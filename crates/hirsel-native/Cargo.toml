@@ -9,6 +9,7 @@ rust-version.workspace = true
 native-tsan = ["hirsel-llvm/native-tsan", "hirsel-cranelift/native-tsan"]
 
 [dependencies]
+hirsel-registry = { path = "../hirsel-registry" }
 hirsel-compiler-identity = { path = "../hirsel-compiler-identity" }
 base64 = "=0.22.1"
 hirsel-artifact-store = { path = "../hirsel-artifact-store" }

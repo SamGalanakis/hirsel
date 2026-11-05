@@ -42,7 +42,7 @@ MANIFEST = 'hirsel.json'
 SORTED_LISTS = (
     'conformance/passing.txt',
     'conformance/pending.txt',
-    'crates/hirsel-engine/src/registry/review-table.txt',
+    'crates/hirsel-registry/src/review-table.txt',
     'crates/hirsel-authority/src/corpus/passing.txt',
     'crates/hirsel-authority/src/corpus/pending.txt',
     'crates/hirsel-ownership/src/tests/passing.txt',

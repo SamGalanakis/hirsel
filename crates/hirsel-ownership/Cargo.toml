@@ -15,6 +15,7 @@ hirsel-intern = { path = "../hirsel-intern" }
 hirsel-modes = { path = "../hirsel-modes" }
 
 [dev-dependencies]
+hirsel-registry = { path = "../hirsel-registry" }
 hirsel-host-io = { path = "../hirsel-host-io" }
 hirsel-front-phases = { path = "../hirsel-front-phases" }
 hirsel-guard = { path = "../hirsel-guard" }

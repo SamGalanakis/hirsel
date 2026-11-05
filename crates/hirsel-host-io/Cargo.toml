@@ -21,6 +21,7 @@ hirsel-rt = { path = "../hirsel-rt" }
 sha2 = "0.10"
 
 [dev-dependencies]
+hirsel-registry = { path = "../hirsel-registry" }
 serde_json = "1"
 tempfile = "3"
 hirsel-guard = { path = "../hirsel-guard" }

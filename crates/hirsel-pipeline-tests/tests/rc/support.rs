@@ -209,9 +209,9 @@ pub fn lower(source: &str) -> (Program, Lowered) {
 }
 
 pub fn manifest(program: &Program) -> hirsel_core_contract::Manifest {
-    let inventory = hirsel_engine::registry::BuiltinRegistry::shared().operation_inventory();
+    let inventory = hirsel_registry::BuiltinRegistry::shared().operation_inventory();
     let records = program.operations.values().map(|operation| {
-        let key = hirsel_engine::OperationKey {
+        let key = hirsel_registry::OperationKey {
             definition: operation.definition.clone(),
             declaration_digest: operation.declaration_digest,
         };

@@ -87,7 +87,7 @@ pub fn trial(t: Test) -> Result[(), ()] {
         ] {
             assert!(found.contains(name), "missing {name}: {found:?}");
             assert!(
-                registry::BuiltinRegistry::new()
+                hirsel_registry::BuiltinRegistry::new()
                     .get(&hirsel_syntax::DefPath::core(&format!("test.{name}")))
                     .is_none()
             );

@@ -1,5 +1,6 @@
-use hirsel_engine::{check_operation_coverage, registry::*};
 use hirsel_interp::library::{OperationDisposition, operation_dispatch};
+use hirsel_registry::check_operation_coverage;
+use hirsel_registry::*;
 use hirsel_types::{PassingMode, SignatureKind};
 use std::collections::BTreeSet;
 #[test]

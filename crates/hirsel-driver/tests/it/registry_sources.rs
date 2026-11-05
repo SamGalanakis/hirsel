@@ -1,8 +1,8 @@
 //! Builtin registry signatures agree with the same declarations written as source
 //! and normalized, checked and lowered by the real front phases.
-use hirsel_engine::registry::review::describe_function;
-use hirsel_engine::registry::*;
 use hirsel_engine::*;
+use hirsel_registry::review::describe_function;
+use hirsel_registry::*;
 use hirsel_types::*;
 use std::collections::BTreeSet;
 
@@ -239,7 +239,7 @@ fn ordinary_ledger_signatures_agree_with_the_separate_source_normalizer() {
         }
         let mut provider = registry.clone();
         // A session over the registry's base, so registry ids read here too.
-        let header_types = hirsel_engine::registry::session_types();
+        let header_types = hirsel_registry::session_types();
         let header_memo = TypeMemo::new();
         let mut normalized = normalize(
             Input {

@@ -1,6 +1,7 @@
 //! Documentation coverage is checked independently against the compiler's exports.
-use hirsel_engine::{DefinitionQueries, registry::BuiltinRegistry};
+use hirsel_engine::DefinitionQueries;
 use hirsel_project_info::api_index;
+use hirsel_registry::BuiltinRegistry;
 use hirsel_syntax::{ItemKind, TypeBody, Visibility};
 use hirsel_types::{SignatureKind, TypeKind};
 use std::{collections::BTreeSet, path::Path};

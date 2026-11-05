@@ -25,7 +25,7 @@ fn every_declared_signature_matches_the_review_table_and_canonical_hash() {
     }).collect::<String>();
     if std::env::var_os("HIRSEL_BLESS").is_some() {
         std::fs::write(
-            concat!(env!("CARGO_MANIFEST_DIR"), "/src/registry/review-table.txt"),
+            concat!(env!("CARGO_MANIFEST_DIR"), "/src/review-table.txt"),
             &table,
         )
         .unwrap();
@@ -36,7 +36,7 @@ fn every_declared_signature_matches_the_review_table_and_canonical_hash() {
 #[test]
 fn section22_ledger_is_a_complete_verbatim_transcription() {
     // Independent normative oracle: no runtime code or Builder is used here.
-    let spec = include_str!("../../../../docs/spec/core-library.md");
+    let spec = include_str!("../../../docs/spec/core-library.md");
     let section = spec
         .split("\n## The ledger\n")
         .nth(1)
@@ -298,7 +298,7 @@ fn generic_option_results_derive_sendability_after_substitution() {
         (Primitive::U64, Sendability::Sendable),
         (Primitive::Bytes, Sendability::NotSendable),
     ] {
-        let target = crate::registry::session_types();
+        let target = crate::session_types();
         let memo = hirsel_types::TypeMemo::new();
         let actual = target.intern(Type {
             modes: Modes {
@@ -334,8 +334,8 @@ fn schema_cleanup_uses_declared_ordinals_instead_of_metavariable_spelling() {
         ("I,J", "I", "J"),
         ("Source,Destination", "Source", "Destination"),
     ] {
-        let mut builder = build::Builder::new(&crate::registry::session_types(), generics)
-            .with_schema(schema("int.widen"));
+        let mut builder =
+            build::Builder::new(&crate::session_types(), generics).with_schema(schema("int.widen"));
         let function = builder.function(&format!("value:{input}"), output, true);
         assert_eq!(
             builder.types.get(function.result).unwrap().drop_allocation,
@@ -350,7 +350,7 @@ fn schema_cleanup_uses_declared_ordinals_instead_of_metavariable_spelling() {
             DropAllocation::NoAlloc
         );
     }
-    let mut ordinary = build::Builder::new(&crate::registry::session_types(), "I");
+    let mut ordinary = build::Builder::new(&crate::session_types(), "I");
     let function = ordinary.function("value:I", "I", true);
     assert_eq!(
         ordinary.types.get(function.result).unwrap().drop_allocation,
@@ -437,7 +437,7 @@ fn core_generics_hand_back_borrowed_content_only_related_to_it() {
     );
     // A declaration handing back a borrowed list's element unrelated to it is
     // what the test exists to catch.
-    let mut builder = build::Builder::new(&crate::registry::session_types(), "T");
+    let mut builder = build::Builder::new(&crate::session_types(), "T");
     let function = builder.function("xs:List[T]", "T", true);
     assert_eq!(
         borrowed_content(&builder.types, &function, &[]),

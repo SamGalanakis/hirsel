@@ -162,7 +162,7 @@ fn replace_local_content_33_v_rejects_forged_displaced_lifetime() {
         let mut engine = checked(ORIGINAL);
         let output = engine.lower_to_tir(&named("keep")).unwrap();
         let mut signatures = hirsel_validate::SignatureMap::new(engine.types().clone());
-        for signature in registry::BuiltinRegistry::new().signatures() {
+        for signature in hirsel_registry::BuiltinRegistry::new().signatures() {
             signatures.insert(signature.definition.clone(), signature.as_ref().clone());
         }
         signatures.insert(
@@ -312,7 +312,7 @@ fn replace_local_content_33_v_rejects_forged_mutation_acceptance() {
         }
         forged.types = hirsel_tir::definition_types(engine.types(), &forged);
         let mut signatures = hirsel_validate::SignatureMap::new(engine.types().clone());
-        for signature in registry::BuiltinRegistry::new().signatures() {
+        for signature in hirsel_registry::BuiltinRegistry::new().signatures() {
             signatures.insert(signature.definition.clone(), signature.as_ref().clone());
         }
         for name in ["probe", "touch"] {

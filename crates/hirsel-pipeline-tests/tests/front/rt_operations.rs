@@ -1,6 +1,6 @@
 //! hirsel-rt-operations' native operation dispositions checked against the driver's registry inventory.
 use hirsel_core_contract::*;
-use hirsel_engine::registry::BuiltinRegistry;
+use hirsel_registry::BuiltinRegistry;
 use hirsel_types::{DropAllocation, PassingMode};
 use std::collections::BTreeSet;
 fn cleanup(value: &DropAllocation) -> CleanupEffect {

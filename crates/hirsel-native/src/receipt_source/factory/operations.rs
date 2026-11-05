@@ -102,7 +102,7 @@ pub fn expand(
     {
         return Ok(None);
     }
-    let registry = hirsel_engine::registry::BuiltinRegistry::shared();
+    let registry = hirsel_registry::BuiltinRegistry::shared();
     let declaration = provider.signature(path)?;
     let reviewed = registry
         .get(declaration.definition)

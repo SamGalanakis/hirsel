@@ -6,7 +6,7 @@ use std::sync::Arc;
 /// Every fixture and builtin row belongs to this shared session.
 pub(super) fn session() -> &'static TypeInterner {
     static TYPES: std::sync::OnceLock<Arc<TypeInterner>> = std::sync::OnceLock::new();
-    TYPES.get_or_init(hirsel_engine::registry::session_types)
+    TYPES.get_or_init(hirsel_registry::session_types)
 }
 pub(super) fn memo() -> &'static TypeMemo {
     static MEMO: std::sync::OnceLock<TypeMemo> = std::sync::OnceLock::new();
@@ -192,7 +192,7 @@ pub(super) fn registry(file: &ast::SyntaxFile) -> Registry {
         index,
         reads: vec![],
     };
-    let core_registry = hirsel_engine::registry::BuiltinRegistry::new();
+    let core_registry = hirsel_registry::BuiltinRegistry::new();
     for signature in core_registry
         .signatures()
         .filter(|s| s.definition.path().0.modules == ["$intrinsic"])
@@ -376,7 +376,7 @@ pub(super) fn registry(file: &ast::SyntaxFile) -> Registry {
         if let Err(reason) = normalize_file(&library, &mut registry) {
             panic!("library {name}: {reason}");
         }
-        if let Some(builtin) = hirsel_engine::registry::BuiltinRegistry::new().get(&p) {
+        if let Some(builtin) = hirsel_registry::BuiltinRegistry::new().get(&p) {
             Arc::make_mut(registry.signatures.get_mut(&p).unwrap())
                 .metadata
                 .schema = builtin.metadata.schema.clone();

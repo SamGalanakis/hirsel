@@ -2,6 +2,7 @@
 //! revalidates ordinary Lower reads and V's own source envelope before any
 //! Definition materialization. Source/private and native proof domains differ.
 use crate::*;
+use hirsel_registry::{OperationKey, OperationRecord};
 use hirsel_syntax::{DefId, ExprId};
 use hirsel_tir::{DefinitionRef, Materialized};
 use hirsel_types::{SignatureKind, SignatureRef};
@@ -90,7 +91,7 @@ impl QueryEngine {
         if crate::queries::has_errors(&diagnostics) {
             return Err(QueryError::Diagnostics(diagnostics));
         }
-        let registry = registry::BuiltinRegistry::shared();
+        let registry = hirsel_registry::BuiltinRegistry::shared();
         Ok(NativeSourceRoots {
             definitions: paths.iter().cloned().collect(),
             instance_bodies: self.instance_bodies(&paths),

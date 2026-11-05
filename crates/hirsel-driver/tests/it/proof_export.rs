@@ -682,7 +682,7 @@ fn position_view_13_scalar_iteration_retains_the_source_brand() {
     with_compiler_stack(|| {
         let (text, export) = position_view_13_export(POSITION_ITERATION_13);
         assert_eq!(position_view_13_export(POSITION_ITERATION_13).0, text);
-        let registry = registry::BuiltinRegistry::new();
+        let registry = hirsel_registry::BuiltinRegistry::new();
         for name in [
             "PositionView",
             "ScalarView",

@@ -283,7 +283,7 @@ fn private_view(
 #[derive(Clone, Default)]
 pub(crate) struct LookupInput {
     pub manifest: ContentHash,
-    pub registry: crate::registry::BuiltinRegistry,
+    pub registry: hirsel_registry::BuiltinRegistry,
     pub builtins: std::collections::BTreeSet<DefId>,
     pub candidates: DefMap<ContentHash>,
     pub failed: DefMap<Option<ContentHash>>,

@@ -3,7 +3,7 @@ use super::*;
 use declarations::dictionaries::INTEGERS;
 use hirsel_tir::{Constructor, Materialized, ValueKind, ValueNode};
 impl BuiltinRegistry {
-    pub(crate) fn dictionary_value(
+    pub fn dictionary_value(
         &self,
         t: &TypeInterner,
         m: &TypeMemo,

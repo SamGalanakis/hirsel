@@ -440,9 +440,9 @@ mod source_tests {
 
     #[test]
     fn frozen_materialization_matches_serial_and_records_owning_private_views() {
-        let types = registry::session_types();
+        let types = hirsel_registry::session_types();
         let memo = hirsel_types::TypeMemo::new();
-        let registry = registry::BuiltinRegistry::new();
+        let registry = hirsel_registry::BuiltinRegistry::new();
         let path = DefPath::core("Option");
         let id = DefId::intern(&path);
         let private = registry.get(id).unwrap();

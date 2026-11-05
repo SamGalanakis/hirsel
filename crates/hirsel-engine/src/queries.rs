@@ -326,7 +326,7 @@ pub struct QueryEngine {
     detached: Vec<Arc<ItemSyntax>>,
     parsed: BTreeMap<FileId, ParsedFile>,
     pub(crate) installed_sources: BTreeSet<FileId>,
-    pub(crate) registry: crate::registry::BuiltinRegistry,
+    pub(crate) registry: hirsel_registry::BuiltinRegistry,
     pub(crate) builtins: BTreeMap<DefPath, hirsel_types::SignatureRef>,
     syntax_keys: BTreeMap<(DefPath, QueryKind), ContentHash>,
     signatures: Table<hirsel_types::SignatureRef>,
@@ -713,7 +713,7 @@ impl QueryEngine {
         adapters: PhaseAdapters,
         hold_bytes: u64,
     ) -> Self {
-        let registry = crate::registry::BuiltinRegistry::shared();
+        let registry = hirsel_registry::BuiltinRegistry::shared();
         environment.builtin_signatures_hash = registry.revision();
         let source_ownership = Arc::new(native_records::SourceOwnership::default());
         Self {
@@ -792,7 +792,7 @@ impl QueryEngine {
             snapshot_epoch: crate::memo::Revision::from_u64(1).expect("a nonzero revision"),
             snapshot_sources: Default::default(),
             snapshot_inputs_revision: 0,
-            types: crate::registry::session_types(),
+            types: hirsel_registry::session_types(),
             memo: Arc::new(hirsel_types::TypeMemo::new()),
             private_summary_reads: Default::default(),
             private_summaries: Default::default(),

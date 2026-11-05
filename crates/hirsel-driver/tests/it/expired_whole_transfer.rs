@@ -133,14 +133,14 @@ fn whole_transfers_and_expired_reads_agree_with_independent_validation() {
                 });
                 adapters.modes = Some(capture.clone());
                 let lower = adapters.lowering.clone().unwrap();
-                let t = hirsel_engine::registry::session_types();
+                let t = hirsel_registry::session_types();
                 let mut engine =
                     QueryEngine::new(default_environment(), adapters).with_types(t.clone());
                 let file = engine.sources.add("expired.hir", source.clone()).unwrap();
                 let parsed = engine.parse_file(file, &default_context()).unwrap();
                 let mut signatures = hirsel_validate::SignatureMap::new(t.clone());
                 signatures.extend_signatures(
-                    hirsel_engine::registry::BuiltinRegistry::new()
+                    hirsel_registry::BuiltinRegistry::new()
                         .signatures()
                         .map(|s| (**s).clone()),
                 );

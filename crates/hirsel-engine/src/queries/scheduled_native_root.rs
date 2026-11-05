@@ -4,6 +4,7 @@
 use super::*;
 use crate::runtime::*;
 use crate::store::{Domain, Reference, ResultStore};
+use hirsel_registry::{OperationKey, OperationParameter, OperationRecord};
 use hirsel_types::SignatureKind;
 use std::{sync::Mutex, task::Poll};
 mod acceptance;
@@ -47,7 +48,7 @@ pub struct FrontNativeQueries {
     entry: DefPath,
     template: crate::NativeSourceRoots,
     constants: Vec<DefPath>,
-    registry: crate::registry::BuiltinRegistry,
+    registry: hirsel_registry::BuiltinRegistry,
     memo: Arc<hirsel_types::TypeMemo>,
     run: Arc<FrontRunQueries>,
     definitions: Arc<FrontNativeDefinitionQueries>,
@@ -111,7 +112,7 @@ impl FrontNativeQueries {
         // constructor still charges only its selected constant paths.
         static CORE_BYTES: std::sync::OnceLock<Option<u64>> = std::sync::OnceLock::new();
         let core = *CORE_BYTES.get_or_init(|| {
-            let registry = crate::registry::BuiltinRegistry::shared();
+            let registry = hirsel_registry::BuiltinRegistry::shared();
             let operations = registry.operation_inventory();
             metadata_bytes(
                 &operations,
@@ -715,7 +716,7 @@ impl QueryEngine {
                 "native roots differ from the pinned signature snapshot",
             ));
         }
-        let registry = crate::registry::BuiltinRegistry::shared();
+        let registry = hirsel_registry::BuiltinRegistry::shared();
         let template = crate::NativeSourceRoots {
             definitions: seeds.clone(),
             environment: self.environment.clone(),

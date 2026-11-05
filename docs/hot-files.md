@@ -75,7 +75,7 @@ is excluded: its edits are not independent registrations.
 | `third-party/NOTICES.md` | 96 | Existing append-only merge driver; preserve notice prose/attribution |
 | `tools/known-failures.tsv` | 84 | Three-way line set; removals survive; land resolves IDs by date, then incoming row |
 | `docs/api.md` | 42 | Existing main-runs generator; legacy rebase conflicts keep main's writer |
-| `crates/hirsel-engine/src/registry/review-table.txt` | 35 | Existing semantic sorted-list merge |
+| `crates/hirsel-registry/src/review-table.txt` | 35 | Existing semantic sorted-list merge |
 | `BUCK` | 31 | Already removed from Git, generated on demand |
 | `native-tests/library/operations.tsv` | 30 | Existing semantic sorted-list merge |
 | `crates/hirsel-driver/tests/it-stdlib/main.rs` | 18 | Ordinary declarations isolated into independent `modules.rs` |

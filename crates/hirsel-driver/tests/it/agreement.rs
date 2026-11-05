@@ -15,7 +15,7 @@ type Signatures = hirsel_validate::SignatureMap;
 fn types() -> &'static std::sync::Arc<hirsel_types::TypeInterner> {
     static TYPES: std::sync::OnceLock<std::sync::Arc<hirsel_types::TypeInterner>> =
         std::sync::OnceLock::new();
-    TYPES.get_or_init(hirsel_engine::registry::session_types)
+    TYPES.get_or_init(hirsel_registry::session_types)
 }
 fn new_engine() -> QueryEngine {
     QueryEngine::new(default_environment(), compiler_adapters()).with_types(types().clone())
@@ -320,7 +320,7 @@ fn forged_container_brands_after_an_indexed_write_are_rejected() {
             };
             let mut signatures = hirsel_validate::SignatureMap::new(types().clone());
             signatures.extend_signatures(
-                hirsel_engine::registry::BuiltinRegistry::new()
+                hirsel_registry::BuiltinRegistry::new()
                     .signatures()
                     .map(|s| (**s).clone()),
             );

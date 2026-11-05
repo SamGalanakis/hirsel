@@ -223,7 +223,7 @@ fn registry_fallback_records_reads_and_respects_program_definitions_on_compiler_
     let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
     assert_eq!(
         engine.environment.builtin_signatures_hash,
-        registry::BuiltinRegistry::new().revision()
+        hirsel_registry::BuiltinRegistry::new().revision()
     );
     edit(&mut engine, "fn inspect(rt: Io) { io.stdout(rt); }\n");
     engine.check_definition(&path("inspect")).unwrap();
@@ -729,7 +729,7 @@ fn assert_captured_alias_identity(body: &str, rejects_end_origin: bool) {
         .lower_to_tir(&path("probe"))
         .unwrap_or_else(|e| panic!("{source}: {e:?}"));
     let mut signatures = hirsel_validate::SignatureMap::new(engine.types().clone());
-    for signature in registry::BuiltinRegistry::new().signatures() {
+    for signature in hirsel_registry::BuiltinRegistry::new().signatures() {
         signatures.insert(signature.definition.clone(), signature.as_ref().clone());
     }
     for name in ["probe", "use_pos", "Holder", "relay"] {
@@ -851,7 +851,7 @@ fn sibling_projection_cannot_claim_another_records_identity_on_compiler_thread()
     );
     let output = engine.lower_to_tir(&path("probe")).unwrap();
     let mut signatures = hirsel_validate::SignatureMap::new(engine.types().clone());
-    for signature in registry::BuiltinRegistry::new().signatures() {
+    for signature in hirsel_registry::BuiltinRegistry::new().signatures() {
         signatures.insert(signature.definition.clone(), signature.as_ref().clone());
     }
     for name in ["probe", "inspect", "Log"] {
@@ -911,7 +911,7 @@ fn sibling_constructor_checks_the_supplied_owner_operand_on_compiler_thread() {
     );
     let output = engine.lower_to_tir(&path("probe")).unwrap();
     let mut signatures = hirsel_validate::SignatureMap::new(engine.types().clone());
-    for signature in registry::BuiltinRegistry::new().signatures() {
+    for signature in hirsel_registry::BuiltinRegistry::new().signatures() {
         signatures.insert(signature.definition.clone(), signature.as_ref().clone());
     }
     for name in ["probe", "Log"] {
@@ -975,7 +975,7 @@ fn destructuring_derives_sibling_brands_instead_of_trusting_field_types_on_compi
     );
     let output = engine.lower_to_tir(&path("probe")).unwrap();
     let mut signatures = hirsel_validate::SignatureMap::new(engine.types().clone());
-    for signature in registry::BuiltinRegistry::new().signatures() {
+    for signature in hirsel_registry::BuiltinRegistry::new().signatures() {
         signatures.insert(signature.definition.clone(), signature.as_ref().clone());
     }
     for name in ["probe", "inspect", "Log"] {
@@ -1075,7 +1075,7 @@ fn named_function_identity_requires_named_definition_evidence_on_compiler_thread
     );
     let output = engine.lower_to_tir(&path("probe")).unwrap();
     let mut signatures = hirsel_validate::SignatureMap::new(engine.types().clone());
-    for signature in registry::BuiltinRegistry::new().signatures() {
+    for signature in hirsel_registry::BuiltinRegistry::new().signatures() {
         signatures.insert(signature.definition.clone(), signature.as_ref().clone());
     }
     for name in ["probe", "inspect", "target", "other"] {
@@ -1133,7 +1133,7 @@ fn expiring_one_stored_capture_does_not_invalidate_another_field_on_compiler_thr
     );
     let output = engine.lower_to_tir(&path("probe")).unwrap();
     let mut signatures = hirsel_validate::SignatureMap::new(engine.types().clone());
-    for signature in registry::BuiltinRegistry::new().signatures() {
+    for signature in hirsel_registry::BuiltinRegistry::new().signatures() {
         signatures.insert(signature.definition.clone(), signature.as_ref().clone());
     }
     for name in ["probe", "use_pos", "Pair"] {
@@ -1195,7 +1195,7 @@ fn mutable_iteration_alias_access_requires_its_live_loan_on_compiler_thread() {
     );
     let output = engine.lower_to_tir(&path("probe")).unwrap();
     let mut signatures = hirsel_validate::SignatureMap::new(engine.types().clone());
-    for signature in registry::BuiltinRegistry::new().signatures() {
+    for signature in hirsel_registry::BuiltinRegistry::new().signatures() {
         signatures.insert(signature.definition.clone(), signature.as_ref().clone());
     }
     signatures.insert(
@@ -1297,7 +1297,7 @@ fn borrowed_closure_and_holder_relay_retain_source_loans_on_compiler_thread() {
             .lower_to_tir(&path("probe"))
             .unwrap_or_else(|e| panic!("{source}: {e:?}"));
         let mut signatures = hirsel_validate::SignatureMap::new(engine.types().clone());
-        for signature in registry::BuiltinRegistry::new().signatures() {
+        for signature in hirsel_registry::BuiltinRegistry::new().signatures() {
             signatures.insert(signature.definition.clone(), signature.as_ref().clone());
         }
         for name in names {
@@ -1453,7 +1453,7 @@ fn an_element_of_a_capture_has_its_own_name_but_cannot_take_the_captures() {
     );
     let output = engine.lower_to_tir(&path("probe")).unwrap();
     let mut signatures = hirsel_validate::SignatureMap::new(engine.types().clone());
-    for signature in registry::BuiltinRegistry::new().signatures() {
+    for signature in hirsel_registry::BuiltinRegistry::new().signatures() {
         signatures.insert(signature.definition.clone(), signature.as_ref().clone());
     }
     signatures.insert(
@@ -1528,7 +1528,7 @@ fn fresh_alias_join_identity_is_independently_checked() {
             edit(&mut engine, &source);
             let output = engine.lower_to_tir(&path("probe")).unwrap();
             let mut signatures = hirsel_validate::SignatureMap::new(engine.types().clone());
-            for signature in registry::BuiltinRegistry::new().signatures() {
+            for signature in hirsel_registry::BuiltinRegistry::new().signatures() {
                 signatures.insert(signature.definition.clone(), signature.as_ref().clone());
             }
             for name in ["probe", "make", "inspect", "R"] {
@@ -1626,7 +1626,7 @@ fn copied_field_join_partitions_are_independently_checked() {
                 .lower_to_tir(&path("probe"))
                 .unwrap_or_else(|error| panic!("{source}: {error:?}"));
             let mut signatures = hirsel_validate::SignatureMap::new(engine.types().clone());
-            for signature in registry::BuiltinRegistry::new().signatures() {
+            for signature in hirsel_registry::BuiltinRegistry::new().signatures() {
                 signatures.insert(signature.definition.clone(), signature.as_ref().clone());
             }
             for name in [
@@ -1716,7 +1716,7 @@ fn whole_owned_replacement_requires_a_fresh_receiving_origin() {
             edit(&mut engine, &source);
             let output = engine.lower_to_tir(&path("probe")).unwrap();
             let mut signatures = hirsel_validate::SignatureMap::new(engine.types().clone());
-            for signature in registry::BuiltinRegistry::new().signatures() {
+            for signature in hirsel_registry::BuiltinRegistry::new().signatures() {
                 signatures.insert(signature.definition.clone(), signature.as_ref().clone());
             }
             let signature = engine

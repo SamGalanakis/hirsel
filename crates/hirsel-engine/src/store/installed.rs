@@ -5,7 +5,7 @@ use bincode::Options;
 use hirsel_syntax::{FileContext, PackageId};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 const PACKAGE: Domain = Domain {
     kind: 0x4600_0039,
@@ -18,6 +18,7 @@ fn address() -> Address {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
 
     fn fixture(
         root: &Path,

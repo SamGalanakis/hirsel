@@ -19,6 +19,7 @@ hirsel-intern = { path = "../hirsel-intern" }
 hirsel-modes = { path = "../hirsel-modes" }
 
 [dev-dependencies]
+hirsel-registry = { path = "../hirsel-registry" }
 hirsel-guard = { path = "../hirsel-guard" }
 hirsel-signature = { path = "../hirsel-signature" }
 hirsel-check-protocol = { path = "../hirsel-check-protocol" }

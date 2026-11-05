@@ -217,7 +217,7 @@ pub(crate) struct HeaderProducts {
     types: Arc<hirsel_types::TypeInterner>,
     memo: Arc<hirsel_types::TypeMemo>,
     builtins: BTreeMap<DefPath, hirsel_types::SignatureRef>,
-    registry: crate::registry::BuiltinRegistry,
+    registry: hirsel_registry::BuiltinRegistry,
     package_manifests: BTreeMap<hirsel_syntax::PackageId, ContentHash>,
     package_sources: BTreeMap<hirsel_syntax::PackageId, ContentHash>,
     published_manifest: Option<ContentHash>,

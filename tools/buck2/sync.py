@@ -78,8 +78,8 @@ READS = generated.Reads(ROOT)
 # repository paths: it hashes these into the frozen runtime revision.
 BUILD_SCRIPT_INPUTS = {
     "hirsel-rt-operations": ["native-tests/library/operations.tsv"],
+    "hirsel-registry": ["crates/hirsel-registry/src/**"],
     "hirsel-engine": [
-        "crates/hirsel-engine/src/registry/**",
         "crates/hirsel-host-io/src/**",
         "crates/hirsel-interp/src/**",
         "crates/hirsel-interp/Cargo.toml",
@@ -91,10 +91,10 @@ BUILD_SCRIPT_INPUTS = {
         "crates/hirsel-kernels/src/**",
         "crates/hirsel-kernels/Cargo.toml",
         "crates/hirsel-rc/src/library/**",
-        "crates/hirsel-engine/src/registry/section22.txt",
-        "crates/hirsel-engine/src/registry/dictionaries.rs",
-        "crates/hirsel-engine/src/registry/loops.rs",
-        "crates/hirsel-engine/src/registry/heap.rs",
+        "crates/hirsel-registry/src/section22.txt",
+        "crates/hirsel-registry/src/dictionaries.rs",
+        "crates/hirsel-registry/src/loops.rs",
+        "crates/hirsel-registry/src/heap.rs",
         "native-tests/library/operations.tsv",
         "Cargo.lock",
     ],
@@ -969,7 +969,7 @@ def first_party(meta: dict) -> str:
                 "hirsel_build_script",
                 name=build_script,
                 crate_root=relative(src),
-                srcs=Raw('glob(["crates/hirsel-engine/build.rs", "crates/hirsel-engine/src/registry/**"])') if name == "hirsel-engine" else [relative(src)],
+                srcs=Raw('glob(["crates/hirsel-registry/build.rs", "crates/hirsel-registry/src/**"])') if name == "hirsel-registry" else [relative(src)],
                 deps=sorted(deps["build"]),
                 inputs=Raw(f"glob({starlark(BUILD_SCRIPT_INPUTS[name], 4)})"),
                 features=features,

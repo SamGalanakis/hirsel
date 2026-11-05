@@ -54,7 +54,7 @@ fn nominal_reification_uses_declared_generic_fields_and_preserves_identity() {
 }
 #[test]
 fn capability_materialization_is_a_language_error_without_hiding_malformed_values() {
-    let types = hirsel_engine::registry::session_types();
+    let types = hirsel_registry::session_types();
     let capability = types.intern(ty(TypeKind::Named {
         definition: hirsel_syntax::DefId::intern(&hirsel_syntax::DefPath::core("Io")),
         arguments: vec![].into(),
@@ -88,7 +88,7 @@ fn capability_materialization_is_a_language_error_without_hiding_malformed_value
 }
 #[test]
 fn partial_and_non_data_values_fail_closed() {
-    let types = hirsel_engine::registry::session_types();
+    let types = hirsel_registry::session_types();
     let boolean = types.intern(ty(TypeKind::Primitive(Primitive::Bool)));
     let tuple = types.intern(ty(TypeKind::Tuple(vec![boolean].into())));
     let mut engine =
@@ -119,7 +119,7 @@ fn partial_and_non_data_values_fail_closed() {
 fn finite_value_trees_materialize_at_and_past_the_old_32_level_guard() {
     with_compiler_stack(|| {
         for depth in [31, 32, 33, 200] {
-            let types = hirsel_engine::registry::session_types();
+            let types = hirsel_registry::session_types();
             let mut root = types.intern(ty(TypeKind::Primitive(Primitive::U32)));
             let mut value = Value::Integer(hirsel_interp::Integer::new(Primitive::U32, 7).unwrap());
             for _ in 0..depth {

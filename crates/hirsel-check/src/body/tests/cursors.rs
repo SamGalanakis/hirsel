@@ -1,6 +1,6 @@
 use super::super::*;
 use super::{properties, support};
-use hirsel_engine::registry::BuiltinRegistry;
+use hirsel_registry::BuiltinRegistry;
 use hirsel_types::core_roles::loop_protocols;
 use std::sync::Arc;
 

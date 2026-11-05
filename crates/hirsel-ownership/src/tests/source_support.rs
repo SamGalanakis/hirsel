@@ -1,7 +1,7 @@
 use hirsel_diag::Diagnostic;
 use hirsel_engine::DefinitionQueries;
-use hirsel_engine::registry::{BuiltinRegistry, nominal_roles};
 use hirsel_intern::Symbol;
+use hirsel_registry::{BuiltinRegistry, nominal_roles};
 use hirsel_resolve::{ManifestFixture, ManifestIndex};
 use hirsel_span::SourceMap;
 use hirsel_syntax as ast;

@@ -463,7 +463,7 @@ fn every_runtime_primitive_row_matches_its_export() {
     with_compiler_stack(|| {
         let program = checked(HELLO);
         let manifest = hirsel_native::manifest(program.validated.snapshot()).unwrap();
-        let inventory = hirsel_engine::registry::BuiltinRegistry::new().operation_inventory();
+        let inventory = hirsel_registry::BuiltinRegistry::new().operation_inventory();
         manifest
             .check_coverage(
                 inventory

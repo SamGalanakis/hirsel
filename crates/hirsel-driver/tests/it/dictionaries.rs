@@ -12,7 +12,7 @@ fn named_integer_dictionaries_materialize_declared_typed_records() {
     );
 }
 fn named_integer_dictionaries_materialize_declared_typed_records_on_compiler_thread() {
-    let registry = registry::BuiltinRegistry::new();
+    let registry = hirsel_registry::BuiltinRegistry::new();
     let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
     for name in [
         "u8", "u16", "u32", "u64", "u128", "i8", "i16", "i32", "i64", "i128",

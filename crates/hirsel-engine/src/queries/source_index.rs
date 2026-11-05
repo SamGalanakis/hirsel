@@ -201,7 +201,7 @@ impl QueryEngine {
         if self
             .types
             .base()
-            .is_some_and(|base| !Arc::ptr_eq(base, &crate::registry::base()))
+            .is_some_and(|base| !Arc::ptr_eq(base, &hirsel_registry::base()))
         {
             return Err(invalid());
         }

@@ -28,12 +28,9 @@ fn explicit_launch_selects_source_std_without_registry_status() {
             .unwrap();
         assert_eq!(std.value.path.path().0.package.name, "std");
         assert!(
-            !registry::BuiltinRegistry::new().signatures().any(|s| s
-                .definition
-                .path()
-                .0
-                .package
-                .name_is("std"))
+            !hirsel_registry::BuiltinRegistry::new()
+                .signatures()
+                .any(|s| s.definition.path().0.package.name_is("std"))
         );
         assert!(matches!(
             run_path(&manifest, &mut Vec::new()).unwrap(),

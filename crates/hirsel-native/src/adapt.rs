@@ -133,7 +133,7 @@ pub fn manifest(input: &NativeInput) -> Result<Manifest, String> {
 /// catalogue. Every digest, ownership contract and capability is checked as
 /// for a complete native snapshot; no candidate LIR supplies these facts.
 pub fn manifest_for_operations<'a>(
-    operations: impl IntoIterator<Item = &'a hirsel_engine::OperationRecord>,
+    operations: impl IntoIterator<Item = &'a hirsel_registry::OperationRecord>,
 ) -> Result<Manifest, String> {
     let rows = operations
         .into_iter()

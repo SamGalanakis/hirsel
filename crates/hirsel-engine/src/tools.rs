@@ -241,7 +241,7 @@ pub fn default_environment() -> QueryEnvironment {
                 .flat_map(|(name, text)| [name.as_bytes(), *text]),
         ),
         package_manifest_hash: ContentHash::of_bytes(b"standalone@0"),
-        builtin_signatures_hash: registry::BuiltinRegistry::new().revision(),
+        builtin_signatures_hash: hirsel_registry::BuiltinRegistry::new().revision(),
     }
 }
 

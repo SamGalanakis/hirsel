@@ -12,6 +12,7 @@ test = false
 doctest = false
 
 [dev-dependencies]
+hirsel-registry = { path = "../hirsel-registry" }
 hirsel-host-io = { path = "../hirsel-host-io" }
 hirsel-requests = { path = "../hirsel-requests" }
 hirsel-native-cache = { path = "../hirsel-native-cache" }

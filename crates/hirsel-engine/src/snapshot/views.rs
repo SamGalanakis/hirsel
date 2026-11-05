@@ -10,8 +10,8 @@ mod tests {
 
     #[test]
     fn universe_input_digest_covers_valid_views_and_package_replacements() {
-        let types = crate::registry::session_types();
-        let registry = crate::registry::BuiltinRegistry::new();
+        let types = hirsel_registry::session_types();
+        let registry = hirsel_registry::BuiltinRegistry::new();
         let option = registry
             .get(DefId::intern(&hirsel_syntax::DefPath::core("Option")))
             .unwrap();

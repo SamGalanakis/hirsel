@@ -23,7 +23,7 @@ impl HostAuthority for Host {
 fn types() -> &'static std::sync::Arc<hirsel_types::TypeInterner> {
     static TYPES: std::sync::OnceLock<std::sync::Arc<hirsel_types::TypeInterner>> =
         std::sync::OnceLock::new();
-    TYPES.get_or_init(hirsel_engine::registry::session_types)
+    TYPES.get_or_init(hirsel_registry::session_types)
 }
 fn fixture(parameters: &str) -> (hirsel_types::SignatureRef, ProgramRevision) {
     let source = format!("pub fn main({parameters}) -> Result[(), ()] {{ Ok(()) }}");

@@ -724,7 +724,7 @@ impl DeclarationIndex {
         hirsel_intern::work::count(hirsel_intern::work::Counter::DeclarationProjections);
         hirsel_intern::timings::count(hirsel_intern::timings::Count::DeclarationProjections);
         let mut metadata = self.inputs.signature_metadata.clone();
-        let roles = crate::registry::nominal_roles();
+        let roles = hirsel_registry::nominal_roles();
         metadata.unsafe_capability = roles.unsafe_capability;
         metadata.result_type = roles.result_type;
         metadata.tasks_capability = roles.tasks_capability;
@@ -740,7 +740,7 @@ impl DeclarationIndex {
                 .insert(path.path().clone(), row.metadata.clone());
             entries.push(row.entry());
         }
-        let registry = crate::registry::BuiltinRegistry::new();
+        let registry = hirsel_registry::BuiltinRegistry::new();
         // Index core declarations alongside source metadata, so merged heads
         // resolve members through the same lookup and visibility path.
         entries.extend(registry.signatures().filter_map(|signature| {

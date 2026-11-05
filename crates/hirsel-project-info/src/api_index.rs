@@ -1,5 +1,6 @@
 //! Documentation from public declarations, without checking or executing bodies.
-use hirsel_engine::{DefinitionQueries, PackageDeclarations, ToolError, registry};
+use hirsel_engine::{DefinitionQueries, PackageDeclarations, ToolError};
+use hirsel_registry as registry;
 use hirsel_span::SourceMap;
 use hirsel_syntax::{self as ast, DefPath, FileContext, ItemKind, TokenKind, Visibility};
 use hirsel_types::*;

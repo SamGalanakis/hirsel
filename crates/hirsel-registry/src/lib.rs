@@ -1,5 +1,8 @@
 //! Declared core@1 signatures. This module reads only the normative declaration
 //! ledger, never executable operation bodies (LANG-6). Package identity: #36.
+#[cfg(test)]
+hirsel_guard::install!();
+
 mod declarations;
 mod products;
 pub use declarations::nominal_roles;
@@ -191,3 +194,6 @@ impl SignatureProvider for BuiltinRegistry {
         }
     }
 }
+
+mod operations;
+pub use operations::*;

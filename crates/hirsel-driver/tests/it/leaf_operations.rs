@@ -2,7 +2,7 @@
 //! declared core primitive that needs no host authority, takes no callback and
 //! releases nothing it is handed, so it can run no language code.
 use hirsel_core_contract::depth::{LEAF_MODULES, LEAF_OPERATIONS, adds_activation};
-use hirsel_engine::registry::{BuiltinRegistry, review::describe_function, shared_types};
+use hirsel_registry::{BuiltinRegistry, review::describe_function, shared_types};
 use hirsel_syntax::DefPath;
 use hirsel_types::SignatureKind;
 use std::collections::BTreeSet;

@@ -1,5 +1,6 @@
 //! Frozen native handoff: all owners are retained; no provider reaches a backend.
 use crate::*;
+use hirsel_registry::{OperationKey, OperationRecord};
 use hirsel_syntax::ExprId;
 use hirsel_tir::DefinitionRef;
 use hirsel_tir::Materialized;
@@ -226,7 +227,7 @@ impl QueryEngine {
         for (path, source) in &mut source_owners {
             source.generated = self.generated_source(path).cloned();
         }
-        let registry = registry::BuiltinRegistry::shared();
+        let registry = hirsel_registry::BuiltinRegistry::shared();
         let mut input = NativeInput {
             types: self.types.clone(),
             environment: self.environment.clone(),
@@ -272,7 +273,7 @@ impl QueryEngine {
         if !Arc::ptr_eq(&input.types, &self.types) {
             return Err(invalid("native input from another session's interner"));
         }
-        let registry = registry::BuiltinRegistry::shared();
+        let registry = hirsel_registry::BuiltinRegistry::shared();
         if input.environment != self.environment
             || input.registry_revision != registry.revision()
             || input.completed_source_stages != NativeStatus::Complete

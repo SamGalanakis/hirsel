@@ -1,5 +1,5 @@
 //! Registry-owned native operation facts, joined with the exported dispatch table.
-use crate::registry::BuiltinRegistry;
+use crate::BuiltinRegistry;
 use hirsel_interp::library::OperationDisposition;
 use hirsel_syntax::{ContentHash, DefPath};
 use hirsel_types::{Allocation, DropAllocation, ParamId, PassingMode, SignatureKind, SignatureRef};

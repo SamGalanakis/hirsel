@@ -40,7 +40,7 @@ fn fixture(fail: bool) -> (Fixture, SourceMap, RunConfiguration) {
     let mut sources = SourceMap::default();
     let file = sources.add("runtime.hir", "\n\nfixture\n".into()).unwrap();
     let span = Span::new(sources.file_anchor(file), 2, 9).unwrap();
-    let types = hirsel_engine::registry::session_types();
+    let types = hirsel_registry::session_types();
     let unit = types.intern(Type {
         drop_allocation: hirsel_types::DropAllocation::MayAllocate,
         ..Type::with_kind(TypeKind::Tuple(vec![].into()))
@@ -154,7 +154,7 @@ fn library_launch_uses_declared_runtime_types_and_exact_simulated_output_on_comp
         .item_signature(&entry_path(&default_context()))
         .unwrap()
         .value;
-    let registry = registry::BuiltinRegistry::new();
+    let registry = hirsel_registry::BuiltinRegistry::new();
     let output = registry
         .get(&hirsel_syntax::DefPath::core("out.print"))
         .unwrap();

@@ -74,7 +74,7 @@ impl PackageDeclarations {
             Err(hirsel_types::LookupError::Missing)
                 if path.package.is_none() && path.segments.len() == 1 =>
             {
-                let definition = registry::BuiltinRegistry::new()
+                let definition = hirsel_registry::BuiltinRegistry::new()
                     .lookup_name(path)
                     .ok_or(hirsel_types::LookupError::Missing)?;
                 index.access(context, &definition)

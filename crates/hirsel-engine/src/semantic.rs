@@ -39,7 +39,7 @@ pub struct PhaseProducts {
 }
 fn resolver_expected() -> hirsel_resolve::ExpectedTypes {
     hirsel_resolve::ExpectedTypes {
-        available_variants: crate::registry::variant_names().clone(),
+        available_variants: hirsel_registry::variant_names().clone(),
         ..Default::default()
     }
 }

@@ -40,7 +40,7 @@ mod manifest {
     use super::*;
 
     fn inventory() -> Vec<OperationId> {
-        hirsel_engine::registry::BuiltinRegistry::new()
+        hirsel_registry::BuiltinRegistry::new()
             .operation_inventory()
             .into_keys()
             .map(|key| OperationId {

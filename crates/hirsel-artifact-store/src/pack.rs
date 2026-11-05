@@ -312,6 +312,7 @@ impl Store {
         Ok(Bytes {
             region,
             range: 0..len,
+            checked_container: false,
         })
     }
     /// Compact published installation contents through the existing bounded

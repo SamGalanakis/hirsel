@@ -75,6 +75,7 @@ impl VerifiedRecords {
                     Bytes {
                         region,
                         range: start..end,
+                        checked_container: false,
                     }
                     .with_reference(reference),
                 )
@@ -282,6 +283,7 @@ impl Store {
                 Bytes {
                     region,
                     range: 0..len,
+                    checked_container: false,
                 }
             };
             #[cfg(unix)]

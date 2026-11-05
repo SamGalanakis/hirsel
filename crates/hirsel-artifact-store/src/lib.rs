@@ -295,6 +295,9 @@ impl Drop for Region {
 pub struct Bytes {
     region: Arc<Region>,
     range: Range<usize>,
+    // Only a fully validated container payload sets this bit. Its immutable
+    // preceding header holds the full reference; proper subranges clear it.
+    checked_container: bool,
 }
 impl std::fmt::Debug for Bytes {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -313,6 +316,7 @@ impl From<Arc<[u8]>> for Bytes {
         Self {
             region: Arc::new(Region::Owned(bytes)),
             range: 0..len,
+            checked_container: false,
         }
     }
 }
@@ -322,6 +326,7 @@ impl From<Vec<u8>> for Bytes {
         Self {
             region: Arc::new(Region::Buffer(bytes.into_boxed_slice())),
             range: 0..len,
+            checked_container: false,
         }
     }
 }
@@ -349,6 +354,22 @@ impl Bytes {
     }
 
     fn has_reference(&self, reference: Reference) -> bool {
+        if self.checked_container {
+            let header = self
+                .range
+                .start
+                .checked_sub(HEADER)
+                .and_then(|start| self.region.bytes().get(start..self.range.start));
+            if let Some(header) = header
+                && reference.len == self.len() as u64
+                && word(header, 8) == Some(reference.domain.kind)
+                && word(header, 12) == Some(reference.domain.schema)
+                && number(header, 16) == Some(reference.len)
+                && header.get(24..56) == Some(reference.output.0.0.as_slice())
+            {
+                return true;
+            }
+        }
         let mut region = &self.region;
         loop {
             match &**region {
@@ -407,6 +428,7 @@ impl Bytes {
                 reference,
             }))),
             range: self.range,
+            checked_container: self.checked_container,
         }
     }
 
@@ -472,6 +494,7 @@ impl Bytes {
                 _owner: owner,
             }),
             range: self.range,
+            checked_container: self.checked_container,
         }
     }
 
@@ -490,6 +513,7 @@ impl Bytes {
         Some(Self {
             region: self.region.clone(),
             range: self.range.start.checked_add(start)?..self.range.start.checked_add(end)?,
+            checked_container: self.checked_container && start == 0 && end == self.len(),
         })
     }
 }
@@ -834,6 +858,7 @@ impl Store {
                 Some(Bytes {
                     region,
                     range: 0..len,
+                    checked_container: false,
                 })
             }
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
@@ -1153,6 +1178,7 @@ fn checked_content(region: Arc<Region>, reference: Reference) -> Option<Bytes> {
         Bytes {
             region,
             range: 0..len,
+            checked_container: false,
         },
         reference,
     )
@@ -1189,7 +1215,9 @@ fn checked_container(bytes: Bytes, reference: Reference) -> Option<Bytes> {
         if let Some(statistics) = checks.and_then(|checks| checks.statistics.as_ref()) {
             statistics.add(Counter::ContentReuses, 1);
         }
-        return bytes.range(HEADER as u64, reference.len, 1);
+        let mut payload = bytes.range(HEADER as u64, reference.len, 1)?;
+        payload.checked_container = true;
+        return Some(payload);
     }
     if let Some(statistics) = checks.and_then(|checks| checks.statistics.as_ref()) {
         statistics.add(Counter::ContentChecks, 1);
@@ -1212,10 +1240,7 @@ fn checked_container(bytes: Bytes, reference: Reference) -> Option<Bytes> {
             reference,
         });
     }
-    let payload = bytes.range(HEADER as u64, reference.len, 1)?;
-    Some(if payload.has_reference(reference) {
-        payload
-    } else {
-        payload.with_reference(reference)
-    })
+    let mut payload = bytes.range(HEADER as u64, reference.len, 1)?;
+    payload.checked_container = true;
+    Some(payload)
 }

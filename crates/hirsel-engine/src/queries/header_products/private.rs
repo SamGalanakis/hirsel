@@ -662,6 +662,7 @@ impl HeaderProducts {
             generation: AtomicU64::new(0),
             revision: AtomicU64::new(0),
             admission: Mutex::new(None),
+            validation_caches: Default::default(),
             environment: self.environment.clone(),
             adapters: self.adapters.clone(),
             sources: self.sources.clone(),

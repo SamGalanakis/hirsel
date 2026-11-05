@@ -8,6 +8,7 @@ use crate::TaskCtx;
 use crate::budget::stretch::Stretch;
 use crate::pool::cpu_scoped::ledger::{HeapReservation, Ledger};
 use std::mem::MaybeUninit;
+use std::ptr::NonNull;
 use std::sync::Arc;
 
 struct Checkpoint {
@@ -26,34 +27,58 @@ struct Checkpoint {
     _reservation: HeapReservation,
 }
 
-pub(super) struct State {
-    eligible: bool,
-    started: bool,
-    heap: *mut crate::alloc::Heap,
-    registry: *const crate::heaps::HeapRegistry,
-    checkpoint: Option<Checkpoint>,
+pub(super) enum State {
+    Disabled,
+    Eligible,
+    Spent,
+    Active(PrivateAttempt),
+}
+pub(super) struct PrivateAttempt {
+    heap: NonNull<crate::alloc::Heap>,
+    registry: NonNull<crate::heaps::HeapRegistry>,
+    checkpoint: Checkpoint,
 }
 impl State {
     pub(super) fn new(preclaimed: bool) -> Self {
-        Self {
-            eligible: preclaimed,
-            started: false,
-            heap: std::ptr::null_mut(),
-            registry: std::ptr::null(),
-            checkpoint: None,
+        if preclaimed {
+            Self::Eligible
+        } else {
+            Self::Disabled
+        }
+    }
+
+    fn begin_probe(&mut self) -> bool {
+        if matches!(self, Self::Eligible) {
+            *self = Self::Spent;
+            true
+        } else {
+            false
+        }
+    }
+
+    fn take_active(&mut self) -> Option<PrivateAttempt> {
+        match std::mem::replace(self, Self::Spent) {
+            Self::Active(attempt) => Some(attempt),
+            state => {
+                *self = state;
+                None
+            }
+        }
+    }
+
+    pub(super) fn discard(&mut self, arena: &super::cpu_arena::Arena) {
+        if let Some(attempt) = self.take_active() {
+            attempt.discard(arena);
         }
     }
 }
-impl State {
-    pub(super) fn discard(&mut self, arena: &super::cpu_arena::Arena) {
-        if !self.heap.is_null() {
-            // SAFETY: the native owner has drained. No attempt value escaped.
-            unsafe {
-                discard_storage(self.checkpoint.as_ref().unwrap(), self.heap, arena);
-                (*self.registry).return_private(self.heap);
-            }
-            self.heap = std::ptr::null_mut();
-            self.checkpoint = None;
+
+impl PrivateAttempt {
+    fn discard(self, arena: &super::cpu_arena::Arena) {
+        // SAFETY: the native owner has drained. No attempt value escaped.
+        unsafe {
+            discard_storage(&self.checkpoint, self.heap.as_ptr(), arena);
+            self.registry.as_ref().return_private(self.heap.as_ptr());
         }
     }
 }
@@ -115,12 +140,20 @@ pub(crate) fn heap(ctx: &TaskCtx) -> *mut crate::alloc::Heap {
         return std::ptr::null_mut();
     }
     // SAFETY: the exclusively dispatched context owns this native record.
-    unsafe { (*native).restart.heap }
+    unsafe {
+        match &(*native).restart {
+            State::Active(attempt) => attempt.heap.as_ptr(),
+            _ => std::ptr::null_mut(),
+        }
+    }
 }
 
 pub(crate) fn active(ctx: *mut TaskCtx) -> bool {
     // SAFETY: the caller owns this context's dispatch token.
-    unsafe { !heap(&*ctx).is_null() }
+    unsafe {
+        let native = (*ctx).ahead_physical.cast::<Native>();
+        !native.is_null() && matches!((*native).restart, State::Active(_))
+    }
 }
 
 /// Idle and role-owned, before the first physical mapper allocation. Version
@@ -134,14 +167,12 @@ pub(super) unsafe fn prepare(ctx: *mut TaskCtx, native: *mut Native, sp: *mut u8
 
 unsafe fn prepare_at(ctx: *mut TaskCtx, native: *mut Native, sp: *mut u8, top: *mut u8) {
     unsafe {
-        if (*native).restart.started
-            || !(*native).restart.eligible
-            || (*native).cpu_phase != 2
+        if (*native).cpu_phase != 2
             || (!(*native).allocation.pending() && (*native).growth.is_null())
+            || !(*native).restart.begin_probe()
         {
             return;
         }
-        (*native).restart.started = true;
         let task = engine::current(ctx);
         if engine::with_driver(ctx, |d| d.frontier.as_ref().unwrap().head() == Some(task)) {
             return;
@@ -183,14 +214,19 @@ unsafe fn prepare_at(ctx: *mut TaskCtx, native: *mut Native, sp: *mut u8, top: *
             owner,
             _reservation: reservation,
         };
-        let registry = &*(*ctx).run_ref().heaps as *const crate::heaps::HeapRegistry;
-        let private = (*registry).private_heap();
+        let registry = NonNull::from(&*(*ctx).run_ref().heaps);
+        // SAFETY: the registry returns a registered, nonnull heap and outlives
+        // this native record. Its dispatch token exclusively owns the attempt.
+        let private = NonNull::new_unchecked(registry.as_ref().private_heap());
         (*ctx).heap().unbind();
-        (*native).restart.registry = registry;
-        (*native).restart.heap = private;
-        (*native).restart.checkpoint = Some(checkpoint);
-        (*private).bind(&raw mut (*ctx).view);
-        (*private).set_fuel((*native).restart.checkpoint.as_ref().unwrap().fuel);
+        let fuel = checkpoint.fuel;
+        (*native).restart = State::Active(PrivateAttempt {
+            heap: private,
+            registry,
+            checkpoint,
+        });
+        (*private.as_ptr()).bind(&raw mut (*ctx).view);
+        (*private.as_ptr()).set_fuel(fuel);
     }
 }
 
@@ -214,52 +250,62 @@ pub(super) unsafe fn must_revoke(ctx: *mut TaskCtx, native: *mut Native) -> bool
 /// Idle owns the complete pure attempt, its stack and the scheduler role.
 pub(super) unsafe fn rollback(ctx: *mut TaskCtx, native: *mut Native) {
     unsafe {
-        let Some(checkpoint) = (*native).restart.checkpoint.take() else {
-            return;
-        };
-        let task = engine::current(ctx);
-        engine::with_driver(ctx, |d| {
-            d.cpu_allocation_leases.remove(&task);
-            d.frontier.as_mut().unwrap().discard_cpu_attempt(task);
-            d.stretches.remove(&task);
-            if let Some(before) = checkpoint.before.clone() {
-                d.stretches.insert(task, before);
-            }
-            d.release_grant(task);
-            if let Some(grant) = checkpoint.grant {
-                d.grant(task, grant);
-            }
-        });
-        let private = (*native).restart.heap;
-        discard_storage(&checkpoint, private, &(*native).arena);
-        (*private).unbind();
-        (*native).restart.heap = std::ptr::null_mut();
-        (*(*native).restart.registry).return_private(private);
-        std::ptr::copy_nonoverlapping(
-            checkpoint.stack.as_ptr(),
-            checkpoint.sp.cast(),
-            checkpoint.stack.len(),
-        );
-        (*ctx).ordered_freed.set(checkpoint.freed);
-        (*ctx).ordered_charge_trace = checkpoint.charges.clone();
-        (*ctx).heap().bind(&raw mut (*ctx).view);
-        (*ctx).heap().set_fuel(checkpoint.fuel);
-        (*ctx).task_sp = checkpoint.sp;
-        (*native).physical.saved_sp = checkpoint.sp;
-        (*native).physical.points_left = 1024;
-        (*native).physical.reason = super::cpu_allocation::REASON;
-        (*native).cpu_fuel = checkpoint.private_fuel;
-        (*native).pending_refill = false;
-        (*native).allocation = checkpoint.request;
-        (*native).growth = checkpoint.growth;
-        (*native).growth_status = 0;
-        (*native).growth_plan = None;
-        (*native).summary = std::ptr::null_mut();
-        (*native).summary_status = 0;
-        (*native).summary_blocks.clear();
-        (*native).saved_roots = None;
-        (*native).arena = super::cpu_arena::Arena::new();
-        (*native).restart.eligible = false;
+        if let Some(attempt) = (*native).restart.take_active() {
+            attempt.rollback(ctx, native);
+        }
+    }
+}
+
+impl PrivateAttempt {
+    unsafe fn rollback(self, ctx: *mut TaskCtx, native: *mut Native) {
+        unsafe {
+            let Self {
+                heap,
+                registry,
+                checkpoint,
+            } = self;
+            let task = engine::current(ctx);
+            engine::with_driver(ctx, |d| {
+                d.cpu_allocation_leases.remove(&task);
+                d.frontier.as_mut().unwrap().discard_cpu_attempt(task);
+                d.stretches.remove(&task);
+                if let Some(before) = checkpoint.before.clone() {
+                    d.stretches.insert(task, before);
+                }
+                d.release_grant(task);
+                if let Some(grant) = checkpoint.grant {
+                    d.grant(task, grant);
+                }
+            });
+            let private = heap.as_ptr();
+            discard_storage(&checkpoint, private, &(*native).arena);
+            (*private).unbind();
+            registry.as_ref().return_private(private);
+            std::ptr::copy_nonoverlapping(
+                checkpoint.stack.as_ptr(),
+                checkpoint.sp.cast(),
+                checkpoint.stack.len(),
+            );
+            (*ctx).ordered_freed.set(checkpoint.freed);
+            (*ctx).ordered_charge_trace = checkpoint.charges.clone();
+            (*ctx).heap().bind(&raw mut (*ctx).view);
+            (*ctx).heap().set_fuel(checkpoint.fuel);
+            (*ctx).task_sp = checkpoint.sp;
+            (*native).physical.saved_sp = checkpoint.sp;
+            (*native).physical.points_left = 1024;
+            (*native).physical.reason = super::cpu_allocation::REASON;
+            (*native).cpu_fuel = checkpoint.private_fuel;
+            (*native).pending_refill = false;
+            (*native).allocation = checkpoint.request;
+            (*native).growth = checkpoint.growth;
+            (*native).growth_status = 0;
+            (*native).growth_plan = None;
+            (*native).summary = std::ptr::null_mut();
+            (*native).summary_status = 0;
+            (*native).summary_blocks.clear();
+            (*native).saved_roots = None;
+            (*native).arena = super::cpu_arena::Arena::new();
+        }
     }
 }
 

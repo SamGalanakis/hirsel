@@ -87,6 +87,7 @@ fn check_lower_reuse(carry_across_stores: bool) {
                 let carry = LowerCarry::new(carry_budget.reserve(32 << 20).unwrap())
                     .ok()
                     .unwrap();
+                let mut original_identity = None;
                 for revision in 0..4 {
                     let store: Arc<dyn store::ResultStore> = if carry_across_stores {
                         Arc::new(FreshBytes {
@@ -167,6 +168,16 @@ fn check_lower_reuse(carry_across_stores: bool) {
                             lower.failure(error)
                         )
                     });
+                    let identity = (products[0].address, products[0].action);
+                    if revision == 0 {
+                        original_identity = Some(identity);
+                    } else if revision == 1 {
+                        assert_eq!(
+                            Some(identity),
+                            original_identity,
+                            "unchanged Lower must preserve replay identity"
+                        );
+                    }
                     let actual = lower.outcome((products[0]).clone()).unwrap();
                     let scalar = program.engine.lower_to_tir(&program.entry).unwrap();
                     let records = NativeRecords::new(program.engine.types().clone(), store.clone());

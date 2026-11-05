@@ -110,8 +110,6 @@ struct Computed {
 struct Publication {
     domain: Domain,
     bytes: hirsel_artifact_store::Bytes,
-    persist: bool,
-    raw: Option<RawLowerOutput>,
 }
 #[derive(Clone)]
 struct LowerProduct {
@@ -1245,7 +1243,6 @@ impl FrontLowerQueries {
             kind: FRONT_LOWER_KIND,
             address: product.address,
         };
-        self.selected(id, Ok(product.clone()))?;
         self.selected(id, Ok(product))?.observations
     }
     pub fn failure(&self, reference: Reference) -> Option<QueryError> {
@@ -1532,16 +1529,7 @@ impl FrontLowerQueries {
             .and_then(|_| source.evidence.borrow().finish(&observed));
         if result.is_ok() {
             let selections = std::mem::take(&mut *source.selections.borrow_mut());
-            let action = hirsel_artifact_store::Action(ContentHash::of_parts(
-                "hirsel.front.live-action.v1",
-                [
-                    key.0.0.as_slice(),
-                    key.1.0.as_slice(),
-                    self.namespace.manifest.0.as_slice(),
-                    crate::store::payload_reads_hash(&observed).0.as_slice(),
-                    id.kind.to_le_bytes().as_slice(),
-                ],
-            ));
+            let action = self.output_action(id, &key, &observed);
             let execution_subject = action.0;
             if let Some((definition, evidence)) = verification
                 && let Ok(Value::Lower(lower)) = &mut result
@@ -1624,8 +1612,6 @@ impl FrontLowerQueries {
             Publication {
                 domain,
                 bytes: bytes.into(),
-                persist: true,
-                raw,
             },
             &source.reads,
         )
@@ -1641,34 +1627,34 @@ impl FrontLowerQueries {
         publication: Publication,
         query_reads: &QueryReads,
     ) -> Result<ProductRef, Reference> {
-        let Publication {
-            domain,
-            bytes,
-            persist,
-            raw,
-        } = publication;
+        let Publication { domain, bytes } = publication;
         let record = self
             .store
             .put_content(domain, &bytes)
             .ok_or(self.errors.resource)?;
-        let action = hirsel_artifact_store::Action(ContentHash::of_parts(
-            "hirsel.front.scheduled-action.v1",
-            [
-                key.0.0.as_slice(),
-                key.1.0.as_slice(),
-                self.manifest_for_outcome(id, &outcome.reads)
-                    .ok_or(self.errors.resource)?
-                    .output
-                    .0
-                    .0
-                    .as_slice(),
-                crate::store::payload_reads_hash(&outcome.reads)
-                    .0
-                    .as_slice(),
-                domain.kind.to_le_bytes().as_slice(),
-                domain.schema.to_le_bytes().as_slice(),
-            ],
-        ));
+        let action = if outcome.result.is_ok() {
+            self.output_action(id, key, &outcome.reads)
+        } else {
+            hirsel_artifact_store::Action(ContentHash::of_parts(
+                "hirsel.front.scheduled-action.v1",
+                [
+                    key.0.0.as_slice(),
+                    key.1.0.as_slice(),
+                    self.manifest_for_outcome(id, &outcome.reads)
+                        .ok_or(self.errors.resource)?
+                        .output
+                        .0
+                        .0
+                        .as_slice(),
+                    crate::store::payload_reads_hash(&outcome.reads)
+                        .0
+                        .as_slice(),
+                    domain.kind.to_le_bytes().as_slice(),
+                    domain.schema.to_le_bytes().as_slice(),
+                ],
+            ))
+        };
+        outcome.action = action;
         if let Some(receipt) = &outcome.execution
             && let Some(cache) = self.store.verifier()
         {
@@ -1678,12 +1664,8 @@ impl FrontLowerQueries {
         if let Ok(Value::Constant(value)) = &mut outcome.result {
             value.pack(record);
         }
-        if persist {
-            self.remember_stored(id, key, record, &outcome);
-        }
-        let raw = match (raw, &outcome.result) {
-            (Some(raw), _) => Some(raw),
-            (None, Ok(Value::Lower(lower))) => Some((
+        let raw = match &outcome.result {
+            Ok(Value::Lower(lower)) => Some((
                 lower.decode(self).ok_or(self.errors.protocol)?,
                 self.records
                     .decode(
@@ -1695,7 +1677,7 @@ impl FrontLowerQueries {
                     )
                     .ok_or(self.errors.protocol)?,
             )),
-            (None, _) => None,
+            _ => None,
         };
         let mut original = if let Some((output, materialized)) = raw {
             Some({
@@ -1814,6 +1796,9 @@ impl FrontLowerQueries {
                 None => None,
             };
             let outcome_ref = outcome.as_mut().expect("unadmitted outcome");
+            outcome_ref.observations = archive
+                .clone()
+                .map(|archive| ProductRef::import_archive(id.address, action, archive));
             if let Ok(Value::Lower(lower)) = &mut outcome_ref.result {
                 lower.live = live.as_ref().map(LiveLowerProduct::downgrade);
             }
@@ -2214,6 +2199,23 @@ impl Drop for LowerCharge {
     }
 }
 impl FrontLowerQueries {
+    fn output_action(
+        &self,
+        id: QueryId,
+        key: &EntryKey,
+        reads: &Reads,
+    ) -> hirsel_artifact_store::Action {
+        hirsel_artifact_store::Action(ContentHash::of_parts(
+            "hirsel.front.live-action.v1",
+            [
+                key.0.0.as_slice(),
+                key.1.0.as_slice(),
+                self.namespace.manifest.0.as_slice(),
+                crate::store::payload_reads_hash(reads).0.as_slice(),
+                id.kind.to_le_bytes().as_slice(),
+            ],
+        ))
+    }
     async fn publish_live(
         &self,
         id: QueryId,
@@ -2224,18 +2226,7 @@ impl FrontLowerQueries {
     ) -> Result<ProductRef, Reference> {
         let _ = self.persist_live(id, key, &outcome, &raw);
         self.remember_live_carry(id, key, &outcome, &raw);
-        let action = hirsel_artifact_store::Action(ContentHash::of_parts(
-            "hirsel.front.live-action.v1",
-            [
-                key.0.0.as_slice(),
-                key.1.0.as_slice(),
-                self.namespace.manifest.0.as_slice(),
-                crate::store::payload_reads_hash(&outcome.reads)
-                    .0
-                    .as_slice(),
-                id.kind.to_le_bytes().as_slice(),
-            ],
-        ));
+        let action = self.output_action(id, key, &outcome.reads);
         outcome.action = action;
         let metadata = (
             outcome.reads.clone(),

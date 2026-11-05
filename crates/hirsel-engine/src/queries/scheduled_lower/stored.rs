@@ -562,8 +562,6 @@ impl FrontLowerQueries {
                             Publication {
                                 domain: FAILURE,
                                 bytes: bytes.into(),
-                                persist: false,
-                                raw: None,
                             },
                             query_reads,
                         )
@@ -610,8 +608,6 @@ impl FrontLowerQueries {
                 Publication {
                     domain,
                     bytes: descriptor,
-                    persist: false,
-                    raw: None,
                 },
                 query_reads,
             )

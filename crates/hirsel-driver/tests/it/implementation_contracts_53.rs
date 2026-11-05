@@ -2,10 +2,9 @@
 //! optimization zero, each specialization `f$with$H=impl` calls its
 //! implementation's targets directly on LLVM and Cranelift, as MLton's
 //! defunctorizer leaves only first-order code (defunctorize/defunctorize.sig).
-use hirsel_engine::{
-    QueryEngine, default_context, default_environment, source_check_request, with_compiler_stack,
-};
+use hirsel_engine::{QueryEngine, default_context, default_environment, source_check_request};
 use hirsel_front_phases::compiler_adapters;
+use hirsel_intern::jobs::with_compiler_stack;
 use hirsel_lir::emission::symbol_name;
 use hirsel_native::OptLevel;
 use hirsel_native::Options;

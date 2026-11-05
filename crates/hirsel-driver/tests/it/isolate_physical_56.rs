@@ -29,7 +29,7 @@ pub fn main(rt: Io) -> Result[(), GrantError] {
 
 #[test]
 fn known_isolate_owned_result_survives_generated_begin_save_replay_and_migration() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let ready = super::runtime50_continuation::ready(SOURCE);
         let plans = hirsel_native::continuation::plans(&ready);
         hirsel_native::continuation::validate(&ready, &plans).unwrap();
@@ -103,7 +103,7 @@ fn known_isolate_owned_result_survives_generated_begin_save_replay_and_migration
 
 #[test]
 fn known_isolate_boundary_emits_without_a_task_scope() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let program = super::runtime50_continuation::ready(
             r#"
 pub fn main(rt: Io) -> Result[(), GrantError] {

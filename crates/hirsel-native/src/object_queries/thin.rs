@@ -161,7 +161,7 @@ mod tests {
     }
     #[test]
     fn frozen_thin_archives_preserve_duplicate_members_symbols_and_real_link_inputs() {
-        hirsel_engine::with_compiler_stack(|| {
+        hirsel_intern::jobs::with_compiler_stack(|| {
             let root = tempfile::tempdir().unwrap();
             let target = TargetSpec::x86_64_unknown_linux_gnu();
             let store = Arc::new(hirsel_engine::store::DirStore::new(

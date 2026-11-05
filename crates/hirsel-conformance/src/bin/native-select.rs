@@ -98,7 +98,7 @@ fn main() -> std::process::ExitCode {
         return status;
     }
 
-    hirsel_engine::with_compiler_stack(|| match run() {
+    hirsel_intern::jobs::with_compiler_stack(|| match run() {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("native-select: {error}");

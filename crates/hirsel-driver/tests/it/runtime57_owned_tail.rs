@@ -3,7 +3,7 @@ use super::runtime50_continuation::ready;
 use super::runtime50_resume::{compact_runs_with, routing};
 use hirsel_driver::native;
 use hirsel_driver::native::*;
-use hirsel_engine::with_compiler_stack;
+use hirsel_intern::jobs::with_compiler_stack;
 use hirsel_lir::continuation::{Representation, ResumeAction};
 use hirsel_native::*;
 use hirsel_native_batch::*;

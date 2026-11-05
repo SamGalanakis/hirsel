@@ -1,7 +1,9 @@
 //! Native Link continuations with explicit root, fragment, native and byte reads.
 use super::{products::SettledProducts, root_tasks::NativeRootTasks, roots::RootProducts, *};
+use hirsel_engine::store::ResultStore;
 use hirsel_engine::store::{Action, Address, Domain};
-use hirsel_engine::{runtime::*, store::ResultStore};
+use hirsel_engine_runtime::*;
+
 use hirsel_native::object_queries::CodegenKey;
 use hirsel_native::object_queries::LinkDependencies;
 use hirsel_native::object_queries::LinkInputs;
@@ -350,7 +352,7 @@ impl LinkTasks {
         if association.action != product.action
             || association.reference
                 != product
-                    .archive(hirsel_engine::runtime::ArchiveAdmission::Retained)
+                    .archive(hirsel_engine_runtime::ArchiveAdmission::Retained)
                     .map_err(|e| e.to_string())?
                     .reference()
         {
@@ -364,7 +366,7 @@ impl LinkTasks {
     ) -> Result<(Arc<Plan>, ProductRef, Arc<NativeRootProduct>), String> {
         self.current(manifest.clone())?;
         if manifest
-            .archive(hirsel_engine::runtime::ArchiveAdmission::Retained)
+            .archive(hirsel_engine_runtime::ArchiveAdmission::Retained)
             .map_err(|e| e.to_string())?
             .reference()
             .domain
@@ -376,7 +378,7 @@ impl LinkTasks {
             .store()
             .get_content(
                 manifest
-                    .archive(hirsel_engine::runtime::ArchiveAdmission::Retained)
+                    .archive(hirsel_engine_runtime::ArchiveAdmission::Retained)
                     .map_err(|e| e.to_string())?
                     .reference(),
             )
@@ -456,7 +458,7 @@ impl LeafTask {
                     plan.input.key.address().0,
                     root.address.0,
                     root.action.0,
-                    root.archive(hirsel_engine::runtime::ArchiveAdmission::Retained)
+                    root.archive(hirsel_engine_runtime::ArchiveAdmission::Retained)
                         .map_err(|e| QueryPoll::Failed(self.tasks.failure(&e.to_string())))?
                         .reference(),
                 ))
@@ -554,7 +556,7 @@ impl ObjectTaskSnapshot for LinkTasks {
         let read = || -> Result<Reference, String> {
             self.current(product.clone())?;
             if product
-                .archive(hirsel_engine::runtime::ArchiveAdmission::Retained)
+                .archive(hirsel_engine_runtime::ArchiveAdmission::Retained)
                 .map_err(|e| e.to_string())?
                 .reference()
                 .domain
@@ -566,7 +568,7 @@ impl ObjectTaskSnapshot for LinkTasks {
                 .store()
                 .get_content(
                     product
-                        .archive(hirsel_engine::runtime::ArchiveAdmission::Retained)
+                        .archive(hirsel_engine_runtime::ArchiveAdmission::Retained)
                         .map_err(|e| e.to_string())?
                         .reference(),
                 )

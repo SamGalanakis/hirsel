@@ -7,7 +7,7 @@ use hirsel_types::*;
 
 #[test]
 fn named_integer_dictionaries_materialize_declared_typed_records() {
-    hirsel_engine::with_compiler_stack(
+    hirsel_intern::jobs::with_compiler_stack(
         named_integer_dictionaries_materialize_declared_typed_records_on_compiler_thread,
     );
 }

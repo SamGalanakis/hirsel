@@ -1,9 +1,8 @@
 //! The binarytrees arena node in optimized LLVM IR: the construction of
 //! `tree` and the traversal of `check` from the measured program, on both targets.
-use hirsel_engine::{
-    QueryEngine, default_context, default_environment, source_check_request, with_compiler_stack,
-};
+use hirsel_engine::{QueryEngine, default_context, default_environment, source_check_request};
 use hirsel_front_phases::compiler_adapters;
+use hirsel_intern::jobs::with_compiler_stack;
 use hirsel_native::OptLevel;
 use hirsel_native::Options;
 use hirsel_native::TargetSpec;

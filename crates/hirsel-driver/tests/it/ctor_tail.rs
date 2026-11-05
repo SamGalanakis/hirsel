@@ -4,8 +4,9 @@
 //! Vectors follow OCaml 4.14's testsuite/tests/tmc (stack_space.ml, semantic.ml)
 //! and Koka's test/cgen/ctail*.kk, restricted to Hirsel's last-field subset.
 use hirsel_driver::native;
-use hirsel_engine::{DefinitionQueries, RunConfiguration, SimulationConfig, with_compiler_stack};
+use hirsel_engine::{DefinitionQueries, RunConfiguration, SimulationConfig};
 use hirsel_front_phases::load_program_source;
+use hirsel_intern::jobs::with_compiler_stack;
 use hirsel_tir::TailKind;
 
 /// How a vector runs: its explicit reference step grant (None: the default

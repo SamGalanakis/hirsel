@@ -77,7 +77,9 @@ pub fn evaluate_with_hash_seed(
     expect: &Expect,
     hash_seed: u64,
 ) -> (Status, Observation) {
-    hirsel_engine::with_compiler_stack(|| evaluate_on_compiler_thread(path, expect, hash_seed))
+    hirsel_intern::jobs::with_compiler_stack(|| {
+        evaluate_on_compiler_thread(path, expect, hash_seed)
+    })
 }
 /// A diagnostic raised while indexing package sources, before any Check output.
 fn source_rejection(
@@ -636,7 +638,7 @@ mod tests {
     use super::*;
     #[test]
     fn inner_unavailable_execution_preserves_stdout_in_conformance_observation() {
-        hirsel_engine::with_compiler_stack(|| {
+        hirsel_intern::jobs::with_compiler_stack(|| {
             let path = std::env::temp_dir().join(format!(
                 "hirsel-conformance-api-error-{}.hir",
                 std::process::id()

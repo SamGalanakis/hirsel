@@ -551,7 +551,7 @@ fn assert_run(observed: &Observed, outcome: RunOutcome, stdout: &str) {
 
 #[test]
 fn mem14_through_a_nested_projection_fails_before_extraction_or_write() {
-    hirsel_engine::with_compiler_stack(
+    hirsel_intern::jobs::with_compiler_stack(
         mem14_through_a_nested_projection_fails_before_extraction_or_write_on_compiler_thread,
     );
 }
@@ -586,7 +586,7 @@ fn mem14_through_a_nested_projection_fails_before_extraction_or_write_on_compile
 
 #[test]
 fn mem14_through_a_callback_mut_argument_fails_before_the_callback_runs() {
-    hirsel_engine::with_compiler_stack(
+    hirsel_intern::jobs::with_compiler_stack(
         mem14_through_a_callback_mut_argument_fails_before_the_callback_runs_on_compiler_thread,
     );
 }
@@ -652,7 +652,7 @@ fn observe_stably(body: &str) -> Observed {
 
 #[test]
 fn a_return_value_cleanup_failure_releases_the_prepared_result_once() {
-    hirsel_engine::with_compiler_stack(
+    hirsel_intern::jobs::with_compiler_stack(
         a_return_value_cleanup_failure_releases_the_prepared_result_once_on_compiler_thread,
     );
 }
@@ -682,7 +682,7 @@ fn a_return_value_cleanup_failure_releases_the_prepared_result_once_on_compiler_
 
 #[test]
 fn two_finalizer_failures_are_both_observed_in_unwinding_order() {
-    hirsel_engine::with_compiler_stack(
+    hirsel_intern::jobs::with_compiler_stack(
         two_finalizer_failures_are_both_observed_in_unwinding_order_on_compiler_thread,
     );
 }
@@ -715,7 +715,7 @@ fn iterator(fail: &str) -> String {
 }
 #[test]
 fn an_iterator_callback_failure_after_a_state_update_releases_the_updated_state() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         // A `mut` argument is the caller's storage: the update precedes the
         // failure, so unwinding releases the updated state, as for a direct call.
         assert_run(
@@ -730,7 +730,7 @@ fn an_iterator_callback_failure_after_a_state_update_releases_the_updated_state(
 /// functions, while still including and auditing every reached private helper.
 #[test]
 fn explicit_native_roots_keep_their_private_closure() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         use hirsel_engine::DefinitionQueries;
         let mut engine = hirsel_engine::QueryEngine::new(
             hirsel_engine::default_environment(),
@@ -766,7 +766,7 @@ fn explicit_native_roots_keep_their_private_closure() {
 
 #[test]
 fn library_surface_instantiates_generics_and_preserves_argument_labels() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let root = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("native-library-surface");
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(root.join("hirsel.json"), r#"{"schema":1,"package":{"name":"surface","version":"1"},"sources":[{"path":"sample.hir","module":["sample"]}],"dependencies":[]}"#).unwrap();

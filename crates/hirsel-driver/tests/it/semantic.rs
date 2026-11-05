@@ -17,7 +17,7 @@ fn parse(engine: &mut QueryEngine, text: &str) -> hirsel_span::FileId {
 }
 #[test]
 fn real_signature_reads_only_headers_and_real_resolver_retains_failed_reads() {
-    hirsel_engine::with_compiler_stack(
+    hirsel_intern::jobs::with_compiler_stack(
         real_signature_reads_only_headers_and_real_resolver_retains_failed_reads_on_compiler_thread,
     );
 }
@@ -48,7 +48,7 @@ fn real_signature_reads_only_headers_and_real_resolver_retains_failed_reads_on_c
 }
 #[test]
 fn real_adapters_track_sibling_signatures_across_body_and_signature_edits() {
-    hirsel_engine::with_compiler_stack(
+    hirsel_intern::jobs::with_compiler_stack(
         real_adapters_track_sibling_signatures_across_body_and_signature_edits_on_compiler_thread,
     );
 }
@@ -81,7 +81,7 @@ fn real_adapters_track_sibling_signatures_across_body_and_signature_edits_on_com
 }
 #[test]
 fn real_signature_phase_reports_duplicate_at_exact_later_name() {
-    hirsel_engine::with_compiler_stack(
+    hirsel_intern::jobs::with_compiler_stack(
         real_signature_phase_reports_duplicate_at_exact_later_name_on_compiler_thread,
     );
 }
@@ -98,7 +98,7 @@ fn real_signature_phase_reports_duplicate_at_exact_later_name_on_compiler_thread
 }
 #[test]
 fn self_nominal_signature_probes_are_recorded_without_recomputing_forever() {
-    hirsel_engine::with_compiler_stack(
+    hirsel_intern::jobs::with_compiler_stack(
         self_nominal_signature_probes_are_recorded_without_recomputing_forever_on_compiler_thread,
     );
 }
@@ -140,7 +140,7 @@ fn self_nominal_signature_probes_are_recorded_without_recomputing_forever_on_com
 
 #[test]
 fn v20_signature_forms_reach_shared_semantics_through_real_adapters() {
-    hirsel_engine::with_compiler_stack(
+    hirsel_intern::jobs::with_compiler_stack(
         v20_signature_forms_reach_shared_semantics_through_real_adapters_on_compiler_thread,
     );
 }
@@ -188,7 +188,7 @@ fn v20_signature_forms_reach_shared_semantics_through_real_adapters_on_compiler_
 
 #[test]
 fn v20_mem_rejections_reach_their_owner_or_report_an_incomplete_pipeline() {
-    hirsel_engine::with_compiler_stack(
+    hirsel_intern::jobs::with_compiler_stack(
         v20_mem_rejections_reach_their_owner_or_report_an_incomplete_pipeline_on_compiler_thread,
     );
 }
@@ -235,7 +235,7 @@ fn v20_mem_rejections_reach_their_owner_or_report_an_incomplete_pipeline_on_comp
 
 #[test]
 fn a_partial_check_keeps_the_exact_opaque_clause_diagnostic_and_completion() {
-    hirsel_engine::with_compiler_stack(
+    hirsel_intern::jobs::with_compiler_stack(
         a_partial_check_keeps_the_exact_opaque_clause_diagnostic_and_completion_on_compiler_thread,
     );
 }
@@ -259,7 +259,7 @@ fn a_partial_check_keeps_the_exact_opaque_clause_diagnostic_and_completion_on_co
 
 #[test]
 fn duplicate_diagnostics_keep_candidate_order_when_the_first_snapshot_changes() {
-    hirsel_engine::with_compiler_stack(duplicate_diagnostics_keep_candidate_order_when_the_first_snapshot_changes_on_compiler_thread);
+    hirsel_intern::jobs::with_compiler_stack(duplicate_diagnostics_keep_candidate_order_when_the_first_snapshot_changes_on_compiler_thread);
 }
 fn duplicate_diagnostics_keep_candidate_order_when_the_first_snapshot_changes_on_compiler_thread() {
     let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
@@ -275,7 +275,7 @@ fn duplicate_diagnostics_keep_candidate_order_when_the_first_snapshot_changes_on
 
 #[test]
 fn missing_handle_capabilities_own_the_incomplete_call() {
-    hirsel_engine::with_compiler_stack(
+    hirsel_intern::jobs::with_compiler_stack(
         missing_handle_capabilities_own_the_incomplete_call_on_compiler_thread,
     );
 }
@@ -311,7 +311,7 @@ fn missing_handle_capabilities_own_the_incomplete_call_on_compiler_thread() {
 
 #[test]
 fn unicode_position_loop_binders_retain_the_written_string_origin() {
-    hirsel_engine::with_compiler_stack(
+    hirsel_intern::jobs::with_compiler_stack(
         unicode_position_loop_binders_retain_the_written_string_origin_on_compiler_thread,
     );
 }
@@ -338,7 +338,7 @@ fn unicode_position_loop_binders_retain_the_written_string_origin_on_compiler_th
 
 #[test]
 fn position_loops_preserve_union_origins_until_the_branded_use() {
-    hirsel_engine::with_compiler_stack(
+    hirsel_intern::jobs::with_compiler_stack(
         position_loops_preserve_union_origins_until_the_branded_use_on_compiler_thread,
     );
 }
@@ -358,7 +358,7 @@ fn position_loops_preserve_union_origins_until_the_branded_use_on_compiler_threa
 
 #[test]
 fn failed_sendable_instantiation_suppresses_only_dependent_parameter_modes() {
-    hirsel_engine::with_compiler_stack(
+    hirsel_intern::jobs::with_compiler_stack(
         failed_sendable_instantiation_suppresses_only_dependent_parameter_modes_on_compiler_thread,
     );
 }
@@ -386,7 +386,7 @@ fn failed_sendable_instantiation_suppresses_only_dependent_parameter_modes_on_co
 
 #[test]
 fn header_views_retain_the_original_syntax_and_exclude_execution_reads() {
-    hirsel_engine::with_compiler_stack(
+    hirsel_intern::jobs::with_compiler_stack(
         header_views_retain_the_original_syntax_and_exclude_execution_reads_on_compiler_thread,
     );
 }
@@ -440,7 +440,7 @@ fn header_views_retain_the_original_syntax_and_exclude_execution_reads_on_compil
 
 #[test]
 fn header_dependencies_ignore_sibling_bodies_but_track_contract_changes() {
-    hirsel_engine::with_compiler_stack(
+    hirsel_intern::jobs::with_compiler_stack(
         header_dependencies_ignore_sibling_bodies_but_track_contract_changes_on_compiler_thread,
     );
 }

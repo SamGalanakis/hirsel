@@ -72,7 +72,7 @@ fn checked(output: &crate::requests::CompileOutput) -> &hirsel_engine::CheckOutp
 
 #[test]
 fn checked_product_requests_record_private_layout_reads_as_the_cold_receipt_does() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let (_directory, entry, source) = fixture();
         // std@1/adler32's in-place update of its opaque state.
         std::fs::write(
@@ -108,7 +108,7 @@ fn checked_product_requests_record_private_layout_reads_as_the_cold_receipt_does
 
 #[test]
 fn checked_product_requests_match_the_cold_receipt_with_and_without_text() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         for source in [ORIGINAL, "const VALUE:u8=7u8\npub fn main()->u8{VALUE}\n"] {
             let (_directory, entry, source_path) = fixture();
             std::fs::write(source_path, source).unwrap();
@@ -143,7 +143,7 @@ fn checked_product_requests_match_the_cold_receipt_with_and_without_text() {
 
 #[test]
 fn real_compiler_requests_coalesce_cancel_independently_and_keep_frozen_revisions() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let (_directory, entry, source) = fixture();
         let initial = request(&entry);
         let mut host = Host::new(selector(hirsel_engine_admission::ProcessBudget::new(
@@ -198,7 +198,7 @@ fn real_compiler_requests_coalesce_cancel_independently_and_keep_frozen_revision
 
 #[test]
 fn real_compiler_host_shutdown_cancels_its_subscription_and_releases_the_allowance() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let (_directory, entry, _source) = fixture();
         let request = request(&entry);
         let budget = hirsel_engine_admission::ProcessBudget::new(768 << 20);
@@ -216,7 +216,7 @@ fn real_compiler_host_shutdown_cancels_its_subscription_and_releases_the_allowan
 
 #[test]
 fn real_compiler_requests_refuse_a_zero_process_allowance() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let (_directory, entry, _source) = fixture();
         let request = request(&entry);
         let mut host = Host::new(selector(hirsel_engine_admission::ProcessBudget::new(0)));
@@ -226,7 +226,7 @@ fn real_compiler_requests_refuse_a_zero_process_allowance() {
 
 #[test]
 fn physical_inspection_counts_survive_revisions_eviction_and_detached_snapshot_owners() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let (_directory, entry, source) = fixture();
         let original = request(&entry);
         let budget = hirsel_engine_admission::ProcessBudget::new(600 << 20);
@@ -309,7 +309,7 @@ fn physical_inspection_counts_survive_revisions_eviction_and_detached_snapshot_o
 
 #[test]
 fn production_host_policy_admits_a_small_real_check_with_its_existing_cap() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let (_directory, entry, _source) = fixture();
         let request = request(&entry);
         let mut host = Host::new(CompilerRequests::for_host(crate::COMPILER, config()));
@@ -337,7 +337,7 @@ fn run_selector(budget: Arc<hirsel_engine_admission::ProcessBudget>) -> Compiler
 
 #[test]
 fn selected_run_executes_tir_and_checked_after_host_drop() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let (_directory, entry, source) = fixture();
         std::fs::write(&source, "pub fn main()->Result[(),()]{Ok(())}\n").unwrap();
         let mut selected = request(&entry);
@@ -387,7 +387,7 @@ fn selected_run_executes_tir_and_checked_after_host_drop() {
 
 #[test]
 fn selected_run_callee_identity_and_cancellation_keep_the_shared_check_live() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let (_directory, entry, source) = fixture();
         std::fs::write(
             &source,
@@ -428,7 +428,7 @@ fn selected_run_callee_identity_and_cancellation_keep_the_shared_check_live() {
 
 #[test]
 fn selected_safe_check_preserves_rejection_and_library_checks_without_run() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         for library in [false, true] {
             let (_directory, entry, source) = fixture();
             if library {
@@ -468,7 +468,7 @@ fn selected_safe_check_preserves_rejection_and_library_checks_without_run() {
 
 #[test]
 fn selected_safe_check_reports_the_settled_entry_escape() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let (_directory, entry, _source) = fixture();
         let mut selected = request(&entry);
         selected.operation = CompileOperation::SafeCheck;
@@ -491,7 +491,7 @@ fn selected_safe_check_reports_the_settled_entry_escape() {
 
 #[test]
 fn selected_private_layout_cache_matches_cold_and_preserves_unread_reader_work() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         for (opaque, reads_field) in [(true, true), (true, false), (false, true)] {
             let (_directory, entry, source) = fixture();
             let visibility = if opaque { "opaque " } else { "" };
@@ -596,7 +596,7 @@ fn selected_private_layout_cache_matches_cold_and_preserves_unread_reader_work()
 
 #[test]
 fn unread_representation_edit_adopts_reader_bodies_and_matches_the_cold_receipt() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let (_directory, entry, source) = fixture();
         let initial = "pub opaque type Secret: data uses {} { level:u64, }\nfn view()->u64{1}\npub fn main()->u64{1}\n";
         std::fs::write(&source, initial).unwrap();
@@ -668,7 +668,7 @@ fn unread_representation_edit_adopts_reader_bodies_and_matches_the_cold_receipt(
 
 #[test]
 fn selected_footprint_planner_admits_many_small_definitions_under_the_same_snapshot_bound() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let (_directory, entry, source) = fixture();
         let mut text = String::new();
         for index in 0..256 {
@@ -707,7 +707,7 @@ fn selected_footprint_planner_admits_many_small_definitions_under_the_same_snaps
 
 #[test]
 fn source_transport_scratch_keeps_the_selected_provider_and_lives_through_detached_source_files() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let (_directory, entry, source) = fixture();
         let selected = request(&entry);
         let parent = tempfile::tempdir().unwrap();
@@ -754,7 +754,7 @@ fn source_transport_scratch_keeps_the_selected_provider_and_lives_through_detach
 
 #[test]
 fn immutable_query_capacity_preserves_sixteen_real_coalesced_subscribers() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let (_directory, entry, _source) = fixture();
         let mut selected = request(&entry);
         let budget = hirsel_engine_admission::ProcessBudget::new(512 << 20);

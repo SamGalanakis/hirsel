@@ -46,7 +46,7 @@ fn scratch(label: &str) -> tempfile::TempDir {
         .unwrap()
 }
 fn scripted(caps: bool) {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let scratch = scratch("batchrun-27-script-");
         let selection = package(scratch.path());
         let prepared =

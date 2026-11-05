@@ -71,7 +71,7 @@ fn host_stale_denied_replays_at_each_width() {
 }
 
 fn replay_case(case: &str) {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let base = std::env::var_os("UNIX_LISTEN_REPLAY_31_EVIDENCE")
             .map(std::path::PathBuf::from)
             .unwrap_or_else(std::env::temp_dir);

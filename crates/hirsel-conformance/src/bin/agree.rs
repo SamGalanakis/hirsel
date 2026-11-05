@@ -12,7 +12,7 @@ fn main() -> ExitCode {
         return status;
     }
 
-    hirsel_engine::with_compiler_stack(main_on_compiler_thread)
+    hirsel_intern::jobs::with_compiler_stack(main_on_compiler_thread)
 }
 fn main_on_compiler_thread() -> ExitCode {
     let mut seed = std::env::var("PROPTEST_RNG_SEED")

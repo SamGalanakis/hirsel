@@ -161,7 +161,7 @@ impl Fixture {
 
 #[test]
 fn immutable_constructor_refuses_a_verified_nonentry_body_within_bounds() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let mut fixture = Fixture::with_source(
             Verify::On,
             "pub fn main()->Result[(),u64]{let f=fn()->Result[(),u64] uses {}{Error(7u64)};f()}",
@@ -183,7 +183,7 @@ fn immutable_constructor_refuses_a_verified_nonentry_body_within_bounds() {
 
 #[test]
 fn immutable_constructor_refuses_missing_lower_and_cross_wired_source_facts() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let mut fixture = Fixture::new(Verify::On);
         assert!(NativeLinkSource::from_settled(fixture.facts(), &fixture.empty).is_err());
         let mut foreign = QueryEngine::new(
@@ -223,7 +223,7 @@ fn immutable_constructor_refuses_missing_lower_and_cross_wired_source_facts() {
 
 #[test]
 fn immutable_launch_manifest_binds_run_seed_and_all_profile_fields() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let fixture = Fixture::new(Verify::On);
         let mut source = NativeLinkSource::from_settled(fixture.facts(), &fixture.lower).unwrap();
         let entry = &fixture.selected[0];
@@ -294,7 +294,7 @@ fn immutable_launch_manifest_binds_run_seed_and_all_profile_fields() {
 
 #[test]
 fn generated_source_selectors_keep_exact_source_ownership() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let source = "fn body()->Result[Body[fn(u64)->u64 uses {}],String]{Ok(codegen.body(\"fn(x:u64)->u64 uses {} {9u64/x}\"))}\nfn generated(x:u64)->u64 uses {}=comptime body()\npub fn main()->Result[(),()]{let _=generated(0u64);Ok(())}";
         let mut fixture = Fixture::with_source(Verify::On, source);
         NativeLinkSource::from_settled(fixture.facts(), &fixture.lower).unwrap();
@@ -324,7 +324,7 @@ fn generated_source_selectors_keep_exact_source_ownership() {
 
 #[test]
 fn callee_launch_binds_checked_decoder_and_refuses_missing_native_root() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let fixture =
             Fixture::with_source(Verify::On, "pub fn main(n:u64)->Result[u64,u64]{Ok(n)}");
         let entry = &fixture.selected[0];

@@ -13,3 +13,6 @@ hirsel-types = { path = "../hirsel-types" }
 
 [dev-dependencies]
 hirsel-guard = { path = "../hirsel-guard" }
+
+[features]
+test-alloc = []

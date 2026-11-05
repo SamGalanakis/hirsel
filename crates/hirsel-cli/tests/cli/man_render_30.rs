@@ -81,7 +81,7 @@ fn scratch(label: &str) -> tempfile::TempDir {
         .unwrap()
 }
 fn scripted(selected: Vec<Value>) {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let tmp = scratch("man-script-");
         let selection = package(tmp.path());
         let mut loaded =
@@ -275,7 +275,7 @@ fn native(backend: &str) {
         );
     }
     eprintln!("{}", String::from_utf8_lossy(&result.stdout));
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         for path in fs::read_dir(root)
             .unwrap()
             .map(|p| p.unwrap().path())
@@ -351,7 +351,7 @@ fn man_render_30_native_cranelift() {
 // success cells are not repeated to replace missing archival evidence.
 #[test]
 fn man_render_30_host_refusal_controls() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let root = scratch("man-controls-").keep();
         let selection = package(&root);
         let data = root.join("data");

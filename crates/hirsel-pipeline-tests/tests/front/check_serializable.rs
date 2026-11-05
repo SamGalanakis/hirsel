@@ -1,8 +1,7 @@
 //! SER-1 source twins exercise the complete pipeline, including independent V.
-use hirsel_engine::{
-    QueryEngine, default_context, default_environment, source_check_request, with_compiler_stack,
-};
+use hirsel_engine::{QueryEngine, default_context, default_environment, source_check_request};
 use hirsel_front_phases::compiler_adapters;
+use hirsel_intern::jobs::with_compiler_stack;
 
 fn check(source: &str, expected: Option<&str>) {
     with_compiler_stack(|| {

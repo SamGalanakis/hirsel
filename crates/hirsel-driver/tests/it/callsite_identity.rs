@@ -1,10 +1,9 @@
 //! Call-site and symbol identity exclude the callee's body revision: editing
 //! one callee's body leaves every caller's emitted calls and every link name
 //! byte-identical, for a plain and a generic callee alike.
-use hirsel_engine::{
-    QueryEngine, default_context, default_environment, source_check_request, with_compiler_stack,
-};
+use hirsel_engine::{QueryEngine, default_context, default_environment, source_check_request};
 use hirsel_front_phases::compiler_adapters;
+use hirsel_intern::jobs::with_compiler_stack;
 use hirsel_native::OptLevel;
 use hirsel_native::Options;
 use hirsel_native::TargetSpec;

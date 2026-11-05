@@ -102,7 +102,7 @@ fn main() {
     if mode == "cold-once" {
         let index: usize = args[3].parse().unwrap();
         let tree = Path::new(spec["trees"][index].as_str().unwrap());
-        let row = hirsel_engine::with_compiler_stack(|| {
+        let row = hirsel_intern::jobs::with_compiler_stack(|| {
             let load = Instant::now();
             let mut session =
                 hirsel_driver::session::Session::open_configured(tree, config.clone());
@@ -137,7 +137,7 @@ fn main() {
     };
     let mut resident = Session::open_configured(entry, config.clone());
     if mode == "disk" || mode == "frozen" {
-        hirsel_engine::with_compiler_stack(|| {
+        hirsel_intern::jobs::with_compiler_stack(|| {
             let mut p = compiler.load_program_source(entry, None).unwrap();
             assert!(
                 p.check(LoweringPolicy::Comptime)
@@ -277,7 +277,7 @@ fn main() {
             );
         } else {
             let tree = Path::new(spec["trees"][i].as_str().unwrap());
-            let output = hirsel_engine::with_compiler_stack(|| {
+            let output = hirsel_intern::jobs::with_compiler_stack(|| {
                 let t = Instant::now();
                 let mut session =
                     hirsel_driver::session::Session::open_configured(tree, config.clone());

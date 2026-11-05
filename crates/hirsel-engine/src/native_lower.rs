@@ -46,7 +46,7 @@ impl NativeOriginalProduct {
 #[derive(Clone)]
 pub struct NativeOriginalHandle {
     input: OriginalInput,
-    pinned: Option<crate::runtime::LiveLowerProduct>,
+    pinned: Option<crate::products::LiveLowerProduct>,
     _admission: Option<Arc<OriginalLease>>,
 }
 #[derive(Clone)]
@@ -57,7 +57,7 @@ enum OriginalInput {
 }
 struct BoundOriginal {
     definition: hirsel_syntax::DefId,
-    live: crate::runtime::WeakLowerProduct,
+    live: crate::products::WeakLowerProduct,
     reference: Arc<std::sync::OnceLock<hirsel_artifact_store::Reference>>,
     action: hirsel_artifact_store::Action,
     context: Arc<NativeRecordContext>,
@@ -108,7 +108,7 @@ impl From<hirsel_product_codec::CheckedTir> for NativeOriginalHandle {
 }
 impl NativeOriginalHandle {
     pub(crate) fn bound(
-        live: &crate::runtime::LiveLowerProduct,
+        live: &crate::products::LiveLowerProduct,
         reference: Arc<std::sync::OnceLock<hirsel_artifact_store::Reference>>,
         context: Arc<NativeRecordContext>,
         records: crate::NativeRecords,
@@ -136,7 +136,7 @@ impl NativeOriginalHandle {
         }
     }
     /// Upgrade only an already admitted live payload. The caller pins it.
-    pub fn live(&self) -> Option<crate::runtime::LiveLowerProduct> {
+    pub fn live(&self) -> Option<crate::products::LiveLowerProduct> {
         if let Some(live) = &self.pinned {
             return Some(live.clone());
         }
@@ -157,7 +157,7 @@ impl NativeOriginalHandle {
             );
             weight.add(size_of::<OriginalLease>() + 2 * size_of::<usize>());
             weight.path(input.definition.path());
-            weight.add(crate::runtime::WeakLowerProduct::metadata_bytes());
+            weight.add(crate::products::WeakLowerProduct::metadata_bytes());
             weight.add(size_of::<NativeRecordContext>() + 2 * size_of::<usize>());
             if let Some(output) = &input.verified {
                 weight.add(output.retained_bytes()?.try_into().ok()?);
@@ -242,7 +242,7 @@ impl NativeOriginalHandle {
 /// Raw input with its original immutable owner. Neither variant grants V or C.
 #[derive(Clone)]
 pub enum NativeOriginalValue {
-    Live(crate::runtime::LiveLowerProduct),
+    Live(crate::products::LiveLowerProduct),
     Scalar(Arc<NativeScalarLower>),
     Archive(hirsel_product_codec::CheckedTir),
 }

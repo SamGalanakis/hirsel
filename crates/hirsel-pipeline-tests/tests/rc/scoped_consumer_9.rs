@@ -264,7 +264,7 @@ fn native_zero_environment_on_both_backends() {
             Sha256::digest(std::fs::read(archive).unwrap())
         );
     }
-    hirsel_engine::with_compiler_stack(move || {
+    hirsel_intern::jobs::with_compiler_stack(move || {
         let mut engine = hirsel_engine::QueryEngine::new(
             hirsel_engine::default_environment(),
             hirsel_front_phases::compiler_adapters(),
@@ -414,7 +414,7 @@ fn native_counted_owner_capture_preserves_one_owner() {
             Sha256::digest(std::fs::read(archive).unwrap())
         );
     }
-    hirsel_engine::with_compiler_stack(move || {
+    hirsel_intern::jobs::with_compiler_stack(move || {
         let mut engine = hirsel_engine::QueryEngine::new(
             hirsel_engine::default_environment(),
             hirsel_front_phases::compiler_adapters(),

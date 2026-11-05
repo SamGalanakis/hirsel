@@ -2,7 +2,7 @@
 use super::runtime50_continuation::ready;
 use super::runtime50_resume::{agree_on, routing};
 use hirsel_driver::native;
-use hirsel_engine::with_compiler_stack;
+use hirsel_intern::jobs::with_compiler_stack;
 use hirsel_lir::continuation::{Representation, ResumeAction, RuntimeOpKind};
 use hirsel_native::Backend;
 use hirsel_native::Fixture;

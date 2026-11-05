@@ -293,7 +293,7 @@ fn campaign<'a>(
     coverage: bool,
     store: Option<std::sync::Arc<dyn hirsel_engine::store::ResultStore>>,
 ) -> usize {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         let compiler = hirsel_front_phases::COMPILER
             .with_owned_engines()

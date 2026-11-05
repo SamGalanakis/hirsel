@@ -821,7 +821,7 @@ mod tests {
     }
     #[test]
     fn source_index_moves_bounded_anchors_headers_and_reverse_reads_without_a_controller() {
-        crate::with_compiler_stack(|| {
+        hirsel_intern::jobs::with_compiler_stack(|| {
             drop(engine(&[]));
             let symbol = Symbol::intern("value");
             let _ = symbol;
@@ -909,7 +909,7 @@ mod tests {
     }
     #[test]
     fn source_carry_drops_syntax_products_and_restores_private_proofs_with_exact_reads() {
-        crate::with_compiler_stack(|| {
+        hirsel_intern::jobs::with_compiler_stack(|| {
             let mut prior = QueryEngine::new(environment(), crate::phases::engine_only_adapters());
             let context = default_context();
             let body = (0..256)
@@ -989,7 +989,7 @@ mod tests {
     }
     #[test]
     fn source_carry_compacts_unowned_buffers_and_keeps_shared_output_identity() {
-        crate::with_compiler_stack(|| {
+        hirsel_intern::jobs::with_compiler_stack(|| {
             let path = DefPath::core("source.buffers");
             for shared in [false, true] {
                 let mut prior = engine(&[path.clone()]);
@@ -1057,7 +1057,7 @@ mod tests {
 
     #[test]
     fn refused_source_index_restore_keeps_its_reservation_and_target_untouched() {
-        crate::with_compiler_stack(|| {
+        hirsel_intern::jobs::with_compiler_stack(|| {
             let path = DefPath::core("source.refused");
             let mut prior = engine(&[path.clone()]);
             let required = prior.source_index_bytes().unwrap();

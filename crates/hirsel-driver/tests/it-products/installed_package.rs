@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 #[test]
 fn installed_std_compiles_without_its_source_files_and_never_checks_unused_items() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let directory = tempfile::tempdir().unwrap();
         let source_root = directory.path().join("std");
         std::fs::create_dir(&source_root).unwrap();
@@ -240,7 +240,7 @@ fn installed_std_compiles_without_its_source_files_and_never_checks_unused_items
 
 #[test]
 fn missing_std_products_name_the_selected_root_without_source_fallback() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let directory = tempfile::tempdir().unwrap();
         let missing = directory.path().join("missing.products");
         let store =

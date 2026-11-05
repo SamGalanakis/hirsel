@@ -2,7 +2,7 @@
 use super::runtime50_continuation::ready;
 use super::runtime50_resume::{compact_runs_with, exact_compact_custody};
 use hirsel_driver::native;
-use hirsel_engine::with_compiler_stack;
+use hirsel_intern::jobs::with_compiler_stack;
 use hirsel_native::Backend;
 use hirsel_native::Partition;
 

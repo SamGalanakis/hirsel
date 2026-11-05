@@ -1403,7 +1403,7 @@ fn stdout_grant() -> serde_json::Value {
 }
 #[test]
 fn standalone_hello_runs_directly_with_fresh_grants_and_only_floor_glibc() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let source = file(
             "pub fn main(rt: Io) -> Result[(), GrantError] { let _ = out.print(io.stdout(rt)?, \"hello, world\\n\"); Ok(()) }",
         );
@@ -1540,7 +1540,7 @@ fn standalone_hello_runs_directly_with_fresh_grants_and_only_floor_glibc() {
 }
 #[test]
 fn standalone_reads_a_granted_file_using_process_args_in_source_root_order() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let source = file(
             "pub type Error = Usage(ArgError) | Files(FileError) | Grant(GrantError)\npub fn main(args: Args, rt: Io) -> Result[(), Error] { let root = arg.path(args, 0) ? Usage; let dir = io.dir(rt, root) ? Files; let bytes = file.read_bytes(dir, path.of(\"hello.txt\")) ? Files; let _ = out.print(io.stdout(rt) ? Grant, if bytes == b\"from disk\" { \"file ok\\n\" } else { \"wrong\\n\" }); Ok(()) }",
         );
@@ -1581,7 +1581,7 @@ fn standalone_reads_a_granted_file_using_process_args_in_source_root_order() {
 }
 #[test]
 fn standalone_cross_target_runs_under_pinned_qemu_and_debug_has_line_tables() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let source = file("pub fn main() -> Result[(), ()] { Ok(()) }\n");
         let cross = build_executable(&source, &["--target", "aarch64-linux"]);
         let output = Command::new(std::env::var_os("HIRSEL_QEMU_AARCH64").unwrap())
@@ -1620,7 +1620,7 @@ fn standalone_cross_target_runs_under_pinned_qemu_and_debug_has_line_tables() {
 
 #[test]
 fn standalone_admits_selected_roots_and_explicit_argv_without_ambient_grants() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let source = file(
             "pub fn main(environment: Env, args: Args, rt: Io, permit: Unsafe) -> Result[(), ()] { Ok(()) }",
         );
@@ -2070,7 +2070,7 @@ fn host_io_records_use_piped_stdin_distinct_stderr_and_exact_environment_snapsho
 
 #[test]
 fn file_stream_cli_reads_multiple_buffers_and_appends_under_explicit_host_grants() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let source = file(
             r#"
 pub type Error = Files(FileError) | Grant(GrantError) | Wrong()
@@ -2157,7 +2157,7 @@ pub fn main(rt: Io) -> Result[(), Error] {
 #[test]
 fn file_errors_cli_reports_permission_denied_for_a_chmod_zero_host_file() {
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let source = file(
             r#"pub fn main(rt: Io) -> Result[(), FileError] {
   let d = io.dir(rt, path.of("data"))?

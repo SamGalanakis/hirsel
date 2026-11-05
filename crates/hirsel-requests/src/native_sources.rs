@@ -54,7 +54,7 @@ mod tests {
     use super::*;
     #[test]
     fn native_source_additions_index_exact_text_without_lowering_and_refuse_bad_bindings() {
-        hirsel_engine::with_compiler_stack(|| {
+        hirsel_intern::jobs::with_compiler_stack(|| {
             let directory = tempfile::tempdir().unwrap();
             let path = directory.path().join("main.hir");
             std::fs::write(&path, "pub fn main()->u64{1u64}").unwrap();

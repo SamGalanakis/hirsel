@@ -654,7 +654,7 @@ mod tests {
 
     #[test]
     fn immutable_tir_refuses_foreign_use_and_missing_settled_bodies_without_compiler_fallback() {
-        hirsel_engine::with_compiler_stack(|| {
+        hirsel_intern::jobs::with_compiler_stack(|| {
             let mut input = fixture();
             let extern_ = DefPath::core("external");
             input.foreign.externs.insert(extern_.clone());

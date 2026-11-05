@@ -6,12 +6,12 @@ fn fixture_product(
     address: hirsel_engine::store::Address,
     action: hirsel_engine::store::Action,
     reference: hirsel_engine::store::Reference,
-) -> hirsel_engine::runtime::ProductRef {
+) -> hirsel_engine_runtime::ProductRef {
     let budget = hirsel_engine_admission::ProcessBudget::new(64 << 20);
     let mut allowance = budget.reserve(64 << 20).unwrap();
     let archive =
-        hirsel_engine::runtime::ProductArchive::open(store, reference, &mut allowance).unwrap();
-    hirsel_engine::runtime::ProductRef::import_archive(address, action, archive)
+        hirsel_engine_runtime::ProductArchive::open(store, reference, &mut allowance).unwrap();
+    hirsel_engine_runtime::ProductRef::import_archive(address, action, archive)
 }
 
 fn fixture_product_bytes(
@@ -19,7 +19,7 @@ fn fixture_product_bytes(
     action: hirsel_engine::store::Action,
     domain: hirsel_engine::store::Domain,
     bytes: &[u8],
-) -> hirsel_engine::runtime::ProductRef {
+) -> hirsel_engine_runtime::ProductRef {
     use hirsel_engine::store::ResultStore;
     let store = hirsel_engine::store::MemStore::default();
     let reference = store.put_content(domain, bytes).unwrap();

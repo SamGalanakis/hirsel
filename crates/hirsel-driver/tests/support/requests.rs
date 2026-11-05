@@ -1,6 +1,8 @@
 //! Request executor fixtures for tests that start with an indexed engine.
 use hirsel_engine::requests::source_graph::InstalledSource;
-use hirsel_engine::{requests::source_graph::*, runtime::*, store::*, *};
+use hirsel_engine::{requests::source_graph::*, store::*, *};
+use hirsel_engine_runtime::*;
+
 use hirsel_intern::jobs::Jobs;
 use std::{collections::BTreeMap, sync::Arc};
 

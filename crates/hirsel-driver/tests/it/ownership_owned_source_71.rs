@@ -24,7 +24,7 @@ fn source_owned_and_resource_selections_keep_distinct_products_in_the_same_sessi
     use hirsel_requests::*;
     use std::{collections::BTreeSet, sync::Arc};
 
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let directory = tempfile::tempdir().unwrap();
         let source = directory.path().join("main.hir");
         std::fs::write(&source, "pub fn main()->Result[(),()] { let first=\"equal\"\nlet second=b\"equal\"\nlet moved=take first\nOk(()) }").unwrap();

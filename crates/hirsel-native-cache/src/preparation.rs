@@ -3,8 +3,10 @@
 //! Target/ABI/toolchain/policy reads and C/Ready admission stay in consumers.
 use hirsel_engine::{
     FrontNativeDefinitionOutput, FrontNativeDefinitionQueries, NativeDefinitionProduct,
-    NativeMetadataWeight, NativeOriginalProduct, runtime::*, store::*,
+    NativeMetadataWeight, NativeOriginalProduct, store::*,
 };
+use hirsel_engine_runtime::*;
+
 use hirsel_rc::instance::{Requirement, SourceDeclaration};
 use hirsel_syntax::{ContentHash, DefPath};
 use std::{

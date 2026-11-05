@@ -2,8 +2,8 @@
 //! products. Source selection keeps the existing whole-package default and
 //! semantic closure; host readiness only inspects this completed handoff.
 use super::*;
-use crate::runtime::*;
 use crate::store::{Domain, Reference, ResultStore};
+use hirsel_engine_runtime::*;
 use hirsel_registry::{OperationKey, OperationParameter, OperationRecord};
 use hirsel_types::SignatureKind;
 use std::{sync::Mutex, task::Poll};

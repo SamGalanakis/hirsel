@@ -116,7 +116,7 @@ impl NativeProducts for NativeFixture {
 
 #[test]
 fn actual_ready_fixture_emits_links_restores_and_exits_on_both_backends() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         use hirsel_engine::{QueryEngine, default_context, default_environment, entry_path};
         use hirsel_native as native;
         let mut engine = QueryEngine::new(
@@ -277,7 +277,7 @@ fn actual_ready_fixture_emits_links_restores_and_exits_on_both_backends() {
     });
 }
 
-use hirsel_engine::runtime::ArchiveAdmission;
 use hirsel_engine::store::{Action, Address, Domain, Output, Reference, ResultStore, VerifyStore};
+use hirsel_engine_runtime::ArchiveAdmission;
 use hirsel_lir::stage::ObjectArtifact;
 use std::path::Path;

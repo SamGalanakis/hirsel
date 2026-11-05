@@ -75,12 +75,12 @@ impl FrontBodyQueries {
         }
         let charge = weight
             .bytes
-            .checked_add(crate::memo::retained_arc_bytes(&std::mem::MaybeUninit::<
-                FrontObservations,
-            >::uninit()))?
-            .checked_add(crate::memo::retained_arc_bytes(&std::mem::MaybeUninit::<
-                LiveSourceBacking,
-            >::uninit()))?;
+            .checked_add(hirsel_engine_admission::retained_arc_bytes(
+                &std::mem::MaybeUninit::<FrontObservations>::uninit(),
+            ))?
+            .checked_add(hirsel_engine_admission::retained_arc_bytes(
+                &std::mem::MaybeUninit::<LiveSourceBacking>::uninit(),
+            ))?;
         if let Some(backing) = outcome._backing.split(charge) {
             return Some(Arc::new(FrontObservations {
                 rows: Rows::Retained(outcome.memos.clone()),

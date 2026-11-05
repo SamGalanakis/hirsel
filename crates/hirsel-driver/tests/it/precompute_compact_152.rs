@@ -161,7 +161,7 @@ fn installed_compact_source_checks_skip_modes_bodies_and_refuse_stale_missing_co
 
 #[test]
 fn cached_front_retains_no_more_metadata_than_the_same_cold_front() {
-    use hirsel_engine::runtime::*;
+    use hirsel_engine_runtime::*;
     with_compiler_stack(|| {
         let directory = tempfile::tempdir().unwrap();
         let manifest = directory.path().join("hirsel.json");

@@ -1,9 +1,9 @@
 //! The borrowed CSV cursor's differential and allocation contracts.
 use hirsel_driver::native;
 use hirsel_driver::*;
-use hirsel_engine::with_compiler_stack;
 use hirsel_front_phases::*;
 use hirsel_host_io::launch::*;
+use hirsel_intern::jobs::with_compiler_stack;
 use hirsel_native::OptLevel;
 use hirsel_native::Options;
 use hirsel_native::Partition;

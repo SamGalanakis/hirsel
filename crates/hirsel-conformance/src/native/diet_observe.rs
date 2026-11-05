@@ -8,7 +8,7 @@ const INPUT: &str = "HIRSEL_NATIVE_OBSERVATION_INPUT";
 pub(super) type Observed = (BTreeSet<String>, Vec<String>);
 
 pub(super) fn observe(path: &Path) -> Observed {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let observe = || {
             let mut program = hirsel_front_phases::load_program(path).map_err(|e| e.to_string())?;
             program.check_for_execution().map_err(|e| e.to_string())?;

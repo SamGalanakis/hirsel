@@ -317,7 +317,7 @@ fn verify(row: &Value, o: &hirsel_interp::observation::Observable, world: &Fixtu
 }
 #[test]
 fn assignment_planner_34_reference_checked_workflows() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let root = scratch("simulation-");
         let path = package(&root);
         let mut loaded = hirsel_front_phases::load_program(&path).unwrap_or_else(|e| panic!("{e}"));
@@ -462,7 +462,7 @@ fn assignment_planner_34_native_four_engine_replay_part_5() {
 }
 
 fn native_four_engine_replay(partition: usize) {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let root = scratch("native-");
         let path = package(&root);
         let mut loaded = hirsel_front_phases::load_program(&path).unwrap_or_else(|e| panic!("{e}"));
@@ -977,7 +977,7 @@ fn native_four_engine_replay(partition: usize) {
 
 #[test]
 fn assignment_planner_34_output_cap_and_certificate_controls() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         // Missing-only recovery for an immutable original tape before a runtime
         // revision. Never treats a new recording as recovery of historical bytes.
         if let Some(tape) = std::env::var_os("ASSIGNMENT_PLANNER_34_INTERPRETER_TAPE") {

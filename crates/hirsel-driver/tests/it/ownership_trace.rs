@@ -682,7 +682,7 @@ fn read(token: Token) -> u64 { token.value }
 
 #[test]
 fn ownership_native_source_emission_binds_checked_metadata_and_preserves_ordinary_objects() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         use hirsel_driver::native;
         use hirsel_native::Backend;
         use hirsel_native::OptLevel;
@@ -781,7 +781,7 @@ pub fn main() -> Result[(), ()] {
 }
 
 fn observed_native_source(body: &str, created: u64, expect_calls: bool) {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         use hirsel_driver::native;
         use hirsel_native::Backend;
         use hirsel_native::OptLevel;
@@ -1203,7 +1203,7 @@ pub fn main() -> Result[(), ()] {
 
 #[test]
 fn ownership_native_call_inputs_require_original_projection_for_synthetic_moves() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         use hirsel_driver::native;
         use hirsel_native::Backend;
         use hirsel_native::OptLevel;

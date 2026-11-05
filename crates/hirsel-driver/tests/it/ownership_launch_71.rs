@@ -11,7 +11,7 @@ use std::sync::Arc;
 #[test]
 #[ignore = "requires diagnostic runtime: -c hirsel.ownership_trace=true -- --test-arg=--include-ignored"]
 fn ownership_native_granted_args_record_and_replay_keep_the_selected_resource_lineage() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let directory = tempfile::tempdir().unwrap();
         let source = directory.path().join("main.hir");
         std::fs::write(&source, "resource type Token { value:u64 }\ndrop(x) {}\npub fn main(args:Args)->Result[(),u64] { let first=Token(value:7u64)\nlet moved=take first\nOk(()) }\n").unwrap();

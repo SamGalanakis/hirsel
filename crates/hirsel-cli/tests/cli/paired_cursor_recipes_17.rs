@@ -174,7 +174,7 @@ fn paired_cursor_recipes_17_bounded_matrix_engines() {
     let interpreted = cli().arg("run").arg(&manifest).output().unwrap();
     assert_eq!(interpreted.status.code(), Some(0), "{interpreted:?}");
     assert!(interpreted.stdout.is_empty() && interpreted.stderr.is_empty());
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         use hirsel_driver::native::*;
         use hirsel_native::*;
         use hirsel_native_batch::*;

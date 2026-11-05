@@ -3,7 +3,9 @@
 //! no legacy Ready/object controller or test implementation supplies products.
 use hirsel_compiler_identity::COMPILER_IDENTITY;
 use hirsel_driver::native;
-use hirsel_engine::{runtime::*, store::ResultStore, *};
+use hirsel_engine::{store::ResultStore, *};
+use hirsel_engine_runtime::*;
+
 use hirsel_native::object_queries::CodegenKey;
 use hirsel_native::object_queries::ObjectTaskFactory;
 use hirsel_native::object_queries::fragment_product;
@@ -505,7 +507,7 @@ fn compile_settled<R>(
                 old.action == now.action
                     && old.reference
                         == now
-                            .archive(hirsel_engine::runtime::ArchiveAdmission::Retained)
+                            .archive(hirsel_engine_runtime::ArchiveAdmission::Retained)
                             .unwrap()
                             .reference()
             })

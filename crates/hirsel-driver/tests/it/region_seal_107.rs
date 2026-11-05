@@ -1,6 +1,7 @@
 use hirsel_driver::native;
-use hirsel_engine::{RunConfiguration, SimulationConfig, with_compiler_stack};
+use hirsel_engine::{RunConfiguration, SimulationConfig};
 use hirsel_front_phases::load_program;
+use hirsel_intern::jobs::with_compiler_stack;
 
 #[test]
 fn sealed_heap_107_runs_on_four_engines_and_replays() {

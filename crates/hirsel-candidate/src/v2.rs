@@ -374,7 +374,7 @@ impl CandidateWorkspace {
             return Err("ResourceLimit".into());
         }
         plan.environment = environment(w).0.to_vec();
-        let namespace = hirsel_engine::with_compiler_stack(|| {
+        let namespace = hirsel_intern::jobs::with_compiler_stack(|| {
             NamespaceLease::capture_program(
                 &plan,
                 &DiskCapture,
@@ -384,7 +384,7 @@ impl CandidateWorkspace {
             )
         })
         .map_err(err)?;
-        let program = hirsel_engine::with_compiler_stack(|| {
+        let program = hirsel_intern::jobs::with_compiler_stack(|| {
             namespace.load(&w.compiler, w.config.clone(), false)
         })
         .map_err(err)?;

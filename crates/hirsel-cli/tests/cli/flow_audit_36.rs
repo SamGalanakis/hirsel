@@ -367,7 +367,7 @@ fn verify(row: &Value, o: &hirsel_interp::observation::Observable, world: &Fixtu
 }
 #[test]
 fn flow_audit_36_reference_checked_workflows() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let root = scratch("simulation-");
         let _evidence = Evidence(root.clone());
         let path = package(&root);
@@ -488,7 +488,7 @@ fn flow_audit_36_reference_checked_workflows() {
 
 #[test]
 fn flow_audit_36_native_four_engine_replay() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let root = scratch("native-");
         let _evidence = Evidence(root.clone());
         let path = package(&root);
@@ -928,7 +928,7 @@ fn flow_audit_36_native_four_engine_replay() {
 fn flow_audit_36_ordered_capacity() {
     use std::io::{BufRead, BufReader, Write};
     use std::os::unix::net::UnixStream;
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let root = scratch("ordered-");
         let _evidence = Evidence(root.clone());
         let path = package(&root);
@@ -1261,7 +1261,7 @@ fn flow_audit_36_ordered_capacity() {
 
 #[test]
 fn flow_audit_36_unique_projection_small_controls() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let root = scratch("projection-");
         let _evidence = Evidence(root.clone());
         let mut failed = vec![];

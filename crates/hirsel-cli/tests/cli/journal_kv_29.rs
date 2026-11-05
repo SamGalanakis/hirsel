@@ -56,7 +56,7 @@ fn append_fixture(root: &std::path::Path) -> PathBuf {
 
 #[test]
 fn journal_kv_29_open_append_reference_checked() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let root = Scratch::new();
         let mut loaded = hirsel_front_phases::load_program(&append_fixture(root.path())).unwrap();
         loaded.check_for_execution().unwrap();
@@ -199,7 +199,7 @@ fn journal_kv_29_open_append_native_replay() {
 
 #[test]
 fn journal_kv_29_open_append_crash_modes_checked() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let root = Scratch::new();
         let source = append_fixture(root.path());
         // The public execution adapter requires a public root entry. Keep the
@@ -387,7 +387,7 @@ fn full_gate_journal_kv_29_boundaries_reference_checked() {
     );
 }
 fn reference_cases(mut selected: Vec<serde_json::Value>, boundaries: bool) {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let root = Scratch::new();
         let selection = app_package(root.path());
         let mut loaded = hirsel_front_phases::load_program(&selection).unwrap();
@@ -572,7 +572,7 @@ fn journal_kv_29_application_native_replay() {
 
 #[test]
 fn journal_kv_29_crash_cancellation_integration() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let root = Scratch::new();
         let selection = app_package(root.path());
         fs::write(

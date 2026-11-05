@@ -176,7 +176,7 @@ fn run_case(
 }
 #[test]
 fn toy_analyzer_31_reference_checked_oracle_and_session() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let scratch = scratch();
         let path = package(scratch.path());
         let mut loaded = hirsel_front_phases::load_program(&path).unwrap();
@@ -255,7 +255,7 @@ fn toy_analyzer_31_reference_checked_oracle_and_session() {
 }
 #[test]
 fn toy_analyzer_31_caps_denial_and_pending_cancellation() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let scratch = scratch();
         let path = package(scratch.path());
         let mut loaded = hirsel_front_phases::load_program(&path).unwrap();
@@ -351,7 +351,7 @@ fn scripted_native(group: u8) {
     let readiness = group == 2;
     let missing = group == 3;
     let widths = group == 4;
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let scratch = scratch();
         let path = package(scratch.path());
         // Each body owns one compiled fixture; replay providers and tape state
@@ -685,7 +685,7 @@ fn toy_analyzer_31_production_ordered_real_files() {
 #[test]
 #[ignore = "offline audit of existing immutable host tapes; set TOY_ANALYZER_31_ARCHIVES and use hirsel.tests=host"]
 fn toy_analyzer_31_host_tapes_checked_replay_and_controls() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let directories = std::env::var("TOY_ANALYZER_31_ARCHIVES")
             .expect("explicit archived launch directories");
 
@@ -1106,7 +1106,7 @@ fn toy_analyzer_31_scripted_width_streams() {
 #[test]
 #[ignore = "negative-only existing tape audit; explicit host archive, no live recording or positive replay"]
 fn toy_analyzer_31_exact_refusal_controls() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let directory = PathBuf::from(std::env::var("TOY_ANALYZER_31_REFUSAL_ARCHIVE").unwrap());
         let manifest = directory.join("hirsel.json");
         let tape = directory.join("cranelift-success-w1.tape");

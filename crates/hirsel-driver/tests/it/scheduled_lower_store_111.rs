@@ -1,6 +1,8 @@
 use hirsel_driver::*;
 use hirsel_engine::store::ResultStore;
-use hirsel_engine::{runtime::*, store::MemStore, *};
+use hirsel_engine::{store::MemStore, *};
+use hirsel_engine_runtime::*;
+
 use hirsel_front_phases::*;
 use hirsel_host_io::launch::*;
 use std::sync::Arc;
@@ -458,7 +460,7 @@ fn check_live_lower_observations(live_only: bool) {
                 .remove(0);
             let actual = lower.outcome(product.clone()).unwrap();
             let published = product
-                .lower_value()
+                .live_value::<hirsel_engine::products::LiveLowerProduct>()
                 .expect("ordinary Lower publishes its admitted live owner");
             assert!(Arc::ptr_eq(&published.output().value, &actual.output.value));
             let reserved = budget.reserved();

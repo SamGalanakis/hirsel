@@ -6,16 +6,17 @@ use crate::requests::{
 use hirsel_engine::{
     CompileConfig,
     requests::{RequestEngine, observe_inputs},
-    runtime::*,
     store::{MemStore, ResultStore},
 };
+use hirsel_engine_runtime::*;
+
 use hirsel_intern::jobs::Jobs;
 use std::task::Poll;
 
 #[test]
 #[ignore = "requires native-selector-proof selected platform inputs"]
 fn actual_native_selector_coalesces_build_and_bound_run_without_a_retained_controller() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         for backend in [
             hirsel_native::Backend::Cranelift,
             hirsel_native::Backend::Llvm,

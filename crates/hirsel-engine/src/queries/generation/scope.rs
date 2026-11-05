@@ -1,7 +1,7 @@
 //! Host admission for a demanded source scope. The host waits for the same
 //! instance producer that suspended Lower and Front consumers use.
 use super::*;
-use crate::runtime::*;
+use hirsel_engine_runtime::*;
 use hirsel_intern::jobs::Jobs;
 
 pub struct FrontDemandAdmission {

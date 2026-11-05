@@ -1,8 +1,8 @@
 //! Native query descriptors. Content references convey integrity, never proof
 //! authority; materialization independently checks the native stage and inputs.
-use hirsel_engine::runtime::ArchiveAdmission;
-pub use hirsel_engine::runtime::ProductRef;
 use hirsel_engine::store::Reference;
+use hirsel_engine_runtime::ArchiveAdmission;
+pub use hirsel_engine_runtime::ProductRef;
 pub use hirsel_rc::arena_credit::equations::LocalArenaEquations;
 use hirsel_syntax::ContentHash;
 use std::sync::Arc;
@@ -15,8 +15,8 @@ pub const ROOT_KIND: u32 = 0x4e00_0005;
 pub fn instance_query(
     key: &InstanceAddress,
     product: ProductRef,
-) -> hirsel_engine::runtime::QueryId {
-    hirsel_engine::runtime::QueryId {
+) -> hirsel_engine_runtime::QueryId {
+    hirsel_engine_runtime::QueryId {
         kind: if product.address == key.address(CALLABLE_VALUE_KIND) {
             CALLABLE_VALUE_KIND
         } else {
@@ -36,13 +36,13 @@ pub struct NativeRootKey {
 }
 
 impl NativeRootKey {
-    pub fn query_id(&self) -> Result<hirsel_engine::runtime::QueryId, String> {
+    pub fn query_id(&self) -> Result<hirsel_engine_runtime::QueryId, String> {
         if self.roots.windows(2).any(|w| w[0] >= w[1]) {
             return Err("noncanonical native root selection".into());
         }
         let selection = serde_json::to_vec(&(&self.roots, self.target_abi, self.policy))
             .map_err(|e| e.to_string())?;
-        Ok(hirsel_engine::runtime::QueryId {
+        Ok(hirsel_engine_runtime::QueryId {
             kind: ROOT_KIND,
             address: hirsel_engine::store::Address(ContentHash::of_parts(
                 "hirsel.native.root-address.v1",
@@ -94,8 +94,8 @@ impl InstanceAddress {
             .then_with(|| self.target_abi.cmp(&other.target_abi))
             .then_with(|| self.policy.cmp(&other.policy))
     }
-    pub fn ready_query_id(&self) -> hirsel_engine::runtime::QueryId {
-        hirsel_engine::runtime::QueryId {
+    pub fn ready_query_id(&self) -> hirsel_engine_runtime::QueryId {
+        hirsel_engine_runtime::QueryId {
             kind: READY_KIND,
             address: self.address(READY_KIND),
         }
@@ -110,8 +110,8 @@ impl InstanceAddress {
                 self.policy.0.as_slice(),
             ],
         ));
-        hirsel_engine::runtime::profile::definition(
-            hirsel_engine::runtime::QueryId { kind, address },
+        hirsel_engine_runtime::profile::definition(
+            hirsel_engine_runtime::QueryId { kind, address },
             self.instance.definition(),
         );
         address
@@ -408,7 +408,7 @@ pub fn ready_product(
     product: ProductRef,
 ) -> Result<ReadyProduct, String> {
     let archive = product
-        .archive(hirsel_engine::runtime::ArchiveAdmission::Retained)
+        .archive(hirsel_engine_runtime::ArchiveAdmission::Retained)
         .map_err(|e| e.to_string())?;
     let reference = archive.reference();
     if reference.domain != READY_RECORD_DOMAIN {

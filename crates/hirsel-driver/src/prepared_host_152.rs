@@ -1,7 +1,8 @@
 use crate::COMPILER;
 use crate::requests::*;
 use crate::*;
-use hirsel_engine::{CompileConfig, Verify, with_compiler_stack};
+use hirsel_engine::{CompileConfig, Verify};
+use hirsel_intern::jobs::with_compiler_stack;
 use hirsel_native::Fixture;
 
 #[test]

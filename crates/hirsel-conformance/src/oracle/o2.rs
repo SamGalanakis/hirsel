@@ -127,5 +127,5 @@ fn one(
 }
 
 fn resident_artifacts(session: &mut Session, config: &Config) -> Artifacts {
-    hirsel_engine::with_compiler_stack(|| request_artifacts(session, config))
+    hirsel_intern::jobs::with_compiler_stack(|| request_artifacts(session, config))
 }

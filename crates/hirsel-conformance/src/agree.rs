@@ -356,7 +356,7 @@ fn classify_package_native(
     hash_seed: u64,
 ) -> Classification {
     match catch_unwind(AssertUnwindSafe(|| {
-        hirsel_engine::with_compiler_stack(|| match path {
+        hirsel_intern::jobs::with_compiler_stack(|| match path {
             Some(path) => classify_requested(source, execution, native, path, hash_seed),
             None => classify_standalone(source, execution, native, hash_seed),
         })

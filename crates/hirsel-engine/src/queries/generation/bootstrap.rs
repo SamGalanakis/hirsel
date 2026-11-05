@@ -1,11 +1,11 @@
 //! Ordered acceptance of generator text before capturing the final immutable
 //! front. All bootstrap work uses explicit parts of the caller's existing grant.
 use super::*;
-use crate::runtime::AdmittedRuntime;
-use crate::runtime::MemoryWeight;
-use crate::runtime::QueryRuntime;
-use crate::runtime::RuntimeErrors;
-use crate::runtime::RuntimeStats;
+use hirsel_engine_runtime::AdmittedRuntime;
+use hirsel_engine_runtime::MemoryWeight;
+use hirsel_engine_runtime::QueryRuntime;
+use hirsel_engine_runtime::RuntimeErrors;
+use hirsel_engine_runtime::RuntimeStats;
 
 use hirsel_intern::jobs::Jobs;
 

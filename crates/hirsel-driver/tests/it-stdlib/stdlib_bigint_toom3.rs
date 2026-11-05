@@ -1,7 +1,7 @@
 //! Exercise the large-input mac3 branches against an independent base-2^64
 //! schoolbook oracle. num-bigint tests/biguint.rs:845-869 supplies the product
 //! table already covered by SEM-1-bigint-tables-sum-run.
-use hirsel_engine::with_compiler_stack;
+use hirsel_intern::jobs::with_compiler_stack;
 
 fn product(a: &[u64], b: &[u64]) -> Vec<u64> {
     let mut out = vec![0; a.len() + b.len()];

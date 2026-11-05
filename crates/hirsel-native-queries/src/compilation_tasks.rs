@@ -13,8 +13,8 @@ use super::{
     tasks::{CodegenTasks, NativeTaskFactory, NativeTasks},
     *,
 };
-use hirsel_engine::runtime::*;
 use hirsel_engine::store::{Action, Address, Domain};
+use hirsel_engine_runtime::*;
 use hirsel_native::object_queries::CODEGEN_KIND;
 use hirsel_native::object_queries::CodegenKey;
 use hirsel_native::object_queries::LINK_KIND;

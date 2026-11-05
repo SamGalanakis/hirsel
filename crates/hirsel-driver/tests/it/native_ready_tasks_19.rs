@@ -1,5 +1,7 @@
 use hirsel_driver::*;
-use hirsel_engine::{runtime::*, store::ResultStore, *};
+use hirsel_engine::{store::ResultStore, *};
+use hirsel_engine_runtime::*;
+
 use hirsel_front_phases::*;
 use hirsel_host_io::launch::*;
 use hirsel_native::query_model::ARENA_CANDIDATES_KIND;

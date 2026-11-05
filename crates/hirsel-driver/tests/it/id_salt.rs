@@ -35,7 +35,7 @@ fn transcript() -> String {
     let mut out = String::new();
     for path in sample() {
         out.push_str(&format!("== {}\n", path.display()));
-        let program = hirsel_engine::with_compiler_stack(|| {
+        let program = hirsel_intern::jobs::with_compiler_stack(|| {
             let mut program = load_program(&path)?;
             let checked = program
                 .check(hirsel_engine::LoweringPolicy::Comptime)

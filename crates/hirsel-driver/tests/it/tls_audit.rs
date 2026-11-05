@@ -4,10 +4,9 @@
 //! has a TLS section, symbol or relocation (`hirsel_lir::emission::artifact`); this audit
 //! compiles programs that reach every suspending operation family through both emitters, for
 //! both targets and both optimisation levels, and reads each object back.
-use hirsel_engine::{
-    QueryEngine, default_context, default_environment, source_check_request, with_compiler_stack,
-};
+use hirsel_engine::{QueryEngine, default_context, default_environment, source_check_request};
 use hirsel_front_phases::compiler_adapters;
+use hirsel_intern::jobs::with_compiler_stack;
 use hirsel_lir::object::ObjectFile;
 use hirsel_native::Backend;
 use hirsel_native::OptLevel;

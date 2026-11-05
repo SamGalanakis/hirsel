@@ -219,7 +219,7 @@ impl Proofs {
     pub fn assess_native(
         export: &hirsel_engine::FrontProofExport,
         native: &std::sync::Arc<hirsel_engine::FrontNativeQueries>,
-        completed: hirsel_engine::runtime::ProductRef,
+        completed: hirsel_engine_runtime::ProductRef,
         evidence: &Evidence,
         store: std::sync::Arc<dyn hirsel_engine::store::ResultStore>,
     ) -> Result<Self, super::NativeError> {

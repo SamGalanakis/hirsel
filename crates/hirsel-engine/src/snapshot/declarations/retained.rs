@@ -99,7 +99,7 @@ fn row(weight: &mut Weight, value: &Arc<Row>) {
     weight.flat_vec(&value.site_spans);
     weight.flat_vec(&value.headers);
     if let Some(sites) = value.sites.get() {
-        weight.add(crate::memo::retained_arc_bytes(&**sites) as usize);
+        weight.add(hirsel_engine_admission::retained_arc_bytes(&**sites) as usize);
         for site in &**sites {
             weight.path(&site.definition);
         }
@@ -132,7 +132,7 @@ fn hash<K, V>(weight: &mut Weight, capacity: usize) {
 }
 fn files(weight: &mut Weight, values: &BTreeMap<FileId, Arc<[Arc<ItemSyntax>]>>) {
     weight.map(values, |w, _, items| {
-        w.add(crate::memo::retained_arc_bytes(&**items) as usize);
+        w.add(hirsel_engine_admission::retained_arc_bytes(&**items) as usize);
         for syntax in &**items {
             w.add(crate::memo::retained::retained_syntax_bytes(syntax) as usize);
         }
@@ -203,7 +203,7 @@ mod tests {
 
     #[test]
     fn source_projection_releases_derived_sites_with_a_complete_allocation_bound() {
-        crate::with_compiler_stack(|| {
+        hirsel_intern::jobs::with_compiler_stack(|| {
             for width in [1, 4, 16] {
                 let paths: Vec<_> = (0..width)
                     .map(|i| DefPath::core(&format!("carry_row_{i}")))
@@ -280,7 +280,7 @@ mod tests {
 
     #[test]
     fn declaration_backing_bound_covers_manifest_frozen_rows_sites_and_last_clone() {
-        crate::with_compiler_stack(|| {
+        hirsel_intern::jobs::with_compiler_stack(|| {
             // Registry and interned identities are process-owned, outside the
             // source-index allocation whose actual release is measured below.
             drop(DeclarationIndex::default().frozen());
@@ -381,7 +381,7 @@ mod tests {
                     bound > before,
                     "frozen rows and site payload must be included"
                 );
-                let bound = bound + crate::memo::retained_arc_bytes(&*index);
+                let bound = bound + hirsel_engine_admission::retained_arc_bytes(&*index);
                 assert!(
                     actual.live as u64 <= bound,
                     "width {width}: actual {} exceeds {bound}",

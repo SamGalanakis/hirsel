@@ -537,8 +537,8 @@ mod tests {
     }
 
     struct DeferredSource {
-        dependencies: crate::runtime::QueryReads,
-        query: crate::runtime::QueryId,
+        dependencies: hirsel_engine_runtime::QueryReads,
+        query: hirsel_engine_runtime::QueryId,
         types: Arc<hirsel_types::TypeInterner>,
         reads: Reads,
         calls: Arc<std::sync::atomic::AtomicUsize>,
@@ -599,8 +599,8 @@ mod tests {
         .reference(text)
         .unwrap()
     }
-    fn errors() -> crate::runtime::RuntimeErrors {
-        crate::runtime::RuntimeErrors {
+    fn errors() -> hirsel_engine_runtime::RuntimeErrors {
+        hirsel_engine_runtime::RuntimeErrors {
             resource: reference(b"resource"),
             protocol: reference(b"protocol"),
             cycle: reference(b"cycle"),
@@ -608,14 +608,14 @@ mod tests {
             cancelled: reference(b"cancelled"),
         }
     }
-    fn query(kind: u32) -> crate::runtime::QueryId {
-        crate::runtime::QueryId {
+    fn query(kind: u32) -> hirsel_engine_runtime::QueryId {
+        hirsel_engine_runtime::QueryId {
             kind,
             address: crate::store::Address(ContentHash::of_bytes(&kind.to_le_bytes())),
         }
     }
-    fn product(query: crate::runtime::QueryId) -> crate::runtime::ProductRef {
-        crate::runtime::test_product(
+    fn product(query: hirsel_engine_runtime::QueryId) -> hirsel_engine_runtime::ProductRef {
+        hirsel_engine_runtime::test_product(
             query.address,
             crate::store::Action(query.address.0),
             crate::store::Domain { kind: 1, schema: 1 },
@@ -623,11 +623,11 @@ mod tests {
         )
     }
     struct Leaf(bool);
-    impl crate::runtime::QueryFactory for Leaf {
+    impl hirsel_engine_runtime::QueryFactory for Leaf {
         fn create(
             &self,
-            query: crate::runtime::QueryId,
-        ) -> Result<Box<dyn crate::runtime::QueryTask>, crate::store::Reference> {
+            query: hirsel_engine_runtime::QueryId,
+        ) -> Result<Box<dyn hirsel_engine_runtime::QueryTask>, crate::store::Reference> {
             Ok(Box::new(LeafTask {
                 query,
                 fail: self.0,
@@ -635,21 +635,24 @@ mod tests {
         }
     }
     struct LeafTask {
-        query: crate::runtime::QueryId,
+        query: hirsel_engine_runtime::QueryId,
         fail: bool,
     }
-    impl crate::runtime::QueryTask for LeafTask {
-        fn id(&self) -> crate::runtime::QueryId {
+    impl hirsel_engine_runtime::QueryTask for LeafTask {
+        fn id(&self) -> hirsel_engine_runtime::QueryId {
             self.query
         }
-        fn weight(&self) -> crate::runtime::MemoryWeight {
+        fn weight(&self) -> hirsel_engine_runtime::MemoryWeight {
             Default::default()
         }
-        fn poll(&mut self, _: &mut dyn crate::runtime::QueryContext) -> crate::runtime::QueryPoll {
+        fn poll(
+            &mut self,
+            _: &mut dyn hirsel_engine_runtime::QueryContext,
+        ) -> hirsel_engine_runtime::QueryPoll {
             if self.fail {
-                crate::runtime::QueryPoll::Failed(errors().protocol)
+                hirsel_engine_runtime::QueryPoll::Failed(errors().protocol)
             } else {
-                crate::runtime::QueryPoll::Complete(product(self.query))
+                hirsel_engine_runtime::QueryPoll::Complete(product(self.query))
             }
         }
     }
@@ -659,12 +662,12 @@ mod tests {
         calls: Arc<std::sync::atomic::AtomicUsize>,
         fail: bool,
     }
-    impl crate::runtime::LocalQueryFactory for EvaluationFactory {
+    impl hirsel_engine_runtime::LocalQueryFactory for EvaluationFactory {
         fn weight(
             &self,
-            _: crate::runtime::QueryId,
-        ) -> Result<crate::runtime::MemoryWeight, crate::store::Reference> {
-            Ok(crate::runtime::MemoryWeight {
+            _: hirsel_engine_runtime::QueryId,
+        ) -> Result<hirsel_engine_runtime::MemoryWeight, crate::store::Reference> {
+            Ok(hirsel_engine_runtime::MemoryWeight {
                 retained: 1 << 20,
                 scratch: 1 << 20,
                 stack: 0,
@@ -672,13 +675,14 @@ mod tests {
         }
         fn create(
             &self,
-            query: crate::runtime::QueryId,
-        ) -> Result<Box<dyn crate::runtime::LocalQueryTask>, crate::store::Reference> {
+            query: hirsel_engine_runtime::QueryId,
+        ) -> Result<Box<dyn hirsel_engine_runtime::LocalQueryTask>, crate::store::Reference>
+        {
             let types = self.types.clone();
             let snapshot = self.snapshot.clone();
             let calls = self.calls.clone();
             let fail = self.fail;
-            let task = crate::runtime::LocalFutureTask::new(
+            let task = hirsel_engine_runtime::LocalFutureTask::new(
                 query,
                 self.weight(query)?,
                 1,
@@ -744,10 +748,10 @@ mod tests {
     }
     #[test]
     fn validated_private_evaluation_suspends_on_s5_with_one_worker_and_complete_failure_reads() {
-        use crate::runtime::AdmittedRuntime;
-        use crate::runtime::QueryRuntime;
+        use hirsel_engine_runtime::AdmittedRuntime;
+        use hirsel_engine_runtime::QueryRuntime;
 
-        crate::with_compiler_stack(|| {
+        hirsel_intern::jobs::with_compiler_stack(|| {
             for fail in [false, true] {
                 let types = hirsel_types::TypeInterner::new(None);
                 let dependency = DefPath::core("saved-private-dependency");
@@ -796,7 +800,7 @@ mod tests {
     }
     #[test]
     fn immutable_evaluation_keeps_dependency_and_reflection_reads_after_failure() {
-        crate::with_compiler_stack(|| {
+        hirsel_intern::jobs::with_compiler_stack(|| {
             let types = hirsel_types::TypeInterner::new(None);
             let root = DefPath::core("private-evaluation");
             let dependency = DefPath::core("constant-dependency");
@@ -841,7 +845,7 @@ mod tests {
 
     #[test]
     fn failed_private_admission_keeps_its_originating_universe_receipt() {
-        crate::with_compiler_stack(|| {
+        hirsel_intern::jobs::with_compiler_stack(|| {
             let types = hirsel_types::TypeInterner::new(None);
             let root = DefPath::core("private-admission");
             let dependency = DefPath::core("constant-dependency");

@@ -96,7 +96,7 @@ fn cases(root: &Path) -> Vec<Value> {
     cases
 }
 fn scripted(checked: bool, full: bool) {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let retained = scratch().keep();
         let root = retained.as_path();
         let manifest = package(root);

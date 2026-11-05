@@ -1,5 +1,6 @@
 //! Full-entry chunkbackup fixtures. Bounds are fixture policies, never defaults.
-use hirsel_engine::{RunConfiguration, SimulationConfig, with_compiler_stack};
+use hirsel_engine::{RunConfiguration, SimulationConfig};
+use hirsel_intern::jobs::with_compiler_stack;
 use hirsel_run_schema::Access;
 use serde_json::Value;
 use sha2::{Digest, Sha256};

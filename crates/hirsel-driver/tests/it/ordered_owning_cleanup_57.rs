@@ -1,6 +1,6 @@
 //! A retained owning await result remains initialized while the child's rest
 //! yields twice and contributes two cleanup failures.
-use hirsel_engine::with_compiler_stack;
+use hirsel_intern::jobs::with_compiler_stack;
 
 pub(super) const SOURCE: &str = r#"
 resource type Guard { output:Stdout, text:String }

@@ -1,5 +1,7 @@
 use hirsel_driver::*;
-use hirsel_engine::{runtime::*, store::ResultStore, *};
+use hirsel_engine::{store::ResultStore, *};
+use hirsel_engine_runtime::*;
+
 use hirsel_front_phases::*;
 use hirsel_host_io::launch::*;
 use hirsel_native::query_model::ARENA_CANDIDATES_KIND;
@@ -244,12 +246,12 @@ fn native_arena_recursive_source_edit_propagates_through_both_strata_without_rei
                 assert_ne!(
                     initial.chosen[name]
                         .0
-                        .archive(hirsel_engine::runtime::ArchiveAdmission::Retained)
+                        .archive(hirsel_engine_runtime::ArchiveAdmission::Retained)
                         .unwrap()
                         .reference(),
                     edited.chosen[name]
                         .0
-                        .archive(hirsel_engine::runtime::ArchiveAdmission::Retained)
+                        .archive(hirsel_engine_runtime::ArchiveAdmission::Retained)
                         .unwrap()
                         .reference(),
                     "{name}"

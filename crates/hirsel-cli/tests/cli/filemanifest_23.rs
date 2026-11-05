@@ -106,7 +106,7 @@ fn filemanifest_23_oracle_engines_bounds_and_read_only_effects() {
 
 #[test]
 fn filemanifest_23_checked_h_pure_model_and_upstream_vectors() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let scratch = tempfile::tempdir().unwrap();
         let root = scratch.path();
         fs::write(

@@ -1,5 +1,5 @@
 //! Retained ABI output is independent of the native stack's result temporary.
-use hirsel_engine::with_compiler_stack;
+use hirsel_intern::jobs::with_compiler_stack;
 use hirsel_lir::continuation::{check_ordered_host_result, core_name, ordered_host_result};
 use hirsel_lir::ir::CallId;
 

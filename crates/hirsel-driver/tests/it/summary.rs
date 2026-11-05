@@ -132,7 +132,7 @@ fn generated_selections(
 
 #[test]
 fn a_generic_forwarder_summarizes_one_open_call_selected_at_each_actual() {
-    hirsel_engine::with_compiler_stack(
+    hirsel_intern::jobs::with_compiler_stack(
         a_generic_forwarder_summarizes_one_open_call_selected_at_each_actual_on_compiler_thread,
     );
 }
@@ -210,7 +210,7 @@ pub fn main() -> Result[(), ()] {{
 
 #[test]
 fn nested_local_size_generic_functions_capture_the_enclosing_size() {
-    hirsel_engine::with_compiler_stack(
+    hirsel_intern::jobs::with_compiler_stack(
         nested_local_size_generic_functions_capture_the_enclosing_size_on_compiler_thread,
     );
 }
@@ -381,7 +381,7 @@ fn staged_selections(
 
 #[test]
 fn a_generated_call_in_an_unexecuted_comptime_branch_is_selected_by_execution() {
-    hirsel_engine::with_compiler_stack(
+    hirsel_intern::jobs::with_compiler_stack(
         a_generated_call_in_an_unexecuted_comptime_branch_is_selected_by_execution_on_compiler_thread,
     );
 }
@@ -550,7 +550,7 @@ fn published_summary_survives_body_release_and_rejects_stale_seeds() {
 
 #[test]
 fn published_summaries_match_mode_refined_selection_inputs() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         for source in [
             format!("{WIDTH}\nfn forward[T](v: T) -> u64 uses {{}} {{ width(v) }}\npub fn main() -> Result[(), ()] {{ let _ = forward(Point(x: 1, y: 2)); Ok(()) }}"),
             "fn outer[n: size](xs: Inline[u8, n]) -> u64 { fn inner[m: size](ys: Inline[u8, m]) -> u64 { let _ = ys; comptime (n * m) }; inner(xs) }\npub fn main() { let xs: Inline[u8, 2] = [1, 2]; let _ = outer(xs) }".into(),

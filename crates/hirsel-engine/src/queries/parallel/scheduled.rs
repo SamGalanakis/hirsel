@@ -2,9 +2,13 @@
 //! existing immutable Worker and scalar canonical codec; no batch pool or
 //! mutable engine is invoked by a factory or a poll. Publication is separate.
 use super::*;
-use crate::runtime::*;
+use crate::products::{
+    LiveAnalyzedProduct, LiveSummaryProduct, ProductSource, SharedProductSource,
+    WeakAnalyzedProduct,
+};
 use crate::snapshot::OwnedSourceContext;
 use crate::store::{Domain, EntryKey, Reference, ResultStore, VariantRef};
+use hirsel_engine_runtime::*;
 use std::sync::{
     Mutex, OnceLock,
     atomic::{AtomicU64, Ordering::Relaxed},
@@ -415,7 +419,7 @@ impl FrontBodyQueries {
         self: &Arc<Self>,
         product: ProductRef,
         allowance: &mut hirsel_engine_admission::MemoryReservation,
-    ) -> Option<crate::runtime::LiveSummaryProduct> {
+    ) -> Option<crate::products::LiveSummaryProduct> {
         let query = QueryId {
             kind: FRONT_BODY_KIND,
             address: product.address,
@@ -430,9 +434,11 @@ impl FrontBodyQueries {
         };
         let value = match &outcome.state {
             FrontState::Failed { .. } => return None,
-            FrontState::Settled { publication, .. } => publication.summary_value()?.value_arc(),
+            FrontState::Settled { publication, .. } => publication
+                .live_value::<crate::products::LiveSummaryProduct>()?
+                .value_arc(),
         };
-        crate::runtime::LiveSummaryProduct::new(
+        crate::products::LiveSummaryProduct::new(
             (product.address, product.action),
             value,
             ProductSource::prepare(
@@ -781,9 +787,9 @@ impl FrontBodyQueries {
             charge = charge.checked_add(LiveSummaryProduct::shared_payload_bytes(summary)?)?;
         }
         charge = charge
-            .checked_add(crate::memo::retained_arc_bytes(&std::mem::MaybeUninit::<
-                FrontFacts,
-            >::uninit()))?
+            .checked_add(hirsel_engine_admission::retained_arc_bytes(
+                &std::mem::MaybeUninit::<FrontFacts>::uninit(),
+            ))?
             .checked_add(
                 (memos.len() * std::mem::size_of::<(crate::memo::MemoKey, Arc<Reads>)>()) as u64,
             )?
@@ -888,8 +894,10 @@ impl FrontBodyQueries {
             FrontSlot::Live { outcome, .. } => match &outcome.state {
                 FrontState::Failed { .. } => None,
                 FrontState::Settled { publication, .. } => (publication
-                    .summary_value()
-                    .is_some_and(|summary| summary.cache_owners(1))
+                    .live_value::<crate::products::LiveSummaryProduct>()
+                    .is_some_and(|summary| {
+                        publication.live_owners() == 1 && summary.cache_owners(1)
+                    })
                     && Arc::strong_count(&outcome.facts) == 2)
                     .then_some(*key),
             },
@@ -928,8 +936,10 @@ impl FrontBodyQueries {
                         FrontState::Settled { publication, .. } => {
                             Arc::strong_count(&outcome.facts) != 2
                                 || publication
-                                    .summary_value()
-                                    .is_none_or(|summary| !summary.cache_owners(1))
+                                    .live_value::<crate::products::LiveSummaryProduct>()
+                                    .is_none_or(|summary| {
+                                        publication.live_owners() != 1 || !summary.cache_owners(1)
+                                    })
                         }
                     };
                     if pinned_live {
@@ -959,8 +969,9 @@ impl FrontBodyQueries {
         hirsel_engine_admission::MemoryReservation,
         Arc<LiveSourceBacking>,
     )> {
-        let backing_bytes =
-            crate::memo::retained_arc_bytes(&std::mem::MaybeUninit::<LiveSourceBacking>::uninit());
+        let backing_bytes = hirsel_engine_admission::retained_arc_bytes(&std::mem::MaybeUninit::<
+            LiveSourceBacking,
+        >::uninit());
         let charge = value_bytes.checked_add(backing_bytes)?;
         if self.make_room(cx, charge).is_none() {
             let available = (*self.retention.lock().unwrap_or_else(|e| e.into_inner()))
@@ -995,7 +1006,7 @@ impl FrontBodyQueries {
         summary: Arc<PublishedSummary>,
         facts: Arc<FrontFacts>,
     ) -> Option<ProductRef> {
-        let tuple_bytes = crate::memo::retained_arc_bytes(&std::mem::MaybeUninit::<(
+        let tuple_bytes = hirsel_engine_admission::retained_arc_bytes(&std::mem::MaybeUninit::<(
             Arc<FrontFacts>,
             Arc<LiveSourceBacking>,
         )>::uninit());
@@ -1013,7 +1024,7 @@ impl FrontBodyQueries {
             ProductSource::backed(self._allowance.products.clone(), backing),
             &mut allowance,
         )?;
-        Some(ProductRef::summary(product))
+        product.publish(self.store.as_ref()).ok()
     }
     fn publish_facts(
         &self,
@@ -1087,7 +1098,7 @@ impl FrontBodyQueries {
             ProductSource::backed(self._allowance.products.clone(), backing),
             &mut allowance,
         )?;
-        Some(ProductRef::analyzed(product))
+        product.publish(self.store.as_ref()).ok()
     }
     /// Captured rows and actual settled metadata owned by this producer view.
     /// Provider content bytes and active decode scratch have separate owners.
@@ -1520,11 +1531,14 @@ impl FrontBodyQueries {
                         if publication == product {
                             return Some(key);
                         }
-                        let analyzed = product.analyzed_value()?;
+                        let analyzed =
+                            product.live_value::<crate::products::LiveAnalyzedProduct>()?;
                         (product.action == publication.action
                             && analyzed.address() == product.address
                             && analyzed.action() == product.action
-                            && analyzed.summary().same_owner(publication.summary_value()?))
+                            && analyzed.summary().same_owner(
+                                publication.live_value::<crate::products::LiveSummaryProduct>()?,
+                            ))
                         .then_some(key)
                     }
                 }
@@ -1724,14 +1738,16 @@ impl FrontBodyQueries {
                 ..
             } => (
                 Ok(diagnostics.clone()),
-                publication.summary_value().is_some_and(|summary| {
-                    summary
-                        .value()
-                        .summary
-                        .calls
-                        .iter()
-                        .any(|call| call.callee.path().is_core("region.with"))
-                }),
+                publication
+                    .live_value::<crate::products::LiveSummaryProduct>()
+                    .is_some_and(|summary| {
+                        summary
+                            .value()
+                            .summary
+                            .calls
+                            .iter()
+                            .any(|call| call.callee.path().is_core("region.with"))
+                    }),
                 Some(lowering.clone()),
             ),
         };
@@ -1806,9 +1822,12 @@ impl FrontBodyQueries {
         };
         match &outcome.state {
             FrontState::Failed { .. } => None,
-            FrontState::Settled { publication, .. } => {
-                Some(read(&publication.summary_value()?.value().summary))
-            }
+            FrontState::Settled { publication, .. } => Some(read(
+                &publication
+                    .live_value::<crate::products::LiveSummaryProduct>()?
+                    .value()
+                    .summary,
+            )),
         }
     }
 
@@ -1832,7 +1851,9 @@ impl FrontBodyQueries {
                 diagnostics,
                 ..
             } => Ok(PublishedDefinition {
-                summary: publication.summary_value()?.value_arc(),
+                summary: publication
+                    .live_value::<crate::products::LiveSummaryProduct>()?
+                    .value_arc(),
                 diagnostics: diagnostics.clone(),
             }),
         };
@@ -1866,7 +1887,7 @@ impl FrontBodyQueries {
                 let owner = selected
                     .as_ref()
                     .ok()?
-                    .analyzed_value()
+                    .live_value::<crate::products::LiveAnalyzedProduct>()
                     .cloned()
                     .or_else(|| body.as_ref()?.upgrade())?;
                 let mut handoff = self.handoff.lock().unwrap_or_else(|e| e.into_inner());
@@ -1875,7 +1896,11 @@ impl FrontBodyQueries {
                 }
                 (
                     Ok(owner.output().clone()),
-                    Some(publication.summary_value()?.value_arc()),
+                    Some(
+                        publication
+                            .live_value::<crate::products::LiveSummaryProduct>()?
+                            .value_arc(),
+                    ),
                     Some(owner),
                 )
             }
@@ -2010,8 +2035,10 @@ impl QueryFactory for Factory {
             FrontState::Settled { publication, .. } => (
                 Some(publication),
                 publication
-                    .summary_value()
-                    .is_some_and(|summary| summary.cache_owners(2))
+                    .live_value::<crate::products::LiveSummaryProduct>()
+                    .is_some_and(|summary| {
+                        publication.live_owners() == 2 && summary.cache_owners(1)
+                    })
                     && Arc::strong_count(&outcome.facts) == 2,
             ),
         };
@@ -2283,7 +2310,7 @@ impl BodyTask {
                 return Err(queries.errors.protocol);
             }
             let summary = publication
-                .summary_value()
+                .live_value::<crate::products::LiveSummaryProduct>()
                 .ok_or(queries.errors.protocol)?
                 .clone();
             let old_summary = summary.value();
@@ -2318,7 +2345,9 @@ impl BodyTask {
         let product = queries
             .admit_body(cx, self.query.address, action, outcome, summary)
             .ok_or(queries.errors.resource)?;
-        let body = product.analyzed_value().ok_or(queries.errors.protocol)?;
+        let body = product
+            .live_value::<crate::products::LiveAnalyzedProduct>()
+            .ok_or(queries.errors.protocol)?;
         let mut slots = queries.slots.lock().unwrap_or_else(|e| e.into_inner());
         let current = match slots.get_mut(&self.input).ok_or(queries.errors.protocol)? {
             FrontSlot::Archived(_) => return Err(queries.errors.protocol),
@@ -2504,7 +2533,9 @@ impl BodyTask {
             if let Some(product) = product
                 && product.address() == self.query.address
             {
-                return Ok(ProductRef::analyzed(product));
+                return product
+                    .publish(self.queries.store.as_ref())
+                    .map_err(|_| self.queries.errors.resource);
             }
         }
         if self.materialize
@@ -2771,13 +2802,12 @@ impl BodyTask {
             && let FrontState::Settled {
                 publication, body, ..
             } = &mut cached.state
-            && let Some(summary) = publication.summary_value()
+            && let Some(summary) = publication.live_value::<crate::products::LiveSummaryProduct>()
         {
             let charge = LiveAnalyzedProduct::shared_required_bytes(&outcome).and_then(|bytes| {
-                bytes.checked_add(crate::memo::retained_arc_bytes(&std::mem::MaybeUninit::<
-                    LiveSourceBacking,
-                >::uninit(
-                )))
+                bytes.checked_add(hirsel_engine_admission::retained_arc_bytes(
+                    &std::mem::MaybeUninit::<LiveSourceBacking>::uninit(),
+                ))
             });
             if charge.is_some_and(|bytes| {
                 bytes <= queries.handoff_limit
@@ -2791,7 +2821,8 @@ impl BodyTask {
                 action,
                 outcome,
                 summary.clone(),
-            ) && let Some(analyzed) = product.analyzed_value()
+            ) && let Some(analyzed) =
+                product.live_value::<crate::products::LiveAnalyzedProduct>()
             {
                 *body = Some(analyzed.downgrade());
                 *queries.handoff.lock().unwrap_or_else(|e| e.into_inner()) = Some(analyzed.clone());

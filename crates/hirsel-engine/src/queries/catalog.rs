@@ -1394,7 +1394,7 @@ mod tests {
 
     #[test]
     fn source_roots_include_unexecuted_declarations_without_demanding_headers() {
-        crate::with_compiler_stack(|| {
+        hirsel_intern::jobs::with_compiler_stack(|| {
             let store = Arc::new(crate::store::MemStore::default());
             let create = || {
                 QueryEngine::new(default_environment(), crate::phases::engine_only_adapters())
@@ -1422,7 +1422,7 @@ mod tests {
 
     #[test]
     fn front_admission_uses_indexed_heads_when_syntax_is_unavailable() {
-        crate::with_compiler_stack(|| {
+        hirsel_intern::jobs::with_compiler_stack(|| {
             let store = Arc::new(crate::store::MemStore::default());
             let create = || {
                 QueryEngine::new(default_environment(), crate::phases::engine_only_adapters())
@@ -1454,7 +1454,7 @@ mod tests {
 
     #[test]
     fn parse_heads_reuse_signature_and_implementation_declarations_and_reject_unknown_kinds() {
-        crate::with_compiler_stack(|| {
+        hirsel_intern::jobs::with_compiler_stack(|| {
             let store = Arc::new(crate::store::MemStore::default());
             let create = || {
                 QueryEngine::new(default_environment(), crate::phases::engine_only_adapters())
@@ -1484,7 +1484,7 @@ mod tests {
 
     #[test]
     fn manifest_only_edits_do_not_adopt_duplicate_heads_over_retained_syntax() {
-        crate::with_compiler_stack(|| {
+        hirsel_intern::jobs::with_compiler_stack(|| {
             let mut engine =
                 QueryEngine::new(default_environment(), crate::phases::engine_only_adapters())
                     .with_result_store(Arc::new(crate::store::MemStore::default()));
@@ -1510,7 +1510,7 @@ mod tests {
 
     #[test]
     fn generated_probe_uses_positive_heads_and_preserves_syntax_shadowing() {
-        crate::with_compiler_stack(|| {
+        hirsel_intern::jobs::with_compiler_stack(|| {
             for generic in [false, true] {
                 let store = Arc::new(crate::store::MemStore::default());
                 let create = || {
@@ -1585,7 +1585,7 @@ mod tests {
 
     #[test]
     fn parse_heads_refuse_every_single_byte_corruption() {
-        crate::with_compiler_stack(|| {
+        hirsel_intern::jobs::with_compiler_stack(|| {
             use crate::store::ResultStore;
             let store = Arc::new(crate::store::MemStore::default());
             let mut engine = QueryEngine::new(
@@ -1624,7 +1624,7 @@ mod tests {
     }
     #[test]
     fn malformed_parse_heads_refuse_before_namespace_or_syntax_adoption() {
-        crate::with_compiler_stack(|| {
+        hirsel_intern::jobs::with_compiler_stack(|| {
             let context = default_context();
             let path = DefPath(ItemPath {
                 package: context.package.clone(),

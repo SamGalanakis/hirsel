@@ -383,7 +383,7 @@ fn profiling_build_resolves_hirsel_source_lines_and_runs_the_release_program() {
 
 #[test]
 fn cranelift_debug_lines_match_llvm_per_function_on_both_targets() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         for program in [
             "fn step(x: u64) -> u64 {\n  x + 1u64\n}\npub fn main() -> Result[(), ()] {\n  let n = step(3u64)\n  failure.check(n == 4u64, Arithmetic())\n  Ok(())\n}\n",
             "fn step(x: u64) -> u64 {\n  if x == 0u64 {\n    7u64\n  } else {\n    x + 1u64\n  }\n}\npub fn main() -> Result[(), ()] {\n  let n = step(0u64)\n  failure.check(n == 7u64, Arithmetic())\n  Ok(())\n}\n",
@@ -490,7 +490,7 @@ fn cranelift_debug_lines_match_llvm_per_function_on_both_targets() {
 /// of the declaration's location (the generator remains separate origin data).
 #[test]
 fn a_generated_body_is_reported_in_its_generated_source() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let program = "@serializable\npub type Pair {\n  a: u64,\n  b: String,\n}\n\n\
         @preserves_unique(out)\npub fn pair_json_into(value: Pair, mut out: List[u8], depth: u64) -> Result[\n  \
         (),\n  json.JsonError\n] uses {} = comptime derive.json_into(shape(Pair))\n\n\
@@ -543,7 +543,7 @@ fn a_generated_body_is_reported_in_its_generated_source() {
 
 #[test]
 fn manifest_artifacts_are_identical_under_different_source_roots() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let root = super::file("");
         std::fs::remove_file(&root).unwrap();
         std::fs::create_dir(&root).unwrap();

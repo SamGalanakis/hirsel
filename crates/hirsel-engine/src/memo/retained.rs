@@ -1,5 +1,6 @@
 //! Retained allocation accounting, adapted from Buck2 allocative's Arc and Vec
 //! visitors (third-party/NOTICES.md). This measures storage, never wire bytes.
+use hirsel_engine_admission::arc_bytes;
 mod front;
 pub(crate) use front::{
     analyzed_capture_bytes, retained_analyzed_bytes, retained_structural_bytes,
@@ -67,11 +68,6 @@ fn tir_bytes(definition: &Definition, mut weight: Weight) -> u64 {
     weight.vec(bodies, Weight::body);
     weight.flat_vec(contracts);
     weight.bytes
-}
-
-/// Arc allocation including its inline value; payload allocations are separate.
-pub(crate) fn retained_arc_bytes<T: ?Sized>(value: &T) -> u64 {
-    arc_bytes(value) as u64
 }
 
 /// Owned buffers of lowering's returned warnings and ordered signature
@@ -163,15 +159,6 @@ pub(crate) fn retained_lower_entry_bytes(
         weight.flat_vec(reads);
     }
     weight.bytes
-}
-
-pub(super) fn arc_bytes<T: ?Sized>(value: &T) -> usize {
-    Layout::new::<[usize; 2]>()
-        .extend(Layout::for_value(value))
-        .expect("an allocated Arc has a valid layout")
-        .0
-        .pad_to_align()
-        .size()
 }
 
 #[derive(Default)]

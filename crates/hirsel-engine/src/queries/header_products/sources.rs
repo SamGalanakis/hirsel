@@ -81,9 +81,9 @@ pub(in crate::queries) fn source_refusal(message: impl ToString) -> QueryError {
 }
 fn standalone_syntax(bytes: u64) -> Result<Charge, QueryError> {
     let bytes = bytes
-        .checked_add(crate::memo::retained_arc_bytes(&std::mem::MaybeUninit::<
-            std::sync::Mutex<HeaderCharge>,
-        >::uninit()))
+        .checked_add(hirsel_engine_admission::retained_arc_bytes(
+            &std::mem::MaybeUninit::<std::sync::Mutex<HeaderCharge>>::uninit(),
+        ))
         .ok_or_else(|| source_refusal("syntax size overflow"))?;
     let reservation = private_unique::scheduled::standalone_budget()
         .reserve(bytes)
@@ -572,7 +572,9 @@ impl HeaderSources {
     pub(super) fn written_bytes(engine: &QueryEngine) -> u64 {
         fn add(seen: &mut BTreeMap<usize, u64>, syntax: &Arc<ItemSyntax>, indexed: bool) -> u64 {
             let bytes = if indexed {
-                crate::memo::retained_arc_bytes(&std::mem::MaybeUninit::<ItemSyntax>::uninit())
+                hirsel_engine_admission::retained_arc_bytes(
+                    &std::mem::MaybeUninit::<ItemSyntax>::uninit(),
+                )
             } else {
                 crate::memo::retained::retained_syntax_bytes(syntax)
             };

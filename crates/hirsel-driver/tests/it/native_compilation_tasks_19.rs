@@ -1,6 +1,8 @@
 use hirsel_compiler_identity::COMPILER_IDENTITY;
 use hirsel_driver::*;
-use hirsel_engine::{runtime::*, store::ResultStore, *};
+use hirsel_engine::{store::ResultStore, *};
+use hirsel_engine_runtime::*;
+
 use hirsel_front_phases::*;
 use hirsel_host_io::launch::*;
 use hirsel_native::object_queries::linked_product;
@@ -796,7 +798,7 @@ fn run_program_case_with_frame(
             .iter()
             .map(|output| {
                 output
-                    .archive(hirsel_engine::runtime::ArchiveAdmission::Retained)
+                    .archive(hirsel_engine_runtime::ArchiveAdmission::Retained)
                     .unwrap()
                     .reference()
             })

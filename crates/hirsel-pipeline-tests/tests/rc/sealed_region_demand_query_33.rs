@@ -1,7 +1,6 @@
-use hirsel_engine::{
-    runtime::ProductRef,
-    store::{Action, Address, Domain, MemStore, ResultStore},
-};
+use hirsel_engine::store::{Action, Address, Domain, MemStore, ResultStore};
+use hirsel_engine_runtime::ProductRef;
+
 use hirsel_lir::operation::{NativeType, Primitive};
 use hirsel_native_queries::seal_demand::Input;
 use hirsel_native_queries::seal_demand::Plan;
@@ -46,7 +45,7 @@ fn guard_query_refuses_missing_roots_and_repairs_malformed_cached_selections() {
         .put_content(domain, b"ordinary admitted instance control")
         .unwrap();
     let input = Input {
-        query: hirsel_engine::runtime::QueryId {
+        query: hirsel_engine_runtime::QueryId {
             kind: 0x4e00_0001,
             address: Address(hash),
         },
@@ -77,7 +76,7 @@ fn guard_query_refuses_missing_roots_and_repairs_malformed_cached_selections() {
         (0x4e00_0001, Address(ContentHash([8; 32]))),
     ] {
         let mut wrong = input.clone();
-        wrong.query = hirsel_engine::runtime::QueryId { kind, address };
+        wrong.query = hirsel_engine_runtime::QueryId { kind, address };
         assert!(Plan::new(vec![wrong], std::slice::from_ref(&owner), hash, hash).is_err());
     }
     let missing = (hirsel_syntax::DefPath::core("missing_guard_owner"), hash);
@@ -86,7 +85,7 @@ fn guard_query_refuses_missing_roots_and_repairs_malformed_cached_selections() {
     let correct = query.execute(&store).unwrap();
     let archive = correct
         .product
-        .archive(hirsel_engine::runtime::ArchiveAdmission::Retained)
+        .archive(hirsel_engine_runtime::ArchiveAdmission::Retained)
         .unwrap();
     let bytes = store.get_content(archive.reference()).unwrap();
     for mutant in 0..4 {
@@ -157,7 +156,7 @@ fn original_scalar_guard_query_uses_only_metadata_and_rechecks_dependency_output
                         let product = crate::imported_fixture(&store, address, action, record);
                         records.push(product.clone());
                         Input {
-                            query: hirsel_engine::runtime::QueryId {
+                            query: hirsel_engine_runtime::QueryId {
                                 kind: 0x4e00_0001,
                                 address: product.address,
                             },

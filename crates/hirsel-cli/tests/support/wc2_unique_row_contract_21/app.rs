@@ -75,7 +75,7 @@ pub fn main(rt: Io) -> Result[(), AppError] {
 
 #[test]
 fn wc2_contract_original_and_strong_all_engines() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let scratch = tempfile::tempdir().unwrap();
         let matrix: Vec<_> = [
             Engine::Heap { campaign: false },
@@ -187,7 +187,7 @@ fn wc2_contract_recipes_and_live_alias_rejection() {
 
 #[test]
 fn wc2_contract_error_exits_all_engines() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let scratch = tempfile::tempdir().unwrap();
         let matrix: Vec<_> = [
             Engine::Heap { campaign: false },

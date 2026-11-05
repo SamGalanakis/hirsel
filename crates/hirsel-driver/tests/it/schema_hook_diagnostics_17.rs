@@ -1,7 +1,8 @@
 //! Field-attributed failures, following Serde check.rs:29–53 (MIT OR Apache-2.0).
 //! Expected hook contracts below are written independently of generated text.
 use hirsel_driver::session::Session;
-use hirsel_engine::{LoweringPolicy, with_compiler_stack};
+use hirsel_engine::LoweringPolicy;
+use hirsel_intern::jobs::with_compiler_stack;
 use hirsel_requests::CompileOperation;
 use hirsel_requests::CompileResult;
 use std::{fs, path::PathBuf};

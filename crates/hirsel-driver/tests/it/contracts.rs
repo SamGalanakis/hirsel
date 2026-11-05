@@ -5,7 +5,7 @@ use hirsel_host_io::launch::*;
 
 #[test]
 fn fact_predicates_are_boolean_even_without_a_constructor_use() {
-    hirsel_engine::with_compiler_stack(
+    hirsel_intern::jobs::with_compiler_stack(
         fact_predicates_are_boolean_even_without_a_constructor_use_on_compiler_thread,
     );
 }

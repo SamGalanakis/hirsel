@@ -4,7 +4,9 @@ use super::{
     CompileInputs, CompileOperation, CompileOutput, CompileRequest, CompileResult,
     CompilerReadiness, RequestLimits,
 };
-use hirsel_engine::{CheckCompletion, CheckOutput, ToolError, runtime::*};
+use hirsel_engine::{CheckCompletion, CheckOutput, ToolError};
+use hirsel_engine_runtime::*;
+
 use std::{
     collections::BTreeMap,
     path::PathBuf,

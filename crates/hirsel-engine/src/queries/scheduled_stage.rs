@@ -3,8 +3,8 @@
 //! The ordered source transaction decides which declarations become visible.
 use super::*;
 use crate::comptime::{StagedDeclarationInput, StagedRegistration};
-use crate::runtime::*;
 use crate::store::{Domain, Reference, ResultStore};
+use hirsel_engine_runtime::*;
 use std::{sync::Mutex, task::Poll};
 
 pub const FRONT_STAGE_KIND: u32 = 0x4601_0001;
@@ -179,11 +179,11 @@ impl FrontStageQueries {
         Ok(registrations)
     }
     fn complete(&self, id: QueryId, mut data: Data) -> Result<ProductRef, Reference> {
-        let mut charge = crate::memo::retained_arc_bytes(&data)
+        let mut charge = hirsel_engine_admission::retained_arc_bytes(&data)
             .checked_add((data.sites.capacity() * size_of::<Span>()) as u64)
             .ok_or(self.errors.resource)?;
         charge = charge
-            .checked_add(crate::memo::retained_arc_bytes(&*data.reads))
+            .checked_add(hirsel_engine_admission::retained_arc_bytes(&*data.reads))
             .ok_or(self.errors.resource)?;
         for (_, bytes) in data.reads.allocations() {
             charge = charge

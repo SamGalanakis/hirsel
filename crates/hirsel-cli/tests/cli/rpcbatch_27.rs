@@ -63,7 +63,7 @@ fn evidence(label: &str) -> PathBuf {
 }
 
 fn semantic(part: usize) {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let root = evidence(&format!("semantic-{part}-"));
         let selection = package(&root);
         let mut loaded = hirsel_front_phases::load_program(&selection).unwrap();

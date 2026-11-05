@@ -89,7 +89,7 @@ fn a_fallible_resource_call_beside_a_resource_construction_keeps_its_edges() {
 
 fn validate_driver_ready(source: &'static str) {
     let built = try_build(source).unwrap();
-    let rows = hirsel_engine::with_compiler_stack(move || {
+    let rows = hirsel_intern::jobs::with_compiler_stack(move || {
         let mut engine = hirsel_engine::QueryEngine::new(
             hirsel_engine::default_environment(),
             hirsel_front_phases::compiler_adapters(),

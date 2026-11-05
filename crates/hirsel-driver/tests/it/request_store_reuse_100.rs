@@ -49,13 +49,13 @@ fn selected_request_keeps_one_read_epoch_and_releases_it_before_retained_outputs
     use hirsel_engine::requests::OutputReadiness;
     use hirsel_engine::requests::RequestEngine;
     use hirsel_engine::requests::observe_inputs;
-    use hirsel_engine::runtime::QueryRuntime;
+    use hirsel_engine_runtime::QueryRuntime;
 
     use hirsel_requests::CompileOperation;
     use hirsel_requests::CompileRequest;
     use hirsel_requests::CompilerRequests;
     use hirsel_requests::RequestLimits;
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let directory = tempfile::tempdir().unwrap();
         let manifest = directory.path().join("hirsel.json");
         std::fs::write(directory.path().join("main.hir"), "pub fn one()->u8{1u8}\npub fn two()->u8{2u8}\npub fn three()->u8{3u8}\npub fn main()->u8{one()+two()+three()}\n").unwrap();
@@ -125,7 +125,7 @@ fn selected_request_keeps_one_read_epoch_and_releases_it_before_retained_outputs
 
 #[test]
 fn directory_request_products_reuse_unchanged_bodies_across_sessions_and_edits() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let directory = tempfile::tempdir().unwrap();
         let source = directory.path().join("main.hir");
         let manifest = directory.path().join("hirsel.json");
@@ -200,13 +200,13 @@ fn unfinished_equal_requests_have_independent_abort_owners_and_completed_graphs_
     use hirsel_engine::requests::OutputReadiness;
     use hirsel_engine::requests::RequestEngine;
     use hirsel_engine::requests::observe_inputs;
-    use hirsel_engine::runtime::QueryRuntime;
+    use hirsel_engine_runtime::QueryRuntime;
 
     use hirsel_requests::CompileOperation;
     use hirsel_requests::CompileRequest;
     use hirsel_requests::CompilerRequests;
     use hirsel_requests::RequestLimits;
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let directory = tempfile::tempdir().unwrap();
         let manifest = directory.path().join("hirsel.json");
         std::fs::write(
@@ -281,7 +281,7 @@ fn check_diagnostics_do_not_require_a_valid_run_or_export_entry() {
     use hirsel_engine::LoweringPolicy;
     use hirsel_requests::CompileOperation;
     use hirsel_requests::CompileResult;
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let tree = tempfile::tempdir().unwrap();
         let source = tree.path().join("main.hir");
         let manifest = tree.path().join("hirsel.json");
@@ -314,10 +314,11 @@ fn source_operations_share_one_graph_only_for_exact_inputs_and_compiler() {
         LoweringPolicy,
         requests::OutputReadiness,
         requests::{RequestEngine, observe_inputs},
-        runtime::QueryRuntime,
     };
+    use hirsel_engine_runtime::QueryRuntime;
+
     use hirsel_requests::*;
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         for provider in ["none@1", "mem@1", "dir@1"] {
             let tree = tempfile::tempdir().unwrap();
             let source = tree.path().join("main.hir");

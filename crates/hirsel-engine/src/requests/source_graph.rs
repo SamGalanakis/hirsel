@@ -4,7 +4,6 @@
 //! generated and staged declarations, and wires the immutable Front, Lower,
 //! Growth, storage and Check producers here. A host adds only the roots its
 //! operation selects on top of the installed source graph.
-use crate::runtime::*;
 use crate::store::{Domain, NoneStore, RequestStore, ResultStore};
 use crate::{
     CheckOutput, FRONT_BODY_KIND, FRONT_CHECK_KIND, FRONT_EVALUATE_KIND, FRONT_GROWTH_KIND,
@@ -14,6 +13,7 @@ use crate::{
     FrontRegistrationBootstrapError, FrontRunInputs, FrontStorageGraphQueries, FrontStorageQueries,
     LowerCarry, LoweringPolicy, QueryEngine, QueryError, ToolError, UnsafeFfiPackage,
 };
+use hirsel_engine_runtime::*;
 use hirsel_intern::jobs::Jobs;
 use hirsel_span::{FileId, SourceMap};
 use hirsel_syntax::{DefPath, FileContext, PackageId};

@@ -141,7 +141,7 @@ fn source(signature: &Signature) -> Source {
 }
 #[test]
 fn suspension_retains_constant_and_inner_expression_substitutions_without_replay() {
-    crate::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let (types, body, signature) = fixture();
         let mut source = source(&signature);
         let mut preparation = ValuePreparation::new(&body);
@@ -189,7 +189,7 @@ fn suspension_retains_constant_and_inner_expression_substitutions_without_replay
 }
 #[test]
 fn failed_dependency_stops_preparation_before_later_expression_selection() {
-    crate::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let (types, body, signature) = fixture();
         let mut source = source(&signature);
         source.fail = true;

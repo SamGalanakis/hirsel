@@ -11,8 +11,9 @@ use hirsel_engine::{
     loader_inputs::{InputLimits, LoaderInputs, Operation},
     memo::MemoKey,
     requests::{InputObserver, RequestEngine},
-    runtime::AdmittedRuntime,
 };
+use hirsel_engine_runtime::AdmittedRuntime;
+
 use std::{
     cell::{Cell, RefCell},
     collections::{BTreeMap, BTreeSet},
@@ -484,7 +485,9 @@ fn check_error(error: ToolError) -> Result<CheckOutput, ToolError> {
 mod tests {
     use super::*;
     use hirsel_artifact_store::{Action, Address, Domain};
-    use hirsel_engine::{QueryError, QueryOutput, runtime::*};
+    use hirsel_engine::{QueryError, QueryOutput};
+    use hirsel_engine_runtime::*;
+
     use hirsel_syntax::ContentHash;
     use std::sync::{
         Mutex,
@@ -658,7 +661,7 @@ mod tests {
     }
     #[test]
     fn observed_session_keeps_explicit_delivery_and_loader_watch_semantics_without_a_check_cache() {
-        hirsel_engine::with_compiler_stack(|| {
+        hirsel_intern::jobs::with_compiler_stack(|| {
             let directory = fixture();
             let calls = Arc::new(AtomicUsize::new(0));
             let mut session = session(directory.path(), None, calls.clone());
@@ -692,7 +695,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn observed_session_applies_same_byte_alias_retarget_as_loader_change() {
-        hirsel_engine::with_compiler_stack(|| {
+        hirsel_intern::jobs::with_compiler_stack(|| {
             let directory = fixture();
             let source = directory.path().join("main.hir");
             let first = directory.path().join("first.hir");
@@ -721,7 +724,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn observed_session_disk_refresh_consumes_prior_alias_notification() {
-        hirsel_engine::with_compiler_stack(|| {
+        hirsel_intern::jobs::with_compiler_stack(|| {
             let directory = fixture();
             let source = directory.path().join("main.hir");
             let first = directory.path().join("first.hir");
@@ -748,7 +751,7 @@ mod tests {
 
     #[test]
     fn observed_session_preserves_non_diagnostic_loader_query_errors() {
-        hirsel_engine::with_compiler_stack(|| {
+        hirsel_intern::jobs::with_compiler_stack(|| {
             for expected in [
                 QueryError::NotImplemented,
                 QueryError::Operational(hirsel_types::OperationalFailure {

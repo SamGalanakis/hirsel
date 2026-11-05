@@ -16,19 +16,16 @@ impl From<MemoryReservation> for ProducerAdmission {
     }
 }
 impl ProducerAdmission {
-    pub(crate) fn shared(inputs: MemoryReservation, outputs: Arc<OutputPartition>) -> Self {
+    pub fn shared(inputs: MemoryReservation, outputs: Arc<OutputPartition>) -> Self {
         Self {
             inputs,
             outputs: Some(outputs),
         }
     }
-    pub(crate) fn bytes(&self) -> u64 {
+    pub fn bytes(&self) -> u64 {
         self.inputs.bytes()
     }
-    pub(crate) fn partition(
-        mut self,
-        retained: u64,
-    ) -> Option<(MemoryReservation, Arc<OutputPartition>)> {
+    pub fn partition(mut self, retained: u64) -> Option<(MemoryReservation, Arc<OutputPartition>)> {
         let remaining = self.inputs.bytes().checked_sub(retained)?;
         let outputs = match self.outputs {
             Some(outputs) => outputs,
@@ -38,13 +35,14 @@ impl ProducerAdmission {
     }
 }
 
-pub(crate) struct OutputPartition {
-    pub(crate) pool: MemoryReservationPool,
+pub struct OutputPartition {
+    pub pool: MemoryReservationPool,
     _allocation: MemoryReservation,
 }
 impl OutputPartition {
-    pub(crate) fn new(mut allowance: MemoryReservation) -> Option<Arc<Self>> {
-        let bytes = crate::memo::retained_arc_bytes(&std::mem::MaybeUninit::<Self>::uninit());
+    pub fn new(mut allowance: MemoryReservation) -> Option<Arc<Self>> {
+        let bytes =
+            hirsel_engine_admission::retained_arc_bytes(&std::mem::MaybeUninit::<Self>::uninit());
         let allocation = allowance.split(bytes)?;
         let pool = MemoryReservationPool::new(allowance).ok()?;
         Some(Arc::new(Self {
@@ -61,7 +59,7 @@ pub struct RetainedView<T> {
     owner: Arc<dyn Send + Sync>,
 }
 impl<T> RetainedView<T> {
-    pub(crate) fn new(value: Arc<T>, owner: Arc<impl Send + Sync + 'static>) -> Self {
+    pub fn new(value: Arc<T>, owner: Arc<impl Send + Sync + 'static>) -> Self {
         Self { value, owner }
     }
 }

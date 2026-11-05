@@ -115,7 +115,7 @@ fn pair(loaded: &mut hirsel_engine::LoadedProgram, old: &str, new: &str) -> Obse
 }
 #[test]
 fn public_witness() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let mut loaded = hirsel_front_phases::load_program(&path()).unwrap();
         loaded.check_for_execution().unwrap();
         let (old, new) = witness();
@@ -125,7 +125,7 @@ fn public_witness() {
 }
 #[test]
 fn lcs_property_reference_and_checked_h() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let mut loaded = hirsel_front_phases::load_program(&path()).unwrap();
         loaded.check_for_execution().unwrap();
         let mut words = vec![String::new()];
@@ -178,7 +178,7 @@ fn lcs_property_reference_and_checked_h() {
 }
 #[test]
 fn public_witness_four_engines() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let mut loaded = hirsel_front_phases::load_program(&path()).unwrap();
         loaded.check_for_execution().unwrap();
         let (old, new) = witness();

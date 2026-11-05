@@ -514,8 +514,8 @@ impl NamespaceCapture {
                     && captured.text() == current.text()
             })
     }
-    pub(crate) fn query_id(&self, kind: u32, key: ContentHash) -> crate::runtime::QueryId {
-        crate::runtime::QueryId {
+    pub(crate) fn query_id(&self, kind: u32, key: ContentHash) -> hirsel_engine_runtime::QueryId {
+        hirsel_engine_runtime::QueryId {
             kind,
             address: hirsel_artifact_store::Address(ContentHash::of_parts(
                 "hirsel.namespace.query.v1",
@@ -1233,7 +1233,7 @@ mod tests {
     }
     #[test]
     fn namespace_installation_keeps_indexed_bodies_undemanded() {
-        crate::with_compiler_stack(|| {
+        hirsel_intern::jobs::with_compiler_stack(|| {
             let store = Arc::new(MemStore::default());
             drop(indexed(store.clone()));
             let (mut engine, definitions) = indexed(store);
@@ -1262,7 +1262,7 @@ mod tests {
     }
     #[test]
     fn store_off_capture_needs_no_syntax_or_manifest_archive() {
-        crate::with_compiler_stack(|| {
+        hirsel_intern::jobs::with_compiler_stack(|| {
             let store = Arc::new(StoreOff::default());
             let (mut engine, definitions) = indexed(store.clone());
             let before =
@@ -1351,7 +1351,7 @@ mod tests {
                 self.inner.parse(file, tokens, context, sources)
             }
         }
-        crate::with_compiler_stack(|| {
+        hirsel_intern::jobs::with_compiler_stack(|| {
             for cold in [false, true] {
                 let calls = Arc::new(AtomicUsize::new(0));
                 let mut adapters = crate::phases::engine_only_adapters();
@@ -1454,7 +1454,7 @@ mod tests {
     }
     #[test]
     fn successor_views_charge_fixed_operation_inputs_once_until_the_last_lease() {
-        crate::with_compiler_stack(|| {
+        hirsel_intern::jobs::with_compiler_stack(|| {
             let (mut engine, definitions) = indexed(Arc::new(MemStore::default()));
             let budget = hirsel_engine_admission::ProcessBudget::new(8 << 20);
             let pool = hirsel_engine_admission::MemoryReservationPool::new(
@@ -1549,7 +1549,7 @@ mod tests {
                 self.0.take(bytes)
             }
         }
-        crate::with_compiler_stack(|| {
+        hirsel_intern::jobs::with_compiler_stack(|| {
             let store = Arc::new(MemStore::default());
             drop(indexed(store.clone()));
             let (mut engine, definitions) = indexed(store);

@@ -1,6 +1,8 @@
 //! Durable completion consumes compact facts without loading the Modes body.
 use hirsel_driver::*;
-use hirsel_engine::{runtime::QueryRuntime, *};
+use hirsel_engine::*;
+use hirsel_engine_runtime::QueryRuntime;
+
 use hirsel_front_phases::*;
 use hirsel_host_io::launch::*;
 use std::sync::{
@@ -594,7 +596,7 @@ fn request_semantic_node(
     engine: &mut QueryEngine,
     path: &DefPath,
 ) -> Result<hirsel_run_schema::ProgramNode, QueryError> {
-    use hirsel_engine::runtime::{MemoryWeight, QueryRuntime};
+    use hirsel_engine_runtime::{MemoryWeight, QueryRuntime};
     let mut graph = crate::request_graph::Graph::try_new(engine, hirsel_intern::jobs::Jobs::new(1))
         .map_err(|error| match error {
             ToolError::Query { error, .. } => error,

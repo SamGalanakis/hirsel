@@ -6,7 +6,7 @@ thread_local! {
 
 #[test]
 fn unchanged_file_placement_does_no_index_updates() {
-    crate::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let mut engine = crate::QueryEngine::new(
             crate::default_environment(),
             crate::phases::engine_only_adapters(),
@@ -109,7 +109,7 @@ fn row(path: &DefPath, anchor: Anchor) -> DeclarationRow {
 
 #[test]
 fn declaration_rows_share_ownership_and_materialize_sites_only_on_demand() {
-    crate::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let path = DefPath::core("compact_declaration");
         let id = DefId::intern(&path);
         let anchor = Anchor::fresh();
@@ -153,7 +153,7 @@ fn declaration_rows_share_ownership_and_materialize_sites_only_on_demand() {
 
 #[test]
 fn compact_row_roundtrip_preserves_order_visibility_and_exact_anchors() {
-    crate::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let path = DefPath::core("compact_row_roundtrip");
         let id = DefId::intern(&path);
         let anchor = Anchor::fresh();

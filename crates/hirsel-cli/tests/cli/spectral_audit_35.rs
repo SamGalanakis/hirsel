@@ -403,7 +403,7 @@ fn native_workflows(part: usize) {
     if part != 0 && std::env::var_os("SPECTRAL_AUDIT_35_CASE").is_some() {
         return;
     }
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let root = scratch("native-");
         let path = package(&root);
         let mut loaded = hirsel_front_phases::load_program(&path).unwrap();
@@ -770,7 +770,7 @@ fn native_workflows(part: usize) {
 
 #[test]
 fn spectral_audit_35_unrounded_oracle() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let root = scratch("kernel-");
         let path = package_entry(
             &root,
@@ -934,7 +934,7 @@ fn spectral_audit_35_ordered_capacity() {
 
 #[test]
 fn spectral_audit_35_output_cap_helpers() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let root = scratch("output-bounds-");
         let path = package_entry(
             &root,
@@ -1003,7 +1003,7 @@ fn semantic_record(mut record: hirsel_rt::launch::Recording) -> hirsel_rt::launc
 }
 #[test]
 fn spectral_audit_35_scripted_ordered_streams() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let root = scratch("scripted-ordered-");
         let path = package(&root);
         let mut loaded = hirsel_front_phases::load_program(&path).unwrap();
@@ -1186,7 +1186,7 @@ fn spectral_audit_35_scripted_ordered_streams() {
 // qualify or rerun the original aggregate Steps1M obligation.
 #[test]
 fn spectral_audit_35_unrounded_vector_controls() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let root = scratch("oracle-vectors-");
         let path = package_entry(
             &root,

@@ -1,10 +1,9 @@
 //! Opt-in diagnostic roots over the same settled instance/arena dependencies
 //! as ordinary Ready. No ordinary request installs or polls these producers.
 use super::{products::DemandProducts, ready::ObservedReady, tasks::NativeTasks, *};
-use hirsel_engine::{
-    runtime::*,
-    store::{Action, Address, Domain},
-};
+use hirsel_engine::store::{Action, Address, Domain};
+use hirsel_engine_runtime::*;
+
 use hirsel_lir::{
     ir::LirUnit,
     ownership_trace::{Plan, Recipe},
@@ -214,7 +213,7 @@ impl OwnershipTasks {
             product.address,
             product.action,
             product
-                .archive(hirsel_engine::runtime::ArchiveAdmission::Retained)
+                .archive(hirsel_engine_runtime::ArchiveAdmission::Retained)
                 .map_err(|e| e.to_string())?
                 .reference(),
         );
@@ -244,7 +243,7 @@ impl OwnershipTasks {
                     Ok((
                         p.address.0,
                         p.action.0,
-                        p.archive(hirsel_engine::runtime::ArchiveAdmission::Retained)
+                        p.archive(hirsel_engine_runtime::ArchiveAdmission::Retained)
                             .map_err(|e| e.to_string())?
                             .reference(),
                     ))
@@ -257,7 +256,7 @@ impl OwnershipTasks {
             .snapshot
             .store
             .get_content(
-                root.archive(hirsel_engine::runtime::ArchiveAdmission::Retained)
+                root.archive(hirsel_engine_runtime::ArchiveAdmission::Retained)
                     .map_err(|e| e.to_string())?
                     .reference(),
             )
@@ -265,7 +264,7 @@ impl OwnershipTasks {
         if bytes.as_ref() != expected
             || ROOT.reference(&bytes)
                 != Some(
-                    root.archive(hirsel_engine::runtime::ArchiveAdmission::Retained)
+                    root.archive(hirsel_engine_runtime::ArchiveAdmission::Retained)
                         .map_err(|e| e.to_string())?
                         .reference(),
                 )
@@ -679,7 +678,7 @@ impl OwnershipTasks {
             .store
             .get_content(
                 product
-                    .archive(hirsel_engine::runtime::ArchiveAdmission::Retained)
+                    .archive(hirsel_engine_runtime::ArchiveAdmission::Retained)
                     .map_err(|e| e.to_string())?
                     .reference(),
             )
@@ -687,7 +686,7 @@ impl OwnershipTasks {
         if UNIT.reference(&bytes)
             != Some(
                 product
-                    .archive(hirsel_engine::runtime::ArchiveAdmission::Retained)
+                    .archive(hirsel_engine_runtime::ArchiveAdmission::Retained)
                     .map_err(|e| e.to_string())?
                     .reference(),
             )
@@ -832,7 +831,7 @@ impl Task {
                 Poll::Ready(Err(error)) => return Err(error),
                 Poll::Ready(Ok(product)) => {
                     let selected = product
-                        .archive(hirsel_engine::runtime::ArchiveAdmission::Retained)
+                        .archive(hirsel_engine_runtime::ArchiveAdmission::Retained)
                         .map_err(|e| fail(e.to_string()))?
                         .reference();
                     if product.address != query.address
@@ -857,7 +856,7 @@ impl Task {
                         Ok((
                             p.address.0,
                             p.action.0,
-                            p.archive(hirsel_engine::runtime::ArchiveAdmission::Retained)
+                            p.archive(hirsel_engine_runtime::ArchiveAdmission::Retained)
                                 .map_err(|e| e.to_string())?
                                 .reference(),
                         ))

@@ -14,7 +14,7 @@ fn native_logical_depth_does_not_turn_operational_budgets_into_failures() {
     use crate::Tape;
     use hirsel_native as native;
     use hirsel_run_schema::{BudgetKind, Budgets, IoGrants, LaunchKind, RunOutcome};
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let source = r#"
 resource type Trace {stdout:Stdout}
 drop(x) {let _=out.print(x.stdout,"cleanup\n")}
@@ -163,7 +163,7 @@ pub fn main(rt:Io)->Result[(),GrantError] {
 
 #[test]
 fn http_reject_lowering_has_valid_projections() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         use hirsel_engine::DefinitionQueries;
         let manifest =
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../stdlib/std@1/hirsel.json");
@@ -185,7 +185,7 @@ fn http_reject_lowering_has_valid_projections() {
 // object. An untyped LLVM address declaration conflicts with the bound call.
 #[test]
 fn ordinary_store_delete_has_one_consistent_entry_abi() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         use hirsel_engine::DefinitionQueries;
         let manifest =
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../stdlib/std@1/hirsel.json");

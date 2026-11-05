@@ -2,8 +2,8 @@
 //! Evaluate products. This is ordinary data; V's token is passed through from
 //! the exact Lower completion and no native C/Ready authority is constructed.
 use super::*;
-use crate::runtime::*;
 use crate::store::{Domain, Reference, ResultStore};
+use hirsel_engine_runtime::*;
 use hirsel_types::{SignatureKind, SignatureRef};
 use std::{sync::Mutex, task::Poll};
 

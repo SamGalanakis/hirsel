@@ -1173,8 +1173,9 @@ fn loop_version_matches_reference_heap_llvm_and_cranelift() {
     use hirsel_driver::native::*;
     use hirsel_engine::{
         QueryEngine, RunConfiguration, default_context, default_environment, entry_path,
-        run_observed_snapshot, source_check_request, with_compiler_stack,
+        run_observed_snapshot, source_check_request,
     };
+    use hirsel_intern::jobs::with_compiler_stack;
     use hirsel_native::*;
     use hirsel_native_batch::*;
     use hirsel_native_testing::*;

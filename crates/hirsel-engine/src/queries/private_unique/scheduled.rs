@@ -1,8 +1,8 @@
 //! Private module proofs run on the demanding compiler worker with the canonical read codec.
 //! The SCC/fixed-point algorithm remains the Modes adapter's implementation.
 use super::*;
-use crate::runtime::*;
 use crate::store::{Entry as StoredEntry, EntryKey, VariantRef};
+use hirsel_engine_runtime::*;
 use std::sync::{OnceLock, RwLock};
 
 const KIND: u32 = 0x4602_0001;
@@ -834,7 +834,7 @@ impl QueryEngine {
                 // Immutable demand runs on its already admitted compiler worker.
                 inference.produce()?
             } else {
-                crate::with_compiler_stack(|| inference.produce())?
+                hirsel_intern::jobs::with_compiler_stack(|| inference.produce())?
             };
             let mut private_work = self
                 .operation

@@ -534,7 +534,7 @@ fn partition(index: usize) {
     })
     .collect();
     let runner = Runner::with_matrix(directory.path(), matrix).unwrap();
-    let report = hirsel_engine::with_compiler_stack(|| {
+    let report = hirsel_intern::jobs::with_compiler_stack(|| {
         let mut loaded = hirsel_front_phases::load_program_source(
             &std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
                 .join("../hirsel-driver/tests/fixtures/std_numeric.hir"),

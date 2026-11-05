@@ -1,4 +1,5 @@
-use hirsel_engine::{CompileConfig, QueryKind, store, with_compiler_stack};
+use hirsel_engine::{CompileConfig, QueryKind, store};
+use hirsel_intern::jobs::with_compiler_stack;
 
 const SOURCE: &str = r#"@loop_source(open, next)
 type View { source: String }

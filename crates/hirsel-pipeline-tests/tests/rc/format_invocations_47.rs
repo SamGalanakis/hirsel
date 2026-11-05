@@ -28,7 +28,7 @@ fn appended_format_keeps_reserve_and_finish_invocations() {
 
 #[test]
 fn primitive_formats_share_the_reserved_output_allocation() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let source = r#"pub fn main() -> Result[(), ()] {
   let mut output: List[u8] = []
   list.reserve(mut output, 128u64)

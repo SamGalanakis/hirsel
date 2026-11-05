@@ -123,7 +123,7 @@ fn success(command: &mut Command, expected: &[u8]) -> Output {
 
 #[test]
 fn native_process_argv_and_archive_payloads_replay_exactly_in_four_engines() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let fixture = Fixture::new(include_str!("../support/reference_replay_29/main.hir"));
         fixture.build();
         // Include NUL/invalid UTF-8 in file bytes, and multibyte/empty argv entries.
@@ -193,7 +193,7 @@ fn native_process_argv_and_archive_payloads_replay_exactly_in_four_engines() {
 
 #[test]
 fn native_tape_step_cuts_report_steps_before_finish_or_cleanup() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let fixture = Fixture::new(include_str!("../support/reference_replay_29/stopped.hir"));
         fixture.configure(&[], b"payload");
         fixture.build();
@@ -257,7 +257,7 @@ fn native_tape_step_cuts_report_steps_before_finish_or_cleanup() {
 
 #[test]
 fn language_failure_still_replays_its_resource_cleanup() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let source = include_str!("../support/reference_replay_29/stopped.hir").replace(
             "let mut count = 0u64",
             "failure.check(false, Arithmetic())\n  let mut count = 0u64",

@@ -118,7 +118,7 @@ struct Record {
 /// current typed result usable but supplies no successful durable association.
 #[derive(Clone)]
 pub struct NativeDiscoveryProduct {
-    pub product: Option<crate::runtime::ProductRef>,
+    pub product: Option<hirsel_engine_runtime::ProductRef>,
     pub source: Arc<NativeDefinitionProduct>,
     pub contracts: Option<NativeBodyContracts>,
     pub requirements: InstanceGraph,
@@ -200,9 +200,9 @@ impl NativeDiscoveryCache {
             && (!crate::queries::generation::executable(&source.source.syntax)
                 || source.lower.is_some())
     }
-    pub fn query_id(path: &DefPath) -> crate::runtime::QueryId {
+    pub fn query_id(path: &DefPath) -> hirsel_engine_runtime::QueryId {
         let bytes = serde_json::to_vec(path).expect("definition path serializes");
-        crate::runtime::QueryId {
+        hirsel_engine_runtime::QueryId {
             kind: NATIVE_DISCOVERY_KIND,
             address: Address(ContentHash::of_parts(
                 "hirsel.native.discovery-address.v1",
@@ -249,7 +249,7 @@ impl NativeDiscoveryCache {
             {
                 self.counts.hits += 1;
                 return Ok(NativeDiscoveryProduct {
-                    product: Some(crate::runtime::ProductRef::import_archive(
+                    product: Some(hirsel_engine_runtime::ProductRef::import_archive(
                         address,
                         previous.action,
                         archive,
@@ -298,7 +298,7 @@ impl NativeDiscoveryCache {
             let bytes = self.records.encode(engine, &record)?;
             let reference = self.store.put_content(DISCOVERY, &bytes)?;
             self.store.associate_product(address, action, reference);
-            Some(crate::runtime::ProductRef::import_archive(
+            Some(hirsel_engine_runtime::ProductRef::import_archive(
                 address,
                 action,
                 self.store.open_product_archive(reference)?,

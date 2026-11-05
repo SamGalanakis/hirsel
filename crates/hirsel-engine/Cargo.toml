@@ -6,6 +6,7 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+hirsel-engine-runtime = { path = "../hirsel-engine-runtime" }
 hirsel-query-products = { path = "../hirsel-query-products" }
 hirsel-engine-admission = { path = "../hirsel-engine-admission" }
 hirsel-registry = { path = "../hirsel-registry" }
@@ -39,4 +40,6 @@ libc = { version = "0.2", default-features = false }
 hirsel-run-schema = { path = "../hirsel-run-schema" }
 
 [dev-dependencies]
+hirsel-engine-runtime = { path = "../hirsel-engine-runtime", features = ["test-support"] }
+hirsel-engine-admission = { path = "../hirsel-engine-admission", features = ["test-alloc"] }
 tempfile = "3"

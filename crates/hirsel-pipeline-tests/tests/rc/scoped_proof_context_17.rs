@@ -267,7 +267,7 @@ fn opaque_context_native_both_backends() {
     use hirsel_native::*;
     use hirsel_native_batch::*;
     use hirsel_native_testing::*;
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let source = "fn invoke(f:fn()->u64 uses {})->u64 uses {f}{f()}\nfn value(n:u64)->u64{let reader=std@1/bufio.new(8u64);let x=std@1/bufio.buffered(reader)+n;let mut total=0u64;for i in 0u64..20u64{total+=invoke(fn()->u64 uses {}{invoke(fn()->u64 uses {}{x+i})})};total}\npub fn main()->Result[(),u64]{Error(value(3u64))}";
         let source_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../hirsel-driver/tests/fixtures/std_numeric.hir");

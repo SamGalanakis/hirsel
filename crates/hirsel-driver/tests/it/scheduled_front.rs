@@ -1,9 +1,10 @@
 use hirsel_driver::*;
 use hirsel_engine::{
-    runtime::*,
     store::{Domain, MemStore, ResultStore},
     *,
 };
+use hirsel_engine_runtime::*;
+
 use hirsel_front_phases::*;
 use hirsel_host_io::launch::*;
 use std::sync::Arc;
@@ -76,7 +77,7 @@ impl QueryTask for EvictCompact {
 }
 #[test]
 fn admitted_real_front_tasks_match_scalar_modes_and_complete_reads() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("main.hir");
         std::fs::write(
@@ -202,7 +203,7 @@ fn admitted_real_front_tasks_match_scalar_modes_and_complete_reads() {
 
 #[test]
 fn admitted_lower_saved_work_and_native_metadata_survive_dependency_suspension() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("main.hir");
         std::fs::write(&path, "const A:u8=comptime 1u8;\nconst B:u8=comptime A;\nfn helper()->u8{B}\npub fn main()->u8{comptime helper()}\n").unwrap();
@@ -419,7 +420,9 @@ fn admitted_lower_saved_work_and_native_metadata_survive_dependency_suspension()
             );
             let detached_source = NativeRecordContext::capture(&program.engine);
             assert!(
-                products[0].lower_value().is_some(),
+                products[0]
+                    .live_value::<hirsel_engine::products::LiveLowerProduct>()
+                    .is_some(),
                 "ordinary Lower keeps a live owner"
             );
             let native = program
@@ -462,7 +465,7 @@ fn admitted_lower_saved_work_and_native_metadata_survive_dependency_suspension()
 
 #[test]
 fn admitted_lower_depth_matches_scalar_after_warm_constant_dependencies() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("main.hir");
         std::fs::write(&path,"const A:u8=comptime 1u8;\nconst B:u8=comptime A;\nconst C:u8=comptime B;\npub fn main()->u8{C}\n").unwrap();
@@ -752,7 +755,11 @@ fn admitted_front_store_hits_validate_signature_reads_before_materializing_bodie
                 u64::from(main_hit) + u64::from(spare_hit)
             );
             for product in &products {
-                assert!(product.summary_value().is_some());
+                assert!(
+                    product
+                        .live_value::<hirsel_engine::products::LiveSummaryProduct>()
+                        .is_some()
+                );
                 assert!(front.checked(Ok(product.clone())).is_some());
                 assert!(product.archive(ArchiveAdmission::Retained).is_err());
             }
@@ -1240,12 +1247,17 @@ fn admitted_front_pressure_evicts_only_unpinned_settled_bodies_and_recomputes_eq
                 let a = runtime.wait(request).unwrap().pop().unwrap();
                 let mut scratch = budget.reserve(2 << 20).unwrap();
                 let canonical = a
-                    .analyzed_value()
+                    .live_value::<hirsel_engine::products::LiveAnalyzedProduct>()
                     .unwrap()
                     .archive(&mut scratch, 1 << 20)
                     .unwrap();
                 let action = a.action;
-                let reads = a.analyzed_value().unwrap().reads().as_ref().clone();
+                let reads = a
+                    .live_value::<hirsel_engine::products::LiveAnalyzedProduct>()
+                    .unwrap()
+                    .reads()
+                    .as_ref()
+                    .clone();
                 if mode == 0 {
                     limit = front.retained_bytes();
                     assert!(limit > metadata);
@@ -1394,13 +1406,19 @@ fn admitted_front_pressure_evicts_only_unpinned_settled_bodies_and_recomputes_eq
                     assert_eq!(runtime.stats().body_evictions, 2);
                     assert_eq!(a.action, action);
                     let recomputed = a
-                        .analyzed_value()
+                        .live_value::<hirsel_engine::products::LiveAnalyzedProduct>()
                         .unwrap()
                         .archive(&mut scratch, 1 << 20)
                         .unwrap();
                     assert_eq!(canonical.reference(), recomputed.reference());
                     assert_eq!(canonical.bytes(), recomputed.bytes());
-                    assert_eq!(a.analyzed_value().unwrap().reads().as_ref(), &reads);
+                    assert_eq!(
+                        a.live_value::<hirsel_engine::products::LiveAnalyzedProduct>()
+                            .unwrap()
+                            .reads()
+                            .as_ref(),
+                        &reads
+                    );
                     assert_eq!(front.recompute_count(&definitions[0], QueryKind::Modes), 3);
                     let request = runtime.request(&[summaries[0]]);
                     assert_eq!(
@@ -1522,12 +1540,17 @@ fn admitted_front_pressure_evicts_only_unpinned_settled_bodies_and_recomputes_eq
             }
             let mut scratch = budget.reserve(2 << 20).unwrap();
             let canonical = a
-                .summary_value()
+                .live_value::<hirsel_engine::products::LiveSummaryProduct>()
                 .unwrap()
                 .archive(&mut scratch, 1 << 20)
                 .unwrap();
             let action = a.action;
-            let summary = a.summary_value().unwrap().value().summary.clone();
+            let summary = a
+                .live_value::<hirsel_engine::products::LiveSummaryProduct>()
+                .unwrap()
+                .value()
+                .summary
+                .clone();
             let checked = (mode == 2).then(|| front.checked(Ok(a.clone())).unwrap());
             let pinned_summary = (mode == 3).then(|| a.clone());
             drop(a);
@@ -1561,9 +1584,16 @@ fn admitted_front_pressure_evicts_only_unpinned_settled_bodies_and_recomputes_eq
                 let recomputed = runtime.wait(request).unwrap().pop().unwrap();
                 assert_eq!(runtime.stats().body_evictions, 2);
                 assert_eq!(recomputed.action, action);
-                assert_eq!(recomputed.summary_value().unwrap().value().summary, summary);
+                assert_eq!(
+                    recomputed
+                        .live_value::<hirsel_engine::products::LiveSummaryProduct>()
+                        .unwrap()
+                        .value()
+                        .summary,
+                    summary
+                );
                 let archived = recomputed
-                    .summary_value()
+                    .live_value::<hirsel_engine::products::LiveSummaryProduct>()
                     .unwrap()
                     .archive(&mut scratch, 1 << 20)
                     .unwrap();

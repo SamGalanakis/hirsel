@@ -3,10 +3,9 @@
 //! replays. These controls read the Ready units of the whole native pipeline:
 //! the scoped kernel's loops hold no RC instruction, while an escaping
 //! closure and a callee replaced during its arguments keep theirs.
-use hirsel_engine::{
-    QueryEngine, default_context, default_environment, source_check_request, with_compiler_stack,
-};
+use hirsel_engine::{QueryEngine, default_context, default_environment, source_check_request};
 use hirsel_front_phases::compiler_adapters;
+use hirsel_intern::jobs::with_compiler_stack;
 use hirsel_lir::ir::{Inst, LirUnit, Terminator};
 use hirsel_lir::{Ready, TargetSpec};
 

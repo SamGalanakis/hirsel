@@ -1,7 +1,7 @@
 //! Complete typed cleanup coverage precedes runtime resolver admission.
 #[test]
 fn finalizer_coverage_retains_nested_and_variant_descriptors_and_refuses_omissions() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         use hirsel_driver::native;
         use hirsel_lir::continuation::PlanInputs;
         use hirsel_lir::continuation::isolate::FinalizerCoverage;

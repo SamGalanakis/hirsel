@@ -42,7 +42,7 @@ fn prepare(scripted: bool) -> tempfile::TempDir {
 
 #[test]
 fn watchfiles_27_scripted_interpreter_and_checked_h() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let scratch = prepare(true);
         let script = scratch.path().join("oracle.py");
         fs::write(&script, include_str!("../support/watchfiles_27/oracle.py")).unwrap();
@@ -179,7 +179,7 @@ fn watchfiles_27_real_files() {
 
 #[test]
 fn watchfiles_27_argument_and_snapshot_boundaries() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let scratch = prepare(false);
         let mut loaded =
             hirsel_front_phases::load_program(&scratch.path().join("hirsel.json")).unwrap();
@@ -293,7 +293,7 @@ fn watchfiles_27_argument_and_snapshot_boundaries() {
 
 #[test]
 fn watchfiles_27_clock_errors_and_overflow() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let scratch = prepare(false);
         let mut loaded =
             hirsel_front_phases::load_program(&scratch.path().join("hirsel.json")).unwrap();

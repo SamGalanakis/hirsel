@@ -985,7 +985,7 @@ mod frozen_task_tests {
     }
     #[test]
     fn structural_check_reuses_declarations_and_rebinds_receipts_after_inference() {
-        crate::with_compiler_stack(|| {
+        hirsel_intern::jobs::with_compiler_stack(|| {
             let (mut engine, path) = fixture();
             let id = DefId::intern(&path);
             let first = engine.signatures[&id].result().unwrap().value.clone();
@@ -1146,7 +1146,7 @@ mod frozen_task_tests {
         engine.signatures.insert(id, Arc::new(entry));
         (engine, path)
     }
-    fn runtime_errors() -> crate::runtime::RuntimeErrors {
+    fn runtime_errors() -> hirsel_engine_runtime::RuntimeErrors {
         let diagnostic = |text: &[u8]| {
             crate::store::Domain {
                 kind: 0x4600_00ff,
@@ -1155,7 +1155,7 @@ mod frozen_task_tests {
             .reference(text)
             .unwrap()
         };
-        crate::runtime::RuntimeErrors {
+        hirsel_engine_runtime::RuntimeErrors {
             resource: diagnostic(b"resource"),
             cycle: diagnostic(b"cycle"),
             cancelled: diagnostic(b"cancelled"),
@@ -1165,11 +1165,11 @@ mod frozen_task_tests {
     }
     #[test]
     fn admitted_front_body_failure_matches_scalar_reads_and_retains_snapshot_admission() {
-        use crate::runtime::AdmittedRuntime;
-        use crate::runtime::MemoryWeight;
-        use crate::runtime::QueryRuntime;
+        use hirsel_engine_runtime::AdmittedRuntime;
+        use hirsel_engine_runtime::MemoryWeight;
+        use hirsel_engine_runtime::QueryRuntime;
 
-        crate::with_compiler_stack(|| {
+        hirsel_intern::jobs::with_compiler_stack(|| {
             let (mut engine, path) = fixture();
             let store = Arc::new(crate::store::MemStore::default());
             engine = engine.with_result_store(store.clone());
@@ -1236,7 +1236,7 @@ mod frozen_task_tests {
     }
     #[test]
     fn frozen_task_receipts_equal_scalar_failure_with_cold_and_partial_hits() {
-        crate::with_compiler_stack(|| {
+        hirsel_intern::jobs::with_compiler_stack(|| {
             for partial in [false, true] {
                 let (mut engine, path) = fixture();
                 if partial {
@@ -1307,7 +1307,7 @@ mod frozen_task_tests {
     }
     #[test]
     fn frozen_task_header_stop_inherits_the_already_observed_header_receipt() {
-        crate::with_compiler_stack(|| {
+        hirsel_intern::jobs::with_compiler_stack(|| {
             let (mut engine, path) = fixture();
             let snapshot = engine.signature_inputs();
             let declarations = engine.frozen_declarations();

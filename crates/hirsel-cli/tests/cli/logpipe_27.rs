@@ -172,7 +172,7 @@ fn verify(output: &[u8], vectors: &[Value]) {
 }
 
 fn partition(ids: &[&str]) {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let evidence = std::env::var_os("LOGPIPE_27_EVIDENCE").map(PathBuf::from);
         let scratch = tempfile::Builder::new()
             .prefix("logpipe-27-")

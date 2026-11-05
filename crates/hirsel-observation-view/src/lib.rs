@@ -903,7 +903,7 @@ mod tests {
 
     #[test]
     fn replay_enrichment_matches_live_observations_without_repeating_host_writes() {
-        hirsel_engine::with_compiler_stack(|| {
+        hirsel_intern::jobs::with_compiler_stack(|| {
             let root_scratch = tempfile::Builder::new()
                 .prefix("observation-replay-")
                 .tempdir()

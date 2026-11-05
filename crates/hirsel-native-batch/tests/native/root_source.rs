@@ -161,7 +161,7 @@ impl Fixture {
 
 #[test]
 fn settled_source_assembles_without_engine_or_body_reads_and_binds_actual_ready() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         for verify in [Verify::Off, Verify::On] {
             let fixture = Fixture::new(verify);
             let source = NativeLinkSource::from_settled(fixture.facts(), &fixture.lower).unwrap();

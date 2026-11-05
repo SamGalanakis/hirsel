@@ -45,10 +45,8 @@ fn cpu_fixture_four_engine_source_grant(
     let _compiler = QUAL_COMPILER.lock().unwrap_or_else(|e| e.into_inner());
     use hirsel_front_phases::compiler_adapters;
     use hirsel_driver::native;
-    use hirsel_engine::{
-        QueryEngine, RunConfiguration, source_check_request, default_context, default_environment,
-        entry_path, run_observed_checked, run_observed_snapshot, with_compiler_stack,
-    };
+    use hirsel_engine::{QueryEngine,RunConfiguration,source_check_request,default_context,default_environment,entry_path,run_observed_checked,run_observed_snapshot,};
+use hirsel_intern::jobs::{with_compiler_stack};
 
     with_compiler_stack(|| {
         let mut engine = QueryEngine::new(default_environment(), compiler_adapters());

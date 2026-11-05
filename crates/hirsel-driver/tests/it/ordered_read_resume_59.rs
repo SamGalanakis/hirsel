@@ -1,5 +1,5 @@
 //! Read certificates retain exactly the mutable slot and typed ABI result.
-use hirsel_engine::with_compiler_stack;
+use hirsel_intern::jobs::with_compiler_stack;
 use hirsel_lir::continuation::{Representation, ResumeAction, RuntimeOpKind, RuntimeResultSource};
 
 pub(super) const STDIN: &str = r#"

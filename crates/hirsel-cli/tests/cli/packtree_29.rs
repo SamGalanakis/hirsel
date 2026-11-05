@@ -63,7 +63,7 @@ fn scratch(label: &str) -> tempfile::TempDir {
         .unwrap()
 }
 fn scripted(caps: bool) {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let tmp = scratch("packtree-script-");
         let selection = package(tmp.path());
         let mut loaded =
@@ -427,7 +427,7 @@ fn replay_batch(path: &std::path::Path) {
             }
         }
     }
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let requests: Vec<Value> = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
         assert!(!requests.is_empty() && requests.len() <= 8);
         for request in requests {

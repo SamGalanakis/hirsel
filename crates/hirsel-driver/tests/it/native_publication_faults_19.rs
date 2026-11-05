@@ -1,10 +1,11 @@
 //! Original private plan missing/corrupt/publication-failure vectors over Codegen.
 use hirsel_driver::native;
 use hirsel_engine::{
-    runtime::*,
     store::{self, ResultStore},
     *,
 };
+use hirsel_engine_runtime::*;
+
 use hirsel_front_phases::compiler_adapters;
 use std::sync::{
     Arc, Mutex,
@@ -139,7 +140,7 @@ fn original_missing_corrupt_metadata_and_failed_publication_recompute_without_lo
         let (key, record) = cold.products.first().unwrap();
         store.hidden.lock().unwrap().push(
             record
-                .archive(hirsel_engine::runtime::ArchiveAdmission::Retained)
+                .archive(hirsel_engine_runtime::ArchiveAdmission::Retained)
                 .unwrap()
                 .reference(),
         );
@@ -155,7 +156,7 @@ fn original_missing_corrupt_metadata_and_failed_publication_recompute_without_lo
             .disk
             .put_content(
                 record
-                    .archive(hirsel_engine::runtime::ArchiveAdmission::Retained)
+                    .archive(hirsel_engine_runtime::ArchiveAdmission::Retained)
                     .unwrap()
                     .reference()
                     .domain,

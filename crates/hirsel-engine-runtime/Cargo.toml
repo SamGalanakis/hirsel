@@ -1,0 +1,22 @@
+[package]
+name = "hirsel-engine-runtime"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+hirsel-artifact-store = { path = "../hirsel-artifact-store" }
+hirsel-engine-admission = { path = "../hirsel-engine-admission" }
+hirsel-intern = { path = "../hirsel-intern" }
+hirsel-syntax = { path = "../hirsel-syntax" }
+serde_json = "1"
+serde = { version = "1", features = ["derive", "rc"] }
+libc = { version = "0.2", default-features = false }
+
+[dev-dependencies]
+hirsel-engine-admission = { path = "../hirsel-engine-admission", features = ["test-alloc"] }
+hirsel-guard = { path = "../hirsel-guard" }
+
+[features]
+test-support = []

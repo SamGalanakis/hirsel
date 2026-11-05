@@ -4,16 +4,16 @@ use hirsel_artifact_store::{Action, Address, Domain};
 use hirsel_driver::resident::{Host, RequestError};
 use hirsel_engine::loader_inputs::{FrozenInputs, InputLimits, LoaderInputs};
 use hirsel_engine::requests::{OutputReadiness, RequestEngine, SelectedRequest, observe_inputs};
-use hirsel_engine::runtime::AdmittedRuntime;
-use hirsel_engine::runtime::MemoryWeight;
-use hirsel_engine::runtime::ProductRef;
-use hirsel_engine::runtime::QueryContext;
-use hirsel_engine::runtime::QueryFactory;
-use hirsel_engine::runtime::QueryId;
-use hirsel_engine::runtime::QueryPoll;
-use hirsel_engine::runtime::QueryTask;
-use hirsel_engine::runtime::RuntimeErrors;
 use hirsel_engine::store::{MemStore, ResultStore};
+use hirsel_engine_runtime::AdmittedRuntime;
+use hirsel_engine_runtime::MemoryWeight;
+use hirsel_engine_runtime::ProductRef;
+use hirsel_engine_runtime::QueryContext;
+use hirsel_engine_runtime::QueryFactory;
+use hirsel_engine_runtime::QueryId;
+use hirsel_engine_runtime::QueryPoll;
+use hirsel_engine_runtime::QueryTask;
+use hirsel_engine_runtime::RuntimeErrors;
 
 use hirsel_intern::jobs::Jobs;
 use hirsel_syntax::ContentHash;
@@ -91,7 +91,7 @@ impl OutputReadiness for Readiness {
         self.store
             .get_content(
                 product
-                    .archive(hirsel_engine::runtime::ArchiveAdmission::Retained)
+                    .archive(hirsel_engine_runtime::ArchiveAdmission::Retained)
                     .map_err(|e| e.to_string())?
                     .reference(),
             )
@@ -185,7 +185,7 @@ fn engine(
     }
 }
 fn complete<
-    R: hirsel_engine::runtime::QueryRuntime,
+    R: hirsel_engine_runtime::QueryRuntime,
     O: OutputReadiness<Output = Vec<u8>, Error = String>,
 >(
     request: &mut hirsel_driver::resident::RequestLease<R, O>,

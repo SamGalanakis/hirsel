@@ -2,7 +2,7 @@ use hirsel_artifact_store::{Action, Address, Domain, Reference};
 use hirsel_driver::resident::{Host, RequestError};
 use hirsel_engine::loader_inputs::{InputLimits, LoaderInputs};
 use hirsel_engine::requests::{OutputReadiness, RequestEngine, SelectedRequest, observe_inputs};
-use hirsel_engine::runtime::{ProductRef, QueryId, QueryRuntime, RequestId};
+use hirsel_engine_runtime::{ProductRef, QueryId, QueryRuntime, RequestId};
 use hirsel_syntax::ContentHash;
 use std::collections::VecDeque;
 use std::io;
@@ -178,7 +178,7 @@ fn query_failure_never_materializes_output() {
     let (mut host, runtime) = host();
     let mut request = host.request(&false).unwrap();
     let reference = product()
-        .archive(hirsel_engine::runtime::ArchiveAdmission::Retained)
+        .archive(hirsel_engine_runtime::ArchiveAdmission::Retained)
         .unwrap()
         .reference();
     reply(&runtime, Poll::Ready(Err(reference)));

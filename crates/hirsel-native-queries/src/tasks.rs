@@ -5,7 +5,9 @@ use super::{
     products::{DemandProducts, NativeSnapshot, SettledProducts},
     *,
 };
-use hirsel_engine::{runtime::*, store::ResultStore};
+use hirsel_engine::store::ResultStore;
+use hirsel_engine_runtime::*;
+
 use hirsel_native::object_queries::CodegenKey;
 use hirsel_native::object_queries::LinkDependencies;
 use hirsel_native::object_queries::LinkInputs;

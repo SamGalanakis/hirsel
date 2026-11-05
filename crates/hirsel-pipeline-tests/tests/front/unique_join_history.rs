@@ -1,8 +1,8 @@
 //! Bounded ownership histories, independent of either production flow join.
 use hirsel_engine::{
     DefinitionQueries, QueryEngine, default_context, default_environment, source_check_request,
-    with_compiler_stack,
 };
+use hirsel_intern::jobs::with_compiler_stack;
 use std::collections::BTreeSet;
 
 #[derive(Clone, Copy, Debug)]

@@ -300,7 +300,7 @@ impl InstanceQueries {
             .lookup_inner(key, action, &environment)
             .map(|p| {
                 p.product
-                    .archive(hirsel_engine::runtime::ArchiveAdmission::Retained)
+                    .archive(hirsel_engine_runtime::ArchiveAdmission::Retained)
                     .map(|archive| archive.reference())
                     .map_err(|e| e.to_string())
             })

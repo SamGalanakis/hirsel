@@ -1,11 +1,11 @@
 use hirsel_diag::{Diagnostic, RuleId};
 use hirsel_engine::memo::MemoKey;
-use hirsel_engine::runtime::AdmittedRuntime;
-use hirsel_engine::runtime::MemoryWeight;
-use hirsel_engine::runtime::QueryRuntime;
-use hirsel_engine::runtime::RuntimeErrors;
 use hirsel_engine::store::MemStore;
 use hirsel_engine::*;
+use hirsel_engine_runtime::AdmittedRuntime;
+use hirsel_engine_runtime::MemoryWeight;
+use hirsel_engine_runtime::QueryRuntime;
+use hirsel_engine_runtime::RuntimeErrors;
 
 use hirsel_intern::Symbol;
 use hirsel_span::{FileId, SourceMap, Span};
@@ -568,7 +568,7 @@ fn admitted_memo_reads(
 }
 #[test]
 fn invalid_tir_is_never_published_and_operational_failures_retry() {
-    hirsel_engine::with_compiler_stack(
+    hirsel_intern::jobs::with_compiler_stack(
         invalid_tir_is_never_published_and_operational_failures_retry_on_compiler_thread,
     );
 }
@@ -595,7 +595,7 @@ fn invalid_tir_is_never_published_and_operational_failures_retry_on_compiler_thr
 /// `Verify::Off` is the one switch that skips V: the same invalid TIR lowers.
 #[test]
 fn invalid_tir_lowers_without_v() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let (mut engine, _) = make_engine(Some("invalid-tir"), false);
         engine.verify = Verify::Off;
         parse(&mut engine, "fn a () { 1 }\n");
@@ -604,7 +604,7 @@ fn invalid_tir_lowers_without_v() {
 }
 #[test]
 fn phases_run_in_order_and_stop_at_every_error_boundary() {
-    hirsel_engine::with_compiler_stack(
+    hirsel_intern::jobs::with_compiler_stack(
         phases_run_in_order_and_stop_at_every_error_boundary_on_compiler_thread,
     );
 }
@@ -759,7 +759,7 @@ fn frozen_signature_preflight_preserves_resolution_rejection_precedence() {
 }
 #[test]
 fn changing_one_body_recomputes_only_that_definition() {
-    hirsel_engine::with_compiler_stack(
+    hirsel_intern::jobs::with_compiler_stack(
         changing_one_body_recomputes_only_that_definition_on_compiler_thread,
     );
 }
@@ -787,7 +787,7 @@ fn changing_one_body_recomputes_only_that_definition_on_compiler_thread() {
 }
 #[test]
 fn changing_a_signature_recomputes_its_users() {
-    hirsel_engine::with_compiler_stack(
+    hirsel_intern::jobs::with_compiler_stack(
         changing_a_signature_recomputes_its_users_on_compiler_thread,
     );
 }
@@ -808,7 +808,7 @@ fn changing_a_signature_recomputes_its_users_on_compiler_thread() {
 }
 #[test]
 fn failed_provider_reads_survive_rejection_and_manifest_changes_invalidate() {
-    hirsel_engine::with_compiler_stack(
+    hirsel_intern::jobs::with_compiler_stack(
         failed_provider_reads_survive_rejection_and_manifest_changes_invalidate_on_compiler_thread,
     );
 }
@@ -834,7 +834,7 @@ fn failed_provider_reads_survive_rejection_and_manifest_changes_invalidate_on_co
 }
 #[test]
 fn missing_stages_remain_unavailable_and_diagnostic_sources_survive_edits() {
-    hirsel_engine::with_compiler_stack(
+    hirsel_intern::jobs::with_compiler_stack(
         missing_stages_remain_unavailable_and_diagnostic_sources_survive_edits_on_compiler_thread,
     );
 }
@@ -945,7 +945,7 @@ impl SignaturePhase for ContractSignatures {
 }
 #[test]
 fn contract_signature_reads_invalidate_the_owner_and_its_users() {
-    hirsel_engine::with_compiler_stack(
+    hirsel_intern::jobs::with_compiler_stack(
         contract_signature_reads_invalidate_the_owner_and_its_users_on_compiler_thread,
     );
 }
@@ -977,7 +977,7 @@ fn contract_signature_reads_invalidate_the_owner_and_its_users_on_compiler_threa
 
 #[test]
 fn failed_signature_changes_invalidate_a_rejected_user() {
-    hirsel_engine::with_compiler_stack(
+    hirsel_intern::jobs::with_compiler_stack(
         failed_signature_changes_invalidate_a_rejected_user_on_compiler_thread,
     );
 }
@@ -1035,7 +1035,7 @@ impl SignaturePhase for ObserveDuplicates {
 }
 #[test]
 fn duplicate_items_keep_one_identity_and_reach_the_signature_phase() {
-    hirsel_engine::with_compiler_stack(
+    hirsel_intern::jobs::with_compiler_stack(
         duplicate_items_keep_one_identity_and_reach_the_signature_phase_on_compiler_thread,
     );
 }
@@ -1065,7 +1065,7 @@ fn duplicate_items_keep_one_identity_and_reach_the_signature_phase_on_compiler_t
 
 #[test]
 fn environment_revisions_invalidate_semantic_queries() {
-    hirsel_engine::with_compiler_stack(
+    hirsel_intern::jobs::with_compiler_stack(
         environment_revisions_invalidate_semantic_queries_on_compiler_thread,
     );
 }
@@ -1089,7 +1089,7 @@ fn environment_revisions_invalidate_semantic_queries_on_compiler_thread() {
 
 #[test]
 fn provider_results_share_graphs_and_manifest_misses_have_revisions() {
-    hirsel_engine::with_compiler_stack(
+    hirsel_intern::jobs::with_compiler_stack(
         provider_results_share_graphs_and_manifest_misses_have_revisions_on_compiler_thread,
     );
 }
@@ -1115,7 +1115,7 @@ fn provider_results_share_graphs_and_manifest_misses_have_revisions_on_compiler_
 }
 #[test]
 fn operational_signature_failures_retry_and_are_not_rejection_cache_entries() {
-    hirsel_engine::with_compiler_stack(
+    hirsel_intern::jobs::with_compiler_stack(
         operational_signature_failures_retry_and_are_not_rejection_cache_entries_on_compiler_thread,
     );
 }
@@ -1165,7 +1165,7 @@ fn operational_signature_failures_retry_and_are_not_rejection_cache_entries_on_c
 }
 #[test]
 fn partial_check_preserves_diagnostics_and_reports_the_missing_phase() {
-    hirsel_engine::with_compiler_stack(
+    hirsel_intern::jobs::with_compiler_stack(
         partial_check_preserves_diagnostics_and_reports_the_missing_phase_on_compiler_thread,
     );
 }
@@ -1191,7 +1191,7 @@ fn partial_check_preserves_diagnostics_and_reports_the_missing_phase_on_compiler
 
 #[test]
 fn signature_hits_track_later_duplicate_headers_and_positions() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let (mut engine, _) = make_engine(None, false);
         parse(&mut engine, "fn a () { 1 }\n");
         let duplicate = engine
@@ -1758,12 +1758,12 @@ fn scheduled_scc_run_with_capacity(
     runtime.evict_to(0);
     for (index, query) in
         std::iter::once(growth.query())
-            .chain(std::iter::once(hirsel_engine::runtime::QueryId {
+            .chain(std::iter::once(hirsel_engine_runtime::QueryId {
                 kind: FRONT_GROWTH_KIND,
                 address: output.facets.membership.address,
             }))
             .chain(output.facets.components.iter().map(|component| {
-                hirsel_engine::runtime::QueryId {
+                hirsel_engine_runtime::QueryId {
                     kind: FRONT_GROWTH_KIND,
                     address: component.product.address,
                 }
@@ -1892,7 +1892,7 @@ fn scheduled_scc_split_merge_and_durable_reopen_agree_with_cold_solve() {
         );
         assert_eq!(
             cached_membership.reference.domain,
-            hirsel_engine::runtime::LIVE_SOURCE_MEMBERSHIP
+            hirsel_engine::products::LIVE_SOURCE_MEMBERSHIP
         );
         let (cold, _, _) =
             scheduled_scc_run(text, calls, Arc::new(MemStore::default()), 1, 8 << 20);
@@ -1987,7 +1987,7 @@ fn scheduled_scc_store_off_edit_split_merge_and_reopen_agree_with_cold_solve() {
 
 #[test]
 fn scheduled_scc_cancelled_prefix_reopens_and_records_its_consumed_reads() {
-    use hirsel_engine::runtime::*;
+    use hirsel_engine_runtime::*;
     use std::{
         sync::{
             atomic::{AtomicBool, Ordering},

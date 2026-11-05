@@ -357,7 +357,7 @@ mod tests {
     }
     #[test]
     fn parse_cache_refuses_every_single_byte_corruption() {
-        crate::with_compiler_stack(|| {
+        hirsel_intern::jobs::with_compiler_stack(|| {
             let store = Arc::new(MemStore::default());
             let context = default_context();
             let (cold, file, _) = indexed(&store, &context);
@@ -378,7 +378,7 @@ mod tests {
     }
     #[test]
     fn parse_cache_restores_real_library_syntax() {
-        crate::with_compiler_stack(|| {
+        hirsel_intern::jobs::with_compiler_stack(|| {
             for (name, source) in [
                 (
                     "two-items",
@@ -443,7 +443,7 @@ mod tests {
     }
     #[test]
     fn parse_cache_rebinds_anchors_and_recomputes_duplicate_occurrences() {
-        crate::with_compiler_stack(|| {
+        hirsel_intern::jobs::with_compiler_stack(|| {
             let store = Arc::new(MemStore::default());
             let context = default_context();
             let (cold, file, path) = indexed(&store, &context);
@@ -487,7 +487,7 @@ mod tests {
     }
     #[test]
     fn parse_cache_binds_source_package_and_module() {
-        crate::with_compiler_stack(|| {
+        hirsel_intern::jobs::with_compiler_stack(|| {
             let store = Arc::new(MemStore::default());
             let context = default_context();
             let (cold, file, _) = indexed(&store, &context);
@@ -525,7 +525,7 @@ mod tests {
     }
     #[test]
     fn parse_cache_refuses_malformed_payload_spans_tokens_and_arenas() {
-        crate::with_compiler_stack(|| {
+        hirsel_intern::jobs::with_compiler_stack(|| {
             for change in 0..8 {
                 let store = Arc::new(MemStore::default());
                 let context = default_context();
@@ -563,7 +563,7 @@ mod tests {
     }
     #[test]
     fn parse_cache_verify_store_recomputes_and_detects_canonical_mismatch() {
-        crate::with_compiler_stack(|| {
+        hirsel_intern::jobs::with_compiler_stack(|| {
             let context = default_context();
             for changed in [false, true] {
                 let store = Arc::new(MemStore::default());

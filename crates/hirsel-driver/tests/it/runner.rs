@@ -6,9 +6,9 @@
 //! foreign-call surface runs as an executable.
 use hirsel_engine::{
     DefPath, QueryEngine, default_context, default_environment, entry_path, source_check_request,
-    with_compiler_stack,
 };
 use hirsel_front_phases::compiler_adapters;
+use hirsel_intern::jobs::with_compiler_stack;
 use hirsel_native::Backend;
 use hirsel_native::Execution;
 use hirsel_native::Launched;

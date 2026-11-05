@@ -520,9 +520,9 @@ impl FrontBodyQueries {
         let charge = view
             .weight(false, Some(&reads), true)
             .checked_add(LiveSummaryProduct::shared_payload_bytes(&summary)?)?
-            .checked_add(crate::memo::retained_arc_bytes(&std::mem::MaybeUninit::<
-                FrontFacts,
-            >::uninit()))?
+            .checked_add(hirsel_engine_admission::retained_arc_bytes(
+                &std::mem::MaybeUninit::<FrontFacts>::uninit(),
+            ))?
             .checked_add(
                 (memos.len() * std::mem::size_of::<(crate::memo::MemoKey, Arc<Reads>)>()) as u64,
             )?;
@@ -649,7 +649,8 @@ impl BodyTask {
                 lowering,
                 ..
             } => {
-                let Some(summary) = publication.summary_value() else {
+                let Some(summary) = publication.live_value::<crate::products::LiveSummaryProduct>()
+                else {
                     return;
                 };
                 (*archive, summary.value_arc(), diagnostics, lowering)
@@ -1169,7 +1170,7 @@ mod tests {
 
     #[test]
     fn carry_codec_layout_covers_independent_reads_diagnostics_and_summary_decode_peaks() {
-        crate::with_compiler_stack(|| {
+        hirsel_intern::jobs::with_compiler_stack(|| {
             for (width, full) in [(1, true), (4, true), (16, true), (64, true), (4096, false)] {
                 let anchor = Anchor::fresh();
                 let relocated = Anchor::fresh();

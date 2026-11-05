@@ -28,7 +28,7 @@ use std::process::Command;
 use std::time::Duration;
 
 fn main() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         if let Err(error) = profile() {
             eprintln!("profile: {error}");
             std::process::exit(1);

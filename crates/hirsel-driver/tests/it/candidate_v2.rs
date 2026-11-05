@@ -603,7 +603,7 @@ fn candidate_v2_h7_aliases_roles_preconditions_duplicates_and_utf8() {
 }
 #[test]
 fn candidate_v2_h8_frozen_library_sources_allow_edits() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let t = Tree::basic();
         t.write("lib.hir", "pub fn value(x:u64)->u64{x+1}\n");
         let mut m: Value =
@@ -877,7 +877,7 @@ fn candidate_v2_h16_old_secondary_diagnostics_survive_deletion_and_pressure() {
 }
 #[test]
 fn candidate_receipts_bind_failed_lowerings_to_complete_current_checks() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         for jobs in [1, 2] {
             for retention in [
                 hirsel_engine::memo::Retention::Batch,
@@ -1125,7 +1125,7 @@ fn candidate_v2_cold_child() {
     hirsel_intern::salt_ids(salt);
     let entry = PathBuf::from(entry);
     let root = entry.parent().unwrap();
-    let value = hirsel_engine::with_compiler_stack(|| {
+    let value = hirsel_intern::jobs::with_compiler_stack(|| {
         let compiler = hirsel_front_phases::COMPILER
             .clone()
             .with_config(config(jobs))

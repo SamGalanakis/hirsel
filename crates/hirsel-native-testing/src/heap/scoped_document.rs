@@ -1,7 +1,7 @@
 //! The scoped document stays within ordinary layout and cleanup machinery.
 use super::*;
-use hirsel_engine::with_compiler_stack;
 use hirsel_heapcheck::{Config, Event};
+use hirsel_intern::jobs::with_compiler_stack;
 use hirsel_lir::layout_types::{LayoutKind, ScalarKind, SizeSpec};
 use hirsel_native::Options;
 use hirsel_native::TargetSpec;

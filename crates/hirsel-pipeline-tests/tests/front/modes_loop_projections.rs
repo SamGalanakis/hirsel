@@ -2,7 +2,7 @@ use hirsel_engine::{DefinitionQueries, QueryEngine};
 
 #[test]
 fn indexed_loop_patterns_follow_the_published_source_storage() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         for (element, literal, pattern, read) in [
             ("String", "\"a\"", "input", "input == input"),
             (

@@ -328,7 +328,7 @@ fn finite_exits_all_engines() {
     for (index, case) in cases().into_iter().enumerate() {
         let source = source(case, true);
         let expected = model(case);
-        let report = hirsel_engine::with_compiler_stack(|| {
+        let report = hirsel_intern::jobs::with_compiler_stack(|| {
             use hirsel_engine::*;
             use hirsel_interp::observation::{Effect, SemanticRole};
             let mut engine = QueryEngine::new(

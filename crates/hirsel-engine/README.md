@@ -881,12 +881,14 @@ their current source products. Type handles are scoped to their interner;
 foreign owners require complete graph comparison. Explicit portable identities
 preserve the existing byte contract.
 
-`runtime::LiveSummaryProduct` and `LiveLowerProduct` retain typed values and their
+`products::LiveSummaryProduct` and `LiveLowerProduct` retain typed values and their
 producer/source/type admission. `SummaryFacet` can keep an old equal settled value
 while the current product supplies fresh reads, action and positions. Explicit
 archive materialization retains its bytes and complete backing grant through
 `ProductArchive`; a refused or failed encoding remains retryable. These owners
-are also available to consumers of the existing runtime result descriptors.
+remain engine-owned. Generic scheduling, result descriptors and checked archives
+belong to `hirsel-engine-runtime`, whose `ProductBacking` interface provides
+content reads and allocation leases without store authority.
 
 Published summaries keep GEN-5's pre-mode checked summary and growth separately
 from the final mode-refined selection input. Batch publication retains both

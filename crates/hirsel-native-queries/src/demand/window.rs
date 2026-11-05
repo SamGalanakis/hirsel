@@ -261,7 +261,7 @@ impl StoredInstance {
             archive: self
                 .product
                 .product
-                .archive(hirsel_engine::runtime::ArchiveAdmission::Retained)
+                .archive(hirsel_engine_runtime::ArchiveAdmission::Retained)
                 .map_err(|e| e.to_string())?
                 .reference(),
             value: self.product.value,
@@ -279,7 +279,7 @@ impl StoredInstance {
             .ok_or("missing window product archive")?;
         Ok(Self {
             product: Arc::new(InstanceProduct {
-                product: hirsel_engine::runtime::ProductRef::import_archive(
+                product: hirsel_engine_runtime::ProductRef::import_archive(
                     hirsel_engine::store::Address(row.address),
                     hirsel_engine::store::Action(row.action),
                     archive,

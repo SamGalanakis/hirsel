@@ -161,7 +161,7 @@ pub fn main(rt:Io,args:Args)->Result[(),GrantError] {{
   Ok(())
 }}"#
         );
-        hirsel_engine::with_compiler_stack(move || {
+        hirsel_intern::jobs::with_compiler_stack(move || {
             let mut engine = hirsel_engine::QueryEngine::new(
                 hirsel_engine::default_environment(),
                 hirsel_front_phases::compiler_adapters(),

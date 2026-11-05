@@ -3,9 +3,9 @@
 //! or changes the inputs of a queued/live request.
 use super::{Host, RequestLease};
 use crate::requests::{CompileOperation, CompileRequest};
-use hirsel_engine::{
-    loader_inputs::FrozenInputs, requests::RequestEngine, runtime::AdmittedRuntime,
-};
+use hirsel_engine::{loader_inputs::FrozenInputs, requests::RequestEngine};
+use hirsel_engine_runtime::AdmittedRuntime;
+
 use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},

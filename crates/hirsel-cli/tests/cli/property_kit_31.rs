@@ -1,6 +1,7 @@
 //! Full property-kit entry: independent fixtures, four engines and immutable replay.
 use hirsel_driver::native::*;
-use hirsel_engine::{RunConfiguration, with_compiler_stack};
+use hirsel_engine::RunConfiguration;
+use hirsel_intern::jobs::with_compiler_stack;
 use hirsel_native::*;
 use hirsel_native_batch::*;
 use hirsel_native_testing::*;

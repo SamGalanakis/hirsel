@@ -9,7 +9,7 @@ use std::path::Path;
 
 #[test]
 fn opened_file_identity_agrees_natively_and_replays_real_io_for_every_control() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("file-identity");
         std::fs::create_dir_all(&dir).unwrap();

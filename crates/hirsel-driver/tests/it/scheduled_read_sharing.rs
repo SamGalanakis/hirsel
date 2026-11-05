@@ -1,5 +1,7 @@
 use hirsel_driver::*;
-use hirsel_engine::{runtime::*, store::MemStore, *};
+use hirsel_engine::{store::MemStore, *};
+use hirsel_engine_runtime::*;
+
 use hirsel_front_phases::*;
 use hirsel_host_io::launch::*;
 use std::sync::Arc;
@@ -45,7 +47,9 @@ fn front_complete_reads_share_equal_phase_allocations_without_merging_phase_keys
         runtime.register(FRONT_BODY_KIND, front.factory()).unwrap();
         let request = runtime.request(&[front.query(&program.entry).unwrap()]);
         let product = runtime.wait(request).unwrap()[0].clone();
-        let output = product.summary_value().unwrap();
+        let output = product
+            .live_value::<hirsel_engine::products::LiveSummaryProduct>()
+            .unwrap();
         let rows = front.memo_snapshot().unwrap();
         let find = |phase| {
             rows.iter()

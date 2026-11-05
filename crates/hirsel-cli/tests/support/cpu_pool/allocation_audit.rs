@@ -28,7 +28,7 @@ fn cpu_owned_allocation_audit(width: usize, source: &str, provider: &str, label:
     use hirsel_native::TargetSpec;
     use hirsel_native::Toolchain;
     let _compiler = QUAL_COMPILER.lock().unwrap_or_else(|e| e.into_inner());
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let scratch = tempfile::tempdir().unwrap();
         let root = scratch.path();
         let manifest = qual_manifest(root, source);

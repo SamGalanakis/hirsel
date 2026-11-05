@@ -139,7 +139,7 @@ fn world(case: &Value) -> hirsel_engine::SimulationConfig {
     world
 }
 fn scripted(caps: bool) {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let scratch = scratch("suite-runner-29-script-");
         let root = scratch.path();
         let selection = package(root);

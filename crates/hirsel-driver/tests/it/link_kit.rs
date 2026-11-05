@@ -3,7 +3,7 @@
 //! on a repeat and from 1, 2 or 4 builds running at once,
 //! on both targets, each build in its own scratch directory.
 use hirsel_driver::native;
-use hirsel_engine::with_compiler_stack;
+use hirsel_intern::jobs::with_compiler_stack;
 use hirsel_native::Backend;
 use hirsel_native::BuildProfile;
 use hirsel_native::TargetSpec;

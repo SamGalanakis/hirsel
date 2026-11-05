@@ -3,9 +3,10 @@
 use hirsel_driver::native;
 use hirsel_engine::{
     QueryEngine, RunConfiguration, SimulationConfig, default_context, default_environment,
-    entry_path, run_observed_snapshot, source_check_request, with_compiler_stack,
+    entry_path, run_observed_snapshot, source_check_request,
 };
 use hirsel_front_phases::compiler_adapters;
+use hirsel_intern::jobs::with_compiler_stack;
 
 // The historical helper fixture stays byte-for-byte intact. Only direct field
 // projections covered by 063cbde7 change in this current-main counterpart;

@@ -35,7 +35,7 @@ fn package(root: &std::path::Path) -> PathBuf {
 
 #[test]
 fn shardsearch_27_reference_and_checked_application() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let scratch = scratch();
         let selection = package(scratch.path());
         let mut loaded = hirsel_front_phases::load_program(&selection).unwrap();

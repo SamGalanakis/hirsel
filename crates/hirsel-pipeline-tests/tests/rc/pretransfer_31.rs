@@ -19,7 +19,7 @@ pub fn main()->Result[(),()] {
 
 #[test]
 fn keyed_adapter_custody_and_edge_adversaries() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let (program, lowered) = support::lower(SOURCE);
         let registry = lowered.operation_registry(&program);
         assert_eq!(registry.pretransfer_adapters.len(), 1);
@@ -180,7 +180,7 @@ fn erase_callback<S: hirsel_lir::stage::Stage>(unit: LirUnit<S>) -> LirUnit<S> {
 
 #[test]
 fn callback_recipe_c_rejects_dispatch_and_both_events_erased() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let (program, lowered) = support::lower(CALLBACK_SOURCE);
         let registry = lowered.operation_registry(&program);
         let manifest = support::manifest(&program);
@@ -209,7 +209,7 @@ fn callback_recipe_c_rejects_dispatch_and_both_events_erased() {
 
 #[test]
 fn callback_recipe_h_rejects_dispatch_and_both_events_erased() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let program = support::compile(CALLBACK_SOURCE);
         let ready = hirsel_native_batch::build_program(
             &program,
@@ -261,7 +261,7 @@ fn callback_recipe_h_rejects_dispatch_and_both_events_erased() {
 
 #[test]
 fn source_evidence_factory_31_uses_original_source_and_planned_instances() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let (program, mut lowered) = support::lower(SOURCE);
         let mut signatures = hirsel_validate::SignatureMap::new(program.types.clone());
         signatures.extend(
@@ -389,7 +389,7 @@ fn cached_pretransfer_inventory_rederives_canonical_abis_from_independent_plans(
     use hirsel_lir::stage::StageKind;
     use hirsel_lir::validate::{NativeCache, NativeEnvironment};
     use std::sync::Arc;
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let (program, lowered) = support::lower(SOURCE);
         let registry = lowered.operation_registry(&program);
         assert_eq!(registry.pretransfer_adapters.len(), 1);
@@ -504,7 +504,7 @@ fn cached_pretransfer_inventory_rederives_canonical_abis_from_independent_plans(
 
 #[test]
 fn keyed_map_resource_actual_keeps_gate_custody_through_ready_cleanup() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let source = r#"
 resource type Payload {}
 drop(x) {}

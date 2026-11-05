@@ -1,9 +1,8 @@
 //! Library-created message storage retains exact source finalizer instances.
 use hirsel_driver::native;
-use hirsel_engine::{
-    requests::{OutputReadiness, RequestEngine, observe_inputs},
-    runtime::QueryRuntime,
-};
+use hirsel_engine::requests::{OutputReadiness, RequestEngine, observe_inputs};
+use hirsel_engine_runtime::QueryRuntime;
+
 use hirsel_native::Backend;
 use hirsel_requests::CompileOperation;
 use hirsel_requests::CompileRequest;
@@ -35,7 +34,7 @@ fn library_detached_task_discovers_its_callable_result_finalizer() {
 }
 
 fn compile_objects(source: &str) {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let directory = tempfile::tempdir().unwrap();
         let manifest = directory.path().join("hirsel.json");
         std::fs::write(directory.path().join("main.hir"), source).unwrap();

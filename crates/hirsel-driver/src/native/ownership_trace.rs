@@ -28,7 +28,7 @@ pub fn run_path_with_launch(
     policy: crate::session::Policy,
     event_limit: usize,
 ) -> Result<Result<LeafExecution, NativeError>, crate::ToolError> {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         use crate::requests::{
             CompileOperation, CompileResult, CompilerRequests, OwnershipRequest,
         };

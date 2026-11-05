@@ -2,7 +2,7 @@ hirsel_guard::install!();
 
 use std::{env, path::PathBuf, process::ExitCode};
 fn main() -> ExitCode {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let mut root = env::current_dir().unwrap();
         let mut hirsel = None;
         let mut evidence = None;

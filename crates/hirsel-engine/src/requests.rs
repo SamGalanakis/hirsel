@@ -1,7 +1,7 @@
 //! Request selection shared by fresh and resident hosts. The engine owns input
 //! observation, immutable snapshot installation and root selection; a host owns
 //! only the lifetime of a request. Descriptors confer no verification authority.
-use crate::runtime::{ProductRef, QueryId, QueryRuntime};
+use hirsel_engine_runtime::{ProductRef, QueryId, QueryRuntime};
 use std::sync::{Arc, Mutex};
 
 mod observation;

@@ -156,7 +156,7 @@ fn borrow_cursor_recipes_13_package_engines() {
             && interpreted.stderr.is_empty(),
         "{interpreted:?}"
     );
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         use hirsel_driver::native::*;
         use hirsel_native::*;
         use hirsel_native_batch::*;
@@ -216,7 +216,7 @@ fn borrow_cursor_recipes_13_package_engines() {
 // A bounded use of the existing native RC instrumentation, with transport
 // sites kept separate from the explicit owned result. No timing comparison.
 fn count_free_transport(root: &Path) {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         use hirsel_driver::native::*;
         use hirsel_native::*;
         use hirsel_native_batch::*;

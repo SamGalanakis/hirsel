@@ -4,7 +4,8 @@
 //! recorded run refuses (exit 3).
 #[path = "../../../hirsel-driver/tests/support/source_std.rs"]
 mod source_std;
-use hirsel_engine::{default_context, entry_path, source_check_request, with_compiler_stack};
+use hirsel_engine::{default_context, entry_path, source_check_request};
+use hirsel_intern::jobs::with_compiler_stack;
 use hirsel_lir::layout_types::TargetSpec;
 use hirsel_native::Launched;
 use hirsel_native::OptLevel;

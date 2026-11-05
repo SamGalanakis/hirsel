@@ -2,9 +2,10 @@
 use crate::rc_support as support;
 use hirsel_engine::{
     QueryEngine, RunConfiguration, default_context, default_environment, entry_path,
-    run_observed_snapshot, source_check_request, with_compiler_stack,
+    run_observed_snapshot, source_check_request,
 };
 use hirsel_front_phases::compiler_adapters;
+use hirsel_intern::jobs::with_compiler_stack;
 use support::*;
 fn observed_heap(source: &str) -> hirsel_native_testing::HeapRun {
     let source = source.to_owned();

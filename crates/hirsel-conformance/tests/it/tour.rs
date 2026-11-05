@@ -41,7 +41,7 @@ fn every_tour_program_runs_with_checked_execution() {
 
 #[test]
 fn input_program_uses_supplied_snapshots_and_stream() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();

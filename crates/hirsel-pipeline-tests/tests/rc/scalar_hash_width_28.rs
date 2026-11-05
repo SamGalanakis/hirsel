@@ -3,10 +3,9 @@
 //! Test expectations use an independent buffered reference, fixed upstream vectors,
 //! and the unchanged byte ABI; no DefaultHasher framing is assumed.
 use hirsel_driver::native::*;
-use hirsel_engine::{
-    QueryEngine, default_context, default_environment, source_check_request, with_compiler_stack,
-};
+use hirsel_engine::{QueryEngine, default_context, default_environment, source_check_request};
 use hirsel_front_phases::compiler_adapters;
+use hirsel_intern::jobs::with_compiler_stack;
 use hirsel_lir::layout::sequence_elements_offset;
 use hirsel_lir::layout_types::{LayoutKind, SizeSpec};
 use hirsel_native::*;

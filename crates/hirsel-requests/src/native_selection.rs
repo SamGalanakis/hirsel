@@ -16,10 +16,10 @@ use hirsel_engine::FrontNativeQueries;
 use hirsel_engine::LinkInput;
 use hirsel_engine::LoadedProgram;
 use hirsel_engine::ToolError;
-use hirsel_engine::runtime::MemoryWeight;
-use hirsel_engine::runtime::QueryId;
-use hirsel_engine::runtime::RuntimeErrors;
 use hirsel_engine::store::ResultStore;
+use hirsel_engine_runtime::MemoryWeight;
+use hirsel_engine_runtime::QueryId;
+use hirsel_engine_runtime::RuntimeErrors;
 
 use hirsel_native::NativeError;
 use hirsel_native::object_queries;

@@ -10,10 +10,9 @@ use super::{
     tasks::NativeTasks,
     *,
 };
-use hirsel_engine::{
-    runtime::*,
-    store::{Action, Address, Domain},
-};
+use hirsel_engine::store::{Action, Address, Domain};
+use hirsel_engine_runtime::*;
+
 use std::{
     collections::BTreeMap,
     sync::{Mutex, OnceLock},
@@ -279,7 +278,7 @@ impl OwnershipCompilation {
         let bytes = serde_json::to_vec(&(
             root.address.0,
             root.action.0,
-            root.archive(hirsel_engine::runtime::ArchiveAdmission::Retained)
+            root.archive(hirsel_engine_runtime::ArchiveAdmission::Retained)
                 .map_err(|e| e.to_string())?
                 .reference(),
         ))

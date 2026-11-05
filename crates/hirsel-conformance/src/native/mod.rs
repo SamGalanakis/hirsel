@@ -1005,7 +1005,7 @@ pub fn run_cases_with(
             scope.spawn(move || {
                 let dir = scratch.join(format!("job-{job}"));
                 std::fs::create_dir_all(&dir).expect("scratch directory");
-                hirsel_engine::with_compiler_stack(move || {
+                hirsel_intern::jobs::with_compiler_stack(move || {
                     loop {
                         let index = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         let Some(case) = cases.get(index) else { break };

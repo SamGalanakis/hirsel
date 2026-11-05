@@ -210,7 +210,7 @@ mod tests {
     }
 
     fn check_entries(name: &str) {
-        hirsel_engine::with_compiler_stack(|| {
+        hirsel_intern::jobs::with_compiler_stack(|| {
             let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
                 .join("../../conformance/MEM")
                 .join(name);

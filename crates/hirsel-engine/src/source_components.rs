@@ -5,8 +5,8 @@ use crate::CheckedSummary;
 use crate::NativeRecordContext;
 use crate::NativeRecordSource;
 use crate::memo::Reads;
-use crate::runtime::ProductRef;
 use crate::store::{Action, Address, Reference};
+use hirsel_engine_runtime::ProductRef;
 
 use hirsel_span::Span;
 use hirsel_syntax::{ContentHash, DefId};
@@ -51,7 +51,7 @@ pub struct SourceGrowthComponent {
     #[serde(skip)]
     settled_growing: Box<[(DefId, u32, u32, u32)]>,
     #[serde(skip)]
-    pub(crate) publication: Option<crate::runtime::SourceGrowthPublication>,
+    pub(crate) publication: Option<crate::products::SourceGrowthPublication>,
     #[serde(skip)]
     _reservation: hirsel_engine_admission::MemoryReservation,
 }
@@ -187,7 +187,7 @@ pub(crate) struct SourceComponentMembers {
 #[derive(serde::Serialize)]
 pub(crate) struct SourceMembership {
     #[serde(skip)]
-    pub(crate) publication: Option<crate::runtime::SourceGrowthPublication>,
+    pub(crate) publication: Option<crate::products::SourceGrowthPublication>,
     pub product: SourceGrowthIdentity,
     pub components: Box<[SourceComponentMembers]>,
     #[serde(skip)]

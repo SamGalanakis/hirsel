@@ -92,7 +92,7 @@ fn verify_manifest(tree: &BTreeMap<String, Vec<u8>>, cfg: &str) {
     assert_eq!(outputs, manifest["files"].as_object().unwrap().len() + 1);
 }
 fn scripted_cases(selected: Vec<Value>) {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let scratch = tempfile::tempdir().unwrap();
         let selection = package(scratch.path());
         let mut loaded =
@@ -517,7 +517,7 @@ fn recording_controls(root: &Path) {
 // Bounded renderer importers select original, unmodified application vectors.
 #[test]
 fn sitebuild_29_small_render_and_manifest_boundaries() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let scratch = tempfile::tempdir().unwrap();
         let selection = package(scratch.path());
         let html = "<!doctype html>\n<meta charset=\"utf-8\">\n<title>A &amp; &#34;</title>\n<h1>Hi</h1>\n";

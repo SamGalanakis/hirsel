@@ -2,6 +2,8 @@
 //! preparation and interpreter state on the admitted home worker. Publication
 //! into a source namespace remains a separate ordered transaction.
 use super::*;
+use crate::products::ProductSource;
+use crate::products::{LiveAdmission, LiveLowerProduct, WeakLowerProduct};
 mod carry;
 mod constants;
 mod dependencies;
@@ -18,12 +20,12 @@ pub(crate) use successor::SuccessorCapture;
 mod stored;
 use crate::comptime::{EvaluationInput, PreparingSource, ValuePreparation};
 use crate::memo::{DepthEvidence, dependency_limit};
-use crate::runtime::*;
 use crate::store::{Domain, EntryKey, Reference, ResultStore};
 pub use carry::LowerCarry;
 use constants::Constants;
 use dependencies::{Dependencies, PackedDependencies};
 use evidence::Evidence;
+use hirsel_engine_runtime::*;
 use hirsel_syntax::PackageId;
 use hirsel_tir::{DefinitionRef, Materialized, MaterializedRef};
 use inputs::Inputs;
@@ -428,13 +430,13 @@ impl FrontLowerOutput {
         self,
         product: ProductRef,
         allowance: &mut hirsel_engine_admission::MemoryReservation,
-    ) -> Option<crate::runtime::LiveLowerProduct> {
+    ) -> Option<crate::products::LiveLowerProduct> {
         let source = ProductSource::prepare(
             self.owner.anchors.clone(),
             self.owner.records.clone(),
             self.owner.clone(),
         )?;
-        crate::runtime::LiveLowerProduct::new(
+        crate::products::LiveLowerProduct::new(
             (product.address, product.action),
             self,
             source,
@@ -1115,7 +1117,7 @@ impl FrontLowerQueries {
             return row.owner.outcome(row.selected.ok()?);
         }
 
-        if let Some(live) = product.lower_value() {
+        if let Some(live) = product.live_value::<crate::products::LiveLowerProduct>() {
             self.selected(
                 QueryId {
                     kind: FRONT_LOWER_KIND,
@@ -1200,7 +1202,9 @@ impl FrontLowerQueries {
             },
             Ok(product.clone()),
         )?;
-        let live = product.lower_value()?.clone();
+        let live = product
+            .live_value::<crate::products::LiveLowerProduct>()?
+            .clone();
         let outcomes = self.outcomes.lock().unwrap_or_else(|e| e.into_inner());
         let (_, outcome, _) = outcomes.get(&(FRONT_LOWER_KIND, product.address.0))?;
         let Ok(Value::Lower(lower)) = &outcome.result else {
@@ -1305,7 +1309,7 @@ impl FrontLowerQueries {
             .get(&(id.kind, id.address.0))
             .filter(|(reference, outcome, _)| match &selected {
                 Ok(product) => {
-                    if let Some(live) = product.lower_value() {
+                    if let Some(live) = product.live_value::<crate::products::LiveLowerProduct>() {
                         product.address == live.address() && product.action == live.action()
                             && matches!(&outcome.result, Ok(Value::Lower(lower)) if lower.live.as_ref().and_then(WeakLowerProduct::upgrade).is_some_and(|stored| stored.same_owner(live)))
                     } else if product.action == outcome.action && reference.is_none() {
@@ -1842,7 +1846,9 @@ impl FrontLowerQueries {
         self.store
             .associate_product(hirsel_artifact_store::Address(key.0), action, record);
         if let Some(live) = live {
-            return Ok(ProductRef::lower(live));
+            return live
+                .publish(self.store.as_ref())
+                .map_err(|_| self.errors.resource);
         }
         Ok(ProductRef::import_archive(
             id.address,

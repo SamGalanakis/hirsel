@@ -157,7 +157,7 @@ fn execute_recipe(root: &Path, source: &str, expected_output: &[u8]) {
         .unwrap();
     assert!(exported.status.success(), "{exported:?}");
     assert!(fs::metadata(root.join("reachable.tir")).unwrap().len() > 0);
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let mut loaded = hirsel_front_phases::load_program(&manifest).unwrap();
         loaded
             .check_for_execution()

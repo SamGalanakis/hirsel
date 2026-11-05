@@ -130,7 +130,7 @@ pub fn main()->u64 {
 
     #[test]
     fn executable_roots_keep_real_code_and_finalizers_and_refuse_missing_bodies() {
-        hirsel_engine::with_compiler_stack(|| {
+        hirsel_intern::jobs::with_compiler_stack(|| {
             let (program, entry, ignored) = fixture();
             let units = program.units.iter().collect::<Vec<_>>();
             let selected = select(&program, &units, &entry).unwrap();
@@ -170,7 +170,7 @@ pub fn main()->u64 {
 
     #[test]
     fn declared_entries_callbacks_codec_checks_and_static_references_cannot_be_omitted() {
-        hirsel_engine::with_compiler_stack(|| {
+        hirsel_intern::jobs::with_compiler_stack(|| {
             let (program, entry, ignored) = fixture();
             let target = program.functions[&ignored];
             for route in 0..5 {

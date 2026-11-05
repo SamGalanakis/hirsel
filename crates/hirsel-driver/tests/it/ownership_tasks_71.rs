@@ -32,7 +32,7 @@ pub fn main(rt:Io)->Result[(),GrantError] {
 }
 
 fn child_local_source(source_text: &str, expected_tasks: usize, require_spawn_binding: bool) {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let directory = tempfile::tempdir().unwrap();
         let source = directory.path().join("main.hir");
         std::fs::write(&source, source_text).unwrap();

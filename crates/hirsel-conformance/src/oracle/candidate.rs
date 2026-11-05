@@ -45,7 +45,7 @@ pub fn cold(path: &Path, config: &Config) -> Result<Artifacts, String> {
     use hirsel_requests::CompileResult;
     use hirsel_requests::CompilerRequests;
     let compiler = compiler(config);
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         // The loader alone selects the package scope; it checks nothing.
         let scope: Vec<_> = compiler
             .load_check_package(path)

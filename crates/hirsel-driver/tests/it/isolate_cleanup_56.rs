@@ -12,7 +12,7 @@ pub fn main(rt: Io) -> Result[(), GrantError] {
 "#;
 
 fn check(source: &str, mechanical: bool) {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let program = super::runtime50_continuation::ready(source);
         let mut checked = 0;
         for caller in &program.units {
@@ -149,7 +149,7 @@ pub fn main(rt: Io) -> Result[(), GrantError] {
 
 #[test]
 fn proved_isolate_capture_cleanup_has_retained_source_frames() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let program = super::runtime50_continuation::ready(
             r#"
 resource type Guard { output: Stdout, n: u64 }

@@ -192,7 +192,7 @@ fn verify(row: &Value, observed: &hirsel_interp::observation::Observable, fixtur
 }
 #[test]
 fn relation_query_33_reference_checked_vectors() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let root = root("simulation");
         let manifest = package(&root);
         let mut loaded =
@@ -293,7 +293,7 @@ fn relation_query_33_reference_checked_vectors() {
 }
 #[test]
 fn relation_query_33_full_entry_native_replay() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let resume = std::env::var_os("RELATION_QUERY_33_RESUME_ROOT");
         let root = resume
             .as_ref()
@@ -743,7 +743,7 @@ fn accept(root: &Path, progress: &mut BTreeSet<String>, key: String) {
 #[test]
 #[ignore = "selected exact-capacity pool cell"]
 fn relation_query_33_ordered_capacity() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let (backend, width, kind) =
             super::width_capacity_36::selection("RELATION_QUERY_33_ORDERED");
         let root = root("ordered");

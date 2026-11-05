@@ -158,7 +158,7 @@ fn seal_inventory_92_import_refuses_erased_original_allocation_and_foreign_sourc
 #[test]
 fn seal_inventory_92_source_heap_sum_executes_with_independent_inventory_in_h() {
     let text = "pub fn value() -> u64 { arena.with(fn(a: Arena) -> u64 { let retained: List[u64] in a = [11u64, 12u64]; retained[0u64] + retained[1u64] }) }\npub fn main() -> Result[(), u64] { let n = value(); if n == 23u64 { Ok(()) } else { Error(n) } }";
-    hirsel_engine::with_compiler_stack(move || {
+    hirsel_intern::jobs::with_compiler_stack(move || {
         use hirsel_engine::*;
         let mut engine = QueryEngine::new(
             default_environment(),

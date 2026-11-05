@@ -5,10 +5,11 @@ use crate::rc_support as support;
 
 use hirsel_engine::{
     QueryEngine, RunConfiguration, default_context, default_environment, entry_path,
-    run_observed_snapshot, source_check_request, with_compiler_stack,
+    run_observed_snapshot, source_check_request,
 };
 use hirsel_front_phases::compiler_adapters;
 use hirsel_heapcheck::{Config, NoOperations, Observed};
+use hirsel_intern::jobs::with_compiler_stack;
 use hirsel_interp::observation::ObservedNode;
 use hirsel_lir::ir::{
     ArgumentValue, Callee, ConstantValue, Inst, LirUnit, Terminator, UnitOrigin, ValueId,

@@ -1,9 +1,9 @@
 //! One ordered publication owner for instance demand. Execution suspends through
 //! the existing query graph; no publication lock crosses a dependency wait.
 use super::*;
-use crate::runtime::MemoryWeight;
-use crate::runtime::QueryReads;
-use crate::runtime::RuntimeErrors;
+use hirsel_engine_runtime::MemoryWeight;
+use hirsel_engine_runtime::QueryReads;
+use hirsel_engine_runtime::RuntimeErrors;
 
 use std::sync::{Mutex, Weak};
 
@@ -322,7 +322,10 @@ impl DemandProducer {
         }
         None
     }
-    pub(crate) fn lower_for(&self, id: crate::runtime::QueryId) -> Option<Arc<FrontLowerQueries>> {
+    pub(crate) fn lower_for(
+        &self,
+        id: hirsel_engine_runtime::QueryId,
+    ) -> Option<Arc<FrontLowerQueries>> {
         self.state
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -332,7 +335,10 @@ impl DemandProducer {
             .find(|view| view.owns_query(id))
             .cloned()
     }
-    pub(crate) fn front_for(&self, id: crate::runtime::QueryId) -> Option<Arc<FrontBodyQueries>> {
+    pub(crate) fn front_for(
+        &self,
+        id: hirsel_engine_runtime::QueryId,
+    ) -> Option<Arc<FrontBodyQueries>> {
         self.state
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -348,7 +354,7 @@ impl DemandProducer {
         previous: Arc<NamespaceCapture>,
         declaration: &DefPath,
         site: Span,
-    ) -> Result<crate::runtime::QueryId, QueryError> {
+    ) -> Result<hirsel_engine_runtime::QueryId, QueryError> {
         let key = ContentHash::of_parts(
             "hirsel.front.generation-demand.v2",
             [
@@ -378,7 +384,7 @@ impl DemandProducer {
                 }),
             );
         }
-        Ok(crate::runtime::QueryId {
+        Ok(hirsel_engine_runtime::QueryId {
             kind: scheduled_lower::FRONT_LOWER_KIND,
             address: hirsel_artifact_store::Address(key),
         })
@@ -389,7 +395,7 @@ impl DemandProducer {
         roots: &[DefPath],
         policy: LoweringPolicy,
         stop_on_error: bool,
-    ) -> Result<crate::runtime::QueryId, QueryError> {
+    ) -> Result<hirsel_engine_runtime::QueryId, QueryError> {
         let seed = ContentHash::of_parts(
             "hirsel.front.generation-scope.v2",
             [
@@ -427,14 +433,14 @@ impl DemandProducer {
                 }),
             );
         }
-        Ok(crate::runtime::QueryId {
+        Ok(hirsel_engine_runtime::QueryId {
             kind: scheduled_lower::FRONT_LOWER_KIND,
             address: hirsel_artifact_store::Address(key),
         })
     }
     pub(crate) fn scope_completed(
         &self,
-        id: crate::runtime::QueryId,
+        id: hirsel_engine_runtime::QueryId,
     ) -> Option<Result<scheduled_lower::SuccessorCapture, QueryError>> {
         self.scopes
             .lock()
@@ -445,7 +451,7 @@ impl DemandProducer {
             .unwrap_or_else(|e| e.into_inner())
             .clone()
     }
-    pub(crate) fn owns_demand(&self, id: crate::runtime::QueryId) -> bool {
+    pub(crate) fn owns_demand(&self, id: hirsel_engine_runtime::QueryId) -> bool {
         id.kind == scheduled_lower::FRONT_LOWER_KIND
             && (self
                 .requests
@@ -458,7 +464,7 @@ impl DemandProducer {
                     .unwrap_or_else(|e| e.into_inner())
                     .contains_key(&id.address.0))
     }
-    pub(crate) fn failed(&self, id: crate::runtime::QueryId) -> Option<DemandFailure> {
+    pub(crate) fn failed(&self, id: hirsel_engine_runtime::QueryId) -> Option<DemandFailure> {
         self.requests
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -511,7 +517,7 @@ impl DemandProducer {
     }
     pub(crate) fn completed(
         &self,
-        id: crate::runtime::QueryId,
+        id: hirsel_engine_runtime::QueryId,
     ) -> Option<Result<scheduled_lower::SuccessorCapture, QueryError>> {
         self.requests
             .lock()
@@ -524,8 +530,8 @@ impl DemandProducer {
     }
     pub(crate) fn task(
         self: &Arc<Self>,
-        id: crate::runtime::QueryId,
-    ) -> Result<Box<dyn crate::runtime::LocalQueryTask>, crate::store::Reference> {
+        id: hirsel_engine_runtime::QueryId,
+    ) -> Result<Box<dyn hirsel_engine_runtime::LocalQueryTask>, crate::store::Reference> {
         if let Some(scope) = self
             .scopes
             .lock()
@@ -534,7 +540,7 @@ impl DemandProducer {
             .cloned()
         {
             let producer = self.clone();
-            return Ok(Box::new(crate::runtime::LocalFutureTask::new(
+            return Ok(Box::new(hirsel_engine_runtime::LocalFutureTask::new(
                 id,
                 self.weight,
                 self.max_reads,
@@ -571,7 +577,7 @@ impl DemandProducer {
             .cloned()
             .ok_or(self.errors.protocol)?;
         let producer = self.clone();
-        Ok(Box::new(crate::runtime::LocalFutureTask::new(
+        Ok(Box::new(hirsel_engine_runtime::LocalFutureTask::new(
             id,
             self.weight,
             self.max_reads,
@@ -634,14 +640,14 @@ impl DemandProducer {
     }
     fn scope_product(
         &self,
-        id: crate::runtime::QueryId,
+        id: hirsel_engine_runtime::QueryId,
         namespace: &NamespaceCapture,
-    ) -> Result<crate::runtime::ProductRef, crate::store::Reference> {
+    ) -> Result<hirsel_engine_runtime::ProductRef, crate::store::Reference> {
         let bytes = size_of::<crate::queries::live_record::LiveRecord<ContentHash>>()
             + size_of::<hirsel_engine_admission::MemoryReservation>()
             + 4 * size_of::<usize>();
         let allowance = self.text.take(bytes as u64).ok_or(self.errors.resource)?;
-        Ok(crate::runtime::ProductRef::live(
+        Ok(hirsel_engine_runtime::ProductRef::live(
             id.address,
             hirsel_artifact_store::Action(namespace.identity()),
             Arc::new(crate::queries::live_record::LiveRecord {
@@ -695,7 +701,7 @@ impl DemandProducer {
         self: &Arc<Self>,
         previous: &Arc<NamespaceCapture>,
         path: &DefPath,
-        reads: crate::runtime::QueryReads,
+        reads: hirsel_engine_runtime::QueryReads,
     ) -> Result<Option<scheduled_lower::SuccessorCapture>, QueryError> {
         let id = DefId::intern(path);
         let Some(body) = previous.bodies.get(&id) else {

@@ -196,7 +196,7 @@ fn verify(row: &Value, o: &hirsel_interp::observation::Observable, world: &Fixtu
 }
 #[test]
 fn geofence_audit_34_reference_checked_workflows() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let root = scratch("simulation-");
         let path = package(&root);
         let mut loaded = hirsel_front_phases::load_program(&path).unwrap();
@@ -320,7 +320,7 @@ fn native_workflows(part: usize) {
     {
         return;
     }
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let root = scratch("native-");
         let path = package(&root);
         let mut loaded = hirsel_front_phases::load_program(&path).unwrap();
@@ -867,7 +867,7 @@ fn native_workflows(part: usize) {
 
 #[test]
 fn geofence_audit_34_geometry_and_output_cap_controls() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let root = scratch("helper-controls-");
         let path = package_entry(
             &root,

@@ -258,7 +258,7 @@ mod tests {
     #[test]
     fn immutable_launch_binding_denies_ungranted_roots_and_binds_explicit_grants_after_engine_drop()
     {
-        hirsel_engine::with_compiler_stack(|| {
+        hirsel_intern::jobs::with_compiler_stack(|| {
             let (types, signature, revision) = fixture("main", "args:Args");
             let launch = HostLaunch::empty();
             let selected = LaunchSelection::read(launch).unwrap();
@@ -293,7 +293,7 @@ mod tests {
 
     #[test]
     fn immutable_callee_binding_selects_its_own_entry_and_preserves_call_kind() {
-        hirsel_engine::with_compiler_stack(|| {
+        hirsel_intern::jobs::with_compiler_stack(|| {
             let (types, signature, revision) = fixture("worker", "x:u8");
             let mut record = hirsel_run_config::RunConfig::for_program(&revision, LaunchKind::Call);
             record.call = Some(hirsel_run_schema::CallRecord::new(
@@ -328,7 +328,7 @@ mod tests {
     }
     #[test]
     fn ownership_policy_capture_keeps_inputs_fuel_and_grants_after_the_file_changes() {
-        hirsel_engine::with_compiler_stack(|| {
+        hirsel_intern::jobs::with_compiler_stack(|| {
             let (types, signature, revision) = fixture("main", "args:Args");
             let directory = tempfile::tempdir().unwrap();
             let path = directory.path().join("grants.json");
@@ -362,7 +362,7 @@ mod tests {
 
     #[test]
     fn ownership_policy_capture_keeps_a_bound_records_original_program_identity() {
-        hirsel_engine::with_compiler_stack(|| {
+        hirsel_intern::jobs::with_compiler_stack(|| {
             let (types, signature, revision) = fixture("main", "");
             let mut record = hirsel_run_config::RunConfig::for_program(&revision, LaunchKind::Main);
             record.program = hirsel_run_schema::hex(&[7; 32]);

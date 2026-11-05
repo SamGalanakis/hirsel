@@ -1,7 +1,7 @@
 //! Typed Codegen/Link continuations. Creation observes immutable key metadata
 //! only; actual dependency reads suspend before any backend/linker is entered.
 use super::*;
-use hirsel_engine::runtime::{
+use hirsel_engine_runtime::{
     MemoryWeight, QueryContext, QueryFactory, QueryId, QueryPoll, QueryTask,
 };
 use std::task::Poll;
@@ -14,7 +14,7 @@ impl CodegenKey {
             kind: CODEGEN_KIND,
             address: self.address(),
         };
-        hirsel_engine::runtime::profile::definition(query, self.owner.instance.definition());
+        hirsel_engine_runtime::profile::definition(query, self.owner.instance.definition());
         query
     }
 }
@@ -275,10 +275,10 @@ impl<S: ObjectTaskSnapshot> ObjectTask<S> {
                 for (current, (id, expected)) in copies.iter().zip(&dependencies) {
                     let mismatch = if let Some(old) = expected {
                         let current_archive = current
-                            .archive(hirsel_engine::runtime::ArchiveAdmission::Retained)
+                            .archive(hirsel_engine_runtime::ArchiveAdmission::Retained)
                             .map_err(|e| failed(self.snapshot.failure(&e.to_string())))?;
                         let old_archive = old
-                            .archive(hirsel_engine::runtime::ArchiveAdmission::Retained)
+                            .archive(hirsel_engine_runtime::ArchiveAdmission::Retained)
                             .map_err(|e| failed(self.snapshot.failure(&e.to_string())))?;
                         current.address != old.address
                             || current_archive.reference() != old_archive.reference()
@@ -340,7 +340,7 @@ impl<S: ObjectTaskSnapshot> ObjectTask<S> {
                     execution: outputs[outputs.len() - deps.execution.len()..]
                         .iter()
                         .map(|p| {
-                            p.archive(hirsel_engine::runtime::ArchiveAdmission::Retained)
+                            p.archive(hirsel_engine_runtime::ArchiveAdmission::Retained)
                                 .map(|archive| archive.reference())
                                 .map_err(|e| failed(self.snapshot.failure(&e.to_string())))
                         })

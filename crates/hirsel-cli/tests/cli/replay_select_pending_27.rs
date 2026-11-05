@@ -34,7 +34,7 @@ fn deadline() {
 }
 
 fn verify(name: &str, source: String, expected: &str) {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         eprintln!("RSP27 STARTED {name}");
         let root = tempfile::Builder::new().prefix("rsp27-").tempdir().unwrap();
         let stdlib = Path::new(env!("CARGO_MANIFEST_DIR"))

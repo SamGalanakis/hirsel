@@ -1,7 +1,6 @@
-use hirsel_engine::{
-    runtime::ProductRef,
-    store::{Action, Address, Domain, MemStore, ResultStore},
-};
+use hirsel_engine::store::{Action, Address, Domain, MemStore, ResultStore};
+use hirsel_engine_runtime::ProductRef;
+
 use hirsel_lir::operation::{NativeType, Primitive};
 use hirsel_native::Options;
 use hirsel_native::Validation;
@@ -60,7 +59,7 @@ fn original_scalar_selected_guard_reaches_every_production_ready_unit() {
                         );
                         store.associate_product(product.address, product.action, record);
                         Input {
-                            query: hirsel_engine::runtime::QueryId {
+                            query: hirsel_engine_runtime::QueryId {
                                 kind: 0x4e00_0001,
                                 address: product.address,
                             },

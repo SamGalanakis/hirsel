@@ -107,7 +107,7 @@ impl ReadPool {
             as u64;
         let shared_bytes =
             shared_bytes.checked_add(reads.observation.as_ref().map_or(0, |order| {
-                super::super::retained::retained_arc_bytes(&**order)
+                hirsel_engine_admission::retained_arc_bytes(&**order)
             }))?;
         let loaned = (missing as u64)
             .checked_mul(row_bytes)?
@@ -121,7 +121,7 @@ impl ReadPool {
     pub(crate) fn required_tracked_bytes(&self, reads: &Reads) -> Option<u64> {
         self.admission(reads)?
             .1
-            .checked_add(crate::memo::retained_arc_bytes(reads))
+            .checked_add(hirsel_engine_admission::retained_arc_bytes(reads))
     }
     pub(crate) fn intern_tracked(
         &mut self,
@@ -152,7 +152,7 @@ impl ReadPool {
         }
         let (loaned, charge, row_bytes, shared_bytes) = self.admission(reads)?;
         let wrapper = if credit.is_some() {
-            crate::memo::retained_arc_bytes(reads)
+            hirsel_engine_admission::retained_arc_bytes(reads)
         } else {
             0
         };
@@ -270,7 +270,7 @@ impl Rows {
         // Shared observations and each receipt's array carry their own
         // original source reservations, including after their source drops.
         match self {
-            Self::Flat(rows) => super::super::retained::retained_arc_bytes(&**rows) as usize,
+            Self::Flat(rows) => hirsel_engine_admission::retained_arc_bytes(&**rows) as usize,
             Self::Shared(_) => 0,
         }
     }

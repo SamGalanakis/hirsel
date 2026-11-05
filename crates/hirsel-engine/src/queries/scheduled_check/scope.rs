@@ -60,7 +60,7 @@ impl FrontCheckQueries {
                 usize::try_from(observed.reads.decoding_bytes().ok_or_else(missing)?)
                     .map_err(|_| missing())?,
             );
-            weight.add(crate::memo::retained_arc_bytes(&Reads::empty()) as usize);
+            weight.add(hirsel_engine_admission::retained_arc_bytes(&Reads::empty()) as usize);
             weight.add(
                 observed
                     .reads
@@ -76,7 +76,7 @@ impl FrontCheckQueries {
                 .front
                 .selected_reads(Err(*reference))
                 .ok_or_else(missing)?;
-            weight.add(crate::memo::retained_arc_bytes(&*reads) as usize);
+            weight.add(hirsel_engine_admission::retained_arc_bytes(&*reads) as usize);
             weight.add(
                 reads
                     .len()
@@ -101,7 +101,7 @@ impl FrontCheckQueries {
                 .lower
                 .selected_read_len(query, reference)
                 .ok_or_else(missing)?;
-            weight.add(2 * crate::memo::retained_arc_bytes(&Reads::empty()) as usize);
+            weight.add(2 * hirsel_engine_admission::retained_arc_bytes(&Reads::empty()) as usize);
             // The Lower read clone, linear union and a possible boxed-slice
             // shrink overlap temporarily. Front rows have two union buffers
             // above; producer-owned originals stay under their own grants.

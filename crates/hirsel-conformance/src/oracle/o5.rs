@@ -254,7 +254,7 @@ fn native_runs(path: &Path) -> String {
     let dir = path.with_extension("native");
     let _ = std::fs::remove_dir_all(&dir);
     let _ = std::fs::create_dir_all(&dir);
-    let result = hirsel_engine::with_compiler_stack(|| {
+    let result = hirsel_intern::jobs::with_compiler_stack(|| {
         native::run_source("o5", &source, &matrix, &toolchain, &dir)
     });
     let mut text = format!(
@@ -269,7 +269,7 @@ fn native_runs(path: &Path) -> String {
 
 /// LANG-6 definition hashes of `roots`, one `path hash` line each.
 fn hashes(path: &Path, roots: Vec<DefPath>) -> String {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let mut program = match hirsel_front_phases::load_program_source(path, None) {
             Ok(program) => program,
             Err(error) => return format!("load: {error}\n"),

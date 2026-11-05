@@ -56,7 +56,7 @@ pub fn arena_query(
             }
             dependencies.push(
                 own.product
-                    .archive(hirsel_engine::runtime::ArchiveAdmission::Retained)
+                    .archive(hirsel_engine_runtime::ArchiveAdmission::Retained)
                     .map_err(|e| e.to_string())?
                     .reference(),
             );
@@ -67,7 +67,7 @@ pub fn arena_query(
         outgoing
             .iter()
             .map(|(_, _, p)| {
-                p.archive(hirsel_engine::runtime::ArchiveAdmission::Retained)
+                p.archive(hirsel_engine_runtime::ArchiveAdmission::Retained)
                     .map(|archive| archive.reference())
                     .map_err(|e| e.to_string())
             })

@@ -119,7 +119,7 @@ fn existing_destination_does_not_mask_corrupt_or_missing_linked_record() {
     let record = hirsel_artifact_store::Store::new(root).output_path(
         linked
             .product
-            .archive(hirsel_engine::runtime::ArchiveAdmission::Retained)
+            .archive(hirsel_engine_runtime::ArchiveAdmission::Retained)
             .unwrap()
             .reference(),
     );

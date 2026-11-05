@@ -1,5 +1,5 @@
 //! The native dispatcher must allocate the whole checked runtime frame.
-use hirsel_engine::with_compiler_stack;
+use hirsel_intern::jobs::with_compiler_stack;
 
 #[test]
 fn entered_runtime_import_refuses_a_forged_allocation_extent() {

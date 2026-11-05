@@ -1,8 +1,7 @@
 use hirsel_driver::native;
-use hirsel_engine::{
-    QueryEngine, default_context, default_environment, source_check_request, with_compiler_stack,
-};
+use hirsel_engine::{QueryEngine, default_context, default_environment, source_check_request};
 use hirsel_front_phases::compiler_adapters;
+use hirsel_intern::jobs::with_compiler_stack;
 use hirsel_lir::ahead::{Refusal, ScalarGraph, scalar_graph};
 use hirsel_syntax::ContentHash;
 

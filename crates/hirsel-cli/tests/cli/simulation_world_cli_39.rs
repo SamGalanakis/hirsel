@@ -189,7 +189,7 @@ fn typed(id: &str) -> SimulationConfig {
 #[test]
 fn simulation_world_cli_39_worlds_match_typed_and_real_cli() {
     seal_tools();
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let mut selected = 0;
         for (id, source, stdout, stderr, blocked) in [
             (

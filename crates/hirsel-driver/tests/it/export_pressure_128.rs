@@ -3,9 +3,9 @@ use hirsel_engine::LoweringPolicy;
 use hirsel_engine::requests::OutputReadiness;
 use hirsel_engine::requests::RequestEngine;
 use hirsel_engine::requests::observe_inputs;
-use hirsel_engine::runtime::QueryRuntime;
 use hirsel_engine::store::MemStore;
-use hirsel_engine::with_compiler_stack;
+use hirsel_engine_runtime::QueryRuntime;
+use hirsel_intern::jobs::with_compiler_stack;
 
 use hirsel_front_phases::COMPILER;
 use hirsel_requests::CompileOperation;

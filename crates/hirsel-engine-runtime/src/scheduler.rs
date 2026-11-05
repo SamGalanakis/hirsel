@@ -358,7 +358,9 @@ impl RuntimeCompletion {
         if let Some(stack) = self.caller_stack {
             let _caller = self.shared.caller.lock().unwrap_or_else(|e| e.into_inner());
             if !self.shared.lock().request_complete(request.0) {
-                crate::with_compiler_stack(|| run_worker(self.shared.clone(), 0, stack, true));
+                hirsel_intern::jobs::with_compiler_stack(|| {
+                    run_worker(self.shared.clone(), 0, stack, true)
+                });
             }
         }
         let mut state = self.shared.lock();
@@ -1111,12 +1113,7 @@ impl State {
     fn evict_spill(&mut self, scratch: u64) -> bool {
         let selected = self.spill.iter().find_map(|(&query, spilled)| {
             let product = spilled.result.as_ref().ok()?;
-            let body = product
-                .analyzed_value()
-                .is_some_and(|body| body.cache_only())
-                || product
-                    .lower_value()
-                    .is_some_and(|body| body.cache_only() && body.prepare_eviction(scratch));
+            let body = product.prepare_eviction(scratch);
             let archived = match self.factories.get(&query.0) {
                 Some(Factory::Send(factory)) if !body => factory.evict(id(query), product, scratch),
                 _ => false,
@@ -1365,11 +1362,8 @@ impl QueryContext for Context<'_> {
                         return None;
                     };
                     let product = result.as_ref().as_ref().ok()?;
-                    let body = product
-                        .analyzed_value()
-                        .is_some_and(|body| body.cache_only())
-                        || product.lower_value().is_some_and(|body| body.cache_only());
-                    let summary = product.summary_value().is_some();
+                    let body = product.cache_only();
+                    let summary = product.evictable();
                     (body || summary).then_some((order, body))
                 })
                 .min();

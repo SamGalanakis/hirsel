@@ -89,7 +89,7 @@ fn eventmerge_23_independent_vectors_and_three_engines() {
 
 #[test]
 fn eventmerge_23_pure_model_and_uuid_bytes_checked_heap() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let scratch = tempfile::tempdir().unwrap();
         let manifest = package(scratch.path());
         let mut source = String::from(

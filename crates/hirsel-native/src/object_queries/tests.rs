@@ -154,11 +154,11 @@ fn hit_never_materializes_and_equal_recomputation_backdates() {
     assert_eq!(
         changed
             .product
-            .archive(hirsel_engine::runtime::ArchiveAdmission::Retained)
+            .archive(hirsel_engine_runtime::ArchiveAdmission::Retained)
             .unwrap()
             .reference(),
         cold.product
-            .archive(hirsel_engine::runtime::ArchiveAdmission::Retained)
+            .archive(hirsel_engine_runtime::ArchiveAdmission::Retained)
             .unwrap()
             .reference(),
         "equal output failed to backdate"
@@ -263,7 +263,7 @@ fn corrupt_or_missing_object_recomputes_instead_of_hitting() {
         let cold = codegen(&store, &key, &ready, || Ok(object())).unwrap();
         let reference = cold
             .product
-            .archive(hirsel_engine::runtime::ArchiveAdmission::Retained)
+            .archive(hirsel_engine_runtime::ArchiveAdmission::Retained)
             .unwrap()
             .reference();
         let path = output_path(&backend, reference);
@@ -282,7 +282,7 @@ fn corrupt_or_missing_object_recomputes_instead_of_hitting() {
         assert_eq!(
             repaired
                 .product
-                .archive(hirsel_engine::runtime::ArchiveAdmission::Retained)
+                .archive(hirsel_engine_runtime::ArchiveAdmission::Retained)
                 .unwrap()
                 .reference(),
             reference
@@ -318,12 +318,12 @@ fn link_order_is_canonical_and_archive_order_is_significant() {
     assert_eq!(
         third
             .product
-            .archive(hirsel_engine::runtime::ArchiveAdmission::Retained)
+            .archive(hirsel_engine_runtime::ArchiveAdmission::Retained)
             .unwrap()
             .reference(),
         fourth
             .product
-            .archive(hirsel_engine::runtime::ArchiveAdmission::Retained)
+            .archive(hirsel_engine_runtime::ArchiveAdmission::Retained)
             .unwrap()
             .reference()
     );
@@ -353,7 +353,7 @@ fn linked_hit_refuses_stale_fragments_and_relinks_missing_executable() {
         let old = link(&store, &link_key(), &manifest, &mut compute).unwrap();
         let reference = old
             .product
-            .archive(hirsel_engine::runtime::ArchiveAdmission::Retained)
+            .archive(hirsel_engine_runtime::ArchiveAdmission::Retained)
             .unwrap()
             .reference();
         let path = output_path(&backend, reference);
@@ -372,7 +372,7 @@ fn linked_hit_refuses_stale_fragments_and_relinks_missing_executable() {
         assert_eq!(
             repaired
                 .product
-                .archive(hirsel_engine::runtime::ArchiveAdmission::Retained)
+                .archive(hirsel_engine_runtime::ArchiveAdmission::Retained)
                 .unwrap()
                 .reference(),
             reference
@@ -527,7 +527,7 @@ fn object_hit_never_reads_ready_body_payload() {
 use crate::object_queries::tasks::{
     LinkDependencies, ObjectTaskFactory, ObjectTaskRequest, ObjectTaskSnapshot,
 };
-use hirsel_engine::runtime::{MemoryWeight, QueryContext, QueryFactory, QueryId, QueryPoll};
+use hirsel_engine_runtime::{MemoryWeight, QueryContext, QueryFactory, QueryId, QueryPoll};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::task::Poll;
 
@@ -593,7 +593,7 @@ impl ObjectTaskSnapshot for TaskSnapshot {
         Ok(self.link.clone())
     }
     fn link_input(&self, p: ProductRef) -> Result<Reference, Reference> {
-        p.archive(hirsel_engine::runtime::ArchiveAdmission::Retained)
+        p.archive(hirsel_engine_runtime::ArchiveAdmission::Retained)
             .map(|archive| archive.reference())
             .map_err(|_| self.failure("link product archive unavailable"))
     }
@@ -604,7 +604,7 @@ impl ObjectTaskSnapshot for TaskSnapshot {
             result: self.result.clone(),
             reference: self
                 .result
-                .archive(hirsel_engine::runtime::ArchiveAdmission::Retained)
+                .archive(hirsel_engine_runtime::ArchiveAdmission::Retained)
                 .unwrap()
                 .reference(),
         }))
@@ -1033,8 +1033,8 @@ fn execution_plan_identity_controls_object_hits_and_imported_keys() {
     }
 }
 
-use hirsel_engine::runtime::ArchiveAdmission;
 use hirsel_engine::store::{Action, Address, Domain, Output, Reference, ResultStore, VerifyStore};
+use hirsel_engine_runtime::ArchiveAdmission;
 use hirsel_lir::stage::ObjectArtifact;
 use std::path::Path;
 
@@ -1043,10 +1043,10 @@ fn fixture_product(
     address: hirsel_engine::store::Address,
     action: hirsel_engine::store::Action,
     reference: hirsel_engine::store::Reference,
-) -> hirsel_engine::runtime::ProductRef {
+) -> hirsel_engine_runtime::ProductRef {
     let budget = hirsel_engine_admission::ProcessBudget::new(64 << 20);
     let mut allowance = budget.reserve(64 << 20).unwrap();
     let archive =
-        hirsel_engine::runtime::ProductArchive::open(store, reference, &mut allowance).unwrap();
-    hirsel_engine::runtime::ProductRef::import_archive(address, action, archive)
+        hirsel_engine_runtime::ProductArchive::open(store, reference, &mut allowance).unwrap();
+    hirsel_engine_runtime::ProductRef::import_archive(address, action, archive)
 }

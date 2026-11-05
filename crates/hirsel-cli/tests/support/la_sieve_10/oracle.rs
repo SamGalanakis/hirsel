@@ -112,7 +112,7 @@ fn la_sieve_10_flags_cranelift() {
 
 #[test]
 fn la_sieve_10_allocations() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         use hirsel_driver::native;
         use hirsel_native::OptLevel;
         use hirsel_native::Options;

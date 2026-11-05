@@ -182,7 +182,7 @@ impl Fixture {
 
 #[test]
 fn child_artifact_native_tapes_replay_in_all_four_engines() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let fixture = Fixture::new(
             "minimal-",
             &[("main.hir", SOURCE)],
@@ -265,7 +265,7 @@ fn child_artifact_native_tapes_replay_in_all_four_engines() {
 
 #[test]
 fn dagbuild_child_artifact_first_input_and_twins_replay_in_all_four_engines() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let sources = [
             (
                 "main.hir",

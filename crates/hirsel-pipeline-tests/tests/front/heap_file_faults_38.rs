@@ -9,7 +9,8 @@
 // Hardware backends qualified by native_file_faults_33; these vectors port the
 // same finite typed semantics to the independent lowered Heap provider.
 use hirsel_driver::native::*;
-use hirsel_engine::{RunConfiguration, run_observed_snapshot, with_compiler_stack};
+use hirsel_engine::{RunConfiguration, run_observed_snapshot};
+use hirsel_intern::jobs::with_compiler_stack;
 use hirsel_native::*;
 use hirsel_native_batch::*;
 use hirsel_native_testing::*;

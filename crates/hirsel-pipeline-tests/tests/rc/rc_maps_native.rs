@@ -1,9 +1,8 @@
 //! Compiled laws inspect the private index directly; source has no bucket API.
 use hirsel_driver::native::*;
-use hirsel_engine::{
-    QueryEngine, default_context, default_environment, source_check_request, with_compiler_stack,
-};
+use hirsel_engine::{QueryEngine, default_context, default_environment, source_check_request};
 use hirsel_front_phases::compiler_adapters;
+use hirsel_intern::jobs::with_compiler_stack;
 use hirsel_lir::layout::sequence_elements_offset;
 use hirsel_lir::layout_types::{
     FieldLayout, LayoutId, LayoutKind, LayoutTable, ScalarKind, SizeSpec,

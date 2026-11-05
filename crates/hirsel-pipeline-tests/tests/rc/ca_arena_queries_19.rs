@@ -74,7 +74,7 @@ fn arena_query_graph_settles_local_equations_and_reuses_unchanged_components() {
             .iter()
             .map(|s| s
                 .product
-                .archive(hirsel_engine::runtime::ArchiveAdmission::Retained)
+                .archive(hirsel_engine_runtime::ArchiveAdmission::Retained)
                 .unwrap()
                 .reference())
             .collect::<Vec<_>>(),
@@ -82,7 +82,7 @@ fn arena_query_graph_settles_local_equations_and_reuses_unchanged_components() {
             .iter()
             .map(|s| s
                 .product
-                .archive(hirsel_engine::runtime::ArchiveAdmission::Retained)
+                .archive(hirsel_engine_runtime::ArchiveAdmission::Retained)
                 .unwrap()
                 .reference())
             .collect::<Vec<_>>()

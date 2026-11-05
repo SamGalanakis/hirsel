@@ -8,8 +8,8 @@ use hirsel_engine::Reads;
 use hirsel_engine::ToolError;
 use hirsel_engine::memo::MemoKey;
 use hirsel_engine::memo::MemoStats;
-use hirsel_engine::runtime::RuntimeEvent;
-use hirsel_engine::runtime::RuntimeObserver;
+use hirsel_engine_runtime::RuntimeEvent;
+use hirsel_engine_runtime::RuntimeObserver;
 
 use hirsel_syntax::DefPath;
 use std::{

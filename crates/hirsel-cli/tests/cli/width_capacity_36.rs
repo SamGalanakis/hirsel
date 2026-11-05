@@ -323,7 +323,7 @@ fn immediate_host_records_exact_admission_and_replays() {
     immediate(true);
 }
 fn immediate(host: bool) {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let scratch = tempfile::tempdir().unwrap();
         let root = scratch.path();
         let _evidence = Evidence(root.to_owned());

@@ -59,7 +59,7 @@ fn receipt(row: &Value, engine: &str, extra: Value) {
     );
 }
 fn simulated(part: bool, only: Option<&str>) {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let root = scratch("simulation");
         let selection = package(&root);
         let mut loaded = hirsel_front_phases::load_program(&selection).unwrap();
@@ -266,7 +266,7 @@ fn llvm_workflows() {
 }
 #[test]
 fn digest_vectors_and_split_update() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let root = scratch("vectors");
         let selection = package(&root);
         let vectors: Value =
@@ -353,7 +353,7 @@ fn measured_copy_cost() {
     use hirsel_native::RuntimeBuild;
     use hirsel_native::TargetSpec;
     use hirsel_native::Toolchain;
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let root = scratch("copies");
         let selection = package(&root);
         let mut loaded = hirsel_front_phases::load_program(&selection).unwrap();

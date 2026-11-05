@@ -139,12 +139,12 @@ impl FrontBodyQueries {
             .archive_encoded(crate::store::ArchiveBoundary::RequiredSpill);
         let bytes = self.encode_terminal(key, outcome, scratch)?;
         let charge = (bytes.len() as u64)
-            .checked_add(crate::memo::retained_arc_bytes(&std::mem::MaybeUninit::<
-                TerminalFront,
-            >::uninit()))?
-            .checked_add(crate::memo::retained_arc_bytes(&std::mem::MaybeUninit::<
-                LiveSourceBacking,
-            >::uninit()))?;
+            .checked_add(hirsel_engine_admission::retained_arc_bytes(
+                &std::mem::MaybeUninit::<TerminalFront>::uninit(),
+            ))?
+            .checked_add(hirsel_engine_admission::retained_arc_bytes(
+                &std::mem::MaybeUninit::<LiveSourceBacking>::uninit(),
+            ))?;
         let backing = outcome._backing.split(charge)?;
         Some(ArchivedFront {
             facts: Some(Arc::new(TerminalFront {
@@ -159,9 +159,9 @@ impl FrontBodyQueries {
             .dead_arms
             .as_ref()
             .map_or(0, LintFacts::materialize_bytes)
-            .checked_add(crate::memo::retained_arc_bytes(&std::mem::MaybeUninit::<
-                PublishedSummary,
-            >::uninit()))?;
+            .checked_add(hirsel_engine_admission::retained_arc_bytes(
+                &std::mem::MaybeUninit::<PublishedSummary>::uninit(),
+            ))?;
         if temporary > scratch {
             return None;
         }
@@ -175,7 +175,11 @@ impl FrontBodyQueries {
                 lowering,
                 ..
             } => (
-                Some(publication.summary_value()?.value_arc()),
+                Some(
+                    publication
+                        .live_value::<crate::products::LiveSummaryProduct>()?
+                        .value_arc(),
+                ),
                 diagnostics,
                 Some(lowering),
                 *archive,

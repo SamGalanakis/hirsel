@@ -924,7 +924,7 @@ mod tests {
     #[test]
     fn unit_pipeline_is_identical_at_every_worker_count_and_validation_policy() {
         let run = || {
-            hirsel_engine::with_compiler_stack(|| {
+            hirsel_intern::jobs::with_compiler_stack(|| {
                 let mut engine = hirsel_engine::QueryEngine::new(
                     hirsel_engine::default_environment(),
                     hirsel_front_phases::compiler_adapters(),
@@ -1036,7 +1036,7 @@ fn main() -> u64 {
     }
     #[test]
     fn semantic_binding_rejects_unplanned_units_and_object_exports() {
-        hirsel_engine::with_compiler_stack(|| {
+        hirsel_intern::jobs::with_compiler_stack(|| {
             let mut engine = hirsel_engine::QueryEngine::new(
                 hirsel_engine::default_environment(),
                 hirsel_front_phases::compiler_adapters(),

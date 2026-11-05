@@ -263,7 +263,7 @@ impl hirsel_validate::VerifierRows for RequestVerifierRows {
     ) -> Result<Option<Arc<dyn Send + Sync>>, hirsel_validate::FactRefusal> {
         let mut bytes = metadata
             .checked_add(
-                crate::runtime::ProductArchive::checked_import_charge(
+                hirsel_engine_runtime::ProductArchive::checked_import_charge(
                     archive.reference(),
                     archive.backing(),
                 )
@@ -368,10 +368,9 @@ impl ResultStore for RequestStore {
         admitted
     }
     fn try_admit_product_memory(&self, bytes: u64) -> Option<Arc<dyn Send + Sync>> {
-        let bytes =
-            bytes.checked_add(crate::memo::retained_arc_bytes(&std::mem::MaybeUninit::<
-                ArchiveLease,
-            >::uninit()))?;
+        let bytes = bytes.checked_add(hirsel_engine_admission::retained_arc_bytes(
+            &std::mem::MaybeUninit::<ArchiveLease>::uninit(),
+        ))?;
         if !self.memory.try_charge(bytes) {
             return None;
         }
@@ -419,7 +418,10 @@ impl ResultStore for RequestStore {
             self.backend.demand(keys)
         }
     }
-    fn open_product_archive(&self, reference: Reference) -> Option<crate::runtime::ProductArchive> {
+    fn open_product_archive(
+        &self,
+        reference: Reference,
+    ) -> Option<hirsel_engine_runtime::ProductArchive> {
         let bytes = self.get_content(reference)?;
         self.admit_product_archive(reference, bytes)
     }
@@ -427,12 +429,13 @@ impl ResultStore for RequestStore {
         &self,
         reference: Reference,
         bytes: Bytes,
-    ) -> Option<crate::runtime::ProductArchive> {
-        let charge = crate::runtime::ProductArchive::checked_import_charge(reference, &bytes)
-            .ok()?
-            .checked_add(crate::memo::retained_arc_bytes(&std::mem::MaybeUninit::<
-                ArchiveLease,
-            >::uninit()))?;
+    ) -> Option<hirsel_engine_runtime::ProductArchive> {
+        let charge =
+            hirsel_engine_runtime::ProductArchive::checked_import_charge(reference, &bytes)
+                .ok()?
+                .checked_add(hirsel_engine_admission::retained_arc_bytes(
+                    &std::mem::MaybeUninit::<ArchiveLease>::uninit(),
+                ))?;
         if !self.memory.charge(charge) {
             return None;
         }
@@ -440,11 +443,15 @@ impl ResultStore for RequestStore {
             memory: self.memory.clone(),
             bytes: charge,
         });
-        Some(crate::runtime::ProductArchive::from_admitted_content(
+        hirsel_engine_runtime::ProductArchive::from_admitted_content(
             reference, bytes, charge, owner,
-        ))
+        )
+        .ok()
     }
-    fn copy_product_archive(&self, reference: Reference) -> Option<crate::runtime::ProductArchive> {
+    fn copy_product_archive(
+        &self,
+        reference: Reference,
+    ) -> Option<hirsel_engine_runtime::ProductArchive> {
         let bytes = self.get_content(reference)?;
         if !bytes.matches_reference(reference) {
             return None;
@@ -456,14 +463,14 @@ impl ResultStore for RequestStore {
             return None;
         }
         let bytes = Bytes::from(bytes.to_vec());
-        let charge = crate::runtime::ProductArchive::checked_import_charge(reference, &bytes)
-            .ok()
-            .and_then(|bytes| {
-                bytes.checked_add(crate::memo::retained_arc_bytes(&std::mem::MaybeUninit::<
-                    ArchiveLease,
-                >::uninit(
-                )))
-            });
+        let charge =
+            hirsel_engine_runtime::ProductArchive::checked_import_charge(reference, &bytes)
+                .ok()
+                .and_then(|bytes| {
+                    bytes.checked_add(hirsel_engine_admission::retained_arc_bytes(
+                        &std::mem::MaybeUninit::<ArchiveLease>::uninit(),
+                    ))
+                });
         let Some(charge) = charge.filter(|charge| *charge <= working) else {
             self.memory.release(working);
             return None;
@@ -473,9 +480,10 @@ impl ResultStore for RequestStore {
             memory: self.memory.clone(),
             bytes: charge,
         });
-        Some(crate::runtime::ProductArchive::from_admitted_content(
+        hirsel_engine_runtime::ProductArchive::from_admitted_content(
             reference, bytes, charge, owner,
-        ))
+        )
+        .ok()
     }
     fn get_content(&self, reference: Reference) -> Option<Bytes> {
         if let Some((actual, bytes)) = self
@@ -636,9 +644,12 @@ mod tests {
         backing[100..108].copy_from_slice(b"complete");
         let bytes = Bytes::from(backing).range(100, 8, 1).unwrap();
         let reference = domain().reference(b"complete").unwrap();
-        let required = crate::runtime::ProductArchive::checked_import_charge(reference, &bytes)
-            .unwrap()
-            + crate::memo::retained_arc_bytes(&std::mem::MaybeUninit::<ArchiveLease>::uninit());
+        let required =
+            hirsel_engine_runtime::ProductArchive::checked_import_charge(reference, &bytes)
+                .unwrap()
+                + hirsel_engine_admission::retained_arc_bytes(
+                    &std::mem::MaybeUninit::<ArchiveLease>::uninit(),
+                );
         assert!(required > 4096);
         let backend = Arc::new(Backend(Mutex::new(bytes.clone())));
         let provider = Arc::downgrade(&backend);
@@ -698,9 +709,12 @@ mod tests {
         let bytes = Bytes::from(vec![7; 4096]);
         let pointer = bytes.as_ptr();
         let reference = domain().reference(&bytes).unwrap();
-        let required = crate::runtime::ProductArchive::checked_import_charge(reference, &bytes)
-            .unwrap()
-            + crate::memo::retained_arc_bytes(&std::mem::MaybeUninit::<ArchiveLease>::uninit());
+        let required =
+            hirsel_engine_runtime::ProductArchive::checked_import_charge(reference, &bytes)
+                .unwrap()
+                + hirsel_engine_admission::retained_arc_bytes(
+                    &std::mem::MaybeUninit::<ArchiveLease>::uninit(),
+                );
         let budget = hirsel_engine_admission::ProcessBudget::new(required);
         let request = RequestStore::new(Arc::new(Backend), budget.reserve(required).unwrap());
         let archive = request.admit_product_archive(reference, bytes).unwrap();

@@ -65,13 +65,13 @@ impl Composed {
 #[derive(Clone)]
 pub struct QueryReads(Rc<RefCell<Reads>>);
 impl QueryReads {
-    pub(crate) fn take_cycle(&self) -> Vec<QueryId> {
+    pub fn take_cycle(&self) -> Vec<QueryId> {
         std::mem::take(&mut self.0.borrow_mut().cycle)
     }
     /// Poll one producer under this continuation's working grant. Its reads
     /// subscribe to the existing graph; the composed producer claims no node.
     /// Its frame consumes mailbox capacity until destruction.
-    pub(crate) async fn compose(&self, task: Box<dyn QueryTask>) -> Outcome {
+    pub async fn compose(&self, task: Box<dyn QueryTask>) -> Outcome {
         let mut task = Some(task);
         poll_fn(|_| {
             let mut reads = self.0.borrow_mut();
@@ -105,7 +105,7 @@ impl QueryReads {
     }
     /// Retry a producer admission using the runtime's existing unpinned-body
     /// eviction policy. The request and result stay in this bounded mailbox.
-    pub(crate) async fn evict_body(&self) -> bool {
+    pub async fn evict_body(&self) -> bool {
         poll_fn(|_| {
             let mut reads = self.0.borrow_mut();
             match std::mem::take(&mut reads.eviction) {
@@ -118,7 +118,7 @@ impl QueryReads {
         })
         .await
     }
-    pub(crate) async fn publication(&self) -> Result<(), Reference> {
+    pub async fn publication(&self) -> Result<(), Reference> {
         poll_fn(|_| {
             let mut reads = self.0.borrow_mut();
             match std::mem::take(&mut reads.publication) {
@@ -362,7 +362,7 @@ mod tests {
         }
     }
     fn product(id: QueryId) -> ProductRef {
-        crate::runtime::test_product(
+        crate::test_product(
             id.address,
             Action(id.address.0),
             Domain { kind: 1, schema: 1 },

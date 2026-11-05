@@ -731,7 +731,7 @@ mod tests {
         ] {
             std::fs::write(root.join(path), "").unwrap();
         }
-        let value = hirsel_engine::with_compiler_stack(|| {
+        let value = hirsel_intern::jobs::with_compiler_stack(|| {
             derive_shard_with(&root, None, None, |path| Ok(observation::observe(path)))
         })
         .unwrap();
@@ -763,7 +763,7 @@ mod tests {
         );
         let shards: Vec<_> = (1..=2)
             .map(|index| {
-                hirsel_engine::with_compiler_stack(|| {
+                hirsel_intern::jobs::with_compiler_stack(|| {
                     derive_shard_with(
                         &root,
                         Some(crate::Shard { index, count: 2 }),

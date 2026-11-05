@@ -420,10 +420,9 @@ pub(crate) fn check_empty_selection(
     selector: &mut crate::requests::CompilerRequests,
 ) -> Result<(), ToolError> {
     use crate::requests::{CompileOperation, CompileRequest, CompileResult};
-    use hirsel_engine::{
-        requests::{OutputReadiness, RequestEngine},
-        runtime::QueryRuntime,
-    };
+    use hirsel_engine::requests::{OutputReadiness, RequestEngine};
+    use hirsel_engine_runtime::QueryRuntime;
+
     let mut selected = selector.select(&CompileRequest {
         path: path.to_owned(),
         inputs: discovery.inputs.clone(),

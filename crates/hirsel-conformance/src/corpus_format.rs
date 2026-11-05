@@ -819,7 +819,7 @@ pub fn migrate(root: &Path, hirsel: &Path, evidence: &Path) -> Result<serde_json
 mod tests {
     use super::*;
     fn on_stack(f: impl FnOnce() + Send + 'static) {
-        hirsel_engine::with_compiler_stack(f)
+        hirsel_intern::jobs::with_compiler_stack(f)
     }
     fn rejection(line: usize) -> Expect {
         Expect::Reject {

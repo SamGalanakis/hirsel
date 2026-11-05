@@ -2,7 +2,7 @@
 use super::runtime50_continuation::ready;
 use super::runtime50_resume::compact_runs_with;
 use hirsel_driver::native;
-use hirsel_engine::with_compiler_stack;
+use hirsel_intern::jobs::with_compiler_stack;
 use hirsel_lir::continuation::{ResumeAction, TailKind};
 
 const KILL: &str = r#"

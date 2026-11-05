@@ -49,7 +49,7 @@ fn localrpc_23_checked_model_vectors() {
         include_str!("../../../../examples/localrpc/fixtures/vectors.hir"),
     )
     .unwrap();
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let mut loaded = hirsel_front_phases::load_program(&manifest).unwrap();
         loaded.check_for_execution().unwrap();
         let config = hirsel_engine::RunConfiguration {

@@ -59,7 +59,7 @@ mod tests {
 
     #[test]
     fn heap_witness_imports_each_original_and_library_body() {
-        hirsel_engine::with_compiler_stack(|| {
+        hirsel_intern::jobs::with_compiler_stack(|| {
             let source = include_str!("../../../conformance/MEM/MEM-4-sealed-heap-run.hir");
             let scratch = tempfile::tempdir().unwrap();
             let path = scratch.path().join("sealed-heap.hir");

@@ -73,7 +73,7 @@ fn record(command: Command) {
 
 #[test]
 fn signal_cancel_twin_replays_on_reference_and_checked() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let root = tempfile::tempdir().unwrap();
         let dir = root.path();
         std::fs::write(dir.join("main.hir"), PROGRAM).unwrap();
@@ -129,7 +129,7 @@ fn signal_cancel_twin_replays_on_reference_and_checked() {
 
 #[test]
 fn checked_signal_cancel_twin_runs_fresh() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let mut engine = hirsel_engine::QueryEngine::new(
             hirsel_engine::default_environment(),
             hirsel_front_phases::compiler_adapters(),
@@ -180,7 +180,7 @@ fn checked_signal_cancel_twin_runs_fresh() {
 #[test]
 #[ignore = "requires immutable recordings made by an older runtime and their original source manifest"]
 fn production_cancel_recordings_refuse_incompatible_runtime() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let root = std::path::PathBuf::from(
             std::env::var_os("HIRSEL_CANCEL_REPLAY_FIXTURES").expect("recording evidence root"),
         );

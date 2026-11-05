@@ -3,9 +3,14 @@
 //! factories and output inspection execute no compiler phase.
 use super::reader_receipts::{ArchivedReader, ReadUnion};
 use super::*;
-use crate::runtime::*;
+use crate::products::ProductSource;
+use crate::products::{
+    GrowthPublicationSource, LIVE_SOURCE_COMPONENT, LIVE_SOURCE_MEMBERSHIP, LiveGrowthProduct,
+    LiveSourceGrowthProduct, SourceGrowthQueryData,
+};
 use crate::source_components::{SourceGrowthComponents, SourceGrowthQueryRecord, SourceMembership};
 use crate::store::{Domain, Reference, ResultStore};
+use hirsel_engine_runtime::*;
 use std::{
     sync::{
         Mutex,
@@ -100,7 +105,9 @@ impl FrontGrowthQueries {
     pub fn outcome(self: &Arc<Self>, product: ProductRef) -> Option<FrontGrowthOutput> {
         let completed = self.completed.lock().unwrap_or_else(|e| e.into_inner());
         let selected = completed.as_ref()?;
-        let data = product.growth_value()?.value();
+        let data = product
+            .live_value::<crate::products::LiveGrowthProduct>()?
+            .value();
         if *selected != product {
             return None;
         }
@@ -126,7 +133,7 @@ impl QueryFactory for Factory {
             let selected = queries.membership.lock().unwrap_or_else(|e| e.into_inner());
             let value = selected
                 .as_ref()
-                .and_then(ProductRef::source_growth_value)
+                .and_then(ProductRef::live_value::<LiveSourceGrowthProduct>)
                 .and_then(LiveSourceGrowthProduct::membership)
                 .ok_or(queries.errors.protocol)?;
             let index = value
@@ -160,7 +167,7 @@ impl QueryFactory for Factory {
                         .lock()
                         .unwrap_or_else(|e| e.into_inner())
                         .as_ref()?
-                        .growth_value()?
+                        .live_value::<crate::products::LiveGrowthProduct>()?
                         .value()
                         .facets
                         .components
@@ -169,7 +176,12 @@ impl QueryFactory for Factory {
                 });
             value
                 .and_then(LiveSourceGrowthProduct::reopen_component)
-                .map(ProductRef::source_growth)
+                .map(|value| {
+                    value
+                        .publish(queries.store.as_ref())
+                        .map_err(|_| queries.errors.resource)
+                })
+                .transpose()?
         };
         if let Some(product) = cached {
             return Ok(Box::new(Reopened { product }));
@@ -455,7 +467,9 @@ impl FactTask {
             queries.publication_source()?,
         )
         .ok_or(queries.errors.resource)?;
-        let product = ProductRef::source_growth(value);
+        let product = value
+            .publish(queries.store.as_ref())
+            .map_err(|_| queries.errors.resource)?;
         queries.persist(&product);
         if self.component.is_none() {
             *queries.membership.lock().unwrap_or_else(|e| e.into_inner()) = Some(product.clone());
@@ -532,7 +546,7 @@ impl FrontGrowthQueries {
         if !self.store.persistence().retains() {
             return;
         }
-        let Some(value) = product.source_growth_value() else {
+        let Some(value) = product.live_value::<crate::products::LiveSourceGrowthProduct>() else {
             return;
         };
         let Some(value) = value.value() else {
@@ -596,7 +610,9 @@ impl Task {
                 Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
                 Poll::Ready(Ok(p)) => p,
             };
-            let Some(publication) = product.source_growth_value() else {
+            let Some(publication) =
+                product.live_value::<crate::products::LiveSourceGrowthProduct>()
+            else {
                 return Poll::Ready(Err(queries.errors.protocol));
             };
             let Some(value) = publication.membership() else {
@@ -620,7 +636,9 @@ impl Task {
                 Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
                 Poll::Ready(Ok(p)) => p,
             };
-            let Some(publication) = product.source_growth_value() else {
+            let Some(publication) =
+                product.live_value::<crate::products::LiveSourceGrowthProduct>()
+            else {
                 return Poll::Ready(Err(queries.errors.protocol));
             };
             let Some(value) = publication.component() else {
@@ -836,7 +854,9 @@ impl Task {
             &mut allowance,
         )
         .ok_or(queries.errors.resource)?;
-        let product = ProductRef::growth(value);
+        let product = value
+            .publish(queries.store.as_ref())
+            .map_err(|_| queries.errors.resource)?;
         *queries.completed.lock().unwrap_or_else(|e| e.into_inner()) = Some(product.clone());
         Ok(product)
     }

@@ -52,7 +52,7 @@ fn export_friction_recipe(name: &str, source: &str) {
         .unwrap();
     assert!(output.status.success(), "{name}: {output:?}");
     let text = std::fs::read_to_string(artifact).unwrap();
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let mut program =
             hirsel_front_phases::load_program(&fixture.0.join("hirsel.json")).unwrap();
         program.check_for_execution().unwrap();
@@ -230,7 +230,7 @@ impl Fixture {
     }
     // Exercise explicit Args/root/Net through the native fixture boundary.
     fn native_executable(&self) -> PathBuf {
-        hirsel_engine::with_compiler_stack(|| {
+        hirsel_intern::jobs::with_compiler_stack(|| {
             use hirsel_native::OptLevel;
             use hirsel_native::Options;
             use hirsel_native::Partition;
@@ -445,7 +445,7 @@ fn httpget() {
     simulation.args = vec![config["args"][0].as_str().unwrap().to_owned()];
     simulation.net = Some(serde_json::from_value(config["net"].clone()).unwrap());
     let mut output = Vec::new();
-    let result = hirsel_engine::with_compiler_stack(|| {
+    let result = hirsel_intern::jobs::with_compiler_stack(|| {
         hirsel_driver::run_path_with_step_budget(
             &fixture.0.join("hirsel.json"),
             simulation,
@@ -1255,7 +1255,7 @@ impl Example {
     /// `hirsel build` for `target`, in this process.
     fn build(&self, target: hirsel_native::TargetSpec) -> PathBuf {
         let exe = self.dir.join(format!("program-{}", target.triple));
-        hirsel_engine::with_compiler_stack(|| {
+        hirsel_intern::jobs::with_compiler_stack(|| {
             hirsel_driver::native::build_path_native_backend_with_validation(
                 &self.dir.join("hirsel.json"),
                 &exe,
@@ -1280,7 +1280,7 @@ impl Example {
         simulation.args = args.iter().map(|a| a.to_string()).collect();
         simulation.files = self.files.iter().cloned().collect();
         let (mut stdout, mut stderr) = (Vec::new(), Vec::new());
-        let result = hirsel_engine::with_compiler_stack(|| {
+        let result = hirsel_intern::jobs::with_compiler_stack(|| {
             hirsel_driver::run_path_with_step_budget(
                 &self.dir.join("hirsel.json"),
                 simulation,

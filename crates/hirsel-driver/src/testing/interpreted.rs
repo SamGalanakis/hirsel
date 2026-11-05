@@ -8,8 +8,9 @@ use crate::requests::{
 use hirsel_engine::{
     InterpreterPhase, ToolError,
     requests::{OutputReadiness, RequestEngine},
-    runtime::QueryRuntime,
 };
+use hirsel_engine_runtime::QueryRuntime;
+
 use hirsel_syntax::DefPath;
 use std::{
     path::{Path, PathBuf},
@@ -154,7 +155,7 @@ mod tests {
     use super::*;
     #[test]
     fn invalid_selected_test_header_returns_diagnostics_before_wrapper_planning() {
-        hirsel_engine::with_compiler_stack(|| {
+        hirsel_intern::jobs::with_compiler_stack(|| {
             let directory = tempfile::tempdir().unwrap();
             let path = directory.path().join("suite.json");
             std::fs::write(
@@ -189,7 +190,7 @@ mod tests {
     }
     #[test]
     fn empty_test_selection_still_rejects_an_invalid_unselected_body() {
-        hirsel_engine::with_compiler_stack(|| {
+        hirsel_intern::jobs::with_compiler_stack(|| {
             let directory = tempfile::tempdir().unwrap();
             let path = directory.path().join("suite.json");
             std::fs::write(
@@ -220,7 +221,7 @@ mod tests {
     }
     #[test]
     fn immutable_test_entries_keep_captured_text_seed_isolation_and_step_limits() {
-        hirsel_engine::with_compiler_stack(|| {
+        hirsel_intern::jobs::with_compiler_stack(|| {
             let directory = tempfile::tempdir().unwrap();
             let path = directory.path().join("suite.json");
             let source = directory.path().join("suite.hir");

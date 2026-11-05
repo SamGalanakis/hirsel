@@ -1,7 +1,7 @@
 //! Source finalizer identity precedes any entered cleanup admission.
 #[test]
 fn finalizer_source_binds_actual_resource_borrow_and_rejects_forged_resolvers() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         use hirsel_lir::continuation::isolate::FinalizerSource;
         let program = super::runtime50_continuation::ready(
             r#"

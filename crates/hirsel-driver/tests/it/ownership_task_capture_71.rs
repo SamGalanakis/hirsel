@@ -38,7 +38,7 @@ fn capture_source(source_text: &str, expected_exit: i32) {
 }
 
 fn capture_with_tasks(source_text: &str, expected_exit: i32, tasks: &str) {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let directory = tempfile::tempdir().unwrap();
         let source = directory.path().join("main.hir");
         std::fs::write(&source, source_text).unwrap();

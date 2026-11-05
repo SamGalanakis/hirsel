@@ -715,7 +715,7 @@ mod matrix {
             std::fs::create_dir_all(&cold).unwrap();
             std::fs::write(cold.join("hirsel.json"), manifest).unwrap();
             std::fs::write(cold.join("main.hir"), texts[index]).unwrap();
-            let expected = hirsel_engine::with_compiler_stack(|| {
+            let expected = hirsel_intern::jobs::with_compiler_stack(|| {
                 let compiler = hirsel_front_phases::COMPILER.with_config(config.clone());
                 let engine = super::requests::CompilerRequests::new(
                     compiler.clone(),

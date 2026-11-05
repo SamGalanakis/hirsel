@@ -8,8 +8,9 @@
 //! The bounded leaf/branch enumeration follows proptest's recursive strategy
 //! tests (recursive.rs:150-208, revision 70cf37d46b7d83393b6ed94c611f8c52209f585d,
 //! MIT OR Apache-2.0); exhaustive small graphs replace random recursion.
-use hirsel_engine::{DefinitionQueries, QueryError, with_compiler_stack};
+use hirsel_engine::{DefinitionQueries, QueryError};
 use hirsel_front_phases::load_program;
+use hirsel_intern::jobs::with_compiler_stack;
 use hirsel_syntax::{DefPath, ItemPath, PackageId};
 use serde_json::{Value, json};
 use std::{collections::BTreeSet, path::Path};

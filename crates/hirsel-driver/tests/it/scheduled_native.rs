@@ -1,9 +1,10 @@
 use hirsel_driver::*;
 use hirsel_engine::{
-    runtime::*,
     store::{MemStore, ResultStore},
     *,
 };
+use hirsel_engine_runtime::*;
+
 use hirsel_front_phases::*;
 use hirsel_host_io::launch::*;
 use std::{
@@ -577,10 +578,23 @@ fn native_catalogue_allows_lower_pressure_eviction_and_scoped_cold_reads() {
             assert!(!original.same_binding(&stale));
             assert!(native.original_context().reader([stale]).is_err());
             drop(rebound);
-            assert_eq!(recomputed.lower_value().unwrap().reads(), &reads);
+            assert_eq!(
+                recomputed
+                    .live_value::<hirsel_engine::products::LiveLowerProduct>()
+                    .unwrap()
+                    .reads(),
+                &reads
+            );
             assert_eq!(
                 records
-                    .encode(&anchors, &recomputed.lower_value().unwrap().output().value)
+                    .encode(
+                        &anchors,
+                        &recomputed
+                            .live_value::<hirsel_engine::products::LiveLowerProduct>()
+                            .unwrap()
+                            .output()
+                            .value
+                    )
                     .unwrap(),
                 expected
             );

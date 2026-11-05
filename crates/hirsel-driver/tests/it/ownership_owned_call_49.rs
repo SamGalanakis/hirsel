@@ -57,7 +57,7 @@ fn source_calls_selected(
     selection: hirsel_lir::ownership_trace::Selection,
     observe: impl Fn(&hirsel_run_schema::ownership_trace::native::Log) + Send,
 ) {
-    hirsel_engine::with_compiler_stack(move || {
+    hirsel_intern::jobs::with_compiler_stack(move || {
         let directory = tempfile::tempdir().unwrap();
         std::fs::write(directory.path().join("main.hir"), source).unwrap();
         let manifest = directory.path().join("hirsel.json");

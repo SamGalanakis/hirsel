@@ -13,9 +13,10 @@ use hirsel_engine::{
     CompileConfig, Compiler, FrontBodyQueries, FrontCheckQueries, FrontGrowthQueries,
     FrontLowerQueries, FrontRunQueries, LoweringPolicy, QueryError, QueryKind, ToolError,
     requests::source_graph::{SourceHost, SourceSelection, SourceShape, registration},
-    runtime::*,
     store::{RequestStore, ResultStore},
 };
+use hirsel_engine_runtime::*;
+
 use hirsel_span::SourceMap;
 use hirsel_syntax::DefPath;
 use std::sync::{Arc, Mutex};
@@ -1870,7 +1871,7 @@ pub(super) fn install(
         .into_iter()
         .flatten()
         {
-            hirsel_engine::runtime::profile::definition(query, path);
+            hirsel_engine_runtime::profile::definition(query, path);
             inventory.insert((query.kind, query.address.0));
         }
     }

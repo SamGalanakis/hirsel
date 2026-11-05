@@ -123,7 +123,7 @@ fn fixture(fail: bool) -> (Fixture, SourceMap, RunConfiguration) {
 }
 #[test]
 fn invalid_tir_remains_a_tool_error() {
-    hirsel_engine::with_compiler_stack(invalid_tir_remains_a_tool_error_on_compiler_thread);
+    hirsel_intern::jobs::with_compiler_stack(invalid_tir_remains_a_tool_error_on_compiler_thread);
 }
 fn invalid_tir_remains_a_tool_error_on_compiler_thread() {
     let (mut provider, sources, config) = fixture(false);
@@ -136,7 +136,7 @@ fn invalid_tir_remains_a_tool_error_on_compiler_thread() {
 
 #[test]
 fn library_launch_uses_declared_runtime_types_and_exact_simulated_output() {
-    hirsel_engine::with_compiler_stack(
+    hirsel_intern::jobs::with_compiler_stack(
         library_launch_uses_declared_runtime_types_and_exact_simulated_output_on_compiler_thread,
     );
 }
@@ -453,7 +453,7 @@ fn library_launch_uses_declared_runtime_types_and_exact_simulated_output_on_comp
 
 #[test]
 fn generic_sizes_execute_in_forwarded_calls_and_escaping_closures() {
-    hirsel_engine::with_compiler_stack(
+    hirsel_intern::jobs::with_compiler_stack(
         generic_sizes_execute_in_forwarded_calls_and_escaping_closures_on_compiler_thread,
     );
 }
@@ -507,7 +507,7 @@ fn grant_error(refusal: GrantError) -> () uses {} { () }
 
 #[test]
 fn borrowed_branch_results_execute_both_alternatives() {
-    hirsel_engine::with_compiler_stack(
+    hirsel_intern::jobs::with_compiler_stack(
         borrowed_branch_results_execute_both_alternatives_on_compiler_thread,
     );
 }
@@ -551,7 +551,7 @@ fn grant_error(refusal: GrantError) -> () uses {} { () }
 
 #[test]
 fn ambient_heap_token_executes_without_an_allocation_or_capability() {
-    hirsel_engine::with_compiler_stack(
+    hirsel_intern::jobs::with_compiler_stack(
         ambient_heap_token_executes_without_an_allocation_or_capability_on_compiler_thread,
     );
 }
@@ -579,7 +579,7 @@ fn ambient_heap_token_executes_without_an_allocation_or_capability_on_compiler_t
 
 #[test]
 fn consuming_cursors_release_yielded_and_remaining_resources_exactly_once() {
-    hirsel_engine::with_compiler_stack(
+    hirsel_intern::jobs::with_compiler_stack(
         consuming_cursors_release_yielded_and_remaining_resources_exactly_once_on_compiler_thread,
     );
 }
@@ -659,7 +659,7 @@ pub fn main(rt:Io) -> Result[(),GrantError] {{
 
 #[test]
 fn observed_api_failure_retains_stdout_and_inner_cause() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
         let file = engine.sources.add("unavailable.hir", "fn charge[T: copyable](x: T) -> u8 { match arena.bounded(64, fn(a: Arena) -> u8 { let c = copy_to(a, x); 0u8 }) { Ok(n) => n, Error(e) => 1u8 } }\npub fn main(rt: Io, args: Args) -> Result[(), GrantError] { let _ = out.print(io.stdout(rt)?, \"before unavailable\\n\"); let n = charge(7u8); Ok(()) }".into()).unwrap();
         let checked = source_check_request(&mut engine, file, &default_context()).unwrap();
@@ -691,7 +691,7 @@ fn observed_api_failure_retains_stdout_and_inner_cause() {
 
 #[test]
 fn strict_and_mixed_replacement_failures_keep_the_new_value_in_named_cleanup_order() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         for source in [
             include_str!("../../../../conformance/DROP/DROP-2-moved-storage-failure-strict.hir"),
             include_str!("../../../../conformance/DROP/DROP-2-moved-storage-failure-mixed.hir"),
@@ -732,7 +732,7 @@ fn strict_and_mixed_replacement_failures_keep_the_new_value_in_named_cleanup_ord
 
 #[test]
 fn all_four_projection_controls_propagate_not_granted_without_dummy_capabilities() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         for (operation, source) in [
             ("stdout", include_str!("../fixtures/grants/stdout.hir")),
             ("tasks", include_str!("../fixtures/grants/tasks.hir")),

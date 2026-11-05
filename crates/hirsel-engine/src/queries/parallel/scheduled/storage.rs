@@ -290,9 +290,9 @@ impl StorageTask {
         }
         let reads = Arc::new(reads.finish().map_err(|_| owner.errors.protocol)?);
         let mut weight = crate::memo::retained::Weight::default();
-        weight.add(
-            crate::memo::retained_arc_bytes(&std::mem::MaybeUninit::<Outcome>::uninit()) as usize,
-        );
+        weight.add(hirsel_engine_admission::retained_arc_bytes(
+            &std::mem::MaybeUninit::<Outcome>::uninit(),
+        ) as usize);
         weight.reads(&reads);
         match &result {
             Ok(output) => weight.arc(output, |w, output| {
@@ -309,13 +309,17 @@ impl StorageTask {
             Result<Arc<QueryOutput<StorageDefinition>>, QueryError>,
             Arc<Reads>,
         );
-        weight.add(crate::memo::retained_arc_bytes(&std::mem::MaybeUninit::<
-            super::super::super::live_record::LiveRecord<Record>,
-        >::uninit()) as usize);
+        weight.add(
+            hirsel_engine_admission::retained_arc_bytes(&std::mem::MaybeUninit::<
+                super::super::super::live_record::LiveRecord<Record>,
+            >::uninit()) as usize,
+        );
         weight.def_path(path);
-        weight.add(crate::memo::retained_arc_bytes(&std::mem::MaybeUninit::<
-            hirsel_engine_admission::MemoryReservation,
-        >::uninit()) as usize);
+        weight.add(
+            hirsel_engine_admission::retained_arc_bytes(&std::mem::MaybeUninit::<
+                hirsel_engine_admission::MemoryReservation,
+            >::uninit()) as usize,
+        );
         let reservation = Arc::new(
             owner
                 .outputs

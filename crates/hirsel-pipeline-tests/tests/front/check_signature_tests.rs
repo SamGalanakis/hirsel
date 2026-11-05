@@ -42,11 +42,9 @@ fn flat_storage_proves_actual_nominal_and_generic_fields() {
 
 #[test]
 fn represented_seals_prove_ceilings_and_exported_bounds() {
-    use hirsel_engine::{
-        QueryEngine, default_context, default_environment, source_check_request,
-        with_compiler_stack,
-    };
+    use hirsel_engine::{QueryEngine, default_context, default_environment, source_check_request};
     use hirsel_front_phases::compiler_adapters;
+    use hirsel_intern::jobs::with_compiler_stack;
     with_compiler_stack(|| {
         for (declaration, expected) in [
             (

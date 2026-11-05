@@ -4,7 +4,9 @@
 use super::NativeExecution;
 use super::NativeRequest;
 use super::native_bootstrap::NativeBootstrap;
-use hirsel_engine::{FrontNativeProducts, runtime::ProductRef, store::ResultStore};
+use hirsel_engine::{FrontNativeProducts, store::ResultStore};
+use hirsel_engine_runtime::ProductRef;
+
 use hirsel_native::NativeError;
 use hirsel_native::StageName;
 use hirsel_native::object_queries;

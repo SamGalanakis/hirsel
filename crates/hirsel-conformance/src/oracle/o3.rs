@@ -25,7 +25,7 @@ const KINDS: [QueryKind; 5] = [
 pub fn run(scenarios: &[Scenario]) -> Report {
     let mut report = Report::new("O3");
     for scenario in scenarios {
-        if let Err(why) = hirsel_engine::with_compiler_stack(|| one(scenario, &mut report)) {
+        if let Err(why) = hirsel_intern::jobs::with_compiler_stack(|| one(scenario, &mut report)) {
             report.add(format!("{}: setup", scenario.name), Verdict::Fail(why));
         }
     }

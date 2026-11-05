@@ -1,7 +1,8 @@
 //! PROG-3's return contract on the interpreter, checked interpreter, heap and both emitters.
 use hirsel_driver::native;
-use hirsel_engine::{DefinitionQueries, RunConfiguration, SimulationConfig, with_compiler_stack};
+use hirsel_engine::{DefinitionQueries, RunConfiguration, SimulationConfig};
 use hirsel_front_phases::load_program_source;
+use hirsel_intern::jobs::with_compiler_stack;
 
 #[test]
 fn exit_code_16_all_entry_shapes_and_status_bytes_agree() {

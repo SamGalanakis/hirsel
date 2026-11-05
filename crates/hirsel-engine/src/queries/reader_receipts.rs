@@ -68,12 +68,12 @@ impl ReaderReceipt {
         let charge = reads
             .allocations()
             .try_fold(
-                crate::memo::retained_arc_bytes(reads),
+                hirsel_engine_admission::retained_arc_bytes(reads),
                 |bytes, (_, allocation)| bytes.checked_add(allocation as u64),
             )?
-            .checked_add(crate::memo::retained_arc_bytes(&std::mem::MaybeUninit::<
-                ReaderBacking,
-            >::uninit()))?;
+            .checked_add(hirsel_engine_admission::retained_arc_bytes(
+                &std::mem::MaybeUninit::<ReaderBacking>::uninit(),
+            ))?;
         if let Some(admission) = store.try_admit_product_memory(charge) {
             return Some(Self {
                 backing: Arc::new(ReaderBacking::Live {
@@ -86,7 +86,7 @@ impl ReaderReceipt {
         let encoded = reads.encoded_bytes()?;
         let native = (reads.len() as u64)
             .checked_mul((size_of::<(ReadKey, ContentHash)>() + 4) as u64)?
-            .checked_add(crate::memo::retained_arc_bytes(reads))?;
+            .checked_add(hirsel_engine_admission::retained_arc_bytes(reads))?;
         if encoded.checked_mul(2)?.checked_add(native)? > scratch {
             return None;
         }
@@ -214,22 +214,22 @@ impl ReadUnion {
 /// that original grant and the required request transport alive.
 pub(crate) struct ArchivedReader {
     receipt: ReaderReceipt,
-    source: Arc<crate::runtime::GrowthPublicationSource>,
+    source: Arc<crate::products::GrowthPublicationSource>,
     _owned: Option<Arc<hirsel_engine_admission::MemoryReservation>>,
 }
 impl ArchivedReader {
-    pub(crate) fn source(&self) -> &Arc<crate::runtime::GrowthPublicationSource> {
+    pub(crate) fn source(&self) -> &Arc<crate::products::GrowthPublicationSource> {
         &self.source
     }
     pub(crate) fn capture(
-        source: Arc<crate::runtime::GrowthPublicationSource>,
+        source: Arc<crate::products::GrowthPublicationSource>,
         reads: &Reads,
     ) -> Option<Arc<Self>> {
         let receipt = ReaderReceipt::capture(&*source.store, reads, source.scratch)?;
         Some(Self::from_receipt(source, receipt))
     }
     pub(super) fn from_receipt(
-        source: Arc<crate::runtime::GrowthPublicationSource>,
+        source: Arc<crate::products::GrowthPublicationSource>,
         receipt: ReaderReceipt,
     ) -> Arc<Self> {
         Arc::new(Self {
@@ -239,14 +239,15 @@ impl ArchivedReader {
         })
     }
     pub(crate) fn capture_owned(
-        source: Arc<crate::runtime::GrowthPublicationSource>,
+        source: Arc<crate::products::GrowthPublicationSource>,
         reads: &Reads,
         pool: &hirsel_engine_admission::MemoryReservationPool,
     ) -> Option<Arc<Self>> {
-        let bytes = crate::memo::retained_arc_bytes(&std::mem::MaybeUninit::<Self>::uninit())
-            .checked_add(crate::memo::retained_arc_bytes(&std::mem::MaybeUninit::<
-                hirsel_engine_admission::MemoryReservation,
-            >::uninit()))?;
+        let bytes =
+            hirsel_engine_admission::retained_arc_bytes(&std::mem::MaybeUninit::<Self>::uninit())
+                .checked_add(hirsel_engine_admission::retained_arc_bytes(
+                &std::mem::MaybeUninit::<hirsel_engine_admission::MemoryReservation>::uninit(),
+            ))?;
         let allowance = Arc::new(pool.take(bytes)?);
         let mut reader = Self::capture(source, reads)?;
         Arc::get_mut(&mut reader)?._owned = Some(allowance);

@@ -2,10 +2,9 @@
 //! scalar returns `{ value, status }` in registers, so the erased stage loop of
 //! `bench/native/programs/closure-iter-erased.hir` calls through its code
 //! pointers with no out-cell, on both targets.
-use hirsel_engine::{
-    QueryEngine, default_context, default_environment, source_check_request, with_compiler_stack,
-};
+use hirsel_engine::{QueryEngine, default_context, default_environment, source_check_request};
 use hirsel_front_phases::compiler_adapters;
+use hirsel_intern::jobs::with_compiler_stack;
 use hirsel_native::OptLevel;
 use hirsel_native::Options;
 use hirsel_native::TargetSpec;

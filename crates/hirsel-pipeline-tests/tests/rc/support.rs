@@ -3,9 +3,10 @@
 //! (the driver wires the same adapter).
 use hirsel_engine::{
     DefinitionQueries, InstanceKind, NativeInput, QueryEngine, default_context,
-    default_environment, source_check_request, with_compiler_stack,
+    default_environment, source_check_request,
 };
 use hirsel_front_phases::compiler_adapters;
+use hirsel_intern::jobs::with_compiler_stack;
 use hirsel_layout::layout::{OwnerRepresentation, Owners};
 
 use hirsel_lir::stage::InputIdentity;

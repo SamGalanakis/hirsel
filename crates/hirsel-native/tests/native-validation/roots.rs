@@ -20,7 +20,7 @@ fn manifest(program: &Program) -> hirsel_core_contract::Manifest {
     hirsel_core_contract::Manifest::skeleton(program.operations.values().cloned())
 }
 fn lower_valid(source: &str) -> (Program, hirsel_rc::import::Lowered) {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let mut engine = hirsel_engine::QueryEngine::new(
             hirsel_engine::default_environment(),
             hirsel_front_phases::compiler_adapters(),

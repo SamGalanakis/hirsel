@@ -11,7 +11,7 @@ fn check(source: &str) -> CheckOutput {
 
 #[test]
 fn growing_cycles_cite_the_earliest_growing_call() {
-    hirsel_engine::with_compiler_stack(
+    hirsel_intern::jobs::with_compiler_stack(
         growing_cycles_cite_the_earliest_growing_call_on_compiler_thread,
     );
 }
@@ -34,7 +34,7 @@ fn growing_cycles_cite_the_earliest_growing_call_on_compiler_thread() {
 
 #[test]
 fn stable_shrinking_acyclic_and_reset_edges_are_not_growth_cycles() {
-    hirsel_engine::with_compiler_stack(
+    hirsel_intern::jobs::with_compiler_stack(
         stable_shrinking_acyclic_and_reset_edges_are_not_growth_cycles_on_compiler_thread,
     );
 }
@@ -51,7 +51,7 @@ fn stable_shrinking_acyclic_and_reset_edges_are_not_growth_cycles_on_compiler_th
 
 #[test]
 fn graph_verdict_updates_after_same_signature_body_edits() {
-    hirsel_engine::with_compiler_stack(
+    hirsel_intern::jobs::with_compiler_stack(
         graph_verdict_updates_after_same_signature_body_edits_on_compiler_thread,
     );
 }
@@ -78,7 +78,7 @@ fn graph_verdict_updates_after_same_signature_body_edits_on_compiler_thread() {
 
 #[test]
 fn graph_source_order_does_not_depend_on_file_discovery() {
-    hirsel_engine::with_compiler_stack(
+    hirsel_intern::jobs::with_compiler_stack(
         graph_source_order_does_not_depend_on_file_discovery_on_compiler_thread,
     );
 }
@@ -146,7 +146,7 @@ const EDGES: &str = "resource type Holder[T: copyable] { v: T }\ndrop(x) { keep(
 
 #[test]
 fn exported_instance_edges_keep_owner_store_binder_and_round_trip() {
-    hirsel_engine::with_compiler_stack(
+    hirsel_intern::jobs::with_compiler_stack(
         exported_instance_edges_keep_owner_store_binder_and_round_trip_on_compiler_thread,
     );
 }
@@ -197,7 +197,7 @@ fn exported_instance_edges_keep_owner_store_binder_and_round_trip_on_compiler_th
 
 #[test]
 fn native_import_rejects_forged_and_dropped_instance_edges() {
-    hirsel_engine::with_compiler_stack(
+    hirsel_intern::jobs::with_compiler_stack(
         native_import_rejects_forged_and_dropped_instance_edges_on_compiler_thread,
     );
 }
@@ -348,7 +348,7 @@ fn source_verdict(units: &[String]) -> (QueryEngine, Vec<String>) {
 
 #[test]
 fn finite_cycles_pass_and_growing_cycles_fail_over_every_partition_order() {
-    hirsel_engine::with_compiler_stack(
+    hirsel_intern::jobs::with_compiler_stack(
         finite_cycles_pass_and_growing_cycles_fail_over_every_partition_order_on_compiler_thread,
     );
 }
@@ -409,7 +409,7 @@ fn finite_cycles_pass_and_growing_cycles_fail_over_every_partition_order_on_comp
 
 #[test]
 fn a_growing_finalizer_cycle_is_native_unavailable_over_every_partition_order() {
-    hirsel_engine::with_compiler_stack(
+    hirsel_intern::jobs::with_compiler_stack(
         a_growing_finalizer_cycle_is_native_unavailable_over_every_partition_order_on_compiler_thread,
     );
 }

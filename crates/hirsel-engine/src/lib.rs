@@ -4,7 +4,7 @@
 hirsel_guard::install!(test_alloc::Counting: test_alloc::Counting);
 
 #[cfg(test)]
-mod test_alloc;
+use hirsel_engine_admission::test_alloc;
 mod work;
 pub use work::WorkStats;
 mod native_audit;
@@ -653,10 +653,7 @@ mod tests {
     }
 }
 
-mod stack;
-pub use stack::{COMPILER_STACK_BYTES, with_compiler_stack};
-
-pub mod runtime;
+pub mod products;
 
 pub use queries::native_discovery::{
     NATIVE_DISCOVERY_KIND, NativeBodyContracts, NativeDiscoveryCache, NativeDiscoveryCounts,

@@ -159,7 +159,7 @@ fn assert_record(bytes: &[u8], row: &Value) {
 }
 #[test]
 fn discrete_simulation_33_reference_checked_workflows() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let root = root("simulation-");
         let path = package(&root);
         let mut loaded = hirsel_front_phases::load_program(&path).unwrap();
@@ -244,7 +244,7 @@ fn discrete_simulation_33_reference_checked_workflows() {
 }
 #[test]
 fn discrete_simulation_33_native_full_entry_replay() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let root = std::env::var_os("QUEUESIM_NATIVE_ROOT")
             .map(PathBuf::from)
             .unwrap_or_else(|| root("native-"));
@@ -674,7 +674,7 @@ fn discrete_simulation_33_arithmetic_and_encoder_boundaries() {
 fn ordered(backend: Backend) {
     use std::io::{BufRead, BufReader, Write};
     use std::os::unix::net::UnixStream;
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let root = root(&format!("ordered-{backend:?}-"));
         let _evidence = super::width_capacity_36::Evidence(root.clone());
         let path = package(&root);

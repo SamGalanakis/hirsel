@@ -538,7 +538,7 @@ impl NativeProducts for DemandProducts {
             || current.reference
                 != summary
                     .product
-                    .archive(hirsel_engine::runtime::ArchiveAdmission::Retained)
+                    .archive(hirsel_engine_runtime::ArchiveAdmission::Retained)
                     .map_err(|e| e.to_string())?
                     .reference()
             || self.snapshot.store.get_content(current.reference).is_none()

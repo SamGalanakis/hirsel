@@ -22,7 +22,7 @@ fn ownership_request_selects_native_source_products_and_keeps_readiness_compiler
 }
 
 fn source_request(explicit_manifest: bool) {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("main.hir");
         std::fs::write(&path, "resource type Token { value:u64 }\ndrop(x) {}\npub fn main()->Result[(),u64] { let first=Token(value:7u64)\nlet second=take first\nOk(()) }\n").unwrap();

@@ -9,7 +9,7 @@ use hirsel_conformance::{SeededCompiler, Status, run_suite_selected_with_format}
 use std::{env, process::ExitCode};
 
 fn main() -> ExitCode {
-    hirsel_engine::with_compiler_stack(main_on_compiler_thread)
+    hirsel_intern::jobs::with_compiler_stack(main_on_compiler_thread)
 }
 fn main_on_compiler_thread() -> ExitCode {
     let mut common = CommonOptions::default();

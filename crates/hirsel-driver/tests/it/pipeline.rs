@@ -169,7 +169,7 @@ fn equal_fresh(engine: &mut QueryEngine, source: &str) {
 }
 #[test]
 fn real_phases_edit_body_signature_failed_read_and_recovery() {
-    hirsel_engine::with_compiler_stack(
+    hirsel_intern::jobs::with_compiler_stack(
         real_phases_edit_body_signature_failed_read_and_recovery_on_compiler_thread,
     );
 }
@@ -215,7 +215,7 @@ fn real_phases_edit_body_signature_failed_read_and_recovery_on_compiler_thread()
 }
 #[test]
 fn registry_fallback_records_reads_and_respects_program_definitions() {
-    hirsel_engine::with_compiler_stack(
+    hirsel_intern::jobs::with_compiler_stack(
         registry_fallback_records_reads_and_respects_program_definitions_on_compiler_thread,
     );
 }
@@ -258,7 +258,7 @@ fn registry_fallback_records_reads_and_respects_program_definitions_on_compiler_
 
 #[test]
 fn calls_borrow_owned_string_computations_without_transferring_them() {
-    hirsel_engine::with_compiler_stack(
+    hirsel_intern::jobs::with_compiler_stack(
         calls_borrow_owned_string_computations_without_transferring_them_on_compiler_thread,
     );
 }
@@ -299,7 +299,7 @@ fn calls_borrow_owned_string_computations_without_transferring_them_on_compiler_
 
 #[test]
 fn inferred_closures_satisfy_unrestricted_callable_authority_promises() {
-    hirsel_engine::with_compiler_stack(
+    hirsel_intern::jobs::with_compiler_stack(
         inferred_closures_satisfy_unrestricted_callable_authority_promises_on_compiler_thread,
     );
 }
@@ -320,7 +320,7 @@ fn inferred_closures_satisfy_unrestricted_callable_authority_promises_on_compile
 
 #[test]
 fn written_function_binding_uses_restrict_closure_captures() {
-    hirsel_engine::with_compiler_stack(
+    hirsel_intern::jobs::with_compiler_stack(
         written_function_binding_uses_restrict_closure_captures_on_compiler_thread,
     );
 }
@@ -350,7 +350,7 @@ fn written_function_binding_uses_restrict_closure_captures_on_compiler_thread() 
 
 #[test]
 fn noalloc_function_values_satisfy_callbacks_that_permit_allocation() {
-    hirsel_engine::with_compiler_stack(
+    hirsel_intern::jobs::with_compiler_stack(
         noalloc_function_values_satisfy_callbacks_that_permit_allocation_on_compiler_thread,
     );
 }
@@ -366,7 +366,7 @@ fn noalloc_function_values_satisfy_callbacks_that_permit_allocation_on_compiler_
 
 #[test]
 fn generic_value_evidence_does_not_strengthen_callable_or_container_promises() {
-    hirsel_engine::with_compiler_stack(generic_value_evidence_does_not_strengthen_callable_or_container_promises_on_compiler_thread);
+    hirsel_intern::jobs::with_compiler_stack(generic_value_evidence_does_not_strengthen_callable_or_container_promises_on_compiler_thread);
 }
 fn generic_value_evidence_does_not_strengthen_callable_or_container_promises_on_compiler_thread() {
     for source in [
@@ -387,7 +387,7 @@ fn generic_value_evidence_does_not_strengthen_callable_or_container_promises_on_
 
 #[test]
 fn generic_bounds_check_each_complete_actual_and_callback_result() {
-    hirsel_engine::with_compiler_stack(
+    hirsel_intern::jobs::with_compiler_stack(
         generic_bounds_check_each_complete_actual_and_callback_result_on_compiler_thread,
     );
 }
@@ -434,7 +434,7 @@ fn generic_bounds_check_each_complete_actual_and_callback_result_on_compiler_thr
 
 #[test]
 fn shared_properties_survive_substitution_projection_and_ownership_refinement() {
-    hirsel_engine::with_compiler_stack(shared_properties_survive_substitution_projection_and_ownership_refinement_on_compiler_thread);
+    hirsel_intern::jobs::with_compiler_stack(shared_properties_survive_substitution_projection_and_ownership_refinement_on_compiler_thread);
 }
 fn shared_properties_survive_substitution_projection_and_ownership_refinement_on_compiler_thread() {
     for source in [
@@ -458,7 +458,7 @@ fn shared_properties_survive_substitution_projection_and_ownership_refinement_on
 
 #[test]
 fn outer_parameter_authority_is_instantiated_in_callback_arguments_and_results() {
-    hirsel_engine::with_compiler_stack(outer_parameter_authority_is_instantiated_in_callback_arguments_and_results_on_compiler_thread);
+    hirsel_intern::jobs::with_compiler_stack(outer_parameter_authority_is_instantiated_in_callback_arguments_and_results_on_compiler_thread);
 }
 fn outer_parameter_authority_is_instantiated_in_callback_arguments_and_results_on_compiler_thread()
 {
@@ -481,7 +481,7 @@ fn outer_parameter_authority_is_instantiated_in_callback_arguments_and_results_o
 
 #[test]
 fn local_result_rejects_an_undeclared_parameter_even_through_an_alias() {
-    hirsel_engine::with_compiler_stack(
+    hirsel_intern::jobs::with_compiler_stack(
         local_result_rejects_an_undeclared_parameter_even_through_an_alias_on_compiler_thread,
     );
 }
@@ -509,7 +509,7 @@ fn local_result_rejects_an_undeclared_parameter_even_through_an_alias_on_compile
 
 #[test]
 fn conditional_local_results_retain_alternative_sources() {
-    hirsel_engine::with_compiler_stack(
+    hirsel_intern::jobs::with_compiler_stack(
         conditional_local_results_retain_alternative_sources_on_compiler_thread,
     );
 }
@@ -533,7 +533,7 @@ fn conditional_local_results_retain_alternative_sources_on_compiler_thread() {
 
 #[test]
 fn erased_iterator_state_retains_authority_and_sendability() {
-    hirsel_engine::with_compiler_stack(
+    hirsel_intern::jobs::with_compiler_stack(
         erased_iterator_state_retains_authority_and_sendability_on_compiler_thread,
     );
 }
@@ -561,7 +561,7 @@ fn erased_iterator_state_retains_authority_and_sendability_on_compiler_thread() 
 
 #[test]
 fn heap_is_a_typed_allocator_value_through_aliases() {
-    hirsel_engine::with_compiler_stack(
+    hirsel_intern::jobs::with_compiler_stack(
         heap_is_a_typed_allocator_value_through_aliases_on_compiler_thread,
     );
 }
@@ -597,7 +597,7 @@ fn heap_is_a_typed_allocator_value_through_aliases_on_compiler_thread() {
 
 #[test]
 fn consuming_sequence_loops_extract_owned_elements_through_cursor_calls() {
-    hirsel_engine::with_compiler_stack(
+    hirsel_intern::jobs::with_compiler_stack(
         consuming_sequence_loops_extract_owned_elements_through_cursor_calls_on_compiler_thread,
     );
 }
@@ -617,7 +617,7 @@ fn consuming_sequence_loops_extract_owned_elements_through_cursor_calls_on_compi
 
 #[test]
 fn local_result_calls_select_actual_lifetime_independently_of_identity() {
-    hirsel_engine::with_compiler_stack(
+    hirsel_intern::jobs::with_compiler_stack(
         local_result_calls_select_actual_lifetime_independently_of_identity_on_compiler_thread,
     );
 }
@@ -642,7 +642,7 @@ fn local_result_calls_select_actual_lifetime_independently_of_identity_on_compil
 
 #[test]
 fn branded_calls_replay_argument_identity_from_storage() {
-    hirsel_engine::with_compiler_stack(
+    hirsel_intern::jobs::with_compiler_stack(
         branded_calls_replay_argument_identity_from_storage_on_compiler_thread,
     );
 }
@@ -675,7 +675,7 @@ fn branded_calls_replay_argument_identity_from_storage_on_compiler_thread() {
 
 #[test]
 fn closure_calls_keep_the_captured_alias_identity() {
-    hirsel_engine::with_compiler_stack(
+    hirsel_intern::jobs::with_compiler_stack(
         closure_calls_keep_the_captured_alias_identity_on_compiler_thread,
     );
 }
@@ -705,7 +705,7 @@ fn closure_calls_keep_the_captured_alias_identity_on_compiler_thread() {
 
 #[test]
 fn generic_relays_preserve_owned_capture_identity_scopes() {
-    hirsel_engine::with_compiler_stack(
+    hirsel_intern::jobs::with_compiler_stack(
         generic_relays_preserve_owned_capture_identity_scopes_on_compiler_thread,
     );
 }
@@ -838,7 +838,7 @@ fn assert_captured_alias_identity(body: &str, rejects_end_origin: bool) {
 
 #[test]
 fn sibling_projection_cannot_claim_another_records_identity() {
-    hirsel_engine::with_compiler_stack(
+    hirsel_intern::jobs::with_compiler_stack(
         sibling_projection_cannot_claim_another_records_identity_on_compiler_thread,
     );
 }
@@ -898,7 +898,7 @@ fn sibling_projection_cannot_claim_another_records_identity_on_compiler_thread()
 
 #[test]
 fn sibling_constructor_checks_the_supplied_owner_operand() {
-    hirsel_engine::with_compiler_stack(
+    hirsel_intern::jobs::with_compiler_stack(
         sibling_constructor_checks_the_supplied_owner_operand_on_compiler_thread,
     );
 }
@@ -962,7 +962,7 @@ fn sibling_constructor_checks_the_supplied_owner_operand_on_compiler_thread() {
 
 #[test]
 fn destructuring_derives_sibling_brands_instead_of_trusting_field_types() {
-    hirsel_engine::with_compiler_stack(
+    hirsel_intern::jobs::with_compiler_stack(
         destructuring_derives_sibling_brands_instead_of_trusting_field_types_on_compiler_thread,
     );
 }
@@ -1038,7 +1038,7 @@ fn destructuring_derives_sibling_brands_instead_of_trusting_field_types_on_compi
 
 #[test]
 fn computed_unary_values_do_not_retain_the_operand_identity() {
-    hirsel_engine::with_compiler_stack(
+    hirsel_intern::jobs::with_compiler_stack(
         computed_unary_values_do_not_retain_the_operand_identity_on_compiler_thread,
     );
 }
@@ -1062,7 +1062,7 @@ fn computed_unary_values_do_not_retain_the_operand_identity_on_compiler_thread()
 
 #[test]
 fn named_function_identity_requires_named_definition_evidence() {
-    hirsel_engine::with_compiler_stack(
+    hirsel_intern::jobs::with_compiler_stack(
         named_function_identity_requires_named_definition_evidence_on_compiler_thread,
     );
 }
@@ -1120,7 +1120,7 @@ fn named_function_identity_requires_named_definition_evidence_on_compiler_thread
 
 #[test]
 fn expiring_one_stored_capture_does_not_invalidate_another_field() {
-    hirsel_engine::with_compiler_stack(
+    hirsel_intern::jobs::with_compiler_stack(
         expiring_one_stored_capture_does_not_invalidate_another_field_on_compiler_thread,
     );
 }
@@ -1181,7 +1181,7 @@ fn expiring_one_stored_capture_does_not_invalidate_another_field_on_compiler_thr
 
 #[test]
 fn mutable_iteration_alias_access_requires_its_live_loan() {
-    hirsel_engine::with_compiler_stack(
+    hirsel_intern::jobs::with_compiler_stack(
         mutable_iteration_alias_access_requires_its_live_loan_on_compiler_thread,
     );
 }
@@ -1275,7 +1275,7 @@ fn mutable_iteration_alias_access_requires_its_live_loan_on_compiler_thread() {
 
 #[test]
 fn borrowed_closure_and_holder_relay_retain_source_loans() {
-    hirsel_engine::with_compiler_stack(
+    hirsel_intern::jobs::with_compiler_stack(
         borrowed_closure_and_holder_relay_retain_source_loans_on_compiler_thread,
     );
 }
@@ -1370,7 +1370,7 @@ fn borrowed_closure_and_holder_relay_retain_source_loans_on_compiler_thread() {
 
 #[test]
 fn cached_phase_artifacts_keep_frames_cursors_and_ownership_with_their_body() {
-    hirsel_engine::with_compiler_stack(
+    hirsel_intern::jobs::with_compiler_stack(
         cached_phase_artifacts_keep_frames_cursors_and_ownership_with_their_body_on_compiler_thread,
     );
 }
@@ -1416,7 +1416,7 @@ fn cached_phase_artifacts_keep_frames_cursors_and_ownership_with_their_body_on_c
 
 #[test]
 fn missing_capability_arguments_keep_declared_mutation_ordinals() {
-    hirsel_engine::with_compiler_stack(
+    hirsel_intern::jobs::with_compiler_stack(
         missing_capability_arguments_keep_declared_mutation_ordinals_on_compiler_thread,
     );
 }
@@ -1514,7 +1514,7 @@ fn an_element_of_a_capture_has_its_own_name_but_cannot_take_the_captures() {
 
 #[test]
 fn fresh_alias_join_identity_is_independently_checked() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         use hirsel_types::SignatureProvider;
         for branch in [
             "if c{r=copy z}",
@@ -1572,7 +1572,7 @@ fn fresh_alias_join_identity_is_independently_checked() {
 
 #[test]
 fn moved_aliases_have_no_join_identity_introduction() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         for branch in [
             "if c{let _=take r}",
             "match c{true=>{let _=take r},false=>{}}",
@@ -1610,7 +1610,7 @@ fn moved_aliases_have_no_join_identity_introduction() {
 
 #[test]
 fn copied_field_join_partitions_are_independently_checked() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         use hirsel_types::SignatureProvider;
         for branch in [
             "if c{r.n=3}",
@@ -1689,7 +1689,7 @@ fn copied_field_join_partitions_are_independently_checked() {
 
 #[test]
 fn closure_authority_allows_capabilities_derived_from_permitted_inputs() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         for body in [
             "let _=(fn(){out.print(rt,\"ok\\n\")})()",
             "let f=fn(){out.print(rt,\"ok\\n\")};let _=f()",
@@ -1706,7 +1706,7 @@ fn closure_authority_allows_capabilities_derived_from_permitted_inputs() {
 
 #[test]
 fn whole_owned_replacement_requires_a_fresh_receiving_origin() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         use hirsel_types::SignatureProvider;
         for replacement in ["s=copy s", "s=copy other", "s=take other"] {
             let source = format!(
@@ -1768,7 +1768,7 @@ fn whole_owned_replacement_requires_a_fresh_receiving_origin() {
 
 #[test]
 fn record_constructors_independently_require_every_declared_field() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         use hirsel_types::SignatureProvider;
         for declaration in ["type R{x:u8}", "type R[T]{x:T}"] {
             let source = format!("{declaration}\nfn probe(){{let x=R(x:1u8)}}");
@@ -1824,7 +1824,7 @@ fn record_constructors_independently_require_every_declared_field() {
 
 #[test]
 fn call_argument_mapping_independently_rejects_missing_and_duplicate_ordinals() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         use hirsel_types::SignatureProvider;
         let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
         edit(
@@ -1888,7 +1888,7 @@ fn call_argument_mapping_independently_rejects_missing_and_duplicate_ordinals() 
 
 #[test]
 fn branch_results_are_independently_checked_against_the_receiving_type() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         use hirsel_types::SignatureProvider;
         for branch in ["if b { 1u8 } else { 2 }", "match b { true=>1u8, false=>2 }"] {
             let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
@@ -1940,7 +1940,7 @@ fn branch_results_are_independently_checked_against_the_receiving_type() {
 
 #[test]
 fn match_payload_projections_keep_the_physical_type_and_validate_it_independently() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         use hirsel_types::SignatureProvider;
         let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
         edit(
@@ -2015,7 +2015,7 @@ fn match_payload_projections_keep_the_physical_type_and_validate_it_independentl
 
 #[test]
 fn projected_unique_receipts_require_current_deep_owner_uniqueness() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         use hirsel_types::SignatureProvider;
         let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
         edit(
@@ -2153,7 +2153,7 @@ fn projected_unique_receipts_require_current_deep_owner_uniqueness() {
 
 #[test]
 fn aggregate_uniqueness_requires_owned_unique_parts_independently() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         for (source, nominal) in [
             (
                 "type R{items:List[Bytes]}\nfn probe(take xs:List[Bytes]){let r=R(items:take xs)}",
@@ -2279,7 +2279,7 @@ fn aggregate_uniqueness_requires_owned_unique_parts_independently() {
 
 #[test]
 fn nonrecord_names_cannot_forge_nullary_record_constructions() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         use hirsel_types::SignatureProvider;
         for name in ["u8", "bool", "List"] {
             let source = format!("fn probe(){{let x={name}}}");
@@ -2365,7 +2365,7 @@ fn nonrecord_names_cannot_forge_nullary_record_constructions() {
 
 #[test]
 fn physical_projection_contracts_are_independently_checked() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         use hirsel_types::SignatureProvider;
         for (source, names, local) in [
             (
@@ -2448,7 +2448,7 @@ fn physical_projection_contracts_are_independently_checked() {
 
 #[test]
 fn computed_part_shares_cannot_forge_unique_aggregate_receipts() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         for value in ["box ({r}).xs", "(({r}).xs,1u8)"] {
             let source =
                 format!("type R{{xs:unique List[Bytes]}}\nfn probe(take r:R){{let built={value}}}");
@@ -2523,7 +2523,7 @@ fn computed_part_shares_cannot_forge_unique_aggregate_receipts() {
 
 #[test]
 fn shared_handle_qualifiers_publish_canonical_copy_receipts() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
         edit(
             &mut engine,
@@ -2604,7 +2604,7 @@ fn shared_handle_qualifiers_publish_canonical_copy_receipts() {
 
 #[test]
 fn nested_view_calls_preserve_mut_handback_and_reject_forged_strengthening() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         for mutable in [true, false] {
             let source = if mutable {
                 "fn inspect(take x:box List[Bytes]){}\nfn probe(){let xs:List[Bytes]=[b\"x\"];let x=box unique xs;inspect(take x)}"

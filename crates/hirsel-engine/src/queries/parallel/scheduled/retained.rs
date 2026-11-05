@@ -180,7 +180,7 @@ mod tests {
         let empty = Arc::new(Reads::empty());
         let first = outcome(empty.clone(), checked.clone());
         let base = metadata(&first, &None, None, &[]).unwrap()
-            + crate::memo::retained_arc_bytes(&OrderedSignatureReads::new(&[]));
+            + hirsel_engine_admission::retained_arc_bytes(&OrderedSignatureReads::new(&[]));
         assert_eq!(
             metadata(
                 &first,

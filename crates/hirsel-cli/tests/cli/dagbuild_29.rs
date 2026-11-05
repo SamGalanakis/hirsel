@@ -64,7 +64,7 @@ pub(super) fn cases() -> Vec<Value> {
 }
 #[test]
 fn dagbuild_29_reference_checked_workflows() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let scratch = scratch("dagbuild-29-semantic-");
         let selection = package(scratch.path());
         let prepared =

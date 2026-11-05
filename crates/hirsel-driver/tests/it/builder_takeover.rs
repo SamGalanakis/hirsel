@@ -7,9 +7,9 @@
 //! the diagnostic and the production runtime.
 use hirsel_engine::{
     QueryEngine, default_context, default_environment, entry_path, source_check_request,
-    with_compiler_stack,
 };
 use hirsel_front_phases::compiler_adapters;
+use hirsel_intern::jobs::with_compiler_stack;
 use hirsel_lir::ir::*;
 use hirsel_native::OptLevel;
 use hirsel_native::Options;

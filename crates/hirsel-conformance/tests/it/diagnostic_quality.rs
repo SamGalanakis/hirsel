@@ -36,7 +36,7 @@ fn core_source(dir: &Path, name: &str, source: &str) -> PathBuf {
 
 #[test]
 fn mechanical_json_repairs_recheck_and_preserve_primary_sites() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         for (case, twin, rule, line, before, after) in [
             (
                 "conformance/LANG/LANG-11-block-local-element-borrow-bad.hir",
@@ -140,7 +140,7 @@ fn mechanical_json_repairs_recheck_and_preserve_primary_sites() {
 
 #[test]
 fn near_miss_help_and_json_fixes_recheck_corpus() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         for (kind, before, after, help) in [
             (
                 "std",

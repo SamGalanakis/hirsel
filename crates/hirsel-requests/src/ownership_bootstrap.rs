@@ -3,9 +3,9 @@
 use super::native_lower;
 use super::native_routing::NativeRouting;
 use super::ownership_admission::Admission;
-use hirsel_engine::{
-    FrontLowerQueries, FrontNativeProducts, FrontNativeQueries, runtime::*, store::*,
-};
+use hirsel_engine::{FrontLowerQueries, FrontNativeProducts, FrontNativeQueries, store::*};
+use hirsel_engine_runtime::*;
+
 use hirsel_native::query_model as model;
 use hirsel_native::root_source::NativeLinkFacts;
 use hirsel_native::root_source::NativeLinkSource;

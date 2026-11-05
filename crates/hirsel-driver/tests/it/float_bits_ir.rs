@@ -2,10 +2,9 @@
 //! `from_bits` inverses are a bitcast and a NaN select in the caller, with no
 //! runtime entry, no status branch and no result slot, so a checksum loop over
 //! a float list is a reduction the vectorizer can take, as C's `memcpy` read is.
-use hirsel_engine::{
-    QueryEngine, default_context, default_environment, source_check_request, with_compiler_stack,
-};
+use hirsel_engine::{QueryEngine, default_context, default_environment, source_check_request};
 use hirsel_front_phases::compiler_adapters;
+use hirsel_intern::jobs::with_compiler_stack;
 use hirsel_native::OptLevel;
 use hirsel_native::Options;
 use hirsel_native::TargetSpec;

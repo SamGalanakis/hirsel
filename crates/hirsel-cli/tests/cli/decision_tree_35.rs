@@ -688,7 +688,7 @@ fn prepare_product_inputs(root: &Path, manifest: &Path) -> PathBuf {
     // Ordinary products are immutable action inputs. Package loading and the
     // qualification closure use the same tree before bounded cells start.
     let products = PathBuf::from(std::env::var_os("HIRSEL_PRODUCTS").unwrap());
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         hirsel_front_phases::load_program_source(manifest, None)
             .unwrap_or_else(|e| panic!("ordinary package setup: {e}"));
     });
@@ -793,7 +793,7 @@ fn decision_tree_35_native_record_replay() {
 #[test]
 #[ignore = "bounded per-vector worker, launched by the campaign"]
 fn decision_tree_35_cell() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let root = PathBuf::from(std::env::var_os("DECISION_TREE_35_ROOT").unwrap());
         let row: Value = serde_json::from_slice(
             &fs::read(std::env::var_os("DECISION_TREE_35_ROW_FILE").unwrap()).unwrap(),

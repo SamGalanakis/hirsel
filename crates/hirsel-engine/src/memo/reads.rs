@@ -539,7 +539,7 @@ impl Reads {
         self.indices.as_ref().map(|_| {
             let rows = 2 * size_of::<usize>() + self.len() * size_of::<(ReadKey, ContentHash)>();
             let observation = self.observation.as_ref().map_or(0, |order| {
-                super::retained::retained_arc_bytes(&**order) as usize
+                hirsel_engine_admission::retained_arc_bytes(&**order) as usize
             });
             rows + observation
         })
@@ -551,13 +551,13 @@ impl Reads {
         let indices = self.indices.as_ref().map(|indices| {
             (
                 indices.as_ptr() as usize,
-                super::retained::arc_bytes(&**indices),
+                hirsel_engine_admission::arc_bytes(&**indices),
             )
         });
         let observation = self.observation.as_ref().map(|order| {
             (
                 order.as_ptr() as usize,
-                super::retained::arc_bytes(&**order),
+                hirsel_engine_admission::arc_bytes(&**order),
             )
         });
         [rows, indices, observation].into_iter().flatten()

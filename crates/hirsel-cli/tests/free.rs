@@ -1431,7 +1431,7 @@ fn receives_reference_and_checked(
 ) {
     assert_eq!(live.stdout, b"receives\n");
     let (program, tape) = (scratch.path("main.hir"), scratch.path(level));
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let plain = hirsel_driver::replay_observations(&program, &tape, Some(1_000_000)).unwrap();
         let checked =
             hirsel_driver::replay_observations_checked(&program, &tape, Some(1_000_000)).unwrap();

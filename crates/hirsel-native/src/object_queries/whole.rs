@@ -1,7 +1,7 @@
 //! Explicit whole-module LLVM emission, using the same admitted Ready products
 //! and fragment transport as per-instance Codegen. No whole-program controller.
 use super::*;
-use hirsel_engine::runtime::QueryId;
+use hirsel_engine_runtime::QueryId;
 
 const SUMMARY: Domain = Domain {
     kind: 0x4f00_000a,
@@ -85,7 +85,7 @@ pub fn codegen<N: NativeProducts, L>(
         reads.extend([
             ready
                 .product
-                .archive(hirsel_engine::runtime::ArchiveAdmission::Retained)
+                .archive(hirsel_engine_runtime::ArchiveAdmission::Retained)
                 .map_err(|e| e.to_string())?
                 .reference(),
             ready.ready,

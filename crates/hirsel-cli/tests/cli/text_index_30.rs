@@ -109,7 +109,7 @@ fn expected(stage: &Value, output: &[u8]) {
 }
 
 fn scripted(boundary: bool) {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let scratch = scratch("text-index-30-script-");
         let selection = package(scratch.path());
         let mut loaded = hirsel_front_phases::load_program(&selection).unwrap();
@@ -331,7 +331,7 @@ fn text_index_30_boundaries_reference_checked() {
 }
 
 fn native(boundary: bool) {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         if let Ok(existing) = std::env::var("TEXT_INDEX_30_REPLAY_ONLY") {
             let root = Path::new(&existing);
             let selection = root.join("hirsel.json");
@@ -647,7 +647,7 @@ fn replay_refusals(selection: &Path, root: &Path, tape: &Path, binaries: &[PathB
 /// order, including when a younger task can start while the job is off-worker.
 #[test]
 fn ordered_file_jobs_preserve_host_replay_order() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let scratch = scratch("ordered-file-jobs-");
         let root = scratch.path();
         let input = root.join("input");

@@ -149,7 +149,7 @@ fn constructed_record_placed_by_its_part() {
 
 #[test]
 fn for_item_brand_diagnostic_names_the_declared_owner_without_internal_markers() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let text = rendered("PROV/PROV-1-for-item-find-reject.hir");
         assert!(!text.contains('\u{1}'), "{text}");
         assert!(text.contains("of other"), "{text}");

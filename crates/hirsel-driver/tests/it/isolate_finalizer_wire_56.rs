@@ -29,7 +29,7 @@ pub fn main(rt: Io) -> Result[(), GrantError] {
 
 #[test]
 fn source_finalizer_resolver_is_checked_at_both_native_entry_points() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         use hirsel_lir::emission::{EmitInputs, OptLevel};
         let program = super::runtime50_continuation::ready(SOURCE);
         let units: Vec<_> = program.units.iter().collect();
@@ -132,7 +132,7 @@ fn source_finalizer_resolver_is_checked_at_both_native_entry_points() {
 
 #[test]
 fn source_finalizer_physically_saves_with_retained_cursor_and_strict_replay() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let traces = super::runtime50_resume::compact_runs_with(
             SOURCE,
             "source boxed finalizer",

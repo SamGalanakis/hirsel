@@ -316,7 +316,7 @@ fn verify(row: &Value, o: &hirsel_interp::observation::Observable, world: &Fixtu
 }
 #[test]
 fn route_planner_33_reference_checked_workflows() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let root = scratch("simulation-");
         let path = package(&root);
         let mut loaded = hirsel_front_phases::load_program(&path).unwrap();
@@ -408,7 +408,7 @@ fn route_planner_33_reference_checked_workflows() {
 // both native backends and both interpreters, without files/readiness scripts.
 #[test]
 fn route_planner_33_native_four_engine_replay() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let raw_only = std::env::var("ROUTE_PLANNER_33_LIVE_STDERR_ONLY").as_deref() == Ok("1");
         if raw_only {
             assert!(
@@ -913,7 +913,7 @@ fn route_planner_33_native_four_engine_replay() {
 
 #[test]
 fn route_planner_33_output_cap_and_predecessor_controls() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let root = scratch("helper-controls-");
         let path = package_entry(
             &root,

@@ -9,9 +9,10 @@ use super::ownership_bootstrap;
 use super::ownership_bootstrap::OwnershipBootstrap;
 use hirsel_engine::{
     FrontNativeProducts, FrontNativeQueries, LoadedProgram, ToolError,
-    runtime::*,
     store::{Reference, VerifyStore},
 };
+use hirsel_engine_runtime::*;
+
 use hirsel_native_cache::ready::ObservedReady;
 use hirsel_native_queries::ownership_tasks::OwnershipTasks;
 use hirsel_syntax::{ContentHash, DefPath};

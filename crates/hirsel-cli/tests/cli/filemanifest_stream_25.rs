@@ -225,7 +225,7 @@ fn simulated(caps: bool) {
         fs::remove_dir_all(root).unwrap();
         return;
     }
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let root = scratch();
         let selection = package(&root);
         let mut loaded = hirsel_front_phases::load_program(&selection).unwrap();

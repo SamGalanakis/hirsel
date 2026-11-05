@@ -1,10 +1,9 @@
 //! Certified execution is a request dependency of ordinary Codegen and Link.
 //! The complete C-admitted closure binds both planners and final object checks.
 use super::{root_tasks::NativeRootTasks, *};
-use hirsel_engine::{
-    runtime::*,
-    store::{Action, Address, Domain},
-};
+use hirsel_engine::store::{Action, Address, Domain};
+use hirsel_engine_runtime::*;
+
 use hirsel_native::ReadyProgram;
 use hirsel_native::execution_plan::ExecutionPlan;
 use hirsel_native::execution_plan::{ExecutionProduct, identity};
@@ -188,7 +187,7 @@ impl ExecutionTasks {
         let dependencies = reads
             .iter()
             .map(|p| {
-                p.archive(hirsel_engine::runtime::ArchiveAdmission::Retained)
+                p.archive(hirsel_engine_runtime::ArchiveAdmission::Retained)
                     .map(|archive| archive.reference())
                     .map_err(|e| e.to_string())
             })
@@ -196,7 +195,7 @@ impl ExecutionTasks {
         let action = Action(ContentHash::of_parts(
             "hirsel.native.execution-action.v1",
             [serde_json::to_vec(&(
-                root.archive(hirsel_engine::runtime::ArchiveAdmission::Retained)
+                root.archive(hirsel_engine_runtime::ArchiveAdmission::Retained)
                     .map_err(|e| e.to_string())?
                     .reference(),
                 dependencies,
@@ -345,7 +344,7 @@ impl ExecutionTasks {
     ) -> Result<Vec<hirsel_lir::stage::ObjectArtifact>, String> {
         self.objects_from_reference(
             product
-                .archive(hirsel_engine::runtime::ArchiveAdmission::Retained)
+                .archive(hirsel_engine_runtime::ArchiveAdmission::Retained)
                 .map_err(|e| e.to_string())?
                 .reference(),
         )

@@ -3,9 +3,10 @@
 use super::native_lower;
 use super::native_routing::NativeRouting;
 use hirsel_engine::{
-    FrontLowerQueries, FrontNativeProducts, FrontNativeQueries, FrontProofExport, runtime::*,
-    store::*,
+    FrontLowerQueries, FrontNativeProducts, FrontNativeQueries, FrontProofExport, store::*,
 };
+use hirsel_engine_runtime::*;
+
 use hirsel_native::query_model::NativeRootKey;
 use hirsel_native::root_source::NativeLinkFacts;
 use hirsel_native::root_source::NativeLinkSource;

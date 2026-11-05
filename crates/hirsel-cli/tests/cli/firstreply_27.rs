@@ -49,7 +49,7 @@ fn package(root: &std::path::Path) -> PathBuf {
 
 #[test]
 fn firstreply_27_scripted_reference_checked_h() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let scratch = tempfile::tempdir().unwrap();
         let rows: serde_json::Value = serde_json::from_str(include_str!(
             "../../../../examples/firstreply/fixtures/workflows.json"
@@ -166,7 +166,7 @@ fn firstreply_27_caps_reference_checked_and_native() {
         .tempdir()
         .unwrap();
     let manifest = package(scratch.path());
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let rows: serde_json::Value = serde_json::from_str(include_str!(
             "../../../../examples/firstreply/fixtures/controls.json"
         ))
@@ -245,7 +245,7 @@ fn firstreply_27_caps_reference_checked_and_native() {
 #[test]
 fn firstreply_27_cleanup_finishes_before_output() {
     use hirsel_interp::{library::simulation::ObservedGrant, observation::Effect};
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let scratch = tempfile::tempdir().unwrap();
         let selection = package(scratch.path());
         let rows: serde_json::Value = serde_json::from_str(include_str!(

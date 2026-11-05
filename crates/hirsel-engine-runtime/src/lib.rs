@@ -1,27 +1,23 @@
 //! Shared admitted-query runtime. Identities describe immutable products; none
 //! of these descriptors grants verifier or native-validator authority.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 use hirsel_artifact_store::Action;
 use hirsel_artifact_store::{Address, Reference};
 use std::task::Poll;
+#[cfg(test)]
+hirsel_guard::install!(test_alloc::Counting: test_alloc::Counting);
+#[cfg(test)]
+use hirsel_engine_admission::test_alloc;
 mod future_task;
 mod output_partition;
 mod product;
-pub(crate) use output_partition::OutputPartition;
+pub use output_partition::OutputPartition;
 pub use output_partition::{ProducerAdmission, RetainedView};
 pub mod profile;
 mod scheduler;
 pub use future_task::{LocalFutureTask, QueryReads};
 
-pub use product::{
-    ArchiveAdmission, LIVE_ANALYZED, LIVE_GROWTH, LIVE_LOWER, LIVE_SOURCE_COMPONENT,
-    LIVE_SOURCE_MEMBERSHIP, LIVE_SUMMARY, LiveAnalyzedProduct, LiveGrowthProduct, LiveLowerProduct,
-    LiveSourceGrowthProduct, LiveSummaryProduct, ProductArchive, SummaryFacet,
-};
-pub(crate) use product::{
-    GrowthPublicationSource, LiveAdmission, ProductSource, SharedProductSource,
-    SourceGrowthPublication, SourceGrowthQueryData, WeakAnalyzedProduct, WeakLowerProduct,
-};
+pub use product::{ArchiveAdmission, ProductArchive};
 pub use scheduler::{
     AdmittedRuntime, RuntimeCompletion, RuntimeErrors, RuntimeEvent, RuntimeObserver, RuntimeStats,
     WaitReason, WakeReason,
@@ -45,16 +41,24 @@ pub use published::{LiveProductValue, ProductRef};
 mod dependencies;
 pub use dependencies::LiveDependencyProduct;
 
-#[cfg(test)]
-pub(crate) fn test_product(
+#[cfg(any(test, feature = "test-support"))]
+pub fn test_product(
     address: Address,
     action: Action,
     domain: hirsel_artifact_store::Domain,
     bytes: &[u8],
 ) -> ProductRef {
-    use crate::store::ResultStore;
-    let store = crate::store::MemStore::default();
-    let reference = store.put_content(domain, bytes).unwrap();
+    struct Backing(hirsel_artifact_store::Bytes);
+    impl backing::ProductBacking for Backing {
+        fn get_content(&self, _: Reference) -> Option<hirsel_artifact_store::Bytes> {
+            Some(self.0.clone())
+        }
+        fn admit_product_memory(&self, _: u64) -> Option<std::sync::Arc<dyn Send + Sync>> {
+            None
+        }
+    }
+    let store = Backing(bytes.to_vec().into());
+    let reference = domain.reference(bytes).unwrap();
     let budget =
         hirsel_engine_admission::ProcessBudget::new((bytes.len() as u64).saturating_add(4096));
     let mut allowance = budget.reserve(budget.limit()).unwrap();

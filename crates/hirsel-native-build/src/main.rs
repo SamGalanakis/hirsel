@@ -22,7 +22,7 @@ const CONFIGURATIONS: [&str; 4] = [
 ];
 
 fn main() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         if let Err(error) = compile() {
             eprintln!("{error}");
             std::process::exit(1);

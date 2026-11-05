@@ -1,10 +1,12 @@
 //! CT-5 source registration must settle before freezing an admitted front.
-use hirsel_engine::with_compiler_stack;
 use hirsel_front_phases::COMPILER;
+use hirsel_intern::jobs::with_compiler_stack;
 
 #[test]
 fn admitted_generator_text_waits_on_lower_with_one_worker_and_keeps_detached_evidence() {
-    use hirsel_engine::{runtime::*, store::MemStore, *};
+    use hirsel_engine::{store::MemStore, *};
+    use hirsel_engine_runtime::*;
+
     use std::sync::Arc;
     with_compiler_stack(|| {
         let directory = tempfile::tempdir().unwrap();
@@ -149,7 +151,9 @@ fn admitted_generator_text_refuses_zero_depth_before_lowering_or_execution() {
 }
 
 fn generator_refusal_control(zero_depth: bool) {
-    use hirsel_engine::{runtime::*, store::MemStore, *};
+    use hirsel_engine::{store::MemStore, *};
+    use hirsel_engine_runtime::*;
+
     use std::sync::Arc;
     with_compiler_stack(|| {
         let directory = tempfile::tempdir().unwrap();
@@ -265,7 +269,9 @@ fn generator_refusal_control(zero_depth: bool) {
 
 #[test]
 fn accepted_generator_view_checks_and_lowers_the_literal_without_changing_raw_source() {
-    use hirsel_engine::{runtime::*, store::MemStore, *};
+    use hirsel_engine::{store::MemStore, *};
+    use hirsel_engine_runtime::*;
+
     use std::sync::Arc;
     with_compiler_stack(|| {
         let directory = tempfile::tempdir().unwrap();
@@ -483,7 +489,9 @@ fn accepted_output_control_with(
         hirsel_engine::FrontRegistrationOutput,
     ),
 ) {
-    use hirsel_engine::{runtime::*, store::MemStore, *};
+    use hirsel_engine::{store::MemStore, *};
+    use hirsel_engine_runtime::*;
+
     use std::sync::Arc;
     let directory = tempfile::tempdir().unwrap();
     let manifest = directory.path().join("hirsel.json");
@@ -569,7 +577,9 @@ fn accepted_output_control_with(
 #[test]
 fn accepted_generator_view_refuses_short_grants_without_publishing_sources_and_keeps_last_source_owner()
  {
-    use hirsel_engine::{runtime::*, *};
+    use hirsel_engine::*;
+    use hirsel_engine_runtime::*;
+
     with_compiler_stack(|| {
         for jobs in [1, 2] {
             accepted_output_control(jobs, |program, budget, output| {
@@ -614,7 +624,9 @@ fn accepted_generator_view_refuses_changed_original_declarations() {
 }
 
 fn accepted_edit_control(own: bool) {
-    use hirsel_engine::{runtime::*, *};
+    use hirsel_engine::*;
+    use hirsel_engine_runtime::*;
+
     with_compiler_stack(|| {
         for jobs in [1, 2] {
             accepted_output_control(jobs, |program, budget, output| {
@@ -815,7 +827,9 @@ fn rejected_generator_header_retains_diagnostic_sources_without_namespace_public
 
 #[test]
 fn accepted_generator_view_releases_unused_syntax_grant_and_keeps_clone_owned_bytes() {
-    use hirsel_engine::{runtime::*, *};
+    use hirsel_engine::*;
+    use hirsel_engine_runtime::*;
+
     with_compiler_stack(|| {
         for jobs in [1, 2] {
             let mut retained_budget = None;
@@ -861,7 +875,9 @@ fn accepted_generator_view_releases_unused_syntax_grant_and_keeps_clone_owned_by
 
 #[test]
 fn generator_bootstrap_finishes_before_final_admitted_check_and_preserves_its_scalar_result() {
-    use hirsel_engine::{runtime::*, store::MemStore, *};
+    use hirsel_engine::{store::MemStore, *};
+    use hirsel_engine_runtime::*;
+
     use std::sync::Arc;
     with_compiler_stack(|| {
         let directory = tempfile::tempdir().unwrap();
@@ -1053,7 +1069,9 @@ fn generator_bootstrap_counts_spare_syntax_grants_before_engine_work() {
 }
 
 fn bootstrap_refusal_control(zero_depth: bool, spare_grants: bool) {
-    use hirsel_engine::{runtime::*, store::MemStore, *};
+    use hirsel_engine::{store::MemStore, *};
+    use hirsel_engine_runtime::*;
+
     use std::sync::Arc;
     with_compiler_stack(|| {
         let directory = tempfile::tempdir().unwrap();
@@ -1180,7 +1198,9 @@ fn bootstrap_refusal_control(zero_depth: bool, spare_grants: bool) {
 
 #[test]
 fn accepted_generated_native_catalogue_preserves_raw_source_and_actual_lower_authority() {
-    use hirsel_engine::{runtime::*, *};
+    use hirsel_engine::*;
+    use hirsel_engine_runtime::*;
+
     with_compiler_stack(|| {
         for jobs in [1, 2] {
             accepted_output_control(jobs, |program, budget, output| {
@@ -1286,7 +1306,9 @@ fn accepted_generated_native_catalogue_preserves_raw_source_and_actual_lower_aut
 
 #[test]
 fn accepted_generated_native_inputs_bind_current_views_and_exact_metadata_grants() {
-    use hirsel_engine::{runtime::*, *};
+    use hirsel_engine::*;
+    use hirsel_engine_runtime::*;
+
     with_compiler_stack(|| {
         for jobs in [1, 2] {
             accepted_output_control(jobs, |program, budget, output| {
@@ -1490,7 +1512,9 @@ fn detached_generator_text_releases_completed_front_and_lower_input_grants() {
 
 #[test]
 fn namespace_capture_keeps_its_admitted_memory_after_front_release() {
-    use hirsel_engine::{runtime::*, *};
+    use hirsel_engine::*;
+    use hirsel_engine_runtime::*;
+
     with_compiler_stack(|| {
         accepted_output_control(1, |program, budget, output| {
             let accepted = program
@@ -1532,7 +1556,9 @@ fn namespace_capture_keeps_its_admitted_memory_after_front_release() {
 
 #[test]
 fn captured_check_refuses_an_edited_written_file_before_publication() {
-    use hirsel_engine::{runtime::*, *};
+    use hirsel_engine::*;
+    use hirsel_engine_runtime::*;
+
     with_compiler_stack(|| {
         accepted_output_control(1, |program, budget, output| {
             let accepted = program

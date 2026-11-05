@@ -153,13 +153,13 @@ pub trait NativeLowerProducts: Send + Sync {
     fn lower_product(
         &self,
         definition: &DefPath,
-        selected: hirsel_engine::runtime::ProductRef,
+        selected: hirsel_engine_runtime::ProductRef,
     ) -> Result<hirsel_engine::NativeOriginalProduct, String>;
 }
 
 pub struct NativeFrontLower {
     pub context: Arc<hirsel_engine::NativeOriginalContext>,
-    pub bindings: std::collections::BTreeMap<DefPath, hirsel_engine::runtime::QueryId>,
+    pub bindings: std::collections::BTreeMap<DefPath, hirsel_engine_runtime::QueryId>,
     pub products: Arc<dyn NativeLowerProducts>,
 }
 
@@ -380,7 +380,7 @@ impl NativeLowerProducts for hirsel_engine::FrontLowerQueries {
     fn lower_product(
         &self,
         definition: &DefPath,
-        selected: hirsel_engine::runtime::ProductRef,
+        selected: hirsel_engine_runtime::ProductRef,
     ) -> Result<hirsel_engine::NativeOriginalProduct, String> {
         self.native_product(selected)
             .filter(|product| &product.definition == definition)

@@ -242,7 +242,7 @@ impl LocalReadyQueries {
                 .store
                 .get_content(
                     product
-                        .archive(hirsel_engine::runtime::ArchiveAdmission::Retained)
+                        .archive(hirsel_engine_runtime::ArchiveAdmission::Retained)
                         .map_err(|e| e.to_string())?
                         .reference(),
                 )
@@ -255,14 +255,14 @@ impl LocalReadyQueries {
                 .map(|(a, xs)| (a.instance.encoding().to_vec(), xs.clone()))
                 .collect::<Vec<_>>();
             if product
-                .archive(hirsel_engine::runtime::ArchiveAdmission::Retained)
+                .archive(hirsel_engine_runtime::ArchiveAdmission::Retained)
                 .map_err(|e| e.to_string())?
                 .reference()
                 .domain
                 .kind
                 != ARENA_CHOSEN_KIND
                 || product
-                    .archive(hirsel_engine::runtime::ArchiveAdmission::Retained)
+                    .archive(hirsel_engine_runtime::ArchiveAdmission::Retained)
                     .map_err(|e| e.to_string())?
                     .reference()
                     .domain
@@ -271,7 +271,7 @@ impl LocalReadyQueries {
                 || association.action != product.action
                 || association.reference
                     != product
-                        .archive(hirsel_engine::runtime::ArchiveAdmission::Retained)
+                        .archive(hirsel_engine_runtime::ArchiveAdmission::Retained)
                         .map_err(|e| e.to_string())?
                         .reference()
                 || rows != expected
@@ -289,7 +289,7 @@ impl LocalReadyQueries {
                                 address,
                                 candidates.first().copied(),
                                 product
-                                    .archive(hirsel_engine::runtime::ArchiveAdmission::Retained)
+                                    .archive(hirsel_engine_runtime::ArchiveAdmission::Retained)
                                     .map_err(|e| e.to_string())?
                                     .reference(),
                             ),
@@ -330,7 +330,7 @@ impl LocalReadyQueries {
             owner
                 .product
                 .product
-                .archive(hirsel_engine::runtime::ArchiveAdmission::Retained)
+                .archive(hirsel_engine_runtime::ArchiveAdmission::Retained)
                 .map_err(|e| e.to_string())?
                 .reference(),
             own.1,
@@ -349,7 +349,7 @@ impl LocalReadyQueries {
                 serde_json::to_vec(&(
                     selection
                         .product
-                        .archive(hirsel_engine::runtime::ArchiveAdmission::Retained)
+                        .archive(hirsel_engine_runtime::ArchiveAdmission::Retained)
                         .map_err(|e| e.to_string())?
                         .reference(),
                     guard,

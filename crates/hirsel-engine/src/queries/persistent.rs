@@ -4287,10 +4287,10 @@ mod malformed_tests {
     }
     #[test]
     fn live_analyzed_archive_keeps_source_and_complete_body_fields_under_exact_admission() {
-        use crate::runtime::LIVE_ANALYZED;
-        use crate::runtime::LiveAnalyzedProduct;
-        use crate::runtime::LiveSummaryProduct;
-        use crate::runtime::ProductSource;
+        use crate::products::LIVE_ANALYZED;
+        use crate::products::LiveAnalyzedProduct;
+        use crate::products::LiveSummaryProduct;
+        use crate::products::ProductSource;
 
         let mut identities = Vec::new();
         for (text, capture_case) in [

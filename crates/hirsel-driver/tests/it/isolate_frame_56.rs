@@ -6,7 +6,7 @@ use hirsel_lir::ir::{CallId, Callee};
 
 #[test]
 fn isolate_frame_retains_entered_mark_and_refuses_forged_physical_custody() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let program = super::runtime50_continuation::ready(
             r#"
 pub fn main(rt: Io) -> Result[(), GrantError] {
@@ -190,7 +190,7 @@ pub fn main(rt: Io) -> Result[(), GrantError] {
 
 #[test]
 fn a_callback_local_finalizer_cannot_hide_behind_a_mechanical_isolate_environment() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let mut program = super::runtime50_continuation::ready(
             r#"
 resource type Guard { n: u64 }

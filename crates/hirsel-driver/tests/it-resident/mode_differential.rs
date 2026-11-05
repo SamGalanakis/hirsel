@@ -232,7 +232,7 @@ fn describe(outputs: &Outputs) -> String {
 /// One column of the law: `mode` at `jobs` against the fresh jobs-1 oracle,
 /// both in one private tree so diagnostics name the same source path.
 fn column(mode: Mode, jobs: usize) {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let tree = tempfile::tempdir().unwrap();
         let entry = tree.path().join("main.hir");
         let mut oracle = Cell::new(Mode::Fresh, 1, tree.path());

@@ -100,7 +100,7 @@ fn selected(caps: bool) -> Vec<Value> {
     cases
 }
 fn scripted(engine: &str, caps: bool) {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let scratch = scratch(&format!("config-migrate-29-{engine}-"));
         let root = scratch.path();
         let selection = package(root);

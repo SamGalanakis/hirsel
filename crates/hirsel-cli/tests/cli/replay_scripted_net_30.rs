@@ -30,7 +30,7 @@ fn run(command: &mut Command, expected: &[u8]) {
 
 #[test]
 fn unanswered_then_refused_replays_without_clock_deadline_or_queue() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let root = tempfile::tempdir().unwrap();
         let dir = root.path();
         fs::write(dir.join("main.hir"), SOURCE).unwrap();

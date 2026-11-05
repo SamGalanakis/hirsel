@@ -1,8 +1,8 @@
 //! Local plan ownership and the explicit portable identity boundary. Imported
 //! descriptors describe cache identity only; local C still admits every body.
-use hirsel_engine::runtime::*;
 use hirsel_engine::store::ResultStore;
 use hirsel_engine::store::{Domain, Reference};
+use hirsel_engine_runtime::*;
 use hirsel_syntax::ContentHash;
 use std::{collections::BTreeMap, sync::Arc};
 use std::{io, sync::Mutex};
@@ -364,7 +364,9 @@ mod tests {
         let budget = hirsel_engine_admission::ProcessBudget::new(64 << 10);
         let mut scratch = budget.reserve(64 << 10).unwrap();
         let expected = PLAN.reference(b"original descriptor").unwrap();
-        assert!(ProductArchive::open(&Corrupt, expected, &mut scratch).is_err());
+        assert!(
+            ProductArchive::open(&Corrupt as &dyn ResultStore, expected, &mut scratch).is_err()
+        );
         let store = store::MemStore::default();
         let canonical =
             serde_json::to_vec(&(hash(b"ahead"), hash(b"continuation"), context())).unwrap();

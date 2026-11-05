@@ -187,7 +187,7 @@ pub struct PrecomputedSources {
     pub(super) lower: Arc<hirsel_engine::FrontLowerQueries>,
 }
 impl PrecomputedSources {
-    fn product(&self, path: &DefPath) -> Result<hirsel_engine::runtime::ProductRef, QueryError> {
+    fn product(&self, path: &DefPath) -> Result<hirsel_engine_runtime::ProductRef, QueryError> {
         self.run
             .completed_semantic_product(path)
             .ok_or(QueryError::NotImplemented)
@@ -362,7 +362,7 @@ impl TirProvider for ExecutionProvider<'_> {
 /// admission/scratch owner lives until the last output user releases it.
 pub struct NativeExecution {
     pub executable: PathBuf,
-    pub product: hirsel_engine::runtime::ProductRef,
+    pub product: hirsel_engine_runtime::ProductRef,
     pub(crate) platform: Arc<super::native_link::FrozenPlatform>,
     pub store: Arc<dyn hirsel_engine::store::ResultStore>,
     pub observation: NativeObservation,
@@ -415,7 +415,7 @@ impl CompileStoreOperation {
         result
     }
 }
-pub(crate) type Materialize = dyn Fn(&[hirsel_engine::runtime::ProductRef]) -> Result<Arc<CompileOutput>, ToolError>
+pub(crate) type Materialize = dyn Fn(&[hirsel_engine_runtime::ProductRef]) -> Result<Arc<CompileOutput>, ToolError>
     + Send
     + Sync;
 
@@ -428,7 +428,7 @@ impl hirsel_engine::requests::OutputReadiness for CompilerReadiness {
     }
     fn ready(
         &mut self,
-        products: &[hirsel_engine::runtime::ProductRef],
+        products: &[hirsel_engine_runtime::ProductRef],
     ) -> Result<Self::Output, Self::Error> {
         let _timing = hirsel_intern::timings::interval(hirsel_intern::timings::Interval::Merge);
         let operation = self.read_scope.take();
@@ -454,8 +454,8 @@ impl hirsel_engine::requests::OutputReadiness for CompilerReadiness {
 /// from exactly those products, which the heap executor and native emission
 /// execute. The retained owner holds the admitted producers, never an engine.
 pub struct NativeReady {
-    pub root: hirsel_engine::runtime::ProductRef,
-    pub ready: Vec<hirsel_engine::runtime::ProductRef>,
+    pub root: hirsel_engine_runtime::ProductRef,
+    pub ready: Vec<hirsel_engine_runtime::ProductRef>,
     pub program: hirsel_native::ReadyProgram,
     pub entry: DefPath,
     pub observation: NativeObservation,
@@ -482,7 +482,7 @@ impl NativeReady {
 /// Settled object products. The retained owner holds the same admitted source
 /// and native producers; the store provides ordinary content, never authority.
 pub struct NativeObjectOutput {
-    pub products: Vec<hirsel_engine::runtime::ProductRef>,
+    pub products: Vec<hirsel_engine_runtime::ProductRef>,
     pub instances: usize,
     pub store: Arc<dyn hirsel_engine::store::ResultStore>,
     pub(super) _owner: Arc<dyn Send + Sync>,

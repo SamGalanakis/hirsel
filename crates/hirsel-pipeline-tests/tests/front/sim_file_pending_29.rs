@@ -2,9 +2,10 @@
 use hirsel_driver::native::*;
 use hirsel_engine::{
     QueryEngine, RunConfiguration, SimulationConfig, default_context, default_environment,
-    entry_path, source_check_request, with_compiler_stack,
+    entry_path, source_check_request,
 };
 use hirsel_front_phases::compiler_adapters;
+use hirsel_intern::jobs::with_compiler_stack;
 use hirsel_native::*;
 use hirsel_native_batch::*;
 use hirsel_native_testing::*;

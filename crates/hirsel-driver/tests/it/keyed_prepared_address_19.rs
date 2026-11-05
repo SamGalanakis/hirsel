@@ -5,9 +5,10 @@ mod history;
 use hirsel_driver::native;
 use hirsel_engine::{
     requests::{OutputReadiness, RequestEngine, observe_inputs},
-    runtime::QueryRuntime,
     with_compiler_stack,
 };
+use hirsel_engine_runtime::QueryRuntime;
+
 use hirsel_front_phases::COMPILER;
 use hirsel_requests::*;
 use std::sync::Arc;

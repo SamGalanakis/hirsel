@@ -244,7 +244,7 @@ fn picked(variable: &str, id: &str) -> bool {
     std::env::var(variable).map_or(true, |value| value.split(',').any(|chosen| chosen == id))
 }
 fn model_part(part: usize) {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let root = scratch("merge37-model-");
         let path = package(&root, None);
         let mut loaded = hirsel_front_phases::load_program(&path).unwrap_or_else(|e| panic!("{e}"));
@@ -347,7 +347,7 @@ fn merge_audit_37_model_2() {
 
 #[test]
 fn merge_audit_37_independent_oracles() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let root = scratch("merge37-oracle-");
         let path = package(
             &root,
@@ -463,7 +463,7 @@ fn cancel_fixture() -> Fixture {
     world
 }
 fn refusal_cases(include_four: bool) {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let root = scratch("merge37-refuse-");
         let path = package(&root, None);
         let mut loaded = hirsel_front_phases::load_program(&path).unwrap_or_else(|e| panic!("{e}"));
@@ -695,7 +695,7 @@ fn merge_audit_37_native_missing_workflows() {
     native_workflows(true)
 }
 fn native_workflows(native_only: bool) {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let root = scratch("merge37-native-");
         let path = package(&root, None);
         let mut loaded = hirsel_front_phases::load_program(&path).unwrap_or_else(|e| panic!("{e}"));
@@ -1308,7 +1308,7 @@ fn replay_controls(
 #[ignore = "requires an explicit backend:width:kind exact worker capacity request"]
 fn merge_audit_37_ordered_capacity() {
     let (backend, width, kind) = super::width_capacity_36::selection("MERGE_AUDIT_37_WIDTH");
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let root = scratch("merge37-width-");
         let path = package(&root, None);
         let mut world = native_fixture(if kind == "success" { "resolve" } else { &kind });
@@ -1382,7 +1382,7 @@ fn merge_audit_37_ordered_capacity() {
     });
 }
 fn cap_case(kind: &str) {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let root = scratch("merge37-cap-");
         let path = package(&root, None);
         let mut loaded = hirsel_front_phases::load_program(&path).unwrap_or_else(|e| panic!("{e}"));
@@ -1794,7 +1794,7 @@ fn merge_audit_37_cap_report_over() {
 // vectors; reference/checked Steps stops remain separate, never replaced.
 #[test]
 fn merge_audit_37_native_report_boundaries() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let root = scratch("merge37-native-report-");
         let path = package(&root, None);
         let mut loaded = hirsel_front_phases::load_program(&path).unwrap_or_else(|e| panic!("{e}"));

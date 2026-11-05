@@ -58,7 +58,7 @@ fn fixture_store() -> Arc<dyn ResultStore> {
 }
 
 fn bootstrap_link_refusal(test_table: bool, emit_only: bool) {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         for jobs in [1, 2] {
             let directory = tempfile::tempdir().unwrap();
             let path = directory.path().join("main.hir");
@@ -390,7 +390,7 @@ impl link_tasks::NativeLinkExecutor for CountLink {
 #[test]
 #[ignore = "requires native-bootstrap-link-proof selected linker inputs"]
 fn actual_native_bootstrap_links_both_backends_and_restores_after_runtime_drop() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         for backend in [
             hirsel_native::Backend::Cranelift,
             hirsel_native::Backend::Llvm,
@@ -772,7 +772,7 @@ fn actual_native_bootstrap_binds_run_identity_and_delivers_live_output() {
     native_bootstrap_policy_case(true);
 }
 fn native_bootstrap_policy_case(bind_run: bool) {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         for backend in [
             hirsel_native::Backend::Cranelift,
             hirsel_native::Backend::Llvm,
@@ -1462,7 +1462,7 @@ fn proof_evidence(graph: &mut ProofGraph) -> hirsel_native::Evidence {
 
 #[test]
 fn native_bootstrap_assesses_evidence_against_its_settled_source_root_before_instances() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let directory = tempfile::tempdir().unwrap();
         let manifest = directory.path().join("hirsel.json");
         std::fs::write(directory.path().join("main.hir"), PROOF_SOURCE).unwrap();
@@ -1654,7 +1654,7 @@ fn native_bootstrap_assesses_evidence_against_its_settled_source_root_before_ins
 
 #[test]
 fn original_plan_inputs_bind_source_edits_membership_options_and_foreign_bytes() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         const SOURCE: &str = "fn helper(x:u64)->u64{x+1u64}\nfn main()->u64{helper(7u64)}";
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("plan.hir");
@@ -1760,7 +1760,7 @@ fn original_plan_inputs_bind_source_edits_membership_options_and_foreign_bytes()
                 .iter()
                 .map(|product| {
                     product
-                        .archive(hirsel_engine::runtime::ArchiveAdmission::Retained)
+                        .archive(hirsel_engine_runtime::ArchiveAdmission::Retained)
                         .unwrap()
                         .reference()
                 })

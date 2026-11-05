@@ -1,6 +1,7 @@
 //! Validated continuation plans (runtime-native-50).
 use hirsel_driver::native;
-use hirsel_engine::{QueryEngine, default_context, source_check_request, with_compiler_stack};
+use hirsel_engine::{QueryEngine, default_context, source_check_request};
+use hirsel_intern::jobs::with_compiler_stack;
 use hirsel_lir::continuation::{
     ContinuationError, ContinuationPlan, ContinuationPlans, RegionKind, RegionTokenLayout,
     Representation, ResumeAction,

@@ -1,5 +1,5 @@
 //! Print admission retains the original request and a checked result cell.
-use hirsel_engine::with_compiler_stack;
+use hirsel_intern::jobs::with_compiler_stack;
 use hirsel_lir::continuation::{Representation, ResumeAction, RuntimeOpKind};
 
 pub(super) const CERTIFIED_SOURCE: &str = r#"

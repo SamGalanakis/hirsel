@@ -753,18 +753,17 @@ impl HeaderProducts {
             .as_ref()
             .and_then(|entry| crate::memo::retained::retained_signature_entry_bytes(entry))
             .unwrap_or(0)
-            .saturating_add(crate::memo::retained_arc_bytes(&std::mem::MaybeUninit::<
-                HeaderProduct,
-            >::uninit()));
+            .saturating_add(hirsel_engine_admission::retained_arc_bytes(
+                &std::mem::MaybeUninit::<HeaderProduct>::uninit(),
+            ));
         let (charge, transient) = match self.admit_signature(entry.as_ref(), bytes) {
             Ok(charge) => (charge, false),
             Err(_)
                 if working.as_ref().is_some_and(|(_, scratch)| {
                     bytes
-                        .checked_add(crate::memo::retained_arc_bytes(&std::mem::MaybeUninit::<
-                            std::sync::Mutex<HeaderCharge>,
-                        >::uninit(
-                        )))
+                        .checked_add(hirsel_engine_admission::retained_arc_bytes(
+                            &std::mem::MaybeUninit::<std::sync::Mutex<HeaderCharge>>::uninit(),
+                        ))
                         .is_some_and(|required| required <= *scratch)
                 }) =>
             {
@@ -827,9 +826,9 @@ impl HeaderProducts {
     /// after the partition ends; its aliases never reserve the payload again.
     fn admit_source(&self, bytes: u64) -> Result<Charge, QueryError> {
         let bytes = bytes
-            .checked_add(crate::memo::retained_arc_bytes(&std::mem::MaybeUninit::<
-                std::sync::Mutex<HeaderCharge>,
-            >::uninit()))
+            .checked_add(hirsel_engine_admission::retained_arc_bytes(
+                &std::mem::MaybeUninit::<std::sync::Mutex<HeaderCharge>>::uninit(),
+            ))
             .ok_or_else(|| sources::source_refusal("syntax size overflow"))?;
         let partition = self
             .scope()
@@ -903,10 +902,9 @@ impl HeaderProducts {
             )));
         };
         // The charge cell itself is part of what the partition retains.
-        let bytes =
-            bytes.saturating_add(crate::memo::retained_arc_bytes(&std::mem::MaybeUninit::<
-                std::sync::Mutex<HeaderCharge>,
-            >::uninit()));
+        let bytes = bytes.saturating_add(hirsel_engine_admission::retained_arc_bytes(
+            &std::mem::MaybeUninit::<std::sync::Mutex<HeaderCharge>>::uninit(),
+        ));
         let allowance = loop {
             let mut grant = admission
                 .remaining
@@ -1063,8 +1061,9 @@ impl HeaderProducts {
                 payload
             }
         };
-        let wrapper_bytes =
-            crate::memo::retained_arc_bytes(&std::mem::MaybeUninit::<HeaderProduct>::uninit());
+        let wrapper_bytes = hirsel_engine_admission::retained_arc_bytes(&std::mem::MaybeUninit::<
+            HeaderProduct,
+        >::uninit());
         let row_bytes = bytes
             .saturating_sub(payload_bytes)
             .saturating_sub(wrapper_bytes)
@@ -1108,10 +1107,9 @@ impl HeaderProducts {
         let Some(bytes) = crate::memo::retained::retained_signature_entry_bytes(&entry) else {
             return;
         };
-        let bytes =
-            bytes.saturating_add(crate::memo::retained_arc_bytes(&std::mem::MaybeUninit::<
-                HeaderProduct,
-            >::uninit()));
+        let bytes = bytes.saturating_add(hirsel_engine_admission::retained_arc_bytes(
+            &std::mem::MaybeUninit::<HeaderProduct>::uninit(),
+        ));
         let Ok(charge) = self.admit_signature(Some(&entry), bytes) else {
             return;
         };

@@ -1,6 +1,7 @@
 //! A restored checked constant still owns its separately evaluated value.
 use hirsel_driver::session;
-use hirsel_engine::{CompileConfig, LoweringPolicy, store, with_compiler_stack};
+use hirsel_engine::{CompileConfig, LoweringPolicy, store};
+use hirsel_intern::jobs::with_compiler_stack;
 use std::sync::Arc;
 
 #[test]

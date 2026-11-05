@@ -2048,7 +2048,7 @@ mod tests {
                 }))
             }
         }
-        crate::with_compiler_stack(|| {
+        hirsel_intern::jobs::with_compiler_stack(|| {
             let trace = Arc::new(Mutex::new(Vec::new()));
             let mut adapters = crate::phases::engine_only_adapters();
             adapters.signature = Some(Arc::new(Header(trace.clone())));
@@ -2101,7 +2101,7 @@ extern "unused" fn unused()"#
                 }))
             }
         }
-        crate::with_compiler_stack(|| {
+        hirsel_intern::jobs::with_compiler_stack(|| {
             let mut adapters = crate::phases::engine_only_adapters();
             adapters.signature = Some(Arc::new(Header));
             let store = Arc::new(crate::store::MemStore::default());

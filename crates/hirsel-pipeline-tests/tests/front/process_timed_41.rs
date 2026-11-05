@@ -2,9 +2,8 @@
 use hirsel_driver::native::*;
 use hirsel_driver::record_loaded_fixture_observations;
 use hirsel_driver::replay_loaded_observations;
-use hirsel_engine::{
-    RunConfiguration, run_observed_checked, run_observed_snapshot, with_compiler_stack,
-};
+use hirsel_engine::{RunConfiguration, run_observed_checked, run_observed_snapshot};
+use hirsel_intern::jobs::with_compiler_stack;
 use hirsel_native::*;
 use hirsel_native_batch::*;
 use hirsel_native_testing::*;

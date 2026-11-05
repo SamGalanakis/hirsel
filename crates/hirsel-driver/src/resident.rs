@@ -2,7 +2,7 @@
 //! the same selection and completion path. Hot products, mappings, admission,
 //! dependency validation and deterministic transactions belong to the engine.
 use hirsel_engine::requests::{OutputReadiness, RequestEngine, SelectedRequest};
-use hirsel_engine::runtime::{QueryRuntime, RequestId};
+use hirsel_engine_runtime::{QueryRuntime, RequestId};
 use std::sync::{Arc, Mutex, Weak};
 use std::task::Poll;
 
@@ -156,7 +156,7 @@ impl<R: QueryRuntime, O> Drop for RequestLease<R, O> {
     }
 }
 
-impl<O: OutputReadiness> RequestLease<hirsel_engine::runtime::AdmittedRuntime, O> {
+impl<O: OutputReadiness> RequestLease<hirsel_engine_runtime::AdmittedRuntime, O> {
     /// Complete a synchronous host operation while leaving request admission,
     /// cancellation and shutdown available to other users of this runtime.
     /// The engine's completion latch never consumes the terminal product;
@@ -194,7 +194,7 @@ impl OutputReadiness for ExecutableOutput {
     type Error = String;
     fn ready(
         &mut self,
-        products: &[hirsel_engine::runtime::ProductRef],
+        products: &[hirsel_engine_runtime::ProductRef],
     ) -> Result<Self::Output, String> {
         let [product] = products else {
             return Err("executable request requires exactly one linked root".into());

@@ -1,6 +1,6 @@
 //! The native root is a suspending producer, never factory-time work.
 use super::{roots::RootProducts, tasks::NativeTasks, *};
-use hirsel_engine::runtime::*;
+use hirsel_engine_runtime::*;
 use hirsel_native::root_source::NativeLinkSource;
 use std::{
     sync::{

@@ -46,7 +46,7 @@ impl CompilerRequests {
         path: &std::path::Path,
         operation: CompileOperation,
     ) -> Result<Arc<CompileOutput>, hirsel_engine::ToolError> {
-        hirsel_engine::with_compiler_stack(|| self.execute_on_stack(path, operation))
+        hirsel_intern::jobs::with_compiler_stack(|| self.execute_on_stack(path, operation))
     }
     fn execute_on_stack(
         &mut self,
@@ -105,16 +105,15 @@ impl CompilerRequests {
         &mut self,
         request: &CompileRequest,
     ) -> Result<Arc<CompileOutput>, hirsel_engine::ToolError> {
-        hirsel_engine::with_compiler_stack(|| self.execute_request_on_stack(request))
+        hirsel_intern::jobs::with_compiler_stack(|| self.execute_request_on_stack(request))
     }
     fn execute_request_on_stack(
         &mut self,
         request: &CompileRequest,
     ) -> Result<Arc<CompileOutput>, hirsel_engine::ToolError> {
-        use hirsel_engine::{
-            requests::{OutputReadiness, RequestEngine},
-            runtime::QueryRuntime,
-        };
+        use hirsel_engine::requests::{OutputReadiness, RequestEngine};
+        use hirsel_engine_runtime::QueryRuntime;
+
         let mut selected = self.select(request)?;
         let completed = {
             let mut runtime = selected
@@ -287,7 +286,7 @@ impl CompilerRequests {
 impl hirsel_engine::requests::RequestEngine for CompilerRequests {
     type Request = CompileRequest;
     type Error = hirsel_engine::ToolError;
-    type Runtime = hirsel_engine::runtime::AdmittedRuntime;
+    type Runtime = hirsel_engine_runtime::AdmittedRuntime;
     type Readiness = CompilerReadiness;
 
     fn select(

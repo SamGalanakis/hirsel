@@ -225,7 +225,7 @@ fn produce_with_store(
     store: Arc<dyn ResultStore>,
 ) -> Result<Artifacts, Switch> {
     switches::missing(config.switches())?;
-    Ok(hirsel_engine::with_compiler_stack(|| {
+    Ok(hirsel_intern::jobs::with_compiler_stack(|| {
         artifacts(program, config, store)
     }))
 }

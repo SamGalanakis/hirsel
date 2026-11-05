@@ -33,8 +33,8 @@ pub struct FrontRunOutput {
     pub(crate) _owner: Arc<dyn Send + Sync>,
 }
 
-use crate::runtime::*;
 use crate::store::{Domain, Reference, ResultStore};
+use hirsel_engine_runtime::*;
 use hirsel_proof_export::DefinitionContent;
 use hirsel_types::{SignatureKind, SignatureRef};
 use std::{sync::Mutex, task::Poll};
@@ -265,14 +265,12 @@ impl FrontRunQueries {
     pub fn input_bytes(definitions: &[DefPath]) -> Option<u64> {
         definitions.iter().try_fold(
             (std::mem::size_of::<Self>() as u64)
-                .checked_add(crate::memo::retained_arc_bytes(&std::mem::MaybeUninit::<
-                    Mutex<u64>,
-                >::uninit(
-                )))?
-                .checked_add(crate::memo::retained_arc_bytes(&std::mem::MaybeUninit::<
-                    hirsel_engine_admission::MemoryReservation,
-                >::uninit(
-                )))?,
+                .checked_add(hirsel_engine_admission::retained_arc_bytes(
+                    &std::mem::MaybeUninit::<Mutex<u64>>::uninit(),
+                ))?
+                .checked_add(hirsel_engine_admission::retained_arc_bytes(
+                    &std::mem::MaybeUninit::<hirsel_engine_admission::MemoryReservation>::uninit(),
+                ))?,
             |n, path| {
                 n.checked_add(bincode::serialized_size(path).ok()?.checked_mul(5)?)?
                     .checked_add(

@@ -87,7 +87,7 @@ fn depplan_23_named_manifest_three_engines_and_effects() {
 
 #[test]
 fn depplan_23_pure_model_checked_heap() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         use hirsel_driver::native::*;
         use hirsel_native::*;
         use hirsel_native_batch::*;

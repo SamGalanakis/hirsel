@@ -591,7 +591,7 @@ impl RootProducts {
             || current.reference
                 != root
                     .product
-                    .archive(hirsel_engine::runtime::ArchiveAdmission::Retained)
+                    .archive(hirsel_engine_runtime::ArchiveAdmission::Retained)
                     .map_err(|e| e.to_string())?
                     .reference()
         {
@@ -599,7 +599,7 @@ impl RootProducts {
         }
         for reference in [
             root.product
-                .archive(hirsel_engine::runtime::ArchiveAdmission::Retained)
+                .archive(hirsel_engine_runtime::ArchiveAdmission::Retained)
                 .map_err(|e| e.to_string())?
                 .reference(),
             root.static_manifest,
@@ -660,7 +660,7 @@ impl NativeRoots for RootProducts {
                 instance
                     .product
                     .product
-                    .archive(hirsel_engine::runtime::ArchiveAdmission::Retained)
+                    .archive(hirsel_engine_runtime::ArchiveAdmission::Retained)
                     .map_err(|e| e.to_string())?
                     .reference(),
             );

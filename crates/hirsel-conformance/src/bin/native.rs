@@ -43,7 +43,7 @@ fn main() -> ExitCode {
     }
 
     let started = std::time::Instant::now();
-    let result = hirsel_engine::with_compiler_stack(run);
+    let result = hirsel_intern::jobs::with_compiler_stack(run);
     isolate::report(started.elapsed(), matches!(result, Ok(true)));
     match result {
         Ok(true) => ExitCode::SUCCESS,
@@ -890,7 +890,7 @@ fn run() -> Result<bool, String> {
             let toolchain = toolchain(std::slice::from_ref(&configuration))?;
             let scratch = native::scratch("replay")?;
             let reduce = mode == "--reduce";
-            hirsel_engine::with_compiler_stack(move || {
+            hirsel_intern::jobs::with_compiler_stack(move || {
                 let probe = artifact::NativeProbe {
                     configuration,
                     toolchain: &toolchain,
@@ -936,7 +936,7 @@ fn cranelift(
     if clif {
         for case in &cases {
             let case = case.clone();
-            let text = hirsel_engine::with_compiler_stack(move || cranelift::clif(&case))
+            let text = hirsel_intern::jobs::with_compiler_stack(move || cranelift::clif(&case))
                 .unwrap_or_else(|e| format!("unavailable: {e}"));
             println!("{text}");
         }
@@ -1241,7 +1241,7 @@ fn full(
             let (next, failures, stored, toolchain) = (&next, &failures, &stored, &toolchain);
             scope.spawn(move || {
                 let scratch = native::scratch(&format!("replay-{job}")).expect("scratch");
-                hirsel_engine::with_compiler_stack(move || {
+                hirsel_intern::jobs::with_compiler_stack(move || {
                     loop {
                         let index = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         let Some(item) = stored.get(index) else { break };

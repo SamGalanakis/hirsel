@@ -880,7 +880,7 @@ fn settled_original_assessment_binds_exported_bodies_without_a_native_snapshot()
 
 #[test]
 fn native_discovery_reports_actual_removals_on_cold_and_body_free_fresh_hits() {
-    use hirsel_engine::runtime::*;
+    use hirsel_engine_runtime::*;
     use hirsel_native::query_model::INSTANCE_KIND;
     use hirsel_native_cache::declarations::NativeDeclarations;
     use hirsel_native_cache::source_inputs::NativeInstanceInputs;

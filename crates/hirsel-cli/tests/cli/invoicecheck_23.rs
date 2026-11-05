@@ -74,7 +74,7 @@ fn invoicecheck_23_oracle_cli_engines_and_effects() {
 
 #[test]
 fn invoicecheck_23_pure_model_checked_h() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let scratch = tempfile::tempdir().unwrap();
         let source = r#"
 pub fn main() -> Result[(), scalar.ParseError] {

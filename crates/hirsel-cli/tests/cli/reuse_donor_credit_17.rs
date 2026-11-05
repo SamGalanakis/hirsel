@@ -4,7 +4,7 @@ const SOURCE: &str = include_str!("../../../../conformance/MEM/MEM-14-reuse-dono
 
 #[test]
 fn reuse_donor_credit_17_engines() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         use hirsel_driver::native::*;
         use hirsel_native::*;
         use hirsel_native_batch::*;
@@ -76,7 +76,7 @@ fn original_paired_programs_keep_owned_credit() {
         include_str!("../support/reuse_donor_credit_17/original-long-chain.hir"),
         include_str!("../support/reuse_donor_credit_17/sequential-temporaries.hir"),
     ] {
-        hirsel_engine::with_compiler_stack(|| {
+        hirsel_intern::jobs::with_compiler_stack(|| {
             use hirsel_driver::native::*;
             use hirsel_native::*;
             use hirsel_native_batch::*;

@@ -254,11 +254,11 @@ fn original_warm_ready_skips_work_and_recompute_compares_actual_fragments() {
                             .unwrap();
                         assert_ne!(
                             original
-                                .archive(hirsel_engine::runtime::ArchiveAdmission::Retained)
+                                .archive(hirsel_engine_runtime::ArchiveAdmission::Retained)
                                 .unwrap()
                                 .reference(),
                             replacement
-                                .archive(hirsel_engine::runtime::ArchiveAdmission::Retained)
+                                .archive(hirsel_engine_runtime::ArchiveAdmission::Retained)
                                 .unwrap()
                                 .reference()
                         );
@@ -267,7 +267,7 @@ fn original_warm_ready_skips_work_and_recompute_compares_actual_fragments() {
                             Association {
                                 action: original.action,
                                 reference: replacement
-                                    .archive(hirsel_engine::runtime::ArchiveAdmission::Retained)
+                                    .archive(hirsel_engine_runtime::ArchiveAdmission::Retained)
                                     .unwrap()
                                     .reference(),
                             },
@@ -392,7 +392,7 @@ fn original_whole_plan_cross_open_skips_all_value_work_and_compares_recomputatio
                             (
                                 key.address(),
                                 product
-                                    .archive(hirsel_engine::runtime::ArchiveAdmission::Retained)
+                                    .archive(hirsel_engine_runtime::ArchiveAdmission::Retained)
                                     .unwrap()
                                     .reference(),
                             )
@@ -418,11 +418,11 @@ fn original_whole_plan_cross_open_skips_all_value_work_and_compares_recomputatio
                             .unwrap();
                         assert_ne!(
                             original
-                                .archive(hirsel_engine::runtime::ArchiveAdmission::Retained)
+                                .archive(hirsel_engine_runtime::ArchiveAdmission::Retained)
                                 .unwrap()
                                 .reference(),
                             replacement
-                                .archive(hirsel_engine::runtime::ArchiveAdmission::Retained)
+                                .archive(hirsel_engine_runtime::ArchiveAdmission::Retained)
                                 .unwrap()
                                 .reference()
                         );
@@ -431,7 +431,7 @@ fn original_whole_plan_cross_open_skips_all_value_work_and_compares_recomputatio
                             Association {
                                 action: original.action,
                                 reference: replacement
-                                    .archive(hirsel_engine::runtime::ArchiveAdmission::Retained)
+                                    .archive(hirsel_engine_runtime::ArchiveAdmission::Retained)
                                     .unwrap()
                                     .reference(),
                             },

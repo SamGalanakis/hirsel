@@ -1,7 +1,6 @@
-use hirsel_engine::{
-    runtime::*,
-    store::{Action, Address, Domain, MemStore, ResultStore},
-};
+use hirsel_engine::store::{Action, Address, Domain, MemStore, ResultStore};
+use hirsel_engine_runtime::*;
+
 use hirsel_lir::operation::{NativeType, Primitive};
 use hirsel_native::query_model::INSTANCE_KIND;
 use hirsel_native_queries::seal_demand::GuardTasks;

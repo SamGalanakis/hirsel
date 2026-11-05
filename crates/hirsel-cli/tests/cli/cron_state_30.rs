@@ -63,7 +63,7 @@ fn cases() -> Vec<Value> {
 }
 #[test]
 fn cron_state_30_reference_checked() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let temp = scratch();
         let selection = package(temp.path());
         let mut loaded =
@@ -347,7 +347,7 @@ fn native(backend: &str) {
         String::from_utf8_lossy(&output.stderr)
     );
     // Replays use the checked host adapter, with no live grant admission.
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         for mode in ["success", "error", "cancel"] {
             for width in [1, 2, 4] {
                 if selected
@@ -391,7 +391,7 @@ fn full_gate_cron_state_30_public_fixture_witness() {
     use hirsel_native::*;
     use hirsel_native_batch::*;
     use hirsel_native_testing::*;
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let temp = scratch();
         let selection = package(temp.path());
         let mut loaded = hirsel_front_phases::load_program(&selection).unwrap();
@@ -476,7 +476,7 @@ fn cron_state_30_crash_boundaries() {
     use hirsel_native::*;
     use hirsel_native_batch::*;
     use hirsel_native_testing::*;
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let temp = scratch();
         let selection = package(temp.path());
         fs::write(
@@ -673,7 +673,7 @@ fn cron_state_30_numeric_step_native_and_tapes() {
     }
     fs::rename(&config, root.as_path().join("config.unavailable")).unwrap();
     fs::rename(&grant, root.as_path().join("grants.unavailable")).unwrap();
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         for receipt in &receipts {
             let tape = Path::new(receipt["tape"].as_str().unwrap());
             let original = fs::read(tape).unwrap();
@@ -766,7 +766,7 @@ fn cron_state_30_past_deadline_native_replay() {
     fs::rename(data, root.join("config.unavailable")).unwrap();
     fs::rename(state, root.join("state.unavailable")).unwrap();
     fs::rename(grant, root.join("grants.unavailable")).unwrap();
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         for r in &receipts {
             let tape = Path::new(r["tape"].as_str().unwrap());
             let original = fs::read(tape).unwrap();

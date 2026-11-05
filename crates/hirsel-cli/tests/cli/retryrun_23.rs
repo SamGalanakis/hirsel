@@ -114,7 +114,7 @@ fn retryrun_23_shipped_workflows_and_template() {
 
 #[test]
 fn retryrun_23_virtual_clock_vectors_checked_h() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let scratch = tempfile::tempdir().unwrap();
         let root = scratch.path();
         fs::write(

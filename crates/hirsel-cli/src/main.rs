@@ -166,7 +166,7 @@ fn main() -> ExitCode {
     if args.first().is_some_and(|arg| arg == "explain") {
         return ExitCode::from(explain::execute(&args[1..]));
     }
-    hirsel_engine::with_compiler_stack(|| ExitCode::from(execute(args, start)))
+    hirsel_intern::jobs::with_compiler_stack(|| ExitCode::from(execute(args, start)))
 }
 enum Command {
     Help(&'static str),

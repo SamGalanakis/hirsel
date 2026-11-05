@@ -124,12 +124,12 @@ fn native_discovery_cache_reuses_requirements_without_demanding_source_bodies() 
         assert_eq!(
             seed.product
                 .unwrap()
-                .archive(hirsel_engine::runtime::ArchiveAdmission::Retained)
+                .archive(hirsel_engine_runtime::ArchiveAdmission::Retained)
                 .unwrap()
                 .reference(),
             read.product
                 .unwrap()
-                .archive(hirsel_engine::runtime::ArchiveAdmission::Retained)
+                .archive(hirsel_engine_runtime::ArchiveAdmission::Retained)
                 .unwrap()
                 .reference()
         );
@@ -205,13 +205,13 @@ fn native_discovery_cache_type_only_respects_forced_recomputation() {
             expected
                 .product
                 .unwrap()
-                .archive(hirsel_engine::runtime::ArchiveAdmission::Retained)
+                .archive(hirsel_engine_runtime::ArchiveAdmission::Retained)
                 .unwrap()
                 .reference(),
             actual
                 .product
                 .unwrap()
-                .archive(hirsel_engine::runtime::ArchiveAdmission::Retained)
+                .archive(hirsel_engine_runtime::ArchiveAdmission::Retained)
                 .unwrap()
                 .reference()
         );

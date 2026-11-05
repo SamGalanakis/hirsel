@@ -558,7 +558,7 @@ impl CandidateWorkspace {
             // its original spelling while edit identity uses its physical file.
             let alias = capture.canonicalize(&entry);
             let loaded = alias.map(|_| ()).map_err(ToolError::from).and_then(|_| {
-                hirsel_engine::with_compiler_stack(|| {
+                hirsel_intern::jobs::with_compiler_stack(|| {
                     w.compiler.load_program_inputs(&entry, &capture, false)
                 })
             });
@@ -1413,195 +1413,197 @@ impl CandidateWorkspace {
         let Some(charge) = w.budget.reserve(w.limits.result_bytes) else {
             return self.control_snapshot(IncompleteReason::ResourceLimit);
         };
-        let computed = hirsel_engine::with_compiler_stack(|| -> Result<Snapshot, ToolError> {
-            w.state.lock().unwrap().counters.frozen_loads += 1;
-            let selected_config = CompileConfig {
-                verify: Verify::On,
-                lowering: LoweringPolicy::Comptime,
-                ..w.config.clone()
-            };
-            let selected_config = if inputs.namespace.is_some() {
-                CompileConfig {
-                    store: Arc::new(hirsel_engine::store::NoneStore),
-                    ..selected_config
-                }
-            } else {
-                selected_config
-            };
-            let selection = if let Some(namespace) = &inputs.namespace {
-                let program = match namespace.load(&w.compiler, selected_config.clone(), false) {
-                    Ok(program) => program,
-                    Err(error) => return Ok(snapshot_error(error, charge.clone(), true)),
-                };
-                let selection = Arc::new(v2::Selection::of(&program));
-                drop(program);
-                Some(selection)
-            } else {
-                None
-            };
-            let request_inputs = if let Some(namespace) = &inputs.namespace {
-                CompileInputs::Namespace(namespace.clone())
-            } else {
-                CompileInputs::Frozen(inputs.frozen.clone())
-            };
-            let mut requests = CompilerRequests::for_host(w.compiler.clone(), selected_config);
-            #[cfg(test)]
-            requests.set_before_check(*w.before_check.lock().unwrap());
-            // One install per candidate: the CheckedProducts graph also
-            // answers Check, so a rejected or incomplete program reads its
-            // Check outcome from the same hot graph.
-            let products_request = CompileRequest {
-                path: inputs.entry.clone(),
-                inputs: request_inputs.clone(),
-                operation: CompileOperation::CheckedProducts {
+        let computed =
+            hirsel_intern::jobs::with_compiler_stack(|| -> Result<Snapshot, ToolError> {
+                w.state.lock().unwrap().counters.frozen_loads += 1;
+                let selected_config = CompileConfig {
+                    verify: Verify::On,
                     lowering: LoweringPolicy::Comptime,
-                    canonical: w.limits.retain_canonical_export,
-                },
-            };
-            let check_started = std::time::Instant::now();
-            let mut request_work = RequestWork::default();
-            let selected = requests.execute_request(&products_request);
-            let checked = match selected {
-                Ok(selected) => {
-                    aggregate_request_work(&mut request_work, &selected.work);
-                    match &selected.result {
-                        CompileResult::CheckedProducts { checked, products } => {
-                            Ok((checked.clone(), Some(products.clone()), None))
-                        }
-                        _ => Err(ToolError::Runtime(
-                            "checked-products request returned another operation".into(),
-                        )),
+                    ..w.config.clone()
+                };
+                let selected_config = if inputs.namespace.is_some() {
+                    CompileConfig {
+                        store: Arc::new(hirsel_engine::store::NoneStore),
+                        ..selected_config
                     }
-                }
-                Err(products_error) => {
-                    let check_request = CompileRequest {
-                        path: inputs.entry.clone(),
-                        inputs: request_inputs,
-                        operation: CompileOperation::Check {
-                            lowering: LoweringPolicy::Comptime,
-                        },
+                } else {
+                    selected_config
+                };
+                let selection = if let Some(namespace) = &inputs.namespace {
+                    let program = match namespace.load(&w.compiler, selected_config.clone(), false)
+                    {
+                        Ok(program) => program,
+                        Err(error) => return Ok(snapshot_error(error, charge.clone(), true)),
                     };
-                    requests
-                        .execute_request(&check_request)
-                        .and_then(|checked| {
-                            aggregate_request_work(&mut request_work, &checked.work);
-                            match &checked.result {
-                                CompileResult::Check(output) => {
-                                    Ok((output.clone(), None, Some(products_error)))
-                                }
-                                _ => Err(ToolError::Runtime(
-                                    "source check request returned another operation".into(),
-                                )),
+                    let selection = Arc::new(v2::Selection::of(&program));
+                    drop(program);
+                    Some(selection)
+                } else {
+                    None
+                };
+                let request_inputs = if let Some(namespace) = &inputs.namespace {
+                    CompileInputs::Namespace(namespace.clone())
+                } else {
+                    CompileInputs::Frozen(inputs.frozen.clone())
+                };
+                let mut requests = CompilerRequests::for_host(w.compiler.clone(), selected_config);
+                #[cfg(test)]
+                requests.set_before_check(*w.before_check.lock().unwrap());
+                // One install per candidate: the CheckedProducts graph also
+                // answers Check, so a rejected or incomplete program reads its
+                // Check outcome from the same hot graph.
+                let products_request = CompileRequest {
+                    path: inputs.entry.clone(),
+                    inputs: request_inputs.clone(),
+                    operation: CompileOperation::CheckedProducts {
+                        lowering: LoweringPolicy::Comptime,
+                        canonical: w.limits.retain_canonical_export,
+                    },
+                };
+                let check_started = std::time::Instant::now();
+                let mut request_work = RequestWork::default();
+                let selected = requests.execute_request(&products_request);
+                let checked = match selected {
+                    Ok(selected) => {
+                        aggregate_request_work(&mut request_work, &selected.work);
+                        match &selected.result {
+                            CompileResult::CheckedProducts { checked, products } => {
+                                Ok((checked.clone(), Some(products.clone()), None))
                             }
-                        })
-                }
-            };
-            let check_nanos = nanos(check_started);
-            let receipt_started = std::time::Instant::now();
-            let snapshot = match checked {
-                // Language diagnostics a phase found while the graph installed
-                // are that program's complete rejection, not a load failure.
-                Err(ToolError::Query {
-                    error: QueryError::Diagnostics(diagnostics),
-                    phase: Some(_),
-                    sources,
-                }) => Snapshot {
-                    selection: selection.clone(),
-                    completion: Completion::Complete,
-                    phase: None,
-                    verdict: Verdict::Reject,
-                    output: Arc::new(CheckOutput {
+                            _ => Err(ToolError::Runtime(
+                                "checked-products request returned another operation".into(),
+                            )),
+                        }
+                    }
+                    Err(products_error) => {
+                        let check_request = CompileRequest {
+                            path: inputs.entry.clone(),
+                            inputs: request_inputs,
+                            operation: CompileOperation::Check {
+                                lowering: LoweringPolicy::Comptime,
+                            },
+                        };
+                        requests
+                            .execute_request(&check_request)
+                            .and_then(|checked| {
+                                aggregate_request_work(&mut request_work, &checked.work);
+                                match &checked.result {
+                                    CompileResult::Check(output) => {
+                                        Ok((output.clone(), None, Some(products_error)))
+                                    }
+                                    _ => Err(ToolError::Runtime(
+                                        "source check request returned another operation".into(),
+                                    )),
+                                }
+                            })
+                    }
+                };
+                let check_nanos = nanos(check_started);
+                let receipt_started = std::time::Instant::now();
+                let snapshot = match checked {
+                    // Language diagnostics a phase found while the graph installed
+                    // are that program's complete rejection, not a load failure.
+                    Err(ToolError::Query {
+                        error: QueryError::Diagnostics(diagnostics),
+                        phase: Some(_),
                         sources,
-                        diagnostics,
-                        ..Default::default()
-                    }),
-                    loader_error: None,
-                    failure_class: None,
-                    products: None,
-                    _charge: charge.clone(),
-                },
-                Err(error) => {
-                    let loader = !matches!(&error, ToolError::Query { phase: Some(_), .. });
-                    snapshot_error(error, charge.clone(), loader)
-                }
-                Ok((output, products, products_failure)) => {
-                    let complete = output.completion == CheckCompletion::Complete;
-                    let rejecting = output
-                        .diagnostics
-                        .iter()
-                        .any(|d| d.severity == hirsel_diag::Severity::Error);
-                    // A complete accepted Check always yields products; a
-                    // rejected one fails products with exactly its diagnostics.
-                    let products_error = match products_failure {
-                        None => None,
-                        Some(_) if !complete => None,
-                        Some(ToolError::Query {
-                            error: QueryError::NotImplemented,
-                            ..
-                        }) if rejecting => None,
-                        Some(ToolError::Query {
-                            error: QueryError::Diagnostics(diagnostics),
-                            phase,
+                    }) => Snapshot {
+                        selection: selection.clone(),
+                        completion: Completion::Complete,
+                        phase: None,
+                        verdict: Verdict::Reject,
+                        output: Arc::new(CheckOutput {
                             sources,
-                        }) if rejecting => {
-                            let diagnostics = hirsel_engine::select_diagnostics(
-                                diagnostics,
-                                Some(&output.sources),
-                            );
-                            (diagnostics != output.diagnostics).then_some(ToolError::Query {
+                            diagnostics,
+                            ..Default::default()
+                        }),
+                        loader_error: None,
+                        failure_class: None,
+                        products: None,
+                        _charge: charge.clone(),
+                    },
+                    Err(error) => {
+                        let loader = !matches!(&error, ToolError::Query { phase: Some(_), .. });
+                        snapshot_error(error, charge.clone(), loader)
+                    }
+                    Ok((output, products, products_failure)) => {
+                        let complete = output.completion == CheckCompletion::Complete;
+                        let rejecting = output
+                            .diagnostics
+                            .iter()
+                            .any(|d| d.severity == hirsel_diag::Severity::Error);
+                        // A complete accepted Check always yields products; a
+                        // rejected one fails products with exactly its diagnostics.
+                        let products_error = match products_failure {
+                            None => None,
+                            Some(_) if !complete => None,
+                            Some(ToolError::Query {
+                                error: QueryError::NotImplemented,
+                                ..
+                            }) if rejecting => None,
+                            Some(ToolError::Query {
                                 error: QueryError::Diagnostics(diagnostics),
                                 phase,
                                 sources,
-                            })
-                        }
-                        Some(error) => Some(error),
-                    };
-                    if let Some(error) = products_error {
-                        snapshot_error(error, charge.clone(), false)
-                    } else {
-                        Snapshot {
-                            selection: selection.clone(),
-                            phase: match output.completion {
-                                CheckCompletion::Complete => None,
-                                CheckCompletion::Incomplete { phase } => Some(phase),
-                            },
-                            completion: if complete {
-                                Completion::Complete
-                            } else {
-                                Completion::Incomplete(IncompleteReason::MissingPhase)
-                            },
-                            verdict: if !complete {
-                                Verdict::Undecided
-                            } else if rejecting {
-                                Verdict::Reject
-                            } else {
-                                Verdict::Pass
-                            },
-                            output: Arc::new(output),
-                            loader_error: None,
-                            failure_class: None,
-                            products,
-                            _charge: charge.clone(),
+                            }) if rejecting => {
+                                let diagnostics = hirsel_engine::select_diagnostics(
+                                    diagnostics,
+                                    Some(&output.sources),
+                                );
+                                (diagnostics != output.diagnostics).then_some(ToolError::Query {
+                                    error: QueryError::Diagnostics(diagnostics),
+                                    phase,
+                                    sources,
+                                })
+                            }
+                            Some(error) => Some(error),
+                        };
+                        if let Some(error) = products_error {
+                            snapshot_error(error, charge.clone(), false)
+                        } else {
+                            Snapshot {
+                                selection: selection.clone(),
+                                phase: match output.completion {
+                                    CheckCompletion::Complete => None,
+                                    CheckCompletion::Incomplete { phase } => Some(phase),
+                                },
+                                completion: if complete {
+                                    Completion::Complete
+                                } else {
+                                    Completion::Incomplete(IncompleteReason::MissingPhase)
+                                },
+                                verdict: if !complete {
+                                    Verdict::Undecided
+                                } else if rejecting {
+                                    Verdict::Reject
+                                } else {
+                                    Verdict::Pass
+                                },
+                                output: Arc::new(output),
+                                loader_error: None,
+                                failure_class: None,
+                                products,
+                                _charge: charge.clone(),
+                            }
                         }
                     }
-                }
-            };
-            let mut state = w.state.lock().unwrap();
-            state.counters.check_nanos += check_nanos;
-            state.counters.receipt_nanos += nanos(receipt_started);
-            state.counters.load_nanos += request_work.load_nanos;
-            state.counters.recomputations += request_work.recomputations;
-            state.counters.store_adoptions += request_work.store_adoptions;
-            state.counters.peak_type_bytes = state
-                .counters
-                .peak_type_bytes
-                .max(request_work.peak_type_bytes);
-            state.counters.dropped_engines += request_work.dropped_engines;
-            drop(state);
-            let mut snapshot = snapshot;
-            snapshot.selection = selection;
-            Ok(snapshot)
-        });
+                };
+                let mut state = w.state.lock().unwrap();
+                state.counters.check_nanos += check_nanos;
+                state.counters.receipt_nanos += nanos(receipt_started);
+                state.counters.load_nanos += request_work.load_nanos;
+                state.counters.recomputations += request_work.recomputations;
+                state.counters.store_adoptions += request_work.store_adoptions;
+                state.counters.peak_type_bytes = state
+                    .counters
+                    .peak_type_bytes
+                    .max(request_work.peak_type_bytes);
+                state.counters.dropped_engines += request_work.dropped_engines;
+                drop(state);
+                let mut snapshot = snapshot;
+                snapshot.selection = selection;
+                Ok(snapshot)
+            });
         let mut snapshot: Snapshot = match computed {
             Ok(snapshot) => snapshot,
             Err(error) => snapshot_error(error, charge.clone(), false),
@@ -2121,7 +2123,7 @@ mod tests {
         // A later sidecar cannot redirect an already captured standalone graph.
         std::fs::write(&sidecar, "{}").unwrap();
         assert!(!base.inputs.frozen.changed_on_disk().is_empty());
-        hirsel_engine::with_compiler_stack(|| {
+        hirsel_intern::jobs::with_compiler_stack(|| {
             let frozen = w
                 .inner
                 .compiler

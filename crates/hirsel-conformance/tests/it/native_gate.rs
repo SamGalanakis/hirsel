@@ -46,7 +46,7 @@ const FIXTURE: &str = "native-tests/replay/column-skew";
 const WARM: &str = "type Warm { a: u64, b: Bytes }\nfn warm(x: u64) -> u64 { x + 1u64 }\n";
 
 fn on_compiler<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
-    hirsel_engine::with_compiler_stack(f)
+    hirsel_intern::jobs::with_compiler_stack(f)
 }
 
 #[test]

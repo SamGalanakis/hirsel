@@ -580,7 +580,7 @@ fn store_fault_checks(candidate: bool) -> String {
         hirsel_engine::CheckedProducts,
         u64,
     ) {
-        hirsel_engine::with_compiler_stack(|| {
+        hirsel_intern::jobs::with_compiler_stack(|| {
             let compiler = hirsel_front_phases::COMPILER
                 .clone()
                 .with_config(config.clone())
@@ -763,7 +763,7 @@ fn candidate_eight_results_release_unused_reserves_and_old_observations_have_bac
 }
 #[test]
 fn candidate_ordinary_products_keep_snapshots_frozen_and_allow_library_edits() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let f = Fixture::new("pub fn main()->u64{lib.value(1)}\n");
         let library = f.0.join("lib.hir");
         std::fs::write(&library, "pub fn value(x:u64)->u64{x+1}\n").unwrap();
@@ -957,7 +957,7 @@ fn candidate_recursive_source_missing_name_becomes_available_in_a_sibling() {
 }
 
 fn cold_products(entry: &std::path::Path, jobs: usize) -> hirsel_engine::CheckedProducts {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let mut session = hirsel_driver::session::Session::open_configured(
             entry,
             CompileConfig {

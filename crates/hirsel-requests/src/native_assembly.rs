@@ -17,12 +17,12 @@ use hirsel_engine::FrontNativeQueries;
 use hirsel_engine::FrontRunQueries;
 use hirsel_engine::LoadedProgram;
 use hirsel_engine::ToolError;
-use hirsel_engine::runtime::MemoryWeight;
-use hirsel_engine::runtime::QueryFactory;
-use hirsel_engine::runtime::QueryId;
-use hirsel_engine::runtime::RuntimeErrors;
 use hirsel_engine::store::Reference;
 use hirsel_engine::store::ResultStore;
+use hirsel_engine_runtime::MemoryWeight;
+use hirsel_engine_runtime::QueryFactory;
+use hirsel_engine_runtime::QueryId;
+use hirsel_engine_runtime::RuntimeErrors;
 
 use hirsel_native::object_queries;
 use hirsel_native::query_model::{
@@ -204,7 +204,7 @@ impl NativeAssembly {
         queries.extend(self.source.run_query_inventory());
         for path in definitions {
             if let Some(query) = self.source.definition_query(path) {
-                hirsel_engine::runtime::profile::definition(query, path);
+                hirsel_engine_runtime::profile::definition(query, path);
                 queries.push(query);
             }
         }

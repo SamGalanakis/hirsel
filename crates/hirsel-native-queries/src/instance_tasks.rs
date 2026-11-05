@@ -7,8 +7,10 @@ use super::{
     source_inputs::{NativeFrontLower, NativeInstanceInputs, NativeSourceProvider},
     *,
 };
+use hirsel_engine::store::ResultStore;
 use hirsel_engine::store::{Action, Address, Domain};
-use hirsel_engine::{runtime::*, store::ResultStore};
+use hirsel_engine_runtime::*;
+
 use std::{
     collections::BTreeMap,
     sync::{
@@ -1231,7 +1233,7 @@ impl InstanceTasks {
                 output
                     .product
                     .product
-                    .archive(hirsel_engine::runtime::ArchiveAdmission::Retained)
+                    .archive(hirsel_engine_runtime::ArchiveAdmission::Retained)
                     .map_err(|e| e.to_string())?
                     .reference(),
             ));
@@ -1300,7 +1302,7 @@ impl InstanceTasks {
                     output
                         .product
                         .product
-                        .archive(hirsel_engine::runtime::ArchiveAdmission::Retained)
+                        .archive(hirsel_engine_runtime::ArchiveAdmission::Retained)
                         .map_err(|e| e.to_string())?
                         .reference(),
                 ))
@@ -1421,7 +1423,7 @@ mod retained_tests {
 
     #[test]
     fn discovery_frontier_keeps_addresses_within_a_small_frame() {
-        hirsel_engine::with_compiler_stack(|| {
+        hirsel_intern::jobs::with_compiler_stack(|| {
             for count in [48, 256] {
                 let transport = hirsel_engine_admission::ProcessBudget::new(64 << 20);
                 let store: Arc<dyn ResultStore> =
@@ -1518,7 +1520,7 @@ mod retained_tests {
 
     #[test]
     fn registry_metadata_refuses_one_less_and_releases_its_exact_partition() {
-        hirsel_engine::with_compiler_stack(|| {
+        hirsel_intern::jobs::with_compiler_stack(|| {
             let transport = hirsel_engine_admission::ProcessBudget::new(64 << 20);
             let store: Arc<dyn ResultStore> = Arc::new(hirsel_engine::store::RequestStore::new(
                 Arc::new(hirsel_engine::store::MemStore::default()),

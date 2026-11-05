@@ -5,11 +5,11 @@ use crate::requests::{
     NativeRequest,
 };
 use crate::testing::{BenchResult, Selection, Test, TestResult};
-use hirsel_engine::runtime::QueryRuntime;
 use hirsel_engine::{
     ToolError,
     requests::{OutputReadiness, RequestEngine},
 };
+use hirsel_engine_runtime::QueryRuntime;
 use std::sync::Arc;
 use std::{
     path::Path,

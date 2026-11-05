@@ -3,8 +3,8 @@
 //! actual callee/constant references extend it. The solver is shared with the
 //! scalar adapter and is never used as a substitute for V's independent proof.
 use super::*;
-use crate::runtime::*;
 use crate::store::{Domain, Reference, ResultStore};
+use hirsel_engine_runtime::*;
 use hirsel_types::storage::{CallableStorageProfile, graph::*};
 use std::{
     sync::{
@@ -553,9 +553,9 @@ impl Task {
         let diagnostics = Arc::new(diagnostics);
         let reads = Arc::new(reads);
         let mut weight = crate::memo::retained::Weight::default();
-        weight.add(
-            crate::memo::retained_arc_bytes(&std::mem::MaybeUninit::<Data>::uninit()) as usize,
-        );
+        weight.add(hirsel_engine_admission::retained_arc_bytes(
+            &std::mem::MaybeUninit::<Data>::uninit(),
+        ) as usize);
         weight.arc(&profiles, |w, profiles| w.storage_profiles(profiles));
         weight.arc(&diagnostics, |w, diagnostics| {
             w.vec(diagnostics, |w, diagnostic| w.diagnostic(diagnostic))
@@ -566,12 +566,16 @@ impl Task {
             Arc<Vec<Diagnostic>>,
             Arc<Reads>,
         );
-        weight.add(crate::memo::retained_arc_bytes(&std::mem::MaybeUninit::<
-            super::live_record::LiveRecord<Record>,
-        >::uninit()) as usize);
-        weight.add(crate::memo::retained_arc_bytes(&std::mem::MaybeUninit::<
-            hirsel_engine_admission::MemoryReservation,
-        >::uninit()) as usize);
+        weight.add(
+            hirsel_engine_admission::retained_arc_bytes(&std::mem::MaybeUninit::<
+                super::live_record::LiveRecord<Record>,
+            >::uninit()) as usize,
+        );
+        weight.add(
+            hirsel_engine_admission::retained_arc_bytes(&std::mem::MaybeUninit::<
+                hirsel_engine_admission::MemoryReservation,
+            >::uninit()) as usize,
+        );
         let reservation = Arc::new(
             owner
                 .outputs

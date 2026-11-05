@@ -32,7 +32,7 @@ impl NativeMetadataWeight {
     /// Owned Arc allocation (inline value only). Shared front payloads must not
     /// be passed here. Callers visit the backing buffers separately.
     pub fn arc<T>(&mut self, value: &Arc<T>) {
-        self.add(crate::memo::retained_arc_bytes(&**value) as usize);
+        self.add(hirsel_engine_admission::retained_arc_bytes(&**value) as usize);
     }
     pub fn program_revision(&mut self, value: &hirsel_run_schema::ProgramRevision) {
         self.add(value.retained_metadata_bytes() as usize);

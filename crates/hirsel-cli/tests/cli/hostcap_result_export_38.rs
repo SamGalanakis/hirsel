@@ -83,7 +83,7 @@ fn resource_result_and_replay(program: &str) {
             } else {
                 canonical = Some(evidence.clone());
             }
-            hirsel_engine::with_compiler_stack(|| {
+            hirsel_intern::jobs::with_compiler_stack(|| {
                 let reference = hirsel_driver::replay_observations(&source, &tape, None).unwrap();
                 let checked =
                     hirsel_driver::replay_observations_checked(&source, &tape, None).unwrap();
@@ -152,7 +152,7 @@ fn hostcap_result_export_38_forged_task_result_is_not_replay_authority() {
                 .unwrap();
             assert_eq!(output.status.code(), Some(3), "{backend}: {output:?}");
             assert!(output.stdout.is_empty());
-            hirsel_engine::with_compiler_stack(|| {
+            hirsel_intern::jobs::with_compiler_stack(|| {
                 assert!(hirsel_driver::replay_observations(&source, &tape, None).is_err());
                 assert!(hirsel_driver::replay_observations_checked(&source, &tape, None).is_err());
             });
@@ -188,7 +188,7 @@ fn hostcap_result_export_38_forged_task_result_is_not_replay_authority() {
             "forged acquisition {backend}: {output:?}"
         );
         assert!(output.stdout.is_empty());
-        hirsel_engine::with_compiler_stack(|| {
+        hirsel_intern::jobs::with_compiler_stack(|| {
             assert!(hirsel_driver::replay_observations(&source, &tape, None).is_err());
             assert!(hirsel_driver::replay_observations_checked(&source, &tape, None).is_err());
         });

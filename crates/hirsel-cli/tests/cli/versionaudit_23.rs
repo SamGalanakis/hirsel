@@ -80,7 +80,7 @@ fn versionaudit_23_upstream_vectors_and_application_three_engines() {
 
 #[test]
 fn versionaudit_23_pure_model_checked_heap() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let scratch = tempfile::tempdir().unwrap();
         let manifest = package(scratch.path());
         fs::write(scratch.path().join("main.hir"), r#"

@@ -88,7 +88,7 @@ fn selected(row: &Value) -> bool {
     std::env::var("PNM_TILES_30_CASE").map_or(true, |v| v.split(',').any(|id| row["id"] == id))
 }
 fn simulated(large: bool) {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let root = scratch("simulation");
         let selection = package(&root);
         let mut loaded = hirsel_front_phases::load_program(&selection).unwrap();
@@ -246,7 +246,7 @@ fn pnm_tiles_30_reference_checked_caps() {
 
 #[test]
 fn pnm_tiles_30_native_record_replay() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let root = if let Some(root) = std::env::var_os("PNM_TILES_30_REPLAY_ROOT") {
             PathBuf::from(root)
         } else {
@@ -426,7 +426,7 @@ fn refused(manifest: &Path, root: &Path, tape: &Path, kind: &str) {
 
 #[test]
 fn pnm_tiles_30_replay_refusals() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let root = if let Some(path) = std::env::var_os("PNM_TILES_30_REPLAY_ROOT") {
             PathBuf::from(path)
         } else {

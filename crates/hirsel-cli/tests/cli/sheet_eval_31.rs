@@ -135,7 +135,7 @@ fn fixture(case: &Value) -> Fixture {
 
 #[test]
 fn sheet_eval_31_scripted_reference_checked_entry() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let scratch = scratch("sheet-scripted-");
         let path = package(scratch.path());
         let mut loaded = hirsel_front_phases::load_program(&path).unwrap();
@@ -206,7 +206,7 @@ fn sheet_eval_31_scripted_reference_checked_entry() {
 }
 
 fn native_cases(selected: Vec<Value>) {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let retained = scratch("sheet-native-").keep();
         let scratch = retained.as_path();
         let path = package(scratch);
@@ -542,7 +542,7 @@ fn extra_cases() -> Vec<Value> {
 
 #[test]
 fn sheet_eval_31_additional_bounds_entry() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let scratch = scratch("sheet-additional-");
         let path = package(scratch.path());
         let mut loaded = hirsel_front_phases::load_program(&path).unwrap();
@@ -607,7 +607,7 @@ fn sheet_eval_31_additional_bounds_entry() {
 
 #[test]
 fn sheet_eval_31_repl_cancel_output_entry() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let scratch = scratch("sheet-repl-");
         let path = package(scratch.path());
         let mut loaded = hirsel_front_phases::load_program(&path).unwrap();
@@ -724,7 +724,7 @@ fn sheet_eval_31_native_additional_providers() {
 #[test]
 #[ignore = "edges4096/4097 exhausted their original 16M reference/checked bound; INCOMPLETE, see FRICTION.md"]
 fn sheet_eval_31_dense_reference_boundary() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let scratch = scratch("sheet-dense-");
         let path = package(scratch.path());
         let mut loaded = hirsel_front_phases::load_program(&path).unwrap();
@@ -764,7 +764,7 @@ fn sheet_eval_31_dense_reference_boundary() {
 #[test]
 #[ignore = "requires SHEET_EVAL_31_PRODUCTION pointing at immutable production evidence; run explicitly on host"]
 fn sheet_eval_31_production_host_replay() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let evidence = PathBuf::from(
             std::env::var_os("SHEET_EVAL_31_PRODUCTION").expect("production evidence root"),
         );
@@ -845,7 +845,7 @@ fn sheet_eval_31_production_host_replay() {
 #[test]
 #[ignore = "requires SHEET_EVAL_31_PRODUCTION with immutable tapes and linked native executables"]
 fn sheet_eval_31_production_refusal_controls() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let evidence = PathBuf::from(
             std::env::var_os("SHEET_EVAL_31_PRODUCTION").expect("production evidence"),
         );
@@ -927,7 +927,7 @@ fn sheet_eval_31_production_refusal_controls() {
 
 #[test]
 fn sheet_eval_31_ast_preflight_reference_checked() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let scratch = scratch("sheet-ast-");
         let path = package(scratch.path());
         let mut loaded = hirsel_front_phases::load_program(&path).unwrap();
@@ -982,7 +982,7 @@ fn sheet_eval_31_afterwrite_full_entry() {
 
 #[test]
 fn sheet_eval_31_reduced_dense_entry() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let scratch = scratch("sheet-reduced-");
         let path = package(scratch.path());
         let mut loaded = hirsel_front_phases::load_program(&path).unwrap();
@@ -1024,7 +1024,7 @@ fn sheet_eval_31_reduced_dense_entry() {
 
 #[test]
 fn sheet_eval_31_unicode_formula_bounds() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let scratch = scratch("sheet-unicode-");
         let path = package(scratch.path());
         let mut loaded = hirsel_front_phases::load_program(&path).unwrap();
@@ -1070,7 +1070,7 @@ fn sheet_eval_31_canceled_recalculation() {
 #[test]
 #[ignore = "requires SHEET_EVAL_31_PRODUCTION with the retained original dense recordings"]
 fn sheet_eval_31_remaining_dense_native_replay() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let evidence =
             PathBuf::from(std::env::var_os("SHEET_EVAL_31_PRODUCTION").expect("evidence"));
         let path = evidence.join("qualified-app/hirsel.json");
@@ -1142,7 +1142,7 @@ fn sheet_eval_31_remaining_dense_native_replay() {
 #[test]
 #[ignore = "requires SHEET_EVAL_31_PRODUCTION with the immutable real ENOSPC stdout recordings"]
 fn sheet_eval_31_real_output_error_replay() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let root = PathBuf::from(std::env::var_os("SHEET_EVAL_31_PRODUCTION").expect("evidence"));
         let path = root.join("qualified-app/hirsel.json");
         let mut program = hirsel_front_phases::load_program(&path).unwrap();

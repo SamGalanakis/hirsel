@@ -32,14 +32,23 @@ pub(crate) use installed::{
 pub use remote::RemoteStore;
 pub use request::RequestStore;
 
-impl<T: ResultStore + ?Sized> crate::runtime::backing::ProductBacking for T {
-    fn get_content(&self, reference: Reference) -> Option<Bytes> {
-        ResultStore::get_content(self, reference)
-    }
-    fn admit_product_memory(&self, bytes: u64) -> Option<Arc<dyn Send + Sync>> {
-        ResultStore::admit_product_memory(self, bytes)
-    }
+macro_rules! product_backing {
+    ($($provider:ty),* $(,)?) => { $(
+        impl hirsel_engine_runtime::backing::ProductBacking for $provider {
+            fn get_content(&self, reference: Reference) -> Option<Bytes> { ResultStore::get_content(self, reference) }
+            fn admit_product_memory(&self, bytes: u64) -> Option<Arc<dyn Send + Sync>> { ResultStore::admit_product_memory(self, bytes) }
+        }
+    )* };
 }
+product_backing!(
+    NoneStore,
+    MemStore,
+    SimStore,
+    DirStore,
+    RemoteStore,
+    RequestStore,
+    dyn ResultStore + '_
+);
 
 /// Stable logical address plus explicit source inputs. The address does not
 /// change when the body changes; variants bind inputs and dependency outputs
@@ -284,7 +293,7 @@ pub trait ResultStore: Send + Sync {
     fn open_product_archive(
         &self,
         _reference: Reference,
-    ) -> Option<crate::runtime::ProductArchive> {
+    ) -> Option<hirsel_engine_runtime::ProductArchive> {
         None
     }
     /// Transfer a producer's complete immutable encoded backing into this
@@ -293,7 +302,7 @@ pub trait ResultStore: Send + Sync {
         &self,
         _reference: Reference,
         _bytes: Bytes,
-    ) -> Option<crate::runtime::ProductArchive> {
+    ) -> Option<hirsel_engine_runtime::ProductArchive> {
         None
     }
     /// Copy a checked payload into independently admitted compact backing.
@@ -301,7 +310,7 @@ pub trait ResultStore: Send + Sync {
     fn copy_product_archive(
         &self,
         _reference: Reference,
-    ) -> Option<crate::runtime::ProductArchive> {
+    ) -> Option<hirsel_engine_runtime::ProductArchive> {
         None
     }
     /// Immutable content and logical action indexes use distinct addresses.

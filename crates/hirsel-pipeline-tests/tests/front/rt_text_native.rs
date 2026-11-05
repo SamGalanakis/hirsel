@@ -1,8 +1,8 @@
 //! Compiled text calls, failure anchors and generated drop glue on both targets.
 use hirsel_engine::{
     RunConfiguration, SimulationConfig, default_context, entry_path, run_observed_snapshot,
-    with_compiler_stack,
 };
+use hirsel_intern::jobs::with_compiler_stack;
 use hirsel_lir::layout_types::TargetSpec;
 use hirsel_native::Observation;
 use hirsel_native::OptLevel;

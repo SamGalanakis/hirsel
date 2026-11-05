@@ -20,7 +20,7 @@ fn cranelift_two_source_lines_have_three_and_five_count_pairs_and_dwarf() {
 }
 
 fn check_source_profile(backend: Backend) {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let dir_scratch = tempfile::Builder::new()
             .prefix("hirsel-source-profile-")
             .tempdir()
@@ -254,7 +254,7 @@ fn check_profile_context(backend: Backend) {
     use std::path::PathBuf;
     use std::process::Command;
 
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let dir_scratch = tempfile::Builder::new()
             .prefix("hirsel-profile-context-")
             .tempdir()
@@ -461,7 +461,7 @@ fn llvm_generated_and_scoped_task_sites_keep_their_source_coordinates() {
 }
 
 fn check_scoped_profile(backend: Backend) {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let dir_scratch = tempfile::Builder::new()
             .prefix("hirsel-profile-scoped-")
             .tempdir()

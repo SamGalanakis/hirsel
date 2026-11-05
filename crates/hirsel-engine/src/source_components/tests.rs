@@ -400,7 +400,7 @@ fn membership_record_reopens_through_the_same_native_codec_as_components() {
     let store = Arc::new(crate::store::MemStore::default());
     let records = crate::NativeRecords::new(engine.types().clone(), store);
     let product = membership.product;
-    let data = crate::runtime::SourceGrowthQueryData::Membership {
+    let data = crate::products::SourceGrowthQueryData::Membership {
         value: Arc::new(membership),
         reads: Arc::new(Reads::empty()),
     };
@@ -478,7 +478,7 @@ fn compact_source_fact_releases_checked_input_and_admits_growth_backing() {
     assert_eq!(
         fact.input_bytes(),
         (std::mem::size_of::<SourceGrowthFact>() + std::mem::size_of::<DefId>()) as u64
-            + crate::memo::retained::retained_arc_bytes(&[edge][..]),
+            + hirsel_engine_admission::retained_arc_bytes(&[edge][..]),
         "the compact fact admits its surviving edge allocation",
     );
     let settled = settle(&producer, vec![fact]).unwrap();

@@ -187,7 +187,7 @@ pub struct TirFixture {
 #[allow(dead_code)]
 impl TirFixture {
     pub fn new(path: &Path) -> Result<Self, ToolError> {
-        hirsel_engine::with_compiler_stack(|| {
+        hirsel_intern::jobs::with_compiler_stack(|| {
             let (compiler, _, inputs) =
                 compiler_for(path, LoweringPolicy::Reachable, ComptimeLimits::default()).map_err(
                     |output| ToolError::Query {

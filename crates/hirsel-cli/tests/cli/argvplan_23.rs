@@ -83,7 +83,7 @@ fn argvplan_23_oracle_engines_bounds_and_read_only_effects() {
 
 #[test]
 fn argvplan_23_checked_h_pure_model_vectors() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let scratch = tempfile::tempdir().unwrap();
         let root = scratch.path();
         fs::write(

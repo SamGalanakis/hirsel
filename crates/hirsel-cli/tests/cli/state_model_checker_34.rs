@@ -272,7 +272,7 @@ fn assert_record(bytes: &[u8], row: &Value) {
 }
 #[test]
 fn state_model_checker_34_reference_checked_workflows() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let root = root("simulation-");
         let path = package(&root);
         let mut loaded = hirsel_front_phases::load_program(&path).unwrap_or_else(|e| panic!("{e}"));
@@ -362,7 +362,7 @@ fn state_model_checker_34_reference_checked_workflows() {
 }
 #[test]
 fn state_model_checker_34_native_full_entry_replay() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let root = std::env::var_os("STATECHECK_NATIVE_ROOT")
             .map(PathBuf::from)
             .unwrap_or_else(|| root("native-"));
@@ -820,7 +820,7 @@ fn state_model_checker_34_arithmetic_and_encoder_boundaries() {
 fn ordered(backend: Backend) {
     use std::io::{BufRead, BufReader, Write};
     use std::os::unix::net::UnixStream;
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let root = root(&format!("ordered-{backend:?}-"));
         let _evidence = super::width_capacity_36::Evidence(root.clone());
         let path = package(&root);
@@ -1033,7 +1033,7 @@ fn state_model_checker_34_ordered_llvm() {
 
 #[test]
 fn state_model_checker_34_file_faults_reference_checked() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let root = root("fault-simulation-");
         let path = package(&root);
         let mut loaded = hirsel_front_phases::load_program(&path).unwrap_or_else(|e| panic!("{e}"));

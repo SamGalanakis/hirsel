@@ -125,7 +125,7 @@ fn real_lexer_and_formatter_reach_a_fixed_point_with_a_fixture_parser_on_compile
 }
 #[test]
 fn formatter_fallback_is_unavailable_and_never_a_clean_format_check() {
-    hirsel_engine::with_compiler_stack(
+    hirsel_intern::jobs::with_compiler_stack(
         formatter_fallback_is_unavailable_and_never_a_clean_format_check_on_compiler_thread,
     );
 }

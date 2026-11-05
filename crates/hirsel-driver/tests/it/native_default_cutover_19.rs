@@ -1,6 +1,6 @@
 //! Public fresh build readiness through the compiler-owned native query graph.
 use hirsel_driver::native;
-use hirsel_engine::with_compiler_stack;
+use hirsel_intern::jobs::with_compiler_stack;
 use hirsel_native::Backend;
 use hirsel_native::BuildProfile;
 use hirsel_native::TargetSpec;

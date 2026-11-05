@@ -2,8 +2,10 @@
 //! incomplete check publishes its diagnostics without demanding a Run closure.
 use hirsel_engine::store::{Action, Address, Domain, Reference};
 use hirsel_engine::{
-    CheckOutput, FrontCheckQueries, FrontRunQueries, ToolError, runtime::*, store::ResultStore,
+    CheckOutput, FrontCheckQueries, FrontRunQueries, ToolError, store::ResultStore,
 };
+use hirsel_engine_runtime::*;
+
 use hirsel_syntax::{ContentHash, DefPath};
 use std::{
     sync::{Arc, Mutex},

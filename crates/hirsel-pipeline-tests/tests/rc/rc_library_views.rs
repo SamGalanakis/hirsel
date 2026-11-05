@@ -1,8 +1,9 @@
 //! SEM-3 string views through the validated compiler and executed native ABI.
 use hirsel_engine::{
     InterpreterAdapter, RunConfiguration, RunOutcome, SimulationConfig, default_context,
-    entry_path, run_observed_snapshot, source_check_request, with_compiler_stack,
+    entry_path, run_observed_snapshot, source_check_request,
 };
+use hirsel_intern::jobs::with_compiler_stack;
 use hirsel_interp::Limits;
 use hirsel_native::Observation;
 use hirsel_native::OptLevel;

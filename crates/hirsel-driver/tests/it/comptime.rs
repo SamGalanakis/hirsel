@@ -56,7 +56,7 @@ fn materialized_constant_publishes_and_validates_on_compiler_thread() {
 }
 #[test]
 fn dependent_constants_materialize_before_their_readers_and_refresh_after_edits() {
-    hirsel_engine::with_compiler_stack(dependent_constants_materialize_before_their_readers_and_refresh_after_edits_on_compiler_thread);
+    hirsel_intern::jobs::with_compiler_stack(dependent_constants_materialize_before_their_readers_and_refresh_after_edits_on_compiler_thread);
 }
 fn dependent_constants_materialize_before_their_readers_and_refresh_after_edits_on_compiler_thread()
 {
@@ -81,7 +81,7 @@ fn dependent_constants_materialize_before_their_readers_and_refresh_after_edits_
 }
 #[test]
 fn evaluation_budget_diagnostics_retry_after_budget_changes() {
-    hirsel_engine::with_compiler_stack(
+    hirsel_intern::jobs::with_compiler_stack(
         evaluation_budget_diagnostics_retry_after_budget_changes_on_compiler_thread,
     );
 }
@@ -103,7 +103,9 @@ fn evaluation_budget_diagnostics_retry_after_budget_changes_on_compiler_thread()
 }
 #[test]
 fn static_errors_keep_their_ordinary_owner() {
-    hirsel_engine::with_compiler_stack(static_errors_keep_their_ordinary_owner_on_compiler_thread);
+    hirsel_intern::jobs::with_compiler_stack(
+        static_errors_keep_their_ordinary_owner_on_compiler_thread,
+    );
 }
 fn static_errors_keep_their_ordinary_owner_on_compiler_thread() {
     let mut engine = engine("const VALUE: u32 = comptime missing\n");
@@ -151,7 +153,7 @@ fn comptime_and_runtime_use_the_same_scalar_semantics_on_compiler_thread() {
 }
 #[test]
 fn pure_library_operations_are_reused_without_root_capabilities() {
-    hirsel_engine::with_compiler_stack(
+    hirsel_intern::jobs::with_compiler_stack(
         pure_library_operations_are_reused_without_root_capabilities_on_compiler_thread,
     );
 }
@@ -164,7 +166,7 @@ fn pure_library_operations_are_reused_without_root_capabilities_on_compiler_thre
 }
 #[test]
 fn nested_comptime_evaluations_materialize_inside_out() {
-    hirsel_engine::with_compiler_stack(
+    hirsel_intern::jobs::with_compiler_stack(
         nested_comptime_evaluations_materialize_inside_out_on_compiler_thread,
     );
 }
@@ -178,7 +180,7 @@ fn nested_comptime_evaluations_materialize_inside_out_on_compiler_thread() {
 
 #[test]
 fn compiler_dependency_depth_is_bounded_without_a_language_failure() {
-    hirsel_engine::with_compiler_stack(
+    hirsel_intern::jobs::with_compiler_stack(
         compiler_dependency_depth_is_bounded_without_a_language_failure_on_compiler_thread,
     );
 }
@@ -210,7 +212,7 @@ fn compiler_dependency_depth_is_bounded_without_a_language_failure_on_compiler_t
 
 #[test]
 fn same_signature_function_body_edits_invalidate_materialized_values() {
-    hirsel_engine::with_compiler_stack(
+    hirsel_intern::jobs::with_compiler_stack(
         same_signature_function_body_edits_invalidate_materialized_values_on_compiler_thread,
     );
 }
@@ -237,7 +239,7 @@ fn same_signature_function_body_edits_invalidate_materialized_values_on_compiler
 
 #[test]
 fn same_signature_body_edits_retry_prior_compile_time_language_failures() {
-    hirsel_engine::with_compiler_stack(
+    hirsel_intern::jobs::with_compiler_stack(
         same_signature_body_edits_retry_prior_compile_time_language_failures_on_compiler_thread,
     );
 }
@@ -261,7 +263,7 @@ fn same_signature_body_edits_retry_prior_compile_time_language_failures_on_compi
 
 #[test]
 fn compile_time_constants_do_not_depend_on_unexecuted_finalizer_bodies() {
-    hirsel_engine::with_compiler_stack(
+    hirsel_intern::jobs::with_compiler_stack(
         compile_time_constants_do_not_depend_on_unexecuted_finalizer_bodies_on_compiler_thread,
     );
 }
@@ -278,7 +280,7 @@ fn compile_time_constants_do_not_depend_on_unexecuted_finalizer_bodies_on_compil
 
 #[test]
 fn executed_compile_time_finalizers_use_the_runtime_scheduler_and_failure_policy() {
-    hirsel_engine::with_compiler_stack(executed_compile_time_finalizers_use_the_runtime_scheduler_and_failure_policy_on_compiler_thread);
+    hirsel_intern::jobs::with_compiler_stack(executed_compile_time_finalizers_use_the_runtime_scheduler_and_failure_policy_on_compiler_thread);
 }
 fn executed_compile_time_finalizers_use_the_runtime_scheduler_and_failure_policy_on_compiler_thread()
  {
@@ -315,7 +317,7 @@ fn compiled_constant_installation_is_dependency_first_with_source_order_ties() {
 
 #[test]
 fn source_comptime_values_have_no_data_nesting_cutoff() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         for depth in [31, 32, 33] {
             let mut ty = "u32".to_string();
             let mut value = "7u32".to_string();
@@ -476,7 +478,7 @@ fn staged_constants_survive_proof_export_and_unrelated_item_insertion() {
 }
 #[test]
 fn generated_bodies_regenerate_after_shape_and_generator_edits() {
-    hirsel_engine::with_compiler_stack(
+    hirsel_intern::jobs::with_compiler_stack(
         generated_bodies_regenerate_after_shape_and_generator_edits_on_compiler_thread,
     );
 }
@@ -526,7 +528,7 @@ fn generated_bodies_regenerate_after_shape_and_generator_edits_on_compiler_threa
 }
 #[test]
 fn generated_body_diagnostics_name_the_literal_parameter() {
-    hirsel_engine::with_compiler_stack(
+    hirsel_intern::jobs::with_compiler_stack(
         generated_body_diagnostics_name_the_literal_parameter_on_compiler_thread,
     );
 }
@@ -569,7 +571,7 @@ fn generated_body_diagnostics_name_the_literal_parameter_on_compiler_thread() {
 
 #[test]
 fn generic_generated_instances_follow_their_declaration() {
-    hirsel_engine::with_compiler_stack(
+    hirsel_intern::jobs::with_compiler_stack(
         generic_generated_instances_follow_their_declaration_on_compiler_thread,
     );
 }
@@ -2391,7 +2393,7 @@ fn frozen_lowering_prefix_publishes_exact_staged_instances_through_cache_hits() 
 /// its closure reaches, is answered.
 #[test]
 fn running_hello_builds_runtime_type_rows_only_for_types_its_closure_reaches() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
             dir.path().join("hello.hir"),
@@ -2448,7 +2450,7 @@ fn running_hello_builds_runtime_type_rows_only_for_types_its_closure_reaches() {
 
 #[test]
 fn frozen_frontier_generator_demand_skips_a_dead_compile_time_branch() {
-    use hirsel_engine::runtime::*;
+    use hirsel_engine_runtime::*;
     use std::sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
@@ -2643,7 +2645,7 @@ fn frozen_generator_instance_allowance_counts_current_selections_including_hits(
 
 #[test]
 fn frozen_generator_acceptance_cancellation_publishes_no_registration() {
-    use hirsel_engine::runtime::*;
+    use hirsel_engine_runtime::*;
     use std::sync::{Arc, Mutex, mpsc};
     with_compiler_stack(|| {
         let source = "type Point{x:u64}\nfn gen[T](s:TypeShape[T])->Result[Body[fn(T)->u64 uses {}],String]{let _=s;Ok(codegen.body(\"fn(v:standalone@0/Point)->u64 uses {}{let _=v;7u64}\"))}\nfn width[T](v:T)->u64 uses {}=comptime gen(shape(T))\nconst A:u64=comptime width(Point(x:1u64))\n";

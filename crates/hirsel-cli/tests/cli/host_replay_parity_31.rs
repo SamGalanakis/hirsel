@@ -98,7 +98,7 @@ fn record(app: &Path, manifest: Option<&Path>, tape: &Path, grants: &Path) {
 
 #[test]
 fn task_set_signal_suspensions_replay_exact_readiness() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let root = tempfile::tempdir().unwrap();
         let dir = root.path();
         fs::write(dir.join("main.hir"), SIGNALS).unwrap();
@@ -214,7 +214,7 @@ fn snapshot_file_waits_live_and_native_replay() {
     use hirsel_native_batch::*;
     use hirsel_native_testing::*;
     use hirsel_run_schema::{Access, FileReadScript};
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let root = tempfile::tempdir().unwrap();
         let source = root.path().join("main.hir");
         fs::write(&source, FILES).unwrap();
@@ -380,7 +380,7 @@ fn snapshot_file_waits_live_and_native_replay() {
 #[test]
 #[ignore = "requires HOST_REPLAY_PARITY_31_CASES with immutable host evidence"]
 fn retained_production_tapes() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let cases = std::env::var_os("HOST_REPLAY_PARITY_31_CASES").unwrap();
         let rows: Vec<serde_json::Value> =
             serde_json::from_slice(&fs::read(cases).unwrap()).unwrap();
@@ -448,7 +448,7 @@ fn record_chunk_blocked_on_current_runtime() {
     use hirsel_native::*;
     use hirsel_native_batch::*;
     use hirsel_native_testing::*;
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let root =
             std::path::PathBuf::from(std::env::var_os("HOST_REPLAY_PARITY_31_CHUNK").unwrap());
         let source = root.join("hirsel.json");

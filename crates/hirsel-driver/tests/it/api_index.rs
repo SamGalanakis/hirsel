@@ -8,7 +8,7 @@ use std::{collections::BTreeSet, path::Path};
 
 #[test]
 fn published_index_matches_every_core_and_std_export() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         let entries = api_index::entries(&root.join("stdlib/std@1/hirsel.json")).unwrap();
         assert_eq!(
@@ -119,7 +119,7 @@ fn published_index_matches_every_core_and_std_export() {
 
 #[test]
 fn index_retains_source_contracts_comments_and_public_visibility() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let root_scratch = tempfile::Builder::new()
             .prefix("api-index-")
             .tempdir_in(Path::new(env!("CARGO_TARGET_TMPDIR")))
@@ -199,7 +199,7 @@ pub fn comment(text: String) -> String/* relation */in text uses {} { text }
 
 #[test]
 fn package_public_api_matches_readable_golden() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         let entries = api_index::entries(&root.join("packages/doc_api@1/hirsel.json")).unwrap();
         let page = api_index::render(&entries);
@@ -229,7 +229,7 @@ fn package_public_api_matches_readable_golden() {
 
 #[test]
 fn package_documentation_does_not_query_bodies_or_initializers() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let root_scratch = tempfile::Builder::new()
             .prefix("api-body-")
             .tempdir_in(Path::new(env!("CARGO_TARGET_TMPDIR")))

@@ -10,7 +10,7 @@ use hirsel_native_testing::Outcome;
 
 #[test]
 fn iterator_dispatch_preserves_the_exact_activation_boundary() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let options = Options::new(TargetSpec::x86_64_unknown_linux_gnu());
         let mut matrix = native::cranelift::matrix(options.target.clone());
         matrix.insert(

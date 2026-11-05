@@ -1,7 +1,7 @@
 //! A source finalizer's compact extent never substitutes for root custody.
 #[test]
 fn finalizer_frame_checks_self_and_disjoint_bounded_nested_storage() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         use hirsel_driver::native;
         use hirsel_lir::continuation::isolate::{FinalizerFrame, FinalizerSource};
         use hirsel_lir::continuation::{MAX_FRAME_BYTES, PlanInputs};

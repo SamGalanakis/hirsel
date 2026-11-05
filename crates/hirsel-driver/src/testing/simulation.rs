@@ -60,7 +60,7 @@ mod tests {
 
     #[test]
     fn prepared_simulations_match_scalar_engines_and_keep_state_per_execution() {
-        hirsel_engine::with_compiler_stack(|| {
+        hirsel_intern::jobs::with_compiler_stack(|| {
             let directory = tempfile::tempdir().unwrap();
             let path = directory.path().join("hirsel.json");
             std::fs::write(

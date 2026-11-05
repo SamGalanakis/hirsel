@@ -1,5 +1,5 @@
 //! Sleep admission consumes a checked result cell and the original host token.
-use hirsel_engine::with_compiler_stack;
+use hirsel_intern::jobs::with_compiler_stack;
 use hirsel_lir::continuation::{Representation, ResumeAction, RuntimeOpKind};
 
 const SOURCE: &str = r#"

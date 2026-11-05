@@ -2,7 +2,7 @@
 //! Completed-begin and complete cleanup evidence enables the known exception;
 //! a dynamic phi retains the existing opaque boundary.
 use hirsel_driver::native;
-use hirsel_engine::with_compiler_stack;
+use hirsel_intern::jobs::with_compiler_stack;
 use hirsel_lir::ir::{Callee, UnitOrigin};
 
 const PROGRAM: &str = r#"

@@ -65,7 +65,7 @@ fn clear_spawn_hints(program: &mut hirsel_native::ReadyProgram) {
 
 #[test]
 fn spawn_await_preserves_the_queued_sibling_load_and_ordered_tape_in_both_backends() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let dir_scratch = tempfile::Builder::new()
             .prefix("hirsel-spawn-fast-")
             .tempdir()

@@ -2,6 +2,7 @@
 //! entry points start fresh sessions on the compiler thread, so a compiler is
 //! the plain constructor of its phases and crosses threads freely.
 use crate::*;
+use hirsel_intern::jobs::with_compiler_stack;
 use std::{path::Path, sync::Arc};
 
 /// A fully prepared source; constructing a batch never writes to disk.
@@ -403,6 +404,7 @@ impl Compiler {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use hirsel_intern::jobs::with_compiler_stack;
     use hirsel_span::Span;
     use hirsel_syntax::ItemSyntax;
     use hirsel_types::{Resolution, Signature, TypeInterner, TypeMemo};

@@ -23,7 +23,7 @@ fn matrix() -> Vec<Configuration> {
 
 #[test]
 fn p1_recursion_and_self_restart_preserve_the_invocation_boundary() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let matrix = matrix();
         let toolchain = hirsel_native_testing::toolchain_for_matrix(
             &hirsel_conformance::native::runtime_cache().unwrap(),
@@ -141,7 +141,7 @@ fn agreement_output(name: &str, source: &str, rules: &[&str], output: Option<&[u
 
 #[test]
 fn p2_arena_primitive_and_callback_each_keep_their_invocation() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         for (n, rules) in [(1020, &[][..]), (1021, &["LANG-10"][..])] {
             let source = format!(
                 "fn f(n:u64)->u64 {{if n==0u64 {{0u64}}else {{1u64+f(n-1u64)}}}}\npub fn main()->Result[(), ()] {{let _ = arena.with(fn(a:Arena)->u64 {{f({n}u64)}}); Ok(())}}"
@@ -153,7 +153,7 @@ fn p2_arena_primitive_and_callback_each_keep_their_invocation() {
 
 #[test]
 fn p2_generic_payload_does_not_change_invocation_cost() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         for (n, rules) in [(1022, &[][..]), (1023, &["LANG-10"][..])] {
             let source = format!(
                 "type Four {{a:u64,b:u64,c:u64,d:u64}}\nfn f[T](n:u64,x:T)->u64 {{if n==0u64 {{0u64}}else {{1u64+f(n-1u64,x)}}}}\npub fn main()->Result[(), ()] {{let _ = f({n}u64,Four(a:1u64,b:2u64,c:3u64,d:4u64)); Ok(())}}"
@@ -165,7 +165,7 @@ fn p2_generic_payload_does_not_change_invocation_cost() {
 
 #[test]
 fn p2_indirect_closure_invocations_remain_live() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         for (n, rules) in [(511, &[][..]), (512, &["LANG-10"][..])] {
             let source = format!(
                 "fn f(n:u64)->u64 {{if n==0u64 {{0u64}}else {{let g=fn()->u64 {{f(n-1u64)}}; 1u64+g()}}}}\npub fn main()->Result[(), ()] {{let _ = f({n}u64); Ok(())}}"
@@ -185,7 +185,7 @@ drop(x) {()}
 
 #[test]
 fn p4_finalizer_has_an_independent_exact_cleanup_allowance() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         for (n, rules) in [(62, &[][..]), (63, &["LANG-10"][..])] {
             let source =
                 format!("{P4_HEADER}\npub fn main()->Result[(), ()] {{let r=R(n:{n}u64);Ok(())}}");
@@ -196,7 +196,7 @@ fn p4_finalizer_has_an_independent_exact_cleanup_allowance() {
 
 #[test]
 fn p4_outer_finalizer_stays_live_through_nested_inline_fields() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let source = format!(
             "{P4_HEADER}\npub fn main()->Result[(), ()] {{let r=Outer(inner:R(n:62u64));Ok(())}}"
         );
@@ -206,7 +206,7 @@ fn p4_outer_finalizer_stays_live_through_nested_inline_fields() {
 
 #[test]
 fn p4_rejected_take_keeps_primary_failure_and_runs_sibling_cleanup() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let source = format!(
             r#"{P4_HEADER}
 fn sink(take r:R)->() {{ () }}
@@ -223,7 +223,7 @@ pub fn main()->Result[(), ()] {{let _=dive(1022u64);Ok(())}}
 
 #[test]
 fn p4_defused_shell_does_not_reenter_the_resource_finalizer() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let source = format!(
             "{P4_HEADER}\npub fn main()->Result[(), ()] {{let r=Outer(inner:R(n:0u64));let Outer(inner:inner)=take r;let R(n:n)=take inner;Ok(())}}"
         );
@@ -233,7 +233,7 @@ fn p4_defused_shell_does_not_reenter_the_resource_finalizer() {
 
 #[test]
 fn p4_rejected_take_preserves_effect_order_and_finalizes_each_owner_once() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let source = r#"
 resource type Trace {stdout:Stdout, text:String, n:u64}
 drop(x) {let _=out.print(x.stdout,x.text); let _=f(x.n)}
@@ -266,7 +266,7 @@ pub fn main(rt:Io)->Result[(),GrantError] {
 
 #[test]
 fn p5_mem6_charge_remains_independent_of_invocation_depth() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         for cap in [15, 16] {
             let source = format!(
                 r#"
@@ -310,7 +310,7 @@ pub fn main()->Result[(), ()] {
 /// adapter-backed primitive and a leaf called through a function value still count.
 #[test]
 fn p6_leaf_operations_add_no_activation_at_the_boundary() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         // At f(0), main and the f frames hold n + 2 activations.
         let leaf = "fn f(n:u64)->u64 {if n==0u64 {let mut xs:List[u64]=[]; list.reserve(mut xs,1u64); list.push(mut xs,int.wrapping_add(n,1u64)); failure.check(list.len(xs)==1u64,TextInvariant()); f64.bits(f64.from_bits(xs[0u64]))} else {1u64+f(n-1u64)}}";
         let callback = "fn f(n:u64)->u64 {if n==0u64 {arena.with(fn(a:Arena)->u64 {0u64})} else {1u64+f(n-1u64)}}";
@@ -345,7 +345,7 @@ pub fn main(rt:Io)->Result[(),GrantError] {{let s=io.stdout(rt)?; let _=f({n}u64
 /// test is the same for every call, so the first call past the limit fails.
 #[test]
 fn p7_depth_leaf_callees_count_one_activation_at_the_boundary() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let step = "fn step(h:u64,v:u64)->u64 {let wide:u128=int.widen(h)*131u128+int.widen(v)\n int.truncate(wide)}";
         // At f(0), main and the f frames hold n + 2 activations; step adds one.
         let once = "fn f(n:u64)->u64 {if n==0u64 {step(n,1u64)} else {1u64+f(n-1u64)}}";
@@ -377,7 +377,7 @@ fn chain(payload:bool)->Chain {
 fn p3_logical_edges_admit_s_minus_one_and_s_but_reject_distinct_and_tuple_s_plus_one(
     selected: &str,
 ) {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let mut ran = false;
         for (name, setup, rules, output) in [
             (
@@ -425,7 +425,7 @@ fn p3_logical_edges_admit_s_minus_one_and_s_but_reject_distinct_and_tuple_s_plus
 }
 
 fn p3_preflight_precedes_mismatch_tag_length_and_repeated_shared_path_shortcuts(selected: &str) {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let mut ran = false;
         for (name, setup) in [
             (
@@ -458,7 +458,7 @@ fn p3_preflight_precedes_mismatch_tag_length_and_repeated_shared_path_shortcuts(
 }
 
 fn p3_key_admission_precedes_empty_container_and_whole_map_counts_no_pair_edge(selected: &str) {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let mut ran = false;
         for (name, setup, rules) in [
             (
@@ -495,7 +495,7 @@ fn p3_key_admission_precedes_empty_container_and_whole_map_counts_no_pair_edge(s
 
 #[test]
 fn p3_packed_and_flat_representation_wrappers_add_no_edges_at_the_boundary() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         for (name, declaration, leaf) in [
             (
                 "p3-packed-exact",
@@ -526,7 +526,7 @@ pub fn main(rt:Io)->Result[(),GrantError] {{
 
 #[test]
 fn p3_shallow_width_and_byte_lengths_do_not_spend_logical_depth() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let source = r#"
 flat type Row {xs:List[u64]}
 pub fn main(rt:Io)->Result[(),GrantError] {
@@ -546,7 +546,7 @@ pub fn main(rt:Io)->Result[(),GrantError] {
 fn p3_value_operations_preserve_flat_packed_sequential_and_column_equality_and_hash(
     selected: &str,
 ) {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let mut ran = false;
         for (name, declaration, checks) in [
             (
@@ -622,7 +622,7 @@ pub fn main(rt:Io)->Result[(),GrantError] {{
 // Draft outside frozen source; compile/run before accepting any identity.
 #[test]
 fn task_entry_has_fresh_count_and_parent_suspension_retains_its_count() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         for (name, child, rules) in [
             ("task-fresh-exact", 1022, &[][..]),
             ("task-fresh-over", 1023, &["LANG-10"][..]),
@@ -646,7 +646,7 @@ pub fn main(rt:Io)->Result[(),GrantError] {{let tasks=io.tasks(rt)?;let _=launch
 
 #[test]
 fn isolate_unwinds_live_invocations_without_resetting_parent() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         agreement_output(
             "isolate-depth-recovery",
             r#"
@@ -672,7 +672,7 @@ pub fn main(rt:Io)->Result[(),GrantError] {
 
 #[test]
 fn cancellation_drains_cleanup_at_full_foreground_depth_and_retires_for_later_calls() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         agreement_output(
             "cancel-depth-cleanup",
             r#"
@@ -820,7 +820,7 @@ pub fn main(rt:Io)->Result[(),GrantError] {{
 
 #[test]
 fn p3_take_map_exact() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         agreement_output(
             "p3-take-map-exact",
             &keyed_take_source(false, false),
@@ -832,7 +832,7 @@ fn p3_take_map_exact() {
 
 #[test]
 fn p3_take_map_over() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         agreement_output(
             "p3-take-map-over",
             &keyed_take_source(false, true),
@@ -844,7 +844,7 @@ fn p3_take_map_over() {
 
 #[test]
 fn p3_take_set_exact() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         agreement_output(
             "p3-take-set-exact",
             &keyed_take_source(true, false),
@@ -856,7 +856,7 @@ fn p3_take_set_exact() {
 
 #[test]
 fn p3_take_set_over() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         agreement_output(
             "p3-take-set-over",
             &keyed_take_source(true, true),
@@ -868,7 +868,7 @@ fn p3_take_set_over() {
 
 #[test]
 fn optimized_inlining_keeps_the_leaf_invocation_at_full_foreground_depth() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let mut matrix = matrix();
         for configuration in &mut matrix {
             if let Engine::Native { opt, .. } = &mut configuration.engine {
@@ -927,7 +927,7 @@ pub fn main()->Result[(),()] {{let _=f({n}u64);Ok(())}}
 
 #[test]
 fn independent_body_and_callback_proofs_cover_generic_closures_and_contracts() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         agreement_output(
             "body-proof-generic-callback-contract",
             r#"
@@ -975,19 +975,19 @@ fn indirect_keyed_take(set: bool, over: bool) {
 }
 #[test]
 fn indirect_keyed_map_exact() {
-    hirsel_engine::with_compiler_stack(|| indirect_keyed_take(false, false));
+    hirsel_intern::jobs::with_compiler_stack(|| indirect_keyed_take(false, false));
 }
 #[test]
 fn indirect_keyed_map_rejection() {
-    hirsel_engine::with_compiler_stack(|| indirect_keyed_take(false, true));
+    hirsel_intern::jobs::with_compiler_stack(|| indirect_keyed_take(false, true));
 }
 #[test]
 fn indirect_keyed_set_exact() {
-    hirsel_engine::with_compiler_stack(|| indirect_keyed_take(true, false));
+    hirsel_intern::jobs::with_compiler_stack(|| indirect_keyed_take(true, false));
 }
 #[test]
 fn indirect_keyed_set_rejection() {
-    hirsel_engine::with_compiler_stack(|| indirect_keyed_take(true, true));
+    hirsel_intern::jobs::with_compiler_stack(|| indirect_keyed_take(true, true));
 }
 
 fn indirect_borrowed_key(set: bool, over: bool) {
@@ -1020,19 +1020,19 @@ fn indirect_borrowed_key(set: bool, over: bool) {
 }
 #[test]
 fn indirect_borrowed_map_exact() {
-    hirsel_engine::with_compiler_stack(|| indirect_borrowed_key(false, false));
+    hirsel_intern::jobs::with_compiler_stack(|| indirect_borrowed_key(false, false));
 }
 #[test]
 fn indirect_borrowed_map_rejection() {
-    hirsel_engine::with_compiler_stack(|| indirect_borrowed_key(false, true));
+    hirsel_intern::jobs::with_compiler_stack(|| indirect_borrowed_key(false, true));
 }
 #[test]
 fn indirect_borrowed_set_exact() {
-    hirsel_engine::with_compiler_stack(|| indirect_borrowed_key(true, false));
+    hirsel_intern::jobs::with_compiler_stack(|| indirect_borrowed_key(true, false));
 }
 #[test]
 fn indirect_borrowed_set_rejection() {
-    hirsel_engine::with_compiler_stack(|| indirect_borrowed_key(true, true));
+    hirsel_intern::jobs::with_compiler_stack(|| indirect_borrowed_key(true, true));
 }
 
 fn mixed_keyed_target(primitive: bool, over: bool) {
@@ -1071,15 +1071,15 @@ pub fn main(rt:Io)->Result[(),GrantError] {{
 }
 #[test]
 fn indirect_mixed_primitive_exact() {
-    hirsel_engine::with_compiler_stack(|| mixed_keyed_target(true, false));
+    hirsel_intern::jobs::with_compiler_stack(|| mixed_keyed_target(true, false));
 }
 #[test]
 fn indirect_mixed_primitive_rejection() {
-    hirsel_engine::with_compiler_stack(|| mixed_keyed_target(true, true));
+    hirsel_intern::jobs::with_compiler_stack(|| mixed_keyed_target(true, true));
 }
 #[test]
 fn indirect_mixed_ordinary_deep_key_has_no_structural_read() {
-    hirsel_engine::with_compiler_stack(|| mixed_keyed_target(false, true));
+    hirsel_intern::jobs::with_compiler_stack(|| mixed_keyed_target(false, true));
 }
 
 fn indirect_resource_actual(over: bool) {
@@ -1114,11 +1114,11 @@ pub fn main(rt:Io)->Result[(),GrantError] {{
 }
 #[test]
 fn indirect_resource_actual_exact() {
-    hirsel_engine::with_compiler_stack(|| indirect_resource_actual(false));
+    hirsel_intern::jobs::with_compiler_stack(|| indirect_resource_actual(false));
 }
 #[test]
 fn indirect_resource_actual_rejection() {
-    hirsel_engine::with_compiler_stack(|| indirect_resource_actual(true));
+    hirsel_intern::jobs::with_compiler_stack(|| indirect_resource_actual(true));
 }
 
 fn indirect_key_before_arena_charge(over: bool) {
@@ -1153,11 +1153,11 @@ pub fn main(rt:Io)->Result[(),GrantError] {{
 }
 #[test]
 fn indirect_arena_charge_after_admitted_key() {
-    hirsel_engine::with_compiler_stack(|| indirect_key_before_arena_charge(false));
+    hirsel_intern::jobs::with_compiler_stack(|| indirect_key_before_arena_charge(false));
 }
 #[test]
 fn indirect_arena_rejection_precedes_charge() {
-    hirsel_engine::with_compiler_stack(|| indirect_key_before_arena_charge(true));
+    hirsel_intern::jobs::with_compiler_stack(|| indirect_key_before_arena_charge(true));
 }
 
 fn sorted_callback_boundary(over: bool) {
@@ -1184,11 +1184,11 @@ pub fn main()->Result[(),()] {{let _=f({n}u64);Ok(())}}
 }
 #[test]
 fn sorted_callback_exact() {
-    hirsel_engine::with_compiler_stack(|| sorted_callback_boundary(false));
+    hirsel_intern::jobs::with_compiler_stack(|| sorted_callback_boundary(false));
 }
 #[test]
 fn sorted_callback_rejection() {
-    hirsel_engine::with_compiler_stack(|| sorted_callback_boundary(true));
+    hirsel_intern::jobs::with_compiler_stack(|| sorted_callback_boundary(true));
 }
 
 fn implicit_codec_check(over: bool) {
@@ -1226,16 +1226,16 @@ pub fn main(rt:Io)->Result[(),GrantError] {{
 
 #[test]
 fn implicit_codec_check_exact() {
-    hirsel_engine::with_compiler_stack(|| implicit_codec_check(false));
+    hirsel_intern::jobs::with_compiler_stack(|| implicit_codec_check(false));
 }
 #[test]
 fn implicit_codec_check_rejection_is_fatal_before_sibling_cleanup() {
-    hirsel_engine::with_compiler_stack(|| implicit_codec_check(true));
+    hirsel_intern::jobs::with_compiler_stack(|| implicit_codec_check(true));
 }
 
 #[test]
 fn short_circuit_self_restarts_preserve_the_invocation_boundary() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         for (name, expression, expected, iterations, rules) in [
             ("tail-or", "n == 0u64 || f(n - 1u64)", true, 2048, &[][..]),
             ("tail-and", "n != 0u64 && f(n - 1u64)", false, 2048, &[][..]),

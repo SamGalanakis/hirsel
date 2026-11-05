@@ -1,8 +1,9 @@
 use hirsel_engine::{
     requests::{OutputReadiness, RequestEngine, observe_inputs},
-    runtime::QueryRuntime,
     *,
 };
+use hirsel_engine_runtime::QueryRuntime;
+
 use hirsel_requests::CompileOperation;
 use hirsel_requests::CompileRequest;
 use hirsel_requests::CompileResult;

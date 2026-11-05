@@ -19,8 +19,7 @@ mod holds;
 pub use holds::{HoldStats, Holds, Retention, default_hold_bytes};
 pub(crate) mod retained;
 pub(crate) use retained::{
-    retained_arc_bytes, retained_lower_entry_bytes, retained_lowering_output_bytes,
-    retained_tir_bytes,
+    retained_lower_entry_bytes, retained_lowering_output_bytes, retained_tir_bytes,
 };
 mod worklist;
 pub use worklist::{Step, WorkKey, WorkKind, Worklist};

@@ -668,7 +668,7 @@ impl DemandInstances {
                 let record = output
                     .product
                     .product
-                    .archive(hirsel_engine::runtime::ArchiveAdmission::Retained)
+                    .archive(hirsel_engine_runtime::ArchiveAdmission::Retained)
                     .map_err(|e| e.to_string())?
                     .reference();
                 return Err(format!(

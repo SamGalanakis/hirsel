@@ -3,9 +3,10 @@
 //! traces are Hirsel-specific additions; the oracle never calls an adapter.
 use hirsel_driver::native::*;
 use hirsel_driver::*;
-use hirsel_engine::{RunConfiguration, with_compiler_stack};
+use hirsel_engine::RunConfiguration;
 use hirsel_front_phases::*;
 use hirsel_host_io::launch::*;
+use hirsel_intern::jobs::with_compiler_stack;
 use hirsel_native::*;
 use hirsel_native_batch::*;
 use hirsel_native_testing::*;

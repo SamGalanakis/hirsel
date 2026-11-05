@@ -41,7 +41,7 @@ fn concurrent_native_builds_keep_descriptors_and_observations_separate() {
             .unwrap();
             let rendezvous = rendezvous.clone();
             std::thread::spawn(move || {
-                hirsel_engine::with_compiler_stack(move || {
+                hirsel_intern::jobs::with_compiler_stack(move || {
                     RENDEZVOUS.set(Some(rendezvous));
                     let mut stdout = Vec::new();
                     let mut stderr = Vec::new();

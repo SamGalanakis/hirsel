@@ -1,8 +1,8 @@
 //! Body-free physical guard selection over settled original instance records.
 //! Neither this ordinary query product nor a true hint authorizes sealing.
 use super::*;
-use hirsel_engine::runtime::QueryId;
 use hirsel_engine::store::{Action, Address, Domain, ResultStore};
+use hirsel_engine_runtime::QueryId;
 use hirsel_rc::seal_demand::{
     UnitDemand,
     equations::{Function, LocalDemandEquations, solve},
@@ -184,7 +184,7 @@ impl Plan {
                     input.product.address.0,
                     input
                         .product
-                        .archive(hirsel_engine::runtime::ArchiveAdmission::Retained)
+                        .archive(hirsel_engine_runtime::ArchiveAdmission::Retained)
                         .map_err(|e| e.to_string())?
                         .reference(),
                 ))
@@ -229,14 +229,14 @@ impl Plan {
                 || current.reference
                     != input
                         .product
-                        .archive(hirsel_engine::runtime::ArchiveAdmission::Retained)
+                        .archive(hirsel_engine_runtime::ArchiveAdmission::Retained)
                         .map_err(|e| e.to_string())?
                         .reference()
                 || store
                     .get_content(
                         input
                             .product
-                            .archive(hirsel_engine::runtime::ArchiveAdmission::Retained)
+                            .archive(hirsel_engine_runtime::ArchiveAdmission::Retained)
                             .map_err(|e| e.to_string())?
                             .reference(),
                     )
@@ -310,7 +310,7 @@ impl Plan {
 pub struct GuardTasks {
     store: Arc<dyn ResultStore>,
     plan: Plan,
-    weight: hirsel_engine::runtime::MemoryWeight,
+    weight: hirsel_engine_runtime::MemoryWeight,
     output: std::sync::OnceLock<Arc<Selection>>,
     failure: Reference,
     _allowances: Vec<Arc<hirsel_engine_admission::MemoryReservation>>,
@@ -320,7 +320,7 @@ impl GuardTasks {
     pub fn new(
         store: Arc<dyn ResultStore>,
         plan: Plan,
-        weight: hirsel_engine::runtime::MemoryWeight,
+        weight: hirsel_engine_runtime::MemoryWeight,
         admitted_bytes: u64,
         allowances: Vec<Arc<hirsel_engine_admission::MemoryReservation>>,
     ) -> Result<Arc<Self>, String> {
@@ -358,7 +358,7 @@ impl GuardTasks {
     pub fn query_id(&self) -> QueryId {
         self.plan.query_id()
     }
-    pub fn factory(self: &Arc<Self>) -> Arc<dyn hirsel_engine::runtime::QueryFactory> {
+    pub fn factory(self: &Arc<Self>) -> Arc<dyn hirsel_engine_runtime::QueryFactory> {
         Arc::new(GuardFactory(self.clone()))
     }
     pub fn selection(&self) -> Option<Arc<Selection>> {
@@ -372,11 +372,8 @@ impl GuardTasks {
 }
 
 struct GuardFactory(Arc<GuardTasks>);
-impl hirsel_engine::runtime::QueryFactory for GuardFactory {
-    fn create(
-        &self,
-        key: QueryId,
-    ) -> Result<Box<dyn hirsel_engine::runtime::QueryTask>, Reference> {
+impl hirsel_engine_runtime::QueryFactory for GuardFactory {
+    fn create(&self, key: QueryId) -> Result<Box<dyn hirsel_engine_runtime::QueryTask>, Reference> {
         if key != self.0.query_id() {
             return Err(self.0.failure);
         }
@@ -390,12 +387,12 @@ struct GuardTask {
     owner: Arc<GuardTasks>,
     terminal: Option<Result<ProductRef, Reference>>,
 }
-impl hirsel_engine::runtime::QueryTask for GuardTask {
+impl hirsel_engine_runtime::QueryTask for GuardTask {
     fn id(&self) -> QueryId {
         self.owner.query_id()
     }
-    fn weight(&self) -> hirsel_engine::runtime::MemoryWeight {
-        hirsel_engine::runtime::MemoryWeight {
+    fn weight(&self) -> hirsel_engine_runtime::MemoryWeight {
+        hirsel_engine_runtime::MemoryWeight {
             retained: (std::mem::size_of::<Self>()
                 + self.owner.plan.inputs.len() * size_of::<QueryId>()) as u64,
             ..self.owner.weight
@@ -406,9 +403,9 @@ impl hirsel_engine::runtime::QueryTask for GuardTask {
     }
     fn poll(
         &mut self,
-        cx: &mut dyn hirsel_engine::runtime::QueryContext,
-    ) -> hirsel_engine::runtime::QueryPoll {
-        use hirsel_engine::runtime::QueryPoll;
+        cx: &mut dyn hirsel_engine_runtime::QueryContext,
+    ) -> hirsel_engine_runtime::QueryPoll {
+        use hirsel_engine_runtime::QueryPoll;
         use std::task::Poll;
         let finish = |result| match result {
             Ok(p) => QueryPoll::Complete(p),

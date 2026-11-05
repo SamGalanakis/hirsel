@@ -85,7 +85,7 @@ impl Measure {
     /// Start recording before the command runs.
     pub fn start(&self) -> Result<(), String> {
         if self.query_profile.is_some() {
-            hirsel_engine::runtime::profile::start()?;
+            hirsel_engine_runtime::profile::start()?;
         }
         if self.timings.is_some() {
             timings::start_request();
@@ -102,7 +102,7 @@ impl Measure {
             .query_profile
             .as_ref()
             .map(|path| {
-                let capture = hirsel_engine::runtime::profile::finish().expect("profile started");
+                let capture = hirsel_engine_runtime::profile::finish().expect("profile started");
                 std::fs::File::create(path)
                     .and_then(|file| capture.write_to(std::io::BufWriter::new(file)))
                     .map_err(|e| format!("query profile {}: {e}", path.display()))

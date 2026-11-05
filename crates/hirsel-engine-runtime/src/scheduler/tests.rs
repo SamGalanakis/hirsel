@@ -25,7 +25,7 @@ fn trace(rt: &mut AdmittedRuntime) -> Arc<Events> {
     events
 }
 fn product(q: QueryId) -> ProductRef {
-    crate::runtime::test_product(
+    crate::test_product(
         q.address,
         Action(q.address.0),
         Domain { kind: 1, schema: 1 },
@@ -962,7 +962,7 @@ fn compiler_caller_drives_affine_dependencies_and_destroys_them_before_returning
         rt.shutdown();
         assert_eq!(budget.reserved(), 0);
     };
-    crate::with_compiler_stack(|| exercise(true));
+    hirsel_intern::jobs::with_compiler_stack(|| exercise(true));
     exercise(false);
 }
 #[test]

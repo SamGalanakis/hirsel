@@ -1,6 +1,7 @@
 //! Ordinary scalar tasks: final object custody, partitions and four-engine semantics.
 use hirsel_driver::native;
-use hirsel_engine::{QueryEngine, default_context, source_check_request, with_compiler_stack};
+use hirsel_engine::{QueryEngine, default_context, source_check_request};
+use hirsel_intern::jobs::with_compiler_stack;
 use hirsel_lir::emission::{EmitInputs, OptLevel};
 use hirsel_native::query_model::NativeRootKey;
 use hirsel_syntax::ContentHash;
@@ -48,10 +49,9 @@ fn request_objects(
     hirsel_native::ReadyProgram,
     Vec<hirsel_lir::stage::ObjectArtifact>,
 ) {
-    use hirsel_engine::{
-        runtime::*,
-        store::{self, ResultStore},
-    };
+    use hirsel_engine::store::{self, ResultStore};
+    use hirsel_engine_runtime::*;
+
     use hirsel_native_cache::declarations::NativeDeclarations;
     use hirsel_native_cache::source_inputs::NativeInstanceInputs;
     use hirsel_native_cache::*;

@@ -4,10 +4,10 @@ use std::{
     cell::Cell,
 };
 #[derive(Clone, Copy, Default)]
-pub(crate) struct Count {
-    pub(crate) live: isize,
-    pub(crate) peak: isize,
-    pub(crate) allocations: usize,
+pub struct Count {
+    pub live: isize,
+    pub peak: isize,
+    pub allocations: usize,
 }
 thread_local! {
     static COUNT: Cell<Option<Count>> = const { Cell::new(None) };
@@ -24,7 +24,7 @@ fn count(added: usize, removed: usize) {
 }
 // Same System delegation as driver/tests/validate_memory.rs; thread-local
 // counters exclude concurrent test harness work from this control's peak.
-pub(crate) struct Counting;
+pub struct Counting;
 unsafe impl GlobalAlloc for Counting {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         let pointer = unsafe { System.alloc(layout) };
@@ -52,7 +52,7 @@ unsafe impl GlobalAlloc for Counting {
         moved
     }
 }
-pub(crate) fn measured<T>(run: impl FnOnce() -> T) -> (T, Count) {
+pub fn measured<T>(run: impl FnOnce() -> T) -> (T, Count) {
     struct Reset;
     impl Drop for Reset {
         fn drop(&mut self) {
@@ -67,7 +67,7 @@ pub(crate) fn measured<T>(run: impl FnOnce() -> T) -> (T, Count) {
     (result, count)
 }
 /// Nest one metadata inspection while preserving its outer physical live count.
-pub(crate) fn measured_independent<T>(run: impl FnOnce() -> T) -> (T, Count) {
+pub fn measured_independent<T>(run: impl FnOnce() -> T) -> (T, Count) {
     let previous = COUNT.with(|slot| slot.replace(Some(Count::default())));
     let result = run();
     let count = COUNT.with(|slot| slot.replace(previous).unwrap());

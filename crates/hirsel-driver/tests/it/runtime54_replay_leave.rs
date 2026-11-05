@@ -172,7 +172,7 @@ fn replayed(source: &str, label: &str) -> Vec<(usize, usize)> {
 /// saved frame, and its wake reissues `mutex.with`.
 #[test]
 fn runtime54_replayed_mutex_takers_hold_worker_stacks() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         for children in [8u64, 16, 32] {
             let source = TAKERS.replace("CHILDREN", &format!("{}u64", children + 1));
             let label = format!("mutex takers {children}");
@@ -194,7 +194,7 @@ fn runtime54_replayed_mutex_takers_hold_worker_stacks() {
 /// replay of the recorded live run) equals the reference interpreter's.
 #[test]
 fn runtime55_live_mutex_takers_hold_worker_stacks() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         for children in [8u64, 16, 32] {
             let source = TAKERS.replace("CHILDREN", &format!("{}u64", children + 1));
             for recording in [false, true] {
@@ -215,7 +215,7 @@ fn runtime55_live_mutex_takers_hold_worker_stacks() {
 
 #[test]
 fn runtime55_live_mutex_takers_checked_heap_agrees() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         for children in [8u64, 16, 32] {
             let source = TAKERS.replace("CHILDREN", &format!("{}u64", children + 1));
             super::runtime50_resume::checked_heap_agrees(&source);
@@ -227,7 +227,7 @@ fn runtime55_live_mutex_takers_checked_heap_agrees() {
 /// The diagnostic begin event detects re-entry independently of the root PC.
 #[test]
 fn runtime54_a_take_after_an_effect_keeps_its_stack() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let source = ISOLATED_TAKERS.replace("CHILDREN", "17u64");
         for (leaves, _) in replayed(&source, "isolated takers") {
             assert_eq!(leaves, 0, "isolated takers: a take reissued task.isolate");
@@ -239,7 +239,7 @@ fn runtime54_a_take_after_an_effect_keeps_its_stack() {
 /// its tape turn in its dup leaves from its saved frame.
 #[test]
 fn runtime54_replayed_sender_dups_leave_their_stacks() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let source = DUPS.replace("CHILDREN", "33u64");
         let leaves: usize = replayed(&source, "dups").iter().map(|cell| cell.0).sum();
         assert!(leaves > 0, "dups: no replayed dup left its stack");
@@ -250,7 +250,7 @@ fn runtime54_replayed_sender_dups_leave_their_stacks() {
 /// The diagnostic begin event detects re-entry independently of the root PC.
 #[test]
 fn runtime54_a_dup_after_an_effect_keeps_its_stack() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let source = ISOLATED_DUPS.replace("CHILDREN", "17u64");
         for (leaves, _) in replayed(&source, "isolated dups") {
             assert_eq!(leaves, 0, "isolated dups: a dup reissued task.isolate");
@@ -275,7 +275,7 @@ fn unknown_isolate(source: &str, alternate: &str) -> String {
 
 #[test]
 fn runtime56_unknown_isolate_mutex_callbacks_never_restart() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let source = unknown_isolate(
             ISOLATED_TAKERS,
             r#"
@@ -291,7 +291,7 @@ fn runtime56_unknown_isolate_mutex_callbacks_never_restart() {
 
 #[test]
 fn runtime56_unknown_isolate_sender_callbacks_never_restart() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let source = unknown_isolate(
             ISOLATED_DUPS,
             r#"
@@ -308,7 +308,7 @@ fn runtime56_unknown_isolate_sender_callbacks_never_restart() {
 }
 
 fn admitted_isolate_fanout(source: &str, label: &str, children: u64, policies: &[&str]) {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         let source = source.replace("CHILDREN", &format!("{}u64", children + 1));
         for tasks in policies {
             for (cell, trace) in compact_runs_with(&source, label, false, tasks)
@@ -382,7 +382,7 @@ fn isolate_admission_dups_eight() {
 
 #[test]
 fn isolate_admission_taker_fanout_checked_heap() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         for children in [8u64, 16, 32] {
             let source = ISOLATED_TAKERS.replace("CHILDREN", &format!("{}u64", children + 1));
             super::runtime50_resume::checked_heap_agrees(&source);
@@ -392,7 +392,7 @@ fn isolate_admission_taker_fanout_checked_heap() {
 
 #[test]
 fn isolate_admission_dup_fanout_checked_heap() {
-    hirsel_engine::with_compiler_stack(|| {
+    hirsel_intern::jobs::with_compiler_stack(|| {
         for children in [8u64, 16, 32] {
             let source = ISOLATED_DUPS.replace("CHILDREN", &format!("{}u64", children + 1));
             super::runtime50_resume::checked_heap_agrees(&source);

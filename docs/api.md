@@ -4,7 +4,7 @@ Generated from manifest-selected public declarations. Do not edit by hand.
 Signatures retain modes, brands, attributes, relations and `uses` clauses.
 Opaque representations stay hidden; bodies are not checked or evaluated.
 
-2291 exported definitions; 1011 variants.
+2293 exported definitions; 1011 variants.
 
 ## Types and roots
 
@@ -11215,6 +11215,16 @@ References: [`core@1/List`](#def-core_401_2fList), [`core@1/Result`](#def-core_4
 - `@noalloc pub fn map.same_entries[K: key, V: data](a: Map[K, V], b: Map[K, V]) -> bool`
 
 References: [`core@1/Map`](#def-core_401_2fMap), [`core@1/bool`](#def-core_401_2fbool)
+
+<a id="def-std_401_2fmap_2ftry_5finsert"></a>
+
+- `pub fn map.try_insert[K: key, V, S, E]( mut m: Map[K, V], take k: K, mut state: S, initial: fn(mut cursor: S) -> Result[V, E] uses {} ) -> Result[bool, E] uses {}`
+
+References: [`core@1/Map`](#def-core_401_2fMap), [`core@1/Result`](#def-core_401_2fResult), [`core@1/bool`](#def-core_401_2fbool)
+
+<a id="def-core_401_2fmap_2ftry_5finsert_5fwith"></a>
+
+- `fn map.try_insert_with[K: key, V, S, E](mut m: Map[K, V], take k: K, mut state: S, initial: fn(mut state: S) -> Result[V, E] uses {}) -> Result[bool, E] uses {}`
 
 <a id="def-std_401_2fmap_2fupdate"></a>
 

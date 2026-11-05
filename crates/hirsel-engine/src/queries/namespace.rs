@@ -71,7 +71,9 @@ pub(crate) struct CaptureDelta {
 }
 impl CaptureDelta {
     fn unadmitted_bytes(&self) -> u64 {
-        self.registrations.unadmitted_bytes().saturating_add(self.private_sources.unadmitted_bytes())
+        self.registrations
+            .unadmitted_bytes()
+            .saturating_add(self.private_sources.unadmitted_bytes())
     }
     fn admit(&self, allowance: &mut crate::runtime::MemoryReservation) -> Result<(), QueryError> {
         self.registrations.admit(allowance)?;
@@ -362,7 +364,7 @@ impl NamespaceCapture {
     pub(crate) fn input_bytes(definitions: &[DefPath]) -> Option<u64> {
         let mut weight = crate::NativeMetadataWeight::default();
         weight.add(
-            size_of::<NamespaceCapture>()
+            920 // The original capture planning budget; owner storage consumes it.
                 + size_of::<crate::snapshot::Declarations>()
                 + 2 * size_of::<usize>(),
         );
@@ -382,7 +384,11 @@ impl NamespaceCapture {
                 + size_of::<crate::snapshot::Declarations>()
                 + 2 * size_of::<usize>(),
         );
-        weight.add(size_of::<CaptureDelta>() + 2 * size_of::<usize>() + 4 * size_of::<std::sync::Weak<NamespaceCapture>>());
+        weight.add(
+            size_of::<CaptureDelta>()
+                + 2 * size_of::<usize>()
+                + 4 * size_of::<std::sync::Weak<NamespaceCapture>>(),
+        );
         Some(weight.bytes())
     }
 
@@ -404,6 +410,9 @@ impl NamespaceCapture {
                     .map_err(|_| refused("capture reservation partition"))?;
             }
         }
+        self.anchors
+            .admit(allowance)
+            .ok_or_else(|| refused("anchor reservation"))?;
         self.inputs.admit(allowance)?;
         self.bodies.admit(allowance)?;
         self._delta.admit(allowance)?;
@@ -537,6 +546,7 @@ impl NamespaceCapture {
             .saturating_add(self.inputs.unadmitted_bytes())
             .saturating_add(self.bodies.unadmitted_bytes())
             .saturating_add(self._delta.unadmitted_bytes())
+            .saturating_add(self.anchors.unadmitted_bytes().unwrap_or(u64::MAX))
     }
     pub(crate) fn consistent(&self, other: &Self) -> bool {
         self.identity == other.identity
@@ -646,7 +656,10 @@ impl QueryEngine {
         self.prepare_namespace_scope(registrations);
         let snapshot = self.signature_inputs();
         if let Some(previous) = self
-            .operation.captures.lock().unwrap_or_else(|e| e.into_inner())
+            .operation
+            .captures
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
             .iter()
             .filter_map(std::sync::Weak::upgrade)
             .find(|previous| {
@@ -869,18 +882,18 @@ impl QueryEngine {
         if store.persistence().retains() && store.put_content(MANIFEST, &bytes) != Some(manifest) {
             return Err(refused("manifest publication"));
         }
-        let mut previous = self.operation.bodies.lock().unwrap_or_else(|e| e.into_inner());
-        let bodies = operation_inputs::InputIndex::capture(
-            bodies,
-            previous.as_ref(),
-            |len| {
-                let mut weight = crate::NativeMetadataWeight::default();
-                weight.add(len.checked_mul(
-                    size_of::<BodyInput>() + size_of::<BodyKeys>() + 4 * size_of::<usize>(),
-                )?);
-                Some(weight.bytes())
-            },
-        )?;
+        let mut previous = self
+            .operation
+            .bodies
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let bodies = operation_inputs::InputIndex::capture(bodies, previous.as_ref(), |len| {
+            let mut weight = crate::NativeMetadataWeight::default();
+            weight.add(len.checked_mul(
+                size_of::<BodyInput>() + size_of::<BodyKeys>() + 4 * size_of::<usize>(),
+            )?);
+            Some(weight.bytes())
+        })?;
         *previous = Some(bodies.clone());
         drop(previous);
         let body_identities = bodies
@@ -926,11 +939,27 @@ impl QueryEngine {
             .iter()
             .map(|r| (DefId::intern(r.definition()), r.clone()))
             .collect();
-        let mut delta_owner = self.operation.delta.lock().unwrap_or_else(|e| e.into_inner());
+        let mut delta_owner = self
+            .operation
+            .delta
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let previous = delta_owner.as_ref().and_then(std::sync::Weak::upgrade);
-        let registrations = operation_inputs::InputIndex::capture_by(registrations, previous.as_ref().map(|delta| &delta.registrations), |_| Some(0), Arc::ptr_eq)?;
-        let private_sources = operation_inputs::InputIndex::capture(private_sources, previous.as_ref().map(|delta| &delta.private_sources), |_| Some(0))?;
-        let delta = Arc::new(CaptureDelta { registrations: registrations.clone(), private_sources: private_sources.clone() });
+        let registrations = operation_inputs::InputIndex::capture_by(
+            registrations,
+            previous.as_ref().map(|delta| &delta.registrations),
+            |_| Some(0),
+            Arc::ptr_eq,
+        )?;
+        let private_sources = operation_inputs::InputIndex::capture(
+            private_sources,
+            previous.as_ref().map(|delta| &delta.private_sources),
+            |_| Some(0),
+        )?;
+        let delta = Arc::new(CaptureDelta {
+            registrations: registrations.clone(),
+            private_sources: private_sources.clone(),
+        });
         *delta_owner = Some(Arc::downgrade(&delta));
         drop(delta_owner);
         let source_paths = self
@@ -971,6 +1000,14 @@ impl QueryEngine {
             .ok_or_else(|| refused("capture size overflow"))?;
         if std::env::var_os("HIRSEL_OPERATION_OWNER_TRACE").is_some() {
             eprintln!(
+                "OWNER INDEX SET source_bytes={} body_bytes={} anchor_bytes={} anchor_pending={} delta_bytes={}",
+                inputs.retained_bytes(),
+                bodies.retained_bytes(),
+                anchors.input_bytes().unwrap_or(u64::MAX),
+                anchors.unadmitted_bytes().unwrap_or(u64::MAX),
+                delta.unadmitted_bytes()
+            );
+            eprintln!(
                 "OWNER CAPTURE fixed={:p} body={:p} view={} selection={} paths={} instances={} source_total={} source_pending={} bodies_pending={} definitions={} registrations={} limit={}",
                 Arc::as_ptr(&inputs),
                 &bodies,
@@ -990,6 +1027,7 @@ impl QueryEngine {
             .checked_add(inputs.unadmitted_bytes())
             .and_then(|bytes| bytes.checked_add(bodies.unadmitted_bytes()))
             .and_then(|bytes| bytes.checked_add(delta.unadmitted_bytes()))
+            .and_then(|bytes| bytes.checked_add(anchors.unadmitted_bytes()?))
             .is_none_or(|bytes| bytes > limit)
         {
             return Err(refused("capture exceeds admission"));
@@ -1020,7 +1058,11 @@ impl QueryEngine {
             capture_inputs,
             operation: self.operation.clone(),
         });
-        let mut captures = self.operation.captures.lock().unwrap_or_else(|e| e.into_inner());
+        let mut captures = self
+            .operation
+            .captures
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         captures.retain(|capture| capture.strong_count() != 0);
         captures.push(Arc::downgrade(&capture));
         Ok(capture)
@@ -1309,18 +1351,23 @@ mod tests {
                     .capture_namespace(&definitions, &[], (8 << 20) - successor)
                     .unwrap();
                 let required = capture.retained_bytes();
-                if let Some((inputs, bodies)) = fixed {
+                if let Some((inputs, bodies, anchors)) = fixed {
                     assert_eq!(capture.inputs.unadmitted_bytes(), 0);
                     assert_eq!(capture.bodies.unadmitted_bytes(), 0);
-                    assert_eq!(required, capture.retained + capture._delta.unadmitted_bytes());
+                    assert_eq!(capture.anchors.unadmitted_bytes(), Some(0));
+                    assert_eq!(
+                        required,
+                        capture.retained + capture._delta.unadmitted_bytes()
+                    );
                     assert_eq!(
                         before - pool.available_bytes(),
-                        inputs + bodies + view_bytes
+                        inputs + bodies + anchors + view_bytes
                     );
                 } else {
                     fixed = Some((
                         capture.inputs.unadmitted_bytes(),
                         capture.bodies.unadmitted_bytes(),
+                        capture.anchors.unadmitted_bytes().unwrap(),
                     ));
                 }
                 let mut allowance = pool.take(required).unwrap();
@@ -1328,7 +1375,12 @@ mod tests {
                     .admit(&mut allowance, engine.sources.clone())
                     .unwrap();
                 assert_eq!(allowance.bytes(), 0);
-                view_bytes += required - if view_bytes == 0 { fixed.unwrap().0 + fixed.unwrap().1 } else { 0 };
+                view_bytes += required
+                    - if view_bytes == 0 {
+                        fixed.unwrap().0 + fixed.unwrap().1 + fixed.unwrap().2
+                    } else {
+                        0
+                    };
                 for definition in &definitions {
                     assert_eq!(
                         capture.bodies[&DefId::intern(definition)].implementation,

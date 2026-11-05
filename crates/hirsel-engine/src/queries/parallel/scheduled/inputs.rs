@@ -27,7 +27,12 @@ impl Inputs {
         rows: BTreeMap<Key, Input>,
         previous: Option<&Self>,
     ) -> Result<Self, QueryError> {
-        let addresses = capture_map(rows.iter().map(|(address, input)| (*address, input.definition)).collect(), previous.map(|previous| &previous.addresses))?;
+        let addresses = capture_map(
+            rows.iter()
+                .map(|(address, input)| (*address, input.definition))
+                .collect(),
+            previous.map(|previous| &previous.addresses),
+        )?;
         let rows = InputIndex::capture(
             rows.into_values()
                 .map(|input| (input.definition, input))
@@ -53,7 +58,9 @@ impl Inputs {
         self.addresses.iter().map(|(key, _)| key)
     }
     pub(super) fn unadmitted_bytes(&self) -> u64 {
-        self.rows.unadmitted_bytes().saturating_add(self.addresses.unadmitted_bytes())
+        self.rows
+            .unadmitted_bytes()
+            .saturating_add(self.addresses.unadmitted_bytes())
     }
     pub(super) fn admit(&self, allowance: &mut MemoryReservation) -> Result<(), QueryError> {
         self.rows.admit(allowance)?;
@@ -67,7 +74,10 @@ impl std::ops::Index<&Key> for Inputs {
     }
 }
 
-pub(super) fn capture_map<K: Ord + Clone, V: PartialEq>(rows: BTreeMap<K, V>, previous: Option<&InputIndex<K, V>>) -> Result<InputIndex<K, V>, QueryError> {
+pub(super) fn capture_map<K: Ord + Clone, V: PartialEq>(
+    rows: BTreeMap<K, V>,
+    previous: Option<&InputIndex<K, V>>,
+) -> Result<InputIndex<K, V>, QueryError> {
     InputIndex::capture(rows, previous, |_| Some(0))
 }
 #[derive(Clone)]
@@ -81,7 +91,8 @@ pub(in crate::queries) struct OperationFrontInputs {
 }
 impl OperationFrontInputs {
     pub(super) fn unadmitted_bytes(&self) -> u64 {
-        self.inputs.unadmitted_bytes()
+        self.inputs
+            .unadmitted_bytes()
             .saturating_add(self.by_definition.unadmitted_bytes())
             .saturating_add(self.body_demands.unadmitted_bytes())
             .saturating_add(self.cited.unadmitted_bytes())

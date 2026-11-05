@@ -197,7 +197,7 @@ impl QueryEngine {
             .and_then(|count| count.checked_mul(size_of::<DefId>()))
             .ok_or_else(refused)?;
         let owner_bytes = crate::NativeRecordContext::capture(self)
-            .input_bytes()
+            .planning_bytes()
             .ok_or_else(refused)?;
         let front_inputs = FrontBodyQueries::input_bytes(definitions)
             .and_then(|bytes| bytes.checked_add(owner_bytes))

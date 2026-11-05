@@ -123,7 +123,8 @@ pub(crate) struct OwnedSourceContext {
     pub catalog: crate::queries::catalog::Catalog,
     pub owners: Arc<crate::NativeRecordContext>,
     pub cited: crate::queries::operation_inputs::SourceIndex<DefId, ContentHash>,
-    pub arm_fixes: crate::queries::operation_inputs::SourceIndex<DefPath, (Span, FileId, ContentHash)>,
+    pub arm_fixes:
+        crate::queries::operation_inputs::SourceIndex<DefPath, (Span, FileId, ContentHash)>,
 }
 impl OwnedSourceContext {
     fn borrowed(&self) -> SourceContext<'_> {

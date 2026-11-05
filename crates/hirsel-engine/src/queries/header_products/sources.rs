@@ -89,8 +89,14 @@ impl SourceInputs {
         self.retained
     }
     pub(super) fn reusable(engine: &QueryEngine) -> Option<Arc<Self>> {
-        let operation_inputs = engine.operation.inputs.lock().unwrap_or_else(|e| e.into_inner());
-        operation_inputs.iter().chain(engine.source_inputs.iter())
+        let operation_inputs = engine
+            .operation
+            .inputs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        operation_inputs
+            .iter()
+            .chain(engine.source_inputs.iter())
             .chain(engine.header_products.iter().map(|headers| &headers.inputs))
             .chain(engine.snapshot.iter().filter_map(|(_, snapshot)| {
                 snapshot.header_products().map(|headers| &headers.inputs)
@@ -187,10 +193,19 @@ impl SourceInputs {
             installed: engine.installed_sources.clone(),
             retained: Self::metadata_bytes(engine)
                 .unwrap_or(u64::MAX)
+                .saturating_add(
+                    (size_of::<Self>() - 288
+                        + size_of::<operation_inputs::OperationOwner>()
+                        + 2 * size_of::<usize>()) as u64,
+                )
                 .saturating_add(HeaderSources::written_bytes(engine)),
             admission: OnceLock::new(),
         });
-        *engine.operation.inputs.lock().unwrap_or_else(|e| e.into_inner()) = Some(inputs.clone());
+        *engine
+            .operation
+            .inputs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(inputs.clone());
         inputs
     }
     pub(crate) fn metadata_bytes(engine: &QueryEngine) -> Option<u64> {
@@ -201,7 +216,7 @@ impl SourceInputs {
                 engine.source_paths().len(),
             ))?
             .checked_add(engine.declarations.observation_bytes()?)?
-            .checked_add((size_of::<Self>() + size_of::<operation_inputs::OperationOwner>() + 4 * size_of::<usize>()) as u64)
+            .checked_add((288 + 2 * size_of::<usize>()) as u64)
     }
     pub(crate) fn unadmitted_bytes(&self) -> u64 {
         if self.admission.get().is_some() {

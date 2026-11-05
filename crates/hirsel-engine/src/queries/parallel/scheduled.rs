@@ -590,10 +590,8 @@ impl FrontBodyQueries {
             )?
             .checked_add(NamespaceCapture::input_bytes(definitions)?)?
             .checked_add(
-                (std::mem::size_of::<Self>()
-                    + std::mem::size_of::<OperationFrontInputs>()
-                    + 2 * size_of::<usize>()
-                    + std::mem::size_of::<FrontSourceBacking>()
+                (1328 // Frozen pre-owner Front planning budget.
+                    + 104 // Frozen source backing planning budget.
                     + std::mem::size_of::<Mutex<u64>>()
                     + 4 * std::mem::size_of::<usize>()) as u64
                     + MemoryReservationPool::metadata_bytes()
@@ -2017,7 +2015,10 @@ impl QueryFactory for Factory {
         let (key, input, materialize) = if let Some(input) = self.0.inputs.get(&query.address.0) {
             (query.address.0, input, false)
         } else {
-            let key = *self.0.body_demands.get(&query.address.0)
+            let key = *self
+                .0
+                .body_demands
+                .get(&query.address.0)
                 .ok_or(self.0.errors.protocol)?;
             (key, &self.0.inputs[&key], true)
         };
@@ -2956,9 +2957,13 @@ impl QueryEngine {
         };
         // The pool has already reserved its metadata before exposing available
         // bytes. The public footprint includes that owner exactly once.
-        let mut required = FrontBodyQueries::input_bytes(&[])
-            .and_then(|bytes| bytes.checked_sub(MemoryReservationPool::metadata_bytes()))
-            .ok_or_else(|| refusal("input size overflow"))?;
+        let mut required = (size_of::<FrontBodyQueries>()
+            + size_of::<OperationFrontInputs>()
+            + 2 * size_of::<usize>()
+            + size_of::<FrontSourceBacking>()
+            + size_of::<Mutex<u64>>()
+            + 4 * size_of::<usize>()) as u64
+            + ProductSource::metadata_bytes();
         if required > available {
             return Err(refused_inputs(required));
         }
@@ -2980,20 +2985,8 @@ impl QueryEngine {
         }
         let anchors = namespace.anchors.clone();
         required = required
-            .checked_add(
-                namespace.retained_bytes().saturating_sub(
-                    NamespaceCapture::input_bytes(&[])
-                        .ok_or_else(|| refusal("capture size overflow"))?,
-                ),
-            )
+            .checked_add(namespace.retained_bytes())
             .ok_or_else(|| refusal("capture size overflow"))?;
-        required = required
-            .checked_add(
-                anchors
-                    .input_bytes()
-                    .ok_or_else(|| refusal("anchor size overflow"))?,
-            )
-            .ok_or_else(|| refusal("anchor size overflow"))?;
         if required > available {
             return Err(refused_inputs(required));
         }
@@ -3062,16 +3055,64 @@ impl QueryEngine {
                 },
             );
         }
-        let mut operation_front = namespace.operation.front.lock().unwrap_or_else(|e| e.into_inner());
+        let mut operation_front = namespace
+            .operation
+            .front
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let previous = operation_front.as_ref().and_then(std::sync::Weak::upgrade);
         let previous = previous.as_deref();
         let inputs = Inputs::new(inputs, previous.map(|previous| &previous.inputs))?;
-        let arm_fixes = inputs::capture_map(arm_fixes::capture(&self.sources, &self.items), previous.map(|previous| &previous.arm_fixes))?;
-        let cited = inputs::capture_map(self.source_paths().into_iter().map(|path| (DefId::intern(&path), self.cited_value(&path))).collect(), previous.map(|previous| &previous.cited))?;
-        let candidates = inputs::capture_map(inputs.values().map(|input| (input.definition, self.candidates_value(input.definition.path()))).collect(), previous.map(|previous| &previous.candidates))?;
-        let by_definition = inputs::capture_map(inputs.iter().map(|(&key, input)| (input.definition, key)).collect(), previous.map(|previous| &previous.by_definition))?;
-        let body_demands = inputs::capture_map(inputs.keys().map(|&key| (ContentHash::of_parts("hirsel.front.body-demand.v1", [key.0.as_slice()]), key)).collect(), previous.map(|previous| &previous.body_demands))?;
-        let indexes = Arc::new(OperationFrontInputs { inputs: inputs.clone(), by_definition: by_definition.clone(), body_demands: body_demands.clone(), cited: cited.clone(), candidates: candidates.clone(), arm_fixes: arm_fixes.clone() });
+        let arm_fixes = inputs::capture_map(
+            arm_fixes::capture(&self.sources, &self.items),
+            previous.map(|previous| &previous.arm_fixes),
+        )?;
+        let cited = inputs::capture_map(
+            self.source_paths()
+                .into_iter()
+                .map(|path| (DefId::intern(&path), self.cited_value(&path)))
+                .collect(),
+            previous.map(|previous| &previous.cited),
+        )?;
+        let candidates = inputs::capture_map(
+            inputs
+                .values()
+                .map(|input| {
+                    (
+                        input.definition,
+                        self.candidates_value(input.definition.path()),
+                    )
+                })
+                .collect(),
+            previous.map(|previous| &previous.candidates),
+        )?;
+        let by_definition = inputs::capture_map(
+            inputs
+                .iter()
+                .map(|(&key, input)| (input.definition, key))
+                .collect(),
+            previous.map(|previous| &previous.by_definition),
+        )?;
+        let body_demands = inputs::capture_map(
+            inputs
+                .keys()
+                .map(|&key| {
+                    (
+                        ContentHash::of_parts("hirsel.front.body-demand.v1", [key.0.as_slice()]),
+                        key,
+                    )
+                })
+                .collect(),
+            previous.map(|previous| &previous.body_demands),
+        )?;
+        let indexes = Arc::new(OperationFrontInputs {
+            inputs: inputs.clone(),
+            by_definition: by_definition.clone(),
+            body_demands: body_demands.clone(),
+            cited: cited.clone(),
+            candidates: candidates.clone(),
+            arm_fixes: arm_fixes.clone(),
+        });
         required = required
             .checked_add(indexes.unadmitted_bytes())
             .ok_or_else(|| refusal("input size overflow"))?;

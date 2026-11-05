@@ -64,6 +64,12 @@ impl Charge {
     fn engine() -> Self {
         Self(Arc::new(std::sync::Mutex::new(HeaderCharge::Engine)))
     }
+    fn front_bytes(&self) -> u64 {
+        match &*self.0.lock().unwrap_or_else(|e| e.into_inner()) {
+            HeaderCharge::Front(charge) => charge.bytes,
+            _ => 0,
+        }
+    }
     fn evictable(&self) -> bool {
         matches!(
             &*self.0.lock().unwrap_or_else(|e| e.into_inner()),
@@ -222,17 +228,24 @@ impl HeaderProducts {
                         .is_none_or(|private| !private.requires_proof(id))
                 {
                     let entry = engine.signatures[&id].clone();
-                    let _ = cell.set(HeaderProduct {
-                        result: entry.result(),
-                        entry: Some(engine.operation.project_header(&entry)),
-                        recomputes: 0,
-                        graph_work: 0,
-                        publication: engine.private_signature_publications.contains(&id),
-                        charge: Charge::engine(),
-                        _row_charge: Charge::engine(),
-                        origin: Arc::downgrade(&entry),
-                        accounted: AtomicBool::new(true),
-                    });
+                    let projected = engine.operation.project_header(&entry);
+                    let publication = engine.private_signature_publications.contains(&id);
+                    let existing = engine.operation.header(&projected, publication);
+                    if let Some(existing) = existing {
+                        cell.set_shared(existing);
+                    } else {
+                        let _ = cell.set(HeaderProduct {
+                            result: entry.result(),
+                            entry: Some(projected),
+                            recomputes: 0,
+                            graph_work: 0,
+                            publication: engine.private_signature_publications.contains(&id),
+                            charge: Charge::engine(),
+                            _row_charge: Charge::engine(),
+                            origin: Arc::downgrade(&entry),
+                            accounted: AtomicBool::new(true),
+                        });
+                    }
                 }
                 (id, cell)
             })
@@ -364,19 +377,32 @@ impl HeaderProducts {
     /// Publish one row; a row already present keeps its product.
     /// Returns the resident row and whether it is this one.
     fn publish(&self, cell: &HeaderSlot, product: HeaderProduct) -> (Arc<HeaderProduct>, bool) {
-        let mut rows = self.operation.headers.lock().unwrap_or_else(|e| e.into_inner());
+        let mut rows = self
+            .operation
+            .headers
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let id = product.entry.as_ref().map(|entry| entry.memo.key.def);
         let product = if let Some(id) = id {
             let versions = rows.entry(id).or_default();
             versions.retain(|row| row.strong_count() != 0);
             if let Some(existing) = versions.iter().filter_map(Weak::upgrade).find(|existing| {
-                existing.publication == product.publication && existing.entry.as_ref().zip(product.entry.as_ref()).is_some_and(|(old, new)| Arc::ptr_eq(old, new))
-            }) { existing } else {
+                existing.publication == product.publication
+                    && existing
+                        .entry
+                        .as_ref()
+                        .zip(product.entry.as_ref())
+                        .is_some_and(|(old, new)| Arc::ptr_eq(old, new))
+            }) {
+                existing
+            } else {
                 let product = Arc::new(product);
                 versions.push(Arc::downgrade(&product));
                 product
             }
-        } else { Arc::new(product) };
+        } else {
+            Arc::new(product)
+        };
         drop(rows);
         let (product, settled) = cell.set_shared(product);
         if settled {
@@ -622,6 +648,17 @@ impl HeaderProducts {
             .filter(|_| local)
             .map_or_else(Weak::new, Arc::downgrade);
         let entry = source.map(|entry| self.operation.project_header(entry));
+        if let Some(existing) = entry
+            .as_ref()
+            .and_then(|entry| self.operation.header(entry, self.provisional))
+        {
+            let (product, settled) = cell.set_shared(existing);
+            if settled {
+                self.revision.fetch_add(1, Ordering::Release);
+                self.generation.fetch_add(1, Ordering::Relaxed);
+            }
+            return self.use_product(engine, id, &product);
+        }
         // Never wait while holding a recursive header stack. Concurrent pure
         // normalizations race only to publish the same immutable source product.
         let recomputes = engine.recompute_count(id.path(), QueryKind::Signature);
@@ -774,6 +811,44 @@ impl HeaderProducts {
             drop(grant);
             if !self.evict() {
                 if std::env::var_os("HIRSEL_OPERATION_OWNER_TRACE").is_some() {
+                    let payloads = self
+                        .operation
+                        .payloads
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .iter()
+                        .filter_map(Weak::upgrade)
+                        .collect::<Vec<_>>();
+                    let mut payload_bytes = 0u64;
+                    let mut row_bytes = 0u64;
+                    let mut row_count = 0;
+                    for payload in &payloads {
+                        payload_bytes += payload.charge.front_bytes();
+                        if let Ok(rows) = payload.rows.try_lock() {
+                            for row in rows.iter() {
+                                row_count += 1;
+                                row_bytes += row._charge.front_bytes();
+                            }
+                        }
+                    }
+                    let wrappers = self
+                        .operation
+                        .headers
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .values()
+                        .flatten()
+                        .filter_map(Weak::upgrade)
+                        .map(|product| product._row_charge.front_bytes())
+                        .sum::<u64>();
+                    eprintln!(
+                        "OWNER HEADER SET payloads={} payload_bytes={} rows={} row_bytes={} wrappers={}",
+                        payloads.len(),
+                        payload_bytes,
+                        row_count,
+                        row_bytes,
+                        wrappers
+                    );
                     let tables = admission
                         .tables
                         .lock()
@@ -841,7 +916,9 @@ impl HeaderProducts {
         entry: Option<&Arc<Entry<hirsel_types::SignatureRef>>>,
         bytes: u64,
     ) -> Result<(Charge, Charge), QueryError> {
-        let Some((entry, output)) = entry.and_then(|entry| Some((entry, entry.memo.value.as_ref().ok()?))) else {
+        let Some((entry, output)) =
+            entry.and_then(|entry| Some((entry, entry.memo.value.as_ref().ok()?)))
+        else {
             return Ok((self.admit(bytes)?, Charge::engine()));
         };
         let signature = &output.value;
@@ -849,30 +926,56 @@ impl HeaderProducts {
         let payload = match signature.metadata.retention.get::<HeaderPayload>() {
             Some(payload) => payload,
             None => {
-                let overhead = (size_of::<HeaderPayload>() + 2 * size_of::<usize>() + 4 * size_of::<Weak<HeaderPayload>>()) as u64;
+                let overhead = (size_of::<HeaderPayload>()
+                    + 2 * size_of::<usize>()
+                    + 4 * size_of::<Weak<HeaderPayload>>()) as u64;
                 let charge = self.admit(payload_bytes.saturating_add(overhead))?;
-                if matches!(&*charge.0.lock().unwrap_or_else(|e| e.into_inner()), HeaderCharge::Engine) {
+                if matches!(
+                    &*charge.0.lock().unwrap_or_else(|e| e.into_inner()),
+                    HeaderCharge::Engine
+                ) {
                     return Ok((charge, Charge::engine()));
                 }
-                let payload = signature.metadata.retention.retain(Arc::new(HeaderPayload { charge, rows: Default::default() }));
-                let mut payloads = self.operation.payloads.lock().unwrap_or_else(|e| e.into_inner());
+                let payload = signature.metadata.retention.retain(Arc::new(HeaderPayload {
+                    charge,
+                    rows: Default::default(),
+                }));
+                let mut payloads = self
+                    .operation
+                    .payloads
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
                 payloads.retain(|payload| payload.strong_count() != 0);
-                if payloads.capacity() > 4 * payloads.len().max(1) { payloads.shrink_to_fit(); }
+                if payloads.capacity() > 4 * payloads.len().max(1) {
+                    payloads.shrink_to_fit();
+                }
                 payloads.push(Arc::downgrade(&payload));
                 payload
             }
         };
-        let wrapper_bytes = crate::memo::retained_arc_bytes(&std::mem::MaybeUninit::<HeaderProduct>::uninit());
-        let row_bytes = bytes.saturating_sub(payload_bytes).saturating_sub(wrapper_bytes)
+        let wrapper_bytes =
+            crate::memo::retained_arc_bytes(&std::mem::MaybeUninit::<HeaderProduct>::uninit());
+        let row_bytes = bytes
+            .saturating_sub(payload_bytes)
+            .saturating_sub(wrapper_bytes)
             .saturating_add((4 * size_of::<HeaderRowLease>()) as u64);
         let mut rows = payload.rows.lock().unwrap_or_else(|e| e.into_inner());
         rows.retain(|row| row.entry.strong_count() != 0 || row.output.strong_count() != 0);
-        if !rows.iter().any(|row| row.entry.ptr_eq(&Arc::downgrade(entry))) {
+        if !rows
+            .iter()
+            .any(|row| row.entry.ptr_eq(&Arc::downgrade(entry)))
+        {
             let charge = self.admit(row_bytes)?;
-            rows.push(HeaderRowLease { entry: Arc::downgrade(entry), output: Arc::downgrade(output), _charge: charge });
+            rows.push(HeaderRowLease {
+                entry: Arc::downgrade(entry),
+                output: Arc::downgrade(output),
+                _charge: charge,
+            });
         }
         // Bound spare Vec allocation by the charged four slots per live row.
-        if rows.capacity() > 4 * rows.len().max(1) { rows.shrink_to_fit(); }
+        if rows.capacity() > 4 * rows.len().max(1) {
+            rows.shrink_to_fit();
+        }
         drop(rows);
         let wrapper = self.admit(wrapper_bytes.saturating_add((24 * size_of::<usize>()) as u64))?;
         Ok((payload.charge.clone(), wrapper))
@@ -883,6 +986,13 @@ impl HeaderProducts {
             return;
         };
         if cell.get().is_some() {
+            return;
+        }
+        if let Some(existing) = self.operation.header(&entry, false) {
+            let (_, settled) = cell.set_shared(existing);
+            if settled {
+                self.revision.fetch_add(1, Ordering::Release);
+            }
             return;
         }
         let Some(bytes) = crate::memo::retained::retained_signature_entry_bytes(&entry) else {
@@ -1042,7 +1152,11 @@ impl HeaderProducts {
     }
     /// Evict one unpinned settled entry: a header row, else a module proof.
     pub(crate) fn evict(&self) -> bool {
-        if self.reclaim_header_rows() || self.evict_validation_cache() || self.evict_row() || self.evict_proof() {
+        if self.reclaim_header_rows()
+            || self.evict_validation_cache()
+            || self.evict_row()
+            || self.evict_proof()
+        {
             return true;
         }
         let tables = self
@@ -1066,25 +1180,34 @@ impl HeaderProducts {
             .any(|table| table.evict_row() || table.evict_proof())
     }
     fn reclaim_header_rows(&self) -> bool {
-        let payloads = self.operation.payloads.lock().unwrap_or_else(|e| e.into_inner())
-            .iter().filter_map(Weak::upgrade).collect::<Vec<_>>();
+        let payloads = self
+            .operation
+            .payloads
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .filter_map(Weak::upgrade)
+            .collect::<Vec<_>>();
         let mut reclaimed = false;
         for payload in payloads {
-            let Ok(mut rows) = payload.rows.try_lock() else { continue; };
+            let Ok(mut rows) = payload.rows.try_lock() else {
+                continue;
+            };
             let before = rows.len();
             rows.retain(|row| row.entry.strong_count() != 0 || row.output.strong_count() != 0);
             reclaimed |= before != rows.len();
-            if rows.capacity() > 4 * rows.len().max(1) { rows.shrink_to_fit(); }
+            if rows.capacity() > 4 * rows.len().max(1) {
+                rows.shrink_to_fit();
+            }
         }
         reclaimed
     }
     fn evict_row(&self) -> bool {
-        for cell in self.rows.values() {
-            let mut slot = cell.product.lock().unwrap_or_else(|e| e.into_inner());
-            let Some(product) = slot.as_ref() else {
+        for (id, cell) in &self.rows {
+            let Some(product) = cell.get() else {
                 continue;
             };
-            if Arc::strong_count(product) != 1 || !product.charge.evictable() {
+            if !product.charge.evictable() {
                 continue;
             }
             let Some(entry) = &product.entry else {
@@ -1096,9 +1219,9 @@ impl HeaderProducts {
             let Ok(output) = &product.result else {
                 continue;
             };
-            // The row and its Entry share the output. Scoped raw signatures,
-            // validation views and active normalizers pin the exact payload.
-            if Arc::strong_count(output) != 2 || Arc::strong_count(&output.value) != 1 {
+            // Raw signature aliases lease only their shared payload. Entry and
+            // output consumers additionally retain the row's observations.
+            if Arc::strong_count(output) != 2 {
                 continue;
             }
             if entry
@@ -1110,9 +1233,52 @@ impl HeaderProducts {
             {
                 continue;
             }
-
-            *slot = None;
-            return true;
+            let tables = self
+                .admission
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .as_ref()
+                .map(|admission| admission.tables.clone());
+            let Some(tables) = tables else {
+                continue;
+            };
+            let tables = tables
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .iter()
+                .filter_map(Weak::upgrade)
+                .collect::<Vec<_>>();
+            let mut holders = 0;
+            for table in &tables {
+                if let Some(cell) = table.rows.get(id) {
+                    let slot = cell.product.lock().unwrap_or_else(|e| e.into_inner());
+                    if slot
+                        .as_ref()
+                        .is_some_and(|held| Arc::ptr_eq(held, &product))
+                    {
+                        holders += 1;
+                    }
+                }
+            }
+            // The local handle plus cache aliases are the only row holders.
+            // A racing consumer retains the product's charges independently.
+            if Arc::strong_count(&product) != holders + 1 {
+                continue;
+            }
+            for table in &tables {
+                if let Some(cell) = table.rows.get(id) {
+                    let mut slot = cell.product.lock().unwrap_or_else(|e| e.into_inner());
+                    if slot
+                        .as_ref()
+                        .is_some_and(|held| Arc::ptr_eq(held, &product))
+                    {
+                        *slot = None;
+                    }
+                }
+            }
+            if holders != 0 {
+                return true;
+            }
         }
         false
     }
@@ -1293,17 +1459,45 @@ fn project(
 }
 
 impl operation_inputs::OperationOwner {
-    fn project_header(&self, entry: &Arc<Entry<hirsel_types::SignatureRef>>) -> Arc<Entry<hirsel_types::SignatureRef>> {
+    fn header(
+        &self,
+        entry: &Arc<Entry<hirsel_types::SignatureRef>>,
+        publication: bool,
+    ) -> Option<Arc<HeaderProduct>> {
+        self.headers
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&entry.memo.key.def)?
+            .iter()
+            .filter_map(Weak::upgrade)
+            .find(|product| {
+                product.publication == publication
+                    && product
+                        .entry
+                        .as_ref()
+                        .is_some_and(|old| Arc::ptr_eq(old, entry))
+            })
+    }
+    fn project_header(
+        &self,
+        entry: &Arc<Entry<hirsel_types::SignatureRef>>,
+    ) -> Arc<Entry<hirsel_types::SignatureRef>> {
         let mut entries = self.projections.lock().unwrap_or_else(|e| e.into_inner());
         let key = Arc::as_ptr(entry) as usize;
         if let Some(projected) = entries.get(&key).and_then(Weak::upgrade) {
             // A source address can be recycled after its original entry dies.
-            if Arc::ptr_eq(&projected.memo.reads, &entry.memo.reads) && match (&projected.memo.value, &entry.memo.value) {
-                (Ok(old), Ok(new)) => Arc::ptr_eq(old, new),
-                _ => false,
-            } { return projected; }
+            if Arc::ptr_eq(&projected.memo.reads, &entry.memo.reads)
+                && match (&projected.memo.value, &entry.memo.value) {
+                    (Ok(old), Ok(new)) => Arc::ptr_eq(old, new),
+                    _ => false,
+                }
+            {
+                return projected;
+            }
         }
-        if entries.len().is_multiple_of(256) { entries.retain(|_, entry| entry.strong_count() != 0); }
+        if entries.len().is_multiple_of(256) {
+            entries.retain(|_, entry| entry.strong_count() != 0);
+        }
         let projected = project(entry);
         entries.insert(key, Arc::downgrade(&projected));
         projected

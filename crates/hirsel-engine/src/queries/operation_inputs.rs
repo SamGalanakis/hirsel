@@ -17,7 +17,6 @@ pub(crate) struct OperationOwner {
     pub(crate) projections: Mutex<BTreeMap<usize, Weak<Entry<hirsel_types::SignatureRef>>>>,
 }
 
-
 pub(crate) struct InputIndex<K, V>(Arc<Rows<K, V>>);
 struct Rows<K, V> {
     parent: Option<InputIndex<K, V>>,
@@ -34,7 +33,8 @@ impl<K, V> Clone for InputIndex<K, V> {
 }
 impl<K: Ord + Clone, V: PartialEq> InputIndex<K, V> {
     pub(crate) fn capture(
-        rows: BTreeMap<K, V>, previous: Option<&Self>,
+        rows: BTreeMap<K, V>,
+        previous: Option<&Self>,
         payload_bytes: impl FnOnce(usize) -> Option<u64>,
     ) -> Result<Self, QueryError> {
         Self::capture_by(rows, previous, payload_bytes, PartialEq::eq)
@@ -42,24 +42,45 @@ impl<K: Ord + Clone, V: PartialEq> InputIndex<K, V> {
 }
 impl<K: Ord + Clone, V> InputIndex<K, V> {
     pub(crate) fn capture_by(
-        mut rows: BTreeMap<K, V>, previous: Option<&Self>,
+        mut rows: BTreeMap<K, V>,
+        previous: Option<&Self>,
         payload_bytes: impl FnOnce(usize) -> Option<u64>,
         equal: impl Fn(&V, &V) -> bool,
     ) -> Result<Self, QueryError> {
         let len = rows.len();
-        let removed: Box<[K]> = previous.map_or_else(|| Box::new([]) as Box<[K]>, |previous| {
-            previous.keys().filter(|key| !rows.contains_key(*key)).cloned().collect()
-        });
+        let removed: Box<[K]> = previous.map_or_else(
+            || Box::new([]) as Box<[K]>,
+            |previous| {
+                previous
+                    .keys()
+                    .filter(|key| !rows.contains_key(*key))
+                    .cloned()
+                    .collect()
+            },
+        );
         if let Some(previous) = previous {
             rows.retain(|key, value| previous.get(key).is_none_or(|old| !equal(old, value)));
-            if rows.is_empty() && removed.is_empty() { return Ok(previous.clone()); }
+            if rows.is_empty() && removed.is_empty() {
+                return Ok(previous.clone());
+            }
         }
         let bytes = payload_bytes(rows.len())
-            .and_then(|bytes| bytes.checked_add((rows.len().checked_mul(size_of::<(K, V)>())?) as u64))
+            .and_then(|bytes| {
+                bytes.checked_add((rows.len().checked_mul(size_of::<(K, V)>())?) as u64)
+            })
             .and_then(|bytes| bytes.checked_add(size_of_val(&*removed) as u64))
-            .and_then(|bytes| bytes.checked_add((size_of::<Rows<K, V>>() + 2 * size_of::<usize>()) as u64))
+            .and_then(|bytes| {
+                bytes.checked_add((size_of::<Rows<K, V>>() + 2 * size_of::<usize>()) as u64)
+            })
             .ok_or_else(|| header_products::source_refusal("operation index size overflow"))?;
-        Ok(Self(Arc::new(Rows { parent: previous.cloned(), delta: rows.into_iter().collect(), removed, len, bytes, admission: OnceLock::new() })))
+        Ok(Self(Arc::new(Rows {
+            parent: previous.cloned(),
+            delta: rows.into_iter().collect(),
+            removed,
+            len,
+            bytes,
+            admission: OnceLock::new(),
+        })))
     }
 }
 impl<K: Ord, V> InputIndex<K, V> {
@@ -67,7 +88,10 @@ impl<K: Ord, V> InputIndex<K, V> {
         if self.0.removed.binary_search(key).is_ok() {
             return None;
         }
-        self.0.delta.binary_search_by(|(candidate, _)| candidate.cmp(key)).ok()
+        self.0
+            .delta
+            .binary_search_by(|(candidate, _)| candidate.cmp(key))
+            .ok()
             .map(|at| &self.0.delta[at].1)
             .or_else(|| self.0.parent.as_ref()?.get(key))
     }
@@ -77,9 +101,16 @@ impl<K: Ord, V> InputIndex<K, V> {
     pub(crate) fn len(&self) -> usize {
         self.0.len
     }
-    pub(crate) fn is_empty(&self) -> bool { self.len() == 0 }
+    pub(crate) fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
     pub(crate) fn iter(&self) -> Box<dyn Iterator<Item = (&K, &V)> + '_> {
-        let mut own = self.0.delta.iter().map(|(key, value)| (key, value)).peekable();
+        let mut own = self
+            .0
+            .delta
+            .iter()
+            .map(|(key, value)| (key, value))
+            .peekable();
         let mut parent = self.0.parent.as_ref().map(|parent| {
             parent
                 .iter()
@@ -109,6 +140,11 @@ impl<K: Ord, V> InputIndex<K, V> {
     }
     pub(crate) fn values(&self) -> impl Iterator<Item = &V> {
         self.iter().map(|(_, value)| value)
+    }
+    pub(crate) fn retained_bytes(&self) -> u64 {
+        self.0
+            .bytes
+            .saturating_add(self.0.parent.as_ref().map_or(0, Self::retained_bytes))
     }
     pub(crate) fn unadmitted_bytes(&self) -> u64 {
         self.0
@@ -167,7 +203,9 @@ impl<K: Ord, V> SourceIndex<K, V> {
     }
 }
 impl<K, V> From<BTreeMap<K, V>> for SourceIndex<K, V> {
-    fn from(rows: BTreeMap<K, V>) -> Self { Self::Owned(rows) }
+    fn from(rows: BTreeMap<K, V>) -> Self {
+        Self::Owned(rows)
+    }
 }
 impl<K: Ord, V> FromIterator<(K, V)> for SourceIndex<K, V> {
     fn from_iter<T: IntoIterator<Item = (K, V)>>(iter: T) -> Self {

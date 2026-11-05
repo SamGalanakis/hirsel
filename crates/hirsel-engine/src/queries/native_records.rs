@@ -38,6 +38,120 @@ struct SourceBindings {
     owners: Box<[(Anchor, (RecordOwner, u32))]>,
     anchors: Box<[((RecordOwner, u32), Anchor)]>,
     source_definitions: Box<[(Anchor, DefId)]>,
+    parent: Option<Arc<SourceBindings>>,
+    admission: std::sync::OnceLock<crate::runtime::MemoryReservation>,
+}
+impl SourceBindings {
+    fn owner(&self, anchor: Anchor) -> Option<&(RecordOwner, u32)> {
+        self.owners
+            .binary_search_by_key(&anchor, |(anchor, _)| *anchor)
+            .ok()
+            .map(|at| &self.owners[at].1)
+            .or_else(|| self.parent.as_ref()?.owner(anchor))
+    }
+    fn anchor(&self, owner: &DefPath, occurrence: u32) -> Option<Anchor> {
+        self.anchors
+            .binary_search_by(|((selected, ordinal), _)| {
+                (selected.path(), *ordinal).cmp(&(owner, occurrence))
+            })
+            .ok()
+            .map(|at| self.anchors[at].1)
+            .or_else(|| self.parent.as_ref()?.anchor(owner, occurrence))
+    }
+    fn definition(&self, anchor: Anchor) -> Option<DefId> {
+        self.source_definitions
+            .binary_search_by_key(&anchor, |(anchor, _)| *anchor)
+            .ok()
+            .map(|at| self.source_definitions[at].1)
+            .or_else(|| self.parent.as_ref()?.definition(anchor))
+    }
+    fn owners(&self) -> Box<dyn Iterator<Item = &(Anchor, (RecordOwner, u32))> + '_> {
+        Box::new(
+            self.owners.iter().chain(
+                self.parent
+                    .iter()
+                    .flat_map(|parent| parent.owners())
+                    .filter(|(anchor, _)| {
+                        self.owners
+                            .binary_search_by_key(anchor, |(anchor, _)| *anchor)
+                            .is_err()
+                    }),
+            ),
+        )
+    }
+    fn anchors(&self) -> Box<dyn Iterator<Item = &((RecordOwner, u32), Anchor)> + '_> {
+        Box::new(
+            self.anchors.iter().chain(
+                self.parent
+                    .iter()
+                    .flat_map(|parent| parent.anchors())
+                    .filter(|(owner, _)| {
+                        self.anchors
+                            .binary_search_by(|(selected, _)| selected.cmp(owner))
+                            .is_err()
+                    }),
+            ),
+        )
+    }
+    fn definitions(&self) -> Box<dyn Iterator<Item = &(Anchor, DefId)> + '_> {
+        Box::new(
+            self.source_definitions.iter().chain(
+                self.parent
+                    .iter()
+                    .flat_map(|parent| parent.definitions())
+                    .filter(|(anchor, _)| {
+                        self.source_definitions
+                            .binary_search_by_key(anchor, |(anchor, _)| *anchor)
+                            .is_err()
+                    }),
+            ),
+        )
+    }
+    fn bytes(&self) -> Option<u64> {
+        let mut weight = crate::NativeMetadataWeight::default();
+        weight.add(size_of::<NativeRecordContext>() + size_of::<Self>() + 4 * size_of::<usize>());
+        weight.add(
+            size_of_val(&*self.owners)
+                + size_of_val(&*self.anchors)
+                + size_of_val(&*self.source_definitions),
+        );
+        for (owner, _) in self
+            .owners
+            .iter()
+            .map(|(_, owner)| owner)
+            .chain(self.anchors.iter().map(|(owner, _)| owner))
+        {
+            if let RecordOwner::Written(path) = owner {
+                weight.arc(path);
+                weight.path(path);
+            }
+        }
+        Some(weight.bytes())
+    }
+    fn unadmitted_bytes(&self) -> Option<u64> {
+        let own = if self.admission.get().is_some() {
+            0
+        } else {
+            self.bytes()?
+        };
+        own.checked_add(
+            self.parent
+                .as_ref()
+                .map_or(Some(0), |parent| parent.unadmitted_bytes())?,
+        )
+    }
+    fn admit(&self, allowance: &mut crate::runtime::MemoryReservation) -> Option<()> {
+        if let Some(parent) = &self.parent {
+            parent.admit(allowance)?;
+        }
+        if self.admission.get().is_none() {
+            let reservation = allowance.split(self.bytes()?)?;
+            if let Err(reservation) = self.admission.set(reservation) {
+                allowance.join(reservation).ok()?;
+            }
+        }
+        Some(())
+    }
 }
 #[derive(Clone)]
 enum RecordOwner {
@@ -192,28 +306,17 @@ impl QueryEngine {
 }
 impl NativeRecordContext {
     fn extend(&self, inherited: &Self, sources: &hirsel_span::SourceMap) -> Self {
-        let mut owners = self
-            .bindings
-            .owners
-            .iter()
-            .cloned()
-            .collect::<BTreeMap<_, _>>();
-        let mut anchors = self
-            .bindings
-            .anchors
-            .iter()
-            .cloned()
-            .collect::<BTreeMap<_, _>>();
+        let mut owners = self.bindings.owners().cloned().collect::<BTreeMap<_, _>>();
+        let mut anchors = self.bindings.anchors().cloned().collect::<BTreeMap<_, _>>();
         let mut definitions = self
             .bindings
-            .source_definitions
-            .iter()
+            .definitions()
             .copied()
             .collect::<BTreeMap<_, _>>();
-        for (anchor, owner) in &inherited.bindings.owners {
+        for (anchor, owner) in inherited.bindings.owners() {
             owners.entry(*anchor).or_insert_with(|| owner.clone());
         }
-        for (owner, anchor) in &inherited.bindings.anchors {
+        for (owner, anchor) in inherited.bindings.anchors() {
             let same_source = |other| {
                 let ((old_file, old_base), (new_file, new_base)) =
                     (sources.anchor(*anchor)?, sources.anchor(other)?);
@@ -236,12 +339,27 @@ impl NativeRecordContext {
                 _ => {}
             }
         }
-        for (anchor, definition) in &inherited.bindings.source_definitions {
+        for (anchor, definition) in inherited.bindings.definitions() {
             definitions.entry(*anchor).or_insert(*definition);
+        }
+        owners.retain(|anchor, owner| inherited.bindings.owner(*anchor) != Some(owner));
+        anchors.retain(|(owner, occurrence), anchor| {
+            inherited.bindings.anchor(owner.path(), *occurrence) != Some(*anchor)
+        });
+        definitions.retain(|anchor, definition| {
+            inherited.bindings.definition(*anchor) != Some(*definition)
+        });
+        if owners.is_empty() && anchors.is_empty() && definitions.is_empty() {
+            return Self {
+                types: self.types.clone(),
+                bindings: inherited.bindings.clone(),
+            };
         }
         Self {
             types: self.types.clone(),
             bindings: Arc::new(SourceBindings {
+                parent: Some(inherited.bindings.clone()),
+                admission: Default::default(),
                 owners: owners.into_iter().collect(),
                 anchors: anchors.into_iter().collect(),
                 source_definitions: definitions.into_iter().collect(),
@@ -253,25 +371,55 @@ impl NativeRecordContext {
             && (Arc::ptr_eq(&self.bindings, &current.bindings)
                 || self
                     .bindings
-                    .anchors
-                    .iter()
+                    .anchors()
                     .all(|((owner, occurrence), anchor)| {
                         current.record_source_anchor(owner.path(), *occurrence) == Some(*anchor)
                     }))
     }
 
     pub(crate) fn input_bytes(&self) -> Option<u64> {
+        self.bindings
+            .bytes()?
+            .checked_add(self.bindings.parent.as_ref().map_or(Some(0), |parent| {
+                NativeRecordContext {
+                    types: self.types.clone(),
+                    bindings: parent.clone(),
+                }
+                .input_bytes()
+            })?)
+    }
+    pub(crate) fn unadmitted_bytes(&self) -> Option<u64> {
+        self.bindings.unadmitted_bytes()
+    }
+    pub(crate) fn admit(&self, allowance: &mut crate::runtime::MemoryReservation) -> Option<()> {
+        self.bindings.admit(allowance)
+    }
+    pub(crate) fn planning_bytes(&self) -> Option<u64> {
         let mut weight = crate::NativeMetadataWeight::default();
-        weight.add(size_of::<Self>() + size_of::<SourceBindings>() + 4 * size_of::<usize>());
-        weight.add(size_of_val(&*self.bindings.owners));
-        weight.add(size_of_val(&*self.bindings.anchors));
-        weight.add(size_of_val(&*self.bindings.source_definitions));
+        weight.add(size_of::<Self>() + 3 * size_of::<Box<[usize]>>() + 4 * size_of::<usize>());
+        weight.add(
+            self.bindings
+                .owners()
+                .count()
+                .checked_mul(size_of::<(Anchor, (RecordOwner, u32))>())?,
+        );
+        weight.add(
+            self.bindings
+                .anchors()
+                .count()
+                .checked_mul(size_of::<((RecordOwner, u32), Anchor)>())?,
+        );
+        weight.add(
+            self.bindings
+                .definitions()
+                .count()
+                .checked_mul(size_of::<(Anchor, DefId)>())?,
+        );
         for (owner, _) in self
             .bindings
-            .owners
-            .iter()
+            .owners()
             .map(|(_, owner)| owner)
-            .chain(self.bindings.anchors.iter().map(|(owner, _)| owner))
+            .chain(self.bindings.anchors().map(|(owner, _)| owner))
         {
             if let RecordOwner::Written(path) = owner {
                 weight.arc(path);
@@ -285,11 +433,7 @@ impl NativeRecordContext {
     /// codec owner is content-bound and can differ from this declaration;
     /// selector ordinals are neither codec occurrences nor source bases.
     pub fn source_definition(&self, anchor: Anchor) -> Option<&DefPath> {
-        let definitions = &self.bindings.source_definitions;
-        let position = definitions
-            .binary_search_by_key(&anchor, |(anchor, _)| *anchor)
-            .ok()?;
-        Some(definitions[position].1.path())
+        Some(self.bindings.definition(anchor)?.path())
     }
 
     pub fn capture(engine: &QueryEngine) -> Self {
@@ -403,6 +547,8 @@ impl NativeRecordContext {
         Self {
             types: engine.types().clone(),
             bindings: Arc::new(SourceBindings {
+                parent: None,
+                admission: Default::default(),
                 owners: owners
                     .into_iter()
                     .map(|(anchor, (owner, occurrence))| {
@@ -421,11 +567,7 @@ impl NativeRecordContext {
     }
 
     pub(crate) fn record_owner_ref(&self, anchor: Anchor) -> Option<(&DefPath, u32)> {
-        let owners = &self.bindings.owners;
-        let position = owners
-            .binary_search_by_key(&anchor, |(anchor, _)| *anchor)
-            .ok()?;
-        let (owner, occurrence) = &owners[position].1;
+        let (owner, occurrence) = self.bindings.owner(anchor)?;
         Some((owner.path(), *occurrence))
     }
 }
@@ -438,13 +580,7 @@ impl NativeRecordSource for NativeRecordContext {
             .map(|(owner, occurrence)| (owner.clone(), occurrence))
     }
     fn record_source_anchor(&self, owner: &DefPath, occurrence: u32) -> Option<Anchor> {
-        let anchors = &self.bindings.anchors;
-        let position = anchors
-            .binary_search_by(|((selected, ordinal), _)| {
-                (selected.path(), *ordinal).cmp(&(owner, occurrence))
-            })
-            .ok()?;
-        Some(anchors[position].1)
+        self.bindings.anchor(owner, occurrence)
     }
 }
 

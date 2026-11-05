@@ -349,7 +349,9 @@ def run_stages(directory, log, tier):
         logs.mkdir(parents=True, exist_ok=True)
         env = ({k: v for k, v in os.environ.items() if k not in RUN_VARIABLES} if isolated
                else os.environ | {'HIRSEL_BUCK2_LOG_DIR': str(logs), 'HIRSEL_TEST_BATCH_SIZE': '32',
-                                  'HIRSEL_TEST_BATCH_CONCURRENCY': '8'})
+                                  # One target per command releases its prepared-request slot
+                                  # as soon as it finishes, even while another target is slow.
+                                  'HIRSEL_TEST_BATCH_CONCURRENCY': '32'})
         log.write(f'\n== {name}\n')
         log.flush()
         started = time.monotonic()

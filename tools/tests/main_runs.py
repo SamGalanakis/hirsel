@@ -16,6 +16,7 @@ import tempfile
 import threading
 import tracemalloc
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -472,6 +473,57 @@ class Tiers(unittest.TestCase):
 
 
 class BoundedTests(unittest.TestCase):
+    def test_completed_targets_release_capacity_while_slow_targets_are_running(self):
+        tool = runpy.run_path(str(ROOT / 'tools/main-runs'))
+        targets = [f'//:target-{i}' for i in range(36)]
+        slow = set(targets[:32:4])
+        release, completed = threading.Event(), threading.Event()
+        lock = threading.Lock()
+        seen, active, peak = [], 0, 0
+
+        def stages(stage, tier):
+            stage('workspace tests', ['buck2', 'test', *targets])
+
+        def execute(command, **kwargs):
+            env = kwargs['env']
+
+            def run_batch(batch, **_):
+                nonlocal active, peak
+                selected = [arg for arg in batch if arg in targets]
+                with lock:
+                    seen.extend(selected)
+                    active += len(selected)
+                    peak = max(peak, active)
+                    if set(targets) - slow <= set(seen):
+                        completed.set()
+                if slow.intersection(selected):
+                    release.wait()
+                with lock:
+                    active -= len(selected)
+                return subprocess.CompletedProcess(batch, 7 if targets[-1] in selected else 0)
+
+            return tool['event_logs'].run(command[1:], runner=run_batch,
+                                         batch_size=int(env['HIRSEL_TEST_BATCH_SIZE']),
+                                         batch_concurrency=int(env['HIRSEL_TEST_BATCH_CONCURRENCY']))
+
+        with tempfile.TemporaryDirectory() as temporary, \
+                patch.dict(tool['run_stages'].__globals__, stage_plan=lambda tier: {},
+                           exception_tables=lambda: ({}, {}, {}), stages=stages), \
+                patch.object(tool['event_logs'], 'test_results', return_value=[]), \
+                patch('subprocess.run', side_effect=execute), ThreadPoolExecutor(max_workers=1) as worker:
+            directory = Path(temporary)
+            with (directory / 'run.log').open('w+') as log:
+                future = worker.submit(tool['run_stages'], directory, log, 'fast')
+                try:
+                    replenished = completed.wait(2)
+                finally:
+                    release.set()
+                _, _, _, _, status = future.result()
+        self.assertTrue(replenished, 'completed targets must release their slots independently')
+        self.assertCountEqual(seen, targets)
+        self.assertLessEqual(peak, 32)
+        self.assertEqual(status['selections'][0]['exit_status'], 7)
+
     def test_run_bounds_buck_requests_without_leaking_the_bound_into_tool_tests(self):
         tool = runpy.run_path(str(ROOT / 'tools/main-runs'))
         environments = []
@@ -490,7 +542,7 @@ class BoundedTests(unittest.TestCase):
                 tool['run_stages'](directory, log, 'fast')
         self.assertEqual(environments[0]['HIRSEL_TEST_BATCH_SIZE'], '32')
         self.assertNotIn('HIRSEL_TEST_BATCH_SIZE', environments[1])
-        self.assertEqual(environments[0]['HIRSEL_TEST_BATCH_CONCURRENCY'], '8')
+        self.assertEqual(environments[0]['HIRSEL_TEST_BATCH_CONCURRENCY'], '32')
         self.assertNotIn('HIRSEL_TEST_BATCH_CONCURRENCY', environments[1])
 
 

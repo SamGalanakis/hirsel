@@ -892,6 +892,20 @@ fn cross_module_declared_reads_reuse_proofs_before_private_headers_are_demanded(
                 .with_owned_engines()
                 .load_program(&manifest)
                 .unwrap();
+            let inputs = program.engine.front_run_inputs(128 << 20).unwrap();
+            for (module, name) in [("a", "left"), ("a", "value"), ("b", "right")] {
+                let mut path = program.entry.clone();
+                path.0.modules = vec![module.into()];
+                path.0.name = name.into();
+                assert_eq!(
+                    program
+                        .engine
+                        .recompute_count(&path, QueryKind::PrivateInference),
+                    0,
+                    "capturing Run must not demand unrelated module inference: {path}"
+                );
+            }
+            drop(inputs);
             let reservation = program
                 .engine
                 .prepare_private_inference(budget.reserve(256 << 20).unwrap())

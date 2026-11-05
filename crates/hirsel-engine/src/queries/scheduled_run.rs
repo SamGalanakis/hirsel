@@ -1400,7 +1400,13 @@ impl QueryEngine {
     /// Capture before partitioning the existing host snapshot allowance. Both
     /// the planner and producer consume this one catalog's exact byte count.
     pub fn front_run_inputs(&mut self, limit: u64) -> Result<FrontRunInputs, QueryError> {
-        self.prepare_private_summaries();
+        if self
+            .result_store
+            .as_ref()
+            .is_some_and(|store| store.installation_output().is_some())
+        {
+            self.prepare_private_summaries();
+        }
         let definitions = self.source_paths();
         let namespace = self.capture_namespace(&definitions, &[], limit)?;
         self.front_run_inputs_in(namespace, limit)

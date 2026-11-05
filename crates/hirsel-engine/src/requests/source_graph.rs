@@ -1040,7 +1040,9 @@ pub fn install(
         if let Err(error) = engine.prepare_namespace_registrations(&registrations) {
             return Err(loading.failed(engine_error(engine, error)));
         }
-        engine.prepare_private_summaries();
+        if store.installation_output().is_some() {
+            engine.prepare_private_summaries();
+        }
     }
     let namespace = match namespace {
         Some(capture) => {

@@ -1010,6 +1010,20 @@ impl EncodedWriter {
     }
 }
 
+// Optional product decoding can miss; operational replay failures leave the
+// decoder through its enclosing Result instead of becoming cache misses.
+macro_rules! cached_result {
+    ($error:ident, $request:expr) => {
+        match $request {
+            Ok(value) => value,
+            Err(error) => {
+                $error = Some(error);
+                return None;
+            }
+        }
+    };
+}
+
 impl QueryEngine {
     /// Observe only declared structure before private inference settles. The
     /// producer's own body proof changes inferred_unique, which the declared
@@ -1569,16 +1583,25 @@ impl QueryEngine {
     fn load_execution_receipt(
         &mut self,
         subject: ContentHash,
-    ) -> Option<hirsel_validate::ExecutionReceipt> {
-        let cache = self.result_store.as_ref()?.verifier()?;
+    ) -> Result<Option<hirsel_validate::ExecutionReceipt>, QueryError> {
+        let Some(cache) = self
+            .result_store
+            .as_ref()
+            .and_then(|store| store.verifier())
+        else {
+            return Ok(None);
+        };
         let snapshot = self.signature_snapshot();
-        cache.execution_revalidated(
-            subject,
-            self.types.clone(),
-            |path, occurrence| self.record_anchor(path, occurrence),
-            &*snapshot,
-        )
+        cache
+            .execution_revalidated(
+                subject,
+                self.types.clone(),
+                |path, occurrence| self.record_anchor(path, occurrence),
+                &*snapshot,
+            )
+            .map_err(Into::into)
     }
+
     pub(super) fn decode_record<T: serde::de::DeserializeOwned + Serialize>(
         &self,
         bytes: &[u8],
@@ -2171,46 +2194,57 @@ impl QueryEngine {
     fn replay_evaluation_selections(
         &mut self,
         value: &crate::comptime::EvaluatedConstant,
-    ) -> Option<()> {
+    ) -> Result<Option<()>, QueryError> {
         if !self.portable_evaluation_reads(value) {
-            return None;
+            return Ok(None);
         }
         self.replay_selections(&value.selections)
     }
     pub(super) fn replay_selections(
         &mut self,
         selections: &[crate::comptime::Selection],
-    ) -> Option<()> {
-        use crate::comptime::Selection;
-        for selection in selections {
-            match selection {
-                Selection::Staged(id, arguments) => {
-                    let key = (id.path().clone(), arguments.clone());
-                    let memory = self.staged_values.get(&key).cloned().filter(|old| {
-                        self.evaluation_validation_holds(old)
-                            && self.execution_valid(id.path(), &old.executed)
-                    });
-                    let selected =
-                        memory.or_else(|| self.load_staged_evaluation(id.path(), arguments))?;
-                    self.staged_values.insert(key, selected);
-                }
-                Selection::Generated(id) => {
-                    self.charge_generated_path(*id).ok()?;
-                    let old = self.checked.get(id).cloned();
-                    let valid = old.is_some_and(|entry| {
-                        self.key_text(id.path(), QueryKind::Check)
-                            .ok()
-                            .is_some_and(|text| self.memo_valid(id.path(), &entry, text))
-                            && self.lower_acceptance_holds(entry.acceptance.as_ref())
-                            && entry.result().is_ok()
-                    });
-                    if !valid {
-                        self.check_query(id.path()).ok()?;
+    ) -> Result<Option<()>, QueryError> {
+        let mut replay_error: Option<QueryError> = None;
+        let value = (|| {
+            use crate::comptime::Selection;
+            for selection in selections {
+                match selection {
+                    Selection::Staged(id, arguments) => {
+                        let key = (id.path().clone(), arguments.clone());
+                        let memory = self.staged_values.get(&key).cloned().filter(|old| {
+                            self.evaluation_validation_holds(old)
+                                && self.execution_valid(id.path(), &old.executed)
+                        });
+                        let selected = memory.or_else(|| {
+                            cached_result!(
+                                replay_error,
+                                self.load_staged_evaluation(id.path(), arguments)
+                            )
+                        })?;
+                        self.staged_values.insert(key, selected);
+                    }
+                    Selection::Generated(id) => {
+                        self.charge_generated_path(*id).ok()?;
+                        let old = self.checked.get(id).cloned();
+                        let valid = old.is_some_and(|entry| {
+                            self.key_text(id.path(), QueryKind::Check)
+                                .ok()
+                                .is_some_and(|text| self.memo_valid(id.path(), &entry, text))
+                                && self.lower_acceptance_holds(entry.acceptance.as_ref())
+                                && entry.result().is_ok()
+                        });
+                        if !valid {
+                            self.check_query(id.path()).ok()?;
+                        }
                     }
                 }
             }
+            Some(())
+        })();
+        match replay_error {
+            Some(error) => Err(error),
+            None => Ok(value),
         }
-        Some(())
     }
     fn store_evaluation_selections(
         &mut self,
@@ -2298,39 +2332,48 @@ impl QueryEngine {
         &mut self,
         path: &DefPath,
         body: hirsel_syntax::ExprId,
-    ) -> Option<(GenerationRecord, Reads)> {
-        let key = self.store_key(path, QueryKind::Generate)?;
-        let variant = self.stored_variant(path, QueryKind::Generate)?;
-        let mut record: GenerationRecord = self.decode_record(&variant.payload)?;
-        if record.owner != DefId::intern(path)
-            || record.body != body
-            || !self.portable_lower_reads(path, &variant.reads, &record.selections)
-            || record.depth.bounded
-            || record.depth.first.len() != self.depth_limit() as usize + 1
-            || record
-                .depth
-                .first
-                .iter()
-                .flatten()
-                .any(|site| self.sources.slice(*site).is_none())
-        {
-            return None;
+    ) -> Result<Option<(GenerationRecord, Reads)>, QueryError> {
+        let mut replay_error: Option<QueryError> = None;
+        let value = (|| {
+            let key = self.store_key(path, QueryKind::Generate)?;
+            let variant = self.stored_variant(path, QueryKind::Generate)?;
+            let mut record: GenerationRecord = self.decode_record(&variant.payload)?;
+            if record.owner != DefId::intern(path)
+                || record.body != body
+                || !self.portable_lower_reads(path, &variant.reads, &record.selections)
+                || record.depth.bounded
+                || record.depth.first.len() != self.depth_limit() as usize + 1
+                || record
+                    .depth
+                    .first
+                    .iter()
+                    .flatten()
+                    .any(|site| self.sources.slice(*site).is_none())
+            {
+                return None;
+            }
+            if self.verify == Verify::On {
+                record.acceptance = Some(cached_result!(
+                    replay_error,
+                    self.load_execution_receipt(evaluation_subject(&key, &variant.payload))
+                )?);
+            }
+            if self.verify_store == crate::store::VerifyStore::Recompute {
+                self.pending_store_checks.insert(
+                    (DefId::intern(path), QueryKind::Generate),
+                    Expected::capture(variant, &mut self.store_check_spool),
+                );
+                return None;
+            }
+            cached_result!(replay_error, self.replay_selections(&record.selections))?;
+            timings::count(Count::StoreHits);
+            self.store_adoptions += 1;
+            Some((record, variant.reads))
+        })();
+        match replay_error {
+            Some(error) => Err(error),
+            None => Ok(value),
         }
-        if self.verify == Verify::On {
-            record.acceptance =
-                Some(self.load_execution_receipt(evaluation_subject(&key, &variant.payload))?);
-        }
-        if self.verify_store == crate::store::VerifyStore::Recompute {
-            self.pending_store_checks.insert(
-                (DefId::intern(path), QueryKind::Generate),
-                Expected::capture(variant, &mut self.store_check_spool),
-            );
-            return None;
-        }
-        self.replay_selections(&record.selections)?;
-        timings::count(Count::StoreHits);
-        self.store_adoptions += 1;
-        Some((record, variant.reads))
     }
     pub(super) fn store_generation(
         &mut self,
@@ -2380,45 +2423,54 @@ impl QueryEngine {
     pub(super) fn load_semantic_body(
         &mut self,
         path: &DefPath,
-    ) -> Option<(Vec<Vec<u8>>, BTreeSet<DefPath>)> {
-        if !self.s1.is_empty() {
-            return None;
+    ) -> Result<Option<(Vec<Vec<u8>>, BTreeSet<DefPath>)>, QueryError> {
+        let mut replay_error: Option<QueryError> = None;
+        let value = (|| {
+            if !self.s1.is_empty() {
+                return None;
+            }
+            let variant = self.stored_variant(path, QueryKind::SemanticBody)?;
+            let record: SemanticBodyRecord = self.decode_record(&variant.payload)?;
+            if record.owner != DefId::intern(path)
+                || record.content.is_empty()
+                || !self.portable_lower_reads(path, &variant.reads, &record.selections)
+                || record.depth.first.len() != self.depth_limit() as usize + 1
+                || record
+                    .depth
+                    .first
+                    .iter()
+                    .flatten()
+                    .any(|site| self.sources.slice(*site).is_none())
+            {
+                return None;
+            }
+            if self.verify_store == crate::store::VerifyStore::Recompute {
+                self.pending_store_checks.insert(
+                    (record.owner, QueryKind::SemanticBody),
+                    Expected::capture(variant, &mut self.store_check_spool),
+                );
+                return None;
+            }
+            if self.lower_requires_execution(path, &variant.reads) {
+                let key = self.store_key(path, QueryKind::SemanticBody)?;
+                let receipt = cached_result!(
+                    replay_error,
+                    self.load_execution_receipt(evaluation_subject(&key, &variant.payload))
+                )?;
+                self.merge_lower_acceptance(Some(&receipt), true);
+            }
+            cached_result!(replay_error, self.replay_selections(&record.selections))?;
+            self.depth_replay_requests(&record.depth).ok()?;
+            self.merge_execution(&variant.reads);
+            self.record_selections(&record.selections).ok()?;
+            timings::count(Count::StoreHits);
+            self.store_adoptions += 1;
+            Some((record.content, record.dependencies))
+        })();
+        match replay_error {
+            Some(error) => Err(error),
+            None => Ok(value),
         }
-        let variant = self.stored_variant(path, QueryKind::SemanticBody)?;
-        let record: SemanticBodyRecord = self.decode_record(&variant.payload)?;
-        if record.owner != DefId::intern(path)
-            || record.content.is_empty()
-            || !self.portable_lower_reads(path, &variant.reads, &record.selections)
-            || record.depth.first.len() != self.depth_limit() as usize + 1
-            || record
-                .depth
-                .first
-                .iter()
-                .flatten()
-                .any(|site| self.sources.slice(*site).is_none())
-        {
-            return None;
-        }
-        if self.verify_store == crate::store::VerifyStore::Recompute {
-            self.pending_store_checks.insert(
-                (record.owner, QueryKind::SemanticBody),
-                Expected::capture(variant, &mut self.store_check_spool),
-            );
-            return None;
-        }
-        if self.lower_requires_execution(path, &variant.reads) {
-            let key = self.store_key(path, QueryKind::SemanticBody)?;
-            let receipt =
-                self.load_execution_receipt(evaluation_subject(&key, &variant.payload))?;
-            self.merge_lower_acceptance(Some(&receipt), true);
-        }
-        self.replay_selections(&record.selections)?;
-        self.depth_replay_requests(&record.depth).ok()?;
-        self.merge_execution(&variant.reads);
-        self.record_selections(&record.selections).ok()?;
-        timings::count(Count::StoreHits);
-        self.store_adoptions += 1;
-        Some((record.content, record.dependencies))
     }
     pub(super) fn store_semantic_body(
         &mut self,
@@ -2480,57 +2532,67 @@ impl QueryEngine {
     pub(crate) fn load_source_audit(
         &mut self,
         path: &DefPath,
-    ) -> Option<crate::native_audit::SourceAuditProducts> {
-        if !self.s1.is_empty() {
-            return None;
+    ) -> Result<Option<crate::native_audit::SourceAuditProducts>, QueryError> {
+        let mut replay_error: Option<QueryError> = None;
+        let value = (|| {
+            if !self.s1.is_empty() {
+                return None;
+            }
+            let key = self.store_key(path, QueryKind::SourceAudit)?;
+            let variant = self.stored_variant(path, QueryKind::SourceAudit)?;
+            let record: AuditRecord = self.decode_record(&variant.payload)?;
+            let (_, shape) = self.lexical_shape(path)?;
+            let audit = &record.products.audit;
+            if audit.definition != *path
+                || Some(audit.implementation_revision) != self.implementation_hash(path)
+                || !self.portable_lower_reads(path, &variant.reads, &record.selections)
+                || record.depth.first.len() != self.depth_limit() as usize + 1
+                || record
+                    .depth
+                    .first
+                    .iter()
+                    .flatten()
+                    .any(|site| self.sources.slice(*site).is_none())
+                || audit
+                    .closures
+                    .iter()
+                    .chain(&audit.invocations)
+                    .map(|(id, _)| id)
+                    .chain(record.products.materialized.iter().map(|(id, _)| id))
+                    .any(|id| !shape.valid_site(hirsel_types::NameSite::Expression(*id)))
+                || self.signature_output(path).ok()?.value.fingerprint != audit.signature
+            {
+                return None;
+            }
+            let required = self.lower_requires_execution(path, &variant.reads);
+            let acceptance = if required && self.verify == Verify::On {
+                Some(cached_result!(
+                    replay_error,
+                    self.load_execution_receipt(evaluation_subject(&key, &variant.payload))
+                )?)
+            } else {
+                None
+            };
+            if self.verify_store == crate::store::VerifyStore::Recompute {
+                self.pending_store_checks.insert(
+                    (DefId::intern(path), QueryKind::SourceAudit),
+                    Expected::capture(variant, &mut self.store_check_spool),
+                );
+                return None;
+            }
+            cached_result!(replay_error, self.replay_selections(&record.selections))?;
+            self.depth_replay_requests(&record.depth).ok()?;
+            self.merge_execution(&variant.reads);
+            self.merge_lower_acceptance(acceptance.as_ref(), required);
+            self.record_selections(&record.selections).ok()?;
+            timings::count(Count::StoreHits);
+            self.store_adoptions += 1;
+            Some(record.products)
+        })();
+        match replay_error {
+            Some(error) => Err(error),
+            None => Ok(value),
         }
-        let key = self.store_key(path, QueryKind::SourceAudit)?;
-        let variant = self.stored_variant(path, QueryKind::SourceAudit)?;
-        let record: AuditRecord = self.decode_record(&variant.payload)?;
-        let (_, shape) = self.lexical_shape(path)?;
-        let audit = &record.products.audit;
-        if audit.definition != *path
-            || Some(audit.implementation_revision) != self.implementation_hash(path)
-            || !self.portable_lower_reads(path, &variant.reads, &record.selections)
-            || record.depth.first.len() != self.depth_limit() as usize + 1
-            || record
-                .depth
-                .first
-                .iter()
-                .flatten()
-                .any(|site| self.sources.slice(*site).is_none())
-            || audit
-                .closures
-                .iter()
-                .chain(&audit.invocations)
-                .map(|(id, _)| id)
-                .chain(record.products.materialized.iter().map(|(id, _)| id))
-                .any(|id| !shape.valid_site(hirsel_types::NameSite::Expression(*id)))
-            || self.signature_output(path).ok()?.value.fingerprint != audit.signature
-        {
-            return None;
-        }
-        let required = self.lower_requires_execution(path, &variant.reads);
-        let acceptance = if required && self.verify == Verify::On {
-            Some(self.load_execution_receipt(evaluation_subject(&key, &variant.payload))?)
-        } else {
-            None
-        };
-        if self.verify_store == crate::store::VerifyStore::Recompute {
-            self.pending_store_checks.insert(
-                (DefId::intern(path), QueryKind::SourceAudit),
-                Expected::capture(variant, &mut self.store_check_spool),
-            );
-            return None;
-        }
-        self.replay_selections(&record.selections)?;
-        self.depth_replay_requests(&record.depth).ok()?;
-        self.merge_execution(&variant.reads);
-        self.merge_lower_acceptance(acceptance.as_ref(), required);
-        self.record_selections(&record.selections).ok()?;
-        timings::count(Count::StoreHits);
-        self.store_adoptions += 1;
-        Some(record.products)
     }
     pub(crate) fn store_source_audit(
         &mut self,
@@ -2587,7 +2649,7 @@ impl QueryEngine {
     pub(super) fn load_lower(
         &mut self,
         path: &DefPath,
-    ) -> Option<Arc<Entry<hirsel_tir::DefinitionRef>>> {
+    ) -> Result<Option<Arc<Entry<hirsel_tir::DefinitionRef>>>, QueryError> {
         self.load_lower_with_replay(path, &mut false)
     }
     /// A current producer body may lack this consumer's private execution
@@ -2597,60 +2659,63 @@ impl QueryEngine {
         &mut self,
         path: &DefPath,
         replay: &mut bool,
-    ) -> Option<Arc<Entry<hirsel_tir::DefinitionRef>>> {
-        if !self.s1.is_empty() {
-            return None;
-        }
-        // A durable lookup must not bypass this session's rejected private
-        // context. Fresh readers may independently revalidate retained bytes;
-        // an invalidated resident completion follows ordinary recomputation.
-        let id = DefId::intern(path);
-        let retained = self
-            .lowered
-            .get(&id)
-            .and_then(|entry| entry.acceptance.clone())
-            .or_else(|| {
-                self.lower_receipts
-                    .get(&id)
-                    .and_then(|entry| entry.acceptance.clone())
-            });
-        if retained
-            .as_ref()
-            .is_some_and(|receipt| !self.lower_acceptance_holds(Some(receipt)))
-        {
-            return None;
-        }
-        self.result_store.as_ref()?;
-        self.prepare_lower_generation(path)?;
-        let variant = self.stored_variant(path, QueryKind::Lower)?;
-        let record = self.decode_lower_record(&variant.payload)?;
-        if record.output.value.path != DefId::intern(path)
-            || !self.portable_lower_reads(path, &variant.reads, &record.selections)
-            || record.depth.first.len() != self.depth_limit() as usize + 1
-            || record
-                .depth
-                .first
-                .iter()
-                .flatten()
-                .any(|site| self.sources.slice(*site).is_none())
-        {
-            return None;
-        }
-        let staged = crate::comptime::has_staged_reads(&record.output.value);
-        if staged {
-            self.load_registrations(path)?;
-            if !self.valid_staged_lowering(path, &record.output.value) {
+    ) -> Result<Option<Arc<Entry<hirsel_tir::DefinitionRef>>>, QueryError> {
+        let mut replay_error: Option<QueryError> = None;
+        let value = (|| {
+            if !self.s1.is_empty() {
                 return None;
             }
-        }
-        let acceptance =
-            if self.verify == Verify::On && self.lower_requires_execution(path, &variant.reads) {
+            // A durable lookup must not bypass this session's rejected private
+            // context. Fresh readers may independently revalidate retained bytes;
+            // an invalidated resident completion follows ordinary recomputation.
+            let id = DefId::intern(path);
+            let retained = self
+                .lowered
+                .get(&id)
+                .and_then(|entry| entry.acceptance.clone())
+                .or_else(|| {
+                    self.lower_receipts
+                        .get(&id)
+                        .and_then(|entry| entry.acceptance.clone())
+                });
+            if retained
+                .as_ref()
+                .is_some_and(|receipt| !self.lower_acceptance_holds(Some(receipt)))
+            {
+                return None;
+            }
+            self.result_store.as_ref()?;
+            self.prepare_lower_generation(path)?;
+            let variant = self.stored_variant(path, QueryKind::Lower)?;
+            let record = self.decode_lower_record(&variant.payload)?;
+            if record.output.value.path != DefId::intern(path)
+                || !self.portable_lower_reads(path, &variant.reads, &record.selections)
+                || record.depth.first.len() != self.depth_limit() as usize + 1
+                || record
+                    .depth
+                    .first
+                    .iter()
+                    .flatten()
+                    .any(|site| self.sources.slice(*site).is_none())
+            {
+                return None;
+            }
+            let staged = crate::comptime::has_staged_reads(&record.output.value);
+            if staged {
+                self.load_registrations(path)?;
+                if !self.valid_staged_lowering(path, &record.output.value) {
+                    return None;
+                }
+            }
+            let acceptance = if self.verify == Verify::On
+                && self.lower_requires_execution(path, &variant.reads)
+            {
                 let key = self.store_key(path, QueryKind::Lower)?;
                 let subject = evaluation_subject(&key, &variant.payload);
                 let receipt = if staged {
                     self.load_staged_lower_receipt(subject)
                 } else {
-                    self.load_execution_receipt(subject)
+                    cached_result!(replay_error, self.load_execution_receipt(subject))
                 };
                 let Some(receipt) = receipt else {
                     // A body product does not supply private execution authority.
@@ -2663,87 +2728,100 @@ impl QueryEngine {
             } else {
                 None
             };
-        if self.verify_store == crate::store::VerifyStore::Recompute {
-            self.pending_store_checks.insert(
-                (DefId::intern(path), QueryKind::Lower),
-                Expected::capture(variant, &mut self.store_check_spool),
+            if self.verify_store == crate::store::VerifyStore::Recompute {
+                self.pending_store_checks.insert(
+                    (DefId::intern(path), QueryKind::Lower),
+                    Expected::capture(variant, &mut self.store_check_spool),
+                );
+                return None;
+            }
+            let verification = self.ensure_lowered_verdict(&record.output.value).ok()?;
+            cached_result!(replay_error, self.replay_selections(&record.selections))?;
+            timings::count(Count::StoreHits);
+            self.store_adoptions += 1;
+            let mut entry = self.adopted(
+                path,
+                QueryKind::Lower,
+                variant,
+                Ok(record.output),
+                record.detail,
             );
-            return None;
+            let unpublished = Arc::get_mut(&mut entry).expect("unpublished lower record");
+            unpublished.depth = Some(record.depth);
+            unpublished.verification = std::sync::Mutex::new(verification);
+            unpublished.acceptance = acceptance;
+            unpublished.selections = record.selections;
+            Some(entry)
+        })();
+        match replay_error {
+            Some(error) => Err(error),
+            None => Ok(value),
         }
-        let verification = self.ensure_lowered_verdict(&record.output.value).ok()?;
-        self.replay_selections(&record.selections)?;
-        timings::count(Count::StoreHits);
-        self.store_adoptions += 1;
-        let mut entry = self.adopted(
-            path,
-            QueryKind::Lower,
-            variant,
-            Ok(record.output),
-            record.detail,
-        );
-        let unpublished = Arc::get_mut(&mut entry).expect("unpublished lower record");
-        unpublished.depth = Some(record.depth);
-        unpublished.verification = std::sync::Mutex::new(verification);
-        unpublished.acceptance = acceptance;
-        unpublished.selections = record.selections;
-        Some(entry)
     }
     pub(crate) fn load_evaluation(
         &mut self,
         path: &DefPath,
-    ) -> Option<crate::comptime::EvaluatedConstant> {
-        if !self.s1.is_empty() {
-            return None;
-        }
-        let key = self.store_key(path, QueryKind::Evaluate)?;
-        let variant = self.stored_variant(path, QueryKind::Evaluate)?;
-        let record: EvaluationRecord = self.decode_record(&variant.payload)?;
-        let mut value = record.constant;
-        let (owner, shape) = self.lexical_shape(path)?;
-        if record.owner != owner.def
-            || !self.source_facts(path)?.constant
-            || value.executed != variant.reads
-            || !self.portable_evaluation_reads(&value)
-            || value.depth.first.len() != self.depth_limit() as usize + 1
-            || value
-                .depth
-                .first
-                .iter()
-                .flatten()
-                .any(|site| self.sources.slice(*site).is_none())
-            || value
-                .substitutions
-                .iter()
-                .any(|(id, _)| !shape.valid_site(hirsel_types::NameSite::Expression(*id)))
-        {
-            return None;
-        }
-        if self.verify == Verify::On {
-            let Some(receipt) =
-                self.load_execution_receipt(evaluation_subject(&key, &variant.payload))
-            else {
-                // The old action and its complete observed reads have held, but
-                // this reader must independently execute and verify the value.
-                // Restore only existing ordinary mode bodies of those executed
-                // dependencies before S1 starts. Missing products stay misses;
-                // no helper is evaluated or granted execution authority here.
-                self.restore_execution_dependencies(&value.executed);
+    ) -> Result<Option<crate::comptime::EvaluatedConstant>, QueryError> {
+        let mut replay_error: Option<QueryError> = None;
+        let value = (|| {
+            if !self.s1.is_empty() {
                 return None;
-            };
-            value.validation = Some(receipt.contexts().to_vec().into());
-            value.acceptance = Some(receipt);
+            }
+            let key = self.store_key(path, QueryKind::Evaluate)?;
+            let variant = self.stored_variant(path, QueryKind::Evaluate)?;
+            let record: EvaluationRecord = self.decode_record(&variant.payload)?;
+            let mut value = record.constant;
+            let (owner, shape) = self.lexical_shape(path)?;
+            if record.owner != owner.def
+                || !self.source_facts(path)?.constant
+                || value.executed != variant.reads
+                || !self.portable_evaluation_reads(&value)
+                || value.depth.first.len() != self.depth_limit() as usize + 1
+                || value
+                    .depth
+                    .first
+                    .iter()
+                    .flatten()
+                    .any(|site| self.sources.slice(*site).is_none())
+                || value
+                    .substitutions
+                    .iter()
+                    .any(|(id, _)| !shape.valid_site(hirsel_types::NameSite::Expression(*id)))
+            {
+                return None;
+            }
+            if self.verify == Verify::On {
+                let Some(receipt) = cached_result!(
+                    replay_error,
+                    self.load_execution_receipt(evaluation_subject(&key, &variant.payload))
+                ) else {
+                    // The old action and its complete observed reads have held, but
+                    // this reader must independently execute and verify the value.
+                    // Restore only existing ordinary mode bodies of those executed
+                    // dependencies before S1 starts. Missing products stay misses;
+                    // no helper is evaluated or granted execution authority here.
+                    self.restore_execution_dependencies(&value.executed);
+                    return None;
+                };
+                value.validation = Some(receipt.contexts().to_vec().into());
+                value.acceptance = Some(receipt);
+            }
+            if self.verify_store == crate::store::VerifyStore::Recompute {
+                self.pending_store_checks.insert(
+                    (DefId::intern(path), QueryKind::Evaluate),
+                    Expected::capture(variant, &mut self.store_check_spool),
+                );
+                return None;
+            }
+            cached_result!(replay_error, self.replay_evaluation_selections(&value))?;
+            timings::count(Count::StoreHits);
+            self.store_adoptions += 1;
+            Some(value)
+        })();
+        match replay_error {
+            Some(error) => Err(error),
+            None => Ok(value),
         }
-        if self.verify_store == crate::store::VerifyStore::Recompute {
-            self.pending_store_checks.insert(
-                (DefId::intern(path), QueryKind::Evaluate),
-                Expected::capture(variant, &mut self.store_check_spool),
-            );
-            return None;
-        }
-        self.replay_evaluation_selections(&value)?;
-        timings::count(Count::StoreHits);
-        self.store_adoptions += 1;
-        Some(value)
     }
     /// S1 may first compute a signature while persistence is withheld. Once
     /// execution settles, publish only its already checked, current signature
@@ -2856,11 +2934,11 @@ impl QueryEngine {
         &mut self,
         path: &DefPath,
         arguments: &[u64],
-    ) -> Option<crate::comptime::EvaluatedConstant> {
+    ) -> Result<Option<crate::comptime::EvaluatedConstant>, QueryError> {
         let instance = hirsel_tir::constant_instance_path(path, arguments);
         let active = (instance, QueryKind::Evaluate);
         if !self.active.insert(active.clone()) {
-            return None;
+            return Ok(None);
         }
         let result = self.load_staged_evaluation_inner(path, arguments);
         self.active.remove(&active);
@@ -2870,52 +2948,61 @@ impl QueryEngine {
         &mut self,
         path: &DefPath,
         arguments: &[u64],
-    ) -> Option<crate::comptime::EvaluatedConstant> {
-        if !self.s1.is_empty() {
-            return None;
+    ) -> Result<Option<crate::comptime::EvaluatedConstant>, QueryError> {
+        let mut replay_error: Option<QueryError> = None;
+        let value = (|| {
+            if !self.s1.is_empty() {
+                return None;
+            }
+            let declaration = self.staged_constants.get(path)?.clone();
+            let key = self.staged_evaluation_key(path, arguments)?;
+            let variant = self.stored_variant_at(&declaration.owner, &key)?;
+            let record: StagedEvaluationRecord = self.decode_record(&variant.payload)?;
+            let (_, shape) = self.lexical_shape(&declaration.owner)?;
+            let mut value = record.constant;
+            if record.declaration != DefId::intern(path)
+                || record.arguments != arguments
+                || value.executed != variant.reads
+                || !self.portable_evaluation_reads(&value)
+                || value.depth.first.len() != self.depth_limit() as usize + 1
+                || value
+                    .depth
+                    .first
+                    .iter()
+                    .flatten()
+                    .any(|site| self.sources.slice(*site).is_none())
+                || value
+                    .substitutions
+                    .iter()
+                    .any(|(id, _)| !shape.valid_site(hirsel_types::NameSite::Expression(*id)))
+            {
+                return None;
+            }
+            if self.verify == Verify::On {
+                let receipt = cached_result!(
+                    replay_error,
+                    self.load_execution_receipt(evaluation_subject(&key, &variant.payload))
+                )?;
+                value.validation = Some(receipt.contexts().to_vec().into());
+                value.acceptance = Some(receipt);
+            }
+            if self.verify_store == crate::store::VerifyStore::Recompute {
+                let instance = hirsel_tir::constant_instance_path(path, arguments);
+                self.pending_store_checks.insert(
+                    (DefId::intern(&instance), QueryKind::Evaluate),
+                    Expected::capture(variant, &mut self.store_check_spool),
+                );
+                return None;
+            }
+            cached_result!(replay_error, self.replay_evaluation_selections(&value))?;
+            timings::count(Count::StoreHits);
+            self.store_adoptions += 1;
+            Some(value)
+        })();
+        match replay_error {
+            Some(error) => Err(error),
+            None => Ok(value),
         }
-        let declaration = self.staged_constants.get(path)?.clone();
-        let key = self.staged_evaluation_key(path, arguments)?;
-        let variant = self.stored_variant_at(&declaration.owner, &key)?;
-        let record: StagedEvaluationRecord = self.decode_record(&variant.payload)?;
-        let (_, shape) = self.lexical_shape(&declaration.owner)?;
-        let mut value = record.constant;
-        if record.declaration != DefId::intern(path)
-            || record.arguments != arguments
-            || value.executed != variant.reads
-            || !self.portable_evaluation_reads(&value)
-            || value.depth.first.len() != self.depth_limit() as usize + 1
-            || value
-                .depth
-                .first
-                .iter()
-                .flatten()
-                .any(|site| self.sources.slice(*site).is_none())
-            || value
-                .substitutions
-                .iter()
-                .any(|(id, _)| !shape.valid_site(hirsel_types::NameSite::Expression(*id)))
-        {
-            return None;
-        }
-        if self.verify == Verify::On {
-            let receipt =
-                self.load_execution_receipt(evaluation_subject(&key, &variant.payload))?;
-            value.validation = Some(receipt.contexts().to_vec().into());
-            value.acceptance = Some(receipt);
-        }
-        if self.verify_store == crate::store::VerifyStore::Recompute {
-            let instance = hirsel_tir::constant_instance_path(path, arguments);
-            self.pending_store_checks.insert(
-                (DefId::intern(&instance), QueryKind::Evaluate),
-                Expected::capture(variant, &mut self.store_check_spool),
-            );
-            return None;
-        }
-        self.replay_evaluation_selections(&value)?;
-        timings::count(Count::StoreHits);
-        self.store_adoptions += 1;
-        Some(value)
     }
     pub(crate) fn store_staged_evaluation(
         &mut self,
@@ -3070,7 +3157,7 @@ impl QueryEngine {
         &mut self,
         path: &DefPath,
     ) -> Result<Option<hirsel_validate::VerifiedDefinitionOutput>, QueryError> {
-        let Some((output, depth)) = self.verified_lower_output_inner(path) else {
+        let Some((output, depth)) = self.verified_lower_output_inner(path)? else {
             return Ok(None);
         };
         self.depth_replay_requests(&depth)?;
@@ -3132,46 +3219,56 @@ impl QueryEngine {
     fn verified_lower_output_inner(
         &mut self,
         path: &DefPath,
-    ) -> Option<(
-        hirsel_validate::VerifiedDefinitionOutput,
-        crate::memo::DepthEvidence<Span>,
-    )> {
-        if self.verify != Verify::On
-            || !self.s1.is_empty()
-            || self.verify_store == crate::store::VerifyStore::Recompute
-        {
-            return None;
+    ) -> Result<
+        Option<(
+            hirsel_validate::VerifiedDefinitionOutput,
+            crate::memo::DepthEvidence<Span>,
+        )>,
+        QueryError,
+    > {
+        let mut replay_error: Option<QueryError> = None;
+        let value = (|| {
+            if self.verify != Verify::On
+                || !self.s1.is_empty()
+                || self.verify_store == crate::store::VerifyStore::Recompute
+            {
+                return None;
+            }
+            let variant = self.stored_variant(path, QueryKind::Lower)?;
+            let key = self.store_key(path, QueryKind::Lower)?;
+            let cache = self.result_store.as_ref()?.verifier()?;
+            let snapshot = self.signature_snapshot();
+            let policy = self.source_verification_policy();
+            let subject = evaluation_subject(&key, &variant.payload);
+            let output = cache.definition_output(
+                subject,
+                DefId::intern(path),
+                &self.types,
+                policy,
+                snapshot.validation(&path.0.package).ok()?,
+            )?;
+            let metadata: LowerIdentityMetadata = self.decode_record(output.metadata())?;
+            if metadata.depth.first.len() != self.depth_limit() as usize + 1
+                || metadata
+                    .depth
+                    .first
+                    .iter()
+                    .flatten()
+                    .any(|site| self.sources.slice(*site).is_none())
+                || !self.portable_lower_reads(path, &variant.reads, &metadata.selections)
+            {
+                return None;
+            }
+            if self.lower_requires_execution(path, &variant.reads) {
+                cached_result!(replay_error, self.load_execution_receipt(subject))?;
+            }
+            cached_result!(replay_error, self.replay_selections(&metadata.selections))?;
+            Some((output, metadata.depth))
+        })();
+        match replay_error {
+            Some(error) => Err(error),
+            None => Ok(value),
         }
-        let variant = self.stored_variant(path, QueryKind::Lower)?;
-        let key = self.store_key(path, QueryKind::Lower)?;
-        let cache = self.result_store.as_ref()?.verifier()?;
-        let snapshot = self.signature_snapshot();
-        let policy = self.source_verification_policy();
-        let subject = evaluation_subject(&key, &variant.payload);
-        let output = cache.definition_output(
-            subject,
-            DefId::intern(path),
-            &self.types,
-            policy,
-            snapshot.validation(&path.0.package).ok()?,
-        )?;
-        let metadata: LowerIdentityMetadata = self.decode_record(output.metadata())?;
-        if metadata.depth.first.len() != self.depth_limit() as usize + 1
-            || metadata
-                .depth
-                .first
-                .iter()
-                .flatten()
-                .any(|site| self.sources.slice(*site).is_none())
-            || !self.portable_lower_reads(path, &variant.reads, &metadata.selections)
-        {
-            return None;
-        }
-        if self.lower_requires_execution(path, &variant.reads) {
-            self.load_execution_receipt(subject)?;
-        }
-        self.replay_selections(&metadata.selections)?;
-        Some((output, metadata.depth))
     }
     pub(super) fn publish_captured_lower(
         &mut self,
@@ -3469,7 +3566,7 @@ mod malformed_tests {
                     .unwrap();
                 engine.verify_store = verify;
                 assert!(
-                    engine.load_semantic_body(path).is_none(),
+                    engine.load_semantic_body(path).unwrap().is_none(),
                     "fault={fault} verify={verify:?}"
                 );
                 assert_eq!(engine.store_adoptions(), 0);
@@ -3531,7 +3628,7 @@ mod malformed_tests {
                     .unwrap();
                 engine.verify_store = verify;
                 assert!(
-                    engine.load_source_audit(path).is_none(),
+                    engine.load_source_audit(path).unwrap().is_none(),
                     "fault={fault} verify={verify:?}"
                 );
                 assert_eq!(engine.recompute_count(path, QueryKind::Signature), 0);
@@ -3652,7 +3749,7 @@ mod malformed_tests {
                     .write_record(path, QueryKind::Generate, &Reads::empty(), &record)
                     .unwrap();
                 engine.verify_store = verify;
-                let hit = engine.load_generation(path, body);
+                let hit = engine.load_generation(path, body).unwrap();
                 assert_eq!(
                     hit.is_some(),
                     fault == 0 && verify == crate::store::VerifyStore::Off,
@@ -3915,13 +4012,18 @@ mod malformed_tests {
                 .write(&Reads::empty(), payload)
                 .unwrap();
                 engine.verify_store = verify;
-                let hit = engine.load_staged_evaluation(&path, &[2]);
+                let hit = engine.load_staged_evaluation(&path, &[2]).unwrap();
                 assert_eq!(
                     hit.is_some(),
                     fault == 0 && verify == crate::store::VerifyStore::Off,
                     "fault={fault} verify={verify:?}"
                 );
-                assert!(engine.load_staged_evaluation(&path, &[3]).is_none());
+                assert!(
+                    engine
+                        .load_staged_evaluation(&path, &[3])
+                        .unwrap()
+                        .is_none()
+                );
                 if fault != 0 {
                     assert_eq!(engine.store_adoptions(), 0);
                     assert!(engine.pending_store_checks.is_empty());
@@ -4018,7 +4120,7 @@ mod malformed_tests {
                     .write_record(path, QueryKind::Evaluate, &Reads::empty(), &record)
                     .unwrap();
                 engine.verify_store = verify;
-                let hit = engine.load_evaluation(path);
+                let hit = engine.load_evaluation(path).unwrap();
                 assert_eq!(
                     hit.is_some(),
                     fault == 0 && verify == crate::store::VerifyStore::Off,
@@ -4485,7 +4587,7 @@ mod malformed_tests {
                     })
                     .unwrap();
                 engine.verify_store = verify;
-                assert!(engine.load_lower(path).is_none());
+                assert!(engine.load_lower(path).unwrap().is_none());
                 assert_eq!(engine.store_adoptions(), 0);
                 assert!(engine.pending_store_checks.is_empty());
             }

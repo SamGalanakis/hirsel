@@ -140,23 +140,27 @@ impl FrontBodyQueries {
         } else {
             self.archive_observations(outcome, scratch)?
         };
-        // Optional cache publication never consumes the request's required
-        // transport. Missing or evicted provider bytes take the ordinary miss.
-        let facts = self.archive_cached_facts(key, outcome, scratch);
+        // Replace the live terminal's charge with its compact representation.
+        // This consumes no second required-transport record. If compaction
+        // cannot fit, leave the live terminal in place and refuse admission.
+        let bytes = self.encode_terminal(key, outcome, scratch)?;
+        let charge = (bytes.len() as u64)
+            .checked_add(crate::memo::retained_arc_bytes(&std::mem::MaybeUninit::<
+                TerminalFront,
+            >::uninit()))?
+            .checked_add(crate::memo::retained_arc_bytes(&std::mem::MaybeUninit::<
+                LiveSourceBacking,
+            >::uninit()))?;
+        let backing = outcome._backing.split(charge)?;
         Some(ArchivedFront {
-            facts,
+            facts: Arc::new(TerminalFront {
+                bytes: bytes.into_boxed_slice(),
+                _backing: backing,
+            }),
             observations,
         })
     }
-    fn archive_cached_facts(
-        &self,
-        key: Key,
-        outcome: &FrontOutcome,
-        scratch: u64,
-    ) -> Option<Reference> {
-        if !self.store.persistence().retains() {
-            return None;
-        }
+    fn encode_terminal(&self, key: Key, outcome: &FrontOutcome, scratch: u64) -> Option<Vec<u8>> {
         let temporary = outcome
             .dead_arms
             .as_ref()
@@ -220,13 +224,7 @@ impl FrontBodyQueries {
         {
             return None;
         }
-        let bytes = bincode::serialize(&record).ok()?;
-        remember(
-            &*self.store,
-            &self.inputs.get(&key)?.key,
-            &outcome.reads,
-            &bytes,
-        )
+        bincode::serialize(&record).ok()
     }
 }
 impl BodyTask {
@@ -234,7 +232,7 @@ impl BodyTask {
         &self,
         cx: &mut dyn QueryContext,
     ) -> Option<Result<ProductRef, Reference>> {
-        let reference = match self
+        let facts = match self
             .queries
             .slots
             .lock()
@@ -242,30 +240,29 @@ impl BodyTask {
             .get(&self.input)?
         {
             FrontSlot::Live { .. } => return None,
-            FrontSlot::Archived(archived) => archived.facts?,
+            FrontSlot::Archived(archived) => archived.facts.clone(),
         };
-        self.load_compact_reference(cx, reference)
+        Some(
+            self.load_terminal(cx, &facts.bytes)
+                .unwrap_or(Err(self.queries.errors.protocol)),
+        )
     }
-    fn load_compact_reference(
+    fn load_terminal(
         &self,
         cx: &mut dyn QueryContext,
-        reference: Reference,
+        bytes: &[u8],
     ) -> Option<Result<ProductRef, Reference>> {
-        if reference.domain != crate::store::product_domain(QueryKind::Summary)
-            || reference.len.checked_mul(8)? > self.weight.scratch
-        {
+        if (bytes.len() as u64).checked_mul(8)? > self.weight.scratch {
             return None;
         }
-        let bytes = self.queries.store.get_content(reference)?;
         let record: Record = bincode::DefaultOptions::new()
             .with_fixint_encoding()
-            .with_limit(reference.len)
+            .with_limit(bytes.len() as u64)
             .reject_trailing_bytes()
-            .deserialize(&bytes)
+            .deserialize(bytes)
             .ok()?;
         if record.key != self.queries.inputs[&self.input].key.0
-            || reference
-                .len
+            || (bytes.len() as u64)
                 .checked_mul(8)?
                 .checked_add(record.decode_bytes)?
                 > self.weight.scratch
@@ -273,13 +270,6 @@ impl BodyTask {
                 body.domain != crate::store::product_domain(QueryKind::Modes)
                     || body.len > self.weight.scratch
             })
-            || record
-                .reads
-                .first_changed(|read| {
-                    self.queries
-                        .observe(self.queries.inputs[&self.input].definition.path(), read)
-                })
-                .is_some()
         {
             return None;
         }

@@ -234,6 +234,16 @@ pub(crate) struct HeaderProducts {
     failures: BTreeMap<DefId, Vec<hirsel_types::UniqueFailure>>,
 }
 impl HeaderProducts {
+    pub(crate) fn fact_graph(&self) -> Arc<hirsel_validate::FactGraph> {
+        self.store
+            .as_ref()
+            .and_then(|store| store.verifier())
+            .map_or_else(
+                || self.operation.fact_graph.clone(),
+                |verifier| verifier.fact_graph(),
+            )
+    }
+
     fn scope(&self) -> Arc<PrivateInferenceScope> {
         self.scope.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }

@@ -477,7 +477,7 @@ impl QueryEngine {
         let SignatureKind::Function(_) = &signature.kind else {
             return Err(QueryError::NotImplemented);
         };
-        let text = if let Some((record, observed)) = self.load_generation(definition, body) {
+        let text = if let Some((record, observed)) = self.load_generation(definition, body)? {
             self.depth_replay_requests(&record.depth)?;
             self.merge_execution(&observed);
             reads.observed.merged.merge(&observed);

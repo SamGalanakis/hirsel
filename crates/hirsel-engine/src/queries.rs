@@ -2247,7 +2247,7 @@ impl QueryEngine {
                 .is_none_or(|depth| depth.limit() == self.depth_limit())
             && self.memo_valid(definition, &entry, text)
             && self.lower_acceptance_holds(entry.acceptance.as_ref())
-            && self.replay_selections(&entry.selections).is_some()
+            && self.replay_selections(&entry.selections)?.is_some()
         {
             // Staged declarations still need their registration product. Ordinary
             // immutable lower hits do not demand the checked/Modes bodies.
@@ -2273,7 +2273,7 @@ impl QueryEngine {
         }
         self.lower_holds
             .demand_evicted(&MemoKey::new(QueryKind::Lower, id));
-        if let Some(entry) = self.load_lower(definition) {
+        if let Some(entry) = self.load_lower(definition)? {
             self.depth_replay_requests(entry.depth.as_ref().expect("stored depth receipt"))?;
             let required = self.lower_requires_execution(definition, entry.reads());
             self.merge_lower_acceptance(entry.acceptance.as_ref(), required);

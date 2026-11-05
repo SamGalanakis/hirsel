@@ -770,18 +770,24 @@ pub struct EnvironmentStamp {
 }
 #[derive(Default)]
 pub(crate) struct EnvironmentFacts {
-    pub(crate) execution: std::sync::Mutex<Vec<Arc<crate::receipts::ExecutionFact>>>,
-    pub(crate) reads: std::sync::Mutex<crate::hashed::HashMap<VRead, (bool, Arc<dyn Send + Sync>)>>,
+    pub(crate) execution: crate::FactTable<crate::receipts::ExecutionKey, crate::ExecutionReceipt>,
+    pub(crate) reads: crate::FactTable<VRead, bool>,
 }
 impl EnvironmentStamp {
     fn new(types: &Arc<TypeInterner>, store: &ValidatedSignatures) -> Self {
+        let graph = store
+            .verifier()
+            .map_or_else(Arc::default, |v| v.fact_graph());
         Self {
             types: types.clone(),
             identity: Arc::new(()),
             verifier: store
                 .verifier()
                 .map_or_else(std::sync::Weak::new, Arc::downgrade),
-            facts: Arc::default(),
+            facts: Arc::new(EnvironmentFacts {
+                execution: crate::FactTable::new(graph.clone()),
+                reads: crate::FactTable::new(graph),
+            }),
         }
     }
 }

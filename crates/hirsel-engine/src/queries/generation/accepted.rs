@@ -164,7 +164,8 @@ impl AcceptedFrontRegistration {
         revalidate: impl FnOnce(
             &mut C,
             &hirsel_validate::ExecutionReceipt,
-        ) -> Option<hirsel_validate::ExecutionReceipt>,
+        )
+            -> Result<Option<hirsel_validate::ExecutionReceipt>, QueryError>,
         mut observe: impl FnMut(&mut C, &DefPath, &ReadKey) -> Option<ContentHash>,
     ) -> Result<(Reads, Option<hirsel_validate::ExecutionReceipt>), QueryError> {
         let invalid = |reason: &str| {
@@ -182,7 +183,7 @@ impl AcceptedFrontRegistration {
             let receipt = self
                 .acceptance()
                 .ok_or_else(|| invalid("missing private execution acceptance"))?;
-            Some(revalidate(context, receipt).ok_or_else(|| {
+            Some(revalidate(context, receipt)?.ok_or_else(|| {
                 invalid("V refused the private artifacts in the current environment")
             })?)
         } else {
@@ -402,7 +403,7 @@ impl AcceptanceInputs {
                                         .flatten()
                                 })
                             })
-                        })
+                        })?
                         .ok_or_else(refusal)?,
                 )
             } else {

@@ -1147,7 +1147,7 @@ impl QueryEngine {
             }
             self.constant_values.remove(path);
         }
-        if let Some(value) = self.load_evaluation(path) {
+        if let Some(value) = self.load_evaluation(path)? {
             self.depth_admit(&value.depth, reference)?;
             self.merge_execution(&value.executed);
             self.merge_evaluation_validation(&value)?;
@@ -1571,7 +1571,7 @@ impl QueryEngine {
                 return Ok(value);
             }
         }
-        if let Some(value) = self.load_staged_evaluation(path, arguments) {
+        if let Some(value) = self.load_staged_evaluation(path, arguments)? {
             self.depth_admit(&value.depth, site)?;
             self.merge_execution(&value.executed);
             self.merge_evaluation_validation(&value)?;

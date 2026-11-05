@@ -65,7 +65,7 @@ impl SuccessorCapture {
         let execution = execution
             .map(|receipt| {
                 self.namespace()
-                    .revalidate_execution(receipt)
+                    .revalidate_execution(receipt)?
                     .ok_or_else(|| refused("V refused execution in the successor environment"))
             })
             .transpose()?;

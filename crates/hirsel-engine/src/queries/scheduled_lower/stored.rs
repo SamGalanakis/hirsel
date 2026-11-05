@@ -373,7 +373,7 @@ impl FrontLowerQueries {
         }
         let execution_subject = persistent::evaluation_subject(key, &descriptor);
         let execution = if self.verify == Verify::On && executed {
-            Some(self.store.verifier()?.execution_revalidated(
+            match self.store.verifier()?.execution_revalidated(
                 execution_subject,
                 self.namespace.snapshot.types().clone(),
                 |path, occurrence| {
@@ -384,7 +384,43 @@ impl FrontLowerQueries {
                     )
                 },
                 &*self.namespace.snapshot,
-            )?)
+            ) {
+                Ok(Some(receipt)) => Some(receipt),
+                Ok(None) => return None,
+                Err(error) => {
+                    let error = QueryError::from(error);
+                    let bytes = self.records.encode(
+                        &*self.namespace.anchors,
+                        &(path, &error, &reads, &depth, executed),
+                    )?;
+                    let outcome = Outcome {
+                        diagnostic_sources: None,
+                        result: Err(error),
+                        reads,
+                        reads_decode_bytes: record.reads_decode_bytes,
+                        selections,
+                        depth: depth.into(),
+                        executed,
+                        execution: None,
+                        execution_subject,
+                    };
+                    return Some(
+                        self.publish(
+                            id,
+                            key,
+                            outcome,
+                            Publication {
+                                domain: FAILURE,
+                                bytes: bytes.into(),
+                                persist: false,
+                                raw: None,
+                            },
+                            query_reads,
+                        )
+                        .await,
+                    );
+                }
+            }
         } else {
             None
         };

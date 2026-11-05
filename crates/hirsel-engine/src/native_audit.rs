@@ -128,7 +128,7 @@ impl QueryEngine {
         path: &DefPath,
     ) -> Result<SourceAuditProducts, QueryError> {
         self.prepare_private_summaries();
-        if let Some(products) = self.load_source_audit(path) {
+        if let Some(products) = self.load_source_audit(path)? {
             return Ok(products);
         }
         self.s1.begin_requests();

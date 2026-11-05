@@ -162,8 +162,12 @@ impl FrontFacts {
 }
 #[derive(Clone)]
 struct ArchivedFront {
-    facts: Option<Reference>,
+    facts: Arc<TerminalFront>,
     observations: Arc<FrontObservations>,
+}
+struct TerminalFront {
+    bytes: Box<[u8]>,
+    _backing: Arc<LiveSourceBacking>,
 }
 struct FrontObservations {
     rows: observations::Rows,
@@ -231,7 +235,7 @@ impl LiveSourceBacking {
             debit: Mutex::new(FrontDebit {
                 charge: bytes,
                 allowance,
-                observation: None,
+                observation: debit.observation.take(),
             }),
         });
         // The original value also keeps the transferred read charge until its
@@ -1402,7 +1406,7 @@ impl FrontBodyQueries {
                 queries: self,
                 scratch,
             };
-            let mut task = BodyTask {
+            let task = BodyTask {
                 queries: self.clone(),
                 query,
                 input: query.address.0,
@@ -1415,7 +1419,7 @@ impl FrontBodyQueries {
             };
             let restored = task
                 .load_evicted(&mut context)
-                .unwrap_or_else(|| task.run(&mut context));
+                .unwrap_or(Err(self.errors.protocol));
             if let Err(reference) = restored {
                 return Err(self
                     .outcome(Err(reference))

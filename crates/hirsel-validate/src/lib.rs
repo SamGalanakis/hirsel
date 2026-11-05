@@ -38,6 +38,8 @@ mod cleanup_proof;
 mod cpu;
 mod declaration;
 mod effects;
+mod facts;
+pub use facts::{FactError, FactGraph, FactTable};
 mod flow;
 mod flow_origins;
 mod generics;

@@ -135,7 +135,7 @@ impl QueryEngine {
         &mut self,
         path: &DefPath,
     ) -> Result<(Vec<Vec<u8>>, BTreeSet<DefPath>), QueryError> {
-        let (content, mut dependencies) = if let Some(node) = self.load_semantic_body(path) {
+        let (content, mut dependencies) = if let Some(node) = self.load_semantic_body(path)? {
             node
         } else {
             self.s1.begin_requests();
@@ -235,7 +235,7 @@ impl QueryEngine {
                     .expect("indexed source item")
                     .clone();
                 content.extend(self.semantic_tokens(&syntax)?);
-            } else if let Some(entry) = self.load_lower(path) {
+            } else if let Some(entry) = self.load_lower(path)? {
                 // Demand the ordinary Lower product before reconstructing its
                 // checked body. Its reads and private execution authority have
                 // already been validated independently by load_lower.

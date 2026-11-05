@@ -302,7 +302,7 @@ impl NamespaceCapture {
     pub(crate) fn revalidate_execution(
         &self,
         receipt: &hirsel_validate::ExecutionReceipt,
-    ) -> Option<hirsel_validate::ExecutionReceipt> {
+    ) -> Result<Option<hirsel_validate::ExecutionReceipt>, QueryError> {
         self.snapshot
             .revalidate_execution(receipt, |path, occurrence| {
                 self.private_sources

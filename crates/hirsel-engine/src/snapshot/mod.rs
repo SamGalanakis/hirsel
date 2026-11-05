@@ -189,14 +189,16 @@ pub(crate) struct ValidationState {
     /// Full installed tables for materialized owners. The snapshot fixes the
     /// source, registration and verifier inputs; each overlay still gets its
     /// own replacement verdicts and every execution receipt is replayed.
-    overlay_bases: Mutex<BTreeMap<PackageId, Arc<ViewTable>>>,
-    overlays: Mutex<BTreeMap<(PackageId, ValidationDigest), Arc<PackageViews>>>,
-    producers: Arc<crate::memo::S1Coordinator<ValidationProducer>>,
+    overlay_bases: hirsel_validate::FactTable<PackageId, RetainedView<ViewTable>, QueryError>,
+    overlays: hirsel_validate::FactTable<
+        (PackageId, ValidationDigest),
+        RetainedView<PackageViews>,
+        QueryError,
+    >,
 }
-#[derive(Clone, Eq, PartialEq, Hash)]
-enum ValidationProducer {
-    Base(PackageId),
-    Overlay(PackageId, ValidationDigest),
+struct RetainedView<T> {
+    value: Arc<T>,
+    retained: bool,
 }
 /// A read-only installed dependency's published universe summaries: its own
 /// universe, which its bodies are validated against, and what importers'
@@ -310,15 +312,12 @@ fn validation_retention_refused() {
 
 impl ValidationState {
     pub(crate) fn evict_cached(&self) -> bool {
-        let mut overlays = self.overlays.lock().unwrap();
-        let before = overlays.len();
-        overlays.retain(|_, views| Arc::strong_count(views) > 1);
-        let mut removed = before - overlays.len();
-        drop(overlays);
-        let mut bases = self.overlay_bases.lock().unwrap();
-        let before = bases.len();
-        bases.retain(|_, table| Arc::strong_count(table) > 1);
-        removed += before - bases.len();
+        let removed = self
+            .overlays
+            .evict_ready_when(|view| Arc::strong_count(&view.value) == 1)
+            + self
+                .overlay_bases
+                .evict_ready_when(|view| Arc::strong_count(&view.value) == 1);
         hirsel_intern::work::count_by(
             hirsel_intern::work::Counter::VerifierFactEvictions,
             removed as u64,
@@ -762,14 +761,21 @@ impl SignatureSnapshot {
                     ))
                 })
                 .collect::<Result<_, hirsel_validate::ViewRefusal>>()?;
+            let graph = self.headers.as_ref().map_or_else(
+                || {
+                    self.verifier
+                        .as_ref()
+                        .map_or_else(Arc::default, |v| v.fact_graph())
+                },
+                |headers| headers.fact_graph(),
+            );
             let state = Arc::new(ValidationState {
                 registration: OnceLock::new(),
                 views,
                 bases,
                 packages,
-                overlay_bases: Mutex::default(),
-                overlays: Mutex::default(),
-                producers: crate::memo::S1Coordinator::new(),
+                overlay_bases: hirsel_validate::FactTable::new(graph.clone()),
+                overlays: hirsel_validate::FactTable::new(graph),
                 installed: installed_universes,
                 validated,
             });
@@ -802,9 +808,13 @@ impl SignatureSnapshot {
         &self,
         receipt: &hirsel_validate::ExecutionReceipt,
         anchor: impl FnMut(&DefPath, u32) -> Option<hirsel_span::Anchor>,
-    ) -> Option<hirsel_validate::ExecutionReceipt> {
-        let verifier = self.verifier.as_ref()?;
-        verifier.revalidate_execution(receipt, self.types.clone(), anchor, self)
+    ) -> Result<Option<hirsel_validate::ExecutionReceipt>, QueryError> {
+        let Some(verifier) = self.verifier.as_ref() else {
+            return Ok(None);
+        };
+        verifier
+            .revalidate_execution(receipt, self.types.clone(), anchor, self)
+            .map_err(Into::into)
     }
     pub(crate) fn validate_source_artifact<'input>(
         &self,
@@ -1195,63 +1205,81 @@ impl SignatureSnapshot {
             package.clone(),
             hirsel_validate::digest(&self.types, &signature),
         );
-        let mut producer = state.producers.thread_worker::<()>();
-        loop {
-            if let Some(views) = state.overlays.lock().unwrap().get(&key).cloned() {
-                return Ok(views);
-            }
-            match producer.enter(ValidationProducer::Overlay(key.0.clone(), key.1), ()) {
-                crate::memo::Entered::Settled => continue,
-                crate::memo::Entered::Run => break,
-            }
-        }
-        let (views, retain) = self.compute_validation_with(package, signature.clone())?;
-        if !retain {
-            return Ok(Arc::new(views));
-        }
-        let views = if let Some(delta) = views.retained_delta_bytes() {
-            let bytes = delta
-                .checked_add(crate::memo::retained::retained_signature_payload_bytes(
-                    &signature,
-                ))
-                .and_then(|bytes| {
-                    bytes.checked_add(
-                        (3 * size_of::<((PackageId, ValidationDigest), Arc<PackageViews>)>()
-                            + package.name.capacity()
-                            + package.version.capacity()) as u64,
-                    )
-                })
-                .ok_or_else(|| hirsel_validate::ViewRefusal::Unreadable {
-                    definition: signature.definition,
-                    cause: QueryError::Operational(hirsel_types::OperationalFailure {
-                        operation: "validation overlay retention".into(),
-                        message: "overlay size overflow".into(),
-                    }),
-                })?;
-            let lease = match &self.headers {
-                Some(headers) => match headers.validation_lease(bytes) {
-                    Ok(lease) => lease,
-                    Err(_) => {
-                        // The exact transient result is already computed. A
-                        // declined optional retention publishes no cache entry.
-                        validation_retention_refused();
-                        return Ok(Arc::new(views));
-                    }
-                },
-                None => Arc::new(()) as Arc<dyn Send + Sync>,
-            };
-            let views = Arc::new(views.retain_owner(lease));
-            state
-                .overlays
-                .lock()
-                .unwrap()
-                .entry(key)
-                .or_insert_with(|| views.clone())
-                .clone()
-        } else {
-            Arc::new(views)
+        let refusal = |cause| hirsel_validate::ViewRefusal::Unreadable {
+            definition: signature.definition,
+            cause,
         };
-        Ok(views)
+        let value = state
+            .overlays
+            .get_or_try_init(
+                key,
+                || self.validation_fact_lease(1024).map_err(QueryError::from),
+                || {
+                    let (views, retain) =
+                        self.compute_validation_with(package, signature.clone())?;
+                    if !retain {
+                        return Ok(Arc::new(RetainedView {
+                            value: Arc::new(views),
+                            retained: false,
+                        }));
+                    }
+                    let views = if let Some(delta) = views.retained_delta_bytes() {
+                        let bytes = delta
+                            .checked_add(crate::memo::retained::retained_signature_payload_bytes(
+                                &signature,
+                            ))
+                            .and_then(|bytes| {
+                                bytes.checked_add(
+                                    (3 * size_of::<(
+                                        (PackageId, ValidationDigest),
+                                        Arc<PackageViews>,
+                                    )>() + package.name.capacity()
+                                        + package.version.capacity())
+                                        as u64,
+                                )
+                            })
+                            .ok_or_else(|| hirsel_validate::ViewRefusal::Unreadable {
+                                definition: signature.definition,
+                                cause: QueryError::Operational(hirsel_types::OperationalFailure {
+                                    operation: "validation overlay retention".into(),
+                                    message: "overlay size overflow".into(),
+                                }),
+                            })?;
+                        let lease = match &self.headers {
+                            Some(headers) => match headers.validation_lease(bytes) {
+                                Ok(lease) => lease,
+                                Err(_) => {
+                                    // The exact transient result is already computed. A
+                                    // declined optional retention publishes no cache entry.
+                                    validation_retention_refused();
+                                    return Ok(Arc::new(RetainedView {
+                                        value: Arc::new(views),
+                                        retained: false,
+                                    }));
+                                }
+                            },
+                            None => Arc::new(()) as Arc<dyn Send + Sync>,
+                        };
+                        let views = Arc::new(views.retain_owner(lease));
+                        views
+                    } else {
+                        Arc::new(views)
+                    };
+                    Ok(Arc::new(RetainedView {
+                        value: views,
+                        retained: true,
+                    }))
+                },
+                |result| result.as_ref().is_ok_and(|view| view.retained),
+            )
+            .map_err(refusal)?;
+        Ok(value.value.clone())
+    }
+    fn validation_fact_lease(&self, bytes: u64) -> Result<Arc<dyn Send + Sync>, QueryError> {
+        match &self.headers {
+            Some(headers) => headers.validation_lease(bytes),
+            None => Ok(Arc::new(())),
+        }
     }
     fn compute_validation_with(
         &self,
@@ -1267,104 +1295,110 @@ impl SignatureSnapshot {
             // its full table once in this exact immutable snapshot, then check
             // each replacement and all verdicts that read it against that table.
             // A refused construction publishes nothing and remains retryable.
-            let mut retain = true;
-            let mut producer = state.producers.thread_worker::<()>();
-            let full = loop {
-                if let Some(full) = state.overlay_bases.lock().unwrap().get(package).cloned() {
-                    break full;
-                }
-                match producer.enter(ValidationProducer::Base(package.clone()), ()) {
-                    crate::memo::Entered::Settled => continue,
-                    crate::memo::Entered::Run => {}
-                }
-                hirsel_intern::timings::count(
-                    hirsel_intern::timings::Count::RegistrationValidationViews,
-                );
-                hirsel_intern::work::count(
-                    hirsel_intern::work::Counter::RegistrationValidationViews,
-                );
-                let visible = self
-                    .visible(package)
-                    .expect("installed closures are complete");
-                let full = ViewTable::from_views(
-                    t,
-                    self.membership()
-                        .definitions
-                        .iter()
-                        .copied()
-                        .filter(|d| visible.contains(&d.path().0.package))
-                        .filter_map(|d| match self.body_view(package, d)? {
-                            Ok(view) => Some(Ok(
-                                if package == &d.path().0.package && self.private_view(d).is_some()
-                                {
-                                    View::new(t, view, None)
-                                } else {
-                                    self.public_views[&d]
-                                        .get_or_init(|| self.view_of(d, &view, None))
-                                        .clone()
+            let full = state
+                .overlay_bases
+                .get_or_try_init(
+                    package.clone(),
+                    || self.validation_fact_lease(1024),
+                    || {
+                        hirsel_intern::timings::count(
+                            hirsel_intern::timings::Count::RegistrationValidationViews,
+                        );
+                        hirsel_intern::work::count(
+                            hirsel_intern::work::Counter::RegistrationValidationViews,
+                        );
+                        let visible = self
+                            .visible(package)
+                            .expect("installed closures are complete");
+                        let full = ViewTable::from_views(
+                            t,
+                            self.membership()
+                                .definitions
+                                .iter()
+                                .copied()
+                                .filter(|d| visible.contains(&d.path().0.package))
+                                .filter_map(|d| match self.body_view(package, d)? {
+                                    Ok(view) => Some(Ok(
+                                        if package == &d.path().0.package
+                                            && self.private_view(d).is_some()
+                                        {
+                                            View::new(t, view, None)
+                                        } else {
+                                            self.public_views[&d]
+                                                .get_or_init(|| self.view_of(d, &view, None))
+                                                .clone()
+                                        },
+                                    )),
+                                    Err(cause @ QueryError::Operational(_)) => {
+                                        Some(Err(hirsel_validate::ViewRefusal::Unreadable {
+                                            definition: d,
+                                            cause,
+                                        }))
+                                    }
+                                    Err(_) => None,
+                                })
+                                .collect::<Result<Vec<_>, _>>()?,
+                            &mut store,
+                            Some(&state.validated),
+                        )?;
+                        let full = if let Some(mut bytes) = full.retained_control_bytes() {
+                            let refusal = || hirsel_validate::ViewRefusal::Unreadable {
+                                definition: signature.definition,
+                                cause: QueryError::Operational(hirsel_types::OperationalFailure {
+                                    operation: "validation base retention".into(),
+                                    message: "full table size overflow".into(),
+                                }),
+                            };
+                            for view in full.views() {
+                                if let Some(payload) = view.identified().held_signature() {
+                                    bytes = bytes
+                                        .checked_add(
+                                            crate::memo::retained::retained_signature_payload_bytes(
+                                                payload,
+                                            ),
+                                        )
+                                        .ok_or_else(refusal)?;
+                                }
+                            }
+                            let mut weight = crate::NativeMetadataWeight::default();
+                            weight.tree::<PackageId, Arc<ViewTable>>(1);
+                            weight.add(package.name.capacity() + package.version.capacity());
+                            bytes = bytes.checked_add(weight.bytes()).ok_or_else(refusal)?;
+                            let lease = match &self.headers {
+                                Some(headers) => match headers.validation_lease(bytes) {
+                                    Ok(lease) => lease,
+                                    Err(_) => {
+                                        validation_retention_refused();
+                                        return Ok(Arc::new(RetainedView {
+                                            value: Arc::new(full),
+                                            retained: false,
+                                        }));
+                                    }
                                 },
-                            )),
-                            Err(cause @ QueryError::Operational(_)) => {
-                                Some(Err(hirsel_validate::ViewRefusal::Unreadable {
-                                    definition: d,
-                                    cause,
-                                }))
-                            }
-                            Err(_) => None,
-                        })
-                        .collect::<Result<Vec<_>, _>>()?,
-                    &mut store,
-                    Some(&state.validated),
-                )?;
-                let full = if let Some(mut bytes) = full.retained_control_bytes() {
-                    let refusal = || hirsel_validate::ViewRefusal::Unreadable {
-                        definition: signature.definition,
-                        cause: QueryError::Operational(hirsel_types::OperationalFailure {
-                            operation: "validation base retention".into(),
-                            message: "full table size overflow".into(),
-                        }),
-                    };
-                    for view in full.views() {
-                        if let Some(payload) = view.identified().held_signature() {
-                            bytes = bytes
-                                .checked_add(
-                                    crate::memo::retained::retained_signature_payload_bytes(
-                                        payload,
-                                    ),
-                                )
-                                .ok_or_else(refusal)?;
-                        }
-                    }
-                    let mut weight = crate::NativeMetadataWeight::default();
-                    weight.tree::<PackageId, Arc<ViewTable>>(1);
-                    weight.add(package.name.capacity() + package.version.capacity());
-                    bytes = bytes.checked_add(weight.bytes()).ok_or_else(refusal)?;
-                    let lease = match &self.headers {
-                        Some(headers) => match headers.validation_lease(bytes) {
-                            Ok(lease) => lease,
-                            Err(_) => {
-                                validation_retention_refused();
-                                retain = false;
-                                break Arc::new(full);
-                            }
-                        },
-                        None => Arc::new(()) as Arc<dyn Send + Sync>,
-                    };
-                    Arc::new(full.retain_owner(lease))
-                } else {
-                    // Failed tables remain exact transient inputs. A later
-                    // request can retry after its resource/context changes.
-                    retain = false;
-                    break Arc::new(full);
-                };
-                state
-                    .overlay_bases
-                    .lock()
-                    .unwrap()
-                    .insert(package.clone(), full.clone());
-                break full;
-            };
-            drop(producer);
+                                None => Arc::new(()) as Arc<dyn Send + Sync>,
+                            };
+                            Arc::new(full.retain_owner(lease))
+                        } else {
+                            // Failed tables remain exact transient inputs. A later
+                            // request can retry after its resource/context changes.
+                            return Ok(Arc::new(RetainedView {
+                                value: Arc::new(full),
+                                retained: false,
+                            }));
+                        };
+                        Ok(Arc::new(RetainedView {
+                            value: full,
+                            retained: true,
+                        }))
+                    },
+                    |result| result.as_ref().is_ok_and(|view| view.retained),
+                )
+                .map_err(|cause| hirsel_validate::ViewRefusal::Unreadable {
+                    definition: signature.definition,
+                    cause,
+                })?;
+            let retain = full.retained;
+            let full = full.value.clone();
             return PackageViews::new(
                 t,
                 full,
@@ -1389,58 +1423,42 @@ impl SignatureSnapshot {
 }
 
 impl hirsel_validate::ReplayEnvironment for SignatureSnapshot {
-    fn checked(&self, package: &PackageId) -> Option<&dyn hirsel_validate::CheckedEnvironment> {
+    fn checked(
+        &self,
+        package: &PackageId,
+    ) -> Result<Option<&dyn hirsel_validate::CheckedEnvironment>, hirsel_validate::ViewRefusal>
+    {
         self.validation(package)
-            .map_err(|error| {
-                if std::env::var_os("HIRSEL_OPERATION_OWNER_TRACE").is_some() {
-                    eprintln!("OWNER CHECKED REFUSAL {error:?}");
-                }
-                error
-            })
-            .ok()
+            .map(|input| Some(input as &dyn hirsel_validate::CheckedEnvironment))
     }
-
+    fn base_digest(
+        &self,
+        package: &PackageId,
+    ) -> Result<Option<ContentHash>, hirsel_validate::ViewRefusal> {
+        if !self.membership().packages.contains(package) {
+            return Ok(None);
+        }
+        self.validation_input_digest(package).map(Some)
+    }
     fn checked_overlay(
         &self,
         package: &PackageId,
         overlay: SignatureRef,
-    ) -> Option<Arc<PackageViews>> {
-        self.validation_with(package, overlay)
-            .map_err(|error| {
-                if std::env::var_os("HIRSEL_OPERATION_OWNER_TRACE").is_some() {
-                    eprintln!("OWNER OVERLAY REFUSAL {error:?}");
-                }
-                error
-            })
-            .ok()
-    }
-    fn base_digest(&self, package: &PackageId) -> Option<ContentHash> {
-        self.membership()
-            .packages
-            .contains(package)
-            .then(|| {
-                self.validation_input_digest(package)
-                    .map_err(|error| {
-                        if std::env::var_os("HIRSEL_OPERATION_OWNER_TRACE").is_some() {
-                            eprintln!("OWNER DIGEST REFUSAL {error:?}");
-                        }
-                        error
-                    })
-                    .ok()
-            })
-            .flatten()
+    ) -> Result<Option<Arc<PackageViews>>, hirsel_validate::ViewRefusal> {
+        self.validation_with(package, overlay).map(Some)
     }
     fn views(
         &self,
         package: &PackageId,
         overlay: Option<SignatureRef>,
-    ) -> Option<Box<dyn SignatureLookup + '_>> {
-        self.base_digest(package)?;
-        // A refused universe replays nothing: the execution runs again.
-        Some(match overlay {
-            Some(signature) => Box::new(self.validation_with(package, signature).ok()?),
-            None => Box::new(self.validation(package).ok()?),
-        })
+    ) -> Result<Option<Box<dyn SignatureLookup + '_>>, hirsel_validate::ViewRefusal> {
+        if self.base_digest(package)?.is_none() {
+            return Ok(None);
+        }
+        Ok(Some(match overlay {
+            Some(signature) => Box::new(self.validation_with(package, signature)?),
+            None => Box::new(self.validation(package)?),
+        }))
     }
 }
 
@@ -1960,7 +1978,7 @@ mod tests {
         drop(reused);
         drop(pinned);
         assert!(state.evict_cached());
-        assert!(state.overlay_bases.lock().unwrap().is_empty());
+        assert!(state.overlay_bases.is_empty());
         let fresh = snapshot.validation_with(&package, rows[0].clone()).unwrap();
         assert!(fresh.universe_errors().1.is_empty());
         assert_eq!(

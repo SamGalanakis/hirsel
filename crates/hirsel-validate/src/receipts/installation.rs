@@ -242,7 +242,7 @@ impl Installation {
             Backend::Registered(local, rows),
             Mutex::default(),
             Arc::new(()),
-            Mutex::default(),
+            crate::FactTable::default(),
             Mutex::default(),
         )))
     }

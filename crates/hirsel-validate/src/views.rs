@@ -374,6 +374,13 @@ impl ViewTable {
             )
         })
     }
+    /// Whether this definition belongs to the immutable installed part.
+    /// New private execution owners have no installed verdict to replace.
+    pub fn contains_installed(&self, d: DefId) -> bool {
+        self.installed
+            .as_ref()
+            .is_some_and(|installed| installed.views.contains(d))
+    }
     /// The views V checks in this universe; installed views are not listed.
     pub fn views(&self) -> &[View] {
         &self.views
@@ -523,7 +530,7 @@ impl PackageViews {
         Ok(result)
     }
     /// The independently identified complete universe before this replacement.
-    pub(crate) fn origin_input(&self) -> ContentHash {
+    pub fn origin_input(&self) -> ContentHash {
         self.origin_input
     }
     /// Incremental control storage of a successful overlay, excluding its

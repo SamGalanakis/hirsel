@@ -1307,6 +1307,19 @@ impl SignatureSnapshot {
         let mut store =
             ValidatedSignatures::with_cache(self.verifier.clone(), self.verifier_policy);
         if state.installed.contains_key(package) {
+            let base = state.base(package);
+            if !base.contains_installed(signature.definition) {
+                // The private helper is added beside the installed catalogue;
+                // it replaces no installed input or reverse-reader verdict.
+                return PackageViews::new(
+                    t,
+                    base.clone(),
+                    [View::new(t, signature, None)],
+                    &mut store,
+                    Some(&state.validated),
+                )
+                .map(|views| (views, true));
+            }
             // An installed summary does not retain reverse readers. Materialize
             // its full table once in this exact immutable snapshot, then check
             // each replacement and all verdicts that read it against that table.
@@ -1899,9 +1912,22 @@ mod tests {
             source.installed_universe(&package).unwrap(),
         )]);
         let snapshot = build(&rows, installed.clone());
+        let memberships_before = work::read(Counter::SnapshotMembershipBuilds);
+        let helper = constant(&types, "first$generator", hirsel_types::Primitive::U64);
+        let base = snapshot.validation_input_digest(&package).unwrap();
+        let before_helper = work::read(Counter::RegistrationValidationViews);
+        let generated = snapshot.validation_with(&package, helper.clone()).unwrap();
+        assert_eq!(generated.origin_input(), base);
+        assert_eq!(
+            generated.replacement(helper.definition).unwrap().digest(),
+            View::new(&types, helper, None).digest()
+        );
+        assert_eq!(
+            work::read(Counter::RegistrationValidationViews),
+            before_helper
+        );
         let before = work::read(Counter::RegistrationValidationViews);
         let overlays_before = work::read(Counter::ValidationOverlayConstructions);
-        let memberships_before = work::read(Counter::SnapshotMembershipBuilds);
         let mut identities = std::collections::BTreeSet::new();
 
         for row in &rows {

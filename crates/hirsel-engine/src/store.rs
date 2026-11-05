@@ -32,6 +32,15 @@ pub(crate) use installed::{
 pub use remote::RemoteStore;
 pub use request::RequestStore;
 
+impl<T: ResultStore + ?Sized> crate::runtime::backing::ProductBacking for T {
+    fn get_content(&self, reference: Reference) -> Option<Bytes> {
+        ResultStore::get_content(self, reference)
+    }
+    fn admit_product_memory(&self, bytes: u64) -> Option<Arc<dyn Send + Sync>> {
+        ResultStore::admit_product_memory(self, bytes)
+    }
+}
+
 /// Stable logical address plus explicit source inputs. The address does not
 /// change when the body changes; variants bind inputs and dependency outputs
 /// into complete actions before a payload can be adopted.

@@ -1,7 +1,7 @@
 //! Immutable completion values retain their exact observed products. They
 //! convey query completion, never verifier or native-validator acceptance.
 use super::{ArchiveAdmission, ProductArchive, ProductRef};
-use crate::store::{Action, Address, Domain, ResultStore};
+use hirsel_artifact_store::{Action, Address, Domain};
 use std::{
     io,
     sync::{Arc, Mutex},
@@ -19,7 +19,7 @@ struct Owner {
 }
 impl LiveDependencyProduct {
     pub fn new(
-        store: &dyn ResultStore,
+        store: &(impl crate::runtime::backing::ProductBacking + ?Sized),
         address: Address,
         action: Action,
         domain: Domain,
@@ -103,6 +103,7 @@ mod tests {
     use crate::store::EntryKey;
     use crate::store::Reference;
     use crate::store::RequestStore;
+    use crate::store::ResultStore;
 
     use hirsel_syntax::ContentHash;
 
@@ -122,7 +123,10 @@ mod tests {
             "live-only-test"
         }
     }
-    fn value(store: &dyn ResultStore, reads: Vec<ProductRef>) -> LiveDependencyProduct {
+    fn value(
+        store: &(impl crate::runtime::backing::ProductBacking + ?Sized),
+        reads: Vec<ProductRef>,
+    ) -> LiveDependencyProduct {
         LiveDependencyProduct::new(
             store,
             Address(ContentHash::of_bytes(b"completion")),

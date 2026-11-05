@@ -294,7 +294,7 @@ impl ProductArchive {
     /// `remaining` is the same quota used for that partition's other retained
     /// allocations. Only the independent grant survives the producer.
     pub fn open_retained(
-        store: &dyn crate::store::ResultStore,
+        store: &(impl super::backing::ProductBacking + ?Sized),
         reference: Reference,
         allowance: Arc<hirsel_engine_admission::MemoryReservation>,
         remaining: Arc<Mutex<u64>>,
@@ -342,7 +342,7 @@ impl ProductArchive {
     /// Import from an existing reusable producer partition. Detached archives
     /// return their charge only after their final reader drops them.
     pub fn open_in(
-        store: &dyn crate::store::ResultStore,
+        store: &(impl super::backing::ProductBacking + ?Sized),
         reference: Reference,
         allowance: &hirsel_engine_admission::MemoryReservationPool,
     ) -> io::Result<Self> {
@@ -402,7 +402,7 @@ impl ProductArchive {
     /// Import checked bytes under a complete backing reservation. A small view
     /// admits the entire region it keeps alive, including across eviction.
     pub fn open(
-        store: &dyn crate::store::ResultStore,
+        store: &(impl super::backing::ProductBacking + ?Sized),
         reference: Reference,
         allowance: &mut hirsel_engine_admission::MemoryReservation,
     ) -> io::Result<Self> {

@@ -27,6 +27,8 @@ pub use scheduler::{
     WaitReason, WakeReason,
 };
 
+pub mod backing;
+
 /// Logical address, independent of source revision, worker or request order.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct QueryId {

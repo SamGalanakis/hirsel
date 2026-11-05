@@ -87,10 +87,23 @@ impl CaptureDelta {
 #[derive(Clone)]
 pub struct OperationLease {
     capture: Arc<NamespaceCapture>,
+    _demand: Option<Arc<FrontLowerQueries>>,
 }
 impl OperationLease {
     pub fn capture(&self) -> &NamespaceCapture {
         &self.capture
+    }
+    pub(crate) fn with_demand(mut self, owner: Arc<FrontLowerQueries>) -> Self {
+        self._demand = Some(owner);
+        self
+    }
+    pub(crate) fn namespace(&self) -> &Arc<NamespaceCapture> {
+        &self.capture
+    }
+    pub(crate) fn native_sources(&self) -> impl Iterator<Item = &DefPath> {
+        self.capture.bodies.iter().filter_map(|(id, body)| {
+            (!body.generated || self.capture.registrations.contains_key(id)).then_some(id.path())
+        })
     }
 }
 
@@ -457,6 +470,7 @@ impl NamespaceCapture {
     pub fn lease(self: &Arc<Self>) -> OperationLease {
         OperationLease {
             capture: self.clone(),
+            _demand: None,
         }
     }
     pub fn generation_manifest(&self) -> Reference {

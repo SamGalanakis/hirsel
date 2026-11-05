@@ -19,7 +19,7 @@ fn object_requests_emit_generic_helpers_without_link_or_launch() {
     hirsel_engine::with_compiler_stack(|| {
         let directory = tempfile::tempdir().unwrap();
         let manifest = directory.path().join("hirsel.json");
-        std::fs::write(directory.path().join("sample.hir"), "pub fn keep[T](name take value:T)->T uses {value} {value}\npub fn empty[T]()->List[T] uses {} {[]}\n").unwrap();
+        std::fs::write(directory.path().join("sample.hir"), "pub fn keep[T](name take value:T)->T uses {value} {value}\npub fn empty[T]()->List[T] uses {} {[]}\nfn unused_make()->Result[Body[fn()->u64 uses {}],String]{Error(\"unselected generator must stay idle\")}\nfn unused()->u64 uses {} = comptime unused_make()\n").unwrap();
         std::fs::write(&manifest, r#"{"schema":1,"package":{"name":"object_helpers","version":"1"},"sources":[{"path":"sample.hir","module":["sample"]}],"dependencies":[]}"#).unwrap();
         let compiler = hirsel_front_phases::COMPILER.with_owned_engines();
         let target = hirsel_native::TargetSpec::x86_64_unknown_linux_gnu();
@@ -62,7 +62,7 @@ fn object_requests_emit_generic_helpers_without_link_or_launch() {
                     test_entries: vec![],
                     supplemental_sources: vec![NativeSourceText {
                         name: "native-surface/sample.hir".into(), context,
-                        text: "fn native_coverage_keep(name take value:u64)->u64 {keep(name: take value)}\nfn native_coverage_empty()->List[u64]{empty()}\n".into(),
+                        text: "fn native_coverage_keep(name take value:u64)->u64 {keep(name: take value)}\nfn empty_make()->Result[Body[fn()->List[u64] uses {}],String]{Ok(codegen.body(\"fn()->List[u64] uses {} {empty()}\"))}\nfn native_coverage_empty()->List[u64] uses {} = comptime empty_make()\n".into(),
                     }],
                     output: NativeOutput::Objects { roots: vec![first, second] },
                     run: None,

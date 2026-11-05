@@ -35,9 +35,6 @@ impl Footprint {
     const ROUTING: u64 = 16 << 10;
     const PLATFORM: u64 = 64 << 10;
     const POLICY: u64 = 64 << 10;
-    pub fn minimum(definitions: &[DefPath]) -> Option<u64> {
-        Self::new(definitions, 0, false)?.bytes()
-    }
     pub fn new(definitions: &[DefPath], slack: u64, proofs: bool) -> Option<Self> {
         let bootstrap = definitions.iter().try_fold(32 << 10, |bytes: u64, path| {
             bytes.checked_add(serde_json::to_vec(path).ok()?.len() as u64 + 128)
@@ -53,6 +50,13 @@ impl Footprint {
             tasks: share,
             proofs: if proofs { share } else { 0 },
         })
+    }
+    pub fn with_catalogue_bytes(mut self, definitions: &[DefPath], bytes: u64) -> Option<Self> {
+        self.catalogue = self
+            .catalogue
+            .checked_sub(FrontNativeDefinitionQueries::input_bytes(definitions)?)?
+            .checked_add(bytes)?;
+        Some(self)
     }
     /// The native source root's partition: whole selected catalogue records.
     pub fn source(&self) -> u64 {

@@ -687,6 +687,7 @@ pub struct InstalledSource {
     /// A Run-only preparation failure does not reject an ordinary source Check.
     pub run_error: Option<QueryError>,
     pub catalogue: Option<FrontNativeDefinitionInputs>,
+    pub operation: crate::OperationLease,
     /// The admitted source owner every product source view retains.
     pub source: Arc<MemoryReservation>,
     pub source_index: MemoryReservation,
@@ -804,13 +805,12 @@ fn plan_source(
             Ok(generators) => !generators.is_empty(),
             Err(error) => return Err(engine_error(engine, error)),
         };
-        let catalogue = if shape.ownership && (!generated || namespace.is_some()) {
+        let catalogue = if (shape.native || shape.ownership) && (!generated || namespace.is_some())
+        {
             let captured = match namespace {
-                Some(namespace) => engine.front_native_definition_inputs_in(
-                    &definitions,
-                    namespace.clone(),
-                    limits.snapshot_bytes,
-                ),
+                Some(namespace) => {
+                    engine.front_native_catalogue_inputs(namespace.lease(), limits.snapshot_bytes)
+                }
                 None => engine.front_native_definition_inputs(&definitions, limits.snapshot_bytes),
             };
             match captured {
@@ -997,6 +997,7 @@ pub fn install(
         .as_ref()
         .and_then(|scope| scope.carry().cloned())
         .or_else(|| carry.map(|carry| carry.front.clone()));
+    let operation = scope.as_ref().map(FrontDemandScope::lease);
     let namespace = scope.map(|scope| scope.namespace().clone());
     engine.admit_private_inference(loading.lend_runtime());
     let planner = SourcePlanner {
@@ -1042,6 +1043,7 @@ pub fn install(
             Err(error) => return Err(loading.failed(engine_error(engine, error))),
         },
     };
+    let operation = operation.unwrap_or_else(|| namespace.lease());
     let footprint;
     // Registration changes the source namespace. Capture every final consumer
     // against the same accepted views, including Run and ownership catalogues.
@@ -1064,13 +1066,11 @@ pub fn install(
                     Err(error) => return Err(loading.failed(engine_error(engine, error))),
                 };
         }
-        if shape.ownership {
+        if shape.native || shape.ownership {
             catalogue = Some(
-                match engine.front_native_definition_inputs_in(
-                    &definitions,
-                    namespace.clone(),
-                    final_limits.snapshot_bytes,
-                ) {
+                match engine
+                    .front_native_catalogue_inputs(operation.clone(), final_limits.snapshot_bytes)
+                {
                     Ok(inputs) => inputs,
                     Err(error) => return Err(loading.failed(engine_error(engine, error))),
                 },
@@ -1230,6 +1230,7 @@ pub fn install(
         })
         .transpose()?;
     Ok(InstalledSource {
+        operation,
         definitions,
         plan,
         front,

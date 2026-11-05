@@ -973,7 +973,9 @@ impl SourceHost for RequestHost<'_> {
     }
     fn extension_minimum(&self, definitions: &[DefPath], catalogue: u64) -> Option<u64> {
         if self.native {
-            super::native_selection::Footprint::minimum(definitions)
+            super::native_selection::Footprint::new(definitions, 0, false)?
+                .with_catalogue_bytes(definitions, catalogue)?
+                .bytes()
         } else {
             super::ownership_admission::Footprint::new(definitions, 0)?
                 .with_catalogue_bytes(definitions, catalogue)?
@@ -987,7 +989,8 @@ impl SourceHost for RequestHost<'_> {
         catalogue: u64,
     ) -> Option<(u64, u64)> {
         if self.native {
-            let native = super::native_selection::Footprint::new(definitions, slack, self.proofs)?;
+            let native = super::native_selection::Footprint::new(definitions, slack, self.proofs)?
+                .with_catalogue_bytes(definitions, catalogue)?;
             Some((native.bytes()?, native.source()))
         } else {
             let ownership = super::ownership_admission::Footprint::new(definitions, slack)?
@@ -1229,19 +1232,34 @@ pub(super) fn install(
                     .clone()
                     .unwrap_or_else(|| program.entry.clone()),
             ];
-            roots.extend(selected.test_entries.iter().map(|(path, _)| path.clone()));
-            if let super::NativeOutput::Objects { roots: objects } = &selected.output {
-                roots.extend(objects.iter().cloned());
+            let exports = match &selected.output {
+                super::NativeOutput::Objects { roots } => roots.clone(),
+                _ => selected
+                    .test_entries
+                    .iter()
+                    .map(|(path, _)| path.clone())
+                    .collect(),
+            };
+            if exports.is_empty() {
+                roots.extend(program.engine.front_native_source_roots());
+            } else {
+                roots.extend(exports);
             }
+            roots.sort();
+            roots.dedup();
             roots
         }
         CompileOperation::NativeOwnership(selected) => {
-            vec![
+            let mut roots = program.engine.front_native_source_roots();
+            roots.push(
                 selected
                     .definition
                     .clone()
                     .unwrap_or_else(|| program.entry.clone()),
-            ]
+            );
+            roots.sort();
+            roots.dedup();
+            roots
         }
         CompileOperation::ExportTir => vec![program.entry.clone()],
         CompileOperation::DataAbi => vec![],
@@ -1334,6 +1352,7 @@ pub(super) fn install(
                 installed.plan.extension_slack,
                 needs_proofs,
             )
+            .and_then(|footprint| footprint.with_catalogue_bytes(&definitions, catalogue_bytes))
             .ok_or_else(|| uninstalled())?,
         )
     } else {
@@ -1573,6 +1592,7 @@ pub(super) fn install(
             &mut program,
             super::native_assembly::NativeSourceInputs {
                 definitions: definitions.clone(),
+                catalogue: native_catalogue.take().ok_or_else(|| uninstalled())?,
                 entry,
                 front: front.clone(),
                 lower: lower.clone(),
@@ -1674,6 +1694,7 @@ pub(super) fn install(
                 &mut program,
                 super::native_assembly::NativeSourceInputs {
                     definitions: definitions.clone(),
+                    catalogue: native_catalogue.take().ok_or_else(|| uninstalled())?,
                     entry,
                     front: front.clone(),
                     lower: lower.clone(),

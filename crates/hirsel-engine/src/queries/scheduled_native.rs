@@ -18,6 +18,7 @@ const FAILURE: Domain = Domain {
 };
 struct SourceOwnership {
     _allowance: Arc<MemoryReservation>,
+    _operation: OperationLease,
     _front: Arc<FrontBodyQueries>,
     _lower: Arc<FrontLowerQueries>,
 }
@@ -37,7 +38,7 @@ struct AcceptedNativeSource {
 /// same private data; the caller cannot supply source V or native authority.
 pub struct FrontNativeDefinitionInputs {
     definitions: Vec<DefPath>,
-    namespace: Arc<NamespaceCapture>,
+    operation: OperationLease,
     original_context: crate::NativeOriginalContext,
     inputs: BTreeMap<DefPath, Input>,
     ids: BTreeMap<DefPath, QueryId>,
@@ -281,6 +282,7 @@ impl FrontNativeDefinitionQueries {
     pub fn input_bytes(definitions: &[DefPath]) -> Option<u64> {
         definitions.iter().try_fold(
             (std::mem::size_of::<Self>()
+                + std::mem::size_of::<SourceOwnership>()
                 + std::mem::size_of::<Mutex<u64>>()
                 + std::mem::size_of::<MemoryReservation>()
                 + 4 * std::mem::size_of::<usize>()) as u64,
@@ -842,6 +844,25 @@ impl QueryEngine {
         namespace: Arc<NamespaceCapture>,
         limit: u64,
     ) -> Result<FrontNativeDefinitionInputs, QueryError> {
+        self.front_native_definition_inputs_with_lease(definitions, namespace.lease(), limit)
+    }
+    /// Prepare only source authority published by this exact operation. The
+    /// capture's undeveloped declarations remain available to semantic lookup.
+    pub fn front_native_catalogue_inputs(
+        &mut self,
+        operation: OperationLease,
+        limit: u64,
+    ) -> Result<FrontNativeDefinitionInputs, QueryError> {
+        let definitions = operation.native_sources().cloned().collect::<Vec<_>>();
+        self.front_native_definition_inputs_with_lease(&definitions, operation, limit)
+    }
+    fn front_native_definition_inputs_with_lease(
+        &mut self,
+        definitions: &[DefPath],
+        operation: OperationLease,
+        limit: u64,
+    ) -> Result<FrontNativeDefinitionInputs, QueryError> {
+        let namespace = operation.namespace();
         namespace.require_environment(self)?;
         let registration =
             |path: &DefPath| namespace.registrations.get(&DefId::intern(path)).cloned();
@@ -858,7 +879,7 @@ impl QueryEngine {
                 accepted.validate(self)?;
             }
         }
-        let original_context = self.native_original_context_in(definitions, &namespace)?;
+        let original_context = self.native_original_context_in(definitions, namespace)?;
         let store = self.result_store.clone().ok_or_else(refuse)?;
         let records = crate::NativeRecords::new(self.types.clone(), store.clone());
         let anchors = (*namespace.anchors).clone();
@@ -932,7 +953,7 @@ impl QueryEngine {
         }
         Ok(FrontNativeDefinitionInputs {
             definitions: definitions.to_vec(),
-            namespace,
+            operation,
             original_context,
             inputs,
             ids,
@@ -952,9 +973,10 @@ impl QueryEngine {
         allowance: MemoryReservation,
         errors: RuntimeErrors,
     ) -> Result<Arc<FrontNativeDefinitionQueries>, QueryError> {
-        inputs.namespace.require_consistent(front.namespace()).map_err(|_| native_selection_error("native catalogue and front use different accepted registrations or namespace captures"))?;
+        inputs.operation.capture().require_consistent(front.namespace()).map_err(|_| native_selection_error("native catalogue and front use different accepted registrations or namespace captures"))?;
         inputs
-            .namespace
+            .operation
+            .capture()
             .require_consistent(lower.namespace())
             .map_err(|_| {
                 native_selection_error(
@@ -994,7 +1016,7 @@ impl QueryEngine {
         }
         let FrontNativeDefinitionInputs {
             definitions: _,
-            namespace: _,
+            operation,
             original_context,
             inputs,
             ids,
@@ -1005,6 +1027,7 @@ impl QueryEngine {
         } = inputs;
         let output_budget = allowance.bytes() - required;
         let ownership = Arc::new(SourceOwnership {
+            _operation: operation,
             _front: front.clone(),
             _lower: lower.clone(),
             _allowance: Arc::new(allowance),

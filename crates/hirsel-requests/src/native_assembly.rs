@@ -10,8 +10,8 @@ use super::native_link::FrozenPlatform;
 use super::native_products::NativeBuildReadiness;
 use super::native_routing::NativeRouting;
 use hirsel_engine::{
-    FrontBodyQueries, FrontLowerQueries, FrontNativePlan, FrontNativeQueries, FrontRunQueries,
-    LoadedProgram, ToolError,
+    FrontBodyQueries, FrontLowerQueries, FrontNativeDefinitionInputs, FrontNativePlan,
+    FrontNativeQueries, FrontRunQueries, LoadedProgram, ToolError,
     runtime::{MemoryReservation, MemoryWeight, QueryFactory, QueryId, RuntimeErrors},
     store::{Reference, ResultStore},
 };
@@ -27,6 +27,7 @@ use std::sync::Arc;
 /// checks their signature/context ownership before any factory becomes visible.
 pub(super) struct NativeSourceInputs {
     pub definitions: Vec<DefPath>,
+    pub catalogue: FrontNativeDefinitionInputs,
     pub entry: DefPath,
     pub front: Arc<FrontBodyQueries>,
     pub lower: Arc<FrontLowerQueries>,
@@ -101,21 +102,14 @@ impl NativeAssembly {
         let request_output = plan.output.clone();
         let catalogue = program
             .engine
-            .front_native_definition_inputs_in(
-                &inputs.definitions,
-                inputs.front.namespace().clone(),
-                plan.catalogue.bytes(),
+            .front_native_definition_queries_with_inputs(
+                inputs.front.clone(),
+                inputs.lower.clone(),
+                inputs.catalogue,
+                plan.source_weight,
+                plan.catalogue,
+                plan.errors,
             )
-            .and_then(|catalogue| {
-                program.engine.front_native_definition_queries_with_inputs(
-                    inputs.front.clone(),
-                    inputs.lower.clone(),
-                    catalogue,
-                    plan.source_weight,
-                    plan.catalogue,
-                    plan.errors,
-                )
-            })
             .map_err(source_error)?;
         let source = program
             .engine

@@ -52,6 +52,7 @@ pub struct FrontDemandScope {
     definitions: Vec<DefPath>,
     registrations: Vec<Arc<AcceptedFrontRegistration>>,
     namespace: Arc<NamespaceCapture>,
+    demand_owner: Arc<FrontLowerQueries>,
     front: Option<Arc<FrontBodyQueries>>,
     rounds: usize,
     stats: RuntimeStats,
@@ -70,6 +71,11 @@ impl FrontDemandScope {
     }
     pub fn namespace(&self) -> &Arc<NamespaceCapture> {
         &self.namespace
+    }
+    pub fn lease(&self) -> OperationLease {
+        self.namespace
+            .lease()
+            .with_demand(self.demand_owner.clone())
     }
     pub(crate) fn front(&self) -> Option<&Arc<FrontBodyQueries>> {
         self.front.as_ref()
@@ -265,6 +271,7 @@ impl QueryEngine {
             definitions,
             registrations,
             namespace,
+            demand_owner: initial,
             front,
             rounds,
             stats,

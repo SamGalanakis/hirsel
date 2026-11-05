@@ -79,9 +79,7 @@ fn standalone_syntax(bytes: u64) -> Result<Charge, QueryError> {
     let reservation = private_unique::scheduled::standalone_budget()
         .reserve(bytes)
         .map_err(source_refusal)?;
-    Ok(Charge(Arc::new(std::sync::Mutex::new(
-        HeaderCharge::Standalone(reservation),
-    ))))
+    Ok(Charge::retained(HeaderCharge::Standalone(reservation)))
 }
 
 impl SourceInputs {

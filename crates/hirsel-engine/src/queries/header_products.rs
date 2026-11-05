@@ -31,9 +31,6 @@ pub(crate) trait HeaderAllowance: Send + Sync {
 }
 /// What one settled header row or module proof holds against a budget.
 enum HeaderCharge {
-    /// Uncharged, like every engine-retained signature; admission never
-    /// evicts it.
-    Engine,
     /// Charged to the shared standalone source-inference budget.
     Standalone(
         #[expect(dead_code, reason = "held for its drop")] crate::runtime::MemoryReservation,
@@ -59,22 +56,30 @@ impl Drop for FrontCharge {
 }
 /// One admitted payload, shared by its row, entry and raw signature readers.
 #[derive(Clone)]
-struct Charge(Arc<std::sync::Mutex<HeaderCharge>>);
+struct Charge(Option<Arc<std::sync::Mutex<HeaderCharge>>>);
 impl Charge {
     fn engine() -> Self {
-        Self(Arc::new(std::sync::Mutex::new(HeaderCharge::Engine)))
+        Self(None)
+    }
+    fn retained(charge: HeaderCharge) -> Self {
+        Self(Some(Arc::new(std::sync::Mutex::new(charge))))
     }
     fn front_bytes(&self) -> u64 {
-        match &*self.0.lock().unwrap_or_else(|e| e.into_inner()) {
+        let Some(charge) = &self.0 else {
+            return 0;
+        };
+        match &*charge.lock().unwrap_or_else(|e| e.into_inner()) {
             HeaderCharge::Front(charge) => charge.bytes,
             _ => 0,
         }
     }
     fn evictable(&self) -> bool {
-        matches!(
-            &*self.0.lock().unwrap_or_else(|e| e.into_inner()),
-            HeaderCharge::Front(_)
-        )
+        self.0.as_ref().is_some_and(|charge| {
+            matches!(
+                &*charge.lock().unwrap_or_else(|e| e.into_inner()),
+                HeaderCharge::Front(_)
+            )
+        })
     }
 }
 /// The payload's aliases hold one reservation. Distinct memo rows retain their
@@ -99,7 +104,7 @@ struct HeaderAdmission {
 }
 impl HeaderAdmission {
     fn lend(&self, charge: FrontCharge) -> Charge {
-        Charge(Arc::new(std::sync::Mutex::new(HeaderCharge::Front(charge))))
+        Charge::retained(HeaderCharge::Front(charge))
     }
 }
 #[derive(Default)]
@@ -755,9 +760,7 @@ impl HeaderProducts {
             },
             None => self.reserve_standalone(bytes)?,
         };
-        Ok(Charge(Arc::new(std::sync::Mutex::new(
-            HeaderCharge::Source(allowance),
-        ))))
+        Ok(Charge::retained(HeaderCharge::Source(allowance)))
     }
     pub(crate) fn validation_lease(&self, bytes: u64) -> Result<Arc<dyn Send + Sync>, QueryError> {
         Ok(Arc::new(
@@ -778,17 +781,15 @@ impl HeaderProducts {
             .clone();
         let Some(admission) = admission else {
             return Ok(if self.standalone {
-                Charge(Arc::new(std::sync::Mutex::new(HeaderCharge::Standalone(
-                    self.reserve_standalone(bytes)?,
-                ))))
+                Charge::retained(HeaderCharge::Standalone(self.reserve_standalone(bytes)?))
             } else {
                 Charge::engine()
             });
         };
         let Some(partition) = admission.partition.upgrade() else {
-            return Ok(Charge(Arc::new(std::sync::Mutex::new(
-                HeaderCharge::Standalone(self.reserve_standalone(bytes)?),
-            ))));
+            return Ok(Charge::retained(HeaderCharge::Standalone(
+                self.reserve_standalone(bytes)?,
+            )));
         };
         // The charge cell itself is part of what the partition retains.
         let bytes =
@@ -863,12 +864,13 @@ impl HeaderProducts {
                         let mut charged = 0;
                         let mut aliases = 0;
                         for cell in table.rows.values() {
-                            if let Some(product) = cell.get() {
-                                let charge =
-                                    product.charge.0.lock().unwrap_or_else(|e| e.into_inner());
+                            if let Some(product) = cell.get()
+                                && let Some(cell) = &product.charge.0
+                            {
+                                let charge = cell.lock().unwrap_or_else(|e| e.into_inner());
                                 if let HeaderCharge::Front(charge) = &*charge {
                                     rows += 1;
-                                    if seen.insert(Arc::as_ptr(&product.charge.0) as usize) {
+                                    if seen.insert(Arc::as_ptr(cell) as usize) {
                                         charged += charge.bytes;
                                     }
                                     aliases += product
@@ -930,10 +932,7 @@ impl HeaderProducts {
                     + 2 * size_of::<usize>()
                     + 4 * size_of::<Weak<HeaderPayload>>()) as u64;
                 let charge = self.admit(payload_bytes.saturating_add(overhead))?;
-                if matches!(
-                    &*charge.0.lock().unwrap_or_else(|e| e.into_inner()),
-                    HeaderCharge::Engine
-                ) {
+                if charge.0.is_none() {
                     return Ok((charge, Charge::engine()));
                 }
                 let payload = signature.metadata.retention.retain(Arc::new(HeaderPayload {

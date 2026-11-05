@@ -98,8 +98,10 @@ impl PrivateProducts {
     pub(super) fn trace(&self) -> (usize, u64, usize) {
         let mut totals = (0, 0, 0);
         for slot in self.modules.values() {
-            if let Some(Ok(product)) = slot.current() {
-                let charge = product.charge.0.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(Ok(product)) = slot.current()
+                && let Some(cell) = &product.charge.0
+            {
+                let charge = cell.lock().unwrap_or_else(|e| e.into_inner());
                 if let HeaderCharge::Front(charge) = &*charge {
                     totals.0 += 1;
                     totals.1 += charge.bytes;

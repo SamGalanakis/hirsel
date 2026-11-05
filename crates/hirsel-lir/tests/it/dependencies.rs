@@ -72,7 +72,19 @@ const CRATES: &[(&str, Class)] = &[
     ("hirsel-remote", Class::Implementation),
     ("hirsel-kernels", Class::LeafKernel),
     ("hirsel-engine", Class::Wiring),
+    ("hirsel-compiler-identity", Class::LeafUtility),
+    ("hirsel-front-phases", Class::Wiring),
+    ("hirsel-host-io", Class::Wiring),
+    ("hirsel-native", Class::Wiring),
+    ("hirsel-native-cache", Class::Wiring),
+    ("hirsel-native-queries", Class::Wiring),
+    ("hirsel-native-batch", Class::Wiring),
+    ("hirsel-native-testing", Class::Wiring),
+    ("hirsel-project-info", Class::Wiring),
+    ("hirsel-requests", Class::Wiring),
     ("hirsel-driver", Class::Wiring),
+    ("hirsel-observation-view", Class::Wiring),
+    ("hirsel-candidate", Class::Tool),
     ("hirsel-analysis-canary", Class::Tool),
     ("hirsel-cli", Class::Tool),
     ("hirsel-cli-args", Class::Tool),
@@ -98,6 +110,8 @@ const ENGINE_IMPLEMENTATIONS: &[&str] = &[
 const STORAGE_CONSUMERS: &[&str] = &[
     "hirsel-driver",
     "hirsel-engine",
+    "hirsel-native",
+    "hirsel-requests",
     "hirsel-lir",
     "hirsel-product-codec",
     "hirsel-validate",
@@ -162,7 +176,47 @@ fn check_edge(from: &str, to: &str, kind: Kind) -> Result<(), String> {
         (Class::Implementation, _) => false,
         (Class::Tool, Class::Tool) => to == "hirsel-cli-args",
         (_, Class::Tool) => false,
-        (Class::Wiring, Class::Wiring) => from == "hirsel-driver" && to == "hirsel-engine",
+        (Class::Wiring, Class::Wiring) => match from {
+            "hirsel-front-phases" | "hirsel-host-io" | "hirsel-native" => to == "hirsel-engine",
+            "hirsel-native-cache" | "hirsel-project-info" => {
+                matches!(to, "hirsel-engine" | "hirsel-front-phases")
+                    || from == "hirsel-native-cache" && to == "hirsel-native"
+            }
+            "hirsel-native-queries" => matches!(
+                to,
+                "hirsel-engine" | "hirsel-front-phases" | "hirsel-native" | "hirsel-native-cache"
+            ),
+            "hirsel-native-batch" => matches!(
+                to,
+                "hirsel-engine" | "hirsel-front-phases" | "hirsel-native" | "hirsel-native-queries"
+            ),
+            "hirsel-native-testing" => matches!(
+                to,
+                "hirsel-engine"
+                    | "hirsel-front-phases"
+                    | "hirsel-native"
+                    | "hirsel-native-queries"
+                    | "hirsel-native-batch"
+            ),
+            "hirsel-requests" | "hirsel-driver" => {
+                matches!(
+                    to,
+                    "hirsel-engine"
+                        | "hirsel-front-phases"
+                        | "hirsel-host-io"
+                        | "hirsel-native"
+                        | "hirsel-native-cache"
+                        | "hirsel-native-queries"
+                        | "hirsel-native-batch"
+                        | "hirsel-native-testing"
+                        | "hirsel-project-info"
+                ) || from == "hirsel-driver" && to == "hirsel-requests"
+            }
+            "hirsel-observation-view" => {
+                matches!(to, "hirsel-engine" | "hirsel-driver" | "hirsel-host-io")
+            }
+            _ => false,
+        },
     };
     if allowed {
         Ok(())

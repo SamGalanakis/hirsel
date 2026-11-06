@@ -2536,6 +2536,19 @@ fn consumed_records_reuse_slot_bookkeeping_before_debiting_working_memory() {
 struct OrderedPublication {
     published: Arc<Mutex<Vec<QueryId>>>,
     prerequisite: Option<(QueryId, QueryId)>,
+    retired: Option<Arc<AtomicUsize>>,
+}
+struct PublicationLifetime {
+    retired: Option<Arc<AtomicUsize>>,
+    home: std::thread::ThreadId,
+}
+impl Drop for PublicationLifetime {
+    fn drop(&mut self) {
+        assert_eq!(std::thread::current().id(), self.home);
+        if let Some(retired) = &self.retired {
+            retired.fetch_add(1, Ordering::SeqCst);
+        }
+    }
 }
 impl LocalQueryFactory for OrderedPublication {
     fn weight(&self, _: QueryId) -> Result<MemoryWeight, Reference> {
@@ -2547,6 +2560,10 @@ impl LocalQueryFactory for OrderedPublication {
     }
     fn create(&self, id: QueryId) -> Result<Box<dyn LocalQueryTask>, Reference> {
         let published = self.published.clone();
+        let lifetime = PublicationLifetime {
+            retired: self.retired.clone(),
+            home: std::thread::current().id(),
+        };
         let dependency = self
             .prerequisite
             .filter(|(root, _)| *root == id)
@@ -2557,6 +2574,7 @@ impl LocalQueryFactory for OrderedPublication {
             2,
             errors(),
             move |reads| async move {
+                let _lifetime = lifetime;
                 if let Some(dependency) = dependency {
                     reads.read_consuming(dependency).await?;
                 }
@@ -2577,6 +2595,7 @@ fn ordered_publication_admits_a_later_root_as_an_earlier_prerequisite() {
             Arc::new(OrderedPublication {
                 published: published.clone(),
                 prerequisite: Some((local_query(0), local_query(2))),
+                retired: None,
             }),
         )
         .unwrap();
@@ -2594,6 +2613,80 @@ fn ordered_publication_admits_a_later_root_as_an_earlier_prerequisite() {
             vec![local_query(2), local_query(0), local_query(1)]
         );
     }
+}
+
+#[test]
+fn compiler_caller_retires_speculative_publication_after_its_parent_fails() {
+    struct Parent(QueryId);
+    impl QueryFactory for Parent {
+        fn create(&self, id: QueryId) -> Result<Box<dyn QueryTask>, Reference> {
+            Ok(Box::new(Self(id)))
+        }
+    }
+    impl QueryTask for Parent {
+        fn id(&self) -> QueryId {
+            self.0
+        }
+        fn weight(&self) -> MemoryWeight {
+            MemoryWeight {
+                retained: 64,
+                scratch: 32,
+                stack: 0,
+            }
+        }
+        fn poll(&mut self, cx: &mut dyn QueryContext) -> QueryPoll {
+            match cx.read(query(1)) {
+                Poll::Ready(Err(error)) => QueryPoll::Failed(error),
+                Poll::Ready(Ok(_)) => unreachable!(),
+                Poll::Pending => {
+                    assert!(cx.read(local_query(2)).is_pending());
+                    QueryPoll::WaitingAny(vec![query(1), local_query(2)])
+                }
+            }
+        }
+    }
+    let budget = hirsel_engine_admission::ProcessBudget::new(4 << 20);
+    let mut rt = AdmittedRuntime::with_metadata(
+        Jobs::ONE,
+        budget.reserve(4 << 20).unwrap(),
+        errors(),
+        STACK,
+        Some(16),
+        true,
+    )
+    .unwrap();
+    let mut failure = Spec::deps(&[]);
+    failure.result = Some(errors().resource);
+    install(&mut rt, &[(1, failure)]);
+    rt.register(3, Arc::new(Parent(query(0)))).unwrap();
+    let published = Arc::new(Mutex::new(vec![]));
+    let retired = Arc::new(AtomicUsize::new(0));
+    rt.register_local(
+        2,
+        Arc::new(OrderedPublication {
+            published: published.clone(),
+            prerequisite: None,
+            retired: Some(retired.clone()),
+        }),
+    )
+    .unwrap();
+    // The speculative child parks behind the earlier failing dependency.
+    rt.set_cost(local_query(2), 3).unwrap();
+    let root = QueryId {
+        kind: 3,
+        ..query(0)
+    };
+    let request = rt.request(&[root]);
+    assert_eq!(rt.wait(request), Err(errors().resource));
+    assert!(published.lock().unwrap().is_empty());
+    assert_eq!(retired.load(Ordering::SeqCst), 1);
+    let request = rt.request(&[local_query(2)]);
+    assert_eq!(rt.wait(request), Ok(vec![product(local_query(2))]));
+    assert_eq!(*published.lock().unwrap(), vec![local_query(2)]);
+    assert_eq!(retired.load(Ordering::SeqCst), 2);
+    assert_eq!(rt.stats().claims, 4);
+    rt.shutdown();
+    assert_eq!(budget.reserved(), 0);
 }
 
 struct PublicationAfterHandledFailure;

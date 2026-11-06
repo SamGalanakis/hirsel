@@ -142,7 +142,11 @@ impl Nodes {
             let node = &mut self.rows[slot as usize];
             if !node.live && !matches!(node.state, NodeState::Dormant) {
                 node.live = true;
-                pending.extend(node.dependencies.iter().map(|edge| edge.target()));
+                // Settled results retain their semantic reads, but no longer
+                // own unfinished speculative executions of those reads.
+                if !matches!(node.state, NodeState::Settled { .. }) {
+                    pending.extend(node.dependencies.iter().map(|edge| edge.target()));
+                }
             }
         }
     }

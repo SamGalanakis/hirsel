@@ -1657,6 +1657,10 @@ fn run_worker(shared: Arc<Shared>, worker: usize, stack: u64, caller: bool) {
                     }
                 }
                 if caller && state.ready.is_empty() {
+                    state.prune();
+                    if !state.ready.is_empty() || !state.cleanup[worker].is_empty() {
+                        continue;
+                    }
                     debug_assert!(
                         locals.is_empty(),
                         "idle caller retains a local continuation"

@@ -1141,6 +1141,22 @@ impl QueryEngine {
     }
     pub(crate) fn materialize(&mut self, path: &DefPath) -> Result<(), QueryError> {
         if self.items.contains_key(path) {
+            let files: BTreeSet<_> = self
+                .catalog
+                .candidates
+                .get(path)
+                .into_iter()
+                .flatten()
+                .filter(|candidate| {
+                    !self.items[path]
+                        .iter()
+                        .any(|item| item.anchor == candidate.head.name.anchor)
+                })
+                .map(|candidate| candidate.file)
+                .collect();
+            for file in files {
+                self.materialize_source(file)?;
+            }
             return Ok(());
         }
         if self.declared(path) && self.installed_definition(path) {

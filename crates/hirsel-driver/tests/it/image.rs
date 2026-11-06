@@ -308,7 +308,11 @@ fn editing_an_imaged_std_module_is_warm_equals_cold() {
         let file = warm.engine.sources.add(path, edited).unwrap();
         warm.engine.parse_file(file, &context).unwrap();
 
-        let mut cold = load(&client, None);
+        let edited_products = f.0.join("edited-std.products");
+        COMPILER
+            .precompute_package(&manifest, &edited_products)
+            .unwrap();
+        let mut cold = load(&client, Some(&edited_products));
         let checked = |program: &mut LoadedProgram| {
             let output = program.check(LoweringPolicy::Reachable).unwrap();
             let diagnostics: Vec<_> = output

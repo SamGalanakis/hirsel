@@ -97,6 +97,7 @@ struct Observed {
     summary_content_reads: AtomicUsize,
     indexes: Mutex<std::collections::BTreeSet<hirsel_syntax::ContentHash>>,
     forbid_content_reads: AtomicBool,
+    produced_content: Mutex<std::collections::BTreeSet<hirsel_syntax::ContentHash>>,
 }
 
 #[test]
@@ -191,6 +192,11 @@ impl store::ResultStore for Observed {
     fn get_content(&self, reference: store::Reference) -> Option<store::Bytes> {
         assert!(
             !self.forbid_content_reads.load(Ordering::Relaxed)
+                || self
+                    .produced_content
+                    .lock()
+                    .unwrap()
+                    .contains(&reference.output.0)
                 || ![QueryKind::Modes, QueryKind::Summary, QueryKind::Lower]
                     .iter()
                     .any(|kind| reference.domain.kind == *kind as u32 + 16),
@@ -208,7 +214,14 @@ impl store::ResultStore for Observed {
         if store::ResultStore::get_content(&self.inner, reference).is_none() {
             self.content_writes.fetch_add(1, Ordering::Relaxed);
         }
-        store::ResultStore::put_content(&self.inner, domain, bytes)
+        let stored = store::ResultStore::put_content(&self.inner, domain, bytes);
+        if stored.is_some() && self.forbid_content_reads.load(Ordering::Relaxed) {
+            self.produced_content
+                .lock()
+                .unwrap()
+                .insert(reference.output.0);
+        }
+        stored
     }
     fn name(&self) -> &'static str {
         "observed-completion"

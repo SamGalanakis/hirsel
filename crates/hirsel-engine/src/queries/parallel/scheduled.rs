@@ -3010,6 +3010,7 @@ impl BodyTask {
                 hirsel_engine_store::query_action(&input.key, input.key.1, &outcome.reads),
             )
         };
+        drop(bytes);
         let handoff =
             (!failed && queries.handoff_limit != 0 && !queries.store.persistence().retains())
                 .then(|| outcome.clone());
@@ -3018,6 +3019,7 @@ impl BodyTask {
                 cx, self.input, record, action, outcome, checked, dead_arms, table_keys, memo_rows,
             )
             .ok_or_else(|| queries.resource_refusal())?;
+        queries.store_compact(self.input, &cached, self.weight.scratch);
         if let Some(outcome) = handoff
             && let FrontState::Settled {
                 publication, body, ..

@@ -1597,7 +1597,8 @@ fn original_callable_values_retain_their_thunk_owners_on_both_backends(path: &st
     use std::sync::Arc;
     with_compiler_stack(|| {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-        let store: Arc<dyn ResultStore> = admitted_native_store(Arc::new(MemStore::default()));
+        let store: Arc<dyn ResultStore> =
+            admitted_native_store(Arc::new(MemStore::default().with_installed_products()));
         let mut config = hirsel_front_phases::COMPILER.configuration();
         config.store = store.clone();
         config.verify = hirsel_engine::Verify::On;

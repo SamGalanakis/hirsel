@@ -177,6 +177,21 @@ pub(in crate::queries) fn load_publication(
 }
 
 impl FrontBodyQueries {
+    pub(super) fn store_compact(&self, key: Key, outcome: &FrontOutcome, scratch: u64) {
+        if !self.store.persistence().retains() {
+            return;
+        }
+        self.store
+            .archive_encoded(hirsel_engine_store::ArchiveBoundary::Ordinary);
+        if let Some(bytes) = self.encode_terminal(key, outcome, scratch) {
+            self.store.cache_query(
+                &storage_key(&self.inputs[&key].key),
+                (*outcome.reads).clone(),
+                &bytes,
+            );
+        }
+    }
+
     pub(super) fn archive_facts(
         &self,
         key: Key,

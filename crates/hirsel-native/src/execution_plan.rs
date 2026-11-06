@@ -161,7 +161,7 @@ mod retained;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hirsel_engine_store::{self, Bytes, EntryKey};
+    use hirsel_engine_store::{self as store, Bytes, EntryKey};
     struct NoTransport;
     impl ResultStore for NoTransport {
         fn capability(&self) -> hirsel_engine_store::ProviderCapability {

@@ -220,8 +220,8 @@ impl ResultStore for ScratchStore {
         if expected.len > self.disk_limit.saturating_sub(files.disk) {
             return None;
         }
-        // One append-only private file owns the payloads. Exact ranges and
-        // content hashes isolate records; no per-record path is retained.
+        // Charge the next record's index before retaining provider backing or
+        // appending an independently checked range to the private spool.
         let mut metadata = index_bytes(files.entries.len().checked_add(1)?)
             .checked_sub(index_bytes(files.entries.len()))?;
         if !self.admission.charge(metadata) {
@@ -677,6 +677,8 @@ mod tests {
     #[test]
     #[cfg(target_os = "linux")]
     fn retained_provider_records_do_not_retain_one_descriptor_per_output() {
+        use std::os::unix::fs::MetadataExt;
+
         let parent = tempfile::tempdir().unwrap();
         let selected = Arc::new(DirStore::new(parent.path().join("provider")));
         let ram = 512 << 10;
@@ -692,15 +694,18 @@ mod tests {
         let references: Vec<_> = (0u8..96)
             .map(|number| request.put_content(domain(), &vec![number; 5000]).unwrap())
             .collect();
+        let store = request.local_product_store().unwrap();
+        let provider_inodes: Vec<_> = references
+            .iter()
+            .map(|reference| {
+                let metadata = fs::metadata(store.output_path(*reference)).unwrap();
+                (metadata.dev(), metadata.ino())
+            })
+            .collect();
         let descriptors = fs::read_dir("/proc/self/fd")
             .unwrap()
-            .filter_map(|entry| fs::read_link(entry.ok()?.path()).ok())
-            .filter(|path| {
-                path.starts_with(parent.path())
-                    && path.file_name().is_some_and(|name| {
-                        name != "contents" && !name.as_encoded_bytes().ends_with(b".lock")
-                    })
-            })
+            .filter_map(|entry| fs::metadata(entry.ok()?.path()).ok())
+            .filter(|metadata| provider_inodes.contains(&(metadata.dev(), metadata.ino())))
             .count();
         assert_eq!(
             descriptors, 0,

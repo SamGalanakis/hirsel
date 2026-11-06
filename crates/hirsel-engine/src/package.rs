@@ -978,10 +978,7 @@ impl<'a> Graph<'a> {
                 Ok(_) => graph.visit(&sidecar, None)?,
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                     let source = inputs.canonicalize(path)?;
-                    let std_manifest = inputs
-                        .toolchain_std_manifest()
-                        .transpose()?
-                        .unwrap_or_else(|| PathBuf::from("/$hirsel-installed/std@1/hirsel.json"));
+                    let std_manifest = crate::tools::toolchain_std_manifest_inputs(inputs)?;
                     let mut manifest = source.as_os_str().to_os_string();
                     manifest.push(".json");
                     let value = serde_json::json!({

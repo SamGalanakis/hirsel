@@ -291,6 +291,21 @@ impl QueryEngine {
             self.staged_constants = headers.staged_constants().clone();
         }
         for (id, input) in &namespace.bodies {
+            // A successor adds accepted sources; it does not demand every
+            // immutable installed body. Keep unchanged catalog bindings lazy,
+            // as namespace assembly does, until an actual syntax consumer asks.
+            if !self.items.contains_key(id.path())
+                && self.installed_definition(id.path())
+                && self.implementation_hash(id.path()) == Some(input.implementation)
+                && previous.is_some_and(|previous| {
+                    previous
+                        .bodies
+                        .get(id)
+                        .is_some_and(|old| old.syntax == input.syntax)
+                })
+            {
+                continue;
+            }
             let retained = previous.is_some_and(|previous| {
                 previous
                     .bodies

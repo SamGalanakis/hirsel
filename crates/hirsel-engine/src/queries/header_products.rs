@@ -1659,26 +1659,52 @@ pub(super) fn decode_installed_syntax(
     let requirement = records
         .installed_syntax(source, bytes)
         .ok_or_else(|| source_refusal("invalid installed body"))?;
+    let owner_bytes =
+        hirsel_engine_admission::retained_arc_bytes(&std::mem::MaybeUninit::<Charge>::uninit());
+    let decode_bytes = requirement
+        .required_bytes()
+        .checked_add(owner_bytes)
+        .ok_or_else(|| source_refusal("installed body size overflow"))?;
     let charge = match headers {
-        Some(headers) => headers.admit_source(requirement.required_bytes())?,
-        None => sources::standalone_syntax(requirement.required_bytes())?,
+        Some(headers) => headers.admit_source(decode_bytes)?,
+        None => sources::standalone_syntax(decode_bytes)?,
     };
     let syntax = {
-        let held = charge
+        let mut held = charge
             .0
             .as_ref()
             .ok_or_else(|| source_refusal("missing installed body reservation"))?
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        let reservation = match &*held {
+        let reservation = match &mut *held {
             HeaderCharge::Standalone(reservation) | HeaderCharge::Source(reservation) => {
                 reservation
             }
-            HeaderCharge::Front(front) => &front.allowance,
+            HeaderCharge::Front(front) => &mut front.allowance,
         };
-        requirement
+        let syntax = requirement
             .decode(reservation)
-            .ok_or_else(|| source_refusal("invalid installed body"))?
+            .ok_or_else(|| source_refusal("invalid installed body"))?;
+        // Preflight admits the decode peak. Only the output and its ownership
+        // allocations survive the decoder's temporary buffers and byte view.
+        let retained = hirsel_query_products::retained::retained_syntax_bytes(&syntax)
+            .checked_add(owner_bytes)
+            .and_then(|bytes| {
+                bytes.checked_add(hirsel_engine_admission::retained_arc_bytes(
+                    &std::mem::MaybeUninit::<std::sync::Mutex<HeaderCharge>>::uninit(),
+                ))
+            })
+            .ok_or_else(|| source_refusal("installed body size overflow"))?;
+        let scratch = reservation
+            .bytes()
+            .checked_sub(retained)
+            .ok_or_else(|| source_refusal("installed body exceeds preflight admission"))?;
+        drop(
+            reservation
+                .split(scratch)
+                .ok_or_else(|| source_refusal("installed body scratch partition"))?,
+        );
+        syntax
     };
     syntax.retention.retain(Arc::new(charge));
     Ok(syntax)

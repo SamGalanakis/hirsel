@@ -56,7 +56,15 @@ impl<'a> Scan<'a> {
             return None;
         }
         if n != 0 {
-            self.add(n.checked_mul(3)?.max(4).checked_mul(size_of::<T>())?)?;
+            // Serde 1.0.229 de/impls.rs:1161-1165 reserves the complete
+            // bincode size hint through private/size_hint.rs:12-24's 1 MiB
+            // preallocation threshold. Only larger vectors can reallocate.
+            let slots = if n <= (1024 * 1024) / size_of::<T>().max(1) {
+                n
+            } else {
+                n.checked_mul(3)?.max(4)
+            };
+            self.add(slots.checked_mul(size_of::<T>())?)?;
         }
         for _ in 0..n {
             T::walk(self)?;

@@ -114,7 +114,12 @@ scope scratch. Its nonserializable `DecodeRequirement` retains the exact bytes
 and type owner; NativeRecords also binds the exact source context. Decoding
 requires the caller's live `MemoryReservation`, and raw syntax/signature aliases
 retain the corresponding source or Run admission owner. Independently loaded
-type rows keep their existing admission. Run token content uses the same
-byte-derived requirement. Installed ownership contains content references and
-source bindings, with no serialized allocation estimates. Installed package
+type rows keep their existing admission. Syntax decoding returns scratch after
+decoding and retains only the output and its lease allocations. Vector bounds
+follow Serde 1.0.229 `de/impls.rs:1161-1165` and
+`private/size_hint.rs:12-24`: vectors within its preallocation threshold reserve
+their exact length; larger vectors include reallocation overlap.
+Successor adoption keeps unchanged installed catalog bindings lazy.
+Run token content uses the same byte-derived requirement. Installed ownership
+contains content references and source bindings, with no serialized allocation estimates. Installed package
 schema 3 and semantic-input schema 2 reject the superseded descriptors.

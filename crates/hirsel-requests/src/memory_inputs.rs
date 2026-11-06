@@ -63,6 +63,12 @@ impl MemoryInputs {
             manifest,
         }
     }
+    pub(crate) fn execution_identity(&self) -> hirsel_syntax::ContentHash {
+        hirsel_syntax::ContentHash::of_parts(
+            "hirsel.execution.memory-inputs.v1",
+            [self.source.as_ref(), self.manifest.as_ref()],
+        )
+    }
     /// A logical loader key, never an external file or an ambient read.
     pub fn path(&self) -> &Path {
         &self.path

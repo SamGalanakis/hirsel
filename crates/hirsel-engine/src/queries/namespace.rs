@@ -59,7 +59,7 @@ pub struct NamespaceCapture {
     pub(crate) manifest: ContentHash,
     manifest_inputs: Manifest,
     identity: ContentHash,
-    installation: ContentHash,
+    pub(crate) installation: ContentHash,
     retained: u64,
     admission: std::sync::OnceLock<NamespaceAdmission>,
     capture_inputs: CaptureInputs,

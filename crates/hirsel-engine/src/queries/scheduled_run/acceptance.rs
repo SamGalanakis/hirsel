@@ -64,6 +64,22 @@ impl Task {
             .archive(ArchiveAdmission::Retained)
             .map_err(|_| queries.errors.resource)?;
         let record = archive.reference();
+        // Only this join may associate prepared bytes with source acceptance.
+        // The association is not a capability to execute a decoded product.
+        if let Some((namespace, compiler, options)) = queries.execution_identity
+            && let Some(verifier) = queries.store.verifier()
+            && let Ok(checked_archive) = checked.archive(ArchiveAdmission::Retained)
+        {
+            let inputs = hirsel_validate::ExecutionProductInputs {
+                namespace,
+                imports: queries.operation.capture().installation,
+                compiler,
+                policy: queries.lower.signatures().source_verification_policy(),
+                options,
+                entry: output.entry.clone(),
+            };
+            verifier.publish_execution_product(&inputs, record, checked_archive.reference());
+        }
         let action = hirsel_artifact_store::Action(ContentHash::of_parts(
             "hirsel.front.run-acceptance.action.v1",
             [

@@ -1,9 +1,11 @@
 //! Local verifier authority, separate from producer query associations. Imported
 //! content can share the physical store but cannot publish through this API.
 use crate::{SignatureLookup, VRead, Validation};
+mod execution_product;
 mod installation;
 mod outputs;
 use bincode::Options;
+pub use execution_product::{ExecutionProductBinding, ExecutionProductInputs};
 use hirsel_artifact_store::{Action, Address, Domain, Store};
 use hirsel_span::Anchor;
 use hirsel_syntax::{ContentHash, DefPath, PackageId};
@@ -2887,6 +2889,113 @@ mod tests {
             decoded.len() as u64,
             "a new operation has its own decoded owner and issuer"
         );
+    }
+
+    #[test]
+    fn execution_product_binding_refuses_substitution_and_stale_inputs() {
+        let mut fixture = Fixture::string();
+        let string = fixture.definition.bodies[0].locals[1].ty;
+        fixture.body().result = string;
+        fixture.body().blocks[0].terminator = crate::support::ret(1, 0);
+        owner_sig(&mut fixture, &[]);
+        let directory = Directory::new();
+        let cache = VerifierCache::directory(directory.0.clone());
+        let policy = ContentHash::of_bytes(b"current V policy");
+        assert!(check(&fixture, &cache, policy).0.violations.is_empty());
+        let inputs = ExecutionProductInputs {
+            namespace: ContentHash::of_bytes(b"exact source bytes and directory membership"),
+            imports: ContentHash::of_bytes(b"std implementation and private representations"),
+            compiler: ContentHash::of_bytes(b"compiler implementation"),
+            policy,
+            options: ContentHash::of_bytes(b"lowering and comptime charging"),
+            entry: path("main"),
+        };
+        let domain = Domain {
+            kind: 0x4600_0011,
+            schema: 1,
+        };
+        let value = hirsel_tir::Materialized {
+            root: hirsel_tir::ValueNode {
+                ty: fixture.definition.bodies[0].locals[1].ty,
+                kind: hirsel_tir::ValueKind::Constant(hirsel_tir::Constant::String(
+                    "original".into(),
+                )),
+            },
+        };
+        let product = |definition: &Definition, value: &hirsel_tir::Materialized| {
+            let bytes =
+                hirsel_product_codec::canonical_bytes(session(), &(definition, value), |_| {
+                    Some((path("main"), 0))
+                })
+                .unwrap();
+            domain.reference(&bytes).unwrap()
+        };
+        let original_definition = fixture.definition.clone();
+        let original = product(&original_definition, &value);
+        assert!(cache.execution_product(&inputs, original).is_none());
+        let source_check = domain.reference(b"completed source Check").unwrap();
+        cache
+            .publish_execution_product(&inputs, original, source_check)
+            .unwrap();
+        // The same declarations admit this different body. V alone cannot
+        // establish that it came from the accepted sources.
+        let literal = fixture
+            .body()
+            .rvalues
+            .iter_mut()
+            .find_map(|rvalue| match rvalue {
+                hirsel_tir::Rvalue::Constant(hirsel_tir::Constant::String(value)) => Some(value),
+                _ => None,
+            })
+            .unwrap();
+        *literal = "substituted".into();
+        assert!(check(&fixture, &cache, policy).0.violations.is_empty());
+        let substituted_body = product(&fixture.definition, &value);
+        assert_ne!(original, substituted_body);
+        let mut substituted_value = value.clone();
+        substituted_value.root.kind =
+            hirsel_tir::ValueKind::Constant(hirsel_tir::Constant::String("substituted".into()));
+        let substituted_constant = product(&original_definition, &substituted_value);
+        assert_ne!(substituted_body, substituted_constant);
+        let cache = VerifierCache::directory(directory.0.clone());
+        let binding = cache.execution_product(&inputs, original).unwrap();
+        assert_eq!(binding.product(), original);
+        assert_eq!(binding.inputs(), &inputs);
+        assert_eq!(binding.source_check(), source_check);
+        for substituted in [substituted_body, substituted_constant] {
+            assert!(cache.execution_product(&inputs, substituted).is_none());
+        }
+        for field in 0..6 {
+            let mut stale = inputs.clone();
+            let changed = ContentHash::of_bytes(b"changed input");
+            match field {
+                0 => stale.namespace = changed,
+                1 => stale.imports = changed,
+                2 => stale.compiler = changed,
+                3 => stale.policy = changed,
+                4 => stale.options = changed,
+                _ => stale.entry = path("another_entry"),
+            }
+            assert!(cache.execution_product(&stale, original).is_none());
+        }
+        assert!(
+            VerifierCache::default()
+                .execution_product(&inputs, original)
+                .is_none()
+        );
+        // Keep the key and framing valid while substituting the record's
+        // claimed inputs or product: the loaded fields must be checked too.
+        let key = inputs.key(original).unwrap();
+        cache.publish(
+            key,
+            execution_product::DOMAIN,
+            &execution_product::BindingRecord {
+                inputs: inputs.clone(),
+                product: substituted_body,
+                source_check,
+            },
+        );
+        assert!(cache.execution_product(&inputs, original).is_none());
     }
 
     #[test]

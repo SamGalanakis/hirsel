@@ -44,7 +44,6 @@ pub use output::{
     RequestWork, TirBatchExecution, TirExecution, TirProducts,
 };
 pub use ownership_selection::{OwnershipExecution, OwnershipObjects};
-pub(crate) use selector::host_budget;
 pub use selector::{CompilerRequests, RequestLimits};
 
 /// Already observed inputs, including missing files, manifests, aliases and
@@ -58,6 +57,16 @@ pub enum CompileInputs {
     Memory(MemoryInputs),
 }
 impl CompileInputs {
+    pub(crate) fn execution_identity(&self) -> hirsel_syntax::ContentHash {
+        match self {
+            Self::Frozen(inputs) => hirsel_syntax::ContentHash::of_parts(
+                "hirsel.execution.frozen-inputs.v1",
+                inputs.identity_parts().iter().map(Vec::as_slice),
+            ),
+            Self::Namespace(inputs) => inputs.digest(),
+            Self::Memory(inputs) => inputs.execution_identity(),
+        }
+    }
     pub fn known_path(&self, path: &std::path::Path) -> Option<PathBuf> {
         match self {
             Self::Frozen(inputs) => inputs.known_path(path),
@@ -276,4 +285,5 @@ pub enum NativeOutput {
 }
 
 use hirsel_compiler_identity::COMPILER_IDENTITY;
+#[cfg(test)]
 use hirsel_front_phases::{COMPILER, compiler_adapters};

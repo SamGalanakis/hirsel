@@ -29,7 +29,7 @@ use hirsel_query_products::LoweringPolicy;
 use hirsel_query_products::QueryKind;
 
 use hirsel_span::SourceMap;
-use hirsel_syntax::DefPath;
+use hirsel_syntax::{ContentHash, DefPath};
 use std::sync::{Arc, Mutex};
 
 /// The checked-product receipt of the completed Check root: its captured
@@ -367,7 +367,6 @@ impl GraphProducts for SourceProducts {
             CompileOperation::NativeRun(request) => self.native.as_ref().is_some_and(|native| {
                 native.accepts(request, super::native_platform::NativePurpose::Run)
             }),
-            _ => false,
         }
     }
     fn select(
@@ -1610,7 +1609,34 @@ pub(super) fn install(
                 errors,
             )
         };
-        Some(selected.map_err(&query_error)?)
+        let options = ContentHash::of_parts(
+            "hirsel.execution.options.v1",
+            [
+                &[u8::from(config.verify == hirsel_engine::Verify::On)][..],
+                &program.engine.comptime_limits.budget.to_le_bytes(),
+                &(program.engine.comptime_limits.call_depth as u64).to_le_bytes(),
+                &hirsel_tir::CHARGING_VERSION.to_le_bytes(),
+                &[match config.lowering {
+                    LoweringPolicy::Comptime => 0,
+                    LoweringPolicy::Reachable => 1,
+                }],
+                std::env::consts::ARCH.as_bytes(),
+                std::env::consts::OS.as_bytes(),
+                &usize::BITS.to_le_bytes(),
+                &[u8::from(cfg!(target_endian = "little"))],
+            ],
+        );
+        Some(
+            selected
+                .and_then(|run| {
+                    run.with_execution_identity(
+                        request.inputs.execution_identity(),
+                        compiler.identity(),
+                        options,
+                    )
+                })
+                .map_err(&query_error)?,
+        )
     } else {
         drop(run);
         None

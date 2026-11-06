@@ -1,6 +1,7 @@
 //! Exact settled front descriptors for native source tasks. Query demand and
 //! V/native C admission remain with their respective producers.
 use hirsel_engine::{FrontLowerQueries, NativeOriginalContext};
+#[cfg(test)]
 use hirsel_intern::jobs::with_compiler_stack;
 use hirsel_native_cache::source_inputs::NativeFrontLower;
 use hirsel_syntax::DefPath;

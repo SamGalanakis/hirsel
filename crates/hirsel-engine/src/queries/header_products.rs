@@ -28,6 +28,7 @@ pub(crate) struct HeaderProduct {
 }
 pub(crate) trait HeaderAllowance: Send + Sync {
     fn take_header(&self, bytes: u64) -> Option<hirsel_engine_admission::MemoryReservation>;
+    fn available_header_bytes(&self) -> u64;
 }
 /// What one settled header row or module proof holds against a budget.
 enum HeaderCharge {
@@ -611,8 +612,14 @@ impl HeaderProducts {
         if let Some(product) = cell.get() {
             return Some(Ok(product));
         }
-        let demanded = self.demand(&mut self.execution(), id);
-        match (cell.get(), demanded) {
+        let mut working = None;
+        let scratch = self.scope().working.load(Ordering::Relaxed);
+        let demanded = self.produce_with_working(
+            &mut self.execution(),
+            id,
+            (self.provisional && scratch != 0).then_some((&mut working, scratch)),
+        );
+        match (cell.get().or(working), demanded) {
             (Some(product), _) => Some(Ok(product)),
             (None, Err(error)) => Some(Err(error)),
             (None, Ok(_)) => None,
@@ -623,20 +630,63 @@ impl HeaderProducts {
     pub(crate) fn working_product(
         self: &Arc<Self>,
         id: DefId,
-        scratch: u64,
+        cx: &mut dyn hirsel_engine_runtime::QueryContext,
     ) -> Option<Result<Arc<HeaderProduct>, QueryError>> {
         let cell = self.rows.get(&id)?;
-        if let Some(product) = cell.get() {
-            return Some(Ok(product));
+        let mut credit = 0;
+        loop {
+            if let Some(product) = cell.get() {
+                return Some(Ok(product));
+            }
+            let mut working = None;
+            let demanded = self.produce_with_working(
+                &mut self.execution(),
+                id,
+                Some((&mut working, cx.scratch_bytes())),
+            );
+            match (cell.get().or(working), demanded) {
+                (Some(product), _) => return Some(Ok(product)),
+                (None, Err(error)) => {
+                    if matches!(&error, QueryError::Operational(failure)
+                        if matches!(failure.operation.as_str(), "header admission" | "private inference admission"))
+                    {
+                        let refused_credit = self.header_credit();
+                        loop {
+                            let available = self.header_credit();
+                            if available > credit && available > refused_credit {
+                                credit = available;
+                                break;
+                            }
+                            if !cx.evict_body() {
+                                return Some(Err(error));
+                            }
+                        }
+                    } else {
+                        return Some(Err(error));
+                    }
+                }
+                (None, Ok(_)) => return None,
+            }
         }
-        let mut working = None;
-        let demanded =
-            self.produce_with_working(&mut self.execution(), id, Some((&mut working, scratch)));
-        match (cell.get().or(working), demanded) {
-            (Some(product), _) => Some(Ok(product)),
-            (None, Err(error)) => Some(Err(error)),
-            (None, Ok(_)) => None,
-        }
+    }
+    fn header_credit(&self) -> u64 {
+        let admission = self
+            .scope()
+            .admission
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let Some(admission) = admission else {
+            return 0;
+        };
+        let Some(partition) = admission.partition.upgrade() else {
+            return 0;
+        };
+        let remaining = *admission
+            .remaining
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        remaining.min(partition.available_header_bytes())
     }
     fn admitted(&self) -> bool {
         self.scope()
@@ -667,6 +717,7 @@ impl HeaderProducts {
         id: DefId,
         working: Option<(&mut Option<Arc<HeaderProduct>>, u64)>,
     ) -> SignatureOutput {
+        self.track_scope();
         if let Some(failures) = self.failures.get(&id) {
             engine
                 .private_unique_failures
@@ -717,8 +768,7 @@ impl HeaderProducts {
         }
         if let Some(stale) = proof.take().filter(|proof| {
             proof
-                .identities
-                .get(&id)
+                .signature_identity(id)
                 .is_some_and(|expected| *expected != private::identity(&result))
         }) {
             // The recomputed payload disagrees with the proof that named it.
@@ -737,8 +787,7 @@ impl HeaderProducts {
             }
             if fresh.is_some_and(|proof| {
                 proof
-                    .identities
-                    .get(&id)
+                    .signature_identity(id)
                     .is_some_and(|expected| *expected != private::identity(&result))
             }) {
                 return Err(QueryError::Operational(hirsel_types::OperationalFailure {
@@ -777,16 +826,38 @@ impl HeaderProducts {
             .saturating_add(hirsel_engine_admission::retained_arc_bytes(
                 &std::mem::MaybeUninit::<HeaderProduct>::uninit(),
             ));
+        let private_working = self.provisional
+            && engine.private_summary_active
+            && self.scope().working.load(Ordering::Relaxed) != 0;
+        let working_bytes = || {
+            let mut weight = hirsel_query_products::retained::MetadataWeight::default();
+            weight.tree::<DefId, Arc<Entry<hirsel_types::SignatureRef>>>(engine.signatures.len());
+            engine
+                .signatures
+                .values()
+                .try_fold(weight.bytes(), |bytes, entry| {
+                    bytes.checked_add(crate::memo::retained::retained_signature_entry_bytes(
+                        entry,
+                    )?)
+                })?
+                .checked_add(bytes)
+        };
         let (charge, transient) = match self.admit_signature(entry.as_ref(), bytes) {
             Ok(charge) => (charge, false),
             Err(_)
-                if working.as_ref().is_some_and(|(_, scratch)| {
-                    bytes
-                        .checked_add(hirsel_engine_admission::retained_arc_bytes(
-                            &std::mem::MaybeUninit::<std::sync::Mutex<HeaderCharge>>::uninit(),
-                        ))
-                        .is_some_and(|required| required <= *scratch)
-                }) =>
+                if if private_working {
+                    working_bytes().is_some_and(|required| {
+                        required <= self.scope().working.load(Ordering::Relaxed) / 2
+                    })
+                } else {
+                    working.as_ref().is_some_and(|(_, scratch)| {
+                        bytes
+                            .checked_add(hirsel_engine_admission::retained_arc_bytes(
+                                &std::mem::MaybeUninit::<std::sync::Mutex<HeaderCharge>>::uninit(),
+                            ))
+                            .is_some_and(|required| required <= *scratch)
+                    })
+                } =>
             {
                 ((Charge::engine(), Charge::engine()), true)
             }
@@ -804,9 +875,13 @@ impl HeaderProducts {
             accounted: AtomicBool::new(local),
         };
         if transient {
+            cell.work
+                .fetch_add(product.graph_work as u64, Ordering::Relaxed);
             let product = Arc::new(product);
             let result = product.result.clone();
-            *working.expect("working header input").0 = Some(product);
+            if let Some((working, _)) = working {
+                *working = Some(product);
+            }
             return result;
         }
         let (product, settled) = self.publish(cell, product);
@@ -1723,6 +1798,9 @@ mod retention_tests {
     impl HeaderAllowance for Allowance {
         fn take_header(&self, bytes: u64) -> Option<MemoryReservation> {
             self.0.take(bytes)
+        }
+        fn available_header_bytes(&self) -> u64 {
+            self.0.available_bytes()
         }
     }
 

@@ -198,6 +198,9 @@ impl header_products::HeaderAllowance for FrontSourceBacking {
     fn take_header(&self, bytes: u64) -> Option<hirsel_engine_admission::MemoryReservation> {
         self.allowance.take(bytes)
     }
+    fn available_header_bytes(&self) -> u64 {
+        self.allowance.available_bytes()
+    }
 }
 struct LiveSourceBacking {
     _source: Arc<FrontSourceBacking>,
@@ -642,13 +645,17 @@ impl FrontBodyQueries {
             None => Err(QueryError::NotImplemented),
         }
     }
-    fn signature_input(&self, input: &Input, scratch: u64) -> Result<SignatureInput, QueryError> {
+    fn signature_input(
+        &self,
+        input: &Input,
+        cx: &mut dyn QueryContext,
+    ) -> Result<SignatureInput, QueryError> {
         let mut reads = ReadsBuilder::new();
         let product = self
             .namespace
             .snapshot
             .header_products()
-            .and_then(|headers| headers.working_product(input.definition, scratch))
+            .and_then(|headers| headers.working_product(input.definition, cx))
             .transpose()?;
         if let Some(product) = &product
             && let Some(entry) = &product.entry
@@ -2948,17 +2955,15 @@ impl BodyTask {
         let SignatureInput {
             signature,
             reads: signature_reads,
-        } = queries
-            .signature_input(input, cx.scratch_bytes())
-            .map_err(|error| {
-                if std::env::var_os("HIRSEL_OPERATION_OWNER_TRACE").is_some() {
-                    crate::queries::operation_owner_trace(format_args!(
-                        "OWNER RESOURCE Front signature input {}: {error:?}",
-                        input.definition.path()
-                    ));
-                }
-                queries.resource_refusal()
-            })?;
+        } = queries.signature_input(input, cx).map_err(|error| {
+            if std::env::var_os("HIRSEL_OPERATION_OWNER_TRACE").is_some() {
+                crate::queries::operation_owner_trace(format_args!(
+                    "OWNER RESOURCE Front signature input {}: {error:?}",
+                    input.definition.path()
+                ));
+            }
+            queries.resource_refusal()
+        })?;
         let mut done = worker.run(Task {
             index: 0,
             definition: input.definition.path().clone(),

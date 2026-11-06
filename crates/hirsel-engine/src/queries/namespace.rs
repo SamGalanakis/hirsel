@@ -1550,6 +1550,9 @@ mod tests {
             ) -> Option<hirsel_engine_admission::MemoryReservation> {
                 self.0.take(bytes)
             }
+            fn available_header_bytes(&self) -> u64 {
+                self.0.available_bytes()
+            }
         }
         hirsel_intern::jobs::with_compiler_stack(|| {
             let store = Arc::new(MemStore::default());

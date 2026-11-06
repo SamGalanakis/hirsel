@@ -15,13 +15,21 @@ pub(crate) struct AdoptedPrivate {
 pub(super) struct ModuleProduct {
     facts: Facts,
     complete: bool,
-    work: BTreeMap<(DefId, QueryKind), usize>,
+    work: Box<[((DefId, QueryKind), usize)]>,
     /// The identity of each settled signature this proof covers. Payloads
     /// live only in the admitted header rows; a miss recomputes there.
-    pub(super) identities: hirsel_syntax::DefMap<ContentHash>,
+    identities: Box<[(DefId, ContentHash)]>,
     accounted: AtomicBool,
     /// Charged like a header row; evicting the proof returns it.
     charge: Charge,
+}
+impl ModuleProduct {
+    pub(super) fn signature_identity(&self, id: DefId) -> Option<&ContentHash> {
+        self.identities
+            .binary_search_by_key(&id, |(id, _)| *id)
+            .ok()
+            .map(|index| &self.identities[index].1)
+    }
 }
 /// One module's proof. A settled proof is an evictable entry of the admitted
 /// front cache: it is pinned only while a consumer holds its Arc, and an
@@ -434,17 +442,21 @@ impl HeaderProducts {
             })
             .map(|(definition, entry)| (*definition, self.operation.project_header(entry)))
             .collect();
-        let identities: hirsel_syntax::DefMap<_> = signatures
+        let mut identities: Vec<_> = signatures
             .iter()
             .map(|(definition, entry)| (*definition, identity(&entry.result())))
             .collect();
-        weight.tree::<DefId, ContentHash>(identities.len());
-        let work: BTreeMap<_, _> = engine
+        identities.sort_by_key(|(id, _)| *id);
+        let identities = identities.into_boxed_slice();
+        weight.add(std::mem::size_of_val(&*identities));
+        let work = engine
             .recomputes
             .iter()
             .map(|((path, kind), count)| ((DefId::intern(path), *kind), *count))
-            .collect();
-        weight.tree::<(DefId, QueryKind), usize>(work.len());
+            .collect::<Vec<_>>()
+            .into_boxed_slice();
+        weight.add(std::mem::size_of_val(&*work));
+        weight.add(2 * size_of::<usize>());
         drop(engine);
         drop(declared);
         // The proof is charged like any settled header row: unpinned rows and
@@ -618,7 +630,7 @@ impl HeaderProducts {
                 inferred.insert(*id, proof.clone());
             }
             if !product.accounted.swap(true, Ordering::Relaxed) {
-                for ((id, kind), count) in &product.work {
+                for ((id, kind), count) in product.work.iter() {
                     *engine
                         .recomputes
                         .entry((id.path().clone(), *kind))

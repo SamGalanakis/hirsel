@@ -78,7 +78,7 @@ fn largest_std_bodies_validate_within_a_fixed_heap_budget() {
             let base = LIVE.load(Relaxed);
             PEAK.store(base, Relaxed);
             let validation =
-                hirsel_validate::validate(definition, &input.types, signatures, &mut vec![])
+                hirsel_validate::validate(definition, &input.types, &signatures, &mut vec![])
                     .unwrap_or_else(|refusal| panic!("{name}: V refused: {refusal:?}"));
             let peak = PEAK.load(Relaxed) - base;
             assert!(

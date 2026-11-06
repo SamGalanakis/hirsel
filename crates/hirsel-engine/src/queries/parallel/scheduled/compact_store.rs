@@ -21,6 +21,22 @@ struct RecordTail<'a> {
     #[serde(serialize_with = "hirsel_product_codec::serialize_payload")]
     facts: &'a [u8],
 }
+fn encode_record(
+    head: (Key, Option<Reference>),
+    reads: &Reads,
+    reads_bytes: u64,
+    tail: &RecordTail<'_>,
+    encoded: u64,
+) -> Option<Vec<u8>> {
+    // bincode 1.3.3 src/ser/mod.rs:155-185 leaves tuples/structs unframed.
+    // Preserve Record's field order and write its admitted HRD3 only once.
+    let mut bytes = Vec::with_capacity(usize::try_from(encoded).ok()?);
+    bincode::serialize_into(&mut bytes, &head).ok()?;
+    bincode::serialize_into(&mut bytes, &reads_bytes).ok()?;
+    reads.encode(&mut bytes);
+    bincode::serialize_into(&mut bytes, tail).ok()?;
+    Some(bytes)
+}
 fn address(key: Key) -> hirsel_artifact_store::Address {
     hirsel_artifact_store::Address(ContentHash::of_parts(
         "hirsel.front.compact.address.v1",
@@ -222,14 +238,7 @@ impl FrontBodyQueries {
         {
             return None;
         }
-        // bincode 1.3.3 src/ser/mod.rs:155-185 leaves tuples/structs unframed.
-        // Preserve Record's field order and write its admitted HRD3 only once.
-        let mut bytes = Vec::with_capacity(usize::try_from(encoded).ok()?);
-        bincode::serialize_into(&mut bytes, &head).ok()?;
-        bincode::serialize_into(&mut bytes, &reads_bytes).ok()?;
-        outcome.reads.encode(&mut bytes);
-        bincode::serialize_into(&mut bytes, &tail).ok()?;
-        Some(bytes)
+        encode_record(head, &outcome.reads, reads_bytes, &tail, encoded)
     }
 }
 impl BodyTask {
@@ -495,14 +504,19 @@ mod tests {
             assert_eq!(record.facts, legacy.facts);
             assert_eq!(record.reads, legacy.reads);
             assert_eq!(bincode::serialize(&record).unwrap(), bytes);
-            let borrowed = RecordRef {
-                key: record.key,
-                body: record.body,
-                reads: &record.reads,
+            let tail = RecordTail {
                 decode_bytes: record.decode_bytes,
                 facts: &record.facts,
             };
-            assert_eq!(bincode::serialize(&borrowed).unwrap(), bytes);
+            let streamed = encode_record(
+                (record.key, record.body),
+                &record.reads,
+                record.reads.encoded_bytes().unwrap(),
+                &tail,
+                bytes.len() as u64,
+            )
+            .unwrap();
+            assert_eq!(streamed, bytes);
             for end in 0..bytes.len() {
                 assert!(options().deserialize::<Record>(&bytes[..end]).is_err());
             }

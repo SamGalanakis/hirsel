@@ -99,7 +99,7 @@ impl FrontRunInputs {
 /// One immutable input namespace, shared across selected Run roots. Each task
 /// waits for the ordered source transaction before reading semantic products.
 pub struct FrontRunQueries {
-    execution_identity: Option<(ContentHash, ContentHash, ContentHash)>,
+    execution_identity: Option<Box<ExecutionIdentity>>,
     batch: Option<(QueryId, Vec<DefPath>)>,
     precompute: Option<precompute::Selection>,
     /// The engine environment every address in this namespace is under.
@@ -137,6 +137,12 @@ struct Ownership {
     _lower: Arc<FrontLowerQueries>,
     _allowance: Arc<hirsel_engine_admission::MemoryReservation>,
 }
+struct ExecutionIdentity {
+    namespace: ContentHash,
+    compiler: ContentHash,
+    options: ContentHash,
+    _charge: Arc<inputs::InputCharge>,
+}
 impl FrontRunQueries {
     /// Capture loader and compiler identities before sharing the producer.
     pub fn with_execution_identity(
@@ -145,9 +151,15 @@ impl FrontRunQueries {
         compiler: ContentHash,
         options: ContentHash,
     ) -> Result<Arc<Self>, QueryError> {
-        Arc::get_mut(&mut self)
-            .ok_or_else(|| operational("Run identity configured after sharing"))?
-            .execution_identity = Some((namespace, compiler, options));
+        let this = Arc::get_mut(&mut self)
+            .ok_or_else(|| operational("Run identity configured after sharing"))?;
+        let charge = this.admit_decode(size_of::<ExecutionIdentity>() as u64)?;
+        this.execution_identity = Some(Box::new(ExecutionIdentity {
+            namespace,
+            compiler,
+            options,
+            _charge: charge,
+        }));
         Ok(self)
     }
 

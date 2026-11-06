@@ -337,12 +337,12 @@ impl FrontBodyQueries {
     fn resource_refusal(&self) -> Reference {
         if std::env::var_os("HIRSEL_OPERATION_OWNER_TRACE").is_some() {
             let site = std::panic::Location::caller();
-            eprintln!(
+            crate::queries::operation_owner_trace(format_args!(
                 "OWNER RESOURCE Front producer {}:{} in namespace {:?}",
                 site.file(),
                 site.line(),
                 self.namespace.identity(),
-            );
+            ));
         }
         self.errors.resource
     }
@@ -2350,7 +2350,8 @@ impl QueryTask for BodyTask {
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .insert(
-                    self.input,
+                    // Summary and materialization queries must retain distinct aliases.
+                    self.query.address.0,
                     Forwarded {
                         owner,
                         selected,
@@ -2783,10 +2784,10 @@ impl BodyTask {
             .signature_input(input, cx.scratch_bytes())
             .map_err(|error| {
                 if std::env::var_os("HIRSEL_OPERATION_OWNER_TRACE").is_some() {
-                    eprintln!(
+                    crate::queries::operation_owner_trace(format_args!(
                         "OWNER RESOURCE Front signature input {}: {error:?}",
                         input.definition.path()
-                    );
+                    ));
                 }
                 queries.resource_refusal()
             })?;
@@ -2806,10 +2807,10 @@ impl BodyTask {
         // demand computes it again.
         if let Some(refusal) = done.refused() {
             if std::env::var_os("HIRSEL_OPERATION_OWNER_TRACE").is_some() {
-                eprintln!(
+                crate::queries::operation_owner_trace(format_args!(
                     "OWNER RESOURCE Front phase {}: {refusal:?}",
                     input.definition.path()
-                );
+                ));
             }
             return Err(queries.resource_refusal().into());
         }
@@ -3419,7 +3420,7 @@ impl QueryEngine {
             .checked_add(indexes.unadmitted_bytes())
             .ok_or_else(|| refusal("input size overflow"))?;
         if std::env::var_os("HIRSEL_OPERATION_OWNER_TRACE").is_some() {
-            eprintln!(
+            crate::queries::operation_owner_trace(format_args!(
                 "OWNER FRONT fixed={} namespace={} rows_pending={} required={} available={} definitions={}",
                 FrontBodyQueries::input_bytes(&[]).unwrap_or(u64::MAX),
                 namespace.retained_bytes(),
@@ -3427,7 +3428,7 @@ impl QueryEngine {
                 required,
                 available,
                 definitions.len()
-            );
+            ));
         }
         if required > available {
             return Err(refused_inputs(required));

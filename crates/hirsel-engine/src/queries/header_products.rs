@@ -964,14 +964,14 @@ impl HeaderProducts {
                         .filter_map(Weak::upgrade)
                         .map(|product| product._row_charge.front_bytes())
                         .sum::<u64>();
-                    eprintln!(
+                    crate::queries::operation_owner_trace(format_args!(
                         "OWNER HEADER SET payloads={} payload_bytes={} rows={} row_bytes={} wrappers={}",
                         payloads.len(),
                         payload_bytes,
                         row_count,
                         row_bytes,
                         wrappers
-                    );
+                    ));
                     let tables = admission
                         .tables
                         .lock()
@@ -1002,26 +1002,26 @@ impl HeaderProducts {
                                 }
                             }
                         }
-                        eprintln!(
+                        crate::queries::operation_owner_trace(format_args!(
                             "OWNER HEADERS table={:p} rows={} unique_bytes={} signature_aliases={}",
                             Arc::as_ptr(&table),
                             rows,
                             charged,
                             aliases
-                        );
-                        eprintln!(
+                        ));
+                        crate::queries::operation_owner_trace(format_args!(
                             "OWNER PROOFS table={:p} counts={proofs:?}",
                             Arc::as_ptr(&table)
-                        );
+                        ));
                     }
-                    eprintln!(
+                    crate::queries::operation_owner_trace(format_args!(
                         "OWNER HEADER REFUSAL required={} credit={}",
                         bytes,
                         *admission
                             .remaining
                             .lock()
                             .unwrap_or_else(|e| e.into_inner())
-                    );
+                    ));
                 }
                 return Err(QueryError::Operational(hirsel_types::OperationalFailure {
                     operation: "header admission".into(),

@@ -1104,15 +1104,15 @@ impl QueryEngine {
             .and_then(|bytes| bytes.checked_add(instance_weight.bytes()))
             .ok_or_else(|| refused("capture size overflow"))?;
         if std::env::var_os("HIRSEL_OPERATION_OWNER_TRACE").is_some() {
-            eprintln!(
+            crate::queries::operation_owner_trace(format_args!(
                 "OWNER INDEX SET source_bytes={} body_bytes={} anchor_bytes={} anchor_pending={} delta_bytes={}",
                 inputs.retained_bytes(),
                 bodies.retained_bytes(),
                 anchors.input_bytes().unwrap_or(u64::MAX),
                 anchors.unadmitted_bytes().unwrap_or(u64::MAX),
                 delta.unadmitted_bytes()
-            );
-            eprintln!(
+            ));
+            crate::queries::operation_owner_trace(format_args!(
                 "OWNER CAPTURE fixed={:p} body={:p} view={} selection={} paths={} instances={} source_total={} source_pending={} bodies_pending={} definitions={} registrations={} limit={}",
                 Arc::as_ptr(&inputs),
                 &bodies,
@@ -1126,7 +1126,7 @@ impl QueryEngine {
                 definitions.len(),
                 registrations.len(),
                 limit
-            );
+            ));
         }
         if retained
             .checked_add(inputs.unadmitted_bytes())

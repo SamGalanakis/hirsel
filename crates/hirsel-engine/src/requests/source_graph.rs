@@ -1674,8 +1674,9 @@ pub(crate) fn protocol_failure(
         site.line()
     );
     if std::env::var_os("HIRSEL_OPERATION_OWNER_TRACE").is_some() {
-        eprintln!("OWNER PROTOCOL {message}");
+        crate::queries::operation_owner_trace(format_args!("OWNER PROTOCOL {message}"));
     }
+    eprintln!("hirsel: {message}");
     store
         .put_content(RUNTIME_DIAGNOSTIC, message.as_bytes())
         .unwrap_or(errors.resource)

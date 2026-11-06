@@ -53,7 +53,14 @@ impl RootRead {
                 .plan
                 .front
                 .check_facts(selected.clone())
-                .ok_or_else(|| selected.clone().err().unwrap_or(queries.errors.protocol))?;
+                .ok_or_else(|| selected.clone().err().unwrap_or_else(|| {
+                    crate::requests::source_graph::protocol_failure(
+                        &*queries.store,
+                        queries.errors,
+                        Some(id),
+                        &format!("Front checked facts for {} are unavailable for the selected product", work.path),
+                    )
+                }))?;
             let lower = !stopped
                 && work.executable
                 && facts.result.as_ref().is_ok_and(|d| !has_errors(d))

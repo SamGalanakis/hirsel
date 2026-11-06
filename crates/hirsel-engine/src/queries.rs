@@ -2811,3 +2811,19 @@ pub(crate) fn runtime_types_over(
         ..hirsel_interp::aggregate::RuntimeTypes::new(types)
     }
 }
+
+/// Append opt-in ownership diagnostics without changing application streams.
+/// HIRSEL_OPERATION_OWNER_TRACE names the destination file.
+pub(crate) fn operation_owner_trace(arguments: std::fmt::Arguments<'_>) {
+    use std::io::Write;
+    let Some(path) = std::env::var_os("HIRSEL_OPERATION_OWNER_TRACE") else {
+        return;
+    };
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        let _ = writeln!(file, "{arguments}");
+    }
+}

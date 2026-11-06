@@ -630,7 +630,9 @@ impl DemandProducer {
                     *scope.result.lock().unwrap_or_else(|e| e.into_inner()) = Some(result.clone());
                     let namespace = namespace.map_err(|error| {
                         if std::env::var_os("HIRSEL_OPERATION_OWNER_TRACE").is_some() {
-                            eprintln!("OWNER SCOPE PROTOCOL {error:?}");
+                            crate::queries::operation_owner_trace(format_args!(
+                                "OWNER SCOPE PROTOCOL {error:?}"
+                            ));
                         }
                         producer.errors.protocol
                     })?;
@@ -699,7 +701,9 @@ impl DemandProducer {
                 *request.result.lock().unwrap_or_else(|e| e.into_inner()) = Some(result.clone());
                 let namespace = complete.map_err(|error| {
                     if std::env::var_os("HIRSEL_OPERATION_OWNER_TRACE").is_some() {
-                        eprintln!("OWNER DEMAND PROTOCOL {error:?}");
+                        crate::queries::operation_owner_trace(format_args!(
+                            "OWNER DEMAND PROTOCOL {error:?}"
+                        ));
                     }
                     producer.errors.protocol
                 })?;
@@ -1216,12 +1220,12 @@ impl DemandProducer {
             .collect::<Result<Vec<_>, _>>()?;
         if std::env::var_os("HIRSEL_OPERATION_OWNER_TRACE").is_some() {
             let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-            eprintln!(
+            crate::queries::operation_owner_trace(format_args!(
                 "OWNER VIEWS count={} registrations={} pool_available={}",
                 state.views.len(),
                 registrations.len(),
                 self.front.available_bytes()
-            );
+            ));
         }
         let namespace =
             engine.capture_namespace(definitions, &refreshed, self.front.available_bytes())?;

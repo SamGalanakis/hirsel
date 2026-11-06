@@ -188,6 +188,52 @@ fn assert_edited_refuses(fixture: &Fixture, native: bool, tape: &Path) {
 }
 
 #[test]
+fn a_recording_replays_against_an_unchanged_installation() {
+    // This law requires the installed std closure, rather than a source-only
+    // dependency that cannot expose discovery's missing installation identity.
+    assert!(std::env::var_os("HIRSEL_PRODUCTS").is_some());
+    let fixture = Fixture::new("unchanged-installation");
+    std::fs::write(
+        fixture.source(),
+        r#"pub fn main(rt: Io) -> Result[(), GrantError] {
+  let output = io.stdout(rt)?
+  let _ = out.print(output, std@1/u64.to_string(42u64))
+  Ok(())
+}
+"#,
+    )
+    .unwrap();
+    let tape = fixture.tape("installed.tape");
+    let data = tempfile::tempdir().unwrap();
+    let command = || {
+        let mut command = hirsel(false, &fixture.source(), &[]);
+        command
+            .env("HIRSEL_DAEMON", "off")
+            .env("HIRSEL_RESULTS", "none@1")
+            .env("XDG_DATA_HOME", data.path());
+        command
+    };
+    // Separate processes share only the selected installation and retained
+    // acceptance, so session-local catalogue state cannot make replay pass.
+    let recorded = command()
+        .args([
+            "--grants",
+            r#"{"io":{"stdout":"stdout.bytes@1","dirs":[]}}"#,
+            "--record",
+        ])
+        .arg(&tape)
+        .output()
+        .unwrap();
+    assert_replayed(&recorded, b"42", "record installed std");
+    let original = std::fs::read(&tape).unwrap();
+    let mut replay_command = command();
+    replay_command.arg("--replay").arg(&tape);
+    let replayed = replay(replay_command);
+    assert_replayed(&replayed, b"42", "replay unchanged installation");
+    assert_eq!(std::fs::read(&tape).unwrap(), original);
+}
+
+#[test]
 fn interpreted_recording_replays_without_its_files_or_socket() {
     let fixture = Fixture::new("interpreted");
     let tape = fixture.tape("tape");

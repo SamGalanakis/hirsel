@@ -680,6 +680,33 @@ impl Catalog {
     }
 }
 impl QueryEngine {
+    /// Retain the exact installed closure selected by package discovery before
+    /// indexing any source. Both admitted captures and replay discovery read
+    /// their installation identity from this catalogue.
+    pub(crate) fn select_installed_packages<'a>(
+        &mut self,
+        packages: impl IntoIterator<Item = (&'a PackageId, &'a hirsel_engine_store::InstalledPackage)>,
+    ) -> Result<(), QueryError> {
+        let installed = packages
+            .into_iter()
+            .map(|(package, products)| {
+                let records = products.source_records().ok_or_else(|| {
+                    QueryError::Operational(hirsel_types::OperationalFailure {
+                        operation: "installed package".into(),
+                        message: format!(
+                            "missing declaration products for {}@{}",
+                            package.name, package.version
+                        ),
+                    })
+                })?;
+                Ok((package.clone(), records))
+            })
+            .collect::<Result<_, QueryError>>()?;
+        // Replacement also retires installations removed from the selection
+        // when the loader restores a previous source index.
+        self.catalog.installed = installed;
+        Ok(())
+    }
     pub fn index_installed_source(
         &mut self,
         file: FileId,

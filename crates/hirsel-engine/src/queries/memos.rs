@@ -951,6 +951,21 @@ impl QueryEngine {
     /// Marks the readers of definitions whose signatures appeared or changed
     /// outside indexing (staged constants, generated instances).
     pub(crate) fn note_signatures(&mut self, paths: &[DefPath]) {
+        let mut changes = self.signature_value_changes(paths);
+        self.mark_lookups(&mut changes);
+        self.apply_changes(&changes);
+        self.settle_signatures();
+    }
+
+    /// Inferred uniqueness changes values, never declaration membership,
+    /// visibility or namespace. Lookup observations therefore remain valid.
+    pub(super) fn note_private_signature_values(&mut self, paths: &[DefPath]) {
+        let changes = self.signature_value_changes(paths);
+        self.apply_changes(&changes);
+        self.settle_signatures();
+    }
+
+    fn signature_value_changes(&mut self, paths: &[DefPath]) -> ChangeSet {
         let mut changes = ChangeSet::default();
         for path in paths {
             let id = DefId::intern(path);
@@ -971,9 +986,7 @@ impl QueryEngine {
                 changes.read(k, d);
             }
         }
-        self.mark_lookups(&mut changes);
-        self.apply_changes(&changes);
-        self.settle_signatures();
+        changes
     }
 
     /// Definitions whose only items were dropped and wait to be adopted by

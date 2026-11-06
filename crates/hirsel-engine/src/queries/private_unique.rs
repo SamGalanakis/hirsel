@@ -267,7 +267,7 @@ impl QueryEngine {
             }
             if !changed.is_empty() {
                 self.snapshot_inputs_revision += 1;
-                self.note_signatures(&changed);
+                self.note_private_signature_values(&changed);
             }
         }
         Ok(())

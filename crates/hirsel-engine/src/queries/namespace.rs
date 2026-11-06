@@ -98,6 +98,16 @@ impl OperationLease {
     pub fn identity(&self) -> ContentHash {
         self.identity
     }
+    /// An acceptance binding must name the admitted consumer operation. A
+    /// provisional lease cannot acquire that identity when admission happens
+    /// later on the shared capture.
+    pub fn admitted_identity(&self) -> Option<ContentHash> {
+        self.capture
+            .consumer_scope
+            .get()
+            .copied()
+            .filter(|identity| *identity == self.identity)
+    }
     pub fn capture(&self) -> &NamespaceCapture {
         &self.capture
     }
@@ -1372,7 +1382,10 @@ mod tests {
             );
             let scope = ContentHash::of_bytes(b"selected main root");
             let provisional = capture.lease();
+            assert_eq!(provisional.admitted_identity(), None);
             let operation = capture.admit_consumers(scope).unwrap();
+            assert_eq!(operation.admitted_identity(), Some(operation.identity()));
+            assert_eq!(provisional.admitted_identity(), None);
             assert_eq!(provisional.identity(), capture.identity());
             assert_eq!(
                 operation.identity(),

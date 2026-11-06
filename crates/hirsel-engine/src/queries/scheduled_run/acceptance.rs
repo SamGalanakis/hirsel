@@ -70,8 +70,13 @@ impl Task {
             && let Some(verifier) = queries.store.verifier()
             && let Ok(checked_archive) = checked.archive(ArchiveAdmission::Retained)
         {
+            let namespace = queries
+                .operation
+                .admitted_identity()
+                .ok_or(queries.errors.protocol)?;
             let inputs = hirsel_validate::ExecutionProductInputs {
-                namespace: identity.namespace,
+                namespace,
+                observations: identity.observations,
                 imports: queries.operation.capture().installation,
                 compiler: identity.compiler,
                 policy: queries.lower.signatures().source_verification_policy(),

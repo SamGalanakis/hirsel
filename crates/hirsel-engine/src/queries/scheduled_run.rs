@@ -137,16 +137,17 @@ struct Ownership {
     _allowance: Arc<hirsel_engine_admission::MemoryReservation>,
 }
 struct ExecutionIdentity {
-    namespace: ContentHash,
+    observations: ContentHash,
     compiler: ContentHash,
     options: ContentHash,
     _charge: Arc<inputs::InputCharge>,
 }
 impl FrontRunQueries {
-    /// Capture loader and compiler identities before sharing the producer.
+    /// Capture compiler semantics before sharing the producer. Namespace
+    /// identity comes exclusively from the admitted consumer operation.
     pub fn with_execution_identity(
         mut self: Arc<Self>,
-        namespace: ContentHash,
+        observations: ContentHash,
         compiler: ContentHash,
         options: ContentHash,
     ) -> Result<Arc<Self>, QueryError> {
@@ -154,7 +155,7 @@ impl FrontRunQueries {
             .ok_or_else(|| operational("Run identity configured after sharing"))?;
         let charge = this.admit_decode(size_of::<ExecutionIdentity>() as u64)?;
         this.execution_identity = Some(Box::new(ExecutionIdentity {
-            namespace,
+            observations,
             compiler,
             options,
             _charge: charge,

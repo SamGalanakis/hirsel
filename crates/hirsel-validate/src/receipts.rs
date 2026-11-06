@@ -2904,7 +2904,8 @@ mod tests {
         let policy = ContentHash::of_bytes(b"current V policy");
         assert!(check(&fixture, &cache, policy).0.violations.is_empty());
         let inputs = ExecutionProductInputs {
-            namespace: ContentHash::of_bytes(b"exact source bytes and directory membership"),
+            namespace: ContentHash::of_bytes(b"admitted consumer capture and demand scope"),
+            observations: ContentHash::of_bytes(b"exact source bytes and directory membership"),
             imports: ContentHash::of_bytes(b"std implementation and private representations"),
             compiler: ContentHash::of_bytes(b"compiler implementation"),
             policy,
@@ -2966,15 +2967,16 @@ mod tests {
         for substituted in [substituted_body, substituted_constant] {
             assert!(cache.execution_product(&inputs, substituted).is_none());
         }
-        for field in 0..6 {
+        for field in 0..7 {
             let mut stale = inputs.clone();
             let changed = ContentHash::of_bytes(b"changed input");
             match field {
                 0 => stale.namespace = changed,
-                1 => stale.imports = changed,
-                2 => stale.compiler = changed,
-                3 => stale.policy = changed,
-                4 => stale.options = changed,
+                1 => stale.observations = changed,
+                2 => stale.imports = changed,
+                3 => stale.compiler = changed,
+                4 => stale.policy = changed,
+                5 => stale.options = changed,
                 _ => stale.entry = path("another_entry"),
             }
             assert!(cache.execution_product(&stale, original).is_none());
@@ -2997,6 +2999,78 @@ mod tests {
             },
         );
         assert!(cache.execution_product(&inputs, original).is_none());
+    }
+
+    #[test]
+    fn execution_product_import_requires_v_even_when_invalid_tir_has_a_byte_binding() {
+        let mut fixture = Fixture::unit();
+        owner_sig(&mut fixture, &[]);
+        let cache = VerifierCache::default();
+        let inputs = ExecutionProductInputs {
+            namespace: ContentHash::of_bytes(b"admitted capture"),
+            observations: ContentHash::of_bytes(b"observed bytes"),
+            imports: ContentHash::of_bytes(b"installed implementations"),
+            compiler: ContentHash::of_bytes(b"current compiler"),
+            policy: ContentHash::of_bytes(b"current V policy"),
+            options: ContentHash::of_bytes(b"semantic options"),
+            entry: path("main"),
+        };
+        let records = cache.records(session());
+        let archive = |definition: &Definition| {
+            let bytes = records
+                .encode_tir(definition, |_| Some((path("main"), 0)))
+                .unwrap();
+            let reference = hirsel_product_codec::CheckedTir::DOMAIN
+                .reference(&bytes)
+                .unwrap();
+            Arc::new(
+                hirsel_product_codec::CheckedTir::open(
+                    bytes.into(),
+                    reference,
+                    records.clone(),
+                    |_, _| Some(Anchor::default()),
+                )
+                .unwrap(),
+            )
+        };
+        let valid = archive(&fixture.definition);
+        let source_check = Domain { kind: 1, schema: 1 }
+            .reference(b"source Check")
+            .unwrap();
+        let import = |archive: &Arc<hirsel_product_codec::CheckedTir>| {
+            cache
+                .import_execution_definition(
+                    &inputs,
+                    archive,
+                    session(),
+                    |_| Some((path("main"), 0)),
+                    &fixture.signatures,
+                )
+                .unwrap()
+        };
+        assert!(
+            import(&valid).is_none(),
+            "V-valid bytes need a source binding"
+        );
+        cache
+            .publish_execution_product(&inputs, valid.reference(), source_check)
+            .unwrap();
+        let accepted = import(&valid).unwrap();
+        assert!(accepted.holds(&valid, &session(), inputs.policy, &fixture.signatures));
+        // The archive is well framed and its source binding matches exactly.
+        // Its entry names no body, which V must reject independently of both.
+        let mut invalid = fixture.definition.clone();
+        invalid.entry = BodyId(u32::MAX);
+        let invalid = archive(&invalid);
+        cache
+            .publish_execution_product(&inputs, invalid.reference(), source_check)
+            .unwrap();
+        assert!(
+            cache
+                .execution_product(&inputs, invalid.reference())
+                .is_some()
+        );
+        assert!(import(&invalid).is_none());
     }
 
     #[test]

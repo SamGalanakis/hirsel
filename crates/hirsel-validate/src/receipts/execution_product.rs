@@ -5,7 +5,7 @@ use hirsel_artifact_store::Reference;
 
 pub(super) const DOMAIN: Domain = Domain {
     kind: 0x5600_0009,
-    schema: 1,
+    schema: 2,
 };
 
 /// Independently observed compiler inputs. These identities do not grant V
@@ -13,7 +13,12 @@ pub(super) const DOMAIN: Domain = Domain {
 /// representations, rather than just public signature fingerprints.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ExecutionProductInputs {
+    /// Identity of the admitted immutable consumer capture, including its
+    /// selected demand scope. A loader observation digest is not a capture.
     pub namespace: ContentHash,
+    /// Exact loader observations belonging to that request, including raw
+    /// bytes, manifests, resolution, absent files and directory membership.
+    pub observations: ContentHash,
     pub imports: ContentHash,
     pub compiler: ContentHash,
     pub policy: ContentHash,
@@ -24,7 +29,7 @@ impl ExecutionProductInputs {
     pub(super) fn key(&self, product: Reference) -> Option<ContentHash> {
         let bytes = bincode::serialize(&(self, product)).ok()?;
         Some(ContentHash::of_parts(
-            "hirsel.validate.execution-product-binding.v1",
+            "hirsel.validate.execution-product-binding.v2",
             [bytes.as_slice()],
         ))
     }
@@ -58,6 +63,32 @@ pub(super) struct BindingRecord {
 }
 
 impl VerifierCache {
+    /// Import an individual indexed body whose exact bytes have a local
+    /// source-acceptance binding. Opening/framing the archive is the caller's
+    /// bounded codec operation; it supplies no V authority. This deliberately
+    /// runs V even when this verifier holds a receipt for another use of the
+    /// body. A complete execution importer must apply this to every body and
+    /// separately bind its declarations, constants and runtime metadata.
+    pub fn import_execution_definition<'a>(
+        &self,
+        current: &ExecutionProductInputs,
+        archive: &Arc<hirsel_product_codec::CheckedTir>,
+        types: Arc<TypeInterner>,
+        owner: impl FnMut(Anchor) -> Option<(DefPath, u32)>,
+        signatures: impl Into<crate::SignatureInputs<'a>>,
+    ) -> Result<Option<VerifiedDefinition>, crate::ViewRefusal> {
+        if self
+            .execution_product(current, archive.reference())
+            .is_none()
+            || !archive.uses_types(&types)
+        {
+            return Ok(None);
+        }
+        let (_, _, _, evidence) =
+            validate_definition(archive, types, owner, signatures, current.policy, None)?;
+        Ok(evidence)
+    }
+
     /// The source-check coordinator calls this only after its Check/Run join
     /// accepts the same immutable input snapshot. Ordinary producer archives
     /// cannot populate the verifier's private associations.

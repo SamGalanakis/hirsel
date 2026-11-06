@@ -399,7 +399,7 @@ impl ReaderSequence {
         cx: &mut dyn hirsel_engine_runtime::QueryContext,
         store: &dyn ResultStore,
         scratch: u64,
-        lower: &FrontLowerQueries,
+        lower: &Arc<FrontLowerQueries>,
     ) -> Result<Option<ReaderRefresh>, Reference> {
         use scheduled_lower::check::CheckRefresh;
         for entry in &mut self.0 {
@@ -417,27 +417,31 @@ impl ReaderSequence {
                 return Ok(None);
             };
             if let ReaderSource::Front(id, file, owner) = &source {
-                let current = lower.check_front().map_err(|_| lower.protocol_refusal())?;
-                if reads
-                    .first_changed(|key| current.observe(id.path(), key))
-                    .is_none()
-                {
+                let current = lower
+                    .check_current()
+                    .map_err(|_| lower.protocol_refusal())?;
+                let Some(changed) = reads.first_changed(|key| current.check_read(id.path(), key))
+                else {
                     continue;
-                }
-                let actual = current
+                };
+                let front = current.body_front();
+                let actual = front
                     .query(id.path())
                     .ok_or_else(|| lower.protocol_refusal())?;
                 if owner.query(id.path()) == Some(actual) {
                     return Err(lower.protocol_failure(
                         actual,
-                        "Check Front observations changed without a successor producer",
+                        &format!(
+                            "Check Front {} read {changed:?} changed without a successor producer",
+                            id.path()
+                        ),
                     ));
                 }
                 let selected = match cx.read(actual) {
                     Poll::Pending => return Ok(Some(ReaderRefresh::Waiting(actual))),
                     Poll::Ready(selected) => selected,
                 };
-                let facts = current.check_facts(selected.clone()).ok_or_else(|| {
+                let facts = front.check_facts(selected.clone()).ok_or_else(|| {
                     selected
                         .clone()
                         .err()
@@ -448,7 +452,7 @@ impl ReaderSequence {
                 };
                 cx.consume(actual);
                 entry.receipt = receipt.clone();
-                entry.source = Some(ReaderSource::Front(*id, *file, current));
+                entry.source = Some(ReaderSource::Front(*id, *file, front.clone()));
                 return Ok(Some(ReaderRefresh::Front {
                     file: *file,
                     path: id.path().clone(),

@@ -98,11 +98,21 @@ impl FrontLowerQueries {
 }
 
 impl FrontLowerQueries {
-    pub(in crate::queries) fn check_front(&self) -> Result<Arc<FrontBodyQueries>, QueryError> {
+    pub(in crate::queries) fn check_current(self: &Arc<Self>) -> Result<Arc<Self>, QueryError> {
         match self.demand_producer() {
-            Some(producer) => Ok(producer.current()?.front.clone()),
-            None => Ok(self.front.clone()),
+            Some(producer) => producer.current(),
+            None => Ok(self.clone()),
         }
+    }
+
+    /// Check includes generated registrations' execution and layout reads,
+    /// which Front's deliberately partial cache observer cannot inspect.
+    pub(in crate::queries) fn check_read(
+        &self,
+        path: &DefPath,
+        key: &ReadKey,
+    ) -> Option<ContentHash> {
+        self.observe(path, key)
     }
 
     /// A failed join is a reuse miss. Demand the ordinary producer in the

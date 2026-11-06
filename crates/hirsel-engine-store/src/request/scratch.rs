@@ -227,15 +227,22 @@ impl ResultStore for ScratchStore {
         if !self.admission.charge(metadata) {
             return None;
         }
-        // Only an open provider inode replaces required scratch backing. A
-        // successful but evictable write acknowledgement is insufficient.
+        // A private hard link retains the provider inode across eviction and
+        // abort without keeping a descriptor open for every produced record.
         let held = if self.selected.put_content(domain, bytes) == Some(expected)
             && self.admission.try_charge(ENTRY_CHARGE)
         {
             let held = self
                 .selected
                 .local_product_store()
-                .and_then(|store| store.hold_content(expected))
+                .and_then(|store| {
+                    store.hold_content(
+                        expected,
+                        self.root
+                            .0
+                            .join(format!("provider-{}", files.entries.len())),
+                    )
+                })
                 .filter(|held| held.retained_bytes() <= self.disk_limit.saturating_sub(files.disk))
                 .filter(|held| held.metadata_bytes() <= ENTRY_CHARGE);
             self.admission
@@ -668,6 +675,50 @@ mod tests {
         assert!(budget.reserve(1).is_err());
     }
     #[test]
+    #[cfg(target_os = "linux")]
+    fn retained_provider_records_do_not_retain_one_descriptor_per_output() {
+        let parent = tempfile::tempdir().unwrap();
+        let selected = Arc::new(DirStore::new(parent.path().join("provider")));
+        let ram = 512 << 10;
+        let budget = hirsel_engine_admission::ProcessBudget::new(ram);
+        let request = RequestStore::with_scratch(
+            selected.clone(),
+            budget.reserve(ram).unwrap(),
+            parent.path(),
+            1 << 20,
+        )
+        .unwrap();
+        let operation = request.operation_scope();
+        let references: Vec<_> = (0u8..96)
+            .map(|number| request.put_content(domain(), &vec![number; 5000]).unwrap())
+            .collect();
+        let descriptors = fs::read_dir("/proc/self/fd")
+            .unwrap()
+            .filter_map(|entry| fs::read_link(entry.ok()?.path()).ok())
+            .filter(|path| {
+                path.starts_with(parent.path())
+                    && path.file_name().is_some_and(|name| {
+                        name != "contents" && !name.as_encoded_bytes().ends_with(b".lock")
+                    })
+            })
+            .count();
+        assert_eq!(
+            descriptors, 0,
+            "provider descriptors must close after retaining backing"
+        );
+        drop(operation);
+        selected.local_product_store().unwrap().collect(0);
+        for (number, reference) in references.into_iter().enumerate() {
+            assert_eq!(
+                &*request.get_content(reference).unwrap(),
+                &vec![number as u8; 5000]
+            );
+        }
+        drop(request);
+        assert_eq!(budget.reserved(), 0);
+    }
+
+    #[test]
     fn scratch_preserves_selected_backend_capabilities_and_zero_refuses() {
         let parent = tempfile::tempdir().unwrap();
         let empty = hirsel_engine_admission::ProcessBudget::new(0);
@@ -752,8 +803,8 @@ mod tests {
                 }
                 assert!(request.get_content(forged).is_none());
             }
-            // The descriptor, rather than the publication epoch, owns the
-            // original bytes after an unpublished provider tail is aborted.
+            // The private link retains the original bytes after an unpublished
+            // provider tail is aborted.
             drop(operation);
             selected.local_product_store().unwrap().collect(0);
             assert_eq!(&*request.get_content(reference).unwrap(), &payload);

@@ -375,11 +375,11 @@ impl WeakBytes {
     }
 }
 
-/// A held immutable provider file, independent of its pathname and publication
-/// epoch. Unlink, eviction and abort cannot discard its physical backing.
+/// A private hard link to a provider inode, independent of publication and
+/// eviction. Descriptors live only while checking or reading the container.
 /// Each newly opened range still checks the full container and reference.
 pub struct HeldContent {
-    file: Arc<File>,
+    path: PathBuf,
     reference: Reference,
 }
 impl HeldContent {
@@ -387,14 +387,15 @@ impl HeldContent {
         let len = usize::try_from(self.reference.len)
             .ok()?
             .checked_add(HEADER)?;
-        if self.file.metadata().ok()?.len() != len as u64 {
+        let file = File::open(&self.path).ok()?;
+        if file.metadata().ok()?.len() != len as u64 {
             return None;
         }
         #[cfg(unix)]
         {
             use std::os::unix::fs::FileExt;
             let mut bytes = vec![0; len];
-            self.file.read_exact_at(&mut bytes, 0).ok()?;
+            file.read_exact_at(&mut bytes, 0).ok()?;
             checked_container(Bytes::from(bytes), self.reference)
         }
         #[cfg(not(unix))]
@@ -406,9 +407,12 @@ impl HeldContent {
         self.reference.len + HEADER as u64
     }
     pub fn metadata_bytes(&self) -> u64 {
-        (size_of::<Self>()
-            + (size_of::<File>() + 2 * size_of::<usize>()).next_multiple_of(align_of::<usize>()))
-            as u64
+        (size_of::<Self>() + self.path.capacity()) as u64
+    }
+}
+impl Drop for HeldContent {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
     }
 }
 
@@ -944,26 +948,28 @@ impl Store {
     pub fn get(&self, reference: Reference) -> Option<Bytes> {
         checked_container(self.raw_container(reference)?, reference)
     }
-    /// Lease a standalone provider inode, including unpublished staging files.
-    /// Small packed records keep the bounded request spool instead of pinning a
-    /// larger segment. std File ownership, as in Region::map_file, retains the
-    /// inode without copying it or keeping its publication transaction alive.
-    pub fn hold_content(&self, reference: Reference) -> Option<HeldContent> {
+    /// Lease a standalone provider inode under a caller-owned private path.
+    /// Small packed records and cross-filesystem links use the caller's spool.
+    /// Rust 1.97.1 std fs.rs:2837-2880 hard_link retains the inode without copying it;
+    /// opening the link before checking binds validation to the retained inode.
+    pub fn hold_content(&self, reference: Reference, path: PathBuf) -> Option<HeldContent> {
         if reference.len <= pack::SMALL as u64 || reference.len > MAX_RECORD as u64 {
             return None;
         }
         #[cfg(unix)]
         {
-            let held = HeldContent {
-                file: Arc::new(File::open(self.output_path(reference)).ok()?),
-                reference,
-            };
+            fs::hard_link(self.output_path(reference), &path).ok()?;
+            let held = HeldContent { path, reference };
+            if !fs::symlink_metadata(&held.path).ok()?.is_file() {
+                return None;
+            }
+            let file = File::open(&held.path).ok()?;
             let len = usize::try_from(reference.len).ok()?.checked_add(HEADER)?;
-            if held.file.metadata().ok()?.len() != len as u64 {
+            if file.metadata().ok()?.len() != len as u64 {
                 return None;
             }
             checked_content(
-                Arc::new(Region::map_file(held.file.clone(), len).ok()?),
+                Arc::new(Region::map_file(Arc::new(file), len).ok()?),
                 reference,
             )?;
             Some(held)

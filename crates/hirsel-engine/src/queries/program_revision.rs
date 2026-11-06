@@ -150,7 +150,9 @@ impl QueryEngine {
             let depth = self.s1.finish_requests(self.depth_limit());
             let (_, acceptance, selections) = self.end_evaluation_validation();
             let node = result?;
-            let reads = reads.map_err(|_| QueryError::NotImplemented)?;
+            let reads = reads.map_err(|error| {
+                operational(format!("inconsistent semantic reads for {path}: {error:?}"))
+            })?;
             self.store_semantic_body(path, &node, &reads, depth, selections, acceptance.as_ref())?;
             node
         };

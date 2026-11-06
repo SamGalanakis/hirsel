@@ -5,14 +5,15 @@ hirsel_guard::install!(test_alloc::Counting: test_alloc::Counting);
 
 #[cfg(test)]
 use hirsel_engine_admission::test_alloc;
+use hirsel_query_products::reads::{ReadKey, Reads, ReadsBuilder, Revision};
+use hirsel_query_products::{DependencyReads, LoweringPolicy, QueryKind};
 mod work;
 pub use work::WorkStats;
 mod native_audit;
 pub use native_audit::{CleanupSite, SourceAudit};
 mod native_semantic;
 pub use native_semantic::NativeSemanticProgram;
-mod native_metadata;
-pub use native_metadata::NativeMetadataWeight;
+pub mod native_metadata;
 mod native_queries;
 pub use hirsel_product_codec::{CheckedTir, TirBlockView, TirBodyView, TirMatchView, TirView};
 pub use native_queries::*;
@@ -39,8 +40,7 @@ mod phases;
 pub use phases::*;
 mod diagnostics;
 pub mod memo;
-pub mod store;
-pub use memo::{Durability, ReadKey, Reads, ReadsBuilder, Revision};
+
 mod generic_graph;
 mod storage_graph;
 mod table_keys;
@@ -72,7 +72,7 @@ mod package;
 pub mod requests;
 pub use store::release_shared_caches;
 mod policy;
-pub use policy::{LoweringPolicy, Results, Verify, free_sessions};
+pub use policy::{Results, Verify, free_sessions};
 mod admission;
 mod proof_export;
 mod queries;
@@ -163,52 +163,6 @@ pub enum CheckCompletion {
     Incomplete {
         phase: QueryKind,
     },
-}
-/// Cache domains keep outputs of different phases distinct (PROG-5).
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Ord, PartialOrd)]
-pub enum QueryKind {
-    Lex,
-    Format,
-    Interpret,
-    Parse,
-    Resolve,
-    Signature,
-    Modes,
-    Check,
-    Lower,
-    Summary,
-    CheckedSummary,
-    Registration,
-    Evaluate,
-    Generate,
-    GeneratedRegistration,
-    SourceAudit,
-    SemanticBody,
-    PrivateInference,
-}
-impl QueryKind {
-    pub fn phase_name(self) -> &'static str {
-        match self {
-            Self::Lex => "lexing",
-            Self::Parse => "parsing",
-            Self::Resolve => "name resolution",
-            Self::Signature => "signature normalization",
-            Self::Check => "body checking",
-            Self::Modes => "mode checking",
-            Self::Lower => "TIR lowering",
-            Self::Format => "formatting",
-            Self::Interpret => "interpretation",
-            Self::Summary => "definition summary",
-            Self::CheckedSummary => "checked definition summary",
-            Self::Registration => "staged declaration registration",
-            Self::Evaluate => "compile-time evaluation",
-            Self::Generate => "generated source evaluation",
-            Self::GeneratedRegistration => "generated instance registration",
-            Self::SourceAudit => "source allocation audit",
-            Self::SemanticBody => "semantic source body",
-            Self::PrivateInference => "private uniqueness inference",
-        }
-    }
 }
 /// All non-source meaning inputs are explicit; topology is intentionally absent (DET-3, PROG-5).
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -654,6 +608,7 @@ mod tests {
 }
 
 pub mod products;
+pub mod store;
 
 pub use queries::native_discovery::{
     NATIVE_DISCOVERY_KIND, NativeBodyContracts, NativeDiscoveryCache, NativeDiscoveryCounts,

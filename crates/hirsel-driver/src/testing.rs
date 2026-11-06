@@ -331,7 +331,7 @@ pub fn discover(
         path: path.to_owned(),
         inputs: inputs.clone(),
         operation: CompileOperation::Check {
-            lowering: hirsel_engine::LoweringPolicy::Reachable,
+            lowering: hirsel_query_products::LoweringPolicy::Reachable,
         },
     })?;
     let CompileResult::Check(checked) = &output.result else {
@@ -427,7 +427,7 @@ pub(crate) fn check_empty_selection(
         path: path.to_owned(),
         inputs: discovery.inputs.clone(),
         operation: CompileOperation::Check {
-            lowering: hirsel_engine::LoweringPolicy::Reachable,
+            lowering: hirsel_query_products::LoweringPolicy::Reachable,
         },
     })?;
     let complete = {

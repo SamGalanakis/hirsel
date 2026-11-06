@@ -1,7 +1,8 @@
 use hirsel_driver::CompilerRequestsExt;
-use hirsel_engine::{CompileConfig, DefinitionQueries, QueryKind};
+use hirsel_engine::{CompileConfig, DefinitionQueries};
 use hirsel_front_phases::COMPILER;
 use hirsel_intern::jobs::with_compiler_stack;
+use hirsel_query_products::QueryKind;
 use hirsel_syntax::{DefPath, ItemPath, PackageId};
 
 #[test]

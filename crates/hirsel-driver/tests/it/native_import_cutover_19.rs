@@ -1,13 +1,15 @@
 //! Import-cache vectors exercised through the demand producer before the old
 //! whole-program replay provider is removed.
 use hirsel_driver::*;
-use hirsel_engine::{store::ResultStore, *};
+use hirsel_engine::store::ResultStore;
+use hirsel_engine::*;
 use hirsel_front_phases::*;
 use hirsel_host_io::launch::*;
 use hirsel_intern::jobs::with_compiler_stack;
 use hirsel_native_cache::declarations::NativeDeclarations;
 use hirsel_native_cache::source_inputs::*;
 use hirsel_native_queries::demand::DemandInstances;
+
 use std::{collections::BTreeMap, sync::Arc};
 
 type Bodies = BTreeMap<Vec<u8>, (Vec<u8>, Vec<u8>)>;

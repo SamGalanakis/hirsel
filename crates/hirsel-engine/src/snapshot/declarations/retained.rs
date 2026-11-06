@@ -2,7 +2,7 @@
 //! independent of source text and type interner ownership. Shared rows are
 //! counted per occurrence; inspection creates no lazy sites or frozen inputs.
 use super::*;
-use crate::NativeMetadataWeight as Weight;
+use hirsel_query_products::retained::MetadataWeight as Weight;
 use std::collections::BTreeSet;
 
 fn package(weight: &mut Weight, value: &PackageId) {
@@ -134,7 +134,7 @@ fn files(weight: &mut Weight, values: &BTreeMap<FileId, Arc<[Arc<ItemSyntax>]>>)
     weight.map(values, |w, _, items| {
         w.add(hirsel_engine_admission::retained_arc_bytes(&**items) as usize);
         for syntax in &**items {
-            w.add(crate::memo::retained::retained_syntax_bytes(syntax) as usize);
+            w.add(hirsel_query_products::retained::retained_syntax_bytes(syntax) as usize);
         }
     });
 }

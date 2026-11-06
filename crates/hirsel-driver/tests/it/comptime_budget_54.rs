@@ -6,10 +6,13 @@
 //! test/SemaCXX/constexpr-steps.cpp boundary (check before decrement,
 //! lib/AST/ExprConstant.cpp:969-980), restated in Hirsel's charge units.
 use hirsel_driver::*;
-use hirsel_engine::{store::MemStore, *};
+use hirsel_engine::store::MemStore;
+use hirsel_engine::*;
 use hirsel_front_phases::*;
 use hirsel_host_io::launch::*;
 use hirsel_intern::jobs::with_compiler_stack;
+
+use hirsel_query_products::LoweringPolicy;
 use std::sync::Arc;
 
 /// A diagnostic as lines: rule, primary line, secondary lines and notes.

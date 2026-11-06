@@ -1,7 +1,7 @@
 //! Admitted typed front facts across fresh source graphs. Complete read checks
 //! and bounded source bindings validate and relocate facts without archives.
 use super::*;
-use crate::memo::retained::Weight;
+use hirsel_query_products::retained::Weight;
 
 struct Row {
     id: u32,
@@ -81,7 +81,7 @@ impl FrontCarry {
         decode_bytes: u64,
         type_rows: Option<Arc<hirsel_types::TypeInterner>>,
     ) {
-        let mut weight = crate::NativeMetadataWeight::default();
+        let mut weight = hirsel_query_products::retained::MetadataWeight::default();
         weight.tree::<hirsel_span::Anchor, (DefId, u32)>(bindings.len());
         let charge = facts
             .view()
@@ -158,7 +158,7 @@ impl FrontCarry {
 // Count the complete trees once using Rust's minimum node occupancy bound.
 // Charging a whole node for every read makes bounded carry discard most facts.
 fn index_bytes(entries: usize, subscriptions: usize) -> u64 {
-    let mut weight = crate::NativeMetadataWeight::default();
+    let mut weight = hirsel_query_products::retained::MetadataWeight::default();
     weight.tree::<Key, Row>(entries);
     weight.tree::<u32, Key>(entries);
     weight.tree::<(ReadKey, DefId, u32), ()>(subscriptions);
@@ -471,7 +471,7 @@ impl FactsRef<'_> {
         if let Some(keys) = self.table_keys {
             w.arc(keys, |w, keys| keys.retained(w));
         }
-        let mut dead = crate::NativeMetadataWeight::default();
+        let mut dead = hirsel_query_products::retained::MetadataWeight::default();
         if let Some(uses) = self.dead_arms {
             if !uses.errors.is_empty() {
                 dead.tree::<DefPath, ()>(uses.errors.len());
@@ -570,7 +570,7 @@ impl FrontBodyQueries {
             return Err(carry);
         }
         let rows = carry.rows.lock().unwrap_or_else(|e| e.into_inner());
-        let mut weight = crate::NativeMetadataWeight::default();
+        let mut weight = hirsel_query_products::retained::MetadataWeight::default();
         weight.add(size_of::<CarryChanges>() + 2 * size_of::<usize>());
         weight.tree::<Key, u64>(rows.entries.len());
         let mut retention = self.retention.lock().unwrap_or_else(|e| e.into_inner());

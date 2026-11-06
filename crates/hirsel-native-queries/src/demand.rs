@@ -4,8 +4,12 @@ use super::{
     declarations::NativeDeclarations, instance::*, ready_source::ReadySourceFacts, recipes::*,
     source_inputs::NativeSourceProvider, *,
 };
+use hirsel_engine::NativeRecordSource;
+use hirsel_engine::NativeRecords;
+use hirsel_engine::Verify;
+use hirsel_engine::native_metadata::NativeMetadataExt;
+use hirsel_engine::store::ResultStore;
 use hirsel_engine::store::{Action, Domain, Reference};
-use hirsel_engine::{NativeRecordSource, NativeRecords, Verify, store::ResultStore};
 use hirsel_layout::{instance::InstanceKey, layout::LayoutBuilder};
 use hirsel_lir::{
     LayoutKeys,
@@ -102,7 +106,7 @@ impl Request {
             layouts: _,
             plan: _,
         } = &*self.0;
-        let mut weight = hirsel_engine::NativeMetadataWeight::default();
+        let mut weight = hirsel_query_products::retained::MetadataWeight::default();
         weight.arc(&self.0);
         let mut count = |key: &Arc<NamedKey>| {
             weight.arc(key);
@@ -172,7 +176,7 @@ impl InstanceBodyFacts {
         self
     }
     fn retained_metadata_bytes(&self) -> u64 {
-        let mut weight = hirsel_engine::NativeMetadataWeight::default();
+        let mut weight = hirsel_query_products::retained::MetadataWeight::default();
         weight.add(size_of::<Self>() + 2 * size_of::<usize>());
         weight.vec(&self.callees, |w, (path, _)| w.path(path));
         weight.vec(&self.dependencies, |w, key| {
@@ -312,7 +316,7 @@ impl DiscoveredInstance {
         }
     }
     pub fn wrapper_bytes(&self) -> u64 {
-        let mut weight = hirsel_engine::NativeMetadataWeight::default();
+        let mut weight = hirsel_query_products::retained::MetadataWeight::default();
         weight.add(size_of::<Self>() + 2 * size_of::<usize>());
         weight.arc(&self.product);
         weight.bytes()
@@ -329,7 +333,7 @@ impl InstanceFacts {
             .saturating_add(self.body.retained_metadata_bytes())
     }
     fn local_metadata_bytes(&self) -> u64 {
-        let mut weight = hirsel_engine::NativeMetadataWeight::default();
+        let mut weight = hirsel_query_products::retained::MetadataWeight::default();
         weight.add(size_of::<Self>() + 2 * size_of::<usize>());
         weight.vec(&self.emission.callbacks, |w, path| w.path(path));
         weight.add(self.emission.inline.retained_bytes() as usize);
@@ -352,7 +356,7 @@ impl InstanceSourceFacts {
         self
     }
     fn retained_metadata_bytes(&self) -> u64 {
-        let mut weight = hirsel_engine::NativeMetadataWeight::default();
+        let mut weight = hirsel_query_products::retained::MetadataWeight::default();
         weight.add(size_of::<Self>() + 2 * size_of::<usize>());
         weight.vec(&self.selection_reads, |w, read| {
             w.path(&read.declaration);
@@ -395,7 +399,7 @@ pub struct DemandInstances {
 impl DemandInstances {
     pub fn retained_index_bytes(&mut self) -> u64 {
         use super::ownership_compilation::metadata as m;
-        let mut w = hirsel_engine::NativeMetadataWeight::default();
+        let mut w = hirsel_query_products::retained::MetadataWeight::default();
         w.packed_map(&mut self.requests, |w, key, request| {
             w.flat_vec(key);
             w.add(request.retained_metadata_bytes() as usize);

@@ -1,9 +1,11 @@
 //! Conditional safety observation is an admitted continuation. A rejected or
 //! incomplete check publishes its diagnostics without demanding a Run closure.
+use hirsel_engine::CheckOutput;
+use hirsel_engine::FrontCheckQueries;
+use hirsel_engine::FrontRunQueries;
+use hirsel_engine::ToolError;
+use hirsel_engine::store::ResultStore;
 use hirsel_engine::store::{Action, Address, Domain, Reference};
-use hirsel_engine::{
-    CheckOutput, FrontCheckQueries, FrontRunQueries, ToolError, store::ResultStore,
-};
 use hirsel_engine_runtime::*;
 
 use hirsel_syntax::{ContentHash, DefPath};

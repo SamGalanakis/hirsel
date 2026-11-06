@@ -1,10 +1,14 @@
 use hirsel_driver::*;
 use hirsel_engine::products::LIVE_LOWER;
 use hirsel_engine::products::LiveLowerProduct;
+use hirsel_engine::store::MemStore;
 use hirsel_engine::store::ResultStore;
-use hirsel_engine::{store::MemStore, *};
+use hirsel_engine::*;
 use hirsel_engine_runtime::*;
 use hirsel_intern::jobs::with_compiler_stack;
+
+use hirsel_query_products::QueryKind;
+use hirsel_query_products::reads::{ReadKey, Reads, ReadsBuilder};
 
 use hirsel_front_phases::*;
 use hirsel_host_io::launch::*;
@@ -295,8 +299,8 @@ fn persisted_entry_stops_at_first_observed_changed_read() {
         },
         modules: vec![],
     };
-    let missing_lookup = ReadKey::Lookup(hirsel_engine::memo::LookupKey::of(
-        hirsel_engine::memo::LookupSource::Manifest,
+    let missing_lookup = ReadKey::Lookup(hirsel_query_products::reads::LookupKey::of(
+        hirsel_query_products::reads::LookupSource::Manifest,
         &context,
         None,
         &["missing".into()],

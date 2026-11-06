@@ -50,7 +50,7 @@ impl FrontRegistrationBootstrap {
     /// Copied path cursors and the returned view vector. Bodies, text and
     /// accepted syntax keep the distinct producer reservations above.
     pub fn input_bytes(definitions: &[DefPath], generators: usize) -> Option<u64> {
-        let mut weight = crate::NativeMetadataWeight::default();
+        let mut weight = hirsel_query_products::retained::MetadataWeight::default();
         weight.add(size_of::<Self>() + size_of::<FrontRegistrationBootstrapAdmission>());
         weight.add(size_of::<Vec<DefPath>>());
         weight.add(definitions.len().checked_mul(size_of::<DefPath>())?);

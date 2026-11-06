@@ -1,11 +1,13 @@
 //! Per-definition native views over settled ordinary source products. Tasks
 //! demand one source descriptor, without assembling a source/native snapshot.
 //! Target/ABI/toolchain/policy reads and C/Ready admission stay in consumers.
-use hirsel_engine::{
-    FrontNativeDefinitionOutput, FrontNativeDefinitionQueries, NativeDefinitionProduct,
-    NativeMetadataWeight, NativeOriginalProduct, store::*,
-};
+use hirsel_engine::FrontNativeDefinitionOutput;
+use hirsel_engine::FrontNativeDefinitionQueries;
+use hirsel_engine::NativeDefinitionProduct;
+use hirsel_engine::NativeOriginalProduct;
+use hirsel_engine::store::*;
 use hirsel_engine_runtime::*;
+use hirsel_query_products::retained::MetadataWeight;
 
 use hirsel_rc::instance::{Requirement, SourceDeclaration};
 use hirsel_syntax::{ContentHash, DefPath};
@@ -89,7 +91,7 @@ impl NativePreparationQueries {
         if weight.retained < size_of::<Task>() as u64 {
             return Err("native preparation continuation exceeds admission".into());
         }
-        let mut metadata = NativeMetadataWeight::default();
+        let mut metadata = hirsel_query_products::retained::MetadataWeight::default();
         metadata.add(size_of::<Self>() + 2 * size_of::<usize>());
         metadata.tree::<ContentHash, Entry>(definitions.len());
         for path in definitions {
@@ -257,12 +259,12 @@ impl NativePreparationQueries {
     }
 }
 fn copied_bytes(source: &hirsel_engine::NativeDiscoveryProduct) -> u64 {
-    fn vector<T>(weight: &mut NativeMetadataWeight, len: usize) {
+    fn vector<T>(weight: &mut MetadataWeight, len: usize) {
         weight.add(len.saturating_mul(size_of::<T>()));
     }
     // These projections clone vectors or collect exact-size slice iterators.
     // Reserve their requested layouts before allocating any copied view.
-    let mut weight = NativeMetadataWeight::default();
+    let mut weight = hirsel_query_products::retained::MetadataWeight::default();
     weight.add(size_of::<NativePreparedSource>() + 2 * size_of::<usize>());
     if let Some(contracts) = &source.contracts {
         weight.add(

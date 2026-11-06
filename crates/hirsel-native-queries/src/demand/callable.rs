@@ -146,7 +146,7 @@ struct Rewritten {
     value: Reference,
     inline: Vec<ContentHash>,
 }
-fn address_weight(w: &mut hirsel_engine::NativeMetadataWeight, key: &InstanceAddress) {
+fn address_weight(w: &mut hirsel_query_products::retained::MetadataWeight, key: &InstanceAddress) {
     w.path(key.instance.definition());
     w.add(key.instance.retained_encoding_bytes());
 }
@@ -216,7 +216,7 @@ impl DemandInstances {
             .into_iter()
             .map(|(key, rows)| Ok((key, self.snapshot(&rows)?)))
             .collect::<Result<BTreeMap<_, _>, String>>()?;
-        let mut invocation_weight = hirsel_engine::NativeMetadataWeight::default();
+        let mut invocation_weight = hirsel_query_products::retained::MetadataWeight::default();
         invocation_weight.map(&invocation_records, |w, path, _| w.path(path));
         let index_bytes = self.retained_index_bytes() + invocation_weight.bytes();
         let mut graph_charge = self
@@ -271,7 +271,7 @@ impl DemandInstances {
             );
         }
         let components = hirsel_graph::components(&edges);
-        let mut graph_weight = hirsel_engine::NativeMetadataWeight::default();
+        let mut graph_weight = hirsel_query_products::retained::MetadataWeight::default();
         graph_weight.vec(&originals, |w, (key, _)| address_weight(w, key));
         graph_weight.map(&index, |w, (path, _), _| w.path(path));
         graph_weight.vec(&edges, |w, edges| w.flat_vec(edges));
@@ -318,7 +318,8 @@ impl DemandInstances {
                 // The equation is the last consumer of this decoded record.
                 // An SCC keeps equations, not every member's unrelated facts.
                 drop(output);
-                let mut equation_weight = hirsel_engine::NativeMetadataWeight::default();
+                let mut equation_weight =
+                    hirsel_query_products::retained::MetadataWeight::default();
                 equation_weight.map(&equations, |w, (path, _), facts| {
                     w.path(path);
                     w.add(facts.retained_bytes() as usize)
@@ -346,7 +347,7 @@ impl DemandInstances {
                         .map(|safe| (name.clone(), safe))
                 })
                 .collect::<BTreeMap<_, _>>();
-            let mut w = hirsel_engine::NativeMetadataWeight::default();
+            let mut w = hirsel_query_products::retained::MetadataWeight::default();
             w.map(&equations, |w, (path, _), facts| {
                 w.path(path);
                 w.add(facts.retained_bytes() as usize);
@@ -354,7 +355,7 @@ impl DemandInstances {
             w.map(&outgoing, |w, (path, _), _| w.path(path));
             resize(&mut equation_charge, w.bytes())?;
             let solved = hirsel_rc::closure_calls::settle_operation_freedom(&equations, &outgoing)?;
-            let mut solved_weight = hirsel_engine::NativeMetadataWeight::default();
+            let mut solved_weight = hirsel_query_products::retained::MetadataWeight::default();
             solved_weight.map(&solved, |w, (path, _), _| w.path(path));
             let _solved_charge = self
                 .window
@@ -383,7 +384,7 @@ impl DemandInstances {
                 freedom[*index.get(&name).ok_or("missing callable SCC member")?] = Some(safe);
             }
         }
-        let mut freedom_weight = hirsel_engine::NativeMetadataWeight::default();
+        let mut freedom_weight = hirsel_query_products::retained::MetadataWeight::default();
         freedom_weight.flat_vec(&freedom);
         let graph_bytes = graph_bytes + freedom_weight.bytes();
         resize(&mut graph_charge, graph_bytes)?;
@@ -448,7 +449,7 @@ impl DemandInstances {
         }
         drop(components);
         drop(edges);
-        let mut graph_weight = hirsel_engine::NativeMetadataWeight::default();
+        let mut graph_weight = hirsel_query_products::retained::MetadataWeight::default();
         graph_weight.vec(&originals, |w, (key, _)| address_weight(w, key));
         graph_weight.map(&index, |w, (path, _), _| w.path(path));
         let graph_bytes = index_bytes + graph_weight.bytes();
@@ -456,7 +457,7 @@ impl DemandInstances {
         let mut selected = BTreeSet::new();
         let mut rewritten = Vec::new();
         while let Some(selection_record) = pending.pop_front() {
-            let mut w = hirsel_engine::NativeMetadataWeight::default();
+            let mut w = hirsel_query_products::retained::MetadataWeight::default();
             w.flat_vec(&interfaces);
             w.flat_vec(&counts);
             w.tree::<ContentHash, ()>(selected.len());
@@ -686,7 +687,7 @@ impl DemandInstances {
             Arc::make_mut(&mut request.0).key = Arc::new(selection.key.clone());
             Ok(request)
         };
-        let mut w = hirsel_engine::NativeMetadataWeight::default();
+        let mut w = hirsel_query_products::retained::MetadataWeight::default();
         w.flat_vec(&rewritten);
         w.map(&keys, |w, (path, _), _| w.path(path));
         w.flat_vec(&interfaces);
@@ -918,7 +919,7 @@ impl DemandInstances {
                 })?,
             );
         }
-        let mut w = hirsel_engine::NativeMetadataWeight::default();
+        let mut w = hirsel_query_products::retained::MetadataWeight::default();
         w.map(&rows, |_, _, _| ());
         let index = self
             .window

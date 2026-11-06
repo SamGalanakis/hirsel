@@ -3,7 +3,8 @@
 //! no legacy Ready/object controller or test implementation supplies products.
 use hirsel_compiler_identity::COMPILER_IDENTITY;
 use hirsel_driver::native;
-use hirsel_engine::{store::ResultStore, *};
+use hirsel_engine::store::ResultStore;
+use hirsel_engine::*;
 use hirsel_engine_runtime::*;
 
 use hirsel_native::object_queries::CodegenKey;

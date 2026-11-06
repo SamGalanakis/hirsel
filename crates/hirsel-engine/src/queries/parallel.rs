@@ -99,7 +99,7 @@ impl<T> Product<T> {
         owner: &DefPath,
         inherited: &Reads,
         source: &mut impl memos::ReadSource,
-    ) -> Result<Reads, crate::memo::Inconsistent> {
+    ) -> Result<Reads, hirsel_query_products::reads::Inconsistent> {
         match self {
             Self::Hit(entry) => Ok(entry.reads().clone()),
             Self::Computed(stage) => {
@@ -174,7 +174,7 @@ impl Completed {
     pub(crate) fn complete_reads(
         &self,
         source: &mut impl memos::ReadSource,
-    ) -> Result<Reads, crate::memo::Inconsistent> {
+    ) -> Result<Reads, hirsel_query_products::reads::Inconsistent> {
         let mut reads = Reads::empty();
         if let Some(product) = &self.resolution {
             reads = product.complete_reads(&self.definition, &reads, source)?;

@@ -64,7 +64,7 @@ impl MemoGraph {
         if let Some(touched) = &self.touched_memos {
             bytes = bytes.checked_add(set_bytes(touched.capacity())?)?;
         }
-        let mut stats = crate::NativeMetadataWeight::default();
+        let mut stats = hirsel_query_products::retained::MetadataWeight::default();
         stats.tree::<QueryKind, u64>(self.stats.recomputed.len());
         (bytes as u64).checked_add(stats.bytes())
     }
@@ -111,7 +111,8 @@ impl MemoGraph {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::memo::{ChangeSet, PackageKey, ReadsBuilder};
+    use crate::memo::ChangeSet;
+    use hirsel_query_products::reads::{PackageKey, ReadsBuilder};
     use hirsel_syntax::DefPath;
 
     #[test]

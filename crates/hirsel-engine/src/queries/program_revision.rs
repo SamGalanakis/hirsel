@@ -340,7 +340,7 @@ impl QueryEngine {
 }
 
 /// The definitions a memo executed or whose private representation it read.
-fn executed_definitions(reads: &crate::memo::Reads) -> Vec<DefPath> {
+fn executed_definitions(reads: &hirsel_query_products::reads::Reads) -> Vec<DefPath> {
     reads
         .iter()
         .filter(|(read, _)| {

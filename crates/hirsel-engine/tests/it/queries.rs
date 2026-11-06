@@ -8,6 +8,9 @@ use hirsel_engine_runtime::QueryRuntime;
 use hirsel_engine_runtime::RuntimeErrors;
 use hirsel_intern::jobs::with_compiler_stack;
 
+use hirsel_query_products::QueryKind;
+use hirsel_query_products::reads::Reads;
+
 use hirsel_intern::Symbol;
 use hirsel_span::{FileId, SourceMap, Span};
 use hirsel_syntax::Origin;
@@ -1217,9 +1220,9 @@ fn signature_hits_track_later_duplicate_headers_and_positions() {
                 .unwrap()
                 .iter()
                 .any(|(key, _)| *key
-                    == hirsel_engine::memo::ReadKey::DeclarationCandidates(DefId::intern(&path(
-                        "a"
-                    ))))
+                    == hirsel_query_products::reads::ReadKey::DeclarationCandidates(
+                        DefId::intern(&path("a"))
+                    ))
         );
         // The first candidate is byte-identical. Only the later candidate's
         // header changes and its position moves behind an unrelated item.

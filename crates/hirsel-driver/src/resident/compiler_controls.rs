@@ -4,9 +4,9 @@ use crate::requests::{
     CompileOperation, CompileRequest, CompileResult, CompilerRequests, RequestLimits,
 };
 use hirsel_engine::CompileConfig;
-use hirsel_engine::LoweringPolicy;
 use hirsel_engine::loader_inputs::InputLimits;
 use hirsel_engine::requests::observe_inputs;
+use hirsel_query_products::LoweringPolicy;
 
 use hirsel_intern::jobs::Jobs;
 use std::{collections::BTreeMap, path::PathBuf};
@@ -267,7 +267,7 @@ fn physical_inspection_counts_survive_revisions_eviction_and_detached_snapshot_o
             let count = inspection.definitions[0]
                 .recomputations
                 .iter()
-                .find(|(kind, _)| *kind == hirsel_engine::QueryKind::Check)
+                .find(|(kind, _)| *kind == hirsel_query_products::QueryKind::Check)
                 .unwrap()
                 .1;
             assert!(
@@ -278,13 +278,13 @@ fn physical_inspection_counts_survive_revisions_eviction_and_detached_snapshot_o
                 inspection
                     .memos
                     .iter()
-                    .any(|(key, _)| key.kind == hirsel_engine::QueryKind::Check)
+                    .any(|(key, _)| key.kind == hirsel_query_products::QueryKind::Check)
             );
             if revision == 0 {
                 held = Some(inspection.clone());
             }
             selected.operation = CompileOperation::RecomputeCounts {
-                queries: vec![(definition, hirsel_engine::QueryKind::Check)],
+                queries: vec![(definition, hirsel_query_products::QueryKind::Check)],
             };
             let repeated = host.request(&selected).unwrap().wait().unwrap();
             assert_eq!(repeated.work.recomputations, 0);
@@ -448,7 +448,10 @@ fn selected_safe_check_preserves_rejection_and_library_checks_without_run() {
             assert_eq!(checked.diagnostics.is_empty(), library);
             let mut inspect = selected.clone();
             inspect.operation = CompileOperation::RecomputeCounts {
-                queries: vec![(output.entry.clone(), hirsel_engine::QueryKind::Lower)],
+                queries: vec![(
+                    output.entry.clone(),
+                    hirsel_query_products::QueryKind::Lower,
+                )],
             };
             let counters = host.request(&inspect).unwrap().wait().unwrap();
             let CompileResult::RecomputeCounts(counts) = &counters.result else {
@@ -526,8 +529,8 @@ fn selected_private_layout_cache_matches_cold_and_preserves_unread_reader_work()
             let mut counter_request = selected.clone();
             counter_request.operation = CompileOperation::RecomputeCounts {
                 queries: [
-                    hirsel_engine::QueryKind::Resolve,
-                    hirsel_engine::QueryKind::Check,
+                    hirsel_query_products::QueryKind::Resolve,
+                    hirsel_query_products::QueryKind::Check,
                 ]
                 .map(|kind| (view.clone(), kind))
                 .to_vec(),
@@ -614,8 +617,8 @@ fn unread_representation_edit_adopts_reader_bodies_and_matches_the_cold_receipt(
         let mut counter = selected.clone();
         counter.operation = CompileOperation::RecomputeCounts {
             queries: [
-                hirsel_engine::QueryKind::Resolve,
-                hirsel_engine::QueryKind::Check,
+                hirsel_query_products::QueryKind::Resolve,
+                hirsel_query_products::QueryKind::Check,
             ]
             .map(|kind| (view.clone(), kind))
             .to_vec(),
@@ -774,7 +777,10 @@ fn immutable_query_capacity_preserves_sixteen_real_coalesced_subscribers() {
             assert!(checked(output).diagnostics.is_empty());
         }
         selected.operation = CompileOperation::RecomputeCounts {
-            queries: vec![(outputs[0].entry.clone(), hirsel_engine::QueryKind::Check)],
+            queries: vec![(
+                outputs[0].entry.clone(),
+                hirsel_query_products::QueryKind::Check,
+            )],
         };
         let counts = host.request(&selected).unwrap().wait().unwrap();
         let CompileResult::RecomputeCounts(counts) = &counts.result else {

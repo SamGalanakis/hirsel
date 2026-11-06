@@ -40,6 +40,7 @@ libc = { version = "0.2", default-features = false }
 hirsel-run-schema = { path = "../hirsel-run-schema" }
 
 [dev-dependencies]
+hirsel-query-products = { path = "../hirsel-query-products", features = ["test-support"] }
 hirsel-engine-runtime = { path = "../hirsel-engine-runtime", features = ["test-support"] }
 hirsel-engine-admission = { path = "../hirsel-engine-admission", features = ["test-alloc"] }
 tempfile = "3"

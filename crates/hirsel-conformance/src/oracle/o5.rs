@@ -274,7 +274,7 @@ fn hashes(path: &Path, roots: Vec<DefPath>) -> String {
             Ok(program) => program,
             Err(error) => return format!("load: {error}\n"),
         };
-        if let Err(error) = program.check(hirsel_engine::LoweringPolicy::Reachable) {
+        if let Err(error) = program.check(hirsel_query_products::LoweringPolicy::Reachable) {
             return format!("check: {error:?}\n");
         }
         match program.engine.definition_hashes(roots) {

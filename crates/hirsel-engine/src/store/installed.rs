@@ -5,7 +5,7 @@ mod manifest;
 mod semantic;
 use hirsel_syntax::{FileContext, PackageId};
 pub use semantic::{InstalledDefinition, InstalledDefinitionKey, InstalledDefinitionOwnership};
-pub(crate) use semantic::{
+pub use semantic::{
     InstalledSemanticInput, InstalledSpecializations, SEMANTIC_BODY, SEMANTIC_HEADER,
     SEMANTIC_INPUT, SEMANTIC_SOURCE,
 };
@@ -275,7 +275,7 @@ mod tests {
         let key = EntryKey(
             ContentHash::of_bytes(b"source"),
             ContentHash::default(),
-            crate::QueryKind::Parse,
+            hirsel_query_products::QueryKind::Parse,
         );
         let first = store
             .put(super::super::entry_domain(key.2), b"original source")
@@ -311,7 +311,11 @@ mod tests {
         assert_eq!(&*owner.get(&key).unwrap(), b"original source");
         assert!(
             owner
-                .get(&EntryKey(key.0, key.1, crate::QueryKind::Modes))
+                .get(&EntryKey(
+                    key.0,
+                    key.1,
+                    hirsel_query_products::QueryKind::Modes
+                ))
                 .is_none()
         );
         assert!(InstalledPackage::verify_store(directory.path()).is_err());
@@ -410,8 +414,8 @@ pub struct InstalledSource {
 
 #[derive(Debug)]
 /// One manifest generation and immutable, verified snapshots of demanded records.
-pub(super) struct InstalledRecords {
-    pub(super) root: PathBuf,
+pub(crate) struct InstalledRecords {
+    pub(crate) root: PathBuf,
     store: hirsel_artifact_store::Store,
     // Keep the physical index generation pinned until this operation releases it.
     _scope: hirsel_artifact_store::Batch,
@@ -419,7 +423,7 @@ pub(super) struct InstalledRecords {
     contents: Box<[Reference]>,
 }
 impl InstalledRecords {
-    pub(super) fn lookup(&self, address: Address) -> Option<Association> {
+    pub(crate) fn lookup(&self, address: Address) -> Option<Association> {
         let index = self
             .rows
             .binary_search_by_key(&address.0, |(key, _, _)| *key)
@@ -430,12 +434,12 @@ impl InstalledRecords {
             (row == *expected).then_some(row)
         })
     }
-    pub(super) fn content(&self, reference: Reference) -> Option<Bytes> {
+    pub(crate) fn content(&self, reference: Reference) -> Option<Bytes> {
         self.contents.binary_search(&reference).ok()?;
         self.store.get_owned(reference)
     }
-    pub(crate) fn metadata_bytes(&self) -> usize {
-        let mut weight = crate::NativeMetadataWeight::default();
+    pub fn metadata_bytes(&self) -> usize {
+        let mut weight = hirsel_query_products::retained::MetadataWeight::default();
         weight.add(
             std::mem::size_of::<Self>()
                 + 2 * std::mem::size_of::<usize>()
@@ -450,16 +454,16 @@ impl InstalledRecords {
 /// Immutable parse references survive their operation without retaining its
 /// complete integrity closure. Reads after release validate the pinned reference.
 #[derive(Debug)]
-pub(crate) struct InstalledSourceRecords {
-    pub(crate) installation: ContentHash,
+pub struct InstalledSourceRecords {
+    pub installation: ContentHash,
     store: hirsel_artifact_store::Store,
     rows: BTreeMap<ContentHash, Reference>,
     operation: std::sync::Weak<InstalledRecords>,
     definitions: BTreeMap<DefPath, InstalledDefinition>,
 }
 impl InstalledSourceRecords {
-    pub(crate) fn get(&self, key: &EntryKey) -> Option<Bytes> {
-        if key.2 != crate::QueryKind::Parse {
+    pub fn get(&self, key: &EntryKey) -> Option<Bytes> {
+        if key.2 != hirsel_query_products::QueryKind::Parse {
             return None;
         }
         let reference = *self.rows.get(&key.0)?;
@@ -468,8 +472,8 @@ impl InstalledSourceRecords {
             None => self.store.get_owned(reference),
         }
     }
-    pub(crate) fn metadata_bytes(&self) -> usize {
-        let mut weight = crate::NativeMetadataWeight::default();
+    pub fn metadata_bytes(&self) -> usize {
+        let mut weight = hirsel_query_products::retained::MetadataWeight::default();
         weight.add(
             std::mem::size_of::<Self>()
                 + std::mem::size_of::<InstalledRecords>()
@@ -495,7 +499,7 @@ pub struct InstalledPackage {
     pub compiler: ContentHash,
     /// Identity of the verified installation manifest, including all actions and references.
     #[serde(skip)]
-    pub(crate) identity: ContentHash,
+    pub identity: ContentHash,
     pub package: PackageId,
     pub manifest: Vec<u8>,
     pub sources: Vec<InstalledSource>,
@@ -511,23 +515,23 @@ pub struct InstalledPackage {
 }
 
 #[derive(Debug, Clone)]
-pub(super) struct OpenedInstallation {
-    pub(super) package: Arc<InstalledPackage>,
-    pub(super) records: Arc<InstalledRecords>,
+pub(crate) struct OpenedInstallation {
+    pub(crate) package: Arc<InstalledPackage>,
+    pub(crate) records: Arc<InstalledRecords>,
 }
 
 #[derive(Clone, Debug, Default)]
-pub(super) struct InstallationRecords {
+pub(crate) struct InstallationRecords {
     pub rows: BTreeMap<ContentHash, (Action, Reference)>,
     pub contents: BTreeMap<ContentHash, Reference>,
 }
 
 impl InstalledPackage {
-    pub(crate) fn source_records(&self) -> Option<Arc<InstalledSourceRecords>> {
+    pub fn source_records(&self) -> Option<Arc<InstalledSourceRecords>> {
         self.sources_owner.clone()
     }
-    pub(crate) fn operation_metadata_bytes(&self) -> u64 {
-        let mut weight = crate::NativeMetadataWeight::default();
+    pub fn operation_metadata_bytes(&self) -> u64 {
+        let mut weight = hirsel_query_products::retained::MetadataWeight::default();
         weight.add(std::mem::size_of::<Self>() + 2 * std::mem::size_of::<usize>());
         weight.add(self.package.name.capacity() + self.package.version.capacity());
         weight.add(self.manifest.capacity());
@@ -565,7 +569,7 @@ impl InstalledPackage {
         }
         weight.bytes()
     }
-    pub(crate) fn new(
+    pub fn new(
         compiler: ContentHash,
         package: PackageId,
         manifest: Vec<u8>,
@@ -586,7 +590,7 @@ impl InstalledPackage {
             sources_owner: None,
         }
     }
-    pub(super) fn publish(
+    pub(crate) fn publish(
         mut self,
         store: &hirsel_artifact_store::Store,
         records: &InstallationRecords,
@@ -635,7 +639,7 @@ impl InstalledPackage {
         let store = hirsel_artifact_store::Store::new(root.to_owned());
         Self::audit(&store).map(|_| ())
     }
-    pub(super) fn audit(
+    pub(crate) fn audit(
         store: &hirsel_artifact_store::Store,
     ) -> Result<hirsel_artifact_store::VerifiedRecords, String> {
         let _scope = store.batch();
@@ -673,7 +677,7 @@ impl InstalledPackage {
         installed.check_definitions()?;
         Ok(installed)
     }
-    pub(super) fn open(
+    pub(crate) fn open(
         store: &hirsel_artifact_store::Store,
         package: &PackageId,
         compiler: ContentHash,
@@ -724,7 +728,8 @@ impl InstalledPackage {
                     .rows
                     .iter()
                     .filter(|(_, _, reference)| {
-                        reference.domain == super::entry_domain(crate::QueryKind::Parse)
+                        reference.domain
+                            == super::entry_domain(hirsel_query_products::QueryKind::Parse)
                     })
                     .map(|(address, _, reference)| (*address, *reference))
                     .collect(),

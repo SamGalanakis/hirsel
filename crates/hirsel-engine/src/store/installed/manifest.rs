@@ -43,7 +43,7 @@ fn reference(bytes: &[u8]) -> Option<Reference> {
     })
 }
 
-pub(super) fn decode(bytes: &[u8]) -> bincode::Result<InstalledPackage> {
+pub(crate) fn decode(bytes: &[u8]) -> bincode::Result<InstalledPackage> {
     if bytes.len() > MAX_RECORD {
         return Err(invalid());
     }

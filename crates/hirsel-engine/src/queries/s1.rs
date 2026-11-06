@@ -700,9 +700,9 @@ mod tests {
                     assert!(
                         admitted
                             .reads
-                            .get(&ReadKey::ValidationUniverse(crate::memo::PackageKey::of(
-                                &root.0.package
-                            )))
+                            .get(&ReadKey::ValidationUniverse(
+                                hirsel_query_products::reads::PackageKey::of(&root.0.package)
+                            ))
                             .is_some()
                     );
                     let validated = admitted.result.unwrap();
@@ -856,11 +856,9 @@ mod tests {
                 ValidatedEvaluation::recorded(artifact, &snapshot, Verify::On, Span::default());
             assert!(matches!(product.result, Err(QueryError::Operational(_))));
             assert_eq!(
-                product
-                    .reads
-                    .get(&ReadKey::ValidationUniverse(crate::memo::PackageKey::of(
-                        &root.0.package
-                    ))),
+                product.reads.get(&ReadKey::ValidationUniverse(
+                    hirsel_query_products::reads::PackageKey::of(&root.0.package)
+                )),
                 Some(snapshot.validation_input_digest(&root.0.package).unwrap())
             );
             let artifact = reading_artifact(&types, &root, &dependency);

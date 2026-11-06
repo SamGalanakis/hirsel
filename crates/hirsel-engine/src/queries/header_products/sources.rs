@@ -12,7 +12,7 @@ pub(crate) struct CapturedText {
 pub(super) struct HeaderSources {
     parent: Option<Arc<HeaderSources>>,
     by_definition: hirsel_syntax::DefMap<Vec<FileId>>,
-    facts: hirsel_syntax::DefMap<Arc<catalog::SourceFacts>>,
+    facts: hirsel_syntax::DefMap<Arc<hirsel_query_products::SourceFacts>>,
     /// Each captured definition's cited text, implementation text and header
     /// digest, so an execution engine that has not materialized it observes
     /// the values the capturing engine observes.
@@ -62,7 +62,9 @@ impl LiveSyntax {
         let bytes = items
             .iter()
             .try_fold(0u64, |n, syntax| {
-                n.checked_add(crate::memo::retained::retained_syntax_bytes(syntax))
+                n.checked_add(hirsel_query_products::retained::retained_syntax_bytes(
+                    syntax,
+                ))
             })
             .and_then(|n| n.checked_add(std::mem::size_of_val(items.as_slice()) as u64))
             .ok_or_else(|| source_refusal("syntax size overflow"))?;
@@ -539,7 +541,7 @@ impl HeaderSources {
             sources: engine.sources.clone(),
         }
     }
-    pub(super) fn facts(&self, id: DefId) -> Option<catalog::SourceFacts> {
+    pub(super) fn facts(&self, id: DefId) -> Option<hirsel_query_products::SourceFacts> {
         self.facts
             .get(&id)
             .map(|facts| (**facts).clone())
@@ -552,11 +554,11 @@ impl HeaderSources {
             .or_else(|| self.parent.as_ref()?.text(id))
     }
     pub(super) fn facts_index_bytes(definitions: usize) -> u64 {
-        let mut weight = crate::NativeMetadataWeight::default();
+        let mut weight = hirsel_query_products::retained::MetadataWeight::default();
         weight.add(size_of::<Self>() + 2 * size_of::<usize>());
         // The operation ledger has at most one counter per source definition.
         weight.tree::<DefId, usize>(definitions);
-        weight.tree::<DefId, Arc<catalog::SourceFacts>>(definitions);
+        weight.tree::<DefId, Arc<hirsel_query_products::SourceFacts>>(definitions);
         weight.tree::<DefId, CapturedText>(definitions);
         weight.tree::<DefId, Vec<FileId>>(definitions);
         weight.tree::<FileId, Arc<SyntaxOwner>>(definitions);
@@ -576,7 +578,7 @@ impl HeaderSources {
                     &std::mem::MaybeUninit::<ItemSyntax>::uninit(),
                 )
             } else {
-                crate::memo::retained::retained_syntax_bytes(syntax)
+                hirsel_query_products::retained::retained_syntax_bytes(syntax)
             };
             let old = seen.entry(Arc::as_ptr(syntax) as usize).or_default();
             let added = bytes.saturating_sub(*old);

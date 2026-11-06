@@ -5,11 +5,11 @@
 //! deterministic in-memory store with injectable faults for tests. No choice
 //! changes what a program means: a hit is used only when every recorded read
 //! still observes its value, so the store changes only how much is recomputed.
-use crate::memo::{ReadKey, Reads};
-use crate::{LoweringPolicy, QueryKind};
 pub use hirsel_artifact_store::{
     Action, Address, Association, Bytes, Contents, Domain, MAX_RECORD, Output, Reference,
 };
+use hirsel_query_products::reads::{ReadKey, Reads};
+use hirsel_query_products::{LoweringPolicy, QueryKind};
 use hirsel_syntax::{ContentHash, DefPath};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -20,12 +20,12 @@ mod installed;
 mod remote;
 mod request;
 pub use dir::{DirStore, FORMAT, GcReport};
-pub(crate) use installed::InstalledSourceRecords;
+pub use installed::InstalledSourceRecords;
 pub use installed::{
     InstalledDefinition, InstalledDefinitionKey, InstalledDefinitionOwnership, InstalledPackage,
     InstalledSource,
 };
-pub(crate) use installed::{
+pub use installed::{
     InstalledSemanticInput, InstalledSpecializations, SEMANTIC_BODY, SEMANTIC_HEADER,
     SEMANTIC_INPUT, SEMANTIC_SOURCE,
 };
@@ -549,7 +549,7 @@ pub struct Variant {
     pub payload: Bytes,
 }
 
-pub(crate) fn payload_reads_hash(reads: &Reads) -> ContentHash {
+pub fn payload_reads_hash(reads: &Reads) -> ContentHash {
     // Reads' in-memory ordering is by interned identity. Persisted witnesses
     // sort the canonical key bytes, so another process/salt verifies the same
     // complete set without depending on its DefId assignment order.
@@ -573,7 +573,7 @@ pub(crate) fn payload_reads_hash(reads: &Reads) -> ContentHash {
 /// The complete ordinary-query action, shared by S0 variants and already
 /// settled immutable query owners. Reclaiming an evicted runtime node need
 /// not depend on an optional durable index or reconstruct its body.
-pub(crate) fn query_action(key: &EntryKey, inputs: ContentHash, reads: &Reads) -> Action {
+pub fn query_action(key: &EntryKey, inputs: ContentHash, reads: &Reads) -> Action {
     Action(ContentHash::of_parts(
         "hirsel.result.action.v1",
         [
@@ -612,7 +612,7 @@ impl VariantRef {
         variant.witness = variant.binding(key);
         variant
     }
-    pub(crate) fn action(&self, key: &EntryKey) -> Action {
+    pub fn action(&self, key: &EntryKey) -> Action {
         query_action(key, self.inputs, &self.reads)
     }
     fn binding(&self, key: &EntryKey) -> ContentHash {
@@ -627,7 +627,7 @@ impl VariantRef {
             ],
         )
     }
-    pub(crate) fn valid(&self, key: &EntryKey) -> bool {
+    pub fn valid(&self, key: &EntryKey) -> bool {
         self.output.domain == product_domain(key.2)
             && self.output.len <= hirsel_artifact_store::MAX_RECORD as u64
             && self.witness == self.binding(key)
@@ -663,7 +663,7 @@ impl Entry {
     }
     /// Check each candidate's binding once before observing any of its reads.
     /// Fetch content only for the first bound candidate whose reads are current.
-    pub(crate) fn resolve_current(
+    pub fn resolve_current(
         &self,
         store: &dyn ResultStore,
         key: &EntryKey,
@@ -761,7 +761,7 @@ impl Entry {
         let offset = payload.as_ptr() as usize - bytes.as_ptr() as usize;
         Entry::decode_bytes(bytes.range(offset as u64, payload.len() as u64, 1)?)
     }
-    pub(crate) fn action(&self, key: &EntryKey) -> Action {
+    pub fn action(&self, key: &EntryKey) -> Action {
         let actions: Vec<_> = self.variants.iter().map(|v| v.action(key)).collect();
         Action(ContentHash::of_parts(
             "hirsel.result.variants.v1",
@@ -1107,7 +1107,7 @@ impl ResultStore for SimStore {
 const FRAME_MAGIC: &[u8; 8] = b"HIRRES01";
 
 /// A stored payload: magic, length, SHA-256 of the payload, payload.
-pub(crate) fn frame(payload: &[u8]) -> Vec<u8> {
+pub fn frame(payload: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(payload.len() + 48);
     out.extend(FRAME_MAGIC);
     out.extend((payload.len() as u64).to_le_bytes());
@@ -1116,7 +1116,7 @@ pub(crate) fn frame(payload: &[u8]) -> Vec<u8> {
     out
 }
 /// The payload of a framed record, or `None` on any mismatch.
-pub(crate) fn unframe(bytes: &[u8]) -> Option<&[u8]> {
+pub fn unframe(bytes: &[u8]) -> Option<&[u8]> {
     let rest = bytes.strip_prefix(FRAME_MAGIC.as_slice())?;
     let (len, rest) = rest.split_at_checked(8)?;
     let (sum, payload) = rest.split_at_checked(32)?;

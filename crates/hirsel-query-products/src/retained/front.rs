@@ -1,12 +1,13 @@
 //! Allocation accounting for retained H/J/I products. Reuse the existing
 //! capacity/Arc visitor; local type, symbol and definition IDs remain interned.
 use super::Weight;
-use crate::{AnalyzedBody, QueryOutput};
+use crate::AnalyzedBody;
 use hirsel_check_protocol::body::*;
+use hirsel_types::QueryOutput;
 use hirsel_types::*;
 use std::sync::Arc;
 
-pub(crate) fn retained_analyzed_bytes(output: &Arc<QueryOutput<AnalyzedBody>>) -> u64 {
+pub fn retained_analyzed_bytes(output: &Arc<QueryOutput<AnalyzedBody>>) -> u64 {
     let mut weight = Weight::default();
     weight.arc(output, |w, output| {
         w.vec(&output.diagnostics, Weight::diagnostic);
@@ -15,7 +16,7 @@ pub(crate) fn retained_analyzed_bytes(output: &Arc<QueryOutput<AnalyzedBody>>) -
     });
     weight.bytes
 }
-pub(crate) fn analyzed_capture_bytes(output: &QueryOutput<AnalyzedBody>) -> Option<u64> {
+pub fn analyzed_capture_bytes(output: &QueryOutput<AnalyzedBody>) -> Option<u64> {
     let mut weight = Weight::decoded();
     weight.vec(&output.diagnostics, Weight::diagnostic);
     weight.flat_vec(&output.dependencies);
@@ -285,7 +286,7 @@ impl Weight<'_> {
     }
 }
 
-pub(crate) fn retained_structural_bytes(
+pub fn retained_structural_bytes(
     syntax: &Arc<hirsel_syntax::ItemSyntax>,
     resolution: &Resolution,
     result: &Result<QueryOutput<crate::TypedBody>, QueryError>,
@@ -308,7 +309,7 @@ pub(crate) fn retained_structural_bytes(
     }
     weight.bytes
 }
-pub(crate) fn retained_structural_lookup_bytes(
+pub fn retained_structural_lookup_bytes(
     context: &hirsel_syntax::FileContext,
     path: &hirsel_syntax::Path,
     output: &LookupOutput,
@@ -331,7 +332,7 @@ pub(crate) fn retained_structural_lookup_bytes(
     }
     weight.bytes
 }
-pub(crate) fn retained_structural_path_bytes(path: &hirsel_syntax::DefPath) -> u64 {
+pub fn retained_structural_path_bytes(path: &hirsel_syntax::DefPath) -> u64 {
     let mut weight = Weight::default();
     weight.def_path(path);
     weight.bytes

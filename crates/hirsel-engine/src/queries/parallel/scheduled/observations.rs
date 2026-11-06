@@ -69,7 +69,7 @@ impl FrontBodyQueries {
         scratch: u64,
     ) -> Option<Arc<FrontObservations>> {
         let () = Self::READER_METADATA;
-        let mut weight = crate::memo::retained::Weight::default();
+        let mut weight = hirsel_query_products::retained::Weight::default();
         for (_, reads) in &outcome.memos {
             weight.reads(reads);
         }

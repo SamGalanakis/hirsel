@@ -2,10 +2,9 @@
 //! do not stand in for compiler/Cranelift/LLVM conformance or performance gates.
 use hirsel_artifact_store::Domain;
 use hirsel_driver::resident::ExecutableOutput;
-use hirsel_engine::{
-    requests::OutputReadiness,
-    store::{DirStore, ResultStore},
-};
+use hirsel_engine::requests::OutputReadiness;
+use hirsel_engine::store::DirStore;
+use hirsel_engine::store::ResultStore;
 use hirsel_native::object_queries::*;
 use hirsel_native::query_model::{
     ArenaSummary, ComponentKey, InstanceAddress, InstanceProduct, NativeProducts, ReadyProduct,

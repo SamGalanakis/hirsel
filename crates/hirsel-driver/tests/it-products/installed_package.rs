@@ -1,6 +1,9 @@
 use hirsel_driver::CompilerRequestsExt;
-use hirsel_engine::{CompileConfig, LoweringPolicy, loader_inputs::LoaderInputs, store::*};
+use hirsel_engine::CompileConfig;
+use hirsel_engine::loader_inputs::LoaderInputs;
+use hirsel_engine::store::*;
 use hirsel_front_phases::COMPILER;
+use hirsel_query_products::LoweringPolicy;
 use hirsel_requests::*;
 use hirsel_syntax::{ContentHash, PackageId};
 use std::sync::Arc;
@@ -91,9 +94,9 @@ fn installed_std_compiles_without_its_source_files_and_never_checks_unused_items
                         key.def.path() == &unused
                             && matches!(
                                 key.kind,
-                                hirsel_engine::QueryKind::Modes
-                                    | hirsel_engine::QueryKind::Check
-                                    | hirsel_engine::QueryKind::Resolve
+                                hirsel_query_products::QueryKind::Modes
+                                    | hirsel_query_products::QueryKind::Check
+                                    | hirsel_query_products::QueryKind::Resolve
                             )
                     }),
                     "a matching installed product must not become an unrelated source Front root: {:?}",
@@ -101,7 +104,7 @@ fn installed_std_compiles_without_its_source_files_and_never_checks_unused_items
                 );
                 assert_eq!(
                     requests
-                        .recompute_counts(&[(unused, hirsel_engine::QueryKind::Check)])
+                        .recompute_counts(&[(unused, hirsel_query_products::QueryKind::Check)])
                         .unwrap()[0]
                         .2,
                     0

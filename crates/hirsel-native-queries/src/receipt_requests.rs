@@ -1,6 +1,7 @@
 //! Receipt request reconstruction from current original source, before C replay.
 use super::{source_inputs::NativeSourceProvider, *};
-use hirsel_engine::{NativeRecords, store::Domain};
+use hirsel_engine::NativeRecords;
+use hirsel_engine::store::Domain;
 use hirsel_lir::sealed_payload_source::ReceiptSource;
 use hirsel_native::receipt_source::factory::*;
 use hirsel_native::receipt_source::provider::SelectionProvider;

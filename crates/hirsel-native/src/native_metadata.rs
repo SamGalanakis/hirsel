@@ -1,5 +1,5 @@
-use hirsel_engine::NativeMetadataWeight as Weight;
 use hirsel_lir::operation::{NativeType, OperationArgument};
+use hirsel_query_products::retained::MetadataWeight as Weight;
 pub fn argument(w: &mut Weight, value: &OperationArgument) {
     if let OperationArgument::Type(value) = value {
         native_type(w, value);

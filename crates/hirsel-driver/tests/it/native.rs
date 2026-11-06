@@ -644,7 +644,7 @@ fn every_runtime_primitive_row_matches_its_export() {
 /// source checks (PROG-5's cutoff, by `recompute_count`).
 #[test]
 fn a_same_signature_body_edit_matches_a_fresh_build() {
-    use hirsel_engine::QueryKind;
+    use hirsel_query_products::QueryKind;
     let source = |body: &str| {
         format!(
             "fn weight(n: u64) -> u64 {{\n  {body}\n}}\npub fn main(rt: Io, args: Args) -> Result[(), GrantError] {{\n  let _ = out.print(io.stdout(rt)?, if weight(3u64) == 6u64 {{ \"six\\n\" }} else {{ \"other\\n\" }})\n  Ok(())\n}}\n"

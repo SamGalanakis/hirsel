@@ -6,6 +6,10 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+hirsel-product-codec = { path = "../hirsel-product-codec" }
+hirsel-run-schema = { path = "../hirsel-run-schema" }
+hirsel-diag = { path = "../hirsel-diag" }
+hirsel-engine-admission = { path = "../hirsel-engine-admission" }
 hirsel-check-protocol = { path = "../hirsel-check-protocol" }
 hirsel-graph = { path = "../hirsel-graph" }
 hirsel-intern = { path = "../hirsel-intern" }
@@ -16,4 +20,8 @@ hirsel-types = { path = "../hirsel-types" }
 serde = { version = "1", features = ["derive", "rc"] }
 
 [dev-dependencies]
+hirsel-engine-admission = { path = "../hirsel-engine-admission", features = ["test-alloc"] }
 hirsel-guard = { path = "../hirsel-guard" }
+
+[features]
+test-support = []

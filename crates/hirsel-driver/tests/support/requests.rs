@@ -1,7 +1,12 @@
 //! Request executor fixtures for tests that start with an indexed engine.
 use hirsel_engine::requests::source_graph::InstalledSource;
-use hirsel_engine::{requests::source_graph::*, store::*, *};
+use hirsel_engine::requests::source_graph::*;
+use hirsel_engine::store::*;
+use hirsel_engine::*;
 use hirsel_engine_runtime::*;
+
+use hirsel_query_products::reads::Reads;
+use hirsel_query_products::{LoweringPolicy, QueryKind};
 
 use hirsel_intern::jobs::Jobs;
 use std::{collections::BTreeMap, sync::Arc};
@@ -274,7 +279,7 @@ pub struct LowerOutcome<T> {
     pub result: Result<QueryOutput<T>, QueryError>,
     pub phase: Option<QueryKind>,
     pub reads: Arc<Reads>,
-    pub depth: Option<hirsel_engine::memo::DepthEvidence<hirsel_span::Span>>,
+    pub depth: Option<hirsel_query_products::depth::DepthEvidence<hirsel_span::Span>>,
 }
 #[derive(Debug)]
 pub struct ConstantOutcome {

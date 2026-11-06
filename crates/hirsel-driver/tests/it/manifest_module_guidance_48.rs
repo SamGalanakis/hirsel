@@ -4,8 +4,9 @@
 //! (MIT OR Apache-2.0). No discovery, filename aliases or CreateFile fixes.
 use crate::image_fixture::{Fixture, load};
 use hirsel_driver::session::Session;
-use hirsel_engine::{CheckCompletion, CheckOutput, LoweringPolicy};
+use hirsel_engine::{CheckCompletion, CheckOutput};
 use hirsel_intern::jobs::with_compiler_stack;
+use hirsel_query_products::LoweringPolicy;
 use serde_json::{Value, json};
 use std::path::PathBuf;
 

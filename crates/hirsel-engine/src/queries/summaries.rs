@@ -306,7 +306,7 @@ impl QueryEngine {
             .iter()
             .map(|(read, _)| self.durability_of(read))
             .min()
-            .unwrap_or(crate::memo::Durability::High);
+            .unwrap_or(hirsel_query_products::reads::Durability::High);
         let reads = summary.reads.clone();
         let key = crate::memo::MemoKey::new(QueryKind::Summary, definition);
         let text = summary.text;

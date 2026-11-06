@@ -66,10 +66,10 @@ impl Weight<'_> {
             | StorageCallee::SealArena => (),
         }
     }
-    pub(crate) fn storage_definition(&mut self, definition: &StorageDefinition) {
+    pub fn storage_definition(&mut self, definition: &StorageDefinition) {
         self.vec(&definition.bodies, Self::storage_body);
     }
-    pub(crate) fn storage_body(&mut self, body: &StorageBody) {
+    pub fn storage_body(&mut self, body: &StorageBody) {
         let w = self;
         w.vec(&body.paths, |w, path| w.path(path));
         w.vec(&body.generics, Self::generic);
@@ -103,7 +103,7 @@ impl Weight<'_> {
             }
         });
     }
-    pub(crate) fn storage_profiles(&mut self, profiles: &Vec<CallableStorageProfile>) {
+    pub fn storage_profiles(&mut self, profiles: &Vec<CallableStorageProfile>) {
         self.vec(profiles, |w, profile| match &profile.profile.behavior {
             StorageBehavior::Known {
                 allocations,

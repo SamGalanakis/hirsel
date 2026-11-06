@@ -171,7 +171,7 @@ impl ArenaTasks {
             instances,
             outputs,
         };
-        let mut weight = hirsel_engine::NativeMetadataWeight::default();
+        let mut weight = hirsel_query_products::retained::MetadataWeight::default();
         weight.add(size_of::<Plan>());
         weight.add(plan.queries.retained_storage_bytes() as usize);
         weight.flat_vec(&plan.ids);

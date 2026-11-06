@@ -44,7 +44,7 @@ impl ArenaComponentKeys {
         }))
     }
     fn retained_bytes(&self) -> u64 {
-        let mut w = hirsel_engine::NativeMetadataWeight::default();
+        let mut w = hirsel_query_products::retained::MetadataWeight::default();
         w.arc(&self.0);
         w.vec(
             &self.0.values,
@@ -69,7 +69,7 @@ pub struct SettledArenaGraph {
 
 impl SettledArenaGraph {
     pub fn retained_index_bytes(&mut self) -> u64 {
-        let mut w = hirsel_engine::NativeMetadataWeight::default();
+        let mut w = hirsel_query_products::retained::MetadataWeight::default();
         w.flat_vec(&self.candidates);
         w.flat_vec(&self.chosen);
         if self.component_keys.0.owner.is_none() {
@@ -272,7 +272,7 @@ impl ArenaQueryPlan {
     }
     pub fn retained_storage_bytes(&mut self) -> u64 {
         use super::ownership_compilation::metadata::address;
-        let mut w = hirsel_engine::NativeMetadataWeight::default();
+        let mut w = hirsel_query_products::retained::MetadataWeight::default();
         w.add(self.component_keys.retained_bytes() as usize);
         w.vec(&self.members, |w, members| {
             w.vec(members, |w, row| address(w, &row.owner))

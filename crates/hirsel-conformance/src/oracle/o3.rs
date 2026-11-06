@@ -8,7 +8,8 @@
 use super::{Report, Verdict, edits::Scenario};
 use hirsel_driver::session::FileChange;
 use hirsel_driver::session::Session;
-use hirsel_engine::{DefinitionQueries, QueryEngine, QueryKind};
+use hirsel_engine::{DefinitionQueries, QueryEngine};
+use hirsel_query_products::QueryKind;
 use std::{
     collections::{BTreeMap, BTreeSet},
     sync::Arc,
@@ -54,7 +55,7 @@ fn one(scenario: &Scenario, report: &mut Report) -> Result<(), String> {
     let config = || {
         let mut config = scenario.config_before.compile(super::cold_store());
         // A check lowers only compile-time evaluation.
-        config.lowering = hirsel_engine::LoweringPolicy::Comptime;
+        config.lowering = hirsel_query_products::LoweringPolicy::Comptime;
         config
     };
     let mut session = Session::open_configured(&entry, config());

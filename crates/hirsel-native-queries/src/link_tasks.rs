@@ -143,7 +143,7 @@ pub struct LinkTasks {
 impl LinkTasks {
     pub fn retained_dispatch_bytes(&mut self) -> u64 {
         use super::ownership_compilation::metadata as m;
-        let mut w = hirsel_engine::NativeMetadataWeight::default();
+        let mut w = hirsel_query_products::retained::MetadataWeight::default();
         w.add(size_of::<Self>() + 2 * size_of::<usize>());
         w.packed_map(&mut self.plans, |w, _, plan| {
             w.arc(plan);

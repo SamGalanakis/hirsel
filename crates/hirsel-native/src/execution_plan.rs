@@ -39,7 +39,7 @@ impl ExecutionPlan {
         context: Reference,
     ) -> Result<Arc<Self>, String> {
         reads.shrink_to_fit();
-        let mut weight = hirsel_engine::NativeMetadataWeight::default();
+        let mut weight = hirsel_query_products::retained::MetadataWeight::default();
         weight.add(size_of::<Self>() + size_of::<ExecutionProduct>() + 4 * size_of::<usize>());
         weight.flat_vec(&reads);
         weight.map(&environments, |_, _, _| ());

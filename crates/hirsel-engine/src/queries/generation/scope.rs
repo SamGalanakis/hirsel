@@ -93,7 +93,7 @@ impl FrontDemandScope {
         }
     }
     pub fn input_bytes(definitions: &[DefPath], generators: &[DefPath]) -> Option<u64> {
-        let mut weight = crate::NativeMetadataWeight::default();
+        let mut weight = hirsel_query_products::retained::MetadataWeight::default();
         weight.add(size_of::<Self>() + size_of::<FrontDemandAdmission>());
         weight.add(
             (definitions.len().checked_mul(3)? + generators.len())

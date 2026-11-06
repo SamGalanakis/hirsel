@@ -48,7 +48,7 @@ impl DeadArmLint {
         }
     }
     fn bytes(&self) -> u64 {
-        let mut weight = crate::NativeMetadataWeight::default();
+        let mut weight = hirsel_query_products::retained::MetadataWeight::default();
         weight.add(std::mem::size_of::<Self>());
         weight.tree::<DefPath, (hirsel_span::Anchor, Vec<(String, u32, u32)>)>(
             self.declarations.len(),

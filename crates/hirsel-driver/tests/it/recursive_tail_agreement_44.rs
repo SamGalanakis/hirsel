@@ -5,6 +5,8 @@ use hirsel_front_phases::*;
 use hirsel_host_io::launch::*;
 use hirsel_intern::jobs::with_compiler_stack;
 
+use hirsel_query_products::LoweringPolicy;
+
 #[test]
 fn recursive_tail_agreement_44_original_helper() {
     with_compiler_stack(|| {

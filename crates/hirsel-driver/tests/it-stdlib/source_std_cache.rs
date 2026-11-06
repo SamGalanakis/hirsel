@@ -2,6 +2,8 @@
 use crate::source_std;
 use hirsel_engine::*;
 use hirsel_intern::jobs::with_compiler_stack;
+
+use hirsel_query_products::{LoweringPolicy, QueryKind};
 use hirsel_syntax::{ItemPath, PackageId};
 
 fn source_replacements_check_current_roots_without_sharing_mutable_requests() {

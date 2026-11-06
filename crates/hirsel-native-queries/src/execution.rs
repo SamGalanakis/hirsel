@@ -26,7 +26,7 @@ pub struct ExecutionTasks {
 }
 impl ExecutionTasks {
     pub fn retained_dispatch_bytes(&mut self) -> u64 {
-        let mut weight = hirsel_engine::NativeMetadataWeight::default();
+        let mut weight = hirsel_query_products::retained::MetadataWeight::default();
         weight.add(size_of::<Self>() + 2 * size_of::<usize>());
         weight.packed_map(&mut self.objects, |weight, _, key| {
             super::ownership_compilation::metadata::address(weight, &key.owner);

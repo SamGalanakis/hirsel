@@ -21,9 +21,10 @@ use hirsel_engine::loader_inputs::{
     CaptureInputs, FrozenInputs, InputLimit, InputLimits, InputUnavailable, LoaderInputs,
 };
 use hirsel_engine::{
-    CheckCompletion, CheckOutput, CheckedProducts, CompileConfig, Compiler, LoweringPolicy,
-    QueryError, ToolError, Verify,
+    CheckCompletion, CheckOutput, CheckedProducts, CompileConfig, Compiler, QueryError, ToolError,
+    Verify,
 };
+use hirsel_query_products::LoweringPolicy;
 #[cfg(not(test))]
 use hirsel_requests::CompileInputs;
 #[cfg(not(test))]
@@ -107,7 +108,7 @@ pub struct IncompleteProgress {
     /// includes the selected closure; some phases may already have completed.
     pub uncompleted_packages: Vec<PackageId>,
     /// Last known affected phase; None if work stopped before a phase ran.
-    pub phase: Option<hirsel_engine::QueryKind>,
+    pub phase: Option<hirsel_query_products::QueryKind>,
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Verdict {
@@ -401,7 +402,7 @@ enum WorkState {
 struct Snapshot {
     selection: Option<Arc<v2::Selection>>,
     completion: Completion,
-    phase: Option<hirsel_engine::QueryKind>,
+    phase: Option<hirsel_query_products::QueryKind>,
     verdict: Verdict,
     output: Arc<CheckOutput>,
     loader_error: Option<String>,
@@ -2068,7 +2069,7 @@ mod tests {
             receipt.incomplete,
             Some(IncompleteProgress {
                 uncompleted_packages: receipt.scope.packages.clone(),
-                phase: Some(hirsel_engine::QueryKind::Modes),
+                phase: Some(hirsel_query_products::QueryKind::Modes),
             })
         );
         assert!(receipt.checked_products.is_none());

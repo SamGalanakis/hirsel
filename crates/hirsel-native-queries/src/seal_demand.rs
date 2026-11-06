@@ -65,7 +65,7 @@ impl Plan {
         )
     }
     fn admission_rows<'a>(locals: impl IntoIterator<Item = (u64, u32, &'a Function)>) -> u64 {
-        let mut weight = hirsel_engine::NativeMetadataWeight::default();
+        let mut weight = hirsel_query_products::retained::MetadataWeight::default();
         weight.add(size_of::<GuardTasks>() + size_of::<Plan>() + 4096);
         for (bytes, values, owner) in locals {
             weight.add(size_of::<Input>() + bytes as usize);
@@ -107,7 +107,7 @@ impl Plan {
             .saturating_add(calls.saturating_mul(returns))
             .saturating_add(calls.saturating_mul(closures).saturating_mul(captures));
         let origins = n.saturating_mul(closures);
-        let mut weight = hirsel_engine::NativeMetadataWeight::default();
+        let mut weight = hirsel_query_products::retained::MetadataWeight::default();
         weight.add(copied);
         weight.add(n.saturating_mul(
             size_of::<std::collections::BTreeSet<usize>>() * 2

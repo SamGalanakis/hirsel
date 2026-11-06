@@ -30,7 +30,7 @@ impl FrontRunQueries {
             .len()
             .checked_add(1)
             .ok_or(QueryError::NotImplemented)?;
-        let mut metadata = crate::NativeMetadataWeight::default();
+        let mut metadata = hirsel_query_products::retained::MetadataWeight::default();
         metadata.add(std::mem::size_of::<FrontSemanticGraph>());
         metadata.tree::<String, hirsel_run_schema::ProgramNode>(count);
         metadata.add(
@@ -95,7 +95,7 @@ impl FrontRunQueries {
         drop(completed);
         let graph =
             hirsel_run_schema::ProgramGraph::new(nodes).map_err(|e| operational(e.to_string()))?;
-        let mut actual = crate::NativeMetadataWeight::default();
+        let mut actual = hirsel_query_products::retained::MetadataWeight::default();
         actual.add(std::mem::size_of::<FrontSemanticGraph>());
         actual.tree::<String, hirsel_run_schema::ProgramNode>(graph.nodes().len());
         for node in graph.nodes() {

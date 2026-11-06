@@ -12,7 +12,8 @@ use hirsel_candidate::FileEdit;
 use hirsel_candidate::Limits as TransactionLimits;
 use hirsel_candidate::Priority;
 use hirsel_candidate::Verdict;
-use hirsel_engine::{CheckCompletion, CompileConfig, LoweringPolicy, Verify};
+use hirsel_engine::{CheckCompletion, CompileConfig, Verify};
+use hirsel_query_products::LoweringPolicy;
 use std::path::Path;
 
 /// Materialize the bounded fixture's explicit no-dependency package. Ordinary
@@ -274,7 +275,7 @@ fn artifacts(
         out.insert("checked-products/digest".into(), products.digest.0.to_vec());
         let mut bytes = vec![];
         for (path, reads) in &products.reads {
-            hirsel_engine::memo::encode_def_path(&mut bytes, path);
+            hirsel_query_products::reads::encode_def_path(&mut bytes, path);
             bytes.extend_from_slice(&(reads.len() as u64).to_le_bytes());
             for (key, value) in reads {
                 bytes.extend_from_slice(&(key.len() as u64).to_le_bytes());

@@ -4,6 +4,7 @@ use hirsel_engine::*;
 use hirsel_front_phases::*;
 use hirsel_host_io::launch::*;
 use hirsel_intern::jobs::with_compiler_stack;
+
 use std::path::{Path, PathBuf};
 
 fn fixture() -> PathBuf {
@@ -208,7 +209,7 @@ fn changing_a_packed_active_tag_stays_rejected() {
         );
         let mut loaded = load_program_source(&fixture(), Some(&source)).unwrap();
         let result = loaded
-            .check(hirsel_engine::LoweringPolicy::Reachable)
+            .check(hirsel_query_products::LoweringPolicy::Reachable)
             .unwrap();
         assert!(
             result

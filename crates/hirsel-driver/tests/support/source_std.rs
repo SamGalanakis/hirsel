@@ -1,10 +1,17 @@
 // Tests select the same ordinary package graph as applications.
-use hirsel_engine::{
-    CheckCompletion, CheckOutput, CompileConfig, Compiler, ComptimeLimits, LoadedProgram,
-    LoweringPolicy, QueryEngine, ToolError,
-    loader_inputs::{CaptureInputs, FrozenInputs, InputLimits},
-    store::MemStore,
-};
+use hirsel_engine::CheckCompletion;
+use hirsel_engine::CheckOutput;
+use hirsel_engine::CompileConfig;
+use hirsel_engine::Compiler;
+use hirsel_engine::ComptimeLimits;
+use hirsel_engine::LoadedProgram;
+use hirsel_engine::QueryEngine;
+use hirsel_engine::ToolError;
+use hirsel_engine::loader_inputs::CaptureInputs;
+use hirsel_engine::loader_inputs::FrozenInputs;
+use hirsel_engine::loader_inputs::InputLimits;
+use hirsel_engine::store::MemStore;
+use hirsel_query_products::LoweringPolicy;
 use std::{
     path::{Path, PathBuf},
     sync::{Arc, Mutex, OnceLock},

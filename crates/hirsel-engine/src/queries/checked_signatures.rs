@@ -54,25 +54,25 @@ impl FrontCheckedSignatures {
     pub fn signature_payload_bytes(&self) -> Option<u64> {
         self.inputs.values().try_fold(0u64, |bytes, input| {
             let bytes = bytes.checked_add(
-                crate::memo::retained::retained_signature_payload_bytes(&input.public),
+                hirsel_query_products::retained::retained_signature_payload_bytes(&input.public),
             )?;
             match &input.owner {
                 Some(owner) => bytes.checked_add(
-                    crate::memo::retained::retained_signature_payload_bytes(owner),
+                    hirsel_query_products::retained::retained_signature_payload_bytes(owner),
                 ),
                 None => Some(bytes),
             }
         })
     }
     pub(crate) fn sections_clone_bytes(&self) -> Option<u64> {
-        let mut weight = crate::NativeMetadataWeight::default();
+        let mut weight = hirsel_query_products::retained::MetadataWeight::default();
         weight.tree::<DefPath, SignatureSection>(self.inputs.len());
         let mut payload_bytes = 0u64;
         for (path, input) in &self.inputs {
             weight.path(path);
             weight.path(path);
             weight.flat_vec(&input.coverage);
-            let mut payloads = crate::memo::retained::Weight::default();
+            let mut payloads = hirsel_query_products::retained::Weight::default();
             payloads.signature(&input.public);
             if let Some(owner) = &input.owner {
                 payloads.signature(owner);
@@ -155,13 +155,13 @@ impl QueryEngine {
                     .map(|s| s.definition.path().clone()),
             )
             .collect();
-        let mut weight = crate::NativeMetadataWeight::default();
+        let mut weight = hirsel_query_products::retained::MetadataWeight::default();
         weight.add(size_of::<FrontCheckedSignatures>() + 2 * size_of::<usize>());
         weight.tree::<DefPath, Input>(paths.len());
         weight.add(self.environment.compiler_version.capacity());
         let registrations = self.checked_registration_records();
         weight.vec(&registrations, |w, row| w.add(row.capacity()));
-        let mut owned = crate::memo::retained::Weight::default();
+        let mut owned = hirsel_query_products::retained::Weight::default();
         for path in paths {
             let id = DefId::intern(&path);
             if !snapshot.signature(id).is_some_and(|s| s.is_ok()) {
@@ -283,7 +283,7 @@ pub(super) struct CapturedCheckedSignatures {
 }
 impl CapturedCheckedSignatures {
     fn retained_bytes(&self) -> u64 {
-        let mut weight = crate::NativeMetadataWeight::default();
+        let mut weight = hirsel_query_products::retained::MetadataWeight::default();
         weight.add(size_of::<ProofHeaders>());
         weight.tree::<DefPath, ()>(self.paths.len());
         for path in &self.paths {
@@ -292,7 +292,7 @@ impl CapturedCheckedSignatures {
         weight.add(self.environment.compiler_version.capacity());
         weight.vec(&self.registrations, |w, row| w.add(row.capacity()));
         weight.tree::<DefPath, hirsel_types::SignatureRef>(self.builtins.len());
-        let mut owned = crate::memo::retained::Weight::default();
+        let mut owned = hirsel_query_products::retained::Weight::default();
         for (path, signature) in &self.builtins {
             weight.path(path);
             owned.signature(signature);
@@ -328,7 +328,7 @@ impl CapturedCheckedSignatures {
         allowance: hirsel_engine_admission::MemoryReservation,
     ) -> Result<Arc<FrontCheckedSignatures>, QueryError> {
         let snapshot = self.front.signatures();
-        let mut weight = crate::NativeMetadataWeight::default();
+        let mut weight = hirsel_query_products::retained::MetadataWeight::default();
         weight.add(size_of::<FrontCheckedSignatures>() + 2 * size_of::<usize>());
         weight.tree::<DefPath, Input>(self.paths.len());
         weight.add(self.environment.compiler_version.capacity());
@@ -337,7 +337,7 @@ impl CapturedCheckedSignatures {
             return Err(header_refusal());
         }
         let mut inputs = BTreeMap::new();
-        let mut owned_signatures = crate::memo::retained::Weight::default();
+        let mut owned_signatures = hirsel_query_products::retained::Weight::default();
         for path in &self.paths {
             let id = DefId::intern(path);
             let public = match snapshot.signature(id) {

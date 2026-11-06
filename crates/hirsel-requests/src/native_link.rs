@@ -61,7 +61,7 @@ impl FrozenPlatform {
             .platform
             .runtime()
             .validate(store.as_ref(), &target, inputs.runtime_limits)?;
-        let mut weight = hirsel_engine::NativeMetadataWeight::default();
+        let mut weight = hirsel_query_products::retained::MetadataWeight::default();
         weight.add(std::mem::size_of::<Self>());
         weight.path(&entry);
         weight.add(target.triple.capacity());

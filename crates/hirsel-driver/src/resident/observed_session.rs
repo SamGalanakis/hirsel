@@ -454,8 +454,15 @@ where
     }
     pub fn recompute_counts(
         &mut self,
-        queries: Vec<(hirsel_syntax::DefPath, hirsel_engine::QueryKind)>,
-    ) -> Result<Vec<(hirsel_syntax::DefPath, hirsel_engine::QueryKind, u64)>, ToolError> {
+        queries: Vec<(hirsel_syntax::DefPath, hirsel_query_products::QueryKind)>,
+    ) -> Result<
+        Vec<(
+            hirsel_syntax::DefPath,
+            hirsel_query_products::QueryKind,
+            u64,
+        )>,
+        ToolError,
+    > {
         let output = self.request_applied(CompileOperation::RecomputeCounts { queries })?;
         match &output.result {
             CompileResult::RecomputeCounts(counts) => Ok(counts.clone()),

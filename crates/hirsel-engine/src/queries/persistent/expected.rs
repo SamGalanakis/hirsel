@@ -1,8 +1,8 @@
 //! Immutable VerifyStore expectations outlive preflight, not their heap buffers.
 //! Go's io.copyBuffer (src/io/io.go:407-450) bounds scratch independently of
 //! input size. Here the sink compares exact bytes rather than copying them.
-use crate::memo::Reads;
 use crate::store::Variant;
+use hirsel_query_products::reads::Reads;
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -207,23 +207,35 @@ mod tests {
     #[test]
     fn same_length_reads_are_compared_exactly_and_capture_errors_remain_errors() {
         let reads = |byte| {
-            let mut reads = crate::memo::ReadsBuilder::new();
+            let mut reads = hirsel_query_products::reads::ReadsBuilder::new();
             reads.record(
-                crate::ReadKey::Environment,
+                hirsel_query_products::reads::ReadKey::Environment,
                 hirsel_syntax::ContentHash([byte; 32]),
             );
             reads.finish().unwrap()
         };
         let environment_and_errors = |reverse, environment_byte| {
-            let mut reads = crate::memo::ReadsBuilder::new();
+            let mut reads = hirsel_query_products::reads::ReadsBuilder::new();
             let environment = hirsel_syntax::ContentHash([environment_byte; 32]);
             let errors = hirsel_syntax::ContentHash([2; 32]);
             if reverse {
-                reads.record(crate::ReadKey::UniverseErrors, errors);
-                reads.record(crate::ReadKey::Environment, environment);
+                reads.record(
+                    hirsel_query_products::reads::ReadKey::UniverseErrors,
+                    errors,
+                );
+                reads.record(
+                    hirsel_query_products::reads::ReadKey::Environment,
+                    environment,
+                );
             } else {
-                reads.record(crate::ReadKey::Environment, environment);
-                reads.record(crate::ReadKey::UniverseErrors, errors);
+                reads.record(
+                    hirsel_query_products::reads::ReadKey::Environment,
+                    environment,
+                );
+                reads.record(
+                    hirsel_query_products::reads::ReadKey::UniverseErrors,
+                    errors,
+                );
             }
             reads.finish().unwrap()
         };

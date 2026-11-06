@@ -32,7 +32,7 @@ pub struct RequestWork {
 #[derive(Clone, Debug)]
 pub struct DefinitionWork {
     pub definition: DefPath,
-    pub recomputations: Vec<(hirsel_engine::QueryKind, u64)>,
+    pub recomputations: Vec<(hirsel_query_products::QueryKind, u64)>,
     pub body_validations: u64,
     pub lower_calls: u64,
 }
@@ -41,7 +41,10 @@ pub struct DefinitionWork {
 #[derive(Clone)]
 pub struct CompileInspection {
     pub stats: hirsel_engine::memo::MemoStats,
-    pub memos: Vec<(hirsel_engine::memo::MemoKey, Arc<hirsel_engine::Reads>)>,
+    pub memos: Vec<(
+        hirsel_engine::memo::MemoKey,
+        Arc<hirsel_query_products::reads::Reads>,
+    )>,
     pub definitions: Vec<DefinitionWork>,
     observations: Option<Arc<hirsel_engine::FrontLowerQueries>>,
     owner: Arc<dyn Send + Sync>,
@@ -52,7 +55,7 @@ impl CompileInspection {
     pub fn observed_read_value(
         &self,
         owner: &DefPath,
-        read: &hirsel_engine::ReadKey,
+        read: &hirsel_query_products::reads::ReadKey,
     ) -> Option<hirsel_syntax::ContentHash> {
         self.observations.as_ref()?.observed_read_value(owner, read)
     }
@@ -65,7 +68,10 @@ impl CompileInspection {
     }
     pub(crate) fn new(
         stats: hirsel_engine::memo::MemoStats,
-        memos: Vec<(hirsel_engine::memo::MemoKey, Arc<hirsel_engine::Reads>)>,
+        memos: Vec<(
+            hirsel_engine::memo::MemoKey,
+            Arc<hirsel_query_products::reads::Reads>,
+        )>,
         definitions: Vec<DefinitionWork>,
     ) -> Self {
         Self {
@@ -171,7 +177,7 @@ pub enum CompileResult {
         checked: CheckOutput,
         products: Arc<hirsel_engine::CheckedProducts>,
     },
-    RecomputeCounts(Vec<(DefPath, hirsel_engine::QueryKind, u64)>),
+    RecomputeCounts(Vec<(DefPath, hirsel_query_products::QueryKind, u64)>),
     Tir(Arc<TirExecution>),
     TirBatch(Arc<TirBatchExecution>),
     Native(Arc<NativeExecution>),

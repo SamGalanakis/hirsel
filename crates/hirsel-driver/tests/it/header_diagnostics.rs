@@ -4,6 +4,8 @@ use hirsel_front_phases::*;
 use hirsel_host_io::launch::*;
 use hirsel_intern::jobs::with_compiler_stack;
 
+use hirsel_query_products::LoweringPolicy;
+
 #[test]
 fn header_diagnostics_point_to_the_offending_name_and_earlier_binding() {
     with_compiler_stack(|| {

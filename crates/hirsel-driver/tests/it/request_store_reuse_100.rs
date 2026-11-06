@@ -1,8 +1,10 @@
 use hirsel_driver::session::Session;
-use hirsel_engine::{
-    CheckCompletion, CompileConfig, QueryKind,
-    store::{DirStore, MemStore, ResultStore},
-};
+use hirsel_engine::CheckCompletion;
+use hirsel_engine::CompileConfig;
+use hirsel_engine::store::DirStore;
+use hirsel_engine::store::MemStore;
+use hirsel_engine::store::ResultStore;
+use hirsel_query_products::QueryKind;
 use hirsel_syntax::{DefPath, ItemPath, PackageId};
 use std::sync::{
     Arc,
@@ -45,11 +47,11 @@ impl ResultStore for ReadScopes {
 
 #[test]
 fn selected_request_keeps_one_read_epoch_and_releases_it_before_retained_outputs() {
-    use hirsel_engine::LoweringPolicy;
     use hirsel_engine::requests::OutputReadiness;
     use hirsel_engine::requests::RequestEngine;
     use hirsel_engine::requests::observe_inputs;
     use hirsel_engine_runtime::QueryRuntime;
+    use hirsel_query_products::LoweringPolicy;
 
     use hirsel_requests::CompileOperation;
     use hirsel_requests::CompileRequest;
@@ -196,11 +198,11 @@ fn directory_request_products_reuse_unchanged_bodies_across_sessions_and_edits()
 
 #[test]
 fn unfinished_equal_requests_have_independent_abort_owners_and_completed_graphs_reuse() {
-    use hirsel_engine::LoweringPolicy;
     use hirsel_engine::requests::OutputReadiness;
     use hirsel_engine::requests::RequestEngine;
     use hirsel_engine::requests::observe_inputs;
     use hirsel_engine_runtime::QueryRuntime;
+    use hirsel_query_products::LoweringPolicy;
 
     use hirsel_requests::CompileOperation;
     use hirsel_requests::CompileRequest;
@@ -278,7 +280,7 @@ fn unfinished_equal_requests_have_independent_abort_owners_and_completed_graphs_
 
 #[test]
 fn check_diagnostics_do_not_require_a_valid_run_or_export_entry() {
-    use hirsel_engine::LoweringPolicy;
+    use hirsel_query_products::LoweringPolicy;
     use hirsel_requests::CompileOperation;
     use hirsel_requests::CompileResult;
     hirsel_intern::jobs::with_compiler_stack(|| {
@@ -310,12 +312,11 @@ fn check_diagnostics_do_not_require_a_valid_run_or_export_entry() {
 
 #[test]
 fn source_operations_share_one_graph_only_for_exact_inputs_and_compiler() {
-    use hirsel_engine::{
-        LoweringPolicy,
-        requests::OutputReadiness,
-        requests::{RequestEngine, observe_inputs},
-    };
+    use hirsel_engine::requests::OutputReadiness;
+    use hirsel_engine::requests::RequestEngine;
+    use hirsel_engine::requests::observe_inputs;
     use hirsel_engine_runtime::QueryRuntime;
+    use hirsel_query_products::LoweringPolicy;
 
     use hirsel_requests::*;
     hirsel_intern::jobs::with_compiler_stack(|| {

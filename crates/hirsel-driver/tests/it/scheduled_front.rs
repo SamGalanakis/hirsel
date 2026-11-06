@@ -1,10 +1,12 @@
 use hirsel_driver::*;
-use hirsel_engine::{
-    store::{Domain, MemStore, ResultStore},
-    *,
-};
+use hirsel_engine::store::Domain;
+use hirsel_engine::store::MemStore;
+use hirsel_engine::store::ResultStore;
+use hirsel_engine::*;
 use hirsel_engine_runtime::*;
 use hirsel_intern::jobs::with_compiler_stack;
+
+use hirsel_query_products::QueryKind;
 
 use hirsel_front_phases::*;
 use hirsel_host_io::launch::*;
@@ -557,6 +559,8 @@ fn admitted_lower_depth_matches_scalar_after_warm_constant_dependencies() {
 #[test]
 fn admitted_lower_reserves_outputs_only_for_demanded_definitions() {
     use hirsel_engine::*;
+
+    use hirsel_query_products::QueryKind;
     // Retention is debited by each actual settled outcome, so the allowance
     // that holds exactly the entry's outcome is measured in a fresh probe.
     fn demand(extra: Option<u64>, spare_refused: bool) -> u64 {
@@ -1758,7 +1762,7 @@ fn admitted_storage_recipe_waits_for_checked_body_and_matches_scalar_adapter() {
                 .signature(hirsel_syntax::DefId::intern(&program.entry))
                 .unwrap()
                 .unwrap();
-            let mut reads = hirsel_engine::ReadsBuilder::new();
+            let mut reads = hirsel_query_products::reads::ReadsBuilder::new();
             let mut provider = hirsel_engine::FrozenProvider::for_body(
                 &snapshot,
                 program.entry.0.package.clone(),

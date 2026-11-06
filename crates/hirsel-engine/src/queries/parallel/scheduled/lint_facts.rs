@@ -32,7 +32,7 @@ impl LintFacts {
         }
     }
     pub(super) fn materialize_bytes(&self) -> u64 {
-        let mut weight = crate::NativeMetadataWeight::default();
+        let mut weight = hirsel_query_products::retained::MetadataWeight::default();
         weight.tree::<DefPath, ()>(self.errors.len());
         weight.tree::<(DefPath, u32), ()>(self.constructed.len());
         for id in &self.errors {

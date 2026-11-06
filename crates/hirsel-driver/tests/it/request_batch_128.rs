@@ -1,9 +1,11 @@
 use hirsel_driver::session::Session;
 use hirsel_driver::*;
-use hirsel_engine::{store::MemStore, *};
+use hirsel_engine::store::MemStore;
+use hirsel_engine::*;
 use hirsel_front_phases::COMPILER;
 use hirsel_host_io::launch::*;
 use hirsel_intern::jobs::with_compiler_stack;
+
 use hirsel_requests::*;
 use hirsel_tir::TirProvider;
 use std::sync::Arc;

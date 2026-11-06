@@ -1,5 +1,7 @@
-use hirsel_engine::{CompileConfig, QueryKind, store};
+use hirsel_engine::CompileConfig;
+use hirsel_engine::store;
 use hirsel_intern::jobs::with_compiler_stack;
+use hirsel_query_products::QueryKind;
 
 const SOURCE: &str = r#"@loop_source(open, next)
 type View { source: String }
@@ -49,7 +51,7 @@ fn a_broken_dependency_association_is_reported_before_client_body_planning() {
                 .unwrap()
                 .0;
             let output = program
-                .check(hirsel_engine::LoweringPolicy::Reachable)
+                .check(hirsel_query_products::LoweringPolicy::Reachable)
                 .unwrap();
             if valid {
                 assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);

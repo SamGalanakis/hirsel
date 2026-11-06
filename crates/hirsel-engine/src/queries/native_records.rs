@@ -1,6 +1,7 @@
 //! Typed native descriptor transport through the ordinary product codec. The
 //! engine owns anchor rebinding; native producers do not duplicate its catalog.
-use crate::{QueryEngine, store::ResultStore};
+use crate::QueryEngine;
+use crate::store::ResultStore;
 use hirsel_product_codec::TypeRecords;
 use hirsel_span::Anchor;
 use hirsel_syntax::{DefId, DefPath};
@@ -109,7 +110,7 @@ impl SourceBindings {
         )
     }
     fn bytes(&self) -> Option<u64> {
-        let mut weight = crate::NativeMetadataWeight::default();
+        let mut weight = hirsel_query_products::retained::MetadataWeight::default();
         weight.add(size_of::<NativeRecordContext>() + size_of::<Self>() + 4 * size_of::<usize>());
         weight.add(
             size_of_val(&*self.owners)
@@ -546,7 +547,7 @@ impl NativeRecordContext {
         self.bindings.admit(allowance)
     }
     pub(crate) fn planning_bytes(&self) -> Option<u64> {
-        let mut weight = crate::NativeMetadataWeight::default();
+        let mut weight = hirsel_query_products::retained::MetadataWeight::default();
         weight.add(size_of::<Self>() + 3 * size_of::<Box<[usize]>>() + 4 * size_of::<usize>());
         weight.add(
             self.bindings

@@ -3,7 +3,7 @@
 use super::Weight;
 use hirsel_syntax as ast;
 
-pub(crate) fn retained_syntax_bytes(syntax: &ast::ItemSyntax) -> u64 {
+pub fn retained_syntax_bytes(syntax: &ast::ItemSyntax) -> u64 {
     let mut weight = Weight::default();
     weight.add(super::arc_bytes(syntax));
     weight.syntax(syntax);
@@ -173,7 +173,7 @@ impl Weight<'_> {
             ast::TypeExprKind::Box(_) | ast::TypeExprKind::Error => (),
         }
     }
-    pub(crate) fn syntax(&mut self, syntax: &ast::ItemSyntax) {
+    pub fn syntax(&mut self, syntax: &ast::ItemSyntax) {
         let ast::ItemSyntax {
             item,
             tree,
@@ -313,169 +313,9 @@ impl Weight<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hirsel_intern::Symbol;
-    use hirsel_span::{Anchor, Span};
+    use crate::test_support::syntax_fixture as fixture;
     use std::sync::Arc;
-    fn fixture(width: usize) -> ast::ItemSyntax {
-        let origin = ast::Origin {
-            span: Span::default(),
-            tokens: Default::default(),
-        };
-        let path = ast::Path {
-            package: Some(ast::PackageId {
-                name: "source".into(),
-                version: "1".into(),
-            }),
-            segments: vec![Symbol::intern("nested"); width],
-        };
-        let signature = ast::FunctionSyntax {
-            attributes: vec![ast::Attribute {
-                name: Symbol::intern("state"),
-                origin,
-                arguments: vec![
-                    ast::AttributeArgument::StatePromise(ast::StatePromiseSyntax {
-                        kind: ast::StatePromiseKind::PreserveCaptures,
-                        selectors: vec![path.clone(); width],
-                        origin,
-                    }),
-                    ast::AttributeArgument::String("payload".repeat(width)),
-                ],
-            }],
-            generics: vec![ast::GenericParam {
-                name: Symbol::intern("T"),
-                kind: ast::GenericKind::Implementation {
-                    signature: path.clone(),
-                    sharing: Vec::with_capacity(width),
-                },
-            }],
-            uses: Some(vec![path.clone(); width]),
-            ..Default::default()
-        };
-        ast::ItemSyntax {
-            item: ast::Item {
-                name_span: origin.span,
-                origin,
-                name: Symbol::intern("main"),
-                definition: ast::DefPath::core("source.memory.main"),
-                visibility: ast::Visibility::Private,
-                attributes: signature.attributes.clone(),
-                kind: ast::ItemKind::Function {
-                    signature: signature.clone(),
-                    body: Some(ast::ExprId(0)),
-                    abi: Some(ast::ForeignAbi {
-                        literal: "\"C\"".into(),
-                        contract: Some("contract".repeat(width)),
-                    }),
-                },
-                generated: Some(ast::Generated::Specialization(vec![
-                    (
-                        Symbol::intern("I"),
-                        ast::DefPath::core("source.binding")
-                    );
-                    width
-                ])),
-            },
-            tree: ast::SyntaxTree {
-                expressions: vec![
-                    ast::Expr {
-                        origin,
-                        kind: ast::ExprKind::Closure {
-                            signature: signature.clone(),
-                            body: ast::ExprId(0),
-                        },
-                    },
-                    ast::Expr {
-                        origin,
-                        kind: ast::ExprKind::Literal(ast::Literal::String("literal".repeat(width))),
-                    },
-                    ast::Expr {
-                        origin,
-                        kind: ast::ExprKind::Call {
-                            callee: ast::ExprId(0),
-                            arguments: Vec::with_capacity(width),
-                        },
-                    },
-                ],
-                statements: vec![ast::Stmt {
-                    origin,
-                    kind: ast::StmtKind::Function {
-                        name: Symbol::intern("inner"),
-                        signature: signature.clone(),
-                        body: ast::ExprId(0),
-                    },
-                }],
-                patterns: vec![ast::Pattern {
-                    origin,
-                    kind: ast::PatternKind::Constructor {
-                        path: path.clone(),
-                        fields: Vec::with_capacity(width),
-                        rest: false,
-                    },
-                }],
-                types: vec![ast::TypeExpr {
-                    origin,
-                    kind: ast::TypeExprKind::Qualified {
-                        base: ast::TypeExprId(0),
-                        modifiers: vec![ast::TypeModifier::Unique; width],
-                        brand: Some(ast::BrandSyntax {
-                            sibling: true,
-                            path: path.clone(),
-                        }),
-                        relation: Some(ast::RelationSyntax {
-                            places: vec![ast::RelationPlace::Path(path); width],
-                            origin,
-                        }),
-                    },
-                }],
-                formats: vec![ast::FormatString {
-                    expression: ast::ExprId(0),
-                    pieces: vec!["piece".repeat(width)],
-                    holes: vec![ast::ExprId(0)],
-                    specs: vec![":>8".into()],
-                }],
-                analyses: vec![ast::AnalysisAnnotation {
-                    site: ast::AnalysisSite::Item,
-                    name: "analysis".into(),
-                    payload: vec!["value".repeat(width)],
-                    spaced: vec![true; width],
-                    origin,
-                }],
-                ..Default::default()
-            },
-            anchor: Anchor(0),
-            text_hash: Default::default(),
-            occurrence: 0,
-        }
-    }
-    #[test]
-    fn indexed_syntax_inspection_covers_item_slots_and_owned_paths_without_query_work() {
-        for width in [1, 4, 16] {
-            let input = fixture(width);
-            let mut engine =
-                crate::QueryEngine::new(crate::default_environment(), Default::default());
-            let (_, storage) = crate::test_alloc::measured(|| {
-                for i in 0..width {
-                    let mut syntax = input.clone();
-                    syntax.item.definition.0.name = format!("item{i}");
-                    engine
-                        .items
-                        .insert(syntax.item.definition.clone(), vec![Arc::new(syntax)]);
-                }
-            });
-            let before = engine.work_stats();
-            let (bound, inspection) = crate::test_alloc::measured(|| engine.indexed_syntax_bytes());
-            assert_eq!(inspection.allocations, 0);
-            assert_eq!(engine.work_stats(), before);
-            assert!(
-                storage.live as u64 <= bound.unwrap(),
-                "width {width}: actual {} exceeds {:?}",
-                storage.live,
-                bound
-            );
-            let (_, release) = crate::test_alloc::measured(|| engine.items.clear());
-            assert_eq!(-release.live, storage.live);
-        }
-    }
+
     #[test]
     fn source_syntax_hold_bound_covers_nested_physical_storage_without_allocating() {
         for width in [1, 4, 16] {

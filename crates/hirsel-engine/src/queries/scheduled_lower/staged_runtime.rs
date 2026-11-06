@@ -27,7 +27,7 @@ impl FrontLowerQueries {
         let mut pending = VecDeque::<Frame>::new();
         let mut seen = BTreeSet::<(DefId, NameSite, Bindings)>::new();
         let mut selected = Vec::new();
-        let mut weight = crate::NativeMetadataWeight::default();
+        let mut weight = hirsel_query_products::retained::MetadataWeight::default();
         for path in roots {
             if !self.inputs.contains_key(&path) {
                 continue;
@@ -58,11 +58,11 @@ impl FrontLowerQueries {
             if seen.contains(&key) {
                 continue;
             }
-            let mut previous = crate::NativeMetadataWeight::default();
+            let mut previous = hirsel_query_products::retained::MetadataWeight::default();
             if !seen.is_empty() {
                 previous.tree::<(DefId, NameSite, Bindings), ()>(seen.len());
             }
-            let mut next = crate::NativeMetadataWeight::default();
+            let mut next = hirsel_query_products::retained::MetadataWeight::default();
             next.tree::<(DefId, NameSite, Bindings), ()>(seen.len() + 1);
             weight.add(next.bytes().saturating_sub(previous.bytes()) as usize);
             if !bindings.is_empty() {
@@ -211,7 +211,7 @@ impl FrontLowerQueries {
 
 fn push(
     pending: &mut VecDeque<Frame>,
-    weight: &mut crate::NativeMetadataWeight,
+    weight: &mut hirsel_query_products::retained::MetadataWeight,
     limit: u64,
     frame: Frame,
 ) -> Result<(), QueryError> {
@@ -234,11 +234,11 @@ fn push(
 }
 
 fn admit_binding_map(
-    weight: &crate::NativeMetadataWeight,
+    weight: &hirsel_query_products::retained::MetadataWeight,
     limit: u64,
     entries: usize,
 ) -> Result<(), QueryError> {
-    let mut copied = crate::NativeMetadataWeight::default();
+    let mut copied = hirsel_query_products::retained::MetadataWeight::default();
     if entries != 0 {
         copied.tree::<SizeParameterRef, u64>(entries);
     }

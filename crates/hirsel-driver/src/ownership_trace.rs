@@ -136,7 +136,7 @@ pub fn execute_test_resources(
         .map_err(|error| match error {
             hirsel_engine::RuntimeError::Query(error) => ToolError::Query {
                 error,
-                phase: Some(hirsel_engine::QueryKind::Interpret),
+                phase: Some(hirsel_query_products::QueryKind::Interpret),
                 sources: input.sources.clone(),
             },
             hirsel_engine::RuntimeError::Tool(message) => ToolError::Runtime(message),

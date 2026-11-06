@@ -4,8 +4,12 @@ use hirsel_intern::jobs::with_compiler_stack;
 
 #[test]
 fn admitted_generator_text_waits_on_lower_with_one_worker_and_keeps_detached_evidence() {
-    use hirsel_engine::{store::MemStore, *};
+    use hirsel_engine::store::MemStore;
+    use hirsel_engine::*;
     use hirsel_engine_runtime::*;
+
+    use hirsel_query_products::reads::ReadKey;
+    use hirsel_query_products::{LoweringPolicy, QueryKind};
 
     use std::sync::Arc;
     with_compiler_stack(|| {
@@ -151,8 +155,12 @@ fn admitted_generator_text_refuses_zero_depth_before_lowering_or_execution() {
 }
 
 fn generator_refusal_control(zero_depth: bool) {
-    use hirsel_engine::{store::MemStore, *};
+    use hirsel_engine::store::MemStore;
+    use hirsel_engine::*;
     use hirsel_engine_runtime::*;
+
+    use hirsel_query_products::reads::ReadKey;
+    use hirsel_query_products::{LoweringPolicy, QueryKind};
 
     use std::sync::Arc;
     with_compiler_stack(|| {
@@ -269,8 +277,12 @@ fn generator_refusal_control(zero_depth: bool) {
 
 #[test]
 fn accepted_generator_view_checks_and_lowers_the_literal_without_changing_raw_source() {
-    use hirsel_engine::{store::MemStore, *};
+    use hirsel_engine::store::MemStore;
+    use hirsel_engine::*;
     use hirsel_engine_runtime::*;
+
+    use hirsel_query_products::reads::ReadKey;
+    use hirsel_query_products::{LoweringPolicy, QueryKind};
 
     use std::sync::Arc;
     with_compiler_stack(|| {
@@ -489,8 +501,12 @@ fn accepted_output_control_with(
         hirsel_engine::FrontRegistrationOutput,
     ),
 ) {
-    use hirsel_engine::{store::MemStore, *};
+    use hirsel_engine::store::MemStore;
+    use hirsel_engine::*;
     use hirsel_engine_runtime::*;
+
+    use hirsel_query_products::reads::ReadKey;
+    use hirsel_query_products::{LoweringPolicy, QueryKind};
 
     use std::sync::Arc;
     let directory = tempfile::tempdir().unwrap();
@@ -580,6 +596,9 @@ fn accepted_generator_view_refuses_short_grants_without_publishing_sources_and_k
     use hirsel_engine::*;
     use hirsel_engine_runtime::*;
 
+    use hirsel_query_products::reads::ReadKey;
+    use hirsel_query_products::{LoweringPolicy, QueryKind};
+
     with_compiler_stack(|| {
         for jobs in [1, 2] {
             accepted_output_control(jobs, |program, budget, output| {
@@ -626,6 +645,9 @@ fn accepted_generator_view_refuses_changed_original_declarations() {
 fn accepted_edit_control(own: bool) {
     use hirsel_engine::*;
     use hirsel_engine_runtime::*;
+
+    use hirsel_query_products::reads::ReadKey;
+    use hirsel_query_products::{LoweringPolicy, QueryKind};
 
     with_compiler_stack(|| {
         for jobs in [1, 2] {
@@ -830,6 +852,9 @@ fn accepted_generator_view_releases_unused_syntax_grant_and_keeps_clone_owned_by
     use hirsel_engine::*;
     use hirsel_engine_runtime::*;
 
+    use hirsel_query_products::reads::ReadKey;
+    use hirsel_query_products::{LoweringPolicy, QueryKind};
+
     with_compiler_stack(|| {
         for jobs in [1, 2] {
             let mut retained_budget = None;
@@ -875,8 +900,12 @@ fn accepted_generator_view_releases_unused_syntax_grant_and_keeps_clone_owned_by
 
 #[test]
 fn generator_bootstrap_finishes_before_final_admitted_check_and_preserves_its_scalar_result() {
-    use hirsel_engine::{store::MemStore, *};
+    use hirsel_engine::store::MemStore;
+    use hirsel_engine::*;
     use hirsel_engine_runtime::*;
+
+    use hirsel_query_products::reads::ReadKey;
+    use hirsel_query_products::{LoweringPolicy, QueryKind};
 
     use std::sync::Arc;
     with_compiler_stack(|| {
@@ -1069,8 +1098,12 @@ fn generator_bootstrap_counts_spare_syntax_grants_before_engine_work() {
 }
 
 fn bootstrap_refusal_control(zero_depth: bool, spare_grants: bool) {
-    use hirsel_engine::{store::MemStore, *};
+    use hirsel_engine::store::MemStore;
+    use hirsel_engine::*;
     use hirsel_engine_runtime::*;
+
+    use hirsel_query_products::reads::ReadKey;
+    use hirsel_query_products::{LoweringPolicy, QueryKind};
 
     use std::sync::Arc;
     with_compiler_stack(|| {
@@ -1201,6 +1234,9 @@ fn accepted_generated_native_catalogue_preserves_raw_source_and_actual_lower_aut
     use hirsel_engine::*;
     use hirsel_engine_runtime::*;
 
+    use hirsel_query_products::reads::ReadKey;
+    use hirsel_query_products::{LoweringPolicy, QueryKind};
+
     with_compiler_stack(|| {
         for jobs in [1, 2] {
             accepted_output_control(jobs, |program, budget, output| {
@@ -1308,6 +1344,9 @@ fn accepted_generated_native_catalogue_preserves_raw_source_and_actual_lower_aut
 fn accepted_generated_native_inputs_bind_current_views_and_exact_metadata_grants() {
     use hirsel_engine::*;
     use hirsel_engine_runtime::*;
+
+    use hirsel_query_products::reads::ReadKey;
+    use hirsel_query_products::{LoweringPolicy, QueryKind};
 
     with_compiler_stack(|| {
         for jobs in [1, 2] {
@@ -1492,7 +1531,7 @@ fn detached_generator_text_releases_completed_front_and_lower_input_grants() {
                 );
                 assert_eq!(output.text().unwrap(), "fn()->u8 uses {} {7u8}");
                 assert!(output.has_execution_acceptance());
-                assert!(output.reads().iter().any(|(key, _)| matches!(key, hirsel_engine::ReadKey::ExecutedBody(id) if id.path().0.name == "make")));
+                assert!(output.reads().iter().any(|(key, _)| matches!(key, hirsel_query_products::reads::ReadKey::ExecutedBody(id) if id.path().0.name == "make")));
                 let copy = output.clone();
                 drop(output);
                 assert!(budget.reserved() > 0);
@@ -1514,6 +1553,9 @@ fn detached_generator_text_releases_completed_front_and_lower_input_grants() {
 fn namespace_capture_keeps_its_admitted_memory_after_front_release() {
     use hirsel_engine::*;
     use hirsel_engine_runtime::*;
+
+    use hirsel_query_products::reads::ReadKey;
+    use hirsel_query_products::{LoweringPolicy, QueryKind};
 
     with_compiler_stack(|| {
         accepted_output_control(1, |program, budget, output| {
@@ -1558,6 +1600,9 @@ fn namespace_capture_keeps_its_admitted_memory_after_front_release() {
 fn captured_check_refuses_an_edited_written_file_before_publication() {
     use hirsel_engine::*;
     use hirsel_engine_runtime::*;
+
+    use hirsel_query_products::reads::ReadKey;
+    use hirsel_query_products::{LoweringPolicy, QueryKind};
 
     with_compiler_stack(|| {
         accepted_output_control(1, |program, budget, output| {

@@ -6,7 +6,7 @@ impl FrontRunQueries {
             return Err(operational(format!("missing signature input for {path}")));
         }
         let mut input = self.prepare_input(path)?;
-        let mut weight = crate::NativeMetadataWeight::default();
+        let mut weight = hirsel_query_products::retained::MetadataWeight::default();
         weight.add(std::mem::size_of::<Input>() + 2 * std::mem::size_of::<usize>());
         weight.tree::<DefPath, ()>(input.dependencies.len());
         for dependency in &input.dependencies {
@@ -52,16 +52,23 @@ impl FrontRunQueries {
                 .records
                 .decode(&self.anchors, &bytes)
                 .ok_or_else(|| operational("invalid installed header"))?;
-            if crate::memo::retained::retained_signature_payload_bytes(&signature).saturating_add(
-                crate::memo::retained::retained_signature_payload_bytes(&owner_signature),
-            ) > bound
+            if hirsel_query_products::retained::retained_signature_payload_bytes(&signature)
+                .saturating_add(
+                    hirsel_query_products::retained::retained_signature_payload_bytes(
+                        &owner_signature,
+                    ),
+                )
+                > bound
             {
                 return Err(operational("installed header exceeds ownership descriptor"));
             }
             let owned_header_bytes =
-                crate::memo::retained::retained_signature_payload_bytes(&signature).saturating_add(
-                    crate::memo::retained::retained_signature_payload_bytes(&owner_signature),
-                );
+                hirsel_query_products::retained::retained_signature_payload_bytes(&signature)
+                    .saturating_add(
+                        hirsel_query_products::retained::retained_signature_payload_bytes(
+                            &owner_signature,
+                        ),
+                    );
             return Ok(Input {
                 _charge: None,
                 signature,
@@ -137,7 +144,7 @@ impl FrontRunQueries {
         let specializations = self.specializations.get(path).cloned();
         let bytes =
             bincode::serialize(&content).map_err(|_| operational("Run input content encoding"))?;
-        let mut content_weight = crate::NativeMetadataWeight::default();
+        let mut content_weight = hirsel_query_products::retained::MetadataWeight::default();
         content_weight.add(std::mem::size_of::<Vec<Vec<u8>>>());
         content_weight.vec(&content, |weight, field| weight.flat_vec(field));
         let content_decode_bytes = content_weight

@@ -1,8 +1,9 @@
 //! Checked cookbook: explicit nested hooks, strict wire errors and owned results.
 use hirsel_driver::session::Session;
-use hirsel_engine::{LoweringPolicy, QueryError, RunConfiguration, SimulationConfig, ToolError};
+use hirsel_engine::{QueryError, RunConfiguration, SimulationConfig, ToolError};
 use hirsel_front_phases::load_program_source;
 use hirsel_intern::jobs::with_compiler_stack;
+use hirsel_query_products::LoweringPolicy;
 use hirsel_requests::CompileOperation;
 use hirsel_requests::CompileResult;
 use std::path::PathBuf;

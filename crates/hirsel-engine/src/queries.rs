@@ -1,6 +1,7 @@
 mod live_record;
-use crate::memo::{MemoGraph, MemoKey, ReadKey, Reads, ReadsBuilder};
+use crate::memo::{MemoGraph, MemoKey};
 use crate::*;
+use hirsel_query_products::reads::{ReadKey, Reads, ReadsBuilder};
 mod candidate_products;
 mod checked_signatures;
 pub use checked_signatures::FrontCheckedSignatures;
@@ -230,49 +231,6 @@ impl SourcePhases {
     }
 }
 
-/// Reads survive errors and missing phases, rather than being lost in QueryError.
-#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Default)]
-pub struct DependencyReads {
-    pub operational_failure: Option<hirsel_types::OperationalFailure>,
-    pub signatures: Vec<SignatureDependency>,
-    pub failed_signatures: Vec<DefPath>,
-    pub failed_signature_keys: Vec<(DefPath, Option<ContentHash>)>,
-    pub lookups: Vec<(hirsel_types::ReadPath, bool)>,
-    pub manifest_lookups: Vec<hirsel_types::SharedRead>,
-    pub resolver: Arc<hirsel_types::SharedPath<hirsel_types::SharedRead>>,
-    /// Other items' name sites a result cites, as read (`cite_name`).
-    pub citations: Vec<(DefPath, Option<Span>)>,
-    /// A compact header's semantic closure: the definitions its dropped
-    /// signature and resolved lookup observations named.
-    pub closure: Vec<DefId>,
-}
-
-impl DependencyReads {
-    /// Every definition the semantic closure of this detail names.
-    pub fn semantic_definitions(&self) -> impl Iterator<Item = DefId> + '_ {
-        let reads = self.resolver.iter().chain(&self.manifest_lookups);
-        self.signatures
-            .iter()
-            .map(|dependency| dependency.definition)
-            .chain(reads.filter_map(|read| {
-                match read.as_ref() {
-                    hirsel_types::DependencyRead::Signature { definition, .. } => Some(*definition),
-                    hirsel_types::DependencyRead::Lookup {
-                        result: Ok(definition),
-                        ..
-                    } => Some(DefId::intern(definition.as_ref())),
-                    hirsel_types::DependencyRead::ProviderLookup { output, .. } => output
-                        .result
-                        .as_ref()
-                        .ok()
-                        .map(|definition| DefId::intern(definition.as_ref())),
-                    _ => None,
-                }
-            }))
-            .chain(self.closure.iter().copied())
-    }
-}
-
 /// A file's parse result under its package's query environment.
 pub(crate) type ParsedFile = (
     FileContext,
@@ -396,7 +354,7 @@ pub struct QueryEngine {
     /// The runtime types compile-time evaluation runs with, and the epoch of
     /// the signature snapshot they were built from.
     comptime_runtime: Option<(
-        crate::memo::Revision,
+        hirsel_query_products::reads::Revision,
         Arc<hirsel_interp::aggregate::RuntimeTypes>,
     )>,
     pub(crate) source_growth: crate::generic_graph::SourceGrowth,
@@ -406,7 +364,7 @@ pub struct QueryEngine {
         crate::snapshot::SnapshotCache,
     )>,
     pub(crate) operation: Arc<operation_inputs::OperationOwner>,
-    pub(crate) snapshot_epoch: crate::memo::Revision,
+    pub(crate) snapshot_epoch: hirsel_query_products::reads::Revision,
     /// Producer identity for rows in the retained frozen snapshot. Weak
     /// references establish provenance without retaining old memo generations.
     pub(crate) snapshot_sources:
@@ -420,7 +378,7 @@ pub struct QueryEngine {
     private_summary_reads: BTreeMap<DefId, Arc<Reads>>,
     private_summaries: hirsel_syntax::DefMap<hirsel_types::UniqueSummary>,
     private_unique_failures: BTreeMap<DefId, Vec<hirsel_types::UniqueFailure>>,
-    private_summary_revision: Option<crate::memo::Revision>,
+    private_summary_revision: Option<hirsel_query_products::reads::Revision>,
     private_summary_inputs: private_unique::RegistrationInputs,
     private_summary_active: bool,
     private_bootstrap_active: bool,
@@ -428,7 +386,7 @@ pub struct QueryEngine {
     private_inference_allowance:
         Option<Result<hirsel_engine_admission::MemoryReservation, QueryError>>,
     private_signature_publications: BTreeSet<DefId>,
-    private_summary_failure: Option<(crate::memo::Revision, QueryError)>,
+    private_summary_failure: Option<(hirsel_query_products::reads::Revision, QueryError)>,
     signature_stack: Vec<DefPath>,
     recomputes: BTreeMap<(DefPath, QueryKind), usize>,
     scalar_lower_calls: hirsel_syntax::DefMap<u64>,
@@ -582,7 +540,7 @@ impl QueryEngine {
     /// their independently measured source/header/read-index components.
     /// This visits immutable capacities without parsing or querying a provider.
     pub fn indexed_syntax_bytes(&self) -> Option<u64> {
-        let mut metadata = crate::NativeMetadataWeight::default();
+        let mut metadata = hirsel_query_products::retained::MetadataWeight::default();
         metadata.add(2 * size_of::<usize>() + size_of::<BTreeMap<DefPath, Vec<Arc<ItemSyntax>>>>());
         metadata.tree::<DefPath, Vec<Arc<ItemSyntax>>>(self.items.len());
         let mut payload = 0u64;
@@ -590,8 +548,9 @@ impl QueryEngine {
             metadata.path(path);
             metadata.flat_vec(candidates);
             for syntax in candidates {
-                payload =
-                    payload.checked_add(crate::memo::retained::retained_syntax_bytes(syntax))?;
+                payload = payload.checked_add(
+                    hirsel_query_products::retained::retained_syntax_bytes(syntax),
+                )?;
             }
         }
         payload.checked_add(metadata.bytes())
@@ -791,7 +750,8 @@ impl QueryEngine {
             source_growth: Default::default(),
             snapshot: None,
             operation: Arc::default(),
-            snapshot_epoch: crate::memo::Revision::from_u64(1).expect("a nonzero revision"),
+            snapshot_epoch: hirsel_query_products::reads::Revision::from_u64(1)
+                .expect("a nonzero revision"),
             snapshot_sources: Default::default(),
             snapshot_inputs_revision: 0,
             types: hirsel_registry::session_types(),

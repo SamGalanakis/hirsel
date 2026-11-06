@@ -9,13 +9,24 @@ use super::{
     },
     inspection::{Counters, GraphMeter, InspectionLedger, KINDS, MeterOwner, SourceInspection},
 };
-use hirsel_engine::{
-    CompileConfig, Compiler, FrontBodyQueries, FrontCheckQueries, FrontGrowthQueries,
-    FrontLowerQueries, FrontRunQueries, LoweringPolicy, QueryError, QueryKind, ToolError,
-    requests::source_graph::{SourceHost, SourceSelection, SourceShape, registration},
-    store::{RequestStore, ResultStore},
-};
+use hirsel_engine::CompileConfig;
+use hirsel_engine::Compiler;
+use hirsel_engine::FrontBodyQueries;
+use hirsel_engine::FrontCheckQueries;
+use hirsel_engine::FrontGrowthQueries;
+use hirsel_engine::FrontLowerQueries;
+use hirsel_engine::FrontRunQueries;
+use hirsel_engine::QueryError;
+use hirsel_engine::ToolError;
+use hirsel_engine::requests::source_graph::SourceHost;
+use hirsel_engine::requests::source_graph::SourceSelection;
+use hirsel_engine::requests::source_graph::SourceShape;
+use hirsel_engine::requests::source_graph::registration;
+use hirsel_engine::store::RequestStore;
+use hirsel_engine::store::ResultStore;
 use hirsel_engine_runtime::*;
+use hirsel_query_products::LoweringPolicy;
+use hirsel_query_products::QueryKind;
 
 use hirsel_span::SourceMap;
 use hirsel_syntax::DefPath;

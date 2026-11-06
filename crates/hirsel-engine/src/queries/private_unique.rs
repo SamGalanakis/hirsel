@@ -17,7 +17,7 @@ pub(super) fn registration_inputs(
             // The generated body's own header carries the proof this inference
             // publishes. Reading it back would make each publication a new input.
             let id = DefId::intern(registration.definition());
-            let mut reads = crate::memo::ReadsBuilder::new();
+            let mut reads = hirsel_query_products::reads::ReadsBuilder::new();
             for &(key, value) in registration.reads().iter() {
                 if inherited_registration_read(&key)
                     && !matches!(key, ReadKey::Signature(d) | ReadKey::ExecutedSignature(d) if d == id)
@@ -165,7 +165,7 @@ impl QueryEngine {
             // after inference publishes a stronger result for the same header.
             let summary = self.private_summary(id).unwrap_or_default();
             observed.merged.record(
-                crate::memo::ReadKey::PrivateSummary(id),
+                hirsel_query_products::reads::ReadKey::PrivateSummary(id),
                 memos::private_summary_value(&summary),
             );
         }
@@ -242,7 +242,8 @@ impl QueryEngine {
                         let mut observed = Observed::default();
                         observed.products = entry.products.clone();
                         for (key, value) in entry.reads().iter() {
-                            if !matches!(key, crate::memo::ReadKey::PrivateSummary(d) if *d == id) {
+                            if !matches!(key, hirsel_query_products::reads::ReadKey::PrivateSummary(d) if *d == id)
+                            {
                                 observed.merged.record(*key, *value);
                             }
                         }

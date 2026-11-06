@@ -2,9 +2,11 @@
 //! requires complete source acceptance before publishing executable readiness.
 use super::native_lower;
 use super::native_routing::NativeRouting;
-use hirsel_engine::{
-    FrontLowerQueries, FrontNativeProducts, FrontNativeQueries, FrontProofExport, store::*,
-};
+use hirsel_engine::FrontLowerQueries;
+use hirsel_engine::FrontNativeProducts;
+use hirsel_engine::FrontNativeQueries;
+use hirsel_engine::FrontProofExport;
+use hirsel_engine::store::*;
 use hirsel_engine_runtime::*;
 
 use hirsel_native::query_model::NativeRootKey;
@@ -165,7 +167,7 @@ impl NativeBootstrap {
                 .collect::<Vec<_>>(),
         ))
         .map_err(|error| error.to_string())?;
-        let mut table_weight = hirsel_engine::NativeMetadataWeight::default();
+        let mut table_weight = hirsel_query_products::retained::MetadataWeight::default();
         table_weight.vec(&plan.test_entries, |weight, (path, _)| weight.path(path));
         let metadata = definitions
             .iter()

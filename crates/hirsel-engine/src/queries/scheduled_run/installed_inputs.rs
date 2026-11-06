@@ -20,7 +20,7 @@ impl FrontRunQueries {
             return Ok(());
         }
         let syntax = namespace.syntax(path)?;
-        let discovery = catalog::SourceFacts::capture(&syntax);
+        let discovery = catalog::capture_source_facts(&syntax);
         let header = namespace.header(path)?;
         let mut reads = Vec::new();
         if let Some(observed) = &header.reads {
@@ -34,13 +34,15 @@ impl FrontRunQueries {
             )
             .ok_or_else(|| operational("installed semantic header encoding"))?;
         let header_decode_bytes = header_decode
-            .checked_add(crate::memo::retained::retained_signature_payload_bytes(
-                &input.signature,
-            ))
+            .checked_add(
+                hirsel_query_products::retained::retained_signature_payload_bytes(&input.signature),
+            )
             .and_then(|bytes| {
-                bytes.checked_add(crate::memo::retained::retained_signature_payload_bytes(
-                    &input.owner_signature,
-                ))
+                bytes.checked_add(
+                    hirsel_query_products::retained::retained_signature_payload_bytes(
+                        &input.owner_signature,
+                    ),
+                )
             })
             .ok_or_else(|| operational("installed semantic header size overflow"))?;
         let header_reference =
@@ -51,7 +53,9 @@ impl FrontRunQueries {
             .encode_with_decode_bytes(&self.anchors, &syntax)
             .ok_or_else(|| operational("installed semantic body encoding"))?;
         let body_decode_bytes = body_decode
-            .checked_add(crate::memo::retained::retained_syntax_bytes(&syntax))
+            .checked_add(hirsel_query_products::retained::retained_syntax_bytes(
+                &syntax,
+            ))
             .ok_or_else(|| operational("installed semantic body size overflow"))?;
         let body_reference =
             self.publish_installed_content(&*writer, SEMANTIC_BODY, &body_bytes)?;

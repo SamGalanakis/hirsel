@@ -516,7 +516,7 @@ fn run_provider_on_host(
         }
         hirsel_interp::Error::Query(error) => ToolError::Query {
             error,
-            phase: Some(hirsel_engine::QueryKind::Interpret),
+            phase: Some(hirsel_query_products::QueryKind::Interpret),
             sources: sources.clone(),
         },
         error => ToolError::Runtime(format!("interpret: {error:?}")),

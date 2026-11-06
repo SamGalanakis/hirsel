@@ -21,9 +21,9 @@ impl Constants {
         value: Materialized,
         substitutions: Vec<(hirsel_syntax::ExprId, Materialized)>,
     ) -> Self {
-        let mut root = crate::NativeMetadataWeight::default();
+        let mut root = hirsel_query_products::retained::MetadataWeight::default();
         root.materialized(&value);
-        let mut rest = crate::NativeMetadataWeight::default();
+        let mut rest = hirsel_query_products::retained::MetadataWeight::default();
         rest.vec(&substitutions, |weight, (_, value)| {
             weight.materialized(value)
         });

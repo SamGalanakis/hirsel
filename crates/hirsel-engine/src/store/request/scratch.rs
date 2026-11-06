@@ -35,7 +35,7 @@ impl Entry {
     }
 }
 fn index_bytes(entries: usize) -> u64 {
-    let mut weight = crate::NativeMetadataWeight::default();
+    let mut weight = hirsel_query_products::retained::MetadataWeight::default();
     weight.tree::<ContentHash, Entry>(entries);
     weight.bytes()
 }
@@ -45,7 +45,7 @@ struct Files {
     entries: BTreeMap<ContentHash, Entry>,
     spool: fs::File,
 }
-pub(super) struct ScratchStore {
+pub(crate) struct ScratchStore {
     selected: Arc<dyn ResultStore>,
     // Close the spool before the last directory owner can remove its path.
     files: Mutex<Files>,
@@ -64,7 +64,7 @@ impl Drop for ReadOwner {
     }
 }
 impl ScratchStore {
-    pub(super) fn new(
+    pub(crate) fn new(
         selected: Arc<dyn ResultStore>,
         admission: Arc<Admission>,
         parent: &Path,
@@ -409,7 +409,7 @@ mod tests {
                 "admitted={index}, actual={}",
                 actual.live
             );
-            let mut old = crate::NativeMetadataWeight::default();
+            let mut old = hirsel_query_products::retained::MetadataWeight::default();
             old.tree::<ContentHash, (Reference, u64)>(count as usize);
             assert!(index < old.bytes(), "index={index}, old={}", old.bytes());
             for fault in [0, 1] {

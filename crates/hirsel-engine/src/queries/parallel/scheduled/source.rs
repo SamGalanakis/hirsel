@@ -90,7 +90,9 @@ impl SiblingSources {
             .iter()
             .filter(|syntax| !self.namespace.retains_written(syntax))
             .try_fold(0u64, |bytes, syntax| {
-                bytes.checked_add(crate::memo::retained::retained_syntax_bytes(syntax))
+                bytes.checked_add(hirsel_query_products::retained::retained_syntax_bytes(
+                    syntax,
+                ))
             })
             .ok_or("sibling memory size overflow")?;
         let mut remaining = self.retention.lock().unwrap_or_else(|e| e.into_inner());
@@ -134,7 +136,7 @@ impl FrontInputFootprint {
     }
 }
 pub(super) fn sibling_input_bytes(files: usize, rows: usize) -> Option<u64> {
-    let mut weight = crate::NativeMetadataWeight::default();
+    let mut weight = hirsel_query_products::retained::MetadataWeight::default();
     weight.tree::<FileId, SiblingFile>(files);
     weight.add(rows.checked_mul(size_of::<Arc<ItemSyntax>>())?);
     weight.add(files.checked_mul(4 * size_of::<usize>() + size_of::<LiveSourceBacking>())?);
@@ -181,7 +183,7 @@ impl QueryEngine {
         }
         let (files, siblings) = self.front_sibling_inventory().ok_or_else(refused)?;
         let sibling_bytes = sibling_input_bytes(files, siblings).ok_or_else(refused)?;
-        let mut instance_weight = crate::NativeMetadataWeight::default();
+        let mut instance_weight = hirsel_query_products::retained::MetadataWeight::default();
         instance_weight
             .instance_bodies(&mut self.instance_bodies(&definitions.iter().cloned().collect()));
         let paths = self.source_paths();
@@ -367,7 +369,7 @@ mod tests {
         let available = backing.allowance.available_bytes();
         let items = sources.siblings(&written[0]).unwrap();
         let charged = before - *retention.lock().unwrap();
-        assert!(charged > crate::memo::retained::retained_syntax_bytes(&written[0]));
+        assert!(charged > hirsel_query_products::retained::retained_syntax_bytes(&written[0]));
         assert_eq!(backing.allowance.available_bytes(), available - charged);
         drop(items);
         assert_eq!(*retention.lock().unwrap(), before - charged);

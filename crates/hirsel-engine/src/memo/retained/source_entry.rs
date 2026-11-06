@@ -4,59 +4,10 @@
 use super::{Weight, arc_bytes, retained_signature_payload_bytes};
 use hirsel_types::{ContextualName, Resolution, ResolvedName};
 
-impl Weight<'_> {
-    pub(super) fn resolution(&mut self, value: &Resolution) {
-        let Resolution {
-            reads,
-            contextual,
-            paths,
-            local_functions,
-            drop_binding: _,
-            deferred,
-            generics,
-            generic_declarations,
-            reference_scopes,
-            expressions,
-            types,
-            bindings,
-            dependencies,
-            static_arguments,
-            implementation_binders,
-        } = value;
-        self.read_log(reads);
-        self.vec(contextual, |w, (_, name)| match name {
-            ContextualName::Constructor(path)
-            | ContextualName::Variant { owner: path, .. }
-            | ContextualName::Field { owner: path, .. } => w.def_path(path),
-        });
-        let name = |w: &mut Self, name: &ResolvedName| match name {
-            ResolvedName::Definition(path) => w.def_path(path),
-            ResolvedName::Local(_)
-            | ResolvedName::Parameter(_)
-            | ResolvedName::Variant(_)
-            | ResolvedName::Size(_)
-            | ResolvedName::TypeParameter(_)
-            | ResolvedName::Primitive(_) => (),
-        };
-        self.vec(paths, |w, (_, value)| name(w, value));
-        self.flat_vec(local_functions);
-        self.vec(deferred, |w, value| w.add(value.name.capacity()));
-        self.flat_vec(generics);
-        generic_declarations.visit_retained_allocations(|_, bytes| {
-            self.add(bytes);
-            true
-        });
-        self.flat_vec(reference_scopes);
-        self.vec(expressions, |w, (_, value)| name(w, value));
-        self.vec(types, |w, (_, value)| name(w, value));
-        self.flat_vec(bindings);
-        self.vec(dependencies, Self::def_path);
-        self.vec(static_arguments, |w, (_, arguments)| w.flat_vec(arguments));
-        self.vec(implementation_binders, |w, binder| {
-            w.add(binder.name.capacity());
-            w.vec(&binder.members, |w, (name, _)| w.add(name.capacity()));
-        });
-    }
+trait SourceWeight {
+    fn resolver_snapshot(&mut self, value: &crate::ResolverSnapshot);
+}
+impl SourceWeight for Weight<'_> {
     fn resolver_snapshot(&mut self, value: &crate::ResolverSnapshot) {
         self.add(arc_bytes(&*value.syntax));
         self.syntax(&value.syntax);
@@ -272,7 +223,7 @@ fn signature_entry_bytes(
     match &entry.memo.value {
         Ok(output) => {
             weight.add(arc_bytes(&**output));
-            super::signature::signature_payload(&mut weight, &output.value);
+            hirsel_query_products::retained::signature_payload(&mut weight, &output.value);
             weight.cloned_vectors = compact_output;
             weight.vec(&output.diagnostics, Weight::diagnostic);
             weight.flat_vec(&output.dependencies);
@@ -286,7 +237,8 @@ fn signature_entry_bytes(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{PhaseProducts, QueryKind, ResolverSnapshot, queries::Entry};
+    use crate::{PhaseProducts, ResolverSnapshot, queries::Entry};
+    use hirsel_query_products::QueryKind;
     use hirsel_syntax::{
         ContentHash, DefId, DefPath, ExprId, Item, ItemKind, ItemSyntax, Origin, SyntaxTree,
         TypeExprId, Visibility,
@@ -438,7 +390,7 @@ mod tests {
                 ContentHash::default(),
                 Ok(Arc::new(())),
                 Arc::default(),
-                crate::memo::Durability::Low,
+                hirsel_query_products::reads::Durability::Low,
             );
             let ((entry, actual_snapshot), actual) = crate::test_alloc::measured(|| {
                 let resolver = snapshot(width, &path, symbol);
@@ -482,7 +434,7 @@ mod tests {
                         ..Default::default()
                     }),
                     covered: Vec::with_capacity(width),
-                    depth: Some(crate::memo::DepthEvidence::leaf(4)),
+                    depth: Some(hirsel_query_products::depth::DepthEvidence::leaf(4)),
                     acceptance: None,
                     verification: Mutex::new(None),
                     selections: vec![],

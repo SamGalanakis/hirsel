@@ -36,7 +36,7 @@ impl Staged {
         }
     }
     pub(super) fn retained_bytes(&self) -> u64 {
-        let mut weight = crate::NativeMetadataWeight::default();
+        let mut weight = hirsel_query_products::retained::MetadataWeight::default();
         if !self.declarations.is_empty() {
             weight.tree::<DefId, crate::comptime::StagedConstant>(self.declarations.len());
         }
@@ -106,8 +106,8 @@ impl FrontLowerQueries {
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         if !selections.contains_key(&live) {
-            let mut weight = crate::NativeMetadataWeight::default();
-            let mut previous = crate::NativeMetadataWeight::default();
+            let mut weight = hirsel_query_products::retained::MetadataWeight::default();
+            let mut previous = hirsel_query_products::retained::MetadataWeight::default();
             weight.tree::<ContentHash, Selection>(selections.len() + 1);
             if !selections.is_empty() {
                 previous.tree::<ContentHash, Selection>(selections.len());
@@ -144,7 +144,7 @@ impl FrontLowerQueries {
 // which concrete size instances the interpreter actually selected.
 pub(super) type Selections = Vec<(DefId, Vec<u64>)>;
 pub(super) fn selection_bytes(rows: &Selections) -> u64 {
-    let mut weight = crate::NativeMetadataWeight::default();
+    let mut weight = hirsel_query_products::retained::MetadataWeight::default();
     weight.vec(rows, |weight, (_, arguments)| weight.flat_vec(arguments));
     weight.bytes()
 }
@@ -245,7 +245,7 @@ impl FrontLowerQueries {
                 0,
             ));
         }
-        let mut metadata = crate::NativeMetadataWeight::default();
+        let mut metadata = hirsel_query_products::retained::MetadataWeight::default();
         metadata.tree::<DefPath, Materialized>(values().count());
         metadata.tree::<DefPath, hirsel_types::SignatureRef>(declarations().count());
         let mut working = 0;

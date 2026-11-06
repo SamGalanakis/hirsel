@@ -143,7 +143,7 @@ impl FrontLowerQueries {
                 .values()
                 .map(|row| row.owner.clone())
                 .collect::<Vec<_>>();
-            let mut weight = crate::NativeMetadataWeight::default();
+            let mut weight = hirsel_query_products::retained::MetadataWeight::default();
             weight.tree::<ContentHash, ()>(seen.len());
             weight.add(3 * (pending.len() + next.len()) * size_of::<Arc<Self>>());
             if weight.bytes() > self.weight.scratch {

@@ -1,5 +1,5 @@
 //! Retained diagnostic dispatch storage, excluding producer-owned shared data.
-use hirsel_engine::NativeMetadataWeight as Weight;
+use hirsel_query_products::retained::MetadataWeight as Weight;
 
 pub(crate) fn address(w: &mut Weight, value: &super::super::InstanceAddress) {
     w.path(value.instance.definition());

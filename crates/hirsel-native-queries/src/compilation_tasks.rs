@@ -416,7 +416,7 @@ impl CompilationTasks {
         let mut link = LinkTasks::new(roots.clone(), plans, self.weight)?;
         Arc::get_mut(&mut link).unwrap().execution = needs_execution.then(|| execution.clone());
         let link_bytes = Arc::get_mut(&mut link).unwrap().retained_dispatch_bytes();
-        let mut copied = hirsel_engine::NativeMetadataWeight::default();
+        let mut copied = hirsel_query_products::retained::MetadataWeight::default();
         // Fixed controller/factory envelopes plus every owned variable buffer.
         copied.add(16384);
         copied.add(super::demand::window::WindowBudget::retained_bytes() as usize);

@@ -1,8 +1,9 @@
 //! Compile-time execution uses the runtime interpreter; lowering receives plain values.
-use crate::memo::{DepthEvidence, Entered};
+use crate::memo::Entered;
 use crate::*;
 use hirsel_intern::timings::{self, Phase};
 use hirsel_interp::Outcome;
+use hirsel_query_products::depth::DepthEvidence;
 use hirsel_span::Span;
 use hirsel_syntax::{DefId, ExprId, ExprKind, ItemKind};
 use hirsel_tir::{Constant, DefinitionRef, TirProvider};
@@ -27,7 +28,7 @@ pub(crate) struct EvaluatedConstant {
     pub value: Materialized,
     pub substitutions: Vec<(ExprId, Materialized)>,
     /// The complete reads of everything the evaluation executed or materialized.
-    pub executed: crate::memo::Reads,
+    pub executed: hirsel_query_products::reads::Reads,
     /// Its dependency height and overflow table under the comptime limits.
     pub depth: DepthEvidence<Span>,
     /// Exact ordered staged selections, including transitive value hits.
@@ -982,7 +983,7 @@ impl QueryEngine {
     pub(crate) fn evaluation_context_holds(
         &mut self,
         validation: Option<&[(hirsel_syntax::PackageId, hirsel_syntax::ContentHash)]>,
-        executed: &crate::memo::Reads,
+        executed: &hirsel_query_products::reads::Reads,
     ) -> bool {
         if self.verify == Verify::Off {
             return true;
@@ -995,9 +996,12 @@ impl QueryEngine {
                     .is_ok_and(|current| current == *digest)
             });
         }
-        executed
-            .iter()
-            .any(|(key, _)| matches!(key, crate::ReadKey::ValidationUniverse(_)))
+        executed.iter().any(|(key, _)| {
+            matches!(
+                key,
+                hirsel_query_products::reads::ReadKey::ValidationUniverse(_)
+            )
+        })
     }
     fn merge_evaluation_validation(&mut self, value: &EvaluatedConstant) -> Result<(), QueryError> {
         self.record_selections(&value.selections)?;
@@ -1015,7 +1019,7 @@ impl QueryEngine {
         } else {
             let mut witnessed = false;
             for (key, digest) in value.executed.iter() {
-                if let crate::ReadKey::ValidationUniverse(package) = key {
+                if let hirsel_query_products::reads::ReadKey::ValidationUniverse(package) = key {
                     witnessed = true;
                     self.record_evaluation_validation(package.id(), *digest);
                 }
@@ -1050,7 +1054,10 @@ impl QueryEngine {
     /// Complete execution evidence of a retained constant materialization.
     /// This includes lookup, citation, private-view and transitive body reads;
     /// graph memo counters alone cannot establish that closure.
-    pub fn materialization_reads(&self, constant: &DefPath) -> Option<&crate::Reads> {
+    pub fn materialization_reads(
+        &self,
+        constant: &DefPath,
+    ) -> Option<&hirsel_query_products::reads::Reads> {
         self.constant_values
             .get(constant)
             .map(|value| &value.executed)
@@ -1064,7 +1071,9 @@ impl QueryEngine {
                 .executed
                 .iter()
                 .filter_map(|(read, digest)| match read {
-                    crate::memo::ReadKey::Representation(d) => Some((d.path().clone(), *digest)),
+                    hirsel_query_products::reads::ReadKey::Representation(d) => {
+                        Some((d.path().clone(), *digest))
+                    }
                     _ => None,
                 })
                 .collect(),
@@ -1253,7 +1262,7 @@ impl QueryEngine {
     }
     /// The compile-time dependency limit L.
     pub(crate) fn depth_limit(&self) -> u32 {
-        crate::memo::dependency_limit(self.comptime_limits.call_depth)
+        hirsel_query_products::depth::dependency_limit(self.comptime_limits.call_depth)
     }
     /// Requests a result with `evidence` at `site` from the current stack
     /// length: the cache-free evaluation's verdict, whether the result was
@@ -1549,8 +1558,8 @@ impl QueryEngine {
         // If indexing retires it, enclosing cached constants/lowerings must
         // miss and reconstruct the declaration and its selected instances.
         self.merge_execution(
-            &crate::memo::Reads::from_vec(vec![(
-                crate::memo::ReadKey::Signature(DefId::intern(path)),
+            &hirsel_query_products::reads::Reads::from_vec(vec![(
+                hirsel_query_products::reads::ReadKey::Signature(DefId::intern(path)),
                 crate::queries::memos::signature_value(Some(constant.signature.fingerprint)),
             )])
             .expect("one staged declaration"),

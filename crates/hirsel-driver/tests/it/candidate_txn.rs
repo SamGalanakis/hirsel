@@ -1,6 +1,7 @@
 use hirsel_candidate::*;
 use hirsel_driver::CompilerRequestsExt;
-use hirsel_engine::{CompileConfig, LoweringPolicy, Verify};
+use hirsel_engine::{CompileConfig, Verify};
+use hirsel_query_products::LoweringPolicy;
 use hirsel_syntax::ContentHash;
 use std::path::PathBuf;
 use std::sync::{
@@ -540,7 +541,7 @@ fn store_fault_checks(candidate: bool) -> String {
                 6 => {
                     let mut entry = hirsel_engine::store::Entry::load(&self.backing, key);
                     for variant in &mut entry.variants {
-                        variant.reads = hirsel_engine::memo::Reads::empty();
+                        variant.reads = hirsel_query_products::reads::Reads::empty();
                     }
                     Some(entry.encode_for(key).into())
                 }
@@ -1145,7 +1146,7 @@ fn candidate_checked_read_delta_exact_jobs_salts_and_cold_reads() {
                         assert_eq!(child.verdict, Verdict::Pass);
                         assert!(reads.iter().any(|r| r.before.is_none()));
                         assert!(reads.iter().any(|r| r.key.first()
-                            == Some(&(hirsel_engine::memo::ReadKind::Lookup as u8))
+                            == Some(&(hirsel_query_products::reads::ReadKind::Lookup as u8))
                             && r.key.windows(b"Missing".len()).any(|w| w == b"Missing")
                             && r.before.is_some()
                             && r.after.is_some()));
@@ -1155,7 +1156,7 @@ fn candidate_checked_read_delta_exact_jobs_salts_and_cold_reads() {
                     }
                     if a == 0 {
                         // Actual private representation/view keys changed, not only text reads.
-                        use hirsel_engine::memo::ReadKind;
+                        use hirsel_query_products::reads::ReadKind;
                         assert!(reads.iter().any(|r| {
                             matches!(r.key.first(), Some(tag) if *tag == ReadKind::Representation as u8 || *tag == ReadKind::ValidationView as u8)
                                 && r.before.is_some() && r.after.is_some()

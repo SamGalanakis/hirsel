@@ -35,7 +35,7 @@ struct Pending {
 }
 impl FrontTracker {
     pub(super) fn retained_bytes(&self) -> u64 {
-        let mut weight = crate::NativeMetadataWeight::default();
+        let mut weight = hirsel_query_products::retained::MetadataWeight::default();
         weight.tree::<DefId, Pending>(self.pending.len());
         weight.bytes()
     }
@@ -170,7 +170,7 @@ impl QueryEngine {
                 );
             }
             for read in self.graph.validation_context_reads() {
-                next.read(read, crate::memo::Durability::Low);
+                next.read(read, hirsel_query_products::reads::Durability::Low);
             }
             expanded = next;
             &expanded
@@ -215,7 +215,8 @@ mod tests {
     }
     #[test]
     fn validation_context_subscribers_are_marked_by_signatures_but_not_body_edits() {
-        use crate::memo::{ChangeSet, Durability, PackageKey, ReadKind};
+        use crate::memo::ChangeSet;
+        use hirsel_query_products::reads::{Durability, PackageKey, ReadKind};
         let mut engine = QueryEngine::new(default_environment(), PhaseAdapters::default());
         let (source, dependent, ordinary) =
             (owner("source"), owner("dependent"), owner("ordinary"));

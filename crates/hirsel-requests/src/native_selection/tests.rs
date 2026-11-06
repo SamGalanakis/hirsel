@@ -3,11 +3,11 @@ use crate::native;
 use crate::requests::{
     CompileOperation, CompileRequest, CompileResult, CompilerRequests, RequestLimits,
 };
-use hirsel_engine::{
-    CompileConfig,
-    requests::{RequestEngine, observe_inputs},
-    store::{MemStore, ResultStore},
-};
+use hirsel_engine::CompileConfig;
+use hirsel_engine::requests::RequestEngine;
+use hirsel_engine::requests::observe_inputs;
+use hirsel_engine::store::MemStore;
+use hirsel_engine::store::ResultStore;
 use hirsel_engine_runtime::*;
 
 use hirsel_intern::jobs::Jobs;
@@ -233,11 +233,11 @@ fn native_test_table_order_seed_and_definition_are_request_inputs() {
     request.test_entries.swap(0, 1);
     request.test_entries[0].0 = other;
     assert_ne!(table, request_key(&request, NativePurpose::Build).unwrap());
-    let mut empty_weight = hirsel_engine::NativeMetadataWeight::default();
+    let mut empty_weight = hirsel_query_products::retained::MetadataWeight::default();
     request.test_entries = Vec::new();
     super::super::native_products::request_metadata(&mut empty_weight, &request);
     request.test_entries = vec![(path, 73)];
-    let mut table_weight = hirsel_engine::NativeMetadataWeight::default();
+    let mut table_weight = hirsel_query_products::retained::MetadataWeight::default();
     super::super::native_products::request_metadata(&mut table_weight, &request);
     assert!(table_weight.bytes() > empty_weight.bytes());
 }
@@ -318,14 +318,14 @@ fn native_object_roots_and_emission_level_are_request_inputs() {
         evidence: None,
     };
     let executable = request_key(&request, NativePurpose::Build).unwrap();
-    let mut executable_weight = hirsel_engine::NativeMetadataWeight::default();
+    let mut executable_weight = hirsel_query_products::retained::MetadataWeight::default();
     super::super::native_products::request_metadata(&mut executable_weight, &request);
     request.output = crate::requests::NativeOutput::Objects {
         roots: vec![path.clone()],
     };
     let objects = request_key(&request, NativePurpose::Build).unwrap();
     assert_ne!(executable, objects);
-    let mut object_weight = hirsel_engine::NativeMetadataWeight::default();
+    let mut object_weight = hirsel_query_products::retained::MetadataWeight::default();
     super::super::native_products::request_metadata(&mut object_weight, &request);
     assert!(object_weight.bytes() > executable_weight.bytes());
     request.output = crate::requests::NativeOutput::Objects { roots: vec![other] };

@@ -330,7 +330,7 @@ impl ArenaSummary {
         for (_, candidates) in &mut self.candidates {
             candidates.shrink_to_fit();
         }
-        let mut w = hirsel_engine::NativeMetadataWeight::default();
+        let mut w = hirsel_query_products::retained::MetadataWeight::default();
         w.add(size_of::<Self>() + 2 * size_of::<usize>());
         w.vec(&self.candidates, |w, (owner, candidates)| {
             w.path(owner.instance.definition());

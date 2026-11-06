@@ -115,7 +115,7 @@ impl Config {
                 hirsel_engine::Verify::Off
             },
             retention: hirsel_engine::memo::Retention::Resident,
-            lowering: hirsel_engine::LoweringPolicy::Reachable,
+            lowering: hirsel_query_products::LoweringPolicy::Reachable,
             store,
             verify_store: if self.verify_store {
                 VerifyStore::Recompute

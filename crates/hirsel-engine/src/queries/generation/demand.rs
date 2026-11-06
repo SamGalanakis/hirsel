@@ -415,7 +415,7 @@ impl DemandProducer {
         });
         let mut scopes = self.scopes.lock().unwrap_or_else(|e| e.into_inner());
         if !scopes.contains_key(&key) {
-            let mut weight = crate::NativeMetadataWeight::default();
+            let mut weight = hirsel_query_products::retained::MetadataWeight::default();
             weight.add(size_of::<ScopeRequest>() + 12 * size_of::<usize>() + size_of_val(roots));
             for root in roots {
                 weight.path(root);
@@ -765,9 +765,9 @@ impl DemandProducer {
             .map_err(|_| refused("staged demand cancelled at acceptance"))?;
         let metadata = {
             let staged = self.staged.lock().unwrap_or_else(|e| e.into_inner());
-            let mut next = crate::NativeMetadataWeight::default();
+            let mut next = hirsel_query_products::retained::MetadataWeight::default();
             next.tree::<(DefId, ContentHash), ()>(staged.len() + 1);
-            let mut previous = crate::NativeMetadataWeight::default();
+            let mut previous = hirsel_query_products::retained::MetadataWeight::default();
             if !staged.is_empty() {
                 previous.tree::<(DefId, ContentHash), ()>(staged.len());
             }
@@ -1374,7 +1374,7 @@ impl DemandProducer {
                             .checked_add(1)
                             .ok_or_else(|| refused("producer depth overflow"))?;
                     } else {
-                        let mut weight = crate::NativeMetadataWeight::default();
+                        let mut weight = hirsel_query_products::retained::MetadataWeight::default();
                         weight
                             .tree::<DefId, (usize, hirsel_engine_admission::MemoryReservation)>(1);
                         state

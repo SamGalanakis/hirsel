@@ -127,7 +127,7 @@ impl OwnershipTasks {
         if requests.is_empty() {
             return Err("empty ownership diagnostic closure".into());
         }
-        let mut copied = hirsel_engine::NativeMetadataWeight::default();
+        let mut copied = hirsel_query_products::retained::MetadataWeight::default();
         copied.add(std::mem::size_of::<Self>() + 3 * std::mem::size_of::<usize>());
         // Owner encodings and dependency rows remain in the already admitted
         // native snapshot/dispatch. This graph retains their sole Arc owner,

@@ -191,7 +191,7 @@ impl DirStore {
                     .map(|executable| executable.with_file_name("hirsel-std.products"))
             })
     }
-    pub(super) fn installed_only() -> Option<Self> {
+    pub(crate) fn installed_only() -> Option<Self> {
         let root = Self::installed_root()?;
         let verifier = Self::installed_verifier(&root);
         Some(Self {
@@ -208,7 +208,7 @@ impl DirStore {
     }
     /// Compose environment-selected local storage with installed ordinary
     /// products. Explicit library providers remain exactly caller configured.
-    pub(super) fn with_installed_products(mut self) -> Self {
+    pub(crate) fn with_installed_products(mut self) -> Self {
         if let Some(installed) = Self::installed_root() {
             self = self.with_read_only_root(installed);
         }
@@ -562,7 +562,7 @@ impl ResultStore for DirStore {
     }
     fn put_query(
         &self,
-        kind: crate::QueryKind,
+        kind: hirsel_query_products::QueryKind,
         key: &EntryKey,
         action: super::Action,
         value: &[u8],
@@ -610,7 +610,10 @@ mod tests {
                 vec![n as u8; 5000]
             };
             let reference = writer
-                .put(crate::store::entry_domain(crate::QueryKind::Parse), &bytes)
+                .put(
+                    crate::store::entry_domain(hirsel_query_products::QueryKind::Parse),
+                    &bytes,
+                )
                 .unwrap();
             let address = Address(ContentHash::of_parts(
                 "installed-cost-law",
@@ -702,7 +705,11 @@ mod tests {
         );
         for _ in 0..2 {
             for (address, action, reference, expected) in &inputs {
-                let key = EntryKey(address.0, ContentHash::default(), crate::QueryKind::Parse);
+                let key = EntryKey(
+                    address.0,
+                    ContentHash::default(),
+                    hirsel_query_products::QueryKind::Parse,
+                );
                 let content = operation.get_content(*reference).unwrap();
                 assert_eq!(&*content, expected);
                 assert!(content.matches_reference(*reference));
@@ -744,7 +751,11 @@ mod tests {
         drop(request);
         assert_eq!(budget.reserved(), 0);
         for (address, _, _, expected) in &inputs {
-            let key = EntryKey(address.0, ContentHash::default(), crate::QueryKind::Parse);
+            let key = EntryKey(
+                address.0,
+                ContentHash::default(),
+                hirsel_query_products::QueryKind::Parse,
+            );
             assert_eq!(&*sources.get(&key).unwrap(), expected);
         }
         let refused =
@@ -756,7 +767,10 @@ mod tests {
     #[test]
     fn query_variants_and_product_associations_survive_each_others_publication_and_reopen() {
         use crate::store::{Action, Address, Entry, VariantRef};
-        for kind in [crate::QueryKind::Modes, crate::QueryKind::Lower] {
+        for kind in [
+            hirsel_query_products::QueryKind::Modes,
+            hirsel_query_products::QueryKind::Lower,
+        ] {
             let directory = tempfile::tempdir().unwrap();
             let store = DirStore::new(directory.path().to_owned());
             let key = EntryKey::new(
@@ -764,10 +778,15 @@ mod tests {
                 &hirsel_syntax::DefPath::core("separate-query-and-product"),
                 Default::default(),
                 kind,
-                crate::LoweringPolicy::Reachable,
+                hirsel_query_products::LoweringPolicy::Reachable,
             );
-            let variant =
-                VariantRef::publish(&store, &key, crate::Reads::empty(), b"body").unwrap();
+            let variant = VariantRef::publish(
+                &store,
+                &key,
+                hirsel_query_products::reads::Reads::empty(),
+                b"body",
+            )
+            .unwrap();
             let mut entry = Entry::default();
             entry.insert(variant.clone());
             store.put(&key, &entry.encode_for(&key));
@@ -821,7 +840,7 @@ mod tests {
                 .get(&EntryKey(
                     Default::default(),
                     Default::default(),
-                    crate::QueryKind::Summary
+                    hirsel_query_products::QueryKind::Summary
                 ))
                 .is_none()
         );
@@ -832,13 +851,16 @@ mod tests {
         let key = EntryKey::new(
             Default::default(),
             &hirsel_syntax::DefPath(hirsel_syntax::ItemPath {
-                package: crate::default_context().package,
+                package: hirsel_syntax::PackageId {
+                    name: "standalone".into(),
+                    version: "0".into(),
+                },
                 modules: vec![],
                 name: "host-local".into(),
             }),
             Default::default(),
-            crate::QueryKind::Summary,
-            crate::LoweringPolicy::Reachable,
+            hirsel_query_products::QueryKind::Summary,
+            hirsel_query_products::LoweringPolicy::Reachable,
         );
         reader.put(&key, b"must not persist");
         assert!(reader.get(&key).is_none());

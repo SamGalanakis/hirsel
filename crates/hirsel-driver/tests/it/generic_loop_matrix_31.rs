@@ -13,6 +13,8 @@ use hirsel_front_phases::compiler_adapters;
 use hirsel_native::*;
 use hirsel_native_batch::*;
 use hirsel_native_testing::*;
+
+use hirsel_query_products::LoweringPolicy;
 use std::{collections::BTreeSet, path::Path};
 
 // Greedy lexicographic maximum-uncovered-pairs table, frozen before consumers.

@@ -1,7 +1,8 @@
 //! Bounded scalar TIR ownership. Eviction drops artifacts, not the compact
 //! receipts or the Lower graph record that program fronts subscribe to.
 use super::*;
-use crate::memo::{HoldStats, Retention, retained_lower_entry_bytes};
+use crate::memo::retained::retained_lower_entry_bytes;
+use crate::memo::{HoldStats, Retention};
 
 pub(super) struct LowerReceipt {
     entry: Entry<()>,
@@ -339,7 +340,7 @@ mod tests {
         assert!(engine.memo_stats().touched > before);
 
         let mut changed = crate::memo::ChangeSet::default();
-        changed.text(id, crate::memo::Durability::Low);
+        changed.text(id, hirsel_query_products::reads::Durability::Low);
         engine.graph.apply(&changed);
         assert!(
             engine

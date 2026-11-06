@@ -7,10 +7,12 @@ use super::ownership_admission::Footprint;
 use super::ownership_admission::SourceInputs;
 use super::ownership_bootstrap;
 use super::ownership_bootstrap::OwnershipBootstrap;
-use hirsel_engine::{
-    FrontNativeProducts, FrontNativeQueries, LoadedProgram, ToolError,
-    store::{Reference, VerifyStore},
-};
+use hirsel_engine::FrontNativeProducts;
+use hirsel_engine::FrontNativeQueries;
+use hirsel_engine::LoadedProgram;
+use hirsel_engine::ToolError;
+use hirsel_engine::store::Reference;
+use hirsel_engine::store::VerifyStore;
 use hirsel_engine_runtime::*;
 
 use hirsel_native_cache::ready::ObservedReady;
@@ -421,7 +423,7 @@ impl OwnershipSelection {
             }
             return Ok(completed.clone());
         }
-        let mut copied = hirsel_engine::NativeMetadataWeight::default();
+        let mut copied = hirsel_query_products::retained::MetadataWeight::default();
         copied.add(
             std::mem::size_of::<OwnershipExecution>()
                 + std::mem::size_of::<OutputOwner>()

@@ -25,7 +25,7 @@ impl RequestedProgram {
 
     fn check(
         &mut self,
-        lowering: hirsel_engine::LoweringPolicy,
+        lowering: hirsel_query_products::LoweringPolicy,
     ) -> Result<(hirsel_engine::CheckOutput, Option<String>), ToolError> {
         let output = self.execute(CompileOperation::Check { lowering })?;
         let CompileResult::Check(checked) = &output.result else {
@@ -254,7 +254,7 @@ fn evaluate_on_compiler_thread(
     let mut diagnostic_phase = None;
     let mut rejected = None;
     let checked = (|| {
-        use hirsel_engine::LoweringPolicy::{Comptime, Reachable};
+        use hirsel_query_products::LoweringPolicy::{Comptime, Reachable};
         {
             let (comptime, phase) = match requested.check(Comptime) {
                 Ok(checked) => checked,
@@ -498,7 +498,7 @@ fn evaluate_on_compiler_thread(
             let text = match error {
                 hirsel_engine::RuntimeError::Query(error) => ToolError::Query {
                     error,
-                    phase: Some(hirsel_engine::QueryKind::Interpret),
+                    phase: Some(hirsel_query_products::QueryKind::Interpret),
                     sources: prepared.sources.clone(),
                 }
                 .to_string(),

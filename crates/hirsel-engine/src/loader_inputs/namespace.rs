@@ -444,7 +444,7 @@ impl NamespaceLease {
             .with_owned_engines()
             .with_config(crate::CompileConfig {
                 verify: crate::Verify::On,
-                lowering: crate::LoweringPolicy::Comptime,
+                lowering: hirsel_query_products::LoweringPolicy::Comptime,
                 ..config
             })
             .load_program_inputs(self.entry(), self, parse_sources)

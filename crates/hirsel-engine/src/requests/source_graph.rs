@@ -11,10 +11,11 @@ use crate::{
     FrontCheckQueries, FrontDemandAdmission, FrontDemandError, FrontDemandScope,
     FrontGrowthQueries, FrontInputFootprint, FrontLowerQueries, FrontNativeDefinitionInputs,
     FrontRegistrationBootstrapError, FrontRunInputs, FrontStorageGraphQueries, FrontStorageQueries,
-    LowerCarry, LoweringPolicy, QueryEngine, QueryError, ToolError, UnsafeFfiPackage,
+    LowerCarry, QueryEngine, QueryError, ToolError, UnsafeFfiPackage,
 };
 use hirsel_engine_runtime::*;
 use hirsel_intern::jobs::Jobs;
+use hirsel_query_products::LoweringPolicy;
 use hirsel_span::{FileId, SourceMap};
 use hirsel_syntax::{DefPath, FileContext, PackageId};
 use std::sync::{Arc, OnceLock};
@@ -1593,14 +1594,14 @@ fn instance_bootstrap_error(
                     },
                 })
             }),
-            crate::QueryKind::Check,
+            hirsel_query_products::QueryKind::Check,
             sources.retain_owner(owner),
         ),
         FrontDemandError::Discovery {
             error,
             sources,
             owner,
-        } => language_error(error, crate::QueryKind::Generate, sources.retain_owner(owner)),
+        } => language_error(error, hirsel_query_products::QueryKind::Generate, sources.retain_owner(owner)),
     }
 }
 
@@ -1619,13 +1620,13 @@ fn bootstrap_error(engine: &QueryEngine, error: FrontRegistrationBootstrapError)
                     message: "a generator task failed without a diagnostic".into(),
                 })
             }),
-            crate::QueryKind::Generate,
+            hirsel_query_products::QueryKind::Generate,
             sources.retain_owner(owner),
         ),
         FrontRegistrationBootstrapError::Acceptance(failure) => {
             if failure.error == QueryError::NotImplemented {
                 ToolError::Unsupported {
-                    phase: crate::QueryKind::GeneratedRegistration,
+                    phase: hirsel_query_products::QueryKind::GeneratedRegistration,
                     construct: failure.definition,
                     span: failure.span,
                     sources: failure.sources,
@@ -1633,7 +1634,7 @@ fn bootstrap_error(engine: &QueryEngine, error: FrontRegistrationBootstrapError)
             } else {
                 language_error(
                     failure.error,
-                    crate::QueryKind::GeneratedRegistration,
+                    hirsel_query_products::QueryKind::GeneratedRegistration,
                     failure.sources,
                 )
             }
@@ -1645,7 +1646,11 @@ fn bootstrap_error(engine: &QueryEngine, error: FrontRegistrationBootstrapError)
 /// instances name the phase that found them, so a request reports them as
 /// that phase's rejection rather than a load failure. Operational refusals
 /// keep no phase.
-fn language_error(error: QueryError, phase: crate::QueryKind, sources: SourceMap) -> ToolError {
+fn language_error(
+    error: QueryError,
+    phase: hirsel_query_products::QueryKind,
+    sources: SourceMap,
+) -> ToolError {
     ToolError::Query {
         phase: matches!(
             error,
@@ -1727,7 +1732,7 @@ pub fn selected_definitions(engine: &mut QueryEngine) -> Vec<DefPath> {
         .collect()
 }
 
-type FrontWork = std::collections::BTreeMap<(DefPath, crate::QueryKind), u64>;
+type FrontWork = std::collections::BTreeMap<(DefPath, hirsel_query_products::QueryKind), u64>;
 fn front_work(front: &FrontBodyQueries) -> FrontWork {
     let mut work = FrontWork::new();
     for (path, kind, count) in front.work_snapshot() {
@@ -1741,7 +1746,7 @@ fn front_work(front: &FrontBodyQueries) -> FrontWork {
 fn record_front_work(engine: &mut QueryEngine, front: &FrontBodyQueries, before: &FrontWork) {
     for ((path, kind), count) in front_work(front) {
         let count = count.saturating_sub(before.get(&(path.clone(), kind)).copied().unwrap_or(0));
-        if count != 0 && kind != crate::QueryKind::Signature {
+        if count != 0 && kind != hirsel_query_products::QueryKind::Signature {
             engine.record_worker_recomputes(&path, kind, count);
         }
     }
@@ -1758,10 +1763,18 @@ fn record_lower_work(
         let initializers = work.initializers.saturating_sub(old.initializers);
         let validation_runs = work.validation_runs.saturating_sub(old.validation_runs);
         if lowerings != 0 {
-            engine.record_worker_recomputes(&path, crate::QueryKind::Lower, lowerings);
+            engine.record_worker_recomputes(
+                &path,
+                hirsel_query_products::QueryKind::Lower,
+                lowerings,
+            );
         }
         if initializers != 0 {
-            engine.record_worker_recomputes(&path, crate::QueryKind::Evaluate, initializers);
+            engine.record_worker_recomputes(
+                &path,
+                hirsel_query_products::QueryKind::Evaluate,
+                initializers,
+            );
         }
         if lowerings != 0 || initializers != 0 || validation_runs != 0 {
             engine.record_worker_lower_work(&path, lowerings, initializers, validation_runs);
@@ -1781,14 +1794,14 @@ mod tests {
             .unwrap();
         let span = hirsel_span::Span::new(sources.file_anchor(file), 4, 8).unwrap();
         let error = ToolError::Unsupported {
-            phase: crate::QueryKind::GeneratedRegistration,
+            phase: hirsel_query_products::QueryKind::GeneratedRegistration,
             construct: crate::DefId::intern(&crate::entry_path(&crate::default_context())),
             span: Some(span),
             sources: sources.clone(),
         };
         let missing = language_error(
             QueryError::NotImplemented,
-            crate::QueryKind::Generate,
+            hirsel_query_products::QueryKind::Generate,
             sources,
         );
         assert_eq!(

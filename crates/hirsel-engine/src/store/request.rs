@@ -14,7 +14,7 @@ fn association_bytes(entries: usize) -> u64 {
     if entries == 0 {
         return 0;
     }
-    let mut weight = crate::NativeMetadataWeight::default();
+    let mut weight = hirsel_query_products::retained::MetadataWeight::default();
     weight.tree::<ContentHash, (Association, bool)>(entries);
     weight.bytes()
 }
@@ -215,7 +215,7 @@ fn verifier_row_bytes(entries: usize) -> u64 {
     if entries == 0 {
         return 0;
     }
-    let mut weight = crate::NativeMetadataWeight::default();
+    let mut weight = hirsel_query_products::retained::MetadataWeight::default();
     weight.tree::<ContentHash, Reference>(entries);
     weight.bytes()
 }
@@ -278,9 +278,9 @@ impl hirsel_validate::VerifierRows for RequestVerifierRows {
             .ok_or(hirsel_validate::FactRefusal)?;
         if let Some(overlay) = overlay {
             bytes = bytes
-                .checked_add(crate::memo::retained::retained_signature_payload_bytes(
-                    overlay,
-                ))
+                .checked_add(
+                    hirsel_query_products::retained::retained_signature_payload_bytes(overlay),
+                )
                 .ok_or(hirsel_validate::FactRefusal)?;
         }
         self.retain_fact(bytes)

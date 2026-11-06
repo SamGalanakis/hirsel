@@ -4,7 +4,8 @@ hirsel_guard::install!();
 use hirsel_candidate::*;
 use hirsel_driver::session::FileChange;
 use hirsel_driver::session::Session;
-use hirsel_engine::{CheckCompletion, CompileConfig, LoweringPolicy};
+use hirsel_engine::{CheckCompletion, CompileConfig};
+use hirsel_query_products::LoweringPolicy;
 use sha2::{Digest, Sha256};
 use std::{
     io::{self, BufRead, Write},

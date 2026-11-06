@@ -1,6 +1,7 @@
 use super::*;
 use crate::store::Domain;
-use crate::{DefinitionSummary, GenericParameterRef, ParameterGrowth, QueryEngine, ReadsBuilder};
+use crate::{DefinitionSummary, GenericParameterRef, ParameterGrowth, QueryEngine};
+use hirsel_query_products::reads::ReadsBuilder;
 use hirsel_syntax::LexicalOwner;
 use hirsel_types::{NameSite, TypeParamId, TypeParameterRef};
 
@@ -179,26 +180,26 @@ fn equal_settled_component_stops_changed_member_and_preserves_unrelated_outputs(
         "the acceptance archive contains settled values, not changed producer actions"
     );
     let mut graph = crate::memo::MemoGraph::default();
-    let key = crate::memo::MemoKey::new(crate::QueryKind::Summary, ids[0]);
+    let key = crate::memo::MemoKey::new(hirsel_query_products::QueryKind::Summary, ids[0]);
     let original = graph.insert_output(
         key,
         first.components[0].product.action.0,
         Ok(Arc::new(())),
         Arc::new(reads.clone()),
-        crate::memo::Durability::Low,
+        hirsel_query_products::reads::Durability::Low,
         Some(crate::summary::SettledSummary::component(
             &first.components[0],
         )),
     );
     let mut edits = crate::memo::ChangeSet::default();
-    edits.text(ids[0], crate::memo::Durability::Low);
+    edits.text(ids[0], hirsel_query_products::reads::Durability::Low);
     graph.apply(&edits);
     let equal = graph.insert_output(
         key,
         changed.components[0].product.action.0,
         Ok(Arc::new(())),
         Arc::new(reads.clone()),
-        crate::memo::Durability::Low,
+        hirsel_query_products::reads::Durability::Low,
         Some(crate::summary::SettledSummary::component(
             &changed.components[0],
         )),
@@ -234,15 +235,15 @@ fn changed_observations_bind_live_actions_before_equal_fact_cutoff() {
     };
     let selected = SELECTED.reference(b"accepted checked output").unwrap();
     for key in [
-        crate::ReadKey::PrivateSummary(ids[0]),
-        crate::ReadKey::Lookup(crate::memo::LookupKey::of(
-            crate::memo::LookupSource::Provider,
+        hirsel_query_products::reads::ReadKey::PrivateSummary(ids[0]),
+        hirsel_query_products::reads::ReadKey::Lookup(hirsel_query_products::reads::LookupKey::of(
+            hirsel_query_products::reads::LookupSource::Provider,
             &crate::default_context(),
             None,
             &["missing".into()],
         )),
-        crate::ReadKey::Lookup(crate::memo::LookupKey::of(
-            crate::memo::LookupSource::Manifest,
+        hirsel_query_products::reads::ReadKey::Lookup(hirsel_query_products::reads::LookupKey::of(
+            hirsel_query_products::reads::LookupSource::Manifest,
             &crate::default_context(),
             None,
             &["module".into()],

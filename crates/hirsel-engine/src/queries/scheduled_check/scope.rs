@@ -47,7 +47,7 @@ impl FrontCheckQueries {
         let missing = || QueryError::NotImplemented;
         // Pre-admit every prospective map/set row and copied read buffer.
         // Front reads remain shared, but charging them as well is conservative.
-        let mut weight = crate::NativeMetadataWeight::default();
+        let mut weight = hirsel_query_products::retained::MetadataWeight::default();
         weight.add(size_of::<FrontCheckScope>());
         let front_rows = data.front.len() + data.failed_front.len();
         let lower_rows = data.lowered.len() + data.failed_lowered.len();

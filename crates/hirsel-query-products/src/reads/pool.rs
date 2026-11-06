@@ -4,8 +4,8 @@ use super::*;
 use std::{borrow::Borrow, collections::BTreeSet, sync::Arc};
 type Row = (ReadKey, ContentHash);
 
-pub(super) struct ChargedRow {
-    pub(super) value: Row,
+pub struct ChargedRow {
+    pub value: Row,
     _allowance: hirsel_engine_admission::MemoryReservation,
 }
 impl std::fmt::Debug for ChargedRow {
@@ -41,7 +41,7 @@ impl Ord for RowRef {
 }
 
 #[derive(Default)]
-pub(crate) struct ReadPool {
+pub struct ReadPool {
     rows: BTreeSet<RowRef>,
     charged_bytes: u64,
 }
@@ -49,9 +49,9 @@ impl ReadPool {
     /// The caller owns this dictionary's retention partition. Arrays retain
     /// their refundable leases independently; unused rows can now return the
     /// dictionary's original row and B-tree debits as well.
-    pub(crate) fn reclaim(&mut self) -> u64 {
+    pub fn reclaim(&mut self) -> u64 {
         let tree_bytes = |len| {
-            let mut weight = crate::NativeMetadataWeight::default();
+            let mut weight = crate::retained::MetadataWeight::default();
             if len != 0 {
                 weight.tree::<RowRef, ()>(len);
             }
@@ -73,10 +73,10 @@ impl ReadPool {
         }
         reclaimed + before - tree_bytes(self.rows.len())
     }
-    pub(crate) fn charged_bytes(&self) -> u64 {
+    pub fn charged_bytes(&self) -> u64 {
         self.charged_bytes
     }
-    pub(crate) fn required_bytes(&self, reads: &Reads) -> Option<u64> {
+    pub fn required_bytes(&self, reads: &Reads) -> Option<u64> {
         if reads.is_empty() {
             return Some(0);
         }
@@ -91,7 +91,7 @@ impl ReadPool {
             .pad_to_align()
             .size() as u64;
         let tree_bytes = |len| {
-            let mut weight = crate::NativeMetadataWeight::default();
+            let mut weight = crate::retained::MetadataWeight::default();
             if len != 0 {
                 weight.tree::<RowRef, ()>(len);
             }
@@ -118,12 +118,12 @@ impl ReadPool {
         )?;
         Some((loaned, charge, row_bytes, shared_bytes))
     }
-    pub(crate) fn required_tracked_bytes(&self, reads: &Reads) -> Option<u64> {
+    pub fn required_tracked_bytes(&self, reads: &Reads) -> Option<u64> {
         self.admission(reads)?
             .1
             .checked_add(hirsel_engine_admission::retained_arc_bytes(reads))
     }
-    pub(crate) fn intern_tracked(
+    pub fn intern_tracked(
         &mut self,
         reads: &Reads,
         allowance: &mut hirsel_engine_admission::MemoryReservation,
@@ -132,7 +132,7 @@ impl ReadPool {
     ) -> Option<Reads> {
         self.intern_inner(reads, allowance, remaining, Some(credit))
     }
-    pub(crate) fn intern(
+    pub fn intern(
         &mut self,
         reads: &Reads,
         allowance: &mut hirsel_engine_admission::MemoryReservation,
@@ -208,21 +208,21 @@ impl Drop for ReadCredit {
         *self.remaining.lock().unwrap_or_else(|e| e.into_inner()) += self.bytes;
     }
 }
-pub(super) struct SharedRows {
+pub struct SharedRows {
     values: Box<[Arc<ChargedRow>]>,
     _allowance: hirsel_engine_admission::MemoryReservation,
     _credit: Option<ReadCredit>,
 }
 
 impl Reads {
-    pub(crate) fn bind_tracked_owner(this: &Arc<Self>) {
+    pub fn bind_tracked_owner(this: &Arc<Self>) {
         if let Rows::Shared(rows) = &this.rows
             && let Some(credit) = &rows._credit
         {
             let _ = credit.owner.set(Arc::downgrade(this));
         }
     }
-    pub(crate) fn tracked_by(this: &Arc<Self>, remaining: &Arc<std::sync::Mutex<u64>>) -> bool {
+    pub fn tracked_by(this: &Arc<Self>, remaining: &Arc<std::sync::Mutex<u64>>) -> bool {
         this.indices.is_none()
             && matches!(&this.rows, Rows::Shared(rows) if rows._credit.as_ref().is_some_and(|credit| {
                 Arc::ptr_eq(&credit.remaining, remaining) && credit.owner.get().is_some_and(|owner| std::ptr::eq(owner.as_ptr(), Arc::as_ptr(this)))
@@ -236,7 +236,7 @@ impl std::fmt::Debug for SharedRows {
 }
 
 #[derive(Clone, Debug)]
-pub(super) enum Rows {
+pub enum Rows {
     Flat(Arc<[Row]>),
     Shared(Arc<SharedRows>),
 }
@@ -251,22 +251,22 @@ impl From<Vec<Row>> for Rows {
     }
 }
 impl Rows {
-    pub(super) fn shared(&self) -> bool {
+    pub fn shared(&self) -> bool {
         matches!(self, Self::Shared(_))
     }
-    pub(super) fn len(&self) -> usize {
+    pub fn len(&self) -> usize {
         match self {
             Self::Flat(rows) => rows.len(),
             Self::Shared(rows) => rows.values.len(),
         }
     }
-    pub(super) fn as_ptr(&self) -> *const () {
+    pub fn as_ptr(&self) -> *const () {
         match self {
             Self::Flat(rows) => rows.as_ptr().cast(),
             Self::Shared(rows) => Arc::as_ptr(rows).cast(),
         }
     }
-    pub(super) fn allocation_bytes(&self) -> usize {
+    pub fn allocation_bytes(&self) -> usize {
         // Shared observations and each receipt's array carry their own
         // original source reservations, including after their source drops.
         match self {
@@ -274,7 +274,7 @@ impl Rows {
             Self::Shared(_) => 0,
         }
     }
-    pub(super) fn binary_search_by(
+    pub fn binary_search_by(
         &self,
         mut compare: impl FnMut(&Row) -> std::cmp::Ordering,
     ) -> Result<usize, usize> {

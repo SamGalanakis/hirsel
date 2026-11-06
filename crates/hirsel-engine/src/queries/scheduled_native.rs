@@ -2,6 +2,7 @@
 //! Evaluate products. This is ordinary data; V's token is passed through from
 //! the exact Lower completion and no native C/Ready authority is constructed.
 use super::*;
+use crate::native_metadata::NativeMetadataExt;
 use crate::store::{Domain, Reference, ResultStore};
 use hirsel_engine_runtime::*;
 use hirsel_types::{SignatureKind, SignatureRef};
@@ -155,7 +156,7 @@ fn live_bytes(
     requirements: &InstanceGraph,
     reads: &Reads,
 ) -> Option<u64> {
-    let mut weight = crate::NativeMetadataWeight::default();
+    let mut weight = hirsel_query_products::retained::MetadataWeight::default();
     weight.add(
         size_of::<LiveDefinition>()
             + size_of::<Data>()
@@ -915,9 +916,9 @@ impl QueryEngine {
                 })?;
                 let syntax = namespace.syntax(path)?;
                 let source = accepted.source();
-                let mut weight = crate::NativeMetadataWeight::default();
+                let mut weight = hirsel_query_products::retained::MetadataWeight::default();
                 weight.add(
-                    crate::memo::retained::retained_syntax_bytes(&syntax)
+                    hirsel_query_products::retained::retained_syntax_bytes(&syntax)
                         .try_into()
                         .map_err(|_| refuse())?,
                 );

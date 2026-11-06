@@ -3,7 +3,10 @@
 use super::native_lower;
 use super::native_routing::NativeRouting;
 use super::ownership_admission::Admission;
-use hirsel_engine::{FrontLowerQueries, FrontNativeProducts, FrontNativeQueries, store::*};
+use hirsel_engine::FrontLowerQueries;
+use hirsel_engine::FrontNativeProducts;
+use hirsel_engine::FrontNativeQueries;
+use hirsel_engine::store::*;
 use hirsel_engine_runtime::*;
 
 use hirsel_native::query_model as model;
@@ -150,7 +153,7 @@ impl OwnershipBootstrap {
             plan.options.scoped_specialization,
         ))
         .map_err(|e| e.to_string())?;
-        let mut metadata = hirsel_engine::NativeMetadataWeight::default();
+        let mut metadata = hirsel_query_products::retained::MetadataWeight::default();
         metadata.add(
             std::mem::size_of::<Self>()
                 + std::mem::size_of::<OutputAllowance>()

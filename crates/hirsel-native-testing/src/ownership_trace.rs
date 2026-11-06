@@ -446,7 +446,7 @@ impl LeafObjects {
         format!("objects {objects}, markers {markers}, call bindings {calls} bytes")
     }
     fn retained_parts(&self) -> [u64; 3] {
-        use hirsel_engine::NativeMetadataWeight as Weight;
+        use hirsel_query_products::retained::MetadataWeight as Weight;
         let mut w = Weight::default();
         w.add(std::mem::size_of::<Self>());
         w.path(&self.entry);

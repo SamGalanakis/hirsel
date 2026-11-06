@@ -1,7 +1,10 @@
 use hirsel_driver::*;
-use hirsel_engine::{store::MemStore, *};
+use hirsel_engine::store::MemStore;
+use hirsel_engine::*;
 use hirsel_engine_runtime::*;
 use hirsel_intern::jobs::with_compiler_stack;
+
+use hirsel_query_products::LoweringPolicy;
 
 use hirsel_front_phases::*;
 use hirsel_host_io::launch::*;
@@ -269,7 +272,7 @@ fn scope_case(source: &str, failed_front: bool, failed_lower: bool) {
                 .unwrap();
             oracle_runtime.shutdown();
             assert_eq!(oracle_completion, output.checked.completion);
-            let canonical = |reads: &hirsel_engine::Reads| {
+            let canonical = |reads: &hirsel_query_products::reads::Reads| {
                 reads
                     .iter()
                     .map(|(key, value)| {

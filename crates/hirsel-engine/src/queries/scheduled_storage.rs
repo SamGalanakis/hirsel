@@ -71,7 +71,7 @@ impl FrontStorageGraphQueries {
             && Arc::ptr_eq(&self.growth, growth)
     }
     pub fn input_bytes(definitions: &[DefPath]) -> Option<u64> {
-        let mut weight = crate::NativeMetadataWeight::default();
+        let mut weight = hirsel_query_products::retained::MetadataWeight::default();
         weight.add(std::mem::size_of::<Self>() + 2 * size_of::<usize>());
         weight.add(
             definitions
@@ -122,7 +122,7 @@ impl FrontStorageGraphQueries {
         let Some(bytes) = self.records.encode(&*self.anchors, &error) else {
             return self.errors.resource;
         };
-        let mut weight = crate::memo::retained::Weight::default();
+        let mut weight = hirsel_query_products::retained::Weight::default();
         weight.error(&error);
         let Some(reservation) = self.outputs.pool.take(weight.bytes) else {
             return self.errors.resource;
@@ -464,7 +464,7 @@ impl Task {
                 current.node = 0;
             }
             let bytes = self.bodies.values().try_fold(0u64, |bytes, body| {
-                let mut weight = crate::memo::retained::Weight::default();
+                let mut weight = hirsel_query_products::retained::Weight::default();
                 weight.storage_body(body);
                 bytes.checked_add(weight.bytes)
             });
@@ -552,7 +552,7 @@ impl Task {
         let profiles = Arc::new(profiles);
         let diagnostics = Arc::new(diagnostics);
         let reads = Arc::new(reads);
-        let mut weight = crate::memo::retained::Weight::default();
+        let mut weight = hirsel_query_products::retained::Weight::default();
         weight.add(hirsel_engine_admission::retained_arc_bytes(
             &std::mem::MaybeUninit::<Data>::uninit(),
         ) as usize);

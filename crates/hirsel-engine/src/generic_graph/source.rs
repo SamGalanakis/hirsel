@@ -25,7 +25,7 @@ pub(crate) struct SourceGrowth {
     topology_dirty: bool,
     generation: u64,
     table_result: Option<Vec<Diagnostic>>,
-    unavailable: Option<Option<crate::QueryKind>>,
+    unavailable: Option<Option<hirsel_query_products::QueryKind>>,
 }
 impl SourceGrowth {
     pub(crate) fn changed(&mut self, definition: DefId, present: bool) {
@@ -47,7 +47,7 @@ impl SourceGrowth {
         self.generation += 1;
         self.table_result = None;
     }
-    pub(crate) fn unavailable(&mut self, unavailable: Option<crate::QueryKind>) {
+    pub(crate) fn unavailable(&mut self, unavailable: Option<hirsel_query_products::QueryKind>) {
         if self.unavailable != Some(unavailable) {
             self.unavailable = Some(unavailable);
             for &root in &self.roots {

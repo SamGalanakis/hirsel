@@ -1,6 +1,7 @@
-use hirsel_engine::{CompileConfig, LoweringPolicy, QueryError, ToolError};
+use hirsel_engine::{CompileConfig, QueryError, ToolError};
 use hirsel_front_phases::COMPILER;
 use hirsel_intern::jobs::with_compiler_stack;
+use hirsel_query_products::LoweringPolicy;
 use hirsel_requests::*;
 
 #[test]

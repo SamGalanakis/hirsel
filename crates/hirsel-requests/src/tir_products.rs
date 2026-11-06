@@ -1,7 +1,8 @@
 //! Read-only execution access to the ordinary settled Lower owner. Missing
 //! products remain errors; this adapter cannot demand a query or evaluate data.
 use super::{TirExecution, TirProducts};
-use hirsel_engine::{FrontLowerQueries, FrontRunOutput, QueryKind, ToolError};
+use hirsel_engine::{FrontLowerQueries, FrontRunOutput, ToolError};
+use hirsel_query_products::QueryKind;
 use hirsel_syntax::DefPath;
 use hirsel_tir::{DefinitionRef, MaterializedRef};
 use hirsel_types::{GenericArgument, QueryError};

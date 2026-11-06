@@ -246,7 +246,7 @@ pub(crate) struct GeneratedText {
     pub(crate) text: Result<String, QueryError>,
     pub(crate) reads: Reads,
     pub(crate) detail: DependencyReads,
-    pub(crate) depth: crate::memo::DepthEvidence<Span>,
+    pub(crate) depth: hirsel_query_products::depth::DepthEvidence<Span>,
     pub(crate) products: Arc<PhaseProducts>,
     pub(crate) acceptance: Option<hirsel_validate::ExecutionReceipt>,
     pub(crate) selections: Vec<crate::comptime::Selection>,

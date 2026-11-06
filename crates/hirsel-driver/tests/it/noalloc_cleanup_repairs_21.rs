@@ -5,6 +5,8 @@ use hirsel_front_phases::*;
 use hirsel_host_io::launch::*;
 use hirsel_intern::jobs::with_compiler_stack;
 
+use hirsel_query_products::LoweringPolicy;
+
 fn check(source: &str) -> (QueryEngine, CheckOutput) {
     let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
     let file = engine.sources.add("cleanup.hir", source.into()).unwrap();

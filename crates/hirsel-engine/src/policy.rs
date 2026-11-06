@@ -13,21 +13,6 @@ pub enum Verify {
     Off,
 }
 
-/// Which executable bodies a compile lowers (and V validates). Lowering
-/// reports source diagnostics only through compile-time evaluation (CT-1, CT-2,
-/// CT-4), so both policies report the same diagnostics.
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
-pub enum LoweringPolicy {
-    /// `check`: exactly the bodies compile-time evaluation executes or
-    /// materializes into: constants, bodies containing or reading a compile-time
-    /// value, the functions evaluation calls, and the generated instances CT-5
-    /// selects.
-    Comptime,
-    /// `run`, `test` and `build`: every body of the program's own package and
-    /// the dependency bodies it reaches.
-    Reachable,
-}
-
 static FREE_SESSIONS: AtomicBool = AtomicBool::new(true);
 
 /// Whether a dropped session (an engine a `Compiler` opened) frees its memory.

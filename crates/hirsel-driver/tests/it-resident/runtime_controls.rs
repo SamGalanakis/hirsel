@@ -370,7 +370,7 @@ impl RequestEngine for FrozenEngine {
 
 fn check_operation() -> hirsel_requests::CompileOperation {
     hirsel_requests::CompileOperation::Check {
-        lowering: hirsel_engine::LoweringPolicy::Comptime,
+        lowering: hirsel_query_products::LoweringPolicy::Comptime,
     }
 }
 

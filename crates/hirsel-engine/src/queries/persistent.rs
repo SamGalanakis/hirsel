@@ -462,14 +462,14 @@ impl Registrations {
 
 struct LowerRecord {
     selections: Vec<crate::comptime::Selection>,
-    depth: crate::memo::DepthEvidence<Span>,
+    depth: hirsel_query_products::depth::DepthEvidence<Span>,
     output: QueryOutput<hirsel_tir::DefinitionRef>,
     detail: DependencyReads,
 }
 #[derive(Serialize, Deserialize)]
 struct StoredLowerRecord {
     selections: Vec<crate::comptime::Selection>,
-    depth: crate::memo::DepthEvidence<Span>,
+    depth: hirsel_query_products::depth::DepthEvidence<Span>,
     output: QueryOutput<crate::store::Reference>,
     detail: DependencyReads,
 }
@@ -482,7 +482,7 @@ struct LowerOutputWire<'a> {
 #[derive(Serialize)]
 struct LowerRecordWire<'a> {
     selections: &'a [crate::comptime::Selection],
-    depth: &'a crate::memo::DepthEvidence<Span>,
+    depth: &'a hirsel_query_products::depth::DepthEvidence<Span>,
     output: LowerOutputWire<'a>,
     detail: &'a DependencyReads,
 }
@@ -527,7 +527,7 @@ pub(super) fn capture_lower(
     output: &QueryOutput<hirsel_tir::DefinitionRef>,
     detail: &DependencyReads,
     reads: &Reads,
-    depth: &crate::memo::DepthEvidence<Span>,
+    depth: &hirsel_query_products::depth::DepthEvidence<Span>,
     selections: &[crate::comptime::Selection],
     acceptance: Option<hirsel_validate::ExecutionReceipt>,
 ) -> Option<CapturedLower> {
@@ -558,7 +558,7 @@ pub(super) fn capture_lower(
 
 #[derive(Serialize, Deserialize)]
 struct LowerIdentityMetadata {
-    depth: crate::memo::DepthEvidence<Span>,
+    depth: hirsel_query_products::depth::DepthEvidence<Span>,
     selections: Vec<crate::comptime::Selection>,
 }
 #[derive(Serialize, Deserialize)]
@@ -567,13 +567,13 @@ struct SemanticBodyRecord {
     content: Vec<Vec<u8>>,
     dependencies: BTreeSet<DefPath>,
     selections: Vec<crate::comptime::Selection>,
-    depth: crate::memo::DepthEvidence<Span>,
+    depth: hirsel_query_products::depth::DepthEvidence<Span>,
 }
 #[derive(Serialize, Deserialize)]
 struct AuditRecord {
     products: crate::native_audit::SourceAuditProducts,
     selections: Vec<crate::comptime::Selection>,
-    depth: crate::memo::DepthEvidence<Span>,
+    depth: hirsel_query_products::depth::DepthEvidence<Span>,
 }
 #[derive(Serialize, Deserialize)]
 struct EvaluationRecord {
@@ -586,7 +586,7 @@ pub(super) struct GenerationRecord {
     pub body: hirsel_syntax::ExprId,
     pub text: String,
     pub detail: DependencyReads,
-    pub depth: crate::memo::DepthEvidence<Span>,
+    pub depth: hirsel_query_products::depth::DepthEvidence<Span>,
     pub selections: Vec<crate::comptime::Selection>,
     #[serde(skip)]
     pub acceptance: Option<hirsel_validate::ExecutionReceipt>,
@@ -825,7 +825,7 @@ pub(crate) fn encode_live_analyzed(
         reads.encoding_working_bytes()?,
     )?;
     let body = encoder.capture(
-        crate::memo::retained::analyzed_capture_bytes(output)?,
+        hirsel_query_products::retained::analyzed_capture_bytes(output)?,
         value
             .ownership
             .plain_types
@@ -2482,7 +2482,7 @@ impl QueryEngine {
         path: &DefPath,
         node: &(Vec<Vec<u8>>, BTreeSet<DefPath>),
         reads: &Reads,
-        depth: crate::memo::DepthEvidence<Span>,
+        depth: hirsel_query_products::depth::DepthEvidence<Span>,
         selections: Vec<crate::comptime::Selection>,
         acceptance: Option<&hirsel_validate::ExecutionReceipt>,
     ) -> Result<(), QueryError> {
@@ -2603,7 +2603,7 @@ impl QueryEngine {
         &mut self,
         products: &crate::native_audit::SourceAuditProducts,
         reads: &Reads,
-        depth: crate::memo::DepthEvidence<Span>,
+        depth: hirsel_query_products::depth::DepthEvidence<Span>,
         selections: Vec<crate::comptime::Selection>,
         acceptance: Option<hirsel_validate::ExecutionReceipt>,
     ) -> Result<(), QueryError> {
@@ -3227,7 +3227,7 @@ impl QueryEngine {
     ) -> Result<
         Option<(
             hirsel_validate::VerifiedDefinitionOutput,
-            crate::memo::DepthEvidence<Span>,
+            hirsel_query_products::depth::DepthEvidence<Span>,
         )>,
         QueryError,
     > {
@@ -3531,7 +3531,9 @@ mod malformed_tests {
             engine.lower_requires_execution(
                 path,
                 &Reads::from_vec(vec![(
-                    ReadKey::ValidationUniverse(crate::memo::PackageKey::of(&path.0.package)),
+                    ReadKey::ValidationUniverse(hirsel_query_products::reads::PackageKey::of(
+                        &path.0.package
+                    )),
                     digest
                 )])
                 .unwrap()
@@ -3553,7 +3555,7 @@ mod malformed_tests {
                     content: vec![vec![1]],
                     dependencies: BTreeSet::new(),
                     selections: vec![],
-                    depth: crate::memo::DepthEvidence::leaf(engine.depth_limit()),
+                    depth: hirsel_query_products::depth::DepthEvidence::leaf(engine.depth_limit()),
                 };
                 match fault {
                     0 => record.owner = DefId::intern(&DefPath::core("foreign")),
@@ -3602,7 +3604,7 @@ mod malformed_tests {
                         },
                         materialized: vec![],
                     },
-                    depth: crate::memo::DepthEvidence::leaf(engine.depth_limit()),
+                    depth: hirsel_query_products::depth::DepthEvidence::leaf(engine.depth_limit()),
                     selections: vec![],
                 };
                 match fault {
@@ -3722,7 +3724,8 @@ mod malformed_tests {
                 engine.verify = Verify::Off;
                 let path = &syntax.item.definition;
                 let body = generation::generator(&syntax).unwrap();
-                let mut depth = crate::memo::DepthEvidence::leaf(engine.depth_limit());
+                let mut depth =
+                    hirsel_query_products::depth::DepthEvidence::leaf(engine.depth_limit());
                 depth.bounded = false;
                 let mut record = GenerationRecord {
                     owner: DefId::intern(path),
@@ -3853,7 +3856,8 @@ mod malformed_tests {
         assert!(report.violations.is_empty(), "{:?}", report.violations);
         let package = syntax.item.definition.0.package.clone();
         let digest = ContentHash::of_bytes(b"complete private universe");
-        let guard = ReadKey::ValidationUniverse(crate::memo::PackageKey::of(&package));
+        let guard =
+            ReadKey::ValidationUniverse(hirsel_query_products::reads::PackageKey::of(&package));
         let semantic = vec![
             (
                 ReadKey::ExecutedBody(syntax.owner().def),
@@ -3875,7 +3879,7 @@ mod malformed_tests {
             },
             substitutions: vec![],
             executed: Reads::from_vec(rows).unwrap(),
-            depth: crate::memo::DepthEvidence::leaf(engine.depth_limit()),
+            depth: hirsel_query_products::depth::DepthEvidence::leaf(engine.depth_limit()),
             selections: vec![],
             validation: None,
             acceptance: Some(
@@ -3903,7 +3907,7 @@ mod malformed_tests {
                 }
                 1 => rows.push((guard, ContentHash::of_bytes(b"wrong universe"))),
                 2 => rows.push((
-                    ReadKey::ValidationUniverse(crate::memo::PackageKey::of(
+                    ReadKey::ValidationUniverse(hirsel_query_products::reads::PackageKey::of(
                         &DefPath::core("other").0.package,
                     )),
                     digest,
@@ -3911,7 +3915,7 @@ mod malformed_tests {
                 3 => {
                     rows.push((guard, digest));
                     rows.push((
-                        ReadKey::ValidationUniverse(crate::memo::PackageKey::of(
+                        ReadKey::ValidationUniverse(hirsel_query_products::reads::PackageKey::of(
                             &DefPath::core("other").0.package,
                         )),
                         digest,
@@ -3979,7 +3983,9 @@ mod malformed_tests {
                         },
                         substitutions: vec![],
                         executed: Reads::empty(),
-                        depth: crate::memo::DepthEvidence::leaf(engine.depth_limit()),
+                        depth: hirsel_query_products::depth::DepthEvidence::leaf(
+                            engine.depth_limit(),
+                        ),
                         selections: vec![],
                         validation: None,
                         acceptance: None,
@@ -4049,7 +4055,7 @@ mod malformed_tests {
             },
             substitutions: vec![],
             executed: Reads::empty(),
-            depth: crate::memo::DepthEvidence::leaf(engine.depth_limit()),
+            depth: hirsel_query_products::depth::DepthEvidence::leaf(engine.depth_limit()),
             acceptance: None,
             selections: vec![],
             validation: Some(
@@ -4085,7 +4091,9 @@ mod malformed_tests {
                         },
                         substitutions: vec![],
                         executed: Reads::empty(),
-                        depth: crate::memo::DepthEvidence::leaf(engine.depth_limit()),
+                        depth: hirsel_query_products::depth::DepthEvidence::leaf(
+                            engine.depth_limit(),
+                        ),
                         selections: vec![],
                         validation: None,
                         acceptance: None,
@@ -4547,7 +4555,8 @@ mod malformed_tests {
                 let (mut engine, syntax) = fixture();
                 engine.verify = Verify::Off;
                 let path = &syntax.item.definition;
-                let mut depth = crate::memo::DepthEvidence::leaf(engine.depth_limit());
+                let mut depth =
+                    hirsel_query_products::depth::DepthEvidence::leaf(engine.depth_limit());
                 match fault {
                     0 => depth.first = Box::new([]),
                     1 => depth.first = vec![None; 2].into_boxed_slice(),
@@ -4863,7 +4872,7 @@ mod malformed_tests {
         });
         let record = LowerRecord {
             selections: vec![],
-            depth: crate::memo::DepthEvidence::leaf(engine.depth_limit()),
+            depth: hirsel_query_products::depth::DepthEvidence::leaf(engine.depth_limit()),
             output: output(definition.clone()),
             detail: Default::default(),
         };

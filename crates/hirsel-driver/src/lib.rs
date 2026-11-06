@@ -193,7 +193,7 @@ fn run_simulation(
         hirsel_engine::RuntimeError::Io(error) => ToolError::Io(error),
         hirsel_engine::RuntimeError::Query(error) => ToolError::Query {
             error,
-            phase: Some(hirsel_engine::QueryKind::Interpret),
+            phase: Some(hirsel_query_products::QueryKind::Interpret),
             sources: input.sources.clone(),
         },
         hirsel_engine::RuntimeError::Tool(message) => ToolError::Runtime(message),

@@ -4,20 +4,20 @@ use super::*;
 use bincode::Options;
 use hirsel_syntax::DefPath;
 
-pub(crate) const SEMANTIC_INPUT: Domain = Domain {
+pub const SEMANTIC_INPUT: Domain = Domain {
     kind: 0x4601_000c,
     schema: 1,
 };
-pub(crate) const SEMANTIC_HEADER: Domain = Domain {
+pub const SEMANTIC_HEADER: Domain = Domain {
     kind: 0x4601_000d,
     schema: 1,
 };
-pub(crate) const SEMANTIC_BODY: Domain = Domain {
+pub const SEMANTIC_BODY: Domain = Domain {
     kind: 0x4601_000e,
     schema: 1,
 };
 
-pub(crate) const SEMANTIC_SOURCE: Domain = Domain {
+pub const SEMANTIC_SOURCE: Domain = Domain {
     kind: 0x4601_000f,
     schema: 1,
 };
@@ -66,24 +66,24 @@ pub struct InstalledDefinition {
 }
 
 #[derive(Clone, Serialize, Deserialize)]
-pub(crate) struct InstalledSpecializations {
-    pub(crate) reads: Vec<u8>,
-    pub(crate) definitions: Vec<DefPath>,
+pub struct InstalledSpecializations {
+    pub reads: Vec<u8>,
+    pub definitions: Vec<DefPath>,
 }
 
 /// A record is ordinary compiler input. No successful verifier verdict is
 /// encoded here; executed bodies still go through the existing V path.
 #[derive(Serialize, Deserialize)]
-pub(crate) struct InstalledSemanticInput {
-    pub(crate) definition: DefPath,
-    pub(crate) config: ContentHash,
-    pub(crate) implementation: ContentHash,
-    pub(crate) dependencies: Vec<hirsel_types::SignatureDependency>,
-    pub(crate) reads: Vec<u8>,
-    pub(crate) semantic_dependencies: Vec<DefPath>,
-    pub(crate) discovery: crate::queries::catalog::SourceFacts,
-    pub(crate) specializations: Option<InstalledSpecializations>,
-    pub(crate) ownership: InstalledDefinitionOwnership,
+pub struct InstalledSemanticInput {
+    pub definition: DefPath,
+    pub config: ContentHash,
+    pub implementation: ContentHash,
+    pub dependencies: Vec<hirsel_types::SignatureDependency>,
+    pub reads: Vec<u8>,
+    pub semantic_dependencies: Vec<DefPath>,
+    pub discovery: hirsel_query_products::SourceFacts,
+    pub specializations: Option<InstalledSpecializations>,
+    pub ownership: InstalledDefinitionOwnership,
 }
 impl InstalledSemanticInput {
     fn dependency_identity(&self) -> std::io::Result<ContentHash> {
@@ -99,7 +99,7 @@ impl InstalledSemanticInput {
             [bytes.as_slice()],
         ))
     }
-    pub(crate) fn decode(bytes: &[u8]) -> Result<Self, String> {
+    pub fn decode(bytes: &[u8]) -> Result<Self, String> {
         bincode::DefaultOptions::new()
             .with_fixint_encoding()
             .with_limit(MAX_RECORD as u64)
@@ -115,7 +115,7 @@ impl InstalledPackage {
     pub fn definitions(&self) -> impl Iterator<Item = &InstalledDefinition> {
         self.definitions.values()
     }
-    pub(super) fn index_definitions(
+    pub fn index_definitions(
         &mut self,
         store: &hirsel_artifact_store::Store,
         records: &mut InstallationRecords,
@@ -181,7 +181,7 @@ impl InstalledPackage {
         }
         Ok(())
     }
-    pub(super) fn check_definitions(&self) -> Result<(), String> {
+    pub fn check_definitions(&self) -> Result<(), String> {
         let manifest = ContentHash::of_bytes(&self.manifest);
         let rows = self
             .rows
@@ -232,11 +232,11 @@ impl InstalledPackage {
 }
 
 impl InstalledSourceRecords {
-    pub(crate) fn definition(&self, path: &DefPath) -> Option<&InstalledDefinition> {
+    pub fn definition(&self, path: &DefPath) -> Option<&InstalledDefinition> {
         self.definitions.get(path)
     }
 
-    pub(crate) fn semantic(
+    pub fn semantic(
         &self,
         path: &DefPath,
         config: ContentHash,
@@ -264,7 +264,7 @@ impl InstalledSourceRecords {
         }
         Ok(Some(record))
     }
-    pub(crate) fn content(&self, reference: Reference, limit: u64) -> Result<Bytes, String> {
+    pub fn content(&self, reference: Reference, limit: u64) -> Result<Bytes, String> {
         if reference.len > limit {
             return Err("installed content exceeds admission".into());
         }

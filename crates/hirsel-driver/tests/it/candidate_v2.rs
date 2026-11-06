@@ -3,7 +3,8 @@
 use hirsel_candidate::v2::*;
 use hirsel_candidate::*;
 use hirsel_engine::loader_inputs::namespace::{Limits as NL, Root};
-use hirsel_engine::{CompileConfig, LoweringPolicy, ToolError};
+use hirsel_engine::{CompileConfig, ToolError};
+use hirsel_query_products::LoweringPolicy;
 use hirsel_syntax::ContentHash;
 use serde_json::{Value, json};
 use std::{
@@ -919,7 +920,7 @@ fn candidate_receipts_bind_failed_lowerings_to_complete_current_checks() {
                 );
                 let mut failed = session.logical_entry().unwrap().clone();
                 failed.0.name = "VALUE".into();
-                let queries = vec![(failed, hirsel_engine::QueryKind::Lower)];
+                let queries = vec![(failed, hirsel_query_products::QueryKind::Lower)];
                 let before = session.recompute_counts(queries.clone()).unwrap();
                 let receipt = session.checked_products(true).unwrap();
                 assert_eq!(

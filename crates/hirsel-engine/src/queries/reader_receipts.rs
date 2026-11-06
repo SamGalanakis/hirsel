@@ -160,7 +160,7 @@ impl ReadUnion {
         Self::bytes(self.rows.len().checked_add(missing)?)
     }
     fn bytes(len: usize) -> Option<u64> {
-        let mut weight = crate::NativeMetadataWeight::default();
+        let mut weight = hirsel_query_products::retained::MetadataWeight::default();
         weight.tree::<ReadKey, (ContentHash, usize)>(len);
         Some(weight.bytes())
     }
@@ -197,9 +197,9 @@ impl ReadUnion {
         }
         self.fits_scratch(scratch)?.then_some(())
     }
-    pub(super) fn finish(self) -> Result<Reads, crate::memo::Inconsistent> {
+    pub(super) fn finish(self) -> Result<Reads, hirsel_query_products::reads::Inconsistent> {
         if let Some(key) = self.conflict {
-            return Err(crate::memo::Inconsistent(key));
+            return Err(hirsel_query_products::reads::Inconsistent(key));
         }
         let rows = self
             .rows
@@ -357,7 +357,7 @@ impl ReaderSequence {
         store: &dyn ResultStore,
         scratch: u64,
         front: &FrontBodyQueries,
-    ) -> Option<Result<Reads, crate::memo::Inconsistent>> {
+    ) -> Option<Result<Reads, hirsel_query_products::reads::Inconsistent>> {
         let mut union = ReadUnion::default();
         for reader in &self.0 {
             if let Some(reads) = reader
@@ -383,7 +383,7 @@ impl ReadUnion {
             .checked_add((max_key as u64).checked_mul(8)?)?
             .checked_add(256)?;
         let pending_bytes = |len| {
-            let mut weight = crate::NativeMetadataWeight::default();
+            let mut weight = hirsel_query_products::retained::MetadataWeight::default();
             weight.tree::<usize, (ReadKey, ContentHash)>(len);
             weight.bytes()
         };

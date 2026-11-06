@@ -13,7 +13,7 @@ pub(super) struct Body {
 }
 impl Body {
     fn weight(&self) -> u64 {
-        let mut weight = crate::NativeMetadataWeight::default();
+        let mut weight = hirsel_query_products::retained::MetadataWeight::default();
         weight.add(std::mem::size_of::<Self>());
         let audit = &self.products.audit;
         weight.path(&audit.definition);

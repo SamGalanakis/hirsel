@@ -1,5 +1,8 @@
 use hirsel_driver::CompilerRequestsExt;
-use hirsel_engine::{CompileConfig, QueryError, ToolError, store::DirStore};
+use hirsel_engine::CompileConfig;
+use hirsel_engine::QueryError;
+use hirsel_engine::ToolError;
+use hirsel_engine::store::DirStore;
 use hirsel_front_phases::COMPILER;
 use hirsel_intern::jobs::with_compiler_stack;
 use hirsel_requests::*;
@@ -97,7 +100,7 @@ fn precompute_rejects_disabled_verification_before_package_loading() {
 
 #[test]
 fn precomputed_dependency_readers_preserve_order_admission_and_owner_lifetime() {
-    use hirsel_engine::QueryKind;
+    use hirsel_query_products::QueryKind;
 
     with_compiler_stack(|| {
         let directory = tempfile::tempdir().unwrap();

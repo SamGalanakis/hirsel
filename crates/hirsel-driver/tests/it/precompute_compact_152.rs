@@ -1,10 +1,14 @@
 use hirsel_driver::CompilerRequestsExt;
-use hirsel_engine::{
-    CheckCompletion, CompileConfig, LoweringPolicy, QueryError, QueryKind, ToolError,
-    store::{self, ResultStore},
-};
+use hirsel_engine::CheckCompletion;
+use hirsel_engine::CompileConfig;
+use hirsel_engine::QueryError;
+use hirsel_engine::ToolError;
+use hirsel_engine::store;
+use hirsel_engine::store::ResultStore;
 use hirsel_front_phases::COMPILER;
 use hirsel_intern::jobs::with_compiler_stack;
+use hirsel_query_products::LoweringPolicy;
+use hirsel_query_products::QueryKind;
 use hirsel_requests::*;
 use std::sync::{
     Arc,

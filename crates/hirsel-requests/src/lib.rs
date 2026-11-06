@@ -1,16 +1,16 @@
 //! Explicit immutable request selection shared by fresh and resident callers.
 //! The engine installs factories; these descriptors select operations and never
 //! accept caller-supplied tasks, caches, verifier receipts or mutable programs.
-use hirsel_engine::{
-    LoweringPolicy,
-    loader_inputs::{
-        DirectoryEntry, FrozenInputs, InputKind, LoaderInputs, namespace::NamespaceLease,
-    },
-};
+use hirsel_engine::loader_inputs::DirectoryEntry;
+use hirsel_engine::loader_inputs::FrozenInputs;
+use hirsel_engine::loader_inputs::InputKind;
+use hirsel_engine::loader_inputs::LoaderInputs;
+use hirsel_engine::loader_inputs::namespace::NamespaceLease;
 use hirsel_native::BuildOptions;
 use hirsel_native::LaunchInputs;
 use hirsel_native::TargetSpec;
 use hirsel_native::Validation;
+use hirsel_query_products::LoweringPolicy;
 use hirsel_syntax::DefPath;
 use std::io;
 use std::path::PathBuf;
@@ -197,7 +197,7 @@ pub enum CompileOperation {
     },
     /// Observe work counters without demanding or recomputing these definitions.
     RecomputeCounts {
-        queries: Vec<(DefPath, hirsel_engine::QueryKind)>,
+        queries: Vec<(DefPath, hirsel_query_products::QueryKind)>,
     },
     /// None selects the declared launch entry using the observed manifest.
     Tir {

@@ -5,6 +5,8 @@ use hirsel_front_phases::*;
 use hirsel_host_io::launch::*;
 use hirsel_intern::jobs::with_compiler_stack;
 
+use hirsel_query_products::LoweringPolicy;
+
 const ORIGINAL: &str = include_str!("../fixtures/replace-local-content-33/original.hir");
 
 fn named(name: &str) -> DefPath {

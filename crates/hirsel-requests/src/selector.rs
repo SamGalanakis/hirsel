@@ -135,9 +135,13 @@ impl CompilerRequests {
     /// inputs, installing a producer, or retaining an idle runtime.
     pub fn recompute_counts(
         &self,
-        queries: &[(hirsel_syntax::DefPath, hirsel_engine::QueryKind)],
+        queries: &[(hirsel_syntax::DefPath, hirsel_query_products::QueryKind)],
     ) -> Result<
-        Vec<(hirsel_syntax::DefPath, hirsel_engine::QueryKind, u64)>,
+        Vec<(
+            hirsel_syntax::DefPath,
+            hirsel_query_products::QueryKind,
+            u64,
+        )>,
         hirsel_engine::ToolError,
     > {
         self.ledger.counts(queries)

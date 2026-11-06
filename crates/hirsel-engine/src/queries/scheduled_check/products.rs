@@ -92,7 +92,7 @@ impl FrontCheckScope {
             return Err(QueryError::NotImplemented);
         }
         let lower = &self.owner().plan.lower;
-        let mut weight = crate::NativeMetadataWeight::default();
+        let mut weight = hirsel_query_products::retained::MetadataWeight::default();
         weight.add(size_of::<FrontCheckedInput>() + 4 * size_of::<usize>());
         weight.path(entry);
         weight.add(hirsel_proof_export::FORMAT.len());
@@ -309,7 +309,7 @@ impl FrontCheckScope {
         _canonical: usize,
     ) -> Result<u64, QueryError> {
         let missing = || QueryError::NotImplemented;
-        let mut weight = crate::NativeMetadataWeight::default();
+        let mut weight = hirsel_query_products::retained::MetadataWeight::default();
         weight.add(receipt_owner_bytes().ok_or_else(missing)?);
         weight.tree::<DefPath, Arc<Reads>>(self.reads().len());
         weight.tree::<DefPath, BTreeMap<Vec<u8>, ContentHash>>(self.reads().len());
@@ -329,7 +329,8 @@ impl FrontCheckScope {
         for (path, reads) in self.reads() {
             weight.path(path);
             weight.tree::<Vec<u8>, ContentHash>(reads.len());
-            let path_bytes = crate::memo::encoded_def_path_bytes(path).ok_or_else(missing)?;
+            let path_bytes =
+                hirsel_query_products::reads::encoded_def_path_bytes(path).ok_or_else(missing)?;
             weight.add(path_bytes.checked_mul(3).ok_or_else(missing)?);
             parts = parts
                 .checked_add(1)
@@ -375,7 +376,7 @@ fn receipt_owner_bytes() -> Option<usize> {
 impl CheckedProducts {
     /// Retained maps only; canonical bytes have their separate detached owner.
     pub(crate) fn receipt_retained_bytes(&self) -> Option<u64> {
-        let mut weight = crate::NativeMetadataWeight::default();
+        let mut weight = hirsel_query_products::retained::MetadataWeight::default();
         weight.add(receipt_owner_bytes()?);
         weight.tree::<DefPath, BTreeMap<Vec<u8>, ContentHash>>(self.reads.len());
         for (path, reads) in &self.reads {

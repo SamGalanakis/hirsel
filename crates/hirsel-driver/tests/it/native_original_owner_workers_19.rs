@@ -1,13 +1,14 @@
 //! Retained-owner source vector from the removed-controller migration inventory.
 use hirsel_driver::native;
-use hirsel_engine::{
-    store::{MemStore, ResultStore, VerifyStore},
-    *,
-};
+use hirsel_engine::store::MemStore;
+use hirsel_engine::store::ResultStore;
+use hirsel_engine::store::VerifyStore;
+use hirsel_engine::*;
 use hirsel_front_phases::compiler_adapters;
 use hirsel_intern::jobs::Jobs;
 use hirsel_intern::jobs::with_compiler_stack;
 use hirsel_lir::ir::UnitOrigin;
+
 use std::sync::Arc;
 
 #[test]

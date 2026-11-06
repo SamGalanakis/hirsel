@@ -63,7 +63,7 @@ pub struct NativeDischargeFacts {
 }
 impl NativeDischargeFacts {
     pub fn retained_metadata_bytes(&self) -> u64 {
-        let mut weight = hirsel_engine::NativeMetadataWeight::default();
+        let mut weight = hirsel_query_products::retained::MetadataWeight::default();
         weight.vec(&self.sites, |w, site| match &site.form {
             SiteForm::Check(rule) | SiteForm::Projection { rule, .. } => w.add(rule.capacity()),
             SiteForm::Integer | SiteForm::Negation => (),

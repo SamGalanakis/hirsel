@@ -5,7 +5,7 @@
 //! with the value it observed, so the memo the task produces can be verified
 //! by comparing observed values alone (design §1(b), "Typed reads").
 use super::SignatureSnapshot;
-use crate::memo::{LookupKey, LookupSource, PackageKey, ReadKey, ReadsBuilder};
+use hirsel_query_products::reads::{LookupKey, LookupSource, PackageKey, ReadKey, ReadsBuilder};
 use hirsel_syntax::{ContentHash, DefId, FileContext, PackageId, Path};
 use hirsel_types::{LookupOutput, QueryError, SignatureProvider, SignatureRef};
 

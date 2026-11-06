@@ -38,7 +38,7 @@ fn transcript() -> String {
         let program = hirsel_intern::jobs::with_compiler_stack(|| {
             let mut program = load_program(&path)?;
             let checked = program
-                .check(hirsel_engine::LoweringPolicy::Comptime)
+                .check(hirsel_query_products::LoweringPolicy::Comptime)
                 .map_err(|error| program.error(error))?;
             let mut text = format!("completion {:?}\n", checked.completion);
             for diagnostic in &checked.diagnostics {

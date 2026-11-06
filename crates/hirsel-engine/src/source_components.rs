@@ -4,9 +4,9 @@
 use crate::CheckedSummary;
 use crate::NativeRecordContext;
 use crate::NativeRecordSource;
-use crate::memo::Reads;
 use crate::store::{Action, Address, Reference};
 use hirsel_engine_runtime::ProductRef;
+use hirsel_query_products::reads::Reads;
 
 use hirsel_span::Span;
 use hirsel_syntax::{ContentHash, DefId};
@@ -257,7 +257,7 @@ impl From<Result<ProductRef, Reference>> for SourceGrowthSelection {
 impl SourceGrowthFact {
     /// Physical fact backing retained by an admitted source-growth task.
     pub fn input_bytes(&self) -> u64 {
-        let mut weight = crate::memo::retained::Weight::default();
+        let mut weight = hirsel_query_products::retained::Weight::default();
         weight.add(std::mem::size_of::<Self>() + std::mem::size_of_val(&*self.calls));
         weight.parameter_growth(&self.growth);
         weight.bytes
@@ -356,7 +356,7 @@ impl SourceGrowthProducer<'_> {
             .chain(facts.iter().flat_map(|fact| fact.calls.iter().copied()))
         {
             if !nodes.contains(&node) {
-                let mut weight = crate::NativeMetadataWeight::default();
+                let mut weight = hirsel_query_products::retained::MetadataWeight::default();
                 weight.tree::<DefId, ()>(nodes.len().checked_add(1)?);
                 if weight.bytes() > self.scratch {
                     return None;
@@ -424,7 +424,7 @@ impl SourceGrowthProducer<'_> {
         product: SourceGrowthIdentity,
         components: Box<[SourceComponentMembers]>,
     ) -> Option<SourceMembership> {
-        let mut weight = crate::NativeMetadataWeight::default();
+        let mut weight = hirsel_query_products::retained::MetadataWeight::default();
         weight.add(std::mem::size_of::<SourceMembership>() + 2 * std::mem::size_of::<usize>());
         weight.add(std::mem::size_of_val(&*components));
         for component in &components {
@@ -617,7 +617,7 @@ fn graph_bytes(nodes: usize, edges: usize, facts: usize) -> Option<u64> {
     let twice = nodes.checked_mul(2)?.checked_add(4)?;
     let members = nodes.checked_mul(6)?.checked_add(4)?;
     let adjacency = edges.checked_mul(2)?.checked_add(facts.checked_mul(4)?)?;
-    let mut weight = crate::NativeMetadataWeight::default();
+    let mut weight = hirsel_query_products::retained::MetadataWeight::default();
     weight.tree::<DefId, ()>(nodes);
     weight.tree::<DefId, usize>(nodes);
     weight.tree::<usize, (usize, usize)>(nodes);

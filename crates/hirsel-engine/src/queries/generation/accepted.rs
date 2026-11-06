@@ -42,7 +42,7 @@ impl AcceptedFrontRegistration {
         if reads == *self.reads {
             return Ok(self.clone());
         }
-        let mut weight = crate::NativeMetadataWeight::default();
+        let mut weight = hirsel_query_products::retained::MetadataWeight::default();
         weight.add(
             size_of::<Self>()
                 + size_of::<Reads>()
@@ -190,7 +190,9 @@ impl AcceptedFrontRegistration {
         };
         if let Some(execution) = &execution {
             for (package, digest) in execution.contexts() {
-                let key = ReadKey::ValidationUniverse(crate::memo::PackageKey::of(package));
+                let key = ReadKey::ValidationUniverse(
+                    hirsel_query_products::reads::PackageKey::of(package),
+                );
                 if observe(context, self.definition(), &key) != Some(*digest) {
                     return Err(invalid(
                         "observer does not identify the current validation universe",
@@ -249,7 +251,7 @@ impl AcceptedFrontRegistration {
     pub(crate) fn generation_manifest(&self) -> ContentHash {
         self.output.manifest()
     }
-    pub(crate) fn depth(&self) -> &crate::memo::DepthEvidence<Span> {
+    pub(crate) fn depth(&self) -> &hirsel_query_products::depth::DepthEvidence<Span> {
         self.output.depth()
     }
     pub(crate) fn acceptance(&self) -> Option<&hirsel_validate::ExecutionReceipt> {
@@ -354,8 +356,8 @@ fn source_weight(
     sources: &SourceMap,
     generated: Option<&GeneratedSource>,
     previous_payload: u64,
-) -> crate::NativeMetadataWeight {
-    let mut weight = crate::NativeMetadataWeight::default();
+) -> hirsel_query_products::retained::MetadataWeight {
+    let mut weight = hirsel_query_products::retained::MetadataWeight::default();
     weight.add(size_of::<hirsel_engine_admission::MemoryReservation>() + 2 * size_of::<usize>());
     weight.tree::<DefPath, GeneratedSource>(1);
     if let Some(source) = generated {
@@ -529,7 +531,7 @@ impl AcceptanceInputs {
                 weight.add(label.message.capacity())
             });
             weight.add(
-                crate::memo::retained::retained_syntax_bytes(&syntax)
+                hirsel_query_products::retained::retained_syntax_bytes(&syntax)
                     .try_into()
                     .map_err(|_| refusal())?,
             );
@@ -572,7 +574,7 @@ impl AcceptanceInputs {
                 let mut weight = source_weight(&sources, generated.as_ref(), source_before);
                 weight.path(&definition);
                 weight.add(
-                    crate::memo::retained::retained_query_error_bytes(&error)
+                    hirsel_query_products::retained::retained_query_error_bytes(&error)
                         .try_into()
                         .unwrap_or(usize::MAX),
                 );

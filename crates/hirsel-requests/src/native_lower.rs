@@ -30,10 +30,11 @@ pub(super) fn inputs(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hirsel_engine::{
-        store::{Domain, MemStore, Reference, ResultStore},
-        *,
-    };
+    use hirsel_engine::store::Domain;
+    use hirsel_engine::store::MemStore;
+    use hirsel_engine::store::Reference;
+    use hirsel_engine::store::ResultStore;
+    use hirsel_engine::*;
     use hirsel_engine_runtime::*;
 
     use hirsel_intern::jobs::Jobs;

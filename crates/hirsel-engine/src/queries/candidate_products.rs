@@ -63,7 +63,7 @@ impl CheckedProducts {
                     .size(),
             )
         }
-        let mut weight = crate::NativeMetadataWeight::default();
+        let mut weight = hirsel_query_products::retained::MetadataWeight::default();
         weight.add(arc::<Self>()?);
         weight.add(arc::<(Arc<dyn Send + Sync>, Arc<dyn Send + Sync>)>()?);
         weight.add(arc::<hirsel_engine_admission::MemoryReservation>()?);
@@ -84,7 +84,7 @@ impl CheckedProducts {
             .iter()
             .flat_map(|(owner, reads)| {
                 let mut bytes = Vec::new();
-                crate::memo::encode_def_path(&mut bytes, owner);
+                hirsel_query_products::reads::encode_def_path(&mut bytes, owner);
                 reads
                     .iter()
                     .map(move |(key, value)| ((bytes.clone(), key.clone()), *value))
@@ -99,13 +99,13 @@ impl QueryEngine {
         let mut registrations = Vec::new();
         for (path, generated) in &self.generated {
             let mut key = vec![];
-            crate::memo::encode_def_path(&mut key, path);
+            hirsel_query_products::reads::encode_def_path(&mut key, path);
             registrations.push(key);
             registrations.push(generated.text.as_bytes().to_vec());
         }
         for declaration in &self.instance_bodies.declarations {
             let mut key = vec![];
-            crate::memo::encode_def_path(&mut key, declaration.path());
+            hirsel_query_products::reads::encode_def_path(&mut key, declaration.path());
             registrations.push(key);
         }
         for (declaration, instances) in &self.instance_bodies.instances {
@@ -113,12 +113,15 @@ impl QueryEngine {
                 .iter()
                 .map(|(actual, body)| {
                     let mut record = vec![];
-                    crate::memo::encode_def_path(&mut record, declaration.path());
+                    hirsel_query_products::reads::encode_def_path(&mut record, declaration.path());
                     for spelling in actual.spellings() {
                         record.extend_from_slice(&(spelling.len() as u64).to_le_bytes());
                         record.extend_from_slice(spelling.as_bytes());
                     }
-                    crate::memo::encode_def_path(&mut record, body.definition.path());
+                    hirsel_query_products::reads::encode_def_path(
+                        &mut record,
+                        body.definition.path(),
+                    );
                     record
                 })
                 .collect();
@@ -163,7 +166,7 @@ impl CheckedProductEncoder {
     /// semantic cache or omitted because its body was evicted.
     pub fn finish(
         self,
-        required_reads: BTreeMap<DefPath, Arc<crate::memo::Reads>>,
+        required_reads: BTreeMap<DefPath, Arc<hirsel_query_products::reads::Reads>>,
         registrations: Vec<Vec<u8>>,
     ) -> CheckedProducts {
         let canonical = self.canonical;
@@ -179,7 +182,7 @@ impl CheckedProductEncoder {
         let mut parts = registrations;
         for (path, observed) in &reads {
             let mut key = vec![];
-            crate::memo::encode_def_path(&mut key, path);
+            hirsel_query_products::reads::encode_def_path(&mut key, path);
             parts.push(key);
             for (key, value) in observed {
                 parts.push(key.clone());
@@ -326,7 +329,7 @@ mod registration_tests {
         let records = engine.checked_registration_records();
         let encode = |path: &DefPath| {
             let mut bytes = Vec::new();
-            crate::memo::encode_def_path(&mut bytes, path);
+            hirsel_query_products::reads::encode_def_path(&mut bytes, path);
             bytes
         };
         assert_eq!(records.len(), 5);

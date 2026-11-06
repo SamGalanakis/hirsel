@@ -125,7 +125,7 @@ pub struct FrontRegistrationQueries {
 }
 impl FrontRegistrationQueries {
     pub fn input_bytes(definitions: &[DefPath]) -> u64 {
-        let mut weight = crate::NativeMetadataWeight::default();
+        let mut weight = hirsel_query_products::retained::MetadataWeight::default();
         weight.add(size_of::<Self>() + 2 * size_of::<usize>());
         weight.add(hirsel_engine_admission::MemoryReservationPool::metadata_bytes() as usize);
         weight.tree::<ContentHash, Input>(definitions.len());
@@ -303,13 +303,13 @@ impl FrontRegistrationQueries {
                 source.capture(),
             )
         };
-        let mut weight = crate::NativeMetadataWeight::default();
+        let mut weight = hirsel_query_products::retained::MetadataWeight::default();
         weight.arc(&data);
         weight.add(size_of::<live_record::LiveRecord<Arc<Data>>>() + 2 * size_of::<usize>());
         match &data.text {
             Ok(text) => weight.add(text.capacity()),
             Err(error) => weight.add(
-                crate::memo::retained::retained_query_error_bytes(error)
+                hirsel_query_products::retained::retained_query_error_bytes(error)
                     .try_into()
                     .map_err(|_| self.errors.resource)?,
             ),
@@ -751,7 +751,9 @@ impl QueryEngine {
                 .store_key(definition, QueryKind::Generate)
                 .ok_or_else(refused)?;
             required = required
-                .checked_add(crate::memo::retained::retained_syntax_bytes(&syntax))
+                .checked_add(hirsel_query_products::retained::retained_syntax_bytes(
+                    &syntax,
+                ))
                 .ok_or_else(refused)?;
             if required > available {
                 return Err(refused());

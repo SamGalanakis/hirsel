@@ -809,7 +809,7 @@ fn seal_tools(root: &Path) {
 
 fn check_program(loaded: &mut hirsel_engine::LoadedProgram) {
     let output = loaded
-        .check(hirsel_engine::LoweringPolicy::Reachable)
+        .check(hirsel_query_products::LoweringPolicy::Reachable)
         .unwrap_or_else(|e| panic!("{e:?}"));
     for diagnostic in &output.diagnostics {
         eprintln!("{}", diagnostic.render_human(&output.sources));

@@ -13,6 +13,8 @@ use hirsel_driver::*;
 use hirsel_engine::*;
 use hirsel_front_phases::*;
 use hirsel_host_io::launch::*;
+
+use hirsel_query_products::{LoweringPolicy, QueryKind};
 use image_fixture::*;
 
 const STD_PROGRAM: &str = "pub type AppError = Grant(GrantError) | Output(OutputError)

@@ -1,13 +1,15 @@
 //! Admitted typed values. Producers retain their existing snapshot reservation;
 //! this owner additionally admits every value allocation it keeps alive.
 
-use crate::memo::{DepthEvidence, retained::Weight};
 use crate::{
-    NativeRecordContext, NativeRecordSource, NativeRecords, PublishedSummary, Reads, SummaryView,
+    NativeRecordContext, NativeRecordSource, NativeRecords, PublishedSummary, SummaryView,
 };
 use hirsel_artifact_store::{Action, Address, Domain, Reference};
 use hirsel_engine_admission::{RetainedArchiveLease, retained_arc_bytes};
 use hirsel_engine_runtime::{ArchiveAdmission, ProductArchive};
+use hirsel_query_products::depth::DepthEvidence;
+use hirsel_query_products::reads::Reads;
+use hirsel_query_products::retained::Weight;
 use hirsel_span::Span;
 use hirsel_tir::DefinitionRef;
 use hirsel_types::{QueryOutput, TypeInterner};
@@ -725,7 +727,7 @@ impl LiveLowerProduct {
         }
         weight.add(size_of_val(&*value.depth.first));
         weight.add(2 * (size_of::<std::sync::OnceLock<Reference>>() + 2 * size_of::<usize>()));
-        let mut materialized = crate::NativeMetadataWeight::default();
+        let mut materialized = hirsel_query_products::retained::MetadataWeight::default();
         materialized.add(
             value
                 .materialized
@@ -737,11 +739,15 @@ impl LiveLowerProduct {
             materialized.materialized(value);
         }
         owner_bytes::<LowerValue>()
-            .checked_add(crate::memo::retained_tir_bytes(&value.output.value))?
-            .checked_add(crate::memo::retained_lowering_output_bytes(
-                &value.output.diagnostics,
-                &value.output.dependencies,
+            .checked_add(hirsel_query_products::retained::retained_tir_bytes(
+                &value.output.value,
             ))?
+            .checked_add(
+                hirsel_query_products::retained::retained_lowering_output_bytes(
+                    &value.output.diagnostics,
+                    &value.output.dependencies,
+                ),
+            )?
             .checked_add(weight.bytes)?
             .checked_add(materialized.bytes())?
             .checked_add(
@@ -917,7 +923,7 @@ pub(crate) struct WeakAnalyzedProduct(Weak<Owner<AnalyzedValue>>);
 struct AnalyzedValue {
     output: Arc<QueryOutput<crate::AnalyzedBody>>,
     summary: LiveSummaryProduct,
-    phase: Option<crate::QueryKind>,
+    phase: Option<hirsel_query_products::QueryKind>,
     diagnostic_phases: Vec<(hirsel_diag::Diagnostic, String)>,
 }
 impl LiveAnalyzedProduct {
@@ -944,7 +950,9 @@ impl LiveAnalyzedProduct {
             w.add(phase.capacity());
         });
         owner_bytes::<AnalyzedValue>()
-            .checked_add(crate::memo::retained::retained_analyzed_bytes(output))?
+            .checked_add(hirsel_query_products::retained::retained_analyzed_bytes(
+                output,
+            ))?
             .checked_add(weight.bytes)
     }
     pub(crate) fn new(
@@ -986,7 +994,7 @@ impl LiveAnalyzedProduct {
     pub fn reads(&self) -> &Arc<Reads> {
         &self.0.value.summary.current.value.reads
     }
-    pub fn phase(&self) -> Option<crate::QueryKind> {
+    pub fn phase(&self) -> Option<hirsel_query_products::QueryKind> {
         self.0.value.phase
     }
     pub fn diagnostic_phases(&self) -> &[(hirsel_diag::Diagnostic, String)] {
@@ -1174,7 +1182,10 @@ mod tests {
         let view = product.clone();
         drop(backing);
         let mut retained = crate::memo::Holds::new(bytes);
-        let key = crate::memo::MemoKey::new(crate::QueryKind::Summary, product.value().definition);
+        let key = crate::memo::MemoKey::new(
+            hirsel_query_products::QueryKind::Summary,
+            product.value().definition,
+        );
         retained.hold(key, product, bytes);
         assert_eq!(retained.set_budget(0), vec![key]);
         assert!(producer.upgrade().is_some());
@@ -1478,7 +1489,10 @@ mod tests {
                                 DefId::intern(&DefPath::core(&format!("archive-read-{index}")));
                             let mut output = [0; 32];
                             output[..8].copy_from_slice(&(index as u64).to_le_bytes());
-                            (crate::ReadKey::Signature(owner), ContentHash(output))
+                            (
+                                hirsel_query_products::reads::ReadKey::Signature(owner),
+                                ContentHash(output),
+                            )
                         })
                         .collect(),
                 )
@@ -1602,9 +1616,9 @@ mod tests {
         .unwrap();
         let mut value = (*value).clone();
         let dependency = DefId::intern(&DefPath::core("new-read"));
-        let mut reads = crate::ReadsBuilder::new();
+        let mut reads = hirsel_query_products::reads::ReadsBuilder::new();
         reads.record(
-            crate::ReadKey::Signature(dependency),
+            hirsel_query_products::reads::ReadKey::Signature(dependency),
             ContentHash::of_parts("test", [b"new-read".as_slice()]),
         );
         value.reads = Arc::new(reads.finish().unwrap());
@@ -1703,9 +1717,9 @@ mod source_component_tests {
             (product, weak)
         };
         let (old, old_owner) = make(b"old", Arc::new(Reads::empty()));
-        let mut reads = crate::ReadsBuilder::new();
+        let mut reads = hirsel_query_products::reads::ReadsBuilder::new();
         reads.record(
-            crate::ReadKey::Environment,
+            hirsel_query_products::reads::ReadKey::Environment,
             ContentHash::of_bytes(b"current"),
         );
         let reads = Arc::new(reads.finish().unwrap());

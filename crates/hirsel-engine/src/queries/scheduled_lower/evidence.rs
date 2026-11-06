@@ -1,6 +1,7 @@
 //! Opaque private execution evidence, following S1 TaskWorker's acceptance
 //! composition. Missing evidence disables reuse; it never disables actual V.
-use crate::{ReadKey, Reads, Verify};
+use crate::Verify;
+use hirsel_query_products::reads::{ReadKey, Reads};
 use hirsel_validate::{AcceptedArtifact, ExecutionReceipt};
 
 /// Unexecuted Lower products retain their validation guards. Only an opaque
@@ -30,8 +31,9 @@ pub(in crate::queries) fn current_reads(
     };
     if receipt.contexts().iter().all(|(package, digest)| {
         reads.iter().any(|(key, value)| {
-            *key == ReadKey::ValidationUniverse(crate::memo::PackageKey::of(package))
-                && value == digest
+            *key == ReadKey::ValidationUniverse(hirsel_query_products::reads::PackageKey::of(
+                package,
+            )) && value == digest
         })
     }) && reads
         .iter()
@@ -44,7 +46,8 @@ pub(in crate::queries) fn current_reads(
         .map(|(key, digest)| Some((*key, current(key, *digest)?)))
         .collect::<Option<Vec<_>>>()?;
     for (package, digest) in receipt.contexts() {
-        let key = ReadKey::ValidationUniverse(crate::memo::PackageKey::of(package));
+        let key =
+            ReadKey::ValidationUniverse(hirsel_query_products::reads::PackageKey::of(package));
         if !values.iter().any(|(selected, _)| *selected == key) {
             values.push((key, *digest));
         }

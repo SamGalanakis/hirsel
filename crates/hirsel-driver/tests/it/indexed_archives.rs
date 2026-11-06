@@ -1,8 +1,12 @@
 //! Actual compiler products read through the same typed live/archive contract.
-use hirsel_engine::{
-    CheckedTir, CompileConfig, DefinitionQueries, NativeRecordContext, NativeRecords, TirView,
-    store::{MemStore, ResultStore},
-};
+use hirsel_engine::CheckedTir;
+use hirsel_engine::CompileConfig;
+use hirsel_engine::DefinitionQueries;
+use hirsel_engine::NativeRecordContext;
+use hirsel_engine::NativeRecords;
+use hirsel_engine::TirView;
+use hirsel_engine::store::MemStore;
+use hirsel_engine::store::ResultStore;
 use hirsel_front_phases::COMPILER;
 use hirsel_intern::jobs::with_compiler_stack;
 use std::sync::Arc;

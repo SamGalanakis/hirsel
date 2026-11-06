@@ -1,10 +1,11 @@
 use hirsel_driver::*;
-use hirsel_engine::{
-    store::{MemStore, ResultStore},
-    *,
-};
+use hirsel_engine::store::MemStore;
+use hirsel_engine::store::ResultStore;
+use hirsel_engine::*;
 use hirsel_engine_runtime::*;
 use hirsel_intern::jobs::with_compiler_stack;
+
+use hirsel_query_products::QueryKind;
 
 use hirsel_front_phases::*;
 use hirsel_host_io::launch::*;

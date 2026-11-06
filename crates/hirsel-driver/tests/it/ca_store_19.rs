@@ -4,6 +4,8 @@ use hirsel_engine::*;
 use hirsel_engine_runtime::QueryRuntime;
 use hirsel_intern::jobs::with_compiler_stack;
 
+use hirsel_query_products::{LoweringPolicy, QueryKind};
+
 use hirsel_front_phases::*;
 use hirsel_host_io::launch::*;
 use std::sync::{

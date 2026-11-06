@@ -4,6 +4,8 @@ use hirsel_engine::*;
 use hirsel_front_phases::*;
 use hirsel_host_io::launch::*;
 use hirsel_intern::jobs::with_compiler_stack;
+
+use hirsel_query_products::{LoweringPolicy, QueryKind};
 use hirsel_syntax::{ItemPath, PackageId};
 use std::{
     path::{Path, PathBuf},
@@ -44,7 +46,7 @@ impl Fixture {
     fn check(&self) -> LoadedProgram {
         let mut program = load_program_source(&self.0.join("app.json"), None).unwrap();
         let output = program
-            .check(hirsel_engine::LoweringPolicy::Reachable)
+            .check(hirsel_query_products::LoweringPolicy::Reachable)
             .unwrap();
         assert_eq!(output.completion, CheckCompletion::Complete);
         assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
@@ -281,7 +283,7 @@ fn library_diagnostics(f: &Fixture, files: &[(&str, &str)], as_dependency: bool)
     };
     let mut program = load_program_source(&f.0.join(root), None).unwrap();
     let output = program
-        .check(hirsel_engine::LoweringPolicy::Reachable)
+        .check(hirsel_query_products::LoweringPolicy::Reachable)
         .unwrap();
     let mut rendered = vec![format!("{:?}", output.completion)];
     rendered.extend(

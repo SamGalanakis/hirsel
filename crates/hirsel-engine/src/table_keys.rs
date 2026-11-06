@@ -41,7 +41,7 @@ impl TableKeyUse {
             visit(&mut call.site);
         }
     }
-    pub(crate) fn retained(&self, weight: &mut crate::memo::retained::Weight) {
+    pub(crate) fn retained(&self, weight: &mut hirsel_query_products::retained::Weight) {
         self.generics
             .visit_retained_allocations(|id, bytes| weight.allocation(id, bytes));
         weight.vec(&self.calls, |w, call| {

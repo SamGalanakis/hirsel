@@ -47,7 +47,7 @@ impl StoredSealEquations {
         self.decoded_bytes
     }
     pub(crate) fn retained_metadata_bytes(&self) -> u64 {
-        let mut weight = hirsel_engine::NativeMetadataWeight::default();
+        let mut weight = hirsel_query_products::retained::MetadataWeight::default();
         weight.path(&self.owner.0);
         weight.bytes()
     }

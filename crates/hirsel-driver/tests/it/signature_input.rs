@@ -4,6 +4,9 @@ use hirsel_engine::*;
 use hirsel_front_phases::*;
 use hirsel_host_io::launch::*;
 use hirsel_intern::jobs::with_compiler_stack;
+
+use hirsel_query_products::reads::{PackageKey, ReadKey, Reads, ReadsBuilder};
+use hirsel_query_products::{LoweringPolicy, QueryKind};
 use hirsel_span::Span;
 use hirsel_tir::*;
 use hirsel_types::{Destination, Primitive, SignatureKind, Type, TypeKind, UseKind};
@@ -659,7 +662,7 @@ fn frozen_frontier_keeps_serial_generation_between_source_frontiers() {
 #[test]
 fn validation_universe_receipts_distinguish_valid_changes_and_originating_private_packages() {
     with_compiler_stack(|| {
-        use hirsel_engine::memo::PackageKey;
+        use hirsel_query_products::reads::PackageKey;
         use hirsel_validate::SignatureLookup;
         let context = default_context();
         let foreign = hirsel_syntax::PackageId {

@@ -20,7 +20,7 @@ impl std::ops::Deref for ResolverSnapshot {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ModeArchive {
     pub key: crate::store::EntryKey,
-    pub reads: Arc<crate::memo::Reads>,
+    pub reads: Arc<hirsel_query_products::reads::Reads>,
     pub record: crate::store::Reference,
 }
 

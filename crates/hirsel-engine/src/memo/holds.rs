@@ -148,7 +148,7 @@ impl<T> Holds<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::QueryKind;
+    use hirsel_query_products::QueryKind;
     use hirsel_syntax::{DefId, DefPath, ItemPath, PackageId};
     fn key(i: u32) -> MemoKey {
         MemoKey::new(

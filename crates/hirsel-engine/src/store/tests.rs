@@ -1,5 +1,5 @@
 use super::*;
-use crate::memo::ReadKey;
+use hirsel_query_products::reads::ReadKey;
 use hirsel_syntax::{DefId, ItemPath, PackageId};
 
 fn path(name: &str) -> DefPath {

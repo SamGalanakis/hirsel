@@ -146,7 +146,7 @@ impl NativeSelection {
         };
         let validation = Arc::new(split(Footprint::PLATFORM)?);
         let policy_allowance = split(Footprint::POLICY)?;
-        let mut copied = hirsel_engine::NativeMetadataWeight::default();
+        let mut copied = hirsel_query_products::retained::MetadataWeight::default();
         copied.add(std::mem::size_of::<Self>() + 3 * std::mem::size_of::<usize>());
         super::native_products::request_metadata(&mut copied, &request);
         copied.path(&entry);

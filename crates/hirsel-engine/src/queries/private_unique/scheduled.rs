@@ -275,13 +275,19 @@ impl QueryEngine {
     }
     fn inference_groups(
         &self,
-    ) -> BTreeMap<(crate::memo::PackageKey, crate::memo::ModuleKey), Vec<DefPath>> {
+    ) -> BTreeMap<
+        (
+            hirsel_query_products::reads::PackageKey,
+            hirsel_query_products::reads::ModuleKey,
+        ),
+        Vec<DefPath>,
+    > {
         let mut groups = BTreeMap::<_, Vec<_>>::new();
         for path in self.source_paths() {
             groups
                 .entry((
-                    crate::memo::PackageKey::of(&path.0.package),
-                    crate::memo::ModuleKey::of(&path.0.modules),
+                    hirsel_query_products::reads::PackageKey::of(&path.0.package),
+                    hirsel_query_products::reads::ModuleKey::of(&path.0.modules),
                 ))
                 .or_default()
                 .push(path);
@@ -290,7 +296,13 @@ impl QueryEngine {
     }
     fn local_inference(
         &self,
-    ) -> BTreeMap<(crate::memo::PackageKey, crate::memo::ModuleKey), Facts> {
+    ) -> BTreeMap<
+        (
+            hirsel_query_products::reads::PackageKey,
+            hirsel_query_products::reads::ModuleKey,
+        ),
+        Facts,
+    > {
         let mut groups = BTreeMap::<_, Facts>::new();
         for (id, summary) in &self.private_summaries {
             let Some(reads) = self.private_summary_reads.get(id) else {
@@ -299,8 +311,8 @@ impl QueryEngine {
             let path = id.path();
             let facts = groups
                 .entry((
-                    crate::memo::PackageKey::of(&path.0.package),
-                    crate::memo::ModuleKey::of(&path.0.modules),
+                    hirsel_query_products::reads::PackageKey::of(&path.0.package),
+                    hirsel_query_products::reads::ModuleKey::of(&path.0.modules),
                 ))
                 .or_insert_with(|| Facts {
                     proofs: vec![],
@@ -486,8 +498,8 @@ impl QueryEngine {
     ) -> Result<(Facts, bool), QueryError> {
         self.private_summary_active = true;
         let module = (
-            crate::memo::PackageKey::of(&owner.path().0.package),
-            crate::memo::ModuleKey::of(&owner.path().0.modules),
+            hirsel_query_products::reads::PackageKey::of(&owner.path().0.package),
+            hirsel_query_products::reads::ModuleKey::of(&owner.path().0.modules),
         );
         self.infer_private_modules(working_bytes, registrations, Some(module))?;
         let facts = self.local_inference().remove(&module).unwrap_or(Facts {
@@ -532,7 +544,10 @@ impl QueryEngine {
         &mut self,
         working_bytes: u64,
         registrations: &[Arc<AcceptedFrontRegistration>],
-        selected: Option<(crate::memo::PackageKey, crate::memo::ModuleKey)>,
+        selected: Option<(
+            hirsel_query_products::reads::PackageKey,
+            hirsel_query_products::reads::ModuleKey,
+        )>,
     ) -> Result<(), QueryError> {
         let Some(modes) = self
             .adapters
@@ -921,7 +936,7 @@ impl QueryEngine {
         }
     }
     fn inference_input_bytes(&self, inputs: usize) -> u64 {
-        let mut metadata = crate::NativeMetadataWeight::default();
+        let mut metadata = hirsel_query_products::retained::MetadataWeight::default();
         metadata.add(size_of::<Inference>() + inputs * size_of::<Input>());
         metadata.tree::<DefPath, Vec<Arc<ItemSyntax>>>(2 * self.items.len());
         for (path, values) in &self.items {

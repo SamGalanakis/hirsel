@@ -49,7 +49,7 @@ impl FrontStageOutput {
     }
     pub fn installation_bytes(&self) -> Result<u64, QueryError> {
         let registrations = self.data.result.as_ref().map_err(Clone::clone)?;
-        let mut weight = crate::NativeMetadataWeight::default();
+        let mut weight = hirsel_query_products::retained::MetadataWeight::default();
         weight.add(
             crate::memo::retained::retained_staged_declaration_bytes(registrations)
                 .try_into()
@@ -94,7 +94,7 @@ pub struct FrontStageQueries {
 impl FrontStageQueries {
     /// Fixed query/owner rows; output allocations are debited only on demand.
     pub fn input_bytes(definitions: &[DefPath]) -> u64 {
-        let mut weight = crate::NativeMetadataWeight::default();
+        let mut weight = hirsel_query_products::retained::MetadataWeight::default();
         weight.add(size_of::<Self>() + 2 * size_of::<usize>());
         weight.add(hirsel_engine_admission::MemoryReservationPool::metadata_bytes() as usize);
         weight.tree::<ContentHash, Input>(definitions.len());
@@ -195,15 +195,15 @@ impl FrontStageQueries {
                 Ok(registrations) => {
                     crate::memo::retained::retained_staged_declaration_bytes(registrations)
                 }
-                Err(error) => crate::memo::retained::retained_query_error_bytes(error),
+                Err(error) => hirsel_query_products::retained::retained_query_error_bytes(error),
             })
             .ok_or(self.errors.resource)?;
         let mut outcomes = self.outcomes.lock().unwrap_or_else(|e| e.into_inner());
         if let Some((result, _)) = outcomes.get(&id.address.0) {
             return result.clone();
         }
-        let mut before = crate::NativeMetadataWeight::default();
-        let mut after = crate::NativeMetadataWeight::default();
+        let mut before = hirsel_query_products::retained::MetadataWeight::default();
+        let mut after = hirsel_query_products::retained::MetadataWeight::default();
         if !outcomes.is_empty() {
             before.tree::<ContentHash, Completed>(outcomes.len());
         }

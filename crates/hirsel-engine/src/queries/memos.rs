@@ -4,9 +4,9 @@
 //! exactly the subscribers of what changed; a marked memo is deep-verified by
 //! observing every read again, and an unmarked one is valid as it stands.
 use super::*;
-use crate::memo::{
-    ChangeSet, Durability, LookupKey, LookupSource, Memo, MemoKey, ModuleKey, PackageKey, ReadKey,
-    Reads, ReadsBuilder, Verdict,
+use crate::memo::{ChangeSet, Memo, MemoKey, Verdict};
+use hirsel_query_products::reads::{
+    Durability, LookupKey, LookupSource, ModuleKey, PackageKey, ReadKey, Reads, ReadsBuilder,
 };
 use hirsel_syntax::DefId;
 use hirsel_types::LookupError;
@@ -23,7 +23,7 @@ pub(crate) struct Entry<T> {
     pub covered: Vec<SignatureDependency>,
     /// A generator evaluation's depth evidence, or a lowering's transparent
     /// dependency-request trace (design §1c).
-    pub depth: Option<crate::memo::DepthEvidence<Span>>,
+    pub depth: Option<hirsel_query_products::depth::DepthEvidence<Span>>,
     pub acceptance: Option<hirsel_validate::ExecutionReceipt>,
     pub verification: std::sync::Mutex<Option<Arc<hirsel_validate::VerifiedDefinition>>>,
     pub selections: Vec<crate::comptime::Selection>,
@@ -224,7 +224,7 @@ pub(crate) fn complete_reads(
     detail: &DependencyReads,
     observed: &Observed,
     source: &mut impl ReadSource,
-) -> Result<Reads, crate::memo::Inconsistent> {
+) -> Result<Reads, hirsel_query_products::reads::Inconsistent> {
     let mut reads = observed.merged.clone();
     let def = DefId::intern;
     for s in &detail.signatures {
@@ -449,7 +449,7 @@ impl QueryEngine {
         owner: &DefPath,
         detail: &DependencyReads,
         observed: &Observed,
-    ) -> Result<Reads, crate::memo::Inconsistent> {
+    ) -> Result<Reads, hirsel_query_products::reads::Inconsistent> {
         complete_reads(owner, detail, observed, self)
     }
 

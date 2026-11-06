@@ -13,7 +13,7 @@ pub(crate) struct LoweringUse {
     referenced: Vec<DefId>,
 }
 impl LoweringUse {
-    pub(super) fn retained(&self, weight: &mut crate::memo::retained::Weight) {
+    pub(super) fn retained(&self, weight: &mut hirsel_query_products::retained::Weight) {
         weight.flat_vec(&self.referenced);
     }
     pub(crate) fn capture(typed: &TypedBody) -> Self {

@@ -28,7 +28,7 @@ pub(super) struct CarryChanges {
     clean: BTreeMap<(u32, ContentHash), u64>,
 }
 fn index_bytes(entries: usize, subscriptions: usize) -> u64 {
-    let mut weight = crate::NativeMetadataWeight::default();
+    let mut weight = hirsel_query_products::retained::MetadataWeight::default();
     weight.tree::<(u32, ContentHash), Row>(entries);
     weight.tree::<(ReadKey, DefId, ContentHash, (u32, ContentHash)), ()>(subscriptions);
     weight.bytes()
@@ -124,7 +124,7 @@ impl FrontLowerQueries {
             return Err(carry);
         }
         let rows = carry.rows.lock().unwrap_or_else(|e| e.into_inner());
-        let mut weight = crate::NativeMetadataWeight::default();
+        let mut weight = hirsel_query_products::retained::MetadataWeight::default();
         weight.add(size_of::<CarryChanges>() + 2 * size_of::<usize>());
         weight.tree::<(u32, ContentHash), u64>(rows.entries.len());
         let mut retention = self.retention.lock().unwrap_or_else(|e| e.into_inner());
@@ -230,12 +230,16 @@ impl FrontLowerQueries {
         let mut estimate = outcome.retained_bytes().unwrap_or(u64::MAX);
         if let Some((output, materialized)) = raw {
             estimate = estimate
-                .saturating_add(crate::memo::retained_tir_bytes(&output.value))
-                .saturating_add(crate::memo::retained_lowering_output_bytes(
-                    &output.diagnostics,
-                    &output.dependencies,
-                ));
-            let mut weight = crate::NativeMetadataWeight::default();
+                .saturating_add(hirsel_query_products::retained::retained_tir_bytes(
+                    &output.value,
+                ))
+                .saturating_add(
+                    hirsel_query_products::retained::retained_lowering_output_bytes(
+                        &output.diagnostics,
+                        &output.dependencies,
+                    ),
+                );
+            let mut weight = hirsel_query_products::retained::MetadataWeight::default();
             weight.vec(materialized, |weight, (_, value)| {
                 weight.materialized(value)
             });
@@ -303,7 +307,7 @@ impl FrontLowerQueries {
         let Some(mut charge) = outcome.retained_bytes() else {
             return;
         };
-        let mut weight = crate::NativeMetadataWeight::default();
+        let mut weight = hirsel_query_products::retained::MetadataWeight::default();
         weight.tree::<hirsel_span::Anchor, (DefId, u32)>(bindings.len());
         weight.add(demands.capacity() * size_of::<namespace::reopen::ManifestDemand>());
         for demand in &demands {
@@ -311,12 +315,14 @@ impl FrontLowerQueries {
             weight.flat_vec(&demand.arguments);
         }
         if let Some((output, materialized)) = &raw {
-            let Some(bytes) = crate::memo::retained_tir_bytes(&output.value).checked_add(
-                crate::memo::retained_lowering_output_bytes(
-                    &output.diagnostics,
-                    &output.dependencies,
-                ),
-            ) else {
+            let Some(bytes) = hirsel_query_products::retained::retained_tir_bytes(&output.value)
+                .checked_add(
+                    hirsel_query_products::retained::retained_lowering_output_bytes(
+                        &output.diagnostics,
+                        &output.dependencies,
+                    ),
+                )
+            else {
                 return;
             };
             charge = charge.saturating_add(bytes);

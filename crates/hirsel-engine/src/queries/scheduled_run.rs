@@ -1,5 +1,6 @@
 //! Immutable launch facts from the admitted source semantic closure.
 use super::*;
+use crate::native_metadata::NativeMetadataExt;
 mod acceptance;
 mod content;
 mod graph_reader;
@@ -873,7 +874,7 @@ impl Task {
         Poll::Ready(Ok((node, content, all_dependencies, source_products)))
     }
     fn graph_bytes(&self) -> Option<u64> {
-        let mut metadata = crate::NativeMetadataWeight::default();
+        let mut metadata = hirsel_query_products::retained::MetadataWeight::default();
         metadata.tree::<DefId, Arc<GraphEntry>>(self.entries.len());
         metadata.flat_vec(&self.pending);
         Some(metadata.bytes())
@@ -952,7 +953,7 @@ impl Task {
     fn complete(&self) -> Result<ProductRef, QueryError> {
         let queries = &self.queries;
         let snapshot = queries.lower.signatures();
-        let mut references = crate::NativeMetadataWeight::default();
+        let mut references = hirsel_query_products::retained::MetadataWeight::default();
         references.tree::<DefPath, Vec<DefPath>>(self.entries.len());
         for (id, entry) in &self.entries {
             references.path(id.path());
@@ -994,7 +995,7 @@ impl Task {
         if self.query != *batch {
             return Err(operational("batch Run requires its batch root"));
         }
-        let mut weight = crate::NativeMetadataWeight::default();
+        let mut weight = hirsel_query_products::retained::MetadataWeight::default();
         weight.arc(&checked_runtime);
         for paths in [
             &checked_runtime.noalloc,
@@ -1262,7 +1263,7 @@ impl Task {
                 shared
             }
         };
-        let mut hash_bytes = crate::NativeMetadataWeight::default();
+        let mut hash_bytes = hirsel_query_products::retained::MetadataWeight::default();
         let definition_hashes = if queries.export_hashes {
             hash_bytes.map(&hashes, |weight, path, _| weight.path(path));
             Some(hashes.clone())
@@ -1341,7 +1342,7 @@ fn operational(message: impl Into<String>) -> QueryError {
 fn extend_reads(
     dependencies: &mut BTreeSet<DefPath>,
     reads: &Reads,
-    mut lookup: impl FnMut(crate::memo::LookupKey) -> Option<DefPath>,
+    mut lookup: impl FnMut(hirsel_query_products::reads::LookupKey) -> Option<DefPath>,
 ) {
     dependencies.extend(reads.iter().filter_map(|(read, _)| match read {
         ReadKey::Signature(id)
@@ -1436,7 +1437,7 @@ impl QueryEngine {
             .clone()
             .ok_or(QueryError::NotImplemented)?;
         let mut specializations = BTreeMap::new();
-        let mut weight = crate::NativeMetadataWeight::default();
+        let mut weight = hirsel_query_products::retained::MetadataWeight::default();
         if store.installation_output().is_some() {
             for (id, receipt) in &self.specialization_dependencies {
                 let mut reads = Vec::new();

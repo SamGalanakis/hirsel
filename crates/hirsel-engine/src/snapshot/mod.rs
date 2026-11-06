@@ -4,8 +4,8 @@
 //! private views each opaque type's own package sees, and V's verdict on every
 //! view with each package's universe errors. It is immutable, `Send + Sync`
 //! and stamped with its epoch, so definitions read it without locks.
-use crate::memo::Revision;
 use crate::*;
+use hirsel_query_products::reads::Revision;
 use hirsel_syntax::{DefId, DefMap, PackageId};
 use hirsel_types::{LookupOutput, SignatureRef, TypeInterner};
 use hirsel_validate::{SignatureLookup, ValidatedSignatures, ValidationDigest};
@@ -1005,7 +1005,7 @@ impl SignatureSnapshot {
             .iter()
             .map(|d| d.path().0.package.clone())
             .collect::<std::collections::BTreeSet<_>>();
-        let mut weight = crate::NativeMetadataWeight::default();
+        let mut weight = hirsel_query_products::retained::MetadataWeight::default();
         weight.add(
             size_of::<SnapshotMembership>() + 2 * size_of::<usize>() + size_of_val(&*definitions),
         );
@@ -1220,9 +1220,11 @@ impl SignatureSnapshot {
                 }
                 let views = if let Some(delta) = views.retained_delta_bytes() {
                     let bytes = delta
-                        .checked_add(crate::memo::retained::retained_signature_payload_bytes(
-                            &signature,
-                        ))
+                        .checked_add(
+                            hirsel_query_products::retained::retained_signature_payload_bytes(
+                                &signature,
+                            ),
+                        )
                         .and_then(|bytes| {
                             bytes.checked_add(
                                 (3 * size_of::<((PackageId, ValidationDigest), Arc<PackageViews>)>(
@@ -1378,14 +1380,14 @@ impl SignatureSnapshot {
                             if let Some(payload) = view.identified().held_signature() {
                                 bytes = bytes
                                     .checked_add(
-                                        crate::memo::retained::retained_signature_payload_bytes(
+                                        hirsel_query_products::retained::retained_signature_payload_bytes(
                                             payload,
                                         ),
                                     )
                                     .ok_or_else(refusal)?;
                             }
                         }
-                        let mut weight = crate::NativeMetadataWeight::default();
+                        let mut weight = hirsel_query_products::retained::MetadataWeight::default();
                         weight.tree::<PackageId, Arc<ViewTable>>(1);
                         weight.add(package.name.capacity() + package.version.capacity());
                         bytes = bytes.checked_add(weight.bytes()).ok_or_else(refusal)?;
@@ -1737,7 +1739,7 @@ pub(crate) struct SnapshotStamp {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::memo::{ReadKey, ReadsBuilder};
+    use hirsel_query_products::reads::{ReadKey, ReadsBuilder};
     use hirsel_syntax::ItemKind;
     use hirsel_types::{SignatureKind, SignatureProvider, Type, TypeKind};
 

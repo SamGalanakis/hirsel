@@ -192,7 +192,7 @@ impl CaptureInputs {
             }
     }
     fn retained_bytes(&mut self) -> Option<u64> {
-        let mut weight = crate::NativeMetadataWeight::default();
+        let mut weight = hirsel_query_products::retained::MetadataWeight::default();
         weight.add(size_of::<Self>() + 256);
         weight.flat_vec(&self.definitions);
         weight.flat_vec(&self.registrations);
@@ -441,7 +441,7 @@ impl NamespaceCapture {
         Ok(engine)
     }
     pub(crate) fn input_bytes(definitions: &[DefPath]) -> Option<u64> {
-        let mut weight = crate::NativeMetadataWeight::default();
+        let mut weight = hirsel_query_products::retained::MetadataWeight::default();
         weight.add(
             920 // The original capture planning budget; owner storage consumes it.
                 + size_of::<crate::snapshot::Declarations>()
@@ -457,7 +457,7 @@ impl NamespaceCapture {
     }
 
     pub(crate) fn view_bytes(_registrations: usize, _private_sources: usize) -> Option<u64> {
-        let mut weight = crate::NativeMetadataWeight::default();
+        let mut weight = hirsel_query_products::retained::MetadataWeight::default();
         weight.add(
             size_of::<NamespaceCapture>()
                 + size_of::<crate::snapshot::Declarations>()
@@ -573,7 +573,7 @@ impl NamespaceCapture {
                 .ok_or_else(|| refused("invalid installed body"))?;
             if syntax.text_hash != input.implementation
                 || syntax.item.definition != *path
-                || crate::memo::retained::retained_syntax_bytes(&syntax)
+                || hirsel_query_products::retained::retained_syntax_bytes(&syntax)
                     > record.ownership.body_decode_bytes
             {
                 return Err(refused("installed body differs from captured binding"));
@@ -965,7 +965,7 @@ impl QueryEngine {
                         ],
                     )
                 });
-        let mut instance_weight = crate::NativeMetadataWeight::default();
+        let mut instance_weight = hirsel_query_products::retained::MetadataWeight::default();
         instance_weight.instance_bodies(&mut instances);
         let instances = Arc::new(instances);
         let manifest_inputs = Manifest {
@@ -991,7 +991,7 @@ impl QueryEngine {
             .as_ref()
             .and_then(operation_inputs::WeakInputIndex::upgrade);
         let bodies = operation_inputs::InputIndex::capture(bodies, previous.as_ref(), |len| {
-            let mut weight = crate::NativeMetadataWeight::default();
+            let mut weight = hirsel_query_products::retained::MetadataWeight::default();
             weight.add(len.checked_mul(
                 size_of::<BodyInput>() + size_of::<BodyKeys>() + 4 * size_of::<usize>(),
             )?);
@@ -1087,7 +1087,7 @@ impl QueryEngine {
             .map(DefId::intern)
             .collect::<Vec<_>>()
             .into_boxed_slice();
-        let mut weight = crate::NativeMetadataWeight::default();
+        let mut weight = hirsel_query_products::retained::MetadataWeight::default();
         weight.add(size_of_val(&*source_paths) + size_of_val(&*roots));
         weight.flat_vec(&manifest_inputs.dependencies);
         weight.flat_vec(&manifest_inputs.trace);

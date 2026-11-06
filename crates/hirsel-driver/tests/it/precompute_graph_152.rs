@@ -1,8 +1,8 @@
 use hirsel_engine::CompileConfig;
-use hirsel_engine::LoweringPolicy;
-use hirsel_engine::QueryKind;
 use hirsel_engine::store::DirStore;
 use hirsel_intern::jobs::with_compiler_stack;
+use hirsel_query_products::LoweringPolicy;
+use hirsel_query_products::QueryKind;
 
 use hirsel_front_phases::COMPILER;
 use hirsel_requests::*;

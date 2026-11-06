@@ -1,6 +1,7 @@
 //! Ordinary parse heads, separate from semantic products and verifier authority.
 //! A hit indexes names and source positions without expression arenas or types.
 use super::*;
+use hirsel_query_products::SourceFacts;
 mod syntax;
 use crate::snapshot::DeclarationHead;
 use bincode::Options;
@@ -35,99 +36,81 @@ impl LexicalShape {
         }
     }
 }
-/// Declaration observations needed by checking without retaining syntax.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub(crate) struct SourceFacts {
-    pub(crate) generator: bool,
-    pub(crate) instance_bodied: bool,
-    pub(crate) executable: bool,
-    pub(crate) body: bool,
-    pub(crate) constant: bool,
-    pub(crate) execution: bool,
-    pub(crate) specializes: bool,
-    pub(crate) staged: bool,
-    pub(crate) comptime: Vec<(u32, u32, u32)>,
-    pub(crate) fact: bool,
-    pub(crate) associations: Vec<(u8, u32, u32)>,
-    pub(crate) arms: Vec<(String, u32, u32)>,
-}
-impl SourceFacts {
-    pub(crate) fn capture(syntax: &ItemSyntax) -> Self {
-        use hirsel_syntax::{AttributeArgument, TypeBody, Visibility};
-        let item = &syntax.item;
-        let constant = matches!(item.kind, ItemKind::Const { .. });
-        let arms = match &item.kind {
-            ItemKind::Type {
-                body: TypeBody::Variants(arms),
-                ..
-            } if !arms.is_empty() && item.visibility == Visibility::Private => {
-                let names = super::dead_arms::arm_names(syntax);
-                if names.len() == arms.len() {
-                    names
-                        .into_iter()
-                        .map(|(name, span)| (name, span.start, span.end))
-                        .collect()
-                } else {
-                    vec![]
-                }
+pub(crate) fn capture_source_facts(syntax: &ItemSyntax) -> hirsel_query_products::SourceFacts {
+    use hirsel_syntax::{AttributeArgument, TypeBody, Visibility};
+    let item = &syntax.item;
+    let constant = matches!(item.kind, ItemKind::Const { .. });
+    let arms = match &item.kind {
+        ItemKind::Type {
+            body: TypeBody::Variants(arms),
+            ..
+        } if !arms.is_empty() && item.visibility == Visibility::Private => {
+            let names = super::dead_arms::arm_names(syntax);
+            if names.len() == arms.len() {
+                names
+                    .into_iter()
+                    .map(|(name, span)| (name, span.start, span.end))
+                    .collect()
+            } else {
+                vec![]
             }
-            _ => vec![],
-        };
-        let comptime: Vec<_> = syntax
-            .tree
-            .expressions
-            .iter()
-            .enumerate()
-            .filter_map(|(index, e)| {
-                matches!(e.kind, hirsel_syntax::ExprKind::Comptime(_)).then_some((
-                    index as u32,
-                    e.origin.span.start,
-                    e.origin.span.end,
-                ))
-            })
-            .collect();
-        Self {
-            generator: generation::generator(syntax).is_some(),
-            instance_bodied: generation::instance_bodied(syntax),
-            executable: generation::executable(syntax),
-            body: constant || matches!(item.kind, ItemKind::Function { body: Some(_), .. }),
-            constant,
-            execution: constant || !comptime.is_empty(),
-            specializes: crate::families::closes(syntax),
-            staged: super::scheduled_stage::has_staged_body(syntax),
-            comptime,
-            fact: matches!(
-                item.kind,
-                ItemKind::Type {
-                    body: TypeBody::Distinct { fact: Some(_), .. },
-                    ..
-                }
-            ),
-            associations: item
-                .attributes
-                .iter()
-                .filter_map(|attribute| {
-                    let name = attribute.name.as_str();
-                    if !matches!(name, "loop_source" | "format")
-                        && !matches!(
-                            attribute.arguments.as_slice(),
-                            [AttributeArgument::SerializableCheck(_)]
-                        )
-                    {
-                        return None;
-                    }
-                    let kind = if name == "format" {
-                        0
-                    } else if name == "serializable" {
-                        1
-                    } else {
-                        2
-                    };
-                    Some((kind, attribute.origin.span.start, attribute.origin.span.end))
-                })
-                .collect(),
-            arms,
         }
+        _ => vec![],
+    };
+    let comptime: Vec<_> = syntax
+        .tree
+        .expressions
+        .iter()
+        .enumerate()
+        .filter_map(|(index, e)| {
+            matches!(e.kind, hirsel_syntax::ExprKind::Comptime(_)).then_some((
+                index as u32,
+                e.origin.span.start,
+                e.origin.span.end,
+            ))
+        })
+        .collect();
+    hirsel_query_products::SourceFacts {
+        generator: generation::generator(syntax).is_some(),
+        instance_bodied: generation::instance_bodied(syntax),
+        executable: generation::executable(syntax),
+        body: constant || matches!(item.kind, ItemKind::Function { body: Some(_), .. }),
+        constant,
+        execution: constant || !comptime.is_empty(),
+        specializes: crate::families::closes(syntax),
+        staged: super::scheduled_stage::has_staged_body(syntax),
+        comptime,
+        fact: matches!(
+            item.kind,
+            ItemKind::Type {
+                body: TypeBody::Distinct { fact: Some(_), .. },
+                ..
+            }
+        ),
+        associations: item
+            .attributes
+            .iter()
+            .filter_map(|attribute| {
+                let name = attribute.name.as_str();
+                if !matches!(name, "loop_source" | "format")
+                    && !matches!(
+                        attribute.arguments.as_slice(),
+                        [AttributeArgument::SerializableCheck(_)]
+                    )
+                {
+                    return None;
+                }
+                let kind = if name == "format" {
+                    0
+                } else if name == "serializable" {
+                    1
+                } else {
+                    2
+                };
+                Some((kind, attribute.origin.span.start, attribute.origin.span.end))
+            })
+            .collect(),
+        arms,
     }
 }
 #[derive(Clone)]
@@ -200,7 +183,7 @@ impl CatalogIdentity {
             )
     }
     pub(super) fn retained_bytes(&self) -> u64 {
-        let mut weight = crate::NativeMetadataWeight::default();
+        let mut weight = hirsel_query_products::retained::MetadataWeight::default();
         weight.add(size_of::<Self>() + 256);
         weight.flat_vec(&self.installed);
         for (package, _) in &self.installed {
@@ -291,7 +274,7 @@ impl Catalog {
         })
     }
 
-    fn installed_bytes(&self, weight: &mut crate::NativeMetadataWeight) {
+    fn installed_bytes(&self, weight: &mut hirsel_query_products::retained::MetadataWeight) {
         weight.tree::<PackageId, Arc<crate::store::InstalledSourceRecords>>(self.installed.len());
         for (package, owner) in &self.installed {
             weight
@@ -323,7 +306,7 @@ impl Catalog {
         self.payload_bytes(true, false)
     }
     fn payload_bytes(&self, cached_facts: bool, packed: bool) -> u64 {
-        let mut weight = crate::NativeMetadataWeight::default();
+        let mut weight = hirsel_query_products::retained::MetadataWeight::default();
         self.installed_bytes(&mut weight);
         if !packed {
             weight.add(
@@ -332,7 +315,8 @@ impl Catalog {
                     + size_of::<BTreeMap<DefPath, Vec<Candidate>>>(),
             );
         }
-        let facts = |weight: &mut crate::NativeMetadataWeight, facts: &SourceFacts| {
+        let facts = |weight: &mut hirsel_query_products::retained::MetadataWeight,
+                     facts: &SourceFacts| {
             weight.flat_vec(&facts.comptime);
             weight.flat_vec(&facts.associations);
             weight.vec(&facts.arms, |w, (name, _, _)| w.add(name.capacity()));
@@ -390,7 +374,7 @@ impl Catalog {
                     head: DeclarationHead::capture(sources, syntax),
                     file,
                     base,
-                    facts: SourceFacts::capture(syntax),
+                    facts: capture_source_facts(syntax),
                     lexical: LexicalShape::capture(syntax),
                     occurrence: syntax.occurrence,
                 });
@@ -421,7 +405,7 @@ impl Catalog {
         items: &BTreeMap<DefPath, Vec<Arc<ItemSyntax>>>,
         indexed: &BTreeMap<FileId, (FileContext, QueryEnvironment)>,
     ) -> u64 {
-        let mut weight = crate::NativeMetadataWeight::default();
+        let mut weight = hirsel_query_products::retained::MetadataWeight::default();
         self.installed_bytes(&mut weight);
         let files = self.files.len()
             + indexed
@@ -551,7 +535,7 @@ impl Catalog {
         {
             return facts.clone();
         }
-        let facts = Arc::new(SourceFacts::capture(syntax));
+        let facts = Arc::new(capture_source_facts(syntax));
         self.facts_cache
             .write()
             .unwrap()
@@ -1179,7 +1163,7 @@ impl QueryEngine {
                 .ok_or(QueryError::NotImplemented)?;
             if syntax.item.definition != *path
                 || syntax.text_hash != record.implementation
-                || crate::memo::retained::retained_syntax_bytes(&syntax)
+                || hirsel_query_products::retained::retained_syntax_bytes(&syntax)
                     > record.ownership.body_decode_bytes
             {
                 return Err(QueryError::NotImplemented);
@@ -1299,7 +1283,7 @@ impl QueryEngine {
             if syntax.text_hash != candidate.head.body
                 || self.header_hash(syntax) != candidate.head.header
                 || LexicalShape::capture(syntax) != candidate.lexical
-                || SourceFacts::capture(syntax) != candidate.facts
+                || capture_source_facts(syntax) != candidate.facts
             {
                 return Err(QueryError::NotImplemented);
             }

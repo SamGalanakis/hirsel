@@ -24,7 +24,9 @@ pub trait CompilerRequestsExt {
 impl CompilerRequestsExt for Compiler {
     fn precompute_package(&self, manifest: &Path, output: &Path) -> Result<(), ToolError> {
         use crate::requests::{CompileOperation, CompileResult, CompilerRequests};
-        use hirsel_engine::{Verify, memo::Retention, store::DirStore};
+        use hirsel_engine::Verify;
+        use hirsel_engine::memo::Retention;
+        use hirsel_engine::store::DirStore;
         let mut config = self.configuration();
         if config.verify == Verify::Off {
             return Err(ToolError::Runtime(

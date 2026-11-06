@@ -1,6 +1,10 @@
-use hirsel_engine::{memo::MemoKey, store::DirStore, *};
+use hirsel_engine::memo::MemoKey;
+use hirsel_engine::store::DirStore;
+use hirsel_engine::*;
 use hirsel_front_phases::COMPILER;
 use hirsel_intern::jobs::with_compiler_stack;
+
+use hirsel_query_products::{LoweringPolicy, QueryKind};
 use hirsel_requests::CompileOperation;
 use hirsel_requests::CompileResult;
 use hirsel_requests::CompilerRequests;

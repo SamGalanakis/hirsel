@@ -64,7 +64,7 @@ struct Request {
 }
 impl Request {
     fn retained_bytes(&self) -> u64 {
-        let mut w = hirsel_engine::NativeMetadataWeight::default();
+        let mut w = hirsel_query_products::retained::MetadataWeight::default();
         w.add(size_of::<Self>());
         w.flat_vec(&self.reads);
         match &self.work {
@@ -88,7 +88,7 @@ pub struct NativeTasks {
 }
 impl NativeTasks {
     pub fn retained_dispatch_bytes(&mut self) -> u64 {
-        let mut w = hirsel_engine::NativeMetadataWeight::default();
+        let mut w = hirsel_query_products::retained::MetadataWeight::default();
         w.add(size_of::<Self>() + 2 * size_of::<usize>());
         w.packed_map(&mut self.requests, |_, _, _| ());
         w.bytes()
@@ -614,9 +614,10 @@ pub struct CodegenTasks {
 impl CodegenTasks {
     pub fn retained_dispatch_bytes(&mut self) -> u64 {
         use super::ownership_compilation::metadata as m;
-        let mut w = hirsel_engine::NativeMetadataWeight::default();
+        let mut w = hirsel_query_products::retained::MetadataWeight::default();
         w.add(size_of::<Self>() + 2 * size_of::<usize>());
-        let codegen = |w: &mut hirsel_engine::NativeMetadataWeight, key: &CodegenKey| {
+        let codegen = |w: &mut hirsel_query_products::retained::MetadataWeight,
+                       key: &CodegenKey| {
             m::address(w, &key.owner);
             w.add(key.backend.capacity());
         };

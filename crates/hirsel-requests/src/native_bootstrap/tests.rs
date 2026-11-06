@@ -1,12 +1,11 @@
 use super::*;
 use crate::native;
-use hirsel_engine::{
-    CompileConfig, DefinitionQueries, FrontCheckPlan, FrontNativePlan, LoweringPolicy,
-};
+use hirsel_engine::{CompileConfig, DefinitionQueries, FrontCheckPlan, FrontNativePlan};
 use hirsel_intern::jobs::Jobs;
 use hirsel_native::object_queries;
 use hirsel_native_cache::*;
 use hirsel_native_queries::*;
+use hirsel_query_products::LoweringPolicy;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 struct StopLink(Arc<AtomicU64>, Vec<(DefPath, u64)>);

@@ -1,5 +1,6 @@
 use super::{NativeDeclarations, RootInputs};
-use hirsel_engine::NativeMetadataWeight as Weight;
+use hirsel_engine::native_metadata::NativeMetadataExt;
+use hirsel_query_products::retained::MetadataWeight as Weight;
 use hirsel_rc::instance::Requirement;
 use std::sync::Arc;
 

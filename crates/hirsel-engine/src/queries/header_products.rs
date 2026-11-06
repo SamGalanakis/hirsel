@@ -234,7 +234,7 @@ pub(crate) struct HeaderProducts {
     summaries: Arc<hirsel_syntax::DefMap<hirsel_types::UniqueSummary>>,
     /// The reads each carried summary's module proof recorded: a module
     /// producer validates them like any previous proof.
-    summary_reads: Arc<hirsel_syntax::DefMap<Arc<crate::memo::Reads>>>,
+    summary_reads: Arc<hirsel_syntax::DefMap<Arc<hirsel_query_products::reads::Reads>>>,
     failures: BTreeMap<DefId, Vec<hirsel_types::UniqueFailure>>,
 }
 impl HeaderProducts {
@@ -496,7 +496,7 @@ impl HeaderProducts {
         }
         (product, settled)
     }
-    pub(crate) fn source_facts(&self, id: DefId) -> Option<catalog::SourceFacts> {
+    pub(crate) fn source_facts(&self, id: DefId) -> Option<hirsel_query_products::SourceFacts> {
         self.syntax.facts(id)
     }
     pub(crate) fn captured_text(&self, id: DefId) -> Option<sources::CapturedText> {
@@ -1033,7 +1033,8 @@ impl HeaderProducts {
             return Ok((self.admit(bytes)?, Charge::engine()));
         };
         let signature = &output.value;
-        let payload_bytes = crate::memo::retained::retained_signature_payload_bytes(signature);
+        let payload_bytes =
+            hirsel_query_products::retained::retained_signature_payload_bytes(signature);
         let payload = match signature.metadata.retention.get::<HeaderPayload>() {
             Some(payload) => payload,
             None => {

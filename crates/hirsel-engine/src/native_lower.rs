@@ -147,7 +147,7 @@ impl NativeOriginalHandle {
     }
     /// Catalogue backing charged once, independently of any scoped body lease.
     pub fn retained_metadata_bytes(&self) -> Option<u64> {
-        let mut weight = crate::NativeMetadataWeight::default();
+        let mut weight = hirsel_query_products::retained::MetadataWeight::default();
         weight.add(size_of::<NativeOriginalProduct>() + 2 * size_of::<usize>());
         if let OriginalInput::Bound(input) = &self.input {
             weight.add(size_of::<BoundOriginal>() + 2 * size_of::<usize>());
@@ -649,7 +649,7 @@ impl NativeOriginalReader {
     /// Copied reader maps and path buffers only. Shared source/signature/V,
     /// interner, CT-5 and store payloads retain their original admission owners.
     pub fn retained_metadata_bytes(&self) -> u64 {
-        let mut weight = crate::NativeMetadataWeight::default();
+        let mut weight = hirsel_query_products::retained::MetadataWeight::default();
         weight.add(std::mem::size_of::<Self>());
         weight.map(&self.verified.selected, |weight, path, _| weight.path(path));
         weight.map(&self.ordinary, |weight, path, source| {

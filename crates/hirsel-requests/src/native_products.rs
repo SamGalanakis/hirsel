@@ -4,7 +4,9 @@
 use super::NativeExecution;
 use super::NativeRequest;
 use super::native_bootstrap::NativeBootstrap;
-use hirsel_engine::{FrontNativeProducts, store::ResultStore};
+use hirsel_engine::FrontNativeProducts;
+use hirsel_engine::native_metadata::NativeMetadataExt;
+use hirsel_engine::store::ResultStore;
 use hirsel_engine_runtime::ProductRef;
 
 use hirsel_native::NativeError;
@@ -81,7 +83,7 @@ impl NativeBuildReadiness {
             return Ok(output.clone());
         }
         let instances = compilation.emitted_instances(product).map_err(failed)?;
-        let mut weight = hirsel_engine::NativeMetadataWeight::default();
+        let mut weight = hirsel_query_products::retained::MetadataWeight::default();
         weight.add(
             std::mem::size_of::<super::NativeObjectOutput>() + 6 * std::mem::size_of::<usize>(),
         );
@@ -112,7 +114,7 @@ impl NativeBuildReadiness {
         }
         let (compilation, product, source) = self.bootstrap.outcome(selected).map_err(failed)?;
         let view = compilation.ready_view(product).map_err(failed)?;
-        let mut weight = hirsel_engine::NativeMetadataWeight::default();
+        let mut weight = hirsel_query_products::retained::MetadataWeight::default();
         // Envelope plus copied identity, table and source metadata; Ready
         // bodies are charged to their producers' materialization scope.
         weight.add(std::mem::size_of::<super::NativeReady>() + 4 * std::mem::size_of::<usize>());
@@ -241,7 +243,7 @@ impl NativeBuildReadiness {
         object_queries::materialize_executable(self.store.as_ref(), &artifact, &executable)
             .map_err(failed)?;
         platform.validate_image(&executable).map_err(failed)?;
-        let mut copied = hirsel_engine::NativeMetadataWeight::default();
+        let mut copied = hirsel_query_products::retained::MetadataWeight::default();
         // Inline Arc/header storage plus actual backing capacities. Signatures,
         // types and source text remain shared with the retained producer owner.
         copied.add(std::mem::size_of::<OutputOwner>() + 3 * std::mem::size_of::<usize>());
@@ -332,7 +334,7 @@ pub(super) fn evidence_identity(evidence: &hirsel_native::Evidence) -> ContentHa
 }
 
 pub(super) fn request_metadata(
-    weight: &mut hirsel_engine::NativeMetadataWeight,
+    weight: &mut hirsel_query_products::retained::MetadataWeight,
     request: &NativeRequest,
 ) {
     if let Some(path) = &request.definition {

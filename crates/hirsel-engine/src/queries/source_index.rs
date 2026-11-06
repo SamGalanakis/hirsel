@@ -13,7 +13,7 @@ pub struct SourceIndexState {
     private_summary_reads: Box<[(DefId, Arc<Reads>)]>,
     private_summaries: Box<[(DefId, hirsel_types::UniqueSummary)]>,
     private_unique_failures: Box<[(DefId, Vec<hirsel_types::UniqueFailure>)]>,
-    private_summary_revision: Option<crate::Revision>,
+    private_summary_revision: Option<hirsel_query_products::reads::Revision>,
     private_summary_inputs: private_unique::RegistrationInputs,
     graph: crate::memo::SourceHeaderGraph,
     front_changes: frontier::FrontTracker,
@@ -32,7 +32,7 @@ pub struct SourceIndexState {
     types: Arc<hirsel_types::TypeInterner>,
     catalog: catalog::SourceCatalog,
     compiler: ContentHash,
-    snapshot_epoch: crate::Revision,
+    snapshot_epoch: hirsel_query_products::reads::Revision,
     snapshot_inputs_revision: u64,
     // The SourceMap also owns this token, including its detached output clones.
     allowance: Arc<hirsel_engine_admission::MemoryReservation>,
@@ -52,7 +52,7 @@ pub(crate) struct PackedSourceHeader {
 struct SourceHeaderDetails {
     failure: Option<hirsel_types::OperationalFailure>,
     covered: Option<Vec<SignatureDependency>>,
-    depth: Option<crate::memo::DepthEvidence<Span>>,
+    depth: Option<hirsel_query_products::depth::DepthEvidence<Span>>,
     acceptance: Option<hirsel_validate::ExecutionReceipt>,
     selections: Vec<crate::comptime::Selection>,
 }
@@ -204,7 +204,7 @@ impl QueryEngine {
         {
             return Err(invalid());
         }
-        let mut weight = crate::NativeMetadataWeight::default();
+        let mut weight = hirsel_query_products::retained::MetadataWeight::default();
         weight.add(
             size_of::<SourceIndexState>()
                 + 4 * size_of::<usize>()
@@ -231,7 +231,7 @@ impl QueryEngine {
             }
         }
         weight.map(&self.specialization_dependencies, |w, _, entry| {
-            let mut reads = crate::memo::retained::Weight::default();
+            let mut reads = hirsel_query_products::retained::Weight::default();
             reads.reads(&entry.reads);
             w.add(reads.bytes.try_into().unwrap_or(usize::MAX));
             w.vec(&entry.paths, |w, path| w.path(path));
@@ -304,7 +304,7 @@ impl QueryEngine {
         }
         // One prospective source-owner decoration covers its envelope and COW
         // file metadata; original detached views keep their own reservations.
-        let mut names = crate::memo::retained::NameAllocations::<32768>::default();
+        let mut names = hirsel_query_products::retained::NameAllocations::<32768>::default();
         let shared_products = self
             .signatures
             .values()
@@ -351,9 +351,9 @@ impl QueryEngine {
             .ok_or_else(invalid)?;
         for signature in self.builtins.values() {
             total = total
-                .checked_add(crate::memo::retained::retained_signature_payload_bytes(
-                    signature,
-                ))
+                .checked_add(
+                    hirsel_query_products::retained::retained_signature_payload_bytes(signature),
+                )
                 .ok_or_else(invalid)?;
         }
         if hirsel_intern::memory::metered() {
@@ -363,7 +363,7 @@ impl QueryEngine {
                 0
             };
             let mut parts = [0u64; 4];
-            let mut names = crate::memo::retained::NameAllocations::<32768>::default();
+            let mut names = hirsel_query_products::retained::NameAllocations::<32768>::default();
             for entry in self.signatures.values() {
                 headers += crate::memo::retained::source_signature_head_bytes(entry, &mut names)
                     .ok_or_else(invalid)?;
@@ -773,7 +773,7 @@ mod tests {
                 ContentHash::default(),
                 Ok(Arc::new(output(value))),
                 Arc::default(),
-                crate::memo::Durability::Low,
+                hirsel_query_products::reads::Durability::Low,
             );
             engine.signatures.insert(
                 id,
@@ -798,7 +798,7 @@ mod tests {
         let mut engine = engine(std::slice::from_ref(&path));
         let id = DefId::intern(&path);
         let text = engine.key_text(&path, QueryKind::Resolve).unwrap();
-        let mut reads = crate::memo::ReadsBuilder::new();
+        let mut reads = hirsel_query_products::reads::ReadsBuilder::new();
         reads.record(ReadKey::Environment, engine.environment_value());
         engine.specialization_dependencies.insert(
             id,

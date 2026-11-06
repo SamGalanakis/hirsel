@@ -40,8 +40,8 @@
 //! so the requester runs the key itself. Not storing a failure that met a
 //! cycle follows tsrs's rule that a diagnostic must not depend on what the
 //! checker visited before (/tmp/ref-tsrs/notes/fix-history-dependent-diagnostics.md).
-use super::depth::DepthEvidence;
 use hirsel_intern::timings::{self, Count};
+use hirsel_query_products::depth::DepthEvidence;
 use std::collections::HashMap;
 use std::hash::Hash;
 use std::sync::atomic::{AtomicU64, Ordering};

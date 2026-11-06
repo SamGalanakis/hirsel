@@ -19,13 +19,13 @@ mod successor;
 pub(crate) use successor::SuccessorCapture;
 mod stored;
 use crate::comptime::{EvaluationInput, PreparingSource, ValuePreparation};
-use crate::memo::{DepthEvidence, dependency_limit};
 use crate::store::{Domain, EntryKey, Reference, ResultStore};
 pub use carry::LowerCarry;
 use constants::Constants;
 use dependencies::{Dependencies, PackedDependencies};
 use evidence::Evidence;
 use hirsel_engine_runtime::*;
+use hirsel_query_products::depth::{DepthEvidence, dependency_limit};
 use hirsel_syntax::PackageId;
 use hirsel_tir::{DefinitionRef, Materialized, MaterializedRef};
 use inputs::Inputs;
@@ -287,7 +287,7 @@ impl Outcome {
     }
 
     fn retained_bytes(&self) -> Option<u64> {
-        let mut weight = crate::NativeMetadataWeight::default();
+        let mut weight = hirsel_query_products::retained::MetadataWeight::default();
         weight.add(size_of::<Self>() + 2 * size_of::<usize>());
         for (_, bytes) in self.reads.allocations() {
             weight.add(bytes);
@@ -298,9 +298,12 @@ impl Outcome {
             Ok(Value::Lower(lower)) => {
                 weight.add(size_of::<LowerProduct>() + 2 * size_of::<usize>());
                 weight.add(
-                    crate::memo::retained_lowering_output_bytes(&lower.diagnostics, &Vec::new())
-                        .try_into()
-                        .ok()?,
+                    hirsel_query_products::retained::retained_lowering_output_bytes(
+                        &lower.diagnostics,
+                        &Vec::new(),
+                    )
+                    .try_into()
+                    .ok()?,
                 );
                 weight.add(lower.dependencies.retained_bytes());
                 if lower.archived_metadata.is_some() {
@@ -323,7 +326,7 @@ impl Outcome {
                 }
             }
             Err(error) => weight.add(
-                crate::memo::retained::retained_query_error_bytes(error)
+                hirsel_query_products::retained::retained_query_error_bytes(error)
                     .try_into()
                     .ok()?,
             ),
@@ -337,7 +340,7 @@ impl Outcome {
 // Upper bound for products.rs's temporary required-constant map. Count every
 // occurrence, including duplicates and references that will eventually refuse.
 fn constant_selection_bytes(definition: &hirsel_tir::Definition) -> Result<u64, QueryError> {
-    let mut weight = crate::NativeMetadataWeight::default();
+    let mut weight = hirsel_query_products::retained::MetadataWeight::default();
     let mut rows = 1usize; // a constant definition may also require its own value
     weight.path(definition.path.path());
     weight.path(definition.path.path());
@@ -368,7 +371,7 @@ fn outcome_table_bytes(rows: usize) -> u64 {
     if rows == 0 {
         return 0;
     }
-    let mut weight = crate::NativeMetadataWeight::default();
+    let mut weight = hirsel_query_products::retained::MetadataWeight::default();
     weight.tree::<(u32, ContentHash), (Option<Reference>, Box<Outcome>, u64)>(rows);
     weight.bytes()
 }
@@ -717,7 +720,7 @@ impl FrontLowerQueries {
     /// Bound all settled constant clones without copying their payloads or paths.
     pub(crate) fn settled_constants_input_bytes(&self) -> Result<u64, QueryError> {
         let outcomes = self.outcomes.lock().unwrap_or_else(|e| e.into_inner());
-        let mut weight = crate::NativeMetadataWeight::default();
+        let mut weight = hirsel_query_products::retained::MetadataWeight::default();
         weight.tree::<DefPath, Materialized>(outcomes.len());
         for path in self.inputs.keys().cloned().chain(self.staged.instances()) {
             let Some(id) = self.evaluate_query(&path) else {
@@ -932,7 +935,7 @@ impl FrontLowerQueries {
             .collect();
         let mut seen = BTreeSet::new();
         let mut selected = BTreeSet::new();
-        let mut work = crate::NativeMetadataWeight::default();
+        let mut work = hirsel_query_products::retained::MetadataWeight::default();
         work.flat_vec(&pending);
         while let Some((path, bindings)) = pending.pop() {
             let key: Vec<_> = bindings
@@ -2148,7 +2151,7 @@ impl FrontLowerQueries {
         if has_errors(&output.diagnostics) {
             return Err(QueryError::Diagnostics(output.diagnostics));
         }
-        let retained = crate::memo::retained::decoded_tir_bytes(&definition);
+        let retained = hirsel_query_products::retained::decoded_tir_bytes(&definition);
         let definition_decode_layout = DefinitionDecodeLayout {
             retained,
             transient: retained,
@@ -2236,7 +2239,7 @@ impl FrontLowerQueries {
             outcome.selections.clone(),
             self.namespace.manifest,
         );
-        let mut weight = crate::NativeMetadataWeight::default();
+        let mut weight = hirsel_query_products::retained::MetadataWeight::default();
         weight.add(size_of_val(&metadata) + size_of::<LowerCharge>() + 8 * size_of::<usize>());
         for (_, bytes) in outcome.reads.allocations() {
             weight.add(bytes);

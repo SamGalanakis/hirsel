@@ -1,13 +1,16 @@
 use super::*;
 use crate::queries::private_unique::scheduled::Facts;
 use std::sync::{Mutex, atomic::AtomicU64};
-type Module = (crate::memo::PackageKey, crate::memo::ModuleKey);
+type Module = (
+    hirsel_query_products::reads::PackageKey,
+    hirsel_query_products::reads::ModuleKey,
+);
 /// The immutable proof owner and loader inputs whose facts are already adopted.
 pub(crate) struct AdoptedPrivate {
     owner: std::sync::Weak<HeaderProducts>,
     revision: u64,
     inputs: u64,
-    graph: crate::memo::Revision,
+    graph: hirsel_query_products::reads::Revision,
 }
 pub(super) struct ModuleProduct {
     facts: Facts,
@@ -119,7 +122,7 @@ impl PrivateProducts {
     pub(super) fn index_bytes(engine: &QueryEngine) -> u64 {
         let paths = Self::candidate_paths(engine);
         let modules = paths.iter().map(module_of).collect::<BTreeSet<_>>().len();
-        let mut weight = crate::NativeMetadataWeight::default();
+        let mut weight = hirsel_query_products::retained::MetadataWeight::default();
         weight.add(size_of::<Self>() + 4 * size_of::<usize>());
         weight.tree::<DefId, Candidate>(paths.len());
         weight.tree::<Module, ModuleSlot>(modules);
@@ -221,8 +224,8 @@ impl PrivateProducts {
 }
 fn module_of(path: &DefPath) -> Module {
     (
-        crate::memo::PackageKey::of(&path.0.package),
-        crate::memo::ModuleKey::of(&path.0.modules),
+        hirsel_query_products::reads::PackageKey::of(&path.0.package),
+        hirsel_query_products::reads::ModuleKey::of(&path.0.modules),
     )
 }
 /// The value a signature read observes: what equal-output cutoff and
@@ -389,7 +392,7 @@ impl HeaderProducts {
                 return Err(error);
             }
         };
-        let mut weight = crate::NativeMetadataWeight::default();
+        let mut weight = hirsel_query_products::retained::MetadataWeight::default();
         weight.add(
             size_of::<ModuleProduct>()
                 + facts.proofs.capacity() * size_of::<(DefId, hirsel_types::UniqueInference)>(),
@@ -850,7 +853,10 @@ mod adoption_tests {
         headers.adopt_private_products(&mut engine).unwrap();
         let previous = engine.private_summary_revision;
         let mut changes = crate::memo::ChangeSet::default();
-        changes.read(ReadKey::Environment, crate::memo::Durability::High);
+        changes.read(
+            ReadKey::Environment,
+            hirsel_query_products::reads::Durability::High,
+        );
         engine.apply_changes(&changes);
         assert_ne!(previous, Some(engine.graph.revision()));
         headers.adopt_private_products(&mut engine).unwrap();

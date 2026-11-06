@@ -12,7 +12,7 @@ impl Bytes {
         allowance: u64,
         value: &Vec<Vec<u8>>,
     ) -> Result<Self, QueryError> {
-        let mut weight = crate::NativeMetadataWeight::default();
+        let mut weight = hirsel_query_products::retained::MetadataWeight::default();
         weight.add(std::mem::size_of::<Vec<Vec<u8>>>());
         weight.vec(value, |weight, field| weight.flat_vec(field));
         let bytes = bincode::serialize(value).map_err(|_| QueryError::NotImplemented)?;
@@ -94,7 +94,10 @@ impl Content {
             references,
         })
     }
-    pub(super) fn reference_bytes(&self, weight: &mut crate::NativeMetadataWeight) {
+    pub(super) fn reference_bytes(
+        &self,
+        weight: &mut hirsel_query_products::retained::MetadataWeight,
+    ) {
         weight.add(
             self.references
                 .len()
@@ -117,7 +120,7 @@ impl Content {
         allowance: u64,
     ) -> Result<DefinitionContent, QueryError> {
         let input = queries.input(path)?;
-        let mut weight = crate::NativeMetadataWeight::default();
+        let mut weight = hirsel_query_products::retained::MetadataWeight::default();
         weight.add(std::mem::size_of::<DefinitionContent>());
         weight.add(input.owned_header_bytes as usize);
         let working = match &self.header {
@@ -164,7 +167,7 @@ impl Content {
             },
         })
     }
-    pub(super) fn weight(&self, weight: &mut crate::NativeMetadataWeight) {
+    pub(super) fn weight(&self, weight: &mut hirsel_query_products::retained::MetadataWeight) {
         weight.add(std::mem::size_of_val(&*self.references));
         if let Header::Named { reads, .. } = &self.header {
             weight.add(std::mem::size_of_val(&**reads));
@@ -224,7 +227,7 @@ impl Node {
             dependencies,
         })
     }
-    pub(super) fn weight(&self, weight: &mut crate::NativeMetadataWeight) {
+    pub(super) fn weight(&self, weight: &mut hirsel_query_products::retained::MetadataWeight) {
         weight.add(std::mem::size_of_val(&*self.dependencies));
     }
 }

@@ -2,7 +2,9 @@
 use super::host_selector;
 use super::native_assembly::NativeAssembly;
 use super::proof_export::ProofExport;
-use hirsel_engine::{CheckCompletion, ToolError, store::*};
+use hirsel_engine::CheckCompletion;
+use hirsel_engine::ToolError;
+use hirsel_engine::store::*;
 use hirsel_engine_runtime::*;
 
 use hirsel_native::Backend;

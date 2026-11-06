@@ -904,7 +904,7 @@ mod tests {
             path: "first.hir".into(),
             inputs: inputs.into(),
             operation: CompileOperation::Check {
-                lowering: hirsel_engine::LoweringPolicy::Comptime,
+                lowering: hirsel_query_products::LoweringPolicy::Comptime,
             },
         };
         let bytes = hirsel_intern::jobs::COMPILER_STACK_BYTES as u64 + 4096;
@@ -1079,7 +1079,7 @@ mod tests {
         );
         let incomplete = CheckOutput {
             completion: CheckCompletion::Incomplete {
-                phase: hirsel_engine::QueryKind::Lower,
+                phase: hirsel_query_products::QueryKind::Lower,
             },
             ..Default::default()
         };

@@ -5,6 +5,8 @@ hirsel_guard::install!();
 
 use hirsel_engine::*;
 use hirsel_front_phases::load_program_source;
+
+use hirsel_query_products::QueryKind;
 use hirsel_syntax::ItemKind;
 use std::{path::Path, time::Instant};
 
@@ -30,7 +32,7 @@ fn main() {
                     timed(name, || {
                         let mut program = load_program_source(Path::new(&path), None).unwrap();
                         let output = program
-                            .check(hirsel_engine::LoweringPolicy::Reachable)
+                            .check(hirsel_query_products::LoweringPolicy::Reachable)
                             .unwrap();
                         assert_eq!(output.completion, CheckCompletion::Complete);
                         assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
@@ -107,7 +109,7 @@ fn main() {
             "reachable dependency lowering, program audits and artifact publication",
             || {
                 let output = program
-                    .check(hirsel_engine::LoweringPolicy::Reachable)
+                    .check(hirsel_query_products::LoweringPolicy::Reachable)
                     .unwrap();
                 assert_eq!(output.completion, CheckCompletion::Complete);
                 assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
@@ -120,7 +122,7 @@ fn main() {
         });
         timed("reused check and program audits", || {
             let output = warm
-                .check(hirsel_engine::LoweringPolicy::Reachable)
+                .check(hirsel_query_products::LoweringPolicy::Reachable)
                 .unwrap();
             assert_eq!(output.completion, CheckCompletion::Complete);
             assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);

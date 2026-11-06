@@ -3,13 +3,13 @@
 use super::{CompileInspection, DefinitionWork, RequestWork};
 use hirsel_engine::FrontBodyQueries;
 use hirsel_engine::FrontLowerQueries;
-use hirsel_engine::QueryKind;
-use hirsel_engine::Reads;
 use hirsel_engine::ToolError;
 use hirsel_engine::memo::MemoKey;
 use hirsel_engine::memo::MemoStats;
 use hirsel_engine_runtime::RuntimeEvent;
 use hirsel_engine_runtime::RuntimeObserver;
+use hirsel_query_products::QueryKind;
+use hirsel_query_products::reads::Reads;
 
 use hirsel_syntax::DefPath;
 use std::{
@@ -112,7 +112,7 @@ impl InspectionLedger {
             return Err(unavailable());
         }
         let update = (|| {
-            let mut metadata = hirsel_engine::NativeMetadataWeight::default();
+            let mut metadata = hirsel_query_products::retained::MetadataWeight::default();
             metadata.add(std::mem::size_of::<Self>());
             let new_rows = delta
                 .keys()
@@ -237,7 +237,7 @@ impl GraphMeter {
     /// Current/S0 counters and flush temporaries have a fixed, known namespace.
     /// Bound their actual tree/path layout under the existing source partition.
     pub fn input_bytes(definitions: &[DefPath], memos: usize) -> Option<u64> {
-        let mut metadata = hirsel_engine::NativeMetadataWeight::default();
+        let mut metadata = hirsel_query_products::retained::MetadataWeight::default();
         metadata.add(std::mem::size_of::<Self>());
         for _ in 0..4 {
             metadata.tree::<DefPath, Counters>(definitions.len());

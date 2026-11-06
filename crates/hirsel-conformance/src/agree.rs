@@ -431,7 +431,7 @@ fn classify_requested(
         })
     };
     let checked = match execute(CompileOperation::Check {
-        lowering: hirsel_engine::LoweringPolicy::Reachable,
+        lowering: hirsel_query_products::LoweringPolicy::Reachable,
     }) {
         Ok(output) => output,
         Err(e) => return tool_error(e),

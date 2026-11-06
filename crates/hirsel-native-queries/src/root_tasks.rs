@@ -25,7 +25,7 @@ pub struct NativeRootTasks {
 }
 impl NativeRootTasks {
     pub fn retained_dispatch_bytes(&self) -> u64 {
-        let mut w = hirsel_engine::NativeMetadataWeight::default();
+        let mut w = hirsel_query_products::retained::MetadataWeight::default();
         w.add(size_of::<Self>() + 2 * size_of::<usize>());
         w.vec(&self.key.roots, |w, path| w.path(path));
         w.flat_vec(&self.reads);

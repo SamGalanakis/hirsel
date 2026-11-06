@@ -8,6 +8,7 @@ use hirsel_front_phases::*;
 use hirsel_host_io::launch::*;
 use hirsel_intern::jobs::with_compiler_stack;
 use hirsel_proof_export::{DefinitionSection, Detail, Export, FORMAT, ImportError, ObligationKind};
+
 use hirsel_tir::TIR_VERSION;
 use std::path::{Path, PathBuf};
 
@@ -613,7 +614,7 @@ fn round_trip(path: &Path) -> Result<Option<Kinds>, String> {
     let export_once = || -> Result<Option<(String, QueryEngine)>, String> {
         let mut program = load_program(path).map_err(|e| format!("load: {e}"))?;
         let checked = program
-            .check(hirsel_engine::LoweringPolicy::Reachable)
+            .check(hirsel_query_products::LoweringPolicy::Reachable)
             .map_err(|e| format!("check: {e:?}"))?;
         if checked
             .diagnostics

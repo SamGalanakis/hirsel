@@ -5,6 +5,8 @@ use hirsel_host_io::launch::*;
 use hirsel_intern::jobs::with_compiler_stack;
 use hirsel_native_cache::declarations::NativeDeclarations;
 use hirsel_native_cache::source_inputs::*;
+
+use hirsel_query_products::QueryKind;
 use std::sync::Arc;
 
 #[test]

@@ -451,7 +451,7 @@ impl FrontProofExport {
             .collect();
         // The captured headers and their type snapshot are immutable. Export
         // derives their closure once, only when its input is requested.
-        let mut input_weight = crate::NativeMetadataWeight::default();
+        let mut input_weight = hirsel_query_products::retained::MetadataWeight::default();
         input_weight
             .add(size_of::<FrontProofInput>() + size_of::<SourceMap>() + 8 * size_of::<usize>());
         input_weight.add(hirsel_proof_export::FORMAT.len());
@@ -483,7 +483,7 @@ impl FrontProofExport {
                     .ok_or(QueryError::NotImplemented)?,
             )
             .ok_or(QueryError::NotImplemented)?;
-        let mut weight = crate::NativeMetadataWeight::default();
+        let mut weight = hirsel_query_products::retained::MetadataWeight::default();
         weight.add(
             size_of::<FrontProofExport>()
                 + size_of::<ProofSourceMetadata>()
@@ -538,7 +538,7 @@ impl FrontProofExport {
                         .collect::<Vec<_>>();
                     edges.insert(DefId::intern(path), references);
                 }
-                let mut weight = crate::NativeMetadataWeight::default();
+                let mut weight = hirsel_query_products::retained::MetadataWeight::default();
                 weight.map(&edges, |weight, _, edges| weight.flat_vec(edges));
                 if metadata
                     .metadata_bytes
@@ -587,7 +587,7 @@ impl FrontProofExport {
         let metadata = self.source_metadata(closure)?;
         let mut required = self.signature_edges(closure)?.input_metadata_bytes;
         let mut transient = 0u64;
-        let mut maps = crate::NativeMetadataWeight::default();
+        let mut maps = hirsel_query_products::retained::MetadataWeight::default();
         maps.tree::<DefPath, hirsel_tir::DefinitionRef>(closure.len());
         maps.tree::<DefPath, hirsel_tir::Materialized>(closure.len());
         for path in closure {

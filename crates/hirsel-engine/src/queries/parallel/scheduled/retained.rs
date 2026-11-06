@@ -2,7 +2,7 @@
 //! Wire tables can repeat path spellings and shared reads, so their length is
 //! neither this representation's storage size nor an allocation allowance.
 use super::*;
-use crate::memo::retained::Weight;
+use hirsel_query_products::retained::Weight;
 pub(super) fn definition(weight: &mut Weight, summary: &DefinitionSummary) {
     weight.definition_summary(summary);
 }

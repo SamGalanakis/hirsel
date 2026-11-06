@@ -1,8 +1,9 @@
 //! Executable NetPeer repair recipe. Payload equality is not a lifetime proof.
 use hirsel_driver::native;
-use hirsel_engine::{LoweringPolicy, RunConfiguration, SimulationConfig};
+use hirsel_engine::{RunConfiguration, SimulationConfig};
 use hirsel_front_phases::load_program;
 use hirsel_intern::jobs::with_compiler_stack;
+use hirsel_query_products::LoweringPolicy;
 use std::path::PathBuf;
 
 fn root() -> PathBuf {

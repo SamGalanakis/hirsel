@@ -2,8 +2,8 @@
 //! internals/check.rs:29–53 and tests/ui/with/incorrect_type.rs (MIT OR Apache-2.0).
 //! Contracts are handwritten independently of the generator.
 use hirsel_driver::session::Session;
-use hirsel_engine::LoweringPolicy;
 use hirsel_intern::jobs::with_compiler_stack;
+use hirsel_query_products::LoweringPolicy;
 use hirsel_requests::CompileOperation;
 use hirsel_requests::CompileResult;
 use std::{fs, path::PathBuf};

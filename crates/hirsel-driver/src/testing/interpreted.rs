@@ -58,7 +58,7 @@ impl Executions {
     pub fn prepare_all(mut self) -> Result<Self, ToolError> {
         let operation = if self.roots.is_empty() {
             CompileOperation::Check {
-                lowering: hirsel_engine::LoweringPolicy::Reachable,
+                lowering: hirsel_query_products::LoweringPolicy::Reachable,
             }
         } else {
             CompileOperation::TirBatch {
@@ -140,7 +140,7 @@ impl Executions {
             .map_err(|error| match error {
                 hirsel_engine::RuntimeError::Query(error) => ToolError::Query {
                     error,
-                    phase: Some(hirsel_engine::QueryKind::Interpret),
+                    phase: Some(hirsel_query_products::QueryKind::Interpret),
                     sources: input.sources.clone(),
                 },
                 hirsel_engine::RuntimeError::Tool(message) => ToolError::Runtime(message),

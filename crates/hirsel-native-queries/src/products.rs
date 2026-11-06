@@ -132,7 +132,7 @@ impl NativeSnapshot {
     }
     pub fn retained_dispatch_bytes(&mut self) -> u64 {
         use super::ownership_compilation::metadata as m;
-        let mut w = hirsel_engine::NativeMetadataWeight::default();
+        let mut w = hirsel_query_products::retained::MetadataWeight::default();
         w.add(size_of::<Self>() + 2 * size_of::<usize>());
         m::options(&mut w, &self.options);
         m::emission(&mut w, &self.emission);
@@ -284,7 +284,7 @@ impl NativeSnapshot {
         }
         let mut owners = vec![key.clone()];
         if backend != "llvm" || self.emission.opt == OptLevel::None || self.emission.debug {
-            let mut w = hirsel_engine::NativeMetadataWeight::default();
+            let mut w = hirsel_query_products::retained::MetadataWeight::default();
             w.vec(&owners, super::ownership_compilation::metadata::address);
             return Ok(DispatchOwners {
                 values: owners,
@@ -319,7 +319,7 @@ impl NativeSnapshot {
             seen.insert(member);
             copies.push(owner.clone());
             pending.extend(facts.references);
-            let mut w = hirsel_engine::NativeMetadataWeight::default();
+            let mut w = hirsel_query_products::retained::MetadataWeight::default();
             w.vec(&pending, |w, (path, _)| w.path(path));
             w.tree::<super::optimizer::Function, ()>(seen.len());
             for (path, _) in &seen {
@@ -339,7 +339,7 @@ impl NativeSnapshot {
             )
         });
         owners.extend(copies);
-        let mut w = hirsel_engine::NativeMetadataWeight::default();
+        let mut w = hirsel_query_products::retained::MetadataWeight::default();
         w.vec(&owners, super::ownership_compilation::metadata::address);
         if let Some(lease) = &mut lease {
             Arc::get_mut(lease)

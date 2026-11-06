@@ -7,6 +7,8 @@ use hirsel_engine::*;
 use hirsel_front_phases::*;
 use hirsel_host_io::launch::*;
 use hirsel_intern::jobs::with_compiler_stack;
+
+use hirsel_query_products::{LoweringPolicy, QueryKind};
 use hirsel_syntax::DefId;
 use std::{path::PathBuf, sync::Arc};
 
@@ -64,7 +66,9 @@ fn ordinary_std_definition_products_partition(partition: usize) {
         assert!(definitions.len() > 100);
         let mut reference = compiler.load_program_source(&client, None).unwrap();
         let checked = |p: &mut LoadedProgram| {
-            let output = p.check(hirsel_engine::LoweringPolicy::Reachable).unwrap();
+            let output = p
+                .check(hirsel_query_products::LoweringPolicy::Reachable)
+                .unwrap();
             let rendered: Vec<_> = output
                 .diagnostics
                 .iter()

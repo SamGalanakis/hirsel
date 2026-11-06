@@ -927,7 +927,7 @@ impl QueryEngine {
         // of this same reservation to its completed output.
         let source = front.stage_source();
         let package = root.0.package.clone();
-        let mut retained = crate::NativeMetadataWeight::default();
+        let mut retained = hirsel_query_products::retained::MetadataWeight::default();
         retained.add(std::mem::size_of::<FrontGrowthQueries>() + 2 * std::mem::size_of::<usize>());
         retained.flat_vec(&roots);
         retained.add(package.name.capacity() + package.version.capacity());

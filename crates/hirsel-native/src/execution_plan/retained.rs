@@ -1,8 +1,8 @@
 //! Allocation bounds use the existing native metadata visitor and Rust BTree
 //! node bound, not encoded lengths. Shared observation products keep admission.
 use crate::native_metadata::native_type;
-use hirsel_engine::NativeMetadataWeight as W;
 use hirsel_lir::{ahead::*, continuation::*, layout_types::*, products::Binding};
+use hirsel_query_products::retained::MetadataWeight as W;
 
 fn symbol(w: &mut W, s: &hirsel_lir::ir::Symbol) {
     w.path(&s.definition);

@@ -3,7 +3,7 @@
 use super::Weight;
 use hirsel_types::{FamilyMemberKind, SignatureKind, SignatureRef};
 
-pub(crate) fn retained_signature_payload_bytes(signature: &SignatureRef) -> u64 {
+pub fn retained_signature_payload_bytes(signature: &SignatureRef) -> u64 {
     let mut weight = Weight {
         count_shared_repeats: true,
         ..Default::default()
@@ -12,7 +12,7 @@ pub(crate) fn retained_signature_payload_bytes(signature: &SignatureRef) -> u64 
     weight.bytes
 }
 
-pub(super) fn signature_payload(weight: &mut Weight<'_>, signature: &SignatureRef) {
+pub fn signature_payload(weight: &mut Weight<'_>, signature: &SignatureRef) {
     weight.signature(signature);
     // These owned containers are outside the old diagnostic signature visitor.
     weight.vec(&signature.metadata.implementations, |w, binder| {
@@ -70,7 +70,7 @@ mod tests {
                 })
             });
             let (bound, inspection) = crate::test_alloc::measured_independent(|| {
-                let mut names = super::super::NameAllocations::<64>::default();
+                let mut names = crate::retained::NameAllocations::<64>::default();
                 let mut weight = Weight {
                     count_shared_repeats: true,
                     source_names: Some(&mut names),

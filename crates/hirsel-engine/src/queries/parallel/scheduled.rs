@@ -289,7 +289,7 @@ pub struct FrontBodyQueries {
     store_adoptions: AtomicU64,
     /// Full-rescan refusals of stored body entries: by the first changed read
     /// of the newest variant, in `ReadKind::ALL` order, then by own text.
-    refusals: [AtomicU64; crate::memo::ReadKind::ALL.len()],
+    refusals: [AtomicU64; hirsel_query_products::reads::ReadKind::ALL.len()],
     text_refusals: AtomicU64,
     /// Stored entry validations plus memo rows written.
     memo_operations: AtomicU64,
@@ -312,7 +312,7 @@ pub struct FrontBodyQueries {
     retention: Arc<Mutex<u64>>,
     // Own immutable snapshot and output metadata admission until every task and
     // external output reader releases this view.
-    read_pool: std::sync::OnceLock<Mutex<crate::memo::ReadPool>>,
+    read_pool: std::sync::OnceLock<Mutex<hirsel_query_products::reads::ReadPool>>,
     _allowance: Arc<FrontSourceBacking>,
     _header_allowance: Option<Arc<dyn header_products::HeaderAllowance>>,
 }
@@ -632,7 +632,7 @@ impl FrontBodyQueries {
         &self,
         cx: &mut dyn QueryContext,
         reads: &Arc<Reads>,
-        pool: &Mutex<crate::memo::ReadPool>,
+        pool: &Mutex<hirsel_query_products::reads::ReadPool>,
     ) -> Option<Arc<Reads>> {
         let pool = self.read_pool.get().unwrap_or(pool);
         if Reads::tracked_by(reads, &self.retention) {
@@ -754,7 +754,7 @@ impl FrontBodyQueries {
             return Some(());
         }
         let inventory = |len| {
-            let mut weight = crate::NativeMetadataWeight::default();
+            let mut weight = hirsel_query_products::retained::MetadataWeight::default();
             weight.tree::<Key, FrontSlot>(len);
             weight.tree::<DefId, ()>(len);
             weight.add(
@@ -1167,15 +1167,18 @@ impl FrontBodyQueries {
     }
     /// Successful lookup targets are semantic closure edges even when a
     /// primitive/alias adds no normalized signature fingerprint dependency.
-    pub(crate) fn lookup_definition(&self, key: crate::memo::LookupKey) -> Option<DefPath> {
+    pub(crate) fn lookup_definition(
+        &self,
+        key: hirsel_query_products::reads::LookupKey,
+    ) -> Option<DefPath> {
         Self::lookup_in(&self.namespace.snapshot, &self.declarations, key)
     }
     pub(crate) fn lookup_in(
         snapshot: &SignatureSnapshot,
         declarations: &Declarations,
-        key: crate::memo::LookupKey,
+        key: hirsel_query_products::reads::LookupKey,
     ) -> Option<DefPath> {
-        use crate::memo::LookupSource;
+        use hirsel_query_products::reads::LookupSource;
         let context = key.context();
         let path = hirsel_syntax::Path {
             package: key.qualifier(),
@@ -1202,7 +1205,7 @@ impl FrontBodyQueries {
         package: &hirsel_syntax::PackageId,
         read: &ReadKey,
     ) -> Option<ContentHash> {
-        use crate::memo::LookupSource;
+        use hirsel_query_products::reads::LookupSource;
         Some(match *read {
             ReadKey::PrivateSummary(id) => memos::private_summary_value(
                 &self

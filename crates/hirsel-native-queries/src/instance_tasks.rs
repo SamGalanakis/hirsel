@@ -275,7 +275,7 @@ impl InstanceTasks {
         {
             return Err("native task frame exceeds retained allowance".into());
         }
-        let mut metadata = hirsel_engine::NativeMetadataWeight::default();
+        let mut metadata = hirsel_query_products::retained::MetadataWeight::default();
         metadata.add(size_of::<Self>() + 2 * size_of::<usize>());
         metadata.add(super::demand::window::WindowBudget::retained_bytes() as usize);
         metadata
@@ -347,7 +347,7 @@ impl InstanceTasks {
         if tasks.front.is_some() {
             return Err("native front Lower dispatch is already bound".into());
         }
-        let mut metadata = hirsel_engine::NativeMetadataWeight::default();
+        let mut metadata = hirsel_query_products::retained::MetadataWeight::default();
         metadata.map(&front.bindings, |w, path, _| w.path(path));
         let mut registry = tasks.registry.lock().unwrap_or_else(|e| e.into_inner());
         registry.charged = registry
@@ -403,7 +403,7 @@ impl InstanceTasks {
         let entries = requests
             .into_iter()
             .map(|(key, request)| {
-                let mut weight = hirsel_engine::NativeMetadataWeight::default();
+                let mut weight = hirsel_query_products::retained::MetadataWeight::default();
                 weight.add(size_of::<Registered>() + 2 * size_of::<usize>());
                 let charge = weight.bytes();
                 let request = StoredRequest::capture(self.store.as_ref(), request)?;
@@ -427,7 +427,7 @@ impl InstanceTasks {
             .collect::<Result<Vec<_>, String>>()?;
         let mut registry = self.registry.lock().unwrap_or_else(|e| e.into_inner());
         let index_bytes = |len| {
-            let mut weight = hirsel_engine::NativeMetadataWeight::default();
+            let mut weight = hirsel_query_products::retained::MetadataWeight::default();
             weight.tree::<ContentHash, Arc<Registered>>(len);
             weight.bytes().saturating_mul(2)
         };
@@ -505,7 +505,7 @@ impl InstanceTasks {
             }
             return Ok(());
         }
-        let mut weight = hirsel_engine::NativeMetadataWeight::default();
+        let mut weight = hirsel_query_products::retained::MetadataWeight::default();
         weight.path(&original.definition);
         weight.path(&original.definition);
         weight.add(size_of::<SourceBinding>() + 2 * size_of::<usize>());
@@ -517,7 +517,7 @@ impl InstanceTasks {
                 .ok_or("native source binding metadata overflow")?,
         );
         let nodes = |len| {
-            let mut w = hirsel_engine::NativeMetadataWeight::default();
+            let mut w = hirsel_query_products::retained::MetadataWeight::default();
             w.tree::<hirsel_syntax::DefPath, Arc<SourceBinding>>(len);
             w.bytes()
         };
@@ -880,7 +880,7 @@ impl QueryTask for InstanceTask {
             Ok(key) => key,
             Err(error) => return finish(Err(self.tasks.failure(&error))),
         };
-        let mut key_weight = hirsel_engine::NativeMetadataWeight::default();
+        let mut key_weight = hirsel_query_products::retained::MetadataWeight::default();
         key_weight.path(key.instance.definition());
         key_weight.add(key.instance.retained_encoding_bytes());
         let _key_read = match self.tasks.window.read_for("owner-key", key_weight.bytes()) {
@@ -1143,7 +1143,7 @@ impl DiscoveryTask {
                     }
                 }
             }
-            let mut weight = hirsel_engine::NativeMetadataWeight::default();
+            let mut weight = hirsel_query_products::retained::MetadataWeight::default();
             weight.add(size_of::<Self>());
             weight.flat_vec(&frontier);
             weight.flat_vec(&self.frontier);

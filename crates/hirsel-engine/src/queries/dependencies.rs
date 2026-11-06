@@ -1,7 +1,7 @@
 //! What queries observe: lookups through the manifest index and the
 //! provider, and the implementations an evaluation executes.
 use super::*;
-use crate::memo::ReadKey;
+use hirsel_query_products::reads::ReadKey;
 use hirsel_resolve::ManifestIndex;
 use hirsel_syntax::{PackageId, Path};
 use hirsel_types::LookupError;

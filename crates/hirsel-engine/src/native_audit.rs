@@ -133,7 +133,8 @@ impl QueryEngine {
         }
         self.s1.begin_requests();
         self.begin_evaluation_validation();
-        self.execution_stack.push(crate::memo::ReadsBuilder::new());
+        self.execution_stack
+            .push(hirsel_query_products::reads::ReadsBuilder::new());
         let result = self.compute_source_audit(path);
         let reads = self
             .execution_stack

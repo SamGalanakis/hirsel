@@ -3,8 +3,8 @@
 use hirsel_intern::Symbol;
 use hirsel_syntax::{ContentHash, DefId, DefPath, FileContext, PackageId};
 use std::num::NonZeroU64;
-mod pool;
-pub(crate) use pool::ReadPool;
+pub mod pool;
+pub use pool::ReadPool;
 use pool::Rows;
 
 /// One revision of a session's inputs. Revision 1 is the first.
@@ -448,7 +448,7 @@ impl Reads {
     }
     /// Freeze already canonical unique rows with their first-read ordinals.
     /// Both callers construct uniqueness before reaching this boundary.
-    pub(crate) fn from_canonical_observations(unique: Vec<(ReadKey, ContentHash, usize)>) -> Self {
+    pub fn from_canonical_observations(unique: Vec<(ReadKey, ContentHash, usize)>) -> Self {
         debug_assert!(unique.windows(2).all(|pair| pair[0].0 < pair[1].0));
         let observation = if unique.windows(2).all(|pair| pair[0].2 < pair[1].2) {
             None
@@ -502,7 +502,7 @@ impl Reads {
     /// A lossless view of these exact observations in a complete superset.
     /// Standard Arc slice ownership and sorted integer indices keep the flat
     /// binary-search/order/codec contract; no lookup can see an excluded row.
-    pub(crate) fn share_rows(&self, complete: &Self) -> Option<Self> {
+    pub fn share_rows(&self, complete: &Self) -> Option<Self> {
         if complete.indices.is_some() || complete.rows.shared() || self.len() > complete.len() {
             return None;
         }
@@ -525,7 +525,7 @@ impl Reads {
     }
     /// Detach a selected phase from the complete body's backing rows. Exact
     /// observations, order and encoding stay unchanged.
-    pub(crate) fn flat_copy(&self) -> Self {
+    pub fn flat_copy(&self) -> Self {
         if self.indices.is_none() {
             return self.clone();
         }
@@ -535,7 +535,7 @@ impl Reads {
             observation: self.observation.clone(),
         }
     }
-    pub(crate) fn flat_backing_bytes(&self) -> Option<usize> {
+    pub fn flat_backing_bytes(&self) -> Option<usize> {
         self.indices.as_ref().map(|_| {
             let rows = 2 * size_of::<usize>() + self.len() * size_of::<(ReadKey, ContentHash)>();
             let observation = self.observation.as_ref().map_or(0, |order| {
@@ -546,7 +546,7 @@ impl Reads {
     }
     /// Actual distinct Arc backing allocations; the containing Reads value is
     /// accounted separately by its owner. This exposes no semantic identity.
-    pub(crate) fn allocations(&self) -> impl Iterator<Item = (usize, usize)> {
+    pub fn allocations(&self) -> impl Iterator<Item = (usize, usize)> {
         let rows = Some((self.rows.as_ptr() as usize, self.rows.allocation_bytes()));
         let indices = self.indices.as_ref().map(|indices| {
             (
@@ -639,7 +639,7 @@ impl Reads {
             out.extend(logical.to_le_bytes());
         }
     }
-    pub(crate) fn encoded_bytes(&self) -> Option<u64> {
+    pub fn encoded_bytes(&self) -> Option<u64> {
         let bytes = self.iter().try_fold(8u64, |bytes, (key, value)| {
             bytes
                 .checked_add(u64::try_from(key.encoded_bytes()?).ok()?)?
@@ -647,7 +647,7 @@ impl Reads {
         })?;
         bytes.checked_add((self.len() as u64).checked_mul(4)?)
     }
-    pub(crate) fn encoding_working_bytes(&self) -> Option<u64> {
+    pub fn encoding_working_bytes(&self) -> Option<u64> {
         self.encoded_bytes()?
             .max(8)
             .checked_mul(4)?
@@ -655,7 +655,7 @@ impl Reads {
     }
     /// Visit HRD3's canonical rows, then its exact observation indices.
     /// This uses the same framing, row-order and permutation checks as decode.
-    pub(crate) fn visit_encoded(
+    pub fn visit_encoded(
         mut input: &[u8],
         mut visit: impl FnMut(usize, Option<(ReadKey, ContentHash)>) -> Option<()>,
     ) -> Option<usize> {

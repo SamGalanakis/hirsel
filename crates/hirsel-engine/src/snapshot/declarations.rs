@@ -178,8 +178,8 @@ struct FrozenRows {
 impl Declarations {
     pub(crate) fn name_set(
         &self,
-        package: crate::memo::PackageKey,
-        module: crate::memo::ModuleKey,
+        package: hirsel_query_products::reads::PackageKey,
+        module: hirsel_query_products::reads::ModuleKey,
     ) -> ContentHash {
         let start = DefPath(hirsel_syntax::ItemPath {
             package: package.id(),

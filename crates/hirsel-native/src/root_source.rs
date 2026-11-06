@@ -61,9 +61,9 @@ fn packed<K: Ord, V>(map: BTreeMap<K, V>) -> BTreeMap<K, V> {
     map.into_iter().collect()
 }
 fn bulk_map<K, V>(
-    weight: &mut hirsel_engine::NativeMetadataWeight,
+    weight: &mut hirsel_query_products::retained::MetadataWeight,
     map: &BTreeMap<K, V>,
-    mut visit: impl FnMut(&mut hirsel_engine::NativeMetadataWeight, &K, &V),
+    mut visit: impl FnMut(&mut hirsel_query_products::retained::MetadataWeight, &K, &V),
 ) {
     weight.bulk_tree::<K, V>(map.len());
     for (key, value) in map {
@@ -266,7 +266,7 @@ impl NativeLinkSource {
     /// Shared semantic/signature/source text and interner payloads retain their
     /// original source owners; this measures only newly allocated containers.
     pub fn retained_metadata_bytes(&self) -> u64 {
-        use hirsel_engine::NativeMetadataWeight as Weight;
+        use hirsel_query_products::retained::MetadataWeight as Weight;
         let mut w = Weight::default();
         let Self {
             input: _,

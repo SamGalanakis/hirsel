@@ -40,7 +40,7 @@ impl NativeSemanticProgram {
     }
     pub(crate) fn metadata_weight(
         &self,
-        weight: &mut crate::NativeMetadataWeight,
+        weight: &mut hirsel_query_products::retained::MetadataWeight,
         nodes: &mut std::collections::BTreeSet<usize>,
     ) {
         weight.add(std::mem::size_of::<Self>() + 2 * std::mem::size_of::<usize>());
@@ -305,11 +305,11 @@ mod tests {
         );
         assert!(!first.foreign_unreplayable());
         assert!(second.foreign_unreplayable());
-        let mut combined = crate::NativeMetadataWeight::default();
+        let mut combined = hirsel_query_products::retained::MetadataWeight::default();
         let mut shared = BTreeSet::new();
         first.metadata_weight(&mut combined, &mut shared);
         second.metadata_weight(&mut combined, &mut shared);
-        let mut separate = crate::NativeMetadataWeight::default();
+        let mut separate = hirsel_query_products::retained::MetadataWeight::default();
         first.metadata_weight(&mut separate, &mut BTreeSet::new());
         second.metadata_weight(&mut separate, &mut BTreeSet::new());
         assert!(combined.bytes() < separate.bytes());

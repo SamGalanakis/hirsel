@@ -112,7 +112,7 @@ impl QueryEngine {
                 &request.actuals,
                 request.site,
             )?;
-            let mut weight = crate::NativeMetadataWeight::default();
+            let mut weight = hirsel_query_products::retained::MetadataWeight::default();
             weight.add(size_of::<FrontInstanceSyntax>() + 2 * size_of::<usize>());
             weight.add(
                 size_of::<hirsel_engine_admission::MemoryReservation>() + 2 * size_of::<usize>(),
@@ -129,9 +129,11 @@ impl QueryEngine {
                 weight.source_snapshot(&self.sources);
                 weight.tree::<hirsel_span::Anchor, (FileId, u32)>(self.sources.anchors().count());
                 weight.add(
-                    crate::memo::retained::retained_syntax_bytes(&*self.snapshot(&definition)?)
-                        .try_into()
-                        .map_err(|_| refusal("instance syntax size overflow"))?,
+                    hirsel_query_products::retained::retained_syntax_bytes(
+                        &*self.snapshot(&definition)?,
+                    )
+                    .try_into()
+                    .map_err(|_| refusal("instance syntax size overflow"))?,
                 );
                 weight.tree::<DefPath, Vec<Arc<ItemSyntax>>>(1);
                 weight.path(&definition);
@@ -165,14 +167,14 @@ impl QueryEngine {
             Ok(value) => Ok(value),
             Err(mut error) => {
                 let allowance = Arc::new(allowance);
-                let mut weight = crate::NativeMetadataWeight::default();
+                let mut weight = hirsel_query_products::retained::MetadataWeight::default();
                 weight.add(
                     size_of::<hirsel_engine_admission::MemoryReservation>()
                         + 2 * size_of::<usize>(),
                 );
                 weight.source_snapshot(&self.sources);
                 weight.add(
-                    crate::memo::retained::retained_query_error_bytes(&error)
+                    hirsel_query_products::retained::retained_query_error_bytes(&error)
                         .try_into()
                         .unwrap_or(usize::MAX),
                 );
@@ -447,7 +449,7 @@ impl QueryEngine {
         }
         let requests: Vec<_> = requests.into_values().collect();
         let pending_bodies: Vec<_> = missing.into_iter().collect();
-        let mut weight = crate::NativeMetadataWeight::default();
+        let mut weight = hirsel_query_products::retained::MetadataWeight::default();
         weight.add(size_of::<FrontInstanceDiscovery>());
         weight.vec(&requests, |w, r| {
             w.path(&r.declaration);

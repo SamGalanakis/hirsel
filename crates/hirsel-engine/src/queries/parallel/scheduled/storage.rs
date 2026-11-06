@@ -36,7 +36,7 @@ impl Outcomes {
             .values
             .len()
             .checked_add(usize::from(!self.values.contains_key(&key)))?;
-        let mut weight = crate::NativeMetadataWeight::default();
+        let mut weight = hirsel_query_products::retained::MetadataWeight::default();
         weight.tree::<Key, Arc<Outcome>>(len);
         let current = self.directory.as_ref().map_or(0, |grant| grant.bytes());
         let extra = outputs.pool.take(weight.bytes().checked_sub(current)?)?;
@@ -75,7 +75,7 @@ impl FrontStorageQueries {
     pub fn input_bytes_for_definitions<'a>(
         _definitions: impl IntoIterator<Item = &'a DefPath>,
     ) -> Option<u64> {
-        let mut weight = crate::NativeMetadataWeight::default();
+        let mut weight = hirsel_query_products::retained::MetadataWeight::default();
         weight.add(size_of::<Self>() + 2 * size_of::<usize>());
         Some(weight.bytes())
     }
@@ -289,7 +289,7 @@ impl StorageTask {
             }
         }
         let reads = Arc::new(reads.finish().map_err(|_| owner.errors.protocol)?);
-        let mut weight = crate::memo::retained::Weight::default();
+        let mut weight = hirsel_query_products::retained::Weight::default();
         weight.add(hirsel_engine_admission::retained_arc_bytes(
             &std::mem::MaybeUninit::<Outcome>::uninit(),
         ) as usize);

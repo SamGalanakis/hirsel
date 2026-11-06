@@ -148,7 +148,7 @@ impl SemanticTask {
                 .collect::<Vec<_>>()
                 .into_boxed_slice(),
         });
-        let mut weight = crate::NativeMetadataWeight::default();
+        let mut weight = hirsel_query_products::retained::MetadataWeight::default();
         weight.tree::<ContentHash, (ProductRef, Arc<GraphEntry>)>(1);
         weight.add(std::mem::size_of::<GraphEntry>() + 2 * std::mem::size_of::<usize>());
         weight.add(std::mem::size_of_val(&*entry.dependencies));

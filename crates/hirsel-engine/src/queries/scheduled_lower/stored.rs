@@ -69,7 +69,7 @@ impl FrontLowerQueries {
         };
         let depth = outcome.depth.evidence();
         let mut persisted = outcome.clone();
-        let mut weight = crate::NativeMetadataWeight::default();
+        let mut weight = hirsel_query_products::retained::MetadataWeight::default();
         weight.add(size_of::<reads::Descriptor>());
         for (_, bytes) in outcome.reads.allocations() {
             weight.add(bytes);
@@ -102,9 +102,12 @@ impl FrontLowerQueries {
                 lower.definition_decode_layout.transient =
                     lower.definition_decode_layout.transient.max(decoding);
                 weight.add(
-                    crate::memo::retained_lowering_output_bytes(&lower.diagnostics, &Vec::new())
-                        .try_into()
-                        .ok()?,
+                    hirsel_query_products::retained::retained_lowering_output_bytes(
+                        &lower.diagnostics,
+                        &Vec::new(),
+                    )
+                    .try_into()
+                    .ok()?,
                 );
                 weight.add(
                     lower
@@ -289,7 +292,7 @@ impl FrontLowerQueries {
                     && declaration.path().0.name.starts_with("$comptime:")
                     && !self.staged.declarations.contains_key(declaration)
                 {
-                    let mut weight = crate::NativeMetadataWeight::default();
+                    let mut weight = hirsel_query_products::retained::MetadataWeight::default();
                     weight.tree::<DefId, ()>(
                         staged.len() + usize::from(!staged.contains(declaration)),
                     );

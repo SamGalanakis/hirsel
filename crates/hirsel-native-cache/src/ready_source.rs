@@ -13,7 +13,7 @@ pub struct ReadySourceFacts {
 }
 impl ReadySourceFacts {
     pub fn retained_metadata_bytes(&self) -> u64 {
-        let mut weight = hirsel_engine::NativeMetadataWeight::default();
+        let mut weight = hirsel_query_products::retained::MetadataWeight::default();
         weight.path(self.origin.definition());
         weight.add(self.origin.retained_encoding_bytes());
         weight.flat_vec(&self.unique);

@@ -3,11 +3,11 @@
 //! their subscribers, which get a dirty mark; every other memo is valid at
 //! the current revision and gets its `verified_at` stamp lazily, when read.
 use super::{Durability, ReadKey, ReadKind, Reads, Revision};
-use crate::QueryKind;
 use crate::summary::SettledSummary;
 use hirsel_intern::IdHasher;
 use hirsel_intern::timings::{self, Count};
 use hirsel_intern::work::{self, Counter};
+use hirsel_query_products::QueryKind;
 use hirsel_syntax::{ContentHash, DefId};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
@@ -764,7 +764,7 @@ impl MemoGraph {
         if let Some(touched) = &self.touched_memos {
             total = total.checked_add(set::<MemoKey>(touched.capacity())?)?;
         }
-        let mut stats = crate::NativeMetadataWeight::default();
+        let mut stats = hirsel_query_products::retained::MetadataWeight::default();
         stats.tree::<QueryKind, u64>(self.stats.recomputed.len());
         (total as u64).checked_add(stats.bytes())
     }
@@ -935,8 +935,8 @@ mod tests {
 
     #[test]
     fn package_context_membership_has_bounded_scaling() {
-        use crate::memo::PackageKey;
         use hirsel_intern::Symbol;
+        use hirsel_query_products::reads::PackageKey;
         let mut measured = Vec::new();
         for n in [2048, 16384] {
             let mut graph = MemoGraph::default();

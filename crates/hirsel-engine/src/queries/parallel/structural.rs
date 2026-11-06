@@ -406,37 +406,45 @@ impl Worker<'_> {
 fn retained_bytes(input: &Input, facets: &[Facet], result: &ResultBody) -> u64 {
     // Include a sparse recipe-tree root, minimum hash-table allocation, weak
     // recipe cells, pending row and Arc headers even for the first fact.
-    let mut bytes =
-        crate::memo::retained::retained_structural_bytes(&input.syntax, &input.resolution, result)
-            .saturating_add(crate::memo::retained::retained_signature_payload_bytes(
-                &input.signature,
-            ))
-            .saturating_add(
-                (size_of::<Key>()
-                    + size_of::<QueryOutput<TypedBody>>()
-                    + 128 * size_of::<usize>()
-                    + size_of_val(facets)) as u64,
-            );
+    let mut bytes = hirsel_query_products::retained::retained_structural_bytes(
+        &input.syntax,
+        &input.resolution,
+        result,
+    )
+    .saturating_add(
+        hirsel_query_products::retained::retained_signature_payload_bytes(&input.signature),
+    )
+    .saturating_add(
+        (size_of::<Key>()
+            + size_of::<QueryOutput<TypedBody>>()
+            + 128 * size_of::<usize>()
+            + size_of_val(facets)) as u64,
+    );
     for facet in facets {
         bytes = bytes.saturating_add(match facet {
             Facet::Signature(_, Ok(signature)) => {
-                crate::memo::retained::retained_signature_payload_bytes(signature)
+                hirsel_query_products::retained::retained_signature_payload_bytes(signature)
             }
             Facet::Signature(_, Err(error)) => {
-                crate::memo::retained::retained_query_error_bytes(error)
+                hirsel_query_products::retained::retained_query_error_bytes(error)
             }
             Facet::Lookup(context, path, output) => {
                 // Path/context ownership uses the same retained read visitor.
-                crate::memo::retained::retained_structural_lookup_bytes(context, path, output)
-            }
-            Facet::Unique(path, _, failure) => {
-                crate::memo::retained::retained_structural_path_bytes(path).saturating_add(
-                    failure
-                        .as_ref()
-                        .map_or(0, |failure| failure.message.capacity() as u64),
+                hirsel_query_products::retained::retained_structural_lookup_bytes(
+                    context, path, output,
                 )
             }
-            Facet::Name(path, _) => crate::memo::retained::retained_structural_path_bytes(path),
+            Facet::Unique(path, _, failure) => {
+                hirsel_query_products::retained::retained_structural_path_bytes(path)
+                    .saturating_add(
+                        failure
+                            .as_ref()
+                            .map_or(0, |failure| failure.message.capacity() as u64),
+                    )
+            }
+            Facet::Name(path, _) => {
+                hirsel_query_products::retained::retained_structural_path_bytes(path)
+            }
         });
     }
     bytes

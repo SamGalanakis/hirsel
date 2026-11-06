@@ -82,7 +82,7 @@ mod tests {
             assert_eq!(
                 program
                     .engine
-                    .recompute_count(&generated, hirsel_engine::QueryKind::Lower),
+                    .recompute_count(&generated, hirsel_query_products::QueryKind::Lower),
                 0
             );
             let (file, installed) = program.files.last().unwrap();

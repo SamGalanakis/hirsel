@@ -1,7 +1,11 @@
 //! Host-selected compiler policy. These options affect work and retention, not
 //! language meaning. Native object storage remains the driver's own provider.
-use crate::{LoweringPolicy, QueryEngine, Verify, memo::Retention, store};
+use crate::QueryEngine;
+use crate::Verify;
+use crate::memo::Retention;
+use crate::store;
 use hirsel_intern::jobs::Jobs;
+use hirsel_query_products::LoweringPolicy;
 use std::sync::Arc;
 
 /// Policy for fresh compiler sessions. Explicit stores, including none@1, take

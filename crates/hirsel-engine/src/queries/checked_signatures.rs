@@ -65,10 +65,18 @@ impl FrontCheckedSignatures {
         })
     }
     pub(crate) fn sections_clone_bytes(&self) -> Option<u64> {
+        self.selected_sections_clone_bytes(self.inputs.keys())
+    }
+    pub(crate) fn selected_sections_clone_bytes<'a>(
+        &self,
+        paths: impl Iterator<Item = &'a DefPath>,
+    ) -> Option<u64> {
         let mut weight = hirsel_query_products::retained::MetadataWeight::default();
-        weight.tree::<DefPath, SignatureSection>(self.inputs.len());
+        let mut count = 0;
         let mut payload_bytes = 0u64;
-        for (path, input) in &self.inputs {
+        for path in paths {
+            let input = self.inputs.get(path)?;
+            count += 1;
             weight.path(path);
             weight.path(path);
             weight.flat_vec(&input.coverage);
@@ -79,6 +87,7 @@ impl FrontCheckedSignatures {
             }
             payload_bytes = payload_bytes.checked_add(payloads.bytes)?;
         }
+        weight.tree::<DefPath, SignatureSection>(count);
         weight.bytes().checked_add(payload_bytes)
     }
     /// Format one already captured section in the caller's admitted scratch.

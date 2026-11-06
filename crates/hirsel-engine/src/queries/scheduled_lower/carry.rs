@@ -486,7 +486,10 @@ impl FrontLowerQueries {
         {
             return Some(Err(error));
         }
-        Some(self.publish_live(id, key, outcome, raw, query_reads).await)
+        Some(
+            self.publish_live(id, key, outcome, raw, None, query_reads)
+                .await,
+        )
     }
 }
 fn visit(

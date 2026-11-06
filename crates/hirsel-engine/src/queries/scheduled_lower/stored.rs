@@ -39,6 +39,7 @@ impl FrontLowerQueries {
         key: &EntryKey,
         outcome: &Outcome,
         raw: &Option<RawLowerOutput>,
+        verification: Option<&hirsel_validate::VerifiedDefinition>,
     ) -> Option<()> {
         if !self.store.persistence().retains() {
             return None;
@@ -172,6 +173,24 @@ impl FrontLowerQueries {
         }
         persisted.reads_decode_bytes = weight.bytes().checked_mul(2)?.checked_add(working)?;
         let descriptor = self.store.put_content(domain, &bytes)?;
+        if let Some(evidence) = verification
+            && let Some((output, _)) = raw
+            && let Some(cache) = self.store.verifier()
+            && let Ok(views) = self
+                .namespace
+                .snapshot
+                .validation(&output.value.path.path().0.package)
+        {
+            cache.publish_definition(
+                persistent::evaluation_subject(key, &bytes),
+                &output.value,
+                self.namespace.snapshot.types().clone(),
+                self.namespace.snapshot.source_verification_policy(),
+                views,
+                evidence,
+                &[],
+            );
+        }
         if let Some(receipt) = &outcome.execution
             && let Some(cache) = self.store.verifier()
         {

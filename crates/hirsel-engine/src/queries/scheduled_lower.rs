@@ -1564,7 +1564,7 @@ impl FrontLowerQueries {
             let selections = std::mem::take(&mut *source.selections.borrow_mut());
             let action = self.output_action(id, &key, &observed);
             let execution_subject = action.0;
-            if let Some((definition, evidence)) = verification
+            if let Some((definition, evidence)) = &verification
                 && let Ok(Value::Lower(lower)) = &mut result
                 && let Some(cache) = self.store.verifier()
             {
@@ -1576,11 +1576,11 @@ impl FrontLowerQueries {
                     .and_then(|views| {
                         cache.publish_definition(
                             execution_subject,
-                            &definition,
+                            definition,
                             self.namespace.snapshot.types().clone(),
                             self.namespace.snapshot.source_verification_policy(),
                             views,
-                            &evidence,
+                            evidence,
                             &[],
                         )
                     });
@@ -1599,7 +1599,14 @@ impl FrontLowerQueries {
                 observations: None,
             };
             return self
-                .publish_live(id, &key, outcome, raw, &source.reads)
+                .publish_live(
+                    id,
+                    &key,
+                    outcome,
+                    raw,
+                    verification.as_ref().map(|(_, evidence)| evidence),
+                    &source.reads,
+                )
                 .await;
         }
         let selections = std::mem::take(&mut *source.selections.borrow_mut());
@@ -2275,9 +2282,10 @@ impl FrontLowerQueries {
         key: &EntryKey,
         mut outcome: Outcome,
         raw: Option<RawLowerOutput>,
+        verification: Option<&hirsel_validate::VerifiedDefinition>,
         query_reads: &QueryReads,
     ) -> Result<ProductRef, Reference> {
-        let _ = self.persist_live(id, key, &outcome, &raw);
+        let _ = self.persist_live(id, key, &outcome, &raw, verification);
         self.remember_live_carry(id, key, &outcome, &raw);
         let action = self.output_action(id, key, &outcome.reads);
         outcome.action = action;

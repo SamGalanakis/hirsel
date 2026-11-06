@@ -109,15 +109,17 @@ impl FrontRunQueries {
             .iter()
             .map(|d| d.definition.path().clone())
             .collect();
-        // Scalar semantic_body_node follows the complete Signature
-        // observations too: normalized coverage can omit aliases and
-        // primitive lookups whose spelling still belongs to PS9 closure.
-        if let Some(reads) = signature_reads {
-            extend_reads(&mut dependencies, &reads, |key| {
-                FrontBodyQueries::lookup_in(signatures, declarations, key)
-            });
+        // Scalar semantic_body_node follows source body observations only for
+        // callable/value items. Type declarations contribute their normalized
+        // signature and explicit drop/fact/check edges, not header lookups.
+        if !matches!(signature.kind, SignatureKind::Type(_)) {
+            if let Some(reads) = signature_reads {
+                extend_reads(&mut dependencies, &reads, |key| {
+                    FrontBodyQueries::lookup_in(signatures, declarations, key)
+                });
+            }
+            dependencies.extend(semantic.into_iter().map(|id| id.path().clone()));
         }
-        dependencies.extend(semantic.into_iter().map(|id| id.path().clone()));
         let mut executable = false;
         let mut generated = false;
         let mut implementation = ContentHash::default();
@@ -126,10 +128,12 @@ impl FrontRunQueries {
             executable = generation::executable(&syntax);
             generated = generation::generator(&syntax).is_some();
             implementation = syntax.text_hash;
-            content.extend(
-                hirsel_fmt::semantic_item(&syntax)
-                    .ok_or_else(|| operational("invalid semantic source item"))?,
-            );
+            if !matches!(signature.kind, SignatureKind::Type(_)) {
+                content.extend(
+                    hirsel_fmt::semantic_item(&syntax)
+                        .ok_or_else(|| operational("invalid semantic source item"))?,
+                );
+            }
         }
         if let SignatureKind::Type(declaration) = &signature.kind {
             dependencies.extend(declaration.drop.iter().cloned());

@@ -1281,7 +1281,12 @@ pub(super) fn install(
             roots.dedup();
             roots
         }
-        CompileOperation::ExportTir => vec![program.entry.clone()],
+        CompileOperation::ExportTir => program
+            .engine
+            .front_source_roots()
+            .into_iter()
+            .filter(|path| path.0.package == program.entry.0.package)
+            .collect(),
         CompileOperation::DataAbi => vec![],
         _ => program.engine.front_source_roots(),
     };

@@ -476,14 +476,7 @@ impl FrontProofExport {
                 input_weight.vec(&a.payload, |w, token| w.add(token.capacity()));
             }
         }
-        let input_metadata_bytes = input_weight
-            .bytes()
-            .checked_add(
-                self.headers()?
-                    .sections_clone_bytes()
-                    .ok_or(QueryError::NotImplemented)?,
-            )
-            .ok_or(QueryError::NotImplemented)?;
+        let input_metadata_bytes = input_weight.bytes();
         let mut weight = hirsel_query_products::retained::MetadataWeight::default();
         weight.add(
             size_of::<FrontProofExport>()
@@ -527,17 +520,21 @@ impl FrontProofExport {
             .get_or_init(|| {
                 let metadata = self.source_metadata(closure)?;
                 let types = self.run.lower.signatures().types().clone();
+                let headers = self.headers()?;
                 let mut edges = BTreeMap::new();
-                for (path, _) in self.headers()?.signatures() {
-                    let section = self
-                        .headers()?
-                        .section(path)
-                        .ok_or(QueryError::NotImplemented)?;
+                let mut pending: Vec<_> = closure.iter().map(DefId::intern).collect();
+                while let Some(id) = pending.pop() {
+                    if edges.contains_key(&id) {
+                        continue;
+                    }
+                    let path = id.path();
+                    let section = headers.section(path).ok_or(QueryError::NotImplemented)?;
                     let references = crate::proof_export::signature_references(&types, &section)
                         .into_iter()
                         .map(|path| DefId::intern(&path))
                         .collect::<Vec<_>>();
-                    edges.insert(DefId::intern(path), references);
+                    pending.extend(references.iter().copied());
+                    edges.insert(id, references);
                 }
                 let mut weight = hirsel_query_products::retained::MetadataWeight::default();
                 weight.map(&edges, |weight, _, edges| weight.flat_vec(edges));
@@ -553,9 +550,13 @@ impl FrontProofExport {
                     .saturating_mul(2)
                     .max(4)
                     .saturating_mul(size_of::<DefId>()) as u64;
+                let sections = headers
+                    .selected_sections_clone_bytes(edges.keys().map(|id| id.path()))
+                    .ok_or(QueryError::NotImplemented)?;
                 let input_metadata_bytes = metadata
                     .input_metadata_bytes
                     .checked_add(bytes)
+                    .and_then(|bytes| bytes.checked_add(sections))
                     .ok_or(QueryError::NotImplemented)?;
                 Ok(SignatureEdges {
                     edges,

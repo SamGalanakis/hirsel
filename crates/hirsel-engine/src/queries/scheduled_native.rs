@@ -469,6 +469,19 @@ impl QueryTask for Task {
                 }
             }
         };
+        if result.is_ok() {
+            for query in [
+                self.owner.front.query(&self.path),
+                self.owner.front.body_query(&self.path),
+                self.owner.lower.query(&self.path),
+                self.owner.lower.evaluate_query(&self.path),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                cx.consume(query);
+            }
+        }
         match result {
             Ok(product) => QueryPoll::Complete(product),
             Err(error) => QueryPoll::Failed(error),

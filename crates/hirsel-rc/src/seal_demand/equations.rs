@@ -26,6 +26,16 @@ fn path_bytes(path: &DefPath) -> usize {
         + path.0.modules.iter().map(String::capacity).sum::<usize>()
 }
 
+pub(super) fn compact_path(path: &mut DefPath) {
+    path.0.package.name.shrink_to_fit();
+    path.0.package.version.shrink_to_fit();
+    path.0.name.shrink_to_fit();
+    path.0.modules.shrink_to_fit();
+    for module in &mut path.0.modules {
+        module.shrink_to_fit();
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 struct Target {
     definition: DefPath,
@@ -80,6 +90,7 @@ impl LocalDemandEquations {
     /// Finish immutable descriptor storage without retaining builder capacity.
     /// Every equation, value and semantic edge remains unchanged.
     pub fn compact(&mut self) {
+        compact_path(&mut self.owner.0);
         self.parameters.shrink_to_fit();
         self.captures.shrink_to_fit();
         self.flow.shrink_to_fit();
@@ -89,9 +100,15 @@ impl LocalDemandEquations {
         self.seals.shrink_to_fit();
         for closure in &mut self.closures {
             closure.captures.shrink_to_fit();
+            if let Some(target) = &mut closure.target {
+                compact_path(&mut target.definition);
+            }
         }
         for call in &mut self.calls {
             call.arguments.shrink_to_fit();
+            if let Some(target) = &mut call.target {
+                compact_path(&mut target.definition);
+            }
         }
     }
 

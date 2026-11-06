@@ -20,6 +20,12 @@ pub struct UnitDemand {
 }
 
 impl UnitDemand {
+    /// Keep decoded selections within the layout of their prospective clone.
+    pub fn compact(&mut self) {
+        equations::compact_path(&mut self.owner.0);
+        self.values.shrink_to_fit();
+    }
+
     pub fn owner(&self) -> &equations::Function {
         &self.owner
     }

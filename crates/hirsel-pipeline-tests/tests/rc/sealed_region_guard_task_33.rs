@@ -62,7 +62,15 @@ fn original_guard_task_waits_for_dependencies_and_keeps_its_existing_grant_with_
                     .collect::<Result<Vec<_>, _>>()
                     .unwrap();
                 locals.sort_by(|a, b| a.owner().cmp(b.owner()));
+                for local in &mut locals {
+                    local.compact();
+                }
                 let bytes = Plan::admission_bytes(&locals);
+                for local in &mut locals {
+                    let encoded = serde_json::to_vec(local).unwrap();
+                    *local = serde_json::from_slice(&encoded).unwrap();
+                    local.compact();
+                }
                 let budget = hirsel_engine_admission::ProcessBudget::new(bytes);
                 let allowance = Arc::new(budget.reserve(bytes).unwrap());
                 let mut context = Context {

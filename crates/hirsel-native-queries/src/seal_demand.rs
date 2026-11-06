@@ -249,8 +249,8 @@ impl Plan {
             && previous.action == self.action
             && previous.reference.domain == OUTPUT
             && let Some(bytes) = store.get_content(previous.reference)
-            && let Ok(units) = serde_json::from_slice::<Vec<UnitDemand>>(&bytes)
-            && self.check(&units).is_ok()
+            && let Ok(mut units) = serde_json::from_slice::<Vec<UnitDemand>>(&bytes)
+            && self.check(&mut units).is_ok()
             && let Some(archive) = store.copy_product_archive(previous.reference)
         {
             return Ok(Selection {
@@ -265,12 +265,12 @@ impl Plan {
             .map(|input| input.equations.clone())
             .collect::<Vec<_>>();
         let solved = solve(&equations, &self.entries)?;
-        let units = equations
+        let mut units = equations
             .iter()
             .enumerate()
             .map(|(i, original)| solved.for_unit(i, original))
             .collect::<Result<Vec<_>, _>>()?;
-        self.check(&units)?;
+        self.check(&mut units)?;
         let bytes = serde_json::to_vec(&units).map_err(|e| e.to_string())?;
         let record = store
             .put_content(OUTPUT, &bytes)
@@ -289,11 +289,13 @@ impl Plan {
         })
     }
 
-    fn check(&self, units: &[UnitDemand]) -> Result<(), String> {
+    fn check(&self, units: &mut Vec<UnitDemand>) -> Result<(), String> {
         if units.len() != self.inputs.len() {
             return Err("seal-demand output member count".into());
         }
-        for (unit, input) in units.iter().zip(&self.inputs) {
+        units.shrink_to_fit();
+        for (unit, input) in units.iter_mut().zip(&self.inputs) {
+            unit.compact();
             unit.validate()?;
             if unit.owner() != input.equations.owner()
                 || unit.original_value_count() != input.equations.value_count()
@@ -333,7 +335,10 @@ impl GuardTasks {
         if needed > admitted_bytes
             || admitted_bytes > allowances.iter().map(|a| a.bytes()).sum::<u64>()
         {
-            return Err("seal-demand metadata exceeds its original admission".into());
+            return Err(format!(
+                "seal-demand metadata exceeds its original admission: needed {needed}, admitted {admitted_bytes}, live {}",
+                allowances.iter().map(|a| a.bytes()).sum::<u64>()
+            ));
         }
         if plan.scratch_bytes() > weight.scratch {
             return Err(format!(

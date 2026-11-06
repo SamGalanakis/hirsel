@@ -5,7 +5,7 @@ use super::*;
 use crate::products::ProductSource;
 use crate::products::{LiveAdmission, LiveLowerProduct, WeakLowerProduct};
 mod carry;
-mod check;
+pub(in crate::queries) mod check;
 mod constants;
 mod dependencies;
 mod depth;

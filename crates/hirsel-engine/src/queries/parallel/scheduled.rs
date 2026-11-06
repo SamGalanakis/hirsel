@@ -1808,6 +1808,21 @@ impl FrontBodyQueries {
             FrontSlot::Live { outcome, .. } => Some(outcome.reads.clone()),
         }
     }
+    /// Compact dependency classification for Check's speculative window.
+    pub(in crate::queries) fn lowering_inputs(
+        &self,
+        path: &DefPath,
+    ) -> Option<lowering::LoweringUse> {
+        let query = self.query(path)?;
+        let slots = self.slots.lock().unwrap_or_else(|e| e.into_inner());
+        let FrontSlot::Live { outcome, .. } = slots.get(&query.address.0)? else {
+            return None;
+        };
+        match &outcome.state {
+            FrontState::Settled { lowering, .. } => Some(lowering.clone()),
+            FrontState::Failed { .. } => None,
+        }
+    }
     /// Settled Check inputs own no analyzed body and never read its archive.
     pub(crate) fn check_facts(
         &self,

@@ -1,7 +1,7 @@
 //! Dependency admission and ordered publication of one complete source Check.
-//! The admission producer streams P/Lower work independently of SCC acceptance.
-//! This owner reduces settled observations in source order. An unavailable P or
-//! failed Lower still withholds its publication suffix, never independent work.
+//! One bounded stream admits and publishes source roots independently of SCC
+//! acceptance. Operational stops fence effectful successors; ordinary bodies
+//! and independent pure evaluations retain their worker window.
 use super::reader_receipts::{ReaderReceipt, ReaderSequence};
 use super::*;
 use hirsel_engine_runtime::*;
@@ -13,7 +13,6 @@ pub use products::FrontCheckedInput;
 mod scope;
 pub use scope::FrontCheckScope;
 pub const FRONT_CHECK_KIND: u32 = 0x4600_000a;
-const FRONT_WINDOW: usize = 1;
 const OUTPUT: Domain = Domain {
     kind: 0x4600_000b,
     schema: 4,
@@ -70,8 +69,15 @@ impl DeadArmLint {
     }
 }
 #[derive(Clone)]
+struct RootInput {
+    path: DefPath,
+    executable: bool,
+    ordered_front: bool,
+    ordered_lower: bool,
+}
+#[derive(Clone)]
 struct FileInput {
-    paths: Vec<(DefPath, bool)>,
+    paths: Vec<RootInput>,
     lowering: LoweringPolicy,
     diagnostics: Vec<Diagnostic>,
     error: Option<QueryError>,
@@ -207,7 +213,7 @@ impl FrontCheckQueries {
     /// Ordered file/path cursors, product-reference rows and separate retained
     /// live output bounds. Bodies keep their own producer admission.
     pub fn input_bytes(definitions: &[DefPath], files: usize, weight: MemoryWeight) -> Option<u64> {
-        let path_slot = (std::mem::size_of::<(DefPath, bool)>()
+        let path_slot = (std::mem::size_of::<RootInput>()
             + std::mem::size_of::<(DefPath, ProductRef)>()
             + std::mem::size_of::<(DefPath, FrontObservation)>()
             + 2 * std::mem::size_of::<(DefPath, Reference)>()
@@ -242,16 +248,6 @@ impl FrontCheckQueries {
     }
     pub fn query(&self) -> QueryId {
         self.query
-    }
-    /// The bounded body stream is a dependency of Check, not an acceptance root.
-    pub fn admission_query(&self) -> QueryId {
-        QueryId {
-            kind: FRONT_CHECK_KIND,
-            address: hirsel_artifact_store::Address(ContentHash::of_parts(
-                "hirsel.front.check-admission.address.v1",
-                [self.query.address.0.0.as_slice()],
-            )),
-        }
     }
     pub fn diagnostic_phase(&self, diagnostic: &Diagnostic) -> Option<String> {
         let matches = |candidate: &Diagnostic| {
@@ -361,9 +357,6 @@ impl FrontCheckQueries {
 struct Factory(Arc<FrontCheckQueries>);
 impl QueryFactory for Factory {
     fn create(&self, id: QueryId) -> Result<Box<dyn QueryTask>, Reference> {
-        if id == self.0.admission_query() {
-            return Ok(Box::new(admission::Task::new(self.0.clone())));
-        }
         if id != self.0.query {
             return Err(self.0.protocol_refusal());
         }
@@ -371,13 +364,7 @@ impl QueryFactory for Factory {
         Ok(Box::new(Task {
             queries: self.0.clone(),
             files: self.0.files.iter().cloned().map(File::new).collect(),
-            publication: Publication::Front,
-            admitted: false,
-            file: 0,
-            root: 0,
-            selecting_instances: false,
-            staged: None,
-            instances: Vec::new(),
+            publication: Publication::roots(0),
             reads: ReaderSequence::default(),
             front: Vec::new(),
             lowered: Vec::new(),
@@ -387,7 +374,6 @@ impl QueryFactory for Factory {
             lint_complete: true,
             lint_errors: BTreeSet::new(),
             lint_constructed: BTreeSet::new(),
-            terminal: None,
         }))
     }
 }
@@ -396,8 +382,7 @@ struct File {
     diagnostics: Vec<Diagnostic>,
     error: Option<QueryError>,
     phase: Option<QueryKind>,
-    comptime: Vec<DefPath>,
-    rest: Vec<DefPath>,
+    lower_diagnostics: Vec<Diagnostic>,
     source_rules: bool,
 }
 impl File {
@@ -407,46 +392,71 @@ impl File {
             error: input.error.clone(),
             phase: input.phase,
             input,
-            comptime: Vec::new(),
-            rest: Vec::new(),
+            lower_diagnostics: Vec::new(),
             source_rules: false,
         }
     }
     fn clean(&self) -> bool {
-        self.error.is_none() && !has_errors(&self.diagnostics)
+        self.error.is_none()
+            && !has_errors(&self.diagnostics)
+            && !has_errors(&self.lower_diagnostics)
     }
     fn error(&mut self, error: QueryError, phase: Option<QueryKind>) {
         match error {
             QueryError::Diagnostics(diagnostics) => self.diagnostics.extend(diagnostics),
-            other => {
+            other if self.error.is_none() => {
                 self.error = Some(other);
                 self.phase = phase;
             }
+            _ => {}
         }
     }
 }
-// Ordered reduction only. All body work, including selected instances and
-// staged evaluation, has already been admitted by the independent stream.
-#[derive(Clone, Copy)]
+// The cursor owns the selected inventory from admission through publication.
+// No phase has an optional payload or a separate cross-phase reset protocol.
 enum Publication {
-    Front,
+    Roots {
+        file: usize,
+        root: usize,
+        window: std::collections::VecDeque<admission::RootRead>,
+    },
+    SelectInstances {
+        file: usize,
+    },
+    Instances {
+        file: usize,
+        paths: Vec<DefPath>,
+        next: usize,
+    },
+    SelectStaged {
+        file: usize,
+    },
+    RuntimeStaged {
+        file: usize,
+        selections: Vec<super::scheduled_lower::staged_runtime::Selection>,
+        next: usize,
+    },
+    Extra {
+        next: usize,
+    },
     Growth,
     Storage,
-    Comptime,
-    Rest,
-    RuntimeStaged,
     Done,
+    Finished(Result<ProductRef, Reference>),
+}
+impl Publication {
+    fn roots(file: usize) -> Self {
+        Self::Roots {
+            file,
+            root: 0,
+            window: std::collections::VecDeque::new(),
+        }
+    }
 }
 struct Task {
     queries: Arc<FrontCheckQueries>,
     files: Vec<File>,
     publication: Publication,
-    admitted: bool,
-    file: usize,
-    root: usize,
-    selecting_instances: bool,
-    instances: Vec<DefPath>,
-    staged: Option<Vec<super::scheduled_lower::staged_runtime::Selection>>,
     reads: ReaderSequence,
     front: Vec<(DefPath, FrontObservation)>,
     lowered: Vec<(DefPath, ProductRef)>,
@@ -456,7 +466,6 @@ struct Task {
     lint_complete: bool,
     lint_errors: BTreeSet<DefPath>,
     lint_constructed: BTreeSet<(DefPath, u32)>,
-    terminal: Option<Result<ProductRef, Reference>>,
 }
 impl QueryTask for Task {
     fn id(&self) -> QueryId {
@@ -466,35 +475,14 @@ impl QueryTask for Task {
         self.queries.weight
     }
     fn poll(&mut self, cx: &mut dyn QueryContext) -> QueryPoll {
-        if let Some(result) = self.terminal.clone() {
-            return finish(result);
-        }
-        // These producers can make progress independently. In particular the
-        // body stream must not be a continuation of the aggregate SCC verdict.
-        if !self.admitted {
-            let mut pending = Vec::new();
-            let admission = self.queries.admission_query();
-            match cx.read(admission) {
-                Poll::Pending => pending.push(admission),
-                Poll::Ready(Err(error)) => return QueryPoll::Failed(error),
-                Poll::Ready(Ok(_)) => cx.consume(admission),
-            }
-            if self.files.iter().any(File::clean) {
-                let growth = self.queries.plan.growth.query();
-                if cx.read(growth).is_pending() {
-                    pending.push(growth);
-                }
-            }
-            if !pending.is_empty() {
-                return QueryPoll::Waiting(pending);
-            }
-            self.admitted = true;
+        if let Publication::Finished(result) = &self.publication {
+            return finish(result.clone());
         }
         match self.advance(cx) {
-            Ok(Some(waiting)) => QueryPoll::Waiting(waiting),
+            Ok(Some(waiting)) => QueryPoll::WaitingAny(waiting),
             result => {
                 let result = result.and_then(|_| self.complete());
-                self.terminal = Some(result.clone());
+                self.publication = Publication::Finished(result.clone());
                 finish(result)
             }
         }
@@ -509,152 +497,195 @@ fn finish(result: Result<ProductRef, Reference>) -> QueryPoll {
 impl Task {
     fn advance(&mut self, cx: &mut dyn QueryContext) -> Result<Option<Vec<QueryId>>, Reference> {
         loop {
-            match self.publication {
-                Publication::Front => {
-                    // Only this source-order window pins speculative P work.
-                    // Consumed roots retain observations and release their edge.
-                    while self.file < self.files.len() {
-                        let file = &mut self.files[self.file];
-                        if file.input.error.is_some()
-                            || has_errors(&file.input.diagnostics)
-                            || file.error.is_some()
-                            || self.root == file.input.paths.len()
-                        {
-                            self.file += 1;
-                            self.root = 0;
-                            continue;
-                        }
-                        let mut pending = Vec::new();
-                        for (path, _) in file.input.paths.iter().skip(self.root).take(FRONT_WINDOW)
-                        {
-                            let id = self
-                                .queries
-                                .plan
-                                .front
-                                .query(path)
-                                .ok_or_else(|| self.queries.protocol_refusal())?;
-                            if cx.read(id).is_pending() {
-                                pending.push(id);
-                            }
-                        }
-                        if !pending.is_empty() {
-                            return Ok(Some(pending));
-                        }
-                        let (path, executable) = &file.input.paths[self.root];
-                        let id = self
-                            .queries
-                            .plan
-                            .front
-                            .query(path)
-                            .ok_or_else(|| self.queries.protocol_refusal())?;
-                        let selected = match cx.read(id) {
-                            Poll::Pending => return Ok(Some(vec![id])),
-                            Poll::Ready(selected) => selected,
-                        };
-                        let reference = selected.clone();
-                        let Some(facts) = self.queries.plan.front.check_facts(reference.clone())
-                        else {
-                            return Err(reference
-                                .err()
-                                .unwrap_or_else(|| self.queries.protocol_refusal()));
-                        };
-                        let observed = self
-                            .reads
-                            .record_receipt(
-                                self.queries
-                                    .plan
-                                    .front
-                                    .reader_receipt(
-                                        id,
-                                        &facts.reads,
-                                        &self.queries.store,
-                                        self.queries.weight.scratch,
-                                    )
-                                    .ok_or(self.queries.errors.resource)?,
-                                self.queries.weight.retained,
-                                Some((DefId::intern(path), false)),
-                            )
-                            .ok_or(self.queries.errors.resource)?;
-                        if self
-                            .queries
-                            .lint
-                            .as_ref()
-                            .is_some_and(|lint| lint.bodies.contains(path))
-                        {
-                            self.lint_seen += 1;
-                            if let Some(uses) = facts.dead_arms {
-                                let lint = self
-                                    .queries
-                                    .lint
-                                    .as_ref()
-                                    .ok_or_else(|| self.queries.protocol_refusal())?;
-                                self.lint_errors.extend(
-                                    uses.errors
-                                        .into_iter()
-                                        .filter(|path| lint.declarations.contains_key(path)),
-                                );
-                                self.lint_constructed
-                                    .extend(uses.constructed.into_iter().filter(|(path, arm)| {
-                                        lint.declarations
-                                            .get(path)
-                                            .is_some_and(|(_, arms)| (*arm as usize) < arms.len())
-                                    }));
-                            } else {
-                                self.lint_complete = false;
-                            }
-                        }
-                        file.source_rules |= facts.source_rules;
-                        match facts.result {
-                            Ok(diagnostics) => {
-                                file.diagnostics.extend(diagnostics);
-                                if let Ok(product) = selected {
-                                    self.front.push((
-                                        path.clone(),
-                                        FrontObservation {
-                                            address: product.address,
-                                            action: product.action,
-                                            domain: product.domain(),
-                                            reads: observed,
-                                        },
-                                    ));
-                                }
-                                if *executable {
-                                    if facts
-                                        .lowering
-                                        .as_ref()
-                                        .ok_or_else(|| self.queries.protocol_refusal())?
-                                        .needed_with(|id| self.queries.constants.contains(&id))
-                                    {
-                                        file.comptime.push(path.clone());
-                                    } else {
-                                        file.rest.push(path.clone());
-                                    }
-                                }
-                            }
-                            Err(error) => {
-                                self.failed_front.push((
-                                    path.clone(),
-                                    reference
-                                        .err()
-                                        .unwrap_or_else(|| self.queries.protocol_refusal()),
-                                ));
-                                file.error(error, facts.phase);
-                                if file.error.is_none()
-                                    && let Some(phase) = facts.incomplete
-                                {
-                                    file.error(QueryError::NotImplemented, Some(phase));
-                                }
-                            }
-                        }
-                        cx.consume(id);
-                        self.root += 1;
+            match &mut self.publication {
+                Publication::Roots { file, root, window } => {
+                    let file_index = *file;
+                    let Some(file) = self.files.get_mut(file_index) else {
+                        self.publication = Publication::Extra { next: 0 };
+                        continue;
+                    };
+                    if file.input.error.is_some() || has_errors(&file.input.diagnostics) {
+                        self.publication = Publication::roots(file_index + 1);
+                        continue;
                     }
-                    self.publication = Publication::Growth;
-                    self.file = 0;
-                    self.root = 0;
+                    if *root == file.input.paths.len() {
+                        self.publication = Publication::SelectInstances { file: file_index };
+                        continue;
+                    }
+                    let width = admission::width(cx, self.queries.weight, size_of::<Self>());
+                    if width == 0 {
+                        return Err(self.queries.errors.resource);
+                    }
+                    if window.capacity() < width {
+                        window.reserve_exact(width - window.len());
+                    }
+                    while window.len() < width && *root + window.len() < file.input.paths.len() {
+                        window.push_back(admission::RootRead::Front);
+                    }
+                    let mut pending = Vec::with_capacity(width);
+                    for (offset, read) in window.iter_mut().enumerate() {
+                        if let Some(id) = read.poll(
+                            &self.queries,
+                            cx,
+                            &file.input,
+                            *root + offset,
+                            offset == 0,
+                            file.error.is_some(),
+                        )? {
+                            pending.push(id);
+                        }
+                    }
+                    if window.front().is_some_and(admission::RootRead::settled) {
+                        let read = window.pop_front().ok_or(self.queries.errors.protocol)?;
+                        let path = file.input.paths[*root].path.clone();
+                        *root += 1;
+                        self.publish_root(cx, file_index, path, read)?;
+                        if !pending.is_empty() { return Ok(Some(pending)); }
+                        continue;
+                    }
+                    if pending.is_empty() {
+                        return Err(self.queries.protocol_refusal());
+                    }
+                    return Ok(Some(pending));
+                }
+                Publication::SelectInstances { file } => {
+                    let index = *file;
+                    if !self.files[index].clean() {
+                        self.publication = Publication::roots(index + 1);
+                        continue;
+                    }
+                    let roots = self.files[index]
+                        .input
+                        .paths
+                        .iter()
+                        .map(|work| work.path.clone());
+                    match self
+                        .queries
+                        .plan
+                        .lower
+                        .selected_instances(roots, self.queries.weight.scratch)
+                    {
+                        Ok(paths) => {
+                            self.publication = Publication::Instances {
+                                file: index,
+                                paths: paths.into_iter().collect(),
+                                next: 0,
+                            }
+                        }
+                        Err(error) => {
+                            self.files[index].error(error, Some(QueryKind::Lower));
+                            self.publication = Publication::roots(index + 1);
+                        }
+                    }
+                }
+                Publication::Instances { file, paths, next } => {
+                    let index = *file;
+                    if !self.files[index].clean() || *next == paths.len() {
+                        self.publication = Publication::SelectStaged { file: index };
+                        continue;
+                    }
+                    let path = paths[*next].clone();
+                    let id = self
+                        .queries
+                        .plan
+                        .lower
+                        .query(&path)
+                        .ok_or(self.queries.errors.protocol)?;
+                    let facts = match self.queries.plan.lower.poll_check(cx, id) {
+                        Poll::Pending => return Ok(Some(vec![id])),
+                        Poll::Ready(facts) => facts?,
+                    };
+                    *next += 1;
+                    self.publish_lower(index, path, facts)?;
+                }
+                Publication::SelectStaged { file } => {
+                    let index = *file;
+                    if !self.files[index].clean() {
+                        self.publication = Publication::roots(index + 1);
+                        continue;
+                    }
+                    let roots = self.files[index]
+                        .input
+                        .paths
+                        .iter()
+                        .map(|work| work.path.clone());
+                    match self.queries.plan.lower.runtime_staged_queries(
+                        roots,
+                        self.queries.weight.scratch,
+                        self.queries.weight.retained,
+                    ) {
+                        Ok(selections) => {
+                            self.publication = Publication::RuntimeStaged {
+                                file: index,
+                                selections,
+                                next: 0,
+                            }
+                        }
+                        Err(error) => {
+                            self.files[index].error(error, Some(QueryKind::Lower));
+                            self.publication = Publication::roots(index + 1);
+                        }
+                    }
+                }
+                Publication::RuntimeStaged {
+                    file,
+                    selections,
+                    next,
+                } => {
+                    let index = *file;
+                    if !self.files[index].clean() || *next == selections.len() {
+                        self.publication = Publication::roots(index + 1);
+                        continue;
+                    }
+                    let (id, site) = selections[*next];
+                    let facts = match self.queries.plan.lower.poll_check(cx, id) {
+                        Poll::Pending => return Ok(Some(vec![id])),
+                        Poll::Ready(facts) => facts?,
+                    };
+                    self.reads
+                        .record(
+                            &*self.queries.store,
+                            &facts.reads,
+                            self.queries.weight.scratch,
+                            self.queries.weight.retained,
+                            None,
+                        )
+                        .ok_or(self.queries.errors.resource)?;
+                    if let Err((reference, _)) = facts.result {
+                        self.files[index].error(
+                            self.queries
+                                .plan
+                                .lower
+                                .staged_failure(id, reference, site)
+                                .ok_or(reference)?,
+                            Some(QueryKind::Lower),
+                        );
+                    }
+                    *next += 1;
+                }
+                Publication::Extra { next } => {
+                    let Some(path) = self.queries.instances.get(*next) else {
+                        self.publication = Publication::Growth;
+                        continue;
+                    };
+                    let id = self
+                        .queries
+                        .plan
+                        .front
+                        .query(path)
+                        .ok_or(self.queries.errors.protocol)?;
+                    match cx.read(id) {
+                        Poll::Pending => return Ok(Some(vec![id])),
+                        Poll::Ready(_) => cx.consume(id),
+                    }
+                    *next += 1;
                 }
                 Publication::Growth => {
-                    if self.files.iter().any(File::clean) {
+                    // SCC acceptance cannot admit an effectful suffix that the
+                    // stream withheld. It never gates ordinary body scheduling.
+                    if self.files.iter().any(File::clean)
+                        && self.files.iter().all(|file| file.error.is_none())
+                    {
                         let id = self.queries.plan.growth.query();
                         let selected = match cx.read(id) {
                             Poll::Pending => return Ok(Some(vec![id])),
@@ -712,6 +743,7 @@ impl Task {
                 }
                 Publication::Storage => {
                     if self.files.iter().any(File::clean)
+                        && self.files.iter().all(|file| file.error.is_none())
                         && self.files.iter().any(|file| file.source_rules)
                     {
                         if let Some(storage) = &self.queries.storage {
@@ -761,154 +793,152 @@ impl Task {
                             }
                         }
                     }
-                    self.publication = Publication::Comptime;
-                }
-                Publication::Comptime | Publication::Rest => {
-                    let rest = matches!(self.publication, Publication::Rest);
-                    while self.file < self.files.len() {
-                        let file = &mut self.files[self.file];
-                        if !file.clean()
-                            || (rest && file.input.lowering != LoweringPolicy::Reachable)
-                        {
-                            self.file += 1;
-                            self.root = 0;
-                            self.selecting_instances = false;
-                            self.instances.clear();
-                            continue;
-                        }
-                        let paths = if rest {
-                            &file.rest
-                        } else if self.selecting_instances {
-                            &self.instances
-                        } else {
-                            &file.comptime
-                        };
-                        if self.root == paths.len() {
-                            if !rest && !self.selecting_instances {
-                                let roots = file.input.paths.iter().map(|(path, _)| path.clone());
-                                match self
-                                    .queries
-                                    .plan
-                                    .lower
-                                    .selected_instances(roots, self.queries.weight.scratch)
-                                {
-                                    Ok(instances) => {
-                                        self.instances = instances.into_iter().collect()
-                                    }
-                                    Err(error) => file.error(error, Some(QueryKind::Lower)),
-                                }
-                                self.selecting_instances = true;
-                                self.root = 0;
-                                continue;
-                            }
-                            self.file += 1;
-                            self.root = 0;
-                            self.selecting_instances = false;
-                            self.instances.clear();
-                            continue;
-                        }
-                        let path = &paths[self.root];
-                        let lower = &self.queries.plan.lower;
-                        let id = lower
-                            .query(path)
-                            .ok_or_else(|| self.queries.protocol_refusal())?;
-                        let facts = match lower.poll_check(cx, id) {
-                            Poll::Pending => return Ok(Some(vec![id])),
-                            Poll::Ready(facts) => facts?,
-                        };
-                        self.reads
-                            .record(
-                                &*self.queries.store,
-                                &facts.reads,
-                                self.queries.weight.scratch,
-                                self.queries.weight.retained,
-                                None,
-                            )
-                            .ok_or(self.queries.errors.resource)?;
-                        match facts.result {
-                            Ok((diagnostics, observations)) => {
-                                file.diagnostics.extend(diagnostics);
-                                self.lowered.push((path.clone(), observations));
-                            }
-                            Err((reference, error)) => {
-                                self.failed_lowered.push((path.clone(), reference));
-                                file.error(error, Some(QueryKind::Lower));
-                            }
-                        }
-                        self.root += 1;
-                    }
-                    self.file = 0;
-                    self.root = 0;
-                    self.publication = if rest {
-                        Publication::RuntimeStaged
-                    } else {
-                        Publication::Rest
-                    };
-                }
-                Publication::RuntimeStaged => {
-                    while self.file < self.files.len() {
-                        let file = &mut self.files[self.file];
-                        if !file.clean() {
-                            self.file += 1;
-                            self.root = 0;
-                            self.staged = None;
-                            continue;
-                        }
-                        if self.staged.is_none() {
-                            let roots = file.input.paths.iter().map(|(path, _)| path.clone());
-                            match self.queries.plan.lower.runtime_staged_queries(
-                                roots,
-                                self.queries.weight.scratch,
-                                self.queries.weight.retained,
-                            ) {
-                                Ok(staged) => self.staged = Some(staged),
-                                Err(error) => {
-                                    file.error(error, Some(QueryKind::Lower));
-                                    continue;
-                                }
-                            }
-                        }
-                        let Some((id, site)) = self
-                            .staged
-                            .as_ref()
-                            .and_then(|rows| rows.get(self.root))
-                            .copied()
-                        else {
-                            self.file += 1;
-                            self.root = 0;
-                            self.staged = None;
-                            continue;
-                        };
-                        let facts = match self.queries.plan.lower.poll_check(cx, id) {
-                            Poll::Pending => return Ok(Some(vec![id])),
-                            Poll::Ready(facts) => facts?,
-                        };
-                        self.reads
-                            .record(
-                                &*self.queries.store,
-                                &facts.reads,
-                                self.queries.weight.scratch,
-                                self.queries.weight.retained,
-                                None,
-                            )
-                            .ok_or(self.queries.errors.resource)?;
-                        if let Err((reference, _)) = facts.result {
-                            file.error(
-                                self.queries
-                                    .plan
-                                    .lower
-                                    .staged_failure(id, reference, site)
-                                    .ok_or(reference)?,
-                                Some(QueryKind::Lower),
-                            );
-                        }
-                        self.root += 1;
-                    }
                     self.publication = Publication::Done;
                 }
-                Publication::Done => return Ok(None),
+                Publication::Done | Publication::Finished(_) => return Ok(None),
             }
         }
+    }
+    fn publish_root(
+        &mut self,
+        cx: &mut dyn QueryContext,
+        file_index: usize,
+        path: DefPath,
+        read: admission::RootRead,
+    ) -> Result<(), Reference> {
+        let admission::RootRead::Settled { front, lower } = read else {
+            return Err(self.queries.errors.protocol);
+        };
+        if let Some(selected) = front {
+            let file = &mut self.files[file_index];
+            let path = &path;
+            let id = self
+                .queries
+                .plan
+                .front
+                .query(path)
+                .ok_or(self.queries.errors.protocol)?;
+            let reference = selected.clone();
+            let Some(facts) = self.queries.plan.front.check_facts(reference.clone()) else {
+                return Err(reference
+                    .err()
+                    .unwrap_or_else(|| self.queries.protocol_refusal()));
+            };
+            let observed = self
+                .reads
+                .record_receipt(
+                    self.queries
+                        .plan
+                        .front
+                        .reader_receipt(
+                            id,
+                            &facts.reads,
+                            &self.queries.store,
+                            self.queries.weight.scratch,
+                        )
+                        .ok_or(self.queries.errors.resource)?,
+                    self.queries.weight.retained,
+                    Some((DefId::intern(path), false)),
+                )
+                .ok_or(self.queries.errors.resource)?;
+            if self
+                .queries
+                .lint
+                .as_ref()
+                .is_some_and(|lint| lint.bodies.contains(path))
+            {
+                self.lint_seen += 1;
+                if let Some(uses) = facts.dead_arms {
+                    let lint = self
+                        .queries
+                        .lint
+                        .as_ref()
+                        .ok_or_else(|| self.queries.protocol_refusal())?;
+                    self.lint_errors.extend(
+                        uses.errors
+                            .into_iter()
+                            .filter(|path| lint.declarations.contains_key(path)),
+                    );
+                    self.lint_constructed
+                        .extend(uses.constructed.into_iter().filter(|(path, arm)| {
+                            lint.declarations
+                                .get(path)
+                                .is_some_and(|(_, arms)| (*arm as usize) < arms.len())
+                        }));
+                } else {
+                    self.lint_complete = false;
+                }
+            }
+            file.source_rules |= facts.source_rules;
+            match facts.result {
+                Ok(diagnostics) => {
+                    file.diagnostics.extend(diagnostics);
+                    if let Ok(product) = selected {
+                        self.front.push((
+                            path.clone(),
+                            FrontObservation {
+                                address: product.address,
+                                action: product.action,
+                                domain: product.domain(),
+                                reads: observed,
+                            },
+                        ));
+                    }
+                }
+                Err(error) => {
+                    self.failed_front.push((
+                        path.clone(),
+                        reference
+                            .err()
+                            .unwrap_or_else(|| self.queries.protocol_refusal()),
+                    ));
+                    file.error(error, facts.phase);
+                    if file.error.is_none()
+                        && let Some(phase) = facts.incomplete
+                    {
+                        file.error(QueryError::NotImplemented, Some(phase));
+                    }
+                }
+            }
+            cx.consume(id);
+        }
+        if let Some(facts) = lower
+            && self.files[file_index].error.is_none()
+        {
+            self.publish_lower(file_index, path, facts)?;
+        }
+        Ok(())
+    }
+    fn publish_lower(
+        &mut self,
+        file: usize,
+        path: DefPath,
+        facts: super::scheduled_lower::check::CheckFacts,
+    ) -> Result<(), Reference> {
+        self.reads
+            .record(
+                &*self.queries.store,
+                &facts.reads,
+                self.queries.weight.scratch,
+                self.queries.weight.retained,
+                None,
+            )
+            .ok_or(self.queries.errors.resource)?;
+        match facts.result {
+            Ok((diagnostics, observations)) => {
+                self.files[file].lower_diagnostics.extend(diagnostics);
+                self.lowered.push((path, observations));
+            }
+            Err((reference, QueryError::Diagnostics(diagnostics))) => {
+                self.failed_lowered.push((path, reference));
+                self.files[file].lower_diagnostics.extend(diagnostics);
+            }
+            Err((reference, error)) => {
+                self.failed_lowered.push((path, reference));
+                self.files[file].error(error, Some(QueryKind::Lower));
+            }
+        }
+        Ok(())
     }
     fn complete(&mut self) -> Result<ProductRef, Reference> {
         let queries = &self.queries;
@@ -961,7 +991,12 @@ impl Task {
         let mut diagnostics: Vec<_> = self
             .files
             .iter()
-            .flat_map(|file| file.diagnostics.iter().cloned())
+            .flat_map(|file| {
+                file.diagnostics
+                    .iter()
+                    .chain(&file.lower_diagnostics)
+                    .cloned()
+            })
             .collect();
         // The root package's dead error arms (LANG-8) warn only after a clean
         // complete check; a body without settled facts leaves it unlinted.
@@ -1185,14 +1220,22 @@ impl QueryEngine {
                             ),
                         }));
                     }
-                    input
-                        .paths
-                        .push((item.definition.clone(), item.facts.executable));
+                    input.paths.push(RootInput {
+                        path: item.definition.clone(),
+                        executable: item.facts.executable,
+                        ordered_front: item.facts.generator || item.facts.specializes,
+                        ordered_lower: item.facts.generator
+                            || item.facts.staged
+                            || item.facts.instance_bodied
+                            || item.facts.specializes,
+                    });
                     if item.facts.fact {
-                        input.paths.push((
-                            hirsel_check_protocol::fact::fact_path(&item.definition),
-                            true,
-                        ));
+                        input.paths.push(RootInput {
+                            path: hirsel_check_protocol::fact::fact_path(&item.definition),
+                            executable: true,
+                            ordered_front: false,
+                            ordered_lower: false,
+                        });
                     }
                 }
             }
@@ -1210,7 +1253,7 @@ impl QueryEngine {
         // per-file selection cursor. The selection walk uses root scratch.
         let definitions: BTreeSet<_> = files
             .iter()
-            .flat_map(|file| file.paths.iter().map(|(path, _)| path.clone()))
+            .flat_map(|file| file.paths.iter().map(|work| work.path.clone()))
             .chain(instances.iter().cloned())
             .collect();
         let definitions: Vec<_> = definitions.into_iter().collect();
@@ -1239,8 +1282,8 @@ impl QueryEngine {
         }
         for file in &files {
             file_identity.push(file.lowering as u8);
-            for (path, _) in &file.paths {
-                file_identity.extend(path.fingerprint().0);
+            for work in &file.paths {
+                file_identity.extend(work.path.fingerprint().0);
             }
         }
         for instance in &instances {

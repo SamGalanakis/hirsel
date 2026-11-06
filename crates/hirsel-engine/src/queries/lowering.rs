@@ -60,6 +60,9 @@ impl LoweringUse {
                 .saturating_mul(std::mem::size_of::<DefId>())
         }
     }
+    pub(super) fn references(&self) -> &[DefId] {
+        &self.referenced
+    }
     fn needed(&self, engine: &QueryEngine) -> bool {
         self.needed_with(|id| engine.source_constant(id.path()))
     }

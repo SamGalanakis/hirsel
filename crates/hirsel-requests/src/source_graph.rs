@@ -2152,10 +2152,9 @@ struct CheckRoots {
 }
 impl QueryFactory for CheckRoots {
     fn create(&self, query: QueryId) -> Result<Box<dyn QueryTask>, hirsel_engine_store::Reference> {
-        let check = if query == self.reachable.query() || query == self.reachable.admission_query()
-        {
+        let check = if query == self.reachable.query() {
             &self.reachable
-        } else if query == self.comptime.query() || query == self.comptime.admission_query() {
+        } else if query == self.comptime.query() {
             &self.comptime
         } else {
             return Err(self.errors.protocol);

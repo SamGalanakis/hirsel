@@ -91,7 +91,7 @@ impl FrontLowerQueries {
             return Err(QueryError::NotImplemented);
         }
         let owner = DefId::intern(&declaration.owner);
-        let original = &self.inputs[owner.path()].captured.evaluate;
+        let original = &self.inputs[owner.path()].evaluate;
         let bytes =
             bincode::serialize(&(path, arguments)).map_err(|_| QueryError::NotImplemented)?;
         let hash = ContentHash::of_parts(

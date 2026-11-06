@@ -179,9 +179,7 @@ impl FrontLowerQueries {
     pub(super) fn observe(&self, owner: &DefPath, read: &ReadKey) -> Option<ContentHash> {
         match *read {
             ReadKey::ExecutedBody(id) => Some(memos::optional(
-                self.inputs
-                    .get_id(id)
-                    .map(|input| input.captured.implementation),
+                self.inputs.get_id(id).map(|input| input.implementation),
             )),
             ReadKey::LayoutBody(id) => Some(memos::optional(self.layouts.get(&id).copied())),
             _ => self.front.observe(owner, read),
@@ -221,7 +219,11 @@ impl FrontLowerQueries {
         let Some(carry) = self.carry() else {
             return;
         };
-        let Some(owner) = self.paths.get(&(id.kind, id.address.0)).copied() else {
+        let Some(owner) = self
+            .paths
+            .get(&(id.kind, id.address.0), &self.inputs, &self.namespace)
+            .copied()
+        else {
             return;
         };
         let Some(mut demands) = self.namespace.live_demands_for_reads(owner, &outcome.reads) else {

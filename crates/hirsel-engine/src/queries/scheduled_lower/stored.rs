@@ -25,7 +25,7 @@ impl FrontLowerQueries {
     pub(super) fn manifest_for_outcome(&self, id: QueryId, reads: &Reads) -> Option<Reference> {
         let owner = self
             .paths
-            .get(&(id.kind, id.address.0))
+            .get(&(id.kind, id.address.0), &self.inputs, &self.namespace)
             .copied()
             .or_else(|| self.staged.selection(id).map(|selection| selection.owner))?;
         self.namespace
@@ -364,7 +364,7 @@ impl FrontLowerQueries {
                     record.manifest,
                     self.inputs
                         .get(path)
-                        .map_or(Span::default(), |input| input.captured.site),
+                        .map_or(Span::default(), |input| input.site),
                     query_reads,
                 )
                 .await

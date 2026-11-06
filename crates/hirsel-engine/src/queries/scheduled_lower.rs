@@ -91,10 +91,6 @@ impl DefinitionDecodeLayout {
         self.retained.checked_add(self.transient)
     }
 }
-struct Input {
-    captured: Arc<namespace::BodyKeys>,
-    waiting: [Mutex<Option<Span>>; 2],
-}
 #[derive(Clone)]
 enum Value {
     Lower(Box<LowerProduct>),
@@ -464,6 +460,7 @@ pub struct FrontLowerQueries {
     forwarded: Mutex<BTreeMap<(u32, ContentHash), ForwardedLower>>,
     namespace: Arc<NamespaceCapture>,
     inputs: Inputs,
+    waiting: Mutex<inputs::Waiting>,
     generator: Option<(DefId, Span)>,
     staged: staged::Staged,
     paths: inputs::Paths,
@@ -553,10 +550,12 @@ impl FrontLowerQueries {
             + size_of::<hirsel_engine_admission::MemoryReservation>()
             + 4 * size_of::<usize>()
             + size_of::<Mutex<u64>>()
-            + 2 * size_of::<usize>();
+            + 2 * size_of::<usize>()
+            + inputs::Waiting::input_bytes();
         let rows = definitions
             .len()
-            .checked_mul(size_of::<(DefId, Input)>() + 2 * size_of::<(ContentHash, DefId)>())?;
+            .checked_mul(size_of::<DefId>())?
+            .checked_add(inputs::Paths::input_bytes(definitions.len())?)?;
         u64::try_from(fixed.checked_add(rows)?).ok()
     }
     /// One completed descriptor plus its independently stored ordinary body,
@@ -593,12 +592,8 @@ impl FrontLowerQueries {
         let mut keys = Vec::new();
         for (path, input) in &self.inputs {
             for (kind, phase, address) in [
-                (FRONT_LOWER_KIND, QueryKind::Lower, input.captured.lower.0),
-                (
-                    FRONT_EVALUATE_KIND,
-                    QueryKind::Evaluate,
-                    input.captured.evaluate.0,
-                ),
+                (FRONT_LOWER_KIND, QueryKind::Lower, input.lower.0),
+                (FRONT_EVALUATE_KIND, QueryKind::Evaluate, input.evaluate.0),
             ] {
                 if outcomes.contains_key(&(kind, self.namespace.query_id(kind, address).address.0))
                 {
@@ -614,12 +609,8 @@ impl FrontLowerQueries {
         let mut rows = Vec::new();
         for (path, input) in &self.inputs {
             for (kind, phase, address) in [
-                (FRONT_LOWER_KIND, QueryKind::Lower, input.captured.lower.0),
-                (
-                    FRONT_EVALUATE_KIND,
-                    QueryKind::Evaluate,
-                    input.captured.evaluate.0,
-                ),
+                (FRONT_LOWER_KIND, QueryKind::Lower, input.lower.0),
+                (FRONT_EVALUATE_KIND, QueryKind::Evaluate, input.evaluate.0),
             ] {
                 if let Some((_, outcome, _)) =
                     outcomes.get(&(kind, self.namespace.query_id(kind, address).address.0))
@@ -1098,15 +1089,15 @@ impl FrontLowerQueries {
                 .flatten();
         };
         let key = if kind == FRONT_LOWER_KIND {
-            &input.captured.lower
+            &input.lower
         } else {
-            &input.captured.evaluate
+            &input.evaluate
         };
         Some(self.namespace.query_id(kind, key.0))
     }
     fn path(&self, id: QueryId) -> Option<DefPath> {
         self.paths
-            .get(&(id.kind, id.address.0))
+            .get(&(id.kind, id.address.0), &self.inputs, &self.namespace)
             .map(|path| path.path().clone())
             .or_else(|| {
                 self.staged
@@ -1191,7 +1182,7 @@ impl FrontLowerQueries {
             executed,
             selections,
             acceptance: lower.acceptance.clone(),
-            implementation_revision: input.captured.implementation,
+            implementation_revision: input.implementation,
             signature,
             verified: lower.verified(self)?,
             materialized,
@@ -1354,9 +1345,9 @@ impl FrontLowerQueries {
         let key = if let Some(selection) = &selection {
             &selection.key
         } else if id.kind == FRONT_LOWER_KIND {
-            &input.captured.lower
+            &input.lower
         } else {
-            &input.captured.evaluate
+            &input.evaluate
         };
         // A constant's checked Lower body does not replace its value product.
         // Restore Evaluate first even when the Lower descriptor itself hits;
@@ -1421,7 +1412,7 @@ impl FrontLowerQueries {
         // that preparation fails. Nested callers keep the same root receipt.
         source.record(
             ReadKey::ExecutedBody(DefId::intern(&path)),
-            memos::optional(Some(self.inputs[&path].captured.implementation)),
+            memos::optional(Some(self.inputs[&path].implementation)),
         );
         let computed = if source.framed && source.depth.borrow().limit() == 0 {
             if self.verify == Verify::On {
@@ -1430,7 +1421,7 @@ impl FrontLowerQueries {
                     .await?;
                 source.merge(&observed.finish().map_err(|_| self.protocol_refusal())?);
             }
-            Err(source.overflow(self.inputs[&path].captured.site))
+            Err(source.overflow(self.inputs[&path].site))
         } else {
             self.compute(id.kind, &path, selection.as_ref(), &mut source)
                 .await
@@ -1487,9 +1478,9 @@ impl FrontLowerQueries {
             let key = if let Some(selection) = &selection {
                 selection.key.clone()
             } else if id.kind == FRONT_LOWER_KIND {
-                owner.inputs[&path].captured.lower.clone()
+                owner.inputs[&path].lower.clone()
             } else {
-                owner.inputs[&path].captured.evaluate.clone()
+                owner.inputs[&path].evaluate.clone()
             };
             let selected = owner
                 .clone()
@@ -1744,7 +1735,6 @@ impl FrontLowerQueries {
                         .inputs
                         .get(path.path())
                         .ok_or_else(|| self.protocol_refusal())?
-                        .captured
                         .implementation,
                     signature: self
                         .namespace
@@ -2358,7 +2348,6 @@ impl FrontLowerQueries {
                         .inputs
                         .get(path.path())
                         .ok_or_else(|| self.protocol_refusal())?
-                        .captured
                         .implementation,
                     signature: self
                         .namespace
@@ -2622,27 +2611,40 @@ struct PendingRequest<'a> {
 }
 impl Drop for PendingRequest<'_> {
     fn drop(&mut self) {
-        self.owner.with_request_site(self.id, |site| *site = None);
+        let _ = self.owner.set_request_site(self.id, None);
     }
 }
 impl FrontLowerQueries {
-    fn with_request_site<R>(
-        &self,
-        id: QueryId,
-        update: impl FnOnce(&mut Option<Span>) -> R,
-    ) -> Option<R> {
-        if let Some(path) = self.paths.get(&(id.kind, id.address.0)) {
-            let input = self.inputs.get_id(*path)?;
-            let slot = usize::from(id.kind == FRONT_EVALUATE_KIND);
-            return Some(update(
-                &mut input.waiting[slot]
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner()),
-            ));
+    fn set_request_site(&self, id: QueryId, site: Option<Span>) -> Result<(), Reference> {
+        if let Some(path) = self
+            .paths
+            .get(&(id.kind, id.address.0), &self.inputs, &self.namespace)
+        {
+            return self
+                .waiting
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .set((*path, id.kind), site)
+                .ok_or(self.errors.resource);
         }
-        self.staged.with_request_site(id, update)
+        self.staged.with_request_site(id, |pending| *pending = site);
+        Ok(())
+    }
+    fn request_site(&self, id: QueryId) -> Option<Span> {
+        if let Some(path) = self
+            .paths
+            .get(&(id.kind, id.address.0), &self.inputs, &self.namespace)
+        {
+            return self
+                .waiting
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .get((*path, id.kind));
+        }
+        self.staged.with_request_site(id, |site| *site).flatten()
     }
 }
+
 impl Source {
     fn active_owner(&self) -> Arc<FrontLowerQueries> {
         self.successor
@@ -2843,9 +2845,9 @@ impl Source {
         kind: u32,
         site: Span,
     ) -> Result<Value, QueryError> {
-        owner.with_request_site(self.id, |pending| {
-            *pending = (kind == FRONT_EVALUATE_KIND).then_some(site);
-        });
+        owner
+            .set_request_site(self.id, (kind == FRONT_EVALUATE_KIND).then_some(site))
+            .map_err(|error| self.refused(error))?;
         let pending = PendingRequest {
             owner: &owner,
             id: self.id,
@@ -2856,7 +2858,7 @@ impl Source {
         if selected == Err(owner.errors.cycle) {
             self.record(
                 ReadKey::ExecutedBody(DefId::intern(path)),
-                memos::optional(Some(owner.inputs[path].captured.implementation)),
+                memos::optional(Some(owner.inputs[path].implementation)),
             );
             let members = self.reads.take_cycle();
             if members.is_empty() {
@@ -2866,7 +2868,7 @@ impl Source {
             // requests contribute their expression sites, not declaration names.
             let mut diagnostics: Vec<_> = members
                 .into_iter()
-                .filter_map(|id| owner.with_request_site(id, |site| *site).flatten())
+                .filter_map(|id| owner.request_site(id))
                 .chain((kind == FRONT_EVALUATE_KIND).then_some(site))
                 .map(|site| {
                     Diagnostic::error(
@@ -2929,7 +2931,7 @@ impl Source {
         }
         self.record(
             ReadKey::ExecutedBody(DefId::intern(path)),
-            memos::optional(Some(owner.inputs[path].captured.implementation)),
+            memos::optional(Some(owner.inputs[path].implementation)),
         );
         outcome.result
     }
@@ -2942,7 +2944,7 @@ impl Source {
             self.owner
                 .inputs
                 .get(path)
-                .map_or(Span::default(), |input| input.captured.site),
+                .map_or(Span::default(), |input| input.site),
         )
         .await
     }
@@ -3025,7 +3027,7 @@ impl s1::AsyncDependencySource for Source {
                 .get(&DefId::intern(path))
                 .ok_or(QueryError::NotImplemented)?;
             let owner = declaration.owner.clone();
-            let site = active.inputs[&owner].captured.site;
+            let site = active.inputs[&owner].site;
             let Value::Constant(value) = self
                 .selected_value_in(active, id, &owner, FRONT_EVALUATE_KIND, site)
                 .await?
@@ -3304,7 +3306,7 @@ impl crate::materialized::MaterializationSource for Materializer<'_> {
         {
             self.source.record(
                 ReadKey::ExecutedBody(id),
-                memos::optional(Some(input.captured.implementation)),
+                memos::optional(Some(input.implementation)),
             );
         }
         Ok(private)
@@ -3468,21 +3470,15 @@ impl QueryEngine {
             if let Some(accepted) = front.registration(path) {
                 accepted.validate(self)?;
             }
-            let captured = front
+            front
                 .namespace()
                 .bodies
                 .get(&DefId::intern(path))
                 .and_then(|input| input.queries.as_ref())
                 .ok_or_else(|| refuse(format!("missing phase source binding for {path}")))?;
-            inputs.push((
-                DefId::intern(path),
-                Input {
-                    captured: captured.clone(),
-                    waiting: [Mutex::new(None), Mutex::new(None)],
-                },
-            ));
+            inputs.push(DefId::intern(path));
         }
-        let inputs = Inputs::new(inputs);
+        let inputs = Inputs::new(inputs, front.namespace().clone());
         if inputs
             .retained_bytes()
             .is_none_or(|bytes| bytes > input_bytes)
@@ -3566,6 +3562,7 @@ impl QueryEngine {
             forwarded: Mutex::new(BTreeMap::new()),
             source,
             inputs,
+            waiting: Mutex::new(inputs::Waiting::new(retention.clone())),
             generator,
             staged,
             paths,

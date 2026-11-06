@@ -428,7 +428,7 @@ struct Checker<'a, 'p> {
     values: BTreeMap<ast::ExprId, TypeId>,
     diagnostics: Vec<Diagnostic>,
     dependencies: BTreeMap<DefId, ast::ContentHash>,
-    snapshots: BTreeMap<DefId, SignatureRef>,
+    snapshots: BTreeMap<DefId, Option<SignatureRef>>,
     /// Each instantiated representation imported so far. The store is
     /// append-only, so a nominal type is expanded into it once rather than
     /// once per projection of its fields (GAP 5).
@@ -542,7 +542,7 @@ impl Checker<'_, '_> {
                 let signature = if definition == self.input.signature.definition {
                     Some(self.input.signature)
                 } else {
-                    self.snapshots.get(&definition).map(|s| s.as_ref())
+                    self.snapshots.get(&definition).and_then(Option::as_deref)
                 };
                 match signature {
                     Some(Signature {
@@ -598,7 +598,7 @@ impl Checker<'_, '_> {
             Ok::<_, hirsel_types::QueryError>(if path == self.input.signature.definition {
                 Some(std::sync::Arc::new(self.input.signature.clone()))
             } else {
-                self.snapshots.get(&path).cloned()
+                self.snapshots.get(&path).cloned().flatten()
             })
         })?;
         Ok(
@@ -656,7 +656,7 @@ impl Checker<'_, '_> {
             Ok::<_, hirsel_types::QueryError>(if path == self.input.signature.definition {
                 Some(std::sync::Arc::new(self.input.signature.clone()))
             } else {
-                self.snapshots.get(&path).cloned()
+                self.snapshots.get(&path).cloned().flatten()
             })
         })
         .unwrap_or_else(|error| self.proof_failure(error, part))
@@ -669,7 +669,7 @@ impl Checker<'_, '_> {
                 Ok::<_, hirsel_types::QueryError>(if path == self.input.signature.definition {
                     Some(std::sync::Arc::new(self.input.signature.clone()))
                 } else {
-                    self.snapshots.get(&path).cloned()
+                    self.snapshots.get(&path).cloned().flatten()
                 })
             };
             let mut memo = ContextMemo::new(self.types, &generics, &mut lookup);
@@ -749,6 +749,7 @@ impl Checker<'_, '_> {
                     let Some(target) = self
                         .snapshots
                         .get(&DefId::intern(&path))
+                        .and_then(Option::as_ref)
                         .and_then(|s| s.metadata.constant_alias.as_deref())
                     else {
                         break;

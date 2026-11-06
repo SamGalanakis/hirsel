@@ -799,6 +799,90 @@ proptest::proptest! {
 }
 
 #[test]
+fn failed_constructor_signature_suppresses_labels_but_checks_arguments() {
+    struct ReportingProvider {
+        inner: Fake,
+        failure: hirsel_diag::Diagnostic,
+    }
+    impl SignatureProvider for ReportingProvider {
+        fn lookup(&mut self, context: &FileContext, path: &Path) -> ty::LookupOutput {
+            self.inner.lookup(context, path)
+        }
+        fn signature(&mut self, definition: DefId) -> Result<ty::SignatureRef, QueryError> {
+            self.inner.reads.push(definition.path().clone());
+            Err(QueryError::Diagnostics(vec![self.failure.clone()]))
+        }
+    }
+    let mut t = Tree::new(
+        "type Record\ntype Other\nRecord(x: missing)\nRecord(x: 1)\nOther(x: 1)\nfn main() {}\n",
+    );
+    t.type_item("Record", TypeBody::Opaque, Visibility::Private, 1);
+    t.type_item("Other", TypeBody::Opaque, Visibility::Private, 2);
+    let mut calls = vec![];
+    for (line, name, missing) in [
+        (3, "Record", true),
+        (4, "Record", false),
+        (5, "Other", false),
+    ] {
+        let callee = t.value(name, line);
+        let value = if missing {
+            t.value("missing", line)
+        } else {
+            t.number("1", line)
+        };
+        let label = t.name("x");
+        let call = t.expr(
+            ExprKind::Call {
+                callee,
+                arguments: vec![Argument {
+                    label: Some(label),
+                    value,
+                }],
+            },
+            line,
+        );
+        calls.push(t.stmt(StmtKind::Expr(call), line));
+    }
+    let body = t.block(calls, None, 6);
+    let item = t.function(
+        "main",
+        FunctionSyntax::default(),
+        body,
+        Visibility::Private,
+        6,
+    );
+    let index = t.index();
+    let failure = hirsel_diag::Diagnostic::error(
+        const { hirsel_diag::RuleId::of("CT-1") },
+        t.origin(1).span,
+        "failed signature prerequisite",
+    );
+    let mut provider = ReportingProvider {
+        inner: Fake::new(&index),
+        failure: failure.clone(),
+    };
+    let output = resolve_view(
+        &t.file.items[item],
+        &t.file.items,
+        ResolveView::Item,
+        &index,
+        session(),
+        &mut provider,
+        &ExpectedTypes::default(),
+    );
+    assert_eq!(provider.inner.reads, vec![own("Record"), own("Other")]);
+    assert_eq!(
+        output.query.diagnostics.len(),
+        2,
+        "{:?}",
+        output.query.diagnostics
+    );
+    assert_eq!(output.query.diagnostics[0], failure);
+    assert_eq!(output.query.diagnostics[1].rule.as_str(), "LANG-4");
+    assert_eq!(output.query.diagnostics[1].primary, t.origin(3).span);
+}
+
+#[test]
 fn failed_provider_diagnostics_are_silent_for_reservations_and_emitted_once_at_use() {
     struct ReportingProvider;
     impl SignatureProvider for ReportingProvider {

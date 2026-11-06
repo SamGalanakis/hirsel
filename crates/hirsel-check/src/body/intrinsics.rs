@@ -47,7 +47,7 @@ impl Checker<'_, '_> {
         let CallTarget::Definition(path) = target else {
             return Ok(true);
         };
-        let Some(signature) = self.snapshots.get(&DefId::intern(path)) else {
+        let Some(Some(signature)) = self.snapshots.get(&DefId::intern(path)) else {
             return Ok(true);
         };
         let schema = signature.metadata.schema.clone();

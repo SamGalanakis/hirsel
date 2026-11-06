@@ -6,7 +6,7 @@ impl Checker<'_, '_> {
     pub(super) fn snapshot(&mut self, path: impl AsDef) -> Result<SignatureRef, QueryError> {
         let definition = path.def();
         if let Some(s) = self.snapshots.get(&definition) {
-            return Ok(s.clone());
+            return s.clone().ok_or_else(|| QueryError::Diagnostics(vec![]));
         }
         let result = self.provider.signature(definition);
         std::sync::Arc::make_mut(&mut self.body.resolution.reads).push(
@@ -19,10 +19,11 @@ impl Checker<'_, '_> {
         match result {
             Ok(s) => {
                 self.dependencies.insert(definition, s.fingerprint);
-                self.snapshots.insert(definition, s.clone());
+                self.snapshots.insert(definition, Some(s.clone()));
                 Ok(s)
             }
             Err(QueryError::Diagnostics(ds)) => {
+                self.snapshots.insert(definition, None);
                 self.diagnostics.extend(ds);
                 Err(QueryError::Diagnostics(vec![]))
             }

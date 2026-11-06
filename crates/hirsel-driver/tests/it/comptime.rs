@@ -1904,7 +1904,15 @@ fn frozen_lowering_prefix_keeps_demanded_closure_and_final_outcomes_across_edits
                         roots.clone(),
                         hirsel_intern::jobs::Jobs::new(jobs),
                     );
-                    assert_eq!(actual.len(), expected.len(), "jobs={jobs} warm={warm}");
+                    assert_eq!(
+                        actual.len(),
+                        expected.len(),
+                        "jobs={jobs} warm={warm} serial failures={:?}",
+                        expected
+                            .iter()
+                            .filter_map(|result| result.as_ref().err())
+                            .collect::<Vec<_>>()
+                    );
                     for (outcome, depth) in actual.iter().zip(&depths) {
                         assert!(!outcome.reads.is_empty());
                         assert_eq!(outcome.phase, Some(QueryKind::Lower));
@@ -1962,6 +1970,14 @@ fn frozen_lowering_prefix_generator_rejections_keep_serial_selection_and_limits(
                         assert!(candidate.lower_to_tir(&path("A")).is_err());
                     }
                     let expected = control.lower_to_tir(&path("B"));
+                    if body == "Error(\"failed\")" {
+                        let Err(QueryError::Diagnostics(diagnostics)) = &expected else {
+                            panic!("the rejected generator must report its CT-1 obligation");
+                        };
+                        assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
+                        assert_eq!(diagnostics[0].rule.as_str(), "CT-1");
+                        assert_eq!(diagnostics[0].notes, ["failed"]);
+                    }
                     let actual = crate::request_graph::lower_prefix(
                         &mut candidate,
                         vec![path("B"), path("A"), path("UNUSED")],

@@ -263,7 +263,7 @@ struct Resolver<'a, P: ?Sized> {
     context: FileContext,
     output: ResolveOutput,
     scopes: Vec<Scope>,
-    signatures: DefMap<Option<ty::SignatureRef>>,
+    signatures: DefMap<Result<ty::SignatureRef, ty::QueryError>>,
     next_local: u32,
     callees: BTreeSet<ExprId>,
     local_function_depth: usize,
@@ -602,7 +602,11 @@ impl<'a, P: SignatureProvider + ?Sized> Resolver<'a, P> {
         if !same_module || self.index.access(&self.context, definition).is_err() {
             return None;
         }
-        let signature = self.signatures.get(&DefId::intern(definition))?.as_ref()?;
+        let signature = self
+            .signatures
+            .get(&DefId::intern(definition))?
+            .as_ref()
+            .ok()?;
         if owner.package != self.context.package
             && signature.metadata.visibility != Visibility::Public
         {
@@ -639,7 +643,7 @@ impl<'a, P: SignatureProvider + ?Sized> Resolver<'a, P> {
         }
         let id = DefId::intern(definition);
         if let Some(signature) = self.signatures.get(&id) {
-            return signature.clone();
+            return signature.as_ref().ok().cloned();
         }
         let result = self.provider.signature(id);
         let signature = match result {
@@ -651,22 +655,26 @@ impl<'a, P: SignatureProvider + ?Sized> Resolver<'a, P> {
                         definition: DefId::intern(definition),
                         fingerprint: signature.fingerprint,
                     });
-                Some(signature)
+                Ok(signature)
             }
             Err(ty::QueryError::Diagnostics(d)) => {
-                self.output.query.diagnostics.extend(d);
-                None
+                for diagnostic in d {
+                    if !self.output.query.diagnostics.contains(&diagnostic) {
+                        self.output.query.diagnostics.push(diagnostic);
+                    }
+                }
+                Err(ty::QueryError::Diagnostics(vec![]))
             }
-            Err(ty::QueryError::NotImplemented) => None,
+            Err(ty::QueryError::NotImplemented) => Err(ty::QueryError::NotImplemented),
             Err(ty::QueryError::Operational(e)) => {
-                self.output.operational_failure = Some(e);
-                None
+                self.output.operational_failure = Some(e.clone());
+                Err(ty::QueryError::Operational(e))
             }
         };
         std::sync::Arc::make_mut(&mut self.output.reads).push(
             DependencyRead::Signature {
                 definition: id,
-                fingerprint: signature.as_ref().map(|s| s.fingerprint),
+                fingerprint: signature.as_ref().ok().map(|s| s.fingerprint),
             }
             .shared(),
         );
@@ -675,8 +683,15 @@ impl<'a, P: SignatureProvider + ?Sized> Resolver<'a, P> {
             .value
             .dependencies
             .push(definition.clone());
-        self.signatures.insert(id, signature.clone());
-        signature
+        let value = signature.as_ref().ok().cloned();
+        self.signatures.insert(id, signature);
+        value
+    }
+    fn failed_signature(&self, definition: &DefPath) -> bool {
+        matches!(
+            self.signatures.get(&DefId::intern(definition)),
+            Some(Err(ty::QueryError::Diagnostics(_)))
+        )
     }
     fn namespace(&mut self, definition: &DefPath) -> Option<Namespace> {
         if let Some(entry) = self.index.entry(definition) {
@@ -2473,7 +2488,7 @@ impl<'a, P: SignatureProvider + ?Sized> Resolver<'a, P> {
             let pending: BTreeSet<_> = self
                 .signatures
                 .values()
-                .flatten()
+                .filter_map(|s| s.as_ref().ok())
                 .flat_map(|s| {
                     ty::closure(self.types, signature_roots(s))
                         .iter()
@@ -2495,20 +2510,24 @@ impl<'a, P: SignatureProvider + ?Sized> Resolver<'a, P> {
                 self.signature(&definition);
             }
         }
-        found |= self.signatures.values().flatten().any(|signature| {
-            if !core && signature.definition.path().package_is("core", "1") {
-                false
-            } else if let ty::SignatureKind::Type(definition) = &signature.kind {
-                definition.representation.is_some_and(|id| {
-                    shape_from_type(self.types, id, &[])
-                        .variants
-                        .iter()
-                        .any(|(variant, _)| variant == &self.spelling(name))
-                })
-            } else {
-                false
-            }
-        });
+        found |= self
+            .signatures
+            .values()
+            .filter_map(|s| s.as_ref().ok())
+            .any(|signature| {
+                if !core && signature.definition.path().package_is("core", "1") {
+                    false
+                } else if let ty::SignatureKind::Type(definition) = &signature.kind {
+                    definition.representation.is_some_and(|id| {
+                        shape_from_type(self.types, id, &[])
+                            .variants
+                            .iter()
+                            .any(|(variant, _)| variant == &self.spelling(name))
+                    })
+                } else {
+                    false
+                }
+            });
         found
     }
     /// Choose a declaration, never a type argument. H infers arguments from
@@ -2521,9 +2540,15 @@ impl<'a, P: SignatureProvider + ?Sized> Resolver<'a, P> {
             .collect();
         // Types reached through declared signatures are also in view, as for
         // contextual variant deferral. No implementation body is consulted.
-        declarations.extend(self.signatures.values().flatten().filter_map(|s| {
-            matches!(s.kind, ty::SignatureKind::Type(_)).then(|| s.definition.path().clone())
-        }));
+        declarations.extend(
+            self.signatures
+                .values()
+                .filter_map(|s| s.as_ref().ok())
+                .filter_map(|s| {
+                    matches!(s.kind, ty::SignatureKind::Type(_))
+                        .then(|| s.definition.path().clone())
+                }),
+        );
         let spelling = self.spelling(name);
         let mut candidates = BTreeSet::new();
         for owner in declarations {
@@ -2952,6 +2977,9 @@ impl<'a, P: SignatureProvider + ?Sized> Resolver<'a, P> {
                     .value
                     .expressions
                     .push((id, ResolvedName::Definition(definition.clone())));
+                if self.failed_signature(&definition) {
+                    return ExpectedType::Unknown;
+                }
                 if namespace == Some(Namespace::Type) {
                     self.output.contextual.push((
                         NameSite::Expression(id),

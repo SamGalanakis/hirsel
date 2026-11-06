@@ -284,17 +284,24 @@ fn nonrecursive_lookup_failures_are_recorded() {
         origin(9).span,
         "bad callee signature",
     )]));
-    let root = f.path("callee", ResolvedName::Definition(path.clone()));
+    let first = f.path("callee", ResolvedName::Definition(path.clone()));
+    let second = f.path("callee", ResolvedName::Definition(path.clone()));
+    let first = f.stmt(ast::StmtKind::Expr(first));
+    let second = f.stmt(ast::StmtKind::Expr(second));
+    let root = f.block(vec![first, second], None);
     let (out, reads) = f.finish(root);
     assert_eq!(reads, vec![path.clone()]);
     assert_eq!(out.checked.diagnostics.len(), 1);
-    assert!(out.checked.value.resolution.reads.iter().any(|read| {
-        read == &DependencyRead::Signature {
-            definition: hirsel_syntax::DefId::intern(&path),
-            fingerprint: None,
-        }
-        .shared()
-    }));
+    assert_eq!(
+        out.checked.value.resolution.reads.as_ref(),
+        &vec![
+            DependencyRead::Signature {
+                definition: hirsel_syntax::DefId::intern(&path),
+                fingerprint: None,
+            }
+            .shared()
+        ]
+    );
     assert!(out.checked.dependencies.is_empty());
 }
 

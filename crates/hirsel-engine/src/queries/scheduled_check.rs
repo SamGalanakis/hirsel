@@ -527,15 +527,23 @@ impl Task {
                     }
                     let mut pending = Vec::with_capacity(width);
                     for (offset, read) in window.iter_mut().enumerate() {
-                        if let Some(id) = read.poll(
+                        let waiting = read.poll(
                             &self.queries,
                             cx,
                             &file.input,
                             *root + offset,
                             offset == 0,
                             file.error.is_some(),
-                        )? {
+                        )?;
+                        if let Some(id) = waiting {
                             pending.push(id);
+                        }
+                        // Declare each root's Front and Lower reads in source
+                        // order, then overlap the pending Lower producers.
+                        if matches!(read, admission::RootRead::Front)
+                            || (!read.settled() && waiting.is_none())
+                        {
+                            break;
                         }
                     }
                     if window.front().is_some_and(admission::RootRead::settled) {

@@ -128,6 +128,13 @@ impl CompilerRequests {
 
         let mut discovery_roots = Vec::new();
         loop {
+            let _attempt = hirsel_intern::test_progress::enter("compiler-attempt", || {
+                format!(
+                    "{} restarts={}",
+                    request.path.display(),
+                    discovery_roots.len()
+                )
+            });
             let mut selected = self.select_with_discovery(request, &discovery_roots)?;
             let completed = {
                 let mut runtime = selected
@@ -140,6 +147,8 @@ impl CompilerRequests {
             if let Some(path) = self.graphs.discovery_dependency(&selected.runtime)
                 && !discovery_roots.contains(&path)
             {
+                let _restart =
+                    hirsel_intern::test_progress::enter("discovery-restart", || path.to_string());
                 discovery_roots.push(path);
                 self.graphs.discard(&selected.runtime);
                 // No materialization, diagnostics or publication from this

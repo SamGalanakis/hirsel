@@ -1433,6 +1433,9 @@ impl QueryEngine {
         let mut discovery_roots = Vec::new();
         let mut loading = loading;
         loop {
+            let _attempt = hirsel_intern::test_progress::enter("compiler-check-attempt", || {
+                format!("restarts={}", discovery_roots.len())
+            });
             let operation = store.operation_scope();
             let (checked, dependency) = self.check_attempt(
                 selection,
@@ -1446,6 +1449,8 @@ impl QueryEngine {
             if let Some(path) = dependency
                 && !discovery_roots.contains(&path)
             {
+                let _restart =
+                    hirsel_intern::test_progress::enter("discovery-restart", || path.to_string());
                 discovery_roots.push(path);
                 drop(checked);
                 drop(operation);

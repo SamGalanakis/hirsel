@@ -257,8 +257,12 @@ impl Task {
                     // Hashes, not bodies, survive out-of-order completion. The
                     // window fits the existing continuation grant and worker count.
                     let slots = usize::try_from(
-                        queries.weight.retained.saturating_sub(std::mem::size_of::<Self>() as u64)
-                            / (std::mem::size_of::<RootRead>() + std::mem::size_of::<QueryId>()) as u64,
+                        queries
+                            .weight
+                            .retained
+                            .saturating_sub(std::mem::size_of::<Self>() as u64)
+                            / (std::mem::size_of::<RootRead>() + std::mem::size_of::<QueryId>())
+                                as u64,
                     )
                     .unwrap_or(usize::MAX);
                     let width = cx.workers().max(1).min(slots);

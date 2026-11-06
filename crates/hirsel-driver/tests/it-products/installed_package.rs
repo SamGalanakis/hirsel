@@ -261,3 +261,50 @@ fn missing_std_products_name_the_selected_root_without_source_fallback() {
         assert!(error.contains("missing"), "{error}");
     });
 }
+
+#[test]
+fn loader_refuses_missing_installed_std_products_with_valid_sources() {
+    hirsel_intern::jobs::with_compiler_stack(|| {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(
+            directory.path().join("math.hir"),
+            "pub fn twice(x:u8)->u8{x+x}\n",
+        )
+        .unwrap();
+        let manifest = directory.path().join("std.json");
+        std::fs::write(&manifest, r#"{"schema":1,"package":{"name":"std","version":"1"},"sources":[{"path":"math.hir","module":["math"]}],"dependencies":[]}"#).unwrap();
+        // Prove this std source package is valid before selecting it as an
+        // installed dependency whose explicit products root is missing.
+        COMPILER
+            .precompute_package(&manifest, &directory.path().join("valid.products"))
+            .unwrap();
+        let client = directory.path().join("client.json");
+        std::fs::write(
+            directory.path().join("client.hir"),
+            "pub fn main()->u8{std@1/math.twice(21u8)}\n",
+        )
+        .unwrap();
+        std::fs::write(&client, serde_json::json!({
+            "schema": 1,
+            "package": {"name": "client", "version": "1"},
+            "sources": [{"path": "client.hir", "module": []}],
+            "dependencies": [{"manifest": manifest, "package": {"name": "std", "version": "1"}, "expose": []}],
+            "entry": {"module": [], "name": "main"},
+        }).to_string()).unwrap();
+        let missing = directory.path().join("missing.products");
+        let compiler = COMPILER.with_config(CompileConfig {
+            store: Arc::new(
+                DirStore::new(directory.path().join("reader")).with_read_only_root(missing.clone()),
+            ),
+            ..Default::default()
+        });
+        let error = match compiler.load_program(&client) {
+            Ok(_) => {
+                panic!("loader compiled std sources despite the missing selected products root")
+            }
+            Err(error) => error.to_string(),
+        };
+        assert!(error.contains(missing.to_str().unwrap()), "{error}");
+        assert!(error.contains("missing"), "{error}");
+    });
+}

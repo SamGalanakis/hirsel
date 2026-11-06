@@ -35,17 +35,11 @@ use canonical_debug::{canonical_ids, placed};
 use hirsel_requests::*;
 use std::{path::Path, sync::Arc};
 
-fn requests(path: &Path, products: Option<&Path>) -> CompilerRequests {
-    let store: Arc<dyn store::ResultStore> = match products {
-        Some(products) => Arc::new(
-            store::DirStore::new(path.parent().unwrap().join("immutable-reader"))
-                .with_read_only_root(products.to_owned()),
-        ),
-        None => Arc::new(
-            store::DirStore::new(path.parent().unwrap().join("fresh-reader"))
-                .with_read_only_root(std_products()),
-        ),
-    };
+fn requests(path: &Path, products: &Path, cache: &str) -> CompilerRequests {
+    let store = Arc::new(
+        store::DirStore::new(path.parent().unwrap().join(cache))
+            .with_read_only_root(products.to_owned()),
+    );
     let config = CompileConfig {
         store,
         jobs: hirsel_intern::jobs::Jobs::ONE,
@@ -103,17 +97,56 @@ fn checked(requests: &mut CompilerRequests, path: &Path) -> (CheckCompletion, Ve
     )
 }
 
+fn source_edit_changes_only_the_source_backed_provider() {
+    let f = Fixture::new();
+    f.write("std.hir", "pub fn value()->u8{1u8}\n");
+    let manifest = f.0.join("std.json");
+    std::fs::write(&manifest, r#"{"schema":1,"package":{"name":"std","version":"1"},"sources":[{"path":"std.hir","module":[]}],"dependencies":[]}"#).unwrap();
+    let installed = f.0.join("installed");
+    COMPILER.precompute_package(&manifest, &installed).unwrap();
+    let client = f.program(
+        "control",
+        "pub fn main()->u8{std@1/value()}\n",
+        &manifest,
+        "std",
+    );
+    let before = hashes(&mut requests(&client, &installed, "before"), &client);
+    f.write("std.hir", "pub fn value()->u8{2u8}\n");
+    let fresh = f.0.join("fresh");
+    COMPILER.precompute_package(&manifest, &fresh).unwrap();
+    let frozen = hashes(&mut requests(&client, &installed, "frozen"), &client);
+    let changed = hashes(&mut requests(&client, &fresh, "changed"), &client);
+    assert_eq!(
+        before, frozen,
+        "installed products must stay frozen after a source edit"
+    );
+    let value = DefPath(ItemPath {
+        package: package("std"),
+        modules: vec![],
+        name: "value".into(),
+    });
+    assert_ne!(
+        frozen[&value], changed[&value],
+        "the fresh provider must observe the edited std source"
+    );
+}
+
 /// Every prechecked std definition hashes the same (LANG-6), lowers to the same TIR
 /// and has the same revision node as in a fresh check, in a program that places
 /// std's sources at other FileIds than the program the precheck was checked in.
 #[test]
 fn ordinary_std_complete_products_equal_fresh_ones() {
     with_compiler_stack(|| {
+        source_edit_changes_only_the_source_backed_provider();
         let f = Fixture::new();
         let products = std_products();
+        let fresh_products = f.0.join("fresh-products");
+        COMPILER
+            .precompute_package(&std_manifest(), &fresh_products)
+            .unwrap();
         let client = f.program("aaa", STD_PROGRAM, &std_manifest(), "std");
-        let mut warm_requests = requests(&client, Some(&products));
-        let mut cold_requests = requests(&client, None);
+        let mut warm_requests = requests(&client, &products, "immutable-reader");
+        let mut cold_requests = requests(&client, &fresh_products, "fresh-reader");
         let actual_hashes = hashes(&mut warm_requests, &client);
         let expected_hashes = hashes(&mut cold_requests, &client);
         assert!(expected_hashes.len() > 1000, "{}", expected_hashes.len());
@@ -239,15 +272,7 @@ fn ordinary_std_complete_products_equal_fresh_ones() {
         }
         drop(cold_requests);
         let mut native_prechecked = load(&client, Some(&products));
-        let mut native_reference = COMPILER
-            .clone()
-            .with_config(CompileConfig {
-                store: store::store_by_name("none@1", None).unwrap(),
-                jobs: hirsel_intern::jobs::Jobs::ONE,
-                ..CompileConfig::for_memory_cap(None)
-            })
-            .load_program(&client)
-            .unwrap();
+        let mut native_reference = load(&client, Some(&fresh_products));
         native_prechecked.check(LoweringPolicy::Reachable).unwrap();
         native_reference.check(LoweringPolicy::Reachable).unwrap();
         let actual = native_prechecked.engine.export_native_input().unwrap();

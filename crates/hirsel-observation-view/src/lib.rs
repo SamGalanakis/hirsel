@@ -823,7 +823,13 @@ mod tests {
         let header = hirsel_run_schema::tape::read(durable(), journal::MAGIC.len(), 0).unwrap();
         let prepared = hirsel_run_schema::tape::read(durable(), header.range.end, 1).unwrap();
         let prefix = &durable()[..prepared.range.end];
-        assert_eq!(document(prefix)["in_doubt"][0]["request_id"], 0);
+        let view = document(prefix);
+        assert_eq!(view["in_doubt"][0]["request_id"], 0);
+        assert_eq!(view["complete"], false);
+        assert_eq!(view["torn_tail"], false);
+        let complete = document(durable());
+        assert_eq!(complete["complete"], true);
+        assert_eq!(complete["torn_tail"], false);
     }
 
     #[test]

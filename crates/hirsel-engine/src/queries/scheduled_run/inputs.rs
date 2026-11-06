@@ -29,23 +29,14 @@ impl FrontRunQueries {
         Ok(Arc::new(input))
     }
     pub(super) fn admit_decode(&self, bytes: u64) -> Result<Arc<InputCharge>, QueryError> {
-        let bytes = bytes
-            .checked_add(hirsel_engine_admission::retained_arc_bytes(
-                &std::mem::MaybeUninit::<InputCharge>::uninit(),
-            ))
-            .ok_or_else(|| operational("installed decode charge size overflow"))?;
-        if bytes > self.weight.scratch {
-            return Err(operational("installed decode exceeds scratch admission"));
-        }
-        let mut remaining = self.retention.lock().unwrap_or_else(|e| e.into_inner());
-        *remaining = remaining
-            .checked_sub(bytes)
-            .ok_or_else(|| operational("installed decode exceeds retention admission"))?;
-        Ok(Arc::new(InputCharge {
+        self.execution_admission().reserve(bytes)
+    }
+    pub(super) fn execution_admission(&self) -> ExecutionAdmission {
+        ExecutionAdmission {
             remaining: self.retention.clone(),
-            _allowance: self.ownership._allowance.clone(),
-            bytes,
-        }))
+            allowance: self.ownership._allowance.clone(),
+            scratch: self.weight.scratch,
+        }
     }
     fn prepare_input(&self, path: &DefPath) -> Result<Input, QueryError> {
         let namespace = self.operation.capture();
@@ -164,6 +155,39 @@ impl FrontRunQueries {
             generated,
             implementation,
         })
+    }
+}
+
+/// Independent of the query owner, so a published handle cannot form a cycle.
+pub(super) struct ExecutionAdmission {
+    remaining: Arc<Mutex<u64>>,
+    allowance: Arc<hirsel_engine_admission::MemoryReservation>,
+    pub(super) scratch: u64,
+}
+impl ExecutionAdmission {
+    pub(super) fn reserve(&self, bytes: u64) -> Result<Arc<InputCharge>, QueryError> {
+        let bytes = bytes
+            .checked_add(hirsel_engine_admission::retained_arc_bytes(
+                &std::mem::MaybeUninit::<InputCharge>::uninit(),
+            ))
+            .ok_or_else(|| operational("installed decode charge size overflow"))?;
+        if bytes > self.scratch {
+            return Err(operational(format!(
+                "installed decode exceeds scratch admission: {bytes} requested, {} available",
+                self.scratch
+            )));
+        }
+        let mut remaining = self.remaining.lock().unwrap_or_else(|e| e.into_inner());
+        *remaining = remaining.checked_sub(bytes).ok_or_else(|| {
+            operational(format!(
+                "installed decode exceeds retention admission: {bytes} requested, {remaining} available"
+            ))
+        })?;
+        Ok(Arc::new(InputCharge {
+            remaining: self.remaining.clone(),
+            _allowance: self.allowance.clone(),
+            bytes,
+        }))
     }
 }
 

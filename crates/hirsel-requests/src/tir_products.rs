@@ -8,5 +8,5 @@ pub(super) fn materialize(
 ) -> Result<Arc<TirExecution>, ToolError> {
     facts
         .accepted_execution()
-        .ok_or_else(|| ToolError::Runtime("accepted execution product was not published".into()))
+        .map_err(|error| ToolError::Runtime(format!("{error:?}")))
 }

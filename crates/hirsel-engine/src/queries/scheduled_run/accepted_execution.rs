@@ -355,9 +355,45 @@ impl ExecutionProducts for Products {
     }
 }
 
+/// Native consumers retain only this durable locator. Interpreter consumers
+/// load through the same importer as replay on their first demand.
+pub(super) struct PublishedExecution {
+    directory: std::path::PathBuf,
+    root: Reference,
+    inputs: hirsel_validate::ExecutionProductInputs,
+    revision: [u8; 32],
+    admission: inputs::ExecutionAdmission,
+    loaded: Mutex<Option<Arc<AcceptedExecutionProduct>>>,
+    _charge: Arc<inputs::InputCharge>,
+}
 impl FrontRunOutput {
-    pub fn accepted_execution(&self) -> Option<Arc<AcceptedExecutionProduct>> {
-        self.accepted.get().cloned()
+    pub fn accepted_execution(&self) -> Result<Arc<AcceptedExecutionProduct>, QueryError> {
+        let published = self
+            .accepted
+            .get()
+            .ok_or_else(|| failure("product not published"))?;
+        let mut loaded = published.loaded.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(execution) = loaded.as_ref() {
+            return Ok(execution.clone());
+        }
+        let execution = load(
+            &Store::new(published.directory.clone()),
+            published.root,
+            &published.inputs,
+            published.admission.scratch,
+            |bytes| {
+                published
+                    .admission
+                    .reserve(bytes)
+                    .map(|owner| owner as Arc<dyn Send + Sync>)
+            },
+        )?;
+        if execution.revision.digest() != published.revision {
+            return Err(failure("semantic revision differs at publication"));
+        }
+        let execution = Arc::new(execution);
+        *loaded = Some(execution.clone());
+        Ok(execution)
     }
 }
 impl FrontRunQueries {
@@ -383,6 +419,7 @@ impl FrontRunQueries {
         let _retention = store
             .retention_scope()
             .map_err(|error| failure(error.to_string()))?;
+        let batch = store.batch();
         let types = self.lower.signatures().types().clone();
         let records = TypeRecords::new(types, Arc::new(store.clone()));
         let snapshot = self.lower.signatures();
@@ -605,21 +642,40 @@ impl FrontRunQueries {
         store
             .associate(address, Action(address.0), locator)
             .map_err(|e| failure(e.to_string()))?;
-        // Fresh execution and replay enter through the same bounded importer.
-        let execution = load(
-            &store,
+        batch.finish().map_err(|e| failure(e.to_string()))?;
+        let inputs = product.inputs();
+        let directory = store.root().to_path_buf();
+        // Publication and encoding are scratch. Release them before charging
+        // the only allocation retained by native Run: its durable handle.
+        drop(bytes);
+        drop(_charge);
+        drop(product);
+        drop(records);
+        drop(verifier);
+        drop(_retention);
+        drop(store);
+        let mut weight = hirsel_query_products::retained::MetadataWeight::default();
+        weight.add(
+            hirsel_engine_admission::retained_arc_bytes(
+                &std::mem::MaybeUninit::<PublishedExecution>::uninit(),
+            ) as usize,
+        );
+        weight.add(directory.capacity());
+        weight.path(&inputs.entry);
+        let charge = self.admit_decode(weight.bytes())?;
+        crate::queries::operation_owner_trace(format_args!(
+            "accepted-execution retained handle_bytes={}",
+            weight.bytes()
+        ));
+        let _ = output.accepted.set(Arc::new(PublishedExecution {
+            directory,
             root,
-            &product.inputs(),
-            self.weight.scratch,
-            |bytes| {
-                self.admit_decode(bytes)
-                    .map(|owner| owner as Arc<dyn Send + Sync>)
-            },
-        )?;
-        if execution.revision != output.revision {
-            return Err(failure("semantic revision differs at publication"));
-        }
-        let _ = output.accepted.set(Arc::new(execution));
+            inputs,
+            revision: output.revision.digest(),
+            admission: self.execution_admission(),
+            loaded: Mutex::new(None),
+            _charge: charge,
+        }));
         Ok(())
     }
 }

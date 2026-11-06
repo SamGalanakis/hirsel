@@ -25,7 +25,7 @@ pub use source_products::FrontSourceProducts;
 /// Metadata consumed by interpreter/H/native hosts. No mutable query engine,
 /// body cache or native Value reconstruction is available through this output.
 pub struct FrontRunOutput {
-    accepted: std::sync::OnceLock<Arc<AcceptedExecutionProduct>>,
+    accepted: std::sync::OnceLock<Arc<accepted_execution::PublishedExecution>>,
     pub definition_hashes: Option<Arc<BTreeMap<DefPath, ContentHash>>>,
     pub entry: DefPath,
     pub revision: ProgramRevision,

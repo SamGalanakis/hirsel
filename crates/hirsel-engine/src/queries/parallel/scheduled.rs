@@ -2351,7 +2351,6 @@ impl QueryFactory for Factory {
         slots.insert(query.address.0, FrontSlot::Archived(archived));
         drop(slots);
         self.0.reclaim_reads();
-        while self.evict_cache(scratch) {}
         true
     }
 

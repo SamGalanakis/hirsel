@@ -521,6 +521,7 @@ fn check_settled_front_eviction(
                 let evict = warmed.as_ref().unwrap().3;
                 let request = runtime.request(&[evict]);
                 drop(runtime.wait(request).unwrap());
+                while front.factory().evict_cache(weight.scratch) {}
                 assert_eq!(
                     front.retained_bytes(),
                     // The completed memo index and work counters remain

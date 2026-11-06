@@ -1414,6 +1414,11 @@ fn checked_payloads_refuse_substitution_and_retain_the_full_parent_owner() {
         before,
         "a repeated check retains no new owner"
     );
+    let read = checked.downgrade();
+    let upgraded = read.upgrade().unwrap();
+    assert_eq!(allocations(&upgraded), before);
+    assert_eq!(upgraded.as_ptr(), checked.as_ptr());
+    drop(upgraded);
     let child = checked.range(11, 9, 1).unwrap();
     assert!(!child.matches_reference(reference));
     assert_eq!(
@@ -1430,6 +1435,10 @@ fn checked_payloads_refuse_substitution_and_retain_the_full_parent_owner() {
     assert!(child.matches_reference(child_reference));
     drop(child);
     assert!(weak.upgrade().is_none());
+    assert!(
+        read.upgrade().is_none(),
+        "a weak handle never revives an unheld backing"
+    );
 }
 
 #[test]

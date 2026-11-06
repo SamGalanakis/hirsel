@@ -14,17 +14,31 @@ impl Drop for Root {
         let _ = fs::remove_dir_all(&self.0);
     }
 }
-#[derive(Clone, Copy)]
 struct Entry {
     domain: Domain,
     len: u64,
-    offset: u64,
+    backing: Backing,
+    read: Option<Box<CachedRead>>,
+}
+enum Backing {
+    Spool(u64),
+    Provider(Box<hirsel_artifact_store::HeldContent>),
+}
+struct CachedRead {
+    bytes: hirsel_artifact_store::WeakBytes,
+    admission: Arc<Admission>,
+    charge: u64,
+}
+impl Drop for CachedRead {
+    fn drop(&mut self) {
+        self.admission.release(self.charge);
+    }
 }
 impl Entry {
-    fn matches(self, reference: Reference) -> bool {
+    fn matches(&self, reference: Reference) -> bool {
         self.domain == reference.domain && self.len == reference.len
     }
-    fn reference(self, output: ContentHash) -> Reference {
+    fn reference(&self, output: ContentHash) -> Reference {
         Reference {
             output: hirsel_artifact_store::Output(output),
             domain: self.domain,
@@ -39,6 +53,7 @@ fn index_bytes(entries: usize) -> u64 {
 }
 struct Files {
     disk: u64,
+    spool_bytes: u64,
     metadata: u64,
     entries: BTreeMap<ContentHash, Entry>,
     spool: fs::File,
@@ -106,6 +121,7 @@ impl ScratchStore {
             disk_limit,
             files: Mutex::new(Files {
                 disk: 0,
+                spool_bytes: 0,
                 metadata,
                 entries: BTreeMap::new(),
                 spool,
@@ -206,31 +222,55 @@ impl ResultStore for ScratchStore {
         }
         // One append-only private file owns the payloads. Exact ranges and
         // content hashes isolate records; no per-record path is retained.
-        let metadata = index_bytes(files.entries.len().checked_add(1)?)
+        let mut metadata = index_bytes(files.entries.len().checked_add(1)?)
             .checked_sub(index_bytes(files.entries.len()))?;
         if !self.admission.charge(metadata) {
             return None;
         }
-        let offset = files.disk;
-        if write_at(&files.spool, bytes, offset).is_err() {
-            let _ = files.spool.set_len(offset);
-            self.admission.release(metadata);
-            return None;
-        }
-        files.disk += expected.len;
+        // Only an open provider inode replaces required scratch backing. A
+        // successful but evictable write acknowledgement is insufficient.
+        let held = if self.selected.put_content(domain, bytes) == Some(expected)
+            && self.admission.try_charge(ENTRY_CHARGE)
+        {
+            let held = self
+                .selected
+                .local_product_store()
+                .and_then(|store| store.hold_content(expected))
+                .filter(|held| held.retained_bytes() <= self.disk_limit.saturating_sub(files.disk))
+                .filter(|held| held.metadata_bytes() <= ENTRY_CHARGE);
+            self.admission
+                .release(ENTRY_CHARGE - held.as_ref().map_or(0, |held| held.metadata_bytes()));
+            held
+        } else {
+            None
+        };
+        let backing = if let Some(held) = held {
+            metadata += held.metadata_bytes();
+            Backing::Provider(Box::new(held))
+        } else {
+            let offset = files.spool_bytes;
+            if write_at(&files.spool, bytes, offset).is_err() {
+                let _ = files.spool.set_len(offset);
+                self.admission.release(metadata);
+                return None;
+            }
+            files.spool_bytes += expected.len;
+            Backing::Spool(offset)
+        };
+        files.disk += match &backing {
+            Backing::Provider(held) => held.retained_bytes(),
+            Backing::Spool(_) => expected.len,
+        };
         files.metadata += metadata;
         files.entries.insert(
             expected.output.0,
             Entry {
                 domain: expected.domain,
                 len: expected.len,
-                offset,
+                backing,
+                read: None,
             },
         );
-        drop(files);
-        // A successful cache put is still evictable. The current request owns
-        // its transport independently of later durable/cache reclamation.
-        self.selected.put_content(domain, bytes);
         Some(expected)
     }
     fn materialize(&self) -> bool {
@@ -262,46 +302,73 @@ impl ResultStore for ScratchStore {
         self.read_product_content(reference).ok()
     }
     fn read_product_content(&self, reference: Reference) -> Result<Bytes, ProductArchiveError> {
-        let files = self.files.lock().unwrap_or_else(|e| e.into_inner());
-        let Some(entry) = files.entries.get(&reference.output.0) else {
+        let mut files = self.files.lock().unwrap_or_else(|e| e.into_inner());
+        let Files {
+            spool_bytes,
+            spool,
+            entries,
+            ..
+        } = &mut *files;
+        let Some(entry) = entries.get_mut(&reference.output.0) else {
             drop(files);
             return self.selected.read_product_content(reference);
         };
         if !entry.matches(reference) {
             return Err(ProductArchiveError::InvalidContent);
         }
-        if files
-            .spool
-            .metadata()
-            .map_err(ProductArchiveError::InvalidArchive)?
-            .len()
-            != files.disk
+        if matches!(entry.backing, Backing::Spool(_))
+            && spool
+                .metadata()
+                .map_err(ProductArchiveError::InvalidArchive)?
+                .len()
+                != *spool_bytes
         {
             return Err(ProductArchiveError::InvalidContent);
         }
-        // Bytes takes the exact Vec backing without copying its payload.
-        // The same charge covers the read and every retained child view.
+        if let Some(bytes) = entry
+            .read
+            .as_ref()
+            .and_then(|cached| cached.bytes.upgrade())
+        {
+            return Ok(bytes);
+        }
+        entry.read = None;
+        let cache_charge = (size_of::<CachedRead>() as u64)
+            .checked_add(hirsel_artifact_store::WeakBytes::metadata_bytes())
+            .ok_or(ProductArchiveError::LayoutOverflow)?;
         let retained = reference
             .len
             .checked_add(ENTRY_CHARGE)
             .ok_or(ProductArchiveError::LayoutOverflow)?;
         self.admission.archive_charge(retained, "scratch read")?;
+        if let Err(error) = self
+            .admission
+            .archive_charge(cache_charge, "scratch read metadata")
+        {
+            self.admission.release(retained);
+            return Err(error);
+        }
         let read = || -> Result<Bytes, ProductArchiveError> {
-            let mut value = vec![
-                0;
-                usize::try_from(reference.len)
-                    .map_err(|_| ProductArchiveError::LayoutOverflow)?
-            ];
-            read_at(&files.spool, &mut value, entry.offset)
-                .map_err(ProductArchiveError::InvalidArchive)?;
-            Bytes::from(value)
-                .checked(reference)
-                .ok_or(ProductArchiveError::InvalidContent)
+            match &entry.backing {
+                Backing::Provider(held) => held.get().ok_or(ProductArchiveError::InvalidContent),
+                Backing::Spool(offset) => {
+                    let mut value = vec![
+                        0;
+                        usize::try_from(reference.len)
+                            .map_err(|_| ProductArchiveError::LayoutOverflow)?
+                    ];
+                    read_at(spool, &mut value, *offset)
+                        .map_err(ProductArchiveError::InvalidArchive)?;
+                    Bytes::from(value)
+                        .checked(reference)
+                        .ok_or(ProductArchiveError::InvalidContent)
+                }
+            }
         };
         let value = match read() {
             Ok(value) => value,
             Err(error) => {
-                self.admission.release(retained);
+                self.admission.release(retained + cache_charge);
                 return Err(error);
             }
         };
@@ -310,7 +377,13 @@ impl ResultStore for ScratchStore {
             _root: self.root.clone(),
             bytes: retained,
         });
-        Ok(value.retain_owner(owner))
+        let value = value.retain_owner(owner);
+        entry.read = Some(Box::new(CachedRead {
+            bytes: value.downgrade(),
+            admission: self.admission.clone(),
+            charge: cache_charge,
+        }));
+        Ok(value)
     }
 }
 
@@ -368,6 +441,7 @@ mod tests {
         )
         .unwrap();
         let reference = request.put_content(domain(), &vec![7; 32 << 10]).unwrap();
+        let other = request.put_content(domain(), &vec![8; 16 << 10]).unwrap();
         let before = request.retained_bytes();
         let (held, actual) =
             crate::test_alloc::measured(|| request.get_content(reference).unwrap());
@@ -377,7 +451,13 @@ mod tests {
         assert!(request.retained_bytes() - before >= actual.peak as u64);
         assert!(request.retained_bytes() <= ram);
         let charged = request.retained_bytes();
-        let (refused, allocations) = crate::test_alloc::measured(|| request.get_content(reference));
+        let (duplicate, allocations) =
+            crate::test_alloc::measured(|| request.get_content(reference).unwrap());
+        assert_eq!(duplicate.as_ptr(), held.as_ptr());
+        assert_eq!(allocations.allocations, 0);
+        assert_eq!(request.retained_bytes(), charged);
+        drop(duplicate);
+        let (refused, allocations) = crate::test_alloc::measured(|| request.get_content(other));
         assert!(refused.is_none());
         assert_eq!(allocations.allocations, 0);
         assert_eq!(request.retained_bytes(), charged);
@@ -601,6 +681,86 @@ mod tests {
             .is_err()
         );
         assert_eq!(fs::read_dir(parent.path()).unwrap().count(), 0);
+        #[cfg(unix)]
+        {
+            let selected = Arc::new(DirStore::new(parent.path().join("provider")));
+            let ram = 128 << 10;
+            let budget = hirsel_engine_admission::ProcessBudget::new(ram);
+            let request = RequestStore::with_scratch(
+                selected.clone(),
+                budget.reserve(ram).unwrap(),
+                parent.path(),
+                64 << 10,
+            )
+            .unwrap();
+            let operation = request.operation_scope();
+            let payload = vec![42; 32 << 10];
+            let reference = request.put_content(domain(), &payload).unwrap();
+            let directory = fs::read_dir(parent.path())
+                .unwrap()
+                .map(|e| e.unwrap().path())
+                .find(|p| {
+                    p.file_name()
+                        .unwrap()
+                        .to_string_lossy()
+                        .starts_with(".hirsel-request-")
+                })
+                .unwrap();
+            assert_eq!(
+                fs::metadata(directory.join("contents")).unwrap().len(),
+                0,
+                "held provider backing must not be copied to the spool"
+            );
+            let held = request.get_content(reference).unwrap();
+            let duplicate = request.get_content(reference).unwrap();
+            assert_eq!(
+                held.as_ptr(),
+                duplicate.as_ptr(),
+                "live readers share the checked range"
+            );
+            drop(duplicate);
+            let file = fs::OpenOptions::new()
+                .write(true)
+                .open(
+                    request
+                        .local_product_store()
+                        .unwrap()
+                        .output_path(reference),
+                )
+                .unwrap();
+            let last = file.metadata().unwrap().len() - 1;
+            write_at(&file, &[0], last).unwrap();
+            assert_eq!(
+                &*request.get_content(reference).unwrap(),
+                &payload,
+                "a held immutable read is independent of later file damage"
+            );
+            drop(held);
+            assert!(
+                request.get_content(reference).is_none(),
+                "an expired read must recheck the complete provider payload"
+            );
+            write_at(&file, &[42], last).unwrap();
+            assert_eq!(&*request.get_content(reference).unwrap(), &payload);
+            for fault in 0..4 {
+                let mut forged = reference;
+                match fault {
+                    0 => forged.len -= 1,
+                    1 => forged.domain.kind += 1,
+                    2 => forged.domain.schema += 1,
+                    _ => forged.output.0.0[0] ^= 1,
+                }
+                assert!(request.get_content(forged).is_none());
+            }
+            // The descriptor, rather than the publication epoch, owns the
+            // original bytes after an unpublished provider tail is aborted.
+            drop(operation);
+            selected.local_product_store().unwrap().collect(0);
+            assert_eq!(&*request.get_content(reference).unwrap(), &payload);
+            assert!(request.retained_bytes() <= ram);
+            drop(request);
+            assert_eq!(budget.reserved(), 0);
+        }
         let selected = Arc::new(MemStore::default());
         let verifier = selected.verifier().unwrap();
         let budget = hirsel_engine_admission::ProcessBudget::new(8 << 10);

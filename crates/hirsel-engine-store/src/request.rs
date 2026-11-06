@@ -548,12 +548,12 @@ impl ResultStore for RequestStore {
         self.backend.get_content(reference)
     }
     fn put_content(&self, domain: Domain, bytes: &[u8]) -> Option<Reference> {
-        let expected = domain.reference(bytes)?;
         if self.memory.scratch.get().is_some()
             && let Some(reference) = self.backend.put_content(domain, bytes)
         {
             return Some(reference);
         }
+        let expected = domain.reference(bytes)?;
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         if let Some((actual, _)) = state.contents.get(&expected.output.0) {
             return (*actual == expected).then_some(expected);

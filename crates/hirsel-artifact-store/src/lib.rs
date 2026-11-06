@@ -355,6 +355,63 @@ pub struct Bytes {
     region: Arc<Region>,
     range: Range<usize>,
 }
+/// A non-owning view of one exact backing. It can reuse integrity only while
+/// a strong reader still owns that backing and its admission reservation.
+#[derive(Clone)]
+pub struct WeakBytes {
+    region: std::sync::Weak<Region>,
+    range: Range<usize>,
+}
+impl WeakBytes {
+    pub fn upgrade(&self) -> Option<Bytes> {
+        Some(Bytes {
+            region: self.region.upgrade()?,
+            range: self.range.clone(),
+        })
+    }
+    /// Allocation left alive by this weak pointer after the last reader drops.
+    pub fn metadata_bytes() -> u64 {
+        (size_of::<Region>() + 2 * size_of::<usize>()) as u64
+    }
+}
+
+/// A held immutable provider file, independent of its pathname and publication
+/// epoch. Unlink, eviction and abort cannot discard its physical backing.
+/// Each newly opened range still checks the full container and reference.
+pub struct HeldContent {
+    file: Arc<File>,
+    reference: Reference,
+}
+impl HeldContent {
+    pub fn get(&self) -> Option<Bytes> {
+        let len = usize::try_from(self.reference.len)
+            .ok()?
+            .checked_add(HEADER)?;
+        if self.file.metadata().ok()?.len() != len as u64 {
+            return None;
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::FileExt;
+            let mut bytes = vec![0; len];
+            self.file.read_exact_at(&mut bytes, 0).ok()?;
+            checked_container(Bytes::from(bytes), self.reference)
+        }
+        #[cfg(not(unix))]
+        {
+            None
+        }
+    }
+    pub fn retained_bytes(&self) -> u64 {
+        self.reference.len + HEADER as u64
+    }
+    pub fn metadata_bytes(&self) -> u64 {
+        (size_of::<Self>()
+            + (size_of::<File>() + 2 * size_of::<usize>()).next_multiple_of(align_of::<usize>()))
+            as u64
+    }
+}
+
 impl std::fmt::Debug for Bytes {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Bytes").field("len", &self.len()).finish()
@@ -396,6 +453,13 @@ impl Deref for Bytes {
     }
 }
 impl Bytes {
+    pub fn downgrade(&self) -> WeakBytes {
+        WeakBytes {
+            region: Arc::downgrade(&self.region),
+            range: self.range.clone(),
+        }
+    }
+
     /// Check this exact payload against a content reference. A matching checked
     /// container range reuses its immutable backing's integrity check. Other
     /// views, including arbitrary provider bytes, require the complete digest.
@@ -880,6 +944,35 @@ impl Store {
     pub fn get(&self, reference: Reference) -> Option<Bytes> {
         checked_container(self.raw_container(reference)?, reference)
     }
+    /// Lease a standalone provider inode, including unpublished staging files.
+    /// Small packed records keep the bounded request spool instead of pinning a
+    /// larger segment. std File ownership, as in Region::map_file, retains the
+    /// inode without copying it or keeping its publication transaction alive.
+    pub fn hold_content(&self, reference: Reference) -> Option<HeldContent> {
+        if reference.len <= pack::SMALL as u64 || reference.len > MAX_RECORD as u64 {
+            return None;
+        }
+        #[cfg(unix)]
+        {
+            let held = HeldContent {
+                file: Arc::new(File::open(self.output_path(reference)).ok()?),
+                reference,
+            };
+            let len = usize::try_from(reference.len).ok()?.checked_add(HEADER)?;
+            if held.file.metadata().ok()?.len() != len as u64 {
+                return None;
+            }
+            checked_content(
+                Arc::new(Region::map_file(held.file.clone(), len).ok()?),
+                reference,
+            )?;
+            Some(held)
+        }
+        #[cfg(not(unix))]
+        {
+            None
+        }
+    }
     /// Copy an untrusted container before checking it. Consumers needing an
     /// owned immutable snapshot can validate that snapshot once, rather than
     /// checking a mapping and then checking its copied payload again.
@@ -1303,5 +1396,10 @@ fn checked_container(bytes: Bytes, reference: Reference) -> Option<Bytes> {
             reference,
         });
     }
-    bytes.range(HEADER as u64, reference.len, 1)
+    let payload = bytes.range(HEADER as u64, reference.len, 1)?;
+    Some(if payload.has_reference(reference) {
+        payload
+    } else {
+        payload.with_reference(reference)
+    })
 }

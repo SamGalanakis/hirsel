@@ -251,8 +251,14 @@ fn corrupt_or_missing_object_recomputes_instead_of_hitting() {
         let blob: BlobRecord = get_record(&store, BLOB, record.bytes.into()).unwrap();
         let path = output_path(&backend, blob.chunks[0].clone().into());
         std::fs::write(&path, bad).unwrap();
+        assert_eq!(
+            &*store.get_content(blob.chunks[0].clone().into()).unwrap(),
+            b"fixture object",
+            "required request bytes survive damage to the cache"
+        );
+        let reopened = admitted(backend.clone());
         let called = Cell::new(false);
-        codegen(&store, &key, &ready, || {
+        codegen(&reopened, &key, &ready, || {
             called.set(true);
             Ok(object())
         })
@@ -272,8 +278,9 @@ fn corrupt_or_missing_object_recomputes_instead_of_hitting() {
         } else {
             std::fs::remove_file(path).unwrap();
         }
+        let reopened = admitted(backend.clone());
         let called = Cell::new(false);
-        let repaired = codegen(&store, &key, &ready, || {
+        let repaired = codegen(&reopened, &key, &ready, || {
             called.set(true);
             Ok(object())
         })
@@ -342,13 +349,15 @@ fn linked_hit_refuses_stale_fragments_and_relinks_missing_executable() {
     let mut compute = |_: &LinkKey, _: &LinkInputs, _: &[ObjectArtifact]| Ok(b"exe".to_vec());
     let first = link(&store, &link_key(), &manifest, &mut compute).unwrap();
     std::fs::remove_file(output_path(&backend, first.executable)).unwrap();
+    let reopened = admitted(backend.clone());
     let called = Cell::new(false);
-    link(&store, &link_key(), &manifest, &mut |_, _, _| {
+    link(&reopened, &link_key(), &manifest, &mut |_, _, _| {
         called.set(true);
         Ok(b"exe".to_vec())
     })
     .unwrap();
     assert!(called.get());
+    drop(reopened);
     for corrupt in [false, true] {
         let old = link(&store, &link_key(), &manifest, &mut compute).unwrap();
         let reference = old
@@ -362,8 +371,9 @@ fn linked_hit_refuses_stale_fragments_and_relinks_missing_executable() {
         } else {
             std::fs::remove_file(path).unwrap();
         }
+        let reopened = admitted(backend.clone());
         let called = Cell::new(false);
-        let repaired = link(&store, &link_key(), &manifest, &mut |_, _, _| {
+        let repaired = link(&reopened, &link_key(), &manifest, &mut |_, _, _| {
             called.set(true);
             Ok(b"exe".to_vec())
         })
@@ -379,8 +389,9 @@ fn linked_hit_refuses_stale_fragments_and_relinks_missing_executable() {
         );
     }
     std::fs::remove_file(output_path(&backend, fragment.object)).unwrap();
+    let reopened = admitted(backend.clone());
     assert!(
-        link(&store, &link_key(), &manifest, &mut |_, _, _| panic!(
+        link(&reopened, &link_key(), &manifest, &mut |_, _, _| panic!(
             "stale fragment reached linker"
         ))
         .is_err()

@@ -234,7 +234,7 @@ impl ProductArchive {
         }))))
     }
     pub fn checked_import_charge(reference: Reference, bytes: &Bytes) -> io::Result<u64> {
-        if reference.domain.reference(bytes) != Some(reference) {
+        if !bytes.matches_reference(reference) {
             return Err(io::Error::other(
                 "product archive content differs from its reference",
             ));

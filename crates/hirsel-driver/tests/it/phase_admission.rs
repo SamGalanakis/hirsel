@@ -340,10 +340,14 @@ fn native_root_demands_a_source_unit_before_run_acceptance() {
 
 #[test]
 fn failed_check_withholds_acceptance_but_independent_lower_still_runs() {
-    use hirsel_engine_store::ResultStore;
     with_compiler_stack(|| {
         for jobs in [1, 2, 8] {
-            let mut f = Fixture::new("pub fn bad()->u8{true}\npub fn main()->u8{7u8}\n", jobs);
+            let (mut f, completion) = Fixture::with_completion_order(
+                "pub fn bad()->u8{true}\npub fn main()->u8{7u8}\n",
+                jobs,
+                Arc::new(tempfile::tempdir().unwrap()),
+                None,
+            );
             let run = f.run();
             f.runtime.register(FRONT_RUN_KIND, run.factory()).unwrap();
             let request = f.runtime.request(&[run.query(&f.program.entry).unwrap()]);
@@ -352,14 +356,21 @@ fn failed_check_withholds_acceptance_but_independent_lower_still_runs() {
                 run.failure(refusal),
                 Some(QueryError::Diagnostics(_))
             ));
-            assert!(
-                f.store.lookup_product(f.check.query().address).is_some(),
-                "an early semantic failure still joins the complete ordered source Check"
-            );
-            let request = f.runtime.request(&[f.check.query()]);
-            let products = f.runtime.wait(request).unwrap();
-            let output = f.check.outcome(products[0].clone()).unwrap();
-            assert_eq!(f.check.accepted(products[0].clone()), Some(false));
+            let checked = completion
+                .events
+                .lock()
+                .unwrap()
+                .iter()
+                .find_map(|event| match event {
+                    RuntimeEvent::Settled {
+                        query,
+                        result: Ok(product),
+                    } if *query == f.check.query() => Some(product.clone()),
+                    _ => None,
+                })
+                .expect("an early semantic failure still joins the complete ordered source Check");
+            let output = f.check.outcome(checked.clone()).unwrap();
+            assert_eq!(f.check.accepted(checked), Some(false));
             assert!(!output.checked.diagnostics.is_empty());
             assert!(
                 output.lowered.is_empty(),

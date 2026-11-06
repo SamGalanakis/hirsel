@@ -68,6 +68,7 @@ impl RootRead {
                     || facts.lowering.as_ref().is_some_and(|lowering| {
                         lowering.needed_with(|id| queries.constants.contains(&id))
                     }));
+            cx.release_body(id);
             *self = if lower {
                 Self::Lower { front: selected }
             } else {

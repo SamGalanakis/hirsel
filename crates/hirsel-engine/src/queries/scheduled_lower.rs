@@ -2396,6 +2396,10 @@ impl FrontLowerQueries {
                 return Err(self.errors.resource);
             }
         };
+        let serialization_working = metadata
+            .0
+            .encoding_working_bytes()
+            .ok_or(self.errors.resource)?;
         let observations = ProductRef::live(
             id.address,
             action,
@@ -2407,7 +2411,7 @@ impl FrontLowerQueries {
                 },
                 records: self.records.clone(),
                 source: (*self.namespace.anchors).clone(),
-                serialization_working: self.weight.scratch,
+                serialization_working,
                 _admission: charge,
             }),
         );
@@ -2518,7 +2522,7 @@ impl FrontLowerQueries {
                         },
                         records: self.records.clone(),
                         source: (*self.namespace.anchors).clone(),
-                        serialization_working: self.weight.scratch,
+                        serialization_working,
                         _admission: charge,
                     }),
                 )

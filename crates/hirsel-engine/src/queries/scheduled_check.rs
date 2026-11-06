@@ -225,6 +225,7 @@ impl FrontCheckQueries {
             as u64;
         const {
             assert!(std::mem::size_of::<ReaderReceipt>() <= 128);
+            assert!(size_of::<File>() <= size_of::<FileInput>() + 128);
         };
         let base = weight
             .retained
@@ -370,7 +371,6 @@ impl QueryFactory for Factory {
             publication: Publication::roots(0),
             reads: ReaderSequence::default(),
             front: Vec::new(),
-            lowered: Vec::new(),
             failed_front: Vec::new(),
             failed_lowered: Vec::new(),
             lint_seen: 0,
@@ -384,8 +384,8 @@ struct File {
     input: FileInput,
     diagnostics: Vec<Diagnostic>,
     error: Option<QueryError>,
-    phase: Option<QueryKind>,
     lower_diagnostics: Vec<Diagnostic>,
+    lowered: Vec<(DefPath, ProductRef)>,
     source_rules: bool,
 }
 impl File {
@@ -393,9 +393,9 @@ impl File {
         Self {
             diagnostics: input.diagnostics.clone(),
             error: input.error.clone(),
-            phase: input.phase,
             input,
             lower_diagnostics: Vec::new(),
+            lowered: Vec::new(),
             source_rules: false,
         }
     }
@@ -409,7 +409,7 @@ impl File {
             QueryError::Diagnostics(diagnostics) => self.diagnostics.extend(diagnostics),
             other if self.error.is_none() => {
                 self.error = Some(other);
-                self.phase = phase;
+                self.input.phase = phase;
             }
             _ => {}
         }
@@ -462,7 +462,6 @@ struct Task {
     publication: Publication,
     reads: ReaderSequence,
     front: Vec<(DefPath, FrontObservation)>,
-    lowered: Vec<(DefPath, ProductRef)>,
     failed_front: Vec<(DefPath, Reference)>,
     failed_lowered: Vec<(DefPath, Reference)>,
     lint_seen: usize,
@@ -482,6 +481,7 @@ impl QueryTask for Task {
             return finish(result.clone());
         }
         match self.advance(cx) {
+            Ok(Some(waiting)) if waiting.len() == 1 => QueryPoll::Waiting(waiting),
             Ok(Some(waiting)) => QueryPoll::WaitingAny(waiting),
             result => {
                 let result = result.and_then(|_| self.complete());
@@ -932,7 +932,7 @@ impl Task {
         match facts.result {
             Ok((diagnostics, observations)) => {
                 self.files[file].lower_diagnostics.extend(diagnostics);
-                self.lowered.push((path, observations));
+                self.files[file].lowered.push((path, observations));
             }
             Err((reference, QueryError::Diagnostics(diagnostics))) => {
                 self.failed_lowered.push((path, reference));
@@ -973,7 +973,7 @@ impl Task {
             })?;
         let stopped = self.files.iter().find_map(|file| match &file.error {
             Some(error) if *error != QueryError::NotImplemented => {
-                Some((error.clone(), file.phase))
+                Some((error.clone(), file.input.phase))
             }
             _ => None,
         });
@@ -1000,7 +1000,7 @@ impl Task {
             .files
             .iter()
             .filter(|file| file.error == Some(QueryError::NotImplemented))
-            .filter_map(|file| file.phase)
+            .filter_map(|file| file.input.phase)
             .last();
         let completion = incomplete.map_or(CheckCompletion::Complete, |phase| {
             CheckCompletion::Incomplete { phase }
@@ -1039,6 +1039,12 @@ impl Task {
             &queries.declarations,
             &mut diagnostics,
         );
+        let lowered: Vec<_> = self
+            .files
+            .iter_mut()
+            .filter(|file| file.clean())
+            .flat_map(|file| std::mem::take(&mut file.lowered))
+            .collect();
         let action = hirsel_artifact_store::Action(ContentHash::of_parts(
             "hirsel.front.check.action.v3",
             std::iter::once(queries.query.address.0.0.as_slice())
@@ -1056,7 +1062,7 @@ impl Task {
                         .map(|file| file.text().as_bytes()),
                 )
                 .chain(self.front.iter().map(|(_, p)| p.action.0.0.as_slice()))
-                .chain(self.lowered.iter().map(|(_, p)| p.action.0.0.as_slice()))
+                .chain(lowered.iter().map(|(_, p)| p.action.0.0.as_slice()))
                 .chain(
                     self.failed_front
                         .iter()
@@ -1080,7 +1086,7 @@ impl Task {
         let data = Arc::new(Data {
             checked,
             front: std::mem::take(&mut self.front),
-            lowered: std::mem::take(&mut self.lowered),
+            lowered,
             failed_front: std::mem::take(&mut self.failed_front),
             failed_lowered: std::mem::take(&mut self.failed_lowered),
             reads: ReaderReceipt::capture(&*queries.store, &reads, queries.weight.scratch)

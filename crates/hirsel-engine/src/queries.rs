@@ -33,9 +33,10 @@ pub use scheduled_native_root::{
     FrontNativeQueries,
 };
 pub use scheduled_run::{
-    FRONT_RUN_BATCH_KIND, FRONT_RUN_KIND, FrontBuiltProof, FrontPrecomputeOutput,
-    FrontPreparedProof, FrontProofExport, FrontProofInput, FrontProofText, FrontRunBatchOutput,
-    FrontRunInputs, FrontRunOutput, FrontRunQueries, FrontSemanticGraph, FrontSourceProducts,
+    AcceptedExecutionProduct, ExecutionProducts, FRONT_RUN_BATCH_KIND, FRONT_RUN_KIND,
+    FrontBuiltProof, FrontPrecomputeOutput, FrontPreparedProof, FrontProofExport, FrontProofInput,
+    FrontProofText, FrontRunBatchOutput, FrontRunInputs, FrontRunOutput, FrontRunQueries,
+    FrontSemanticGraph, FrontSourceProducts, execution_options, import_execution_product,
 };
 pub(crate) use scheduled_run::{UNIVERSE, universe_action, universe_query};
 

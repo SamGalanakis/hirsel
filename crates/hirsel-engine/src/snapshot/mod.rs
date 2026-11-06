@@ -13,6 +13,7 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, OnceLock};
 
 mod checked_runtime;
+pub(crate) use checked_runtime::checked_runtime_from_declarations;
 mod declarations;
 mod provider;
 mod sources;
@@ -358,6 +359,30 @@ impl ValidationState {
     }
 }
 impl SignatureSnapshot {
+    pub(crate) fn execution_declarations(&self) -> Vec<DefPath> {
+        self.lookup
+            .registry
+            .signatures()
+            .map(|s| s.definition.path().clone())
+            .collect()
+    }
+    pub(crate) fn execution_declaration(
+        &self,
+        path: &DefPath,
+    ) -> Result<(SignatureRef, SignatureRef), QueryError> {
+        let id = DefId::intern(path);
+        let public = self
+            .signature(id)
+            .transpose()?
+            .or_else(|| self.lookup.registry.get(path))
+            .ok_or(QueryError::NotImplemented)?;
+        let private = self
+            .body_view(&path.0.package, id)
+            .transpose()?
+            .unwrap_or_else(|| public.clone());
+        Ok((public, private))
+    }
+
     pub(crate) fn builtin_dictionary_value(
         &self,
         memo: &hirsel_types::TypeMemo,

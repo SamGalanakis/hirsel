@@ -322,6 +322,16 @@ impl FrontCheckQueries {
     }
     /// Inspect acceptance without cloning the ordered file/product inventory.
     /// Conditional host continuations use this only after reading this root.
+    pub(crate) fn accepted_product(&self) -> Option<ProductRef> {
+        let product = self
+            .completed
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()?
+            .0
+            .clone();
+        (self.accepted(product.clone()) == Some(true)).then_some(product)
+    }
     pub fn accepted(&self, product: ProductRef) -> Option<bool> {
         let completed = self.completed.lock().unwrap_or_else(|e| e.into_inner());
         let (selected, data) = completed.as_ref()?;

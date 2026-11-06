@@ -34,6 +34,7 @@ mod ownership_admission;
 mod ownership_bootstrap;
 mod ownership_selection;
 mod proof_export;
+mod replay_product;
 mod safe_check;
 mod selector;
 mod source_graph;
@@ -44,6 +45,7 @@ pub use output::{
     RequestWork, TirBatchExecution, TirExecution, TirProducts,
 };
 pub use ownership_selection::{OwnershipExecution, OwnershipObjects};
+pub use replay_product::import_replay_execution;
 pub use selector::{CompilerRequests, RequestLimits};
 
 /// Already observed inputs, including missing files, manifests, aliases and

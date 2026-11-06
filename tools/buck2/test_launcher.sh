@@ -64,8 +64,9 @@ else
     mv -T "$HIRSEL_TEST_TMPDIR.$$" "$HIRSEL_TEST_TMPDIR" 2>/dev/null || rm -f "$HIRSEL_TEST_TMPDIR.$$"
   done
 fi
-# Every action owns its writable caches, including on a host with a populated
-# home. Share them among its test threads/CLI children, never between actions.
+# Every action owns its writable caches and retained test data, including on a
+# host with a populated home. Share them among its test threads/CLI children,
+# never between actions. The sandbox and its recordings have the same lifetime.
 # mktemp creates a unique mode-0700 directory (Go os.MkdirTemp's ownership
 # pattern); the launcher stays alive so its exit trap also runs on test failure.
 action_cache="$(mktemp -d "$scratch/action-XXXXXXXXXX")"
@@ -77,6 +78,7 @@ trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
 export XDG_CACHE_HOME="$action_cache/cache"
+export XDG_DATA_HOME="$action_cache/data"
 export HIRSEL_RESULTS_DIR="$action_cache/results"
 export HIRSEL_NATIVE_CACHE="$action_cache/runtime"
 mkdir -m 700 "$XDG_CACHE_HOME"

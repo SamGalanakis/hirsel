@@ -2924,20 +2924,24 @@ mod tests {
                 )),
             },
         };
-        let product = |definition: &Definition, value: &hirsel_tir::Materialized| {
-            let bytes =
-                hirsel_product_codec::canonical_bytes(session(), &(definition, value), |_| {
-                    Some((path("main"), 0))
-                })
-                .unwrap();
+        let declaration = crate::support::capability_signature("Private");
+        let product = |definition: &Definition,
+                       value: &hirsel_tir::Materialized,
+                       private: &hirsel_types::Signature| {
+            let bytes = hirsel_product_codec::canonical_bytes(
+                session(),
+                &(definition, value, private),
+                |_| Some((path("main"), 0)),
+            )
+            .unwrap();
             domain.reference(&bytes).unwrap()
         };
         let original_definition = fixture.definition.clone();
-        let original = product(&original_definition, &value);
+        let original = product(&original_definition, &value, &declaration);
         assert!(cache.execution_product(&inputs, original).is_none());
         let source_check = domain.reference(b"completed source Check").unwrap();
         cache
-            .publish_execution_product(&inputs, original, source_check)
+            .publish_execution_product_durable(&inputs, original, source_check)
             .unwrap();
         // The same declarations admit this different body. V alone cannot
         // establish that it came from the accepted sources.
@@ -2952,19 +2956,39 @@ mod tests {
             .unwrap();
         *literal = "substituted".into();
         assert!(check(&fixture, &cache, policy).0.violations.is_empty());
-        let substituted_body = product(&fixture.definition, &value);
+        let substituted_body = product(&fixture.definition, &value, &declaration);
         assert_ne!(original, substituted_body);
         let mut substituted_value = value.clone();
         substituted_value.root.kind =
             hirsel_tir::ValueKind::Constant(hirsel_tir::Constant::String("substituted".into()));
-        let substituted_constant = product(&original_definition, &substituted_value);
+        let substituted_constant = product(&original_definition, &substituted_value, &declaration);
         assert_ne!(substituted_body, substituted_constant);
         let cache = VerifierCache::directory(directory.0.clone());
         let binding = cache.execution_product(&inputs, original).unwrap();
         assert_eq!(binding.product(), original);
         assert_eq!(binding.inputs(), &inputs);
         assert_eq!(binding.source_check(), source_check);
-        for substituted in [substituted_body, substituted_constant] {
+        let mut private = declaration.clone();
+        let hirsel_types::SignatureKind::Type(ty) = &mut private.kind else {
+            unreachable!()
+        };
+        ty.representation = Some(session().intern(hirsel_types::Type::unit()));
+        let mismatched_private = product(&original_definition, &value, &private);
+        let mut runtime = declaration.clone();
+        let hirsel_types::SignatureKind::Type(ty) = &mut runtime.kind else {
+            unreachable!()
+        };
+        ty.layout.flat = !ty.layout.flat;
+        ty.destructor_allocation = hirsel_types::Allocation::MayAllocate;
+        let mismatched_runtime = product(&original_definition, &value, &runtime);
+        assert_eq!(private.fingerprint, declaration.fingerprint);
+        assert_eq!(runtime.fingerprint, declaration.fingerprint);
+        for substituted in [
+            substituted_body,
+            substituted_constant,
+            mismatched_private,
+            mismatched_runtime,
+        ] {
             assert!(cache.execution_product(&inputs, substituted).is_none());
         }
         for field in 0..7 {

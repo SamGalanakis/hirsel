@@ -20,6 +20,9 @@ struct Shared {
     foreign_links: Vec<LinkInput>,
 }
 impl NativeSemanticProgram {
+    pub(crate) fn execution_nodes(&self) -> impl Iterator<Item = &hirsel_run_schema::ProgramNode> {
+        self.shared.program.nodes.iter().map(AsRef::as_ref)
+    }
     pub(crate) fn shared_node(
         &self,
         definition: Option<DefId>,

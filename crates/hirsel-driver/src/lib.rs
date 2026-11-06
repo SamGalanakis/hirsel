@@ -567,7 +567,17 @@ pub(crate) fn run_request_on_host(
     checked: bool,
 ) -> Result<(RunOutcome, Option<hirsel_run_schema::CalleeOutcome>), ToolError> {
     let selection = launch_binding::LaunchSelection::read(launch)?;
-    let input = request_tir(path, policy, selection.entry().cloned())?;
+    let input = if let Some((revision, entry)) = selection.replay_product() {
+        match hirsel_intern::jobs::with_compiler_stack(|| {
+            requests::import_replay_execution(path, policy.compiler(), revision, entry)
+        })? {
+            Some(input) => input,
+            // Changed bytes derive their semantic revision through compilation.
+            None => request_tir(path, policy, selection.entry().cloned())?,
+        }
+    } else {
+        request_tir(path, policy, selection.entry().cloned())?
+    };
     tir_execution::run_tir_on_host(
         &input, launch, selection, max_steps, observed, cancel, checked,
     )

@@ -4,8 +4,8 @@
 use super::*;
 use hirsel_engine::{CheckOutput, ToolError, UnsafeReach, WorkStats};
 use hirsel_span::SourceMap;
-use hirsel_tir::{DefinitionRef, MaterializedRef, TirProvider};
-use hirsel_types::{GenericArgument, QueryError, SignatureRef};
+use hirsel_tir::DefinitionRef;
+use hirsel_types::{QueryError, SignatureRef};
 use std::sync::Arc;
 
 /// Work of this completed request, independently of a transport's delivery
@@ -278,16 +278,7 @@ impl PrecomputedSources {
 /// may decode an owned product but never run a compiler query, evaluate a
 /// constant or mutate registration. Missing/corrupt content remains an error.
 /// This owner has no second semantic invalidation or verifier-receipt table.
-pub trait TirProducts: Send + Sync {
-    fn definition(&self, path: &DefPath) -> Result<DefinitionRef, QueryError>;
-    fn constant(&self, path: &DefPath, actuals: &[u64]) -> Result<MaterializedRef, QueryError>;
-    fn constant_definitions(&self) -> Result<Vec<DefPath>, QueryError>;
-    fn instance_body(
-        &self,
-        path: &DefPath,
-        actuals: &[GenericArgument],
-    ) -> Result<Option<DefPath>, QueryError>;
-}
+pub use hirsel_engine::ExecutionProducts as TirProducts;
 /// Completed independently bound entry products from one source-closure pass.
 #[derive(Clone)]
 pub struct TirBatchExecution {
@@ -311,56 +302,7 @@ impl TirBatchExecution {
 /// The selected TIR root and the immutable closure needed to execute it. The
 /// runtime contains the exact type, private-view and checked-H metadata for
 /// this snapshot; semantic revision remains independent of native artifacts.
-#[derive(Clone)]
-pub struct TirExecution {
-    pub entry: DefPath,
-    pub definition: DefinitionRef,
-    pub signature: SignatureRef,
-    pub sources: SourceMap,
-    pub runtime: Arc<hirsel_interp::aggregate::RuntimeTypes>,
-    pub checked_runtime: Arc<hirsel_interp::checked::CheckedRuntime>,
-    pub code: hirsel_run_schema::CodeReach,
-    pub callees: std::collections::BTreeMap<String, hirsel_run_schema::CalleeFacts>,
-    pub entries: std::collections::BTreeMap<
-        String,
-        (hirsel_run_schema::CalleeFacts, hirsel_run_schema::CallForm),
-    >,
-    pub revision: hirsel_run_schema::ProgramRevision,
-    pub foreign_unreplayable: bool,
-    pub foreign: hirsel_engine::ForeignUse,
-    pub(crate) products: Arc<dyn TirProducts>,
-}
-impl TirExecution {
-    pub fn provider(&self) -> impl TirProvider + '_ {
-        ExecutionProvider(self.products.as_ref())
-    }
-}
-struct ExecutionProvider<'a>(&'a dyn TirProducts);
-impl TirProvider for ExecutionProvider<'_> {
-    fn definition(&mut self, path: &DefPath) -> Result<DefinitionRef, QueryError> {
-        self.0.definition(path)
-    }
-    fn constant(&mut self, path: &DefPath) -> Result<MaterializedRef, QueryError> {
-        self.0.constant(path, &[])
-    }
-    fn constant_instance(
-        &mut self,
-        path: &DefPath,
-        actuals: &[u64],
-    ) -> Result<MaterializedRef, QueryError> {
-        self.0.constant(path, actuals)
-    }
-    fn constant_definitions(&mut self) -> Result<Vec<DefPath>, QueryError> {
-        self.0.constant_definitions()
-    }
-    fn instance_body(
-        &mut self,
-        path: &DefPath,
-        actuals: &[GenericArgument],
-    ) -> Result<Option<DefPath>, QueryError> {
-        self.0.instance_body(path, actuals)
-    }
-}
+pub use hirsel_engine::AcceptedExecutionProduct as TirExecution;
 /// Immutable linked observation tables. Detached readers retain the same
 /// output admission and backing allocations as the original execution.
 pub struct NativeObservation {

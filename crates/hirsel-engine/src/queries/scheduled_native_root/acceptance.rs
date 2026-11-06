@@ -49,6 +49,13 @@ impl Task {
         {
             return Err(owner.errors.protocol);
         }
+        let facts = owner
+            .outcome(prepared.clone())
+            .ok_or(owner.errors.protocol)?;
+        owner
+            .run
+            .publish_execution(&facts.products.run, &checked)
+            .map_err(|error| owner.fail(error))?;
         let archive = prepared
             .archive(ArchiveAdmission::Retained)
             .map_err(|_| owner.errors.resource)?;

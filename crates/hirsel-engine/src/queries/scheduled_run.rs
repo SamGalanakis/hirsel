@@ -2,6 +2,10 @@
 use super::*;
 use crate::native_metadata::NativeMetadataExt;
 mod acceptance;
+mod accepted_execution;
+pub use accepted_execution::{
+    AcceptedExecutionProduct, ExecutionProducts, execution_options, import_execution_product,
+};
 mod content;
 mod graph_reader;
 mod inputs;
@@ -21,6 +25,7 @@ pub use source_products::FrontSourceProducts;
 /// Metadata consumed by interpreter/H/native hosts. No mutable query engine,
 /// body cache or native Value reconstruction is available through this output.
 pub struct FrontRunOutput {
+    accepted: std::sync::OnceLock<Arc<AcceptedExecutionProduct>>,
     pub definition_hashes: Option<Arc<BTreeMap<DefPath, ContentHash>>>,
     pub entry: DefPath,
     pub revision: ProgramRevision,
@@ -653,7 +658,7 @@ impl Task {
                 Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
                 Poll::Ready(Ok(product)) => product,
             };
-            let Some(output) = check.outcome(product) else {
+            let Some(output) = check.outcome(product.clone()) else {
                 return Poll::Ready(Err(self.queries.protocol_failure(
                     self.query,
                     "Run producer or observation is unavailable",
@@ -1110,6 +1115,12 @@ impl Task {
                 let output = queries
                     .outcome(product.clone())
                     .ok_or_else(|| operational("batch entry output disappeared"))?;
+                let checked = queries
+                    .check
+                    .as_ref()
+                    .and_then(|check| check.accepted_product())
+                    .ok_or_else(|| operational("batch source acceptance unavailable"))?;
+                queries.publish_execution(&output, &checked)?;
                 weight.path(root);
                 weight.arc(&output);
                 weight.path(&output.entry);
@@ -1343,6 +1354,7 @@ impl Task {
             None
         };
         let output = Arc::new(FrontRunOutput {
+            accepted: Default::default(),
             definition_hashes,
             entry: root.clone(),
             revision,

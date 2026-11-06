@@ -82,6 +82,24 @@ impl LaunchSelection {
         ))
     }
 
+    pub fn replay_product(&self) -> Option<([u8; 32], DefPath)> {
+        let (_, run) = self.replay.as_ref()?;
+        Some((
+            {
+                let text = &run.record().program;
+                if text.len() != 64 {
+                    return None;
+                }
+                let mut bytes = [0; 32];
+                for (at, byte) in bytes.iter_mut().enumerate() {
+                    *byte = u8::from_str_radix(&text[at * 2..at * 2 + 2], 16).ok()?;
+                }
+                bytes
+            },
+            super::def_path(&run.record().entry)?,
+        ))
+    }
+
     pub fn entry(&self) -> Option<&DefPath> {
         self.entry.as_ref()
     }

@@ -63,6 +63,32 @@ pub(super) struct BindingRecord {
 }
 
 impl VerifierCache {
+    /// Strict retention must expose publication errors to its acceptance join.
+    pub fn publish_execution_product_durable(
+        &self,
+        inputs: &ExecutionProductInputs,
+        product: Reference,
+        source_check: Reference,
+    ) -> std::io::Result<()> {
+        let Backend::Directory(store) = &self.0 else {
+            return Err(std::io::Error::other(
+                "durable execution binding requires a strict store",
+            ));
+        };
+        let _retention = store.retention_scope()?;
+        let key = inputs
+            .key(product)
+            .ok_or_else(|| std::io::Error::other("execution binding key"))?;
+        let bytes = bincode::serialize(&BindingRecord {
+            inputs: inputs.clone(),
+            product,
+            source_check,
+        })
+        .map_err(std::io::Error::other)?;
+        let reference = store.put(DOMAIN, &bytes)?;
+        store.associate(Address(key), Action(key), reference)
+    }
+
     /// Import an individual indexed body whose exact bytes have a local
     /// source-acceptance binding. Opening/framing the archive is the caller's
     /// bounded codec operation; it supplies no V authority. This deliberately

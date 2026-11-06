@@ -1623,23 +1623,7 @@ pub(super) fn install(
                 errors,
             )
         };
-        let options = ContentHash::of_parts(
-            "hirsel.execution.options.v1",
-            [
-                &[u8::from(config.verify == hirsel_engine::Verify::On)][..],
-                &program.engine.comptime_limits.budget.to_le_bytes(),
-                &(program.engine.comptime_limits.call_depth as u64).to_le_bytes(),
-                &hirsel_tir::CHARGING_VERSION.to_le_bytes(),
-                &[match config.lowering {
-                    LoweringPolicy::Comptime => 0,
-                    LoweringPolicy::Reachable => 1,
-                }],
-                std::env::consts::ARCH.as_bytes(),
-                std::env::consts::OS.as_bytes(),
-                &usize::BITS.to_le_bytes(),
-                &[u8::from(cfg!(target_endian = "little"))],
-            ],
-        );
+        let options = hirsel_engine::execution_options(config, program.engine.comptime_limits);
         Some(
             selected
                 .and_then(|run| {

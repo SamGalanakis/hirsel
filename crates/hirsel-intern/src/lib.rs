@@ -10,6 +10,7 @@ pub mod memory;
 pub mod persist;
 mod salt;
 mod table;
+pub mod test_progress;
 pub mod timings;
 pub mod work;
 

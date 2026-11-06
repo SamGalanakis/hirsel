@@ -483,6 +483,7 @@ fn run_source_path(
     dir: &Path,
     probe: Probe,
 ) -> CaseResult {
+    let _progress = hirsel_intern::test_progress::enter("native-case", || id.to_string());
     if source.lines().any(|line| line.trim() == "// expect: test") {
         return run_test_suite(id, source, path, matrix, toolchain, dir, probe);
     }

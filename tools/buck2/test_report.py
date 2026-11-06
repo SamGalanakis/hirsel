@@ -15,11 +15,42 @@ import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 
 ACTION_TIMEOUT_SECONDS = 600
 INNER_DEADLINE_SECONDS = ACTION_TIMEOUT_SECONDS * 0.95
 STACK_DUMP_SECONDS = 20
+
+
+def report_phases(directory):
+    """Read coarse spans outside captured application stdout/stderr."""
+    now = time.time()
+    for path in sorted(Path(directory).glob('*.jsonl')):
+        active, totals = {}, {}
+        for line in path.read_text(errors='replace').splitlines():
+            try:
+                row = json.loads(line)
+                timestamp, identity = float(row['timestamp']), row['id']
+                thread, event, phase, detail = (row[key] for key in ('thread', 'event', 'phase', 'detail'))
+            except (ValueError, TypeError, KeyError):
+                continue  # A writer can be interrupted during its last append.
+            if event == 'start':
+                active[identity] = (timestamp, thread, phase, detail)
+            elif event == 'end' and identity in active:
+                started, thread, phase, detail = active.pop(identity)
+                count, seconds = totals.get(phase, (0, 0))
+                totals[phase] = count + 1, seconds + max(0, timestamp - started)
+        for phase, (count, seconds) in sorted(totals.items()):
+            print('HIRSEL_TEST_PHASE_TOTAL ' + json.dumps(dict(
+                pid=int(path.stem), phase=phase, completed=count,
+                inclusive_seconds=round(seconds, 6))), file=sys.stderr, flush=True)
+        for started, thread, phase, detail in active.values():
+            print('HIRSEL_TEST_PHASE_RUNNING ' + json.dumps(dict(
+                pid=int(path.stem), thread=thread, phase=phase, detail=detail,
+                process_alive=Path(f'/proc/{path.stem}').exists(),
+                elapsed_seconds=round(max(0, now - started), 6))),
+                file=sys.stderr, flush=True)
 
 
 def owned_descendants():
@@ -127,6 +158,7 @@ class Progress:
         self.finished = {}
         self.raw_json = raw_json
         self.empty_partition = False
+        self.suite_finished = False
 
     def unittest_line(self, line):
         # unittest's verbose runner writes the start before calling the body,
@@ -153,6 +185,8 @@ class Progress:
             sys.stdout.buffer.flush()
             return
         kind, status = event['type'], event.get('event')
+        if kind == 'suite':
+            self.suite_finished = status in ('ok', 'failed')
         if kind == 'test':
             name = event['name']
             if status == 'started':
@@ -213,8 +247,10 @@ def supervise(command, *, deadline=INNER_DEADLINE_SECONDS, raw_json=False):
     previous_subreaper = ctypes.c_int()
     if libc.prctl(37, ctypes.byref(previous_subreaper), 0, 0, 0) != 0 or libc.prctl(36, 1, 0, 0, 0) != 0:
         raise OSError(ctypes.get_errno(), 'cannot establish test descendant ownership')
+    phases = tempfile.TemporaryDirectory(prefix='hirsel-test-phases-')
     try:
-        child = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        env = os.environ | {'HIRSEL_TEST_PHASE_DIR': phases.name}
+        child = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
         with selectors.DefaultSelector() as selector:
             selector.register(child.stdout, selectors.EVENT_READ)
             selector.register(child.stderr, selectors.EVENT_READ)
@@ -223,6 +259,16 @@ def supervise(command, *, deadline=INNER_DEADLINE_SECONDS, raw_json=False):
                 remaining = end - time.monotonic()
                 if stopped or remaining <= 0:
                     progress.interrupted(f'signal={stopped}' if stopped else f'after {deadline:g}s')
+                    if child.poll() is not None or progress.suite_finished:
+                        print('HIRSEL_TEST_PHASE_RUNNING ' + json.dumps(dict(
+                            phase='child-teardown', status=child.returncode)),
+                            file=sys.stderr, flush=True)
+                    elif (not progress.running and not progress.finished
+                          and not any(Path(phases.name).iterdir())):
+                        print('HIRSEL_TEST_PHASE_RUNNING ' + json.dumps(dict(
+                            phase='launcher-setup-or-discovery')),
+                            file=sys.stderr, flush=True)
+                    report_phases(phases.name)
                     if not stopped:
                         dump_owned_stacks()
                     return 128 + stopped if stopped else 124
@@ -248,6 +294,7 @@ def supervise(command, *, deadline=INNER_DEADLINE_SECONDS, raw_json=False):
                     if stream is child.stderr:
                         progress.unittest_line(pending[stream])
             status = child.wait()
+            report_phases(phases.name)
             binary = os.environ.get('HIRSEL_TEST_BINARY')
             discovery = any(arg in ('--list', '--help', '-h') for arg in command)
             if (status == 0 and binary and not discovery and not progress.empty_partition
@@ -266,6 +313,7 @@ def supervise(command, *, deadline=INNER_DEADLINE_SECONDS, raw_json=False):
             reap_owned_children(child)
             child.stdout.close()
             child.stderr.close()
+        phases.cleanup()
         libc.prctl(36, previous_subreaper.value, 0, 0, 0)
         for sig, handler in previous.items():
             signal.signal(sig, handler)

@@ -2420,6 +2420,8 @@ pub fn run_heap_in(
     sites: &Sites<'_>,
     world: &HeapWorld,
 ) -> Result<HeapRun, NativeError> {
+    let _progress =
+        hirsel_intern::test_progress::enter("checked-h-execution", || entry.to_string());
     if matches!(
         program.launches.get(entry),
         Some(hirsel_native::link::LaunchKind::Call { .. })
@@ -2496,6 +2498,7 @@ pub fn heap_campaign_in(
     sites: &Sites<'_>,
     world: &HeapWorld,
 ) -> Result<HeapRun, NativeError> {
+    let _progress = hirsel_intern::test_progress::enter("checked-h-campaign", || entry.to_string());
     if matches!(
         program.launches.get(entry),
         Some(hirsel_native::link::LaunchKind::Call { .. })

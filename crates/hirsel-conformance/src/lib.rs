@@ -1067,6 +1067,7 @@ pub fn run_suite_selected_with_format(
         }
     }
     for (file, path, header) in headers {
+        let _progress = hirsel_intern::test_progress::enter("corpus-case", || path.clone());
         let (status, observation) = driver.evaluate(&file, &header.expect);
         if let Some(divergence) = &observation.checked {
             report.errors.push(format!("{path}: {divergence}"));

@@ -609,6 +609,8 @@ fn run_observed(
     mut simulation: SimulationConfig,
     checked: bool,
 ) -> Result<ObservedExecution, ToolError> {
+    let _progress =
+        hirsel_intern::test_progress::enter("reference-preparation", || config.entry.to_string());
     let error_sources = engine.sources.clone();
     let query_error = |error| ToolError::Query {
         error,
@@ -638,6 +640,9 @@ fn run_observed(
     };
     interpreter.prepare(signature, runtime, simulation);
     let sources = engine.sources.clone();
+    drop(_progress);
+    let _execution =
+        hirsel_intern::test_progress::enter("reference-execution", || config.entry.to_string());
     let result = closed(engine, &config.entry, |definitions| {
         interpreter.run_observed_query(config, definitions, &sources)
     })

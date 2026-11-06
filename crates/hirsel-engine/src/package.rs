@@ -212,6 +212,8 @@ impl LoadedProgram {
     /// root package lowers under `lowering`, each dependency only what
     /// compile-time evaluation executes. Errors and incomplete checks refuse.
     pub(crate) fn check_scheduled(&mut self, lowering: LoweringPolicy) -> Result<(), ToolError> {
+        let _progress =
+            hirsel_intern::test_progress::enter("compiler-check", || self.entry.to_string());
         let root = self.entry.0.package.clone();
         let files = self
             .source_files()
@@ -245,6 +247,8 @@ impl LoadedProgram {
     }
     /// Check the selected package through the immutable request graph.
     pub fn check(&mut self, lowering: LoweringPolicy) -> Result<CheckOutput, QueryError> {
+        let _progress =
+            hirsel_intern::test_progress::enter("compiler-check", || self.entry.to_string());
         let root = self.entry.0.package.clone();
         let files = self
             .files
@@ -520,6 +524,8 @@ pub(crate) fn load_program_inputs_with_source_index(
     loading: Loading<'_>,
     source_index: Option<crate::SourceIndexState>,
 ) -> Result<LoadedProgram, ToolError> {
+    let _progress =
+        hirsel_intern::test_progress::enter("compiler-inputs", || path.display().to_string());
     let Loading {
         replacement,
         entry_selection,

@@ -111,6 +111,18 @@ impl CompilerRequests {
         &mut self,
         request: &CompileRequest,
     ) -> Result<Arc<CompileOutput>, hirsel_engine::ToolError> {
+        let _progress = hirsel_intern::test_progress::enter("compiler-request", || {
+            let operation = match &request.operation {
+                CompileOperation::Check { .. } => "check",
+                CompileOperation::Tir { .. } | CompileOperation::TirBatch { .. } => "TIR",
+                CompileOperation::NativeBuild(_) => "native build",
+                CompileOperation::NativeRun(_) => "native run preparation",
+                CompileOperation::ExportTir => "TIR export",
+                CompileOperation::Precompute => "precompute",
+                _ => "metadata/export",
+            };
+            format!("{} {operation}", request.path.display())
+        });
         use hirsel_engine::requests::{OutputReadiness, RequestEngine};
         use hirsel_engine_runtime::QueryRuntime;
 

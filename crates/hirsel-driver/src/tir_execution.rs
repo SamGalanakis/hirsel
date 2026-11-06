@@ -270,6 +270,12 @@ fn run_provider_on_host(
     snapshot: Option<hirsel_rt::host_launch::HostGrants>,
     ownership: Option<&mut crate::ownership_trace::Capture>,
 ) -> Result<(RunOutcome, Option<hirsel_run_schema::CalleeOutcome>), ToolError> {
+    let phase = if matches!(launch, HostLaunch::Replay(_)) {
+        "replay"
+    } else {
+        "reference-host-execution"
+    };
+    let _progress = hirsel_intern::test_progress::enter(phase, || input.entry.to_string());
     if selection.requires_replayable(launch) {
         if let Some((user, extern_)) = input.foreign.unmodeled.first_key_value() {
             return Err(ToolError::Runtime(format!(

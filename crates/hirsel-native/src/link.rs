@@ -124,6 +124,7 @@ impl RuntimeBuild {
 }
 
 fn tool(stage: StageName, command: &mut Command) -> Result<std::process::Output, NativeError> {
+    let _progress = hirsel_intern::test_progress::enter("compiler-tool", || format!("{stage:?}"));
     command.output().map_err(|e| {
         NativeError::new(
             stage,
@@ -2941,6 +2942,12 @@ fn launch_impl(
     fixture: Option<&super::Fixture>,
     ownership: Option<&Path>,
 ) -> Result<Launched, NativeError> {
+    let phase = if matches!(tape, Tape::Replay(_)) {
+        "replay"
+    } else {
+        "native-execution"
+    };
+    let _progress = hirsel_intern::test_progress::enter(phase, || target.triple.clone());
     let is_fixture = fixture.is_some();
     let default = super::Fixture::default();
     let fixture = fixture.unwrap_or(&default);

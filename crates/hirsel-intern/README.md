@@ -2,7 +2,8 @@
 
 Process-global session identities, deterministic fan-out and work counters.
 
-Allowed dependencies: std only.
+Dependencies: std, hirsel-guard, serde and serde_json. Serde encodes interned
+identities; serde_json writes optional test-supervisor progress records.
 
 Invariants and boundary:
 
@@ -56,3 +57,9 @@ per-phase work and CPU summed over threads, `wait` and `count`. Totals are
 process-wide atomics; when timings are off each guard is one relaxed load.
 `memory` records the heap bytes a binary's installed heap meter attributes to a
 load (`retained`) or to a dropped table (`released`) for `--mem-usage`.
+
+`test_progress` records coarse compiler and execution spans only when a test
+supervisor supplies `HIRSEL_TEST_PHASE_DIR`. Its JSON lines use source identities,
+not program arguments or grants. The supervisor reports completed span counts
+and inclusive elapsed times separately from spans still open at its deadline.
+Those spans are diagnostic evidence and never test verdicts.

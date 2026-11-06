@@ -13,6 +13,8 @@ pub fn observe_tir(
     limits: hirsel_interp::Limits,
     checked: bool,
 ) -> Result<ObservedExecution, ToolError> {
+    let _progress =
+        hirsel_intern::test_progress::enter("reference-execution", || run.entry.to_string());
     if run.entry != input.entry {
         return Err(ToolError::Runtime(
             "simulation entry differs from its prepared source".into(),

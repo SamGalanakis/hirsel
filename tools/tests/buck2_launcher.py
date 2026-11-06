@@ -248,7 +248,8 @@ class LauncherReporting(LauncherFixture):
         # Same started/result JSON events emitted by pinned libtest. The Rust
         # fixture below additionally exercises the real formatter remotely.
         (self.root / 'harness').write_text(r'''#!/usr/bin/env python3
-import json, os, signal, sys
+import json, os, signal, sys, time
+from pathlib import Path
 if '--list' in sys.argv:
     print('finished: test\nforever: test\nqueued: test'); sys.exit(0)
 assert '--format=json' in sys.argv, sys.argv
@@ -257,6 +258,18 @@ for event in [dict(type='suite',event='started',test_count=3),
               dict(type='test',event='ok',name='finished',exec_time=0.01),
               dict(type='test',event='started',name='forever')]:
     print(json.dumps(event), flush=True)
+phase_dir = os.environ.get('HIRSEL_TEST_PHASE_DIR')
+if phase_dir:
+    # Completed preparation must remain distinct from an active replay, even
+    # when the body captures all of its child process's standard output.
+    now = time.time()
+    events = [dict(timestamp=now - 0.2, id=0, thread='ThreadId(1)', event='start',
+                   phase='compiler-request', detail='fixture.hir'),
+              dict(timestamp=now - 0.1, id=0, thread='ThreadId(1)', event='end', phase='', detail=''),
+              dict(timestamp=now, id=1, thread='ThreadId(1)', event='start',
+                   phase='replay', detail='fixture/main')]
+    Path(phase_dir, str(os.getpid()) + '.jsonl').write_text(
+        ''.join(json.dumps(event) + '\n' for event in events))
 signal.signal(signal.SIGTERM, signal.SIG_IGN)
 while True: signal.pause()
 ''')
@@ -273,6 +286,14 @@ while True: signal.pause()
             self.assertNotIn('HIRSEL_TEST_RUNNING finished', result.stderr)
             self.assertNotIn('HIRSEL_TEST_RUNNING queued', result.stderr)
             self.assertIn('HIRSEL_TEST_INNER_DEADLINE', result.stderr)
+            records = [json.loads(line.split(' ', 1)[1]) for line in result.stderr.splitlines()
+                       if line.startswith('HIRSEL_TEST_PHASE_')]
+            prepared = next(row for row in records if row['phase'] == 'compiler-request')
+            self.assertEqual(prepared['completed'], 1)
+            self.assertAlmostEqual(prepared['inclusive_seconds'], 0.1, places=4)
+            replay = next(row for row in records if row['phase'] == 'replay')
+            self.assertEqual(replay['detail'], 'fixture/main')
+            self.assertGreater(replay['elapsed_seconds'], 0)
 
     def test_deadline_dumps_all_threads_of_owned_children_before_cleanup(self):
         self.fixture()
@@ -420,6 +441,7 @@ with open('orphan.pid', 'w') as output: output.write(str(child.pid))
         result = self.run_report()
         self.assertEqual(result.returncode, 124, result.stderr)
         self.assertIn('HIRSEL_TEST_RUNNING orphan', result.stderr)
+        self.assertIn('"phase": "child-teardown"', result.stderr)
         pid = int((self.root / 'orphan.pid').read_text())
         with self.assertRaises(ProcessLookupError):
             os.kill(pid, 0)

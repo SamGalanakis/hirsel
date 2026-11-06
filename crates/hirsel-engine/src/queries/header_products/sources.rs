@@ -695,15 +695,20 @@ impl HeaderSources {
         let mut changed = false;
         let mut owners = None;
         for syntax in syntaxes {
-            if engine.items.get(&syntax.item.definition).is_some_and(|items| {
-                items.iter().any(|old| {
-                    old.anchor == syntax.anchor && old.occurrence == syntax.occurrence
+            if engine
+                .items
+                .get(&syntax.item.definition)
+                .is_some_and(|items| {
+                    items.iter().any(|old| {
+                        old.anchor == syntax.anchor && old.occurrence == syntax.occurrence
+                    })
                 })
-            }) {
+            {
                 continue;
             }
             if !engine.items.contains_key(&syntax.item.definition) {
-                let owners = owners.get_or_insert_with(|| crate::NativeRecordContext::capture(engine));
+                let owners =
+                    owners.get_or_insert_with(|| crate::NativeRecordContext::capture(engine));
                 engine.materialize_bound_syntax(&syntax.item.definition, syntax.clone(), owners);
                 changed = true;
                 continue;

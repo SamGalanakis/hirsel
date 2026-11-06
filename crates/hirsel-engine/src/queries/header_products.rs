@@ -1342,17 +1342,11 @@ impl HeaderProducts {
             let Some(entry) = &product.entry else {
                 continue;
             };
-            if Arc::strong_count(entry) != 1 {
-                continue;
-            }
-            let Ok(output) = &product.result else {
+            let Ok(_) = &product.result else {
                 continue;
             };
-            // Raw signature aliases lease only their shared payload. Entry and
-            // output consumers additionally retain the row's observations.
-            if Arc::strong_count(output) != 2 {
-                continue;
-            }
+            // Entry/output aliases retain their row lease in HeaderPayload.
+            // Only a reader holding this wrapper pins its separate allocation.
             if entry
                 .products
                 .representation
@@ -1745,10 +1739,15 @@ mod retention_tests {
             &Observed::default(),
         ));
         let mut headers = HeaderProducts::capture(&engine);
-        Arc::get_mut(&mut headers).unwrap().rows.insert(id, HeaderSlot::default());
+        Arc::get_mut(&mut headers)
+            .unwrap()
+            .rows
+            .insert(id, HeaderSlot::default());
         let budget = ProcessBudget::new(1 << 20);
         let backing: Arc<dyn HeaderAllowance> = Arc::new(Allowance(
-            MemoryReservationPool::new(budget.reserve(1 << 20).unwrap()).ok().unwrap(),
+            MemoryReservationPool::new(budget.reserve(1 << 20).unwrap())
+                .ok()
+                .unwrap(),
         ));
         let remaining = Arc::new(std::sync::Mutex::new(1 << 19));
         headers.configure_source_backing(backing.clone(), remaining.clone());
@@ -1759,17 +1758,20 @@ mod retention_tests {
         let (charge, row_charge) = headers.admit_signature(Some(&entry), bytes).unwrap();
         let wrapper = row_charge.front_bytes();
         let payload = charge.front_bytes();
-        headers.publish(&headers.rows[&id], HeaderProduct {
-            result: entry.result(),
-            entry: Some(entry.clone()),
-            recomputes: 0,
-            graph_work: 0,
-            publication: false,
-            charge,
-            _row_charge: row_charge,
-            origin: Weak::new(),
-            accounted: AtomicBool::new(true),
-        });
+        headers.publish(
+            &headers.rows[&id],
+            HeaderProduct {
+                result: entry.result(),
+                entry: Some(entry.clone()),
+                recomputes: 0,
+                graph_work: 0,
+                publication: false,
+                charge,
+                _row_charge: row_charge,
+                origin: Weak::new(),
+                accounted: AtomicBool::new(true),
+            },
+        );
         let raw = entry.result().unwrap();
         let before = *remaining.lock().unwrap();
         assert!(headers.evict_row());

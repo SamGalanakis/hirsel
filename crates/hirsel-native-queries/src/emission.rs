@@ -299,13 +299,19 @@ mod component_tests {
 
     struct ChangedBytes(Vec<u8>);
     impl ResultStore for ChangedBytes {
+        fn retention_scope(&self) -> Option<Box<dyn Send + Sync>> {
+            None
+        }
+
         fn capability(&self) -> hirsel_engine_store::ProviderCapability {
             hirsel_engine_store::ProviderCapability::ReadOnly
         }
         fn get(&self, _: &EntryKey) -> Option<Bytes> {
             None
         }
-        fn put(&self, _: &EntryKey, _: &[u8]) {}
+        fn put(&self, _: &EntryKey, _: &[u8]) -> hirsel_engine_store::WriteOutcome {
+            hirsel_engine_store::WriteOutcome::Refused
+        }
         fn get_content(&self, _: Reference) -> Option<Bytes> {
             Some(self.0.clone().into())
         }

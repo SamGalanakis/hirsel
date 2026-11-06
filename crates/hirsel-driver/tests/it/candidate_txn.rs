@@ -506,6 +506,10 @@ fn store_fault_checks(candidate: bool) -> String {
         records: Mutex<Vec<(EntryKey, hirsel_engine_store::Bytes)>>,
     }
     impl ResultStore for FaultStore {
+        fn retention_scope(&self) -> Option<Box<dyn Send + Sync>> {
+            self.backing.retention_scope()
+        }
+
         fn capability(&self) -> hirsel_engine_store::ProviderCapability {
             self.backing.capability()
         }
@@ -556,11 +560,13 @@ fn store_fault_checks(candidate: bool) -> String {
                 _ => Some(bytes),
             }
         }
-        fn put(&self, key: &EntryKey, bytes: &[u8]) {
-            self.backing.put(key, bytes);
+        fn put(&self, key: &EntryKey, bytes: &[u8]) -> hirsel_engine_store::WriteOutcome {
+            let outcome = self.backing.put(key, bytes);
             if self.mode.load(Ordering::Acquire) == 0 {
                 self.records.lock().unwrap().push((*key, bytes.into()));
             }
+
+            outcome
         }
         fn name(&self) -> &'static str {
             "candidate-test-fault-store"

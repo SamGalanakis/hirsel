@@ -30,7 +30,7 @@ const ROOT_LEN: usize = 152;
 mod group;
 mod index;
 mod pack;
-pub use pack::{Batch, Request};
+pub use pack::{Batch, Request, RetentionScope};
 pub mod reapi;
 mod statistics;
 mod verified;

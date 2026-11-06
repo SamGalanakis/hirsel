@@ -10,6 +10,10 @@ struct CountedStore {
     reads: AtomicU64,
 }
 impl ResultStore for CountedStore {
+    fn retention_scope(&self) -> Option<Box<dyn Send + Sync>> {
+        self.inner.retention_scope()
+    }
+
     fn capability(&self) -> hirsel_engine_store::ProviderCapability {
         self.inner.capability()
     }
@@ -18,8 +22,8 @@ impl ResultStore for CountedStore {
         self.reads.fetch_add(1, Ordering::Relaxed);
         self.inner.get(key)
     }
-    fn put(&self, key: &EntryKey, bytes: &[u8]) {
-        self.inner.put(key, bytes);
+    fn put(&self, key: &EntryKey, bytes: &[u8]) -> hirsel_engine_store::WriteOutcome {
+        self.inner.put(key, bytes)
     }
     fn verifier(&self) -> Option<Arc<hirsel_validate::VerifierCache>> {
         self.inner.verifier()

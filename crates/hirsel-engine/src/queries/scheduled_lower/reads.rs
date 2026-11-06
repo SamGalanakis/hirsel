@@ -89,6 +89,10 @@ mod tests {
         gets: AtomicUsize,
     }
     impl ResultStore for Counting {
+        fn retention_scope(&self) -> Option<Box<dyn Send + Sync>> {
+            self.inner.retention_scope()
+        }
+
         fn capability(&self) -> hirsel_engine_store::ProviderCapability {
             self.inner.capability()
         }
@@ -100,8 +104,8 @@ mod tests {
             self.gets.fetch_add(1, Ordering::Relaxed);
             self.inner.get(key)
         }
-        fn put(&self, key: &EntryKey, bytes: &[u8]) {
-            self.inner.put(key, bytes);
+        fn put(&self, key: &EntryKey, bytes: &[u8]) -> hirsel_engine_store::WriteOutcome {
+            self.inner.put(key, bytes)
         }
     }
     #[test]

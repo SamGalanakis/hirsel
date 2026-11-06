@@ -576,6 +576,10 @@ fn action_index_admission_does_not_fetch_content_and_missing_outputs_miss() {
         content_reads: AtomicUsize,
     }
     impl ResultStore for Counted {
+        fn retention_scope(&self) -> Option<Box<dyn Send + Sync>> {
+            self.inner.retention_scope()
+        }
+
         fn capability(&self) -> crate::ProviderCapability {
             self.inner.capability()
         }
@@ -583,8 +587,8 @@ fn action_index_admission_does_not_fetch_content_and_missing_outputs_miss() {
         fn get(&self, key: &EntryKey) -> Option<Bytes> {
             self.inner.get(key)
         }
-        fn put(&self, key: &EntryKey, bytes: &[u8]) {
-            self.inner.put(key, bytes);
+        fn put(&self, key: &EntryKey, bytes: &[u8]) -> crate::WriteOutcome {
+            self.inner.put(key, bytes)
         }
         fn get_content(&self, reference: Reference) -> Option<Bytes> {
             self.content_reads.fetch_add(1, Ordering::Relaxed);

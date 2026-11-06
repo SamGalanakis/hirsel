@@ -70,6 +70,10 @@ mod tests {
         verifier: Arc<hirsel_validate::VerifierCache>,
     }
     impl ResultStore for SelectedStore {
+        fn retention_scope(&self) -> Option<Box<dyn Send + Sync>> {
+            self.products.retention_scope()
+        }
+
         fn capability(&self) -> hirsel_engine_store::ProviderCapability {
             self.products.capability()
         }
@@ -77,8 +81,8 @@ mod tests {
         fn get(&self, key: &store::EntryKey) -> Option<store::Bytes> {
             self.products.get(key)
         }
-        fn put(&self, key: &store::EntryKey, bytes: &[u8]) {
-            self.products.put(key, bytes);
+        fn put(&self, key: &store::EntryKey, bytes: &[u8]) -> hirsel_engine_store::WriteOutcome {
+            self.products.put(key, bytes)
         }
         fn verifier(&self) -> Option<Arc<hirsel_validate::VerifierCache>> {
             Some(self.verifier.clone())

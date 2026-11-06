@@ -21,6 +21,10 @@ struct Observed {
     compact_fault: AtomicUsize,
 }
 impl ResultStore for Observed {
+    fn retention_scope(&self) -> Option<Box<dyn Send + Sync>> {
+        self.inner.retention_scope()
+    }
+
     fn capability(&self) -> hirsel_engine_store::ProviderCapability {
         self.inner.capability()
     }
@@ -28,8 +32,8 @@ impl ResultStore for Observed {
     fn get(&self, key: &store::EntryKey) -> Option<store::Bytes> {
         self.inner.get(key)
     }
-    fn put(&self, key: &store::EntryKey, value: &[u8]) {
-        self.inner.put(key, value);
+    fn put(&self, key: &store::EntryKey, value: &[u8]) -> hirsel_engine_store::WriteOutcome {
+        self.inner.put(key, value)
     }
     fn get_content(&self, reference: store::Reference) -> Option<store::Bytes> {
         if reference.domain == store::product_domain(QueryKind::Modes) {

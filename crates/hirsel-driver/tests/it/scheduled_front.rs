@@ -799,6 +799,10 @@ fn admitted_front_zero_hold_retains_only_archives_after_settlement() {
         std::fs::write(&path, "pub fn main()->u8{1u8}\n").unwrap();
         struct ContentOnly(MemStore);
         impl ResultStore for ContentOnly {
+            fn retention_scope(&self) -> Option<Box<dyn Send + Sync>> {
+                self.0.retention_scope()
+            }
+
             fn capability(&self) -> hirsel_engine_store::ProviderCapability {
                 self.0.capability()
             }
@@ -811,9 +815,15 @@ fn admitted_front_zero_hold_retains_only_archives_after_settlement() {
                     .then(|| self.0.get(key))
                     .flatten()
             }
-            fn put(&self, key: &hirsel_engine_store::EntryKey, value: &[u8]) {
+            fn put(
+                &self,
+                key: &hirsel_engine_store::EntryKey,
+                value: &[u8],
+            ) -> hirsel_engine_store::WriteOutcome {
                 if key.2 == QueryKind::Interpret {
-                    self.0.put(key, value);
+                    self.0.put(key, value)
+                } else {
+                    hirsel_engine_store::WriteOutcome::Refused
                 }
             }
             fn name(&self) -> &'static str {
@@ -916,6 +926,10 @@ fn admitted_front_pressure_refused_citation_caches_nothing_and_recomputes_the_ci
     with_compiler_stack(|| {
         struct Transport(MemStore);
         impl ResultStore for Transport {
+            fn retention_scope(&self) -> Option<Box<dyn Send + Sync>> {
+                self.0.retention_scope()
+            }
+
             fn capability(&self) -> hirsel_engine_store::ProviderCapability {
                 hirsel_engine_store::ProviderCapability::RequestLocal(
                     hirsel_engine_store::Persistence::Disabled,
@@ -928,8 +942,12 @@ fn admitted_front_pressure_refused_citation_caches_nothing_and_recomputes_the_ci
             ) -> Option<hirsel_engine_store::Bytes> {
                 self.0.get(key)
             }
-            fn put(&self, key: &hirsel_engine_store::EntryKey, value: &[u8]) {
-                self.0.put(key, value);
+            fn put(
+                &self,
+                key: &hirsel_engine_store::EntryKey,
+                value: &[u8],
+            ) -> hirsel_engine_store::WriteOutcome {
+                self.0.put(key, value)
             }
             fn name(&self) -> &'static str {
                 "evictable-body-transport"
@@ -1062,6 +1080,10 @@ fn admitted_front_pressure_evicts_only_unpinned_settled_bodies_and_recomputes_eq
         // recompute instead of being read back.
         struct Transport(Arc<MemStore>, bool);
         impl ResultStore for Transport {
+            fn retention_scope(&self) -> Option<Box<dyn Send + Sync>> {
+                self.0.retention_scope()
+            }
+
             fn capability(&self) -> hirsel_engine_store::ProviderCapability {
                 hirsel_engine_store::ProviderCapability::RequestLocal(
                     hirsel_engine_store::Persistence::Disabled,
@@ -1084,8 +1106,12 @@ fn admitted_front_pressure_evicts_only_unpinned_settled_bodies_and_recomputes_eq
             ) -> Option<hirsel_engine_store::Bytes> {
                 self.0.get(key)
             }
-            fn put(&self, key: &hirsel_engine_store::EntryKey, value: &[u8]) {
-                self.0.put(key, value);
+            fn put(
+                &self,
+                key: &hirsel_engine_store::EntryKey,
+                value: &[u8],
+            ) -> hirsel_engine_store::WriteOutcome {
+                self.0.put(key, value)
             }
             fn name(&self) -> &'static str {
                 "evictable-body-transport"

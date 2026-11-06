@@ -248,6 +248,10 @@ fn original_body_decode_admission_precedes_provider_reads_and_preserves_scalar_t
             reads: AtomicUsize,
         }
         impl ResultStore for CountReads {
+            fn retention_scope(&self) -> Option<Box<dyn Send + Sync>> {
+                self.inner.retention_scope()
+            }
+
             fn capability(&self) -> hirsel_engine_store::ProviderCapability {
                 self.inner.capability()
             }
@@ -256,8 +260,8 @@ fn original_body_decode_admission_precedes_provider_reads_and_preserves_scalar_t
                 self.reads.fetch_add(1, Ordering::Relaxed);
                 self.inner.get(key)
             }
-            fn put(&self, key: &EntryKey, bytes: &[u8]) {
-                self.inner.put(key, bytes);
+            fn put(&self, key: &EntryKey, bytes: &[u8]) -> hirsel_engine_store::WriteOutcome {
+                self.inner.put(key, bytes)
             }
             fn name(&self) -> &'static str {
                 "decode-control"

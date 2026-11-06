@@ -155,6 +155,10 @@ fn ordinary_catalog_native_roots_survive_fresh_warm_checks() {
     });
 }
 impl store::ResultStore for Observed {
+    fn retention_scope(&self) -> Option<Box<dyn Send + Sync>> {
+        self.inner.retention_scope()
+    }
+
     fn capability(&self) -> hirsel_engine_store::ProviderCapability {
         self.inner.capability()
     }
@@ -172,13 +176,13 @@ impl store::ResultStore for Observed {
         }
         store::ResultStore::get(&self.inner, key)
     }
-    fn put(&self, key: &store::EntryKey, bytes: &[u8]) {
+    fn put(&self, key: &store::EntryKey, bytes: &[u8]) -> hirsel_engine_store::WriteOutcome {
         self.writes.fetch_add(1, Ordering::Relaxed);
         if key.2 == QueryKind::Parse {
             self.parse_writes.fetch_add(1, Ordering::Relaxed);
         }
         self.indexes.lock().unwrap().insert(key.0);
-        store::ResultStore::put(&self.inner, key, bytes);
+        store::ResultStore::put(&self.inner, key, bytes)
     }
     fn get_content(&self, reference: store::Reference) -> Option<store::Bytes> {
         assert!(
@@ -914,6 +918,10 @@ fn lower_producer_records_cannot_mint_or_transfer_verifier_authority() {
     // provider interface supplies no verifier capability.
     struct ProducerOnly(Arc<store::MemStore>);
     impl store::ResultStore for ProducerOnly {
+        fn retention_scope(&self) -> Option<Box<dyn Send + Sync>> {
+            self.0.retention_scope()
+        }
+
         fn capability(&self) -> hirsel_engine_store::ProviderCapability {
             self.0.capability()
         }
@@ -921,7 +929,7 @@ fn lower_producer_records_cannot_mint_or_transfer_verifier_authority() {
         fn get(&self, key: &store::EntryKey) -> Option<store::Bytes> {
             store::ResultStore::get(&*self.0, key)
         }
-        fn put(&self, key: &store::EntryKey, bytes: &[u8]) {
+        fn put(&self, key: &store::EntryKey, bytes: &[u8]) -> hirsel_engine_store::WriteOutcome {
             store::ResultStore::put(&*self.0, key, bytes)
         }
         fn name(&self) -> &'static str {
@@ -1099,6 +1107,10 @@ struct Trusted {
     verifier: Arc<hirsel_validate::VerifierCache>,
 }
 impl store::ResultStore for Trusted {
+    fn retention_scope(&self) -> Option<Box<dyn Send + Sync>> {
+        self.remote.retention_scope()
+    }
+
     fn capability(&self) -> hirsel_engine_store::ProviderCapability {
         self.remote.capability()
     }
@@ -1109,7 +1121,7 @@ impl store::ResultStore for Trusted {
     fn get(&self, key: &store::EntryKey) -> Option<store::Bytes> {
         store::ResultStore::get(&*self.remote, key)
     }
-    fn put(&self, key: &store::EntryKey, bytes: &[u8]) {
+    fn put(&self, key: &store::EntryKey, bytes: &[u8]) -> hirsel_engine_store::WriteOutcome {
         store::ResultStore::put(&*self.remote, key, bytes)
     }
     fn associate_product(

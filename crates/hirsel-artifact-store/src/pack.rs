@@ -25,6 +25,7 @@ pub(super) struct State {
     pinned: bool,
     maintenance_due: bool,
     requests: usize,
+    retentions: usize,
     aborted: bool,
     epoch: Option<epoch::Epoch>,
     #[cfg(test)]
@@ -137,6 +138,15 @@ impl Drop for Batch {
 }
 
 impl Store {
+    /// Hold collection off through a complete closure's publication epoch.
+    pub fn retention_scope(&self) -> io::Result<RetentionScope> {
+        let lease = EpochLease::new(&self.root, self.durability)?;
+        self.state().retentions += 1;
+        Ok(RetentionScope {
+            store: self.clone(),
+            _lease: lease,
+        })
+    }
     fn state(&self) -> MutexGuard<'_, State> {
         self.packed.lock().unwrap_or_else(|e| e.into_inner())
     }
@@ -440,6 +450,11 @@ impl Store {
             index::PublishOutcome::Skipped(_) => {
                 self.count(Counter::SkippedPersistence, 1);
                 self.count(Counter::IndexPublicationSkips, 1);
+                if state.retentions != 0 {
+                    return Err(io::Error::other(
+                        "complete publication exceeds index admission",
+                    ));
+                }
             }
             index::PublishOutcome::Empty => {}
         }
@@ -551,6 +566,16 @@ fn encode_segment(
 
 /// This lock is independent of .pack-lock and remains held through final
 /// payload installation and index publication. It creates no V authority.
+pub struct RetentionScope {
+    store: Store,
+    _lease: EpochLease,
+}
+impl Drop for RetentionScope {
+    fn drop(&mut self) {
+        self.store.state().retentions -= 1;
+    }
+}
+
 pub(crate) struct EpochLease {
     root: PathBuf,
     directory: PathBuf,

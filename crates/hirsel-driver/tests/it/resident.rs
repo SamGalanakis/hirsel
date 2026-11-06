@@ -129,6 +129,10 @@ fn path_requests_reuse_one_session_per_thread_and_observe_edits() {
 fn session_representation_edit_matches_cold(opaque: bool, reads_field: bool) {
     struct InstalledNone(Arc<dyn store::ResultStore>);
     impl store::ResultStore for InstalledNone {
+        fn retention_scope(&self) -> Option<Box<dyn Send + Sync>> {
+            None
+        }
+
         fn capability(&self) -> hirsel_engine_store::ProviderCapability {
             hirsel_engine_store::ProviderCapability::Absent
         }
@@ -143,7 +147,9 @@ fn session_representation_edit_matches_cold(opaque: bool, reads_field: bool) {
         fn get(&self, _: &store::EntryKey) -> Option<store::Bytes> {
             None
         }
-        fn put(&self, _: &store::EntryKey, _: &[u8]) {}
+        fn put(&self, _: &store::EntryKey, _: &[u8]) -> hirsel_engine_store::WriteOutcome {
+            hirsel_engine_store::WriteOutcome::Refused
+        }
         fn name(&self) -> &'static str {
             "none@1"
         }
@@ -672,6 +678,10 @@ fn disabled_result_provider_skips_store_work_for_scalar_and_frozen_queries() {
         }
     }
     impl store::ResultStore for Off {
+        fn retention_scope(&self) -> Option<Box<dyn Send + Sync>> {
+            None
+        }
+
         fn capability(&self) -> hirsel_engine_store::ProviderCapability {
             hirsel_engine_store::ProviderCapability::Absent
         }
@@ -687,7 +697,7 @@ fn disabled_result_provider_skips_store_work_for_scalar_and_frozen_queries() {
         fn get(&self, _: &store::EntryKey) -> Option<hirsel_engine_store::Bytes> {
             panic!("off provider read")
         }
-        fn put(&self, _: &store::EntryKey, _: &[u8]) {
+        fn put(&self, _: &store::EntryKey, _: &[u8]) -> hirsel_engine_store::WriteOutcome {
             panic!("off provider write")
         }
         fn name(&self) -> &'static str {
@@ -2108,6 +2118,10 @@ fn durable_front_workers_drain_payloads_before_accepting_another_task() {
         home: std::thread::ThreadId,
     }
     impl store::ResultStore for ObservedStore {
+        fn retention_scope(&self) -> Option<Box<dyn Send + Sync>> {
+            None
+        }
+
         fn capability(&self) -> hirsel_engine_store::ProviderCapability {
             hirsel_engine_store::ProviderCapability::Writable
         }
@@ -2115,7 +2129,7 @@ fn durable_front_workers_drain_payloads_before_accepting_another_task() {
         fn get(&self, _: &store::EntryKey) -> Option<hirsel_engine_store::Bytes> {
             None
         }
-        fn put(&self, key: &store::EntryKey, _: &[u8]) {
+        fn put(&self, key: &store::EntryKey, _: &[u8]) -> hirsel_engine_store::WriteOutcome {
             // Ordinary Parse transport precedes the semantic worker interval.
             // Every semantic query still publishes through put_query below.
             assert_eq!(
@@ -2125,6 +2139,8 @@ fn durable_front_workers_drain_payloads_before_accepting_another_task() {
             );
             assert_eq!(std::thread::current().id(), self.home);
             self.parses.fetch_add(1, Ordering::SeqCst);
+
+            hirsel_engine_store::WriteOutcome::Refused
         }
         fn put_content(&self, domain: store::Domain, bytes: &[u8]) -> Option<store::Reference> {
             if domain.kind == 2 {

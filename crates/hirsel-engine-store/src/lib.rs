@@ -94,6 +94,14 @@ pub enum ArchiveBoundary {
     Export,
     RequiredSpill,
 }
+/// Actual byte-provider outcome. Storage acknowledges the current write only;
+/// future cache eviction needs a separate retention scope.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WriteOutcome {
+    Refused,
+    Stored(Reference),
+}
+
 /// A content-keyed byte store. Implementations never fail a compile: a
 /// missing, unreadable or corrupt entry is a miss.
 pub trait ResultStore: Send + Sync {
@@ -192,7 +200,10 @@ pub trait ResultStore: Send + Sync {
         self.capability().persistence()
     }
     fn get(&self, key: &EntryKey) -> Option<Bytes>;
-    fn put(&self, key: &EntryKey, value: &[u8]);
+    fn put(&self, key: &EntryKey, value: &[u8]) -> WriteOutcome;
+    /// Prevent reclamation of the complete transported closure through the
+    /// held operation. Unsupported providers refuse Complete publication.
+    fn retention_scope(&self) -> Option<Box<dyn Send + Sync>>;
     /// The rows a request expects later revisions to adopt first, replacing
     /// any earlier demand. A bounded provider evicts others before them;
     /// this changes retention only, never what a lookup returns.
@@ -334,8 +345,10 @@ pub trait ResultStore: Send + Sync {
             return None;
         }
         let reference = domain.reference(bytes)?;
-        self.put(&content_key(reference), bytes);
-        Some(reference)
+        match self.put(&content_key(reference), bytes) {
+            WriteOutcome::Refused => None,
+            WriteOutcome::Stored(_) => Some(reference),
+        }
     }
     /// Publish a query product with its domain explicit at the provider seam.
     /// The key already binds the kind; byte-only providers share `put`.
@@ -402,12 +415,14 @@ impl Persistence {
 struct OperationPersistence {
     base: Persistence,
     complete: AtomicBool,
+    retention: Mutex<Option<Box<dyn Send + Sync>>>,
 }
 impl OperationPersistence {
     fn new(base: Persistence) -> Self {
         Self {
             base,
             complete: AtomicBool::new(false),
+            retention: Mutex::new(None),
         }
     }
     fn persistence(&self) -> Persistence {
@@ -778,6 +793,10 @@ impl Entry {
 #[derive(Debug, Default)]
 pub struct NoneStore;
 impl ResultStore for NoneStore {
+    fn retention_scope(&self) -> Option<Box<dyn Send + Sync>> {
+        None
+    }
+
     fn capability(&self) -> ProviderCapability {
         ProviderCapability::Absent
     }
@@ -785,7 +804,9 @@ impl ResultStore for NoneStore {
     fn get(&self, _: &EntryKey) -> Option<Bytes> {
         None
     }
-    fn put(&self, _: &EntryKey, _: &[u8]) {}
+    fn put(&self, _: &EntryKey, _: &[u8]) -> crate::WriteOutcome {
+        crate::WriteOutcome::Refused
+    }
     fn name(&self) -> &'static str {
         "none@1"
     }
@@ -812,6 +833,16 @@ struct MemState {
     entries: HashMap<ContentHash, (EntryKey, Bytes)>,
     order: std::collections::VecDeque<ContentHash>,
     bytes: usize,
+    retained: usize,
+}
+struct MemRetention(Arc<Mutex<MemState>>);
+impl Drop for MemRetention {
+    fn drop(&mut self) {
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .retained -= 1;
+    }
 }
 fn mem_charge(value: &[u8]) -> usize {
     value.len() + std::mem::size_of::<EntryKey>()
@@ -862,13 +893,25 @@ impl MemStore {
     }
     /// Empties the store, returning what it held.
     pub fn take(&self) -> HashMap<EntryKey, Bytes> {
-        std::mem::take(&mut *self.state.lock().unwrap_or_else(PoisonError::into_inner))
-            .entries
-            .into_values()
-            .collect()
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        if state.retained != 0 {
+            return HashMap::new();
+        }
+        std::mem::take(&mut *state).entries.into_values().collect()
     }
 }
 impl ResultStore for MemStore {
+    fn retention_scope(&self) -> Option<Box<dyn Send + Sync>> {
+        if self.cap.is_some() {
+            return None;
+        }
+        self.state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .retained += 1;
+        Some(Box::new(MemRetention(self.state.clone())))
+    }
+
     fn capability(&self) -> ProviderCapability {
         ProviderCapability::Writable
     }
@@ -966,12 +1009,15 @@ impl ResultStore for MemStore {
         }
         self.installed.as_ref()?.lookup_product(address)
     }
-    fn put(&self, key: &EntryKey, value: &[u8]) {
+    fn put(&self, key: &EntryKey, value: &[u8]) -> crate::WriteOutcome {
+        let Some(reference) = entry_domain(key.2).reference(value) else {
+            return WriteOutcome::Refused;
+        };
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         let charge = mem_charge(value);
         if let Some(cap) = self.cap {
             if charge > cap {
-                return;
+                return WriteOutcome::Refused;
             }
             // std::collections::VecDeque supplies the FIFO; replacements keep
             // their place, so repeated writes cannot grow eviction metadata.
@@ -995,6 +1041,7 @@ impl ResultStore for MemStore {
         }
         state.entries.insert(key.0, (*key, value.into()));
         state.bytes += charge;
+        WriteOutcome::Stored(reference)
     }
     fn name(&self) -> &'static str {
         "mem@1"
@@ -1062,6 +1109,10 @@ impl SimStore {
     }
 }
 impl ResultStore for SimStore {
+    fn retention_scope(&self) -> Option<Box<dyn Send + Sync>> {
+        None
+    }
+
     fn capability(&self) -> ProviderCapability {
         ProviderCapability::Writable
     }
@@ -1092,16 +1143,20 @@ impl ResultStore for SimStore {
             }
         }
     }
-    fn put(&self, key: &EntryKey, value: &[u8]) {
+    fn put(&self, key: &EntryKey, value: &[u8]) -> crate::WriteOutcome {
+        let Some(reference) = entry_domain(key.2).reference(value) else {
+            return WriteOutcome::Refused;
+        };
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         let ordinal = state.puts;
         state.puts += 1;
         if state.faults.lose_puts.contains(&ordinal) {
             state.log.push(SimOp::Lost(*key));
-            return;
+            return WriteOutcome::Refused;
         }
         state.entries.insert(key.0, frame(value));
         state.log.push(SimOp::Put(*key));
+        WriteOutcome::Stored(reference)
     }
     fn name(&self) -> &'static str {
         "sim@1"

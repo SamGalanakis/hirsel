@@ -298,6 +298,10 @@ fn check_settled_front_eviction(
         reads_after_eviction: AtomicUsize,
     }
     impl ResultStore for EvictModes {
+        fn retention_scope(&self) -> Option<Box<dyn Send + Sync>> {
+            self.store.retention_scope()
+        }
+
         fn capability(&self) -> hirsel_engine_store::ProviderCapability {
             self.store.capability()
         }
@@ -305,8 +309,8 @@ fn check_settled_front_eviction(
         fn get(&self, key: &EntryKey) -> Option<Bytes> {
             self.store.get(key)
         }
-        fn put(&self, key: &EntryKey, value: &[u8]) {
-            self.store.put(key, value);
+        fn put(&self, key: &EntryKey, value: &[u8]) -> hirsel_engine_store::WriteOutcome {
+            self.store.put(key, value)
         }
         fn get_content(&self, reference: Reference) -> Option<Bytes> {
             if reference.domain.kind == QueryKind::Modes as u32 + 16

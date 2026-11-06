@@ -56,6 +56,10 @@ struct NativeStore {
     cache: Arc<dyn ResultStore>,
 }
 impl ResultStore for NativeStore {
+    fn retention_scope(&self) -> Option<Box<dyn Send + Sync>> {
+        self.cache.retention_scope()
+    }
+
     fn capability(&self) -> ProviderCapability {
         self.cache.capability()
     }
@@ -72,8 +76,8 @@ impl ResultStore for NativeStore {
     fn get(&self, key: &EntryKey) -> Option<Bytes> {
         self.cache.get(key)
     }
-    fn put(&self, key: &EntryKey, value: &[u8]) {
-        self.cache.put(key, value);
+    fn put(&self, key: &EntryKey, value: &[u8]) -> hirsel_engine_store::WriteOutcome {
+        self.cache.put(key, value)
     }
     fn lookup_product(&self, address: Address) -> Option<Association> {
         self.cache.lookup_product(address)

@@ -20,6 +20,10 @@ struct FreshBytes {
     verifier: Arc<hirsel_validate::VerifierCache>,
 }
 impl store::ResultStore for FreshBytes {
+    fn retention_scope(&self) -> Option<Box<dyn Send + Sync>> {
+        self.bytes.retention_scope()
+    }
+
     fn capability(&self) -> hirsel_engine_store::ProviderCapability {
         self.bytes.capability()
     }
@@ -30,8 +34,8 @@ impl store::ResultStore for FreshBytes {
     fn get(&self, key: &store::EntryKey) -> Option<store::Bytes> {
         self.bytes.get(key)
     }
-    fn put(&self, key: &store::EntryKey, value: &[u8]) {
-        self.bytes.put(key, value);
+    fn put(&self, key: &store::EntryKey, value: &[u8]) -> hirsel_engine_store::WriteOutcome {
+        self.bytes.put(key, value)
     }
     fn name(&self) -> &'static str {
         "mem@1"
@@ -44,6 +48,10 @@ struct LiveStore {
     missing: std::sync::atomic::AtomicBool,
 }
 impl ResultStore for LiveStore {
+    fn retention_scope(&self) -> Option<Box<dyn Send + Sync>> {
+        self.bytes.retention_scope()
+    }
+
     fn capability(&self) -> hirsel_engine_store::ProviderCapability {
         hirsel_engine_store::ProviderCapability::RequestLocal(
             hirsel_engine_store::Persistence::Disabled,
@@ -62,8 +70,8 @@ impl ResultStore for LiveStore {
     fn get(&self, key: &store::EntryKey) -> Option<store::Bytes> {
         self.bytes.get(key)
     }
-    fn put(&self, key: &store::EntryKey, bytes: &[u8]) {
-        self.bytes.put(key, bytes);
+    fn put(&self, key: &store::EntryKey, bytes: &[u8]) -> hirsel_engine_store::WriteOutcome {
+        self.bytes.put(key, bytes)
     }
     fn verifier(&self) -> Option<Arc<hirsel_validate::VerifierCache>> {
         self.bytes.verifier()
@@ -274,6 +282,10 @@ fn persisted_entry_stops_at_first_observed_changed_read() {
         signature_gets: std::sync::atomic::AtomicUsize,
     }
     impl ResultStore for CountReads {
+        fn retention_scope(&self) -> Option<Box<dyn Send + Sync>> {
+            self.inner.retention_scope()
+        }
+
         fn capability(&self) -> hirsel_engine_store::ProviderCapability {
             self.inner.capability()
         }
@@ -285,8 +297,8 @@ fn persisted_entry_stops_at_first_observed_changed_read() {
             }
             self.inner.get(key)
         }
-        fn put(&self, key: &store::EntryKey, bytes: &[u8]) {
-            self.inner.put(key, bytes);
+        fn put(&self, key: &store::EntryKey, bytes: &[u8]) -> hirsel_engine_store::WriteOutcome {
+            self.inner.put(key, bytes)
         }
         fn name(&self) -> &'static str {
             "reads-order-counted"

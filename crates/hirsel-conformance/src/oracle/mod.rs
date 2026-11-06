@@ -33,6 +33,10 @@ pub type Artifacts = BTreeMap<String, Vec<u8>>;
 struct ColdStore(Arc<dyn ResultStore>);
 
 impl ResultStore for ColdStore {
+    fn retention_scope(&self) -> Option<Box<dyn Send + Sync>> {
+        None
+    }
+
     fn capability(&self) -> hirsel_engine_store::ProviderCapability {
         hirsel_engine_store::ProviderCapability::Absent
     }
@@ -49,7 +53,13 @@ impl ResultStore for ColdStore {
         None
     }
 
-    fn put(&self, _: &hirsel_engine_store::EntryKey, _: &[u8]) {}
+    fn put(
+        &self,
+        _: &hirsel_engine_store::EntryKey,
+        _: &[u8],
+    ) -> hirsel_engine_store::WriteOutcome {
+        hirsel_engine_store::WriteOutcome::Refused
+    }
 
     fn name(&self) -> &'static str {
         "none@1"

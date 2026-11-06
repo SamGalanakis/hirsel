@@ -729,6 +729,10 @@ fn exact_counts_hardlinks_limits_and_live_lease_release() {
 fn explicit_toolchain_context_loads_sidecar_graph_without_host_discovery() {
     struct InstalledStd(Arc<hirsel_engine_store::InstalledPackage>);
     impl hirsel_engine_store::ResultStore for InstalledStd {
+        fn retention_scope(&self) -> Option<Box<dyn Send + Sync>> {
+            None
+        }
+
         fn capability(&self) -> hirsel_engine_store::ProviderCapability {
             hirsel_engine_store::ProviderCapability::ReadOnly
         }
@@ -745,7 +749,13 @@ fn explicit_toolchain_context_loads_sidecar_graph_without_host_discovery() {
         fn get(&self, _: &hirsel_engine_store::EntryKey) -> Option<hirsel_engine_store::Bytes> {
             None
         }
-        fn put(&self, _: &hirsel_engine_store::EntryKey, _: &[u8]) {}
+        fn put(
+            &self,
+            _: &hirsel_engine_store::EntryKey,
+            _: &[u8],
+        ) -> hirsel_engine_store::WriteOutcome {
+            hirsel_engine_store::WriteOutcome::Refused
+        }
         fn name(&self) -> &'static str {
             "captured-std-fixture"
         }

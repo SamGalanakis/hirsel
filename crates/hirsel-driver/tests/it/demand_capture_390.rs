@@ -23,6 +23,10 @@ impl Default for Observed {
     }
 }
 impl ResultStore for Observed {
+    fn retention_scope(&self) -> Option<Box<dyn Send + Sync>> {
+        self.inner.retention_scope()
+    }
+
     fn capability(&self) -> hirsel_engine_store::ProviderCapability {
         self.inner.capability()
     }
@@ -33,8 +37,8 @@ impl ResultStore for Observed {
     fn get(&self, key: &EntryKey) -> Option<Bytes> {
         self.inner.get(key)
     }
-    fn put(&self, key: &EntryKey, bytes: &[u8]) {
-        self.inner.put(key, bytes);
+    fn put(&self, key: &EntryKey, bytes: &[u8]) -> hirsel_engine_store::WriteOutcome {
+        self.inner.put(key, bytes)
     }
     fn get_content(&self, reference: Reference) -> Option<Bytes> {
         self.inner.get_content(reference)

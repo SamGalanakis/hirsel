@@ -164,6 +164,10 @@ mod tests {
     use hirsel_engine_store::{self as store, Bytes, EntryKey};
     struct NoTransport;
     impl ResultStore for NoTransport {
+        fn retention_scope(&self) -> Option<Box<dyn Send + Sync>> {
+            None
+        }
+
         fn capability(&self) -> hirsel_engine_store::ProviderCapability {
             hirsel_engine_store::ProviderCapability::Writable
         }
@@ -171,7 +175,7 @@ mod tests {
         fn get(&self, _: &EntryKey) -> Option<Bytes> {
             panic!("local plan read bytes")
         }
-        fn put(&self, _: &EntryKey, _: &[u8]) {
+        fn put(&self, _: &EntryKey, _: &[u8]) -> hirsel_engine_store::WriteOutcome {
             panic!("local plan wrote bytes")
         }
         fn name(&self) -> &'static str {
@@ -346,6 +350,10 @@ mod tests {
     fn plan_import_refuses_corruption_noncanonical_descriptors_and_wrong_schema() {
         struct Corrupt;
         impl ResultStore for Corrupt {
+            fn retention_scope(&self) -> Option<Box<dyn Send + Sync>> {
+                None
+            }
+
             fn capability(&self) -> hirsel_engine_store::ProviderCapability {
                 hirsel_engine_store::ProviderCapability::ReadOnly
             }
@@ -353,7 +361,9 @@ mod tests {
             fn get(&self, _: &EntryKey) -> Option<Bytes> {
                 None
             }
-            fn put(&self, _: &EntryKey, _: &[u8]) {}
+            fn put(&self, _: &EntryKey, _: &[u8]) -> hirsel_engine_store::WriteOutcome {
+                hirsel_engine_store::WriteOutcome::Refused
+            }
             fn get_content(&self, _: Reference) -> Option<Bytes> {
                 Some(Bytes::from(b"damaged".as_slice()))
             }

@@ -259,6 +259,10 @@ struct FaultStore {
     damaged: std::sync::Mutex<BTreeMap<hirsel_syntax::ContentHash, Vec<u8>>>,
 }
 impl ResultStore for FaultStore {
+    fn retention_scope(&self) -> Option<Box<dyn Send + Sync>> {
+        self.inner.retention_scope()
+    }
+
     fn capability(&self) -> hirsel_engine_store::ProviderCapability {
         self.inner.capability()
     }
@@ -272,7 +276,7 @@ impl ResultStore for FaultStore {
     fn get(&self, key: &store::EntryKey) -> Option<store::Bytes> {
         self.inner.get(key)
     }
-    fn put(&self, key: &store::EntryKey, value: &[u8]) {
+    fn put(&self, key: &store::EntryKey, value: &[u8]) -> hirsel_engine_store::WriteOutcome {
         self.inner.put(key, value)
     }
     fn lookup_product(&self, address: store::Address) -> Option<store::Association> {

@@ -45,6 +45,10 @@ use std::{
 // reporting the I/O error that its ordinary Option publication seam omits.
 pub(crate) struct DiagnosedStore(pub(crate) store::DirStore);
 impl ResultStore for DiagnosedStore {
+    fn retention_scope(&self) -> Option<Box<dyn Send + Sync>> {
+        self.0.retention_scope()
+    }
+
     fn capability(&self) -> hirsel_engine_store::ProviderCapability {
         self.0.capability()
     }
@@ -61,8 +65,8 @@ impl ResultStore for DiagnosedStore {
     fn get(&self, key: &store::EntryKey) -> Option<store::Bytes> {
         self.0.get(key)
     }
-    fn put(&self, key: &store::EntryKey, bytes: &[u8]) {
-        self.0.put(key, bytes);
+    fn put(&self, key: &store::EntryKey, bytes: &[u8]) -> hirsel_engine_store::WriteOutcome {
+        self.0.put(key, bytes)
     }
     fn get_content(&self, reference: store::Reference) -> Option<store::Bytes> {
         assert_ne!(

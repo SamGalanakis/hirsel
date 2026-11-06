@@ -125,6 +125,10 @@ fn readonly_comptime_products_reuse_only_the_consumers_local_verifier() {
             verifier: Arc<hirsel_validate::VerifierCache>,
         }
         impl store::ResultStore for ReadOnly {
+            fn retention_scope(&self) -> Option<Box<dyn Send + Sync>> {
+                None
+            }
+
             fn capability(&self) -> hirsel_engine_store::ProviderCapability {
                 hirsel_engine_store::ProviderCapability::ReadOnly
             }
@@ -135,7 +139,9 @@ fn readonly_comptime_products_reuse_only_the_consumers_local_verifier() {
             fn get(&self, key: &store::EntryKey) -> Option<store::Bytes> {
                 self.products.get(key)
             }
-            fn put(&self, _: &store::EntryKey, _: &[u8]) {}
+            fn put(&self, _: &store::EntryKey, _: &[u8]) -> hirsel_engine_store::WriteOutcome {
+                hirsel_engine_store::WriteOutcome::Refused
+            }
             fn get_content(&self, reference: store::Reference) -> Option<store::Bytes> {
                 self.products.get_content(reference)
             }

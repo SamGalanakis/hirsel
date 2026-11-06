@@ -20,6 +20,10 @@ struct Faults {
     fragment_puts: AtomicUsize,
 }
 impl ResultStore for Faults {
+    fn retention_scope(&self) -> Option<Box<dyn Send + Sync>> {
+        self.disk.retention_scope()
+    }
+
     fn capability(&self) -> hirsel_engine_store::ProviderCapability {
         self.disk.capability()
     }
@@ -27,8 +31,8 @@ impl ResultStore for Faults {
     fn get(&self, key: &store::EntryKey) -> Option<store::Bytes> {
         self.disk.get(key)
     }
-    fn put(&self, key: &store::EntryKey, bytes: &[u8]) {
-        self.disk.put(key, bytes);
+    fn put(&self, key: &store::EntryKey, bytes: &[u8]) -> hirsel_engine_store::WriteOutcome {
+        self.disk.put(key, bytes)
     }
     fn local_product_store(&self) -> Option<hirsel_artifact_store::Store> {
         self.disk.local_product_store()

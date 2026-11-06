@@ -1760,6 +1760,10 @@ mod dependency_tests {
 
     struct NoTransport;
     impl ResultStore for NoTransport {
+        fn retention_scope(&self) -> Option<Box<dyn Send + Sync>> {
+            None
+        }
+
         fn capability(&self) -> hirsel_engine_store::ProviderCapability {
             hirsel_engine_store::ProviderCapability::Absent
         }
@@ -1767,7 +1771,7 @@ mod dependency_tests {
         fn get(&self, _: &EntryKey) -> Option<Bytes> {
             panic!("live completion read the store")
         }
-        fn put(&self, _: &EntryKey, _: &[u8]) {
+        fn put(&self, _: &EntryKey, _: &[u8]) -> hirsel_engine_store::WriteOutcome {
             panic!("live completion wrote the store")
         }
         fn name(&self) -> &'static str {

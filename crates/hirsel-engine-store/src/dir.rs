@@ -255,23 +255,33 @@ impl DirStore {
     pub fn cap(&self) -> u64 {
         self.cap
     }
-    fn publish(&self, key: &EntryKey, action: super::Action, value: &[u8]) {
+    fn publish(&self, key: &EntryKey, action: super::Action, value: &[u8]) -> super::WriteOutcome {
         use hirsel_artifact_store::Address;
         let Some(store) = self.publication_store() else {
-            return;
+            return super::WriteOutcome::Refused;
         };
-        let _batch = store.batch();
-        let write = || -> std::io::Result<()> {
+        let batch = store.batch();
+        let write = || -> std::io::Result<super::Reference> {
             let reference = store.put(super::entry_domain(key.2), value)?;
             store.associate(Address(key.0), action, reference)?;
             self.record_row(Address(key.0), action, reference);
-            Ok(())
+            Ok(reference)
         };
-        let _ = write();
+        match write().and_then(|reference| batch.finish().map(|()| reference)) {
+            Ok(reference) if self.get(key).is_some_and(|stored| &*stored == value) => {
+                super::WriteOutcome::Stored(reference)
+            }
+            Ok(_) => super::WriteOutcome::Refused,
+            Err(_) => super::WriteOutcome::Refused,
+        }
     }
 }
 
 impl ResultStore for DirStore {
+    fn retention_scope(&self) -> Option<Box<dyn Send + Sync>> {
+        Some(Box::new(self.physical.as_ref()?.retention_scope().ok()?))
+    }
+
     fn capability(&self) -> ProviderCapability {
         match &self.physical {
             Some(_) => ProviderCapability::Writable,
@@ -474,7 +484,11 @@ impl ResultStore for DirStore {
         None
     }
     fn put_content(&self, domain: super::Domain, bytes: &[u8]) -> Option<super::Reference> {
-        let reference = self.publication_store()?.put(domain, bytes).ok()?;
+        let store = self.publication_store()?;
+        let reference = store.put(domain, bytes).ok()?;
+        if !store.get(reference).is_some_and(|stored| &*stored == bytes) {
+            return None;
+        }
         self.record_content(reference);
         Some(reference)
     }
@@ -550,7 +564,7 @@ impl ResultStore for DirStore {
         }
         None
     }
-    fn put(&self, key: &EntryKey, value: &[u8]) {
+    fn put(&self, key: &EntryKey, value: &[u8]) -> crate::WriteOutcome {
         self.publish(
             key,
             super::Action(hirsel_syntax::ContentHash::of_parts(
@@ -558,7 +572,7 @@ impl ResultStore for DirStore {
                 [key.0.0.as_slice(), key.1.0.as_slice()],
             )),
             value,
-        );
+        )
     }
     fn put_query(
         &self,

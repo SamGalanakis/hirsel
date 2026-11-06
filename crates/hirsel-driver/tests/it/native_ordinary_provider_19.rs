@@ -145,6 +145,10 @@ fn ordinary_provider(backend: Backend) {
         drop(warm);
         struct Imported(DirStore);
         impl ResultStore for Imported {
+            fn retention_scope(&self) -> Option<Box<dyn Send + Sync>> {
+                None
+            }
+
             fn capability(&self) -> hirsel_engine_store::ProviderCapability {
                 hirsel_engine_store::ProviderCapability::ReadOnly
             }
@@ -152,7 +156,9 @@ fn ordinary_provider(backend: Backend) {
             fn get(&self, key: &store::EntryKey) -> Option<store::Bytes> {
                 self.0.get(key)
             }
-            fn put(&self, _: &store::EntryKey, _: &[u8]) {}
+            fn put(&self, _: &store::EntryKey, _: &[u8]) -> hirsel_engine_store::WriteOutcome {
+                hirsel_engine_store::WriteOutcome::Refused
+            }
             fn get_content(&self, reference: store::Reference) -> Option<store::Bytes> {
                 self.0.get_content(reference)
             }

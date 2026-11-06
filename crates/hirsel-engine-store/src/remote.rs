@@ -122,22 +122,35 @@ impl RemoteStore {
     }
     /// Publish `value` at `key` with the closure members it cites. A member
     /// this provider cannot name leaves the record unpublished: a later miss.
-    fn put_record(&self, key: &EntryKey, value: &[u8], cites: impl IntoIterator<Item = Reference>) {
+    fn put_record(
+        &self,
+        key: &EntryKey,
+        value: &[u8],
+        cites: impl IntoIterator<Item = Reference>,
+    ) -> WriteOutcome {
         let Some(record) = ActionResult::output(entry_domain(key.2), value) else {
-            return;
+            return WriteOutcome::Refused;
         };
         let mut outputs = vec![record];
         for reference in cites {
             let Some(member) = self.name(reference) else {
-                return;
+                return WriteOutcome::Refused;
             };
             outputs.push(member);
         }
-        self.publish(&entry_action(key), &outputs, vec![value.into()]);
+        if self.publish(&entry_action(key), &outputs, vec![value.into()]) {
+            WriteOutcome::Stored(record.reference)
+        } else {
+            WriteOutcome::Refused
+        }
     }
 }
 
 impl ResultStore for RemoteStore {
+    fn retention_scope(&self) -> Option<Box<dyn Send + Sync>> {
+        None
+    }
+
     fn capability(&self) -> ProviderCapability {
         ProviderCapability::Writable
     }
@@ -155,11 +168,11 @@ impl ResultStore for RemoteStore {
         self.remember(members);
         Some(bytes)
     }
-    fn put(&self, key: &EntryKey, value: &[u8]) {
+    fn put(&self, key: &EntryKey, value: &[u8]) -> crate::WriteOutcome {
         let cites: Vec<_> = Entry::decode_for(key, &value.into())
             .map(|entry| entry.variants.iter().map(|v| v.output).collect())
             .unwrap_or_default();
-        self.put_record(key, value, cites);
+        self.put_record(key, value, cites)
     }
     fn associate_product(&self, address: Address, action: Action, reference: Reference) {
         let bytes = serde_json::to_vec(&(address.0, action.0, reference))

@@ -1192,6 +1192,10 @@ mod tests {
         writes: AtomicUsize,
     }
     impl ResultStore for StoreOff {
+        fn retention_scope(&self) -> Option<Box<dyn Send + Sync>> {
+            None
+        }
+
         fn capability(&self) -> hirsel_engine_store::ProviderCapability {
             hirsel_engine_store::ProviderCapability::Absent
         }
@@ -1202,8 +1206,10 @@ mod tests {
         fn get(&self, key: &EntryKey) -> Option<hirsel_engine_store::Bytes> {
             self.installed.get(key)
         }
-        fn put(&self, _: &EntryKey, _: &[u8]) {
+        fn put(&self, _: &EntryKey, _: &[u8]) -> hirsel_engine_store::WriteOutcome {
             self.writes.fetch_add(1, Ordering::Relaxed);
+
+            hirsel_engine_store::WriteOutcome::Refused
         }
         fn put_content(&self, _: Domain, _: &[u8]) -> Option<Reference> {
             self.writes.fetch_add(1, Ordering::Relaxed);

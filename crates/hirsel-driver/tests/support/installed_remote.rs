@@ -16,6 +16,10 @@ pub fn bind(remote: Arc<dyn ResultStore>) -> Arc<dyn ResultStore> {
 }
 
 impl ResultStore for InstalledRemote {
+    fn retention_scope(&self) -> Option<Box<dyn Send + Sync>> {
+        self.remote.retention_scope()
+    }
+
     fn capability(&self) -> hirsel_engine_store::ProviderCapability {
         self.remote.capability()
     }
@@ -33,8 +37,8 @@ impl ResultStore for InstalledRemote {
     fn get(&self, key: &EntryKey) -> Option<Bytes> {
         self.remote.get(key).or_else(|| self.installed.get(key))
     }
-    fn put(&self, key: &EntryKey, value: &[u8]) {
-        self.remote.put(key, value);
+    fn put(&self, key: &EntryKey, value: &[u8]) -> hirsel_engine_store::WriteOutcome {
+        self.remote.put(key, value)
     }
     fn lookup_product(&self, address: Address) -> Option<Association> {
         self.remote

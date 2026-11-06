@@ -302,6 +302,10 @@ impl hirsel_validate::VerifierRows for RequestVerifierRows {
     }
 }
 impl ResultStore for RequestStore {
+    fn retention_scope(&self) -> Option<Box<dyn Send + Sync>> {
+        self.backend.retention_scope()
+    }
+
     fn capability(&self) -> ProviderCapability {
         ProviderCapability::RequestLocal(
             self.active_policy
@@ -408,9 +412,11 @@ impl ResultStore for RequestStore {
             .then(|| self.backend.get(key))
             .flatten()
     }
-    fn put(&self, key: &EntryKey, value: &[u8]) {
+    fn put(&self, key: &EntryKey, value: &[u8]) -> WriteOutcome {
         if self.persistence().retains() {
             self.backend.put(key, value)
+        } else {
+            WriteOutcome::Refused
         }
     }
     fn demand(&self, keys: &[EntryKey]) {
@@ -499,8 +505,10 @@ impl ResultStore for RequestStore {
     }
     fn put_content(&self, domain: Domain, bytes: &[u8]) -> Option<Reference> {
         let expected = domain.reference(bytes)?;
-        if self.backend.put_content(domain, bytes) == Some(expected) {
-            return Some(expected);
+        if self.memory.scratch.get().is_some()
+            && let Some(reference) = self.backend.put_content(domain, bytes)
+        {
+            return Some(reference);
         }
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         if let Some((actual, _)) = state.contents.get(&expected.output.0) {
@@ -510,7 +518,11 @@ impl ResultStore for RequestStore {
             return None;
         }
         let bytes = Bytes::from(bytes).retain_owner(self.memory.clone());
-        state.contents.insert(expected.output.0, (expected, bytes));
+        state
+            .contents
+            .insert(expected.output.0, (expected, bytes.clone()));
+        drop(state);
+        self.backend.put_content(domain, &bytes);
         Some(expected)
     }
     fn lookup_product(&self, address: Address) -> Option<Association> {
@@ -546,23 +558,19 @@ impl ResultStore for RequestStore {
         let growth =
             association_bytes(next).saturating_sub(association_bytes(state.associations.len()));
         if exists || self.charge(&mut state, growth) {
-            let local = state.contents.contains_key(&reference.output.0);
             state
                 .associations
                 .insert(address.0, (association, deferred));
             drop(state);
             if !deferred {
-                if local {
-                    self.backend.associate_product(address, action, reference);
-                } else {
-                    self.backend
-                        .associate_written_product(address, action, reference);
-                }
+                self.backend.associate_product(address, action, reference);
             }
         }
     }
     fn materialize(&self) -> bool {
-        // Request-local records exist only because the backend refused them.
+        let Some(_retention) = self.backend.retention_scope() else {
+            return false;
+        };
         let local = self
             .state
             .lock()
@@ -572,10 +580,16 @@ impl ResultStore for RequestStore {
             .cloned()
             .collect::<Vec<_>>();
         let mut durable = true;
-        for (reference, bytes) in local {
-            durable &= self.backend.put_content(reference.domain, &bytes) == Some(reference);
+        for (reference, bytes) in &local {
+            durable &= self.backend.put_content(reference.domain, bytes) == Some(*reference);
         }
-        self.backend.materialize() && durable
+        self.backend.materialize()
+            && durable
+            && local.iter().all(|(reference, bytes)| {
+                self.backend
+                    .get_content(*reference)
+                    .is_some_and(|stored| &*stored == &**bytes)
+            })
     }
     fn publish_root(&self, address: Address, action: Action, reference: Reference) -> bool {
         let selected = Association { action, reference };
@@ -584,27 +598,61 @@ impl ResultStore for RequestStore {
         if persistence != Persistence::Complete {
             return persistence.retains() && self.backend.lookup_product(address) == Some(selected);
         }
+        let Some(operation) = self
+            .active_policy
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .upgrade()
+        else {
+            return false;
+        };
+        {
+            let mut retention = operation
+                .retention
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            if retention.is_none() {
+                let Some(scope) = self.backend.retention_scope() else {
+                    return false;
+                };
+                *retention = Some(scope);
+            }
+        }
         if self.lookup_product(address) != Some(selected) || !self.materialize() {
             return false;
         }
-        let pending = {
-            let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-            let mut pending = Vec::new();
-            for (key, (association, deferred)) in &mut state.associations {
-                if std::mem::take(deferred) && *key != address.0 {
-                    pending.push((Address(*key), *association));
-                }
-            }
-            pending
-        };
-        // Every component is durable, so each association names stored
-        // content; the root becomes visible last.
-        for (component, association) in pending {
+        let pending = self
+            .state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .associations
+            .iter()
+            .filter_map(|(key, (association, deferred))| {
+                (*deferred && *key != address.0).then_some((Address(*key), *association))
+            })
+            .collect::<Vec<_>>();
+        // Retention holds through the operation's finish. A failed association
+        // leaves the deferred set intact so a retry cannot omit a component.
+        for (component, association) in &pending {
             self.backend
-                .associate_product(component, association.action, association.reference);
+                .associate_product(*component, association.action, association.reference);
+            if self.backend.lookup_product(*component) != Some(*association) {
+                return false;
+            }
         }
         self.backend.associate_product(address, action, reference);
-        self.backend.lookup_product(address) == Some(selected)
+        if self.backend.lookup_product(address) != Some(selected) {
+            return false;
+        }
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        for (component, published) in pending.into_iter().chain([(address, selected)]) {
+            if let Some((association, deferred)) = state.associations.get_mut(&component.0)
+                && *association == published
+            {
+                *deferred = false;
+            }
+        }
+        true
     }
 }
 
@@ -625,6 +673,10 @@ mod tests {
     fn archive_views_admit_complete_backing_and_outlive_the_request_without_its_table() {
         struct Backend(Mutex<Bytes>);
         impl ResultStore for Backend {
+            fn retention_scope(&self) -> Option<Box<dyn Send + Sync>> {
+                None
+            }
+
             fn capability(&self) -> ProviderCapability {
                 ProviderCapability::Writable
             }
@@ -632,7 +684,9 @@ mod tests {
             fn get(&self, _: &EntryKey) -> Option<Bytes> {
                 None
             }
-            fn put(&self, _: &EntryKey, _: &[u8]) {}
+            fn put(&self, _: &EntryKey, _: &[u8]) -> crate::WriteOutcome {
+                crate::WriteOutcome::Refused
+            }
             fn name(&self) -> &'static str {
                 "archive-view-test"
             }
@@ -694,6 +748,10 @@ mod tests {
     fn encoded_archive_moves_producer_backing_without_reading_the_provider() {
         struct Backend;
         impl ResultStore for Backend {
+            fn retention_scope(&self) -> Option<Box<dyn Send + Sync>> {
+                None
+            }
+
             fn capability(&self) -> ProviderCapability {
                 ProviderCapability::Writable
             }
@@ -701,7 +759,9 @@ mod tests {
             fn get(&self, _: &EntryKey) -> Option<Bytes> {
                 panic!("producer transfer read the provider")
             }
-            fn put(&self, _: &EntryKey, _: &[u8]) {}
+            fn put(&self, _: &EntryKey, _: &[u8]) -> crate::WriteOutcome {
+                crate::WriteOutcome::Refused
+            }
             fn name(&self) -> &'static str {
                 "encoded-archive-test"
             }
@@ -730,6 +790,10 @@ mod tests {
     fn compact_archive_copy_admits_its_payload_and_survives_provider_eviction() {
         struct Backend(Mutex<Bytes>);
         impl ResultStore for Backend {
+            fn retention_scope(&self) -> Option<Box<dyn Send + Sync>> {
+                None
+            }
+
             fn capability(&self) -> ProviderCapability {
                 ProviderCapability::Writable
             }
@@ -737,7 +801,9 @@ mod tests {
             fn get(&self, _: &EntryKey) -> Option<Bytes> {
                 None
             }
-            fn put(&self, _: &EntryKey, _: &[u8]) {}
+            fn put(&self, _: &EntryKey, _: &[u8]) -> crate::WriteOutcome {
+                crate::WriteOutcome::Refused
+            }
             fn name(&self) -> &'static str {
                 "compact-archive-test"
             }
@@ -913,6 +979,10 @@ mod tests {
         }
     }
     impl ResultStore for Refusing {
+        fn retention_scope(&self) -> Option<Box<dyn Send + Sync>> {
+            self.disk.retention_scope()
+        }
+
         fn capability(&self) -> ProviderCapability {
             self.disk.capability()
         }
@@ -920,7 +990,7 @@ mod tests {
         fn get(&self, key: &EntryKey) -> Option<Bytes> {
             self.disk.get(key)
         }
-        fn put(&self, key: &EntryKey, value: &[u8]) {
+        fn put(&self, key: &EntryKey, value: &[u8]) -> crate::WriteOutcome {
             self.disk.put(key, value)
         }
         fn local_product_store(&self) -> Option<hirsel_artifact_store::Store> {
@@ -952,6 +1022,84 @@ mod tests {
     }
     #[test]
     fn complete_roots_become_visible_only_with_their_whole_closure_and_aborts_leave_none() {
+        // Required transport retains the original bytes even when a cache
+        // rejects them or evicts a previously accepted write. A cache without
+        // closure pins must refuse Complete before exposing any root.
+        assert!(
+            MemStore::bounded(0)
+                .put_content(domain(), b"required")
+                .is_none()
+        );
+        let lost = SimStore::with_faults(SimFaults {
+            lose_puts: vec![0],
+            ..Default::default()
+        });
+        assert!(lost.put_content(domain(), b"required").is_none());
+        for scratch in [false, true] {
+            for cap in [0, 512] {
+                let parent = tempfile::tempdir().unwrap();
+                let backend = Arc::new(MemStore::bounded(cap));
+                let budget = hirsel_engine_admission::ProcessBudget::new(64 << 10);
+                let allowance = budget.reserve(64 << 10).unwrap();
+                let request = if scratch {
+                    RequestStore::with_scratch(backend.clone(), allowance, parent.path(), 4096)
+                        .unwrap()
+                } else {
+                    RequestStore::new(backend.clone(), allowance)
+                };
+                let operation = request.operation_scope().completing();
+                let part = request
+                    .put_content(component(), b"required component")
+                    .unwrap();
+                let output = request.put_content(domain(), b"root").unwrap();
+                // Each competing write fits, but together they evict the
+                // request's earlier content from the bounded FIFO cache.
+                for bytes in [b'a', b'b', b'c', b'd'] {
+                    backend.put_content(domain(), &[bytes; 256]);
+                }
+                assert!(backend.get_content(part).is_none());
+                assert_eq!(&*request.get_content(part).unwrap(), b"required component");
+                assert_eq!(&*request.get_content(output).unwrap(), b"root");
+                request.associate_product(
+                    Address(ContentHash::of_bytes(b"cited")),
+                    Action(address().0),
+                    part,
+                );
+                assert!(!request.publish_root(address(), Action(address().0), output));
+                operation.finish().unwrap();
+                assert!(backend.lookup_product(address()).is_none());
+            }
+        }
+        for scratch in [false, true] {
+            let parent = tempfile::tempdir().unwrap();
+            let backend = Arc::new(DirStore::new(parent.path().join("retaining")));
+            let collector = backend.local_product_store().unwrap();
+            let budget = hirsel_engine_admission::ProcessBudget::new(64 << 10);
+            let allowance = budget.reserve(64 << 10).unwrap();
+            let request = if scratch {
+                RequestStore::with_scratch(backend.clone(), allowance, parent.path(), 4096).unwrap()
+            } else {
+                RequestStore::new(backend.clone(), allowance)
+            };
+            let operation = request.operation_scope().completing();
+            let part = request
+                .put_content(component(), b"retained component")
+                .unwrap();
+            let output = request.put_content(domain(), b"retained root").unwrap();
+            let at = Address(ContentHash::of_bytes(b"retained component address"));
+            request.associate_product(at, Action(at.0), part);
+            assert!(request.publish_root(address(), Action(address().0), output));
+            collector.collect(0);
+            operation.finish().unwrap();
+            let fresh = DirStore::new(parent.path().join("retaining"));
+            for (at, expected) in [
+                (at, b"retained component".as_slice()),
+                (address(), b"retained root".as_slice()),
+            ] {
+                let reference = fresh.lookup_product(at).unwrap().reference;
+                assert_eq!(&*fresh.get_content(reference).unwrap(), expected);
+            }
+        }
         let cited = Address(ContentHash::of_bytes(b"cited component"));
         // The rule itself is the oracle: a fresh open of the directory finds
         // the root only when the component it cites is associated and stored,
@@ -1141,9 +1289,9 @@ mod tests {
         let backend = Arc::new(MemStore::default());
         let expected = backend.verifier().unwrap();
         let budget = hirsel_engine_admission::ProcessBudget::new(0);
-        let request = RequestStore::new(backend, budget.reserve(0).unwrap());
+        let request = RequestStore::new(backend.clone(), budget.reserve(0).unwrap());
         assert!(Arc::ptr_eq(&request.verifier().unwrap(), &expected));
-        let reference = request.put_content(domain(), b"durable").unwrap();
+        let reference = backend.put_content(domain(), b"durable").unwrap();
         assert_eq!(request.retained_bytes(), 0);
         let mut wrong = reference;
         wrong.domain.schema += 1;
@@ -1159,8 +1307,8 @@ mod tests {
         let budget = hirsel_engine_admission::ProcessBudget::new(ENTRY_CHARGE * 2);
         let a = RequestStore::new(backend.clone(), budget.reserve(ENTRY_CHARGE).unwrap());
         let b = RequestStore::new(backend.clone(), budget.reserve(ENTRY_CHARGE).unwrap());
-        let first = a.put_content(domain(), b"first request").unwrap();
-        let second = b.put_content(domain(), b"second request").unwrap();
+        let first = backend.put_content(domain(), b"first request").unwrap();
+        let second = backend.put_content(domain(), b"second request").unwrap();
         let action_a = Action(ContentHash::of_bytes(b"first action"));
         let action_b = Action(ContentHash::of_bytes(b"second action"));
         let selected_a = Association {
@@ -1196,7 +1344,7 @@ mod tests {
         let backend = Arc::new(MemStore::default());
         let budget = hirsel_engine_admission::ProcessBudget::new(ENTRY_CHARGE);
         let request = RequestStore::new(backend.clone(), budget.reserve(ENTRY_CHARGE).unwrap());
-        let reference = request.put_content(domain(), b"durable content").unwrap();
+        let reference = backend.put_content(domain(), b"durable content").unwrap();
         let action = Action(address().0);
         request.associate_product(address(), action, reference);
         for index in 1u32..4 {
@@ -1251,6 +1399,10 @@ mod tests {
 
         struct RefusedCache;
         impl ResultStore for RefusedCache {
+            fn retention_scope(&self) -> Option<Box<dyn Send + Sync>> {
+                None
+            }
+
             fn capability(&self) -> ProviderCapability {
                 ProviderCapability::Writable
             }
@@ -1258,7 +1410,9 @@ mod tests {
             fn get(&self, _: &EntryKey) -> Option<Bytes> {
                 None
             }
-            fn put(&self, _: &EntryKey, _: &[u8]) {}
+            fn put(&self, _: &EntryKey, _: &[u8]) -> crate::WriteOutcome {
+                crate::WriteOutcome::Refused
+            }
             fn put_content(&self, _: Domain, _: &[u8]) -> Option<Reference> {
                 None
             }

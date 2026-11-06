@@ -19,8 +19,6 @@ struct Entry {
     domain: Domain,
     len: u64,
     offset: u64,
-    /// Whether the selected provider accepted this record's bytes.
-    durable: bool,
 }
 impl Entry {
     fn matches(self, reference: Reference) -> bool {
@@ -125,20 +123,11 @@ impl Drop for ScratchStore {
         );
     }
 }
-impl ScratchStore {
-    fn mark_durable(&self, reference: Reference) {
-        if let Some(entry) = self
-            .files
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .entries
-            .get_mut(&reference.output.0)
-        {
-            entry.durable = true;
-        }
-    }
-}
 impl ResultStore for ScratchStore {
+    fn retention_scope(&self) -> Option<Box<dyn Send + Sync>> {
+        self.selected.retention_scope()
+    }
+
     fn capability(&self) -> ProviderCapability {
         ProviderCapability::RequestLocal(self.selected.persistence())
     }
@@ -178,8 +167,8 @@ impl ResultStore for ScratchStore {
     fn get(&self, key: &EntryKey) -> Option<Bytes> {
         self.selected.get(key)
     }
-    fn put(&self, key: &EntryKey, bytes: &[u8]) {
-        self.selected.put(key, bytes);
+    fn put(&self, key: &EntryKey, bytes: &[u8]) -> crate::WriteOutcome {
+        self.selected.put(key, bytes)
     }
     fn demand(&self, keys: &[EntryKey]) {
         self.selected.demand(keys);
@@ -191,19 +180,7 @@ impl ResultStore for ScratchStore {
         self.selected.associate_product(address, action, reference);
     }
     fn associate_written_product(&self, address: Address, action: Action, reference: Reference) {
-        let durable = self
-            .files
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .entries
-            .get(&reference.output.0)
-            .is_some_and(|entry| entry.matches(reference) && entry.durable);
-        if durable {
-            self.selected
-                .associate_written_product(address, action, reference);
-        } else {
-            self.selected.associate_product(address, action, reference);
-        }
+        self.selected.associate_product(address, action, reference);
     }
     fn put_content(&self, domain: Domain, bytes: &[u8]) -> Option<Reference> {
         let expected = domain.reference(bytes)?;
@@ -235,38 +212,38 @@ impl ResultStore for ScratchStore {
                 domain: expected.domain,
                 len: expected.len,
                 offset,
-                durable: false,
             },
         );
         drop(files);
         // A successful cache put is still evictable. The current request owns
         // its transport independently of later durable/cache reclamation.
-        if self.selected.put_content(domain, bytes) == Some(expected) {
-            self.mark_durable(expected);
-        }
+        self.selected.put_content(domain, bytes);
         Some(expected)
     }
     fn materialize(&self) -> bool {
-        let refused = self
+        let Some(_retention) = self.selected.retention_scope() else {
+            return false;
+        };
+        let references = self
             .files
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .entries
             .iter()
-            .filter(|(_, entry)| !entry.durable)
             .map(|(output, entry)| entry.reference(*output))
             .collect::<Vec<_>>();
-        let mut durable = true;
-        for reference in refused {
-            let accepted = self.get_content(reference).is_some_and(|bytes| {
-                self.selected.put_content(reference.domain, &bytes) == Some(reference)
-            });
-            if accepted {
-                self.mark_durable(reference);
+        for reference in &references {
+            let Some(bytes) = self.get_content(*reference) else {
+                return false;
+            };
+            if self.selected.put_content(reference.domain, &bytes) != Some(*reference) {
+                return false;
             }
-            durable &= accepted;
         }
-        self.selected.materialize() && durable
+        self.selected.materialize()
+            && references
+                .into_iter()
+                .all(|reference| self.selected.get_content(reference).is_some())
     }
     fn get_content(&self, reference: Reference) -> Option<Bytes> {
         let files = self.files.lock().unwrap_or_else(|e| e.into_inner());

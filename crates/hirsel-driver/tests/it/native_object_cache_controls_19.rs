@@ -27,6 +27,10 @@ struct Store {
     fragment_puts: AtomicUsize,
 }
 impl ResultStore for Store {
+    fn retention_scope(&self) -> Option<Box<dyn Send + Sync>> {
+        self.inner.retention_scope()
+    }
+
     fn capability(&self) -> hirsel_engine_store::ProviderCapability {
         self.inner.capability()
     }
@@ -34,8 +38,8 @@ impl ResultStore for Store {
     fn get(&self, key: &EntryKey) -> Option<Bytes> {
         self.inner.get(key)
     }
-    fn put(&self, key: &EntryKey, bytes: &[u8]) {
-        self.inner.put(key, bytes);
+    fn put(&self, key: &EntryKey, bytes: &[u8]) -> hirsel_engine_store::WriteOutcome {
+        self.inner.put(key, bytes)
     }
     fn local_product_store(&self) -> Option<hirsel_artifact_store::Store> {
         self.inner.local_product_store()

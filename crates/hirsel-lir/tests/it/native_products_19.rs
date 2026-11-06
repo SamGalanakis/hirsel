@@ -144,7 +144,11 @@ fn native_products_19_only_actual_validation_can_issue_a_local_output() {
         expired.upgrade().is_none(),
         "the validator must release layouts after their last consumer"
     );
-    assert_eq!(Arc::strong_count(&admission), 1);
+    assert_eq!(
+        Arc::strong_count(&admission),
+        2,
+        "only the test owner and the admission callback retain the marker"
+    );
     let (closure, _) = cache.read(&output, &target).unwrap();
     drop(cache);
     assert_eq!(

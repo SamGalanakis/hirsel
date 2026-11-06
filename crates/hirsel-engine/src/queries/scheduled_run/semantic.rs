@@ -36,7 +36,21 @@ impl LiveProductValue for LiveSemantic {
     }
     fn archive(&self, admission: ArchiveAdmission<'_>) -> std::io::Result<ProductArchive> {
         ProductArchive::materialize(OUTPUT, admission, |grant| {
-            if grant.bytes() < self.charge {
+            let working = self
+                .entry
+                .node
+                .decode_bytes(self.path.path())
+                .and_then(|bytes| {
+                    bytes.checked_add(
+                        self.entry
+                            .source
+                            .as_ref()
+                            .map_or(0, source_products::Source::view_bytes),
+                    )
+                })
+                .and_then(|bytes| bytes.checked_add(self.charge))
+                .ok_or(std::io::ErrorKind::OutOfMemory)?;
+            if grant.bytes() < working {
                 return Err(std::io::ErrorKind::OutOfMemory.into());
             }
             let source = self
@@ -67,7 +81,13 @@ impl LiveProductValue for LiveSemantic {
                 &self.entry.node.observations,
             );
             let length = bincode::serialized_size(&value).map_err(std::io::Error::other)?;
-            if length > grant.bytes() {
+            let required = usize::try_from(length)
+                .ok()
+                .and_then(ProductArchive::materialized_required_bytes)
+                .and_then(|bytes| bytes.checked_add(length))
+                .and_then(|bytes| bytes.checked_add(working))
+                .ok_or(std::io::ErrorKind::OutOfMemory)?;
+            if required > grant.bytes() {
                 return Err(std::io::ErrorKind::OutOfMemory.into());
             }
             bincode::serialize(&value).map_err(std::io::Error::other)

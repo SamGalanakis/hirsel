@@ -48,7 +48,7 @@ impl Source {
             Self::Spilled { .. } => 0,
         }
     }
-    fn view_bytes(&self) -> u64 {
+    pub(super) fn view_bytes(&self) -> u64 {
         match self {
             Self::Live(body) => body.weight(),
             Self::Spilled { decode_bytes, .. } => *decode_bytes,

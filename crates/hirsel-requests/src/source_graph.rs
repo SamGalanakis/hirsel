@@ -272,6 +272,9 @@ impl GraphProducts for SourceMetadata {
     }
 }
 impl GraphProducts for SourceProducts {
+    fn discovery_dependency(&self) -> Option<DefPath> {
+        self.front.discovery_dependency()
+    }
     fn metadata(&self) -> Option<Arc<InstalledMetadata>> {
         Some(self.metadata.clone())
     }
@@ -282,6 +285,9 @@ impl GraphProducts for SourceProducts {
         Some(Arc::new((self.meter.source_owner(), self.store.clone())))
     }
     fn accepts(&self, operation: &CompileOperation) -> bool {
+        if self.front.discovery_dependency().is_some() {
+            return false;
+        }
         if self
             .completed_operation
             .lock()
@@ -1026,6 +1032,7 @@ pub(super) fn install(
     budget: &GraphBudget,
     may_wait: bool,
     request: &CompileRequest,
+    discovery_roots: &[DefPath],
     ledger: Arc<InspectionLedger>,
     carry: Option<&Carry>,
     source_index: &Arc<Mutex<SourceIndexSlot>>,
@@ -1237,7 +1244,7 @@ pub(super) fn install(
         native: needs_native,
         proofs: needs_proofs,
     };
-    let demand_roots = match &request.operation {
+    let mut demand_roots = match &request.operation {
         CompileOperation::Tir { definition } => {
             vec![definition.clone().unwrap_or_else(|| program.entry.clone())]
         }
@@ -1301,28 +1308,35 @@ pub(super) fn install(
             | CompileOperation::TirBatch { .. }
             | CompileOperation::NativeSources { .. }
     );
-    let (namespace, limits) = if matches!(
+    let ordered_check = matches!(
         request.operation,
         CompileOperation::Check { .. } | CompileOperation::CheckedProducts { .. }
-    ) {
-        // Check admits namespace-producing work through its ordered cursor.
-        (None, limits)
+    );
+    if ordered_check {
+        // Only the actual ordered cursor can request a later producer. Each
+        // failed attempt is discarded before these roots expand discovery.
+        demand_roots = discovery_roots.to_vec();
     } else {
-        hirsel_engine::requests::source_graph::prepare_source_scope(
-            &mut program.engine,
-            &selection,
-            &demand_roots,
-            demand_policy,
-            prefix,
-            shape,
-            config.jobs,
-            limits,
-            &host,
-            &mut loading,
-            store.as_ref(),
-            carry,
-        )?
-    };
+        for path in discovery_roots {
+            if !demand_roots.contains(path) {
+                demand_roots.push(path.clone());
+            }
+        }
+    }
+    let (namespace, limits) = hirsel_engine::requests::source_graph::prepare_source_scope(
+        &mut program.engine,
+        &selection,
+        &demand_roots,
+        demand_policy,
+        prefix,
+        shape,
+        config.jobs,
+        limits,
+        &host,
+        &mut loading,
+        store.as_ref(),
+        carry,
+    )?;
     let scope_roots = (prefix && namespace.is_some()).then(|| match &request.operation {
         CompileOperation::NativeSources { roots } => roots.clone(),
         _ => demand_roots.clone(),

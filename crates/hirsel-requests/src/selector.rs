@@ -123,25 +123,41 @@ impl CompilerRequests {
             };
             format!("{} {operation}", request.path.display())
         });
-        use hirsel_engine::requests::{OutputReadiness, RequestEngine};
+        use hirsel_engine::requests::OutputReadiness;
         use hirsel_engine_runtime::QueryRuntime;
 
-        let mut selected = self.select(request)?;
-        let completed = {
-            let mut runtime = selected
-                .runtime
-                .lock()
-                .unwrap_or_else(|error| error.into_inner());
-            let request = runtime.request(&selected.roots);
-            runtime.wait(request)
+        let mut discovery_roots = Vec::new();
+        loop {
+            let mut selected = self.select_with_discovery(request, &discovery_roots)?;
+            let completed = {
+                let mut runtime = selected
+                    .runtime
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner());
+                let request = runtime.request(&selected.roots);
+                runtime.wait(request)
+            };
+            if let Some(path) = self.graphs.discovery_dependency(&selected.runtime)
+                && !discovery_roots.contains(&path)
+            {
+                discovery_roots.push(path);
+                self.graphs.discard(&selected.runtime);
+                // No materialization, diagnostics or publication from this
+                // attempt can escape into its replacement.
+                drop(selected);
+                continue;
+            }
+            let completed = completed.map_err(|reference| {
+                selected.output.failed(reference).unwrap_or_else(|| {
+                    hirsel_engine::ToolError::Runtime(
+                        "compiler request diagnostics unavailable".into(),
+                    )
+                })
+            })?;
+            return selected.output.ready(&completed);
         }
-        .map_err(|reference| {
-            selected.output.failed(reference).unwrap_or_else(|| {
-                hirsel_engine::ToolError::Runtime("compiler request diagnostics unavailable".into())
-            })
-        })?;
-        selected.output.ready(&completed)
     }
+
     /// Actual cumulative work across this selector's source graphs, including
     /// graphs already evicted. This reads the bounded ledger without observing
     /// inputs, installing a producer, or retaining an idle runtime.
@@ -310,6 +326,21 @@ impl hirsel_engine::requests::RequestEngine for CompilerRequests {
         request: &CompileRequest,
     ) -> Result<hirsel_engine::requests::SelectedRequest<Self::Runtime, Self::Readiness>, Self::Error>
     {
+        self.select_with_discovery(request, &[])
+    }
+}
+impl CompilerRequests {
+    fn select_with_discovery(
+        &mut self,
+        request: &CompileRequest,
+        discovery_roots: &[hirsel_syntax::DefPath],
+    ) -> Result<
+        hirsel_engine::requests::SelectedRequest<
+            hirsel_engine_runtime::AdmittedRuntime,
+            CompilerReadiness,
+        >,
+        hirsel_engine::ToolError,
+    > {
         self.ledger.admit()?;
         let ledger = self.ledger.clone();
         let mut config = self.config.clone();
@@ -333,6 +364,7 @@ impl hirsel_engine::requests::RequestEngine for CompilerRequests {
                 budget,
                 may_wait,
                 request,
+                discovery_roots,
                 ledger,
                 carry,
                 source_index,

@@ -20,6 +20,9 @@ pub(super) use hirsel_engine::requests::source_graph::{
 /// Implemented only by installed compiler producer views. Public requests
 /// carry no tasks, materializer callbacks or compiler/verifier capabilities.
 pub(super) trait GraphProducts: Send + Sync {
+    fn discovery_dependency(&self) -> Option<hirsel_syntax::DefPath> {
+        None
+    }
     fn check_source_owner(&self) -> Option<Arc<dyn Send + Sync>> {
         None
     }
@@ -294,6 +297,29 @@ impl GraphSelections {
             metadata: vec![],
             outputs: Arc::new(Mutex::new(vec![])),
         }
+    }
+    pub fn discovery_dependency(
+        &self,
+        runtime: &Arc<Mutex<AdmittedRuntime>>,
+    ) -> Option<hirsel_syntax::DefPath> {
+        self.live
+            .iter()
+            .filter_map(Weak::upgrade)
+            .find(|graph| Arc::ptr_eq(&graph.runtime, runtime))?
+            .products
+            .discovery_dependency()
+    }
+    pub fn discard(&mut self, runtime: &Arc<Mutex<AdmittedRuntime>>) {
+        self.live.retain(|graph| {
+            graph
+                .upgrade()
+                .is_some_and(|graph| !Arc::ptr_eq(&graph.runtime, runtime))
+        });
+        self.retention
+            .hot
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .retain(|graph| !Arc::ptr_eq(&graph.runtime, runtime));
     }
     pub fn select(
         &mut self,

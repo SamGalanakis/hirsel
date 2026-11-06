@@ -96,6 +96,13 @@ impl CompilerRequestsExt for Compiler {
 }
 
 impl crate::resident::ObservedEngine for crate::requests::CompilerRequests {
+    fn execute_request(
+        &mut self,
+        request: &crate::requests::CompileRequest,
+    ) -> Result<std::sync::Arc<crate::requests::CompileOutput>, hirsel_engine::ToolError> {
+        crate::requests::CompilerRequests::execute_request(self, request)
+    }
+
     fn set_invocation_store(
         &mut self,
         store: Option<std::sync::Arc<dyn hirsel_engine_store::ResultStore>>,

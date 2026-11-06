@@ -2086,6 +2086,16 @@ impl FrontLowerQueries {
             let owner = source.active_owner();
             return Box::pin(owner.compute(kind, path, selection, source)).await;
         }
+        if self.namespace.consumers_admitted()
+            && body.outcome.result.as_ref().is_ok_and(|analyzed| {
+                scheduled_stage::missing_declaration(&self.namespace, &analyzed.value)
+            })
+        {
+            self.front.require_discovery(path);
+            return Err(successor::refused(
+                "staged declarations require discovery before consumer admission",
+            ));
+        }
         source.merge(&body.outcome.reads);
         if self.verify == Verify::On {
             let observed = self
@@ -3230,15 +3240,18 @@ impl s1::AsyncDependencySource for Source {
                 }
             }
         } else {
-            active
-                .namespace
-                .instances
-                .resolve(
-                    DefId::intern(path),
-                    active.namespace.snapshot.types(),
-                    arguments,
-                )
-                .map(|selected| selected.map(|id| id.path().clone()))
+            let resolved = active.namespace.instances.resolve(
+                DefId::intern(path),
+                active.namespace.snapshot.types(),
+                arguments,
+            );
+            if resolved.is_err()
+                && hirsel_tir::InstanceBodies::key(active.namespace.snapshot.types(), arguments)
+                    .is_some()
+            {
+                active.front.require_discovery(self.root.path());
+            }
+            resolved.map(|selected| selected.map(|id| id.path().clone()))
         };
         let successor = self.successor_since(&previous);
         s1::DependencyProduct {

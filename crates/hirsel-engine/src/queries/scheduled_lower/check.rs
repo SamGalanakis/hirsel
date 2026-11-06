@@ -91,8 +91,8 @@ impl FrontLowerQueries {
 }
 
 impl FrontLowerQueries {
-    /// Join the selected producer's observations to the admitted capture.
-    /// V refreshes validation guards only after semantic reads still agree.
+    /// Read an outcome already produced or admitted in this fixed capture.
+    /// Cache adoption owns V revalidation; handoff cannot refresh its reads.
     pub(in crate::queries) fn check_observations(
         &self,
         id: QueryId,
@@ -117,27 +117,27 @@ impl FrontLowerQueries {
             .get(&(id.kind, id.address.0))
             .map(|(_, outcome, _)| outcome.clone())
             .ok_or_else(|| successor::refused("missing Lower observation outcome"))?;
-        let execution = outcome.execution.clone().or_else(|| {
-            let Ok(Value::Lower(lower)) = &outcome.result else {
-                return None;
-            };
-            let proof = lower.acceptance.as_ref()?;
-            let mut contexts: Vec<_> = reads
-                .iter()
-                .filter_map(|(key, value)| match key {
-                    ReadKey::ValidationUniverse(package) => Some((package.id(), *value)),
-                    _ => None,
-                })
-                .collect();
-            contexts.sort_unstable();
-            hirsel_validate::ExecutionReceipt::compose(&contexts, std::slice::from_ref(proof))
-        });
-        let (reads, _) = self
-            .namespace
-            .admit_reuse(&path, &reads, execution.as_ref(), |path, key| {
-                self.observe(path, key)
-            })
-            .map_err(|error| successor::refused(&format!("{path}: {error:?}")))?;
-        Ok(Arc::new(reads))
+        let own_reads = outcome
+            .reads(self)
+            .ok_or_else(|| successor::refused("missing Lower observations"))?;
+        if own_reads != *reads
+            || reads
+                .first_changed(|key| self.observe(&path, key))
+                .is_some()
+        {
+            return Err(successor::refused(
+                "Lower observations differ from the admitted capture",
+            ));
+        }
+        if self.verify == Verify::On && outcome.executed {
+            let execution = outcome
+                .execution
+                .as_ref()
+                .ok_or_else(|| successor::refused("executed Lower lacks admitted V evidence"))?;
+            evidence::persisted_reads(&reads, Some(execution)).ok_or_else(|| {
+                successor::refused("execution does not cover its validation reads")
+            })?;
+        }
+        Ok(reads)
     }
 }

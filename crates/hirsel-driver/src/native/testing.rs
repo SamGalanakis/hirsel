@@ -5,11 +5,7 @@ use crate::requests::{
     NativeRequest,
 };
 use crate::testing::{BenchResult, Selection, Test, TestResult};
-use hirsel_engine::{
-    ToolError,
-    requests::{OutputReadiness, RequestEngine},
-};
-use hirsel_engine_runtime::QueryRuntime;
+use hirsel_engine::ToolError;
 use std::sync::Arc;
 use std::{
     path::Path,
@@ -109,30 +105,8 @@ impl Executable {
                 evidence: None,
             }),
         };
-        let mut selected = selector.select(&request).map_err(|error| failed(&error))?;
-        let complete = {
-            let mut runtime = selected
-                .runtime
-                .lock()
-                .unwrap_or_else(|error| error.into_inner());
-            let request = runtime.request(&selected.roots);
-            runtime.wait(request)
-        };
-        let complete = match complete {
-            Ok(complete) => complete,
-            Err(reference) => {
-                return Err(failed(
-                    &selected
-                        .output
-                        .failed(reference)
-                        .map(|error| error.to_string())
-                        .unwrap_or_else(|| "native test compilation refused".into()),
-                ));
-            }
-        };
-        let output = selected
-            .output
-            .ready(&complete)
+        let output = selector
+            .execute_request(&request)
             .map_err(|error| failed(&error))?;
         let execution = match &output.result {
             CompileResult::Native(execution) => execution.clone(),

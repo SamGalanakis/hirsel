@@ -449,6 +449,42 @@ impl FrontStageQueries {
     }
 }
 
+/// A consumer can inspect typed demand, but only discovery installs these
+/// declarations. The same CT-5 input relation selects the stage producer rows.
+pub(in crate::queries) fn missing_declaration(
+    capture: &NamespaceCapture,
+    analyzed: &AnalyzedBody,
+) -> bool {
+    let typed = &analyzed.typed;
+    if !has_staged_body(&typed.syntax) {
+        return false;
+    }
+    typed.checked.expressions.iter().any(|row| {
+        if !matches!(
+            typed.syntax.tree.expressions[row.expression.0 as usize].kind,
+            hirsel_syntax::ExprKind::Comptime(_)
+        ) {
+            return false;
+        }
+        let path = hirsel_check_protocol::body::comptime_path(
+            &typed.syntax.item.definition,
+            &typed.checked,
+            row.expression,
+        );
+        !capture
+            .snapshot
+            .header_products()
+            .is_some_and(|headers| headers.staged_constants().contains_key(&path))
+            && !hirsel_check_protocol::body::comptime_inputs(
+                capture.snapshot.types(),
+                &typed.syntax,
+                &typed.checked,
+                row.expression,
+            )
+            .is_empty()
+    })
+}
+
 pub(in crate::queries) fn has_staged_body(syntax: &ItemSyntax) -> bool {
     let generics = match &syntax.item.kind {
         hirsel_syntax::ItemKind::Function { signature, .. } => &signature.generics,

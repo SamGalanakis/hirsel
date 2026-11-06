@@ -291,6 +291,8 @@ struct Forwarded {
 pub struct FrontBodyQueries {
     demand: Mutex<std::sync::Weak<generation::demand::DemandProducer>>,
     forwarded: Mutex<BTreeMap<Key, Forwarded>>,
+    /// A late dependency invalidates this whole consumer attempt.
+    discovery_dependency: Mutex<Option<DefPath>>,
     inputs: Inputs,
     _operation_inputs: Arc<OperationFrontInputs>,
     types: Arc<hirsel_types::TypeInterner>,
@@ -456,6 +458,20 @@ impl FrontBodyQueries {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .upgrade()
+    }
+    pub fn discovery_dependency(&self) -> Option<DefPath> {
+        self.discovery_dependency
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone()
+    }
+    pub(crate) fn require_discovery(&self, path: &DefPath) {
+        if self.namespace.consumers_admitted() {
+            self.discovery_dependency
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .get_or_insert_with(|| path.clone());
+        }
     }
     pub(in crate::queries) fn definition(&self, query: QueryId) -> Option<DefId> {
         (query.kind == FRONT_BODY_KIND).then(|| {
@@ -2453,6 +2469,23 @@ impl QueryTask for BodyTask {
         }
         if let Some(dependency) = self.demand {
             let Some(producer) = self.queries.demand_producer() else {
+                if self.queries.namespace.consumers_admitted() {
+                    self.queries.require_discovery(dependency.path());
+                    let result = self.publish_generation_failure(
+                        cx,
+                        QueryError::Operational(hirsel_types::OperationalFailure {
+                            operation: "consumer discovery dependency".into(),
+                            message: format!(
+                                "{} requires an accepted registration",
+                                dependency.path()
+                            ),
+                        }),
+                        Arc::new(Reads::empty()),
+                        None,
+                    );
+                    self.terminal = Some(result.clone());
+                    return finish(result);
+                }
                 return finish(Err(self.queries.protocol_failure(self.query, &format!(
                     "generated declaration {} has no accepted registration and no live demand producer",
                     definition.path(),
@@ -2568,15 +2601,24 @@ impl BodyTask {
         cx: &mut dyn QueryContext,
         failure: generation::demand::DemandFailure,
     ) -> Result<ProductRef, Reference> {
+        self.publish_generation_failure(cx, failure.error, failure.reads, Some(failure.sources))
+    }
+    fn publish_generation_failure(
+        &self,
+        cx: &mut dyn QueryContext,
+        error: QueryError,
+        reads: Arc<Reads>,
+        diagnostic_sources: Option<Arc<namespace::DiagnosticSources>>,
+    ) -> Result<ProductRef, Reference> {
         let queries = &self.queries;
         let input = &queries.inputs[&self.input];
         let phase = Some(QueryKind::Generate);
         let outcome = ModeResult {
             definition: input.definition.path().clone(),
-            result: Err(failure.error.clone()),
+            result: Err(error.clone()),
             phase,
             summary: None,
-            reads: failure.reads.clone(),
+            reads: reads.clone(),
             diagnostic_phases: vec![],
         };
         let bytes = queries
@@ -2584,14 +2626,18 @@ impl BodyTask {
             .encode_record(
                 &(
                     input.definition,
-                    Some(&failure.error),
+                    Some(&error),
                     phase.map(QueryKind::phase_name),
                     Vec::<(Diagnostic, String)>::new(),
-                    &*failure.reads,
+                    &*reads,
                 ),
                 |anchor| {
                     crate::NativeRecordSource::record_owner(&*queries.namespace.anchors, anchor)
-                        .or_else(|| failure.sources.owner(anchor))
+                        .or_else(|| {
+                            diagnostic_sources
+                                .as_ref()
+                                .and_then(|sources| sources.owner(anchor))
+                        })
                 },
             )
             .ok_or_else(|| queries.resource_refusal())?;
@@ -2602,7 +2648,7 @@ impl BodyTask {
             .store
             .put_content(FAILURE, &bytes)
             .ok_or_else(|| queries.resource_refusal())?;
-        let action = hirsel_engine_store::query_action(&input.key, input.key.1, &failure.reads);
+        let action = hirsel_engine_store::query_action(&input.key, input.key.1, &reads);
         let mut cached = queries
             .publish_facts(
                 cx,
@@ -2618,7 +2664,7 @@ impl BodyTask {
             .ok_or_else(|| queries.resource_refusal())?;
         Arc::get_mut(&mut cached.facts)
             .ok_or_else(|| queries.protocol_refusal())?
-            .diagnostic_sources = Some(failure.sources);
+            .diagnostic_sources = diagnostic_sources;
         queries.install_outcome(self.input, cached);
         Err(reference)
     }
@@ -3657,6 +3703,7 @@ impl QueryEngine {
         Ok(Arc::new(FrontBodyQueries {
             demand: Default::default(),
             forwarded: Mutex::new(BTreeMap::new()),
+            discovery_dependency: Mutex::new(None),
             inputs,
             _operation_inputs: indexes,
             types: self.types.clone(),

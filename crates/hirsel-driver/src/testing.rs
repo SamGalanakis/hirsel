@@ -420,28 +420,13 @@ pub(crate) fn check_empty_selection(
     selector: &mut crate::requests::CompilerRequests,
 ) -> Result<(), ToolError> {
     use crate::requests::{CompileOperation, CompileRequest, CompileResult};
-    use hirsel_engine::requests::{OutputReadiness, RequestEngine};
-    use hirsel_engine_runtime::QueryRuntime;
-
-    let mut selected = selector.select(&CompileRequest {
+    let output = selector.execute_request(&CompileRequest {
         path: path.to_owned(),
         inputs: discovery.inputs.clone(),
         operation: CompileOperation::Check {
             lowering: hirsel_query_products::LoweringPolicy::Reachable,
         },
     })?;
-    let complete = {
-        let mut runtime = selected.runtime.lock().unwrap_or_else(|e| e.into_inner());
-        let request = runtime.request(&selected.roots);
-        runtime.wait(request)
-    }
-    .map_err(|reference| {
-        selected
-            .output
-            .failed(reference)
-            .unwrap_or_else(|| ToolError::Runtime("test package Check is unavailable".into()))
-    })?;
-    let output = selected.output.ready(&complete)?;
     let CompileResult::Check(checked) = &output.result else {
         return Err(ToolError::Runtime(
             "test package selected another operation".into(),

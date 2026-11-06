@@ -887,6 +887,9 @@ pub fn prepare_source_scope(
     store: &dyn ResultStore,
     carry: Option<&SourceCarry>,
 ) -> Result<(Option<FrontDemandScope>, RequestLimits), ToolError> {
+    if roots.is_empty() {
+        return Ok((None, limits));
+    }
     engine.admit_private_inference(loading.lend_runtime());
     let definitions = selected_definitions(engine);
     let generators = engine
@@ -895,7 +898,7 @@ pub fn prepare_source_scope(
     let staged = engine
         .front_staged_roots(&definitions)
         .map_err(|error| engine_error(engine, error))?;
-    if roots.is_empty() || (generators.is_empty() && staged.is_empty()) {
+    if generators.is_empty() && staged.is_empty() {
         let runtime = engine
             .release_private_inference_admission()
             .map_err(|error| engine_error(engine, error))?;
@@ -1411,19 +1414,7 @@ impl QueryEngine {
                 .map(|(front, lower)| SourceCarry { front, lower });
         }
         let previous = self.result_store.replace(store.clone());
-        let operation = store.operation_scope();
         let result = self.check_installed(selection, jobs, limits, budget, loading, &store);
-        // A complete Check publishes its products for later requests, as a
-        // host request does; anything else aborts its unpublished epoch.
-        // Cache publication failure only loses reuse, never the result.
-        if result
-            .as_ref()
-            .is_ok_and(|output| output.completion == crate::CheckCompletion::Complete)
-        {
-            let _ = operation.finish();
-        } else {
-            drop(operation);
-        }
         // A failed installation can leave its inference grant behind.
         drop(self.release_private_inference_admission());
         self.result_store = previous;
@@ -1439,6 +1430,56 @@ impl QueryEngine {
         loading: LoadingAdmission,
         store: &Arc<RequestStore>,
     ) -> Result<CheckOutput, ToolError> {
+        let mut discovery_roots = Vec::new();
+        let mut loading = loading;
+        loop {
+            let operation = store.operation_scope();
+            let (checked, dependency) = self.check_attempt(
+                selection,
+                jobs,
+                limits,
+                budget,
+                loading,
+                store,
+                &discovery_roots,
+            )?;
+            if let Some(path) = dependency
+                && !discovery_roots.contains(&path)
+            {
+                discovery_roots.push(path);
+                drop(checked);
+                drop(operation);
+                loading = LoadingAdmission::reserve(
+                    budget,
+                    RequestLimits {
+                        transport_bytes: 0,
+                        ..limits
+                    },
+                    0,
+                )?;
+                continue;
+            }
+            if checked
+                .as_ref()
+                .is_ok_and(|output| output.completion == crate::CheckCompletion::Complete)
+            {
+                let _ = operation.finish();
+            }
+            return checked;
+        }
+    }
+
+    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
+    fn check_attempt(
+        &mut self,
+        selection: &SourceSelection,
+        jobs: Jobs,
+        limits: RequestLimits,
+        budget: &Arc<hirsel_engine_admission::ProcessBudget>,
+        mut loading: LoadingAdmission,
+        store: &Arc<RequestStore>,
+        discovery_roots: &[DefPath],
+    ) -> Result<(Result<CheckOutput, ToolError>, Option<DefPath>), ToolError> {
         let shape = SourceShape {
             storage: true,
             ..SourceShape::default()
@@ -1447,9 +1488,20 @@ impl QueryEngine {
             front: carry.front.clone(),
             lower: carry.lower.clone(),
         });
-        // Check's ordered cursor owns namespace demand as well as publication.
-        // Preparing generators here would execute them before that cursor can
-        // observe an earlier file stop.
+        let (scope, limits) = prepare_source_scope(
+            self,
+            selection,
+            discovery_roots,
+            LoweringPolicy::Comptime,
+            false,
+            shape,
+            jobs,
+            limits,
+            &BudgetHost(budget),
+            &mut loading,
+            store.as_ref(),
+            carry.as_ref(),
+        )?;
         let mut installed = install(
             self,
             selection,
@@ -1460,7 +1512,7 @@ impl QueryEngine {
             loading,
             store.as_ref(),
             carry.as_ref(),
-            None,
+            scope,
         )?;
         let check = installed.check(self, selection)?;
         let runtime = self
@@ -1516,7 +1568,8 @@ impl QueryEngine {
         self.adopt_completed_headers();
         record_front_work(self, &installed.front, &front_before);
         record_lower_work(self, &installed.lower, &lower_before);
-        checked
+        let dependency = installed.front.discovery_dependency();
+        Ok((checked, dependency))
     }
 }
 

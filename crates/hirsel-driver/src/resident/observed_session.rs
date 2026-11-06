@@ -1,7 +1,7 @@
 //! Filesystem/event transport over immutable compiler requests. Source
 //! observation is shared engine code; this facade keeps only its input cursor,
 //! explicit policy and work counters, never a loaded or checked program.
-use super::{Host, RequestError};
+use super::Host;
 use crate::{
     requests::{CompileOperation, CompileOutput, CompileRequest, CompileResult, CompilerReadiness},
     session::{FileChange, SessionInputWork, SessionStats},
@@ -30,6 +30,10 @@ pub trait ObservedEngine:
         Readiness = CompilerReadiness,
     >
 {
+    fn execute_request(
+        &mut self,
+        request: &CompileRequest,
+    ) -> Result<Arc<CompileOutput>, ToolError>;
     fn set_invocation_store(
         &mut self,
         store: Option<Arc<dyn hirsel_engine_store::ResultStore>>,
@@ -412,17 +416,7 @@ where
             operation,
         };
         let _timing = hirsel_intern::timings::interval(hirsel_intern::timings::Interval::Parallel);
-        let output = self
-            .host
-            .request(&request)?
-            .wait()
-            .map_err(|error| match error {
-                RequestError::Output(error) => error,
-                RequestError::Cancelled => ToolError::Runtime("compiler request cancelled".into()),
-                RequestError::Query(reference) => ToolError::Runtime(format!(
-                    "compiler request diagnostic unavailable: {reference:?}"
-                )),
-            })?;
+        let output = self.host.engine.execute_request(&request)?;
         self.logical_entry = Some(output.entry.clone());
         self.work.accumulate(output.work.front);
         self.hold_bytes = output.work.hold_bytes;
@@ -547,6 +541,22 @@ mod tests {
         failure: Option<QueryError>,
     }
     impl ObservedEngine for Checker {
+        fn execute_request(
+            &mut self,
+            request: &CompileRequest,
+        ) -> Result<Arc<CompileOutput>, ToolError> {
+            use hirsel_engine::requests::OutputReadiness;
+            use hirsel_engine_runtime::QueryRuntime;
+            let mut selected = self.select(request)?;
+            let completed = {
+                let mut runtime = selected.runtime.lock().unwrap();
+                let id = runtime.request(&selected.roots);
+                runtime.wait(id)
+            }
+            .map_err(|reference| selected.output.failed(reference).unwrap())?;
+            selected.output.ready(&completed)
+        }
+
         fn set_invocation_store(
             &mut self,
             store: Option<Arc<dyn hirsel_engine_store::ResultStore>>,

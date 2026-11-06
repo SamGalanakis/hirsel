@@ -5,11 +5,7 @@ use crate::requests::{
     CompileOperation, CompileRequest, CompileResult, CompilerRequests, TirBatchExecution,
     TirExecution,
 };
-use hirsel_engine::{
-    InterpreterPhase, ToolError,
-    requests::{OutputReadiness, RequestEngine},
-};
-use hirsel_engine_runtime::QueryRuntime;
+use hirsel_engine::{InterpreterPhase, ToolError};
 
 use hirsel_syntax::DefPath;
 use std::{
@@ -65,23 +61,11 @@ impl Executions {
                 definitions: self.roots.clone(),
             }
         };
-        let mut selected = self.selector.select(&CompileRequest {
+        let output = self.selector.execute_request(&CompileRequest {
             path: self.path.clone(),
             inputs: self.inputs.clone(),
             operation,
         })?;
-        let completed = {
-            let mut runtime = selected.runtime.lock().unwrap_or_else(|e| e.into_inner());
-            let request = runtime.request(&selected.roots);
-            runtime.wait(request)
-        }
-        .map_err(|reference| {
-            selected
-                .output
-                .failed(reference)
-                .unwrap_or_else(|| ToolError::Runtime("interpreted test TIR is unavailable".into()))
-        })?;
-        let output = selected.output.ready(&completed)?;
         match &output.result {
             CompileResult::TirBatch(batch) => self.batch = Some(batch.clone()),
             CompileResult::Check(checked) => super::accepted_check(checked)?,

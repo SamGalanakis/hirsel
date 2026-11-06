@@ -546,7 +546,22 @@ impl ReaderSequence {
         if !union.fits_scratch(scratch)? {
             return None;
         }
-        Some(union.finish())
+        let result = union.finish();
+        if let Err(hirsel_query_products::reads::Inconsistent(key)) = &result {
+            for (index, entry) in self.0.iter().enumerate() {
+                let Some(value) = entry.receipt.load(store).and_then(|reads| reads.get(key)) else {
+                    continue;
+                };
+                let source = match &entry.source {
+                    Some(ReaderSource::Front(id, _, _)) => format!("Front {id:?}"),
+                    Some(ReaderSource::Lower(id, _, _)) => format!("Lower {id:?}"),
+                    Some(ReaderSource::StagedLower(id, _, _, _)) => format!("staged Lower {id:?}"),
+                    None => "Check aggregate".to_owned(),
+                };
+                eprintln!("Check conflicting observation {index}: {source}; {key:?} = {value:?}");
+            }
+        }
+        Some(result)
     }
 }
 impl ReadUnion {

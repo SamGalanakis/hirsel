@@ -1,7 +1,9 @@
 //! Exact per-root observations in request transport. Reductions keep only one
 //! row per key, retaining the first observation and every disagreement.
 use super::*;
+use hirsel_engine_runtime::ProductRef;
 use hirsel_engine_store::{Domain, Reference, ResultStore};
+use std::task::Poll;
 
 const READERS: Domain = Domain {
     kind: 0x4600_003c,
@@ -30,7 +32,7 @@ pub(super) struct ReaderReceipt {
 }
 #[derive(Clone)]
 pub(super) enum ReaderSource {
-    Front(DefId, bool),
+    Front(DefId, usize, Arc<FrontBodyQueries>),
     Lower(
         hirsel_engine_runtime::QueryId,
         usize,
@@ -347,6 +349,13 @@ pub(super) struct ReaderSequence(Vec<SequencedReader>);
 pub(super) enum ReaderRefresh {
     Complete,
     Waiting(hirsel_engine_runtime::QueryId),
+    Front {
+        file: usize,
+        path: DefPath,
+        selected: Result<ProductRef, Reference>,
+        facts: parallel::FrontCheckFacts,
+        receipt: ReaderReceipt,
+    },
     Recomputed {
         source: ReaderSource,
         path: DefPath,
@@ -385,21 +394,17 @@ impl ReaderSequence {
         });
         Some(reader)
     }
-    pub(super) fn refresh_lower(
+    pub(super) fn refresh(
         &mut self,
         cx: &mut dyn hirsel_engine_runtime::QueryContext,
         store: &dyn ResultStore,
         scratch: u64,
+        lower: &FrontLowerQueries,
     ) -> Result<Option<ReaderRefresh>, Reference> {
         use scheduled_lower::check::CheckRefresh;
         for entry in &mut self.0 {
             let Some(source) = entry.source.clone() else {
                 continue;
-            };
-            let (id, producer) = match &source {
-                ReaderSource::Lower(id, _, producer)
-                | ReaderSource::StagedLower(id, _, _, producer) => (*id, producer),
-                ReaderSource::Front(..) => continue,
             };
             if entry
                 .receipt
@@ -410,6 +415,52 @@ impl ReaderSequence {
             }
             let Some(reads) = entry.receipt.load(store) else {
                 return Ok(None);
+            };
+            if let ReaderSource::Front(id, file, owner) = &source {
+                let current = lower.check_front().map_err(|_| lower.protocol_refusal())?;
+                if reads
+                    .first_changed(|key| current.observe(id.path(), key))
+                    .is_none()
+                {
+                    continue;
+                }
+                let actual = current
+                    .query(id.path())
+                    .ok_or_else(|| lower.protocol_refusal())?;
+                if owner.query(id.path()) == Some(actual) {
+                    return Err(lower.protocol_failure(
+                        actual,
+                        "Check Front observations changed without a successor producer",
+                    ));
+                }
+                let selected = match cx.read(actual) {
+                    Poll::Pending => return Ok(Some(ReaderRefresh::Waiting(actual))),
+                    Poll::Ready(selected) => selected,
+                };
+                let facts = current.check_facts(selected.clone()).ok_or_else(|| {
+                    selected
+                        .clone()
+                        .err()
+                        .unwrap_or_else(|| lower.protocol_refusal())
+                })?;
+                let Some(receipt) = ReaderReceipt::capture(store, &facts.reads, scratch) else {
+                    return Ok(None);
+                };
+                cx.consume(actual);
+                entry.receipt = receipt.clone();
+                entry.source = Some(ReaderSource::Front(*id, *file, current));
+                return Ok(Some(ReaderRefresh::Front {
+                    file: *file,
+                    path: id.path().clone(),
+                    selected,
+                    facts,
+                    receipt,
+                }));
+            }
+            let (id, producer) = match &source {
+                ReaderSource::Lower(id, _, producer)
+                | ReaderSource::StagedLower(id, _, _, producer) => (*id, producer),
+                ReaderSource::Front(..) => unreachable!(),
             };
             let (current, recomputed) =
                 match producer.owner.refresh_check(cx, producer.query, reads)? {
@@ -444,6 +495,14 @@ impl ReaderSequence {
         }
         Ok(Some(ReaderRefresh::Complete))
     }
+    pub(super) fn front_reader(&self, path: &DefPath) -> Option<&ReaderReceipt> {
+        self.0
+            .iter()
+            .find_map(|entry| match entry.source.as_ref()? {
+                ReaderSource::Front(id, ..) if id.path() == path => Some(&entry.receipt),
+                _ => None,
+            })
+    }
     pub(super) fn lower_reader(
         &self,
         id: hirsel_engine_runtime::QueryId,
@@ -473,12 +532,11 @@ impl ReaderSequence {
         &self,
         store: &dyn ResultStore,
         scratch: u64,
-        front: &FrontBodyQueries,
     ) -> Option<Result<Reads, hirsel_query_products::reads::Inconsistent>> {
         let mut union = ReadUnion::default();
         for entry in &self.0 {
             let live = entry.source.as_ref().and_then(|source| match source {
-                ReaderSource::Front(id, checked) => front.live_reads(*id, *checked),
+                ReaderSource::Front(id, _, owner) => owner.live_reads(*id, false),
                 ReaderSource::Lower(..) | ReaderSource::StagedLower(..) => None,
             });
             if let Some(reads) = live {

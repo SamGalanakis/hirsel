@@ -373,10 +373,7 @@ impl QueryFactory for Factory {
             front: Vec::new(),
             failed_front: Vec::new(),
             failed_lowered: Vec::new(),
-            lint_seen: 0,
-            lint_complete: true,
-            lint_errors: BTreeSet::new(),
-            lint_constructed: BTreeSet::new(),
+            lint_uses: BTreeMap::new(),
         }))
     }
 }
@@ -384,6 +381,7 @@ struct File {
     input: FileInput,
     diagnostics: Vec<Diagnostic>,
     error: Option<QueryError>,
+    front_diagnostics: BTreeMap<DefPath, Vec<Diagnostic>>,
     lower_diagnostics: BTreeMap<(u32, ContentHash), Vec<Diagnostic>>,
     lowered: Vec<(DefPath, ProductRef)>,
     source_rules: bool,
@@ -394,6 +392,7 @@ impl File {
             diagnostics: input.diagnostics.clone(),
             error: input.error.clone(),
             input,
+            front_diagnostics: BTreeMap::new(),
             lower_diagnostics: BTreeMap::new(),
             lowered: Vec::new(),
             source_rules: false,
@@ -402,6 +401,10 @@ impl File {
     fn clean(&self) -> bool {
         self.error.is_none()
             && !has_errors(&self.diagnostics)
+            && !self
+                .front_diagnostics
+                .values()
+                .any(|diagnostics| has_errors(diagnostics))
             && !self
                 .lower_diagnostics
                 .values()
@@ -468,10 +471,7 @@ struct Task {
     front: Vec<(DefPath, FrontObservation)>,
     failed_front: Vec<(DefPath, Reference)>,
     failed_lowered: Vec<(DefPath, Reference)>,
-    lint_seen: usize,
-    lint_complete: bool,
-    lint_errors: BTreeSet<DefPath>,
-    lint_constructed: BTreeSet<(DefPath, u32)>,
+    lint_uses: BTreeMap<DefPath, Option<crate::tools::DeadArmUse>>,
 }
 impl QueryTask for Task {
     fn id(&self) -> QueryId {
@@ -820,11 +820,33 @@ impl Task {
                 Publication::Join => {
                     match self
                         .reads
-                        .refresh_lower(cx, &*self.queries.store, self.queries.weight.scratch)?
+                        .refresh(
+                            cx,
+                            &*self.queries.store,
+                            self.queries.weight.scratch,
+                            &self.queries.plan.lower,
+                        )?
                         .ok_or(self.queries.errors.resource)?
                     {
                         ReaderRefresh::Complete => self.publication = Publication::Done,
                         ReaderRefresh::Waiting(id) => return Ok(Some(vec![id])),
+                        ReaderRefresh::Front {
+                            file,
+                            path,
+                            selected,
+                            facts,
+                            receipt,
+                        } => {
+                            if facts.result.is_ok()
+                                && self.failed_front.iter().any(|(old, _)| old == &path)
+                            {
+                                self.files[file]
+                                    .error(QueryError::NotImplemented, Some(QueryKind::Check));
+                            }
+                            self.front.retain(|(old, _)| old != &path);
+                            self.failed_front.retain(|(old, _)| old != &path);
+                            self.accept_front(file, path, selected, facts, receipt)?;
+                        }
                         ReaderRefresh::Recomputed {
                             source,
                             path,
@@ -881,7 +903,6 @@ impl Task {
             return Err(self.queries.errors.protocol);
         };
         if let Some(selected) = front {
-            let file = &mut self.files[file_index];
             let path = &path;
             let id = self
                 .queries
@@ -909,74 +930,77 @@ impl Task {
                         )
                         .ok_or(self.queries.errors.resource)?,
                     self.queries.weight.retained,
-                    Some(ReaderSource::Front(DefId::intern(path), false)),
+                    Some(ReaderSource::Front(
+                        DefId::intern(path),
+                        file_index,
+                        self.queries.plan.front.clone(),
+                    )),
                 )
                 .ok_or(self.queries.errors.resource)?;
-            if self
-                .queries
-                .lint
-                .as_ref()
-                .is_some_and(|lint| lint.bodies.contains(path))
-            {
-                self.lint_seen += 1;
-                if let Some(uses) = facts.dead_arms {
-                    let lint = self
-                        .queries
-                        .lint
-                        .as_ref()
-                        .ok_or_else(|| self.queries.protocol_refusal())?;
-                    self.lint_errors.extend(
-                        uses.errors
-                            .into_iter()
-                            .filter(|path| lint.declarations.contains_key(path)),
-                    );
-                    self.lint_constructed
-                        .extend(uses.constructed.into_iter().filter(|(path, arm)| {
-                            lint.declarations
-                                .get(path)
-                                .is_some_and(|(_, arms)| (*arm as usize) < arms.len())
-                        }));
-                } else {
-                    self.lint_complete = false;
-                }
-            }
-            file.source_rules |= facts.source_rules;
-            match facts.result {
-                Ok(diagnostics) => {
-                    file.diagnostics.extend(diagnostics);
-                    if let Ok(product) = selected {
-                        self.front.push((
-                            path.clone(),
-                            FrontObservation {
-                                address: product.address,
-                                action: product.action,
-                                domain: product.domain(),
-                                reads: observed,
-                            },
-                        ));
-                    }
-                }
-                Err(error) => {
-                    self.failed_front.push((
-                        path.clone(),
-                        reference
-                            .err()
-                            .unwrap_or_else(|| self.queries.protocol_refusal()),
-                    ));
-                    file.error(error, facts.phase);
-                    if file.error.is_none()
-                        && let Some(phase) = facts.incomplete
-                    {
-                        file.error(QueryError::NotImplemented, Some(phase));
-                    }
-                }
-            }
+            self.accept_front(file_index, path.clone(), selected, facts, observed)?;
             cx.consume(id);
         }
         if let Some(facts) = lower
             && self.files[file_index].error.is_none()
         {
             self.publish_lower(file_index, path, facts)?;
+        }
+        Ok(())
+    }
+    fn accept_front(
+        &mut self,
+        file_index: usize,
+        path: DefPath,
+        selected: Result<ProductRef, Reference>,
+        facts: parallel::FrontCheckFacts,
+        observed: ReaderReceipt,
+    ) -> Result<(), Reference> {
+        let file = &mut self.files[file_index];
+        let path = &path;
+        if self
+            .queries
+            .lint
+            .as_ref()
+            .is_some_and(|lint| lint.bodies.contains(path))
+        {
+            self.lint_uses.insert(path.clone(), facts.dead_arms);
+        }
+        file.source_rules |= facts.source_rules;
+        match facts.result {
+            Ok(diagnostics) => {
+                file.front_diagnostics.insert(path.clone(), diagnostics);
+                if let Ok(product) = &selected {
+                    self.front.push((
+                        path.clone(),
+                        FrontObservation {
+                            address: product.address,
+                            action: product.action,
+                            domain: product.domain(),
+                            reads: observed,
+                        },
+                    ));
+                }
+            }
+            Err(error) => {
+                self.failed_front.push((
+                    path.clone(),
+                    selected
+                        .clone()
+                        .err()
+                        .unwrap_or_else(|| self.queries.protocol_refusal()),
+                ));
+                match error {
+                    QueryError::Diagnostics(diagnostics) => {
+                        file.front_diagnostics.insert(path.clone(), diagnostics);
+                    }
+                    other => file.error(other, facts.phase),
+                }
+                if file.error.is_none()
+                    && let Some(phase) = facts.incomplete
+                {
+                    file.error(QueryError::NotImplemented, Some(phase));
+                }
+            }
         }
         Ok(())
     }
@@ -1032,7 +1056,7 @@ impl Task {
         queries.plan.front.release_handoff();
         let reads = self
             .reads
-            .finish(&*queries.store, queries.weight.scratch, &queries.plan.front)
+            .finish(&*queries.store, queries.weight.scratch)
             .ok_or(queries.errors.resource)?
             .map_err(|error| {
                 crate::requests::source_graph::protocol_failure(
@@ -1082,6 +1106,7 @@ impl Task {
             .flat_map(|file| {
                 file.diagnostics
                     .iter()
+                    .chain(file.front_diagnostics.values().flatten())
                     .chain(file.lower_diagnostics.values().flatten())
                     .cloned()
             })
@@ -1090,13 +1115,33 @@ impl Task {
         // complete check; a body without settled facts leaves it unlinted.
         if completion == CheckCompletion::Complete && !has_errors(&diagnostics) {
             if let Some(lint) = &queries.lint
-                && self.lint_complete
-                && self.lint_seen == lint.bodies.len()
+                && self.lint_uses.len() == lint.bodies.len()
+                && self.lint_uses.values().all(Option::is_some)
             {
+                let errors = self
+                    .lint_uses
+                    .values()
+                    .flatten()
+                    .flat_map(|uses| uses.errors.iter())
+                    .filter(|path| lint.declarations.contains_key(*path))
+                    .cloned()
+                    .collect();
+                let constructed = self
+                    .lint_uses
+                    .values()
+                    .flatten()
+                    .flat_map(|uses| uses.constructed.iter())
+                    .filter(|(path, arm)| {
+                        lint.declarations
+                            .get(path)
+                            .is_some_and(|(_, arms)| (*arm as usize) < arms.len())
+                    })
+                    .cloned()
+                    .collect();
                 diagnostics.extend(super::dead_arms::dead_arm_diagnostics(
                     lint.declarations.clone(),
-                    &self.lint_errors,
-                    &self.lint_constructed,
+                    &errors,
+                    &constructed,
                 ));
             }
         }

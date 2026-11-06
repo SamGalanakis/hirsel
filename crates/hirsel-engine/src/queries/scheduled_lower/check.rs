@@ -98,6 +98,13 @@ impl FrontLowerQueries {
 }
 
 impl FrontLowerQueries {
+    pub(in crate::queries) fn check_front(&self) -> Result<Arc<FrontBodyQueries>, QueryError> {
+        match self.demand_producer() {
+            Some(producer) => Ok(producer.current()?.front.clone()),
+            None => Ok(self.front.clone()),
+        }
+    }
+
     /// A failed join is a reuse miss. Demand the ordinary producer in the
     /// committed successor, which performs its normal semantic checks and V.
     pub(in crate::queries) fn refresh_check(

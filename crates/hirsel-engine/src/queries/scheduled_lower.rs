@@ -510,7 +510,7 @@ pub struct FrontLowerQueries {
 }
 impl FrontLowerQueries {
     #[track_caller]
-    fn protocol_refusal(&self) -> Reference {
+    pub(in crate::queries) fn protocol_refusal(&self) -> Reference {
         crate::requests::source_graph::protocol_failure(
             &*self.store,
             self.errors,
@@ -522,7 +522,7 @@ impl FrontLowerQueries {
         )
     }
     #[track_caller]
-    fn protocol_failure(&self, query: QueryId, detail: &str) -> Reference {
+    pub(in crate::queries) fn protocol_failure(&self, query: QueryId, detail: &str) -> Reference {
         crate::requests::source_graph::protocol_failure(
             &*self.store,
             self.errors,

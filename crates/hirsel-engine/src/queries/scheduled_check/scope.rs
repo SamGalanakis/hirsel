@@ -84,13 +84,9 @@ impl FrontCheckQueries {
                     .ok_or_else(missing)?,
             );
         }
-        for (path, reference) in &data.failed_front {
+        for (path, _) in &data.failed_front {
             weight.path(path);
-            let reads = self
-                .plan
-                .front
-                .selected_reads(Err(*reference))
-                .ok_or_else(missing)?;
+            let reads = self.completed_front_reads(data, path).ok_or_else(missing)?;
             weight.add(hirsel_engine_admission::retained_arc_bytes(&*reads) as usize);
             weight.add(
                 reads
@@ -128,6 +124,9 @@ impl FrontCheckQueries {
         }
         Ok(weight.bytes())
     }
+    fn completed_front_reads(&self, data: &Data, path: &DefPath) -> Option<Arc<Reads>> {
+        data.observations.front_reader(path)?.load(&*self.store)
+    }
     /// Scope is minted only for this root's exact completed descriptor. The
     /// caller reserves its inspection buffers separately from producer memory.
     pub fn completed_scope(
@@ -160,12 +159,8 @@ impl FrontCheckQueries {
             let reads = observed.reads.load(&*self.store).ok_or_else(missing)?;
             scope.reads.insert(path.clone(), reads);
         }
-        for (path, reference) in &data.failed_front {
-            let reads = self
-                .plan
-                .front
-                .selected_reads(Err(*reference))
-                .ok_or_else(missing)?;
+        for (path, _) in &data.failed_front {
+            let reads = self.completed_front_reads(data, path).ok_or_else(missing)?;
             scope.reads.insert(path.clone(), reads);
         }
         for (path, failed) in data

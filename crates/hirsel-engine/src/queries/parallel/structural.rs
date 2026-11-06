@@ -18,7 +18,7 @@ enum Facet {
     Unique(
         DefPath,
         hirsel_types::UniqueClaim,
-        Option<hirsel_types::UniqueFailure>,
+        Result<Option<hirsel_types::UniqueFailure>, QueryError>,
     ),
 }
 struct Input {
@@ -141,7 +141,7 @@ impl SignatureProvider for Provider<'_> {
         &mut self,
         path: &DefPath,
         claim: hirsel_types::UniqueClaim,
-    ) -> Option<hirsel_types::UniqueFailure> {
+    ) -> Result<Option<hirsel_types::UniqueFailure>, QueryError> {
         let result = self.inner.cite_unique_failure(path, claim);
         self.facets
             .push(Facet::Unique(path.clone(), claim, result.clone()));
@@ -149,7 +149,7 @@ impl SignatureProvider for Provider<'_> {
     }
 }
 impl Provider<'_> {
-    fn replay(&mut self, facets: &[Facet]) -> bool {
+    fn replay(&mut self, facets: &[Facet]) -> Result<bool, QueryError> {
         for facet in facets {
             match facet {
                 Facet::Signature(id, _) => {
@@ -162,14 +162,14 @@ impl Provider<'_> {
                     self.cite_name(path);
                 }
                 Facet::Unique(path, claim, _) => {
-                    self.cite_unique_failure(path, *claim);
+                    self.cite_unique_failure(path, *claim)?;
                 }
             }
             if self.facets.last() != Some(facet) {
-                return false;
+                return Ok(false);
             }
         }
-        true
+        Ok(true)
     }
     fn restore(&self, mut result: ResultBody) -> ResultBody {
         if let Ok(output) = &mut result {
@@ -303,7 +303,7 @@ impl Worker<'_> {
                     facets: Vec::new(),
                     actual: actual.clone(),
                 };
-                if !probe.replay(&candidate.facets) || frozen.refused().is_some() {
+                if !probe.replay(&candidate.facets)? {
                     continue;
                 }
                 let mut current = Provider {
@@ -312,7 +312,7 @@ impl Worker<'_> {
                     facets: Vec::new(),
                     actual: actual.clone(),
                 };
-                if !current.replay(&candidate.facets) {
+                if !current.replay(&candidate.facets)? {
                     return Err(header_products::source_refusal(
                         "immutable structural provider changed while binding its result",
                     ));
@@ -371,7 +371,7 @@ impl Worker<'_> {
             && !current
                 .facets
                 .iter()
-                .any(|facet| matches!(facet, Facet::Signature(_, Err(error)) if !error.cacheable()))
+                .any(|facet| matches!(facet, Facet::Signature(_, Err(error)) | Facet::Unique(_, _, Err(error)) if !error.cacheable()))
         {
             current.facets.shrink_to_fit();
             let bytes = retained_bytes(&input, &current.facets, &result);
@@ -436,11 +436,13 @@ fn retained_bytes(input: &Input, facets: &[Facet], result: &ResultBody) -> u64 {
             }
             Facet::Unique(path, _, failure) => {
                 hirsel_query_products::retained::retained_structural_path_bytes(path)
-                    .saturating_add(
-                        failure
-                            .as_ref()
-                            .map_or(0, |failure| failure.message.capacity() as u64),
-                    )
+                    .saturating_add(match failure {
+                        Ok(Some(failure)) => failure.message.capacity() as u64,
+                        Ok(None) => 0,
+                        Err(error) => {
+                            hirsel_query_products::retained::retained_query_error_bytes(error)
+                        }
+                    })
             }
             Facet::Name(path, _) => {
                 hirsel_query_products::retained::retained_structural_path_bytes(path)

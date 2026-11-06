@@ -1381,17 +1381,19 @@ pub trait SignatureProvider {
     ) -> Result<RecursiveGroup, QueryError> {
         Ok(RecursiveGroup::default())
     }
-    /// The name site of `definition`'s first declaration in the checked
-    /// definition's own source file, for a secondary label. A citation of
-    /// another item: the span is relative to that item's anchor, and the
-    /// provider records the read so a change to the cited text invalidates it.
+    /// The failed unique claim, for a secondary label in the citing body.
+    /// A refused proof read is an error, never an absent citation. The caller
+    /// must refuse the body rather than retain a diagnostic without its cause.
     fn cite_unique_failure(
         &mut self,
         _definition: &DefPath,
         _claim: UniqueClaim,
-    ) -> Option<UniqueFailure> {
-        None
+    ) -> Result<Option<UniqueFailure>, QueryError> {
+        Ok(None)
     }
+    /// The name site in the checked definition's own source file. The span
+    /// is relative to the cited item's anchor, and the provider records the
+    /// read so a change to the cited text invalidates it.
     fn cite_name(&mut self, definition: &DefPath) -> Option<hirsel_span::Span> {
         let _ = definition;
         None

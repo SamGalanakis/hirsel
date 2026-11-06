@@ -210,10 +210,6 @@ impl Inference {
         let result = self
             .modes
             .infer_unique(&self.types, &self.memo, &bodies, &mut provider);
-        // Proofs inferred under a refused citation read are refused, not kept.
-        if let Some(refusal) = provider.refused() {
-            return Err(QueryError::Operational(refusal.clone()));
-        }
         let observed = observed.finish().map_err(|e| {
             QueryError::Operational(hirsel_types::OperationalFailure {
                 operation: "private inference reads".into(),

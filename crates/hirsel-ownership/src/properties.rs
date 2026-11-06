@@ -118,7 +118,11 @@ impl<'q> Signatures<'q> {
         );
         available
     }
-    pub fn unique_failure(&self, path: &DefPath, claim: UniqueClaim) -> Option<UniqueFailure> {
+    pub fn unique_failure(
+        &self,
+        path: &DefPath,
+        claim: UniqueClaim,
+    ) -> Result<Option<UniqueFailure>, QueryError> {
         self.reader
             .borrow_mut()
             .provider()

@@ -2638,7 +2638,7 @@ impl SignatureProvider for Recorder<'_> {
         &mut self,
         definition: &DefPath,
         claim: hirsel_types::UniqueClaim,
-    ) -> Option<hirsel_types::UniqueFailure> {
+    ) -> Result<Option<hirsel_types::UniqueFailure>, QueryError> {
         let failure = self.engine.citation_source().unique_failure(
             DefId::intern(&self.owner),
             DefId::intern(definition),
@@ -2647,7 +2647,7 @@ impl SignatureProvider for Recorder<'_> {
         self.reads
             .citations
             .push((definition.clone(), failure.as_ref().map(|f| f.span)));
-        failure
+        Ok(failure)
     }
     fn cite_name(&mut self, definition: &DefPath) -> Option<Span> {
         let cited = self.engine.cited_name(&self.owner, definition);

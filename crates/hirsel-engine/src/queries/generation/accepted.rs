@@ -362,7 +362,7 @@ impl SignatureProvider for NormalizationProvider<'_> {
         &mut self,
         path: &DefPath,
         claim: hirsel_types::UniqueClaim,
-    ) -> Option<hirsel_types::UniqueFailure> {
+    ) -> Result<Option<hirsel_types::UniqueFailure>, QueryError> {
         self.frozen.cite_unique_failure(path, claim)
     }
 }
@@ -510,9 +510,6 @@ impl AcceptanceInputs {
                         &mut provider,
                     )
                 });
-                if let Some(error) = provider.frozen.refused() {
-                    return Err(QueryError::Operational(error.clone()));
-                }
                 result?;
                 let original_file = self.sources.anchor(original.anchor).ok_or_else(refusal)?.0;
                 literal.finish(

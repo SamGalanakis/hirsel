@@ -66,6 +66,19 @@ pub(super) struct Provenance {
 }
 
 impl Checker<'_, '_> {
+    pub(super) fn unique_failure(
+        &self,
+        path: &hirsel_syntax::DefPath,
+        claim: UniqueClaim,
+    ) -> Option<UniqueFailure> {
+        match self.signatures.unique_failure(path, claim) {
+            Ok(failure) => failure,
+            Err(error) => {
+                self.proof_error.borrow_mut().get_or_insert(error);
+                None
+            }
+        }
+    }
     /// Inspect a transfer only in a failed graph's replay. These are candidate
     /// losses, not new flow facts: loop inputs may already be aliased.
     fn uniqueness_step(
@@ -185,7 +198,7 @@ impl Checker<'_, '_> {
                                 path,
                                 self.own.definition.path(),
                             )
-                            && let Some(failure) = self.signatures.unique_failure(
+                            && let Some(failure) = self.unique_failure(
                                 path,
                                 UniqueClaim::Parameter(ParamId(requirement.parameter as u32)),
                             )

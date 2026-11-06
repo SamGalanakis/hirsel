@@ -325,15 +325,12 @@ impl SignatureProvider for GeneratorRecorder<'_> {
         &mut self,
         definition: &DefPath,
         claim: hirsel_types::UniqueClaim,
-    ) -> Option<hirsel_types::UniqueFailure> {
-        let failure = self.provider.cite_unique_failure(definition, claim);
-        if let Some(refusal) = self.provider.refused() {
-            self.detail.operational_failure = Some(refusal.clone());
-        }
+    ) -> Result<Option<hirsel_types::UniqueFailure>, QueryError> {
+        let failure = self.provider.cite_unique_failure(definition, claim)?;
         self.detail
             .citations
             .push((definition.clone(), failure.as_ref().map(|f| f.span)));
-        failure
+        Ok(failure)
     }
     fn cite_name(&mut self, definition: &DefPath) -> Option<Span> {
         let cited = self.provider.cite_name(definition);
@@ -372,7 +369,7 @@ pub(crate) fn prepare(
             snapshot: snapshot,
             detail: &mut detail,
         };
-        let mut checked = input.check(
+        let checked = input.check(
             types,
             memo,
             declarations,
@@ -380,10 +377,6 @@ pub(crate) fn prepare(
             &mut products,
             &mut recorder,
         );
-        // A check that read a refused citation is refused, never kept.
-        if let Some(refusal) = recorder.provider.refused() {
-            checked = Err(QueryError::Operational(refusal.clone()));
-        }
         Ok(PreparedGenerator {
             syntax,
             body,

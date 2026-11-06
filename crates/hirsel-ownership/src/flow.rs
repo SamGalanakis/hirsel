@@ -9109,9 +9109,8 @@ impl Checker<'_, '_> {
                             c.tree.expressions[call.0 as usize].kind
                         && let Some(path) = c.callee_definition(callee)
                         && hirsel_types::unique_summary::same_module(path, c.own.definition.path())
-                        && let Some(failure) = c
-                            .signatures
-                            .unique_failure(path, UniqueClaim::Result(UniqueResultRow::Root))
+                        && let Some(failure) =
+                            c.unique_failure(path, UniqueClaim::Result(UniqueResultRow::Root))
                     {
                         pending.explanation.provided.push(Fact::new(
                             Cause::UniquenessLoss,

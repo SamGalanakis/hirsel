@@ -276,8 +276,7 @@ impl StorageTask {
             }
             Ok(Arc::new(output))
         })();
-        // Storage computed under a refused citation read is refused, not kept.
-        if provider.refused().is_some() {
+        if matches!(&result, Err(QueryError::Operational(_))) {
             return Err(owner.errors.resource);
         }
         if let Ok(output) = &result {

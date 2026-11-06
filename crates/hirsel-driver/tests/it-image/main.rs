@@ -30,7 +30,7 @@ pub fn main(rt: Io) -> Result[(), AppError] {
 
 #[path = "../support/canonical_debug.rs"]
 mod canonical_debug;
-use canonical_debug::{canonical_ids, placed};
+use canonical_debug::canonical_ids;
 
 use hirsel_requests::*;
 use std::{path::Path, sync::Arc};
@@ -95,6 +95,25 @@ fn checked(requests: &mut CompilerRequests, path: &Path) -> (CheckCompletion, Ve
             .map(|d| d.render_human(&output.sources))
             .collect(),
     )
+}
+
+// Installed products and fresh source compilation run in separate sandboxes.
+// Compare source identity and byte placement, not their diagnostic host roots.
+fn logical_placed(sources: &hirsel_span::SourceMap, text: String) -> String {
+    let mut out = String::new();
+    let mut rest = text.as_str();
+    while let Some(at) = rest.find("Anchor(") {
+        out.push_str(&rest[..at]);
+        rest = &rest[at + "Anchor(".len()..];
+        let end = rest.find(')').unwrap();
+        let anchor = hirsel_span::Anchor(rest[..end].parse().unwrap());
+        let place = sources
+            .anchor(anchor)
+            .map(|(file, base)| (sources.file(file).unwrap().logical_path(), base));
+        out.push_str(&format!("Anchor({place:?})"));
+        rest = &rest[end + 1..];
+    }
+    out + rest
 }
 
 fn source_edit_changes_only_the_source_backed_provider() {
@@ -195,7 +214,7 @@ fn ordinary_std_complete_products_equal_fresh_ones() {
             expected_graph.revision(&entry).unwrap()
         );
         let render = |products: &PrecomputedSources, value: &hirsel_tir::Definition| {
-            placed(
+            logical_placed(
                 products.sources(),
                 canonical_ids(
                     products.signatures().types(),

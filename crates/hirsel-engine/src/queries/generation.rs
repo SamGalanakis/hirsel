@@ -395,6 +395,9 @@ impl QueryEngine {
                 "compile-time dependency cycle: this generator runs its own declaration",
             ));
         }
+        // Durable Lower anchor preparation also enters here without Modes.
+        // Settle private headers before selecting a generated Check memo.
+        self.prepare_private_summaries();
         let signature = self.signature_output(definition)?;
         let _timing = timings::phase(Phase::Check);
         let id = DefId::intern(definition);

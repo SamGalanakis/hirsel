@@ -380,9 +380,14 @@ impl Worker<'_> {
                 facets: current.facets.clone(),
                 bytes,
             });
+            // Check has already computed its result. Optional cache admission
+            // cannot replace that result with a resource failure.
+            let Ok(lease) = headers.validation_lease(bytes) else {
+                return output;
+            };
             let result = checks.facts(headers.fact_graph()).get_or_try_init(
                 key.clone(),
-                || headers.validation_lease(bytes),
+                || Ok(lease),
                 || result.map(Arc::new),
                 retain,
             );

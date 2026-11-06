@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import resource
+import runpy
 import subprocess
 import sys
 from disposition import known
@@ -14,7 +15,12 @@ from disposition import known
 def main(a):
     root=a.root;out=root/'evidence';out.mkdir()
     env={k:v for k,v in os.environ.items() if not k.startswith('HIRSEL_RT_')}
-    env.update(HIRSEL_DAEMON='off',HIRSEL_RESULTS='none@1',HIRSEL_JOBS='4',HIRSEL_MEMORY_LIMIT='2G')
+    capped=runpy.run_path(str(root/'capped'))
+    # The test launcher derives HIRSEL_JOBS from the action's CPU reservation.
+    jobs=int(capped['granted_cpus'](int(env.get('HIRSEL_JOBS') or capped['DEFAULT_JOBS'])))
+    if jobs<1:raise RuntimeError('dagbuild requires at least one granted CPU')
+    widths=[width for width in [1,2,4] if width<=jobs]
+    env.update(HIRSEL_DAEMON='off',HIRSEL_RESULTS='none@1',HIRSEL_JOBS=str(jobs),HIRSEL_MEMORY_LIMIT='2G')
     cases=json.loads((root/'cases.json').read_text())
     if os.environ.get('DAGBUILD_29_CAPS'):
         from caps import boundary_cases
@@ -57,7 +63,7 @@ def main(a):
     for backend,binary in binaries.items():
         if os.environ.get('DAGBUILD_29_BACKEND') and backend!=os.environ['DAGBUILD_29_BACKEND']:continue
         for case in cases:
-            for width in ([1,2,4] if case['id'] in ['diamond-first','failure-descendants'] else [1]):
+            for width in (widths if case['id'] in ['diamond-first','failure-descendants'] else [1]):
                 identity=f'{backend}-{case["id"]}-w{width}'
                 if identity in skip:continue
                 d=out/identity;d.mkdir();project=d/'project';state=d/'state';project.mkdir();state.mkdir()
@@ -114,7 +120,7 @@ def main(a):
     real=[]
     if not os.environ.get('DAGBUILD_29_CAPS') and not os.environ.get('DAGBUILD_29_SKIP_REAL'):
         from real import qualify
-        real=qualify(root,out,binaries,run,env,a.hirsel)
+        real=qualify(root,out,binaries,run,env,a.hirsel,widths)
         if os.environ.get('DAGBUILD_29_INCREMENTAL'):
             from real import incremental
             incremental(root,out,binaries,run,a.hirsel)

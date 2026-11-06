@@ -13,7 +13,7 @@ import time
 from disposition import known
 
 
-def qualify(root,out,binaries,run,env,hirsel):
+def qualify(root,out,binaries,run,env,hirsel,widths):
     libc=ctypes.CDLL(None,use_errno=True)
     receipts=[]
     skip=set()
@@ -23,7 +23,7 @@ def qualify(root,out,binaries,run,env,hirsel):
     for backend,binary in binaries.items():
         if os.environ.get('DAGBUILD_29_BACKEND') and backend!=os.environ['DAGBUILD_29_BACKEND']:continue
         for workflow in ['success','domain-error','cancel-cleanup']:
-            for width in [1,2,4]:
+            for width in widths:
                 identity=f'real-{backend}-{workflow}-w{width}'
                 if identity in skip:continue
                 d=out/identity;d.mkdir();project=d/'project';state=d/'state';project.mkdir();state.mkdir()

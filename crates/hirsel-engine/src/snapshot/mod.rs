@@ -110,9 +110,8 @@ impl hirsel_interp::aggregate::TypeRows for SnapshotRows {
     ) -> Result<Option<(DefPath, hirsel_tir::BodyId)>, QueryError> {
         if self
             .snapshot
-            .lookup
-            .candidates
-            .contains_key(&DefId::intern(drop))
+            .declaration_candidates(DefId::intern(drop))
+            .is_some()
         {
             let entry = self.entry.ok_or(QueryError::NotImplemented)?;
             Ok(Some((drop.clone(), entry)))
@@ -280,14 +279,12 @@ fn private_view(
     Some(owner.body_view(types, public).0.clone())
 }
 /// A snapshot's lookup input: the provider manifest hash every lookup
-/// observes, the registry a bare name falls back to, the source builtins and
-/// each definition's `DeclarationCandidates`.
+/// observes, the registry a bare name falls back to and the source builtins.
 #[derive(Clone, Default)]
 pub(crate) struct LookupInput {
     pub manifest: ContentHash,
     pub registry: hirsel_registry::BuiltinRegistry,
     pub builtins: std::collections::BTreeSet<DefId>,
-    pub candidates: DefMap<ContentHash>,
     pub failed: DefMap<Option<ContentHash>>,
     pub package_dependencies: BTreeMap<PackageId, Vec<PackageId>>,
     /// The dependencies whose published universe summaries are bound to
@@ -916,7 +913,7 @@ impl SignatureSnapshot {
     }
     /// `DeclarationCandidates(d)` at this snapshot's revision.
     pub fn declaration_candidates(&self, d: DefId) -> Option<ContentHash> {
-        self.lookup.candidates.get(&d).copied()
+        self.headers.as_ref()?.declaration_candidates(d)
     }
     /// The exact negative receipt captured from the failed query's complete key,
     /// or the canonical absent-query receipt. A diagnostic's debug spelling is
@@ -1562,11 +1559,6 @@ impl QueryEngine {
                 .iter()
                 .filter(|(_, result)| result.is_err())
                 .map(|(d, _)| (*d, self.failed_signature_key(d.path())))
-                .collect(),
-            candidates: self
-                .source_paths()
-                .iter()
-                .map(|path| (DefId::intern(path), self.candidates_value(path)))
                 .collect(),
         };
         let snapshot = Arc::new(

@@ -512,6 +512,14 @@ impl HeaderProducts {
     pub(crate) fn captured_text(&self, id: DefId) -> Option<sources::CapturedText> {
         self.syntax.text(id)
     }
+    pub(crate) fn declaration_candidates(&self, id: DefId) -> Option<ContentHash> {
+        self.contains(id).then(|| {
+            self.declarations
+                .candidates(id.path())
+                .or_else(|| self.syntax.text(id).map(|text| text.candidates))
+                .unwrap_or_else(memos::no_candidates)
+        })
+    }
     pub(crate) fn owns_written(&self, syntax: &Arc<ItemSyntax>) -> bool {
         self.syntax.owns(syntax)
     }

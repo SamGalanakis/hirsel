@@ -5,6 +5,7 @@ pub(crate) struct CapturedText {
     pub(crate) implementation: Option<ContentHash>,
     /// The digest a signature keys on: every candidate's header.
     pub(crate) header: ContentHash,
+    pub(crate) candidates: ContentHash,
     /// The first candidate's file, which a signature's store key admits.
     pub(crate) file: FileId,
     pub(crate) site: Span,
@@ -523,6 +524,7 @@ impl HeaderSources {
                         cited: engine.cited_value(path),
                         implementation: engine.implementation_hash(path),
                         header: engine.header_digest(path),
+                        candidates: engine.candidates_value(path),
                         file: engine.item_file(candidates.first()?),
                         site: candidates.first()?.item.name_span,
                     },

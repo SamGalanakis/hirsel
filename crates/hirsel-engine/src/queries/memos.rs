@@ -418,7 +418,11 @@ impl QueryEngine {
             return candidates;
         }
         let Some(items) = self.items.get(path) else {
-            return no_candidates();
+            return self
+                .header_products
+                .as_ref()
+                .and_then(|headers| headers.declaration_candidates(DefId::intern(path)))
+                .unwrap_or_else(no_candidates);
         };
         let mut parts: Vec<Vec<u8>> = vec![(items.len() as u64).to_le_bytes().to_vec()];
         for item in items {

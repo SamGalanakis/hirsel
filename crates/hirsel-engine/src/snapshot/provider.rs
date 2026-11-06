@@ -76,7 +76,7 @@ impl<'a> FrozenProvider<'a> {
         if public.metadata.visibility == hirsel_syntax::Visibility::PublicOpaque
             && public.definition.path().0.package == self.owner
             && (self.snapshot.private.contains_key(&d)
-                || self.snapshot.lookup.candidates.contains_key(&d))
+                || self.snapshot.declaration_candidates(d).is_some())
         {
             let digest = self
                 .snapshot

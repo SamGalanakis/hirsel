@@ -5549,10 +5549,11 @@ impl Checker<'_, '_> {
                                 .iter()
                                 .any(|p| matches!(p, Projection::Index(_)))
                         });
-                    // The failure edge joins the state after every operand
-                    // prefix. `joined` is the last prefix joined, so each
-                    // join visits only what that operand changed.
-                    let mut failure_state = may_fail.then(|| {
+                    // Failure cleanup is checked only in the reporting pass.
+                    // The fixed point propagates the successful state alone.
+                    // `joined` is the last operand prefix joined, so each
+                    // failure join visits only what that operand changed.
+                    let mut failure_state = (report && may_fail).then(|| {
                         work::count_by(
                             Counter::ValidateFailureStateRows,
                             state.places.len() as u64,

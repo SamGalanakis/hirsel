@@ -92,12 +92,49 @@ impl Charge {
 /// own allocation charge until both their entry and output leases have ended.
 pub(in crate::queries) struct HeaderPayload {
     charge: Charge,
-    rows: std::sync::Mutex<Vec<HeaderRowLease>>,
+    rows: std::sync::Mutex<HeaderRows>,
 }
 struct HeaderRowLease {
     entry: Weak<Entry<hirsel_types::SignatureRef>>,
     output: Weak<QueryOutput<hirsel_types::SignatureRef>>,
     _charge: Charge,
+}
+#[derive(Default)]
+struct HeaderRows {
+    leases: std::collections::HashMap<usize, HeaderRowLease>,
+    // HashMap's free capacity can exclude tombstones without freeing buckets.
+    // Keep the allocation's high-water capacity until an explicit shrink.
+    capacity: usize,
+}
+impl HeaderRows {
+    fn insert(&mut self, key: usize, lease: HeaderRowLease) {
+        self.leases.entry(key).or_insert(lease);
+        self.capacity = self.capacity.max(self.leases.capacity());
+        self.shrink();
+    }
+    fn shrink(&mut self) {
+        if self.leases.is_empty() || self.capacity > 4 * self.leases.len() {
+            self.leases.shrink_to_fit();
+            self.capacity = self.leases.capacity();
+        }
+    }
+}
+impl HeaderRowLease {
+    fn live(&self) -> bool {
+        self.entry.strong_count() != 0 || self.output.strong_count() != 0
+    }
+}
+impl HeaderPayload {
+    fn reclaim_row(&self, key: usize) {
+        let Ok(mut rows) = self.rows.try_lock() else {
+            return;
+        };
+        if rows.leases.get(&key).is_some_and(|row| !row.live()) {
+            let expired = rows.leases.remove(&key);
+            rows.shrink();
+            drop(expired);
+        }
+    }
 }
 type ValidationCaches = Arc<std::sync::Mutex<Vec<Weak<crate::snapshot::SignatureSnapshot>>>>;
 #[derive(Clone)]
@@ -1056,7 +1093,7 @@ impl HeaderProducts {
                     for payload in &payloads {
                         payload_bytes += payload.charge.front_bytes();
                         if let Ok(rows) = payload.rows.try_lock() {
-                            for row in rows.iter() {
+                            for row in rows.leases.values() {
                                 row_count += 1;
                                 row_bytes += row._charge.front_bytes();
                             }
@@ -1186,28 +1223,32 @@ impl HeaderProducts {
         let wrapper_bytes = hirsel_engine_admission::retained_arc_bytes(&std::mem::MaybeUninit::<
             HeaderProduct,
         >::uninit());
+        // Four buckets per lease cover its key, control bytes and spare capacity.
         let row_bytes = bytes
             .saturating_sub(payload_bytes)
             .saturating_sub(wrapper_bytes)
-            .saturating_add((4 * size_of::<HeaderRowLease>()) as u64);
-        let mut rows = payload.rows.lock().unwrap_or_else(|e| e.into_inner());
-        rows.retain(|row| row.entry.strong_count() != 0 || row.output.strong_count() != 0);
-        if !rows
-            .iter()
-            .any(|row| row.entry.ptr_eq(&Arc::downgrade(entry)))
-        {
+            .saturating_add((4 * (size_of::<HeaderRowLease>() + 2 * size_of::<usize>())) as u64);
+        let key = Arc::as_ptr(entry) as usize;
+        let owned = payload
+            .rows
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .leases
+            .contains_key(&key);
+        if !owned {
+            // Admission can evict this payload's other rows. Never hold its
+            // registry lock while asking the partition to reclaim memory.
             let charge = self.admit(row_bytes)?;
-            rows.push(HeaderRowLease {
-                entry: Arc::downgrade(entry),
-                output: Arc::downgrade(output),
-                _charge: charge,
-            });
+            let mut rows = payload.rows.lock().unwrap_or_else(|e| e.into_inner());
+            rows.insert(
+                key,
+                HeaderRowLease {
+                    entry: Arc::downgrade(entry),
+                    output: Arc::downgrade(output),
+                    _charge: charge,
+                },
+            );
         }
-        // Bound spare Vec allocation by the charged four slots per live row.
-        if rows.capacity() > 4 * rows.len().max(1) {
-            rows.shrink_to_fit();
-        }
-        drop(rows);
         let wrapper = self.admit(wrapper_bytes.saturating_add((24 * size_of::<usize>()) as u64))?;
         Ok((payload.charge.clone(), wrapper))
     }
@@ -1388,7 +1429,6 @@ impl HeaderProducts {
     /// Evict one unpinned settled entry: a header row, else a module proof.
     pub(crate) fn evict(&self) -> bool {
         if self.operation.structural.evict()
-            || self.reclaim_header_rows()
             || self.evict_validation_cache()
             || self.evict_row()
             || self.evict_proof()
@@ -1403,19 +1443,24 @@ impl HeaderProducts {
             .unwrap_or_else(|e| e.into_inner())
             .as_ref()
             .map(|admission| admission.tables.clone());
-        let Some(tables) = tables else {
-            return false;
-        };
-        let tables = tables
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .iter()
-            .filter_map(Weak::upgrade)
-            .collect::<Vec<_>>();
-        tables
-            .iter()
-            .filter(|table| !std::ptr::eq(self, &***table))
-            .any(|table| table.evict_row() || table.evict_proof() || table.syntax.evict())
+        if let Some(tables) = tables {
+            let tables = tables
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .iter()
+                .filter_map(Weak::upgrade)
+                .collect::<Vec<_>>();
+            if tables
+                .iter()
+                .filter(|table| !std::ptr::eq(self, &***table))
+                .any(|table| table.evict_row() || table.evict_proof() || table.syntax.evict())
+            {
+                return true;
+            }
+        }
+        // A reader can outlive its evicted cache wrapper. Sweep those leases
+        // only when no ordinary victim can make progress, before refusing.
+        self.reclaim_header_rows()
     }
     fn reclaim_header_rows(&self) -> bool {
         let payloads = self
@@ -1431,12 +1476,10 @@ impl HeaderProducts {
             let Ok(mut rows) = payload.rows.try_lock() else {
                 continue;
             };
-            let before = rows.len();
-            rows.retain(|row| row.entry.strong_count() != 0 || row.output.strong_count() != 0);
-            reclaimed |= before != rows.len();
-            if rows.capacity() > 4 * rows.len().max(1) {
-                rows.shrink_to_fit();
-            }
+            let before = rows.leases.len();
+            rows.leases.retain(|_, row| row.live());
+            reclaimed |= before != rows.leases.len();
+            rows.shrink();
         }
         reclaimed
     }
@@ -1534,6 +1577,16 @@ impl HeaderProducts {
                         .as_ref()
                         .map_or(0, |o| Arc::strong_count(&o.value))
                 ));
+                let key = Arc::as_ptr(entry) as usize;
+                let payload = product
+                    .result
+                    .as_ref()
+                    .ok()
+                    .and_then(|output| output.value.metadata.retention.get::<HeaderPayload>());
+                drop(product);
+                if let Some(payload) = payload {
+                    payload.reclaim_row(key);
+                }
                 return true;
             }
         }
@@ -1935,74 +1988,89 @@ mod retention_tests {
 
     #[test]
     fn metadata_pressure_reclaims_cache_wrappers_while_readers_retain_their_rows() {
-        let mut engine = QueryEngine::new(default_environment(), PhaseAdapters::default());
-        let id = DefId::intern(&DefPath::core("leased_header"));
-        let signature = Arc::new(hirsel_types::Signature {
-            metadata: Default::default(),
-            definition: id,
-            kind: hirsel_types::SignatureKind::Const {
-                ty: engine.types.intern(hirsel_types::Type::unit()),
-                generics: Default::default(),
-            },
-            fingerprint: ContentHash::of_bytes(b"leased_header"),
-        });
-        let entry = Arc::new(engine.record(
-            MemoKey::new(QueryKind::Signature, id),
-            signature.fingerprint,
-            Ok(Arc::new(output(signature.clone()))),
-            DependencyReads::default(),
-            &Observed::default(),
-        ));
-        let mut headers = HeaderProducts::capture(&engine);
-        Arc::get_mut(&mut headers).unwrap().paths = Arc::from([id]);
-        Arc::get_mut(&mut headers)
-            .unwrap()
-            .rows
-            .insert(id, HeaderSlot::default());
-        let budget = ProcessBudget::new(1 << 20);
-        let backing: Arc<dyn HeaderAllowance> = Arc::new(Allowance(
-            MemoryReservationPool::new(budget.reserve(1 << 20).unwrap())
-                .ok()
-                .unwrap(),
-        ));
-        let remaining = Arc::new(std::sync::Mutex::new(1 << 19));
-        headers.configure_source_backing(backing.clone(), remaining.clone());
-        let bytes = crate::memo::retained::retained_signature_entry_bytes(&entry).unwrap()
-            + hirsel_engine_admission::retained_arc_bytes(
-                &std::mem::MaybeUninit::<HeaderProduct>::uninit(),
+        for retain_readers in [false, true] {
+            let mut engine = QueryEngine::new(default_environment(), PhaseAdapters::default());
+            let id = DefId::intern(&DefPath::core("leased_header"));
+            let signature = Arc::new(hirsel_types::Signature {
+                metadata: Default::default(),
+                definition: id,
+                kind: hirsel_types::SignatureKind::Const {
+                    ty: engine.types.intern(hirsel_types::Type::unit()),
+                    generics: Default::default(),
+                },
+                fingerprint: ContentHash::of_bytes(b"leased_header"),
+            });
+            let entry = Arc::new(engine.record(
+                MemoKey::new(QueryKind::Signature, id),
+                signature.fingerprint,
+                Ok(Arc::new(output(signature.clone()))),
+                DependencyReads::default(),
+                &Observed::default(),
+            ));
+            let mut headers = HeaderProducts::capture(&engine);
+            Arc::get_mut(&mut headers).unwrap().paths = Arc::from([id]);
+            Arc::get_mut(&mut headers)
+                .unwrap()
+                .rows
+                .insert(id, HeaderSlot::default());
+            let budget = ProcessBudget::new(1 << 20);
+            let backing: Arc<dyn HeaderAllowance> = Arc::new(Allowance(
+                MemoryReservationPool::new(budget.reserve(1 << 20).unwrap())
+                    .ok()
+                    .unwrap(),
+            ));
+            let remaining = Arc::new(std::sync::Mutex::new(1 << 19));
+            headers.configure_source_backing(backing.clone(), remaining.clone());
+            let bytes = crate::memo::retained::retained_signature_entry_bytes(&entry).unwrap()
+                + hirsel_engine_admission::retained_arc_bytes(&std::mem::MaybeUninit::<
+                    HeaderProduct,
+                >::uninit());
+            let (charge, row_charge) = headers.admit_signature(Some(&entry), bytes).unwrap();
+            let wrapper = row_charge.front_bytes();
+            let payload = charge.front_bytes();
+            headers.publish(
+                &headers.rows[&id],
+                HeaderProduct {
+                    result: entry.result(),
+                    entry: Some(entry.clone()),
+                    recomputes: 0,
+                    graph_work: 0,
+                    publication: false,
+                    charge,
+                    _row_charge: row_charge,
+                    origin: Weak::new(),
+                    recent: AtomicBool::new(true),
+                    accounted: AtomicBool::new(true),
+                },
             );
-        let (charge, row_charge) = headers.admit_signature(Some(&entry), bytes).unwrap();
-        let wrapper = row_charge.front_bytes();
-        let payload = charge.front_bytes();
-        headers.publish(
-            &headers.rows[&id],
-            HeaderProduct {
-                result: entry.result(),
-                entry: Some(entry.clone()),
-                recomputes: 0,
-                graph_work: 0,
-                publication: false,
-                charge,
-                _row_charge: row_charge,
-                origin: Weak::new(),
-                recent: AtomicBool::new(true),
-                accounted: AtomicBool::new(true),
-            },
-        );
-        let raw = entry.result().unwrap();
-        let before = *remaining.lock().unwrap();
-        assert!(headers.evict_row());
-        assert!(headers.ready(id).is_none());
-        assert_eq!(*remaining.lock().unwrap() - before, wrapper);
-        assert_eq!(raw.value.fingerprint, signature.fingerprint);
-        assert!(payload > 0);
-        assert!(*remaining.lock().unwrap() < 1 << 19);
-        drop(raw);
-        drop(entry);
-        drop(engine);
-        assert!(headers.reclaim_header_rows());
-        assert_eq!(*remaining.lock().unwrap(), (1 << 19) - payload);
-        drop(signature);
-        assert_eq!(*remaining.lock().unwrap(), 1 << 19);
+            if !retain_readers {
+                drop(entry);
+                drop(engine);
+                assert!(headers.evict_row());
+                assert_eq!(
+                    *remaining.lock().unwrap(),
+                    (1 << 19) - payload,
+                    "evicting the last row owner must return its metadata charge"
+                );
+                drop(signature);
+                assert_eq!(*remaining.lock().unwrap(), 1 << 19);
+                continue;
+            }
+            let raw = entry.result().unwrap();
+            let before = *remaining.lock().unwrap();
+            assert!(headers.evict_row());
+            assert!(headers.ready(id).is_none());
+            assert_eq!(*remaining.lock().unwrap() - before, wrapper);
+            assert_eq!(raw.value.fingerprint, signature.fingerprint);
+            assert!(payload > 0);
+            assert!(*remaining.lock().unwrap() < 1 << 19);
+            drop(raw);
+            drop(entry);
+            drop(engine);
+            assert!(headers.reclaim_header_rows());
+            assert_eq!(*remaining.lock().unwrap(), (1 << 19) - payload);
+            drop(signature);
+            assert_eq!(*remaining.lock().unwrap(), 1 << 19);
+        }
     }
 }

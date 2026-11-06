@@ -266,6 +266,11 @@ impl LoadedProgram {
                 )
             })
             .collect::<Vec<_>>();
+        // Namespace and comptime preparation must observe replacement snapshots
+        // before capturing any producer, not wait for the Check root's indexing.
+        for (file, context, _) in &files {
+            self.engine.index_source(*file, context)?;
+        }
         let selection = crate::requests::source_graph::SourceSelection {
             input_bytes: crate::requests::source_graph::source_bytes(&self.engine.sources, &files),
             files,

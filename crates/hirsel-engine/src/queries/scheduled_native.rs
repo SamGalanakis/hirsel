@@ -214,6 +214,15 @@ pub struct FrontNativeDefinitionQueries {
     _ownership: Arc<SourceOwnership>,
 }
 impl FrontNativeDefinitionQueries {
+    #[track_caller]
+    fn protocol_failure(&self, query: QueryId, detail: &str) -> Reference {
+        crate::requests::source_graph::protocol_failure(
+            &*self.store,
+            self.errors,
+            Some(query),
+            detail,
+        )
+    }
     /// Fixed inputs and currently held output or archive-reader charges.
     pub fn retained_bytes(&self) -> u64 {
         self._ownership._allowance.bytes()
@@ -421,7 +430,10 @@ impl QueryFactory for Factory {
             .ids
             .iter()
             .find_map(|(path, query)| (*query == id).then(|| path.clone()))
-            .ok_or(self.0.errors.protocol)?;
+            .ok_or_else(|| {
+                self.0
+                    .protocol_failure(id, "native definition has no immutable input")
+            })?;
         let terminal = self
             .0
             .completed
@@ -512,7 +524,10 @@ impl Task {
             Err(error) => return Poll::Ready(Err(owner.fail(error))),
         };
         let Some(id) = owner.front.query(&self.path) else {
-            return Poll::Ready(Err(owner.errors.protocol));
+            return Poll::Ready(Err(owner.protocol_failure(
+                self.id,
+                "native definition producer or observation is unavailable",
+            )));
         };
         let selected = match self.read(cx, id) {
             Poll::Pending => return Poll::Pending,
@@ -523,7 +538,10 @@ impl Task {
             Some(front) => front,
             None => {
                 let Some(id) = owner.front.body_query(&self.path) else {
-                    return Poll::Ready(Err(owner.errors.protocol));
+                    return Poll::Ready(Err(owner.protocol_failure(
+                        self.id,
+                        "native definition producer or observation is unavailable",
+                    )));
                 };
                 let selected = match self.read(cx, id) {
                     Poll::Pending => return Poll::Pending,
@@ -531,7 +549,10 @@ impl Task {
                     Poll::Ready(Ok(product)) => product,
                 };
                 let Some(front) = owner.front.outcome(Ok(selected.clone())) else {
-                    return Poll::Ready(Err(owner.errors.protocol));
+                    return Poll::Ready(Err(owner.protocol_failure(
+                        self.id,
+                        "native definition producer or observation is unavailable",
+                    )));
                 };
                 front
             }
@@ -553,7 +574,10 @@ impl Task {
         let mut ordinary = None;
         let lower = if executable {
             let Some(id) = owner.lower.query(&self.path) else {
-                return Poll::Ready(Err(owner.errors.protocol));
+                return Poll::Ready(Err(owner.protocol_failure(
+                    self.id,
+                    "native definition producer or observation is unavailable",
+                )));
             };
             let selected = match self.read(cx, id) {
                 Poll::Pending => return Poll::Pending,
@@ -572,7 +596,10 @@ impl Task {
                 original.body = body;
             }
             let Some(output) = owner.lower.outcome(selected) else {
-                return Poll::Ready(Err(owner.errors.protocol));
+                return Poll::Ready(Err(owner.protocol_failure(
+                    self.id,
+                    "native definition producer or observation is unavailable",
+                )));
             };
             reads.merge(&output.reads);
             Some(output)
@@ -585,7 +612,10 @@ impl Task {
             .and_then(|r| r.representation.declaration.drop.as_ref())
         {
             let Some(id) = owner.lower.query(path) else {
-                return Poll::Ready(Err(owner.errors.protocol));
+                return Poll::Ready(Err(owner.protocol_failure(
+                    self.id,
+                    "native definition producer or observation is unavailable",
+                )));
             };
             let selected = match self.read(cx, id) {
                 Poll::Pending => return Poll::Pending,
@@ -593,7 +623,10 @@ impl Task {
                 Poll::Ready(Ok(p)) => p,
             };
             let Some(output) = owner.lower.outcome(selected) else {
-                return Poll::Ready(Err(owner.errors.protocol));
+                return Poll::Ready(Err(owner.protocol_failure(
+                    self.id,
+                    "native definition producer or observation is unavailable",
+                )));
             };
             reads.merge(&output.reads);
             Some((path.clone(), output.output.value.entry))
@@ -603,7 +636,10 @@ impl Task {
         let constant = if matches!(&input.signature.kind,SignatureKind::Const{generics,..} if generics.is_empty())
         {
             let Some(id) = owner.lower.evaluate_query(&self.path) else {
-                return Poll::Ready(Err(owner.errors.protocol));
+                return Poll::Ready(Err(owner.protocol_failure(
+                    self.id,
+                    "native definition producer or observation is unavailable",
+                )));
             };
             match self.read(cx, id) {
                 Poll::Pending => return Poll::Pending,
@@ -611,7 +647,10 @@ impl Task {
                 Poll::Ready(Ok(_)) => {}
             }
             let Some(observed) = owner.lower.settled_reads(&self.path, QueryKind::Evaluate) else {
-                return Poll::Ready(Err(owner.errors.protocol));
+                return Poll::Ready(Err(owner.protocol_failure(
+                    self.id,
+                    "native definition producer or observation is unavailable",
+                )));
             };
             reads.merge(&observed);
             match owner.lower.settled_constant(&self.path, &[]) {
@@ -623,7 +662,10 @@ impl Task {
         };
         if let Some((run, root)) = &owner.selection {
             let Some(id) = run.preparation_query(root) else {
-                return Poll::Ready(Err(owner.errors.protocol));
+                return Poll::Ready(Err(owner.protocol_failure(
+                    self.id,
+                    "native definition producer or observation is unavailable",
+                )));
             };
             let product = match self.read(cx, id) {
                 Poll::Pending => return Poll::Pending,
@@ -631,7 +673,10 @@ impl Task {
                 Poll::Ready(Ok(product)) => product,
             };
             let Some(output) = run.outcome(product) else {
-                return Poll::Ready(Err(owner.errors.protocol));
+                return Poll::Ready(Err(owner.protocol_failure(
+                    self.id,
+                    "native definition producer or observation is unavailable",
+                )));
             };
             if !output.semantic.semantic_contains(&self.path) {
                 return Poll::Ready(Err(owner.fail(native_selection_error(
@@ -640,7 +685,12 @@ impl Task {
             }
         }
         Poll::Ready((|| {
-            let reads = Arc::new(reads.finish().map_err(|_| owner.errors.protocol)?);
+            let reads = Arc::new(reads.finish().map_err(|_| {
+                owner.protocol_failure(
+                    self.id,
+                    "native definition producer or observation is unavailable",
+                )
+            })?);
             let (source, contracts, requirements) = self
                 .complete(&front, &lower, finalizer, constant)
                 .map_err(|e| owner.fail(e))?;

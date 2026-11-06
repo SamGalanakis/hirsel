@@ -137,6 +137,15 @@ struct Ownership {
     _allowance: Arc<hirsel_engine_admission::MemoryReservation>,
 }
 impl FrontRunQueries {
+    #[track_caller]
+    fn protocol_failure(&self, query: QueryId, detail: &str) -> Reference {
+        crate::requests::source_graph::protocol_failure(
+            &*self.store,
+            self.errors,
+            Some(query),
+            detail,
+        )
+    }
     fn admit_archive(
         &self,
         reference: Reference,
@@ -416,7 +425,10 @@ impl QueryFactory for Factory {
                     (*id == query || self.0.preparation_query(path) == Some(query))
                         .then(|| path.clone())
                 })
-                .ok_or(self.0.errors.protocol)?;
+                .ok_or_else(|| {
+                    self.0
+                        .protocol_failure(query, "Run query is outside the selected roots")
+                })?;
             let completed = self
                 .0
                 .completed
@@ -551,7 +563,10 @@ impl Task {
                     continue;
                 }
                 let Some(query) = self.queries.semantic_query(path) else {
-                    return Poll::Ready(Err(self.queries.errors.protocol));
+                    return Poll::Ready(Err(self.queries.protocol_failure(
+                        self.query,
+                        &format!("Run semantic input for {path} is outside the captured namespace"),
+                    )));
                 };
                 let product = match self.read(cx, query) {
                     Poll::Pending => return Poll::Pending,
@@ -559,7 +574,10 @@ impl Task {
                     Poll::Ready(Ok(product)) => product,
                 };
                 let Some(entry) = self.queries.semantic_entry(product) else {
-                    return Poll::Ready(Err(self.queries.errors.protocol));
+                    return Poll::Ready(Err(self.queries.protocol_failure(
+                        self.query,
+                        "Run producer or observation is unavailable",
+                    )));
                 };
                 self.pending.pop();
                 self.pending.extend(
@@ -599,7 +617,10 @@ impl Task {
             // Source acceptance gates Run publication after dependency-ready
             // semantic/Lower work, rather than gating its admission.
             let Some(check) = self.queries.check.clone() else {
-                return Poll::Ready(Err(self.queries.errors.protocol));
+                return Poll::Ready(Err(self.queries.protocol_failure(
+                    self.query,
+                    "Run producer or observation is unavailable",
+                )));
             };
             let product = match self.read(cx, check.query()) {
                 Poll::Pending => return Poll::Pending,
@@ -607,7 +628,10 @@ impl Task {
                 Poll::Ready(Ok(product)) => product,
             };
             let Some(output) = check.outcome(product) else {
-                return Poll::Ready(Err(self.queries.errors.protocol));
+                return Poll::Ready(Err(self.queries.protocol_failure(
+                    self.query,
+                    "Run producer or observation is unavailable",
+                )));
             };
             if output.checked.completion != CheckCompletion::Complete {
                 return Poll::Ready(Err(self.queries.failure_record(operational(format!(
@@ -672,7 +696,9 @@ impl Task {
                 Some(output) => output,
                 None => {
                     let Some(id) = queries.front.body_query(path) else {
-                        return Poll::Ready(Err(queries.errors.protocol));
+                        return Poll::Ready(Err(
+                            queries.protocol_failure(self.query, "Run body input is unavailable")
+                        ));
                     };
                     let product = match self.read(cx, id) {
                         Poll::Pending => return Poll::Pending,

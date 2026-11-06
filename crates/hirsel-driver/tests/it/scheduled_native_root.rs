@@ -215,6 +215,7 @@ fn admitted_native_roots_preserve_selection_constants_and_detached_metadata_owne
                 assert_eq!(front.live_body_count(), 0);
                 runtime.shutdown();
                 drop(runtime);
+                drop(products);
                 let held_bytes = budget.reserved();
                 drop(output);
                 drop(program);
@@ -280,6 +281,8 @@ fn admitted_native_roots_preserve_selection_constants_and_detached_metadata_owne
                         .encode(expected_reader.record_context().as_ref(), &expected.extra)
                 );
                 assert_eq!(actual.roots.environment, expected.roots.environment);
+                drop(anchors);
+                drop(codec);
                 let sources = actual.roots.sources.clone();
                 let file = sources.file(hirsel_span::FileId(0)).unwrap().clone();
                 drop(actual);

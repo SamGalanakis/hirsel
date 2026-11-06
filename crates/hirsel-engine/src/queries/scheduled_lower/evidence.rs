@@ -6,7 +6,10 @@ use hirsel_validate::{AcceptedArtifact, ExecutionReceipt};
 
 /// Unexecuted Lower products retain their validation guards. Only an opaque
 /// execution receipt permits replacing those guards with local V revalidation.
-pub(super) fn persisted_reads(reads: &Reads, receipt: Option<&ExecutionReceipt>) -> Option<Reads> {
+pub(in crate::queries) fn persisted_reads(
+    reads: &Reads,
+    receipt: Option<&ExecutionReceipt>,
+) -> Option<Reads> {
     match receipt {
         Some(receipt) => super::persistent::persisted_execution_reads(reads, Some(receipt)),
         None => Some(reads.clone()),

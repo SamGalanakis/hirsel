@@ -70,27 +70,10 @@ impl SuccessorCapture {
         reads: &Reads,
         execution: Option<&hirsel_validate::ExecutionReceipt>,
     ) -> Result<(Reads, Option<hirsel_validate::ExecutionReceipt>), QueryError> {
-        for registration in self.namespace().registrations.values() {
-            registration
-                .validate_current(self.namespace(), |path, key| self.owner.observe(path, key))?;
-        }
-        // Semantic reads cannot be refreshed by V. A changed body, shape,
-        // header or lookup requires the suspended computation to run again.
-        if let Some(key) = self.changed_input(owner, reads, execution.is_some()) {
-            return Err(refused(&format!(
-                "changed semantic input requires recomputation: {key:?}"
-            )));
-        }
-        let execution = execution
-            .map(|receipt| {
-                self.namespace()
-                    .revalidate_execution(receipt)?
-                    .ok_or_else(|| refused("V refused execution in the successor environment"))
+        self.namespace()
+            .admit_reuse(owner, reads, execution, |path, key| {
+                self.owner.observe(path, key)
             })
-            .transpose()?;
-        let reads = evidence::current_reads(reads.clone(), execution.as_ref())
-            .ok_or_else(|| refused("successor execution does not cover its validation reads"))?;
-        Ok((reads, execution))
     }
 }
 pub(super) fn refused(message: &str) -> QueryError {

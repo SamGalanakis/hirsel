@@ -453,6 +453,20 @@ impl FrontLowerQueries {
         }
         let mut outcome = row.outcome;
         let mut raw = row.raw;
+        if self.verify == Verify::On && outcome.executed && outcome.execution.is_none() {
+            return None;
+        }
+        let (reads, execution) = self
+            .namespace
+            .admit_reuse(
+                path,
+                &outcome.reads,
+                outcome.execution.as_ref(),
+                |path, read| self.observe(path, read),
+            )
+            .ok()?;
+        outcome.reads = reads;
+        outcome.execution = execution;
         let mut valid = true;
         visit(&mut outcome, &mut raw, |span| {
             if span.anchor == hirsel_span::Anchor(0) {

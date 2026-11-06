@@ -382,6 +382,43 @@ impl NamespaceCapture {
                     })
             })
     }
+    /// Candidate observations stay private until bindings, semantic reads and
+    /// V's complete execution context all hold in this exact capture.
+    pub(crate) fn admit_reuse(
+        &self,
+        owner: &DefPath,
+        reads: &Reads,
+        execution: Option<&hirsel_validate::ExecutionReceipt>,
+        mut observe: impl FnMut(&DefPath, &ReadKey) -> Option<ContentHash>,
+    ) -> Result<(Reads, Option<hirsel_validate::ExecutionReceipt>), QueryError> {
+        for registration in self.registrations.values() {
+            registration.validate_current(self, &mut observe)?;
+        }
+        if let Some(key) = reads.first_changed(|key| {
+            if matches!(key, ReadKey::ValidationUniverse(_)) && execution.is_some() {
+                reads.get(key)
+            } else {
+                observe(owner, key)
+            }
+        }) {
+            return Err(refused(&format!(
+                "changed semantic input requires recomputation: {key:?}"
+            )));
+        }
+        // Check coverage before refreshing guards. Revalidation cannot supply
+        // missing authority for an observation the candidate already made.
+        scheduled_lower::evidence::persisted_reads(reads, execution)
+            .ok_or_else(|| refused("execution does not cover its validation reads"))?;
+        let execution = execution
+            .map(|receipt| {
+                self.revalidate_execution(receipt)?
+                    .ok_or_else(|| refused("V refused execution in the admitted capture"))
+            })
+            .transpose()?;
+        let reads = scheduled_lower::evidence::current_reads(reads.clone(), execution.as_ref())
+            .ok_or_else(|| refused("execution does not cover its validation reads"))?;
+        Ok((reads, execution))
+    }
     pub(crate) fn verification(&self) -> Verify {
         self.verify
     }

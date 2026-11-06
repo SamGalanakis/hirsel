@@ -335,6 +335,20 @@ pub struct FrontCheckedOutput {
     _facts: Arc<FrontFacts>,
 }
 impl FrontBodyQueries {
+    #[track_caller]
+    fn resource_refusal(&self) -> Reference {
+        if std::env::var_os("HIRSEL_OPERATION_OWNER_TRACE").is_some() {
+            let site = std::panic::Location::caller();
+            eprintln!(
+                "OWNER RESOURCE Front producer {}:{} in namespace {:?}",
+                site.file(),
+                site.line(),
+                self.namespace.identity(),
+            );
+        }
+        self.errors.resource
+    }
+
     pub(crate) fn runtime_error(&self, reference: Reference) -> Option<QueryError> {
         let message = if reference == self.errors.resource {
             format!(
@@ -2190,7 +2204,7 @@ impl QueryTask for BodyTask {
         }
         let definition = self.queries.inputs[&self.input].definition;
         if self.queries.admit_input_slot(cx, definition).is_none() {
-            return finish(Err(self.queries.errors.resource));
+            return finish(Err(self.queries.resource_refusal()));
         }
         let pending = self
             .queries
@@ -2216,7 +2230,7 @@ impl QueryTask for BodyTask {
                     .map_or(Span::default(), |syntax| syntax.item.name_span),
             ) {
                 Ok(query) => query,
-                Err(_) => return finish(Err(self.queries.errors.resource)),
+                Err(_) => return finish(Err(self.queries.resource_refusal())),
             };
             let selected = match cx.read(demand) {
                 std::task::Poll::Pending => return QueryPoll::Waiting(vec![demand]),
@@ -2334,14 +2348,14 @@ impl BodyTask {
                         .or_else(|| failure.sources.owner(anchor))
                 },
             )
-            .ok_or(queries.errors.resource)?;
+            .ok_or_else(|| queries.resource_refusal())?;
         if bytes.len() as u64 > self.weight.scratch {
-            return Err(queries.errors.resource);
+            return Err(queries.resource_refusal());
         }
         let reference = queries
             .store
             .put_content(FAILURE, &bytes)
-            .ok_or(queries.errors.resource)?;
+            .ok_or_else(|| queries.resource_refusal())?;
         let action = hirsel_engine_store::query_action(&input.key, input.key.1, &failure.reads);
         let mut cached = queries
             .publish_facts(
@@ -2355,7 +2369,7 @@ impl BodyTask {
                 None,
                 vec![],
             )
-            .ok_or(queries.errors.resource)?;
+            .ok_or_else(|| queries.resource_refusal())?;
         Arc::get_mut(&mut cached.facts)
             .ok_or_else(|| queries.protocol_refusal())?
             .diagnostic_sources = Some(failure.sources);
@@ -2423,13 +2437,13 @@ impl BodyTask {
                 return Err(queries.protocol_refusal());
             }
             if queries.store.put_content(reference.domain, bytes) != Some(reference) {
-                return Err(queries.errors.resource);
+                return Err(queries.resource_refusal());
             }
         }
         let action = hirsel_engine_store::query_action(&input.key, input.key.1, &reads);
         let product = queries
             .admit_body(cx, self.query.address, action, outcome, summary)
-            .ok_or(queries.errors.resource)?;
+            .ok_or_else(|| queries.resource_refusal())?;
         let body = product
             .live_value::<crate::products::LiveAnalyzedProduct>()
             .ok_or_else(|| queries.protocol_refusal())?;
@@ -2623,7 +2637,7 @@ impl BodyTask {
             {
                 return product
                     .publish(self.queries.store.as_ref())
-                    .map_err(|_| self.queries.errors.resource);
+                    .map_err(|_| self.queries.resource_refusal());
             }
         }
         if self.materialize
@@ -2690,7 +2704,15 @@ impl BodyTask {
             reads: signature_reads,
         } = queries
             .signature_input(input, cx.scratch_bytes())
-            .map_err(|_| queries.errors.resource)?;
+            .map_err(|error| {
+                if std::env::var_os("HIRSEL_OPERATION_OWNER_TRACE").is_some() {
+                    eprintln!(
+                        "OWNER RESOURCE Front signature input {}: {error:?}",
+                        input.definition.path()
+                    );
+                }
+                queries.resource_refusal()
+            })?;
         let mut done = worker.run(Task {
             index: 0,
             definition: input.definition.path().clone(),
@@ -2705,8 +2727,14 @@ impl BodyTask {
         // A body computed under a refused citation read is a resource
         // refusal: no failure record is published for it, and the next
         // demand computes it again.
-        if done.refused().is_some() {
-            return Err(queries.errors.resource);
+        if let Some(refusal) = done.refused() {
+            if std::env::var_os("HIRSEL_OPERATION_OWNER_TRACE").is_some() {
+                eprintln!(
+                    "OWNER RESOURCE Front phase {}: {refusal:?}",
+                    input.definition.path()
+                );
+            }
+            return Err(queries.resource_refusal());
         }
         if let Some(registration) = &input.registration {
             registration.explain(&mut done.result, &queries.citations.sources);
@@ -2786,7 +2814,7 @@ impl BodyTask {
                         ),
                         |anchor| queries.citations.record_owner(anchor),
                     )
-                    .ok_or(queries.errors.resource)?,
+                    .ok_or_else(|| queries.resource_refusal())?,
             )
         } else {
             completed.take_payload()
@@ -2795,7 +2823,7 @@ impl BodyTask {
             .as_ref()
             .is_some_and(|bytes| bytes.len() as u64 > self.weight.scratch)
         {
-            return Err(queries.errors.resource);
+            return Err(queries.resource_refusal());
         }
         if self.materialize {
             return self.publish_body(cx, outcome, bytes.as_deref());
@@ -2817,11 +2845,11 @@ impl BodyTask {
                         ),
                         |anchor| queries.citations.record_owner(anchor),
                     )
-                    .ok_or(queries.errors.resource)?;
+                    .ok_or_else(|| queries.resource_refusal())?;
                 let record = queries
                     .store
                     .put_content(FAILURE, &failure)
-                    .ok_or(queries.errors.resource)?;
+                    .ok_or_else(|| queries.resource_refusal())?;
                 let output = ModeResult {
                     definition: input.definition.path().clone(),
                     result: Err(error),
@@ -2842,7 +2870,7 @@ impl BodyTask {
                         None,
                         vec![],
                     )
-                    .ok_or(queries.errors.resource)?;
+                    .ok_or_else(|| queries.resource_refusal())?;
                 queries.install_outcome(self.input, cached);
                 return Err(record);
             }
@@ -2854,7 +2882,7 @@ impl BodyTask {
                     FAILURE,
                     bytes.as_deref().ok_or_else(|| queries.protocol_refusal())?,
                 )
-                .ok_or(queries.errors.resource)?;
+                .ok_or_else(|| queries.resource_refusal())?;
             (
                 Some(record),
                 hirsel_artifact_store::Action(ContentHash::of_parts(
@@ -2873,7 +2901,7 @@ impl BodyTask {
                 (*outcome.reads).clone(),
                 &bytes,
             )
-            .ok_or(queries.errors.resource)?;
+            .ok_or_else(|| queries.resource_refusal())?;
             let mut entry = hirsel_engine_store::Entry::load(&*queries.store, &input.key);
             entry.insert(variant.clone());
             queries.store.put_query(
@@ -2896,7 +2924,7 @@ impl BodyTask {
             .publish_facts(
                 cx, self.input, record, action, outcome, checked, dead_arms, table_keys, memo_rows,
             )
-            .ok_or(queries.errors.resource)?;
+            .ok_or_else(|| queries.resource_refusal())?;
         if let Some(outcome) = handoff
             && let FrontState::Settled {
                 publication, body, ..

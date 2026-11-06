@@ -296,7 +296,7 @@ fn editing_an_imaged_std_module_is_warm_equals_cold() {
         let mut warm = load(&client, images);
         warm.check_for_execution().unwrap();
 
-        let (file, context) = warm
+        let (file, _) = warm
             .files
             .iter()
             .find(|(_, context)| context.package == package("std"))
@@ -305,13 +305,14 @@ fn editing_an_imaged_std_module_is_warm_equals_cold() {
         let path = warm.engine.sources.file(file).unwrap().path.clone();
         let edited = LIBRARY.replace("x + 1", "x + 2");
         f.library_named("std", &edited);
-        let file = warm.engine.sources.add(path, edited).unwrap();
-        warm.engine.parse_file(file, &context).unwrap();
+        assert!(!warm.replace_source(&path, edited).unwrap());
 
         let edited_products = f.0.join("edited-std.products");
         COMPILER
             .precompute_package(&manifest, &edited_products)
             .unwrap();
+        drop(warm);
+        let mut warm = load(&client, Some(&edited_products));
         let mut cold = load(&client, Some(&edited_products));
         let checked = |program: &mut LoadedProgram| {
             let output = program.check(LoweringPolicy::Reachable).unwrap();

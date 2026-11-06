@@ -73,8 +73,18 @@ pub fn load(path: &Path, products: Option<&Path>) -> LoadedProgram {
                 .parent()
                 .unwrap()
                 .join(format!("reader-{}", NEXT.fetch_add(1, Ordering::Relaxed)));
+            let (budget, cap) = hirsel_engine::requests::source_graph::host_budget();
+            let limits = hirsel_engine::requests::source_graph::host_limits(cap, 1);
             std::sync::Arc::new(
-                store::DirStore::new(local).with_read_only_root(products.to_path_buf()),
+                store::RequestStore::with_scratch_and_verifier_transport(
+                    std::sync::Arc::new(
+                        store::DirStore::new(local).with_read_only_root(products.to_path_buf()),
+                    ),
+                    budget.reserve(limits.transport_bytes).unwrap(),
+                    path.parent().unwrap(),
+                    limits.runtime_bytes + limits.snapshot_bytes + limits.transport_bytes,
+                )
+                .unwrap(),
             )
         }
         None => std::sync::Arc::new(store::NoneStore),

@@ -5,8 +5,71 @@ use super::*;
 
 const OUTPUT: Domain = Domain {
     kind: 0x4600_0034,
-    schema: 2,
+    schema: 3,
 };
+
+pub(super) struct SemanticOwnership {
+    context: crate::NativeRecordContext,
+    remaining: Arc<Mutex<u64>>,
+    _allowance: Arc<hirsel_engine_admission::MemoryReservation>,
+    bytes: u64,
+}
+impl Drop for SemanticOwnership {
+    fn drop(&mut self) {
+        *self
+            .remaining
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) += self.bytes;
+    }
+}
+pub(super) struct LiveSemantic {
+    entry: Arc<GraphEntry>,
+    path: DefId,
+    records: crate::NativeRecords,
+    pub(super) ownership: Arc<SemanticOwnership>,
+    charge: u64,
+}
+impl LiveProductValue for LiveSemantic {
+    fn domain(&self) -> Domain {
+        OUTPUT
+    }
+    fn archive(&self, admission: ArchiveAdmission<'_>) -> std::io::Result<ProductArchive> {
+        ProductArchive::materialize(OUTPUT, admission, |grant| {
+            if grant.bytes() < self.charge {
+                return Err(std::io::ErrorKind::OutOfMemory.into());
+            }
+            let source = self
+                .entry
+                .source
+                .as_ref()
+                .map(|source| {
+                    self.records
+                        .encode_with_admission(
+                            &self.ownership.context,
+                            &**source,
+                            grant,
+                            source.weight(),
+                        )
+                        .ok_or_else(|| std::io::Error::other("semantic source encoding"))
+                })
+                .transpose()?;
+            let (identity, content, dependencies) = self.entry.node.canonical(self.path.path());
+            let value = (
+                identity,
+                content,
+                dependencies,
+                self.entry.content.references(),
+                source,
+                &self.entry.node.observations,
+            );
+            let length = bincode::serialized_size(&value).map_err(std::io::Error::other)?;
+            if length > grant.bytes() {
+                return Err(std::io::ErrorKind::OutOfMemory.into());
+            }
+            bincode::serialize(&value).map_err(std::io::Error::other)
+        })
+    }
+}
 
 impl FrontRunQueries {
     /// The source-owned semantic node, independent of a launch or Check root.
@@ -96,7 +159,7 @@ impl QueryTask for SemanticTask {
                     .map_err(|error| self.node.queries.failure_record(error)),
             }
         };
-        // The completed descriptors own the semantic result. Neither its
+        // The completed immutable values own the semantic result. Neither its
         // decoded input nor its raw Front/Lower dependencies remain consumers.
         self.node.input = None;
         if result.is_ok() {
@@ -135,13 +198,10 @@ impl SemanticTask {
                 self.node.input.as_ref().ok_or(QueryError::NotImplemented)?,
             )?;
         }
-        let source = source
-            .map(|source| source_products::Packed::new(queries, source))
-            .transpose()?;
         let entry = Arc::new(GraphEntry {
-            source,
+            source: source.map(Arc::new),
+            content: content::Content::new(queries, content, &node)?,
             node,
-            content: content::Content::new(queries, content)?,
             dependencies: dependencies
                 .iter()
                 .map(DefId::intern)
@@ -150,44 +210,49 @@ impl SemanticTask {
         });
         let mut weight = hirsel_query_products::retained::MetadataWeight::default();
         weight.tree::<ContentHash, (ProductRef, Arc<GraphEntry>)>(1);
-        weight.add(std::mem::size_of::<GraphEntry>() + 2 * std::mem::size_of::<usize>());
+        weight.add(
+            std::mem::size_of::<GraphEntry>()
+                + std::mem::size_of::<LiveSemantic>()
+                + std::mem::size_of::<SemanticOwnership>()
+                + 6 * std::mem::size_of::<usize>(),
+        );
         weight.add(std::mem::size_of_val(&*entry.dependencies));
         entry.node.weight(&mut weight);
         entry.content.weight(&mut weight);
+        if let Some(source) = &entry.source {
+            weight.add(source.weight() as usize + 2 * std::mem::size_of::<usize>());
+        }
         let charge = weight.bytes();
         if charge > queries.weight.retained / 2 {
             return Err(operational("semantic product exceeds retained admission"));
         }
-        let node = entry.node.program(queries, &self.node.root)?;
-        let bytes = bincode::serialize(&(
-            node.identity,
-            node.content,
-            node.dependencies,
+        // Hash the canonical semantic preimage directly. Identity encoding does
+        // not create a portable archive or consult the result provider.
+        let (identity, content, dependencies) = entry.node.canonical(&self.node.root);
+        let canonical = (
+            identity,
+            content,
+            dependencies,
             entry.content.references(),
-            entry.source.as_ref(),
-        ))
-        .map_err(|error| operational(error.to_string()))?;
-        if bytes.len() as u64 > queries.weight.scratch {
-            return Err(operational("semantic encoding exceeds scratch admission"));
+            &entry.node.observations,
+        );
+        let length =
+            bincode::serialized_size(&canonical).map_err(|error| operational(error.to_string()))?;
+        if length > queries.weight.scratch {
+            return Err(operational("semantic identity exceeds scratch admission"));
         }
-        let record = queries
-            .store
-            .put_content(OUTPUT, &bytes)
-            .ok_or_else(|| operational("semantic product transport exceeds admission"))?;
+        let identity =
+            ContentHash::of_stream("hirsel.front.semantic.identity.v1", length, |writer| {
+                bincode::serialize_into(writer, &canonical).map_err(std::io::Error::other)
+            })
+            .map_err(|error| operational(error.to_string()))?;
         let action = hirsel_artifact_store::Action(ContentHash::of_parts(
-            "hirsel.front.semantic.action.v1",
+            "hirsel.front.semantic.action.v2",
             [
                 self.node.query.address.0.0.as_slice(),
-                record.output.0.0.as_slice(),
+                identity.0.as_slice(),
             ],
         ));
-        let product = ProductRef::import_archive(
-            self.node.query.address,
-            action,
-            queries
-                .admit_archive(record, bytes)
-                .map_err(|_| QueryError::NotImplemented)?,
-        );
         let mut remaining = queries
             .retention
             .lock()
@@ -195,14 +260,29 @@ impl SemanticTask {
         *remaining = remaining
             .checked_sub(charge)
             .ok_or_else(|| operational("semantic products exceed admission"))?;
+        drop(remaining);
+        let ownership = Arc::new(SemanticOwnership {
+            context: queries.anchors.clone(),
+            remaining: queries.retention.clone(),
+            _allowance: queries.ownership._allowance.clone(),
+            bytes: charge,
+        });
+        let product = ProductRef::live(
+            self.node.query.address,
+            action,
+            Arc::new(LiveSemantic {
+                entry: entry.clone(),
+                path: DefId::intern(&self.node.root),
+                records: queries.records.clone(),
+                ownership,
+                charge,
+            }),
+        );
         queries
             .semantic_completed
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .insert(product.address.0, (product.clone(), entry));
-        queries
-            .store
-            .associate_product(product.address, product.action, record);
         Ok(product)
     }
 }

@@ -462,7 +462,7 @@ struct GraphEntry {
     node: content::Node,
     content: content::Content,
     dependencies: Box<[DefId]>,
-    source: Option<source_products::Packed>,
+    source: Option<Arc<source_products::Body>>,
 }
 struct Task {
     queries: Arc<FrontRunQueries>,
@@ -666,6 +666,7 @@ impl Task {
         >,
     > {
         let queries = self.queries.clone();
+        let mut observations = Vec::new();
         if self.input.is_none() {
             self.input = match queries.input(path) {
                 Ok(input) => Some(input),
@@ -690,7 +691,10 @@ impl Task {
             let product = match self.read(cx, id) {
                 Poll::Pending => return Poll::Pending,
                 Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
-                Poll::Ready(Ok(product)) => product,
+                Poll::Ready(Ok(product)) => {
+                    observations.push((id.kind, id.address.0, product.action.0));
+                    product
+                }
             };
             let output = match queries.front.outcome(Ok(product.clone())) {
                 Some(output) => output,
@@ -703,7 +707,10 @@ impl Task {
                     let product = match self.read(cx, id) {
                         Poll::Pending => return Poll::Pending,
                         Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
-                        Poll::Ready(Ok(product)) => product,
+                        Poll::Ready(Ok(product)) => {
+                            observations.push((id.kind, id.address.0, product.action.0));
+                            product
+                        }
                     };
                     let Some(output) = queries.front.outcome(Ok(product.clone())) else {
                         return Poll::Ready(Err(queries.failure_record(operational(format!(
@@ -749,7 +756,10 @@ impl Task {
                 let product = match self.read(cx, id) {
                     Poll::Pending => return Poll::Pending,
                     Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
-                    Poll::Ready(Ok(product)) => product,
+                    Poll::Ready(Ok(product)) => {
+                        observations.push((id.kind, id.address.0, product.action.0));
+                        product
+                    }
                 };
                 let Some(output) = queries.lower.outcome(product) else {
                     return Poll::Ready(Err(queries.failure_record(operational(format!(
@@ -797,7 +807,9 @@ impl Task {
                     match self.read(cx, id) {
                         Poll::Pending => return Poll::Pending,
                         Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
-                        Poll::Ready(Ok(_)) => {}
+                        Poll::Ready(Ok(product)) => {
+                            observations.push((id.kind, id.address.0, product.action.0));
+                        }
                     }
                     if let Some(reads) = queries.lower.settled_reads(path, QueryKind::Evaluate) {
                         extend_reads(&mut dependencies, &reads, |key| {
@@ -892,7 +904,7 @@ impl Task {
             hirsel_proof_export::references(queries.lower.signatures().types(), &content);
         let mut all_dependencies = dependencies.clone();
         all_dependencies.extend(references);
-        let node = match content::Node::new(&queries, source_content, &dependencies) {
+        let node = match content::Node::new(&queries, source_content, &dependencies, observations) {
             Ok(node) => node,
             Err(error) => return Poll::Ready(Err(queries.failure_record(error))),
         };

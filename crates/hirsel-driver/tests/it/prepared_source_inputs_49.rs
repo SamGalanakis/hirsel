@@ -295,6 +295,11 @@ fn semantic_source_products_do_not_require_a_launch_or_program_check() {
             .filter(|path| path.0.name.starts_with("value_"))
             .map(|path| run.semantic_query(path).unwrap())
             .collect::<Vec<_>>();
+        let codec = NativeRecords::new(
+            program.engine.types().clone(),
+            Arc::new(MemStore::default()),
+        );
+        let anchors = NativeRecordContext::capture(&program.engine);
         drop(program);
         let mut runtime = AdmittedRuntime::new(
             hirsel_intern::jobs::Jobs::new(2),
@@ -319,6 +324,40 @@ fn semantic_source_products_do_not_require_a_launch_or_program_check() {
         assert_eq!(actual.content, expected.content);
         assert_eq!(actual.dependencies, expected.dependencies);
         assert!(run.outcome(product.clone()).is_none());
+        assert!(product.archive(ArchiveAdmission::Retained).is_err());
+        let mut scratch = budget.reserve(weight.scratch).unwrap();
+        let archive = product
+            .archive(ArchiveAdmission::Materialize {
+                scratch: &mut scratch,
+                working_bytes: weight.scratch,
+            })
+            .unwrap();
+        #[derive(serde::Deserialize)]
+        struct ExportedSemantic {
+            identity: String,
+            content: Vec<Vec<u8>>,
+            dependencies: Vec<String>,
+            _references: Vec<hirsel_syntax::DefPath>,
+            source: Option<Vec<u8>>,
+            _observations: Vec<(u32, hirsel_syntax::ContentHash, hirsel_syntax::ContentHash)>,
+        }
+        #[derive(serde::Deserialize)]
+        struct ExportedSource {
+            products: (
+                SourceAudit,
+                Vec<(hirsel_syntax::ExprId, hirsel_tir::Materialized)>,
+            ),
+            constant: Option<hirsel_tir::MaterializedRef>,
+        }
+        let exported: ExportedSemantic = bincode::deserialize(archive.bytes()).unwrap();
+        assert_eq!(exported.identity, expected.identity);
+        assert_eq!(exported.content, expected.content);
+        assert_eq!(exported.dependencies, expected.dependencies);
+        let source: ExportedSource = codec.decode(&anchors, &exported.source.unwrap()).unwrap();
+        assert_eq!(source.products.0, expected_audit);
+        assert!(source.constant.is_none());
+        drop(archive);
+        drop(scratch);
         let bytes = run.source_product_bytes(product.clone()).unwrap().unwrap();
         assert!(
             run.source_products_with_allowance(product.clone(), budget.reserve(bytes - 1).unwrap())
@@ -345,7 +384,6 @@ fn semantic_source_products_do_not_require_a_launch_or_program_check() {
             format!("{:?}", products.constant().unwrap()),
             format!("{expected_constant:?}")
         );
-        drop(products);
         // Their 32 four-MiB continuation grants cannot all fit this existing
         // 64-MiB working grant plus its existing 128-MiB worker stack. Completed node outputs have their own reservation.
         for query in queries {
@@ -361,5 +399,16 @@ fn semantic_source_products_do_not_require_a_launch_or_program_check() {
         wrong.action = hirsel_artifact_store::Action(hirsel_syntax::ContentHash::default());
         assert!(run.semantic_node(wrong).is_err());
         runtime.shutdown();
+        drop(runtime);
+        let catalogue = Arc::downgrade(&run);
+        drop(run);
+        assert!(
+            catalogue.upgrade().is_none(),
+            "a source view must release the Run catalogue"
+        );
+        assert_eq!(
+            format!("{:?}", products.constant().unwrap()),
+            format!("{expected_constant:?}")
+        );
     });
 }

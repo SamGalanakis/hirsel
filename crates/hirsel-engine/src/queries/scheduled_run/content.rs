@@ -1,71 +1,45 @@
-//! Run stores immutable content references and retains only source-owned handles.
+//! Immutable semantic tokens shared by the node and its named-content view.
 use super::*;
 
 #[derive(Clone)]
 struct Bytes {
-    reference: Reference,
+    value: Arc<Vec<Vec<u8>>>,
     decode_bytes: u64,
 }
 impl Bytes {
-    fn new(
-        store: &dyn ResultStore,
-        allowance: u64,
-        value: &Vec<Vec<u8>>,
-    ) -> Result<Self, QueryError> {
-        let bytes: hirsel_artifact_store::Bytes = bincode::serialize(value)
-            .map_err(|_| QueryError::NotImplemented)?
-            .into();
-        let requirement =
-            hirsel_product_codec::DecodeRequirement::<hirsel_product_codec::RunContent>::open(
-                bytes.clone(),
-            )
+    fn new(allowance: u64, value: Vec<Vec<u8>>) -> Result<Self, QueryError> {
+        let mut weight = hirsel_query_products::retained::MetadataWeight::default();
+        weight.add(std::mem::size_of::<Vec<Vec<u8>>>());
+        weight.vec(&value, |weight, field| weight.flat_vec(field));
+        let decode_bytes = weight
+            .bytes()
+            .checked_mul(2)
             .ok_or(QueryError::NotImplemented)?;
-        let decode_bytes = requirement.required_bytes();
         if decode_bytes > allowance {
             return Err(operational("Run content exceeds scratch admission"));
         }
-        let reference = store
-            .put_content(INPUT_CONTENT, &bytes)
-            .ok_or(QueryError::NotImplemented)?;
         Ok(Self {
-            reference,
+            value: Arc::new(value),
             decode_bytes,
         })
     }
-    fn load(
-        &self,
-        store: &dyn ResultStore,
-        reservation: &hirsel_engine_admission::MemoryReservation,
-        allowance: u64,
-    ) -> Result<Vec<Vec<u8>>, QueryError> {
-        if self.reference.domain != INPUT_CONTENT
-            || self.reference.len > allowance
-            || self.decode_bytes > allowance
-        {
+    fn load(&self, allowance: u64) -> Result<Vec<Vec<u8>>, QueryError> {
+        if self.decode_bytes > allowance {
             return Err(operational("Run content exceeds decode admission"));
         }
-        let bytes = store
-            .get_content(self.reference)
-            .ok_or(QueryError::NotImplemented)?;
-        if INPUT_CONTENT.reference(&bytes) != Some(self.reference) {
-            return Err(operational("Run content descriptor changed"));
-        }
-        let requirement =
-            hirsel_product_codec::DecodeRequirement::<hirsel_product_codec::RunContent>::open(
-                bytes,
-            )
-            .ok_or(QueryError::NotImplemented)?;
-        if requirement.required_bytes() > allowance {
-            return Err(operational("Run content exceeds decode admission"));
-        }
-        requirement
-            .decode_content(reservation)
-            .ok_or(QueryError::NotImplemented)
+        Ok((*self.value).clone())
+    }
+    fn weight(&self, weight: &mut hirsel_query_products::retained::MetadataWeight) {
+        weight.arc(&self.value);
+        weight.vec(&self.value, |weight, field| weight.flat_vec(field));
     }
 }
 enum Header {
     Body,
-    Named { source: Bytes, reads: Box<[DefId]> },
+    Named {
+        source: Option<Bytes>,
+        reads: Box<[DefId]>,
+    },
 }
 pub(super) struct Content {
     header: Header,
@@ -76,6 +50,7 @@ impl Content {
     pub(super) fn new(
         queries: &FrontRunQueries,
         content: DefinitionContent,
+        node: &Node,
     ) -> Result<Self, QueryError> {
         let snapshot = queries.lower.signatures();
         let references = hirsel_proof_export::references(snapshot.types(), &content)
@@ -87,7 +62,15 @@ impl Content {
             DefinitionContent::Body { tir, .. } => (Header::Body, tir.is_some()),
             DefinitionContent::Named { source, reads, .. } => (
                 Header::Named {
-                    source: Bytes::new(&*queries.store, queries.weight.scratch, &source)?,
+                    source: if source.is_empty() {
+                        None
+                    } else if source == *node.content.value {
+                        Some(node.content.clone())
+                    } else {
+                        return Err(operational(
+                            "Run named content differs from its semantic node",
+                        ));
+                    },
                     reads: reads
                         .iter()
                         .map(DefId::intern)
@@ -144,7 +127,7 @@ impl Content {
                 for read in reads {
                     weight.path(read.path());
                 }
-                source.decode_bytes
+                source.as_ref().map_or(0, |source| source.decode_bytes)
             }
         };
         if weight
@@ -170,7 +153,11 @@ impl Content {
             },
             Header::Named { source, reads } => DefinitionContent::Named {
                 signature: input.signature.clone(),
-                source: source.load(&*queries.store, &queries.ownership._allowance, allowance)?,
+                source: source
+                    .as_ref()
+                    .map(|source| source.load(allowance))
+                    .transpose()?
+                    .unwrap_or_default(),
                 reads: reads.iter().map(|id| id.path().clone()).collect(),
             },
         })
@@ -185,21 +172,33 @@ impl Content {
 pub(super) struct Node {
     content: Bytes,
     pub dependencies: Box<[DefId]>,
+    pub observations: Box<[(u32, ContentHash, ContentHash)]>,
 }
 impl Node {
     pub(super) fn new(
         queries: &FrontRunQueries,
         content: Vec<Vec<u8>>,
         dependencies: &BTreeSet<DefPath>,
+        observations: Vec<(u32, ContentHash, ContentHash)>,
     ) -> Result<Self, QueryError> {
         Ok(Self {
-            content: Bytes::new(&*queries.store, queries.weight.scratch, &content)?,
+            content: Bytes::new(queries.weight.scratch, content)?,
+            observations: observations.into_boxed_slice(),
             dependencies: dependencies
                 .iter()
                 .map(DefId::intern)
                 .collect::<Vec<_>>()
                 .into_boxed_slice(),
         })
+    }
+    pub(super) fn canonical(&self, path: &DefPath) -> (String, &Vec<Vec<u8>>, Vec<String>) {
+        let mut dependencies: Vec<_> = self
+            .dependencies
+            .iter()
+            .map(|id| id.path().to_string())
+            .collect();
+        dependencies.push("$hirsel/runtime@1".into());
+        (path.to_string(), &self.content.value, dependencies)
     }
     pub(super) fn decode_bytes(&self, path: &DefPath) -> Option<u64> {
         // Bincode's length-framed path bounds Display's separators too. A
@@ -231,93 +230,25 @@ impl Node {
         dependencies.push("$hirsel/runtime@1".into());
         Ok(hirsel_run_schema::ProgramNode {
             identity: path.to_string(),
-            content: self.content.load(
-                &*queries.store,
-                &queries.ownership._allowance,
-                queries.weight.scratch,
-            )?,
+            content: self.content.load(queries.weight.scratch)?,
             dependencies,
         })
     }
     pub(super) fn weight(&self, weight: &mut hirsel_query_products::retained::MetadataWeight) {
         weight.add(std::mem::size_of_val(&*self.dependencies));
+        self.content.weight(weight);
+        weight.add(std::mem::size_of_val(&*self.observations));
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    #[derive(Default)]
-    struct Counting {
-        inner: hirsel_engine_store::MemStore,
-        gets: AtomicUsize,
-    }
-    impl ResultStore for Counting {
-        fn admit_product_memory(&self, bytes: u64) -> Option<std::sync::Arc<dyn Send + Sync>> {
-            self.inner.admit_product_memory(bytes)
-        }
-
-        fn retention_scope(&self) -> Option<Box<dyn Send + Sync>> {
-            self.inner.retention_scope()
-        }
-
-        fn capability(&self) -> hirsel_engine_store::ProviderCapability {
-            self.inner.capability()
-        }
-
-        fn name(&self) -> &'static str {
-            "run-content-bound-test"
-        }
-        fn get(&self, key: &hirsel_engine_store::EntryKey) -> Option<hirsel_engine_store::Bytes> {
-            self.gets.fetch_add(1, Ordering::Relaxed);
-            self.inner.get(key)
-        }
-        fn put(
-            &self,
-            key: &hirsel_engine_store::EntryKey,
-            bytes: &[u8],
-        ) -> hirsel_engine_store::WriteOutcome {
-            self.inner.put(key, bytes)
-        }
-    }
     #[test]
-    fn archived_node_content_keeps_order_and_refuses_before_provider_access() {
-        let store = Counting::default();
+    fn live_node_content_keeps_order_and_refuses_before_cloning() {
         let source = vec![vec![7; 8192], vec![], vec![7; 8192], vec![9; 3]];
-        let saved = Bytes::new(&store, 1 << 20, &source).unwrap();
-        let budget = hirsel_engine_admission::ProcessBudget::new(1 << 20);
-        let reservation = budget.reserve(1 << 20).unwrap();
-        assert!(std::mem::size_of_val(&saved) < source.iter().map(Vec::len).sum::<usize>());
-        store.gets.store(0, Ordering::Relaxed);
-        assert!(
-            saved
-                .load(&store, &reservation, saved.decode_bytes - 1)
-                .is_err()
-        );
-        assert_eq!(store.gets.load(Ordering::Relaxed), 0);
-        assert_eq!(
-            saved
-                .load(&store, &reservation, saved.decode_bytes)
-                .unwrap(),
-            source
-        );
-        assert!(store.gets.load(Ordering::Relaxed) > 0);
-        let mut wrong = saved.clone();
-        wrong.reference.domain = OUTPUT;
-        store.gets.store(0, Ordering::Relaxed);
-        assert!(
-            wrong
-                .load(&store, &reservation, saved.decode_bytes)
-                .is_err()
-        );
-        assert_eq!(store.gets.load(Ordering::Relaxed), 0);
-        let mut missing = saved.clone();
-        missing.reference.output.0 = ContentHash([0x91; 32]);
-        assert!(
-            missing
-                .load(&store, &reservation, saved.decode_bytes)
-                .is_err()
-        );
+        let saved = Bytes::new(1 << 20, source.clone()).unwrap();
+        assert!(saved.load(saved.decode_bytes - 1).is_err());
+        assert_eq!(saved.load(saved.decode_bytes).unwrap(), source);
     }
 }

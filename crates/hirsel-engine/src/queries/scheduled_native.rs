@@ -208,7 +208,7 @@ pub struct FrontNativeDefinitionOutput {
     pub product: Arc<crate::NativeDiscoveryProduct>,
     pub reads: Arc<Reads>,
     pub original: Option<Arc<crate::NativeOriginalProduct>>,
-    _owner: Arc<FrontNativeDefinitionQueries>,
+    _owner: Arc<Data>,
 }
 pub struct FrontNativeDefinitionQueries {
     selection: Option<(Arc<FrontRunQueries>, DefPath)>,
@@ -349,7 +349,7 @@ impl FrontNativeDefinitionQueries {
             product: data.product.clone(),
             original: data.original.clone(),
             reads: data.reads.clone(),
-            _owner: self.clone(),
+            _owner: data.clone(),
         })
     }
     pub(crate) fn export_archive(

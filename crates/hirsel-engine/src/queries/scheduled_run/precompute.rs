@@ -342,16 +342,9 @@ impl Task {
                 Poll::Ready(Ok(product)) => product,
             };
             if source {
-                let archive = match product.archive(ArchiveAdmission::Retained) {
-                    Ok(archive) => archive,
-                    Err(_) => return Poll::Ready(Err(queries.errors.resource)),
-                };
                 self.digest = ContentHash::of_parts(
-                    "hirsel.front.precompute.fold.v1",
-                    [
-                        self.digest.0.as_slice(),
-                        archive.reference().output.0.0.as_slice(),
-                    ],
+                    "hirsel.front.precompute.fold.v2",
+                    [self.digest.0.as_slice(), product.action.0.0.as_slice()],
                 );
             }
             drop(product);

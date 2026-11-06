@@ -402,7 +402,12 @@ fn admitted_native_definition_products_match_independent_scalar_products() {
                     );
                 }
             }
+            let catalogue = Arc::downgrade(&native);
             drop(native);
+            assert!(
+                catalogue.upgrade().is_none(),
+                "selected outputs must release the catalogue"
+            );
             drop(front);
             drop(lower);
             assert!(budget.reserved() > 0, "held catalogue owns admission");

@@ -377,12 +377,16 @@ impl QueryFactory for Factory {
         }))
     }
 }
+#[derive(PartialEq, Eq, PartialOrd, Ord)]
+enum DiagnosticRoot {
+    Front(DefId),
+    Lower(u32, ContentHash),
+}
 struct File {
     input: FileInput,
     diagnostics: Vec<Diagnostic>,
     error: Option<QueryError>,
-    front_diagnostics: BTreeMap<DefPath, Vec<Diagnostic>>,
-    lower_diagnostics: BTreeMap<(u32, ContentHash), Vec<Diagnostic>>,
+    root_diagnostics: BTreeMap<DiagnosticRoot, Vec<Diagnostic>>,
     lowered: Vec<(DefPath, ProductRef)>,
     source_rules: bool,
 }
@@ -392,8 +396,7 @@ impl File {
             diagnostics: input.diagnostics.clone(),
             error: input.error.clone(),
             input,
-            front_diagnostics: BTreeMap::new(),
-            lower_diagnostics: BTreeMap::new(),
+            root_diagnostics: BTreeMap::new(),
             lowered: Vec::new(),
             source_rules: false,
         }
@@ -402,11 +405,7 @@ impl File {
         self.error.is_none()
             && !has_errors(&self.diagnostics)
             && !self
-                .front_diagnostics
-                .values()
-                .any(|diagnostics| has_errors(diagnostics))
-            && !self
-                .lower_diagnostics
+                .root_diagnostics
                 .values()
                 .any(|diagnostics| has_errors(diagnostics))
     }
@@ -882,8 +881,11 @@ impl Task {
                             self.files[file].lowered.retain(|(old, _)| old != &path);
                             self.failed_lowered.retain(|(old, _)| old != &path);
                             self.files[file]
-                                .lower_diagnostics
-                                .remove(&(facts.query.kind, facts.query.address.0));
+                                .root_diagnostics
+                                .remove(&DiagnosticRoot::Lower(
+                                    facts.query.kind,
+                                    facts.query.address.0,
+                                ));
                             self.accept_lower(file, path, facts);
                         }
                     }
@@ -968,7 +970,8 @@ impl Task {
         file.source_rules |= facts.source_rules;
         match facts.result {
             Ok(diagnostics) => {
-                file.front_diagnostics.insert(path.clone(), diagnostics);
+                file.root_diagnostics
+                    .insert(DiagnosticRoot::Front(DefId::intern(path)), diagnostics);
                 if let Ok(product) = &selected {
                     self.front.push((
                         path.clone(),
@@ -991,7 +994,8 @@ impl Task {
                 ));
                 match error {
                     QueryError::Diagnostics(diagnostics) => {
-                        file.front_diagnostics.insert(path.clone(), diagnostics);
+                        file.root_diagnostics
+                            .insert(DiagnosticRoot::Front(DefId::intern(path)), diagnostics);
                     }
                     other => file.error(other, facts.phase),
                 }
@@ -1034,16 +1038,18 @@ impl Task {
     ) {
         match facts.result {
             Ok((diagnostics, observations)) => {
-                self.files[file]
-                    .lower_diagnostics
-                    .insert((facts.query.kind, facts.query.address.0), diagnostics);
+                self.files[file].root_diagnostics.insert(
+                    DiagnosticRoot::Lower(facts.query.kind, facts.query.address.0),
+                    diagnostics,
+                );
                 self.files[file].lowered.push((path, observations));
             }
             Err((reference, QueryError::Diagnostics(diagnostics))) => {
                 self.failed_lowered.push((path, reference));
-                self.files[file]
-                    .lower_diagnostics
-                    .insert((facts.query.kind, facts.query.address.0), diagnostics);
+                self.files[file].root_diagnostics.insert(
+                    DiagnosticRoot::Lower(facts.query.kind, facts.query.address.0),
+                    diagnostics,
+                );
             }
             Err((reference, error)) => {
                 self.failed_lowered.push((path, reference));
@@ -1106,8 +1112,7 @@ impl Task {
             .flat_map(|file| {
                 file.diagnostics
                     .iter()
-                    .chain(file.front_diagnostics.values().flatten())
-                    .chain(file.lower_diagnostics.values().flatten())
+                    .chain(file.root_diagnostics.values().flatten())
                     .cloned()
             })
             .collect();

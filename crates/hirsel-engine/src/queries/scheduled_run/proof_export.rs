@@ -10,6 +10,7 @@ use std::rc::Rc;
 /// producers. A returned ExportInput is data, with no native/V authority.
 pub struct FrontProofExport {
     run: Arc<FrontRunQueries>,
+    query: QueryId,
     headers: super::super::checked_signatures::ProofHeaders,
     entry: DefPath,
     roots: BTreeSet<DefPath>,
@@ -654,7 +655,7 @@ impl FrontProofExport {
         &self.run
     }
     pub fn query(&self) -> QueryId {
-        self.run.query(&self.entry).expect("captured export entry")
+        self.query
     }
     /// Export the exact Run behind this completed native source root. The
     /// producer identity check precedes body decoding and never reselects Run.
@@ -868,6 +869,7 @@ impl QueryEngine {
             .for_boundary(crate::store::ArchiveBoundary::Export);
         self.capture_proof_export(
             entry,
+            run.query(entry).ok_or(QueryError::NotImplemented)?,
             run,
             super::super::checked_signatures::ProofHeaders::Ready(headers),
             roots,
@@ -893,7 +895,14 @@ impl QueryEngine {
         selected.records = selected
             .records
             .for_boundary(crate::store::ArchiveBoundary::Export);
-        self.capture_proof_export(entry, run, headers, roots, allowance)
+        self.capture_proof_export(
+            entry,
+            run.query(entry).ok_or(QueryError::NotImplemented)?,
+            run,
+            headers,
+            roots,
+            allowance,
+        )
     }
     /// Attach to native's already selected Run. Its selected roots must cover
     /// every PS9 entry-package obligation; a subset remains a refusal.
@@ -915,6 +924,7 @@ impl QueryEngine {
         }
         self.capture_proof_export(
             entry,
+            native.run_query(entry).ok_or(QueryError::NotImplemented)?,
             run,
             super::super::checked_signatures::ProofHeaders::Ready(headers),
             roots,
@@ -924,6 +934,7 @@ impl QueryEngine {
     fn capture_proof_export(
         &mut self,
         entry: &DefPath,
+        query: QueryId,
         run: Arc<FrontRunQueries>,
         headers: super::super::checked_signatures::ProofHeaders,
         roots: BTreeSet<DefPath>,
@@ -937,6 +948,7 @@ impl QueryEngine {
         }
         Ok(Arc::new(FrontProofExport {
             run,
+            query,
             headers,
             entry: entry.clone(),
             roots,

@@ -1682,7 +1682,7 @@ impl QueryEngine {
         definition: &DefPath,
     ) -> Result<Vec<SignatureDependency>, QueryError> {
         let output = self.signature_output(definition)?;
-        Ok(match self.signatures.get(&DefId::intern(definition)) {
+        Ok(match self.signature_entry(DefId::intern(definition)) {
             Some(entry)
                 if self.items.contains_key(definition)
                     || self.catalog.body(definition).is_some() =>
@@ -1963,10 +1963,28 @@ impl QueryEngine {
         }
         Ok(bodies)
     }
-    pub(crate) fn signature_products(&self, definition: DefId) -> Option<&PhaseProducts> {
-        self.signatures
-            .get(&definition)
-            .map(|entry| &*entry.products)
+    /// Read the current header's metadata without pinning it in the optional
+    /// scalar memo cache or demanding a new header product.
+    pub(crate) fn signature_entry(
+        &self,
+        definition: DefId,
+    ) -> Option<Arc<Entry<hirsel_types::SignatureRef>>> {
+        self.signatures.get(&definition).cloned().or_else(|| {
+            self.header_products
+                .clone()
+                .or_else(|| {
+                    self.snapshot
+                        .as_ref()
+                        .filter(|(stamp, _)| *stamp == self.snapshot_stamp())?
+                        .1
+                        .get()?
+                        .header_products()
+                        .cloned()
+                })?
+                .ready(definition)?
+                .entry
+                .clone()
+        })
     }
     pub fn resolver_snapshot(
         &self,

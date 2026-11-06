@@ -28,13 +28,8 @@ impl QueryEngine {
     /// `path`'s private shape as its signature's normalization recorded it,
     /// here or in the std image.
     pub(crate) fn owner_record(&self, path: &DefPath) -> Option<OwnerRecord> {
-        if let Some(record) = self
-            .signature_products(DefId::intern(path))
-            .and_then(|products| products.representation.as_ref())
-        {
-            return Some(record.clone());
-        }
-        None
+        self.signature_entry(DefId::intern(path))
+            .and_then(|entry| entry.products.representation.clone())
     }
     /// A body-local view, never published by item_signature or the public
     /// provider. PROG-2's privacy boundary is the exact package (version included).
@@ -50,10 +45,7 @@ impl QueryEngine {
             return Ok((public, None));
         }
 
-        let Some(record) = self
-            .signature_products(public.definition)
-            .and_then(|products| products.representation.as_ref())
-        else {
+        let Some(record) = self.owner_record(public.definition.path()) else {
             // Absence is a private input too: adding a source shape must retry
             // an owner body's previously cached constructor rejection.
             let digest = self

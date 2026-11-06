@@ -539,6 +539,14 @@ impl Deref for Bytes {
     }
 }
 impl Bytes {
+    /// Allocation bound for a copied slice with an attached lifetime owner:
+    /// two region Arcs and the aligned payload Arc, including their counters.
+    pub fn owned_with_owner_bytes(len: u64) -> Option<u64> {
+        let alignment = std::mem::align_of::<usize>() as u64;
+        let payload = len.checked_add(alignment - 1)? / alignment * alignment;
+        payload.checked_add((2 * size_of::<Region>() + 6 * size_of::<usize>()) as u64)
+    }
+
     pub fn downgrade(&self) -> WeakBytes {
         WeakBytes {
             region: Arc::downgrade(&self.region),

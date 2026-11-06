@@ -8,7 +8,7 @@ use std::sync::Weak;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 mod scratch;
 
-// Bounds payload ownership, Arc/region headers and BTreeMap allocation overhead.
+// Initial content-tree reservation and archive-copy working overhead.
 const ENTRY_CHARGE: u64 = 2048;
 fn association_bytes(entries: usize) -> u64 {
     if entries == 0 {
@@ -17,6 +17,14 @@ fn association_bytes(entries: usize) -> u64 {
     let mut weight = hirsel_query_products::retained::MetadataWeight::default();
     weight.tree::<ContentHash, (Association, bool)>(entries);
     weight.bytes()
+}
+fn content_tree_bytes(entries: usize) -> u64 {
+    if entries == 0 {
+        return 0;
+    }
+    let mut weight = hirsel_query_products::retained::MetadataWeight::default();
+    weight.tree::<ContentHash, (Reference, Bytes)>(entries);
+    weight.bytes().max(ENTRY_CHARGE)
 }
 struct State {
     used: u64,
@@ -574,7 +582,11 @@ impl ResultStore for RequestStore {
         if let Some((actual, _)) = state.contents.get(&expected.output.0) {
             return (*actual == expected).then_some(expected);
         }
-        if !self.charge(&mut state, expected.len.checked_add(ENTRY_CHARGE)?) {
+        let next = state.contents.len().checked_add(1)?;
+        let growth =
+            content_tree_bytes(next).saturating_sub(content_tree_bytes(state.contents.len()));
+        let charge = Bytes::owned_with_owner_bytes(expected.len)?.checked_add(growth)?;
+        if !self.charge(&mut state, charge) {
             return None;
         }
         let bytes = Bytes::from(bytes).retain_owner(self.memory.clone());
@@ -1288,6 +1300,45 @@ mod tests {
                 request.associate_product(address, action, reference);
                 assert_eq!(request.retained_bytes(), charged);
             }
+            drop(request);
+            assert_eq!(budget.reserved(), 0);
+        }
+    }
+    #[test]
+    fn request_contents_charge_shared_tree_and_cover_physical_allocations() {
+        for count in [32u32, 64, 128] {
+            let allowance = 64 << 10;
+            let budget = hirsel_engine_admission::ProcessBudget::new(allowance);
+            let request =
+                RequestStore::new(Arc::new(NoneStore), budget.reserve(allowance).unwrap());
+            let mut references = Vec::with_capacity(count as usize);
+            let (_, actual) = crate::test_alloc::measured(|| {
+                for index in 0..count {
+                    references.push(request.put_content(domain(), &index.to_le_bytes()).unwrap());
+                }
+            });
+            let charged = request.retained_bytes();
+            assert!(!request.exhausted());
+            assert!(actual.live > 0);
+            assert!(charged >= actual.live as u64);
+            assert!(
+                charged >= actual.peak as u64,
+                "charged={charged}, actual={}",
+                actual.peak
+            );
+            assert!(charged <= allowance);
+            for (index, reference) in references.into_iter().enumerate() {
+                assert_eq!(
+                    &*request.get_content(reference).unwrap(),
+                    &(index as u32).to_le_bytes()
+                );
+            }
+            assert!(
+                request
+                    .put_content(domain(), &vec![0; allowance as usize])
+                    .is_none()
+            );
+            assert!(request.retained_bytes() <= allowance);
             drop(request);
             assert_eq!(budget.reserved(), 0);
         }

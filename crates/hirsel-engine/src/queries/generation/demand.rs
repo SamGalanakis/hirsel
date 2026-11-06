@@ -965,7 +965,14 @@ impl DemandProducer {
                             }
                         }
                     } else {
-                        return Err(refused("scope Front outcome is unavailable"));
+                        if let Err(reference) = selected
+                            && let Some(error) = front.runtime_error(reference)
+                        {
+                            return Err(error);
+                        }
+                        return Err(refused(&format!(
+                            "scope Front outcome is unavailable for {path}; query {query:?}; selected {selected:?}"
+                        )));
                     }
                     checked.insert(path.clone());
                 }

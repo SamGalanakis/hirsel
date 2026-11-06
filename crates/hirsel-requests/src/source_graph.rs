@@ -929,6 +929,14 @@ impl SourceProducts {
                         .unwrap_or_else(|| sources.clone()),
                 };
             }
+            if reference != errors.resource
+                && let Some(message) = hirsel_engine::requests::source_graph::runtime_diagnostic(
+                    store.as_ref(),
+                    reference,
+                )
+            {
+                return ToolError::Runtime(message);
+            }
             let message = if reference == errors.resource {
                 return ToolError::Runtime(format!(
                     "compiler query allowance exhausted; Front retained {}/{}B, Lower retained {}/{}B; Front refusal {:?}",

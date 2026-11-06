@@ -335,6 +335,47 @@ pub struct FrontCheckedOutput {
     _facts: Arc<FrontFacts>,
 }
 impl FrontBodyQueries {
+    pub(crate) fn runtime_error(&self, reference: Reference) -> Option<QueryError> {
+        let message = if reference == self.errors.resource {
+            format!(
+                "Front producer exceeded its admitted resources; retained {} of {} bytes; refusal {:?}",
+                self.retained_bytes(), self.admitted_bytes(), self.memory_refusal(),
+            )
+        } else if reference == self.errors.cycle {
+            "Front producer has a query dependency cycle".into()
+        } else if reference == self.errors.cancelled {
+            "Front producer was cancelled".into()
+        } else if reference == self.errors.panicked {
+            "Front producer panicked".into()
+        } else {
+            crate::requests::source_graph::runtime_diagnostic(&*self.store, reference)?
+        };
+        Some(QueryError::Operational(hirsel_types::OperationalFailure {
+            operation: "compiler query protocol".into(),
+            message,
+        }))
+    }
+    #[track_caller]
+    fn protocol_refusal(&self) -> Reference {
+        crate::requests::source_graph::protocol_failure(
+            &*self.store,
+            self.errors,
+            None,
+            &format!(
+                "Front producer state is unavailable in namespace {:?}",
+                self.namespace.identity()
+            ),
+        )
+    }
+    #[track_caller]
+    fn protocol_failure(&self, query: QueryId, detail: &str) -> Reference {
+        crate::requests::source_graph::protocol_failure(
+            &*self.store,
+            self.errors,
+            Some(query),
+            detail,
+        )
+    }
     fn delegated(&self, selected: &Result<ProductRef, Reference>) -> Option<Forwarded> {
         self.forwarded
             .lock()
@@ -555,7 +596,7 @@ impl FrontBodyQueries {
                 })
             })
     }
-    fn syntax(&self, input: &Input) -> Option<Arc<ItemSyntax>> {
+    fn syntax(&self, input: &Input) -> Result<Arc<ItemSyntax>, QueryError> {
         // Accepted literals are parser-created immutable source, and legitimately
         // combine the written header's anchor with generated body anchors. They
         // never enter the ordinary single-source untrusted archive decoder.
@@ -566,20 +607,27 @@ impl FrontBodyQueries {
             // identity; the syntax's owner is not a second instance identity.
             return (registration.definition() == input.definition.path()
                 && syntax.text_hash == input.implementation)
-                .then(|| syntax.clone());
+                .then(|| syntax.clone())
+                .ok_or_else(|| QueryError::Operational(hirsel_types::OperationalFailure {
+                    operation: "Front syntax recovery".into(),
+                    message: format!("accepted registration differs from the input for {}", input.definition.path()),
+                }));
         }
-        let syntax = self.namespace.syntax(input.definition.path()).ok()?;
+        let syntax = self.namespace.syntax(input.definition.path())?;
         if syntax.text_hash != input.implementation {
-            return None;
+            return Err(QueryError::Operational(hirsel_types::OperationalFailure {
+                operation: "Front syntax recovery".into(),
+                message: format!("captured implementation differs from the input for {}", input.definition.path()),
+            }));
         }
         if generation::instance_bodied(&syntax) {
             let mut header = (*syntax).clone();
             if let hirsel_syntax::ItemKind::Function { body, .. } = &mut header.item.kind {
                 *body = None;
             }
-            return Some(Arc::new(header));
+            return Ok(Arc::new(header));
         }
-        Some(syntax)
+        Ok(syntax)
     }
 
     /// Potential task, result and counter slots. Completed read/summary
@@ -1944,7 +1992,7 @@ impl FrontBodyQueries {
             .inputs
             .values()
             .find(|input| input.definition.path() == path)?;
-        Some((self.syntax(input)?, self.signature(input).ok()?))
+        Some((self.syntax(input).ok()?, self.signature(input).ok()?))
     }
 
     /// Distinct decoded bodies currently owned by active output consumers.
@@ -2018,7 +2066,7 @@ impl QueryContext for DetachedFrontContext<'_> {
         self.queries.evict_idle(self.scratch)
     }
     fn read(&mut self, _: QueryId) -> std::task::Poll<Result<ProductRef, Reference>> {
-        std::task::Poll::Ready(Err(self.queries.errors.protocol))
+        std::task::Poll::Ready(Err(self.queries.protocol_refusal()))
     }
 }
 struct Factory(Arc<FrontBodyQueries>);
@@ -2082,16 +2130,19 @@ impl QueryFactory for Factory {
             return front.factory().create(query);
         }
         if query.kind != FRONT_BODY_KIND {
-            return Err(self.0.errors.protocol);
+            return Err(self
+                .0
+                .protocol_failure(query, "Front factory received another query kind"));
         }
         let (key, input, materialize) = if let Some(input) = self.0.inputs.get(&query.address.0) {
             (query.address.0, input, false)
         } else {
-            let key = *self
-                .0
-                .body_demands
-                .get(&query.address.0)
-                .ok_or(self.0.errors.protocol)?;
+            let key = *self.0.body_demands.get(&query.address.0).ok_or_else(|| {
+                self.0.protocol_failure(
+                    query,
+                    "Front input is unavailable in the registered immutable views",
+                )
+            })?;
             (key, &self.0.inputs[&key], true)
         };
         Ok(Box::new(BodyTask {
@@ -2141,18 +2192,10 @@ impl QueryTask for BodyTask {
         if pending {
             let Some(producer) = self.queries.demand.get().and_then(std::sync::Weak::upgrade)
             else {
-                if std::env::var_os("HIRSEL_OPERATION_OWNER_TRACE").is_some() {
-                    eprintln!(
-                        "OWNER PROTOCOL BodyTask::poll generated={} registration=false demand_installed={} demand_strong={}",
-                        definition.path(),
-                        self.queries.demand.get().is_some(),
-                        self.queries
-                            .demand
-                            .get()
-                            .map_or(0, std::sync::Weak::strong_count)
-                    );
-                }
-                return finish(Err(self.queries.errors.protocol));
+                return finish(Err(self.queries.protocol_failure(self.query, &format!(
+                    "generated declaration {} has no accepted registration and no live demand producer; route installed={}",
+                    definition.path(), self.queries.demand.get().is_some(),
+                ))));
             };
             let demand = match producer.query(
                 self.queries.namespace.clone(),
@@ -2177,7 +2220,14 @@ impl QueryTask for BodyTask {
             }
             let successor = match producer.completed(demand) {
                 Some(Ok(successor)) => successor,
-                _ => return finish(Err(selected.err().unwrap_or(self.queries.errors.protocol))),
+                _ => {
+                    return finish(Err(selected.err().unwrap_or_else(|| {
+                        self.queries.protocol_failure(
+                            self.query,
+                            "generation demand settled without a successor or failure",
+                        )
+                    })));
+                }
             };
             let owner = successor.owner().body_front().clone();
             let Some(query) = (if self.materialize {
@@ -2185,7 +2235,13 @@ impl QueryTask for BodyTask {
             } else {
                 owner.query(definition.path())
             }) else {
-                return finish(Err(self.queries.errors.protocol));
+                return finish(Err(self.queries.protocol_failure(
+                    self.query,
+                    &format!(
+                        "accepted successor has no Front producer for {}",
+                        definition.path(),
+                    ),
+                )));
             };
             let selected = match cx.read(query) {
                 std::task::Poll::Pending => return QueryPoll::Waiting(vec![query]),
@@ -2291,7 +2347,7 @@ impl BodyTask {
             )
             .ok_or(queries.errors.resource)?;
         Arc::get_mut(&mut cached.facts)
-            .ok_or(queries.errors.protocol)?
+            .ok_or_else(|| queries.protocol_refusal())?
             .diagnostic_sources = Some(failure.sources);
         queries.install_outcome(self.input, cached);
         Err(reference)
@@ -2306,12 +2362,15 @@ impl BodyTask {
         let input = &queries.inputs[&self.input];
         let (reference, reads, summary) = {
             let slots = queries.slots.lock().unwrap_or_else(|e| e.into_inner());
-            let old = match slots.get(&self.input).ok_or(queries.errors.protocol)? {
-                FrontSlot::Archived(_) => return Err(queries.errors.protocol),
+            let old = match slots
+                .get(&self.input)
+                .ok_or_else(|| queries.protocol_refusal())?
+            {
+                FrontSlot::Archived(_) => return Err(queries.protocol_refusal()),
                 FrontSlot::Live { outcome, .. } => outcome,
             };
             let (reference, publication, diagnostics) = match &old.state {
-                FrontState::Failed { .. } => return Err(queries.errors.protocol),
+                FrontState::Failed { .. } => return Err(queries.protocol_refusal()),
                 FrontState::Settled {
                     archive,
                     publication,
@@ -2320,14 +2379,17 @@ impl BodyTask {
                 } => (*archive, publication, diagnostics),
             };
             if outcome.result.is_err() || old.reads.as_ref() != outcome.reads.as_ref() {
-                return Err(queries.errors.protocol);
+                return Err(queries.protocol_refusal());
             }
             let summary = publication
                 .live_value::<crate::products::LiveSummaryProduct>()
-                .ok_or(queries.errors.protocol)?
+                .ok_or_else(|| queries.protocol_refusal())?
                 .clone();
             let old_summary = summary.value();
-            let current_summary = outcome.summary.as_ref().ok_or(queries.errors.protocol)?;
+            let current_summary = outcome
+                .summary
+                .as_ref()
+                .ok_or_else(|| queries.protocol_refusal())?;
             if !crate::SummaryView::from(old_summary).equivalent(
                 &queries.types,
                 crate::SummaryView::from(&**current_summary),
@@ -2337,18 +2399,18 @@ impl BodyTask {
                     != outcome
                         .result
                         .as_ref()
-                        .map_err(|_| queries.errors.protocol)?
+                        .map_err(|_| queries.protocol_refusal())?
                         .diagnostics
                         .as_slice()
             {
-                return Err(queries.errors.protocol);
+                return Err(queries.protocol_refusal());
             }
             outcome.phase = old.phase;
             (reference, old.reads.clone(), summary)
         };
         if let (Some(reference), Some(bytes)) = (reference, bytes) {
             if reference.domain.reference(bytes) != Some(reference) {
-                return Err(queries.errors.protocol);
+                return Err(queries.protocol_refusal());
             }
             if queries.store.put_content(reference.domain, bytes) != Some(reference) {
                 return Err(queries.errors.resource);
@@ -2360,14 +2422,17 @@ impl BodyTask {
             .ok_or(queries.errors.resource)?;
         let body = product
             .live_value::<crate::products::LiveAnalyzedProduct>()
-            .ok_or(queries.errors.protocol)?;
+            .ok_or_else(|| queries.protocol_refusal())?;
         let mut slots = queries.slots.lock().unwrap_or_else(|e| e.into_inner());
-        let current = match slots.get_mut(&self.input).ok_or(queries.errors.protocol)? {
-            FrontSlot::Archived(_) => return Err(queries.errors.protocol),
+        let current = match slots
+            .get_mut(&self.input)
+            .ok_or_else(|| queries.protocol_refusal())?
+        {
+            FrontSlot::Archived(_) => return Err(queries.protocol_refusal()),
             FrontSlot::Live { outcome, .. } => outcome,
         };
         match &mut current.state {
-            FrontState::Failed { .. } => return Err(queries.errors.protocol),
+            FrontState::Failed { .. } => return Err(queries.protocol_refusal()),
             FrontState::Settled { body: owner, .. } => *owner = Some(body.downgrade()),
         }
         drop(slots);
@@ -2420,7 +2485,7 @@ impl BodyTask {
             &queries.records,
             &queries.types,
             input.definition,
-            queries.syntax(input)?,
+            queries.syntax(input).ok()?,
             &queries.citations,
             input.key.1,
             &bytes,
@@ -2465,7 +2530,7 @@ impl BodyTask {
             &queries.records,
             &queries.types,
             input.definition,
-            queries.syntax(input)?,
+            queries.syntax(input).ok()?,
             &queries.citations,
             input.key.1,
             &bytes,
@@ -2601,7 +2666,11 @@ impl BodyTask {
         }
         let worker = queries.worker();
         queries.release_handoff();
-        let syntax = queries.syntax(input).ok_or(queries.errors.protocol)?;
+        let syntax = queries.syntax(input).map_err(|error| {
+            queries.protocol_failure(self.query, &format!(
+                "syntax recovery failed for {}: {error:?}", input.definition.path(),
+            ))
+        })?;
         let SignatureInput {
             signature,
             reads: signature_reads,
@@ -2767,7 +2836,10 @@ impl BodyTask {
         let (record, action) = if failed {
             let record = queries
                 .store
-                .put_content(FAILURE, bytes.as_deref().ok_or(queries.errors.protocol)?)
+                .put_content(
+                    FAILURE,
+                    bytes.as_deref().ok_or_else(|| queries.protocol_refusal())?,
+                )
                 .ok_or(queries.errors.resource)?;
             (
                 Some(record),
@@ -2829,7 +2901,7 @@ impl BodyTask {
                 cx,
                 queries
                     .body_query(input.definition.path())
-                    .ok_or(queries.errors.protocol)?
+                    .ok_or_else(|| queries.protocol_refusal())?
                     .address,
                 action,
                 outcome,

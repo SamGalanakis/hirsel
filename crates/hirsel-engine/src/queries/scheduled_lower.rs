@@ -493,6 +493,27 @@ pub struct FrontLowerQueries {
     source: Arc<LowerSource>,
 }
 impl FrontLowerQueries {
+    #[track_caller]
+    fn protocol_refusal(&self) -> Reference {
+        crate::requests::source_graph::protocol_failure(
+            &*self.store,
+            self.errors,
+            None,
+            &format!(
+                "Lower/Evaluate producer state is unavailable in namespace {:?}",
+                self.namespace.identity()
+            ),
+        )
+    }
+    #[track_caller]
+    fn protocol_failure(&self, query: QueryId, detail: &str) -> Reference {
+        crate::requests::source_graph::protocol_failure(
+            &*self.store,
+            self.errors,
+            Some(query),
+            detail,
+        )
+    }
     pub(crate) fn bind_demand(self: &Arc<Self>, demand: &Arc<generation::demand::DemandProducer>) {
         let _ = self.demand.set(Arc::downgrade(demand));
         self.front.bind_demand(demand);
@@ -1350,7 +1371,9 @@ impl FrontLowerQueries {
                         matches!(signature.kind, hirsel_types::SignatureKind::Const { .. })
                     })
                 }) {
-            let evaluate = self.evaluate_query(&path).ok_or(self.errors.protocol)?;
+            let evaluate = self
+                .evaluate_query(&path)
+                .ok_or_else(|| self.protocol_refusal())?;
             reads.read_consuming(evaluate).await.is_ok()
         } else {
             true
@@ -1405,7 +1428,7 @@ impl FrontLowerQueries {
                 let observed = self
                     .validation_reads(&path.0.package, &source.reads)
                     .await?;
-                source.merge(&observed.finish().map_err(|_| self.errors.protocol)?);
+                source.merge(&observed.finish().map_err(|_| self.protocol_refusal())?);
             }
             Err(source.overflow(self.inputs[&path].captured.site))
         } else {
@@ -1418,11 +1441,16 @@ impl FrontLowerQueries {
             let actual = match &selection {
                 Some(selection) => owner
                     .staged_query(selection.declaration.path(), &selection.arguments)
-                    .map_err(|_| self.errors.protocol)?,
-                None => owner.id(&path, id.kind).ok_or(self.errors.protocol)?,
+                    .map_err(|_| self.protocol_refusal())?,
+                None => owner
+                    .id(&path, id.kind)
+                    .ok_or_else(|| self.protocol_refusal())?,
             };
             if actual == id {
-                return Err(self.errors.protocol);
+                return Err(self.protocol_failure(
+                    id,
+                    &format!("successor restart for {path} selected its own query identity"),
+                ));
             }
             let reads = source.reads.clone();
             drop(computed);
@@ -1451,8 +1479,10 @@ impl FrontLowerQueries {
             let actual = match &selection {
                 Some(selection) => owner
                     .staged_query(selection.declaration.path(), &selection.arguments)
-                    .map_err(|_| self.errors.protocol)?,
-                None => owner.id(&path, id.kind).ok_or(self.errors.protocol)?,
+                    .map_err(|_| self.protocol_refusal())?,
+                None => owner
+                    .id(&path, id.kind)
+                    .ok_or_else(|| self.protocol_refusal())?,
             };
             let key = if let Some(selection) = &selection {
                 selection.key.clone()
@@ -1523,7 +1553,7 @@ impl FrontLowerQueries {
         }
         let observed = std::mem::take(&mut *source.observed.borrow_mut())
             .finish()
-            .map_err(|_| self.errors.protocol)?;
+            .map_err(|_| self.protocol_refusal())?;
         let executed = source.evidence.borrow().executed;
         let execution = result
             .as_ref()
@@ -1574,7 +1604,10 @@ impl FrontLowerQueries {
         let selections = std::mem::take(&mut *source.selections.borrow_mut());
         let reads_decode_bytes = 0;
         let diagnostic_sources = source.diagnostic_sources.borrow().clone();
-        let error = result.as_ref().err().ok_or(self.errors.protocol)?;
+        let error = result
+            .as_ref()
+            .err()
+            .ok_or_else(|| self.protocol_refusal())?;
         let bytes = self
             .records
             .encode_at(
@@ -1668,24 +1701,33 @@ impl FrontLowerQueries {
         }
         let raw = match &outcome.result {
             Ok(Value::Lower(lower)) => Some((
-                lower.decode(self).ok_or(self.errors.protocol)?,
+                lower.decode(self).ok_or_else(|| self.protocol_refusal())?,
                 self.records
                     .decode(
                         &*self.namespace.anchors,
                         &self
                             .store
-                            .get_content(*lower.materialized.get().ok_or(self.errors.protocol)?)
-                            .ok_or(self.errors.protocol)?,
+                            .get_content(
+                                *lower
+                                    .materialized
+                                    .get()
+                                    .ok_or_else(|| self.protocol_refusal())?,
+                            )
+                            .ok_or_else(|| self.protocol_refusal())?,
                     )
-                    .ok_or(self.errors.protocol)?,
+                    .ok_or_else(|| self.protocol_refusal())?,
             )),
             _ => None,
         };
         let mut original = if let Some((output, materialized)) = raw {
             Some({
-                let lower = match outcome.result.as_ref().map_err(|_| self.errors.protocol)? {
+                let lower = match outcome
+                    .result
+                    .as_ref()
+                    .map_err(|_| self.protocol_refusal())?
+                {
                     Value::Lower(lower) => lower,
-                    _ => return Err(self.errors.protocol),
+                    _ => return Err(self.protocol_refusal()),
                 };
                 let path = output.value.path;
                 FrontLowerOutput {
@@ -1701,16 +1743,16 @@ impl FrontLowerQueries {
                     implementation_revision: self
                         .inputs
                         .get(path.path())
-                        .ok_or(self.errors.protocol)?
+                        .ok_or_else(|| self.protocol_refusal())?
                         .captured
                         .implementation,
                     signature: self
                         .namespace
                         .snapshot
                         .signature(path)
-                        .ok_or(self.errors.protocol)?
+                        .ok_or_else(|| self.protocol_refusal())?
                         .as_ref()
-                        .map_err(|_| self.errors.protocol)?
+                        .map_err(|_| self.protocol_refusal())?
                         .fingerprint,
                     verified: lower.verified(self).unwrap_or(None),
                     query_observations: None,
@@ -1851,7 +1893,7 @@ impl FrontLowerQueries {
         Ok(ProductRef::import_archive(
             id.address,
             action,
-            archive.ok_or(self.errors.protocol)?,
+            archive.ok_or_else(|| self.protocol_refusal())?,
         ))
     }
     async fn validation_reads(
@@ -1907,11 +1949,18 @@ impl FrontLowerQueries {
                     .compose(materialize)
                     .await
                     .map_err(|error| source.refused(error))?;
-                self.front
-                    .outcome(Ok(product.clone()))
-                    .ok_or_else(|| source.refused(self.errors.protocol))?
+                self.front.outcome(Ok(product.clone())).ok_or_else(|| {
+                    source.refused(self.protocol_failure(
+                        front,
+                        &format!("Front materialization for {path} settled without its body"),
+                    ))
+                })?
             }
-            None => return Err(source.refused(selected.err().unwrap_or(self.errors.protocol))),
+            None => {
+                return Err(
+                    source.refused(selected.err().unwrap_or_else(|| self.protocol_refusal()))
+                );
+            }
         };
         if let Some(producer) = self.demand_producer()
             && let Some(successor) = producer
@@ -1931,7 +1980,7 @@ impl FrontLowerQueries {
             source.merge(
                 &observed
                     .finish()
-                    .map_err(|_| source.refused(self.errors.protocol))?,
+                    .map_err(|_| source.refused(self.protocol_refusal()))?,
             );
         }
         if let Some(registration) = self.front.registration(path) {
@@ -2308,16 +2357,16 @@ impl FrontLowerQueries {
                     implementation_revision: self
                         .inputs
                         .get(path.path())
-                        .ok_or(self.errors.protocol)?
+                        .ok_or_else(|| self.protocol_refusal())?
                         .captured
                         .implementation,
                     signature: self
                         .namespace
                         .snapshot
                         .signature(path)
-                        .ok_or(self.errors.protocol)?
+                        .ok_or_else(|| self.protocol_refusal())?
                         .as_ref()
-                        .map_err(|_| self.errors.protocol)?
+                        .map_err(|_| self.protocol_refusal())?
                         .fingerprint,
                     verified: lower.local_verified.clone(),
                     query_observations: Some(observations),
@@ -2404,7 +2453,7 @@ impl FrontLowerQueries {
                     }),
                 )
             }
-            _ => return Err(self.errors.protocol),
+            _ => return Err(self.protocol_refusal()),
         };
         loop {
             let charge = outcome.retained_bytes().ok_or(self.errors.resource)?;
@@ -2511,7 +2560,10 @@ impl LocalQueryFactory for Factory {
         if !matches!(id.kind, FRONT_LOWER_KIND | FRONT_EVALUATE_KIND)
             || self.owner.path(id).is_none()
         {
-            return Err(self.owner.errors.protocol);
+            return Err(self.owner.protocol_failure(
+                id,
+                "Lower/Evaluate input or demand is unavailable in the registered immutable views",
+            ));
         }
         Ok(self.owner.weight)
     }
@@ -2532,7 +2584,12 @@ impl LocalQueryFactory for Factory {
             return owner.factory().create(id);
         }
         let weight = self.weight(id)?;
-        let path = self.owner.path(id).ok_or(self.owner.errors.protocol)?;
+        let path = self.owner.path(id).ok_or_else(|| {
+            self.owner.protocol_failure(
+                id,
+                "Lower/Evaluate input disappeared after selecting its weight",
+            )
+        })?;
         let owner = self.owner.clone();
         Ok(Box::new(LowerTask(LocalFutureTask::new(
             id,
@@ -2821,7 +2878,7 @@ impl Source {
                 .collect();
             diagnostics = crate::select_diagnostics(diagnostics, Some(&owner.namespace.sources));
             if diagnostics.is_empty() {
-                return Err(self.refused(owner.errors.protocol));
+                return Err(self.refused(owner.protocol_refusal()));
             }
             return Err(QueryError::Diagnostics(vec![diagnostics.remove(0)]));
         }
@@ -2838,7 +2895,9 @@ impl Source {
         }
         let outcome = owner
             .selected(selected_id, selected.clone())
-            .ok_or_else(|| self.refused(selected.err().unwrap_or(owner.errors.protocol)))?;
+            .ok_or_else(|| {
+                self.refused(selected.err().unwrap_or_else(|| owner.protocol_refusal()))
+            })?;
         self.merge(
             &outcome
                 .reads(&owner)

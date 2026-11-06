@@ -1503,7 +1503,7 @@ impl QueryEngine {
                             .retain_owner(installed.source.clone()),
                     }
                 }
-                None => runtime_failure(reference, installed.errors),
+                None => runtime_failure(reference, installed.errors, store.as_ref()),
             }),
         };
         runtime.shutdown();
@@ -1667,16 +1667,45 @@ pub fn registration(error: &'static str) -> ToolError {
     ToolError::Runtime(error.into())
 }
 
+const RUNTIME_DIAGNOSTIC: Domain = Domain {
+    kind: 0x5200_0001,
+    schema: 1,
+};
+
+#[track_caller]
+pub(crate) fn protocol_failure(
+    store: &dyn ResultStore,
+    errors: RuntimeErrors,
+    query: Option<QueryId>,
+    detail: &str,
+) -> hirsel_engine_store::Reference {
+    let site = std::panic::Location::caller();
+    let message = format!(
+        "compiler query protocol failure: {detail}; query {query:?}; producer {}:{}",
+        site.file(),
+        site.line()
+    );
+    store
+        .put_content(RUNTIME_DIAGNOSTIC, message.as_bytes())
+        .unwrap_or(errors.resource)
+}
+
+pub fn runtime_diagnostic(
+    store: &dyn ResultStore,
+    reference: hirsel_engine_store::Reference,
+) -> Option<String> {
+    (reference.domain == RUNTIME_DIAGNOSTIC).then_some(())?;
+    let bytes = store.get_content(reference)?;
+    let message = std::str::from_utf8(&bytes).ok()?;
+    message
+        .starts_with("compiler query protocol failure: ")
+        .then(|| message.to_owned())
+}
+
 pub fn runtime_errors(store: &dyn ResultStore) -> Result<RuntimeErrors, ToolError> {
     let record = |message: &[u8]| {
         store
-            .put_content(
-                Domain {
-                    kind: 0x5200_0001,
-                    schema: 1,
-                },
-                message,
-            )
+            .put_content(RUNTIME_DIAGNOSTIC, message)
             .ok_or_else(|| {
                 ToolError::Runtime("compiler runtime diagnostics exceed transport admission".into())
             })
@@ -1690,7 +1719,14 @@ pub fn runtime_errors(store: &dyn ResultStore) -> Result<RuntimeErrors, ToolErro
     })
 }
 
-fn runtime_failure(reference: hirsel_engine_store::Reference, errors: RuntimeErrors) -> ToolError {
+fn runtime_failure(
+    reference: hirsel_engine_store::Reference,
+    errors: RuntimeErrors,
+    store: &dyn ResultStore,
+) -> ToolError {
+    if let Some(message) = runtime_diagnostic(store, reference) {
+        return ToolError::Runtime(message);
+    }
     let message = if reference == errors.resource {
         "a compiler producer exceeded its admitted resources"
     } else if reference == errors.cycle {

@@ -150,6 +150,122 @@ pub(super) fn solve<T: Clone + PartialEq>(
     ins
 }
 
+/// The predecessor solver with unchanged balanced join subtrees retained
+/// across visits. Edge and block equality still determine convergence exactly;
+/// no old contribution is accumulated and no lattice identity is assumed.
+pub(super) fn solve_cached<T: Clone + PartialEq>(
+    cfg: &Cfg,
+    init: T,
+    mut transfer: impl FnMut(BlockId, &T) -> Vec<(EdgeId, T)>,
+    join: impl Fn(&mut T, &T),
+) -> Vec<Option<T>> {
+    let mut ins: Vec<Option<T>> = vec![None; cfg.succ.len()];
+    let mut outs: Vec<Option<T>> = vec![None; cfg.source.len()];
+    let mut targets: Vec<Option<BlockId>> = vec![None; cfg.source.len()];
+    for out in cfg.succ.iter().flatten() {
+        targets[out.edge.index()] = Some(out.target);
+    }
+    let mut dirty = vec![false; cfg.source.len()];
+    let mut joins: Vec<Joins<T>> = (0..cfg.succ.len()).map(|_| Joins::default()).collect();
+    let mut work = BTreeSet::from([0usize]);
+    while let Some(next) = work.pop_first() {
+        let block = cfg.rpo[next];
+        let arriving = (block == cfg.entry)
+            .then(|| (cfg.source.len(), init.clone(), false))
+            .into_iter()
+            .chain(cfg.preds[block.index()].iter().filter_map(|&(_, e)| {
+                outs[e.index()]
+                    .as_ref()
+                    .map(|state| (e.index(), state.clone(), dirty[e.index()]))
+            }));
+        let joined = joins[block.index()].update(arriving.collect(), &join);
+        for &(_, edge) in &cfg.preds[block.index()] {
+            dirty[edge.index()] = false;
+        }
+        if joined == ins[block.index()] {
+            continue;
+        }
+        ins[block.index()] = joined;
+        let Some(state) = &ins[block.index()] else {
+            continue;
+        };
+        for (edge, out) in transfer(block, state) {
+            if outs[edge.index()].as_ref() == Some(&out) {
+                continue;
+            }
+            outs[edge.index()] = Some(out);
+            dirty[edge.index()] = true;
+            let target = targets[edge.index()].expect("an edge of this block");
+            if let Some(order) = cfg.order[target.index()] {
+                work.insert(order);
+            }
+        }
+    }
+    ins
+}
+
+/// Cached levels of the same ordered, balanced reduction as `join_all`.
+/// Each edge has one target, so its dirty bit is consumed when that target
+/// rebuilds its input. A new predecessor resets the tree: compacting absent
+/// inputs must preserve the reference reduction's exact pairing and order.
+struct Joins<T> {
+    sources: Vec<usize>,
+    levels: Vec<Vec<T>>,
+}
+
+impl<T> Default for Joins<T> {
+    fn default() -> Self {
+        Self {
+            sources: Vec::new(),
+            levels: Vec::new(),
+        }
+    }
+}
+
+impl<T: Clone> Joins<T> {
+    fn update(&mut self, arriving: Vec<(usize, T, bool)>, join: impl Fn(&mut T, &T)) -> Option<T> {
+        let sources: Vec<_> = arriving.iter().map(|(source, _, _)| *source).collect();
+        let reset = sources != self.sources;
+        if reset {
+            self.sources = sources;
+            self.levels.clear();
+        }
+        let mut states: Vec<_> = arriving
+            .into_iter()
+            .map(|(_, state, dirty)| (state, dirty || reset))
+            .collect();
+        let mut level = 0;
+        while states.len() > 1 {
+            if level == self.levels.len() {
+                self.levels
+                    .push(Vec::with_capacity(states.len().div_ceil(2)));
+            }
+            let cached = &mut self.levels[level];
+            let mut pairs = states.into_iter();
+            let mut next = Vec::with_capacity(pairs.len().div_ceil(2));
+            while let Some((mut a, mut dirty)) = pairs.next() {
+                let b = pairs.next();
+                dirty |= b.as_ref().is_some_and(|(_, changed)| *changed);
+                let index = next.len();
+                if dirty || index == cached.len() {
+                    if let Some((b, _)) = b {
+                        join(&mut a, &b);
+                    }
+                    if index == cached.len() {
+                        cached.push(a);
+                    } else {
+                        cached[index] = a;
+                    }
+                }
+                next.push((cached[index].clone(), dirty));
+            }
+            states = next;
+            level += 1;
+        }
+        states.pop().map(|(state, _)| state)
+    }
+}
+
 /// The join of `states`, neighbours first, level by level. The states
 /// reaching a block with many predecessors (a cleanup tail shared by many
 /// failure sites) are successive points of one function and share structure

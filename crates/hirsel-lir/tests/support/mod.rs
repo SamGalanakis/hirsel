@@ -1518,7 +1518,8 @@ impl<S: Stage> Lir<S> {
             layouts: &table,
             manifest: &manifest,
         };
-        let ordinary = validate::check(&unit, &inputs);
+        let ordinary =
+            hirsel_lir::testing::with_reference_ownership(|| validate::check(&unit, &inputs));
         let context = validate::ValidationContext::new(&inputs);
         // Every mutation and its accepted twin must agree when program checks
         // are first computed, then reused by a later stage/unit check.

@@ -4,7 +4,7 @@
 //! edges.
 //!
 //! Two passes. The lattice pass solves slot, loan, region, stale-view,
-//! unplaced-address and cleanup-order states to a fixpoint with `flow::solve`. The check pass then
+//! unplaced-address and cleanup-order states to a fixpoint with `flow::solve_cached`. The check pass then
 //! walks every block once in reverse postorder from its converged state,
 //! reporting violations and replaying holder credits. Credits are exact, not
 //! a lattice: a join's predecessors must agree on every credit (must-ownership;
@@ -296,16 +296,103 @@ fn join_slot(x: &mut SlotState, y: &SlotState) {
     }
 }
 
+fn union<T: Ord + Clone>(a: &mut Rc<BTreeSet<T>>, b: &Rc<BTreeSet<T>>) {
+    if Rc::ptr_eq(a, b) || b.is_subset(a) {
+        return;
+    }
+    Rc::make_mut(a).extend(b.iter().cloned());
+}
+
 fn join(a: &mut State, b: &State) {
+    if !Rc::ptr_eq(&a.receipt_slots, &b.receipt_slots)
+        && !a.receipt_slots.is_subset(&b.receipt_slots)
+    {
+        Rc::make_mut(&mut a.receipt_slots).retain(|pair| b.receipt_slots.contains(pair));
+    }
+    union(&mut a.defusing, &b.defusing);
+    a.slots.join(&b.slots, join_slot);
+    a.loans.join(&b.loans, |x, y| *x = x.join(*y));
+    a.regions.join(&b.regions, |x, y| *x = x.join(*y));
+    union(&mut a.stale, &b.stale);
+    union(&mut a.unplaced, &b.unplaced);
+    union(&mut a.order, &b.order);
+    if !Rc::ptr_eq(&a.parts, &b.parts) && a.parts != b.parts {
+        let mut parts = (*a.parts).clone();
+        let values: BTreeSet<_> = a.parts.keys().chain(b.parts.keys()).copied().collect();
+        for v in values {
+            let x = a.parts.get(&v).cloned().unwrap_or_default();
+            let y = b.parts.get(&v).cloned().unwrap_or_default();
+            let keys: BTreeSet<_> = x.keys().chain(y.keys()).cloned().collect();
+            let joined = keys
+                .into_iter()
+                .map(|k| {
+                    let l = x.get(&k).copied().unwrap_or(Tri::No);
+                    let r = y.get(&k).copied().unwrap_or(Tri::No);
+                    (k, l.join(r))
+                })
+                .collect();
+            parts.insert(v, joined);
+        }
+        if parts != *a.parts {
+            a.parts = Rc::new(parts);
+        }
+    }
+    let flags_changed = !Rc::ptr_eq(&a.flags, &b.flags)
+        && a.flags
+            .iter()
+            .any(|(part, value)| b.flags.get(part) != Some(value));
+    if flags_changed {
+        Rc::make_mut(&mut a.flags).retain(|s, v| b.flags.get(s) == Some(v));
+    }
+    if flags_changed
+        || a.flag_phases != b.flag_phases
+        || a.flag_phases.keys().any(|part| !a.flags.contains_key(part))
+    {
+        let mut phases = (*a.flag_phases).clone();
+        phases.retain(|part, own| {
+            if !a.flags.contains_key(part) {
+                return false;
+            }
+            let Some(other) = b.flag_phases.get(part) else {
+                return false;
+            };
+            match (&mut *own, other) {
+                (None, other) => *own = other.clone(),
+                (Some(own), Some(other)) => {
+                    let paths: BTreeSet<_> = own.keys().chain(other.keys()).cloned().collect();
+                    for path in paths {
+                        let phase = own.get(&path).copied().unwrap_or(LIVE)
+                            | other.get(&path).copied().unwrap_or(LIVE);
+                        own.insert(path, phase);
+                    }
+                }
+                _ => {}
+            }
+            true
+        });
+        if phases != *a.flag_phases {
+            a.flag_phases = Rc::new(phases);
+        }
+    }
+}
+
+#[cfg(feature = "testing")]
+fn reference_join(a: &mut State, b: &State) {
     if !Rc::ptr_eq(&a.receipt_slots, &b.receipt_slots) {
         Rc::make_mut(&mut a.receipt_slots).retain(|pair| b.receipt_slots.contains(pair));
     }
     if !Rc::ptr_eq(&a.defusing, &b.defusing) && !b.defusing.is_subset(&a.defusing) {
         Rc::make_mut(&mut a.defusing).extend(b.defusing.iter().cloned());
     }
-    a.slots.join(&b.slots, join_slot);
-    a.loans.join(&b.loans, |x, y| *x = x.join(*y));
-    a.regions.join(&b.regions, |x, y| *x = x.join(*y));
+    for i in 0..a.slots.len() {
+        join_slot(&mut a.slots[i], &b.slots[i]);
+    }
+    for i in 0..a.loans.len() {
+        a.loans[i] = a.loans[i].join(b.loans[i]);
+    }
+    for i in 0..a.regions.len() {
+        a.regions[i] = a.regions[i].join(b.regions[i]);
+    }
     if !Rc::ptr_eq(&a.stale, &b.stale) && !b.stale.is_subset(&a.stale) {
         Rc::make_mut(&mut a.stale).extend(b.stale.iter().copied());
     }
@@ -556,18 +643,25 @@ pub(super) fn check<S: Stage>(cx: &Cx<'_, S>, facts: &Facts, report: &mut Report
         receipt_pairs: std::cell::OnceCell::new(),
         receipt_slots: &receipt_slots,
     };
-    let ins = flow::solve(
-        &facts.cfg,
-        init,
-        |b, st| {
-            walker
-                .block(b, st.clone(), Credits::new())
-                .into_iter()
-                .map(|(e, s, _)| (e, s))
-                .collect()
-        },
-        join,
-    );
+    let transfer = &mut |b, st: &State| {
+        walker
+            .block(b, st.clone(), Credits::new())
+            .into_iter()
+            .map(|(e, s, _)| (e, s))
+            .collect()
+    };
+    #[cfg(feature = "testing")]
+    let reference = crate::testing::reference_ownership_enabled()
+        .then(|| flow::solve(&facts.cfg, init.clone(), &mut *transfer, reference_join));
+    let ins = flow::solve_cached(&facts.cfg, init, transfer, join);
+    #[cfg(feature = "testing")]
+    if let Some(reference) = reference {
+        assert_eq!(
+            ins, reference,
+            "ownership fixed point for {:?}",
+            unit.header
+        );
+    }
     let mut walker = Walker {
         cx,
         facts,

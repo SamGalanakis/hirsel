@@ -333,3 +333,27 @@ impl<S: Stage> UnitBuilder<S> {
         self.unit
     }
 }
+
+std::thread_local! {
+    static REFERENCE_OWNERSHIP: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+pub(crate) fn reference_ownership_enabled() -> bool {
+    REFERENCE_OWNERSHIP.get()
+}
+
+/// Check ownership's cached solve against the original predecessor solve
+/// and element-wise joins while running existing LIR corpus cases.
+///
+/// The reference is opt-in so a compiler built with test helpers does not run
+/// two analyses for ordinary compilation.
+pub fn with_reference_ownership<R>(check: impl FnOnce() -> R) -> R {
+    struct Restore(bool);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            REFERENCE_OWNERSHIP.set(self.0);
+        }
+    }
+    let _restore = Restore(REFERENCE_OWNERSHIP.replace(true));
+    check()
+}

@@ -361,6 +361,7 @@ impl Catalog {
         indexed: &BTreeMap<FileId, (FileContext, QueryEnvironment)>,
     ) -> SourceCatalog {
         let mut carry = self.clone();
+        carry.bind_ownership(Default::default());
         for (file, (context, _)) in indexed {
             carry.files.insert(*file, context.clone());
         }

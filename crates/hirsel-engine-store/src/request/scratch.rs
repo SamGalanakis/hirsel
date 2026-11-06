@@ -26,7 +26,6 @@ enum Backing {
 }
 struct CachedRead {
     bytes: hirsel_artifact_store::WeakBytes,
-    provider_version: Option<hirsel_artifact_store::HeldVersion>,
     admission: Arc<Admission>,
     charge: u64,
 }
@@ -497,12 +496,11 @@ impl ScratchStore {
         if let Some(cached) = &entry.read
             && cached.bytes.strong_count() == 1
             && self.reads.contains(reference)
-            && let Backing::Provider(held) = &entry.backing
-            && (cached.provider_version.is_none() || held.version() != cached.provider_version)
+            && matches!(&entry.backing, Backing::Provider(_))
         {
             // Existing readers own independent checked bytes. Once only the
-            // epoch owns them, provider damage conservatively expires the read.
-            // A metadata match only retains those bytes; it never checks a file.
+            // epoch owns them, recheck the provider on its next read. Metadata
+            // timestamps can be coarse or unchanged after external mutation.
             self.reads.remove(reference);
             entry.read = None;
         }
@@ -526,10 +524,6 @@ impl ScratchStore {
             self.admission.release(retained);
             return Err(error);
         }
-        let provider_version = match &entry.backing {
-            Backing::Provider(held) => held.version(),
-            Backing::Spool(_) => None,
-        };
         let read = || -> Result<Bytes, ProductArchiveError> {
             match &entry.backing {
                 Backing::Provider(held) => held
@@ -540,7 +534,10 @@ impl ScratchStore {
                     range.clone(),
                     |at, bytes| read_at(spool, bytes, offset + at),
                 )
-                .map_err(ProductArchiveError::Content),
+                .map_err(|error| match error {
+                    ContentReadError::InvalidContent => ProductArchiveError::InvalidContent,
+                    other => ProductArchiveError::Content(other),
+                }),
             }
         };
         let value = match read() {
@@ -559,7 +556,6 @@ impl ScratchStore {
         let value = value.retain_owner(owner);
         entry.read = Some(Box::new(CachedRead {
             bytes: value.downgrade(),
-            provider_version,
             admission: self.admission.clone(),
             charge: cache_charge,
         }));

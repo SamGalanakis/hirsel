@@ -294,7 +294,7 @@ pub struct PlanInputs<'a> {
 /// Import validation constructs its own set instead of trusting the producer's.
 struct PlanDigests<'a> {
     units: &'a BTreeMap<ContentHash, &'a LirUnit<Ready>>,
-    digests: RefCell<BTreeMap<*const LirUnit<Ready>, ContentHash>>,
+    digests: RefCell<BTreeMap<*const LirUnit<Ready>, (&'a LirUnit<Ready>, ContentHash)>>,
     table: ContentHash,
     target: ContentHash,
 }
@@ -310,11 +310,11 @@ impl<'a> PlanDigests<'a> {
     }
 
     fn unit(&self, unit: &'a LirUnit<Ready>) -> ContentHash {
-        *self
-            .digests
+        self.digests
             .borrow_mut()
             .entry(std::ptr::from_ref(unit))
-            .or_insert_with(|| unit.digest())
+            .or_insert_with(|| (unit, unit.digest()))
+            .1
     }
 
     fn callee(&self, id: &ContentHash) -> ContentHash {

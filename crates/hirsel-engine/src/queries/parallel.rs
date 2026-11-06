@@ -19,8 +19,7 @@ pub use scheduled::{
     FrontStorageQueries,
 };
 pub(in crate::queries) use scheduled::{
-    FrontCheckFacts, LiveFrontReads, OperationFrontInputs, SpecializationDependencies,
-    load_scheduled_publication,
+    FrontCheckFacts, OperationFrontInputs, SpecializationDependencies, load_scheduled_publication,
 };
 
 /// One input's outcome, including the phase that completed or stopped it.

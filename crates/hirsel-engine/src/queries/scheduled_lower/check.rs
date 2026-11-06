@@ -100,7 +100,7 @@ impl FrontLowerQueries {
 impl FrontLowerQueries {
     pub(in crate::queries) fn check_current(self: &Arc<Self>) -> Result<Arc<Self>, QueryError> {
         match self.demand_producer() {
-            Some(producer) => producer.current(),
+            Some(producer) => producer.current_capture(&self.namespace),
             None => Ok(self.clone()),
         }
     }
@@ -133,11 +133,7 @@ impl FrontLowerQueries {
                 &format!("Check Lower observations cannot join: {error:?}"),
             )
         };
-        let current = self
-            .demand_producer()
-            .ok_or_else(|| protocol(error.clone()))?
-            .current()
-            .map_err(protocol)?;
+        let current = self.check_current().map_err(protocol)?;
         let successor = SuccessorCapture::new(&self.namespace, current).map_err(protocol)?;
         let owner = successor.owner();
         let path = self.path(id).ok_or_else(|| protocol(error.clone()))?;
@@ -186,7 +182,7 @@ impl FrontLowerQueries {
         let Some(producer) = self.demand_producer() else {
             return Ok(reads);
         };
-        let current = producer.current()?;
+        let current = producer.current_capture(&self.namespace)?;
         let path = self
             .path(id)
             .ok_or_else(|| successor::refused("missing Lower observation owner"))?;

@@ -98,16 +98,6 @@ pub(crate) struct FrontCheckFacts {
     pub lowering: Option<lowering::LoweringUse>,
     pub dead_arms: Option<crate::tools::DeadArmUse>,
 }
-pub(in crate::queries) struct LiveFrontReads {
-    reads: Arc<Reads>,
-    _facts: Arc<FrontFacts>,
-}
-impl std::ops::Deref for LiveFrontReads {
-    type Target = Reads;
-    fn deref(&self) -> &Self::Target {
-        &self.reads
-    }
-}
 impl FrontOutcome {
     fn failed(record: Reference, error: QueryError, facts: Arc<FrontFacts>) -> Self {
         Self {
@@ -430,6 +420,22 @@ impl FrontBodyQueries {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .upgrade()
+    }
+    pub(in crate::queries) fn check_current(self: &Arc<Self>) -> Result<Arc<Self>, QueryError> {
+        match self.demand_producer() {
+            Some(producer) => Ok(producer
+                .current_capture(&self.namespace)?
+                .body_front()
+                .clone()),
+            None => Ok(self.clone()),
+        }
+    }
+    pub(in crate::queries) fn definition(&self, query: QueryId) -> Option<DefId> {
+        (query.kind == FRONT_BODY_KIND).then(|| {
+            self.inputs
+                .get(&query.address.0)
+                .map(|input| input.definition)
+        })?
     }
     pub(crate) fn has_cached_query(&self, query: QueryId) -> bool {
         query.kind == FRONT_BODY_KIND
@@ -1770,54 +1776,6 @@ impl FrontBodyQueries {
             return Some(receipt);
         }
         ReaderReceipt::capture(&**store, reads, scratch)
-    }
-    /// A hint belongs to this immutable Front view. Eviction removes the live
-    /// slot, and the consumer then uses its exact archived receipt. Delegated
-    /// roots also use their archive rather than another view's live slot.
-    pub(in crate::queries) fn live_reads(
-        &self,
-        definition: DefId,
-        checked: bool,
-    ) -> Option<LiveFrontReads> {
-        let key = self.inputs.address(definition, false)?;
-        self.live_query_reads(
-            QueryId {
-                kind: FRONT_BODY_KIND,
-                address: hirsel_artifact_store::Address(key),
-            },
-            checked,
-        )
-    }
-    pub(in crate::queries) fn live_query_reads(
-        &self,
-        query: QueryId,
-        checked: bool,
-    ) -> Option<LiveFrontReads> {
-        if query.kind != FRONT_BODY_KIND {
-            return None;
-        }
-        let key = &query.address.0;
-        if self
-            .forwarded
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .contains_key(key)
-        {
-            return None;
-        }
-        let slots = self.slots.lock().unwrap_or_else(|e| e.into_inner());
-        let FrontSlot::Live { outcome, .. } = slots.get(key)? else {
-            return None;
-        };
-        let reads = if checked {
-            outcome.checked.as_ref()?.1.clone()
-        } else {
-            outcome.reads.clone()
-        };
-        Some(LiveFrontReads {
-            reads,
-            _facts: outcome.facts.clone(),
-        })
     }
     /// Inspect compact reads without decoding the checked body.
     pub(crate) fn selected_reads(

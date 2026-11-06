@@ -929,6 +929,14 @@ impl DemandProducer {
         }
         Ok(admitted)
     }
+    pub(crate) fn current_capture(
+        &self,
+        previous: &NamespaceCapture,
+    ) -> Result<Arc<FrontLowerQueries>, QueryError> {
+        let current = self.current()?;
+        scheduled_lower::SuccessorCapture::new(previous, current.clone())?;
+        Ok(current)
+    }
     pub(crate) fn current(&self) -> Result<Arc<FrontLowerQueries>, QueryError> {
         self.state
             .lock()

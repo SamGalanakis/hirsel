@@ -190,11 +190,6 @@ impl ReadUnion {
             .try_fold(0u64, |sum, (_, bytes)| sum.checked_add(bytes as u64))?;
         self.merge_rows(reads, scratch, held)
     }
-    fn merge_live(&mut self, reads: &parallel::LiveFrontReads, scratch: u64) -> Option<()> {
-        // The guard retains Front's original allocation grant throughout this
-        // active reduction, including concurrent eviction of its live slot.
-        self.merge_rows(reads, scratch, 0)
-    }
     fn merge_rows(&mut self, reads: &Reads, scratch: u64, held: u64) -> Option<()> {
         if self.required(reads)?.checked_add(held)? > scratch {
             return None;
@@ -318,20 +313,12 @@ impl serde::Serialize for ArchivedReader {
     }
 }
 impl ReadUnion {
-    pub(super) fn reduce(
-        readers: &[Arc<ArchivedReader>],
-        scratch: u64,
-        mut live: impl FnMut(usize) -> Option<parallel::LiveFrontReads>,
-    ) -> Option<Self> {
+    pub(super) fn reduce(readers: &[Arc<ArchivedReader>], scratch: u64) -> Option<Self> {
         let mut union = Self::default();
-        for (index, reader) in readers.iter().enumerate() {
-            if let Some(reads) = live(index) {
-                union.merge_live(&reads, scratch)?;
-            } else {
-                reader
-                    .receipt
-                    .merge(&mut union, &*reader.source.store, scratch)?;
-            }
+        for reader in readers {
+            reader
+                .receipt
+                .merge(&mut union, &*reader.source.store, scratch)?;
         }
         if !union.fits_scratch(scratch)? {
             return None;

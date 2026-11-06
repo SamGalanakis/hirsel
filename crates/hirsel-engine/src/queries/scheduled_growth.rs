@@ -30,7 +30,6 @@ pub struct FrontGrowthQueries {
     items: Arc<crate::NativeRecordContext>,
     records: crate::NativeRecords,
     sources: SourceMap,
-    snapshot: Arc<SignatureSnapshot>,
     package: hirsel_syntax::PackageId,
     store: Arc<dyn ResultStore>,
     completed: Mutex<Option<ProductRef>>,
@@ -186,8 +185,17 @@ impl QueryFactory for Factory {
         if let Some(product) = cached {
             return Ok(Box::new(Reopened { product }));
         }
+        let front = queries.front.check_current().map_err(|error| {
+            crate::requests::source_graph::protocol_failure(
+                &*queries.store,
+                queries.errors,
+                Some(id),
+                &format!("Growth capture: {error:?}"),
+            )
+        })?;
         if id == queries.query {
             return Ok(Box::new(Task {
+                front,
                 queries,
                 membership: None,
                 component_cursor: 0,
@@ -217,6 +225,7 @@ impl QueryFactory for Factory {
             .take(bytes)
             .ok_or(queries.errors.resource)?;
         Ok(Box::new(FactTask {
+            front,
             queries,
             id,
             component,
@@ -260,6 +269,7 @@ fn finish(result: Result<ProductRef, Reference>) -> QueryPoll {
     }
 }
 struct FactTask {
+    front: Arc<FrontBodyQueries>,
     queries: Arc<FrontGrowthQueries>,
     id: QueryId,
     component: Option<(Arc<SourceMembership>, usize)>,
@@ -285,16 +295,17 @@ impl FactTask {
     }
     fn advance(&mut self, cx: &mut dyn QueryContext) -> Poll<Result<ProductRef, Reference>> {
         while self.cursor < self.count {
-            let input = self.input(self.cursor);
+            let input = self
+                .queries
+                .selected_input(&self.front, self.input(self.cursor))?;
             self.waiting = Some(input);
             let selected = match cx.read(input) {
                 Poll::Pending => return Poll::Pending,
                 Poll::Ready(selected) => selected,
             };
-            if let Some(checked) = self.queries.front.checked(selected.clone()) {
+            if let Some(checked) = self.front.checked(selected.clone()) {
                 let source = self.queries.publication_source()?;
                 let reader = self
-                    .queries
                     .front
                     .reader_receipt(
                         input,
@@ -325,7 +336,7 @@ impl FactTask {
                     return Poll::Ready(Err(self.queries.errors.protocol));
                 }
                 self.facts.push(fact);
-            } else if let Some(facts) = self.queries.front.check_facts(selected.clone())
+            } else if let Some(facts) = self.front.check_facts(selected.clone())
                 && matches!(facts.result, Err(QueryError::Diagnostics(_)))
             {
                 self.reads.push(
@@ -362,12 +373,10 @@ impl FactTask {
         // Reduce one encoded root receipt at a time in this active scratch
         // frame. Suspensions and completed roots retain references only.
         let reads = Arc::new(
-            ReadUnion::reduce(&self.reads, queries.weight.scratch, |index| {
-                queries.front.live_query_reads(self.input(index), true)
-            })
-            .ok_or(queries.errors.resource)?
-            .finish()
-            .map_err(|_| queries.errors.protocol)?,
+            ReadUnion::reduce(&self.reads, queries.weight.scratch)
+                .ok_or(queries.errors.resource)?
+                .finish()
+                .map_err(|_| queries.errors.protocol)?,
         );
         let producer = queries.producer();
         let (identity, data) = if let Some((membership, index)) = &self.component {
@@ -506,6 +515,16 @@ impl QueryTask for FactTask {
     }
 }
 impl FrontGrowthQueries {
+    fn selected_input(
+        &self,
+        front: &FrontBodyQueries,
+        original: QueryId,
+    ) -> Result<QueryId, Reference> {
+        self.front
+            .definition(original)
+            .and_then(|definition| front.query(definition.path()))
+            .ok_or(self.errors.protocol)
+    }
     fn publication_source(&self) -> Result<Arc<GrowthPublicationSource>, Reference> {
         let mut source = self
             .publication_source
@@ -566,6 +585,7 @@ impl FrontGrowthQueries {
     }
 }
 struct Task {
+    front: Arc<FrontBodyQueries>,
     queries: Arc<FrontGrowthQueries>,
     membership: Option<Arc<SourceMembership>>,
     component_cursor: usize,
@@ -669,13 +689,13 @@ impl Task {
         // Table-key acceptance reduces the same complete checked roots. It
         // neither builds membership nor solves a source component.
         while self.cursor < queries.roots.len() {
-            let id = queries.roots[self.cursor];
+            let id = queries.selected_input(&self.front, queries.roots[self.cursor])?;
             self.waiting = Some(id);
             let selected = match cx.read(id) {
                 Poll::Pending => return Poll::Pending,
                 Poll::Ready(p) => p,
             };
-            if let Some(checked) = queries.front.checked(selected.clone()) {
+            if let Some(checked) = self.front.checked(selected.clone()) {
                 for call in &checked.summary.summary.calls {
                     let slots = hirsel_types::core_roles::table_key_parameters(call.callee.path());
                     if !slots.is_empty() {
@@ -690,13 +710,13 @@ impl Task {
                     checked.table_keys,
                 );
                 let source = queries.publication_source()?;
-                let reader = queries
+                let reader = self
                     .front
                     .reader_receipt(id, &checked.reads, &source.store, queries.weight.scratch)
                     .ok_or(queries.errors.resource)?;
                 self.reads
                     .push(ArchivedReader::from_receipt(source, reader));
-            } else if let Some(facts) = queries.front.check_facts(selected.clone())
+            } else if let Some(facts) = self.front.check_facts(selected.clone())
                 && matches!(facts.result, Err(QueryError::Diagnostics(_)))
             {
                 self.reads.push(
@@ -715,27 +735,19 @@ impl Task {
     fn complete(&mut self, _cx: &mut dyn QueryContext) -> Result<ProductRef, Reference> {
         let queries = &self.queries;
         let mut table_reads = ReadsBuilder::new();
-        let mut provider =
-            FrozenProvider::new(&queries.snapshot, queries.package.clone(), &mut table_reads);
+        let mut provider = FrozenProvider::new(
+            self.front.snapshot(),
+            queries.package.clone(),
+            &mut table_reads,
+        );
         let table_result = crate::table_keys::check_uses(
-            queries.snapshot.types(),
+            self.front.snapshot().types(),
             &self.table_keys,
             std::mem::take(&mut self.required),
             &mut |definition| provider.signature(definition).map(Some),
         );
-        let roots_start = 1 + self
-            .membership
-            .as_ref()
-            .ok_or(queries.errors.protocol)?
-            .components
-            .len();
-        let mut union = ReadUnion::reduce(&self.reads, queries.weight.scratch, |index| {
-            let root = index.checked_sub(roots_start)?;
-            queries
-                .front
-                .live_query_reads(*queries.roots.get(root)?, true)
-        })
-        .ok_or(queries.errors.resource)?;
+        let mut union = ReadUnion::reduce(&self.reads, queries.weight.scratch)
+            .ok_or(queries.errors.resource)?;
         union
             .merge(
                 &table_reads.finish().map_err(|_| queries.errors.protocol)?,
@@ -953,7 +965,6 @@ impl QueryEngine {
             items: source.anchors,
             records: source.records,
             sources: front.namespace().sources.clone(),
-            snapshot: source.snapshot,
             package,
             store,
             completed: Mutex::new(None),

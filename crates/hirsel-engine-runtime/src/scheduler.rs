@@ -1249,8 +1249,7 @@ impl State {
     fn settle(&mut self, query: Key, result: Outcome) {
         let node = self.nodes.get_mut(&query).expect("claimed query");
         node.state = std::mem::take(&mut node.state).settle(result.clone());
-        node.settled_at = self.stats.settled;
-        self.nodes.settle_records(query);
+        self.nodes.settle_records(query, self.stats.settled);
         self.stats.settled += 1;
         self.admission_waiters.remove(&query);
         self.event(RuntimeEvent::Settled {
@@ -1334,76 +1333,37 @@ impl QueryContext for Context<'_> {
             self.shared.changed.notify_all();
             return true;
         }
-        // Requested results stay protected after settlement, while their
-        // historical reads do not. The traversal already stops at settlement.
-        // Mark this union once instead of searching every request per candidate.
+        // Root/read reachability is reused until its graph or roots change.
+        // Removing an unprotected settled victim does not invalidate it.
         {
             let State {
                 nodes, requests, ..
             } = &mut *state;
             nodes.mark_in_flight(requests.values().flatten().copied());
         }
-        let scratch = state
-            .nodes
-            .get(&self.query)
-            .map_or(0, |node| node.state.scratch());
         let mut previous = None;
         let key = loop {
-            let oldest = state
-                .nodes
-                .iter()
-                .filter_map(|(&key, node)| {
-                    if node.in_flight {
-                        return None;
-                    }
-                    let order = (node.settled_at, key);
-                    if previous.is_some_and(|previous| order <= previous) {
-                        return None;
-                    }
-                    let NodeState::Settled {
-                        outcome: result, ..
-                    } = &node.state
-                    else {
-                        return None;
-                    };
-                    let product = result.as_ref().as_ref().ok()?;
-                    let body = product.cache_only();
-                    let summary = product.evictable();
-                    (body || summary).then_some((order, body))
-                })
-                .min();
-            let Some(((settled, key), body)) = oldest else {
+            let Some((settled, key)) = state.nodes.eviction_after(previous) else {
                 return false;
             };
             previous = Some((settled, key));
-            if body {
-                let NodeState::Settled { outcome, .. } = &state.nodes[&key].state else {
-                    continue;
-                };
-                if outcome
-                    .as_ref()
-                    .as_ref()
-                    .ok()
-                    .is_none_or(|product| product.prepare_eviction(scratch))
-                {
-                    break key;
-                }
+            let NodeState::Settled { outcome, .. } = &state.nodes[&key].state else {
+                unreachable!("indexed settled product");
+            };
+            let product = outcome
+                .as_ref()
+                .as_ref()
+                .expect("indexed successful product");
+            let body = product.cache_only();
+            if !body && !product.evictable() {
                 continue;
             }
-            let Some(Factory::Send(factory)) = state.factories.get(&key.0) else {
-                continue;
-            };
-            let NodeState::Settled {
-                outcome: result, ..
-            } = &state.nodes[&key].state
-            else {
-                continue;
-            };
-            if result
-                .as_ref()
-                .as_ref()
-                .ok()
-                .is_some_and(|product| factory.evict(id(key), product, scratch))
+            if body {
+                if product.prepare_eviction(scratch) {
+                    break key;
+                }
+            } else if let Some(Factory::Send(factory)) = state.factories.get(&key.0)
+                && factory.evict(id(key), product, scratch)
             {
                 break key;
             }

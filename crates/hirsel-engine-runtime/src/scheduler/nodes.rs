@@ -50,6 +50,9 @@ impl Recorded {
 #[derive(Default)]
 pub(super) struct Nodes {
     index: BTreeMap<Key, u32>,
+    // Keep pinned products too: external Arc owners may disappear without a
+    // scheduler callback. Eligibility is checked when the ordered entry is read.
+    eviction: BTreeSet<(u64, Key)>,
     edges: std::collections::HashMap<(u32, u32), u32>,
     keys: Vec<Option<Key>>,
     rows: Vec<Node>,
@@ -59,6 +62,9 @@ pub(super) struct Nodes {
     history: BTreeMap<Key, Recorded>,
     serial: u32,
     repair_epoch: u32,
+    in_flight_roots: Vec<Key>,
+    in_flight_reached: Vec<u32>,
+    in_flight_dirty: bool,
     pub repair_visits: u64,
 }
 impl Nodes {
@@ -140,17 +146,26 @@ impl Nodes {
             }
         }
     }
-    pub fn mark_in_flight(&mut self, roots: impl Iterator<Item = Key>) {
-        for node in &mut self.rows {
-            node.in_flight = false;
+    pub fn mark_in_flight(&mut self, roots: impl Iterator<Item = Key> + Clone) {
+        if !self.in_flight_dirty && self.in_flight_roots.iter().copied().eq(roots.clone()) {
+            return;
         }
-        let mut pending: Vec<u32> = roots
-            .filter_map(|key| self.index.get(&key).copied())
+        self.in_flight_dirty = false;
+        self.in_flight_roots.clear();
+        self.in_flight_roots.extend(roots);
+        for slot in self.in_flight_reached.drain(..) {
+            self.rows[slot as usize].in_flight = false;
+        }
+        let mut pending: Vec<u32> = self
+            .in_flight_roots
+            .iter()
+            .filter_map(|key| self.index.get(key).copied())
             .collect();
         while let Some(slot) = pending.pop() {
             let node = &mut self.rows[slot as usize];
             if !node.in_flight && !matches!(node.state, NodeState::Dormant) {
                 node.in_flight = true;
+                self.in_flight_reached.push(slot);
                 // Completed producers own their results; their historical reads
                 // no longer pin the payloads consumed during computation.
                 if !matches!(node.state, NodeState::Settled { .. }) {
@@ -164,6 +179,21 @@ impl Nodes {
             }
         }
     }
+    fn index_eviction(&mut self, key: Key) {
+        let node = &self[&key];
+        if matches!(&node.state, NodeState::Settled { outcome, .. }
+            if outcome.as_ref().as_ref().is_ok_and(|product| product.live_owners() != 0))
+        {
+            self.eviction.insert((node.settled_at, key));
+        }
+    }
+    pub fn eviction_after(&self, previous: Option<(u64, Key)>) -> Option<(u64, Key)> {
+        use std::ops::Bound::{Excluded, Unbounded};
+        self.eviction
+            .range((previous.map_or(Unbounded, Excluded), Unbounded))
+            .copied()
+            .find(|&(_, key)| !self[&key].in_flight)
+    }
     pub fn iter(&self) -> impl Iterator<Item = (&Key, &Node)> {
         self.index.iter().filter_map(|(key, &slot)| {
             let node = &self.rows[slot as usize];
@@ -171,6 +201,7 @@ impl Nodes {
         })
     }
     pub fn insert(&mut self, key: Key, mut node: Node) -> NodeId {
+        self.in_flight_dirty = true;
         self.serial = self.serial.checked_add(1).expect("admitted generation");
         node.generation = self.serial;
         let slot = if let Some(&slot) = self.index.get(&key) {
@@ -197,6 +228,7 @@ impl Nodes {
             self.index.insert(key, slot);
             slot
         };
+        self.index_eviction(key);
         NodeId {
             slot,
             generation: self.serial,
@@ -215,6 +247,8 @@ impl Nodes {
     pub fn remove(&mut self, key: &Key) -> Option<NodeState> {
         let &slot = self.index.get(key)?;
         let node = &mut self.rows[slot as usize];
+        self.eviction.remove(&(node.settled_at, *key));
+        self.in_flight_dirty |= node.in_flight;
         if !matches!(node.state, NodeState::Settled { .. } | NodeState::Dormant) {
             // Cancellation discards this unfinished generation's reads. Slot
             // retirement of terminal results retains all successful/failed reads.
@@ -291,6 +325,11 @@ impl Nodes {
         if !self.repair_order(source.slot, target.slot) {
             return None;
         }
+        self.in_flight_dirty |= self.rows[source.slot as usize].in_flight
+            && !matches!(
+                self.rows[source.slot as usize].state,
+                NodeState::Settled { .. }
+            );
         let edge = self.rows[source.slot as usize].dependencies.len();
         self.edges.insert((source.slot, target.slot), edge as u32);
         self.rows[source.slot as usize].dependencies.push(Edge {
@@ -402,7 +441,11 @@ impl Nodes {
             recorded.pending.len() as u64 * 512 + if recorded.settled.is_empty() { 1024 } else { 0 }
         })
     }
-    pub fn settle_records(&mut self, query: Key) {
+    pub fn settle_records(&mut self, query: Key, settled_at: u64) {
+        self.in_flight_dirty |= self[&query].in_flight;
+        self.eviction.remove(&(self[&query].settled_at, query));
+        self.get_mut(&query).expect("settled node").settled_at = settled_at;
+        self.index_eviction(query);
         if let Some(recorded) = self.history.get_mut(&query) {
             recorded.settled.append(&mut recorded.pending);
         }
@@ -442,6 +485,9 @@ impl Nodes {
             self.rows[source.slot as usize].state,
             NodeState::Settled { .. }
         );
+        self.in_flight_dirty |= self.rows[source.slot as usize].in_flight
+            && !terminal
+            && !self.rows[source.slot as usize].dependencies[edge].body_consumed();
         let recorded = self.history.entry(source_key).or_default();
         if !recorded.settled.contains(&target_key) {
             if terminal {
@@ -511,7 +557,21 @@ impl Nodes {
         if limit == 0 {
             return None;
         }
-        let mut parents = BTreeMap::new();
+        if source == target {
+            return Some(vec![target]);
+        }
+        if self
+            .get(&target)
+            .is_none_or(|node| node.dependencies.is_empty())
+            && !self.history.contains_key(&target)
+        {
+            return None;
+        }
+        // This is the same exact DFS over live and recorded reads. Parent
+        // lookup needs no ordering; adjacency order still determines the path.
+        // Hash buckets and traversal vectors fit the existing 512-byte debit
+        // per recorded read and ENTRY_BYTES per live row.
+        let mut parents = std::collections::HashMap::new();
         let mut pending = vec![target];
         parents.insert(target, target);
         while let Some(current) = pending.pop() {
@@ -541,7 +601,7 @@ impl Nodes {
                 .into_iter()
                 .flat_map(|recorded| recorded.settled.iter().chain(&recorded.pending).copied());
             for next in live.chain(recorded) {
-                if let std::collections::btree_map::Entry::Vacant(entry) = parents.entry(next) {
+                if let std::collections::hash_map::Entry::Vacant(entry) = parents.entry(next) {
                     entry.insert(current);
                     pending.push(next);
                 }
@@ -551,6 +611,10 @@ impl Nodes {
     }
     pub fn retain_body(&mut self, source: NodeId, edge: usize) {
         if self.get_id(source).is_some() {
+            let node = &self.rows[source.slot as usize];
+            self.in_flight_dirty |= node.in_flight
+                && !matches!(node.state, NodeState::Settled { .. })
+                && node.dependencies[edge].body_consumed();
             self.rows[source.slot as usize].dependencies[edge].target.0 &= !BODY_CONSUMED;
         }
     }
@@ -605,6 +669,10 @@ impl Nodes {
         let Some(&edge) = self.edges.get(&(source.slot, slot)) else {
             return;
         };
+        let node = &self.rows[source.slot as usize];
+        self.in_flight_dirty |= node.in_flight
+            && !matches!(node.state, NodeState::Settled { .. })
+            && !node.dependencies[edge as usize].body_consumed();
         self.rows[source.slot as usize].dependencies[edge as usize]
             .target
             .0 |= BODY_CONSUMED;
@@ -678,6 +746,10 @@ impl Nodes {
             + self.keys.capacity() * size_of::<Option<Key>>()
             + self.free.capacity() * size_of::<u32>()
             + tree_bytes::<Key, u32>(self.index.len())
+            + tree_bytes::<(u64, Key), ()>(self.eviction.len())
+            + self.in_flight_roots.capacity() * size_of::<Key>()
+            + self.in_flight_reached.capacity() * size_of::<u32>()
+            + (2 * (self.in_flight_roots.len() + self.edges.len())).max(4) * size_of::<u32>()
             + self.rows.len() * 12
             + buckets * (size_of::<((u32, u32), u32)>() + 1)
             + 32

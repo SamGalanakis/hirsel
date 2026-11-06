@@ -237,9 +237,11 @@ impl LinkTasks {
                 references
                     .iter()
                     .map(|reference| {
-                        if root.native.snapshot.store.get_content(*reference).is_none() {
-                            return Err("missing admitted Link input".into());
-                        }
+                        root.native
+                            .snapshot
+                            .store
+                            .read_product_content(*reference)
+                            .map_err(|error| format!("admitted Link input: {error}"))?;
                         let query = address(
                             LINK_INPUT_KIND,
                             &serde_json::to_vec(reference).map_err(|e| e.to_string())?,
@@ -376,13 +378,13 @@ impl LinkTasks {
         }
         let bytes = self
             .store()
-            .get_content(
+            .read_product_content(
                 manifest
                     .archive(hirsel_engine_runtime::ArchiveAdmission::Retained)
                     .map_err(|e| e.to_string())?
                     .reference(),
             )
-            .ok_or("missing native Link manifest")?;
+            .map_err(|error| format!("Link manifest archive: {error}"))?;
         let (link, address, action, record): (ContentHash, ContentHash, ContentHash, Reference) =
             serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
         let plan = self
@@ -471,11 +473,14 @@ impl LeafTask {
                     Leaf::Static => root.as_ref().unwrap().1.static_manifest,
                     Leaf::Launch => root.as_ref().unwrap().1.launch_manifest,
                 };
-                if self.tasks.store().get_content(reference).is_none() {
-                    return Err(QueryPoll::Failed(
-                        self.tasks.failure("missing settled Link input bytes"),
-                    ));
-                }
+                self.tasks
+                    .store()
+                    .read_product_content(reference)
+                    .map_err(|error| {
+                        QueryPoll::Failed(
+                            self.tasks.failure(&format!("settled Link input: {error}")),
+                        )
+                    })?;
                 let bytes = serde_json::to_vec(&reference)
                     .map_err(|e| QueryPoll::Failed(self.tasks.failure(&e.to_string())))?;
                 self.tasks.publish(self.request.query, INPUT, bytes)
@@ -566,17 +571,17 @@ impl ObjectTaskSnapshot for LinkTasks {
             }
             let bytes = self
                 .store()
-                .get_content(
+                .read_product_content(
                     product
                         .archive(hirsel_engine_runtime::ArchiveAdmission::Retained)
                         .map_err(|e| e.to_string())?
                         .reference(),
                 )
-                .ok_or("missing Link input descriptor")?;
+                .map_err(|error| format!("Link input descriptor: {error}"))?;
             let reference = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
-            if self.store().get_content(reference).is_none() {
-                return Err("missing Link input content".into());
-            }
+            self.store()
+                .read_product_content(reference)
+                .map_err(|error| format!("Link input content: {error}"))?;
             Ok(reference)
         };
         read().map_err(|e| self.failure(&e))

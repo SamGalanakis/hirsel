@@ -1334,19 +1334,15 @@ impl QueryContext for Context<'_> {
             self.shared.changed.notify_all();
             return true;
         }
-        let roots = state
-            .requests
-            .values()
-            .flatten()
-            .copied()
-            .filter(|key| {
-                state
-                    .nodes
-                    .get(key)
-                    .is_some_and(|n| !matches!(n.state, NodeState::Settled { .. }))
-            })
-            .collect::<Vec<_>>();
-        state.nodes.mark_in_flight(roots.into_iter());
+        // Requested results stay protected after settlement, while their
+        // historical reads do not. The traversal already stops at settlement.
+        // Mark this union once instead of searching every request per candidate.
+        {
+            let State {
+                nodes, requests, ..
+            } = &mut *state;
+            nodes.mark_in_flight(requests.values().flatten().copied());
+        }
         let scratch = state
             .nodes
             .get(&self.query)
@@ -1357,7 +1353,7 @@ impl QueryContext for Context<'_> {
                 .nodes
                 .iter()
                 .filter_map(|(&key, node)| {
-                    if node.in_flight || state.requests.values().any(|roots| roots.contains(&key)) {
+                    if node.in_flight {
                         return None;
                     }
                     let order = (node.settled_at, key);

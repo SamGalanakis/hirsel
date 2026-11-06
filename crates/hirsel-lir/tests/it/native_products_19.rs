@@ -299,7 +299,7 @@ fn native_products_19_directory_reopen_copy_and_corruption() {
             .is_none()
     );
     let held_layouts = reopened.layouts(output.layouts(), &target).unwrap();
-    let original_layout_bytes = local.get(output.layouts()).unwrap().to_vec();
+    let original_layout_bytes = std::fs::read(local.output_path(output.layouts())).unwrap();
     std::fs::write(
         local.output_path(output.layouts()),
         b"corrupt retained layouts",

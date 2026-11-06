@@ -555,7 +555,7 @@ impl StoreOperation {
     /// completion. Read guards alone do not prevent graph subscribers sharing
     /// the same immutable products.
     pub fn has_publication(&self) -> bool {
-        !self.requests.is_empty() || self.request_store
+        !self.requests.is_empty() || self.request_store && self.persistence().retains()
     }
     /// The policy captured when this operation's scope opened.
     pub fn persistence(&self) -> Persistence {

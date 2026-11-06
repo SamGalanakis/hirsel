@@ -260,10 +260,15 @@ def test_results(event_log, *, history=None, all_results=False):
             execution = {True: 'cached', False: 'fresh'}.get(remote.get('cache_hit'), 'unknown')
         elif 'LocalCommand' in command:
             execution = 'fresh'
+        metadata = details.get('metadata') or {}
         executions.setdefault(name, []).append(dict(
             execution=execution, command_kind=next(iter(command), 'unknown'),
             digest=remote.get('action_digest') if remote else None,
-            start_time=(details.get('metadata') or {}).get('start_time'),
+            start_time=metadata.get('start_time'),
+            queue_seconds=(remote.get('queue_time_us') / 1e6 if remote and remote.get('queue_time_us') is not None
+                           else metadata['queue_duration_us'] / 1e6 if metadata.get('queue_duration_us') is not None else None),
+            execution_seconds=metadata['execution_time_us'] / 1e6 if metadata.get('execution_time_us') is not None else None,
+            worker=(remote.get('details') or {}).get('worker') if remote else None,
             configuration=suite['target_label'].get('configuration'),
             suite=suite.get('suite_name'), report_status=report.get('status'),
             signed_exit_code=details.get('signed_exit_code'),
@@ -320,6 +325,14 @@ def test_batches(command, size):
         yield command[:targets[0]] + command[start:min(start + size, targets[-1] + 1)] + command[targets[-1] + 1:]
 
 
+def progress(path, record):
+    """Atomically expose command lifecycle to the main-run report reader."""
+    temporary = path.with_suffix('.tmp')
+    with temporary.open('w') as output:
+        json.dump(record, output)
+    temporary.replace(path)
+
+
 def run(arguments, *, buck2=None, runner=None, batch_size=None, batch_concurrency=None, **kwargs):
     """Run Buck2, retaining every build/test unless its caller owns the log."""
     runner = runner or subprocess.run
@@ -350,7 +363,15 @@ def run(arguments, *, buck2=None, runner=None, batch_size=None, batch_concurrenc
     options = options[:options.index('--')] if '--' in options else options
     if arguments and arguments[0] in ('build', 'test') and '--event-log' not in options:
         with recorded(arguments[0]) as path:
-            return runner([command[0], command[1], '--event-log', str(path), *command[2:]], **kwargs)
+            stage = kwargs.get('env', os.environ).get('HIRSEL_MAIN_RUN_PROGRESS')
+            record = dict(stage=stage, command=arguments, start=time.time(), event_log=str(path))
+            if stage:
+                progress(path.with_suffix('.progress.json'), record)
+            result = runner([command[0], command[1], '--event-log', str(path), *command[2:]], **kwargs)
+        # Publish completion only after recorded releases its writer lock.
+        if stage:
+            progress(path.with_suffix('.progress.json'), record | dict(end=time.time(), exit_status=result.returncode))
+        return result
     return runner(command, **kwargs)
 
 

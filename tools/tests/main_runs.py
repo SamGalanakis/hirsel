@@ -14,6 +14,7 @@ import shutil
 import subprocess
 import tempfile
 import threading
+import time
 import tracemalloc
 import unittest
 from concurrent.futures import ThreadPoolExecutor
@@ -544,6 +545,137 @@ class BoundedTests(unittest.TestCase):
         self.assertNotIn('HIRSEL_TEST_BATCH_SIZE', environments[1])
         self.assertEqual(environments[0]['HIRSEL_TEST_BATCH_CONCURRENCY'], '32')
         self.assertNotIn('HIRSEL_TEST_BATCH_CONCURRENCY', environments[1])
+
+
+class RunningReport(unittest.TestCase):
+    def test_completed_target_is_published_before_stage_end_without_replacing_latest(self):
+        tool = runpy.run_path(str(ROOT / 'tools/main-runs'))
+        events = tool['event_logs']
+        release, fast_finished = threading.Event(), threading.Event()
+        targets = ['root//:fast', 'root//:slow']
+        sha = '0123456789abcdef0123456789abcdef01234567'
+
+        def stages(stage, tier):
+            stage('workspace tests', ['fixture-buck', 'test', *targets, '--', '--timeout', '1800'])
+
+        def execute(command, **kwargs):
+            def buck(arguments, **_):
+                target = next(arg for arg in arguments if arg in targets)
+                if target == targets[1]:
+                    release.wait()
+                path = Path(arguments[arguments.index('--event-log') + 1])
+                records = [
+                    {'Event': {'data': {'SpanEnd': {'data': {'TestRun': {
+                        'suite': {'suite_name': target, 'target_label': {'label': {'name': target.split(':')[-1]}}},
+                        'command_report': {'status': {'Success': {}}, 'details': {
+                            'metadata': {'execution_time_us': 2500000},
+                            'command_kind': {'command': {'RemoteCommand': {
+                                'action_digest': 'action-input-digest:142', 'cache_hit': False, 'queue_time_us': 125000}}}}},
+                    }}}}}},
+                    {'Event': {'data': {'Instant': {'data': {'TestResult': {
+                        'name': target, 'status': events.PASS, 'details': 'test case ... ok', 'duration_us': 2500000,
+                    }}}}}},
+                ]
+                path.write_text(''.join(json.dumps(record) + '\n' for record in records))
+                if target == targets[0]:
+                    fast_finished.set()
+                return subprocess.CompletedProcess(arguments, 0)
+            with patch.object(events, 'directory', return_value=Path(kwargs['env']['HIRSEL_BUCK2_LOG_DIR'])):
+                return events.run(command[1:], runner=buck, env=kwargs['env'],
+                                  batch_size=32, batch_concurrency=32)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / 'latest.md').write_text('last complete report\n')
+            with patch.dict(tool['run'].__globals__, RUNS=root, ROWS=root / 'runs.jsonl', stages=stages,
+                            stage_plan=lambda _: {}, exception_tables=lambda: ({}, {}, {}),
+                            attribute=lambda *args: [], rows=lambda: [], push_to_main=lambda *args: None), \
+                    patch.object(events, 'lines', side_effect=lambda path: iter(Path(path).read_text().splitlines())), \
+                    patch.object(events, 'test_history', return_value=events.NoTestHistory()), \
+                    patch('subprocess.run', side_effect=execute), ThreadPoolExecutor(max_workers=1) as worker:
+                future = worker.submit(tool['run'], sha, 'fast')
+                try:
+                    self.assertTrue(fast_finished.wait(2))
+                    deadline = time.monotonic() + 3
+                    report = ''
+                    while time.monotonic() < deadline:
+                        if (root / 'RUNNING.md').exists():
+                            report = (root / 'RUNNING.md').read_text()
+                        if 'root//:fast' in report and 'action-input-digest:142' in report:
+                            break
+                        release.wait(0.02)
+                    self.assertIn('root//:fast', report)
+                    self.assertIn(sha, report)
+                    self.assertIn('action-input-digest:142', report)
+                    self.assertIn('0.125', report)
+                    self.assertIn('2.5', report)
+                    self.assertIn('unknown', report)
+                    self.assertIn('| root//:fast | pass | yes |', report)
+                    self.assertIn('| unknown | fresh |', report)
+                    self.assertIn('root//:slow', report)
+                    self.assertNotIn('SLOW:', report)
+                    self.assertFalse(future.done(), 'the slow target must still be running')
+                    self.assertEqual((root / 'latest.md').read_text(), 'last complete report\n')
+                    self.assertFalse((root / 'runs.jsonl').exists())
+                finally:
+                    release.set()
+                    future.result()
+            self.assertFalse((root / 'RUNNING.md').exists(), 'a complete run must not remain RUNNING')
+
+
+    def test_slow_boundary_updates_without_a_completion_and_retains_unknowns(self):
+        tool = runpy.run_path(str(ROOT / 'tools/main-runs'))
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            logs = root / 'run/logs/tests'
+            logs.mkdir(parents=True)
+            marker = logs / 'command.progress.json'
+            record = dict(stage='workspace tests', command=['test', 'root//:slow'], start=100)
+            marker.write_text(json.dumps(record))
+            with patch.dict(tool['run'].__globals__, RUNS=root), patch.object(tool['time'], 'time', return_value=1900):
+                report = tool['RunningReport']('tested-sha', 'fast', root / 'run', 100)
+                report.refresh()
+                self.assertNotIn('SLOW:', report.path.read_text())
+                with patch.object(tool['time'], 'time', return_value=1901):
+                    report.refresh()
+                text = report.path.read_text()
+                self.assertIn('SLOW: workspace tests', text)
+                self.assertIn('root//:slow', text)
+                self.assertIn('queue/execution seconds and worker unknown', text)
+                marker.write_text(json.dumps(record | dict(end=1901, exit_status=1)))
+                report.refresh()
+                text = report.path.read_text()
+                self.assertNotIn('SLOW:', text)
+                self.assertIn('| exit 1 |', text)
+                self.assertIn('| unknown | unknown | unknown |', text)
+
+    def test_missing_filtered_empty_and_repeated_results_are_not_reusable(self):
+        tool = runpy.run_path(str(ROOT / 'tools/main-runs'))
+        events = tool['event_logs']
+        for kind in ('missing', 'filtered', 'empty', 'repeated', 'broken-log'):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                logs = root / 'run/logs/tests'
+                logs.mkdir(parents=True)
+                command = ['test', 'root//:binary']
+                if kind == 'filtered':
+                    command += ['--', '--test-arg=one_case']
+                (logs / 'command.progress.json').write_text(json.dumps(dict(stage='tests', command=command,
+                    start=100, end=101, exit_status=0, event_log='fixture.pb.zst')))
+                result = dict(status=events.PASS, details='running 0 tests' if kind == 'empty' else 'test case ... ok')
+                decoded = [] if kind == 'missing' else [('binary', result)] * (2 if kind == 'repeated' else 1)
+                with patch.dict(tool['run'].__globals__, RUNS=root), \
+                        patch.object(events, 'test_results', return_value=decoded,
+                                     side_effect=ValueError('bad evidence') if kind == 'broken-log' else None):
+                    report = tool['RunningReport']('tested-sha', 'fast', root / 'run', 100)
+                    report.refresh()
+                text = report.path.read_text()
+                self.assertNotIn('| yes |', text)
+                if kind == 'broken-log':
+                    self.assertIn('bad evidence', text)
+                else:
+                    self.assertIn('root//:binary', text)
+                    self.assertIn('| no |', text)
 
 
 class ReportMemory(unittest.TestCase):

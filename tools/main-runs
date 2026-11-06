@@ -18,6 +18,11 @@ none, that tools/known-failures.tsv does not explain. The report
 ($HIRSEL_MAIN_RUNS/reports/, latest.md) names each red's likely culprit: of
 the commits since the last run of its stage, the one that changed most under the red's
 crate or its failing corpus cases, with its lane from hirsel-landings.jsonl.
+During execution, $HIRSEL_MAIN_RUNS/RUNNING.md publishes completed targets and
+commands, including exact SHA/inputs, known action timing and worker identity.
+It marks active commands over 30 minutes SLOW without replacing latest.md.
+Only completed targets with identical SHA, target and command inputs can be reused.
+RUNNING.md is removed after final publication.
 New code reds appear in the report's Owners section with their lane and culprit,
 or as unowned when no lane is known.
 Infrastructure reds have no culprit or lane; each run reports them separately
@@ -42,6 +47,7 @@ import re
 import runpy
 import subprocess
 import sys
+import threading
 import time
 
 TREE = Path(__file__).resolve().parents[1]
@@ -57,7 +63,7 @@ ROWS = RUNS / 'runs.jsonl'
 PASSED = (event_logs.PASS, event_logs.SKIP, event_logs.OMITTED)
 PERF_MARKER = 'PERF_COUNTS_RECORD '
 # The run's own settings, which the tool tests never inherit.
-RUN_VARIABLES = ('HIRSEL_BUCK2_CONFIG', 'HIRSEL_BUCK2_LOG_DIR', 'HIRSEL_PRIORITY', 'HIRSEL_MAIN_RUNS', 'HIRSEL_TEST_BATCH_SIZE', 'HIRSEL_TEST_BATCH_CONCURRENCY')
+RUN_VARIABLES = ('HIRSEL_BUCK2_CONFIG', 'HIRSEL_BUCK2_LOG_DIR', 'HIRSEL_PRIORITY', 'HIRSEL_MAIN_RUNS', 'HIRSEL_TEST_BATCH_SIZE', 'HIRSEL_TEST_BATCH_CONCURRENCY', 'HIRSEL_MAIN_RUN_PROGRESS')
 
 
 def say(message):
@@ -332,7 +338,113 @@ def lifecycle(known, observations, selections, revisions):
     return dict(version=1, tables=revisions, selections=selections, observations=observations, known=entries)
 
 
-def run_stages(directory, log, tier):
+class RunningReport:
+    """Publish finished commands while unrelated targets still occupy the run."""
+
+    def __init__(self, sha, tier, directory, start):
+        self.sha, self.tier, self.directory, self.start = sha, tier, directory, start
+        self.path = RUNS / 'RUNNING.md'
+        self.records, self.completed, self.errors = {}, {}, {}
+        self.stop = threading.Event()
+        self.thread = threading.Thread(target=self.watch, name='main-run-report')
+
+    def __enter__(self):
+        self.refresh()
+        self.thread.start()
+        return self
+
+    def __exit__(self, kind, value, traceback):
+        self.stop.set()
+        self.thread.join()
+        self.refresh(state='interrupted' if kind else 'finished')
+        if kind is None:
+            self.path.unlink(missing_ok=True)
+
+    def watch(self):
+        while not self.stop.wait(0.5):
+            self.refresh()
+
+    def refresh(self, state='active'):
+        for path in self.directory.glob('logs/**/*.progress.json'):
+            if path in self.completed:
+                continue
+            try:
+                record = json.loads(path.read_text())
+                self.records[path] = record
+                if 'end' not in record:
+                    continue
+                rows = []
+                event_log = record.get('event_log')
+                if event_log and record['command'][0] == 'test':
+                    results = event_logs.test_results(event_log, history=event_logs.NoTestHistory(), all_results=True)
+                    end = record['command'].index('--') if '--' in record['command'] else len(record['command'])
+                    expected = record['command'][1:end]
+                    expected = [arg for arg in expected if arg.startswith(('//:', 'root//:'))]
+                    counts = {target: sum(target == name for name, _ in results) for target, _ in results}
+                    observed = set()
+                    for target, result in results:
+                        label = next((arg for arg in expected if arg.split(':')[-1] == target), target)
+                        observed.add(label)
+                        provenance = result.get('provenance', {})
+                        verdict = {event_logs.PASS: 'pass', event_logs.FAIL: 'failure', event_logs.SKIP: 'skipped',
+                                   event_logs.OMITTED: 'omitted', event_logs.TIMED_OUT: 'timeout',
+                                   event_logs.FATAL: 'fatal', event_logs.INFRA_FAILURE: 'infrastructure'}.get(result['status'], 'unknown')
+                        filtered = any(arg.startswith(('--test-arg', 'hirsel.conformance_')) for arg in record['command'])
+                        empty = bool(re.search(r'^running 0 tests?$|^test result: .* 0 passed; 0 failed;', result['details'], re.M))
+                        complete = (counts[target] == 1 and label in expected and not result.get('missing_result')
+                                    and result['status'] in (event_logs.PASS, event_logs.FAIL)
+                                    and not filtered and not empty and filtered_population(result) in (None, 0))
+                        rows.append(dict(target=label, result=verdict, complete=complete, **provenance))
+                    rows += [dict(target=target, result='unknown', complete=False) for target in expected if target not in observed]
+                else:
+                    rows.append(dict(target='stage: ' + record['stage'],
+                                     result='pass' if record['exit_status'] == 0 else f'exit {record["exit_status"]}', complete=True))
+                self.completed[path] = rows
+                self.errors.pop(path, None)
+            except (OSError, ValueError, KeyError, subprocess.CalledProcessError) as error:
+                self.errors[path] = str(error)
+        now = time.time()
+        lines = [f'# RUNNING {self.tier} main run {self.sha}', '',
+                 f'State: {state}; updated {time.strftime("%Y-%m-%d %H:%M:%SZ", time.gmtime(now))}; '
+                 f'elapsed {(now - self.start) / 60:.1f} min; log {self.directory / "run.log"}', '',
+                 'Reuse only a completed target with the exact SHA, target and command inputs below. '
+                 'An unknown, skipped, omitted or partial result proves no completed obligation. '
+                 'Cached execution is labeled; its timings describe the cached execution, and it is not fresh recovery proof.', '',
+                 '## Completed results', '',
+                 '| SHA | Stage | Target | Result | Target complete | Action / input identity | Queue seconds | Execution seconds | Worker | Execution | Command record |',
+                 '| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |']
+        def cell(value):
+            return str(value if value is not None else 'unknown').replace('|', r'\|').replace('\n', ' ')
+        count = 0
+        for path, results in self.completed.items():
+            record = self.records[path]
+            for result in results:
+                count += not result['target'].startswith('stage: ')
+                digest = result.get('digest')
+                identity = f'RE action {digest} (binds command and input root)' if digest else 'unknown'
+                values = (self.sha, record['stage'], result['target'], result['result'], 'yes' if result['complete'] else 'no',
+                          identity, result.get('queue_seconds'), result.get('execution_seconds'), result.get('worker'),
+                          result.get('execution'), str(path.relative_to(self.directory)))
+                lines.append('| ' + ' | '.join(cell(value) for value in values) + ' |')
+        lines += ['', f'{count} target results published; {len(self.completed)} completed commands.', '', '## Active actions', '']
+        for path, record in self.records.items():
+            if 'end' not in record:
+                elapsed = now - record['start']
+                lines.append(f'- {"SLOW" if elapsed > 1800 else "running"}: {record["stage"]}; '
+                             f'{elapsed / 60:.1f} min; command {json.dumps(record["command"])}; '
+                             'action/input identity, queue/execution seconds and worker unknown until completion.')
+        lines += ['', '## Command inputs', '']
+        for path, record in self.records.items():
+            lines.append(f'- {path.relative_to(self.directory)}: {record["stage"]}; {json.dumps(record["command"])}; '
+                         f'event log {record.get("event_log") or "unknown"}')
+        lines += ['', '## Unusable progress evidence', '']
+        lines += [f'- {path}: {error}' for path, error in self.errors.items()]
+        temporary = self.path.with_suffix('.md.tmp')
+        temporary.write_text('\n'.join(lines) + '\n')
+        temporary.replace(self.path)
+
+
+def run_stages(directory, log, tier, running=None):
     """Stage verdicts, skips, perf measurement and versioned exception observations."""
     skip, known, revisions = exception_tables()
     reds, ran, skipped, perf = {}, [], [], []
@@ -355,6 +467,11 @@ def run_stages(directory, log, tier):
         log.write(f'\n== {name}\n')
         log.flush()
         started = time.monotonic()
+        stage_progress = dict(stage=name, command=command, start=time.time())
+        if running:
+            event_logs.progress(logs / 'stage.progress.json', stage_progress)
+            if not isolated:
+                env = env | {'HIRSEL_MAIN_RUN_PROGRESS': name}
         attempts = []
         for attempt in range(2):
             attempt_logs = logs if attempt == 0 else logs / 'retry'
@@ -381,6 +498,8 @@ def run_stages(directory, log, tier):
             if restarted:
                 attempts[-1]['restart_exit_status'] = restarted
                 break
+        if running:
+            event_logs.progress(logs / 'stage.progress.json', stage_progress | dict(end=time.time(), exit_status=status))
         selections[-1].update(exit_status=status, seconds=round(time.monotonic() - started, 3),
                               infrastructure_reason=reason, attempts=attempts)
         say(f'{"pass" if status == 0 else "FAIL"}  {name} ({time.monotonic() - started:.0f} s)')
@@ -555,18 +674,19 @@ def run(sha, tier):
     start = time.time()
     directory = RUNS / 'runs' / f'{time.strftime("%Y%m%dT%H%M%SZ", time.gmtime(start))}-{sha[:12]}'
     directory.mkdir(parents=True)
-    with open(directory / 'run.log', 'w') as log:
-        configuration_error = None
-        try:
-            reds, ran, skipped, perf, status = run_stages(directory, log, tier)
-        except TableError as error:
-            configuration_error = str(error)
-            log.write(configuration_error + '\n')
-            reds = {'configuration: exception tables': dict(stage='configuration', target=None, ids=[],
-                    kind='configuration', reason=configuration_error)}
-            ran, skipped, perf = [], [], None
-            status = dict(version=1, configuration_error=configuration_error, known=[], observations=[], selections=[], tables={})
-    return publish(sha, tier, directory, start, reds, ran, skipped, perf, status, configuration_error)
+    with RunningReport(sha, tier, directory, start) as running:
+        with open(directory / 'run.log', 'w') as log:
+            configuration_error = None
+            try:
+                reds, ran, skipped, perf, status = run_stages(directory, log, tier, running)
+            except TableError as error:
+                configuration_error = str(error)
+                log.write(configuration_error + '\n')
+                reds = {'configuration: exception tables': dict(stage='configuration', target=None, ids=[],
+                        kind='configuration', reason=configuration_error)}
+                ran, skipped, perf = [], [], None
+                status = dict(version=1, configuration_error=configuration_error, known=[], observations=[], selections=[], tables={})
+        return publish(sha, tier, directory, start, reds, ran, skipped, perf, status, configuration_error)
 
 
 def publish(sha, tier, directory, start, reds, ran, skipped, perf, status,

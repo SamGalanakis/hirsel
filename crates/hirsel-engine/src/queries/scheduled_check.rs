@@ -277,7 +277,9 @@ impl FrontCheckQueries {
                     diagnostics
                         .iter()
                         .any(matches)
-                        .then(|| QueryKind::Lower.phase_name().to_owned())
+                        .then(|| self.plan.lower.failure_phase(*reference))
+                        .flatten()
+                        .map(|phase| phase.phase_name().to_owned())
                 })
             })
     }
@@ -937,7 +939,7 @@ impl Task {
             }
             Err((reference, error)) => {
                 self.failed_lowered.push((path, reference));
-                self.files[file].error(error, Some(QueryKind::Lower));
+                self.files[file].error(error, facts.phase);
             }
         }
         Ok(())

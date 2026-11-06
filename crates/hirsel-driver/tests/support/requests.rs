@@ -313,11 +313,10 @@ pub fn constant_outcomes(
         .into_iter()
         .map(|definition| {
             let result = graph.constant(&definition);
-            let phase = if result.is_ok() {
-                Some(QueryKind::Lower)
-            } else {
-                graph.body(&definition).phase.or(Some(QueryKind::Lower))
-            };
+            let phase = graph
+                .installed
+                .lower
+                .settled_phase(&definition, QueryKind::Evaluate);
             let reads = graph
                 .installed
                 .lower
@@ -370,10 +369,8 @@ fn lower_requests(
                 }
                 let phase = graph
                     .installed
-                    .front
-                    .body_query(&definition)
-                    .and_then(|_| graph.body(&definition).phase)
-                    .or(Some(QueryKind::Lower));
+                    .lower
+                    .settled_phase(&definition, QueryKind::Lower);
                 let reads = graph
                     .installed
                     .lower

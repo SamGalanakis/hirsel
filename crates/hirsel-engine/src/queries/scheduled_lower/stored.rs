@@ -560,10 +560,18 @@ impl FrontLowerQueries {
                     let error = QueryError::from(error);
                     let bytes = self.records.encode(
                         &*self.namespace.anchors,
-                        &(path, &error, &reads, &depth, executed),
+                        &(
+                            path,
+                            &error,
+                            Some(QueryKind::Lower.phase_name()),
+                            &reads,
+                            &depth,
+                            executed,
+                        ),
                     )?;
                     let outcome = Outcome {
                         diagnostic_sources: None,
+                        phase: Some(QueryKind::Lower),
                         result: Err(error),
                         reads,
                         reads_decode_bytes: record.reads_decode_bytes,
@@ -599,6 +607,7 @@ impl FrontLowerQueries {
         }
         let outcome = Outcome {
             diagnostic_sources: None,
+            phase: Some(QueryKind::Lower),
             result: Ok(value),
             reads,
             reads_decode_bytes: record.reads_decode_bytes,

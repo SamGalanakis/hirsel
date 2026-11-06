@@ -3,6 +3,7 @@ use super::*;
 
 pub(in crate::queries) struct CheckFacts {
     pub reads: Arc<Reads>,
+    pub phase: Option<QueryKind>,
     pub result: Result<(Vec<Diagnostic>, ProductRef), (Reference, QueryError)>,
 }
 impl FrontLowerQueries {
@@ -40,6 +41,7 @@ impl FrontLowerQueries {
         };
         Some(CheckFacts {
             reads: Arc::new(outcome.reads(self)?),
+            phase: outcome.phase,
             result,
         })
     }

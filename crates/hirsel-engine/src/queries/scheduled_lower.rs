@@ -48,7 +48,7 @@ pub const FRONT_LOWER_KIND: u32 = 0x4600_0003;
 pub const FRONT_EVALUATE_KIND: u32 = 0x4600_0004;
 const FAILURE: Domain = Domain {
     kind: 0x4600_0005,
-    schema: 3,
+    schema: 4,
 };
 const LOWER_DESCRIPTOR: Domain = Domain {
     kind: 0x4600_0006,
@@ -200,6 +200,7 @@ fn decode_definition(owner: &FrontLowerQueries, body: Reference) -> Option<Defin
 #[derive(Clone)]
 struct Outcome {
     diagnostic_sources: Option<Arc<namespace::DiagnosticSources>>,
+    phase: Option<QueryKind>,
     result: Result<Value, QueryError>,
     reads: Reads,
     reads_decode_bytes: u64,
@@ -663,6 +664,32 @@ impl FrontLowerQueries {
             .unwrap_or_else(|e| e.into_inner())
             .get(&(id.kind, id.address.0))
             .and_then(|(_, outcome, _)| outcome.reads(self).map(Arc::new))
+    }
+    /// The settled producer's stopping phase, without demanding another body.
+    pub fn settled_phase(&self, path: &DefPath, query: QueryKind) -> Option<QueryKind> {
+        let kind = match query {
+            QueryKind::Lower => FRONT_LOWER_KIND,
+            QueryKind::Evaluate => FRONT_EVALUATE_KIND,
+            _ => return None,
+        };
+        let Some(id) = self.id(path, kind) else {
+            return self.completed_owner(path, kind)?.settled_phase(path, query);
+        };
+        let forwarded = self
+            .forwarded
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&(id.kind, id.address.0))
+            .cloned();
+        if let Some(row) = forwarded {
+            return row.owner.selected(row.id, row.selected)?.phase;
+        }
+        self.outcomes
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&(id.kind, id.address.0))?
+            .1
+            .phase
     }
     pub(crate) fn selected_read_len(
         &self,
@@ -1320,6 +1347,29 @@ impl FrontLowerQueries {
             .into_iter()
             .find_map(|owner| owner.failure_sources(reference))
     }
+    pub(in crate::queries) fn failure_phase(&self, reference: Reference) -> Option<QueryKind> {
+        let local = self
+            .outcomes
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .values()
+            .find(|(r, _, _)| *r == Some(reference))
+            .map(|(_, outcome, _)| outcome.phase);
+        if let Some(phase) = local {
+            return phase;
+        }
+        let owners = self
+            .forwarded
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .values()
+            .filter(|row| row.selected == Err(reference))
+            .map(|row| row.owner.clone())
+            .collect::<Vec<_>>();
+        owners
+            .into_iter()
+            .find_map(|owner| owner.failure_phase(reference))
+    }
     fn selected(&self, id: QueryId, selected: Result<ProductRef, Reference>) -> Option<Outcome> {
         if let Some(row) = self.delegated(id, &selected) {
             return row.owner.selected(row.id, row.selected);
@@ -1417,6 +1467,7 @@ impl FrontLowerQueries {
             successor: Rc::default(),
             restart: Rc::default(),
             diagnostic_sources: Rc::default(),
+            phase: Rc::new(Cell::new(Some(QueryKind::Lower))),
         };
         // A root observes its own body before preparation, including when
         // that preparation fails. Nested callers keep the same root receipt.
@@ -1575,6 +1626,7 @@ impl FrontLowerQueries {
             }
             let outcome = Outcome {
                 diagnostic_sources: source.diagnostic_sources.borrow().clone(),
+                phase: Some(QueryKind::Lower),
                 result,
                 reads: observed,
                 reads_decode_bytes: 0,
@@ -1611,7 +1663,14 @@ impl FrontLowerQueries {
                     base: &self.namespace.anchors,
                     diagnostics: diagnostic_sources.as_deref(),
                 },
-                &(&path, error, &observed, &depth, executed),
+                &(
+                    &path,
+                    error,
+                    source.phase.get().map(QueryKind::phase_name),
+                    &observed,
+                    &depth,
+                    executed,
+                ),
                 hirsel_engine_store::ArchiveBoundary::Ordinary,
             )
             .ok_or(self.errors.resource)?;
@@ -1625,6 +1684,7 @@ impl FrontLowerQueries {
         let execution_subject = persistent::evaluation_subject(&key, &bytes);
         let outcome = Outcome {
             diagnostic_sources: source.diagnostic_sources.borrow().clone(),
+            phase: source.phase.get(),
             result,
             reads: observed,
             reads_decode_bytes,
@@ -1997,7 +2057,9 @@ impl FrontLowerQueries {
                 source.record(ReadKey::LayoutBody(*id), memos::optional(Some(*hash)));
             }
         }
-        let analyzed = body.outcome.result?;
+        let analyzed = body.outcome.result.inspect_err(|_| {
+            source.phase.set(body.outcome.phase);
+        })?;
         source.execution_signatures(analyzed.dependencies.iter());
         let signature = source.signature(path)?;
         let mut observed = ReadsBuilder::new();
@@ -2607,6 +2669,7 @@ struct Source {
     evidence: Rc<RefCell<Evidence>>,
     successor: Rc<RefCell<Option<SuccessorCapture>>>,
     diagnostic_sources: Rc<RefCell<Option<Arc<namespace::DiagnosticSources>>>>,
+    phase: Rc<Cell<Option<QueryKind>>>,
     restart: Rc<RefCell<Option<SuccessorCapture>>>,
 }
 struct PendingRequest<'a> {
@@ -2937,7 +3000,9 @@ impl Source {
             ReadKey::ExecutedBody(DefId::intern(path)),
             memos::optional(Some(owner.inputs[path].implementation)),
         );
-        outcome.result
+        outcome.result.inspect_err(|_| {
+            self.phase.set(outcome.phase);
+        })
     }
     async fn constant_value(
         &self,
@@ -3604,6 +3669,7 @@ mod retention_tests {
             substitutions.capacity() * std::mem::size_of::<(hirsel_syntax::ExprId, Materialized)>();
         let outcome = Outcome {
             diagnostic_sources: None,
+            phase: Some(QueryKind::Lower),
             result: Ok(Value::Constant(Box::new(Constants::new(
                 Materialized {
                     root: hirsel_tir::ValueNode {

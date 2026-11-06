@@ -209,6 +209,7 @@ impl FrontRegistrationQueries {
                 successor: Rc::default(),
                 restart: Rc::default(),
                 diagnostic_sources: Rc::default(),
+                phase: Rc::new(Cell::new(Some(QueryKind::Generate))),
             };
             source.record(
                 ReadKey::ExecutedBody(input.definition),

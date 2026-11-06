@@ -203,6 +203,7 @@ mod tests {
         );
         let mut outcome = Outcome {
             diagnostic_sources: None,
+            phase: Some(QueryKind::Lower),
             result: Ok(Value::Lower(Box::new(LowerProduct {
                 live: None,
                 local_verified: None,
@@ -333,6 +334,7 @@ mod tests {
         let bound = constants.working_bytes();
         let mut outcome = Outcome {
             diagnostic_sources: None,
+            phase: Some(QueryKind::Lower),
             result: Ok(Value::Constant(Box::new(constants))),
             reads: reads.clone(),
             reads_decode_bytes: 0,

@@ -244,7 +244,9 @@ impl Catalog {
         self.installed.get(&path.0.package)
     }
 
-    fn installation_digest<'a>(identities: impl IntoIterator<Item = &'a ContentHash>) -> ContentHash {
+    fn installation_digest<'a>(
+        identities: impl IntoIterator<Item = &'a ContentHash>,
+    ) -> ContentHash {
         ContentHash::of_parts(
             "hirsel.catalog.installations.v1",
             identities.into_iter().map(|identity| identity.0.as_slice()),
@@ -710,7 +712,9 @@ impl QueryEngine {
         self.catalog.installed = selected
             .into_iter()
             .filter_map(|(package, products)| {
-                products.source_records().map(|records| (package.clone(), records))
+                products
+                    .source_records()
+                    .map(|records| (package.clone(), records))
             })
             .collect();
     }

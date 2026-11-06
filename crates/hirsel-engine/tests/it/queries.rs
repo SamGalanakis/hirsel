@@ -1668,7 +1668,15 @@ fn scheduled_scc_run(
     jobs: usize,
     output_bytes: u64,
 ) -> (FrontGrowthOutput, u64, u64) {
-    scheduled_scc_run_with_capacity(text, calls, store, jobs, output_bytes, None)
+    scheduled_scc_run_with_capacity(
+        text,
+        calls,
+        store,
+        jobs,
+        output_bytes,
+        None,
+        hirsel_engine_admission::ProcessBudget::new(1 << 30),
+    )
 }
 fn scheduled_scc_run_with_capacity(
     text: &str,
@@ -1677,6 +1685,7 @@ fn scheduled_scc_run_with_capacity(
     jobs: usize,
     output_bytes: u64,
     capacity: Option<usize>,
+    budget: Arc<hirsel_engine_admission::ProcessBudget>,
 ) -> (FrontGrowthOutput, u64, u64) {
     let fake = Arc::new(Fake {
         events: Default::default(),
@@ -1703,7 +1712,6 @@ fn scheduled_scc_run_with_capacity(
     let mut engine = QueryEngine::new(default_environment(), adapters).with_result_store(store);
     parse(&mut engine, text);
     let definitions = engine.front_source_roots();
-    let budget = hirsel_engine_admission::ProcessBudget::new(1 << 30);
     let weight = MemoryWeight {
         retained: 64 << 10,
         scratch: 8 << 20,
@@ -1885,6 +1893,16 @@ fn scheduled_scc_split_merge_and_durable_reopen_agree_with_cold_solve() {
             directory.path().to_path_buf(),
         )) as Arc<dyn hirsel_engine_store::ResultStore>
     };
+    let run = |text: &str, calls: &[(&str, &[&str])], jobs| {
+        let budget = hirsel_engine_admission::ProcessBudget::new(1 << 30);
+        // Directory retention is disk-backed. Fund live transport from the
+        // same process budget as the Front, growth and runtime reservations.
+        let store = Arc::new(hirsel_engine_store::RequestStore::new(
+            open(),
+            budget.reserve(8 << 20).unwrap(),
+        ));
+        scheduled_scc_run_with_capacity(text, calls, store, jobs, 8 << 20, None, budget)
+    };
     let cases: &[(&str, &[(&str, &[&str])])] = &[
         (
             "fn a {b}\nfn b {a}\nfn main {a}\n",
@@ -1901,7 +1919,7 @@ fn scheduled_scc_split_merge_and_durable_reopen_agree_with_cold_solve() {
     ];
     let mut previous_membership = None;
     for (text, calls) in cases {
-        let (resident, _, memberships) = scheduled_scc_run(text, calls, open(), 1, 8 << 20);
+        let (resident, _, memberships) = run(text, calls, 1);
         assert_eq!(memberships, 1);
         if let Some(previous) = previous_membership {
             assert_ne!(resident.facets.membership.output, previous);
@@ -1921,7 +1939,7 @@ fn scheduled_scc_split_merge_and_durable_reopen_agree_with_cold_solve() {
         let (cold, _, _) =
             scheduled_scc_run(text, calls, Arc::new(MemStore::default()), 1, 8 << 20);
         assert_eq!(scc_products(&resident), scc_products(&cold));
-        let (reopened, solves, memberships) = scheduled_scc_run(text, calls, open(), 2, 8 << 20);
+        let (reopened, solves, memberships) = run(text, calls, 2);
         assert_eq!(
             resident.facets.membership.action, reopened.facets.membership.action,
             "membership observes the same checked inputs after reopening"
@@ -1969,8 +1987,15 @@ fn scheduled_scc_stream_exceeds_8192_with_store_off_and_unchanged_inventory() {
         hirsel_engine_store::ResultStore::persistence(&*store),
         hirsel_engine_store::Persistence::Disabled
     );
-    let (output, solves, memberships) =
-        scheduled_scc_run_with_capacity(&text, &[], store, 1, 8 << 20, Some(8192));
+    let (output, solves, memberships) = scheduled_scc_run_with_capacity(
+        &text,
+        &[],
+        store,
+        1,
+        8 << 20,
+        Some(8192),
+        hirsel_engine_admission::ProcessBudget::new(1 << 30),
+    );
     assert_eq!(output.facets.components.len(), 8194);
     assert_eq!((solves, memberships), (8194, 1));
 }

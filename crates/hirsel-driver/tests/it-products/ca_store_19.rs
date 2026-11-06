@@ -380,11 +380,15 @@ fn ordinary_read_only_executed_helper_keeps_its_check_product() {
             ..CompileConfig::for_memory_cap(None)
         });
         compiler.precompute_package(&manifest, &products).unwrap();
+        let budget = hirsel_engine_admission::ProcessBudget::new(1 << 30);
         let mut reader = compiler
             .with_config(CompileConfig {
-                store: Arc::new(
-                    store::DirStore::new(dir.join("reader")).with_read_only_root(products),
-                ),
+                store: Arc::new(store::RequestStore::new(
+                    Arc::new(
+                        store::DirStore::new(dir.join("reader")).with_read_only_root(products),
+                    ),
+                    budget.reserve(8 << 20).unwrap(),
+                )),
                 jobs: hirsel_intern::jobs::Jobs::new(1),
                 ..CompileConfig::for_memory_cap(None)
             })
@@ -392,7 +396,8 @@ fn ordinary_read_only_executed_helper_keeps_its_check_product() {
             .unwrap();
         let mut root = reader.entry.clone();
         root.0.name = "DECODE".into();
-        let (front, lower, value) = constant_product(&mut reader.engine, &root).unwrap();
+        let (front, lower, value) =
+            constant_product(&mut reader.engine, &root, budget.clone()).unwrap();
         assert_eq!(
             value.root.kind,
             hirsel_tir::ValueKind::Constant(hirsel_tir::Constant::Integer(7))
@@ -400,7 +405,6 @@ fn ordinary_read_only_executed_helper_keeps_its_check_product() {
         for name in ["alphabet_bytes", "decode_words", "DECODE"] {
             root.0.name = name.into();
             reader.engine.semantic_program_revision(&root).unwrap();
-            let budget = hirsel_engine_admission::ProcessBudget::new(1 << 30);
             let mut runtime = AdmittedRuntime::new(
                 hirsel_intern::jobs::Jobs::new(1),
                 budget.reserve(512 << 20).unwrap(),
@@ -433,6 +437,7 @@ fn ordinary_read_only_executed_helper_keeps_its_check_product() {
 fn constant_product(
     engine: &mut QueryEngine,
     path: &DefPath,
+    budget: Arc<hirsel_engine_admission::ProcessBudget>,
 ) -> Result<
     (
         Arc<FrontBodyQueries>,
@@ -441,7 +446,8 @@ fn constant_product(
     ),
     QueryError,
 > {
-    let mut products = crate::staged_product_fixture::StagedProducts::capture(engine, 1)?;
+    let mut products =
+        crate::staged_product_fixture::StagedProducts::capture_with_budget(engine, 1, budget)?;
     let query = products
         .lower
         .evaluate_query(path)

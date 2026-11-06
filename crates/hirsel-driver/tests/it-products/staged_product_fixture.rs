@@ -13,6 +13,13 @@ pub(super) struct StagedProducts {
 impl StagedProducts {
     pub fn capture(engine: &mut QueryEngine, jobs: usize) -> Result<Self, QueryError> {
         let budget = hirsel_engine_admission::ProcessBudget::new(1 << 30);
+        Self::capture_with_budget(engine, jobs, budget)
+    }
+    pub fn capture_with_budget(
+        engine: &mut QueryEngine,
+        jobs: usize,
+        budget: Arc<hirsel_engine_admission::ProcessBudget>,
+    ) -> Result<Self, QueryError> {
         let errors = errors();
         let weight = MemoryWeight {
             retained: 2 << 20,

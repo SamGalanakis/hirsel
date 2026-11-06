@@ -279,6 +279,8 @@ impl DirStore {
 
 impl ResultStore for DirStore {
     fn admit_product_memory(&self, _bytes: u64) -> Option<std::sync::Arc<dyn Send + Sync>> {
+        // Disk capacity provides no admitted RAM. RequestStore supplies live
+        // leases from the caller's process reservation.
         None
     }
 

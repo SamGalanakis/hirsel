@@ -549,6 +549,13 @@ impl ReaderSequence {
         let result = union.finish();
         if let Err(hirsel_query_products::reads::Inconsistent(key)) = &result {
             for (index, entry) in self.0.iter().enumerate() {
+                if entry
+                    .receipt
+                    .decoding_bytes()
+                    .is_none_or(|bytes| bytes > scratch)
+                {
+                    continue;
+                }
                 let Some(value) = entry.receipt.load(store).and_then(|reads| reads.get(key)) else {
                     continue;
                 };

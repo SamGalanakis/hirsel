@@ -28,6 +28,7 @@ pub(super) struct LiveSemantic {
     records: crate::NativeRecords,
     pub(super) ownership: Arc<SemanticOwnership>,
     charge: u64,
+    store: Arc<dyn ResultStore>,
 }
 impl LiveProductValue for LiveSemantic {
     fn domain(&self) -> Domain {
@@ -43,17 +44,20 @@ impl LiveProductValue for LiveSemantic {
                 .source
                 .as_ref()
                 .map(|source| {
-                    self.records
-                        .encode_with_admission(
-                            &self.ownership.context,
-                            &**source,
-                            grant,
-                            source.weight(),
-                        )
+                    source
+                        .export(&self.records, &self.ownership.context, &*self.store, grant)
                         .ok_or_else(|| std::io::Error::other("semantic source encoding"))
                 })
                 .transpose()?;
-            let (identity, content, dependencies) = self.entry.node.canonical(self.path.path());
+            let content::CanonicalNode {
+                identity,
+                content,
+                dependencies,
+            } = self
+                .entry
+                .node
+                .canonical(self.path.path(), &*self.store, grant, grant.bytes())
+                .map_err(|error| std::io::Error::other(format!("{error:?}")))?;
             let value = (
                 identity,
                 content,
@@ -198,8 +202,8 @@ impl SemanticTask {
                 self.node.input.as_ref().ok_or(QueryError::NotImplemented)?,
             )?;
         }
-        let entry = Arc::new(GraphEntry {
-            source: source.map(Arc::new),
+        let mut entry = GraphEntry {
+            source: source.map(|body| source_products::Source::Live(Arc::new(body))),
             content: content::Content::new(queries, content, &node)?,
             node,
             dependencies: dependencies
@@ -207,28 +211,55 @@ impl SemanticTask {
                 .map(DefId::intern)
                 .collect::<Vec<_>>()
                 .into_boxed_slice(),
-        });
-        let mut weight = hirsel_query_products::retained::MetadataWeight::default();
-        weight.tree::<ContentHash, (ProductRef, Arc<GraphEntry>)>(1);
-        weight.add(
-            std::mem::size_of::<GraphEntry>()
-                + std::mem::size_of::<LiveSemantic>()
-                + std::mem::size_of::<SemanticOwnership>()
-                + 6 * std::mem::size_of::<usize>(),
-        );
-        weight.add(std::mem::size_of_val(&*entry.dependencies));
-        entry.node.weight(&mut weight);
-        entry.content.weight(&mut weight);
-        if let Some(source) = &entry.source {
-            weight.add(source.weight() as usize + 2 * std::mem::size_of::<usize>());
+        };
+        let charge_entry = |entry: &GraphEntry| {
+            let mut weight = hirsel_query_products::retained::MetadataWeight::default();
+            weight.tree::<ContentHash, (ProductRef, Arc<GraphEntry>)>(1);
+            weight.add(
+                std::mem::size_of::<GraphEntry>()
+                    + std::mem::size_of::<LiveSemantic>()
+                    + std::mem::size_of::<SemanticOwnership>()
+                    + 6 * std::mem::size_of::<usize>(),
+            );
+            weight.add(std::mem::size_of_val(&*entry.dependencies));
+            entry.node.weight(&mut weight);
+            entry.content.weight(&mut weight);
+            if let Some(source) = &entry.source {
+                weight.add(source.weight() as usize);
+            }
+            weight.bytes()
+        };
+        let mut charge = charge_entry(&entry);
+        let remaining = *queries
+            .retention
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if charge > queries.weight.retained / 2
+            || charge > remaining.saturating_sub(queries.weight.scratch)
+        {
+            entry.node.spill(queries)?;
+            entry.content.spilled_node(&entry.node);
+            if let Some(source) = &mut entry.source {
+                source.spill(queries)?;
+            }
+            charge = charge_entry(&entry);
         }
-        let charge = weight.bytes();
         if charge > queries.weight.retained / 2 {
             return Err(operational("semantic product exceeds retained admission"));
         }
+        let entry = Arc::new(entry);
         // Hash the canonical semantic preimage directly. Identity encoding does
         // not create a portable archive or consult the result provider.
-        let (identity, content, dependencies) = entry.node.canonical(&self.node.root);
+        let content::CanonicalNode {
+            identity,
+            content,
+            dependencies,
+        } = entry.node.canonical(
+            &self.node.root,
+            &*queries.store,
+            &queries.ownership._allowance,
+            queries.weight.scratch,
+        )?;
         let canonical = (
             identity,
             content,
@@ -276,6 +307,7 @@ impl SemanticTask {
                 records: queries.records.clone(),
                 ownership,
                 charge,
+                store: queries.store.clone(),
             }),
         );
         queries

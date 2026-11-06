@@ -462,7 +462,7 @@ struct GraphEntry {
     node: content::Node,
     content: content::Content,
     dependencies: Box<[DefId]>,
-    source: Option<Arc<source_products::Body>>,
+    source: Option<source_products::Source>,
 }
 struct Task {
     queries: Arc<FrontRunQueries>,

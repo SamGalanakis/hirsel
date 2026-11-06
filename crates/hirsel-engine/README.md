@@ -1008,7 +1008,9 @@ that module's verdict only. A recomputed signature that disagrees twice with the
 proof that named it is an operational fault, not a diagnostic.
 `RuntimeStats::body_evictions` counts pressure evictions. Run semantic nodes and source audits retain immutable values under their original
 output admission. Named content shares the node's token allocation. Local readers
-open no portable records; explicit archive exports encode under the caller's grant.
+open no portable records while the value is live. Retention pressure spills tokens
+and source values through the existing bounded codecs; explicit archive exports
+encode under the caller's grant.
 A source view or native definition output retains only its selected data and
 source/type admission, so it can outlive the catalogue without pinning siblings.
 Freshly encoded Lower and native archives transfer their concrete buffers into

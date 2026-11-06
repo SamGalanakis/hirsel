@@ -693,19 +693,28 @@ impl HeaderSources {
     }
     fn install_file(engine: &mut QueryEngine, file: FileId, syntaxes: &[Arc<ItemSyntax>]) {
         let mut changed = false;
+        let mut owners = None;
         for syntax in syntaxes {
+            if engine.items.get(&syntax.item.definition).is_some_and(|items| {
+                items.iter().any(|old| {
+                    old.anchor == syntax.anchor && old.occurrence == syntax.occurrence
+                })
+            }) {
+                continue;
+            }
+            if !engine.items.contains_key(&syntax.item.definition) {
+                let owners = owners.get_or_insert_with(|| crate::NativeRecordContext::capture(engine));
+                engine.materialize_bound_syntax(&syntax.item.definition, syntax.clone(), owners);
+                changed = true;
+                continue;
+            }
             let candidates = engine
                 .items
                 .entry(syntax.item.definition.clone())
                 .or_default();
-            if !candidates
-                .iter()
-                .any(|old| old.anchor == syntax.anchor && old.occurrence == syntax.occurrence)
-            {
-                candidates.push(syntax.clone());
-                candidates.sort_by_key(|s| s.occurrence);
-                changed = true;
-            }
+            candidates.push(syntax.clone());
+            candidates.sort_by_key(|s| s.occurrence);
+            changed = true;
         }
         if !syntaxes.is_empty() && (changed || !engine.declarations.has_file(file)) {
             engine

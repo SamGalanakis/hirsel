@@ -166,7 +166,7 @@ impl PrivateProducts {
                 let declared = engine
                     .unmarked_signature(id)
                     .and_then(|_| engine.signatures.get(&id))
-                    .map(project);
+                    .map(|entry| engine.operation.project_header(entry));
                 (
                     id,
                     Candidate {
@@ -432,7 +432,7 @@ impl HeaderProducts {
                         _ => true,
                     })
             })
-            .map(|(definition, entry)| (*definition, project(entry)))
+            .map(|(definition, entry)| (*definition, self.operation.project_header(entry)))
             .collect();
         let identities: hirsel_syntax::DefMap<_> = signatures
             .iter()

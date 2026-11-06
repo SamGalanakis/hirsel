@@ -1711,3 +1711,79 @@ pub(super) fn decode_installed_syntax(
     syntax.retention.retain(Arc::new(charge));
     Ok(syntax)
 }
+
+#[cfg(test)]
+mod retention_tests {
+    use super::*;
+    use hirsel_engine_admission::{MemoryReservation, MemoryReservationPool, ProcessBudget};
+
+    struct Allowance(MemoryReservationPool);
+    impl HeaderAllowance for Allowance {
+        fn take_header(&self, bytes: u64) -> Option<MemoryReservation> {
+            self.0.take(bytes)
+        }
+    }
+
+    #[test]
+    fn metadata_pressure_reclaims_cache_wrappers_while_readers_retain_their_rows() {
+        let mut engine = QueryEngine::new(default_environment(), PhaseAdapters::default());
+        let id = DefId::intern(&DefPath::core("leased_header"));
+        let signature = Arc::new(hirsel_types::Signature {
+            metadata: Default::default(),
+            definition: id,
+            kind: hirsel_types::SignatureKind::Const {
+                ty: engine.types.intern(hirsel_types::Type::unit()),
+                generics: Default::default(),
+            },
+            fingerprint: ContentHash::of_bytes(b"leased_header"),
+        });
+        let entry = Arc::new(engine.record(
+            MemoKey::new(QueryKind::Signature, id),
+            signature.fingerprint,
+            Ok(Arc::new(output(signature.clone()))),
+            DependencyReads::default(),
+            &Observed::default(),
+        ));
+        let mut headers = HeaderProducts::capture(&engine);
+        Arc::get_mut(&mut headers).unwrap().rows.insert(id, HeaderSlot::default());
+        let budget = ProcessBudget::new(1 << 20);
+        let backing: Arc<dyn HeaderAllowance> = Arc::new(Allowance(
+            MemoryReservationPool::new(budget.reserve(1 << 20).unwrap()).ok().unwrap(),
+        ));
+        let remaining = Arc::new(std::sync::Mutex::new(1 << 19));
+        headers.configure_source_backing(backing.clone(), remaining.clone());
+        let bytes = crate::memo::retained::retained_signature_entry_bytes(&entry).unwrap()
+            + hirsel_engine_admission::retained_arc_bytes(
+                &std::mem::MaybeUninit::<HeaderProduct>::uninit(),
+            );
+        let (charge, row_charge) = headers.admit_signature(Some(&entry), bytes).unwrap();
+        let wrapper = row_charge.front_bytes();
+        let payload = charge.front_bytes();
+        headers.publish(&headers.rows[&id], HeaderProduct {
+            result: entry.result(),
+            entry: Some(entry.clone()),
+            recomputes: 0,
+            graph_work: 0,
+            publication: false,
+            charge,
+            _row_charge: row_charge,
+            origin: Weak::new(),
+            accounted: AtomicBool::new(true),
+        });
+        let raw = entry.result().unwrap();
+        let before = *remaining.lock().unwrap();
+        assert!(headers.evict_row());
+        assert!(headers.ready(id).is_none());
+        assert_eq!(*remaining.lock().unwrap() - before, wrapper);
+        assert_eq!(raw.value.fingerprint, signature.fingerprint);
+        assert!(payload > 0);
+        assert!(*remaining.lock().unwrap() < 1 << 19);
+        drop(raw);
+        drop(entry);
+        drop(engine);
+        assert!(headers.reclaim_header_rows());
+        assert_eq!(*remaining.lock().unwrap(), (1 << 19) - payload);
+        drop(signature);
+        assert_eq!(*remaining.lock().unwrap(), 1 << 19);
+    }
+}

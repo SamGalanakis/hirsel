@@ -419,6 +419,15 @@ fn ownership_product_tracks_removal_reordering_relocation_and_parse_eviction() {
         Some(0),
         "hydrating identical bindings requires no second ownership reservation"
     );
+    let headers = crate::queries::header_products::HeaderProducts::capture(&consumer);
+    let mut restored = headers.execution();
+    assert!(headers.materialize(&mut restored, &path).unwrap());
+    assert_scalar_bindings(&restored);
+    assert_eq!(
+        restored.source_records().unadmitted_bytes(),
+        Some(0),
+        "header materialization reuses the admitted source bindings"
+    );
     consumer.items.remove(&path);
     assert_scalar_bindings(&consumer);
     let mut alias = (*syntax).clone();

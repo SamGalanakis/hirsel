@@ -527,9 +527,13 @@ impl FrontLowerQueries {
             detail,
         )
     }
-    pub(crate) fn bind_demand(self: &Arc<Self>, demand: &Arc<generation::demand::DemandProducer>) {
+    pub(crate) fn bind_demand(
+        self: &Arc<Self>,
+        demand: &Arc<generation::demand::DemandProducer>,
+    ) -> Result<(), QueryError> {
+        self.front.bind_demand(demand)?;
         let _ = self.demand.set(Arc::downgrade(demand));
-        self.front.bind_demand(demand);
+        Ok(())
     }
     pub(crate) fn keep_demand(&self, demand: Arc<generation::demand::DemandProducer>) {
         *self.demand_owner.lock().unwrap_or_else(|e| e.into_inner()) = Some(demand);

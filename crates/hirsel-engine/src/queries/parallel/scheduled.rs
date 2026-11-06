@@ -266,7 +266,7 @@ struct Forwarded {
     successor: scheduled_lower::SuccessorCapture,
 }
 pub struct FrontBodyQueries {
-    demand: std::sync::OnceLock<std::sync::Weak<generation::demand::DemandProducer>>,
+    demand: Mutex<std::sync::Weak<generation::demand::DemandProducer>>,
     forwarded: Mutex<BTreeMap<Key, Forwarded>>,
     inputs: Inputs,
     _operation_inputs: Arc<OperationFrontInputs>,
@@ -411,8 +411,27 @@ impl FrontBodyQueries {
             .get(&query.address.0)
             .map(|row| row.successor.clone())
     }
-    pub(crate) fn bind_demand(&self, demand: &Arc<generation::demand::DemandProducer>) {
-        let _ = self.demand.set(Arc::downgrade(demand));
+    pub(crate) fn bind_demand(
+        &self,
+        demand: &Arc<generation::demand::DemandProducer>,
+    ) -> Result<(), QueryError> {
+        let mut installed = self.demand.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(previous) = installed.upgrade()
+            && !Arc::ptr_eq(&previous, demand)
+        {
+            return Err(QueryError::Operational(hirsel_types::OperationalFailure {
+                operation: "Front demand binding".into(),
+                message: "immutable Front inputs already have a live demand producer".into(),
+            }));
+        }
+        *installed = Arc::downgrade(demand);
+        Ok(())
+    }
+    pub(crate) fn demand_producer(&self) -> Option<Arc<generation::demand::DemandProducer>> {
+        self.demand
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .upgrade()
     }
     pub(crate) fn owns_query(&self, query: QueryId) -> bool {
         query.kind == FRONT_BODY_KIND
@@ -2099,9 +2118,7 @@ impl QueryFactory for Factory {
         if !self.0.owns_query(query)
             && let Some(front) = self
                 .0
-                .demand
-                .get()
-                .and_then(std::sync::Weak::upgrade)
+                .demand_producer()
                 .and_then(|demand| demand.front_for(query))
         {
             return front.factory().evict(query, product, scratch);
@@ -2146,9 +2163,7 @@ impl QueryFactory for Factory {
         if !self.0.owns_query(query)
             && let Some(front) = self
                 .0
-                .demand
-                .get()
-                .and_then(std::sync::Weak::upgrade)
+                .demand_producer()
                 .and_then(|demand| demand.front_for(query))
         {
             return front.factory().create(query);
@@ -2214,11 +2229,10 @@ impl QueryTask for BodyTask {
             .is_some_and(|body| body.generated)
             && self.queries.inputs[&self.input].registration.is_none();
         if pending {
-            let Some(producer) = self.queries.demand.get().and_then(std::sync::Weak::upgrade)
-            else {
+            let Some(producer) = self.queries.demand_producer() else {
                 return finish(Err(self.queries.protocol_failure(self.query, &format!(
-                    "generated declaration {} has no accepted registration and no live demand producer; route installed={}",
-                    definition.path(), self.queries.demand.get().is_some(),
+                    "generated declaration {} has no accepted registration and no live demand producer",
+                    definition.path(),
                 ))));
             };
             let demand = match producer.query(

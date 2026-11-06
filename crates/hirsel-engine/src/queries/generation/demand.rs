@@ -208,7 +208,7 @@ impl DemandProducer {
             staged: Mutex::new(BTreeSet::new()),
             _metadata: metadata,
         });
-        initial.bind_demand(&producer);
+        initial.bind_demand(&producer)?;
         initial.keep_demand(producer.clone());
         Ok(producer)
     }
@@ -1212,7 +1212,7 @@ impl DemandProducer {
             None,
             previous.as_deref(),
         )?;
-        lower.bind_demand(self);
+        lower.bind_demand(self)?;
         let charge = Self::take(
             &self.syntax,
             (3 * (size_of::<Arc<FrontLowerQueries>>()

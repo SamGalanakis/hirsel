@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """tools/land against a scratch origin with fake Buck2 checks: a push rejected
 because main moved goes back to the rebase, and a red check refuses the push."""
+import csv
 import fcntl
+import io
 import json
 import os
 import runpy
@@ -66,7 +68,7 @@ if os.environ.get('FAKE_RED_AFTER_RACE') and STAGE == os.environ['FAKE_RED_AFTER
 
 FAKES = {
     '.buck2/bin/buck2': '#!/bin/sh\necho root//:a\n',
-    'tools/buck2/prepare.py': '',
+    'tools/buck2/prepare.py': "from pathlib import Path\np = Path('.buck2/bin/buck2')\np.parent.mkdir(parents=True, exist_ok=True)\np.write_text('#!/bin/sh\\necho root//:a\\n')\np.chmod(0o755)\n",
     'tools/buck2/sync.py': '',
     'tools/check-hot-files': '',
     'tools/buck2/event_logs.py': "PASS, SKIP, OMITTED = 'PASS', 'SKIP', 'OMITTED'\n",
@@ -99,7 +101,9 @@ class Land(unittest.TestCase):
             FAKE_ORIGIN=str(self.origin))
         self.git(self.top, 'init', '-q', '--bare', '-b', 'main', str(self.origin))
         self.git(self.top, 'clone', '-q', str(self.origin), str(self.lane))
-        files = dict(FAKES, **{'tools/land': (ROOT / 'tools/land').read_text(),
+        files = dict(FAKES, **{'tools/land': Path(os.environ.get('HIRSEL_TEST_LAND', ROOT / 'tools/land')).read_text(),
+                               'tools/land-run': (ROOT / 'tools/land-run').read_text(),
+                               'tools/land_events.py': (ROOT / 'tools/land_events.py').read_text(),
                                'tools/buck2/generated.py': (ROOT / 'tools/buck2/generated.py').read_text(),
                                'tools/buck2/merging.py': (ROOT / 'tools/buck2/merging.py').read_text(),
                                'tools/main-runs': (ROOT / 'tools/main-runs').read_text(),
@@ -126,6 +130,49 @@ class Land(unittest.TestCase):
     def land(self, **env):
         return subprocess.run([sys.executable, '-c', DRIVER], cwd=self.lane, env=self.env | env,
                               capture_output=True, text=True)
+
+    def wrapped_land(self, **env):
+        log, events = self.top / 'detached.log', self.top / 'events.tsv'
+        done = subprocess.run([sys.executable, 'tools/land-run', str(log), str(events)], cwd=self.lane,
+                              env=self.env | env, capture_output=True, text=True, timeout=30)
+        with events.open(newline='') as source:
+            rows = list(csv.reader(source, delimiter='\t'))
+        return done, log.read_text(), rows
+
+    def test_detached_wrapper_records_submission_and_one_completion_with_the_landed_sha(self):
+        done, log, rows = self.wrapped_land()
+        self.assertEqual(done.returncode, 0, log + done.stderr)
+        self.assertEqual([row[0] for row in rows], ['SUBMITTED', 'LANDED'])
+        submitted, landed = rows
+        self.assertEqual(submitted[1:4], landed[1:4])
+        self.assertEqual(landed[1:3], ['my-lane', '00000000000000000001'])
+        self.assertEqual(landed[4], '0')
+        self.assertEqual(landed[5], self.git(self.origin, 'rev-parse', 'main').strip())
+        self.assertEqual(log.count('EXIT 0'), 1)
+        self.assertEqual(self.queued(), [])
+        self.assertEqual(list((self.lane / '.git/land-checkouts').iterdir()), [])
+
+    def test_detached_wrapper_records_failure_without_claiming_a_landing(self):
+        done, log, rows = self.wrapped_land(FAKE_FMT_RED='1')
+        self.assertEqual(done.returncode, 1, log + done.stderr)
+        self.assertEqual([row[0] for row in rows], ['SUBMITTED', 'FAILED'])
+        self.assertEqual(rows[-1][4:6], ['1', ''])
+        self.assertEqual(log.count('EXIT 1'), 1)
+        self.assertEqual(self.main_log(), ['base'])
+
+    def test_detached_wrapper_preserves_one_submission_across_reexec(self):
+        other = self.top / 'other'
+        self.git(self.top, 'clone', '-q', str(self.origin), str(other))
+        with (other / 'tools/land').open('a') as script:
+            script.write('\n# Updated land on main.\n')
+        self.git(other, 'commit', '-qam', 'update land')
+        self.git(other, 'push', '-q', 'origin', 'main')
+        done, log, rows = self.wrapped_land()
+        self.assertEqual(done.returncode, 0, log + done.stderr)
+        self.assertIn('rebased tree has another tools/land', log)
+        self.assertEqual([row[0] for row in rows], ['SUBMITTED', 'LANDED'])
+        self.assertEqual(rows[0][2], rows[1][2])
+        self.assertEqual(list((self.lane / '.git/land-checkouts').iterdir()), [])
 
     def main_log(self):
         return self.git(self.origin, 'log', '--format=%s', 'main').split('\n')[:-1]
@@ -163,7 +210,7 @@ class Land(unittest.TestCase):
         self.ledger_checks(original)
         landed = self.land()
         self.assertEqual(landed.returncode, 1, landed.stdout + landed.stderr)
-        self.assertIn('FAIL  independent line lists', landed.stdout)
+        self.assertIn('FAIL  screen: independent line lists', landed.stdout)
         self.assertEqual((self.lane / 'tools/known-failures.tsv').read_text(), original)
         self.assertEqual(self.main_log(), ['base'])
 
@@ -178,7 +225,7 @@ class Land(unittest.TestCase):
         self.git(self.lane, 'commit', '-qam', 'duplicate unterminated failure')
         landed = self.land()
         self.assertEqual(landed.returncode, 1, landed.stdout + landed.stderr)
-        self.assertIn('FAIL  independent line lists', landed.stdout)
+        self.assertIn('FAIL  screen: independent line lists', landed.stdout)
         self.assertEqual((self.lane / 'tools/known-failures.tsv').read_text(), original)
         self.assertEqual(self.main_log(), ['base'])
 
@@ -213,7 +260,7 @@ class Land(unittest.TestCase):
                 self.git(self.lane, 'commit', '-qam', 'malformed failure')
                 refused = self.land()
                 self.assertEqual(refused.returncode, 1, refused.stdout + refused.stderr)
-                self.assertIn('FAIL  independent line lists', refused.stdout)
+                self.assertIn('FAIL  screen: independent line lists', refused.stdout)
                 self.assertIn(malformed, (self.lane / 'tools/known-failures.tsv').read_text())
                 self.assertEqual(self.main_log(), ['base'])
 
@@ -225,23 +272,23 @@ class Land(unittest.TestCase):
         cargo.chmod(0o755)
         (cargo_bin / 'rustc').symlink_to(cargo)
         # The same nested process boundary as prepare -> bootstrap -> sync.
-        (self.lane / 'tools/buck2/prepare.py').write_text('''import subprocess, sys
+        (self.lane / 'tools/buck2/prepare.py').write_text(FAKES['tools/buck2/prepare.py'] + '''import subprocess, sys
 subprocess.run([sys.executable, 'tools/buck2/sync.py'], check=True)
 ''')
-        (self.lane / 'tools/buck2/sync.py').write_text('''import subprocess
+        (self.lane / 'tools/buck2/sync.py').write_text('''import os, subprocess
 from pathlib import Path
 found = subprocess.check_output(['cargo', '--version'], text=True).strip()
 assert found == 'cargo-found', found
-Path('.buck2/prepared').write_text(found)
+Path(os.environ['FAKE_PREPARED']).write_text(found)
 ''')
         self.git(self.lane, 'commit', '-qam', 'prepare needs cargo')
         stripped = dict(PATH=os.defpath, CARGO='cargo', CARGO_HOME=str(cargo_bin.parent),
                         RUSTUP_HOME=str(self.top / 'rustup-home'))
         self.assertIsNone(shutil.which('cargo', path=stripped['PATH']))
-        landed = self.land(**stripped)
+        landed = self.land(**stripped, FAKE_PREPARED=str(self.top / 'prepared'))
         self.assertEqual(landed.returncode, 0, landed.stdout + landed.stderr)
-        self.assertIn('pass  prepare.py', landed.stdout)
-        self.assertEqual((self.lane / '.buck2/prepared').read_text(), 'cargo-found')
+        self.assertIn('pass  screen: prepare.py', landed.stdout)
+        self.assertEqual((self.top / 'prepared').read_text(), 'cargo-found')
 
     def test_missing_toolchain_is_refused_before_a_ticket_is_published(self):
         for installed in (False, True):
@@ -285,10 +332,10 @@ Path('.buck2/prepared').write_text(found)
         self.assertEqual(self.main_log(), ['change', 'base'])
         self.assertEqual(self.queued(), [])
 
-    def test_persistent_http_500_stops_after_three_pushes_without_landing(self):
+    def test_persistent_http_500_stops_after_one_retry_without_landing(self):
         refused, pushes = self.push_errors([dict(stderr='fatal: HTTP 500') for _ in range(3)])
         self.assertEqual(refused.returncode, 1, refused.stdout + refused.stderr)
-        self.assertEqual(pushes, [pushes[0]] * 3)
+        self.assertEqual(pushes, [pushes[0]] * 2)
         for stage in ('workspace build', 'Clippy', 'formatting'):
             self.assertEqual(refused.stdout.count('pass  ' + stage), 1)
         self.assertEqual(self.main_log(), ['base'])
@@ -534,7 +581,74 @@ if not (root / 'release-build').exists():
         self.assertEqual(self.main_log()[:4], ['lane 2', 'lane 1', 'lane 0', 'record checks'])
         for i in (1, 2):
             self.assertEqual(self.subjects(self.landed(outputs[i])), [f'lane {i}'])
-            self.assertEqual(self.git(lanes[i], 'rev-parse', 'HEAD'), self.git(self.origin, 'rev-parse', f'main~{2 - i}'))
+            self.assertEqual(self.git(lanes[i], 'log', '-1', '--format=%s').strip(), f'lane {i}')
+        self.assertEqual(self.queued(), [])
+
+    def test_commits_after_submission_stay_in_the_lanes_next_ticket(self):
+        checks, lanes, lands, holder = self.batch_lanes(2)
+        for i, lane in enumerate(lanes):
+            (lane / f'next-{i}.txt').write_text('next ticket\n')
+            self.git(lane, 'add', f'next-{i}.txt')
+            self.git(lane, 'commit', '-qm', f'next {i}')
+        heads = [self.git(lane, 'rev-parse', 'HEAD') for lane in lanes]
+        # A dirty edit is also owned by the lane, including when its ticket is delivered.
+        (lanes[1] / 'lane-1.txt').write_text('ongoing edit\n')
+        holder.unlink()
+        outputs = [self.finish_land(land) for land in lands]
+        self.assertEqual(sum(out.count('pass  workspace build') for out in outputs), 1)
+        self.assertNotIn('next 0', self.main_log())
+        self.assertNotIn('next 1', self.main_log())
+        for lane, head in zip(lanes, heads):
+            self.assertEqual(self.git(lane, 'rev-parse', 'HEAD'), head)
+        self.assertEqual((lanes[1] / 'lane-1.txt').read_text(), 'ongoing edit\n')
+        tip = self.git(self.origin, 'rev-parse', 'main').strip()
+        self.assertEqual((checks / tip / 'build').read_text(),
+                         self.git(self.origin, 'rev-parse', 'main~2').strip())
+
+    def test_a_singleton_fmt_failure_stops_before_the_build(self):
+        marker = self.top / 'built'
+        with (self.lane / 'tools/buck2/event_logs.py').open('a') as script:
+            script.write("\nfrom pathlib import Path\nPath(" + repr(str(marker)) + ").touch()\n")
+        self.git(self.lane, 'commit', '-qam', 'record build invocation')
+        refused = self.land(FAKE_FMT_RED='1')
+        self.assertEqual(refused.returncode, 1, refused.stdout + refused.stderr)
+        self.assertIn('Diff in crates/a/src/lib.rs', refused.stdout)
+        self.assertFalse(marker.exists(), refused.stdout)
+        self.assertEqual(self.main_log(), ['base'])
+
+    def test_a_second_ticket_for_a_live_lane_is_refused(self):
+        checks, lanes, lands, holder = self.batch_lanes(1)
+        refused = self.land()
+        self.assertEqual(refused.returncode, 1, refused.stdout + refused.stderr)
+        self.assertIn('already has live ticket', refused.stdout)
+        holder.unlink()
+        self.finish_land(lands[0])
+
+    def test_a_submitted_semantic_conflict_is_reported_even_if_the_owner_keeps_working(self):
+        self.conflicting_lanes('source.rs')
+        queue = runpy.run_path(str(ROOT / 'tools/land'))['LandQueue']
+        directory = self.lane / '.git/land-queue'
+        directory.mkdir()
+        holder = directory / '00000000000000000001'
+        now = time.time()
+        holder.write_text(json.dumps(dict(pid=os.getpid(), process_start=queue.process(os.getpid()),
+                                          started=now, heartbeat=now, lane='holder', worktree=str(self.top / 'holder'))))
+        (directory / 'sequence').write_text('1')
+        land = self.start_land(self.lane)
+        self.wait_for(lambda: len(self.queued()) == 2)
+        # The owner resolves their next submission while the old, conflicting ticket waits.
+        self.git(self.lane, 'fetch', '-q', 'origin', 'main')
+        self.git(self.lane, 'reset', '--soft', 'origin/main')
+        (self.lane / 'source.rs').write_text('main generator output\n')
+        self.git(self.lane, 'add', 'source.rs')
+        self.git(self.lane, 'commit', '-qm', 'owner resolution for next ticket')
+        head = self.git(self.lane, 'rev-parse', 'HEAD')
+        holder.unlink()
+        output = self.finish_land(land, 1)
+        self.assertIn('conflicts in: source.rs', output)
+        self.assertEqual(self.git(self.lane, 'rev-parse', 'HEAD'), head)
+        self.assertEqual(self.git(self.lane, 'status', '--porcelain'), '')
+        self.assertNotIn('owner resolution for next ticket', self.main_log())
         self.assertEqual(self.queued(), [])
 
     def test_a_formatting_red_change_in_a_batch_of_four_leaves_before_any_build(self):
@@ -1024,9 +1138,9 @@ if not marker.exists():
     def test_legacy_linted_environment_cannot_bypass_checks(self):
         refused = self.land(HIRSEL_LAND_LINTED='1', HIRSEL_LAND_ATTEMPT='30', FAKE_FMT_RED='1')
         self.assertEqual(refused.returncode, 1, refused.stdout + refused.stderr)
-        self.assertIn('pass  workspace build', refused.stdout)
-        self.assertIn('pass  Clippy', refused.stdout)
-        self.assertIn('FAIL  formatting', refused.stdout)
+        self.assertNotIn('pass  workspace build', refused.stdout)
+        self.assertNotIn('pass  Clippy', refused.stdout)
+        self.assertIn('FAIL  screen: formatting', refused.stdout)
         self.assertEqual(self.main_log(), ['base'])
 
     def conflicting_lanes(self, path):
@@ -1056,7 +1170,7 @@ if not marker.exists():
         landed = self.land()
         self.assertEqual(landed.returncode, 0, landed.stdout + landed.stderr)
         self.assertEqual(landed.stdout.count('resolved generated conflict in docs/api.md'), 2)
-        self.assertEqual((self.lane / 'docs/api.md').read_text(), 'main generator output\n')
+        self.assertEqual(self.git(self.origin, 'show', 'main:docs/api.md'), 'main generator output\n')
         self.assertEqual(self.main_log()[:2], ['change 1', 'change 0'])
         for i in range(2):
             self.assertEqual((self.lane / f'source-{i}').read_text(), 'source change\n')
@@ -1069,7 +1183,7 @@ if not marker.exists():
         landed = self.land()
         self.assertEqual(landed.returncode, 0, landed.stdout + landed.stderr)
         self.assertNotIn('obsolete generated page', self.main_log())
-        self.assertEqual((self.lane / 'docs/api.md').read_text(), 'main generator output\n')
+        self.assertEqual(self.git(self.origin, 'show', 'main:docs/api.md'), 'main generator output\n')
 
     def test_generated_build_inventory_is_untracked_and_regenerated(self):
         self.conflicting_lanes('BUCK')
@@ -1081,8 +1195,8 @@ if not marker.exists():
         self.git(self.lane, 'commit', '-qm', 'generator')
         landed = self.land()
         self.assertEqual(landed.returncode, 0, landed.stdout + landed.stderr)
-        self.assertEqual((self.lane / 'BUCK').read_text(), 'fresh inventory\n')
-        self.assertEqual(self.git(self.lane, 'ls-files', 'BUCK'), '')
+        self.assertEqual(self.git(self.origin, 'ls-tree', '--name-only', 'main', 'BUCK'), '')
+        self.assertEqual(self.git(self.origin, 'ls-tree', '--name-only', 'main', 'BUCK'), '')
 
     def test_source_conflicts_still_refuse_the_push_and_abort_the_rebase(self):
         self.conflicting_lanes('source.rs')
@@ -1094,7 +1208,7 @@ if not marker.exists():
     def test_a_red_check_refuses_the_push_and_prints_its_first_error(self):
         refused = self.land(FAKE_FMT_RED='1')
         self.assertEqual(refused.returncode, 1, refused.stdout + refused.stderr)
-        self.assertIn('FAIL  formatting', refused.stdout)
+        self.assertIn('FAIL  screen: formatting', refused.stdout)
         self.assertIn('Diff in crates/a/src/lib.rs', refused.stdout)
         self.assertNotIn('checking 3 files', refused.stdout)
         self.assertIn('refusing to push a red tree', refused.stdout)
@@ -1102,6 +1216,27 @@ if not marker.exists():
 
 
 class Units(unittest.TestCase):
+    def test_round_check_reports_each_complete_event_once_then_marks_it_seen(self):
+        module = runpy.run_path(str(ROOT / 'tools/land_events.py'))
+        append, report = module['append_event'], module['report_events']
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'events.tsv'
+            record = dict(lane='owner', ticket='1', submitted='submitted')
+            append(path, 'SUBMITTED', record, '/tmp/owner.log')
+            append(path, 'LANDED', dict(record, landed='checked-sha'), '/tmp/owner.log', 0)
+            first = io.StringIO()
+            self.assertEqual(report(path, first), 2)
+            self.assertIn('LAND SUBMITTED owner ticket 1', first.getvalue())
+            self.assertIn('LAND LANDED owner ticket 1 EXIT 0 landed checked-sha', first.getvalue())
+            second = io.StringIO()
+            self.assertEqual(report(path, second), 0)
+            self.assertEqual(second.getvalue(), '')
+            append(path, 'FAILED', dict(record, ticket='2'), '/tmp/owner-b.log', 1)
+            third = io.StringIO()
+            self.assertEqual(report(path, third), 1)
+            self.assertIn('LAND FAILED owner ticket 2 EXIT 1', third.getvalue())
+            self.assertNotIn('LANDED', third.getvalue())
+
     def test_a_live_ticket_must_still_name_the_checked_head(self):
         module = runpy.run_path(str(ROOT / 'tools/land'))
         queue_type = module['LandQueue']
@@ -1142,7 +1277,7 @@ class Units(unittest.TestCase):
         full = runpy.run_path(str(ROOT / 'tools/land'))['full']
         with patch.dict(full.__globals__, check=lambda *args: None, unchanged=lambda tree: True,
                         run=lambda command: SimpleNamespace(returncode=0, stdout='', stderr='')):
-            self.assertEqual(full('tree')[0], 'FAIL  the build set query')
+            self.assertEqual(full('tree', screened=True)[0], 'FAIL  the build set query')
 
     def test_clippy_rejects_error_diagnostics(self):
         module = runpy.run_path(str(ROOT / 'tools/buck2/clippy.py'))

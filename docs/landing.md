@@ -3,10 +3,19 @@
 Run the tests your change can break, commit it, then run:
 
 ```sh
-tools/land > /tmp/<lane>-land.log 2>&1; echo EXIT $? >> /tmp/<lane>-land.log
+tools/land-run /tmp/<lane>-land.log
 ```
 
 `tools/land --withdraw` stops this checkout's queued or running land after verifying its recorded process start time.
+
+`tools/land-run` is the body of the detached user unit described in the host
+rules. It writes the log, its final `EXIT` line and one durable completion
+row in `/workspace/code/hirsel-briefs/land-events.tsv`. Submission is a separate
+`SUBMITTED` row. Completion is `LANDED` or `FAILED`, with the lane, ticket,
+log path, exit code, submitted SHA and landed SHA when available. Metadata
+comes from land directly, including after re-execution and batched delivery.
+The host's `round-check.py` reports each new row and durably advances its
+reader position after printing it. `tools/land` remains usable directly.
 
 Land first joins a FIFO ticket queue shared by every worktree under
 `$(git rev-parse --git-common-dir)/land-queue/`. Only its head fetches,
@@ -15,7 +24,19 @@ change as one batch (see [Batches](#batches)). A short `flock` protects an atomi
 counter and atomic JSON ticket publication; increasing numeric ticket
 filenames define arrival order. A ticket keeps its place across rejected
 push retries and re-execution into an updated `tools/land`. Exiting releases
-it, including red checks and rebase conflicts.
+it, including red checks and rebase conflicts. One live ticket per lane is
+allowed. At enqueue, the ticket captures HEAD once. The queue head creates a
+detached, land-owned checkout at `<common-git-dir>/land-checkouts/<ticket>`
+from that commit. Rebases, batches and every check run there. Exiting stops
+that checkout's Buck2 daemon and removes the owned checkout. The existing
+`agentlang-land-slots` directory contains only the old slot lock files and is
+unused by the FIFO train.
+
+The source checkout and its branch stay under the lane's control, on success
+and failure. The lane may edit, commit or resolve conflicts there after its
+ticket is queued. Those changes belong to the next submission. Land never
+moves the source branch to a rebased or batched tip. A source conflict names
+the submitted commit's conflicting paths in the log and returns to its owner.
 Waiting lanes print their position and the head's lane name when either
 changes, and at least every 30 seconds.
 
@@ -78,12 +99,12 @@ Every other retry checks its rebased tree. There is no third-attempt exception,
 no inherited lint environment flag and no attempt limit. Losing a push race waits a
 random duration in `[0, min(30, 2**attempt)]` seconds, then fetches and
 rebases again. HTTP 5xx and connection failures retry the exact checked SHA
-up to three pushes while the fetched remote base is unchanged. After each
+with one retry while the fetched remote base is unchanged. After each
 failure, land fetches main and records completion only if main contains the
 proposed SHA, including as an ancestor. A failed fetch refuses the retry;
 it never uses the cached remote ref as proof. If main moved without the SHA,
 the existing rebase and checks path handles it, including row-only reuse above.
-Retries wait with full jitter capped at 30 then 60 seconds and fetch again
+The retry waits with full jitter capped at 30 seconds and fetches again
 after waiting. Queue ownership, live batch members and the checked worktree
 are verified before each push. HTTP 4xx and hook failures stop; rejected
 non-fast-forward pushes use the existing main-moved path. Other push errors
@@ -102,19 +123,19 @@ A ticket records the commit it lands (`head`). When the head has rebased
 its own change, it claims up to 15 live tickets behind it, oldest first, so
 a batch holds at most 16. It replays each ticket's commits after the
 captured `origin/main`, in ticket order, onto the tree of the tickets ahead
-of it (`git rebase --onto <batch> <main> <head>`), detached in the head's
-own worktree. It reads other lanes' commits by SHA from the shared object
+of it (`git rebase --onto <batch> <main> <head>`), detached in the land-owned
+checkout. It reads other lanes' commits by SHA from the shared object
 store and never touches their worktrees or branches. The checks (hot files,
 regenerated build files, build, Clippy and fmt) run once on the combined
-tree, in the head's own worktree, and one push carries every commit. Each lane's commits stay separate,
+tree, in the land-owned checkout, and one push carries every commit. Each lane's commits stay separate,
 with their authors; nothing is squashed. Each landed ticket gets its own row
 in `hirsel-landings.jsonl`.
 
 The head writes each waiting ticket's outcome into its ticket file. The
 waiting `tools/land` prints it and exits with its code: 0 with its own
-landed SHAs, after which its branch points at its last landed commit; 1
-with its conflict or its first error. Commits made after queueing do not
-land; land says so, and you run it again for them.
+landed SHAs; 1 with its conflict or its first error. Commits made after
+queueing belong to the next ticket. The branch and any ongoing edits stay
+untouched.
 
 A ticket whose commits do not replay leaves the batch with the conflict
 message a single land prints; the rest stay on the tree before it. A
@@ -123,9 +144,12 @@ ahead of the ticket stands only if every one of them lands; otherwise the
 ticket stays queued for the next head. A change that touches generated
 files is refused at once.
 
-Before any build, the head screens a batch of two or more with the checks
+Before any build, the head screens every candidate, including single tickets
+and bisection groups, with the checks
 that take seconds: build-file sync, independent line lists and fmt. These
-are the full checks' own scripts. If the combined tree fails, and
+are the full checks' own scripts. A green screen can be reused only for the
+same Git tree within that batch. The final fmt check after build and Clippy
+remains in place. If the combined tree fails, and
 origin/main passes them, a binary search over the batch's cumulative trees
 finds the first ticket that turns them red. That ticket leaves with its
 first error, and the rest are screened again. A fmt slip therefore costs
@@ -229,6 +253,12 @@ by an older land is batched and later finds nothing to land.
 Further cases cover
 22 rejected attempts, a red retry in each aggregate, worktree/HEAD edits,
 legacy lint-pass environment variables and an empty build query.
+New cases prove that a head or waiting lane's subsequent commits stay out of
+the checked tree, dirty lane edits survive delivery, a singleton fmt failure
+runs no build, and a submitted conflict still reaches its owner after the
+owner resolves their next ticket. Persistent failures stop after one retry.
+Wrapper cases cover durable success and failure rows, one submission across
+re-execution, and the round-check reader reporting each event once.
 Fake push responses cover a 500 then success, persistent 500s, connection
 resets, ambiguous completion with main equal to or descending from the pushed
 SHA, failed reconciliation fetches, moved main and permanent 4xx/hook errors.

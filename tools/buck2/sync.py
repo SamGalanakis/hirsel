@@ -1120,7 +1120,7 @@ def first_party(meta: dict) -> str:
     out.append("\n" + call("hirsel_script_test", name="test-pubsub-registration", script="tools/tests/pubsub_registration.py", full=False,
                             data=Raw('glob(["tools/tests/pubsub_registration.py", "crates/hirsel-cli/tests/support/pubsub_relay_30/*.py", "crates/hirsel-cli/tests/support/pubsub_relay_30/cases.json", "crates/hirsel-cli/tests/cli/pubsub_relay_30*.rs"])')))
     out.append("\n" + call("hirsel_script_test", name="test-land", script="tools/tests/land.py", full=False, host=True,
-                            data=["tools/land", "tools/tests/land.py", "tools/check-hot-files", "tools/main-runs",
+                            data=["tools/land", "tools/land-run", "tools/land_events.py", "tools/tests/land.py", "tools/check-hot-files", "tools/main-runs",
                                   "//tools/buck2:run_failures.py", "//tools/buck2:generated.py",
                                   "//tools/buck2:merging.py", "//tools/buck2:clippy.py", "//tools/buck2:fmt.py",
                                   "//tools/buck2:event_logs.py", "//tools/buck2:rust_environment.py"]))

@@ -1,0 +1,58 @@
+#!/usr/bin/env python3
+"""Detached unit body: tools/land-run /tmp/<lane>-land.log [events.tsv]."""
+import json
+import os
+import signal
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
+
+from land_events import append_event
+
+
+def main():
+    if len(sys.argv) not in (2, 3):
+        print(__doc__, file=sys.stderr)
+        return 2
+    root = Path(subprocess.check_output(['git', 'rev-parse', '--show-toplevel'], text=True).strip())
+    log = Path(sys.argv[1]).resolve()
+    events = Path(sys.argv[2] if len(sys.argv) == 3 else '/workspace/code/hirsel-briefs/land-events.tsv').resolve()
+    lane = subprocess.check_output(['git', 'branch', '--show-current'], text=True).strip() or root.name
+    submitted = subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip()
+    with tempfile.TemporaryDirectory(prefix='hirsel-land-result-') as temporary, log.open('w') as output:
+        result = Path(temporary) / 'result.json'
+        env = os.environ | dict(HIRSEL_LAND_RESULT_FILE=str(result), HIRSEL_LAND_LOG=str(log),
+                                HIRSEL_LAND_EVENTS=str(events))
+        code, child, cancelled = 1, None, False
+
+        def withdraw(signum, frame):
+            nonlocal cancelled
+            cancelled = True
+            if child is not None:
+                try:
+                    child.send_signal(signum)
+                except ProcessLookupError:
+                    pass
+
+        previous = signal.signal(signal.SIGTERM, withdraw)
+        try:
+            child = subprocess.Popen([sys.executable, str(root / 'tools/land')], cwd=root, env=env,
+                                     stdout=output, stderr=subprocess.STDOUT)
+            if cancelled:
+                child.terminate()
+            code = child.wait()
+            if code < 0:
+                code = 128 - code
+        finally:
+            signal.signal(signal.SIGTERM, previous)
+            output.write(f'EXIT {code}\n')
+            output.flush()
+            os.fsync(output.fileno())
+            record = json.loads(result.read_text()) if result.exists() else dict(lane=lane, submitted=submitted)
+            append_event(events, 'LANDED' if code == 0 else 'FAILED', record, log, code)
+    return code
+
+
+if __name__ == '__main__':
+    sys.exit(main())

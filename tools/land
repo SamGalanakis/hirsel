@@ -1,23 +1,26 @@
 #!/usr/bin/env python3
 """Land this worktree's commits on origin/main.
 
-    tools/land > /tmp/<lane>-land.log 2>&1; echo EXIT $? >> /tmp/<lane>-land.log
+    tools/land-run /tmp/<lane>-land.log  # detached user unit body
     tools/land --withdraw  # stop this checkout's queued or running land
 
 Join the common git directory's FIFO ticket queue, then fetch and rebase
 onto origin/main (the files many lanes add to merge with the
 `hirsel` merge driver, tools/buck2/merging.py), regenerate the build files
 (`sync.py --if-stale`), build the workspace, run Clippy and check formatting
-through Buck2, then push. The queue head lands a batch: its own commits, then
+through Buck2, then push. Every candidate passes fmt and line-list checks
+before its build. The lane may keep working after submission; later commits
+belong to its next ticket and its branch stays untouched. The queue head
+lands a batch: its own commits, then
 those of up to 15 waiting tickets in ticket order, checked once together in
-this worktree and pushed in one push; a conflicting ticket leaves the batch,
+a land-owned detached checkout and pushed in one push; a conflicting ticket leaves the batch,
 and a red batch bisects until its culprits are found, pushing each green group
 at once (docs/landing.md). A waiting ticket landed in a batch exits with its
 own landed commits. A push rejected because main moved goes back to the rebase
 with full jitter and no attempt limit. Row-only main moves reuse a batch's
 passed checks after a clean rebase; every other proposed tree is checked in
-full. Transient push failures retry the same checked commit up to three times
-while main is unchanged, fetching to resolve ambiguous completion. A red check
+full. Transient push failures retry the same checked commit once while main
+is unchanged, fetching to resolve ambiguous completion. A red check
 refuses the push and prints its first error.
 
 Land runs no tests: the lane runs the tests its change can break, and
@@ -43,12 +46,14 @@ import time
 ROOT = Path(subprocess.run(['git', 'rev-parse', '--show-toplevel'], capture_output=True, text=True,
                            check=True).stdout.strip())
 sys.path.insert(0, str(ROOT / 'tools/buck2'))
+sys.path.insert(0, str(ROOT / 'tools'))
 sys.dont_write_bytecode = True
 import generated  # noqa: E402
 import merging  # noqa: E402
 import rust_environment  # noqa: E402
 
 PY = sys.executable
+SOURCE = Path(os.environ.get('HIRSEL_LAND_SOURCE', ROOT)).resolve()
 BUCK2 = str(ROOT / '.buck2/bin/buck2')
 # The Clippy twins exist under hirsel.clippy, which changes no other action's
 # key; land queues above a lane's tests (50) and main's run (40) on the pool.
@@ -101,7 +106,7 @@ class LandQueue:
             raise ValueError('cannot locate the common git directory')
         self.directory = Path(common.stdout.strip()) / 'land-queue'
         self.directory.mkdir(exist_ok=True)
-        self.lane = lane or ROOT.name
+        self.lane = lane or SOURCE.name
         self.identity = self.process(os.getpid())
         self.ticket = None
         self.record = {}
@@ -150,7 +155,7 @@ class LandQueue:
                 record = json.loads(path.read_text())
                 worktree = record.get('worktree')
                 # A worktree path is authoritative, even if a lane name was reused.
-                if (Path(worktree).resolve() != ROOT.resolve() if worktree else
+                if (Path(worktree).resolve() != SOURCE if worktree else
                         record.get('lane') != self.lane):
                     continue
                 pid = record['pid']
@@ -194,7 +199,7 @@ class LandQueue:
             return False
         record = json.loads(self.ticket.read_text())
         if (record['pid'] != os.getpid() or tuple(record['process_start']) != self.identity
-                or record['worktree'] != str(ROOT) or self.stale(record)):
+                or record['worktree'] != str(SOURCE) or self.stale(record)):
             self.lost.set()
             return False
         record['heartbeat'] = time.time()
@@ -227,9 +232,15 @@ class LandQueue:
                     self.ticket = self.directory / inherited
                     if not self.refresh():
                         raise ValueError('inherited queue ticket is no longer owned by this process')
+                    outcome(lane=self.lane, ticket=self.ticket.name, submitted=self.record['head'])
                 else:
                     if self.identity is None:
                         raise ValueError('cannot determine this process start time')
+                    for path in self.tickets():
+                        record = json.loads(path.read_text())
+                        if (record['lane'] == self.lane or record['worktree'] == str(SOURCE)) and not self.stale(record):
+                            raise ValueError(f'{self.lane} already has live ticket {path.name}')
+                    submitted = revision('HEAD')
                     counter = self.directory / 'sequence'
                     sequence = max(int(counter.read_text()) if counter.exists() else 0,
                                    max((int(p.name) for p in self.tickets()), default=0)) + 1
@@ -239,7 +250,8 @@ class LandQueue:
                     # `head` is the commit a batch head lands for this ticket.
                     self.write(self.ticket, dict(pid=os.getpid(), process_start=self.identity,
                                                 started=now, heartbeat=now, lane=self.lane,
-                                                worktree=str(ROOT), head=revision('HEAD')))
+                                                worktree=str(SOURCE), head=submitted))
+                    outcome(lane=self.lane, ticket=self.ticket.name, submitted=submitted)
                     os.environ['HIRSEL_LAND_TICKET'] = self.ticket.name
                 say(f'queued ticket {self.ticket.name} for {self.lane}')
             # Waiting tickets heartbeat too: a long queue never expires a live lane.
@@ -352,6 +364,58 @@ class LandQueue:
         os.environ.pop('HIRSEL_LAND_TICKET', None)
 
 
+def outcome(**fields):
+    """Publish wrapper metadata independently of human-readable log lines."""
+    if name := os.environ.get('HIRSEL_LAND_RESULT_FILE'):
+        path = Path(name)
+        record = json.loads(path.read_text()) if path.exists() else {}
+        submitted = 'ticket' in fields and 'ticket' not in record
+        record.update(fields)
+        temporary = path.with_suffix('.pending')
+        temporary.write_text(json.dumps(record) + '\n')
+        temporary.replace(path)
+        if submitted:
+            from land_events import append_event
+            append_event(os.environ['HIRSEL_LAND_EVENTS'], 'SUBMITTED', record,
+                         os.environ['HIRSEL_LAND_LOG'])
+
+
+@contextmanager
+def checkout(queue):
+    """The train owns this detached checkout; the submitting lane keeps its branch."""
+    global ROOT, BUCK2
+    original, buck = ROOT, BUCK2
+    directory = queue.directory.parent / 'land-checkouts'
+    directory.mkdir(exist_ok=True)
+    frozen = directory / queue.ticket.name
+    inherited = os.environ.get('HIRSEL_LAND_CHECKOUT')
+    if inherited:
+        if Path(inherited).resolve() != frozen.resolve() or ROOT.resolve() != frozen.resolve():
+            raise ValueError('inherited land checkout does not match its ticket')
+    else:
+        added = git('worktree', 'add', '--detach', str(frozen), queue.record['head'])
+        if added.returncode:
+            raise ValueError('cannot create land checkout: ' + added.stderr)
+    try:
+        ROOT, BUCK2 = frozen, str(frozen / '.buck2/bin/buck2')
+        os.environ.update(HIRSEL_LAND_SOURCE=str(SOURCE), HIRSEL_LAND_CHECKOUT=str(frozen),
+                          HIRSEL_LAND_BRANCH=queue.lane)
+        os.chdir(frozen)
+        say(f'frozen {queue.record["head"][:12]} in {frozen}; source checkout stays at {SOURCE}')
+        yield
+    finally:
+        if Path(BUCK2).is_file():
+            subprocess.run([BUCK2, 'kill'], cwd=frozen, capture_output=True)
+        os.chdir(SOURCE)
+        ROOT, BUCK2 = SOURCE, str(SOURCE / '.buck2/bin/buck2')
+        removed = git('worktree', 'remove', '--force', str(frozen))
+        if removed.returncode:
+            say('cannot remove owned land checkout: ' + removed.stderr.strip())
+        ROOT, BUCK2 = original, buck
+        for key in ('HIRSEL_LAND_SOURCE', 'HIRSEL_LAND_CHECKOUT', 'HIRSEL_LAND_BRANCH'):
+            os.environ.pop(key, None)
+
+
 def revision(name):
     result = git('rev-parse', '--verify', name + '^{commit}')
     value = result.stdout.strip()
@@ -414,14 +478,11 @@ def fast(tree):
     return report
 
 
-def full(tree):
+def full(tree, screened=False):
     """The gate on the checked-out tree: None or the first red check's report."""
     if not unchanged(tree):
         raise Refusal('the worktree changed before checks; refusing to push')
-    # prepare.py is cheap when nothing changed; it reinstalls a changed toolchain pin and restarts the daemon.
-    report = (check('independent line lists', [PY, 'tools/check-hot-files'])
-              or check('prepare.py', [PY, 'tools/buck2/prepare.py'])
-              or check('sync.py --if-stale', [PY, 'tools/buck2/sync.py', '--if-stale']))
+    report = None if screened else fast(tree)
     if report is None:
         query = run([BUCK2, 'uquery', *CONFIG, BUILD_SET])
         if query.returncode or not query.stdout.strip():
@@ -561,6 +622,7 @@ class Batch:
         # The head's own failure, printed when the batch is done.
         self.verdict = None
         self.checked = 0
+        self.screened = set()
         # The members each applied tree holds, and the conflicts against batched changes,
         # which stand only if every change ahead of the ticket lands.
         self.contents = {main_sha: ()}
@@ -637,8 +699,14 @@ class Batch:
         while True:
             tip, applied = self.apply(base, members)
             members = [member for member, _ in applied]
-            if len(applied) < 2 or not (report := fast(tip)):
+            if not applied:
                 return members
+            if not (report := fast(tip)):
+                self.screened.add(git('rev-parse', tip + '^{tree}').stdout.strip())
+                return members
+            if len(applied) == 1:
+                self.red(members[0], report)
+                return []
             if fast(base):
                 say('the base fails the fast checks itself; the screen blames no ticket')
                 return members
@@ -677,13 +745,13 @@ class Batch:
         fresh = [(member, commits) for member, commits in landed if member not in done]
         if not fresh:
             return
-        for attempt in range(3):
+        for attempt in range(2):
             if attempt:
-                # The same full-jitter algorithm as backoff(), bounded to two
-                # waits of at most 30 and 60 s. Fetch again after waiting: main
+                # The same full-jitter algorithm as backoff(), bounded to one
+                # wait of at most 30 s. Fetch again after waiting: main
                 # or the result of an ambiguous push may have moved meanwhile.
                 delay = random.uniform(0, 30 * 2 ** (attempt - 1))
-                say(f'transient push failure; retry {attempt + 1}/3 after {delay:.2f} s jitter')
+                say(f'transient push failure; retry {attempt + 1}/2 after {delay:.2f} s jitter')
                 time.sleep(delay)
                 if self.confirm_push(tip):
                     break
@@ -705,7 +773,7 @@ class Batch:
             if self.confirm_push(tip):
                 break
         else:
-            raise Refusal('git push failed after 3 attempts\n' + pushed.stderr)
+            raise Refusal('git push failed after 2 attempts\n' + pushed.stderr)
         common = Path(git('rev-parse', '--path-format=absolute', '--git-common-dir').stdout.strip())
         at = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
         with open(common / LANDINGS, 'a') as log:
@@ -721,7 +789,9 @@ class Batch:
                 self.conflicts.remove(conflict)
                 self.fail(member, 1, message, report)
         for member, commits in fresh:
-            if member is not self.own:
+            if member is self.own:
+                outcome(landed=commits[-1])
+            else:
                 self.queue.deliver(member, dict(
                     code=0, report=[], commits=commits,
                     message=f'landed {commits[-1][:12]} on main in a batch of {len(fresh)} led by '
@@ -736,7 +806,8 @@ class Batch:
         else:
             tickets = f' with {len(applied)} tickets: ' + ', '.join(str(member) for member, _ in applied)
         say(f'attempt {self.attempt}: checking {tree[:12]} on origin/main {base[:12]}' + tickets)
-        return full(tree)
+        tree_id = git('rev-parse', tree + '^{tree}')
+        return full(tree, tree_id.returncode == 0 and tree_id.stdout.strip() in self.screened)
 
     def resolve(self, members, previous=None):
         """Check groups of tickets one at a time and push each green one at once.
@@ -797,19 +868,14 @@ class Batch:
         return self.pushed
 
 
-def delivered(queue, branch):
+def delivered(queue):
     """Print the outcome a batch head handed this waiting ticket and exit with its code."""
     result = queue.result
     if result['report']:
         print('\n'.join(result['report']), flush=True)
     say(result['message'])
-    commits = result.get('commits') or []
-    if commits:
-        if revision('HEAD') != queue.record.get('head'):
-            say(f'HEAD moved after queueing; only the commits up to {queue.record["head"][:12]} landed;'
-                ' run tools/land again for the rest')
-        elif git('reset', '-q', '--keep', commits[-1]).returncode == 0:
-            say(f'{branch or "HEAD"} is now {commits[-1][:12]} on origin/main')
+    if commits := result.get('commits'):
+        outcome(landed=commits[-1])
     return result['code']
 
 
@@ -834,7 +900,7 @@ def main():
         print(__doc__, file=sys.stderr)
         return 2
     status = git('status', '--porcelain')
-    if status.returncode or status.stdout.strip():
+    if not os.environ.get('HIRSEL_LAND_TICKET') and (status.returncode or status.stdout.strip()):
         say('the worktree has uncommitted changes; commit them first')
         return 1
     try:
@@ -843,13 +909,14 @@ def main():
         say(str(error))
         return 1
     merging.install(ROOT)
-    branch = git('branch', '--show-current').stdout.strip()
+    branch = os.environ.get('HIRSEL_LAND_BRANCH') or git('branch', '--show-current').stdout.strip()
     previous_signal = signal.signal(signal.SIGTERM, withdraw_signal)
     try:
         with LandQueue(branch) as queue:
             if queue.result:
-                return delivered(queue, branch)
-            return land(queue, branch)
+                return delivered(queue)
+            with checkout(queue):
+                return land(queue)
     except Withdrawn:
         say('withdrawn; queue ticket released')
         return 128 + signal.SIGTERM
@@ -860,17 +927,17 @@ def main():
         signal.signal(signal.SIGTERM, previous_signal)
 
 
-def land(queue, branch):
+def land(queue):
     head = revision('HEAD')
     try:
-        return train(queue, branch)
+        return train(queue)
     except BaseException:
         git('rebase', '--abort')
-        git('checkout', '-q', *([branch] if branch else ['--detach', head]))
+        git('checkout', '-q', '--detach', head)
         raise
 
 
-def train(queue, branch):
+def train(queue):
     started = time.monotonic()
     # Kept across the re-exec into a rebased tree's own tools/land.
     first = int(os.environ.get('HIRSEL_LAND_ATTEMPT', '1'))
@@ -906,6 +973,7 @@ def train(queue, branch):
         if previous:
             previous[2][queue.ticket.name] = head
         if head == main_sha:
+            outcome(landed=head)
             say('nothing to land; HEAD is on origin/main')
             return 0
         # Run the rebased tree's own land, so a landed fix to it holds at once.
@@ -924,8 +992,8 @@ def train(queue, branch):
         batch = Batch(queue, main_sha, members, attempt)
 
         def restore():
-            # Back to the lane's own rebased branch; the batch was built detached.
-            git('checkout', '-q', *([branch] if branch else ['--detach', head]))
+            # Return to the head ticket's rebased submission in the owned checkout.
+            git('checkout', '-q', '--detach', head)
 
         try:
             tip = batch.resolve(members, previous)
@@ -938,8 +1006,7 @@ def train(queue, branch):
                 say(str(error))
             if own:
                 # The tickets not yet pushed keep their places; the next head lands them.
-                if branch:
-                    git('checkout', '-q', '-B', branch, own[0][-1])
+                outcome(landed=own[0][-1])
                 say(f'landed {own[0][-1][:12]} on main in {time.monotonic() - started:.0f} s, before the'
                     ' rest of its batch')
                 return 0
@@ -966,8 +1033,7 @@ def train(queue, branch):
             say(batch.verdict)
             return 1
         [own] = [commits for member, commits in landed if member is batch.own]
-        if branch:
-            git('checkout', '-q', '-B', branch, tip)
+        outcome(landed=own[-1])
         say(f'landed {own[-1][:12]} on main in {time.monotonic() - started:.0f} s{summary}')
         return 0
 

@@ -303,10 +303,17 @@ impl HeaderProducts {
         let private = private::PrivateProducts::capture(engine);
         let declarations = engine.declarations.frozen();
         let paths: Arc<[_]> = engine
-            .source_paths()
-            .into_iter()
-            .map(|path| DefId::intern(&path))
-            .collect();
+            .header_products
+            .as_ref()
+            .filter(|headers| Arc::ptr_eq(&headers.inputs, &inputs))
+            .map(|headers| headers.paths.clone())
+            .unwrap_or_else(|| {
+                engine
+                    .source_paths()
+                    .into_iter()
+                    .map(|path| DefId::intern(&path))
+                    .collect()
+            });
         let rows = paths
             .iter()
             .copied()

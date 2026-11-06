@@ -26,6 +26,7 @@ pub(crate) struct SourceInputs {
     origin_catalog: catalog::CatalogIdentity,
     origin_items: Weak<BTreeMap<DefPath, Vec<Arc<ItemSyntax>>>>,
     origin_placement: u64,
+    reconstructed_items: std::sync::Mutex<Weak<BTreeMap<DefPath, Vec<Arc<ItemSyntax>>>>>,
     pub(super) catalog: catalog::Catalog,
     pub(super) syntax: Arc<HeaderSources>,
     declarations: crate::DeclarationIndex,
@@ -154,7 +155,18 @@ impl SourceInputs {
         // the source generation and table owners prove the unchanged catalog.
         if self.sources.placement_revision() == engine.sources.placement_revision()
             && self.catalog.identity().matches(&engine.catalog)
-            && engine.items.values().flatten().all(|syntax| {
+        {
+            let items = engine.items.owner();
+            let mut reconstructed = self
+                .reconstructed_items
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            // SourceTable mutates through Arc::make_mut, which dissociates weak
+            // owners. A verified owner therefore remains an exact alias proof.
+            if reconstructed.ptr_eq(&items) {
+                return true;
+            }
+            if engine.items.values().flatten().all(|syntax| {
                 let binding = (
                     DefId::intern(&syntax.item.definition),
                     syntax.text_hash,
@@ -170,9 +182,10 @@ impl SourceInputs {
                             .binary_search_by(|candidate| compare_binding(candidate, &binding))
                             .is_ok()
                     })
-            })
-        {
-            return true;
+            }) {
+                *reconstructed = items;
+                return true;
+            }
         }
         let mut observed = std::collections::HashSet::new();
         let mut files = BTreeMap::new();
@@ -237,6 +250,7 @@ impl SourceInputs {
             sources: engine.sources.clone(),
             origin_catalog,
             origin_items: engine.items.owner(),
+            reconstructed_items: Default::default(),
             origin_placement: engine.sources.placement_revision(),
             catalog: engine
                 .catalog
@@ -268,6 +282,9 @@ impl SourceInputs {
             retained: Self::metadata_bytes(engine)
                 .unwrap_or(u64::MAX)
                 .saturating_add(origin_bytes)
+                .saturating_add(hirsel_engine_admission::retained_arc_bytes(
+                    &std::mem::MaybeUninit::<BTreeMap<DefPath, Vec<Arc<ItemSyntax>>>>::uninit(),
+                ))
                 .saturating_add(
                     (size_of::<Self>() - 288
                         + size_of::<operation_inputs::OperationOwner>()

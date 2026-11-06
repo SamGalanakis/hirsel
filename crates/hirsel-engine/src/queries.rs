@@ -26,7 +26,7 @@ mod scheduled_native_root;
 mod scheduled_run;
 pub use scheduled_native::{
     FRONT_NATIVE_DEFINITION_KIND, FrontNativeDefinitionInputs, FrontNativeDefinitionOutput,
-    FrontNativeDefinitionQueries,
+    FrontNativeDefinitionQueries, PreparedNativeDefinition,
 };
 pub use scheduled_native_root::{
     FRONT_NATIVE_ROOT_KIND, FrontNativeOutput, FrontNativePlan, FrontNativeProducts,

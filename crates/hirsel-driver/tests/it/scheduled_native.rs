@@ -221,17 +221,28 @@ fn admitted_native_definition_products_match_independent_scalar_products() {
                 .body
                 .retained_metadata_bytes()
                 .unwrap();
-            let retained = main_output
+            let prepared = main_output
+                .product
+                .product
+                .as_ref()
+                .unwrap()
+                .live_value::<PreparedNativeDefinition>()
+                .unwrap();
+            let decoded = decoded_publication_bytes(main_output, prepared);
+            assert_eq!(prepared.retained_bytes(), decoded);
+            let archive_bytes = main_output
                 .product
                 .product
                 .as_ref()
                 .unwrap()
                 .archive(ArchiveAdmission::Retained)
                 .unwrap()
-                .retained_bytes()
-                + metadata;
+                .retained_bytes();
+            assert_eq!(prepared.publication_bytes(), Some(decoded + archive_bytes));
+            let retained = decoded + archive_bytes + metadata;
             // Reuse settled producers, but give a fresh native owner exactly
-            // one payload's allowance. A byte less must refuse publication.
+            // one prepared payload and archive reader's allowance. A byte less
+            // must refuse publication.
             for (available, accepts) in [(retained - 1, false), (retained, true)] {
                 let inputs = program
                     .engine
@@ -403,6 +414,9 @@ fn admitted_native_definition_products_match_independent_scalar_products() {
             );
             drop(main);
             drop(cache);
+            drop(actual_codec);
+            drop(signatures);
+            drop(anchors);
             assert_eq!(budget.reserved(), 0);
         }
     });
@@ -625,4 +639,55 @@ fn native_catalogue_allows_lower_pressure_eviction_and_scoped_cold_reads() {
             assert_eq!(budget.reserved(), 0);
         }
     });
+}
+
+fn decoded_publication_bytes(
+    output: &FrontNativeDefinitionOutput,
+    prepared: &PreparedNativeDefinition,
+) -> u64 {
+    use hirsel_engine::native_metadata::NativeMetadataExt;
+    use hirsel_query_products::{reads::Reads, retained::MetadataWeight};
+    // Five Arc allocations: prepared value, completed row, discovery product,
+    // source descriptor and Reads. Original metadata has its own lease.
+    let arc_headers = 5 * 2 * size_of::<usize>();
+    let completed_row = size_of::<(
+        Arc<NativeDiscoveryProduct>,
+        Arc<Reads>,
+        Option<Arc<NativeOriginalProduct>>,
+    )>();
+    let inline = size_of::<PreparedNativeDefinition>()
+        + completed_row
+        + size_of_val(&*output.product)
+        + size_of_val(&*output.product.source)
+        + size_of_val(&*output.reads)
+        + arc_headers;
+    let mut backing = MetadataWeight::default();
+    backing.source(&output.product.source);
+    for (_, bytes) in output.reads.allocations() {
+        backing.add(bytes);
+    }
+    for (contracts, requirements) in [
+        (&output.product.contracts, &output.product.requirements),
+        (&prepared.contracts, &prepared.requirements),
+    ] {
+        if let Some(contracts) = contracts {
+            backing.add(contracts.source_anchors.capacity() * size_of::<hirsel_span::Anchor>());
+            backing.add(contracts.entry_parameters.capacity() * size_of::<hirsel_types::TypeId>());
+            backing.add(contracts.caller_bodies.capacity() * size_of::<u32>());
+            backing.add(contracts.scoped_parameters.capacity() * size_of::<Vec<(u32, Vec<u32>)>>());
+            for body in &contracts.scoped_parameters {
+                backing.add(body.capacity() * size_of::<(u32, Vec<u32>)>());
+                for (_, parameters) in body {
+                    backing.add(parameters.capacity() * size_of::<u32>());
+                }
+            }
+        }
+        backing.add(requirements.edges.capacity() * size_of::<InstanceEdge>());
+        for edge in &requirements.edges {
+            backing.path(&edge.owner);
+            backing.path(&edge.callee);
+            backing.add(edge.arguments.capacity() * size_of::<hirsel_types::GenericArgument>());
+        }
+    }
+    inline as u64 + backing.bytes()
 }

@@ -58,26 +58,78 @@ struct Data {
     reads: Arc<Reads>,
     original: Option<Arc<crate::NativeOriginalProduct>>,
 }
-struct LiveDefinition {
-    source: Arc<crate::NativeDefinitionProduct>,
-    contracts: Option<crate::NativeBodyContracts>,
-    requirements: InstanceGraph,
-    reads: Arc<Reads>,
+/// Prepared decoded catalogue backing. Its retained layout is fixed before
+/// publication; Original metadata and active archive readers have separate leases.
+pub struct PreparedNativeDefinition {
+    pub source: Arc<crate::NativeDefinitionProduct>,
+    pub contracts: Option<crate::NativeBodyContracts>,
+    pub requirements: InstanceGraph,
+    pub reads: Arc<Reads>,
     original: Option<(ContentHash, ContentHash)>,
     records: crate::NativeRecords,
     anchors: crate::NativeRecordContext,
     archive: Mutex<Option<Reference>>,
     store: Arc<dyn ResultStore>,
     remaining: Arc<Mutex<u64>>,
+    decoded_bytes: u64,
+    archive_bytes: u64,
     charge: u64,
     _ownership: Arc<SourceOwnership>,
 }
-impl Drop for LiveDefinition {
+impl Drop for PreparedNativeDefinition {
     fn drop(&mut self) {
         *self.remaining.lock().unwrap_or_else(|e| e.into_inner()) += self.charge;
     }
 }
-impl LiveDefinition {
+impl PreparedNativeDefinition {
+    /// The prepared decoded backing, excluding independently leased archives
+    /// and Original metadata. Planning reuses this exact admitted layout.
+    pub fn retained_bytes(&self) -> u64 {
+        self.decoded_bytes
+    }
+    /// Publication must leave room for this decoded value and one retained
+    /// archive reader. The reader debits only its own backing when opened.
+    pub fn publication_bytes(&self) -> Option<u64> {
+        self.decoded_bytes.checked_add(self.archive_bytes)
+    }
+    fn prepare_layout(
+        &mut self,
+        output_contracts: &Option<crate::NativeBodyContracts>,
+        output_requirements: &InstanceGraph,
+    ) {
+        let mut weight = hirsel_query_products::retained::MetadataWeight::default();
+        weight.add(
+            size_of::<Self>()
+                + size_of::<Data>()
+                + size_of::<crate::NativeDiscoveryProduct>()
+                + size_of::<crate::NativeDefinitionProduct>()
+                + size_of::<Reads>()
+                + 10 * size_of::<usize>(),
+        );
+        weight.source(&self.source);
+        for (_, bytes) in self.reads.allocations() {
+            weight.add(bytes);
+        }
+        for (contracts, requirements) in [
+            (&self.contracts, &self.requirements),
+            (output_contracts, output_requirements),
+        ] {
+            if let Some(contracts) = contracts {
+                weight.flat_vec(&contracts.source_anchors);
+                weight.flat_vec(&contracts.entry_parameters);
+                weight.flat_vec(&contracts.caller_bodies);
+                weight.vec(&contracts.scoped_parameters, |w, body| {
+                    w.vec(body, |w, (_, parameters)| w.flat_vec(parameters))
+                });
+            }
+            weight.vec(&requirements.edges, |w, edge| {
+                w.path(&edge.owner);
+                w.path(&edge.callee);
+                w.flat_vec(&edge.arguments);
+            });
+        }
+        self.decoded_bytes = weight.bytes();
+    }
     fn encode(&self) -> Option<Vec<u8>> {
         let source = &self.source;
         let lower_identity = source
@@ -121,7 +173,7 @@ impl LiveDefinition {
         )
     }
 }
-impl LiveProductValue for LiveDefinition {
+impl LiveProductValue for PreparedNativeDefinition {
     fn domain(&self) -> Domain {
         OUTPUT
     }
@@ -149,44 +201,6 @@ impl LiveProductValue for LiveDefinition {
             Ok(bytes)
         })
     }
-}
-fn live_bytes(
-    source: &crate::NativeDefinitionProduct,
-    contracts: &Option<crate::NativeBodyContracts>,
-    requirements: &InstanceGraph,
-    reads: &Reads,
-) -> Option<u64> {
-    let mut weight = hirsel_query_products::retained::MetadataWeight::default();
-    weight.add(
-        size_of::<LiveDefinition>()
-            + size_of::<Data>()
-            + size_of::<crate::NativeDiscoveryProduct>()
-            + size_of::<crate::NativeDefinitionProduct>()
-            + size_of::<crate::NativeOriginalProduct>()
-            + size_of::<Reads>()
-            + 12 * size_of::<usize>(),
-    );
-    weight.source(source);
-    for (_, bytes) in reads.allocations() {
-        weight.add(bytes);
-    }
-    // The output and the live publication each retain these small owned rows.
-    for _ in 0..2 {
-        if let Some(contracts) = contracts {
-            weight.flat_vec(&contracts.source_anchors);
-            weight.flat_vec(&contracts.entry_parameters);
-            weight.flat_vec(&contracts.caller_bodies);
-            weight.vec(&contracts.scoped_parameters, |w, body| {
-                w.vec(body, |w, (_, parameters)| w.flat_vec(parameters))
-            });
-        }
-        weight.vec(&requirements.edges, |w, edge| {
-            w.path(&edge.owner);
-            w.path(&edge.callee);
-            w.flat_vec(&edge.arguments);
-        });
-    }
-    Some(weight.bytes())
 }
 /// Shares the settled product its owner charged to the output budget, so a
 /// reader holds handles rather than another decoded copy.
@@ -346,7 +360,7 @@ impl FrontNativeDefinitionQueries {
             return Err(native_selection_error("native export has another producer"));
         }
         let live = product
-            .live_value::<LiveDefinition>()
+            .live_value::<PreparedNativeDefinition>()
             .ok_or(QueryError::NotImplemented)?;
         let mut cached = live.archive.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(reference) = *cached {
@@ -694,12 +708,6 @@ impl Task {
             let (source, contracts, requirements) = self
                 .complete(&front, &lower, finalizer, constant)
                 .map_err(|e| owner.fail(e))?;
-            let charge = live_bytes(&source, &contracts, &requirements, &reads)
-                .ok_or(owner.errors.resource)?;
-            {
-                let mut remaining = owner.remaining.lock().unwrap_or_else(|e| e.into_inner());
-                *remaining = remaining.checked_sub(charge).ok_or(owner.errors.resource)?;
-            }
             let action = hirsel_artifact_store::Action(ContentHash::of_parts(
                 "hirsel.front.native-definition-action.v2",
                 [
@@ -714,7 +722,7 @@ impl Task {
                 ],
             ));
             let source = Arc::new(source);
-            let live = Arc::new(LiveDefinition {
+            let mut prepared = PreparedNativeDefinition {
                 source: source.clone(),
                 contracts: contracts.clone(),
                 requirements: requirements.clone(),
@@ -727,11 +735,14 @@ impl Task {
                 archive: Mutex::new(None),
                 store: owner.store.clone(),
                 remaining: owner.remaining.clone(),
-                charge,
+                decoded_bytes: 0,
+                archive_bytes: 0,
+                charge: 0,
                 _ownership: owner._ownership.clone(),
-            });
+            };
+            prepared.prepare_layout(&contracts, &requirements);
             if owner.store.persistence().retains() {
-                let bytes = live.encode().ok_or(owner.errors.resource)?;
+                let bytes = prepared.encode().ok_or(owner.errors.resource)?;
                 if bytes.len() as u64 > owner.weight.scratch {
                     return Err(owner.errors.resource);
                 }
@@ -739,9 +750,25 @@ impl Task {
                     .store
                     .put_content(OUTPUT, &bytes)
                     .ok_or(owner.errors.resource)?;
-                // Publication keeps the content identity. Only an archive reader
-                // retains a decoded buffer and its producer-partition lease.
-                *live.archive.lock().unwrap_or_else(|e| e.into_inner()) = Some(record);
+                let backing = owner
+                    .store
+                    .get_content(record)
+                    .ok_or(owner.errors.resource)?;
+                prepared.archive_bytes = ProductArchive::retained_required_bytes(record, &backing)
+                    .map_err(|_| owner.errors.resource)?;
+                *prepared.archive.lock().unwrap_or_else(|e| e.into_inner()) = Some(record);
+            }
+            let required = prepared.publication_bytes().ok_or(owner.errors.resource)?;
+            {
+                let mut remaining = owner.remaining.lock().unwrap_or_else(|e| e.into_inner());
+                if *remaining < required {
+                    return Err(owner.errors.resource);
+                }
+                *remaining -= prepared.decoded_bytes;
+                prepared.charge = prepared.decoded_bytes;
+            }
+            let live = Arc::new(prepared);
+            if let Some(record) = *live.archive.lock().unwrap_or_else(|e| e.into_inner()) {
                 owner
                     .store
                     .associate_product(self.id.address, action, record);

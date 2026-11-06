@@ -251,7 +251,15 @@ impl Store {
             .map(|l| self.path(l.segment, "packs"))
     }
     pub(super) fn packed_get(&self, tag: u8, key: ContentHash) -> Option<Bytes> {
-        self.read_packed(self.packed_source(tag, key)?)
+        let mut state = self.state();
+        let source = self.packed_source_in(&mut state, tag, key)?;
+        // Publication renames private segments under this state lock. Open
+        // their bytes before releasing it, while published paths stay stable.
+        if matches!(source, Source::File { .. }) {
+            return self.read_packed(source);
+        }
+        drop(state);
+        self.read_packed(source)
     }
     pub(super) fn read_packed(&self, source: Source) -> Option<Bytes> {
         let (path, offset, len) = match source {
@@ -268,7 +276,9 @@ impl Store {
             .range(u64::from(offset), u64::from(len), 8)
     }
     pub(super) fn packed_source(&self, tag: u8, key: ContentHash) -> Option<Source> {
-        let mut state = self.state();
+        self.packed_source_in(&mut self.state(), tag, key)
+    }
+    fn packed_source_in(&self, state: &mut State, tag: u8, key: ContentHash) -> Option<Source> {
         if let Some(bytes) = state.pending.get(&(tag, key)) {
             return Some(Source::Pending(bytes.clone()));
         }
@@ -281,7 +291,7 @@ impl Store {
                 len: location.len,
             });
         }
-        self.refresh_index(&mut state);
+        self.refresh_index(state);
         let location = index::find(&state.index.as_ref()?.generation, index_key(tag, key)?)?;
         Some(Source::Published {
             segment: location.segment,

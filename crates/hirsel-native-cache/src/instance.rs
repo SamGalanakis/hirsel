@@ -4,7 +4,7 @@
 use super::arena::EQUATIONS_DOMAIN;
 use super::*;
 use hirsel_engine_store::ResultStore;
-use hirsel_engine_store::{Action, Contents, Domain, Reference};
+use hirsel_engine_store::{Action, Domain, Reference};
 use hirsel_lir::stage::{StageKind, ValidatedUnit, Value};
 use hirsel_lir::validate::{Inputs, NativeCache, NativeEnvironment};
 
@@ -42,16 +42,6 @@ impl Phase {
 
 type Record = (Reference, Reference, Reference, Reference, Reference);
 type Metadata = (Reference, Reference, Reference);
-
-struct SelectedContents(Arc<dyn ResultStore>);
-impl Contents for SelectedContents {
-    fn get_content(&self, reference: Reference) -> Option<hirsel_engine_store::Bytes> {
-        self.0.get_content(reference)
-    }
-    fn put_content(&self, domain: Domain, bytes: &[u8]) -> Option<Reference> {
-        self.0.put_content(domain, bytes)
-    }
-}
 
 fn subject(phase: Phase, key: &InstanceAddress, action: Action) -> ContentHash {
     ContentHash::of_parts(
@@ -94,10 +84,7 @@ impl InstanceQueries {
         key.address(self.phase.kind())
     }
     pub fn validator(store: &Arc<dyn ResultStore>) -> Arc<NativeCache> {
-        Arc::new(NativeCache::new(
-            Arc::new(SelectedContents(store.clone())),
-            store.local_product_store(),
-        ))
+        super::ready::ReadyQueries::validator(store)
     }
     pub fn with_validator(store: Arc<dyn ResultStore>, native: Arc<NativeCache>) -> Self {
         Self::with_phase(store, native, Phase::Imported)
@@ -229,6 +216,14 @@ impl InstanceQueries {
         Some(Arc::new(candidate))
     }
 
+    pub fn layouts(
+        &self,
+        reference: Reference,
+        target: &hirsel_lir::TargetSpec,
+    ) -> Result<Arc<hirsel_lir::products::CheckedLayouts>, String> {
+        self.native.layouts(reference, target)
+    }
+
     /// Open a selected accepted Value only for a transformation miss. The
     /// descriptor must still match this stage's own current C admission.
     pub fn read(
@@ -238,7 +233,7 @@ impl InstanceQueries {
         environment: &NativeEnvironment<'_>,
     ) -> Result<
         (
-            hirsel_lir::products::LayoutClosure,
+            Arc<hirsel_lir::products::CheckedLayouts>,
             hirsel_lir::products::UnitBody,
         ),
         String,

@@ -57,8 +57,11 @@ pub fn binding(w: &mut W, value: &Binding) {
     // Each canonical index row names a distinct row in the bound table.
     w.tree::<hirsel_syntax::ContentHash, LayoutId>(value.table.layouts.len());
     w.tree::<hirsel_syntax::ContentHash, hirsel_lir::abi_types::FnAbiId>(value.table.fn_abis.len());
-    w.vec(&value.table.layouts, layout);
-    w.vec(&value.table.fn_abis, |w, abi| {
+    table(w, &value.table);
+}
+pub fn table(w: &mut W, value: &LayoutTable) {
+    w.vec(&value.layouts, layout);
+    w.vec(&value.fn_abis, |w, abi| {
         w.vec(&abi.parameters, |w, p| w.flat_vec(&p.slots));
         if let Some(r) = &abi.result {
             w.flat_vec(&r.slots);

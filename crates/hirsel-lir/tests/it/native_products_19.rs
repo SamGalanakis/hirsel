@@ -26,7 +26,11 @@ fn native_products_19_only_actual_validation_can_issue_a_local_output() {
         discharge: None,
     };
     let store = Arc::new(Memory::default());
-    let cache = NativeCache::new(store.clone(), None);
+    let admission = Arc::new(());
+    let cache = NativeCache::new(store.clone(), None).with_layout_admission({
+        let admission = admission.clone();
+        move |_| Some(admission.clone())
+    });
     let subject = hash("native query action");
     let policy = hash("native policy");
     assert!(
@@ -78,7 +82,13 @@ fn native_products_19_only_actual_validation_can_issue_a_local_output() {
             .is_none()
     );
     let (closure, body) = cache.read(&output, &target).unwrap();
-    let binding = hirsel_lir::products::Binding::new(&target, &[&closure]).unwrap();
+    let (same_closure, _) = cache.read(&output, &target).unwrap();
+    assert!(
+        Arc::ptr_eq(&closure, &same_closure),
+        "one admitted immutable layout owner per exact closure"
+    );
+    drop(same_closure);
+    let binding = closure.binding();
     let rebound = binding.materialize::<Value>(&body).unwrap();
     let local = Inputs {
         memo: Default::default(),
@@ -128,6 +138,14 @@ fn native_products_19_only_actual_validation_can_issue_a_local_output() {
         .validate_and_publish(subject, policy, ready, &original, &[], &[])
         .unwrap();
     assert_eq!(ready_output.unwrap().stage(), StageKind::Ready);
+    drop(cache);
+    assert_eq!(
+        Arc::strong_count(&admission),
+        2,
+        "a detached layout reader retains the original grant"
+    );
+    drop(closure);
+    assert_eq!(Arc::strong_count(&admission), 1);
 }
 
 #[test]
@@ -239,7 +257,8 @@ fn native_products_19_directory_reopen_copy_and_corruption() {
         .unwrap();
     let output = output.unwrap();
     drop(cache);
-    let reopened = NativeCache::new(Arc::new(local.clone()), Some(local.clone()));
+    let reopened = NativeCache::new(Arc::new(local.clone()), Some(local.clone()))
+        .with_layout_admission(|_| Some(Arc::new(())));
     let current = reopened
         .lookup(subject, policy, StageKind::Value, &environment)
         .unwrap();
@@ -279,6 +298,27 @@ fn native_products_19_directory_reopen_copy_and_corruption() {
             .lookup(subject, policy, StageKind::Value, &environment)
             .is_none()
     );
+    let held_layouts = reopened.layouts(output.layouts(), &target).unwrap();
+    let original_layout_bytes = local.get(output.layouts()).unwrap().to_vec();
+    std::fs::write(
+        local.output_path(output.layouts()),
+        b"corrupt retained layouts",
+    )
+    .unwrap();
+    assert!(reopened.layouts(output.layouts(), &target).is_err());
+    assert!(
+        reopened
+            .lookup(subject, policy, StageKind::Value, &environment)
+            .is_none()
+    );
+    std::fs::write(local.output_path(output.layouts()), &original_layout_bytes).unwrap();
+    assert!(Arc::ptr_eq(
+        &held_layouts,
+        &reopened.layouts(output.layouts(), &target).unwrap()
+    ));
+    std::fs::remove_file(local.output_path(output.layouts())).unwrap();
+    assert!(reopened.layouts(output.layouts(), &target).is_err());
+    std::fs::write(local.output_path(output.layouts()), &original_layout_bytes).unwrap();
     // Body corruption must invalidate even an output minted in this process.
     std::fs::write(local.output_path(output.body()), b"truncated").unwrap();
     assert!(

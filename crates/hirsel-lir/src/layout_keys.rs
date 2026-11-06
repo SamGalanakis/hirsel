@@ -194,6 +194,10 @@ impl LayoutKeys {
         }
     }
 
+    pub fn retained_bytes(&self) -> usize {
+        self.keys.capacity() * std::mem::size_of::<LayoutKey>()
+    }
+
     /// The key of `id`, which must index the keyed table.
     pub fn key(&self, id: LayoutId) -> LayoutKey {
         self.keys[id.0 as usize]

@@ -44,6 +44,48 @@ impl Drop for ValueMemory {
     }
 }
 
+static LAYOUT_BYTES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static LAYOUT_PEAK: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+struct LayoutMemory {
+    _grant: Arc<dyn Send + Sync>,
+    bytes: u64,
+}
+impl Drop for LayoutMemory {
+    fn drop(&mut self) {
+        LAYOUT_BYTES.fetch_sub(self.bytes, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+pub(crate) fn admit_layouts(
+    store: &dyn ResultStore,
+    layouts: &hirsel_lir::products::CheckedLayouts,
+) -> Option<Arc<dyn Send + Sync>> {
+    use std::sync::atomic::Ordering::Relaxed;
+    let mut w = hirsel_query_products::retained::MetadataWeight::default();
+    w.add(
+        size_of::<hirsel_lir::products::CheckedLayouts>()
+            + size_of::<LayoutMemory>()
+            + 4 * size_of::<usize>(),
+    );
+    w.tree::<Reference, Arc<hirsel_lir::products::CheckedLayouts>>(1);
+    hirsel_native::execution_plan::retained::table(&mut w, &layouts.table);
+    w.flat_vec(&layouts.layouts);
+    w.flat_vec(&layouts.abis);
+    hirsel_native::execution_plan::retained::binding(&mut w, layouts.binding());
+    w.add(layouts.keys().retained_bytes());
+    let bytes = w.bytes();
+    let grant = store.admit_product_memory(bytes)?;
+    let active = LAYOUT_BYTES.fetch_add(bytes, Relaxed) + bytes;
+    if active > LAYOUT_PEAK.fetch_max(active, Relaxed)
+        && std::env::var_os("HIRSEL_NATIVE_RETENTION").is_some()
+    {
+        eprintln!("NATIVE_LAYOUT_OWNERS peak {active}");
+    }
+    Some(Arc::new(LayoutMemory {
+        _grant: grant,
+        bytes,
+    }))
+}
+
 struct SelectedContents(Arc<dyn ResultStore>);
 impl Contents for SelectedContents {
     fn get_content(&self, reference: Reference) -> Option<hirsel_engine_store::Bytes> {
@@ -127,13 +169,27 @@ impl ReadyQueries {
         Self::with_validator(store, native)
     }
     pub fn fresh_validator_bytes() -> u64 {
-        (size_of::<NativeCache>() + size_of::<SelectedContents>() + 4 * size_of::<usize>()) as u64
+        (size_of::<NativeCache>()
+            + size_of::<SelectedContents>()
+            + size_of::<Arc<dyn ResultStore>>()
+            + 6 * size_of::<usize>()) as u64
     }
     pub fn validator(store: &Arc<dyn ResultStore>) -> Arc<NativeCache> {
-        Arc::new(NativeCache::new(
+        let native = NativeCache::new(
             Arc::new(SelectedContents(store.clone())),
             store.local_product_store(),
-        ))
+        );
+        // Standalone stores have no request memory capability; their direct
+        // callers own temporary metadata, as they own the supplied body inputs.
+        let native = if store.try_admit_product_memory(0).is_some() {
+            native.with_layout_admission({
+                let store = store.clone();
+                move |layouts| admit_layouts(store.as_ref(), layouts)
+            })
+        } else {
+            native
+        };
+        Arc::new(native)
     }
     pub fn with_validator(store: Arc<dyn ResultStore>, native: Arc<NativeCache>) -> Self {
         Self {
@@ -227,22 +283,15 @@ impl ReadyQueries {
         key: &InstanceAddress,
         product: &ReadyProduct,
         environment: &NativeEnvironment<'_>,
-    ) -> Result<hirsel_lir::products::LayoutClosure, String> {
+    ) -> Result<Arc<hirsel_lir::products::CheckedLayouts>, String> {
         let current = self
             .lookup_inner(key, product.product.action, environment)
             .ok_or("Ready assembly lost current C admission")?;
         if current.product != product.product || record(&current)? != record(product)? {
             return Err("Ready assembly descriptor differs".into());
         }
-        let bytes = self
-            .store
-            .get_content(current.layout_closure)
-            .ok_or("missing Ready assembly layouts")?;
-        let closure: hirsel_lir::products::LayoutClosure =
-            hirsel_codec::from_text(std::str::from_utf8(&bytes).map_err(|e| e.to_string())?)
-                .map_err(|e| format!("Ready assembly layouts: {e:?}"))?;
-        closure.check(environment.target)?;
-        Ok(closure)
+        self.native
+            .layouts(current.layout_closure, environment.target)
     }
 
     /// Body access reserved for a selected emission miss. The supplied
@@ -254,7 +303,7 @@ impl ReadyQueries {
         environment: &NativeEnvironment<'_>,
     ) -> Result<
         (
-            hirsel_lir::products::LayoutClosure,
+            Arc<hirsel_lir::products::CheckedLayouts>,
             hirsel_lir::products::UnitBody,
         ),
         String,

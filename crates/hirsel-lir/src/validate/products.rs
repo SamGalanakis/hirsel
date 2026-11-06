@@ -5,7 +5,7 @@ use super::*;
 use crate::FnAbiId;
 use crate::ir::Callee;
 use crate::operation::{OperationArgument, OperationDeclarations};
-use crate::products::{Binding, LayoutClosure, UnitBody};
+use crate::products::{CheckedLayouts, LayoutClosure, UnitBody};
 use crate::sealed_payload_source::SealSourceWitness;
 use hirsel_artifact_store::{Action, Address, Contents, Domain, Reference, Store};
 use hirsel_codec::snapshot_struct;
@@ -216,7 +216,10 @@ impl NativeOutput {
 
 /// Uses the selected ordinary content provider. The only extra table is local
 /// native proof authority; it is never a semantic invalidation graph/provider.
+type LayoutAdmission = dyn Fn(&CheckedLayouts) -> Option<Arc<dyn Send + Sync>> + Send + Sync;
 pub struct NativeCache {
+    layouts: Mutex<BTreeMap<Reference, Arc<CheckedLayouts>>>,
+    layout_admission: Option<Arc<LayoutAdmission>>,
     contents: Arc<dyn Contents>,
     local: Option<Store>,
     accepted: Mutex<BTreeMap<ContentHash, Arc<Record>>>,
@@ -229,7 +232,65 @@ impl NativeCache {
             contents,
             local,
             accepted: Mutex::default(),
+            layouts: Mutex::default(),
+            layout_admission: None,
         }
+    }
+
+    /// Retaining checked metadata requires the selected transport's original
+    /// memory admission. Detached readers keep that reservation through the Arc.
+    pub fn with_layout_admission(
+        mut self,
+        admit: impl Fn(&CheckedLayouts) -> Option<Arc<dyn Send + Sync>> + Send + Sync + 'static,
+    ) -> Self {
+        self.layout_admission = Some(Arc::new(admit));
+        self
+    }
+
+    pub fn layouts(
+        &self,
+        reference: Reference,
+        target: &TargetSpec,
+    ) -> Result<Arc<CheckedLayouts>, String> {
+        self.checked_layouts(reference, target, None)
+    }
+
+    fn checked_layouts(
+        &self,
+        reference: Reference,
+        target: &TargetSpec,
+        captured: Option<LayoutClosure>,
+    ) -> Result<Arc<CheckedLayouts>, String> {
+        if reference.domain != LAYOUTS {
+            return Err("native layout product schema differs".into());
+        }
+        // Even a retained typed owner cannot vouch for a changed or missing
+        // provider range. Verify the complete reference on every boundary read.
+        let bytes = self.get(reference).ok_or("missing native layout product")?;
+        let mut retained = self.layouts.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(owner) = retained.get(&reference) {
+            if owner.table.target != target.digest() {
+                return Err("native layout product target differs".into());
+            }
+            return Ok(owner.clone());
+        }
+        let closure = match captured {
+            Some(closure) => closure,
+            None => {
+                hirsel_codec::from_text(std::str::from_utf8(&bytes).map_err(|e| e.to_string())?)
+                    .map_err(|e| format!("native layout product: {e:?}"))?
+            }
+        };
+        let mut checked = CheckedLayouts::new(closure, target)?;
+        if let Some(admit) = &self.layout_admission {
+            checked.admission =
+                Some(admit(&checked).ok_or("native layout metadata exceeds admission")?);
+        }
+        let checked = Arc::new(checked);
+        if checked.admission.is_some() {
+            retained.insert(reference, checked.clone());
+        }
+        Ok(checked)
     }
 
     fn get(&self, reference: Reference) -> Option<hirsel_artifact_store::Bytes> {
@@ -311,11 +372,11 @@ impl NativeCache {
         // Value and Ready bodies remain unopened. Structural declaration reads
         // may bind only the portable layout metadata needed for reconstruction.
         self.get(record.body.reference())?;
-        let layouts = self.get(record.layouts.reference())?;
         if record.declarations.has_structural() {
-            let closure: LayoutClosure =
-                hirsel_codec::from_text(std::str::from_utf8(&layouts).ok()?).ok()?;
-            let binding = Binding::new(environment.target, &[&closure]).ok()?;
+            let layouts = self
+                .layouts(record.layouts.reference(), environment.target)
+                .ok()?;
+            let binding = layouts.binding();
             if !record.declarations.matches_structural(
                 environment.operations,
                 &binding.table,
@@ -323,6 +384,8 @@ impl NativeCache {
             ) {
                 return None;
             }
+        } else {
+            self.get(record.layouts.reference())?;
         }
         Some(NativeOutput { record })
     }
@@ -384,10 +447,16 @@ impl NativeCache {
                 return None;
             }
             let (closure, body) = LayoutClosure::capture(&checked, inputs, additional_abis).ok()?;
-            let binding = Binding::new(inputs.target, &[&closure]).ok()?;
-            let declarations = observed.finish(&binding.table, inputs.layouts, inputs.target)?;
-            let body = self.put(domain, hirsel_codec::to_text(&body).as_bytes())?;
             let layouts = self.put(LAYOUTS, hirsel_codec::to_text(&closure).as_bytes())?;
+            let checked_layouts = self
+                .checked_layouts(layouts, inputs.target, Some(closure))
+                .ok()?;
+            let declarations = observed.finish(
+                &checked_layouts.binding().table,
+                inputs.layouts,
+                inputs.target,
+            )?;
+            let body = self.put(domain, hirsel_codec::to_text(&body).as_bytes())?;
             let environment = NativeEnvironment {
                 target: inputs.target,
                 manifest: inputs.manifest,
@@ -480,26 +549,20 @@ impl NativeCache {
         &self,
         output: &NativeOutput,
         target: &TargetSpec,
-    ) -> Result<(LayoutClosure, UnitBody), String> {
+    ) -> Result<(Arc<CheckedLayouts>, UnitBody), String> {
         if output.record.target != target.digest()
             || output.record.lir != crate::LIR_VERSION
             || output.record.validator != crate::VALIDATOR_VERSION
         {
             return Err("native output environment changed".into());
         }
-        let closure = self
-            .get(output.layouts())
-            .ok_or("missing native layout product")?;
+        let closure = self.layouts(output.layouts(), target)?;
         let body = self
             .get(output.body())
             .ok_or("missing native body product")?;
-        let closure: LayoutClosure =
-            hirsel_codec::from_text(std::str::from_utf8(&closure).map_err(|e| e.to_string())?)
-                .map_err(|e| format!("native layout product: {e:?}"))?;
         let body: UnitBody =
             hirsel_codec::from_text(std::str::from_utf8(&body).map_err(|e| e.to_string())?)
                 .map_err(|e| format!("native body product: {e:?}"))?;
-        closure.check(target)?;
         Ok((closure, body))
     }
 
@@ -513,7 +576,7 @@ impl NativeCache {
             return Err("native output stage differs".into());
         }
         let (closure, body) = self.read(output, inputs.target)?;
-        let binding = Binding::new(inputs.target, &[&closure])?;
+        let binding = closure.binding();
         if &binding.table != inputs.layouts {
             return Err("native materialization needs its bound local table".into());
         }

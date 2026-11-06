@@ -10,7 +10,7 @@ use super::{
 };
 use hirsel_engine_store::{Action, ResultStore, VerifyStore};
 use hirsel_lir::{
-    products::{Binding, LayoutClosure, UnitBody},
+    products::{Binding, UnitBody},
     stage::Value,
     validate::{Inputs, NativeEnvironment},
 };
@@ -383,17 +383,18 @@ impl LocalReadyQueries {
 
         // Metadata for directly consumed ABIs is bound only on a local miss.
         // The only decoded Value body below belongs to this selected owner.
-        let own_closure: LayoutClosure = self.decode(owner.product.layout_closure)?;
+        let own_closure =
+            instances.layout_metadata(owner.product.layout_closure, environment.target)?;
         let callee_closures = callees
             .iter()
             .map(|(_, instance, _, _, _)| {
-                self.decode::<LayoutClosure>(instance.product.layout_closure)
+                instances.layout_metadata(instance.product.layout_closure, environment.target)
             })
             .collect::<Result<Vec<_>, _>>()?;
-        let closures = std::iter::once(&own_closure)
-            .chain(callee_closures.iter())
+        let closures = std::iter::once(own_closure.as_ref())
+            .chain(callee_closures.iter().map(Arc::as_ref))
             .collect::<Vec<_>>();
-        let mut binding = Binding::new(environment.target, &closures)?;
+        let mut binding = Binding::from_checked(environment.target, &closures)?;
         let body: UnitBody = self.decode(owner.product.value)?;
         let mut value = binding.materialize::<Value>(&body)?;
         let mut callee_bindings = Vec::new();

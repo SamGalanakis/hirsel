@@ -656,14 +656,20 @@ impl NativeProducts for DemandProducts {
             captured.push(self.local.queries.read(&owner, product, &scoped)?);
             contexts.push(context);
         }
-        let closures = captured
-            .iter()
-            .map(|(closure, _)| closure)
-            .collect::<Vec<_>>();
-        let binding = if let Some(execution) = snapshot.execution.get() {
-            execution.plan.binding.clone()
+        let local_binding;
+        let local_keys;
+        let (binding, keys) = if let Some(execution) = snapshot.execution.get() {
+            (execution.plan.binding(), execution.plan.keys())
         } else {
-            Binding::new(environment.target, &closures)?
+            local_binding = Binding::from_checked(
+                environment.target,
+                &captured
+                    .iter()
+                    .map(|(closure, _)| closure.as_ref())
+                    .collect::<Vec<_>>(),
+            )?;
+            local_keys = hirsel_lir::LayoutKeys::new(&local_binding.table);
+            (&local_binding, &local_keys)
         };
         let selected_operations = super::instance_operations::InstanceOperations {
             inventory: None,
@@ -709,11 +715,8 @@ impl NativeProducts for DemandProducts {
         }
         let mut statics = BTreeMap::new();
         for context in contexts {
-            for data in read_statics(
-                snapshot.store.as_ref(),
-                context.statics_finalizers,
-                &binding,
-            )? {
+            for data in read_statics(snapshot.store.as_ref(), context.statics_finalizers, binding)?
+            {
                 let name = hirsel_codec::to_text(&data.symbol);
                 if let Some(previous) = statics.insert(name, data.clone())
                     && previous != data
@@ -723,7 +726,6 @@ impl NativeProducts for DemandProducts {
             }
         }
         let statics = statics.into_values().collect::<Vec<_>>();
-        let keys = hirsel_lir::LayoutKeys::new(&binding.table);
         let index = hirsel_lir::LayoutIndex::new(&binding.table);
         let emit = EmitInputs {
             ahead: snapshot.execution.get().map(|e| &e.plan.ahead),
@@ -733,7 +735,7 @@ impl NativeProducts for DemandProducts {
             input: &snapshot.emission.input,
             target: environment.target,
             layouts: &binding.table,
-            keys: &keys,
+            keys,
             manifest: environment.manifest,
             statics: &statics,
             inline_instances: &snapshot.emission.inline_instances,

@@ -9,7 +9,8 @@ use std::{io, sync::Mutex};
 
 pub struct ExecutionPlan {
     pub environments: BTreeMap<ContentHash, Option<hirsel_lir::LayoutId>>,
-    pub binding: hirsel_lir::products::Binding,
+    binding: hirsel_lir::products::Binding,
+    keys: hirsel_lir::LayoutKeys,
     root: ProductRef,
     reads: Vec<ProductRef>,
     pub ahead: hirsel_lir::ahead::AheadPlan,
@@ -20,6 +21,12 @@ pub struct ExecutionPlan {
     _admission: Arc<dyn Send + Sync>,
 }
 impl ExecutionPlan {
+    pub fn binding(&self) -> &hirsel_lir::products::Binding {
+        &self.binding
+    }
+    pub fn keys(&self) -> &hirsel_lir::LayoutKeys {
+        &self.keys
+    }
     pub fn root(&self) -> &ProductRef {
         &self.root
     }
@@ -39,11 +46,13 @@ impl ExecutionPlan {
         context: Reference,
     ) -> Result<Arc<Self>, String> {
         reads.shrink_to_fit();
+        let keys = hirsel_lir::LayoutKeys::new(&binding.table);
         let mut weight = hirsel_query_products::retained::MetadataWeight::default();
         weight.add(size_of::<Self>() + size_of::<ExecutionProduct>() + 4 * size_of::<usize>());
         weight.flat_vec(&reads);
         weight.map(&environments, |_, _, _| ());
         retained::binding(&mut weight, &binding);
+        weight.add(keys.retained_bytes());
         retained::ahead(&mut weight, &ahead);
         retained::continuations(&mut weight, &continuation);
         let admission = store
@@ -53,6 +62,7 @@ impl ExecutionPlan {
         Ok(Arc::new(Self {
             environments,
             binding,
+            keys,
             root,
             reads,
             ahead,
@@ -156,7 +166,7 @@ fn descriptor_identity(
     )
 }
 
-mod retained;
+pub mod retained;
 
 #[cfg(test)]
 mod tests {

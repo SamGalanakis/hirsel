@@ -154,19 +154,27 @@ impl ExecutionTasks {
         let closures = products
             .iter()
             .map(|p| {
-                let bytes = snapshot
-                    .store
-                    .get_content(p.layout_closure)
-                    .ok_or("missing execution layouts")?;
-                hirsel_codec::from_text::<hirsel_lir::products::LayoutClosure>(
-                    std::str::from_utf8(&bytes).map_err(|e| e.to_string())?,
+                let owner = snapshot
+                    .owners
+                    .get(&p.product.address.0)
+                    .ok_or("missing execution layout owner")?;
+                let operations = snapshot
+                    .instances
+                    .operations(owner, &snapshot.environment())?;
+                let view = super::products::DemandProducts::new(snapshot.clone());
+                view.local.queries.assembly_layouts(
+                    owner,
+                    p,
+                    &hirsel_lir::validate::NativeEnvironment {
+                        operations: &operations,
+                        ..snapshot.environment()
+                    },
                 )
-                .map_err(|e| e.message)
             })
             .collect::<Result<Vec<_>, String>>()?;
-        let binding = hirsel_lir::products::Binding::new(
+        let binding = hirsel_lir::products::Binding::from_checked(
             &program.target,
-            &closures.iter().collect::<Vec<_>>(),
+            &closures.iter().map(Arc::as_ref).collect::<Vec<_>>(),
         )?;
         if binding.table != program.table {
             return Err("execution binding differs from admitted Ready".into());

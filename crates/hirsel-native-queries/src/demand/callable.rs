@@ -181,6 +181,13 @@ fn resize(lease: &mut Option<Arc<window::WindowRead>>, bytes: u64) -> Result<(),
     Ok(())
 }
 impl DemandInstances {
+    pub(crate) fn layout_metadata(
+        &self,
+        reference: Reference,
+        target: &hirsel_lir::TargetSpec,
+    ) -> Result<Arc<hirsel_lir::products::CheckedLayouts>, String> {
+        self.queries.layouts(reference, target)
+    }
     fn json<T: Serialize>(&self, value: &T) -> Result<Reference, String> {
         self.put(
             WINDOW_RECORD,
@@ -457,8 +464,10 @@ impl DemandInstances {
                 source: !output.facts.body.templates.library,
                 op_free: freedom[i].ok_or("unsettled callable interface")?,
                 layouts: {
-                    let closure: LayoutClosure = self.reopen(stored.product.layout_closure)?;
-                    let binding = Binding::new(&self.target, &[&closure])?;
+                    let closure = self
+                        .queries
+                        .layouts(stored.product.layout_closure, &self.target)?;
+                    let binding = closure.binding();
                     let abi = binding
                         .abi(linkage.abi())
                         .ok_or("missing callable signature ABI")?;
@@ -542,7 +551,7 @@ impl DemandInstances {
                     ..env
                 },
             )?;
-            let own = Binding::new(&self.target, &[&closure])?;
+            let own = closure.binding();
             let original_unit = own.materialize::<Value>(&body)?;
             if hirsel_rc::closure_calls::OperationFreedom::extract(&original_unit, &own.table)
                 != output.facts.body.operation_freedom
@@ -562,18 +571,26 @@ impl DemandInstances {
                 })
                 .collect::<BTreeSet<_>>();
             drop(original_unit);
-            drop(own);
             let mut closures = vec![closure];
             let mut declarations = Vec::new();
             for &i in &neighbours {
                 let interface: Interface = read_json(self.store.as_ref(), interfaces[i])?;
-                closures.push(self.reopen::<LayoutClosure>(interface.layouts)?);
+                closures.push(Arc::new(hirsel_lir::products::CheckedLayouts::new(
+                    self.reopen::<LayoutClosure>(interface.layouts)?,
+                    &self.target,
+                )?));
                 declarations.push((i, interface));
             }
             if let Some(layouts) = selection.layouts {
-                closures.push(self.reopen(layouts)?);
+                closures.push(Arc::new(hirsel_lir::products::CheckedLayouts::new(
+                    self.reopen(layouts)?,
+                    &self.target,
+                )?));
             }
-            let binding = Binding::new(&self.target, &closures.iter().collect::<Vec<_>>())?;
+            let binding = Binding::from_checked(
+                &self.target,
+                &closures.iter().map(Arc::as_ref).collect::<Vec<_>>(),
+            )?;
             let mut unit = binding.materialize::<Value>(&body)?;
             unit.header.instance = key.instance.digest();
             let mut entries = HashMap::new();

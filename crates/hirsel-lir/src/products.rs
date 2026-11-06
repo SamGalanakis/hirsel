@@ -304,6 +304,39 @@ impl LayoutClosure {
     }
 }
 
+/// Checked immutable metadata for one exact portable closure. Its local binding
+/// and keys are shared by readers; bodies are never retained here.
+pub struct CheckedLayouts {
+    closure: LayoutClosure,
+    binding: Binding,
+    keys: LayoutKeys,
+    pub(crate) admission: Option<Arc<dyn Send + Sync>>,
+}
+impl CheckedLayouts {
+    pub fn new(closure: LayoutClosure, target: &TargetSpec) -> Result<Self, String> {
+        closure.check(target)?;
+        let (binding, keys) = Binding::merge(target, &[&closure])?;
+        Ok(Self {
+            closure,
+            binding,
+            keys,
+            admission: None,
+        })
+    }
+    pub fn binding(&self) -> &Binding {
+        &self.binding
+    }
+    pub fn keys(&self) -> &LayoutKeys {
+        &self.keys
+    }
+}
+impl std::ops::Deref for CheckedLayouts {
+    type Target = LayoutClosure;
+    fn deref(&self) -> &Self::Target {
+        &self.closure
+    }
+}
+
 /// One temporary table for selected products, owned by a with_ready callback.
 /// The maps have this binding's lifetime, never a second publication owner.
 #[derive(Clone)]
@@ -317,6 +350,28 @@ impl Binding {
         for closure in closures {
             closure.check(target)?;
         }
+        Self::merge(target, closures).map(|(binding, _)| binding)
+    }
+
+    /// Combine already checked immutable closures without rekeying each input.
+    pub fn from_checked(target: &TargetSpec, closures: &[&CheckedLayouts]) -> Result<Self, String> {
+        if closures
+            .iter()
+            .any(|closure| closure.table.target != target.digest())
+        {
+            return Err("native layout product target differs".into());
+        }
+        Self::merge(
+            target,
+            &closures.iter().map(|c| &c.closure).collect::<Vec<_>>(),
+        )
+        .map(|(binding, _)| binding)
+    }
+
+    fn merge(
+        target: &TargetSpec,
+        closures: &[&LayoutClosure],
+    ) -> Result<(Self, LayoutKeys), String> {
         let mut table = LayoutTable::new(target);
         let mut layouts = BTreeMap::new();
         let mut abis: BTreeMap<ContentHash, FnAbiId> = BTreeMap::new();
@@ -386,11 +441,14 @@ impl Binding {
         {
             return Err("bound native product content identities differ".into());
         }
-        Ok(Self {
-            table,
-            layouts,
-            abis,
-        })
+        Ok((
+            Self {
+                table,
+                layouts,
+                abis,
+            },
+            keys,
+        ))
     }
 
     /// Resolve content identities within this binding's temporary table. These

@@ -369,7 +369,7 @@ impl RootProducts {
                 Ok(units.iter().map(|u| (*u).clone()).collect::<Vec<_>>())
             })?;
             self.with_link_context(root, products, |program| {
-                if program.table != execution.plan.binding.table {
+                if program.table != execution.plan.binding().table {
                     return Err("execution Link binding differs".into());
                 }
                 let mut program = program.clone();
@@ -790,9 +790,9 @@ impl NativeRoots for RootProducts {
             linkage.push(checked);
         }
         hirsel_lir::validate::check_arena_scoped_links(&linkage)?;
-        let binding = Binding::new(
+        let binding = Binding::from_checked(
             environment.target,
-            &captured.iter().map(|(_, c)| c).collect::<Vec<_>>(),
+            &captured.iter().map(|(_, c)| c.as_ref()).collect::<Vec<_>>(),
         )?;
         let keys = hirsel_lir::LayoutKeys::new(&binding.table);
         let mut summaries = Vec::new();

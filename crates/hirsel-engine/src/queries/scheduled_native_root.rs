@@ -458,7 +458,10 @@ impl DefinitionsState {
             .run
             .outcome(run_product.clone())
             .ok_or(QueryError::NotImplemented)?;
-        let signatures = owner.definitions.signatures();
+        let current = owner.definitions.current_lower()?;
+        let signatures = current.signatures();
+        let anchors = current.namespace().anchors.clone();
+        let original_context = owner.definitions.current_original_context(current)?;
         let native_selected = self
             .selected
             .iter()
@@ -593,7 +596,7 @@ impl DefinitionsState {
         let bytes = owner
             .records
             .encode(
-                &owner.anchors,
+                &*anchors,
                 &(
                     &roots.definitions,
                     roots.registry_revision,
@@ -660,7 +663,7 @@ impl DefinitionsState {
             catalogue,
             extra,
             originals,
-            original_context: owner.definitions.original_context(),
+            original_context,
             signatures,
             semantic: run.semantic.clone(),
             run,

@@ -75,6 +75,7 @@ pub struct PreparedNativeDefinition {
     archive_bytes: u64,
     charge: u64,
     _ownership: Arc<SourceOwnership>,
+    _successor: Arc<FrontLowerQueries>,
 }
 impl Drop for PreparedNativeDefinition {
     fn drop(&mut self) {
@@ -243,7 +244,13 @@ impl FrontNativeDefinitionQueries {
             - *self.remaining.lock().unwrap_or_else(|e| e.into_inner())
     }
     fn input(&self, path: &DefPath) -> Result<DemandedInput<'_>, QueryError> {
-        let namespace = self.front.namespace();
+        self.input_in(path, self.front.namespace())
+    }
+    fn input_in<'a>(
+        &'a self,
+        path: &DefPath,
+        namespace: &NamespaceCapture,
+    ) -> Result<DemandedInput<'a>, QueryError> {
         let signature = namespace.header(path)?.output.value.clone();
         let representation = namespace.representation(path);
         if representation.as_ref().is_some_and(|record| {
@@ -316,6 +323,22 @@ impl FrontNativeDefinitionQueries {
     pub fn original_context(&self) -> Arc<crate::NativeOriginalContext> {
         self.original_context.clone()
     }
+    pub(crate) fn current_original_context(
+        &self,
+        current: Arc<FrontLowerQueries>,
+    ) -> Result<Arc<crate::NativeOriginalContext>, QueryError> {
+        if Arc::ptr_eq(self.lower.namespace(), current.namespace()) {
+            return Ok(self.original_context.clone());
+        }
+        Ok(Arc::new(
+            self.original_context
+                .in_successor(self.lower.namespace(), current)?,
+        ))
+    }
+    pub(crate) fn current_lower(&self) -> Result<Arc<FrontLowerQueries>, QueryError> {
+        self.lower.check_current()
+    }
+
     pub fn signatures(&self) -> Arc<SignatureSnapshot> {
         self.lower.signatures()
     }
@@ -324,6 +347,9 @@ impl FrontNativeDefinitionQueries {
         definitions.iter().try_fold(
             (std::mem::size_of::<Self>()
                 + std::mem::size_of::<SourceOwnership>()
+                + std::mem::size_of::<crate::NativeOriginalContext>()
+                + std::mem::size_of::<BTreeMap<DefPath, ContentHash>>()
+                + 4 * std::mem::size_of::<usize>()
                 + std::mem::size_of::<Mutex<u64>>()
                 + std::mem::size_of::<hirsel_engine_admission::MemoryReservation>()
                 + 4 * std::mem::size_of::<usize>()) as u64,
@@ -591,7 +617,7 @@ impl Task {
         let executable = generation::executable(&syntax)
             && native_declaration(owner.lower.signatures().types(), &input.signature);
         let mut reads = ReadsBuilder::new();
-        reads.merge(&front.outcome.reads);
+        let mut observations = Vec::new();
         let mut ordinary = None;
         let lower = if executable {
             let Some(id) = owner.lower.query(&self.path) else {
@@ -622,7 +648,7 @@ impl Task {
                     "native definition producer or observation is unavailable",
                 )));
             };
-            reads.merge(&output.reads);
+            observations.push((id, Arc::new(output.reads.clone())));
             Some(output)
         } else {
             None
@@ -649,7 +675,7 @@ impl Task {
                     "native definition producer or observation is unavailable",
                 )));
             };
-            reads.merge(&output.reads);
+            observations.push((id, Arc::new(output.reads.clone())));
             Some((path.clone(), output.output.value.entry))
         } else {
             None
@@ -673,7 +699,7 @@ impl Task {
                     "native definition producer or observation is unavailable",
                 )));
             };
-            reads.merge(&observed);
+            observations.push((id, observed));
             match owner.lower.settled_constant(&self.path, &[]) {
                 Ok(value) => Some((*value).clone()),
                 Err(error) => return Poll::Ready(Err(owner.fail(error))),
@@ -705,15 +731,50 @@ impl Task {
                 ))));
             }
         }
-        Poll::Ready((|| {
-            let reads = Arc::new(reads.finish().map_err(|_| {
+        // Lower/Evaluate and Run preparation can commit source registrations.
+        // Read Front in that committed successor and join exact settled reads
+        // through ordinary semantic checking and V revalidation.
+        let current = match owner.current_lower() {
+            Ok(current) => current,
+            Err(error) => return Poll::Ready(Err(owner.fail(error))),
+        };
+        let current_front = current.body_front();
+        let Some(id) = current_front.body_query(&self.path) else {
+            return Poll::Ready(Err(
+                owner.protocol_failure(self.id, "native successor Front body is unavailable")
+            ));
+        };
+        let selected = match self.read(cx, id) {
+            Poll::Pending => return Poll::Pending,
+            Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+            Poll::Ready(Ok(product)) => product,
+        };
+        let Some(front) = current_front.outcome(Ok(selected)) else {
+            return Poll::Ready(Err(owner.protocol_failure(
+                self.id,
+                "native successor Front outcome is unavailable",
+            )));
+        };
+        reads.merge(&front.outcome.reads);
+        for (id, observed) in observations {
+            let observed = match owner.lower.check_observations(id, observed) {
+                Ok(observed) => observed,
+                Err(error) => return Poll::Ready(Err(owner.fail(error))),
+            };
+            reads.merge(&observed);
+        }
+        let result = (|| {
+            let reads = Arc::new(reads.finish().map_err(|error| {
                 owner.protocol_failure(
                     self.id,
-                    "native definition producer or observation is unavailable",
+                    &format!(
+                        "native definition {} has conflicting observations: {error:?}",
+                        self.path
+                    ),
                 )
             })?);
             let (source, contracts, requirements) = self
-                .complete(&front, &lower, finalizer, constant)
+                .complete(current_front, &front, &lower, finalizer, constant)
                 .map_err(|e| owner.fail(e))?;
             let action = hirsel_artifact_store::Action(ContentHash::of_parts(
                 "hirsel.front.native-definition-action.v2",
@@ -738,7 +799,7 @@ impl Task {
                     .as_ref()
                     .map(|p| (p.implementation_revision, p.signature)),
                 records: owner.records.clone(),
-                anchors: owner.anchors.clone(),
+                anchors: (*current.namespace().anchors).clone(),
                 archive: Mutex::new(None),
                 store: owner.store.clone(),
                 remaining: owner.remaining.clone(),
@@ -746,6 +807,7 @@ impl Task {
                 archive_bytes: 0,
                 charge: 0,
                 _ownership: owner._ownership.clone(),
+                _successor: current.clone(),
             };
             prepared.prepare_layout(&contracts, &requirements);
             if owner.store.persistence().retains() {
@@ -802,10 +864,15 @@ impl Task {
                     ),
                 );
             Ok(product)
-        })())
+        })();
+        if result.is_ok() {
+            cx.consume(id);
+        }
+        Poll::Ready(result)
     }
     fn complete(
         &self,
+        front_owner: &FrontBodyQueries,
         front: &FrontBodyOutput,
         lower: &Option<FrontLowerOutput>,
         finalizer: Option<(DefPath, hirsel_tir::BodyId)>,
@@ -819,10 +886,9 @@ impl Task {
         QueryError,
     > {
         let owner = &self.owner;
-        let input = owner.input(&self.path)?;
+        let input = owner.input_in(&self.path, front_owner.namespace())?;
         let analyzed = front.outcome.result.as_ref().map_err(Clone::clone)?;
-        let (syntax, signature) = owner
-            .front
+        let (syntax, signature) = front_owner
             .native_input(&self.path)
             .ok_or(QueryError::NotImplemented)?;
         let summary = front
@@ -906,8 +972,7 @@ impl Task {
                 ) {
                     return Ok(None);
                 }
-                let (syntax, _) = owner
-                    .front
+                let (syntax, _) = front_owner
                     .native_input(path)
                     .ok_or(QueryError::NotImplemented)?;
                 Ok(Some(syntax.owner().site(hirsel_types::NameSite::Item)))

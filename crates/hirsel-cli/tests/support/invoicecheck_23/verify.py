@@ -93,7 +93,7 @@ def verify(hirsel, root, output, selected=None):
         if engine != 'h':
             command += ['--native', '--backend', engine]
         tested = run('model-tests-' + engine, command)
-        assert tested[0] == 0 and tested[2] == b'', tested
+        assert tested[0] == 0 and tested[2] == b'', (engine, tested)
         summary = json.loads(tested[1])['summary']
         assert summary['total'] == 2 and summary['failed'] == 0, summary
     binaries = {}

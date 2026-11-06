@@ -92,10 +92,10 @@ def verify(hirsel, root, output):
     expect('fmt', run('fmt', ['fmt', '--check', root / 'main.hir']), (0, b'', b''))
     for engine in ENGINES:
         actual = run('package-' + engine, ['test', selection, '--json', *native(engine)])
-        assert actual[0] == 0, actual
+        assert actual[0] == 0, (engine, actual)
         result = json.loads(actual[1])
-        assert result['summary']['total'] == 4, result
-        assert result['summary']['failed'] == 0, result
+        assert result['summary']['total'] == 4, (engine, result)
+        assert result['summary']['failed'] == 0, (engine, result)
 
     binaries = {}
     for engine in ENGINES[1:]:

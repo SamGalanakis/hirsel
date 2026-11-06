@@ -274,7 +274,8 @@ pub struct NativeOriginalContext {
     cache: Option<Arc<hirsel_validate::VerifierCache>>,
     policy: ContentHash,
     instances: Arc<hirsel_tir::InstanceBodies>,
-    expected: BTreeMap<DefPath, ContentHash>,
+    expected: Arc<BTreeMap<DefPath, ContentHash>>,
+    _successor: Option<(Arc<crate::FrontLowerQueries>, Arc<OriginalLease>)>,
     verify: Verify,
     reuse: bool,
 }
@@ -289,6 +290,44 @@ impl NativeOriginalContext {
         self
     }
 
+    pub(crate) fn in_successor(
+        &self,
+        previous: &crate::NamespaceCapture,
+        current: Arc<crate::FrontLowerQueries>,
+    ) -> Result<Self, QueryError> {
+        if !previous.admits_successor(current.namespace()) {
+            return Err(source_transport(
+                "native original context lacks a source-preserving successor",
+            ));
+        }
+        let charge = self
+            .admission
+            .as_ref()
+            .and_then(|admission| {
+                admission.reserve(
+                    (size_of::<Self>() + size_of::<OriginalLease>() + 4 * size_of::<usize>())
+                        as u64,
+                )
+            })
+            .ok_or_else(|| {
+                source_transport("native original successor context exceeds admission")
+            })?;
+        let namespace = current.namespace();
+        Ok(Self {
+            owner: self.owner.clone(),
+            admission: self.admission.clone(),
+            anchors: namespace.anchors.clone(),
+            signatures: namespace.snapshot.clone(),
+            cache: self.cache.clone(),
+            policy: self.policy,
+            instances: namespace.instances.clone(),
+            expected: self.expected.clone(),
+            _successor: Some((current, charge)),
+            verify: self.verify,
+            reuse: self.reuse,
+        })
+    }
+
     /// Bind exact front observations without opening an ordinary source body.
     /// Unknown/stale source identities and duplicate demands are refused.
     pub fn reader(
@@ -300,23 +339,35 @@ impl NativeOriginalContext {
         let mut seen = BTreeSet::new();
         for product in products {
             let path = product.definition.clone();
-            if !seen.insert(path.clone())
-                || self.expected.get(&path) != Some(&product.implementation_revision)
-                || self
-                    .signatures
-                    .signature(DefId::intern(&path))
-                    .and_then(Result::ok)
-                    .map(|signature| signature.fingerprint)
-                    != Some(product.signature)
-                || !product.body.matches(&product, &self.anchors)
-                || product
-                    .verified
-                    .as_ref()
-                    .is_some_and(|output| output.owner().path() != &path)
+            let signature = self
+                .signatures
+                .signature(DefId::intern(&path))
+                .and_then(Result::ok)
+                .map(|signature| signature.fingerprint);
+            let mismatch = if !seen.insert(path.clone()) {
+                Some("duplicate definition")
+            } else if self.expected.get(&path) != Some(&product.implementation_revision) {
+                Some("implementation revision")
+            } else if signature != Some(product.signature) {
+                Some("signature")
+            } else if !product.body.matches(&product, &self.anchors) {
+                Some("body bindings")
+            } else if product
+                .verified
+                .as_ref()
+                .is_some_and(|output| output.owner().path() != &path)
             {
-                return Err(source_transport(
-                    "settled Lower differs from its source snapshot",
-                ));
+                Some("verified owner")
+            } else {
+                None
+            };
+            if let Some(mismatch) = mismatch {
+                return Err(source_transport(&format!(
+                    "settled Lower {path} differs from its source snapshot: {mismatch}; expected implementation {:?}, selected {:?}; expected signature {signature:?}, selected {:?}",
+                    self.expected.get(&path),
+                    product.implementation_revision,
+                    product.signature,
+                )));
             }
             // Retain the raw owner independently of best-effort verifier storage.
             ordinary.insert(
@@ -355,6 +406,7 @@ impl NativeOriginalContext {
         }
         Ok(NativeOriginalReader {
             owner: self.owner.clone(),
+            _successor: self._successor.clone(),
             admission: self.admission.clone(),
             verified: NativeLowerReader {
                 anchors: self.anchors.clone(),
@@ -394,7 +446,8 @@ impl QueryEngine {
             cache: self.product_store().and_then(|store| store.verifier()),
             policy: self.source_verification_policy(),
             instances: namespace.instances.clone(),
-            expected,
+            expected: Arc::new(expected),
+            _successor: None,
             verify: self.verify,
             reuse: self.native_query_policy().reuse,
         })
@@ -424,7 +477,8 @@ impl QueryEngine {
             cache: self.product_store().and_then(|store| store.verifier()),
             policy: self.source_verification_policy(),
             instances: Arc::new(self.instance_bodies(&paths)),
-            expected,
+            expected: Arc::new(expected),
+            _successor: None,
             verify: self.verify,
             reuse: self.native_query_policy().reuse,
         })
@@ -586,6 +640,7 @@ struct OrdinarySource {
 pub const NATIVE_ORIGINAL_BODY: hirsel_artifact_store::Domain =
     hirsel_product_codec::CheckedTir::DOMAIN;
 pub struct NativeOriginalReader {
+    _successor: Option<(Arc<crate::FrontLowerQueries>, Arc<OriginalLease>)>,
     owner: Option<Arc<dyn Send + Sync>>,
     admission: Option<OriginalAdmission>,
     verified: NativeLowerReader,
@@ -859,6 +914,7 @@ impl QueryEngine {
             );
         }
         Ok(NativeOriginalReader {
+            _successor: None,
             owner: None,
             admission: None,
             verified: NativeLowerReader {
@@ -934,6 +990,7 @@ impl QueryEngine {
             );
         }
         Ok(NativeOriginalReader {
+            _successor: None,
             owner: None,
             admission: None,
             verified: NativeLowerReader {

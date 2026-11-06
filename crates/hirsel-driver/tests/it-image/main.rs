@@ -120,7 +120,7 @@ fn source_edit_changes_only_the_source_backed_provider() {
         before, frozen,
         "installed products must stay frozen after a source edit"
     );
-    let value = DefPath(ItemPath {
+    let value = DefPath(hirsel_syntax::ItemPath {
         package: package("std"),
         modules: vec![],
         name: "value".into(),

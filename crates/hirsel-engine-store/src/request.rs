@@ -592,6 +592,30 @@ impl ResultStore for RequestStore {
         )
         .map_err(ProductArchiveError::InvalidArchive)
     }
+    fn read_product_window(
+        &self,
+        reference: Reference,
+        range: std::ops::Range<u64>,
+    ) -> Result<Bytes, ProductArchiveError> {
+        hirsel_artifact_store::window_read_bytes(reference, range.clone())
+            .ok_or(ProductArchiveError::InvalidContent)?;
+        if let Some((actual, bytes)) = self
+            .state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contents
+            .get(&reference.output.0)
+        {
+            return if *actual == reference {
+                bytes
+                    .range(range.start, range.end - range.start, 1)
+                    .ok_or(ProductArchiveError::InvalidContent)
+            } else {
+                Err(ProductArchiveError::InvalidContent)
+            };
+        }
+        self.backend.read_product_window(reference, range)
+    }
     fn read_product_content(&self, reference: Reference) -> Result<Bytes, ProductArchiveError> {
         if let Some((actual, bytes)) = self
             .state

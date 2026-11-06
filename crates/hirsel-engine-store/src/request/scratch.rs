@@ -365,14 +365,21 @@ impl ResultStore for ScratchStore {
         self.read_product_content(reference).ok()
     }
     fn read_product_content(&self, reference: Reference) -> Result<Bytes, ProductArchiveError> {
-        let read = self.read_content(reference);
+        self.read_product_window(reference, 0..reference.len)
+    }
+    fn read_product_window(
+        &self,
+        reference: Reference,
+        range: std::ops::Range<u64>,
+    ) -> Result<Bytes, ProductArchiveError> {
+        let read = self.read_window(reference, range.clone());
         if !matches!(read, Err(ProductArchiveError::Admission { .. })) {
             return read;
         }
         // The failed attempt has released the spool lock. Pressure can now
         // retire expired weak reads as well as their cached payloads.
         self.reads.evict();
-        let read = self.read_content(reference);
+        let read = self.read_window(reference, range);
         if matches!(read, Err(ProductArchiveError::Admission { .. })) {
             self.admission.exhausted.store(true, Ordering::Release);
         }
@@ -393,7 +400,77 @@ impl ScratchStore {
             })
         }
     }
-    fn read_content(&self, reference: Reference) -> Result<Bytes, ProductArchiveError> {
+    fn read_partial_window(
+        &self,
+        reference: Reference,
+        range: std::ops::Range<u64>,
+        required: u64,
+    ) -> Result<Bytes, ProductArchiveError> {
+        let files = self.files.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(entry) = files.entries.get(&reference.output.0) else {
+            drop(files);
+            return self.selected.read_product_window(reference, range);
+        };
+        if !entry.matches(reference) {
+            return Err(ProductArchiveError::InvalidContent);
+        }
+        if let Some(bytes) = entry
+            .read
+            .as_ref()
+            .and_then(|cached| cached.bytes.upgrade())
+        {
+            return bytes
+                .range(range.start, range.end - range.start, 1)
+                .ok_or(ProductArchiveError::InvalidContent);
+        }
+        let charge = required
+            .checked_add(ENTRY_CHARGE)
+            .ok_or(ProductArchiveError::LayoutOverflow)?;
+        self.read_charge(charge, "scratch window")?;
+        let mut owner = ReadOwner {
+            admission: self.admission.clone(),
+            _root: self.root.clone(),
+            bytes: charge,
+        };
+        let value = match &entry.backing {
+            Backing::Provider(held) => held
+                .read_window(range.clone())
+                .map_err(ProductArchiveError::Content),
+            Backing::Spool(offset) => {
+                if files
+                    .spool
+                    .metadata()
+                    .map_err(ProductArchiveError::InvalidArchive)?
+                    .len()
+                    != files.spool_bytes
+                {
+                    return Err(ProductArchiveError::InvalidContent);
+                }
+                hirsel_artifact_store::read_verified_window(
+                    reference,
+                    range.clone(),
+                    |at, bytes| read_at(&files.spool, bytes, offset + at),
+                )
+                .map_err(ProductArchiveError::Content)
+            }
+        }?;
+        let retained = Bytes::owned_with_owner_bytes(range.end - range.start)
+            .and_then(|bytes| bytes.checked_add(ENTRY_CHARGE))
+            .ok_or(ProductArchiveError::LayoutOverflow)?;
+        self.admission.release(charge - retained);
+        owner.bytes = retained;
+        Ok(value.retain_owner(Arc::new(owner)))
+    }
+    fn read_window(
+        &self,
+        reference: Reference,
+        range: std::ops::Range<u64>,
+    ) -> Result<Bytes, ProductArchiveError> {
+        let required = hirsel_artifact_store::window_read_bytes(reference, range.clone())
+            .ok_or(ProductArchiveError::InvalidContent)?;
+        if range != (0..reference.len) {
+            return self.read_partial_window(reference, range, required);
+        }
         let mut files = self.files.lock().unwrap_or_else(|e| e.into_inner());
         let Files {
             spool_bytes,
@@ -455,19 +532,15 @@ impl ScratchStore {
         };
         let read = || -> Result<Bytes, ProductArchiveError> {
             match &entry.backing {
-                Backing::Provider(held) => held.get().map_err(ProductArchiveError::Content),
-                Backing::Spool(offset) => {
-                    let mut value = vec![
-                        0;
-                        usize::try_from(reference.len)
-                            .map_err(|_| ProductArchiveError::LayoutOverflow)?
-                    ];
-                    read_at(spool, &mut value, *offset)
-                        .map_err(ProductArchiveError::InvalidArchive)?;
-                    Bytes::from(value)
-                        .checked(reference)
-                        .ok_or(ProductArchiveError::InvalidContent)
-                }
+                Backing::Provider(held) => held
+                    .read_window(range.clone())
+                    .map_err(ProductArchiveError::Content),
+                Backing::Spool(offset) => hirsel_artifact_store::read_verified_window(
+                    reference,
+                    range.clone(),
+                    |at, bytes| read_at(spool, bytes, offset + at),
+                )
+                .map_err(ProductArchiveError::Content),
             }
         };
         let value = match read() {
@@ -605,6 +678,73 @@ mod tests {
             .unwrap();
         drop(request);
         assert_eq!(&*child, &[7; 11]);
+        assert_eq!(budget.reserved(), ram);
+        drop(child);
+        assert_eq!(budget.reserved(), 0);
+    }
+    #[test]
+    fn scratch_windows_check_the_complete_record_and_keep_only_demanded_bytes() {
+        let parent = tempfile::tempdir().unwrap();
+        let ram = 96 << 10;
+        let budget = hirsel_engine_admission::ProcessBudget::new(ram);
+        let request = RequestStore::with_scratch(
+            Arc::new(NoneStore),
+            budget.reserve(ram).unwrap(),
+            parent.path(),
+            2 << 20,
+        )
+        .unwrap();
+        let input: Vec<_> = (0..1 << 20).map(|n| (n % 251) as u8).collect();
+        let reference = request.put_content(domain(), &input).unwrap();
+        let expected = input[65500..66524].to_vec();
+        drop(input);
+        let before = request.retained_bytes();
+        let (held, actual) = crate::test_alloc::measured(|| {
+            request
+                .read_product_window(reference, 65500..66524)
+                .unwrap()
+        });
+        assert_eq!(&*held, &expected);
+        let retained = request.retained_bytes() - before;
+        assert!(retained >= actual.live as u64);
+        assert!(
+            retained < 8192,
+            "a small window retained its complete backing"
+        );
+        assert!(before + actual.peak as u64 <= ram);
+        let (invalid, actual) = crate::test_alloc::measured(|| {
+            request.read_product_window(reference, reference.len..reference.len + 1)
+        });
+        assert!(matches!(invalid, Err(ProductArchiveError::InvalidContent)));
+        assert_eq!(actual.allocations, 0);
+        assert_eq!(request.retained_bytes(), before + retained);
+        assert!(matches!(
+            request.read_product_content(reference),
+            Err(ProductArchiveError::Admission { .. })
+        ));
+        // Corrupt a byte outside the window. Its complete content identity
+        // must still fail, while the independently owned old window survives.
+        let directory = fs::read_dir(parent.path())
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        let spool = directory.join("contents");
+        let file = fs::OpenOptions::new().write(true).open(&spool).unwrap();
+        write_at(&file, &[255], 1).unwrap();
+        assert!(matches!(
+            request.read_product_window(reference, 65500..66524),
+            Err(ProductArchiveError::Content(
+                ContentReadError::InvalidContent
+            ))
+        ));
+        assert_eq!(&*held, &expected);
+        drop(file);
+        let child = held.range(17, 29, 1).unwrap();
+        drop(held);
+        drop(request);
+        assert_eq!(&*child, &expected[17..46]);
         assert_eq!(budget.reserved(), ram);
         drop(child);
         assert_eq!(budget.reserved(), 0);

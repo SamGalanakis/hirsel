@@ -424,6 +424,20 @@ pub trait ResultStore: Send + Sync {
         self.get_content(reference)
             .ok_or(ProductArchiveError::Unavailable)
     }
+    /// Read one immutable range. Request-local content tables stream integrity
+    /// checks with bounded scratch and retain only the demanded byte window.
+    fn read_product_window(
+        &self,
+        reference: Reference,
+        range: std::ops::Range<u64>,
+    ) -> Result<Bytes, ProductArchiveError> {
+        hirsel_artifact_store::window_read_bytes(reference, range.clone())
+            .ok_or(ProductArchiveError::InvalidContent)?;
+        self.read_product_content(reference)?
+            .range(range.start, range.end - range.start, 1)
+            .ok_or(ProductArchiveError::InvalidContent)
+    }
+
     /// Immutable content and logical action indexes use distinct addresses.
     /// Byte providers share their map; directory providers map content directly.
     fn get_content(&self, reference: Reference) -> Option<Bytes> {

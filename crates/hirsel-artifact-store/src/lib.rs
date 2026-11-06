@@ -186,6 +186,11 @@ impl Domain {
         })
     }
     fn output(self, bytes: &[u8]) -> Output {
+        let mut hash = self.digest(bytes.len() as u64);
+        hash.update(bytes);
+        Output(ContentHash(hash.finalize().into()))
+    }
+    fn digest(self, length: u64) -> Sha256 {
         // ContentHash::of_parts frames each part with its little-endian u64
         // length. Feed the fixed framing together, then every payload byte.
         const DOMAIN: &[u8] = b"hirsel.artifact.output.v1";
@@ -196,13 +201,15 @@ impl Domain {
         prefix[41..45].copy_from_slice(&self.kind.to_le_bytes());
         prefix[45..53].copy_from_slice(&4u64.to_le_bytes());
         prefix[53..57].copy_from_slice(&self.schema.to_le_bytes());
-        prefix[57..65].copy_from_slice(&(bytes.len() as u64).to_le_bytes());
+        prefix[57..65].copy_from_slice(&length.to_le_bytes());
         let mut hash = Sha256::new();
         hash.update(prefix);
-        hash.update(bytes);
-        Output(ContentHash(hash.finalize().into()))
+        hash
     }
 }
+
+mod window;
+pub use window::{read_verified_window, window_read_bytes};
 
 enum Region {
     #[cfg(unix)]
@@ -480,6 +487,43 @@ impl HeldContent {
         }
         #[cfg(not(unix))]
         {
+            Err(ContentReadError::Refused(
+                "provider inode reads require Unix",
+            ))
+        }
+    }
+    /// Read a checked immutable window without mapping or copying the rest of
+    /// the provider inode. The caller admits the window and streaming scratch.
+    pub fn read_window(&self, range: Range<u64>) -> Result<Bytes, ContentReadError> {
+        let file = File::open(&self.path).map_err(ContentReadError::Unreadable)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::FileExt;
+            let mut header = [0; HEADER];
+            file.read_exact_at(&mut header, 0)
+                .map_err(ContentReadError::Unreadable)?;
+            let expected = self
+                .reference
+                .len
+                .checked_add(HEADER as u64)
+                .ok_or(ContentReadError::InvalidContent)?;
+            if file.metadata().map_err(ContentReadError::Unreadable)?.len() != expected
+                || header.get(..8) != Some(MAGIC.as_slice())
+                || word(&header, 8) != Some(self.reference.domain.kind)
+                || word(&header, 12) != Some(self.reference.domain.schema)
+                || number(&header, 16) != Some(self.reference.len)
+                || header[24..56] != self.reference.output.0.0
+                || header[56..64] != [0; 8]
+            {
+                return Err(ContentReadError::InvalidContent);
+            }
+            read_verified_window(self.reference, range, |offset, bytes| {
+                file.read_exact_at(bytes, offset + HEADER as u64)
+            })
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = (file, range);
             Err(ContentReadError::Refused(
                 "provider inode reads require Unix",
             ))

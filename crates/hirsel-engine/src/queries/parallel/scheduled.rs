@@ -431,6 +431,14 @@ impl FrontBodyQueries {
             .unwrap_or_else(|e| e.into_inner())
             .upgrade()
     }
+    pub(crate) fn has_cached_query(&self, query: QueryId) -> bool {
+        query.kind == FRONT_BODY_KIND
+            && self
+                .slots
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .contains_key(&query.address.0)
+    }
     pub(crate) fn owns_query(&self, query: QueryId) -> bool {
         query.kind == FRONT_BODY_KIND
             && (self.inputs.contains_key(&query.address.0)
@@ -2126,11 +2134,11 @@ impl QueryContext for DetachedFrontContext<'_> {
 struct Factory(Arc<FrontBodyQueries>);
 impl QueryFactory for Factory {
     fn evict(&self, query: QueryId, product: &ProductRef, scratch: u64) -> bool {
-        if !self.0.owns_query(query)
+        if !self.0.has_cached_query(query)
             && let Some(front) = self
                 .0
                 .demand_producer()
-                .and_then(|demand| demand.front_for(query))
+                .and_then(|demand| demand.front_for_eviction(query))
         {
             return front.factory().evict(query, product, scratch);
         }

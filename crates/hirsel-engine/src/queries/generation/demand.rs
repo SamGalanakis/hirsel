@@ -403,6 +403,20 @@ impl DemandProducer {
             .find(|front| front.owns_query(id))
             .cloned()
     }
+    pub(crate) fn front_for_eviction(
+        &self,
+        id: hirsel_engine_runtime::QueryId,
+    ) -> Option<Arc<FrontBodyQueries>> {
+        self.state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .views
+            .iter()
+            .rev()
+            .map(|view| view.owner.body_front())
+            .find(|front| front.has_cached_query(id))
+            .cloned()
+    }
     pub(crate) fn query(
         &self,
         previous: Arc<NamespaceCapture>,

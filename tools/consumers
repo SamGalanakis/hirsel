@@ -4,6 +4,8 @@
 Default stdout remains a target list for `buck2 test $(tools/consumers ...)`.
 Selection reasons go to stderr; --reasons puts target/reason columns on stdout.
 --classify LOG reads Buck's .pb.zst or decoded JSONL without running tests.
+Exact known matches cite their selector, diagnostic, caps and existing evidence
+on stderr; stdout retains only new/uncertain results. Classification is read-only.
 """
 import argparse
 import json

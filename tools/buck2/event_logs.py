@@ -248,7 +248,9 @@ def test_results(event_log, *, history=None, all_results=False):
         if not run:
             continue
         suite = run['suite']
-        name = suite['target_label']['label']['name']
+        label = suite['target_label']['label']
+        name = (label['name'] if label.get('package', 'root//') == 'root//'
+                else label['package'] + ':' + label['name'])
         report = run.get('command_report', {})
         details = report.get('details') or {}
         command = details.get('command_kind', {}).get('command', {})

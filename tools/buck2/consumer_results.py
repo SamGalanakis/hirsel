@@ -4,12 +4,19 @@ Buck event decoding and libtest progress follow event_logs.py:test_results and
 Rust's JSON protocol, already consumed by test_report.py:Progress. A ledger's
 free-form family description is insufficient evidence to suppress a failure.
 """
+from dataclasses import dataclass
 import json
 from pathlib import Path
 import re
 import sys
 
 import event_logs
+
+
+@dataclass(frozen=True)
+class KnownFailure:
+    reason: str
+    reference: str
 
 
 def ledger(path):
@@ -23,7 +30,10 @@ def ledger(path):
         identity = fields[0].removeprefix('root//:').removeprefix('//:')
         if identity in rows:
             raise ValueError(f'{path}:{number}: duplicate identity {identity}')
-        rows[identity] = fields[1]
+        current = re.split(r'\bPrior(?: evidence)?:', fields[1], maxsplit=1)[0]
+        reference = re.search(r'\bEvidence\s+(.+)', current)
+        rows[identity] = KnownFailure(fields[1], f'{path}:{number}'
+                                      + (f' ({reference[1]})' if reference else ''))
     return rows
 
 
@@ -116,14 +126,15 @@ def classify(target, result, rows):
     binary = re.sub(r'(?:-cpus-\d+)?-shard-\d+$', '', target)
     verdicts = []
     for body in sorted(active):
-        candidates = [(key, rows[key]) for key in (target, binary + '::' + body) if key in rows]
-        if not candidates:
+        recorded = [(key, rows[key]) for key in (target, binary + '::' + body) if key in rows]
+        if not recorded:
             verdicts.append(('new', f'{body}: no exact selector row'))
             continue
         # Prior receipts remain evidence, but cannot establish that the current
         # assertion and cap still describe this failure.
         current = []
-        for key, reason in candidates:
+        for key, row in recorded:
+            reason = row.reason
             reason = re.split(r'\bPrior(?: evidence)?:', reason, maxsplit=1)[0]
             if key == target:
                 # A target row may describe several failing cases. Its other
@@ -133,7 +144,7 @@ def classify(target, result, rows):
                 named = {name.removeprefix(binary + '::') for name in named}
                 if named != {body}:
                     continue
-            current.append(reason)
+            current.append((key, row, reason))
         candidates = current
         diagnostic = diagnostics.get(body)
         if body in running:
@@ -141,15 +152,24 @@ def classify(target, result, rows):
             # inner and action caps. An aggregate timeout alone never matches.
             diagnostic = next((line for line in details.splitlines() if line.startswith('HIRSEL_TEST_INNER_DEADLINE ')), None)
         observed_caps = caps(details)
+        observation = (f'diagnostic={normalized(diagnostic) if diagnostic else "unknown"}; caps='
+                       + (', '.join(f'{kind}={value:g}s' for kind, value in sorted(observed_caps)) or 'unknown'))
+        references = '; '.join(f'{key}: {row.reference}' for key, row in recorded)
         deadline_caps = {kind for kind, _ in observed_caps}
         if not diagnostic or not observed_caps or body in running and not {'inner', 'action'} <= deadline_caps:
-            verdicts.append(('uncertain', f'{body}: diagnostic or cap evidence missing'))
+            verdicts.append(('uncertain', f'{body}: diagnostic or cap evidence missing; '
+                             f'{observation}; evidence={references}'))
             continue
-        matched = any(re.search(r'(?<![\w:])' + re.escape(body) + r'(?![\w:])', reason)
-                      and normalized(diagnostic) in normalized(reason)
-                      and observed_caps == caps(reason) for reason in candidates)
-        verdicts.append(('known' if matched else 'uncertain',
-                         f'{body}: ' + ('exact selector, diagnostic and cap match' if matched else 'body, assertion or cap differs from row')))
+        matched = next(((key, row) for key, row, reason in candidates
+                        if re.search(r'(?<![\w:])' + re.escape(body) + r'(?![\w:])', reason)
+                        and normalized(diagnostic) in normalized(reason)
+                        and observed_caps == caps(reason)), None)
+        if matched:
+            key, row = matched
+            verdicts.append(('known', f'selector={key}; {observation}; evidence={row.reference}'))
+        else:
+            verdicts.append(('uncertain', f'{body}: body, assertion or cap differs from row; '
+                             f'{observation}; evidence={references}'))
     # A known member never hides another unrecognized failure in its shard.
     state = 'new' if any(state == 'new' for state, _ in verdicts) else 'uncertain' if any(state == 'uncertain' for state, _ in verdicts) else 'known'
     return state, '; '.join(reason for _, reason in verdicts)
@@ -167,5 +187,7 @@ def report(paths, table):
             counts['passed' if state == 'pass' else state] += 1
             if state in ('new', 'uncertain'):
                 print(f'{state}\t{target}\t{reason}')
+            elif state == 'known':
+                print(f'{state}\t{target}\t{reason}', file=sys.stderr)
     print('consumers: ' + ', '.join(f'{count} {state}' for state, count in counts.items()), file=sys.stderr)
     return 1 if counts['new'] or counts['uncertain'] else 0

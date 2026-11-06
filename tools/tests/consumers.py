@@ -237,8 +237,10 @@ HIRSEL_TEST_RUNNING laws::receipt elapsed=570.001s
 """
 
     def classify(self, details=None, rows=None, status=2):
+        rows = {'fixture::laws::receipt': self.reason} if rows is None else rows
+        rows = {key: consumer_results.KnownFailure(reason, 'fixture ledger') for key, reason in rows.items()}
         return consumer_results.classify('fixture-shard-1', dict(status=status, details=details or self.panic),
-                                         {'fixture::laws::receipt': self.reason} if rows is None else rows)[0]
+                                         rows)[0]
 
     def test_exact_selector_diagnostic_body_and_cap_is_known(self):
         self.assertEqual(self.classify(), 'known')
@@ -333,6 +335,99 @@ HIRSEL_TEST_RUNNING laws::receipt elapsed=570.001s
                              ['known', 'new', 'uncertain'])
             with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
                 self.assertEqual(consumer_results.report([log], table), 1)
+
+    def report_events(self, events, reasons):
+        with tempfile.TemporaryDirectory() as directory:
+            folder = Path(directory)
+            table = folder / 'known.tsv'
+            table.write_text(''.join(f'{selector}\t{reason}\towner\t2026-11-06\n'
+                                     for selector, reason in reasons.items()))
+            log = folder / 'results.jsonl'
+            log.write_text('\n'.join(map(json.dumps, events)))
+            stdout, stderr = io.StringIO(), io.StringIO()
+            with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                status = consumer_results.report([log], table)
+            return status, stdout.getvalue(), stderr.getvalue()
+
+    @staticmethod
+    def result_event(name, details, status=2):
+        return {'Event': {'data': {'Instant': {'data': {'TestResult':
+                dict(name=name, status=status, details=details)}}}}}
+
+    def test_440_native_proof_results_do_not_create_zero_body_observations(self):
+        # 440g/h TestRun uses a label object; TestResult uses the qualified name.
+        cases = {
+            'root-plan-proof': 'frozen_root_plans_run_both_backends_without_live_linker_inputs',
+            'root-frozen-kit-proof': 'admitted_root_plans_bind_the_kit_before_codegen',
+        }
+        events = []
+        for target, case in cases.items():
+            label = dict(package='root//tools/buck2/native-toolchain', name=target)
+            events.append({'Event': {'data': {'SpanEnd': {'data': {'TestRun': {
+                'suite': {'suite_name': target, 'target_label': {'label': label}},
+                'command_report': {'status': {'Success': {}}, 'details': {'signed_exit_code': 0}},
+            }}}}}})
+            details = ('---- STDOUT ----\n\nrunning 1 test\n'
+                       f'test native_compilation_tasks_19::{case} ... ok\n\n'
+                       'test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; '
+                       '1906 filtered out; finished in 33.02s\n\n---- STDERR ----\n')
+            events.append(self.result_event(label['package'] + ':' + target, details, 1))
+        status, stdout, stderr = self.report_events(events, {})
+        self.assertEqual((status, stdout), (0, ''))
+        self.assertIn('2 passed', stderr)
+        self.assertIn('0 uncertain', stderr)
+
+    def configctl_observation(self):
+        bodies = ['configctl_8_cli_arguments', 'configctl_8_data_validation', 'configctl_8_record_replay']
+        diagnostic = 'namespace capture exceeds its retained admission'
+        details = 'running 3 tests\nHIRSEL_TEST_LIMITS inner570 action cap=600s\n'
+        reasons = {}
+        for body in bodies:
+            details += (f'HIRSEL_TEST_STARTED {body}\ntest {body} ... FAILED\n'
+                        f"thread '{body}' panicked at crates/hirsel-cli/tests/configctl_8.rs:166:5:\n"
+                        f'{diagnostic}\n\n')
+            reasons['hirsel-cli-test-configctl_8::' + body] = (
+                f'Failed {body}. crates/hirsel-cli/tests/configctl_8.rs:166:5: {diagnostic}; '
+                'inner570 RE600. Evidence mutex-borrow-416/REPORT.md and free-heap-report-421/REPORT.md.')
+        details += 'test result: FAILED. 0 passed; 3 failed; 0 ignored;\n'
+        return details, reasons
+
+    def test_configctl_exact_evidence_is_reused_and_printed(self):
+        details, reasons = self.configctl_observation()
+        status, stdout, stderr = self.report_events([
+            self.result_event('hirsel-cli-test-configctl_8', details)], reasons)
+        self.assertEqual((status, stdout), (0, ''))
+        self.assertIn('known\thirsel-cli-test-configctl_8', stderr)
+        for selector in reasons:
+            self.assertIn(selector, stderr)
+        self.assertIn('namespace capture exceeds its retained admission', stderr)
+        self.assertIn('inner=570s', stderr)
+        self.assertIn('action=600s', stderr)
+        self.assertRegex(stderr, r'known\.tsv:[123]')
+        self.assertIn('mutex-borrow-416/REPORT.md', stderr)
+
+    def test_configctl_changed_diagnostic_stays_uncertain_with_observed_evidence(self):
+        details, reasons = self.configctl_observation()
+        details = details.replace('namespace capture exceeds its retained admission',
+                                  'installed integrity metadata exceeds request transport admission')
+        status, stdout, stderr = self.report_events([
+            self.result_event('hirsel-cli-test-configctl_8', details)], reasons)
+        self.assertEqual(status, 1)
+        self.assertIn('uncertain\thirsel-cli-test-configctl_8', stdout)
+        self.assertIn('installed integrity metadata exceeds request transport admission', stdout)
+        self.assertIn('known.tsv:', stdout)
+        self.assertIn('0 known', stderr)
+
+    def test_original_batch_failure_survives_passing_isolated_controls(self):
+        passed = 'test laws::receipt ... ok\ntest result: ok. 1 passed; 0 failed;'
+        events = [self.result_event('fixture-shard-1', self.panic),
+                  self.result_event('fixture-shard-1', passed, 1),
+                  self.result_event('fixture-shard-1', passed, 1)]
+        status, stdout, stderr = self.report_events(events, {})
+        self.assertEqual(status, 1)
+        self.assertIn('new\tfixture-shard-1', stdout)
+        self.assertIn('1 new', stderr)
+        self.assertIn('2 passed', stderr)
 
     def test_json_libtest_failure_keeps_the_assertion_values(self):
         details = '\n'.join(json.dumps(event) for event in [

@@ -2356,6 +2356,7 @@ fn node_pressure_spills_results_without_persistence_and_preserves_root_delivery(
         assert_eq!(state.nodes.len(), 3);
     }
     assert_eq!(rt.wait(request), Ok(vec![product(query(0))]));
+    let producer_claims = rt.stats().claims;
     let request = rt.request(&[query(2)]);
     assert_eq!(rt.wait(request), Ok(vec![product(query(2))]));
     let reopened = rt.shared.lock().nodes.node_id(key(query(2))).unwrap();
@@ -2364,6 +2365,11 @@ fn node_pressure_spills_results_without_persistence_and_preserves_root_delivery(
         claims.load(Ordering::SeqCst),
         4,
         "spill reopens without another factory execution"
+    );
+    assert_eq!(
+        rt.stats().claims,
+        producer_claims,
+        "restoring a completed spill keeps its original producer claim"
     );
     assert!(rt.metadata_capacity_bytes() <= rt.stats().bookkeeping_bytes);
     assert!(rt.stats().peak_bytes <= bytes);

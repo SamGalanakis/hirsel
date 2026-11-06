@@ -110,6 +110,7 @@ pub enum WakeReason {
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct RuntimeStats {
+    /// New producer claims; completed spill restores retain their original claim.
     pub claims: u64,
     pub polls: u64,
     pub waits: u64,
@@ -968,8 +969,6 @@ impl State {
         if !self.reserve_bookkeeping(self.recorded, self.nodes.next_arena_len(query), self.edges) {
             return Err(self.errors.resource);
         }
-        self.stats.claims += 1;
-        self.event(RuntimeEvent::Claim(id(query)));
         let spilled = self.spill.remove(&query);
         if spilled.is_some() {
             self.recorded -= 512;
@@ -977,13 +976,15 @@ impl State {
                 self.bookkeeping(self.recorded, self.nodes.next_arena_len(query), self.edges);
         }
         let precharged = spilled.is_some();
-        let factory = self.factories.get(&query.0).cloned();
         let node_state = if let Some(spilled) = spilled {
             NodeState::Settled {
                 outcome: Box::new(spilled.result),
                 retained: spilled.retained,
             }
         } else {
+            self.stats.claims += 1;
+            self.event(RuntimeEvent::Claim(id(query)));
+            let factory = self.factories.get(&query.0).cloned();
             let created = catch_unwind(AssertUnwindSafe(|| match factory {
                 Some(Factory::Send(factory)) => {
                     let task = factory.create(id(query))?;

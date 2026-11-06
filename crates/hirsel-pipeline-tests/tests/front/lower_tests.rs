@@ -652,7 +652,7 @@ fn source_capture_preserves_selected_types(annotation: &str, context: CaptureCon
     let definition = engine.lower_to_tir(&path).unwrap();
     let snapshot = engine.signature_snapshot();
     let signatures = snapshot.validation(&path.0.package).unwrap();
-    hirsel_validate::assert_valid(&definition.value, engine.types(), signatures);
+    hirsel_validate::assert_valid(&definition.value, engine.types(), &signatures);
     let parent = &definition.value.bodies[definition.value.entry.0 as usize];
     let (child, operand) = parent
         .rvalues

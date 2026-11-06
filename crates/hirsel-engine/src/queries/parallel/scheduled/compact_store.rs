@@ -16,10 +16,7 @@ struct Record {
     facts: Vec<u8>,
 }
 #[derive(serde::Serialize)]
-struct RecordRef<'a> {
-    key: Key,
-    body: Option<Reference>,
-    reads: &'a Reads,
+struct RecordTail<'a> {
     decode_bytes: u64,
     #[serde(serialize_with = "hirsel_product_codec::serialize_payload")]
     facts: &'a [u8],
@@ -206,15 +203,18 @@ impl FrontBodyQueries {
                 self.citations.record_owner(anchor)
             })?;
         let decode_bytes = outer.checked_add(facts.bytes(true))?;
-        let record = RecordRef {
-            key: self.inputs.get(&key)?.key.0,
-            body: archive,
-            reads: &outcome.reads,
+        let head = (self.inputs.get(&key)?.key.0, archive);
+        let tail = RecordTail {
             decode_bytes,
             facts: &facts_bytes,
         };
-        if bincode::serialized_size(&record)
+        let reads_bytes = outcome.reads.encoded_bytes()?;
+        let encoded = bincode::serialized_size(&head)
             .ok()?
+            .checked_add(8)?
+            .checked_add(reads_bytes)?
+            .checked_add(bincode::serialized_size(&tail).ok()?)?;
+        if encoded
             .checked_mul(8)?
             .checked_add(decode_bytes)?
             .checked_add(temporary)?
@@ -222,7 +222,14 @@ impl FrontBodyQueries {
         {
             return None;
         }
-        bincode::serialize(&record).ok()
+        // bincode 1.3.3 src/ser/mod.rs:155-185 leaves tuples/structs unframed.
+        // Preserve Record's field order and write its admitted HRD3 only once.
+        let mut bytes = Vec::with_capacity(usize::try_from(encoded).ok()?);
+        bincode::serialize_into(&mut bytes, &head).ok()?;
+        bincode::serialize_into(&mut bytes, &reads_bytes).ok()?;
+        outcome.reads.encode(&mut bytes);
+        bincode::serialize_into(&mut bytes, &tail).ok()?;
+        Some(bytes)
     }
 }
 impl BodyTask {

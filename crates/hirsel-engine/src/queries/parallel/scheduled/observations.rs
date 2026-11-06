@@ -96,23 +96,38 @@ impl FrontBodyQueries {
             {
                 return None;
             }
-            // Reads' canonical codec preserves both the exact rows and their
-            // observation order. Admit its temporary encoding before allocating.
-            let working = outcome.memos.iter().try_fold(0u64, |sum, (_, reads)| {
-                sum.checked_add(reads.encoding_working_bytes()?)
-            })?;
-            let vector = (outcome.memos.len() * size_of::<Arc<Reads>>()) as u64;
-            if working.checked_add(vector)?.checked_mul(2)? > scratch {
+            // Derive each HRD3 size once before allocating the spill. Preserve
+            // the existing encoding_working_bytes bound and vector allowance.
+            let (encoded, working) =
+                outcome
+                    .memos
+                    .iter()
+                    .try_fold((8u64, 0u64), |(encoded, working), (_, reads)| {
+                        let size = reads.encoded_bytes()?;
+                        Some((
+                            encoded.checked_add(8)?.checked_add(size)?,
+                            working
+                                .checked_add(size.max(8).checked_mul(4)?)?
+                                .checked_add(size_of::<Vec<u8>>() as u64)?,
+                        ))
+                    })?;
+            let vector = outcome.memos.len().checked_mul(size_of::<Arc<Reads>>())? as u64;
+            if encoded > scratch || working.checked_add(vector)?.checked_mul(2)? > scratch {
                 return None;
             }
-            let reads = outcome
-                .memos
-                .iter()
-                .map(|(_, reads)| reads)
-                .collect::<Vec<_>>();
             self.store
                 .archive_encoded(hirsel_engine_store::ArchiveBoundary::RequiredSpill);
-            let bytes = bincode::serialize(&reads).ok()?;
+            let mut bytes = Vec::with_capacity(usize::try_from(encoded).ok()?);
+            // bincode 1.3.3 src/ser/mod.rs:132-153 frames sequences and bytes
+            // with fixed-width u64 lengths in bincode::serialize's format.
+            bincode::serialize_into(&mut bytes, &(outcome.memos.len() as u64)).ok()?;
+            for (_, reads) in &outcome.memos {
+                let frame = bytes.len();
+                bytes.extend(0u64.to_le_bytes());
+                reads.encode(&mut bytes);
+                let size = (bytes.len() - frame - 8) as u64;
+                bytes[frame..frame + 8].copy_from_slice(&size.to_le_bytes());
+            }
             let reference = self.store.put_content(OBSERVATIONS, &bytes)?;
             Some(Rows::Archived {
                 keys: outcome.memos.iter().map(|(key, _)| *key).collect(),

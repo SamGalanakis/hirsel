@@ -32,6 +32,7 @@ struct Admission {
     exhausted: AtomicBool,
     scratch: OnceLock<Arc<dyn Send + Sync>>,
     verifier: OnceLock<Weak<hirsel_validate::VerifierCache>>,
+    reads: OnceLock<Weak<scratch::ReadCache>>,
 }
 impl Admission {
     fn try_charge(&self, bytes: u64) -> bool {
@@ -45,6 +46,12 @@ impl Admission {
         };
         if reserve() {
             return true;
+        }
+        if let Some(reads) = self.reads.get().and_then(Weak::upgrade) {
+            reads.evict();
+            if reserve() {
+                return true;
+            }
         }
         if let Some(verifier) = self.verifier.get().and_then(Weak::upgrade) {
             verifier.evict_facts();
@@ -112,6 +119,7 @@ impl RequestStore {
                 exhausted: AtomicBool::new(false),
                 scratch: OnceLock::new(),
                 verifier: OnceLock::new(),
+                reads: OnceLock::new(),
             }),
         )
     }
@@ -132,6 +140,7 @@ impl RequestStore {
             exhausted: AtomicBool::new(false),
             scratch: OnceLock::new(),
             verifier: OnceLock::new(),
+            reads: OnceLock::new(),
         });
         let backend = Arc::new(scratch::ScratchStore::new(
             backend,
@@ -1547,6 +1556,7 @@ mod tests {
             exhausted: AtomicBool::new(false),
             scratch: OnceLock::new(),
             verifier: OnceLock::new(),
+            reads: OnceLock::new(),
         });
         let reference = domain().reference(b"verifier-owned content").unwrap();
         let (rows, allocated) = crate::test_alloc::measured(|| {

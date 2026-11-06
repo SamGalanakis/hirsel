@@ -26,12 +26,44 @@ enum Backing {
 }
 struct CachedRead {
     bytes: hirsel_artifact_store::WeakBytes,
+    provider_version: Option<hirsel_artifact_store::HeldVersion>,
     admission: Arc<Admission>,
     charge: u64,
 }
 impl Drop for CachedRead {
     fn drop(&mut self) {
         self.admission.release(self.charge);
+    }
+}
+// Retain checked immutable buffers by complete reference, never by a mutable
+// pathname. Admission can end this read epoch before any required allocation.
+pub(super) struct ReadCache {
+    entries: Mutex<BTreeMap<Reference, Bytes>>,
+}
+impl ReadCache {
+    pub(super) fn evict(&self) {
+        let entries = std::mem::take(&mut *self.entries.lock().unwrap_or_else(|e| e.into_inner()));
+        drop(entries);
+    }
+    fn contains(&self, reference: Reference) -> bool {
+        self.entries
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains_key(&reference)
+    }
+    fn remove(&self, reference: Reference) {
+        self.entries
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&reference);
+    }
+    fn retain(&self, reference: Reference, bytes: &Bytes) {
+        // The read owner reserves both the payload and this tree entry.
+        // Eviction refunds that reservation once no external reader holds it.
+        self.entries
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(reference, bytes.clone());
     }
 }
 impl Entry {
@@ -65,6 +97,7 @@ pub(crate) struct ScratchStore {
     admission: Arc<Admission>,
     root: Arc<Root>,
     disk_limit: u64,
+    reads: Arc<ReadCache>,
 }
 struct ReadOwner {
     admission: Arc<Admission>,
@@ -114,7 +147,12 @@ impl ScratchStore {
             ));
         }
         let _ = admission.scratch.set(root.clone());
+        let reads = Arc::new(ReadCache {
+            entries: Mutex::new(BTreeMap::new()),
+        });
+        let _ = admission.reads.set(Arc::downgrade(&reads));
         Ok(Self {
+            reads,
             selected,
             admission,
             root,
@@ -332,6 +370,18 @@ impl ResultStore for ScratchStore {
         {
             return Err(ProductArchiveError::InvalidContent);
         }
+        if let Some(cached) = &entry.read
+            && cached.bytes.strong_count() == 1
+            && self.reads.contains(reference)
+            && let Backing::Provider(held) = &entry.backing
+            && (cached.provider_version.is_none() || held.version() != cached.provider_version)
+        {
+            // Existing readers own independent checked bytes. Once only the
+            // epoch owns them, provider damage conservatively expires the read.
+            // A metadata match only retains those bytes; it never checks a file.
+            self.reads.remove(reference);
+            entry.read = None;
+        }
         if let Some(bytes) = entry
             .read
             .as_ref()
@@ -350,11 +400,15 @@ impl ResultStore for ScratchStore {
         self.admission.archive_charge(retained, "scratch read")?;
         if let Err(error) = self
             .admission
-            .archive_charge(cache_charge, "scratch read metadata")
+            .archive_charge(cache_charge + ENTRY_CHARGE, "scratch read metadata")
         {
             self.admission.release(retained);
             return Err(error);
         }
+        let provider_version = match &entry.backing {
+            Backing::Provider(held) => held.version(),
+            Backing::Spool(_) => None,
+        };
         let read = || -> Result<Bytes, ProductArchiveError> {
             match &entry.backing {
                 Backing::Provider(held) => held.get().map_err(ProductArchiveError::Content),
@@ -375,21 +429,24 @@ impl ResultStore for ScratchStore {
         let value = match read() {
             Ok(value) => value,
             Err(error) => {
-                self.admission.release(retained + cache_charge);
+                self.admission
+                    .release(retained + cache_charge + ENTRY_CHARGE);
                 return Err(error);
             }
         };
         let owner = Arc::new(ReadOwner {
             admission: self.admission.clone(),
             _root: self.root.clone(),
-            bytes: retained,
+            bytes: retained + ENTRY_CHARGE,
         });
         let value = value.retain_owner(owner);
         entry.read = Some(Box::new(CachedRead {
             bytes: value.downgrade(),
+            provider_version,
             admission: self.admission.clone(),
             charge: cache_charge,
         }));
+        self.reads.retain(reference, &value);
         Ok(value)
     }
 }

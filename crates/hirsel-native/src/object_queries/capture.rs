@@ -128,7 +128,7 @@ impl FrozenLinker {
             .ok_or("non-UTF8 linker working directory")?
             .to_string();
         let scratch = tempfile::tempdir().map_err(error)?;
-        let tool = self.materialize(store, &scratch.path().join("tool"))?;
+        let tool = self.materialize(store)?;
         let archive = scratch.path().join("inputs.tar");
         let mut command = tool.command();
         command
@@ -177,13 +177,41 @@ impl FrozenLinker {
         )?))
     }
 
-    fn materialize(self, store: &dyn ResultStore, root: &Path) -> Result<LocalTool, String> {
+    fn materialize(self, store: &dyn ResultStore) -> Result<LocalTool, String> {
+        use std::os::fd::AsRawFd;
         let record: ToolRecord = get_record(store, TOOL, self.0)?;
         check_tool(&record.files)?;
+        let identity = self
+            .0
+            .output
+            .0
+            .0
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        let cache = std::env::var_os("HIRSEL_NATIVE_CACHE")
+            .map(PathBuf::from)
+            .unwrap_or_else(super::super::runtime_cache::default_directory)
+            .join("linker-v1")
+            .join(identity);
+        let directory = super::super::runtime_cache::private_directory(&cache).map_err(error)?;
+        // Pin this acquisition to its checked private directory. The child
+        // resolves the parent's descriptor while LocalTool holds it alive.
+        let root = PathBuf::from(format!(
+            "/proc/{}/fd/{}",
+            std::process::id(),
+            directory.as_raw_fd()
+        ));
         for file in record.files {
+            // Identity selects the destination, never its integrity. Every
+            // acquisition checks all bytes against the selected product store;
+            // corrupt/missing materializations are atomically restored.
             materialize_link_input(store, file.bytes.into(), &root.join(file.name), true)?;
         }
-        Ok(LocalTool(root.to_path_buf()))
+        Ok(LocalTool {
+            root,
+            _directory: directory,
+        })
     }
 }
 
@@ -247,8 +275,7 @@ impl CapturedLink {
     pub fn link(self, store: &dyn ResultStore, output: &Path) -> Result<(), String> {
         let record = self.record(store)?;
         let scratch = tempfile::tempdir().map_err(error)?;
-        let tool =
-            FrozenLinker(record.tool.into()).materialize(store, &scratch.path().join("tool"))?;
+        let tool = FrozenLinker(record.tool.into()).materialize(store)?;
         let mut roots = vec![serde_json::json!({
             "type": "directory", "name": record.directory, "contents": []
         })];
@@ -603,17 +630,20 @@ impl FrozenLinkKit {
     }
 }
 
-struct LocalTool(PathBuf);
+struct LocalTool {
+    root: PathBuf,
+    _directory: std::fs::File,
+}
 impl LocalTool {
     fn command(&self) -> Command {
         // The package contains this exact loader and its resolved tool DSO
         // closure. Target-library loading is a separate host responsibility.
-        let mut command = Command::new(self.0.join("lib/ld-linux-x86-64.so.2"));
+        let mut command = Command::new(self.root.join("lib/ld-linux-x86-64.so.2"));
         command
             .env_clear()
             .arg("--library-path")
-            .arg(self.0.join("lib"))
-            .arg(self.0.join("bin/ld.lld"));
+            .arg(self.root.join("lib"))
+            .arg(self.root.join("bin/ld.lld"));
         command
     }
 }

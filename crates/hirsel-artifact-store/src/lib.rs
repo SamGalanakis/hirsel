@@ -412,6 +412,10 @@ pub struct WeakBytes {
     range: Range<usize>,
 }
 impl WeakBytes {
+    /// Number of live immutable views, including an epoch's retained view.
+    pub fn strong_count(&self) -> usize {
+        self.region.strong_count()
+    }
     pub fn upgrade(&self) -> Option<Bytes> {
         Some(Bytes {
             region: self.region.upgrade()?,
@@ -431,7 +435,31 @@ pub struct HeldContent {
     path: PathBuf,
     reference: Reference,
 }
+/// A provider change hint used only to discard an owned immutable snapshot.
+/// It never establishes byte integrity or authorizes a provider read.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct HeldVersion([u64; 7]);
 impl HeldContent {
+    pub fn version(&self) -> Option<HeldVersion> {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            let metadata = fs::metadata(&self.path).ok()?;
+            Some(HeldVersion([
+                metadata.dev(),
+                metadata.ino(),
+                metadata.len(),
+                metadata.mtime() as u64,
+                metadata.mtime_nsec() as u64,
+                metadata.ctime() as u64,
+                metadata.ctime_nsec() as u64,
+            ]))
+        }
+        #[cfg(not(unix))]
+        {
+            None
+        }
+    }
     pub fn get(&self) -> Result<Bytes, ContentReadError> {
         let len = usize::try_from(self.reference.len)
             .ok()

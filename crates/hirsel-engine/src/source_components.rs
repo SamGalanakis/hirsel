@@ -481,11 +481,12 @@ impl SourceGrowthProducer<'_> {
         members: &[DefId],
         facts: &[SourceGrowthFact],
     ) -> Option<Action> {
+        // Transport addresses bind the entire namespace capture. Selected
+        // actions and observations already bind each member's actual inputs.
         let observations: Vec<_> = facts
             .iter()
             .map(|fact| {
                 (
-                    fact.definition.0,
                     fact.selected,
                     fact.observed,
                     fact.owner,
@@ -496,7 +497,7 @@ impl SourceGrowthProducer<'_> {
             .collect();
         Some(Action(hash_source_value(
             self.source,
-            "hirsel.source-growth.component.action.v5",
+            "hirsel.source-growth.component.action.v6",
             &(members, observations),
         )?))
     }

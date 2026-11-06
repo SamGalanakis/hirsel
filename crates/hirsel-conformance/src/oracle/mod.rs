@@ -33,6 +33,10 @@ pub type Artifacts = BTreeMap<String, Vec<u8>>;
 struct ColdStore(Arc<dyn ResultStore>);
 
 impl ResultStore for ColdStore {
+    fn admit_product_memory(&self, _bytes: u64) -> Option<std::sync::Arc<dyn Send + Sync>> {
+        None
+    }
+
     fn retention_scope(&self) -> Option<Box<dyn Send + Sync>> {
         None
     }

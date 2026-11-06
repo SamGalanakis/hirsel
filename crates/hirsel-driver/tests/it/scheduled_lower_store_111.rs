@@ -20,6 +20,10 @@ struct FreshBytes {
     verifier: Arc<hirsel_validate::VerifierCache>,
 }
 impl store::ResultStore for FreshBytes {
+    fn admit_product_memory(&self, bytes: u64) -> Option<std::sync::Arc<dyn Send + Sync>> {
+        self.bytes.admit_product_memory(bytes)
+    }
+
     fn retention_scope(&self) -> Option<Box<dyn Send + Sync>> {
         self.bytes.retention_scope()
     }
@@ -48,6 +52,10 @@ struct LiveStore {
     missing: std::sync::atomic::AtomicBool,
 }
 impl ResultStore for LiveStore {
+    fn admit_product_memory(&self, bytes: u64) -> Option<std::sync::Arc<dyn Send + Sync>> {
+        self.bytes.admit_product_memory(bytes)
+    }
+
     fn retention_scope(&self) -> Option<Box<dyn Send + Sync>> {
         self.bytes.retention_scope()
     }
@@ -282,6 +290,10 @@ fn persisted_entry_stops_at_first_observed_changed_read() {
         signature_gets: std::sync::atomic::AtomicUsize,
     }
     impl ResultStore for CountReads {
+        fn admit_product_memory(&self, bytes: u64) -> Option<std::sync::Arc<dyn Send + Sync>> {
+            self.inner.admit_product_memory(bytes)
+        }
+
         fn retention_scope(&self) -> Option<Box<dyn Send + Sync>> {
             self.inner.retention_scope()
         }

@@ -164,6 +164,10 @@ mod tests {
     use hirsel_engine_store::{self as store, Bytes, EntryKey};
     struct NoTransport;
     impl ResultStore for NoTransport {
+        fn admit_product_memory(&self, _bytes: u64) -> Option<std::sync::Arc<dyn Send + Sync>> {
+            None
+        }
+
         fn retention_scope(&self) -> Option<Box<dyn Send + Sync>> {
             None
         }
@@ -350,6 +354,10 @@ mod tests {
     fn plan_import_refuses_corruption_noncanonical_descriptors_and_wrong_schema() {
         struct Corrupt;
         impl ResultStore for Corrupt {
+            fn admit_product_memory(&self, _bytes: u64) -> Option<std::sync::Arc<dyn Send + Sync>> {
+                None
+            }
+
             fn retention_scope(&self) -> Option<Box<dyn Send + Sync>> {
                 None
             }

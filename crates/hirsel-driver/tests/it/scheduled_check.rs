@@ -298,6 +298,10 @@ fn check_settled_front_eviction(
         reads_after_eviction: AtomicUsize,
     }
     impl ResultStore for EvictModes {
+        fn admit_product_memory(&self, bytes: u64) -> Option<std::sync::Arc<dyn Send + Sync>> {
+            self.store.admit_product_memory(bytes)
+        }
+
         fn retention_scope(&self) -> Option<Box<dyn Send + Sync>> {
             self.store.retention_scope()
         }

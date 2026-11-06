@@ -278,6 +278,10 @@ impl DirStore {
 }
 
 impl ResultStore for DirStore {
+    fn admit_product_memory(&self, _bytes: u64) -> Option<std::sync::Arc<dyn Send + Sync>> {
+        None
+    }
+
     fn retention_scope(&self) -> Option<Box<dyn Send + Sync>> {
         Some(Box::new(self.physical.as_ref()?.retention_scope().ok()?))
     }

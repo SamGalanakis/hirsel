@@ -45,6 +45,10 @@ use std::{
 // reporting the I/O error that its ordinary Option publication seam omits.
 pub(crate) struct DiagnosedStore(pub(crate) store::DirStore);
 impl ResultStore for DiagnosedStore {
+    fn admit_product_memory(&self, bytes: u64) -> Option<std::sync::Arc<dyn Send + Sync>> {
+        self.0.admit_product_memory(bytes)
+    }
+
     fn retention_scope(&self) -> Option<Box<dyn Send + Sync>> {
         self.0.retention_scope()
     }

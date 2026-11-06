@@ -506,6 +506,10 @@ fn store_fault_checks(candidate: bool) -> String {
         records: Mutex<Vec<(EntryKey, hirsel_engine_store::Bytes)>>,
     }
     impl ResultStore for FaultStore {
+        fn admit_product_memory(&self, bytes: u64) -> Option<std::sync::Arc<dyn Send + Sync>> {
+            self.backing.admit_product_memory(bytes)
+        }
+
         fn retention_scope(&self) -> Option<Box<dyn Send + Sync>> {
             self.backing.retention_scope()
         }

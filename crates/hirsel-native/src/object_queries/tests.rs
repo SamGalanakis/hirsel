@@ -485,6 +485,10 @@ fn object_hit_never_reads_ready_body_payload() {
         body: Reference,
     }
     impl ResultStore for NoBody {
+        fn admit_product_memory(&self, bytes: u64) -> Option<std::sync::Arc<dyn Send + Sync>> {
+            self.inner.admit_product_memory(bytes)
+        }
+
         fn retention_scope(&self) -> Option<Box<dyn Send + Sync>> {
             self.inner.retention_scope()
         }

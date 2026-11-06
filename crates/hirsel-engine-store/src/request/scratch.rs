@@ -124,6 +124,19 @@ impl Drop for ScratchStore {
     }
 }
 impl ResultStore for ScratchStore {
+    fn admit_product_memory(&self, bytes: u64) -> Option<std::sync::Arc<dyn Send + Sync>> {
+        let bytes = bytes.checked_add(hirsel_engine_admission::retained_arc_bytes(
+            &std::mem::MaybeUninit::<ArchiveLease>::uninit(),
+        ))?;
+        if !self.admission.charge(bytes) {
+            return None;
+        }
+        Some(Arc::new(ArchiveLease {
+            memory: self.admission.clone(),
+            bytes,
+        }))
+    }
+
     fn retention_scope(&self) -> Option<Box<dyn Send + Sync>> {
         self.selected.retention_scope()
     }

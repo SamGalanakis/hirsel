@@ -127,9 +127,7 @@ pub trait ResultStore: Send + Sync {
     }
     /// Retain an immutable live value in this request's existing partition.
     /// Its charge survives the producer and returns after the final reader.
-    fn admit_product_memory(&self, _bytes: u64) -> Option<Arc<dyn Send + Sync>> {
-        None
-    }
+    fn admit_product_memory(&self, bytes: u64) -> Option<Arc<dyn Send + Sync>>;
     /// Attempt live retention before a required spill without exhausting the request.
     fn try_admit_product_memory(&self, bytes: u64) -> Option<Arc<dyn Send + Sync>> {
         self.admit_product_memory(bytes)
@@ -793,6 +791,10 @@ impl Entry {
 #[derive(Debug, Default)]
 pub struct NoneStore;
 impl ResultStore for NoneStore {
+    fn admit_product_memory(&self, _bytes: u64) -> Option<std::sync::Arc<dyn Send + Sync>> {
+        None
+    }
+
     fn retention_scope(&self) -> Option<Box<dyn Send + Sync>> {
         None
     }
@@ -833,7 +835,13 @@ struct MemState {
     entries: HashMap<ContentHash, (EntryKey, Bytes)>,
     order: std::collections::VecDeque<ContentHash>,
     bytes: usize,
+    live: usize,
     retained: usize,
+}
+impl MemState {
+    fn total_bytes(&self) -> usize {
+        self.bytes + self.live
+    }
 }
 struct MemRetention(Arc<Mutex<MemState>>);
 impl Drop for MemRetention {
@@ -844,11 +852,23 @@ impl Drop for MemRetention {
             .retained -= 1;
     }
 }
+struct MemLiveLease {
+    state: Arc<Mutex<MemState>>,
+    bytes: usize,
+}
+impl Drop for MemLiveLease {
+    fn drop(&mut self) {
+        self.state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .live -= self.bytes;
+    }
+}
 fn mem_charge(value: &[u8]) -> usize {
     value.len() + std::mem::size_of::<EntryKey>()
 }
 impl MemStore {
-    /// Bound cache-owned payloads and keys, evicting in insertion order.
+    /// Bound cache-owned payloads, keys and live leases, evicting cache entries in insertion order.
     /// Outstanding reads retain their immutable bytes independently. Like
     /// DirStore's cap, eviction is a cache miss, never query authority.
     pub fn bounded(bytes: usize) -> Self {
@@ -889,7 +909,7 @@ impl MemStore {
         self.state
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .bytes
+            .total_bytes()
     }
     /// Empties the store, returning what it held.
     pub fn take(&self) -> HashMap<EntryKey, Bytes> {
@@ -897,10 +917,32 @@ impl MemStore {
         if state.retained != 0 {
             return HashMap::new();
         }
-        std::mem::take(&mut *state).entries.into_values().collect()
+        state.bytes = 0;
+        state.order.clear();
+        std::mem::take(&mut state.entries).into_values().collect()
     }
 }
 impl ResultStore for MemStore {
+    fn admit_product_memory(&self, bytes: u64) -> Option<std::sync::Arc<dyn Send + Sync>> {
+        let bytes = usize::try_from(bytes.checked_add(
+            hirsel_engine_admission::retained_arc_bytes(
+                &std::mem::MaybeUninit::<MemLiveLease>::uninit(),
+            ),
+        )?)
+        .ok()?;
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        let total = state.total_bytes().checked_add(bytes)?;
+        if self.cap.is_some_and(|cap| total > cap) {
+            return None;
+        }
+        state.live = state.live.checked_add(bytes)?;
+        drop(state);
+        Some(Arc::new(MemLiveLease {
+            state: self.state.clone(),
+            bytes,
+        }))
+    }
+
     fn retention_scope(&self) -> Option<Box<dyn Send + Sync>> {
         if self.cap.is_some() {
             return None;
@@ -1016,6 +1058,7 @@ impl ResultStore for MemStore {
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         let charge = mem_charge(value);
         if let Some(cap) = self.cap {
+            let cap = cap.saturating_sub(state.live);
             if charge > cap {
                 return WriteOutcome::Refused;
             }
@@ -1035,6 +1078,19 @@ impl ResultStore for MemStore {
             if !state.entries.contains_key(&key.0) {
                 state.order.push_back(key.0);
             }
+        }
+        let old = state
+            .entries
+            .get(&key.0)
+            .map_or(0, |(_, bytes)| mem_charge(bytes));
+        if state
+            .bytes
+            .checked_sub(old)
+            .and_then(|bytes| bytes.checked_add(charge))
+            .and_then(|bytes| bytes.checked_add(state.live))
+            .is_none()
+        {
+            return WriteOutcome::Refused;
         }
         if let Some((_, old)) = state.entries.remove(&key.0) {
             state.bytes -= mem_charge(&old);
@@ -1109,6 +1165,10 @@ impl SimStore {
     }
 }
 impl ResultStore for SimStore {
+    fn admit_product_memory(&self, _bytes: u64) -> Option<std::sync::Arc<dyn Send + Sync>> {
+        None
+    }
+
     fn retention_scope(&self) -> Option<Box<dyn Send + Sync>> {
         None
     }

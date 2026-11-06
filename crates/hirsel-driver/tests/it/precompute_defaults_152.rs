@@ -214,6 +214,10 @@ struct GeneratorInputUnavailable {
     corrupted: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 impl hirsel_engine_store::ResultStore for GeneratorInputUnavailable {
+    fn admit_product_memory(&self, bytes: u64) -> Option<std::sync::Arc<dyn Send + Sync>> {
+        self.store.admit_product_memory(bytes)
+    }
+
     fn retention_scope(&self) -> Option<Box<dyn Send + Sync>> {
         self.store.retention_scope()
     }

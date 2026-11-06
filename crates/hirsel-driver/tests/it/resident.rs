@@ -129,6 +129,10 @@ fn path_requests_reuse_one_session_per_thread_and_observe_edits() {
 fn session_representation_edit_matches_cold(opaque: bool, reads_field: bool) {
     struct InstalledNone(Arc<dyn store::ResultStore>);
     impl store::ResultStore for InstalledNone {
+        fn admit_product_memory(&self, _bytes: u64) -> Option<std::sync::Arc<dyn Send + Sync>> {
+            None
+        }
+
         fn retention_scope(&self) -> Option<Box<dyn Send + Sync>> {
             None
         }
@@ -678,6 +682,10 @@ fn disabled_result_provider_skips_store_work_for_scalar_and_frozen_queries() {
         }
     }
     impl store::ResultStore for Off {
+        fn admit_product_memory(&self, _bytes: u64) -> Option<std::sync::Arc<dyn Send + Sync>> {
+            None
+        }
+
         fn retention_scope(&self) -> Option<Box<dyn Send + Sync>> {
             None
         }
@@ -2119,6 +2127,10 @@ fn durable_front_workers_drain_payloads_before_accepting_another_task() {
         home: std::thread::ThreadId,
     }
     impl store::ResultStore for ObservedStore {
+        fn admit_product_memory(&self, _bytes: u64) -> Option<std::sync::Arc<dyn Send + Sync>> {
+            None
+        }
+
         fn retention_scope(&self) -> Option<Box<dyn Send + Sync>> {
             None
         }

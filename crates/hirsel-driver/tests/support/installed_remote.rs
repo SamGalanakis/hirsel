@@ -16,6 +16,10 @@ pub fn bind(remote: Arc<dyn ResultStore>) -> Arc<dyn ResultStore> {
 }
 
 impl ResultStore for InstalledRemote {
+    fn admit_product_memory(&self, bytes: u64) -> Option<std::sync::Arc<dyn Send + Sync>> {
+        self.remote.admit_product_memory(bytes)
+    }
+
     fn retention_scope(&self) -> Option<Box<dyn Send + Sync>> {
         self.remote.retention_scope()
     }

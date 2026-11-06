@@ -45,6 +45,20 @@ use std::path::PathBuf;
 
 #[test]
 fn bounded_memory_cache_preserves_outstanding_reads_across_eviction_and_drain() {
+    let live_store = MemStore::bounded(512);
+    let live = live_store.admit_product_memory(128).unwrap();
+    let held_live = live.clone();
+    assert!(live_store.admit_product_memory(512).is_none());
+    live_store.put(&key("live sibling"), b"optional bytes");
+    assert!(live_store.bytes() <= 512);
+    drop(live);
+    drop(live_store.take());
+    assert!(
+        live_store.bytes() >= 128,
+        "the final reader still owns its charge"
+    );
+    drop(held_live);
+    assert_eq!(live_store.bytes(), 0);
     let cap = 2 * mem_charge(b"first");
     let store = MemStore::bounded(cap);
     store.put(&key("a"), b"first");
@@ -576,6 +590,10 @@ fn action_index_admission_does_not_fetch_content_and_missing_outputs_miss() {
         content_reads: AtomicUsize,
     }
     impl ResultStore for Counted {
+        fn admit_product_memory(&self, bytes: u64) -> Option<std::sync::Arc<dyn Send + Sync>> {
+            self.inner.admit_product_memory(bytes)
+        }
+
         fn retention_scope(&self) -> Option<Box<dyn Send + Sync>> {
             self.inner.retention_scope()
         }

@@ -70,6 +70,13 @@ fn products_case_with_decode_layout(
                 reads: AtomicUsize,
             }
             impl ResultStore for CountReads {
+                fn admit_product_memory(
+                    &self,
+                    bytes: u64,
+                ) -> Option<std::sync::Arc<dyn Send + Sync>> {
+                    self.inner.admit_product_memory(bytes)
+                }
+
                 fn retention_scope(&self) -> Option<Box<dyn Send + Sync>> {
                     self.inner.retention_scope()
                 }

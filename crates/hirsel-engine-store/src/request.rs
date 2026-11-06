@@ -673,6 +673,10 @@ mod tests {
     fn archive_views_admit_complete_backing_and_outlive_the_request_without_its_table() {
         struct Backend(Mutex<Bytes>);
         impl ResultStore for Backend {
+            fn admit_product_memory(&self, _bytes: u64) -> Option<std::sync::Arc<dyn Send + Sync>> {
+                None
+            }
+
             fn retention_scope(&self) -> Option<Box<dyn Send + Sync>> {
                 None
             }
@@ -748,6 +752,10 @@ mod tests {
     fn encoded_archive_moves_producer_backing_without_reading_the_provider() {
         struct Backend;
         impl ResultStore for Backend {
+            fn admit_product_memory(&self, _bytes: u64) -> Option<std::sync::Arc<dyn Send + Sync>> {
+                None
+            }
+
             fn retention_scope(&self) -> Option<Box<dyn Send + Sync>> {
                 None
             }
@@ -790,6 +798,10 @@ mod tests {
     fn compact_archive_copy_admits_its_payload_and_survives_provider_eviction() {
         struct Backend(Mutex<Bytes>);
         impl ResultStore for Backend {
+            fn admit_product_memory(&self, _bytes: u64) -> Option<std::sync::Arc<dyn Send + Sync>> {
+                None
+            }
+
             fn retention_scope(&self) -> Option<Box<dyn Send + Sync>> {
                 None
             }
@@ -979,6 +991,10 @@ mod tests {
         }
     }
     impl ResultStore for Refusing {
+        fn admit_product_memory(&self, bytes: u64) -> Option<std::sync::Arc<dyn Send + Sync>> {
+            self.disk.admit_product_memory(bytes)
+        }
+
         fn retention_scope(&self) -> Option<Box<dyn Send + Sync>> {
             self.disk.retention_scope()
         }
@@ -1399,6 +1415,10 @@ mod tests {
 
         struct RefusedCache;
         impl ResultStore for RefusedCache {
+            fn admit_product_memory(&self, _bytes: u64) -> Option<std::sync::Arc<dyn Send + Sync>> {
+                None
+            }
+
             fn retention_scope(&self) -> Option<Box<dyn Send + Sync>> {
                 None
             }

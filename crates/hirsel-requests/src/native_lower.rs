@@ -70,6 +70,10 @@ mod tests {
         verifier: Arc<hirsel_validate::VerifierCache>,
     }
     impl ResultStore for SelectedStore {
+        fn admit_product_memory(&self, bytes: u64) -> Option<std::sync::Arc<dyn Send + Sync>> {
+            self.products.admit_product_memory(bytes)
+        }
+
         fn retention_scope(&self) -> Option<Box<dyn Send + Sync>> {
             self.products.retention_scope()
         }

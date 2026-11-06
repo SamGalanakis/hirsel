@@ -799,6 +799,10 @@ fn admitted_front_zero_hold_retains_only_archives_after_settlement() {
         std::fs::write(&path, "pub fn main()->u8{1u8}\n").unwrap();
         struct ContentOnly(MemStore);
         impl ResultStore for ContentOnly {
+            fn admit_product_memory(&self, bytes: u64) -> Option<std::sync::Arc<dyn Send + Sync>> {
+                self.0.admit_product_memory(bytes)
+            }
+
             fn retention_scope(&self) -> Option<Box<dyn Send + Sync>> {
                 self.0.retention_scope()
             }
@@ -926,6 +930,10 @@ fn admitted_front_pressure_refused_citation_caches_nothing_and_recomputes_the_ci
     with_compiler_stack(|| {
         struct Transport(MemStore);
         impl ResultStore for Transport {
+            fn admit_product_memory(&self, bytes: u64) -> Option<std::sync::Arc<dyn Send + Sync>> {
+                self.0.admit_product_memory(bytes)
+            }
+
             fn retention_scope(&self) -> Option<Box<dyn Send + Sync>> {
                 self.0.retention_scope()
             }
@@ -1081,6 +1089,10 @@ fn admitted_front_pressure_evicts_only_unpinned_settled_bodies_and_recomputes_eq
         // recompute instead of being read back.
         struct Transport(Arc<MemStore>, bool);
         impl ResultStore for Transport {
+            fn admit_product_memory(&self, bytes: u64) -> Option<std::sync::Arc<dyn Send + Sync>> {
+                self.0.admit_product_memory(bytes)
+            }
+
             fn retention_scope(&self) -> Option<Box<dyn Send + Sync>> {
                 self.0.retention_scope()
             }

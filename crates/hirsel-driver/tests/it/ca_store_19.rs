@@ -155,6 +155,10 @@ fn ordinary_catalog_native_roots_survive_fresh_warm_checks() {
     });
 }
 impl store::ResultStore for Observed {
+    fn admit_product_memory(&self, bytes: u64) -> Option<std::sync::Arc<dyn Send + Sync>> {
+        self.inner.admit_product_memory(bytes)
+    }
+
     fn retention_scope(&self) -> Option<Box<dyn Send + Sync>> {
         self.inner.retention_scope()
     }
@@ -918,6 +922,10 @@ fn lower_producer_records_cannot_mint_or_transfer_verifier_authority() {
     // provider interface supplies no verifier capability.
     struct ProducerOnly(Arc<store::MemStore>);
     impl store::ResultStore for ProducerOnly {
+        fn admit_product_memory(&self, bytes: u64) -> Option<std::sync::Arc<dyn Send + Sync>> {
+            self.0.admit_product_memory(bytes)
+        }
+
         fn retention_scope(&self) -> Option<Box<dyn Send + Sync>> {
             self.0.retention_scope()
         }
@@ -1107,6 +1115,10 @@ struct Trusted {
     verifier: Arc<hirsel_validate::VerifierCache>,
 }
 impl store::ResultStore for Trusted {
+    fn admit_product_memory(&self, bytes: u64) -> Option<std::sync::Arc<dyn Send + Sync>> {
+        self.remote.admit_product_memory(bytes)
+    }
+
     fn retention_scope(&self) -> Option<Box<dyn Send + Sync>> {
         self.remote.retention_scope()
     }

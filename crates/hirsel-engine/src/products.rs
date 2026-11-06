@@ -1760,6 +1760,10 @@ mod dependency_tests {
 
     struct NoTransport;
     impl ResultStore for NoTransport {
+        fn admit_product_memory(&self, _bytes: u64) -> Option<std::sync::Arc<dyn Send + Sync>> {
+            None
+        }
+
         fn retention_scope(&self) -> Option<Box<dyn Send + Sync>> {
             None
         }

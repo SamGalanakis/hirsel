@@ -153,8 +153,11 @@ impl Nodes {
         self.in_flight_dirty = false;
         self.in_flight_roots.clear();
         self.in_flight_roots.extend(roots);
-        for slot in self.in_flight_reached.drain(..) {
+        while let Some(slot) = self.in_flight_reached.pop() {
             self.rows[slot as usize].in_flight = false;
+            if let Some(key) = self.keys[slot as usize] {
+                self.index_eviction(key);
+            }
         }
         let mut pending: Vec<u32> = self
             .in_flight_roots
@@ -166,6 +169,10 @@ impl Nodes {
             if !node.in_flight && !matches!(node.state, NodeState::Dormant) {
                 node.in_flight = true;
                 self.in_flight_reached.push(slot);
+                self.eviction.remove(&(
+                    node.settled_at,
+                    self.keys[slot as usize].expect("live slot"),
+                ));
                 // Completed producers own their results; their historical reads
                 // no longer pin the payloads consumed during computation.
                 if !matches!(node.state, NodeState::Settled { .. }) {
@@ -180,8 +187,11 @@ impl Nodes {
         }
     }
     fn index_eviction(&mut self, key: Key) {
-        let node = &self[&key];
-        if matches!(&node.state, NodeState::Settled { outcome, .. }
+        let Some(node) = self.get(&key) else {
+            return;
+        };
+        if !node.in_flight
+            && matches!(&node.state, NodeState::Settled { outcome, .. }
             if outcome.as_ref().as_ref().is_ok_and(|product| product.live_owners() != 0))
         {
             self.eviction.insert((node.settled_at, key));
@@ -191,8 +201,8 @@ impl Nodes {
         use std::ops::Bound::{Excluded, Unbounded};
         self.eviction
             .range((previous.map_or(Unbounded, Excluded), Unbounded))
+            .next()
             .copied()
-            .find(|&(_, key)| !self[&key].in_flight)
     }
     pub fn iter(&self) -> impl Iterator<Item = (&Key, &Node)> {
         self.index.iter().filter_map(|(key, &slot)| {

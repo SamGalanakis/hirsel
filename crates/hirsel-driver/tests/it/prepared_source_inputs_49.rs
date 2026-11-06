@@ -224,9 +224,10 @@ fn semantic_source_products_do_not_require_a_launch_or_program_check() {
         );
         source.push_str("pub fn square(n:u64)->u64 {n*n}\nconst ANSWER:u64=comptime square(7u64)\nfn invalid()->u64 {true}\n");
         std::fs::write(directory.path().join("main.hir"), source).unwrap();
+        let store = Arc::new(MemStore::default());
         let mut program = COMPILER
             .with_config(CompileConfig {
-                store: Arc::new(MemStore::default()),
+                store: store.clone(),
                 hold_bytes: 0,
                 ..Default::default()
             })
@@ -295,10 +296,7 @@ fn semantic_source_products_do_not_require_a_launch_or_program_check() {
             .filter(|path| path.0.name.starts_with("value_"))
             .map(|path| run.semantic_query(path).unwrap())
             .collect::<Vec<_>>();
-        let codec = NativeRecords::new(
-            program.engine.types().clone(),
-            Arc::new(MemStore::default()),
-        );
+        let codec = NativeRecords::new(program.engine.types().clone(), store);
         let anchors = NativeRecordContext::capture(&program.engine);
         drop(program);
         let mut runtime = AdmittedRuntime::new(

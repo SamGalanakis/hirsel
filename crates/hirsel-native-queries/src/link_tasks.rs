@@ -323,6 +323,9 @@ impl LinkTasks {
         self.root.native.snapshot.store.as_ref()
     }
     fn failure(&self, message: &str) -> Reference {
+        // Failure transport can itself be exhausted. Report the original
+        // cause before its ordinary failure record becomes unreadable.
+        eprintln!("hirsel: native Link: {message}");
         self.root.native.failure(message)
     }
     fn publish(

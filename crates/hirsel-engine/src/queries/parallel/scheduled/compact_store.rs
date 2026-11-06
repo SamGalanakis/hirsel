@@ -189,9 +189,21 @@ impl FrontBodyQueries {
         } else {
             self.archive_observations(outcome, scratch)?
         };
-        // Replace the live terminal's charge with its compact representation.
-        // This consumes no second required-transport record. If compaction
-        // cannot fit, leave the live terminal in place and refuse admission.
+        // Exact observations survive eviction. The compact terminal is an
+        // optional cache: a missed encoding or retention grant must not keep
+        // a consumed Summary alive. load_evicted already recomputes on a miss.
+        let facts = self.archive_terminal(key, outcome, scratch);
+        Some(ArchivedFront {
+            facts,
+            observations,
+        })
+    }
+    fn archive_terminal(
+        &self,
+        key: Key,
+        outcome: &FrontOutcome,
+        scratch: u64,
+    ) -> Option<Arc<TerminalFront>> {
         self.store
             .archive_encoded(hirsel_engine_store::ArchiveBoundary::RequiredSpill);
         let bytes = self.encode_terminal(key, outcome, scratch)?;
@@ -203,13 +215,10 @@ impl FrontBodyQueries {
                 &std::mem::MaybeUninit::<LiveSourceBacking>::uninit(),
             ))?;
         let backing = outcome._backing.split(charge)?;
-        Some(ArchivedFront {
-            facts: Some(Arc::new(TerminalFront {
-                bytes: bytes.into_boxed_slice(),
-                _backing: backing,
-            })),
-            observations,
-        })
+        Some(Arc::new(TerminalFront {
+            bytes: bytes.into_boxed_slice(),
+            _backing: backing,
+        }))
     }
     fn encode_terminal(&self, key: Key, outcome: &FrontOutcome, scratch: u64) -> Option<Vec<u8>> {
         let temporary = outcome

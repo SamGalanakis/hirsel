@@ -722,6 +722,64 @@ fn front_body_handoff_reuses_only_the_latest_admitted_body() {
         assert_eq!(front.queries.live_body_count(), 0);
     });
 }
+#[test]
+fn consumed_summary_eviction_preserves_reads_when_optional_compaction_cannot_fit() {
+    with_compiler_stack(|| {
+        let (mut engine, _) = make_engine_with_store(None, false);
+        parse(&mut engine, "fn a () { 1 }\n");
+        let mut front = admitted_front(&mut engine, &[path("a")], 1);
+        front.queries.compact_retained_reads();
+        let query = front.queries.query(&path("a")).unwrap();
+        let request = front.runtime.request(&[query]);
+        let product = front.runtime.wait(request).unwrap().pop().unwrap();
+        let action = product.action;
+        let summary = product
+            .live_value::<products::LiveSummaryProduct>()
+            .unwrap()
+            .value()
+            .summary
+            .clone();
+        front.runtime.shutdown();
+        let reads = front.queries.memo_snapshot().unwrap();
+        assert!(!reads.is_empty());
+        let checked = front.queries.checked(Ok(product.clone())).unwrap();
+        let before = front.queries.retained_bytes();
+        assert!(!front.queries.factory().evict(query, &product, 0));
+        assert_eq!(checked.summary.summary, summary);
+        assert_eq!(front.queries.retained_bytes(), before);
+        drop(checked);
+        assert!(front.queries.factory().evict(query, &product, 0));
+        drop(product);
+        assert!(front.queries.retained_bytes() < before);
+        assert_eq!(front.queries.memo_snapshot().unwrap(), reads);
+        assert_eq!(
+            front.queries.recompute_count(&path("a"), QueryKind::Modes),
+            1
+        );
+        let mut runtime = AdmittedRuntime::new(
+            hirsel_intern::jobs::Jobs::ONE,
+            front._budget.reserve(512 << 20).unwrap(),
+            runtime_errors(),
+        )
+        .unwrap();
+        runtime
+            .register(FRONT_BODY_KIND, front.queries.factory())
+            .unwrap();
+        let request = runtime.request(&[query]);
+        let restored = runtime.wait(request).unwrap().pop().unwrap();
+        assert_eq!(restored.action, action);
+        assert_eq!(
+            restored
+                .live_value::<products::LiveSummaryProduct>()
+                .unwrap()
+                .value()
+                .summary,
+            summary
+        );
+        assert_eq!(front.queries.memo_snapshot().unwrap(), reads);
+        runtime.shutdown();
+    });
+}
 /// Direct body queries still demand resolution before the owner signature;
 /// program checks freeze signatures in S0 before running the same body stages.
 #[test]

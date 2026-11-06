@@ -141,6 +141,24 @@ impl QueryEngine {
                 }),
             ))
         };
+        let staged = self.front_staged_roots(definitions).map_err(|error| {
+            FrontDemandError::Generator(FrontRegistrationBootstrapError::Admission(error))
+        })?;
+        // With every nongeneric namespace producer explicitly requested, the
+        // ordinary bodies cannot add another registration. Leave their Front
+        // work to the final graph. Prefix requests still visit roots in order.
+        let preparation_roots = (!stop_on_error
+            && generators
+                .iter()
+                .all(|path| !self.instance_bodied(path) && roots.contains(path))
+            && staged.iter().all(|path| roots.contains(path)))
+        .then(|| {
+            roots
+                .iter()
+                .filter(|path| generators.contains(*path) || staged.contains(*path))
+                .cloned()
+                .collect::<Vec<_>>()
+        });
         let required = FrontDemandScope::input_bytes(definitions, generators)
             .ok_or_else(|| admission_error("metadata size overflow"))?;
         if required > admission.metadata.bytes()
@@ -204,7 +222,13 @@ impl QueryEngine {
             FrontDemandError::Generator(FrontRegistrationBootstrapError::Admission(error))
         })?;
         let query = producer
-            .scope_query(initial.namespace().clone(), roots, policy, stop_on_error)
+            .scope_query(
+                initial.namespace().clone(),
+                roots,
+                policy,
+                stop_on_error,
+                preparation_roots.as_deref(),
+            )
             .map_err(|error| {
                 FrontDemandError::Generator(FrontRegistrationBootstrapError::Admission(error))
             })?;

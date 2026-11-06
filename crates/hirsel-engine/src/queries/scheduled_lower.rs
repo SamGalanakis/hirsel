@@ -689,7 +689,7 @@ impl FrontLowerQueries {
         };
         let Some(id) = self.id(path, kind) else {
             return self
-                .completed_owner(path, kind)?
+                .discovery_completed_owner(path, kind)?
                 .with_settled_outcome(path, query, project);
         };
         let forwarded = self
@@ -920,7 +920,7 @@ impl FrontLowerQueries {
             hirsel_tir::constant_instance_path(path, arguments)
         };
         let completed = || {
-            self.completed_owner(&selected, FRONT_EVALUATE_KIND)
+            self.discovery_completed_owner(&selected, FRONT_EVALUATE_KIND)
                 .ok_or(QueryError::NotImplemented)?
                 .settled_constant(path, arguments)
         };

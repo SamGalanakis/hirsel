@@ -116,7 +116,10 @@ impl FrontLowerQueries {
 }
 
 impl FrontLowerQueries {
-    pub(super) fn completed_owner(&self, path: &DefPath, kind: u32) -> Option<Arc<Self>> {
+    pub(super) fn discovery_completed_owner(&self, path: &DefPath, kind: u32) -> Option<Arc<Self>> {
+        if self.namespace.consumers_admitted() {
+            return None;
+        }
         let mut pending = self
             .forwarded
             .lock()

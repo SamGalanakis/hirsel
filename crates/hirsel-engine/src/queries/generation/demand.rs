@@ -489,6 +489,7 @@ impl DemandProducer {
         roots: &[DefPath],
         policy: LoweringPolicy,
         stop_on_error: bool,
+        preparation_roots: Option<&[DefPath]>,
     ) -> Result<hirsel_engine_runtime::QueryId, QueryError> {
         let seed = ContentHash::of_parts(
             "hirsel.front.generation-scope.v2",
@@ -507,6 +508,9 @@ impl DemandProducer {
                 [key.0.as_slice(), root.fingerprint().0.as_slice()],
             )
         });
+        // The address binds the full requested scope, even when discovery
+        // can omit ordinary bodies that cannot publish namespace inputs.
+        let roots = preparation_roots.unwrap_or(roots);
         let mut scopes = self.scopes.lock().unwrap_or_else(|e| e.into_inner());
         if scopes
             .get(&key)
@@ -1020,217 +1024,225 @@ impl DemandProducer {
         drop(initial);
         let mut checked = BTreeSet::new();
         for root in roots {
-            let mut demanded = vec![root.clone()];
             loop {
-                if self
-                    .rounds
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-                    >= 65536
-                {
-                    return Err(refused("scope selection expansion limit"));
+                let mut demanded = vec![root.clone()];
+                loop {
+                    if self
+                        .rounds
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                        >= 65536
+                    {
+                        return Err(refused("scope selection expansion limit"));
+                    }
+                    let owner = self.current()?;
+                    let mut pending = Vec::new();
+                    for path in &demanded {
+                        if checked.contains(path) {
+                            continue;
+                        }
+                        if owner
+                            .capture()
+                            .bodies
+                            .get(&DefId::intern(path))
+                            .is_some_and(|body| body.generated)
+                            && !owner
+                                .capture()
+                                .registrations
+                                .contains_key(&DefId::intern(path))
+                        {
+                            let syntax = owner.capture().syntax(path)?;
+                            match self
+                                .demand(
+                                    owner.capture(),
+                                    path,
+                                    &[],
+                                    syntax.item.name_span,
+                                    reads.clone(),
+                                )
+                                .await
+                            {
+                                Ok(product) => {
+                                    product.result?;
+                                }
+                                Err(error) => return Err(error),
+                            }
+                        }
+                        let current = self.current()?;
+                        let front = current.body_front();
+                        let query = front
+                            .query(path)
+                            .ok_or_else(|| refused("scope body has no Front producer"))?;
+                        let selected = reads.read_consuming(query).await;
+                        if let Some(facts) = front.check_facts(selected.clone()) {
+                            if let Err(error) = facts.result {
+                                // A generated dependency can supply the private
+                                // result proof this body needs. Discover it before
+                                // treating a cacheable front diagnostic as final.
+                                if !error.cacheable() {
+                                    return Err(error);
+                                }
+                            }
+                        } else {
+                            if let Err(reference) = selected
+                                && let Some(error) = front.runtime_error(reference)
+                            {
+                                return Err(error);
+                            }
+                            return Err(refused(&format!(
+                                "scope Front outcome is unavailable for {path}; query {query:?}; selected {selected:?}"
+                            )));
+                        }
+                        checked.insert(path.clone());
+                    }
+                    drop(owner);
+                    if !needs_discovery {
+                        break;
+                    }
+                    let owner = self.current()?;
+                    let mut engine = owner.capture().discovery_assembly(&self.adapters)?;
+                    let fronts = [owner.body_front().clone()];
+                    let discovery = engine.discover_front_instances(
+                        &demanded,
+                        &fronts,
+                        Self::take(&self.syntax, self.syntax.available_bytes())?,
+                    )?;
+                    let requests = discovery.requests().to_vec();
+                    let missing = discovery.pending_bodies().to_vec();
+                    drop(discovery);
+                    drop(engine);
+                    let types = owner.capture().snapshot.types().clone();
+                    drop(owner);
+                    let mut changed = false;
+                    for request in &requests {
+                        let key =
+                            hirsel_tir::InstanceBodies::key(&types, &request.actuals.arguments)
+                                .ok_or_else(|| refused("open static instance"))?;
+                        let instance = instance_path(&request.declaration, key);
+                        if !self
+                            .current()?
+                            .capture()
+                            .registrations
+                            .contains_key(&DefId::intern(&instance))
+                        {
+                            let current = self.current()?;
+                            match self
+                                .demand(
+                                    current.capture(),
+                                    &request.declaration,
+                                    &request.actuals.arguments,
+                                    request.site,
+                                    reads.clone(),
+                                )
+                                .await
+                            {
+                                Ok(product) => {
+                                    product.result?;
+                                    changed = true;
+                                }
+                                Err(error) => return Err(error),
+                            }
+                        }
+                        if !demanded.contains(&instance) && !checked.contains(&instance) {
+                            pending.push(instance);
+                        }
+                    }
+                    for path in &missing {
+                        if !demanded.contains(path)
+                            && !checked.contains(path)
+                            && self
+                                .current()?
+                                .capture()
+                                .bodies
+                                .contains_key(&DefId::intern(path))
+                        {
+                            pending.push(path.clone());
+                        }
+                    }
+                    for path in pending {
+                        if !demanded.contains(&path) {
+                            demanded.push(path);
+                            changed = true;
+                        }
+                    }
+                    if !changed {
+                        break;
+                    }
+                    checked.clear();
                 }
                 let owner = self.current()?;
-                let mut pending = Vec::new();
                 for path in &demanded {
-                    if checked.contains(path) {
+                    let Some(query) = owner.body_front().query(path) else {
+                        continue;
+                    };
+                    let Some(facts) = owner
+                        .body_front()
+                        .check_facts(reads.read_consuming(query).await)
+                    else {
+                        continue;
+                    };
+                    if let Err(error) = facts.result {
+                        if stop_on_error {
+                            return Err(error);
+                        }
                         continue;
                     }
-                    if owner
+                    let executable = owner
                         .capture()
                         .bodies
                         .get(&DefId::intern(path))
-                        .is_some_and(|body| body.generated)
-                        && !owner
-                            .capture()
-                            .registrations
-                            .contains_key(&DefId::intern(path))
-                    {
-                        let syntax = owner.capture().syntax(path)?;
-                        match self
-                            .demand(
-                                owner.capture(),
-                                path,
-                                &[],
-                                syntax.item.name_span,
-                                reads.clone(),
-                            )
-                            .await
-                        {
-                            Ok(product) => {
-                                product.result?;
-                            }
-                            Err(error) => return Err(error),
-                        }
-                    }
-                    let current = self.current()?;
-                    let front = current.body_front();
-                    let query = front
-                        .query(path)
-                        .ok_or_else(|| refused("scope body has no Front producer"))?;
-                    let selected = reads.read_consuming(query).await;
-                    if let Some(facts) = front.check_facts(selected.clone()) {
-                        if let Err(error) = facts.result {
-                            // A generated dependency can supply the private
-                            // result proof this body needs. Discover it before
-                            // treating a cacheable front diagnostic as final.
-                            if !error.cacheable() {
+                        .is_some_and(|body| body.executable);
+                    // Ordinary lowering belongs to the consuming Check/Run graph.
+                    // Preparation only executes bodies that can select CT work.
+                    let needs_comptime =
+                        executable
+                            && facts.lowering.as_ref().is_some_and(|use_| {
+                                use_.needed_with(|id| {
+                                    owner.capture().snapshot.signature(id).is_some_and(
+                                        |signature| {
+                                            signature.is_ok_and(|signature| {
+                                                matches!(
+                                                    signature.kind,
+                                                    hirsel_types::SignatureKind::Const { .. }
+                                                )
+                                            })
+                                        },
+                                    )
+                                })
+                            });
+                    if needs_comptime {
+                        let query = owner
+                            .query(path)
+                            .ok_or_else(|| refused("scope body has no Lower producer"))?;
+                        let selected = reads.read_consuming(query).await;
+                        if let Err(reference) = selected {
+                            let error = owner.failure(reference).ok_or_else(|| {
+                                let reason = if reference == self.errors.resource {
+                                    "resource admission"
+                                } else if reference == self.errors.protocol {
+                                    "runtime protocol"
+                                } else if reference == self.errors.cancelled {
+                                    "cancellation"
+                                } else if reference == self.errors.cycle {
+                                    "dependency cycle"
+                                } else if reference == self.errors.panicked {
+                                    "producer panic"
+                                } else {
+                                    "unavailable outcome"
+                                };
+                                refused(&format!("scope Lower {path} refused: {reason}"))
+                            })?;
+                            if stop_on_error || !error.cacheable() {
                                 return Err(error);
                             }
                         }
-                    } else {
-                        if let Err(reference) = selected
-                            && let Some(error) = front.runtime_error(reference)
-                        {
-                            return Err(error);
-                        }
-                        return Err(refused(&format!(
-                            "scope Front outcome is unavailable for {path}; query {query:?}; selected {selected:?}"
-                        )));
                     }
-                    checked.insert(path.clone());
                 }
-                drop(owner);
-                if !needs_discovery {
+                if owner.capture().identity() == self.current()?.capture().identity() {
                     break;
                 }
-                let owner = self.current()?;
-                let mut engine = owner.capture().discovery_assembly(&self.adapters)?;
-                let fronts = [owner.body_front().clone()];
-                let discovery = engine.discover_front_instances(
-                    &demanded,
-                    &fronts,
-                    Self::take(&self.syntax, self.syntax.available_bytes())?,
-                )?;
-                let requests = discovery.requests().to_vec();
-                let missing = discovery.pending_bodies().to_vec();
-                drop(discovery);
-                drop(engine);
-                let types = owner.capture().snapshot.types().clone();
-                drop(owner);
-                let mut changed = false;
-                for request in &requests {
-                    let key = hirsel_tir::InstanceBodies::key(&types, &request.actuals.arguments)
-                        .ok_or_else(|| refused("open static instance"))?;
-                    let instance = instance_path(&request.declaration, key);
-                    if !self
-                        .current()?
-                        .capture()
-                        .registrations
-                        .contains_key(&DefId::intern(&instance))
-                    {
-                        let current = self.current()?;
-                        match self
-                            .demand(
-                                current.capture(),
-                                &request.declaration,
-                                &request.actuals.arguments,
-                                request.site,
-                                reads.clone(),
-                            )
-                            .await
-                        {
-                            Ok(product) => {
-                                product.result?;
-                                changed = true;
-                            }
-                            Err(error) => return Err(error),
-                        }
-                    }
-                    if !demanded.contains(&instance) && !checked.contains(&instance) {
-                        pending.push(instance);
-                    }
-                }
-                for path in &missing {
-                    if !demanded.contains(path)
-                        && !checked.contains(path)
-                        && self
-                            .current()?
-                            .capture()
-                            .bodies
-                            .contains_key(&DefId::intern(path))
-                    {
-                        pending.push(path.clone());
-                    }
-                }
-                for path in pending {
-                    if !demanded.contains(&path) {
-                        demanded.push(path);
-                        changed = true;
-                    }
-                }
-                if !changed {
-                    break;
-                }
+                // Lower may execute a staged body after static discovery. Settle
+                // that root again in its new capture before admitting consumers.
                 checked.clear();
-            }
-            let owner = self.current()?;
-            for path in &demanded {
-                let Some(query) = owner.body_front().query(path) else {
-                    continue;
-                };
-                let Some(facts) = owner
-                    .body_front()
-                    .check_facts(reads.read_consuming(query).await)
-                else {
-                    continue;
-                };
-                if let Err(error) = facts.result {
-                    if stop_on_error {
-                        return Err(error);
-                    }
-                    continue;
-                }
-                let executable = owner
-                    .capture()
-                    .bodies
-                    .get(&DefId::intern(path))
-                    .is_some_and(|body| body.executable);
-                // Ordinary lowering belongs to the consuming Check/Run graph.
-                // Preparation only executes bodies that can select CT work.
-                let needs_comptime = executable
-                    && facts.lowering.as_ref().is_some_and(|use_| {
-                        use_.needed_with(|id| {
-                            owner
-                                .capture()
-                                .snapshot
-                                .signature(id)
-                                .is_some_and(|signature| {
-                                    signature.is_ok_and(|signature| {
-                                        matches!(
-                                            signature.kind,
-                                            hirsel_types::SignatureKind::Const { .. }
-                                        )
-                                    })
-                                })
-                        })
-                    });
-                if needs_comptime {
-                    let query = owner
-                        .query(path)
-                        .ok_or_else(|| refused("scope body has no Lower producer"))?;
-                    let selected = reads.read_consuming(query).await;
-                    if let Err(reference) = selected {
-                        let error = owner.failure(reference).ok_or_else(|| {
-                            let reason = if reference == self.errors.resource {
-                                "resource admission"
-                            } else if reference == self.errors.protocol {
-                                "runtime protocol"
-                            } else if reference == self.errors.cancelled {
-                                "cancellation"
-                            } else if reference == self.errors.cycle {
-                                "dependency cycle"
-                            } else if reference == self.errors.panicked {
-                                "producer panic"
-                            } else {
-                                "unavailable outcome"
-                            };
-                            refused(&format!("scope Lower {path} refused: {reason}"))
-                        })?;
-                        if stop_on_error || !error.cacheable() {
-                            return Err(error);
-                        }
-                    }
-                }
             }
         }
         scheduled_lower::SuccessorCapture::new(previous, self.current()?)

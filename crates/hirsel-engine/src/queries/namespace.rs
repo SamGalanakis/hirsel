@@ -535,9 +535,13 @@ impl NamespaceCapture {
         Ok(())
     }
     pub(crate) fn require_environment(&self, engine: &QueryEngine) -> Result<(), QueryError> {
-        if self.environment != engine.environment_value() || self.verify != engine.verify {
+        if self.environment != engine.environment_value()
+            || self.verify != engine.verify
+            || !Arc::ptr_eq(&self.operation, &engine.operation)
+            || !Arc::ptr_eq(self.snapshot.types(), engine.types())
+        {
             return Err(refused(
-                "consumer environment differs from namespace capture",
+                "consumer environment or source owner differs from namespace capture",
             ));
         }
         Ok(())
@@ -814,7 +818,8 @@ impl QueryEngine {
             .iter()
             .filter_map(std::sync::Weak::upgrade)
             .find(|previous| {
-                previous.limits == self.comptime_limits
+                !previous.consumers_admitted()
+                    && previous.limits == self.comptime_limits
                     && previous.verify == self.verify
                     && previous.environment == self.environment_value()
                     && Arc::ptr_eq(&previous.snapshot, &snapshot)
@@ -1330,6 +1335,7 @@ mod tests {
         hirsel_intern::jobs::with_compiler_stack(|| {
             let store = Arc::new(StoreOff::default());
             let (mut engine, definitions) = indexed(store.clone());
+            let (other, _) = indexed(store.clone());
             let before =
                 hirsel_intern::work::read(hirsel_intern::work::Counter::NamespaceConstructions);
             let capture = engine
@@ -1362,8 +1368,14 @@ mod tests {
                 .unwrap();
             assert_ne!(capture.manifest, changed.manifest);
             assert!(!Arc::ptr_eq(&capture, &changed));
+            assert!(
+                capture.require_environment(&other).is_err(),
+                "equal source bytes and policy do not transfer operation authority"
+            );
             let scope = ContentHash::of_bytes(b"selected main root");
+            let provisional = capture.lease();
             let operation = capture.admit_consumers(scope).unwrap();
+            assert_eq!(provisional.identity(), capture.identity());
             assert_eq!(
                 operation.identity(),
                 capture.admit_consumers(scope).unwrap().identity()
@@ -1378,6 +1390,16 @@ mod tests {
                 changed.admit_consumers(scope).unwrap().identity()
             );
             assert!(Arc::ptr_eq(operation.namespace(), &capture));
+            engine.comptime_limits = capture.limits;
+            let next = engine
+                .capture_namespace(&definitions, &[], 8 << 20)
+                .unwrap();
+            assert!(!Arc::ptr_eq(&capture, &next));
+            let expanded = next
+                .admit_consumers(ContentHash::of_bytes(b"expanded roots"))
+                .unwrap();
+            assert_ne!(operation.identity(), expanded.identity());
+            assert_eq!(provisional.identity(), capture.identity());
             drop(engine);
             for definition in &definitions {
                 assert_eq!(

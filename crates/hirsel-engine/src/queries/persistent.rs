@@ -4575,6 +4575,85 @@ mod malformed_tests {
         }
     }
     #[test]
+    fn rejected_lower_probe_keeps_generated_check_observations_private() {
+        struct Header;
+        impl SignaturePhase for Header {
+            fn signature(
+                &self,
+                types: &hirsel_types::TypeInterner,
+                _: &hirsel_types::TypeMemo,
+                syntax: Arc<ItemSyntax>,
+                _: &Declarations,
+                _: &mut PhaseProducts,
+                _: &mut dyn SignatureProvider,
+            ) -> Result<QueryOutput<Signature>, QueryError> {
+                Ok(output(Signature {
+                    metadata: Default::default(),
+                    definition: DefId::intern(&syntax.item.definition),
+                    kind: hirsel_types::SignatureKind::Const {
+                        ty: types.intern(hirsel_types::Type::unit()),
+                        generics: Default::default(),
+                    },
+                    fingerprint: syntax.text_hash,
+                }))
+            }
+        }
+        hirsel_intern::jobs::with_compiler_stack(|| {
+            let (mut engine, syntax) = fixture_source("fn main()->u32 uses {}=comptime ignored()");
+            engine.adapters.signature = Some(Arc::new(Header));
+            engine.verify = Verify::Off;
+            let path = &syntax.item.definition;
+            let signature = engine.signature_output(path).unwrap();
+            let id = DefId::intern(path);
+            let mut observed = Observed::default();
+            observed
+                .merged
+                .record(ReadKey::Signature(id), signature.value.fingerprint);
+            let text = engine.key_text(path, QueryKind::Check).unwrap();
+            let entry = engine.record(
+                MemoKey::new(QueryKind::Check, id),
+                text,
+                Err::<Arc<QueryOutput<TypedBody>>, _>(QueryError::NotImplemented),
+                Default::default(),
+                &observed,
+            );
+            engine.checked.insert(id, Arc::new(entry));
+            let sentinel = ContentHash::of_bytes(b"accepted outer environment");
+            let mut outer = ReadsBuilder::new();
+            outer.record(ReadKey::Environment, sentinel);
+            engine.execution_stack.push(outer);
+            engine.evaluation_validation.push(Some(Default::default()));
+            engine.evaluation_acceptance.push(Some(Vec::new()));
+            engine.evaluation_selections.push(Vec::new());
+            assert!(engine.load_lower(path).unwrap().is_none());
+            let reads = engine.execution_stack.pop().unwrap().finish().unwrap();
+            assert_eq!(
+                reads.len(),
+                1,
+                "rejected preparation leaked a Signature read"
+            );
+            assert_eq!(reads.get(&ReadKey::Environment), Some(sentinel));
+            assert!(
+                engine
+                    .evaluation_validation
+                    .pop()
+                    .unwrap()
+                    .unwrap()
+                    .is_empty()
+            );
+            assert!(
+                engine
+                    .evaluation_acceptance
+                    .pop()
+                    .unwrap()
+                    .unwrap()
+                    .is_empty()
+            );
+            assert!(engine.evaluation_selections.pop().unwrap().is_empty());
+        });
+    }
+
+    #[test]
     fn malformed_lower_depth_is_rejected_before_adoption_or_replay() {
         for verify in [
             hirsel_engine_store::VerifyStore::Off,

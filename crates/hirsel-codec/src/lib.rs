@@ -1480,7 +1480,7 @@ mod tests {
         }
         assert_eq!(
             from_text::<Pools>("(Pools 7 (list 1))").unwrap().second,
-            vec![]
+            Vec::<u32>::new()
         );
     }
 

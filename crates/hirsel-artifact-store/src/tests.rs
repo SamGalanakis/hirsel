@@ -513,7 +513,11 @@ fn retained_regions_obey_byte_and_count_bounds_and_charge_held_unlinked_backings
         assert!(cache.entries.len() <= REGION_COUNT);
         assert_eq!(
             cache.bytes,
-            cache.entries.values().map(|r| r.bytes().len()).sum()
+            cache
+                .entries
+                .values()
+                .map(|r| r.bytes().len())
+                .sum::<usize>()
         );
     }
     fs::remove_file(writer.output_path(large[0])).unwrap();

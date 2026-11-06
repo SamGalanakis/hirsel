@@ -2359,6 +2359,7 @@ impl QueryTask for BodyTask {
                         successor,
                     },
                 );
+            cx.release_body(demand);
             self.terminal = Some(alias.clone());
             return finish(alias);
         }

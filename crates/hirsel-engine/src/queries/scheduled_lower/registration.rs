@@ -31,7 +31,7 @@ struct Stored {
 pub(in crate::queries) struct Data {
     diagnostic_sources: Option<Arc<namespace::DiagnosticSources>>,
     definition: DefId,
-    namespace: Arc<NamespaceCapture>,
+    manifest: ContentHash,
     text: Result<String, QueryError>,
     reads: Reads,
     dependencies: Vec<SignatureDependency>,
@@ -40,12 +40,13 @@ pub(in crate::queries) struct Data {
     failure: Option<Reference>,
     _allowance: Option<hirsel_engine_admission::MemoryReservation>,
 }
-type Completed = (ProductRef, Arc<Data>);
+type Completed = (ProductRef, Arc<Data>, Arc<NamespaceCapture>);
 /// Text and evidence retain their immutable consumption capture. Normalization
 /// and ordered publication still decide whether the syntax becomes visible.
 #[derive(Clone)]
 pub struct FrontRegistrationOutput {
     data: Arc<Data>,
+    namespace: Arc<NamespaceCapture>,
 }
 impl serde::Serialize for Data {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
@@ -63,7 +64,7 @@ impl serde::Serialize for Data {
 }
 impl Data {
     pub(in crate::queries) fn manifest(&self) -> ContentHash {
-        self.namespace.manifest
+        self.manifest
     }
     pub(in crate::queries) fn definition(&self) -> &DefPath {
         self.definition.path()
@@ -83,10 +84,10 @@ impl FrontRegistrationOutput {
         self.data
             .diagnostic_sources
             .as_ref()
-            .map_or(&self.data.namespace.sources, |sources| &sources.sources)
+            .map_or(&self.namespace.sources, |sources| &sources.sources)
     }
     pub fn namespace(&self) -> &Arc<NamespaceCapture> {
-        &self.data.namespace
+        &self.namespace
     }
     pub(in crate::queries) fn into_data(self) -> Arc<Data> {
         self.data
@@ -150,7 +151,7 @@ impl FrontRegistrationQueries {
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .values()
-                .map(|(_, data)| {
+                .map(|(_, data, _)| {
                     data._allowance
                         .as_ref()
                         .map_or(0, hirsel_engine_admission::MemoryReservation::bytes)
@@ -159,15 +160,21 @@ impl FrontRegistrationQueries {
     }
     pub fn outcome(self: &Arc<Self>, product: ProductRef) -> Option<FrontRegistrationOutput> {
         let outcomes = self.outcomes.lock().unwrap_or_else(|e| e.into_inner());
-        let (selected, data) = outcomes.get(&product.address.0)?;
-        (*selected == product).then(|| FrontRegistrationOutput { data: data.clone() })
+        let (selected, data, namespace) = outcomes.get(&product.address.0)?;
+        (*selected == product).then(|| FrontRegistrationOutput {
+            data: data.clone(),
+            namespace: namespace.clone(),
+        })
     }
     pub fn failed(self: &Arc<Self>, reference: Reference) -> Option<FrontRegistrationOutput> {
         let outcomes = self.outcomes.lock().unwrap_or_else(|e| e.into_inner());
-        let (_, (_, data)) = outcomes
+        let (_, (_, data, namespace)) = outcomes
             .iter()
-            .find(|(_, (_, data))| data.failure == Some(reference))?;
-        Some(FrontRegistrationOutput { data: data.clone() })
+            .find(|(_, (_, data, _))| data.failure == Some(reference))?;
+        Some(FrontRegistrationOutput {
+            data: data.clone(),
+            namespace: namespace.clone(),
+        })
     }
     pub(in crate::queries) async fn run(
         self: Arc<Self>,
@@ -256,7 +263,7 @@ impl FrontRegistrationQueries {
                 drop(text);
                 drop(source);
                 let selected = Box::pin(replay.clone().run_tentative(query, reads)).await;
-                let (mut product, data) = replay
+                let (mut product, data, namespace) = replay
                     .outcomes
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
@@ -273,7 +280,7 @@ impl FrontRegistrationQueries {
                 self.outcomes
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
-                    .insert(id.address.0, (product.clone(), data));
+                    .insert(id.address.0, (product.clone(), data, namespace));
                 return selected.map(|_| product);
             }
             if let Some(reference) = source.refusal.get() {
@@ -292,7 +299,7 @@ impl FrontRegistrationQueries {
                 Arc::new(Data {
                     diagnostic_sources: source.diagnostic_sources.borrow().clone(),
                     definition: input.definition,
-                    namespace: source.capture(),
+                    manifest: source.capture().manifest,
                     text,
                     reads: observed,
                     dependencies,
@@ -306,7 +313,11 @@ impl FrontRegistrationQueries {
         };
         let mut weight = hirsel_query_products::retained::MetadataWeight::default();
         weight.arc(&data);
-        weight.add(size_of::<live_record::LiveRecord<Arc<Data>>>() + 2 * size_of::<usize>());
+        weight.add(
+            size_of::<live_record::LiveRecord<Arc<Data>>>()
+                + size_of::<FrontRegistrationOutput>()
+                + 4 * size_of::<usize>(),
+        );
         match &data.text {
             Ok(text) => weight.add(text.capacity()),
             Err(error) => weight.add(
@@ -394,14 +405,17 @@ impl FrontRegistrationQueries {
                     records: self.lower.records.clone(),
                     source: (*namespace.anchors).clone(),
                     serialization_working: self.weight.scratch,
-                    _admission: data.clone(),
+                    _admission: Arc::new(FrontRegistrationOutput {
+                        data: data.clone(),
+                        namespace: namespace.clone(),
+                    }),
                 }),
             )
         };
         self.outcomes
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .insert(id.address.0, (product.clone(), data));
+            .insert(id.address.0, (product.clone(), data, namespace));
         failure.map_or(Ok(product), Err)
     }
     pub(in crate::queries) fn commit(&self, product: &ProductRef) {
@@ -412,7 +426,7 @@ impl FrontRegistrationQueries {
             return;
         };
         let outcomes = self.outcomes.lock().unwrap_or_else(|e| e.into_inner());
-        let Some((current, data)) = outcomes.get(&product.address.0).cloned() else {
+        let Some((current, data, namespace)) = outcomes.get(&product.address.0).cloned() else {
             return;
         };
         drop(outcomes);
@@ -422,7 +436,7 @@ impl FrontRegistrationQueries {
         let Some((bytes, working)) = self
             .lower
             .records
-            .encode_with_decode_bytes(&*data.namespace.anchors, &*data)
+            .encode_with_decode_bytes(&*namespace.anchors, &*data)
         else {
             return;
         };
@@ -440,7 +454,7 @@ impl FrontRegistrationQueries {
         let Some(output) = self.lower.store.put_content(OUTPUT, &bytes) else {
             return;
         };
-        self.remember(input, output, &data, decode_bytes, data.namespace.manifest);
+        self.remember(input, output, &data, decode_bytes, data.manifest);
     }
     fn storage_key(input: &Input) -> EntryKey {
         EntryKey(
@@ -532,7 +546,7 @@ impl FrontRegistrationQueries {
         Some(Data {
             diagnostic_sources: None,
             definition: input.definition,
-            namespace: self.lower.namespace.clone(),
+            manifest: self.lower.namespace.manifest,
             text,
             reads,
             dependencies,
@@ -809,5 +823,60 @@ impl QueryEngine {
             output_pool,
             _inputs: inputs_allowance,
         }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn accepted_generator_data_releases_its_capture_after_the_last_pending_reader() {
+        hirsel_intern::jobs::with_compiler_stack(|| {
+            let mut engine =
+                QueryEngine::new(default_environment(), crate::phases::engine_only_adapters())
+                    .with_result_store(Arc::new(hirsel_engine_store::MemStore::default()));
+            let file = engine
+                .sources
+                .add("main.hir", "pub fn main()->u8{1u8}\n".into())
+                .unwrap();
+            engine.index_source(file, &default_context()).unwrap();
+            let definitions = engine.source_paths();
+            let capture = engine
+                .capture_namespace(&definitions, &[], 8 << 20)
+                .unwrap();
+            let manifest = capture.manifest;
+            let weak = Arc::downgrade(&capture);
+            let output = FrontRegistrationOutput {
+                namespace: capture,
+                data: Arc::new(Data {
+                    diagnostic_sources: None,
+                    definition: DefId::intern(&definitions[0]),
+                    manifest,
+                    text: Ok("fn()->u8{1u8}".into()),
+                    reads: Reads::empty(),
+                    dependencies: vec![],
+                    depth: DepthEvidence::leaf(0),
+                    acceptance: None,
+                    failure: None,
+                    _allowance: None,
+                }),
+            };
+            let pending = output.clone();
+            let accepted = output.into_data();
+            drop(engine);
+            assert!(
+                weak.upgrade().is_some(),
+                "a pending reader retains the exact consumption capture"
+            );
+            drop(pending);
+            assert!(
+                weak.upgrade().is_none(),
+                "accepted immutable data must not retain its predecessor capture"
+            );
+            assert_eq!(accepted.text().unwrap(), "fn()->u8{1u8}");
+            assert_eq!(accepted.manifest(), manifest);
+            assert_eq!(accepted.definition(), &definitions[0]);
+        });
     }
 }

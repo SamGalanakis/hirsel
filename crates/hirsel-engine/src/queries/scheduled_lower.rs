@@ -17,7 +17,7 @@ mod registration;
 mod staged;
 pub(super) mod staged_runtime;
 mod successor;
-pub(crate) use successor::SuccessorCapture;
+pub(crate) use successor::{SuccessorCapture, WeakSuccessorCapture};
 mod stored;
 use crate::comptime::{EvaluationInput, PreparingSource, ValuePreparation};
 pub use carry::LowerCarry;

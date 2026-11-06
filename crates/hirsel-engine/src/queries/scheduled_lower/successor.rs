@@ -7,7 +7,26 @@ pub(crate) struct SuccessorCapture {
     previous: ContentHash,
     owner: Arc<FrontLowerQueries>,
 }
+#[derive(Clone)]
+pub(crate) struct WeakSuccessorCapture {
+    previous: ContentHash,
+    owner: std::sync::Weak<FrontLowerQueries>,
+}
+impl WeakSuccessorCapture {
+    pub(crate) fn upgrade(&self) -> Option<SuccessorCapture> {
+        Some(SuccessorCapture {
+            previous: self.previous,
+            owner: self.owner.upgrade()?,
+        })
+    }
+}
 impl SuccessorCapture {
+    pub(crate) fn downgrade(&self) -> WeakSuccessorCapture {
+        WeakSuccessorCapture {
+            previous: self.previous,
+            owner: Arc::downgrade(&self.owner),
+        }
+    }
     pub(crate) fn new(
         previous: &NamespaceCapture,
         owner: Arc<FrontLowerQueries>,

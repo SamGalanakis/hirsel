@@ -34,18 +34,18 @@ pub(crate) struct DemandProducer {
     _metadata: hirsel_engine_admission::MemoryReservation,
 }
 struct ScopeRequest {
-    previous: Arc<NamespaceCapture>,
+    previous: Weak<NamespaceCapture>,
     roots: Vec<DefPath>,
     policy: LoweringPolicy,
     stop_on_error: bool,
-    result: Mutex<Option<Result<scheduled_lower::SuccessorCapture, QueryError>>>,
+    result: Mutex<Option<Result<scheduled_lower::WeakSuccessorCapture, QueryError>>>,
     _allowance: hirsel_engine_admission::MemoryReservation,
 }
 struct DemandRequest {
-    previous: Arc<NamespaceCapture>,
+    previous: Weak<NamespaceCapture>,
     declaration: DefPath,
     site: Span,
-    result: Mutex<Option<Result<scheduled_lower::SuccessorCapture, QueryError>>>,
+    result: Mutex<Option<Result<scheduled_lower::WeakSuccessorCapture, QueryError>>>,
     failure: Mutex<Option<DemandFailure>>,
     _allowance: hirsel_engine_admission::MemoryReservation,
 }
@@ -56,7 +56,8 @@ pub(crate) struct DemandFailure {
     pub(crate) sources: Arc<namespace::DiagnosticSources>,
 }
 struct DemandView {
-    owner: Arc<FrontLowerQueries>,
+    owner: Weak<FrontLowerQueries>,
+    front: Weak<FrontBodyQueries>,
     _allowance: hirsel_engine_admission::MemoryReservation,
 }
 struct InstanceSelection {
@@ -64,14 +65,32 @@ struct InstanceSelection {
     key: hirsel_types::GeneratedActualKey,
     site: Option<Span>,
 }
+#[derive(Clone)]
+enum CurrentView {
+    Initial(Weak<FrontLowerQueries>),
+    Committed(Arc<FrontLowerQueries>),
+}
+impl CurrentView {
+    fn upgrade(&self) -> Option<Arc<FrontLowerQueries>> {
+        match self {
+            Self::Initial(owner) => owner.upgrade(),
+            Self::Committed(owner) => Some(owner.clone()),
+        }
+    }
+}
 struct State {
-    current: Weak<FrontLowerQueries>,
+    current: CurrentView,
     views: Vec<DemandView>,
     trace: Vec<(DefId, Vec<hirsel_types::GenericArgument>)>,
     charges: Vec<hirsel_engine_admission::MemoryReservation>,
     selected: Vec<InstanceSelection>,
     producing: BTreeMap<DefId, (usize, hirsel_engine_admission::MemoryReservation)>,
     staged_log: Vec<(DefId, ContentHash)>,
+}
+impl State {
+    fn commit(&mut self, owner: &Arc<FrontLowerQueries>) {
+        self.current = CurrentView::Committed(owner.clone());
+    }
 }
 struct Production {
     producer: Arc<DemandProducer>,
@@ -94,7 +113,7 @@ impl Drop for Production {
 }
 struct DemandTransaction {
     producer: Arc<DemandProducer>,
-    current: Weak<FrontLowerQueries>,
+    current: CurrentView,
     views: usize,
     trace: usize,
     charges: usize,
@@ -191,7 +210,7 @@ impl DemandProducer {
             carry: admission.carry,
             adapters: engine.adapters.source_phases(),
             state: Mutex::new(State {
-                current: Arc::downgrade(&initial),
+                current: CurrentView::Initial(Arc::downgrade(&initial)),
                 views: vec![],
                 trace: vec![],
                 charges: vec![],
@@ -226,7 +245,13 @@ impl DemandProducer {
             .current
             .upgrade()
             .into_iter()
-            .chain(state.views.iter().rev().map(|view| view.owner.clone()))
+            .chain(
+                state
+                    .views
+                    .iter()
+                    .rev()
+                    .filter_map(|view| view.owner.upgrade()),
+            )
             .find(|owner| owner.capture().identity() == capture.identity())
     }
     pub(crate) fn take_failure(&self) -> Option<FrontRegistrationBootstrapError> {
@@ -353,8 +378,8 @@ impl DemandProducer {
             .views
             .iter()
             .rev()
-            .map(|view| view.owner.body_front())
-            .chain(std::iter::once(initial.body_front()));
+            .filter_map(|view| view.front.upgrade())
+            .chain(std::iter::once(initial.body_front().clone()));
         let mut checked = BTreeSet::new();
         for front in fronts {
             for path in roots {
@@ -386,8 +411,8 @@ impl DemandProducer {
             .views
             .iter()
             .rev()
-            .find(|view| view.owner.owns_query(id))
-            .map(|view| view.owner.clone())
+            .filter_map(|view| view.owner.upgrade())
+            .find(|owner| owner.owns_query(id))
     }
     pub(crate) fn front_for(
         &self,
@@ -399,9 +424,8 @@ impl DemandProducer {
             .views
             .iter()
             .rev()
-            .map(|view| view.owner.body_front())
+            .filter_map(|view| view.front.upgrade())
             .find(|front| front.owns_query(id))
-            .cloned()
     }
     pub(crate) fn front_for_eviction(
         &self,
@@ -413,9 +437,8 @@ impl DemandProducer {
             .views
             .iter()
             .rev()
-            .map(|view| view.owner.body_front())
+            .filter_map(|view| view.front.upgrade())
             .find(|front| front.has_cached_query(id))
-            .cloned()
     }
     pub(crate) fn query(
         &self,
@@ -431,7 +454,10 @@ impl DemandProducer {
             ],
         );
         let mut requests = self.requests.lock().unwrap_or_else(|e| e.into_inner());
-        if !requests.contains_key(&key) {
+        if requests
+            .get(&key)
+            .is_none_or(|request| request.previous.strong_count() == 0)
+        {
             let allowance = Self::take(
                 &self.syntax,
                 (size_of::<DemandRequest>()
@@ -443,7 +469,7 @@ impl DemandProducer {
             requests.insert(
                 key,
                 Arc::new(DemandRequest {
-                    previous,
+                    previous: Arc::downgrade(&previous),
                     declaration: declaration.clone(),
                     site,
                     result: Mutex::new(None),
@@ -482,7 +508,10 @@ impl DemandProducer {
             )
         });
         let mut scopes = self.scopes.lock().unwrap_or_else(|e| e.into_inner());
-        if !scopes.contains_key(&key) {
+        if scopes
+            .get(&key)
+            .is_none_or(|scope| scope.previous.strong_count() == 0)
+        {
             let mut weight = hirsel_query_products::retained::MetadataWeight::default();
             weight.add(size_of::<ScopeRequest>() + 12 * size_of::<usize>() + size_of_val(roots));
             for root in roots {
@@ -492,7 +521,7 @@ impl DemandProducer {
             scopes.insert(
                 key,
                 Arc::new(ScopeRequest {
-                    previous,
+                    previous: Arc::downgrade(&previous),
                     roots: roots.to_vec(),
                     policy,
                     stop_on_error,
@@ -518,6 +547,13 @@ impl DemandProducer {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clone()
+            .map(|result| {
+                result.and_then(|successor| {
+                    successor
+                        .upgrade()
+                        .ok_or_else(|| refused("settled demand lost its memo lease"))
+                })
+            })
     }
     pub(crate) fn owns_demand(&self, id: hirsel_engine_runtime::QueryId) -> bool {
         id.kind == scheduled_lower::FRONT_LOWER_KIND
@@ -595,6 +631,13 @@ impl DemandProducer {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clone()
+            .map(|result| {
+                result.and_then(|successor| {
+                    successor
+                        .upgrade()
+                        .ok_or_else(|| refused("settled demand lost its memo lease"))
+                })
+            })
     }
     pub(crate) fn task(
         self: &Arc<Self>,
@@ -608,6 +651,7 @@ impl DemandProducer {
             .get(&id.address.0)
             .cloned()
         {
+            let previous = scope.previous.upgrade().ok_or(self.errors.protocol)?;
             let producer = self.clone();
             return Ok(Box::new(hirsel_engine_runtime::LocalFutureTask::new(
                 id,
@@ -617,18 +661,16 @@ impl DemandProducer {
                 move |reads| async move {
                     let result = producer
                         .complete_scope(
-                            &scope.previous,
+                            &previous,
                             &scope.roots,
                             scope.policy,
                             scope.stop_on_error,
                             reads,
                         )
                         .await;
-                    let namespace = result
-                        .as_ref()
-                        .map(|successor| successor.namespace().clone());
-                    *scope.result.lock().unwrap_or_else(|e| e.into_inner()) = Some(result.clone());
-                    let namespace = namespace.map_err(|error| {
+                    *scope.result.lock().unwrap_or_else(|e| e.into_inner()) =
+                        Some(result.clone().map(|successor| successor.downgrade()));
+                    let successor = result.map_err(|error| {
                         if std::env::var_os("HIRSEL_OPERATION_OWNER_TRACE").is_some() {
                             crate::queries::operation_owner_trace(format_args!(
                                 "OWNER SCOPE PROTOCOL {error:?}"
@@ -636,7 +678,7 @@ impl DemandProducer {
                         }
                         producer.errors.protocol
                     })?;
-                    producer.scope_product(id, &namespace)
+                    producer.scope_product(id, &previous, &successor)
                 },
             )?));
         }
@@ -647,6 +689,7 @@ impl DemandProducer {
             .get(&id.address.0)
             .cloned()
             .ok_or(self.errors.protocol)?;
+        let previous = request.previous.upgrade().ok_or(self.errors.protocol)?;
         let producer = self.clone();
         Ok(Box::new(hirsel_engine_runtime::LocalFutureTask::new(
             id,
@@ -655,13 +698,7 @@ impl DemandProducer {
             self.errors,
             move |reads| async move {
                 let product = producer
-                    .demand(
-                        &request.previous,
-                        &request.declaration,
-                        &[],
-                        request.site,
-                        reads,
-                    )
+                    .demand(&previous, &request.declaration, &[], request.site, reads)
                     .await;
                 let result = match product {
                     Ok(product) => match product.result {
@@ -672,7 +709,7 @@ impl DemandProducer {
                             let failure = producer
                                 .demand_failure(
                                     &request.declaration,
-                                    &request.previous,
+                                    &previous,
                                     error.clone(),
                                     product.reads,
                                 )
@@ -686,7 +723,7 @@ impl DemandProducer {
                         let failure = producer
                             .demand_failure(
                                 &request.declaration,
-                                &request.previous,
+                                &previous,
                                 error.clone(),
                                 Reads::empty(),
                             )
@@ -695,11 +732,9 @@ impl DemandProducer {
                         Err(error)
                     }
                 };
-                let complete = result
-                    .as_ref()
-                    .map(|successor| successor.namespace().clone());
-                *request.result.lock().unwrap_or_else(|e| e.into_inner()) = Some(result.clone());
-                let namespace = complete.map_err(|error| {
+                *request.result.lock().unwrap_or_else(|e| e.into_inner()) =
+                    Some(result.clone().map(|successor| successor.downgrade()));
+                let successor = result.map_err(|error| {
                     if std::env::var_os("HIRSEL_OPERATION_OWNER_TRACE").is_some() {
                         crate::queries::operation_owner_trace(format_args!(
                             "OWNER DEMAND PROTOCOL {error:?}"
@@ -707,17 +742,21 @@ impl DemandProducer {
                     }
                     producer.errors.protocol
                 })?;
-                producer.scope_product(id, &namespace)
+                producer.scope_product(id, &previous, &successor)
             },
         )?))
     }
     fn scope_product(
         &self,
         id: hirsel_engine_runtime::QueryId,
-        namespace: &NamespaceCapture,
+        previous: &Arc<NamespaceCapture>,
+        successor: &scheduled_lower::SuccessorCapture,
     ) -> Result<hirsel_engine_runtime::ProductRef, hirsel_engine_store::Reference> {
+        let namespace = successor.namespace();
         let bytes = size_of::<crate::queries::live_record::LiveRecord<ContentHash>>()
             + size_of::<hirsel_engine_admission::MemoryReservation>()
+            + size_of::<namespace::OperationLease>()
+            + size_of::<scheduled_lower::SuccessorCapture>()
             + 4 * size_of::<usize>();
         let allowance = self.text.take(bytes as u64).ok_or(self.errors.resource)?;
         Ok(hirsel_engine_runtime::ProductRef::live(
@@ -732,7 +771,7 @@ impl DemandProducer {
                 records: namespace.records.clone(),
                 source: (*namespace.anchors).clone(),
                 serialization_working: self.weight.scratch,
-                _admission: Arc::new(allowance),
+                _admission: Arc::new((allowance, previous.lease(), successor.clone())),
             }),
         ))
     }
@@ -878,7 +917,7 @@ impl DemandProducer {
         // A completed staged demand must expose its owner before the cache
         // marker: callers suspended in an older capture join that owner too.
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        state.current = Arc::downgrade(&successor);
+        state.commit(&successor);
         if self
             .staged
             .lock()
@@ -978,6 +1017,7 @@ impl DemandProducer {
                         .is_some_and(|facts| facts.staged))
                     && !roots.contains(id.path())
             });
+        drop(initial);
         let mut checked = BTreeSet::new();
         for root in roots {
             let mut demanded = vec![root.clone()];
@@ -1049,6 +1089,7 @@ impl DemandProducer {
                     }
                     checked.insert(path.clone());
                 }
+                drop(owner);
                 if !needs_discovery {
                     break;
                 }
@@ -1064,13 +1105,12 @@ impl DemandProducer {
                 let missing = discovery.pending_bodies().to_vec();
                 drop(discovery);
                 drop(engine);
+                let types = owner.capture().snapshot.types().clone();
+                drop(owner);
                 let mut changed = false;
                 for request in &requests {
-                    let key = hirsel_tir::InstanceBodies::key(
-                        owner.capture().snapshot.types(),
-                        &request.actuals.arguments,
-                    )
-                    .ok_or_else(|| refused("open static instance"))?;
+                    let key = hirsel_tir::InstanceBodies::key(&types, &request.actuals.arguments)
+                        .ok_or_else(|| refused("open static instance"))?;
                     let instance = instance_path(&request.declaration, key);
                     if !self
                         .current()?
@@ -1226,6 +1266,19 @@ impl DemandProducer {
                 registrations.len(),
                 self.front.available_bytes()
             ));
+            for (generation, view) in state.views.iter().enumerate() {
+                if let Some(owner) = view.owner.upgrade() {
+                    crate::queries::operation_owner_trace(format_args!(
+                        "OWNER LIVE CAPTURE generation={} registrations={} lower_refs={} namespace_refs={} view_bytes={} front_retained={}",
+                        generation + 1,
+                        owner.capture().registrations.len(),
+                        Arc::strong_count(&owner) - 1,
+                        Arc::strong_count(owner.capture()),
+                        owner.capture().retained_bytes(),
+                        owner.body_front().retained_bytes(),
+                    ));
+                }
+            }
         }
         let namespace =
             engine.capture_namespace(definitions, &refreshed, self.front.available_bytes())?;
@@ -1235,7 +1288,7 @@ impl DemandProducer {
                 .current
                 .upgrade()
                 .into_iter()
-                .chain(state.views.iter().map(|view| view.owner.clone()))
+                .chain(state.views.iter().filter_map(|view| view.owner.upgrade()))
                 .find(|owner| owner.capture().identity() == namespace.identity());
             if let Some(owner) = existing {
                 return Ok(owner);
@@ -1286,14 +1339,11 @@ impl DemandProducer {
             previous.as_deref(),
         )?;
         lower.bind_demand(self)?;
-        let charge = Self::take(
-            &self.syntax,
-            (3 * (size_of::<Arc<FrontLowerQueries>>()
-                + size_of::<hirsel_engine_admission::MemoryReservation>())) as u64,
-        )?;
+        let charge = Self::take(&self.syntax, (3 * size_of::<DemandView>()) as u64)?;
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         state.views.push(DemandView {
-            owner: lower.clone(),
+            owner: Arc::downgrade(&lower),
+            front: Arc::downgrade(lower.body_front()),
             _allowance: charge,
         });
         Ok(lower)
@@ -1438,8 +1488,10 @@ impl DemandProducer {
                 };
                 // The selected head is an admitted prerequisite of private execution.
                 // Nested demand descends from this explicit head capture.
-                self.state.lock().unwrap_or_else(|e| e.into_inner()).current =
-                    Arc::downgrade(&lower);
+                self.state
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .commit(&lower);
 
                 let text = engine.front_registration_queries_in_pool(
                     std::slice::from_ref(&selected),
@@ -1582,7 +1634,7 @@ impl DemandProducer {
                     .trace
                     .push((DefId::intern(declaration), arguments.to_vec()));
                 state.charges.push(metadata);
-                state.current = Arc::downgrade(&successor);
+                state.commit(&successor);
                 drop(state);
                 if let Some(completed) = completed {
                     text.commit(&completed);
@@ -1597,5 +1649,163 @@ impl DemandProducer {
             transaction.completed = true;
             result
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use hirsel_engine_admission::ProcessBudget;
+    use hirsel_engine_store::MemStore;
+
+    #[test]
+    fn committed_successor_releases_predecessor_after_its_last_reader() {
+        hirsel_intern::jobs::with_compiler_stack(|| {
+            let mut engine =
+                QueryEngine::new(default_environment(), crate::phases::engine_only_adapters())
+                    .with_result_store(Arc::new(MemStore::default()));
+            let file = engine
+                .sources
+                .add("main.hir", "pub fn main()->u8{1u8}\n".into())
+                .unwrap();
+            engine.index_source(file, &default_context()).unwrap();
+            let file = engine
+                .sources
+                .add("helper.hir", "pub fn helper()->u8{2u8}\n".into())
+                .unwrap();
+            engine.index_source(file, &default_context()).unwrap();
+            let all_definitions = engine.source_paths();
+            let definitions = vec![all_definitions[0].clone()];
+            let budget = ProcessBudget::new(64 << 20);
+            let reference = |bytes: &[u8]| {
+                hirsel_engine_store::Domain {
+                    kind: 0x4600_00ff,
+                    schema: 1,
+                }
+                .reference(bytes)
+                .unwrap()
+            };
+            let errors = RuntimeErrors {
+                resource: reference(b"resource"),
+                cycle: reference(b"cycle"),
+                cancelled: reference(b"cancelled"),
+                protocol: reference(b"protocol"),
+                panicked: reference(b"panic"),
+            };
+            let weight = MemoryWeight {
+                retained: 1 << 20,
+                scratch: 1 << 20,
+                stack: 1 << 20,
+            };
+            let front = engine
+                .front_body_queries(
+                    &definitions,
+                    weight,
+                    budget.reserve(8 << 20).unwrap(),
+                    errors,
+                )
+                .unwrap();
+            let initial = engine
+                .front_lower_queries(
+                    &definitions,
+                    front,
+                    weight,
+                    256,
+                    budget.reserve(8 << 20).unwrap(),
+                    errors,
+                )
+                .unwrap();
+            let producer = DemandProducer::new(
+                &engine,
+                initial,
+                DemandAdmission {
+                    carry: None,
+                    front: budget.reserve(8 << 20).unwrap(),
+                    lower: budget.reserve(8 << 20).unwrap(),
+                    text: budget.reserve(8 << 20).unwrap(),
+                    syntax: budget.reserve(8 << 20).unwrap(),
+                },
+                weight,
+                256,
+                errors,
+            )
+            .unwrap();
+            let first = producer.view(&mut engine, &definitions, &[]).unwrap();
+            producer.state.lock().unwrap().commit(&first);
+            let weak = Arc::downgrade(&first);
+            let lease = first.capture().lease();
+            let query = producer
+                .query(first.capture().clone(), &definitions[0], Span::default())
+                .unwrap();
+            let successor =
+                scheduled_lower::SuccessorCapture::new(first.capture(), first.clone()).unwrap();
+            let marker = producer
+                .scope_product(query, first.capture(), &successor)
+                .unwrap();
+            *producer.requests.lock().unwrap()[&query.address.0]
+                .result
+                .lock()
+                .unwrap() = Some(Ok(successor.downgrade()));
+            drop(successor);
+            let second = producer.view(&mut engine, &all_definitions, &[]).unwrap();
+            assert_ne!(first.capture().identity(), second.capture().identity());
+            let transaction = DemandTransaction::new(&producer);
+            producer.state.lock().unwrap().commit(&second);
+            drop(transaction);
+            assert!(
+                Arc::ptr_eq(&producer.current().unwrap(), &first),
+                "cancelled publication restores its committed predecessor"
+            );
+            producer.state.lock().unwrap().commit(&second);
+            drop(first);
+            assert!(
+                weak.upgrade().is_some(),
+                "an unconsumed memo pins its exact successor"
+            );
+            assert!(producer.completed(query).unwrap().is_ok());
+            let held = producer.completed(query).unwrap().unwrap();
+            drop(marker);
+            assert!(
+                weak.upgrade().is_some(),
+                "the consuming reader takes over the memo lease"
+            );
+            let front_reader = held.owner().body_front().clone();
+            let front_query = front_reader.query(&definitions[0]).unwrap();
+            drop(held);
+            assert!(
+                weak.upgrade().is_none(),
+                "a Front reader need not retain its Lower producer"
+            );
+            assert!(Arc::ptr_eq(
+                &producer.front_for(front_query).unwrap(),
+                &front_reader
+            ));
+            drop(front_reader);
+            assert!(
+                weak.upgrade().is_none(),
+                "the publication cache must release the predecessor producer"
+            );
+            let retained = producer.front.available_bytes();
+            let expected = lease.capture().retained_bytes();
+            let read = lease.clone();
+            drop(lease);
+            assert_eq!(
+                producer.front.available_bytes(),
+                retained,
+                "the held reader still pins its inputs"
+            );
+            assert_eq!(
+                read.capture().bodies[&DefId::intern(&definitions[0])].implementation,
+                second.capture().bodies[&DefId::intern(&definitions[0])].implementation
+            );
+            drop(read);
+            assert_eq!(
+                producer.front.available_bytes() - retained,
+                expected,
+                "the final reader returns the predecessor capture charge exactly once"
+            );
+            drop((producer, second, engine));
+            assert_eq!(budget.reserved(), 0);
+        });
     }
 }

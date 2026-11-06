@@ -1197,10 +1197,14 @@ impl QueryEngine {
         let mut entry = self.finish(key, text, reads, result.map(shared_output), observed);
         entry.covered = covered;
         let entry = Arc::new(entry);
+        // Provisional proofs are explicit reads, so their canonical records
+        // are safe variants too. Share them before a header projection drops
+        // resolver products or another module producer demands this key.
+        if !provisional {
+            self.store_signature(definition, &entry)?;
+        }
         if self.private_summary_active {
             self.private_signature_publications.insert(id);
-        } else {
-            self.store_signature(definition, &entry)?;
         }
         self.adopted_headers = None;
         keep(

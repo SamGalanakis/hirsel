@@ -1167,12 +1167,83 @@ impl QueryEngine {
         if !matches!(entry.memo.value, Ok(_) | Err(QueryError::Diagnostics(_))) {
             return Ok(());
         }
+        if self.key_text(path, QueryKind::Signature).ok() != Some(entry.memo.text) {
+            return Ok(());
+        }
         self.write_record(
             path,
             QueryKind::Signature,
             entry.reads(),
             &SignatureRecord::capture(entry),
         )
+    }
+
+    /// Recover the canonical source behind a header projection. Match the
+    /// projection's exact reads, including its previous private proof. This
+    /// only restores discarded auxiliary products; the caller still validates
+    /// the memo before using or publishing a signature under current inputs.
+    pub(super) fn complete_signature_source(
+        &mut self,
+        entry: &Arc<Entry<hirsel_types::SignatureRef>>,
+    ) -> Option<Arc<Entry<hirsel_types::SignatureRef>>> {
+        // Verification must reconstruct these products independently, without
+        // replacing or borrowing the oracle before the final comparison.
+        if self.verify_store == hirsel_engine_store::VerifyStore::Recompute {
+            return None;
+        }
+        let path = entry.memo.key.def.path();
+        if self.key_text(path, QueryKind::Signature).ok()? != entry.memo.text {
+            return None;
+        }
+        let key = self.store_key(path, QueryKind::Signature)?;
+        let store = self.result_store.clone()?;
+        let stored = StoredEntry::load(&*store, &key);
+        let variant = stored
+            .variants
+            .iter()
+            .find(|variant| {
+                variant.inputs == key.1 && variant.valid(&key) && &variant.reads == entry.reads()
+            })?
+            .resolve(&*store, &key)?;
+        let record: SignatureRecord = self.decode_record(&variant.payload)?;
+        if record
+            .output
+            .as_ref()
+            .is_ok_and(|output| output.value.definition != entry.memo.key.def)
+            || !matches!(record.output, Ok(_) | Err(QueryError::Diagnostics(_)))
+        {
+            return None;
+        }
+        let resolution = if let Some((occurrence, output)) = record.resolution {
+            self.materialize(path).ok()?;
+            let syntax = self
+                .items
+                .get(path)?
+                .iter()
+                .find(|syntax| syntax.occurrence == occurrence)?
+                .clone();
+            if !valid_resolution(&syntax, &output.value) {
+                return None;
+            }
+            Some(ResolverSnapshot { syntax, output })
+        } else {
+            None
+        };
+        Some(Arc::new(Entry {
+            memo: entry.memo.clone(),
+            detail: record.detail,
+            products: Arc::new(PhaseProducts {
+                signature_persisted: true,
+                resolution,
+                ..(*entry.products).clone()
+            }),
+            covered: entry.covered.clone(),
+            depth: entry.depth.clone(),
+            acceptance: entry.acceptance.clone(),
+            verification: Default::default(),
+            selections: entry.selections.clone(),
+            consistent: entry.consistent,
+        }))
     }
 
     pub(super) fn load_publication(&mut self, path: &DefPath) -> Option<PublishedResult> {
@@ -4815,6 +4886,131 @@ mod malformed_tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn private_signature_publication_matches_fresh_normalization() {
+        struct Header(bool);
+        impl SignaturePhase for Header {
+            fn signature(
+                &self,
+                types: &hirsel_types::TypeInterner,
+                _: &hirsel_types::TypeMemo,
+                syntax: Arc<ItemSyntax>,
+                _: &Declarations,
+                products: &mut PhaseProducts,
+                _: &mut dyn SignatureProvider,
+            ) -> Result<QueryOutput<Signature>, QueryError> {
+                let mut resolution = Resolution::default();
+                if self.0 {
+                    resolution.expressions.push((
+                        hirsel_syntax::ExprId(0),
+                        hirsel_types::ResolvedName::Primitive(hirsel_types::Primitive::Bool),
+                    ));
+                }
+                products.resolution = Some(ResolverSnapshot {
+                    syntax: syntax.clone(),
+                    output: output(resolution),
+                });
+                Ok(output(Signature {
+                    metadata: Default::default(),
+                    definition: DefId::intern(&syntax.item.definition),
+                    kind: hirsel_types::SignatureKind::Function(hirsel_types::FunctionType {
+                        state_promises: Default::default(),
+                        generics: Default::default(),
+                        parameters: Default::default(),
+                        result: types.intern(hirsel_types::Type::boolean()),
+                        error: None,
+                        allocation: hirsel_types::Allocation::NoAlloc,
+                        authority: hirsel_types::AuthoritySummary::inert(),
+                        uses: hirsel_types::Uses::Unrestricted,
+                        contracts: Default::default(),
+                        incomplete: false,
+                        foreign: None,
+                    }),
+                    fingerprint: syntax.text_hash,
+                }))
+            }
+        }
+        hirsel_intern::jobs::with_compiler_stack(|| {
+            for request_local in [false, true] {
+                let (mut engine, syntax) = fixture();
+                if request_local {
+                    let budget = hirsel_engine_admission::ProcessBudget::new(64 << 20);
+                    engine =
+                        engine.with_result_store(Arc::new(hirsel_engine_store::RequestStore::new(
+                            Arc::new(hirsel_engine_store::NoneStore),
+                            budget.reserve(64 << 20).unwrap(),
+                        )));
+                }
+                let id = DefId::intern(&syntax.item.definition);
+                engine.adapters.signature = Some(Arc::new(Header(false)));
+                engine.private_summary_active = true;
+                engine.signature_query_local(id).unwrap();
+                let headers = header_products::HeaderProducts::capture(&engine);
+                engine.signatures.clear();
+                engine.adopt_header_products(&headers);
+                engine
+                    .publish_private_summaries(
+                        [(
+                            id,
+                            hirsel_types::UniqueInference {
+                                summary: hirsel_types::UniqueSummary {
+                                    results: vec![
+                                        hirsel_types::unique_summary::UniqueResultRow::Root,
+                                    ],
+                                    ..Default::default()
+                                },
+                                ..Default::default()
+                            },
+                        )]
+                        .into_iter()
+                        .collect(),
+                    )
+                    .unwrap();
+                let published = engine.signatures[&id].clone();
+                let bytes = engine
+                    .encode_record(&SignatureRecord::capture(&published))
+                    .unwrap();
+                let key = engine.store_key(id.path(), QueryKind::Signature).unwrap();
+                let store = engine.result_store.clone().unwrap();
+                let stored = StoredEntry::load(&*store, &key);
+                let variant = stored
+                    .variants
+                    .iter()
+                    .find(|variant| &variant.reads == published.reads())
+                    .expect("settled canonical record is handed to the shared keyed store")
+                    .resolve(&*store, &key)
+                    .unwrap();
+                assert_eq!(variant.payload.as_ref(), bytes);
+
+                // An independent normalization under the settled proof is the
+                // byte oracle, including resolver products and dependency detail.
+                engine.signatures.clear();
+                engine.header_products = None;
+                engine.snapshot = None;
+                engine.verify_store = hirsel_engine_store::VerifyStore::Recompute;
+                engine.signature_query_local(id).unwrap();
+                let normalized = &engine.signatures[&id];
+                assert_eq!(normalized.reads(), published.reads());
+                assert_eq!(
+                    engine
+                        .encode_record(&SignatureRecord::capture(normalized))
+                        .unwrap(),
+                    bytes
+                );
+                // A different resolver product for these same complete inputs
+                // must fail verification, before it can replace the oracle.
+                engine.signatures.clear();
+                engine.header_products = None;
+                engine.snapshot = None;
+                engine.adapters.signature = Some(Arc::new(Header(true)));
+                engine.signature_query_local(id).unwrap();
+                assert!(
+                    matches!(engine.publish_private_signature(id), Err(QueryError::Operational(error)) if error.operation == "verify-cache")
+                );
+            }
+        });
     }
 
     #[test]

@@ -214,13 +214,22 @@ impl QueryEngine {
             for id in ids {
                 let summary = self.private_summaries.get(&id).cloned().unwrap_or_default();
                 let previous = old.get(&id).cloned().unwrap_or_default();
-                if let Some(entry) = self.signatures.get(&id).cloned()
+                if let Some(mut entry) = self.signatures.get(&id).cloned()
                     && let Ok(output) = entry.result()
                 {
                     if summary == previous && output.value.metadata.inferred_unique == summary {
                         continue;
                     }
-                    if entry.products.signature_persisted {
+                    let complete = if entry.products.resolution.is_none()
+                        || entry.products.signature_persisted
+                    {
+                        self.complete_signature_source(&entry)
+                    } else {
+                        Some(entry.clone())
+                    };
+                    if let Some(complete) = complete {
+                        entry = complete;
+                    } else {
                         // A restored header can omit syntax-backed auxiliary
                         // products. Restore or recompute the complete product
                         // under the new proof instead of rewriting that projection.
@@ -240,7 +249,10 @@ impl QueryEngine {
                         let signature_changed = output.value.fingerprint != fingerprint;
                         output.value = Arc::new(signature);
                         let mut observed = Observed::default();
-                        observed.products = entry.products.clone();
+                        observed.products = Arc::new(PhaseProducts {
+                            signature_persisted: false,
+                            ..(*entry.products).clone()
+                        });
                         for (key, value) in entry.reads().iter() {
                             if !matches!(key, hirsel_query_products::reads::ReadKey::PrivateSummary(d) if *d == id)
                             {
@@ -256,6 +268,9 @@ impl QueryEngine {
                             &observed,
                         );
                         next.covered = entry.covered.clone();
+                        if self.verify_store != hirsel_engine_store::VerifyStore::Recompute {
+                            self.store_signature(id.path(), &next)?;
+                        }
                         self.private_signature_publications.insert(id);
                         self.signatures.insert(id, Arc::new(next));
                         self.adopted_headers = None;

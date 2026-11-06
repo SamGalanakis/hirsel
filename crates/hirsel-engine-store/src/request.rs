@@ -26,10 +26,18 @@ fn content_tree_bytes(entries: usize) -> u64 {
     weight.tree::<ContentHash, (Reference, Bytes)>(entries);
     weight.bytes().max(ENTRY_CHARGE)
 }
+fn signature_index_bytes(entries: usize) -> u64 {
+    let mut weight = hirsel_query_products::retained::MetadataWeight::default();
+    weight.tree::<EntryKey, Bytes>(entries);
+    weight.bytes()
+}
 struct State {
     used: u64,
     installed: Option<Arc<InstalledPackage>>,
     contents: BTreeMap<ContentHash, (Reference, Bytes)>,
+    // Signature producers share their canonical variants within the request,
+    // independently of the selected durable-cache policy.
+    signatures: BTreeMap<EntryKey, Bytes>,
     /// Each selected association, and whether its backend publication is
     /// deferred to the next `publish_root` (only under `Complete`).
     associations: BTreeMap<ContentHash, (Association, bool)>,
@@ -205,6 +213,7 @@ impl RequestStore {
                 used: 0,
                 installed: None,
                 contents: BTreeMap::new(),
+                signatures: BTreeMap::new(),
                 associations: BTreeMap::new(),
             }),
         }
@@ -441,6 +450,16 @@ impl ResultStore for RequestStore {
     // A backend that retains nothing is never read or written through the
     // transport; its live bytes are the request's own.
     fn get(&self, key: &EntryKey) -> Option<Bytes> {
+        if key.2 == QueryKind::Signature
+            && let Some(bytes) = self
+                .state
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .signatures
+                .get(key)
+        {
+            return Some(bytes.clone());
+        }
         self.persistence()
             .retains()
             .then(|| self.backend.get(key))
@@ -451,6 +470,36 @@ impl ResultStore for RequestStore {
             self.backend.put(key, value)
         } else {
             WriteOutcome::Refused
+        }
+    }
+    fn put_query(&self, kind: QueryKind, key: &EntryKey, action: Action, value: &[u8]) {
+        assert_eq!(kind, key.2);
+        if kind == QueryKind::Signature {
+            let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            if !state
+                .signatures
+                .get(key)
+                .is_some_and(|bytes| bytes.as_ref() == value)
+            {
+                let next = state
+                    .signatures
+                    .len()
+                    .saturating_add(usize::from(!state.signatures.contains_key(key)));
+                let growth = signature_index_bytes(next)
+                    .saturating_sub(signature_index_bytes(state.signatures.len()));
+                if let Some(owner) = Bytes::owned_with_owner_bytes(value.len() as u64)
+                    .and_then(|bytes| self.try_admit_product_memory(bytes))
+                    && self.memory.try_charge(growth)
+                {
+                    state.used += growth;
+                    state
+                        .signatures
+                        .insert(*key, Bytes::from(value).retain_owner(owner));
+                }
+            }
+        }
+        if self.persistence().retains() {
+            self.backend.put_query(kind, key, action, value);
         }
     }
     fn demand(&self, keys: &[EntryKey]) {
@@ -1306,41 +1355,64 @@ mod tests {
     }
     #[test]
     fn request_contents_charge_shared_tree_and_cover_physical_allocations() {
-        for count in [32u32, 64, 128] {
-            let allowance = 64 << 10;
-            let budget = hirsel_engine_admission::ProcessBudget::new(allowance);
-            let request =
-                RequestStore::new(Arc::new(NoneStore), budget.reserve(allowance).unwrap());
-            let mut references = Vec::with_capacity(count as usize);
-            let (_, actual) = crate::test_alloc::measured(|| {
-                for index in 0..count {
-                    references.push(request.put_content(domain(), &index.to_le_bytes()).unwrap());
-                }
-            });
-            let charged = request.retained_bytes();
-            assert!(!request.exhausted());
-            assert!(actual.live > 0);
-            assert!(charged >= actual.live as u64);
-            assert!(
-                charged >= actual.peak as u64,
-                "charged={charged}, actual={}",
-                actual.peak
-            );
-            assert!(charged <= allowance);
-            for (index, reference) in references.into_iter().enumerate() {
-                assert_eq!(
-                    &*request.get_content(reference).unwrap(),
-                    &(index as u32).to_le_bytes()
+        for signatures in [false, true] {
+            for count in [32u32, 64, 128] {
+                let allowance = 64 << 10;
+                let budget = hirsel_engine_admission::ProcessBudget::new(allowance);
+                let request =
+                    RequestStore::new(Arc::new(NoneStore), budget.reserve(allowance).unwrap());
+                let mut references = Vec::with_capacity(count as usize);
+                let (_, actual) = crate::test_alloc::measured(|| {
+                    for index in 0..count {
+                        if signatures {
+                            let key = EntryKey(
+                                address().0,
+                                ContentHash::of_bytes(&index.to_le_bytes()),
+                                QueryKind::Signature,
+                            );
+                            request.put_query(key.2, &key, Action(key.0), &index.to_le_bytes());
+                            references.push(None);
+                        } else {
+                            references.push(Some(
+                                request.put_content(domain(), &index.to_le_bytes()).unwrap(),
+                            ));
+                        }
+                    }
+                });
+                let charged = request.retained_bytes();
+                assert!(!request.exhausted());
+                assert!(actual.live > 0);
+                assert!(charged >= actual.live as u64);
+                assert!(
+                    charged >= actual.peak as u64,
+                    "charged={charged}, actual={}",
+                    actual.peak
                 );
+                assert!(charged <= allowance);
+                for (index, reference) in references.into_iter().enumerate() {
+                    let value = (index as u32).to_le_bytes();
+                    if let Some(reference) = reference {
+                        assert_eq!(&*request.get_content(reference).unwrap(), &value);
+                    } else {
+                        let key = EntryKey(
+                            address().0,
+                            ContentHash::of_bytes(&value),
+                            QueryKind::Signature,
+                        );
+                        assert_eq!(&*request.get(&key).unwrap(), &value);
+                        request.put_query(key.2, &key, Action(key.0), &value);
+                        assert_eq!(request.retained_bytes(), charged);
+                    }
+                }
+                assert!(
+                    request
+                        .put_content(domain(), &vec![0; allowance as usize])
+                        .is_none()
+                );
+                assert!(request.retained_bytes() <= allowance);
+                drop(request);
+                assert_eq!(budget.reserved(), 0);
             }
-            assert!(
-                request
-                    .put_content(domain(), &vec![0; allowance as usize])
-                    .is_none()
-            );
-            assert!(request.retained_bytes() <= allowance);
-            drop(request);
-            assert_eq!(budget.reserved(), 0);
         }
     }
     #[test]

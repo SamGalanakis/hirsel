@@ -452,19 +452,25 @@ impl QueryEngine {
             .map(|error| (self.graph.revision(), error.clone()));
         result
     }
-    fn publish_private_signature(&mut self, id: DefId) -> Result<(), QueryError> {
-        // Source projections omit resolver products. The canonical writer must
-        // reconstruct them before comparing or publishing a complete record.
+    pub(in crate::queries) fn publish_private_signature(
+        &mut self,
+        id: DefId,
+    ) -> Result<(), QueryError> {
+        // Recover auxiliary products discarded by the source projection, then
+        // validate the memo normally. An unavailable record recomputes.
         let projected = self.signatures.get(&id).is_some_and(|entry| {
             !entry.products.signature_persisted && entry.products.resolution.is_none()
         });
-        if projected {
+        if projected
+            && let Some(entry) = self.signatures.get(&id).cloned()
+            && let Some(complete) = self.complete_signature_source(&entry)
+        {
+            self.signatures.insert(id, complete);
+        } else if projected {
             self.signatures.remove(&id);
             self.adopted_headers = None;
-            self.signature_query_local(id)?;
-        } else {
-            self.signature_query_id(id)?;
         }
+        self.signature_query_local(id)?;
         if let Some(entry) = self.signatures.get(&id).cloned() {
             if self.verify_store == hirsel_engine_store::VerifyStore::Recompute {
                 // Select the oracle variant only after the module proof is installed.

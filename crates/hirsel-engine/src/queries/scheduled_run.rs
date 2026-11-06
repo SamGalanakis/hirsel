@@ -78,7 +78,6 @@ struct Input {
 /// catalog moves into the producer once, so sizing never repeats encoding or
 /// rereads a newer source snapshot. This carries no V or native C authority.
 pub struct FrontRunInputs {
-    namespace: Arc<NamespaceCapture>,
     source_paths: Vec<DefPath>,
     inputs: BTreeSet<DefPath>,
     specializations: BTreeMap<DefPath, Arc<hirsel_engine_store::InstalledSpecializations>>,
@@ -1536,7 +1535,6 @@ impl QueryEngine {
         }
         Ok(FrontRunInputs {
             operation: namespace.lease(),
-            namespace,
             source_paths,
             inputs: paths,
             specializations,
@@ -1601,13 +1599,18 @@ impl QueryEngine {
         allowance: hirsel_engine_admission::MemoryReservation,
         errors: RuntimeErrors,
     ) -> Result<Arc<FrontRunQueries>, QueryError> {
-        inputs.namespace.require_consistent(front.namespace())?;
-        inputs.namespace.require_consistent(lower.namespace())?;
+        inputs
+            .operation
+            .capture()
+            .require_consistent(front.namespace())?;
+        inputs
+            .operation
+            .capture()
+            .require_consistent(lower.namespace())?;
         if inputs.required > allowance.bytes() {
             return Err(operational("Run inputs exceed admission"));
         }
         let FrontRunInputs {
-            namespace,
             operation,
             source_paths,
             inputs,
@@ -1615,6 +1618,7 @@ impl QueryEngine {
             store,
             required,
         } = inputs;
+        let namespace = operation.namespace().clone();
         let signatures = namespace.snapshot.clone();
         // Rows are demanded per type the run names, so it holds only rows its
         // closure reaches. Each type's drop is one of its Input dependencies,
@@ -1638,7 +1642,7 @@ impl QueryEngine {
                                 "hirsel.front.semantic.address.v1"
                             },
                             [
-                                self.environment_value().0.as_slice(),
+                                operation.identity().0.as_slice(),
                                 path.fingerprint().0.as_slice(),
                             ],
                         )),
@@ -1659,7 +1663,7 @@ impl QueryEngine {
                     address: hirsel_artifact_store::Address(ContentHash::of_parts(
                         "hirsel.front.run.address.v1",
                         [
-                            self.environment_value().0.as_slice(),
+                            operation.identity().0.as_slice(),
                             path.fingerprint().0.as_slice(),
                         ],
                     )),
@@ -1691,7 +1695,7 @@ impl QueryEngine {
             runtime,
             foreign_threads: self.foreign_threads.clone(),
             foreign_links: self.foreign_links.clone(),
-            records: crate::NativeRecords::new(self.types.clone(), store.clone()),
+            records: namespace.records.clone(),
             anchors: (*namespace.anchors).clone(),
             store,
             completed: Mutex::new(BTreeMap::new()),

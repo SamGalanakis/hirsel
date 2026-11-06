@@ -902,22 +902,6 @@ pub fn prepare_source_scope(
         loading.return_runtime(runtime);
         return Ok((None, limits));
     }
-    // Ordinary Front and Lower remain obligations of the final graph. When
-    // every namespace producer is an explicit root and none selects generic
-    // instances, preparation only needs those producers. Prefix requests still
-    // check earlier roots before allowing later source publication.
-    let preparation_roots = (!stop_on_error
-        && generators
-            .iter()
-            .all(|path| !engine.instance_bodied(path) && roots.contains(path))
-        && staged.iter().all(|path| roots.contains(path)))
-    .then(|| {
-        roots
-            .iter()
-            .filter(|path| generators.contains(*path) || staged.contains(*path))
-            .cloned()
-            .collect::<Vec<_>>()
-    });
     let planned = plan_source(
         engine,
         limits,
@@ -965,7 +949,7 @@ pub fn prepare_source_scope(
     let scope = engine
         .demand_front_scope_with_policy(
             &definitions,
-            preparation_roots.as_deref().unwrap_or(roots),
+            roots,
             &generators,
             policy,
             stop_on_error,

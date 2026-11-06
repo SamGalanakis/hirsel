@@ -2672,6 +2672,25 @@ impl QueryEngine {
         path: &DefPath,
         replay: &mut bool,
     ) -> Result<Option<Arc<Entry<hirsel_tir::DefinitionRef>>>, QueryError> {
+        // Anchor/header preparation can execute Check before the candidate is
+        // known to be reusable. Only the accepted Entry's exact observations
+        // cross back to its caller, which merges them after this returns.
+        let execution = std::mem::take(&mut self.execution_stack);
+        let validation = std::mem::take(&mut self.evaluation_validation);
+        let acceptance = std::mem::take(&mut self.evaluation_acceptance);
+        let selections = std::mem::take(&mut self.evaluation_selections);
+        let result = self.probe_lower_with_replay(path, replay);
+        self.execution_stack = execution;
+        self.evaluation_validation = validation;
+        self.evaluation_acceptance = acceptance;
+        self.evaluation_selections = selections;
+        result
+    }
+    fn probe_lower_with_replay(
+        &mut self,
+        path: &DefPath,
+        replay: &mut bool,
+    ) -> Result<Option<Arc<Entry<hirsel_tir::DefinitionRef>>>, QueryError> {
         let mut replay_error: Option<QueryError> = None;
         let value = (|| {
             if !self.s1.is_empty() {

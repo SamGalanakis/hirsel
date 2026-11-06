@@ -3591,19 +3591,6 @@ impl QueryEngine {
             .clone()
             .ok_or_else(|| refuse("missing result store".into()))?;
         let lowering = self.adapters.lowering.clone();
-        // V's consuming universe can differ from Front's captured snapshot.
-        // Its private proofs need the same admitted source owner, working
-        // grant and accepted bodies as Front's own headers.
-        if !front.namespace().registrations.is_empty() {
-            let snapshot = self.signature_inputs();
-            let registrations: Vec<_> = front.namespace().registrations.values().cloned().collect();
-            if let (Some(headers), Some(previous)) = (
-                snapshot.header_products(),
-                front.namespace().snapshot.header_products(),
-            ) {
-                headers.inherit_registration_scope(previous, &registrations);
-            }
-        }
         let mut inputs = Vec::with_capacity(definitions.len());
         for path in definitions {
             if front.query(path).is_none() {
@@ -3643,7 +3630,12 @@ impl QueryEngine {
         let layouts: BTreeMap<_, _> = opaque
             .into_iter()
             .filter(|path| packages.contains(&path.0.package))
-            .filter_map(|path| Some((DefId::intern(&path), self.implementation_hash(&path)?)))
+            .filter_map(|path| {
+                Some((
+                    DefId::intern(&path),
+                    namespace.bodies.get(&DefId::intern(&path))?.implementation,
+                ))
+            })
             .collect();
         let layout_bytes = (layouts.len() as u64)
             .checked_mul(
@@ -3677,13 +3669,13 @@ impl QueryEngine {
         let paths = inputs::Paths::new(partition);
         let allowance = partition.allowance.clone();
         let anchors = (*namespace.anchors).clone();
-        let records = crate::NativeRecords::new(self.types.clone(), store.clone());
+        let records = namespace.records.clone();
         let source = Arc::new(LowerSource {
             _inputs: input_charge,
             anchors: anchors.clone(),
             records: records.clone(),
             store: store.clone(),
-            _sources: self.sources.clone(),
+            _sources: namespace.sources.clone(),
             _allowance: allowance.clone(),
         });
         let lower = Arc::new(FrontLowerQueries {

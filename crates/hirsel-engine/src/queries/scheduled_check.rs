@@ -2,7 +2,7 @@
 //! One bounded stream admits and publishes source roots independently of SCC
 //! acceptance. Operational stops fence effectful successors; ordinary bodies
 //! and independent pure evaluations retain their worker window.
-use super::reader_receipts::{ReaderReceipt, ReaderRefresh, ReaderSequence, ReaderSource};
+use super::reader_receipts::{ReaderReceipt, ReaderSequence, ReaderSource};
 use super::*;
 use hirsel_engine_runtime::*;
 use hirsel_engine_store::{Domain, Reference, ResultStore};
@@ -449,7 +449,6 @@ enum Publication {
     },
     Growth,
     Storage,
-    Join,
     Done,
     Finished(Result<ProductRef, Reference>),
 }
@@ -664,12 +663,7 @@ impl Task {
                             &facts.reads,
                             self.queries.weight.scratch,
                             self.queries.weight.retained,
-                            Some(ReaderSource::StagedLower(
-                                facts.query,
-                                index,
-                                site,
-                                facts.producer.clone(),
-                            )),
+                            Some(ReaderSource::StagedLower(facts.query)),
                         )
                         .ok_or(self.queries.errors.resource)?;
                     if let Err((reference, _)) = facts.result {
@@ -814,81 +808,7 @@ impl Task {
                             }
                         }
                     }
-                    self.publication = Publication::Join;
-                }
-                Publication::Join => {
-                    match self
-                        .reads
-                        .refresh(
-                            cx,
-                            &*self.queries.store,
-                            self.queries.weight.scratch,
-                            &self.queries.plan.lower,
-                        )?
-                        .ok_or(self.queries.errors.resource)?
-                    {
-                        ReaderRefresh::Complete => self.publication = Publication::Done,
-                        ReaderRefresh::Waiting(id) => return Ok(Some(vec![id])),
-                        ReaderRefresh::Front {
-                            file,
-                            path,
-                            selected,
-                            facts,
-                            receipt,
-                        } => {
-                            if facts.result.is_ok()
-                                && self.failed_front.iter().any(|(old, _)| old == &path)
-                            {
-                                self.files[file]
-                                    .error(QueryError::NotImplemented, Some(QueryKind::Check));
-                            }
-                            self.front.retain(|(old, _)| old != &path);
-                            self.failed_front.retain(|(old, _)| old != &path);
-                            self.accept_front(file, path, selected, facts, receipt)?;
-                        }
-                        ReaderRefresh::Recomputed {
-                            source,
-                            path,
-                            facts,
-                        } => {
-                            let file = match source {
-                                ReaderSource::Lower(_, file, _) => file,
-                                ReaderSource::StagedLower(_, file, site, _) => {
-                                    if let Err((reference, _)) = facts.result {
-                                        self.files[file].error(
-                                            self.queries
-                                                .plan
-                                                .lower
-                                                .staged_failure(facts.query, reference, site)
-                                                .ok_or(reference)?,
-                                            Some(QueryKind::Lower),
-                                        );
-                                    }
-                                    continue;
-                                }
-                                ReaderSource::Front(..) => {
-                                    return Err(self.queries.protocol_refusal());
-                                }
-                            };
-                            if facts.result.is_ok()
-                                && self.failed_lowered.iter().any(|(old, _)| old == &path)
-                            {
-                                // The earlier failure withheld a source suffix. A
-                                // refreshed success cannot certify those obligations.
-                                self.files[file]
-                                    .error(QueryError::NotImplemented, Some(QueryKind::Check));
-                            }
-                            self.files[file].lowered.retain(|(old, _)| old != &path);
-                            self.failed_lowered.retain(|(old, _)| old != &path);
-                            self.files[file]
-                                .root_diagnostics
-                                .remove(&DiagnosticRoot::Lower(
-                                    facts.query.kind,
-                                    facts.query.address.0,
-                                ));
-                            self.accept_lower(file, path, facts);
-                        }
-                    }
+                    self.publication = Publication::Done;
                 }
                 Publication::Done | Publication::Finished(_) => return Ok(None),
             }
@@ -932,11 +852,7 @@ impl Task {
                         )
                         .ok_or(self.queries.errors.resource)?,
                     self.queries.weight.retained,
-                    Some(ReaderSource::Front(
-                        DefId::intern(path),
-                        file_index,
-                        self.queries.plan.front.clone(),
-                    )),
+                    Some(ReaderSource::Front(DefId::intern(path))),
                 )
                 .ok_or(self.queries.errors.resource)?;
             self.accept_front(file_index, path.clone(), selected, facts, observed)?;
@@ -1020,11 +936,7 @@ impl Task {
                 &facts.reads,
                 self.queries.weight.scratch,
                 self.queries.weight.retained,
-                Some(ReaderSource::Lower(
-                    facts.query,
-                    file,
-                    facts.producer.clone(),
-                )),
+                Some(ReaderSource::Lower(facts.query, facts.producer.clone())),
             )
             .ok_or(self.queries.errors.resource)?;
         self.accept_lower(file, path, facts);
@@ -1454,7 +1366,7 @@ impl QueryEngine {
             address: hirsel_artifact_store::Address(ContentHash::of_parts(
                 "hirsel.front.check.address.v2",
                 [
-                    self.environment_value().0.as_slice(),
+                    capture.lease().identity().0.as_slice(),
                     file_identity.as_slice(),
                 ],
             )),

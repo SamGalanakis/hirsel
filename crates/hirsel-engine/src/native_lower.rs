@@ -275,7 +275,6 @@ pub struct NativeOriginalContext {
     policy: ContentHash,
     instances: Arc<hirsel_tir::InstanceBodies>,
     expected: Arc<BTreeMap<DefPath, ContentHash>>,
-    _successor: Option<(Arc<crate::FrontLowerQueries>, Arc<OriginalLease>)>,
     verify: Verify,
     reuse: bool,
 }
@@ -288,44 +287,6 @@ impl NativeOriginalContext {
         self.admission = Some(admission);
         self.owner = Some(owner);
         self
-    }
-
-    pub(crate) fn in_successor(
-        &self,
-        previous: &crate::NamespaceCapture,
-        current: Arc<crate::FrontLowerQueries>,
-    ) -> Result<Self, QueryError> {
-        if !previous.admits_successor(current.namespace()) {
-            return Err(source_transport(
-                "native original context lacks a source-preserving successor",
-            ));
-        }
-        let charge = self
-            .admission
-            .as_ref()
-            .and_then(|admission| {
-                admission.reserve(
-                    (size_of::<Self>() + size_of::<OriginalLease>() + 4 * size_of::<usize>())
-                        as u64,
-                )
-            })
-            .ok_or_else(|| {
-                source_transport("native original successor context exceeds admission")
-            })?;
-        let namespace = current.namespace();
-        Ok(Self {
-            owner: self.owner.clone(),
-            admission: self.admission.clone(),
-            anchors: namespace.anchors.clone(),
-            signatures: namespace.snapshot.clone(),
-            cache: self.cache.clone(),
-            policy: self.policy,
-            instances: namespace.instances.clone(),
-            expected: self.expected.clone(),
-            _successor: Some((current, charge)),
-            verify: self.verify,
-            reuse: self.reuse,
-        })
     }
 
     /// Bind exact front observations without opening an ordinary source body.
@@ -406,7 +367,6 @@ impl NativeOriginalContext {
         }
         Ok(NativeOriginalReader {
             owner: self.owner.clone(),
-            _successor: self._successor.clone(),
             admission: self.admission.clone(),
             verified: NativeLowerReader {
                 anchors: self.anchors.clone(),
@@ -447,7 +407,6 @@ impl QueryEngine {
             policy: self.source_verification_policy(),
             instances: namespace.instances.clone(),
             expected: Arc::new(expected),
-            _successor: None,
             verify: self.verify,
             reuse: self.native_query_policy().reuse,
         })
@@ -478,7 +437,6 @@ impl QueryEngine {
             policy: self.source_verification_policy(),
             instances: Arc::new(self.instance_bodies(&paths)),
             expected: Arc::new(expected),
-            _successor: None,
             verify: self.verify,
             reuse: self.native_query_policy().reuse,
         })
@@ -640,7 +598,6 @@ struct OrdinarySource {
 pub const NATIVE_ORIGINAL_BODY: hirsel_artifact_store::Domain =
     hirsel_product_codec::CheckedTir::DOMAIN;
 pub struct NativeOriginalReader {
-    _successor: Option<(Arc<crate::FrontLowerQueries>, Arc<OriginalLease>)>,
     owner: Option<Arc<dyn Send + Sync>>,
     admission: Option<OriginalAdmission>,
     verified: NativeLowerReader,
@@ -914,7 +871,6 @@ impl QueryEngine {
             );
         }
         Ok(NativeOriginalReader {
-            _successor: None,
             owner: None,
             admission: None,
             verified: NativeLowerReader {
@@ -990,7 +946,6 @@ impl QueryEngine {
             );
         }
         Ok(NativeOriginalReader {
-            _successor: None,
             owner: None,
             admission: None,
             verified: NativeLowerReader {

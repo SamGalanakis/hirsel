@@ -75,7 +75,7 @@ pub struct PreparedNativeDefinition {
     archive_bytes: u64,
     charge: u64,
     _ownership: Arc<SourceOwnership>,
-    _successor: Arc<FrontLowerQueries>,
+    _capture: Arc<FrontLowerQueries>,
 }
 impl Drop for PreparedNativeDefinition {
     fn drop(&mut self) {
@@ -323,20 +323,9 @@ impl FrontNativeDefinitionQueries {
     pub fn original_context(&self) -> Arc<crate::NativeOriginalContext> {
         self.original_context.clone()
     }
-    pub(crate) fn current_original_context(
-        &self,
-        current: Arc<FrontLowerQueries>,
-    ) -> Result<Arc<crate::NativeOriginalContext>, QueryError> {
-        if Arc::ptr_eq(self.lower.namespace(), current.namespace()) {
-            return Ok(self.original_context.clone());
-        }
-        Ok(Arc::new(
-            self.original_context
-                .in_successor(self.lower.namespace(), current)?,
-        ))
-    }
-    pub(crate) fn current_lower(&self) -> Result<Arc<FrontLowerQueries>, QueryError> {
-        self.lower.check_current()
+
+    pub(crate) fn lower(&self) -> &Arc<FrontLowerQueries> {
+        &self.lower
     }
 
     pub fn signatures(&self) -> Arc<SignatureSnapshot> {
@@ -734,10 +723,7 @@ impl Task {
         // Lower/Evaluate and Run preparation can commit source registrations.
         // Read Front in that committed successor and join exact settled reads
         // through ordinary semantic checking and V revalidation.
-        let current = match owner.current_lower() {
-            Ok(current) => current,
-            Err(error) => return Poll::Ready(Err(owner.fail(error))),
-        };
+        let current = owner.lower.clone();
         let current_front = current.body_front();
         let Some(id) = current_front.body_query(&self.path) else {
             return Poll::Ready(Err(
@@ -807,7 +793,7 @@ impl Task {
                 archive_bytes: 0,
                 charge: 0,
                 _ownership: owner._ownership.clone(),
-                _successor: current.clone(),
+                _capture: current.clone(),
             };
             prepared.prepare_layout(&contracts, &requirements);
             if owner.store.persistence().retains() {
@@ -1066,7 +1052,6 @@ impl QueryEngine {
                 .map_err(|_| refuse())?
                 .as_slice()],
         );
-        let environment = self.environment_value();
         for path in definitions {
             let generated = if namespace
                 .bodies
@@ -1111,7 +1096,7 @@ impl QueryEngine {
                 address: hirsel_artifact_store::Address(ContentHash::of_parts(
                     "hirsel.front.native-definition-address.v2",
                     [
-                        environment.0.as_slice(),
+                        operation.identity().0.as_slice(),
                         selection_identity.0.as_slice(),
                         bytes.as_slice(),
                     ],

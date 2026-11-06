@@ -92,14 +92,11 @@ impl CaptureDelta {
 #[derive(Clone)]
 pub struct OperationLease {
     capture: Arc<NamespaceCapture>,
+    identity: ContentHash,
 }
 impl OperationLease {
     pub fn identity(&self) -> ContentHash {
-        self.capture
-            .consumer_scope
-            .get()
-            .copied()
-            .unwrap_or(self.capture.identity())
+        self.identity
     }
     pub fn capture(&self) -> &NamespaceCapture {
         &self.capture
@@ -573,6 +570,7 @@ impl NamespaceCapture {
     pub fn lease(self: &Arc<Self>) -> OperationLease {
         OperationLease {
             capture: self.clone(),
+            identity: self.consumer_scope.get().copied().unwrap_or(self.identity),
         }
     }
     /// Discovery owns mutable selection until this boundary. Every subsequent

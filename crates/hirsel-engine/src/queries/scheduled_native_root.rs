@@ -458,10 +458,10 @@ impl DefinitionsState {
             .run
             .outcome(run_product.clone())
             .ok_or(QueryError::NotImplemented)?;
-        let current = owner.definitions.current_lower()?;
+        let current = owner.definitions.lower();
         let signatures = current.signatures();
         let anchors = current.namespace().anchors.clone();
-        let original_context = owner.definitions.current_original_context(current)?;
+        let original_context = owner.definitions.original_context();
         let native_selected = self
             .selected
             .iter()

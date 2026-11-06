@@ -11,12 +11,6 @@ pub(in crate::queries) struct CheckFacts {
 #[derive(Clone)]
 pub(in crate::queries) struct CheckProducer {
     pub owner: Arc<FrontLowerQueries>,
-    pub query: QueryId,
-}
-pub(in crate::queries) enum CheckRefresh {
-    Joined(Arc<Reads>),
-    Waiting(QueryId),
-    Recomputed(DefPath, CheckFacts),
 }
 impl FrontLowerQueries {
     fn check_failure(&self, id: QueryId) -> Option<Reference> {
@@ -60,7 +54,6 @@ impl FrontLowerQueries {
             query: id,
             producer: CheckProducer {
                 owner: self.clone(),
-                query: id,
             },
             reads: Arc::new(outcome.reads(self)?),
             phase: outcome.phase,
@@ -98,72 +91,7 @@ impl FrontLowerQueries {
 }
 
 impl FrontLowerQueries {
-    pub(in crate::queries) fn check_current(self: &Arc<Self>) -> Result<Arc<Self>, QueryError> {
-        match self.demand_producer() {
-            Some(producer) => producer.current_capture(&self.namespace),
-            None => Ok(self.clone()),
-        }
-    }
-
-    /// Check includes generated registrations' execution and layout reads,
-    /// which Front's deliberately partial cache observer cannot inspect.
-    pub(in crate::queries) fn check_read(
-        &self,
-        path: &DefPath,
-        key: &ReadKey,
-    ) -> Option<ContentHash> {
-        self.observe(path, key)
-    }
-
-    /// A failed join is a reuse miss. Demand the ordinary producer in the
-    /// committed successor, which performs its normal semantic checks and V.
-    pub(in crate::queries) fn refresh_check(
-        self: &Arc<Self>,
-        cx: &mut dyn QueryContext,
-        id: QueryId,
-        reads: Arc<Reads>,
-    ) -> Result<CheckRefresh, Reference> {
-        let error = match self.check_observations(id, reads) {
-            Ok(reads) => return Ok(CheckRefresh::Joined(reads)),
-            Err(error) => error,
-        };
-        let protocol = |error: QueryError| {
-            self.protocol_failure(
-                id,
-                &format!("Check Lower observations cannot join: {error:?}"),
-            )
-        };
-        let current = self.check_current().map_err(protocol)?;
-        let successor = SuccessorCapture::new(&self.namespace, current).map_err(protocol)?;
-        let owner = successor.owner();
-        let path = self.path(id).ok_or_else(|| protocol(error.clone()))?;
-        let actual = match self.staged.selection(id) {
-            Some(selection) => owner
-                .staged_query(selection.declaration.path(), &selection.arguments)
-                .map_err(protocol)?,
-            None => owner
-                .id(&path, id.kind)
-                .ok_or_else(|| protocol(error.clone()))?,
-        };
-        if actual == id {
-            return Err(protocol(error));
-        }
-        let selected = match cx.read(actual) {
-            Poll::Pending => return Ok(CheckRefresh::Waiting(actual)),
-            Poll::Ready(selected) => selected,
-        };
-        let mut facts = owner.check_facts(actual, selected.clone()).ok_or_else(|| {
-            selected
-                .clone()
-                .err()
-                .unwrap_or_else(|| owner.protocol_refusal())
-        })?;
-        cx.consume(actual);
-        facts.query = id;
-        Ok(CheckRefresh::Recomputed(path, facts))
-    }
-
-    /// Join the selected producer's observations to the completed demand scope.
+    /// Join the selected producer's observations to the admitted capture.
     /// V refreshes validation guards only after semantic reads still agree.
     pub(in crate::queries) fn check_observations(
         &self,
@@ -179,20 +107,9 @@ impl FrontLowerQueries {
         if let Some(row) = forwarded {
             return row.owner.check_observations(row.id, reads);
         }
-        let Some(producer) = self.demand_producer() else {
-            return Ok(reads);
-        };
-        let current = producer.current_capture(&self.namespace)?;
         let path = self
             .path(id)
             .ok_or_else(|| successor::refused("missing Lower observation owner"))?;
-        if reads
-            .first_changed(|key| current.observe(&path, key))
-            .is_none()
-        {
-            return Ok(reads);
-        }
-        let successor = SuccessorCapture::new(&self.namespace, current)?;
         let outcome = self
             .outcomes
             .lock()
@@ -215,8 +132,11 @@ impl FrontLowerQueries {
             contexts.sort_unstable();
             hirsel_validate::ExecutionReceipt::compose(&contexts, std::slice::from_ref(proof))
         });
-        let (reads, _) = successor
-            .revalidate(&path, &reads, execution.as_ref())
+        let (reads, _) = self
+            .namespace
+            .admit_reuse(&path, &reads, execution.as_ref(), |path, key| {
+                self.observe(path, key)
+            })
             .map_err(|error| successor::refused(&format!("{path}: {error:?}")))?;
         Ok(Arc::new(reads))
     }

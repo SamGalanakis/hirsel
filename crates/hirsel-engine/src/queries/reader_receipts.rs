@@ -3,7 +3,6 @@
 use super::*;
 use hirsel_engine_runtime::ProductRef;
 use hirsel_engine_store::{Domain, Reference, ResultStore};
-use std::task::Poll;
 
 const READERS: Domain = Domain {
     kind: 0x4600_003c,
@@ -32,18 +31,12 @@ pub(super) struct ReaderReceipt {
 }
 #[derive(Clone)]
 pub(super) enum ReaderSource {
-    Front(DefId, usize, Arc<FrontBodyQueries>),
+    Front(DefId),
     Lower(
         hirsel_engine_runtime::QueryId,
-        usize,
         scheduled_lower::check::CheckProducer,
     ),
-    StagedLower(
-        hirsel_engine_runtime::QueryId,
-        usize,
-        Option<Span>,
-        scheduled_lower::check::CheckProducer,
-    ),
+    StagedLower(hirsel_engine_runtime::QueryId),
 }
 enum ReaderBacking {
     Live {
@@ -333,22 +326,6 @@ struct SequencedReader {
 }
 #[derive(Default)]
 pub(super) struct ReaderSequence(Vec<SequencedReader>);
-pub(super) enum ReaderRefresh {
-    Complete,
-    Waiting(hirsel_engine_runtime::QueryId),
-    Front {
-        file: usize,
-        path: DefPath,
-        selected: Result<ProductRef, Reference>,
-        facts: parallel::FrontCheckFacts,
-        receipt: ReaderReceipt,
-    },
-    Recomputed {
-        source: ReaderSource,
-        path: DefPath,
-        facts: scheduled_lower::check::CheckFacts,
-    },
-}
 impl ReaderSequence {
     pub(super) fn record(
         &mut self,
@@ -381,111 +358,6 @@ impl ReaderSequence {
         });
         Some(reader)
     }
-    pub(super) fn refresh(
-        &mut self,
-        cx: &mut dyn hirsel_engine_runtime::QueryContext,
-        store: &dyn ResultStore,
-        scratch: u64,
-        lower: &Arc<FrontLowerQueries>,
-    ) -> Result<Option<ReaderRefresh>, Reference> {
-        use scheduled_lower::check::CheckRefresh;
-        for entry in &mut self.0 {
-            let Some(source) = entry.source.clone() else {
-                continue;
-            };
-            if entry
-                .receipt
-                .decoding_bytes()
-                .is_none_or(|bytes| bytes > scratch)
-            {
-                return Ok(None);
-            }
-            let Some(reads) = entry.receipt.load(store) else {
-                return Ok(None);
-            };
-            if let ReaderSource::Front(id, file, owner) = &source {
-                let current = lower
-                    .check_current()
-                    .map_err(|_| lower.protocol_refusal())?;
-                let Some(changed) = reads.first_changed(|key| current.check_read(id.path(), key))
-                else {
-                    continue;
-                };
-                let front = current.body_front();
-                let actual = front
-                    .query(id.path())
-                    .ok_or_else(|| lower.protocol_refusal())?;
-                if owner.query(id.path()) == Some(actual) {
-                    return Err(lower.protocol_failure(
-                        actual,
-                        &format!(
-                            "Check Front {} read {changed:?} changed without a successor producer",
-                            id.path()
-                        ),
-                    ));
-                }
-                let selected = match cx.read(actual) {
-                    Poll::Pending => return Ok(Some(ReaderRefresh::Waiting(actual))),
-                    Poll::Ready(selected) => selected,
-                };
-                let facts = front.check_facts(selected.clone()).ok_or_else(|| {
-                    selected
-                        .clone()
-                        .err()
-                        .unwrap_or_else(|| lower.protocol_refusal())
-                })?;
-                let Some(receipt) = ReaderReceipt::capture(store, &facts.reads, scratch) else {
-                    return Ok(None);
-                };
-                cx.consume(actual);
-                entry.receipt = receipt.clone();
-                entry.source = Some(ReaderSource::Front(*id, *file, front.clone()));
-                return Ok(Some(ReaderRefresh::Front {
-                    file: *file,
-                    path: id.path().clone(),
-                    selected,
-                    facts,
-                    receipt,
-                }));
-            }
-            let (id, producer) = match &source {
-                ReaderSource::Lower(id, _, producer)
-                | ReaderSource::StagedLower(id, _, _, producer) => (*id, producer),
-                ReaderSource::Front(..) => unreachable!(),
-            };
-            let (current, recomputed) =
-                match producer.owner.refresh_check(cx, producer.query, reads)? {
-                    CheckRefresh::Joined(reads) => (reads, None),
-                    CheckRefresh::Waiting(id) => return Ok(Some(ReaderRefresh::Waiting(id))),
-                    CheckRefresh::Recomputed(path, mut facts) => {
-                        facts.query = id;
-                        (facts.reads.clone(), Some((path, facts)))
-                    }
-                };
-            let Some(refreshed) = ReaderReceipt::capture(store, &current, scratch) else {
-                return Ok(None);
-            };
-            entry.source = Some(match (&source, &recomputed) {
-                (ReaderSource::Lower(id, file, _), Some((_, facts))) => {
-                    ReaderSource::Lower(*id, *file, facts.producer.clone())
-                }
-                (ReaderSource::StagedLower(id, file, site, _), Some((_, facts))) => {
-                    ReaderSource::StagedLower(*id, *file, *site, facts.producer.clone())
-                }
-                _ => source.clone(),
-            });
-            entry.receipt = refreshed;
-            if let Some((path, facts)) = recomputed {
-                // Revisit earlier roots if recomputation published a successor.
-                return Ok(Some(ReaderRefresh::Recomputed {
-                    source,
-                    path,
-                    facts,
-                }));
-            }
-        }
-        Ok(Some(ReaderRefresh::Complete))
-    }
     pub(super) fn front_reader(&self, path: &DefPath) -> Option<&ReaderReceipt> {
         self.0
             .iter()
@@ -513,9 +385,7 @@ impl ReaderSequence {
         self.0
             .iter()
             .find_map(|entry| match entry.source.as_ref()? {
-                ReaderSource::Lower(selected, _, producer) if *selected == id => {
-                    Some(&producer.owner)
-                }
+                ReaderSource::Lower(selected, producer) if *selected == id => Some(&producer.owner),
                 _ => None,
             })
     }
@@ -547,9 +417,9 @@ impl ReaderSequence {
                     continue;
                 };
                 let source = match &entry.source {
-                    Some(ReaderSource::Front(id, _, _)) => format!("Front {id:?}"),
-                    Some(ReaderSource::Lower(id, _, _)) => format!("Lower {id:?}"),
-                    Some(ReaderSource::StagedLower(id, _, _, _)) => format!("staged Lower {id:?}"),
+                    Some(ReaderSource::Front(id)) => format!("Front {id:?}"),
+                    Some(ReaderSource::Lower(id, _)) => format!("Lower {id:?}"),
+                    Some(ReaderSource::StagedLower(id)) => format!("staged Lower {id:?}"),
                     None => "Check aggregate".to_owned(),
                 };
                 eprintln!("Check conflicting observation {index}: {source}; {key:?} = {value:?}");

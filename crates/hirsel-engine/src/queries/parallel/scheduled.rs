@@ -457,15 +457,6 @@ impl FrontBodyQueries {
             .unwrap_or_else(|e| e.into_inner())
             .upgrade()
     }
-    pub(in crate::queries) fn check_current(self: &Arc<Self>) -> Result<Arc<Self>, QueryError> {
-        match self.demand_producer() {
-            Some(producer) => Ok(producer
-                .current_capture(&self.namespace)?
-                .body_front()
-                .clone()),
-            None => Ok(self.clone()),
-        }
-    }
     pub(in crate::queries) fn definition(&self, query: QueryId) -> Option<DefId> {
         (query.kind == FRONT_BODY_KIND).then(|| {
             self.inputs

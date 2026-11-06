@@ -185,14 +185,7 @@ impl QueryFactory for Factory {
         if let Some(product) = cached {
             return Ok(Box::new(Reopened { product }));
         }
-        let front = queries.front.check_current().map_err(|error| {
-            crate::requests::source_graph::protocol_failure(
-                &*queries.store,
-                queries.errors,
-                Some(id),
-                &format!("Growth capture: {error:?}"),
-            )
-        })?;
+        let front = queries.front.clone();
         if id == queries.query {
             return Ok(Box::new(Task {
                 front,
@@ -949,7 +942,7 @@ impl QueryEngine {
             address: hirsel_artifact_store::Address(ContentHash::of_parts(
                 "hirsel.front.source-growth.address.v1",
                 [
-                    self.environment_value().0.as_slice(),
+                    front.namespace().lease().identity().0.as_slice(),
                     root.fingerprint().0.as_slice(),
                 ],
             )),

@@ -25,6 +25,7 @@ pub(crate) struct HeaderProduct {
     _row_charge: Charge,
     origin: Weak<Entry<hirsel_types::SignatureRef>>,
     accounted: AtomicBool,
+    recent: AtomicBool,
 }
 pub(crate) trait HeaderAllowance: Send + Sync {
     fn take_header(&self, bytes: u64) -> Option<hirsel_engine_admission::MemoryReservation>;
@@ -144,6 +145,13 @@ struct HeaderSlot {
 }
 impl HeaderSlot {
     fn get(&self) -> Option<Arc<HeaderProduct>> {
+        let product = self.peek();
+        if let Some(product) = &product {
+            product.recent.store(true, Ordering::Relaxed);
+        }
+        product
+    }
+    fn peek(&self) -> Option<Arc<HeaderProduct>> {
         self.product
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -162,6 +170,7 @@ impl HeaderSlot {
         self.work
             .fetch_add(product.graph_work as u64, Ordering::Relaxed);
         *slot = Some(product.clone());
+        product.recent.store(true, Ordering::Relaxed);
         (product, true)
     }
 }
@@ -202,6 +211,7 @@ pub(crate) struct HeaderProducts {
     rows: hirsel_syntax::DefMap<HeaderSlot>,
     paths: Arc<[DefId]>,
     generation: AtomicU64,
+    eviction_hand: AtomicU64,
     /// Bumped by every row this table publishes after construction. An engine
     /// adopts the completed rows once per revision, not once per read.
     revision: AtomicU64,
@@ -323,6 +333,7 @@ impl HeaderProducts {
                             charge: Charge::engine(),
                             _row_charge: Charge::engine(),
                             origin: Arc::downgrade(&entry),
+                            recent: AtomicBool::new(true),
                             accounted: AtomicBool::new(true),
                         });
                     }
@@ -353,6 +364,7 @@ impl HeaderProducts {
             rows,
             paths,
             generation: AtomicU64::new(0),
+            eviction_hand: AtomicU64::new(0),
             revision: AtomicU64::new(0),
             scope: std::sync::Mutex::new(
                 engine
@@ -539,6 +551,7 @@ impl HeaderProducts {
     pub(crate) fn source_fact_index_bytes(engine: &QueryEngine, private: bool) -> u64 {
         let definitions = engine.source_paths().len();
         HeaderSources::facts_index_bytes(definitions)
+            .saturating_add(size_of::<AtomicU64>() as u64)
             .saturating_add((size_of::<Arc<[DefId]>>() + 2 * size_of::<usize>()) as u64)
             .saturating_add(definitions.saturating_mul(size_of::<DefId>()) as u64)
             .saturating_add(
@@ -759,6 +772,10 @@ impl HeaderProducts {
         }
         // A header or proof read refused inside this producer leaves a
         // conservative result, so the result is never published.
+        crate::queries::operation_owner_trace(format_args!(
+            "OWNER HEADER PRODUCE table={:p} id={id:?}",
+            Arc::as_ptr(self)
+        ));
         let outer = engine.take_header_refusal();
         let result = engine.signature_query_local(id);
         let refusal = engine.take_header_refusal();
@@ -872,6 +889,7 @@ impl HeaderProducts {
             publication: self.provisional,
             charge: charge.0,
             origin,
+            recent: AtomicBool::new(true),
             accounted: AtomicBool::new(local),
         };
         if transient {
@@ -1221,6 +1239,7 @@ impl HeaderProducts {
                 publication: false,
                 charge: charge.0,
                 origin: Weak::new(),
+                recent: AtomicBool::new(true),
                 accounted: AtomicBool::new(true),
             },
         );
@@ -1414,9 +1433,35 @@ impl HeaderProducts {
         }
         reclaimed
     }
+    // PostgreSQL REL_17_STABLE src/backend/storage/buffer/freelist.c:315-354.
+    // The clock advances past pinned rows and ages referenced rows before
+    // selecting a cold victim. One reference bit replaces its usage counter;
+    // immutable aliases share the decision, and retain their existing charges.
     fn evict_row(&self) -> bool {
-        for (id, cell) in &self.rows {
-            let Some(product) = cell.get() else {
+        let tables = self
+            .scope()
+            .admission
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .map(|admission| admission.tables.clone());
+        let Some(tables) = tables else {
+            return false;
+        };
+        let tables = tables
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .filter_map(Weak::upgrade)
+            .collect::<Vec<_>>();
+        let count = self.paths.len();
+        let mut remaining = count;
+        while remaining != 0 {
+            let index = self.eviction_hand.fetch_add(1, Ordering::Relaxed) as usize % count;
+            let id = &self.paths[index];
+            let cell = &self.rows[id];
+            remaining -= 1;
+            let Some(product) = cell.peek() else {
                 continue;
             };
             if !product.charge.evictable() {
@@ -1439,22 +1484,6 @@ impl HeaderProducts {
             {
                 continue;
             }
-            let tables = self
-                .scope()
-                .admission
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .as_ref()
-                .map(|admission| admission.tables.clone());
-            let Some(tables) = tables else {
-                continue;
-            };
-            let tables = tables
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .iter()
-                .filter_map(Weak::upgrade)
-                .collect::<Vec<_>>();
             let mut holders = 0;
             for table in &tables {
                 if let Some(cell) = table.rows.get(id) {
@@ -1472,6 +1501,10 @@ impl HeaderProducts {
             if Arc::strong_count(&product) != holders + 1 {
                 continue;
             }
+            if product.recent.swap(false, Ordering::Relaxed) {
+                remaining = count;
+                continue;
+            }
             for table in &tables {
                 if let Some(cell) = table.rows.get(id) {
                     let mut slot = cell.product.lock().unwrap_or_else(|e| e.into_inner());
@@ -1484,6 +1517,16 @@ impl HeaderProducts {
                 }
             }
             if holders != 0 {
+                crate::queries::operation_owner_trace(format_args!(
+                    "OWNER HEADER EVICT table={:p} id={id:?} entry_aliases={} output_aliases={} payload_aliases={}",
+                    self,
+                    Arc::strong_count(entry),
+                    product.result.as_ref().map_or(0, Arc::strong_count),
+                    product
+                        .result
+                        .as_ref()
+                        .map_or(0, |o| Arc::strong_count(&o.value))
+                ));
                 return true;
             }
         }
@@ -1805,6 +1848,85 @@ mod retention_tests {
     }
 
     #[test]
+    fn repeated_header_read_survives_pressure_while_a_cold_row_can_be_reclaimed() {
+        let mut engine = QueryEngine::new(default_environment(), PhaseAdapters::default());
+        let mut headers = HeaderProducts::capture(&engine);
+        for name in ["first_header", "second_header", "third_header"] {
+            Arc::get_mut(&mut headers)
+                .unwrap()
+                .rows
+                .insert(DefId::intern(&DefPath::core(name)), HeaderSlot::default());
+        }
+        let ids: Vec<_> = headers.rows.keys().copied().collect();
+        Arc::get_mut(&mut headers).unwrap().paths = ids.clone().into();
+        let budget = ProcessBudget::new(1 << 20);
+        let backing: Arc<dyn HeaderAllowance> = Arc::new(Allowance(
+            MemoryReservationPool::new(budget.reserve(1 << 20).unwrap())
+                .ok()
+                .unwrap(),
+        ));
+        headers.configure_source_backing(backing.clone(), Arc::new(std::sync::Mutex::new(1 << 19)));
+        for id in ids {
+            let signature = Arc::new(hirsel_types::Signature {
+                metadata: Default::default(),
+                definition: id,
+                kind: hirsel_types::SignatureKind::Const {
+                    ty: engine.types.intern(hirsel_types::Type::unit()),
+                    generics: Default::default(),
+                },
+                fingerprint: ContentHash::of_bytes(id.path().to_string().as_bytes()),
+            });
+            let entry = Arc::new(engine.record(
+                MemoKey::new(QueryKind::Signature, id),
+                signature.fingerprint,
+                Ok(Arc::new(output(signature))),
+                DependencyReads::default(),
+                &Observed::default(),
+            ));
+            let bytes = crate::memo::retained::retained_signature_entry_bytes(&entry).unwrap()
+                + hirsel_engine_admission::retained_arc_bytes(&std::mem::MaybeUninit::<
+                    HeaderProduct,
+                >::uninit());
+            let (charge, row_charge) = headers.admit_signature(Some(&entry), bytes).unwrap();
+            headers.publish(
+                &headers.rows[&id],
+                HeaderProduct {
+                    result: entry.result(),
+                    entry: Some(entry),
+                    recomputes: 0,
+                    graph_work: 0,
+                    publication: false,
+                    charge,
+                    _row_charge: row_charge,
+                    origin: Weak::new(),
+                    recent: AtomicBool::new(true),
+                    accounted: AtomicBool::new(true),
+                },
+            );
+        }
+        assert!(headers.evict_row());
+        let resident: Vec<_> = headers
+            .rows
+            .iter()
+            .filter_map(|(id, slot)| slot.peek().map(|_| *id))
+            .collect();
+        assert_eq!(resident.len(), 2);
+        let [hot, cold] = resident.as_slice() else {
+            unreachable!()
+        };
+        drop(headers.ready(*hot).unwrap());
+        assert!(headers.evict_row());
+        assert!(
+            headers.ready(*hot).is_some(),
+            "a second read must protect the hot header while a cold victim exists"
+        );
+        assert!(
+            headers.ready(*cold).is_none(),
+            "pressure must still reclaim the cold header"
+        );
+    }
+
+    #[test]
     fn metadata_pressure_reclaims_cache_wrappers_while_readers_retain_their_rows() {
         let mut engine = QueryEngine::new(default_environment(), PhaseAdapters::default());
         let id = DefId::intern(&DefPath::core("leased_header"));
@@ -1825,6 +1947,7 @@ mod retention_tests {
             &Observed::default(),
         ));
         let mut headers = HeaderProducts::capture(&engine);
+        Arc::get_mut(&mut headers).unwrap().paths = Arc::from([id]);
         Arc::get_mut(&mut headers)
             .unwrap()
             .rows
@@ -1855,6 +1978,7 @@ mod retention_tests {
                 charge,
                 _row_charge: row_charge,
                 origin: Weak::new(),
+                recent: AtomicBool::new(true),
                 accounted: AtomicBool::new(true),
             },
         );

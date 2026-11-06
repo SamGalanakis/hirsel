@@ -27,7 +27,12 @@ fn decoding_bytes(rows: u32, max_key: u32) -> Option<u64> {
 #[derive(Clone)]
 pub(super) struct ReaderReceipt {
     backing: Arc<ReaderBacking>,
-    live: Option<(DefId, bool)>,
+    live: Option<ReaderSource>,
+}
+#[derive(Clone, Copy)]
+pub(super) enum ReaderSource {
+    Front(DefId, bool),
+    Lower(hirsel_engine_runtime::QueryId),
 }
 enum ReaderBacking {
     Live {
@@ -329,7 +334,7 @@ impl ReaderSequence {
         reads: &Reads,
         scratch: u64,
         retained: u64,
-        live: Option<(DefId, bool)>,
+        live: Option<ReaderSource>,
     ) -> Option<ReaderReceipt> {
         let reader = ReaderReceipt::capture(store, reads, scratch)?;
         self.record_receipt(reader, retained, live)
@@ -338,7 +343,7 @@ impl ReaderSequence {
         &mut self,
         mut reader: ReaderReceipt,
         retained: u64,
-        live: Option<(DefId, bool)>,
+        live: Option<ReaderSource>,
     ) -> Option<ReaderReceipt> {
         if self.0.len() == self.0.capacity() {
             let slots = usize::try_from(retained / size_of::<ReaderReceipt>() as u64).ok()?;
@@ -352,18 +357,52 @@ impl ReaderSequence {
         self.0.push(reader.clone());
         Some(reader)
     }
+    pub(super) fn refresh_lower(
+        &mut self,
+        store: &dyn ResultStore,
+        scratch: u64,
+        lower: &FrontLowerQueries,
+    ) -> Result<Option<()>, QueryError> {
+        for reader in &mut self.0 {
+            let Some(ReaderSource::Lower(id)) = reader.live else {
+                continue;
+            };
+            if reader.decoding_bytes().is_none_or(|bytes| bytes > scratch) {
+                return Ok(None);
+            }
+            let Some(reads) = reader.load(store) else {
+                return Ok(None);
+            };
+            let current = lower.check_observations(id, reads)?;
+            let Some(mut refreshed) = ReaderReceipt::capture(store, &current, scratch) else {
+                return Ok(None);
+            };
+            refreshed.live = reader.live;
+            *reader = refreshed;
+        }
+        Ok(Some(()))
+    }
+    pub(super) fn lower_reader(
+        &self,
+        id: hirsel_engine_runtime::QueryId,
+    ) -> Option<&ReaderReceipt> {
+        self.0.iter().find(
+            |reader| matches!(reader.live, Some(ReaderSource::Lower(selected)) if selected == id),
+        )
+    }
     pub(super) fn finish(
-        self,
+        &self,
         store: &dyn ResultStore,
         scratch: u64,
         front: &FrontBodyQueries,
     ) -> Option<Result<Reads, hirsel_query_products::reads::Inconsistent>> {
         let mut union = ReadUnion::default();
         for reader in &self.0 {
-            if let Some(reads) = reader
-                .live
-                .and_then(|(id, checked)| front.live_reads(id, checked))
-            {
+            let live = reader.live.and_then(|source| match source {
+                ReaderSource::Front(id, checked) => front.live_reads(id, checked),
+                ReaderSource::Lower(_) => None,
+            });
+            if let Some(reads) = live {
                 union.merge_live(&reads, scratch)?;
             } else {
                 reader.merge(&mut union, store, scratch)?;

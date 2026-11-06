@@ -1294,6 +1294,19 @@ impl FrontBodyQueries {
             LookupSource::Head | LookupSource::Candidates => None,
         }
     }
+    fn provisional_generated_header(&self, id: DefId) -> bool {
+        self.namespace
+            .bodies
+            .get(&id)
+            .is_some_and(|body| body.generated)
+            && !self.namespace.registrations.contains_key(&id)
+            && self
+                .declarations
+                .metadata()
+                .definitions
+                .get(id.path())
+                .is_some_and(|metadata| !metadata.public)
+    }
     pub(crate) fn observe(&self, owner: &DefPath, read: &ReadKey) -> Option<ContentHash> {
         self.observe_in(&owner.0.package, read)
     }
@@ -1302,6 +1315,11 @@ impl FrontBodyQueries {
         package: &hirsel_syntax::PackageId,
         read: &ReadKey,
     ) -> Option<ContentHash> {
+        if let ReadKey::Signature(id) | ReadKey::ExecutedSignature(id) = read
+            && self.provisional_generated_header(*id)
+        {
+            return None;
+        }
         use hirsel_query_products::reads::LookupSource;
         Some(match *read {
             ReadKey::PrivateSummary(id) => memos::private_summary_value(
@@ -1555,10 +1573,14 @@ impl FrontBodyQueries {
                     ..input.weight
                 },
                 terminal: None,
+                demand: None,
             };
-            let restored = task
-                .load_evicted(&mut context)
-                .unwrap_or_else(|| task.run(&mut context));
+            let restored = task.load_evicted(&mut context).unwrap_or_else(|| {
+                task.run(&mut context).map_err(|error| match error {
+                    BodyRunError::Refused(reference) => reference,
+                    BodyRunError::Demand(_) => self.protocol_refusal(),
+                })
+            });
             if let Err(reference) = restored {
                 return Err(self
                     .outcome(Err(reference))
@@ -1697,6 +1719,7 @@ impl FrontBodyQueries {
             materialize: true,
             weight: self.inputs.get(&query.address.0)?.weight,
             terminal: None,
+            demand: None,
         }))
     }
     pub fn factory(self: &Arc<Self>) -> Arc<dyn QueryFactory> {
@@ -2210,6 +2233,7 @@ impl QueryFactory for Factory {
             materialize,
             weight: input.weight,
             terminal: None,
+            demand: None,
         }))
     }
 }
@@ -2220,6 +2244,16 @@ struct BodyTask {
     materialize: bool,
     weight: MemoryWeight,
     terminal: Option<Result<ProductRef, Reference>>,
+    demand: Option<DefId>,
+}
+enum BodyRunError {
+    Refused(Reference),
+    Demand(DefId),
+}
+impl From<Reference> for BodyRunError {
+    fn from(reference: Reference) -> Self {
+        Self::Refused(reference)
+    }
 }
 impl QueryTask for BodyTask {
     fn id(&self) -> QueryId {
@@ -2248,6 +2282,9 @@ impl QueryTask for BodyTask {
             .is_some_and(|body| body.generated)
             && self.queries.inputs[&self.input].registration.is_none();
         if pending {
+            self.demand = Some(definition);
+        }
+        if let Some(dependency) = self.demand {
             let Some(producer) = self.queries.demand_producer() else {
                 return finish(Err(self.queries.protocol_failure(self.query, &format!(
                     "generated declaration {} has no accepted registration and no live demand producer",
@@ -2256,10 +2293,10 @@ impl QueryTask for BodyTask {
             };
             let demand = match producer.query(
                 self.queries.namespace.clone(),
-                definition.path(),
+                dependency.path(),
                 self.queries
                     .namespace
-                    .syntax(definition.path())
+                    .syntax(dependency.path())
                     .map_or(Span::default(), |syntax| syntax.item.name_span),
             ) {
                 Ok(query) => query,
@@ -2338,7 +2375,14 @@ impl QueryTask for BodyTask {
                 std::task::Poll::Ready(Ok(_)) => {}
             }
         }
-        let result = self.run(cx);
+        let result = match self.run(cx) {
+            Ok(product) => Ok(product),
+            Err(BodyRunError::Refused(reference)) => Err(reference),
+            Err(BodyRunError::Demand(dependency)) => {
+                self.demand = Some(dependency);
+                return self.poll(cx);
+            }
+        };
         self.terminal = Some(result.clone());
         finish(result)
     }
@@ -2644,13 +2688,13 @@ impl BodyTask {
             }
         }
     }
-    fn run(&mut self, cx: &mut dyn QueryContext) -> Result<ProductRef, Reference> {
+    fn run(&mut self, cx: &mut dyn QueryContext) -> Result<ProductRef, BodyRunError> {
         let _read_scope = self.queries.store.read_scope();
         let _publication = self.queries.store.publication_scope();
         if !self.materialize
             && let Some(product) = self.queries.completed_product(self.query)
         {
-            return product;
+            return product.map_err(Into::into);
         }
         if self.materialize {
             let product = {
@@ -2670,26 +2714,26 @@ impl BodyTask {
             {
                 return product
                     .publish(self.queries.store.as_ref())
-                    .map_err(|_| self.queries.resource_refusal());
+                    .map_err(|_| self.queries.resource_refusal().into());
             }
         }
         if self.materialize
             && let Some(body) = self.restore_body(cx)
         {
-            return body;
+            return body.map_err(Into::into);
         }
         if !self.materialize && self.queries.verify_store == hirsel_engine_store::VerifyStore::Off {
             if let Some(hit) = self.load_evicted(cx) {
-                return hit;
+                return hit.map_err(Into::into);
             }
             if let Some(hit) = self.load_carry(cx) {
-                return hit;
+                return hit.map_err(Into::into);
             }
             if let Some(hit) = self.load_compact(cx) {
-                return hit;
+                return hit.map_err(Into::into);
             }
             if let Some(hit) = self.load(cx) {
-                return hit;
+                return hit.map_err(Into::into);
             }
             timings::count(Count::StoreMisses);
             timings::count(Count::StoreModeMisses);
@@ -2767,7 +2811,7 @@ impl BodyTask {
                     input.definition.path()
                 );
             }
-            return Err(queries.resource_refusal());
+            return Err(queries.resource_refusal().into());
         }
         if let Some(registration) = &input.registration {
             registration.explain(&mut done.result, &queries.citations.sources);
@@ -2815,6 +2859,18 @@ impl BodyTask {
                 .retains()
                 .then_some(&*queries.records),
         );
+        // A generated private header is provisional until its accepted body
+        // supplies the module proof. Do not publish a caller under that row.
+        if queries.demand_producer().is_some()
+            && let Some(dependency) = completed.outcome().reads.iter().find_map(|(key, _)| {
+                let (ReadKey::Signature(id) | ReadKey::ExecutedSignature(id)) = key else {
+                    return None;
+                };
+                queries.provisional_generated_header(*id).then_some(*id)
+            })
+        {
+            return Err(BodyRunError::Demand(dependency));
+        }
         let memo_rows = completed.memo_snapshot();
         let checked = completed.checked_product();
         let dead_arms = completed.take_dead_arms();
@@ -2856,10 +2912,12 @@ impl BodyTask {
             .as_ref()
             .is_some_and(|bytes| bytes.len() as u64 > self.weight.scratch)
         {
-            return Err(queries.resource_refusal());
+            return Err(queries.resource_refusal().into());
         }
         if self.materialize {
-            return self.publish_body(cx, outcome, bytes.as_deref());
+            return self
+                .publish_body(cx, outcome, bytes.as_deref())
+                .map_err(Into::into);
         }
         if let Some((reads, expected)) = expected {
             if failed || reads != *outcome.reads || bytes.as_deref() != Some(expected.as_ref()) {
@@ -2905,7 +2963,7 @@ impl BodyTask {
                     )
                     .ok_or_else(|| queries.resource_refusal())?;
                 queries.install_outcome(self.input, cached);
-                return Err(record);
+                return Err(record.into());
             }
         }
         let (record, action) = if failed {
@@ -2997,7 +3055,7 @@ impl BodyTask {
             .fetch_add(cached.memos.len() as u64, Relaxed);
         queries.install_outcome(self.input, cached);
         match terminal {
-            Err(reference) => Err(reference),
+            Err(reference) => Err(reference.into()),
             Ok(publication) => {
                 self.remember_carry();
                 if let Some(record) = record {

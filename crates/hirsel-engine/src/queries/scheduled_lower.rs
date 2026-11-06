@@ -220,6 +220,7 @@ impl Outcome {
             _ => None,
         }
     }
+    #[cfg(test)]
     fn read_len(&self) -> usize {
         if let Ok(Value::Lower(lower)) = &self.result
             && let Some(live) = lower.live.as_ref().and_then(WeakLowerProduct::upgrade)
@@ -498,7 +499,8 @@ pub struct FrontLowerQueries {
     carry: Mutex<Option<Arc<LowerCarry>>>,
     carry_changes: Mutex<Option<Arc<carry::CarryChanges>>>,
     clean_memos: Mutex<BTreeSet<crate::memo::MemoKey>>,
-    work: Mutex<BTreeMap<DefPath, FrontLowerWork>>,
+    /// Physical work spans every admitted successor of this operation.
+    work: Arc<Mutex<BTreeMap<DefPath, FrontLowerWork>>>,
     weight: MemoryWeight,
     max_reads: usize,
     errors: RuntimeErrors,
@@ -578,6 +580,8 @@ impl FrontLowerQueries {
         u64::try_from(
             size_of::<Self>()
                 + size_of::<LowerSource>()
+                + size_of::<Mutex<BTreeMap<DefPath, FrontLowerWork>>>()
+                + 2 * size_of::<usize>()
                 + size_of::<hirsel_engine_admission::MemoryReservation>()
                 + 4 * size_of::<usize>()
                 + size_of::<Mutex<u64>>()
@@ -690,21 +694,6 @@ impl FrontLowerQueries {
             .get(&(id.kind, id.address.0))?
             .1
             .phase
-    }
-    pub(crate) fn selected_read_len(
-        &self,
-        id: QueryId,
-        selected: Result<ProductRef, Reference>,
-    ) -> Option<usize> {
-        Some(self.selected(id, selected)?.read_len())
-    }
-    /// Complete settled reads from the exact selected owner.
-    pub(crate) fn selected_reads(
-        &self,
-        id: QueryId,
-        selected: Result<ProductRef, Reference>,
-    ) -> Option<Arc<Reads>> {
-        self.selected(id, selected)?.reads(self).map(Arc::new)
     }
     pub fn work_snapshot(&self) -> Vec<(DefPath, FrontLowerWork)> {
         self.work
@@ -1404,6 +1393,30 @@ impl FrontLowerQueries {
         let _publication = self.store.publication_scope();
         let input = &self.inputs[&path];
         let selection = self.staged.selection(id);
+        // Earlier roots may have published generated or staged declarations.
+        // Select this root's producer in that committed capture before reading
+        // its Front product or restoring a Lower memo.
+        if let Some(producer) = self.demand_producer() {
+            let current = producer.current().map_err(|error| {
+                self.protocol_failure(id, &format!("current Lower capture: {error:?}"))
+            })?;
+            if current.namespace.identity() != self.namespace.identity() {
+                let successor =
+                    SuccessorCapture::new(&self.namespace, current).map_err(|error| {
+                        self.protocol_failure(id, &format!("current Lower successor: {error:?}"))
+                    })?;
+                let owner = successor.owner().clone();
+                let actual = match &selection {
+                    Some(selection) => owner
+                        .staged_query(selection.declaration.path(), &selection.arguments)
+                        .map_err(|_| self.protocol_refusal())?,
+                    None => owner
+                        .id(&path, id.kind)
+                        .ok_or_else(|| self.protocol_refusal())?,
+                };
+                return self.forward_capture(id, actual, owner, &reads).await;
+            }
+        }
         let key = if let Some(selection) = &selection {
             &selection.key
         } else if id.kind == FRONT_LOWER_KIND {
@@ -3647,7 +3660,10 @@ impl QueryEngine {
             carry: Mutex::new(None),
             carry_changes: Mutex::new(None),
             clean_memos: Mutex::new(BTreeSet::new()),
-            work: Mutex::new(BTreeMap::new()),
+            work: previous.map_or_else(
+                || Arc::new(Mutex::new(BTreeMap::new())),
+                |owner| owner.work.clone(),
+            ),
             weight,
             max_reads,
             errors,

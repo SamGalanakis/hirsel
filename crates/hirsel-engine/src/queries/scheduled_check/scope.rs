@@ -84,11 +84,11 @@ impl FrontCheckQueries {
                     .ok_or_else(missing)?,
             );
         }
-        for (path, reference, failed) in data
+        for (path, failed) in data
             .lowered
             .iter()
-            .map(|(p, r)| (p, Ok(r.clone()), false))
-            .chain(data.failed_lowered.iter().map(|(p, r)| (p, Err(*r), true)))
+            .map(|(p, _)| (p, false))
+            .chain(data.failed_lowered.iter().map(|(p, _)| (p, true)))
         {
             weight.path(path);
             weight.path(path);
@@ -96,11 +96,12 @@ impl FrontCheckQueries {
                 weight.path(path);
             }
             let query = self.plan.lower.query(path).ok_or_else(missing)?;
-            let rows = self
-                .plan
-                .lower
-                .selected_read_len(query, reference)
-                .ok_or_else(missing)?;
+            let reader = data.observations.lower_reader(query).ok_or_else(missing)?;
+            let rows = reader.len();
+            weight.add(
+                usize::try_from(reader.decoding_bytes().ok_or_else(missing)?)
+                    .map_err(|_| missing())?,
+            );
             weight.add(2 * hirsel_engine_admission::retained_arc_bytes(&Reads::empty()) as usize);
             // The Lower read clone, linear union and a possible boxed-slice
             // shrink overlap temporarily. Front rows have two union buffers
@@ -152,17 +153,17 @@ impl FrontCheckQueries {
                 .ok_or_else(missing)?;
             scope.reads.insert(path.clone(), reads);
         }
-        for (path, reference, failed) in data
+        for (path, failed) in data
             .lowered
             .iter()
-            .map(|(p, r)| (p, Ok(r.clone()), false))
-            .chain(data.failed_lowered.iter().map(|(p, r)| (p, Err(*r), true)))
+            .map(|(p, _)| (p, false))
+            .chain(data.failed_lowered.iter().map(|(p, _)| (p, true)))
         {
             let query = self.plan.lower.query(path).ok_or_else(missing)?;
-            let reads = self
-                .plan
-                .lower
-                .selected_reads(query, reference)
+            let reads = data
+                .observations
+                .lower_reader(query)
+                .and_then(|reader| reader.load(&*self.store))
                 .ok_or_else(missing)?;
             let complete = match scope.reads.get(path) {
                 Some(front) => Arc::new(front.union(&reads).map_err(|_| missing())?),

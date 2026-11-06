@@ -886,7 +886,7 @@ impl DemandProducer {
         }
         Ok(admitted)
     }
-    fn current(&self) -> Result<Arc<FrontLowerQueries>, QueryError> {
+    pub(crate) fn current(&self) -> Result<Arc<FrontLowerQueries>, QueryError> {
         self.state
             .lock()
             .unwrap_or_else(|e| e.into_inner())

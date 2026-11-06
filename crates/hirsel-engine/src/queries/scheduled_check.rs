@@ -2,7 +2,7 @@
 //! One bounded stream admits and publishes source roots independently of SCC
 //! acceptance. Operational stops fence effectful successors; ordinary bodies
 //! and independent pure evaluations retain their worker window.
-use super::reader_receipts::{ReaderReceipt, ReaderSequence};
+use super::reader_receipts::{ReaderReceipt, ReaderSequence, ReaderSource};
 use super::*;
 use hirsel_engine_runtime::*;
 use hirsel_engine_store::{Domain, Reference, ResultStore};
@@ -103,6 +103,7 @@ struct Data {
     failed_front: Vec<(DefPath, Reference)>,
     failed_lowered: Vec<(DefPath, Reference)>,
     reads: ReaderReceipt,
+    observations: ReaderSequence,
     store: Arc<dyn ResultStore>,
 }
 struct FrontRows<'a>(&'a [(DefPath, FrontObservation)]);
@@ -652,7 +653,7 @@ impl Task {
                             &facts.reads,
                             self.queries.weight.scratch,
                             self.queries.weight.retained,
-                            None,
+                            Some(ReaderSource::Lower(facts.query)),
                         )
                         .ok_or(self.queries.errors.resource)?;
                     if let Err((reference, _)) = facts.result {
@@ -842,7 +843,7 @@ impl Task {
                         )
                         .ok_or(self.queries.errors.resource)?,
                     self.queries.weight.retained,
-                    Some((DefId::intern(path), false)),
+                    Some(ReaderSource::Front(DefId::intern(path), false)),
                 )
                 .ok_or(self.queries.errors.resource)?;
             if self
@@ -925,7 +926,7 @@ impl Task {
                 &facts.reads,
                 self.queries.weight.scratch,
                 self.queries.weight.retained,
-                None,
+                Some(ReaderSource::Lower(facts.query)),
             )
             .ok_or(self.queries.errors.resource)?;
         match facts.result {
@@ -947,7 +948,19 @@ impl Task {
     fn complete(&mut self) -> Result<ProductRef, Reference> {
         let queries = &self.queries;
         queries.plan.front.release_handoff();
-        let reads = std::mem::take(&mut self.reads)
+        self.reads
+            .refresh_lower(&*queries.store, queries.weight.scratch, &queries.plan.lower)
+            .map_err(|error| {
+                crate::requests::source_graph::protocol_failure(
+                    &*queries.store,
+                    queries.errors,
+                    Some(queries.query()),
+                    &format!("Check Lower observations cannot join: {error:?}"),
+                )
+            })?
+            .ok_or(queries.errors.resource)?;
+        let reads = self
+            .reads
             .finish(&*queries.store, queries.weight.scratch, &queries.plan.front)
             .ok_or(queries.errors.resource)?
             .map_err(|error| {
@@ -1072,6 +1085,7 @@ impl Task {
             failed_lowered: std::mem::take(&mut self.failed_lowered),
             reads: ReaderReceipt::capture(&*queries.store, &reads, queries.weight.scratch)
                 .ok_or(queries.errors.resource)?,
+            observations: std::mem::take(&mut self.reads),
             store: queries.store.clone(),
         });
         let product = ProductRef::live(
@@ -1227,7 +1241,22 @@ impl QueryEngine {
                     input.paths.push(RootInput {
                         path: item.definition.clone(),
                         executable: item.facts.executable,
-                        ordered_front: item.facts.generator || item.facts.specializes,
+                        ordered_front: item.facts.generator
+                            || item.facts.specializes
+                            || capture.bodies.iter().any(|(id, body)| {
+                                body.generated
+                                    && hirsel_types::unique_summary::same_module(
+                                        id.path(),
+                                        &item.definition,
+                                    )
+                                    && self
+                                        .declarations
+                                        .frozen()
+                                        .metadata()
+                                        .definitions
+                                        .get(id.path())
+                                        .is_some_and(|metadata| !metadata.public)
+                            }),
                         ordered_lower: item.facts.generator
                             || item.facts.staged
                             || item.facts.instance_bodied

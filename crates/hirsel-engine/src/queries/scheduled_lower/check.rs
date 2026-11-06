@@ -2,6 +2,7 @@
 use super::*;
 
 pub(in crate::queries) struct CheckFacts {
+    pub query: QueryId,
     pub reads: Arc<Reads>,
     pub phase: Option<QueryKind>,
     pub result: Result<(Vec<Diagnostic>, ProductRef), (Reference, QueryError)>,
@@ -40,6 +41,7 @@ impl FrontLowerQueries {
             Err(error) => Err((reference?, error.clone())),
         };
         Some(CheckFacts {
+            query: id,
             reads: Arc::new(outcome.reads(self)?),
             phase: outcome.phase,
             result,
@@ -72,5 +74,65 @@ impl FrontLowerQueries {
         };
         cx.consume(id);
         Poll::Ready(Ok(facts))
+    }
+}
+
+impl FrontLowerQueries {
+    /// Join the selected producer's observations to the completed demand scope.
+    /// V refreshes validation guards only after semantic reads still agree.
+    pub(in crate::queries) fn check_observations(
+        &self,
+        id: QueryId,
+        reads: Arc<Reads>,
+    ) -> Result<Arc<Reads>, QueryError> {
+        let forwarded = self
+            .forwarded
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&(id.kind, id.address.0))
+            .cloned();
+        if let Some(row) = forwarded {
+            return row.owner.check_observations(row.id, reads);
+        }
+        let Some(producer) = self.demand_producer() else {
+            return Ok(reads);
+        };
+        let current = producer.current()?;
+        let path = self
+            .path(id)
+            .ok_or_else(|| successor::refused("missing Lower observation owner"))?;
+        if reads
+            .first_changed(|key| current.observe(&path, key))
+            .is_none()
+        {
+            return Ok(reads);
+        }
+        let successor = SuccessorCapture::new(&self.namespace, current)?;
+        let outcome = self
+            .outcomes
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&(id.kind, id.address.0))
+            .map(|(_, outcome, _)| outcome.clone())
+            .ok_or_else(|| successor::refused("missing Lower observation outcome"))?;
+        let execution = outcome.execution.clone().or_else(|| {
+            let Ok(Value::Lower(lower)) = &outcome.result else {
+                return None;
+            };
+            let proof = lower.acceptance.as_ref()?;
+            let mut contexts: Vec<_> = reads
+                .iter()
+                .filter_map(|(key, value)| match key {
+                    ReadKey::ValidationUniverse(package) => Some((package.id(), *value)),
+                    _ => None,
+                })
+                .collect();
+            contexts.sort_unstable();
+            hirsel_validate::ExecutionReceipt::compose(&contexts, std::slice::from_ref(proof))
+        });
+        let (reads, _) = successor
+            .revalidate(&path, &reads, execution.as_ref())
+            .map_err(|error| successor::refused(&format!("{path}: {error:?}")))?;
+        Ok(Arc::new(reads))
     }
 }

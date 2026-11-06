@@ -250,38 +250,42 @@ impl QueryFactory for Factory {
         if id != self.0.preparation_query() {
             return Err(self.0.errors.protocol);
         }
-        let terminal = self
+        let state = self
             .0
             .completed
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .as_ref()
-            .map(|(p, _)| Ok(p.clone()));
+            .map(|(p, _)| RootState::Finished(Ok(p.clone())))
+            .unwrap_or(RootState::Seeding { next: 0 });
         Ok(Box::new(Task {
             owner: self.0.clone(),
             id,
-            selected: None,
-            cursor: 0,
-            seeds: 0,
-            definitions: Vec::new(),
-            used: 0,
-            run_product: None,
-            waiting: None,
-            terminal,
+            state,
         }))
     }
 }
 struct Task {
     owner: Arc<FrontNativeQueries>,
     id: QueryId,
-    selected: Option<Vec<DefPath>>,
-    cursor: usize,
-    seeds: usize,
+    state: RootState,
+}
+enum RootState {
+    Seeding { next: usize },
+    Preparing,
+    Definitions(DefinitionsState),
+    Finished(Result<ProductRef, Reference>),
+}
+struct DefinitionsState {
+    selected: Vec<DefPath>,
+    run_product: ProductRef,
+    next: usize,
     definitions: Vec<FrontNativeDefinitionOutput>,
     used: u64,
-    run_product: Option<ProductRef>,
-    waiting: Option<QueryId>,
-    terminal: Option<Result<ProductRef, Reference>>,
+}
+enum Advance {
+    Waiting(QueryId),
+    Finished(Result<ProductRef, Reference>),
 }
 impl QueryTask for Task {
     fn id(&self) -> QueryId {
@@ -291,16 +295,12 @@ impl QueryTask for Task {
         self.owner.weight
     }
     fn poll(&mut self, cx: &mut dyn QueryContext) -> QueryPoll {
-        let result = if let Some(result) = self.terminal.clone() {
-            result
-        } else {
-            match self.advance(cx) {
-                Poll::Pending => return QueryPoll::Waiting(self.waiting.into_iter().collect()),
-                Poll::Ready(result) => {
-                    self.terminal = Some(result.clone());
-                    result
-                }
-            }
+        let state = std::mem::replace(&mut self.state, RootState::Preparing);
+        let (state, advance) = state.advance(&self.owner, self.id, cx);
+        self.state = state;
+        let result = match advance {
+            Advance::Waiting(id) => return QueryPoll::Waiting(vec![id]),
+            Advance::Finished(result) => result,
         };
         match result {
             Ok(product) => QueryPoll::Complete(product),
@@ -308,108 +308,134 @@ impl QueryTask for Task {
         }
     }
 }
-impl Task {
-    fn read(
-        &mut self,
-        cx: &mut dyn QueryContext,
+fn read(cx: &mut dyn QueryContext, id: QueryId) -> Result<Result<ProductRef, Reference>, QueryId> {
+    match cx.read(id) {
+        Poll::Pending => Err(id),
+        Poll::Ready(result) => Ok(result),
+    }
+}
+impl RootState {
+    fn finish(result: Result<ProductRef, Reference>) -> (Self, Advance) {
+        (Self::Finished(result.clone()), Advance::Finished(result))
+    }
+    fn advance(
+        self,
+        owner: &Arc<FrontNativeQueries>,
         id: QueryId,
-    ) -> Poll<Result<ProductRef, Reference>> {
-        match cx.read(id) {
-            Poll::Pending => {
-                self.waiting = Some(id);
-                Poll::Pending
+        cx: &mut dyn QueryContext,
+    ) -> (Self, Advance) {
+        match self {
+            Self::Seeding { mut next } => {
+                while next < owner.template.definitions.len() {
+                    let path = &owner.template.definitions[next];
+                    let Some(id) = owner.definitions.query(path) else {
+                        return Self::finish(Err(owner.errors.protocol));
+                    };
+                    match read(cx, id) {
+                        Err(id) => return (Self::Seeding { next }, Advance::Waiting(id)),
+                        Ok(Err(error)) => return Self::finish(Err(error)),
+                        Ok(Ok(_)) => cx.release_body(id),
+                    }
+                    next += 1;
+                }
+                Self::Preparing.advance(owner, id, cx)
             }
-            Poll::Ready(result) => {
-                self.waiting = None;
-                Poll::Ready(result)
+            Self::Preparing => {
+                let Some(run_id) = owner.run.preparation_query(&owner.entry) else {
+                    return Self::finish(Err(owner.errors.protocol));
+                };
+                let product = match read(cx, run_id) {
+                    Err(id) => return (Self::Preparing, Advance::Waiting(id)),
+                    Ok(Err(error)) => return Self::finish(Err(error)),
+                    Ok(Ok(product)) => product,
+                };
+                let Some(output) = owner.run.outcome(product.clone()) else {
+                    return Self::finish(Err(owner.errors.protocol));
+                };
+                Self::Definitions(DefinitionsState::prepared(product, &output))
+                    .advance(owner, id, cx)
             }
+            Self::Definitions(mut state) => {
+                while state.next < state.selected.len() {
+                    let path = &state.selected[state.next];
+                    let Some(id) = owner.definitions.query(path) else {
+                        return Self::finish(Err(owner.fail(invalid(format!(
+                            "missing native source product input {path}"
+                        )))));
+                    };
+                    let product = match read(cx, id) {
+                        Err(id) => return (Self::Definitions(state), Advance::Waiting(id)),
+                        Ok(Err(error)) => return Self::finish(Err(error)),
+                        Ok(Ok(product)) => product,
+                    };
+                    let Some(output) = owner.definitions.outcome(product) else {
+                        return Self::finish(Err(owner.errors.protocol));
+                    };
+                    if let Err(error) = state.definition_done(output, owner) {
+                        return Self::finish(Err(error));
+                    }
+                }
+                Self::finish(
+                    state
+                        .complete(owner, id, cx.scratch_bytes())
+                        .map_err(|error| owner.fail(error)),
+                )
+            }
+            Self::Finished(result) => Self::finish(result),
         }
     }
-    fn advance(&mut self, cx: &mut dyn QueryContext) -> Poll<Result<ProductRef, Reference>> {
-        let owner = self.owner.clone();
-        while self.seeds < owner.template.definitions.len() {
-            let path = &owner.template.definitions[self.seeds];
-            let Some(id) = owner.definitions.query(path) else {
-                return Poll::Ready(Err(owner.errors.protocol));
-            };
-            match self.read(cx, id) {
-                Poll::Pending => return Poll::Pending,
-                Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
-                Poll::Ready(Ok(_)) => cx.release_body(id),
-            }
-            self.seeds += 1;
+}
+impl DefinitionsState {
+    fn prepared(run_product: ProductRef, output: &FrontRunOutput) -> Self {
+        // Bootstrap binds every checked semantic declaration, including
+        // compile-time-only functions. Runtime registration is a separate
+        // subset; omitting these headers breaks the exact source union.
+        Self {
+            selected: output
+                .semantic
+                .source_bindings()
+                .map(|(path, _, _)| path.clone())
+                .collect(),
+            run_product,
+            next: 0,
+            definitions: Vec::new(),
+            used: 0,
         }
-        if self.selected.is_none() {
-            let Some(id) = owner.run.preparation_query(&owner.entry) else {
-                return Poll::Ready(Err(owner.errors.protocol));
-            };
-            let product = match self.read(cx, id) {
-                Poll::Pending => return Poll::Pending,
-                Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
-                Poll::Ready(Ok(product)) => product,
-            };
-            let Some(output) = owner.run.outcome(product.clone()) else {
-                return Poll::Ready(Err(owner.errors.protocol));
-            };
-            // Bootstrap binds every checked semantic declaration, including
-            // compile-time-only functions. Runtime registration is a separate
-            // subset; omitting these headers breaks the exact source union.
-            self.selected = Some(
-                output
-                    .semantic
-                    .source_bindings()
-                    .map(|(path, _, _)| path.clone())
-                    .collect(),
-            );
-            self.run_product = Some(product);
-        }
-        let selected = self.selected.as_ref().unwrap().clone();
-        while self.cursor < selected.len() {
-            let path = &selected[self.cursor];
-            let Some(id) = owner.definitions.query(path) else {
-                return Poll::Ready(Err(owner.fail(invalid(format!(
-                    "missing native source product input {path}"
-                )))));
-            };
-            let product = match self.read(cx, id) {
-                Poll::Pending => return Poll::Pending,
-                Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
-                Poll::Ready(Ok(product)) => product,
-            };
-            let Some(output) = owner.definitions.outcome(product) else {
-                return Poll::Ready(Err(owner.errors.protocol));
-            };
-            // Each handoff row is a handle to a product its definition owner
-            // has already charged to that owner's output budget, so the root
-            // holds only the row and its vector slot.
-            let Some(used) = self
-                .used
-                .checked_add(2 * std::mem::size_of::<FrontNativeDefinitionOutput>() as u64)
-            else {
-                return Poll::Ready(Err(owner.errors.resource));
-            };
-            if used > owner.output_budget || used > owner.weight.retained {
-                return Poll::Ready(Err(owner.errors.resource));
-            }
-            self.used = used;
-            self.definitions.push(output);
-            self.cursor += 1;
-        }
-        Poll::Ready(
-            self.complete(cx.scratch_bytes())
-                .map_err(|error| owner.fail(error)),
-        )
     }
-    fn complete(&self, scratch: u64) -> Result<ProductRef, QueryError> {
-        let owner = &self.owner;
-        let selected = self.selected.as_ref().ok_or(QueryError::NotImplemented)?;
-        let run_product = self.run_product.clone().ok_or(QueryError::NotImplemented)?;
+    fn definition_done(
+        &mut self,
+        output: FrontNativeDefinitionOutput,
+        owner: &FrontNativeQueries,
+    ) -> Result<(), Reference> {
+        // Each handoff row is a handle to a product its definition owner
+        // has already charged to that owner's output budget, so the root
+        // holds only the row and its vector slot.
+        let used = self
+            .used
+            .checked_add(2 * std::mem::size_of::<FrontNativeDefinitionOutput>() as u64)
+            .ok_or(owner.errors.resource)?;
+        if used > owner.output_budget || used > owner.weight.retained {
+            return Err(owner.errors.resource);
+        }
+        self.used = used;
+        self.definitions.push(output);
+        self.next += 1;
+        Ok(())
+    }
+    fn complete(
+        self,
+        owner: &Arc<FrontNativeQueries>,
+        id: QueryId,
+        scratch: u64,
+    ) -> Result<ProductRef, QueryError> {
+        let run_product = self.run_product;
         let run = owner
             .run
             .outcome(run_product.clone())
             .ok_or(QueryError::NotImplemented)?;
         let signatures = owner.definitions.signatures();
-        let native_selected = selected
+        let native_selected = self
+            .selected
             .iter()
             .filter_map(|path| {
                 let signature = signatures.signature(DefId::intern(path))?.ok()?;
@@ -587,10 +613,10 @@ impl Task {
             .ok_or(QueryError::NotImplemented)?;
         let action = hirsel_artifact_store::Action(ContentHash::of_parts(
             "hirsel.front.native-root-action.v1",
-            [self.id.address.0.0.as_slice(), record.output.0.0.as_slice()],
+            [id.address.0.0.as_slice(), record.output.0.0.as_slice()],
         ));
         let product = ProductRef::import_archive(
-            self.id.address,
+            id.address,
             action,
             ProductArchive::from_retained_bytes(
                 record,

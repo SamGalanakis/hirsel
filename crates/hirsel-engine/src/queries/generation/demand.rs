@@ -59,12 +59,17 @@ struct DemandView {
     owner: Arc<FrontLowerQueries>,
     _allowance: hirsel_engine_admission::MemoryReservation,
 }
+struct InstanceSelection {
+    declaration: DefId,
+    key: hirsel_types::GeneratedActualKey,
+    site: Option<Span>,
+}
 struct State {
     current: Weak<FrontLowerQueries>,
     views: Vec<DemandView>,
     trace: Vec<(DefId, Vec<hirsel_types::GenericArgument>)>,
     charges: Vec<hirsel_engine_admission::MemoryReservation>,
-    selected: Vec<(DefId, hirsel_types::GeneratedActualKey)>,
+    selected: Vec<InstanceSelection>,
     producing: BTreeMap<DefId, (usize, hirsel_engine_admission::MemoryReservation)>,
     staged_log: Vec<(DefId, ContentHash)>,
 }
@@ -247,13 +252,17 @@ impl DemandProducer {
         let key = hirsel_tir::InstanceBodies::key(capture.snapshot.types(), arguments)
             .ok_or_else(|| refused("selected instance has no canonical key"))?;
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        if state.selected.contains(&(id, key)) {
+        if state
+            .selected
+            .iter()
+            .any(|selection| selection.declaration == id && selection.key == key)
+        {
             return Ok(());
         }
         if state
             .selected
             .iter()
-            .filter(|(declaration, _)| *declaration == id)
+            .filter(|selection| selection.declaration == id)
             .count()
             >= MAX_GENERATED_INSTANCES
         {
@@ -268,12 +277,53 @@ impl DemandProducer {
         }
         let charge = Self::take(
             &self.syntax,
-            (3 * (size_of::<(DefId, hirsel_types::GeneratedActualKey)>()
+            (3 * (size_of::<InstanceSelection>()
                 + size_of::<hirsel_engine_admission::MemoryReservation>())) as u64,
         )?;
-        state.selected.push((id, key));
+        let fresh = !capture
+            .instances
+            .instances
+            .get(&id)
+            .is_some_and(|rows| rows.contains_key(&key));
+        state.selected.push(InstanceSelection {
+            declaration: id,
+            key,
+            site: fresh.then_some(site),
+        });
         state.charges.push(charge);
         Ok(())
+    }
+    fn label_selection(
+        &self,
+        declaration: &DefPath,
+        key: Option<hirsel_types::GeneratedActualKey>,
+        mut error: QueryError,
+    ) -> QueryError {
+        let site = key.and_then(|key| {
+            self.state
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .selected
+                .iter()
+                .find(|selection| {
+                    selection.declaration.path() == declaration && selection.key == key
+                })
+                .and_then(|selection| selection.site.map(|site| (key, site)))
+        });
+        if let Some((key, site)) = site
+            && let QueryError::Diagnostics(diagnostics) = &mut error
+        {
+            let label = hirsel_diag::Label {
+                span: site,
+                message: format!("selects instance {}", key.instance_name(declaration)),
+            };
+            for diagnostic in diagnostics {
+                if !diagnostic.secondary.contains(&label) {
+                    diagnostic.secondary.push(label.clone());
+                }
+            }
+        }
+        error
     }
     pub(crate) async fn charge_manifest(
         &self,
@@ -1311,15 +1361,6 @@ impl DemandProducer {
                 };
                 let actual_key =
                     hirsel_tir::InstanceBodies::key(current.capture().snapshot.types(), arguments);
-                let fresh = instance_bodied(&original)
-                    && actual_key.is_some_and(|key| {
-                        !current
-                            .capture()
-                            .instances
-                            .instances
-                            .get(&declaration_id)
-                            .is_some_and(|rows| rows.contains_key(&key))
-                    });
                 let selected = if instance_bodied(&original) {
                     let request = FrontInstanceRequest {
                         declaration: declaration.clone(),
@@ -1418,22 +1459,9 @@ impl DemandProducer {
                     Err(reference) => {
                         let output = text.failed(reference);
                         if let Some(output) = &output
-                            && let Err(mut error) = output.text()
+                            && let Err(error) = output.text()
                         {
-                            if fresh && let QueryError::Diagnostics(diagnostics) = &mut error {
-                                let key = actual_key.ok_or_else(|| {
-                                    refused("selected instance has no canonical key")
-                                })?;
-                                for diagnostic in diagnostics {
-                                    diagnostic.secondary.push(hirsel_diag::Label {
-                                        span: site,
-                                        message: format!(
-                                            "selects instance {}",
-                                            key.instance_name(declaration)
-                                        ),
-                                    });
-                                }
-                            }
+                            let error = self.label_selection(declaration, actual_key, error);
                             *self.failure.lock().unwrap_or_else(|e| e.into_inner()) =
                                 Some(FrontRegistrationBootstrapError::Runtime {
                                     reference,
@@ -1487,7 +1515,9 @@ impl DemandProducer {
                     Self::take(&self.syntax, self.syntax.available_bytes())?,
                 ) {
                     Ok(accepted) => accepted,
-                    Err(failure) => {
+                    Err(mut failure) => {
+                        failure.error =
+                            self.label_selection(declaration, actual_key, failure.error);
                         let error = failure.error.clone();
                         *self.failure.lock().unwrap_or_else(|e| e.into_inner()) =
                             Some(FrontRegistrationBootstrapError::Acceptance(failure));

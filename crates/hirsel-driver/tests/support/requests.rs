@@ -17,6 +17,7 @@ pub struct Graph {
     pub check: Arc<FrontCheckQueries>,
     _store: Arc<RequestStore>,
     operation: Option<StoreOperation>,
+    failure_sources: Option<hirsel_span::SourceMap>,
 }
 impl Graph {
     pub fn new(engine: &mut QueryEngine, jobs: Jobs) -> Self {
@@ -124,6 +125,7 @@ impl Graph {
             check,
             _store: store,
             operation: Some(operation),
+            failure_sources: None,
         })
     }
     pub fn finish(&mut self) {
@@ -197,7 +199,10 @@ impl Graph {
                 .lower
                 .outcome(products.remove(0))
                 .ok_or_else(|| self.runtime_failure(self.installed.errors.protocol)),
-            Err(failure) => Err(self.failure(failure)),
+            Err(failure) => {
+                self.failure_sources = self.installed.lower.failure_sources(failure);
+                Err(self.failure(failure))
+            }
         }
     }
     pub fn constant(&mut self, path: &DefPath) -> Result<hirsel_tir::Materialized, QueryError> {
@@ -360,6 +365,9 @@ fn lower_requests(
                 Some(QueryKind::Lower),
             ),
             Err(error) => {
+                if let Some(sources) = graph.failure_sources.take() {
+                    engine.sources = sources;
+                }
                 let phase = graph
                     .installed
                     .front

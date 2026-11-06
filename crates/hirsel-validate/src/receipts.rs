@@ -302,7 +302,7 @@ impl<'a> Artifact<'a> {
     }
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 struct Receipt {
     action: ContentHash,
     artifact: ContentHash,
@@ -564,6 +564,33 @@ impl VerifierCache {
             Backend::Memory(..) => Ok(Some(Arc::new(()))),
             Backend::Directory(_) | Backend::Registered(..) => Ok(None),
         }
+    }
+
+    fn retain_receipt(&self, receipt: Receipt) -> Result<AcceptedArtifact, crate::FactError> {
+        let bytes = (size_of::<OriginalReceipt>() + 4 * size_of::<usize>()) as u64
+            + (receipt.reads.capacity() * size_of::<VRead>()) as u64;
+        let lease = self
+            .retain_fact(bytes)
+            .map_err(|_| crate::FactError::Admission)?;
+        Ok(AcceptedArtifact::new(receipt, lease))
+    }
+    fn restore_receipt(
+        &self,
+        artifact: ContentHash,
+        policy: ContentHash,
+        action: ContentHash,
+    ) -> Result<AcceptedArtifact, crate::FactError> {
+        let receipt: Receipt = self
+            .load(original_receipt_key(action), DOMAIN)
+            .ok_or(crate::FactError::Refused)?;
+        if receipt.artifact != artifact
+            || receipt.policy != policy
+            || receipt.action != action
+            || receipt.action != receipt_action(artifact, policy, &receipt.reads)
+        {
+            return Err(crate::FactError::Refused);
+        }
+        self.retain_receipt(receipt)
     }
 
     fn read_holds(
@@ -1094,13 +1121,23 @@ impl VerifierCache {
             Some(_) => return Ok(None),
             None => self.publish_execution(subject, original),
         }
-        self.execution_revalidated(subject, types, anchor, environment)
+        self.execution_revalidated_in(subject, Some(original), types, anchor, environment)
     }
     /// Refresh only a local association, running V here against independently
     /// supplied current views. A caller cannot refresh it with cloned evidence.
     pub fn execution_revalidated(
         &self,
         subject: ContentHash,
+        types: Arc<TypeInterner>,
+        anchor: impl FnMut(&DefPath, u32) -> Option<Anchor>,
+        environment: &dyn ReplayEnvironment,
+    ) -> Result<Option<ExecutionReceipt>, crate::FactError> {
+        self.execution_revalidated_in(subject, None, types, anchor, environment)
+    }
+    fn execution_revalidated_in(
+        &self,
+        subject: ContentHash,
+        original: Option<&ExecutionReceipt>,
         types: Arc<TypeInterner>,
         mut anchor: impl FnMut(&DefPath, u32) -> Option<Anchor>,
         environment: &dyn ReplayEnvironment,
@@ -1111,6 +1148,17 @@ impl VerifierCache {
         let result = (|| {
             let record: ExecutionRecord = self
                 .load(execution_key(subject), EXECUTION_DOMAIN)
+                .or_else(|| {
+                    original.map(|receipt| ExecutionRecord {
+                        subject,
+                        contexts: receipt.contexts.to_vec(),
+                        artifacts: receipt
+                            .artifacts
+                            .iter()
+                            .map(|a| (a.artifact, a.policy, a.receipt))
+                            .collect(),
+                    })
+                })
                 .ok_or(FactError::Refused)?;
             if record.subject != subject
                 || record.artifacts.is_empty()
@@ -1155,10 +1203,14 @@ impl VerifierCache {
             let mut replayed = Vec::new();
             let mut overlays = Vec::new();
             for &(artifact, policy, receipt) in &record.artifacts {
-                let accepted = AcceptedArtifact {
-                    artifact,
-                    policy,
-                    receipt,
+                let accepted = match original.and_then(|original| {
+                    original
+                        .artifacts
+                        .iter()
+                        .find(|a| (a.artifact, a.policy, a.receipt) == (artifact, policy, receipt))
+                }) {
+                    Some(held) => held.clone(),
+                    None => self.restore_receipt(artifact, policy, receipt)?,
                 };
                 hirsel_intern::work::count(hirsel_intern::work::Counter::ExecutionReplayRequests);
                 hirsel_intern::timings::count(
@@ -1274,9 +1326,7 @@ impl VerifierCache {
                         }
                     };
                     let views = inputs.lookup();
-                    let original: Receipt = self
-                        .load(original_receipt_key(accepted.receipt), DOMAIN)
-                        .ok_or(FactError::Unavailable)?;
+                    let original = &accepted.original.receipt;
                     if original.artifact != accepted.artifact
                         || original.policy != accepted.policy
                         || original.action != accepted.receipt
@@ -1434,12 +1484,10 @@ impl VerifierCache {
             artifacts: record
                 .artifacts
                 .into_iter()
-                .map(|(artifact, policy, receipt)| AcceptedArtifact {
-                    artifact,
-                    policy,
-                    receipt,
+                .map(|(artifact, policy, receipt)| {
+                    self.restore_receipt(artifact, policy, receipt).ok()
                 })
-                .collect::<Vec<_>>()
+                .collect::<Option<Vec<_>>>()?
                 .into(),
         })
     }
@@ -1601,13 +1649,47 @@ fn execution_key(subject: ContentHash) -> ContentHash {
 }
 /// A terminal successful V decision. There is intentionally no Deserialize or
 /// producer constructor: only validate_with_receipt can mint this capability.
-#[derive(Clone, Debug, Eq, PartialEq, Hash)]
+#[derive(Clone, Debug)]
 pub struct AcceptedArtifact {
     artifact: ContentHash,
     policy: ContentHash,
     receipt: ContentHash,
+    original: Arc<OriginalReceipt>,
 }
-/// Composed execution evidence contains small artifact identities, not bodies.
+struct OriginalReceipt {
+    receipt: Receipt,
+    _lease: Option<Arc<dyn Send + Sync>>,
+}
+impl std::fmt::Debug for OriginalReceipt {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.receipt.fmt(f)
+    }
+}
+impl AcceptedArtifact {
+    fn new(receipt: Receipt, lease: Option<Arc<dyn Send + Sync>>) -> Self {
+        Self {
+            artifact: receipt.artifact,
+            policy: receipt.policy,
+            receipt: receipt.action,
+            original: Arc::new(OriginalReceipt {
+                receipt,
+                _lease: lease,
+            }),
+        }
+    }
+}
+impl PartialEq for AcceptedArtifact {
+    fn eq(&self, other: &Self) -> bool {
+        (self.artifact, self.policy, self.receipt) == (other.artifact, other.policy, other.receipt)
+    }
+}
+impl Eq for AcceptedArtifact {}
+impl std::hash::Hash for AcceptedArtifact {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        std::hash::Hash::hash(&(self.artifact, self.policy, self.receipt), state);
+    }
+}
+/// Composed execution evidence holds original V observations, not source bodies.
 /// Its complete independent base contexts guard private overlays and callees.
 #[derive(Clone, Debug)]
 pub struct ExecutionReceipt {
@@ -1632,7 +1714,16 @@ impl ExecutionReceipt {
     /// Actual compact context/artifact ownership, without source body bytes.
     pub fn retained_bytes(&self) -> Option<u64> {
         let slots = (std::mem::size_of::<Self>() + 4 * std::mem::size_of::<usize>()) as u64;
+        let originals = self.artifacts.iter().try_fold(0u64, |bytes, artifact| {
+            bytes.checked_add(
+                (size_of::<OriginalReceipt>()
+                    + 4 * size_of::<usize>()
+                    + artifact.original.receipt.reads.capacity() * size_of::<VRead>())
+                    as u64,
+            )
+        })?;
         slots
+            .checked_add(originals)?
             .checked_add(
                 (self.contexts.len() as u64)
                     .checked_mul(std::mem::size_of::<(PackageId, ContentHash)>() as u64)?,
@@ -1704,6 +1795,21 @@ fn validate_with_receipt_in(
     cache: Option<&VerifierCache>,
     reads: &mut Vec<VRead>,
 ) -> Result<(Validation, bool, Option<AcceptedArtifact>), crate::ViewRefusal> {
+    let accept = |receipt: Receipt| match cache {
+        Some(cache) => {
+            cache
+                .retain_receipt(receipt)
+                .map_err(|error| crate::ViewRefusal::Unreadable {
+                    definition: artifact
+                        .definition
+                        .header()
+                        .expect("identified artifact header")
+                        .path,
+                    cause: error.into(),
+                })
+        }
+        None => Ok(AcceptedArtifact::new(receipt, None)),
+    };
     let key = artifact.identity.map(|identity| {
         ContentHash::of_parts(
             "hirsel.validate.receipt.v2",
@@ -1736,17 +1842,9 @@ fn validate_with_receipt_in(
         if holds {
             cache.retain_artifact(artifact, policy);
             cache.publish(original_receipt_key(receipt.action), DOMAIN, &receipt);
-            let original_action = receipt.action;
+            let accepted = accept(receipt.clone())?;
             reads.extend(receipt.reads);
-            return Ok((
-                Validation::default(),
-                false,
-                Some(AcceptedArtifact {
-                    artifact: identity,
-                    policy,
-                    receipt: original_action,
-                }),
-            ));
+            return Ok((Validation::default(), false, Some(accepted)));
         }
     }
     let mut own = vec![];
@@ -1781,13 +1879,17 @@ fn validate_with_receipt_in(
         .violations
         .is_empty()
         .then(|| {
-            artifact.identity.map(|artifact| AcceptedArtifact {
-                artifact,
-                policy,
-                receipt: receipt_action(artifact, policy, &own),
+            artifact.identity.map(|artifact| {
+                accept(Receipt {
+                    artifact,
+                    policy,
+                    action: receipt_action(artifact, policy, &own),
+                    reads: own.clone(),
+                })
             })
         })
-        .flatten();
+        .flatten()
+        .transpose()?;
     reads.extend(own);
     Ok((report, true, accepted))
 }
@@ -2093,10 +2195,12 @@ mod tests {
         cache.evict_facts();
         assert_eq!(
             rows.3.load(std::sync::atomic::Ordering::Relaxed),
-            1,
-            "eviction preserves the active replay's charge"
+            2,
+            "eviction preserves the held issuance and active replay charges"
         );
         drop(active);
+        assert_eq!(rows.3.load(std::sync::atomic::Ordering::Relaxed), 1);
+        drop(original);
         assert_eq!(rows.3.load(std::sync::atomic::Ordering::Relaxed), 0);
     }
 
@@ -2734,6 +2838,7 @@ mod tests {
                 artifact: accepted.artifact,
                 policy: ContentHash::of_bytes(b"foreign policy"),
                 receipt: accepted.receipt,
+                original: accepted.original.clone(),
             }],
         )
         .unwrap();
@@ -2846,6 +2951,33 @@ mod tests {
             &ExecutionReceipt::compose(&contexts, &[accepted]).unwrap(),
         );
         assert!(replay(&environment).is_none());
+
+        cache.publish_execution(subject, &receipt);
+        // Eviction may remove cache issuance while this operation still owns
+        // V's capability. Its old observations must survive a context refresh.
+        let Backend::Memory(rows, _) = &cache.0 else {
+            unreachable!()
+        };
+        rows.lock()
+            .unwrap()
+            .remove(&original_receipt_key(receipt.artifacts[0].receipt));
+        cache.evict_facts();
+        assert!(
+            cache
+                .revalidate_execution(&receipt, session(), |_, _| Some(anchor), &environment,)
+                .unwrap()
+                .is_some()
+        );
+        // Successful V may republish issuance. Evict it again before testing
+        // an independent cache-only restore with no held capability.
+        rows.lock()
+            .unwrap()
+            .remove(&original_receipt_key(receipt.artifacts[0].receipt));
+        cache.evict_facts();
+        assert!(
+            replay(&environment).is_none(),
+            "cache-only restore refuses absent original issuance"
+        );
     }
 
     #[test]

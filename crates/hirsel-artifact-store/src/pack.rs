@@ -12,6 +12,11 @@ mod epoch;
 use crate::index::{self, Key, KeyKind, Location, PinnedGeneration};
 pub use epoch::Request;
 
+#[cfg(test)]
+thread_local! {
+    pub(super) static INDEX_LOADED: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+}
+
 pub(super) const SMALL: usize = 4096;
 const LIMIT: usize = 1 << 20;
 const RECORDS: usize = 1024;
@@ -201,7 +206,17 @@ impl Store {
     }
     fn load_index(&self, observe_stamp: bool) -> Option<Index> {
         self.count(Counter::IndexLoadAttempts, 1);
+        // Observing before selection may cause an extra refresh if a publisher
+        // races us. Observing afterwards can mark an old generation current.
+        let stamp = observe_stamp.then(|| self.index_stamp()).flatten();
         let generation = index::load_pinned(&self.root).unwrap_or_default();
+        #[cfg(test)]
+        INDEX_LOADED.with(|slot| {
+            let callback = slot.borrow_mut().take();
+            if let Some(callback) = callback {
+                callback();
+            }
+        });
         self.count(Counter::IndexPins, 1);
         let diagnostics = self.statistics.get().map(|statistics| {
             Arc::new(IndexObservation {
@@ -220,11 +235,7 @@ impl Store {
         });
         Some(Index {
             generation,
-            stamp: if observe_stamp {
-                self.index_stamp()
-            } else {
-                None
-            },
+            stamp,
             _backing: backing,
             diagnostics,
         })

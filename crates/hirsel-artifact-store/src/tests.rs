@@ -490,6 +490,16 @@ fn read_scopes_pin_absence_and_refresh_only_at_the_next_scope() {
     }
     assert_eq!(after.counters["RegionCacheHits"], 8);
     scope.finish().unwrap();
+
+    let reader = Store::rebuildable(dir.path().to_owned());
+    let next = DOMAIN.reference(b"published during selection").unwrap();
+    pack::INDEX_LOADED.with(|slot| {
+        *slot.borrow_mut() = Some(Box::new(move || {
+            writer.put(DOMAIN, b"published during selection").unwrap();
+        }));
+    });
+    assert_eq!(&*reader.get(reference).unwrap(), b"later");
+    assert_eq!(&*reader.get(next).unwrap(), b"published during selection");
 }
 
 #[test]

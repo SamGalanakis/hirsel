@@ -540,7 +540,9 @@ impl Task {
                         let path = file.input.paths[*root].path.clone();
                         *root += 1;
                         self.publish_root(cx, file_index, path, read)?;
-                        if !pending.is_empty() { return Ok(Some(pending)); }
+                        if !pending.is_empty() {
+                            return Ok(Some(pending));
+                        }
                         continue;
                     }
                     if pending.is_empty() {

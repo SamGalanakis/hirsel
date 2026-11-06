@@ -1302,20 +1302,28 @@ pub(super) fn install(
             | CompileOperation::TirBatch { .. }
             | CompileOperation::NativeSources { .. }
     );
-    let (namespace, limits) = hirsel_engine::requests::source_graph::prepare_source_scope(
-        &mut program.engine,
-        &selection,
-        &demand_roots,
-        demand_policy,
-        prefix,
-        shape,
-        config.jobs,
-        limits,
-        &host,
-        &mut loading,
-        store.as_ref(),
-        carry,
-    )?;
+    let (namespace, limits) = if matches!(
+        request.operation,
+        CompileOperation::Check { .. } | CompileOperation::CheckedProducts { .. }
+    ) {
+        // Check admits namespace-producing work through its ordered cursor.
+        (None, limits)
+    } else {
+        hirsel_engine::requests::source_graph::prepare_source_scope(
+            &mut program.engine,
+            &selection,
+            &demand_roots,
+            demand_policy,
+            prefix,
+            shape,
+            config.jobs,
+            limits,
+            &host,
+            &mut loading,
+            store.as_ref(),
+            carry,
+        )?
+    };
     let scope_roots = (prefix && namespace.is_some()).then(|| match &request.operation {
         CompileOperation::NativeSources { roots } => roots.clone(),
         _ => demand_roots.clone(),

@@ -1424,7 +1424,7 @@ impl QueryEngine {
         jobs: Jobs,
         limits: RequestLimits,
         budget: &Arc<hirsel_engine_admission::ProcessBudget>,
-        mut loading: LoadingAdmission,
+        loading: LoadingAdmission,
         store: &Arc<RequestStore>,
     ) -> Result<CheckOutput, ToolError> {
         let shape = SourceShape {
@@ -1435,21 +1435,9 @@ impl QueryEngine {
             front: carry.front.clone(),
             lower: carry.lower.clone(),
         });
-        let roots = selected_definitions(self);
-        let (namespace, limits) = prepare_source_scope(
-            self,
-            selection,
-            &roots,
-            LoweringPolicy::Comptime,
-            false,
-            shape,
-            jobs,
-            limits,
-            &BudgetHost(budget),
-            &mut loading,
-            store.as_ref(),
-            carry.as_ref(),
-        )?;
+        // Check's ordered cursor owns namespace demand as well as publication.
+        // Preparing generators here would execute them before that cursor can
+        // observe an earlier file stop.
         let mut installed = install(
             self,
             selection,
@@ -1460,7 +1448,7 @@ impl QueryEngine {
             loading,
             store.as_ref(),
             carry.as_ref(),
-            namespace,
+            None,
         )?;
         let check = installed.check(self, selection)?;
         let runtime = self

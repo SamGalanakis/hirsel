@@ -1528,19 +1528,7 @@ impl FrontLowerQueries {
     ) -> Result<ProductRef, Reference> {
         let (mut result, verification, raw) = match computed {
             Ok(computed) => (Ok(computed.value), computed.verification, computed.raw),
-            Err(error) => (
-                Err(lower_input_error(
-                    &path,
-                    if id.kind == FRONT_EVALUATE_KIND {
-                        "evaluating a constant"
-                    } else {
-                        "lowering a body"
-                    },
-                    error,
-                )),
-                None,
-                None,
-            ),
+            Err(error) => (Err(error), None, None),
         };
         // A missing dependency outcome is a scheduler/transport refusal, not
         // a typed body error. Preserve its exact identity through all clones
@@ -2153,18 +2141,16 @@ impl FrontLowerQueries {
         let completed = source.active_owner();
         let lowering = self.lowering.as_deref().ok_or(QueryError::NotImplemented)?;
         self.count(path, |work| work.lowerings += 1);
-        let output = lowering
-            .lower(
-                completed.namespace.snapshot.types(),
-                &self.memo,
-                &analyzed.value,
-                &Comptime {
-                    materialized: constants.clone(),
-                    staged,
-                },
-                &signature,
-            )
-            .map_err(|error| lower_input_error(path, "lowering the accepted body", error))?;
+        let output = lowering.lower(
+            completed.namespace.snapshot.types(),
+            &self.memo,
+            &analyzed.value,
+            &Comptime {
+                materialized: constants.clone(),
+                staged,
+            },
+            &signature,
+        )?;
         let definition = Arc::new(output.value);
         for dependency in &output.dependencies {
             source.record(

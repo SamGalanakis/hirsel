@@ -1142,6 +1142,9 @@ fn native_bootstrap_policy_case(bind_run: bool) {
             } else {
                 None
             };
+            let detached_observation = execution
+                .as_ref()
+                .map(|execution| execution.observation.clone());
             drop(runtime);
             drop(bootstrap);
             drop(routing);
@@ -1251,6 +1254,13 @@ fn native_bootstrap_policy_case(bind_run: bool) {
                 drop(restored);
             }
             drop(platform);
+            if bind_run {
+                assert!(
+                    budget.reserved() > 0,
+                    "detached observation readers retain their original output admission"
+                );
+            }
+            drop(detached_observation);
             assert_eq!(
                 budget.reserved(),
                 0,

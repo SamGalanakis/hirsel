@@ -708,18 +708,9 @@ pub(crate) fn load_program_inputs_with_source_index(
             .restore(&mut engine)
             .map_err(|_| invalid("source index cannot restore into this compiler"))?;
     }
-    engine
-        .select_installed_packages(graph.packages.iter().filter_map(|(package, selected)| {
-            selected
-                .products
-                .as_deref()
-                .map(|products| (package, products))
-        }))
-        .map_err(|error| ToolError::Query {
-            error,
-            phase: None,
-            sources: engine.sources.clone(),
-        })?;
+    engine.select_installed_packages(graph.packages.iter().filter_map(|(package, selected)| {
+        selected.products.as_deref().map(|products| (package, products))
+    }));
     engine.begin_memo_touch_tracking();
     engine.comptime_limits = limits;
     engine.package_manifests = manifests;

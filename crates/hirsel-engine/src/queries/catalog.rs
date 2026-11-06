@@ -160,12 +160,14 @@ struct Candidate {
 #[derive(Default)]
 pub(crate) struct Catalog {
     installed: BTreeMap<PackageId, Arc<hirsel_engine_store::InstalledSourceRecords>>,
+    selected_installation: Option<ContentHash>,
     files: super::native_records::SourceTable<FileId, FileContext>,
     candidates: super::native_records::SourceTable<DefPath, Vec<Candidate>>,
     facts_cache:
         std::sync::RwLock<BTreeMap<hirsel_syntax::LexicalOwner, (ContentHash, Arc<SourceFacts>)>>,
 }
 pub(super) struct CatalogIdentity {
+    selected_installation: Option<ContentHash>,
     files: std::sync::Weak<BTreeMap<FileId, FileContext>>,
     candidates: std::sync::Weak<BTreeMap<DefPath, Vec<Candidate>>>,
     installed: Vec<(
@@ -175,7 +177,8 @@ pub(super) struct CatalogIdentity {
 }
 impl CatalogIdentity {
     pub(super) fn matches(&self, catalog: &Catalog) -> bool {
-        self.files.ptr_eq(&catalog.files.owner())
+        self.selected_installation == catalog.selected_installation
+            && self.files.ptr_eq(&catalog.files.owner())
             && self.candidates.ptr_eq(&catalog.candidates.owner())
             && self.installed.len() == catalog.installed.len()
             && self.installed.iter().zip(&catalog.installed).all(
@@ -201,6 +204,7 @@ impl CatalogIdentity {
 }
 pub(super) struct SourceCatalog {
     installed: BTreeMap<PackageId, Arc<hirsel_engine_store::InstalledSourceRecords>>,
+    selected_installation: Option<ContentHash>,
     files: Box<[(FileId, FileContext)]>,
     candidates: Box<[(DefId, Box<[Candidate]>)]>,
 }
@@ -208,6 +212,7 @@ impl SourceCatalog {
     pub(super) fn restore(self) -> Catalog {
         Catalog {
             installed: self.installed,
+            selected_installation: self.selected_installation,
             files: self.files.into_vec().into_iter().collect(),
             candidates: self
                 .candidates
@@ -223,6 +228,7 @@ impl Clone for Catalog {
     fn clone(&self) -> Self {
         Self {
             installed: self.installed.clone(),
+            selected_installation: self.selected_installation,
             files: self.files.clone(),
             candidates: self.candidates.clone(),
             // Facts are recomputable memoization, not source observations.
@@ -238,17 +244,22 @@ impl Catalog {
         self.installed.get(&path.0.package)
     }
 
-    pub(super) fn installation_identity(&self) -> ContentHash {
+    fn installation_digest<'a>(identities: impl IntoIterator<Item = &'a ContentHash>) -> ContentHash {
         ContentHash::of_parts(
             "hirsel.catalog.installations.v1",
-            self.installed
-                .values()
-                .map(|owner| owner.installation.0.as_slice()),
+            identities.into_iter().map(|identity| identity.0.as_slice()),
         )
+    }
+
+    pub(super) fn installation_identity(&self) -> ContentHash {
+        self.selected_installation.unwrap_or_else(|| {
+            Self::installation_digest(self.installed.values().map(|owner| &owner.installation))
+        })
     }
 
     pub(super) fn identity(&self) -> CatalogIdentity {
         CatalogIdentity {
+            selected_installation: self.selected_installation,
             files: self.files.owner(),
             candidates: self.candidates.owner(),
             installed: self
@@ -277,6 +288,7 @@ impl Catalog {
     }
 
     fn installed_bytes(&self, weight: &mut hirsel_query_products::retained::MetadataWeight) {
+        weight.add(size_of::<Option<ContentHash>>());
         weight.tree::<PackageId, Arc<hirsel_engine_store::InstalledSourceRecords>>(
             self.installed.len(),
         );
@@ -389,6 +401,7 @@ impl Catalog {
         }
         SourceCatalog {
             installed: carry.installed,
+            selected_installation: carry.selected_installation,
             files: carry
                 .files
                 .into_iter()
@@ -686,26 +699,20 @@ impl QueryEngine {
     pub(crate) fn select_installed_packages<'a>(
         &mut self,
         packages: impl IntoIterator<Item = (&'a PackageId, &'a hirsel_engine_store::InstalledPackage)>,
-    ) -> Result<(), QueryError> {
-        let installed = packages
+    ) {
+        let selected: BTreeMap<_, _> = packages.into_iter().collect();
+        self.catalog.selected_installation = Some(Catalog::installation_digest(
+            selected.values().map(|products| &products.identity),
+        ));
+        // Discovery can select a verified installation without materializing
+        // declaration records. Indexing still requires those records below.
+        // Replacement retires owners removed from a restored source index.
+        self.catalog.installed = selected
             .into_iter()
-            .map(|(package, products)| {
-                let records = products.source_records().ok_or_else(|| {
-                    QueryError::Operational(hirsel_types::OperationalFailure {
-                        operation: "installed package".into(),
-                        message: format!(
-                            "missing declaration products for {}@{}",
-                            package.name, package.version
-                        ),
-                    })
-                })?;
-                Ok((package.clone(), records))
+            .filter_map(|(package, products)| {
+                products.source_records().map(|records| (package.clone(), records))
             })
-            .collect::<Result<_, QueryError>>()?;
-        // Replacement also retires installations removed from the selection
-        // when the loader restores a previous source index.
-        self.catalog.installed = installed;
-        Ok(())
+            .collect();
     }
     pub fn index_installed_source(
         &mut self,

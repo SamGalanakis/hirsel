@@ -52,7 +52,6 @@ pub struct FrontDemandScope {
     definitions: Vec<DefPath>,
     registrations: Vec<Arc<AcceptedFrontRegistration>>,
     namespace: Arc<NamespaceCapture>,
-    demand_owner: Arc<FrontLowerQueries>,
     front: Option<Arc<FrontBodyQueries>>,
     rounds: usize,
     stats: RuntimeStats,
@@ -73,9 +72,7 @@ impl FrontDemandScope {
         &self.namespace
     }
     pub fn lease(&self) -> OperationLease {
-        self.namespace
-            .lease()
-            .with_demand(self.demand_owner.clone())
+        self.namespace.lease()
     }
     pub(crate) fn front(&self) -> Option<&Arc<FrontBodyQueries>> {
         self.front.as_ref()
@@ -266,13 +263,14 @@ impl QueryEngine {
         let front = carry
             .as_ref()
             .map(|_| successor.owner().body_front().clone());
-        producer.finish_scope(successor.owner());
+        // All preparation consumers have joined. Only accepted source inputs
+        // and the optional Front carry cross into the operation.
+        drop(producer);
         Ok(FrontDemandScope {
             carry,
             definitions,
             registrations,
             namespace,
-            demand_owner: successor.owner().clone(),
             front,
             rounds,
             stats,

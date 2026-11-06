@@ -453,7 +453,7 @@ impl Plan {
         .ok_or_else(|| uninstalled())?;
         let slack = limits.snapshot_bytes.checked_sub(fixed).ok_or_else(|| {
             ToolError::Runtime(
-                "compiler immutable input inventory exceeds snapshot admission".into(),
+                format!("compiler immutable input inventory exceeds snapshot admission: fixed {fixed}/{} B; source {source}, Front {}, Lower {lower_inventory}, Growth {growth_inventory}, storage {storage_inventory}, Check {check_inventory}, Run {run_inventory}, extension {extension_inventory}", limits.snapshot_bytes, footprint.front_inputs),
             )
         })?;
         // Headers and private proofs can grow after this metadata-only plan.

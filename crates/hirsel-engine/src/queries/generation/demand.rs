@@ -212,21 +212,6 @@ impl DemandProducer {
         initial.keep_demand(producer.clone());
         Ok(producer)
     }
-    /// The scope runtime has joined every consumer. Keep its accepted head
-    /// and semantic generation history, not completed engines or request memos.
-    pub(crate) fn finish_scope(self: &Arc<Self>, owner: &Arc<FrontLowerQueries>) {
-        let views = {
-            let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-            state.current = Arc::downgrade(owner);
-            std::mem::take(&mut state.views)
-        };
-        let requests =
-            std::mem::take(&mut *self.requests.lock().unwrap_or_else(|e| e.into_inner()));
-        let scopes = std::mem::take(&mut *self.scopes.lock().unwrap_or_else(|e| e.into_inner()));
-        drop((views, requests, scopes));
-        // The head is outside `views`, so this ownership cannot form a cycle.
-        owner.keep_demand(self.clone());
-    }
     pub(crate) fn assembly(&self, capture: &NamespaceCapture) -> Result<QueryEngine, QueryError> {
         capture.assembly(&self.adapters)
     }

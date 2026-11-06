@@ -977,7 +977,7 @@ fn validate_plans(
         .iter()
         .map(|u| (u.unit().header.instance, u.unit()))
         .collect();
-    let digests: BTreeMap<_, _> = index.iter().map(|(k, u)| (*k, u.digest())).collect();
+    let digests = PlanDigests::new(&index, inputs);
     // Suspension propagates from callees to callers over reverse call edges.
     let mut callers: BTreeMap<ContentHash, BTreeSet<ContentHash>> = BTreeMap::new();
     let mut suspends = BTreeSet::new();
@@ -1061,7 +1061,7 @@ fn validate_plans(
     for id in order.iter().rev() {
         let (id, plan) = (id, &plans.plans[id]);
         let u = index[id];
-        if plan.body != *id || plan.digest != u.digest() {
+        if plan.body != *id || plan.digest != digests.units[id] {
             return Err(ContinuationError::Body(*id));
         }
         let effects: Vec<_> = u
@@ -2251,7 +2251,8 @@ pub(super) fn isolate_frame(
         .iter()
         .map(|u| (u.unit().header.instance, u.unit()))
         .collect();
-    if plan.body != id || plan.digest != u.digest() {
+    let digests = PlanDigests::new(&index, inputs);
+    if plan.body != id || plan.digest != digests.units[&id] {
         return Err(ContinuationError::Body(id));
     }
     if plan.representation != Representation::Resumable
@@ -2421,7 +2422,6 @@ pub(super) fn isolate_frame(
     {
         return Err(ContinuationError::Frame(id));
     }
-    let digests = index.iter().map(|(k, u)| (*k, u.digest())).collect();
     let certificate = certify(
         u,
         inputs,

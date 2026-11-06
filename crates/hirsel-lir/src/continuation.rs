@@ -289,6 +289,27 @@ pub struct PlanInputs<'a> {
     pub classify: &'a dyn Fn(&DefPath) -> Option<CalleeClass>,
 }
 
+/// Digests of the immutable inputs to one planning or validation pass.
+/// Import validation constructs its own set instead of trusting the producer's.
+struct PlanDigests {
+    units: BTreeMap<ContentHash, ContentHash>,
+    table: ContentHash,
+    target: ContentHash,
+}
+
+impl PlanDigests {
+    fn new(units: &BTreeMap<ContentHash, &LirUnit<Ready>>, inputs: &PlanInputs<'_>) -> Self {
+        Self {
+            units: units
+                .iter()
+                .map(|(id, unit)| (*id, unit.digest()))
+                .collect(),
+            table: inputs.table.digest(),
+            target: inputs.target.digest(),
+        }
+    }
+}
+
 /// One existing call boundary of the body.
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub struct ExistingBoundary {
@@ -1447,11 +1468,11 @@ fn states(
 }
 
 /// The certificate binds everything the plan was derived from.
-pub(crate) fn certify(
+fn certify(
     u: &LirUnit<Ready>,
     inputs: &PlanInputs<'_>,
     effects: &[CallEffect],
-    callee_digests: &BTreeMap<ContentHash, ContentHash>,
+    digests: &PlanDigests,
     representation: &Representation,
     (parameters, records): (&[FrameParameter], &[FrameRegion]),
     storage: &[LiveStorage],
@@ -1462,16 +1483,16 @@ pub(crate) fn certify(
 ) -> ValidatedContinuation {
     let mut bytes = Vec::new();
     bytes.extend_from_slice(&u.header.instance.0);
-    bytes.extend_from_slice(&u.digest().0);
-    bytes.extend_from_slice(&inputs.table.digest().0);
-    bytes.extend_from_slice(&inputs.target.digest().0);
+    bytes.extend_from_slice(&digests.units[&u.header.instance].0);
+    bytes.extend_from_slice(&digests.table.0);
+    bytes.extend_from_slice(&digests.target.0);
     bytes.extend_from_slice(&inputs.runtime.0);
     for effect in effects {
         let text = match effect {
             CallEffect::Nested(id) => format!(
                 "nested {:?} {:?}",
                 id,
-                callee_digests.get(id).copied().unwrap_or_default()
+                digests.units.get(id).copied().unwrap_or_default()
             ),
             other => format!("{other:?}"),
         };
@@ -1541,7 +1562,7 @@ fn plan_unit(
     inputs: &PlanInputs<'_>,
     units: &BTreeMap<ContentHash, &LirUnit<Ready>>,
     suspends: &BTreeSet<ContentHash>,
-    digests: &BTreeMap<ContentHash, ContentHash>,
+    digests: &PlanDigests,
     done: &BTreeMap<ContentHash, ContinuationPlan>,
     admission: Result<Option<isolate::IsolateEvidence>, String>,
     checked: &[&ValidatedUnit<Ready>],
@@ -1710,7 +1731,7 @@ fn plan_unit(
     );
     ContinuationPlan {
         body: u.header.instance,
-        digest: u.digest(),
+        digest: digests.units[&u.header.instance],
         representation,
         parameters: fixed.0,
         records: fixed.1,
@@ -1732,7 +1753,7 @@ fn plan_in_order(
     inputs: &PlanInputs<'_>,
     units: &BTreeMap<ContentHash, &LirUnit<Ready>>,
     suspends: &BTreeSet<ContentHash>,
-    digests: &BTreeMap<ContentHash, ContentHash>,
+    digests: &PlanDigests,
     active: &mut BTreeSet<ContentHash>,
     done: &mut BTreeMap<ContentHash, ContinuationPlan>,
     checked: &[&ValidatedUnit<Ready>],
@@ -1805,7 +1826,7 @@ impl ContinuationPlans {
             .iter()
             .map(|u| (u.unit().header.instance, u.unit()))
             .collect();
-        let digests: BTreeMap<_, _> = index.iter().map(|(k, u)| (*k, u.digest())).collect();
+        let digests = PlanDigests::new(&index, inputs);
         let suspends = suspending(&index, inputs.table, inputs.classify, inputs.environments);
         let mut plans = BTreeMap::new();
         for id in &suspends {

@@ -30,7 +30,7 @@ impl IsolateProtocol {
             .iter()
             .map(|u| (u.unit().header.instance, u.unit()))
             .collect();
-        let digests = index.iter().map(|(id, u)| (*id, u.digest())).collect();
+        let digests = PlanDigests::new(&index, inputs);
         let suspends = ordinary.plans.keys().copied().collect();
         // The source-proved begin is entered, not an opaque retry. This
         // classification is local to the inactive proposal; ordinary callers

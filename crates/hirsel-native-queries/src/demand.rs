@@ -650,15 +650,37 @@ impl DemandInstances {
         ),
         String,
     > {
-        if key.target_abi != self.target.digest() || key.policy != self.policy {
-            return Err("native dependency differs from the request snapshot".into());
-        }
         let output = self
             .completed
             .get(key.instance.encoding())
             .ok_or("native instance dependency has not completed")?;
+        let request = self
+            .requests
+            .get(key.instance.encoding())
+            .ok_or("native operation scope has no original request")?;
+        self.admitted_input(key, output, request, environment)
+    }
+    fn admitted_input(
+        &self,
+        key: &InstanceAddress,
+        output: &StoredInstance,
+        request: &Request,
+        environment: &NativeEnvironment<'_>,
+    ) -> Result<
+        (
+            Arc<DiscoveredInstance>,
+            hirsel_lir::validate::CheckedLinkage,
+        ),
+        String,
+    > {
+        if key.target_abi != self.target.digest()
+            || key.policy != self.policy
+            || request.key.bind()? != key.instance
+        {
+            return Err("native dependency differs from the request snapshot".into());
+        }
+        let operations = self.operations_input(key, output, request, environment)?;
         let output = output.read(self, key)?;
-        let operations = self.operations(key, environment)?;
         let scoped = NativeEnvironment {
             operations: &operations,
             ..*environment
@@ -697,11 +719,23 @@ impl DemandInstances {
             .completed
             .get(key.instance.encoding())
             .ok_or("native operation scope has no completed original plan")?;
-        let output = output.read(self, key)?;
         let request = self
             .requests
             .get(key.instance.encoding())
             .ok_or("native operation scope has no original request")?;
+        self.operations_input(key, output, request, environment)
+    }
+    fn operations_input<'a>(
+        &'a self,
+        key: &'a InstanceAddress,
+        output: &StoredInstance,
+        request: &Request,
+        environment: &NativeEnvironment<'a>,
+    ) -> Result<super::instance_operations::InstanceOperations<'a>, String> {
+        if request.key.bind()? != key.instance {
+            return Err("native operation scope has another original request".into());
+        }
+        let output = output.read(self, key)?;
         Ok(super::instance_operations::InstanceOperations {
             inventory: Some(&self.seal_inventory),
             declarations: environment.operations,

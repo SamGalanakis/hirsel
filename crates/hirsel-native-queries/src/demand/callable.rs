@@ -201,6 +201,18 @@ impl DemandInstances {
         let text = std::str::from_utf8(&bytes).map_err(|e| e.to_string())?;
         hirsel_codec::from_text(text).map_err(|e| format!("callable interface: {e:?}"))
     }
+    fn callable_request(
+        &self,
+        reference: Reference,
+    ) -> Result<(Request, Option<Arc<window::WindowRead>>), String> {
+        let request: Request = read_json(self.store.as_ref(), reference)?;
+        let charge = self
+            .window
+            .as_ref()
+            .map(|window| window.read_for("request", request.retained_metadata_bytes()))
+            .transpose()?;
+        Ok((request, charge))
+    }
     pub(crate) fn specialize_callables(
         &mut self,
         options: &hirsel_native::Options,
@@ -218,6 +230,23 @@ impl DemandInstances {
             .collect::<Result<BTreeMap<_, _>, String>>()?;
         let mut invocation_weight = hirsel_query_products::retained::MetadataWeight::default();
         invocation_weight.map(&invocation_records, |w, path, _| w.path(path));
+        let mut originals = self.completed_inputs()?;
+        originals.sort_by(|a, b| a.0.canonical_cmp(&b.0));
+        // The original request snapshot has finished discovery and receipt
+        // comparison. Keep ordinary addressed requests, reopen one at its next
+        // consumer, and release the duplicate decoded maps before window work.
+        let request_records = originals
+            .iter()
+            .map(|(key, _)| {
+                let request = self
+                    .requests
+                    .get(key.instance.encoding())
+                    .ok_or("callable original request is missing")?;
+                self.json(request)
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        self.requests.clear();
+        self.completed.clear();
         let index_bytes = self.retained_index_bytes() + invocation_weight.bytes();
         let mut graph_charge = self
             .window
@@ -240,8 +269,6 @@ impl DemandInstances {
                 operations_charge.as_ref().map_or(0, |c| c.bytes())
             );
         }
-        let mut originals = self.completed_inputs()?;
-        originals.sort_by(|a, b| a.0.canonical_cmp(&b.0));
         let index = originals
             .iter()
             .enumerate()
@@ -272,7 +299,15 @@ impl DemandInstances {
         }
         let components = hirsel_graph::components(&edges);
         let mut graph_weight = hirsel_query_products::retained::MetadataWeight::default();
-        graph_weight.vec(&originals, |w, (key, _)| address_weight(w, key));
+        graph_weight.flat_vec(&request_records);
+        graph_weight.vec(&originals, |w, (key, stored)| {
+            address_weight(w, key);
+            w.add(
+                stored
+                    .retained_bytes()
+                    .saturating_sub(size_of::<StoredInstance>() as u64) as usize,
+            );
+        });
         graph_weight.map(&index, |w, (path, _), _| w.path(path));
         graph_weight.vec(&edges, |w, edges| w.flat_vec(edges));
         graph_weight.vec(&components, |w, members| w.flat_vec(members));
@@ -413,8 +448,9 @@ impl DemandInstances {
                 operations: &operations,
                 discharge: Some(&options.discharge),
             };
+            let (request, _request_charge) = self.callable_request(request_records[i])?;
             let (output, linkage) = self
-                .admitted(key, &env)
+                .admitted_input(key, stored, &request, &env)
                 .map_err(|e| format!("callable signatures: {e}"))?;
             interfaces.push(self.json(&Interface {
                 abi: linkage.abi(),
@@ -450,7 +486,15 @@ impl DemandInstances {
         drop(components);
         drop(edges);
         let mut graph_weight = hirsel_query_products::retained::MetadataWeight::default();
-        graph_weight.vec(&originals, |w, (key, _)| address_weight(w, key));
+        graph_weight.flat_vec(&request_records);
+        graph_weight.vec(&originals, |w, (key, stored)| {
+            address_weight(w, key);
+            w.add(
+                stored
+                    .retained_bytes()
+                    .saturating_sub(size_of::<StoredInstance>() as u64) as usize,
+            );
+        });
         graph_weight.map(&index, |w, (path, _), _| w.path(path));
         let graph_bytes = index_bytes + graph_weight.bytes();
         let mut counts = vec![0usize; originals.len()];
@@ -488,7 +532,8 @@ impl DemandInstances {
                 operations: &operations,
                 discharge: Some(&options.discharge),
             };
-            let scoped = self.operations(original, &env)?;
+            let (request, _request_charge) = self.callable_request(request_records[origin])?;
+            let scoped = self.operations_input(original, stored, &request, &env)?;
             let (closure, body) = self.queries.read(
                 original,
                 &output.product,
@@ -679,14 +724,16 @@ impl DemandInstances {
                 return Err("duplicate callable window selection".into());
             }
         }
-        let request = |selection: &Selection| -> Result<Request, String> {
-            let original = originals
-                .get(selection.origin)
-                .ok_or("callable selection has no original")?;
-            let mut request = self.requests[original.0.instance.encoding()].clone();
-            Arc::make_mut(&mut request.0).key = Arc::new(selection.key.clone());
-            Ok(request)
-        };
+        let request =
+            |selection: &Selection| -> Result<(Request, Option<Arc<window::WindowRead>>), String> {
+                let reference = request_records
+                    .get(selection.origin)
+                    .ok_or("callable selection has no original")?;
+                let (mut request, mut charge) = self.callable_request(*reference)?;
+                Arc::make_mut(&mut request.0).key = Arc::new(selection.key.clone());
+                resize(&mut charge, request.retained_metadata_bytes())?;
+                Ok((request, charge))
+            };
         let mut w = hirsel_query_products::retained::MetadataWeight::default();
         w.flat_vec(&rewritten);
         w.map(&keys, |w, (path, _), _| w.path(path));
@@ -700,7 +747,7 @@ impl DemandInstances {
             let row: Rewritten = read_json(self.store.as_ref(), reference)?;
             let selection: Selection = read_json(self.store.as_ref(), row.selection)?;
             let key = self.address(selection.key.bind()?);
-            let selected_request = request(&selection)?;
+            let (selected_request, _selected_request_charge) = request(&selection)?;
             let origin = selection.origin;
             select_invocations(
                 self,
@@ -765,6 +812,14 @@ impl DemandInstances {
                 hirsel_rc::closure_calls::OperationFreedom::extract(&unit, &table);
             let mut emission = super::super::emission::EmissionFacts::extract(&unit, []);
             emission.inline = inline;
+            let discovery_requests = dependencies
+                .iter()
+                .map(|key| {
+                    let name = (key.instance.definition().clone(), key.instance.digest());
+                    let selection: Selection = read_json(self.store.as_ref(), keys[&name])?;
+                    request(&selection)
+                })
+                .collect::<Result<Vec<_>, String>>()?;
             let discovery = self.put(
                 INSTANCE_DISCOVERY_DOMAIN,
                 &serde_json::to_vec(&Discovery {
@@ -773,14 +828,10 @@ impl DemandInstances {
                     ready_source: original.facts.source.ready_source.encode()?,
                     seal_demand: seal_demand.clone(),
                     callees: callees.clone(),
-                    requests: dependencies
+                    requests: discovery_requests
                         .iter()
-                        .map(|key| {
-                            let name = (key.instance.definition().clone(), key.instance.digest());
-                            let selection: Selection = read_json(self.store.as_ref(), keys[&name])?;
-                            request(&selection)
-                        })
-                        .collect::<Result<Vec<_>, String>>()?,
+                        .map(|(request, _)| request.clone())
+                        .collect(),
                     selection_reads: original.facts.source.selection_reads.clone(),
                     constant_reads: original.facts.source.constant_reads.clone(),
                     templates: templates.clone(),
@@ -793,6 +844,7 @@ impl DemandInstances {
                 })
                 .map_err(|e| e.to_string())?,
             )?;
+            drop(discovery_requests);
             let (_, finalizers): (
                 super::super::local::StaticRows,
                 super::super::local::FinalizerRows,
@@ -813,8 +865,12 @@ impl DemandInstances {
                         .ok_or("missing callable finalizer ABI")
                 })
                 .collect::<Result<Vec<_>, _>>()?;
-            let original_operations = self.operations(
+            let original_request: Request =
+                read_json(self.store.as_ref(), request_records[origin])?;
+            let original_operations = self.operations_input(
                 &originals[origin].0,
+                &originals[origin].1,
+                &original_request,
                 &NativeEnvironment {
                     target: &self.target,
                     manifest,

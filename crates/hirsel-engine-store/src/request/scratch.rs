@@ -39,11 +39,27 @@ impl Drop for CachedRead {
 // pathname. Admission can end this read epoch before any required allocation.
 pub(super) struct ReadCache {
     entries: Mutex<BTreeMap<Reference, Bytes>>,
+    files: Weak<Mutex<Files>>,
 }
 impl ReadCache {
     pub(super) fn evict(&self) {
         let entries = std::mem::take(&mut *self.entries.lock().unwrap_or_else(|e| e.into_inner()));
         drop(entries);
+        // Read calls can hold the index while asking admission to evict. They
+        // retry after releasing it; other callers reclaim weak metadata here.
+        if let Some(files) = self.files.upgrade()
+            && let Ok(mut files) = files.try_lock()
+        {
+            for entry in files.entries.values_mut() {
+                if entry
+                    .read
+                    .as_ref()
+                    .is_some_and(|cached| cached.bytes.strong_count() == 0)
+                {
+                    entry.read = None;
+                }
+            }
+        }
     }
     fn contains(&self, reference: Reference) -> bool {
         self.entries
@@ -93,7 +109,7 @@ struct Files {
 pub(crate) struct ScratchStore {
     selected: Arc<dyn ResultStore>,
     // Close the spool before the last directory owner can remove its path.
-    files: Mutex<Files>,
+    files: Arc<Mutex<Files>>,
     admission: Arc<Admission>,
     root: Arc<Root>,
     disk_limit: u64,
@@ -147,8 +163,16 @@ impl ScratchStore {
             ));
         }
         let _ = admission.scratch.set(root.clone());
+        let files = Arc::new(Mutex::new(Files {
+            disk: 0,
+            spool_bytes: 0,
+            metadata,
+            entries: BTreeMap::new(),
+            spool,
+        }));
         let reads = Arc::new(ReadCache {
             entries: Mutex::new(BTreeMap::new()),
+            files: Arc::downgrade(&files),
         });
         let _ = admission.reads.set(Arc::downgrade(&reads));
         Ok(Self {
@@ -157,13 +181,7 @@ impl ScratchStore {
             admission,
             root,
             disk_limit,
-            files: Mutex::new(Files {
-                disk: 0,
-                spool_bytes: 0,
-                metadata,
-                entries: BTreeMap::new(),
-                spool,
-            }),
+            files,
         })
     }
 }
@@ -171,7 +189,7 @@ impl Drop for ScratchStore {
     fn drop(&mut self) {
         self.admission.release(
             self.files
-                .get_mut()
+                .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .metadata,
         );
@@ -347,6 +365,35 @@ impl ResultStore for ScratchStore {
         self.read_product_content(reference).ok()
     }
     fn read_product_content(&self, reference: Reference) -> Result<Bytes, ProductArchiveError> {
+        let read = self.read_content(reference);
+        if !matches!(read, Err(ProductArchiveError::Admission { .. })) {
+            return read;
+        }
+        // The failed attempt has released the spool lock. Pressure can now
+        // retire expired weak reads as well as their cached payloads.
+        self.reads.evict();
+        let read = self.read_content(reference);
+        if matches!(read, Err(ProductArchiveError::Admission { .. })) {
+            self.admission.exhausted.store(true, Ordering::Release);
+        }
+        read
+    }
+}
+
+impl ScratchStore {
+    fn read_charge(&self, bytes: u64, stage: &'static str) -> Result<(), ProductArchiveError> {
+        if self.admission.try_charge(bytes) {
+            Ok(())
+        } else {
+            Err(ProductArchiveError::Admission {
+                stage,
+                requested: bytes,
+                retained: self.admission.used.load(Ordering::Acquire),
+                limit: self.admission.memory.bytes(),
+            })
+        }
+    }
+    fn read_content(&self, reference: Reference) -> Result<Bytes, ProductArchiveError> {
         let mut files = self.files.lock().unwrap_or_else(|e| e.into_inner());
         let Files {
             spool_bytes,
@@ -397,11 +444,8 @@ impl ResultStore for ScratchStore {
             .len
             .checked_add(ENTRY_CHARGE)
             .ok_or(ProductArchiveError::LayoutOverflow)?;
-        self.admission.archive_charge(retained, "scratch read")?;
-        if let Err(error) = self
-            .admission
-            .archive_charge(cache_charge + ENTRY_CHARGE, "scratch read metadata")
-        {
+        self.read_charge(retained, "scratch read")?;
+        if let Err(error) = self.read_charge(cache_charge + ENTRY_CHARGE, "scratch read metadata") {
             self.admission.release(retained);
             return Err(error);
         }
@@ -527,6 +571,38 @@ mod tests {
         assert_eq!(request.retained_bytes(), charged);
         let child = held.range(3, 11, 1).unwrap();
         drop(held);
+        request
+            .memory
+            .reads
+            .get()
+            .unwrap()
+            .upgrade()
+            .unwrap()
+            .evict();
+        assert_eq!(
+            request.retained_bytes(),
+            charged,
+            "live readers keep their cache lease"
+        );
+        drop(child);
+        request
+            .memory
+            .reads
+            .get()
+            .unwrap()
+            .upgrade()
+            .unwrap()
+            .evict();
+        assert_eq!(
+            request.retained_bytes(),
+            before,
+            "pressure releases all reconstructible read state"
+        );
+        let child = request
+            .get_content(reference)
+            .unwrap()
+            .range(3, 11, 1)
+            .unwrap();
         drop(request);
         assert_eq!(&*child, &[7; 11]);
         assert_eq!(budget.reserved(), ram);

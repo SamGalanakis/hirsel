@@ -2021,6 +2021,16 @@ impl QueryContext for DetachedFrontContext<'_> {
 struct Factory(Arc<FrontBodyQueries>);
 impl QueryFactory for Factory {
     fn evict(&self, query: QueryId, product: &ProductRef, scratch: u64) -> bool {
+        if !self.0.owns_query(query)
+            && let Some(front) = self
+                .0
+                .demand
+                .get()
+                .and_then(std::sync::Weak::upgrade)
+                .and_then(|demand| demand.front_for(query))
+        {
+            return front.factory().evict(query, product, scratch);
+        }
         self.0.release_handoff();
         let mut slots = self.0.slots.lock().unwrap_or_else(|e| e.into_inner());
         let (outcome, observations) = match slots.get(&query.address.0) {

@@ -199,6 +199,7 @@ impl HeaderPhases {
 pub(crate) struct HeaderProducts {
     operation: Arc<operation_inputs::OperationOwner>,
     rows: hirsel_syntax::DefMap<HeaderSlot>,
+    paths: Arc<[DefId]>,
     generation: AtomicU64,
     /// Bumped by every row this table publishes after construction. An engine
     /// adopts the completed rows once per revision, not once per read.
@@ -290,11 +291,15 @@ impl HeaderProducts {
         let inputs = SourceInputs::capture(engine);
         let private = private::PrivateProducts::capture(engine);
         let declarations = engine.declarations.frozen();
-        let rows = engine
+        let paths: Arc<[_]> = engine
             .source_paths()
             .into_iter()
-            .map(|path| {
-                let id = DefId::intern(&path);
+            .map(|path| DefId::intern(&path))
+            .collect();
+        let rows = paths
+            .iter()
+            .copied()
+            .map(|id| {
                 let cell = HeaderSlot::default();
                 if engine.unmarked_signature(id).is_some()
                     && private
@@ -345,6 +350,7 @@ impl HeaderProducts {
         let headers = Arc::new(Self {
             operation: engine.operation.clone(),
             rows,
+            paths,
             generation: AtomicU64::new(0),
             revision: AtomicU64::new(0),
             scope: std::sync::Mutex::new(
@@ -520,7 +526,10 @@ impl HeaderProducts {
             .map(|output| output.value.clone())
     }
     pub(crate) fn source_fact_index_bytes(engine: &QueryEngine, private: bool) -> u64 {
-        HeaderSources::facts_index_bytes(engine.source_paths().len())
+        let definitions = engine.source_paths().len();
+        HeaderSources::facts_index_bytes(definitions)
+            .saturating_add((size_of::<Arc<[DefId]>>() + 2 * size_of::<usize>()) as u64)
+            .saturating_add(definitions.saturating_mul(size_of::<DefId>()) as u64)
             .saturating_add(
                 engine
                     .catalog
@@ -554,7 +563,7 @@ impl HeaderProducts {
             .collect()
     }
     pub(crate) fn definitions(&self) -> impl Iterator<Item = DefId> + '_ {
-        self.rows.keys().copied()
+        self.paths.iter().copied()
     }
     /// The settled summary of `id`. Err only for a resource refusal of its
     /// module proof; a failed proof has no summary.

@@ -1747,17 +1747,34 @@ impl QueryEngine {
             })
     }
     pub(crate) fn source_paths(&self) -> Vec<DefPath> {
-        self.items
-            .keys()
-            .chain(self.catalog.paths())
-            .chain(
-                self.header_products
-                    .iter()
-                    .flat_map(|headers| headers.definitions().map(|id| id.path())),
-            )
-            .collect::<BTreeSet<_>>()
-            .into_iter()
-            .cloned()
-            .collect()
+        // alloc/collections/btree/merge_iter.rs:52-94, MergeIterInner::nexts:
+        // advance the lesser head, or both equal heads. Peekable permits the
+        // three differently typed streams to share that ordered-union rule.
+        fn union<'a>(
+            left: impl Iterator<Item = &'a DefPath>,
+            right: impl Iterator<Item = &'a DefPath>,
+        ) -> impl Iterator<Item = &'a DefPath> {
+            let (mut left, mut right) = (left.peekable(), right.peekable());
+            std::iter::from_fn(move || match (left.peek(), right.peek()) {
+                (Some(a), Some(b)) => match a.cmp(b) {
+                    std::cmp::Ordering::Less => left.next(),
+                    std::cmp::Ordering::Greater => right.next(),
+                    std::cmp::Ordering::Equal => {
+                        right.next();
+                        left.next()
+                    }
+                },
+                (Some(_), None) => left.next(),
+                (None, _) => right.next(),
+            })
+        }
+        union(
+            union(self.items.keys(), self.catalog.paths()),
+            self.header_products
+                .iter()
+                .flat_map(|headers| headers.definitions().map(|id| id.path())),
+        )
+        .cloned()
+        .collect()
     }
 }

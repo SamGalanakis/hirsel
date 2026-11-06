@@ -697,6 +697,7 @@ impl HeaderProducts {
         Arc::new(Self {
             operation: self.operation.clone(),
             rows,
+            paths: self.paths.clone(),
             generation: AtomicU64::new(0),
             revision: AtomicU64::new(0),
             scope: Mutex::new(self.scope()),

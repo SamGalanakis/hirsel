@@ -299,6 +299,13 @@ impl FrontNativeDefinitionQueries {
     pub(crate) fn constant_reads(&self, path: &DefPath) -> Option<Arc<Reads>> {
         self.lower.settled_reads(path, QueryKind::Evaluate)
     }
+    pub(crate) fn staged_static_query(
+        &self,
+        selected: &[DefPath],
+        completed: &[QueryId],
+    ) -> Option<QueryId> {
+        self.lower.staged_static_query(selected, completed)
+    }
     pub(crate) fn staged_static_inputs(
         &self,
         selected: &BTreeSet<DefPath>,

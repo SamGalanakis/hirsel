@@ -223,6 +223,26 @@ impl FrontLowerQueries {
 }
 
 impl FrontLowerQueries {
+    /// Lower and reopened descriptors record the exact staged selections they
+    /// consumed. Native statics must demand their Evaluate products in this
+    /// runtime before collecting values; a prior graph's completion is not one.
+    pub(crate) fn staged_static_query(
+        &self,
+        selected: &[DefPath],
+        completed: &[QueryId],
+    ) -> Option<QueryId> {
+        self.staged
+            .selections
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .filter(|(_, selection)| selected.contains(selection.owner.path()))
+            .map(|(address, _)| QueryId {
+                kind: FRONT_EVALUATE_KIND,
+                address: hirsel_artifact_store::Address(*address),
+            })
+            .find(|query| !completed.contains(query))
+    }
     pub(crate) fn staged_static_inputs(
         &self,
         selected: &BTreeSet<DefPath>,

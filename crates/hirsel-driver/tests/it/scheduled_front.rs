@@ -965,9 +965,13 @@ fn admitted_front_pressure_refused_citation_caches_nothing_and_recomputes_the_ci
         let path = directory.path().join("main.hir");
         // `main`'s MODE-2 cites `code`'s failed unique-result claim, which
         // only `code`'s module proof records.
+        // Shared header metadata can be reclaimed before the proof. These
+        // bodies keep the citation read under real pressure at the original cap.
+        let need = "let _=0u64;".repeat(10);
+        let code_body = "let _=0u64;".repeat(8);
         std::fs::write(
             &path,
-            "const NAME:String=\"shared\"\nfn code()->String{NAME}\nfn need(take value:unique String){}\npub fn main(){need(code())}\n",
+            format!("const NAME:String=\"shared\"\nfn code()->String{{{code_body}NAME}}\nfn need(take value:unique String){{{need}}}\npub fn main(){{need(code())}}\n"),
         )
         .unwrap();
         crate::image_fixture::core_manifest(&path, &path.with_extension("hir.json"));
@@ -1048,8 +1052,8 @@ fn admitted_front_pressure_refused_citation_caches_nothing_and_recomputes_the_ci
             let request = runtime.request(&[bodies[0]]);
             let code = runtime.wait(request).unwrap().pop().unwrap();
             if mode == 0 {
-                // Measured: the metadata, the module proof and one body.
-                limit = front.retained_bytes();
+                // Preserve the original pressure allowance across fixture growth.
+                limit = 89_979;
                 let request = runtime.request(&[bodies[2]]);
                 let main = runtime.wait(request).unwrap_err();
                 assert!(cites(&front, Err(main)), "with room the citation is read");

@@ -505,7 +505,9 @@ impl HeaderProducts {
         (product, settled)
     }
     pub(crate) fn source_facts(&self, id: DefId) -> Option<hirsel_query_products::SourceFacts> {
-        self.syntax.facts(id)
+        self.syntax
+            .facts(id)
+            .or_else(|| self.inputs.catalog.facts(id.path()).cloned())
     }
     pub(crate) fn captured_text(&self, id: DefId) -> Option<sources::CapturedText> {
         self.syntax.text(id)

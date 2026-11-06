@@ -281,6 +281,7 @@ struct DefinitionsState {
     run_product: ProductRef,
     next: usize,
     definitions: Vec<FrontNativeDefinitionOutput>,
+    evaluated: Vec<QueryId>,
     used: u64,
 }
 enum Advance {
@@ -375,6 +376,29 @@ impl RootState {
                         return Self::finish(Err(error));
                     }
                 }
+                while let Some(query) = owner
+                    .definitions
+                    .staged_static_query(&state.selected, &state.evaluated)
+                {
+                    match read(cx, query) {
+                        Err(query) => return (Self::Definitions(state), Advance::Waiting(query)),
+                        Ok(Err(error)) => return Self::finish(Err(error)),
+                        Ok(Ok(_)) => {}
+                    }
+                    // Vec's first allocation holds four query slots; this
+                    // bound also covers every later geometric growth step.
+                    let Some(used) = state
+                        .used
+                        .checked_add(4 * std::mem::size_of::<QueryId>() as u64)
+                    else {
+                        return Self::finish(Err(owner.errors.resource));
+                    };
+                    if used > owner.output_budget || used > owner.weight.retained {
+                        return Self::finish(Err(owner.errors.resource));
+                    }
+                    state.used = used;
+                    state.evaluated.push(query);
+                }
                 Self::finish(
                     state
                         .complete(owner, id, cx.scratch_bytes())
@@ -399,6 +423,7 @@ impl DefinitionsState {
             run_product,
             next: 0,
             definitions: Vec::new(),
+            evaluated: Vec::new(),
             used: 0,
         }
     }

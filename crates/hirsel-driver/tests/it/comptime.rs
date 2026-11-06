@@ -1523,7 +1523,13 @@ fn frozen_lowering_frontier_matches_scalar_for_nonconstant_comptime_and_edits() 
                     paths.iter().collect::<Vec<_>>()
                 );
                 for outcome in &actual {
-                    assert!(!outcome.reads.is_empty());
+                    assert!(
+                        !outcome
+                            .reads
+                            .as_ref()
+                            .expect("completed query has read evidence")
+                            .is_empty()
+                    );
 
                     assert_eq!(
                         outcome.phase,
@@ -1536,10 +1542,15 @@ fn frozen_lowering_frontier_matches_scalar_for_nonconstant_comptime_and_edits() 
                     if outcome.definition == path("A") {
                         for name in ["A", "helper", "SEED"] {
                             assert!(
-                                outcome.reads.iter().any(|(key, _)| *key
-                                    == hirsel_query_products::reads::ReadKey::ExecutedBody(
-                                        hirsel_syntax::DefId::intern(&path(name))
-                                    )),
+                                outcome
+                                    .reads
+                                    .as_ref()
+                                    .expect("completed query has read evidence")
+                                    .iter()
+                                    .any(|(key, _)| *key
+                                        == hirsel_query_products::reads::ReadKey::ExecutedBody(
+                                            hirsel_syntax::DefId::intern(&path(name))
+                                        )),
                                 "missing execution read {name}"
                             );
                         }
@@ -1703,15 +1714,26 @@ fn frozen_lowering_frontier_keeps_lower_warnings_and_current_hit_metadata() {
                             continue;
                         }
                         assert_eq!(
-                            outcome.reads.get(key),
+                            outcome
+                                .reads
+                                .as_ref()
+                                .expect("completed query has read evidence")
+                                .get(key),
                             Some(*value),
                             "jobs={jobs} warm={warm} missing {key:?}"
                         );
                     }
-                    assert!(outcome.reads.iter().any(|(key, _)| matches!(
-                        key,
-                        hirsel_query_products::reads::ReadKey::ValidationUniverse(_)
-                    )));
+                    assert!(
+                        outcome
+                            .reads
+                            .as_ref()
+                            .expect("completed query has read evidence")
+                            .iter()
+                            .any(|(key, _)| matches!(
+                                key,
+                                hirsel_query_products::reads::ReadKey::ValidationUniverse(_)
+                            ))
+                    );
                 }
                 let compact = crate::request_graph::checked_prefix(
                     &mut candidate,
@@ -1735,10 +1757,17 @@ fn frozen_lowering_frontier_keeps_lower_warnings_and_current_hit_metadata() {
                         placed_evidence(&candidate.sources, format!("{:?}", output.diagnostics)),
                         placed_evidence(&control.sources, format!("{:?}", expected.diagnostics))
                     );
-                    assert!(outcome.reads.iter().any(|(key, _)| matches!(
-                        key,
-                        hirsel_query_products::reads::ReadKey::ValidationUniverse(_)
-                    )));
+                    assert!(
+                        outcome
+                            .reads
+                            .as_ref()
+                            .expect("completed query has read evidence")
+                            .iter()
+                            .any(|(key, _)| matches!(
+                                key,
+                                hirsel_query_products::reads::ReadKey::ValidationUniverse(_)
+                            ))
+                    );
                 }
             }
         }
@@ -1909,14 +1938,24 @@ fn frozen_lowering_prefix_keeps_demanded_closure_and_final_outcomes_across_edits
                     assert_eq!(
                         actual.len(),
                         expected.len(),
-                        "jobs={jobs} warm={warm} serial failures={:?}",
+                        "jobs={jobs} warm={warm} serial failures={:?} actual failures={:?}",
                         expected
                             .iter()
                             .filter_map(|result| result.as_ref().err())
+                            .collect::<Vec<_>>(),
+                        actual
+                            .iter()
+                            .filter_map(|outcome| outcome.result.as_ref().err())
                             .collect::<Vec<_>>()
                     );
                     for (outcome, depth) in actual.iter().zip(&depths) {
-                        assert!(!outcome.reads.is_empty());
+                        assert!(
+                            !outcome
+                                .reads
+                                .as_ref()
+                                .expect("completed query has read evidence")
+                                .is_empty()
+                        );
                         assert_eq!(
                             outcome.phase,
                             Some(QueryKind::Lower),
@@ -1955,6 +1994,18 @@ fn frozen_lowering_prefix_keeps_demanded_closure_and_final_outcomes_across_edits
                 }
             }
         }
+        let mut candidate = engine(source);
+        let missing = crate::request_graph::lower_prefix(
+            &mut candidate,
+            vec![path("MISSING")],
+            hirsel_intern::jobs::Jobs::ONE,
+        )
+        .remove(0);
+        assert!(missing.reads.is_none());
+        let Err(QueryError::Operational(failure)) = missing.result else {
+            panic!("missing read evidence must refuse the request")
+        };
+        assert_eq!(failure.operation, "settled query evidence");
     });
 }
 

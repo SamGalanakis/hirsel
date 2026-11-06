@@ -1038,15 +1038,35 @@ fn imaged_frontier_replay_budget_matrix() -> String {
                     placed(&cached.engine.sources, actual_text),
                     placed(&fresh.engine.sources, expected_text)
                 );
-                assert!(!outcome.reads.is_empty());
-                assert!(outcome.reads.iter().any(|(key, _)| *key
-                    == hirsel_query_products::reads::ReadKey::ExecutedBody(
-                        hirsel_syntax::DefId::intern(&path)
-                    )));
-                assert!(outcome.reads.iter().any(|(key, _)| matches!(
-                    key,
-                    hirsel_query_products::reads::ReadKey::ValidationUniverse(_)
-                )));
+                assert!(
+                    !outcome
+                        .reads
+                        .as_ref()
+                        .expect("completed query has read evidence")
+                        .is_empty()
+                );
+                assert!(
+                    outcome
+                        .reads
+                        .as_ref()
+                        .expect("completed query has read evidence")
+                        .iter()
+                        .any(|(key, _)| *key
+                            == hirsel_query_products::reads::ReadKey::ExecutedBody(
+                                hirsel_syntax::DefId::intern(&path)
+                            ))
+                );
+                assert!(
+                    outcome
+                        .reads
+                        .as_ref()
+                        .expect("completed query has read evidence")
+                        .iter()
+                        .any(|(key, _)| matches!(
+                            key,
+                            hirsel_query_products::reads::ReadKey::ValidationUniverse(_)
+                        ))
+                );
             }
             for kind in [
                 QueryKind::Resolve,

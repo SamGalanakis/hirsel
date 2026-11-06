@@ -1495,6 +1495,10 @@ impl QueryEngine {
             }),
         };
         runtime.shutdown();
+        installed
+            .lower
+            .commit_namespace(self)
+            .map_err(|error| installed.query_error(error))?;
         // The installed graph is the last reader of its admitted snapshot.
         // Adopt its completed private facts before those reader leases end.
         self.adopt_completed_headers();

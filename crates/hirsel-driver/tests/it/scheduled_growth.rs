@@ -453,7 +453,7 @@ fn rejected_front_root_keeps_its_diagnostic_without_rejecting_growth_or_other_lo
                 engine.sources.slice(diagnostics[0].primary),
                 Some("missing")
             );
-            assert!(graph.lower(&good).is_ok());
+            assert!(graph.lower(&mut engine, &good).is_ok());
             graph.finish();
         }
     });

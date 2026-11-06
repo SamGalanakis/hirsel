@@ -658,26 +658,29 @@ impl FrontLowerQueries {
     }
     /// Actual completed read evidence, with no producer or mutable-engine call.
     pub fn settled_reads(&self, path: &DefPath, phase: QueryKind) -> Option<Arc<Reads>> {
-        let id = match phase {
-            QueryKind::Lower => self.query(path)?,
-            QueryKind::Evaluate => self.evaluate_query(path)?,
-            _ => return None,
-        };
-        self.outcomes
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(&(id.kind, id.address.0))
-            .and_then(|(_, outcome, _)| outcome.reads(self).map(Arc::new))
+        self.with_settled_outcome(path, phase, |owner, outcome| {
+            outcome.reads(owner).map(Arc::new)
+        })
     }
     /// The settled producer's stopping phase, without demanding another body.
     pub fn settled_phase(&self, path: &DefPath, query: QueryKind) -> Option<QueryKind> {
+        self.with_settled_outcome(path, query, |_, outcome| outcome.phase)
+    }
+    fn with_settled_outcome<T>(
+        &self,
+        path: &DefPath,
+        query: QueryKind,
+        project: impl FnOnce(&Self, &Outcome) -> Option<T>,
+    ) -> Option<T> {
         let kind = match query {
             QueryKind::Lower => FRONT_LOWER_KIND,
             QueryKind::Evaluate => FRONT_EVALUATE_KIND,
             _ => return None,
         };
         let Some(id) = self.id(path, kind) else {
-            return self.completed_owner(path, kind)?.settled_phase(path, query);
+            return self
+                .completed_owner(path, kind)?
+                .with_settled_outcome(path, query, project);
         };
         let forwarded = self
             .forwarded
@@ -686,15 +689,41 @@ impl FrontLowerQueries {
             .get(&(id.kind, id.address.0))
             .cloned();
         if let Some(row) = forwarded {
-            return row.owner.selected(row.id, row.selected)?.phase;
+            return row
+                .owner
+                .with_selected_outcome(row.id, row.selected, project);
         }
-        self.outcomes
+        let outcome = self
+            .outcomes
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .get(&(id.kind, id.address.0))?
             .1
-            .phase
+            .clone();
+        project(self, &outcome)
     }
+    /// Import accepted registrations from this graph's committed capture.
+    pub fn commit_namespace(&self, engine: &mut QueryEngine) -> Result<(), QueryError> {
+        if !Arc::ptr_eq(&self.namespace.operation, &engine.operation) {
+            return Err(successor::refused(
+                "capture belongs to another source operation",
+            ));
+        }
+        let current = self
+            .demand_producer()
+            .map(|demand| demand.current())
+            .transpose()?;
+        let namespace = current
+            .as_ref()
+            .map_or(&self.namespace, |owner| owner.capture());
+        if Arc::ptr_eq(namespace, &self.namespace) {
+            engine.adopt_completed_headers();
+            Ok(())
+        } else {
+            engine.adopt_namespace_inputs(namespace, Some(&self.namespace))
+        }
+    }
+
     pub fn work_snapshot(&self) -> Vec<(DefPath, FrontLowerWork)> {
         self.work
             .lock()
@@ -1362,8 +1391,18 @@ impl FrontLowerQueries {
             .find_map(|owner| owner.failure_phase(reference))
     }
     fn selected(&self, id: QueryId, selected: Result<ProductRef, Reference>) -> Option<Outcome> {
+        self.with_selected_outcome(id, selected, |_, outcome| Some(outcome.clone()))
+    }
+    fn with_selected_outcome<T>(
+        &self,
+        id: QueryId,
+        selected: Result<ProductRef, Reference>,
+        project: impl FnOnce(&Self, &Outcome) -> Option<T>,
+    ) -> Option<T> {
         if let Some(row) = self.delegated(id, &selected) {
-            return row.owner.selected(row.id, row.selected);
+            return row
+                .owner
+                .with_selected_outcome(row.id, row.selected, project);
         }
 
         self.outcomes.lock().unwrap_or_else(|e| e.into_inner())
@@ -1381,7 +1420,7 @@ impl FrontLowerQueries {
                 }
                 Err(failure) => Some(*failure) == *reference,
             })
-            .map(|(_, outcome, _)| outcome.as_ref().clone())
+            .and_then(|(_, outcome, _)| project(self, outcome))
     }
     async fn run(
         self: Arc<Self>,

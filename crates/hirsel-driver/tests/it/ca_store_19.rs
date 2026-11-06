@@ -554,7 +554,7 @@ fn request_lower(
                     message: error.to_string(),
                 }),
             })?;
-    let result = graph.lower(path);
+    let result = graph.lower(engine, path);
     graph.finish();
     result
 }
@@ -669,7 +669,7 @@ fn request_constant(
                 message: error.to_string(),
             }),
         })?;
-    let result = graph.constant(path);
+    let result = graph.constant(engine, path);
     graph.finish();
     result
 }
@@ -693,7 +693,7 @@ fn lower_descriptors_keep_canonical_identity_across_unrelated_headers() {
         let mut reader = signature_session(store.clone(), &extended, true);
         let mut graph =
             crate::request_graph::Graph::new(&mut reader, hirsel_intern::jobs::Jobs::new(1));
-        let reused = graph.lower(&path).unwrap();
+        let reused = graph.lower(&mut reader, &path).unwrap();
         assert_eq!(graph.installed.lower.work(&path).lowerings, 0);
         assert_eq!(reused.execution_subject, original.execution_subject);
         graph.finish();
@@ -1982,7 +1982,7 @@ fn enclosing_evaluations_replay_exact_staged_selections_before_body_free_adoptio
                 crate::request_graph::Graph::new(&mut fresh, hirsel_intern::jobs::Jobs::new(jobs));
             let actual = roots
                 .iter()
-                .map(|path| reopened.constant(path))
+                .map(|path| reopened.constant(&mut fresh, path))
                 .collect::<Vec<_>>();
             assert!(actual.iter().all(Result::is_ok), "jobs={jobs}: {actual:?}");
             assert_eq!(
@@ -3623,7 +3623,7 @@ fn frozen_nested_body_demand_restores_ordinary_modes_before_rechecking() {
         let mut reader = signature_session(store.clone(), source, true);
         let mut reader_graph =
             crate::request_graph::Graph::new(&mut reader, hirsel_intern::jobs::Jobs::new(1));
-        let result = reader_graph.constant(&next).unwrap();
+        let result = reader_graph.constant(&mut reader, &next).unwrap();
         assert_eq!(
             result.root.kind,
             hirsel_tir::ValueKind::Constant(hirsel_tir::Constant::Integer(2))
@@ -3640,7 +3640,7 @@ fn frozen_nested_body_demand_restores_ordinary_modes_before_rechecking() {
         let mut edited = signature_session(store, &source.replace("x+1u8", "x+2u8"), true);
         let mut edited_graph =
             crate::request_graph::Graph::new(&mut edited, hirsel_intern::jobs::Jobs::new(1));
-        let result = edited_graph.constant(&next).unwrap();
+        let result = edited_graph.constant(&mut edited, &next).unwrap();
         assert_eq!(
             result.root.kind,
             hirsel_tir::ValueKind::Constant(hirsel_tir::Constant::Integer(3))

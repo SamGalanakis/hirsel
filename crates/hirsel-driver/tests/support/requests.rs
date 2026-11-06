@@ -185,7 +185,11 @@ impl Graph {
             })
             .collect()
     }
-    pub fn lower(&mut self, path: &DefPath) -> Result<FrontLowerOutput, QueryError> {
+    pub fn lower(
+        &mut self,
+        engine: &mut QueryEngine,
+        path: &DefPath,
+    ) -> Result<FrontLowerOutput, QueryError> {
         let query = self.installed.lower.query(path).ok_or_else(|| {
             QueryError::Operational(hirsel_types::OperationalFailure {
                 operation: "Lower request selection".into(),
@@ -193,7 +197,9 @@ impl Graph {
             })
         })?;
         let request = self.runtime.request(&[query]);
-        match self.runtime.wait(request) {
+        let result = self.runtime.wait(request);
+        self.installed.lower.commit_namespace(engine)?;
+        match result {
             Ok(mut products) => self
                 .installed
                 .lower
@@ -205,7 +211,11 @@ impl Graph {
             }
         }
     }
-    pub fn constant(&mut self, path: &DefPath) -> Result<hirsel_tir::Materialized, QueryError> {
+    pub fn constant(
+        &mut self,
+        engine: &mut QueryEngine,
+        path: &DefPath,
+    ) -> Result<hirsel_tir::Materialized, QueryError> {
         let query = self.installed.lower.evaluate_query(path).ok_or_else(|| {
             QueryError::Operational(hirsel_types::OperationalFailure {
                 operation: "constant request selection".into(),
@@ -213,7 +223,9 @@ impl Graph {
             })
         })?;
         let request = self.runtime.request(&[query]);
-        match self.runtime.wait(request) {
+        let result = self.runtime.wait(request);
+        self.installed.lower.commit_namespace(engine)?;
+        match result {
             Ok(_) => self
                 .installed
                 .lower
@@ -283,7 +295,7 @@ pub struct LowerOutcome<T> {
     pub definition: DefPath,
     pub result: Result<QueryOutput<T>, QueryError>,
     pub phase: Option<QueryKind>,
-    pub reads: Arc<Reads>,
+    pub reads: Option<Arc<Reads>>,
     pub depth: Option<hirsel_query_products::depth::DepthEvidence<hirsel_span::Span>>,
 }
 #[derive(Debug)]
@@ -291,7 +303,7 @@ pub struct ConstantOutcome {
     pub definition: DefPath,
     pub result: Result<hirsel_tir::Materialized, QueryError>,
     pub phase: Option<QueryKind>,
-    pub reads: Arc<Reads>,
+    pub reads: Option<Arc<Reads>>,
 }
 pub fn constants(
     engine: &mut QueryEngine,
@@ -299,7 +311,10 @@ pub fn constants(
     jobs: Jobs,
 ) -> Vec<Result<hirsel_tir::Materialized, QueryError>> {
     let mut graph = Graph::new(engine, jobs);
-    let outputs = paths.iter().map(|path| graph.constant(path)).collect();
+    let outputs = paths
+        .iter()
+        .map(|path| graph.constant(engine, path))
+        .collect();
     graph.finish();
     outputs
 }
@@ -312,7 +327,7 @@ pub fn constant_outcomes(
     let outputs = paths
         .into_iter()
         .map(|definition| {
-            let result = graph.constant(&definition);
+            let mut result = graph.constant(engine, &definition);
             let phase = graph
                 .installed
                 .lower
@@ -320,8 +335,10 @@ pub fn constant_outcomes(
             let reads = graph
                 .installed
                 .lower
-                .settled_reads(&definition, QueryKind::Evaluate)
-                .unwrap_or_else(|| Arc::new(Reads::empty()));
+                .settled_reads(&definition, QueryKind::Evaluate);
+            if reads.is_none() {
+                result = Err(missing_reads(&definition, QueryKind::Evaluate));
+            }
             ConstantOutcome {
                 definition,
                 result,
@@ -356,10 +373,10 @@ fn lower_requests(
     let mut graph = Graph::new(engine, jobs);
     let mut outcomes = Vec::new();
     for definition in paths {
-        let (result, reads, depth, phase) = match graph.lower(&definition) {
+        let (result, reads, depth, phase) = match graph.lower(engine, &definition) {
             Ok(output) => (
                 Ok(output.output),
-                Arc::new(output.reads),
+                Some(Arc::new(output.reads)),
                 Some(output.depth),
                 Some(QueryKind::Lower),
             ),
@@ -374,8 +391,12 @@ fn lower_requests(
                 let reads = graph
                     .installed
                     .lower
-                    .settled_reads(&definition, QueryKind::Lower)
-                    .unwrap_or_else(|| Arc::new(Reads::empty()));
+                    .settled_reads(&definition, QueryKind::Lower);
+                let error = if reads.is_some() {
+                    error
+                } else {
+                    missing_reads(&definition, QueryKind::Lower)
+                };
                 (Err(error), reads, None, phase)
             }
         };
@@ -394,6 +415,13 @@ fn lower_requests(
     graph.finish();
     outcomes
 }
+fn missing_reads(definition: &DefPath, phase: QueryKind) -> QueryError {
+    QueryError::Operational(hirsel_types::OperationalFailure {
+        operation: "settled query evidence".into(),
+        message: format!("missing {phase:?} read evidence for {definition}"),
+    })
+}
+
 pub fn checked_prefix(
     engine: &mut QueryEngine,
     paths: Vec<DefPath>,

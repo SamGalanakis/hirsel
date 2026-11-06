@@ -278,7 +278,7 @@ impl QueryEngine {
             _metadata: metadata,
         })
     }
-    fn adopt_namespace_inputs(
+    pub(in crate::queries) fn adopt_namespace_inputs(
         &mut self,
         namespace: &Arc<NamespaceCapture>,
         previous: Option<&NamespaceCapture>,

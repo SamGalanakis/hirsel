@@ -716,17 +716,27 @@ fn decode<T: Walk + serde::de::DeserializeOwned>(
     reserve: &mut impl FnMut(u64) -> Result<Arc<dyn Send + Sync>, QueryError>,
     owners: &mut Vec<Arc<dyn Send + Sync>>,
 ) -> Result<T, QueryError> {
+    let backing = bytes.len();
     let requirement = records
         .record_requirement::<T>(bytes)
         .ok_or_else(|| failure("invalid record"))?;
-    let owner = reserve(requirement.required_bytes())?;
+    let required = requirement.required_bytes();
+    let retained = requirement.retained_bytes();
+    crate::queries::operation_owner_trace(format_args!(
+        "accepted-execution record={} backing={backing} peak={required} retained={retained}",
+        std::any::type_name::<T>()
+    ));
+    let owner = reserve(required)?;
     let value = requirement
         .decode_reserved(
             |_| Some(()),
             |path, occurrence| anchors.record_source_anchor(path, occurrence),
         )
         .ok_or_else(|| failure("record decode refused"))?;
-    owners.push(owner);
+    // decode_reserved consumed its backing and temporary binding tables.
+    // Keep its semantic allocations charged, rather than retaining the peak.
+    drop(owner);
+    owners.push(reserve(retained)?);
     Ok(value)
 }
 fn load(
@@ -787,6 +797,7 @@ fn load(
     }
     let mut public = Vec::new();
     let mut private = BTreeMap::new();
+    let mut header_owners = Vec::new();
     for row in &product.rows {
         if row.header.domain != HEADER {
             return Err(failure("declaration domain"));
@@ -796,7 +807,7 @@ fn load(
             get(store, row.header)?,
             &anchors,
             &mut reserve,
-            &mut owners,
+            &mut header_owners,
         )?;
         if exported.definition.path() != &row.path
             || owner.definition.path() != &row.path
@@ -823,7 +834,7 @@ fn load(
             if needed > limit {
                 return Err(failure("TIR exceeds admission"));
             }
-            owners.push(reserve(needed)?);
+            let decode_owner = reserve(needed)?;
             let archive = Arc::new(
                 hirsel_product_codec::CheckedTir::open(
                     bytes,
@@ -864,12 +875,21 @@ fn load(
             if verified.is_none() {
                 return Err(failure(format!("V rejected {}", row.path)));
             }
+            drop(verified);
             let definition = archive
                 .materialize()
                 .ok_or_else(|| failure("invalid TIR payload"))?;
             if definition.path.path() != &row.path {
                 return Err(failure("body membership"));
             }
+            let retained = hirsel_query_products::retained::decoded_tir_bytes(&definition);
+            drop(archive);
+            drop(decode_owner);
+            owners.push(reserve(retained)?);
+            crate::queries::operation_owner_trace(format_args!(
+                "accepted-execution body peak={needed} retained={retained} released={}",
+                needed.saturating_sub(retained)
+            ));
             definitions.insert(row.path.clone(), Arc::new(definition));
         }
         if let Some(reference) = row.constant {
@@ -886,6 +906,17 @@ fn load(
             constants.insert(row.path.clone(), Arc::new(value));
         }
     }
+    // Public validation views and their private overlays are import scratch.
+    // Runtime retains only the accepted private declaration allocations.
+    drop(environments);
+    drop(base);
+    drop(validations);
+    drop(header_owners);
+    let header_bytes = private
+        .values()
+        .map(hirsel_query_products::retained::retained_signature_payload_bytes)
+        .sum::<u64>();
+    owners.push(reserve(header_bytes)?);
     if product.constants.iter().collect::<BTreeSet<_>>().len() != product.constants.len()
         || product
             .constants
@@ -968,6 +999,18 @@ fn load(
         .get(&product.entry)
         .cloned()
         .ok_or_else(|| failure("missing entry declaration"))?;
+    crate::queries::operation_owner_trace(format_args!(
+        "accepted-execution live types={} bodies={} headers={}",
+        types.retained_local_bytes(),
+        definitions
+            .values()
+            .map(|definition| hirsel_query_products::retained::decoded_tir_bytes(definition))
+            .sum::<u64>(),
+        private
+            .values()
+            .map(hirsel_query_products::retained::retained_signature_payload_bytes)
+            .sum::<u64>()
+    ));
     profile(started, "runtime rebuilt");
     Ok(AcceptedExecutionProduct {
         entry: product.entry,

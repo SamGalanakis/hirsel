@@ -17,12 +17,19 @@ pub struct RunContent;
 pub struct DecodeRequirement<S> {
     bytes: Bytes,
     required: u64,
+    retained: u64,
     records: Option<Arc<TypeRecords>>,
     schema: PhantomData<S>,
 }
 impl<S> DecodeRequirement<S> {
     pub fn required_bytes(&self) -> u64 {
         self.required
+    }
+    /// Conservative decoded allocation bound after the input buffer and
+    /// per-record binding directories disappear. Thread-local scope capacity
+    /// stays charged. Session interner rows keep their existing owner.
+    pub fn retained_bytes(&self) -> u64 {
+        self.retained
     }
 }
 pub struct Scan<'a> {
@@ -398,6 +405,10 @@ impl TypeRecords {
         bytes: Bytes,
     ) -> Option<DecodeRequirement<S>> {
         let mut scan = Scan::record(&bytes)?;
+        let scopes = hirsel_types::collection_scope_working_bytes(1)?
+            .checked_add(ast::def_path_scope_working_bytes(1)?)?
+            .checked_add(hirsel_intern::persist::symbol_scope_working_bytes(1)?)?;
+        let transient = scan.required.checked_sub(scopes)?;
         T::walk(&mut scan)?;
         if !scan.bytes.is_empty() {
             return None;
@@ -406,6 +417,7 @@ impl TypeRecords {
         Some(DecodeRequirement {
             bytes,
             required,
+            retained: required.checked_sub(transient)?,
             records: Some(self.clone()),
             schema: PhantomData,
         })
@@ -447,6 +459,7 @@ impl<T: Walk + serde::de::DeserializeOwned> DecodeRequirement<T> {
         T::walk(&mut scan)?;
         let required = scan.finish()?.checked_add(bytes.len() as u64)?;
         Some(Self {
+            retained: required.checked_sub(bytes.len() as u64)?,
             bytes,
             required,
             records: None,
@@ -500,6 +513,7 @@ impl DecodeRequirement<RunContent> {
         }
         let required = scan.required;
         Some(Self {
+            retained: required.checked_sub(bytes.len() as u64)?,
             bytes,
             required,
             records: None,

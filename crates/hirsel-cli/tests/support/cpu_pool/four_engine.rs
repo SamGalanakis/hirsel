@@ -117,19 +117,19 @@ use hirsel_intern::jobs::{with_compiler_stack};
         // process allowance before admitting the independent native compiler.
         drop(checked);
         drop(engine);
+        // Match cpu_compiler's transport fan-out. The program's CPU grant
+        // still exercises every requested physical worker width.
+        let compiler = hirsel_front_phases::COMPILER;
+        let mut config = compiler.configuration();
+        config.jobs = hirsel_intern::jobs::Jobs::new(config.jobs.get().min(4));
+        let mut ready = native_ready::source_supplier_with_compiler(
+            &source,
+            &entry,
+            &tools,
+            compiler.with_config(config),
+        )
+        .unwrap();
         for (free, fixture, reference) in cases {
-            // Match cpu_compiler's transport fan-out. The program's CPU grant
-            // still exercises every requested physical worker width.
-            let compiler = hirsel_front_phases::COMPILER;
-            let mut config = compiler.configuration();
-            config.jobs = hirsel_intern::jobs::Jobs::new(config.jobs.get().min(4));
-            let mut ready = native_ready::source_supplier_with_compiler(
-                &source,
-                &entry,
-                &tools,
-                compiler.with_config(config),
-            )
-            .unwrap();
             let dir = root.path().join(if free { "free" } else { "ordered" });
             std::fs::create_dir_all(&dir).unwrap();
             let outcomes = hirsel_native_testing::differential_ready(

@@ -11,7 +11,7 @@ pub(super) struct Selection {
     waiting: Option<Span>,
 }
 pub(super) struct Staged {
-    pub declarations: BTreeMap<DefId, crate::comptime::StagedConstant>,
+    pub declarations: Arc<inputs::Shared<BTreeMap<DefId, crate::comptime::StagedConstant>>>,
     selections: Mutex<BTreeMap<ContentHash, Selection>>,
 }
 impl Staged {
@@ -26,25 +26,50 @@ impl Staged {
         let mut selections = self.selections.lock().unwrap_or_else(|e| e.into_inner());
         Some(update(&mut selections.get_mut(&id.address.0)?.waiting))
     }
-    pub(super) fn new(declarations: &BTreeMap<DefPath, crate::comptime::StagedConstant>) -> Self {
-        Self {
-            declarations: declarations
-                .iter()
-                .map(|(path, row)| (DefId::intern(path), row.clone()))
-                .collect(),
+    pub(super) fn new(
+        declarations: &BTreeMap<DefPath, crate::comptime::StagedConstant>,
+        previous: Option<&Self>,
+        partition: &LowerPartition,
+    ) -> Option<Self> {
+        let previous = previous.filter(|previous| {
+            declarations.len() == previous.declarations.len()
+                && declarations.iter().all(|(path, current)| {
+                    previous
+                        .declarations
+                        .get(&DefId::intern(path))
+                        .is_some_and(|previous| {
+                            previous.owner == current.owner
+                                && previous.expression == current.expression
+                                && previous.inputs == current.inputs
+                                && previous.signature.fingerprint == current.signature.fingerprint
+                        })
+                })
+        });
+        let declarations = match previous {
+            Some(previous) => previous.declarations.clone(),
+            None => {
+                let mut weight = hirsel_query_products::retained::MetadataWeight::default();
+                if !declarations.is_empty() {
+                    weight.tree::<DefId, crate::comptime::StagedConstant>(declarations.len());
+                }
+                for row in declarations.values() {
+                    weight.path(&row.owner);
+                    weight.flat_vec(&row.inputs);
+                }
+                inputs::Shared::new(
+                    declarations
+                        .iter()
+                        .map(|(path, row)| (DefId::intern(path), row.clone()))
+                        .collect(),
+                    weight.bytes(),
+                    partition,
+                )?
+            }
+        };
+        Some(Self {
+            declarations,
             selections: Mutex::new(BTreeMap::new()),
-        }
-    }
-    pub(super) fn retained_bytes(&self) -> u64 {
-        let mut weight = hirsel_query_products::retained::MetadataWeight::default();
-        if !self.declarations.is_empty() {
-            weight.tree::<DefId, crate::comptime::StagedConstant>(self.declarations.len());
-        }
-        for row in self.declarations.values() {
-            weight.path(&row.owner);
-            weight.flat_vec(&row.inputs);
-        }
-        weight.bytes()
+        })
     }
     pub(super) fn selection(&self, id: QueryId) -> Option<Selection> {
         if id.kind != FRONT_EVALUATE_KIND {

@@ -1,28 +1,80 @@
-//! Compact immutable indexes over interned identities. Binary searches keep
-//! lookups independent of path length without a second per-definition table.
+//! Immutable selection deltas share their predecessor's inventory. Phase
+//! bindings and query identities always come from the consuming capture.
 use super::*;
 
+pub(super) struct Inventory {
+    previous: Option<Arc<Inventory>>,
+    added: Box<[DefId]>,
+    removed: Box<[DefId]>,
+    _charge: LowerInputCharge,
+}
+impl Inventory {
+    fn contains(&self, id: DefId) -> bool {
+        let mut cursor = Some(self);
+        while let Some(inventory) = cursor {
+            if inventory.added.binary_search(&id).is_ok() {
+                return true;
+            }
+            if inventory.removed.binary_search(&id).is_ok() {
+                return false;
+            }
+            cursor = inventory.previous.as_deref();
+        }
+        false
+    }
+}
 pub(super) struct Inputs {
-    rows: Box<[DefId]>,
+    inventory: Arc<Inventory>,
     namespace: Arc<NamespaceCapture>,
 }
 impl Inputs {
-    pub(super) fn new(mut rows: Vec<DefId>, namespace: Arc<NamespaceCapture>) -> Self {
+    pub(super) fn inventory_bytes(definitions: usize) -> Option<usize> {
+        (size_of::<Inventory>() + 2 * size_of::<usize>())
+            .checked_add(definitions.checked_mul(size_of::<DefId>())?)
+    }
+    pub(super) fn new(
+        mut rows: Vec<DefId>,
+        namespace: Arc<NamespaceCapture>,
+        previous: Option<&Self>,
+        partition: &LowerPartition,
+    ) -> Option<Self> {
         rows.sort_unstable();
         rows.dedup();
-        Self {
-            rows: rows.into_boxed_slice(),
-            namespace,
+        let removed = previous.map_or_else(Vec::new, |previous| {
+            previous
+                .keys()
+                .map(DefId::intern)
+                .filter(|id| rows.binary_search(id).is_err())
+                .collect::<Vec<_>>()
+        });
+        if let Some(previous) = previous {
+            rows.retain(|id| !previous.inventory.contains(*id));
+            if rows.is_empty() && removed.is_empty() {
+                return Some(Self {
+                    inventory: previous.inventory.clone(),
+                    namespace,
+                });
+            }
         }
-    }
-    pub(super) fn retained_bytes(&self) -> Option<u64> {
-        u64::try_from(size_of_val(&*self.rows)).ok()
+        let bytes = Self::inventory_bytes(rows.len().checked_add(removed.len())?)? as u64;
+        let charge = LowerInputCharge::take(partition, bytes)?;
+        Some(Self {
+            inventory: Arc::new(Inventory {
+                previous: previous.map(|previous| previous.inventory.clone()),
+                added: rows.into_boxed_slice(),
+                removed: removed.into_boxed_slice(),
+                _charge: charge,
+            }),
+            namespace,
+        })
     }
     pub(super) fn get(&self, path: &DefPath) -> Option<&Arc<namespace::BodyKeys>> {
         self.get_id(DefId::get(path)?)
     }
     pub(super) fn get_id(&self, id: DefId) -> Option<&Arc<namespace::BodyKeys>> {
-        self.rows.binary_search(&id).ok()?;
+        if !self.inventory.contains(id) {
+            return None;
+        }
         self.namespace.bodies.get(&id)?.queries.as_ref()
     }
     pub(super) fn contains_key(&self, path: &DefPath) -> bool {
@@ -30,12 +82,12 @@ impl Inputs {
     }
     pub(super) fn iter(&self) -> Iter<'_> {
         Iter {
-            rows: self.rows.iter(),
-            namespace: &self.namespace,
+            rows: self.namespace.bodies.iter(),
+            inventory: &self.inventory,
         }
     }
     pub(super) fn keys(&self) -> impl Iterator<Item = &DefPath> {
-        self.rows.iter().map(|id| id.path())
+        self.iter().map(|(path, _)| path)
     }
 }
 impl std::ops::Index<&DefPath> for Inputs {
@@ -45,20 +97,19 @@ impl std::ops::Index<&DefPath> for Inputs {
     }
 }
 pub(super) struct Iter<'a> {
-    rows: std::slice::Iter<'a, DefId>,
-    namespace: &'a NamespaceCapture,
+    rows: Box<dyn Iterator<Item = (&'a DefId, &'a Arc<namespace::BodyInput>)> + 'a>,
+    inventory: &'a Inventory,
 }
 impl<'a> Iterator for Iter<'a> {
     type Item = (&'static DefPath, &'a Arc<namespace::BodyKeys>);
     fn next(&mut self) -> Option<Self::Item> {
-        self.rows.next().map(|id| {
-            (
-                id.path(),
-                self.namespace.bodies[id]
-                    .queries
-                    .as_ref()
-                    .expect("captured Lower phase binding"),
-            )
+        self.rows.find_map(|(id, body)| {
+            self.inventory.contains(*id).then(|| {
+                (
+                    id.path(),
+                    body.queries.as_ref().expect("captured Lower phase binding"),
+                )
+            })
         })
     }
 }
@@ -67,6 +118,27 @@ impl<'a> IntoIterator for &'a Inputs {
     type IntoIter = Iter<'a>;
     fn into_iter(self) -> Self::IntoIter {
         self.iter()
+    }
+}
+
+/// An immutable table owns its debit once, independently of capture lifetime.
+pub(super) struct Shared<T> {
+    pub(super) value: T,
+    _charge: LowerInputCharge,
+}
+impl<T> Shared<T> {
+    pub(super) fn new(value: T, bytes: u64, partition: &LowerPartition) -> Option<Arc<Self>> {
+        let bytes = bytes.checked_add((size_of::<Self>() + 2 * size_of::<usize>()) as u64)?;
+        Some(Arc::new(Self {
+            value,
+            _charge: LowerInputCharge::take(partition, bytes)?,
+        }))
+    }
+}
+impl<T> std::ops::Deref for Shared<T> {
+    type Target = T;
+    fn deref(&self) -> &T {
+        &self.value
     }
 }
 
@@ -81,12 +153,13 @@ impl Waiting {
     pub(super) fn input_bytes() -> usize {
         Self::INITIAL * size_of::<((DefId, u32), Span)>() + 2 * size_of::<usize>()
     }
-    pub(super) fn new(remaining: Arc<Mutex<u64>>) -> Self {
+    pub(super) fn new(partition: &LowerPartition) -> Self {
         Self {
             rows: Vec::with_capacity(Self::INITIAL),
             charge: LowerInputCharge {
-                remaining,
+                remaining: partition.remaining.clone(),
                 bytes: 0,
+                _allowance: partition.allowance.clone(),
             },
         }
     }
@@ -124,72 +197,120 @@ impl Waiting {
     }
 }
 
-/// Query addresses differ across captures. Index their prefixes and recover
-/// the complete address from the admitted input before accepting a match.
+/// Capture-salted addresses need their own reverse lookup. Index only queried
+/// definitions, charging actual capacity to the existing partition. A full
+/// binding scan remains exact when optional index growth cannot be admitted.
 pub(super) struct Paths {
-    lower: Box<[(u32, DefId)]>,
-    evaluate: Box<[(u32, DefId)]>,
+    rows: Mutex<PathRows>,
+}
+struct PathRows {
+    lower: Vec<(u32, DefId)>,
+    evaluate: Vec<(u32, DefId)>,
+    charge: LowerInputCharge,
 }
 impl Paths {
-    pub(super) fn input_bytes(definitions: usize) -> Option<usize> {
-        definitions.checked_mul(2 * size_of::<(u32, DefId)>())
+    pub(super) fn new(partition: &LowerPartition) -> Self {
+        Self {
+            rows: Mutex::new(PathRows {
+                lower: Vec::new(),
+                evaluate: Vec::new(),
+                charge: LowerInputCharge {
+                    remaining: partition.remaining.clone(),
+                    bytes: 0,
+                    _allowance: partition.allowance.clone(),
+                },
+            }),
+        }
+    }
+    pub(super) fn clear(&self) {
+        let mut index = self.rows.lock().unwrap_or_else(|e| e.into_inner());
+        drop(std::mem::take(&mut index.lower));
+        drop(std::mem::take(&mut index.evaluate));
+        let bytes = std::mem::take(&mut index.charge.bytes);
+        *index
+            .charge
+            .remaining
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) += bytes;
     }
     fn prefix(address: ContentHash) -> u32 {
         u32::from_le_bytes([address.0[0], address.0[1], address.0[2], address.0[3]])
     }
-    fn find(
-        rows: &[(u32, DefId)],
-        address: ContentHash,
-        mut identity: impl FnMut(DefId) -> Option<ContentHash>,
-    ) -> Option<&DefId> {
-        let prefix = Self::prefix(address);
-        let start = rows.partition_point(|(candidate, _)| *candidate < prefix);
-        rows[start..]
-            .iter()
-            .take_while(|(candidate, _)| *candidate == prefix)
-            .find_map(|(_, id)| (identity(*id) == Some(address)).then_some(id))
-    }
-    pub(super) fn new(inputs: &Inputs, namespace: &NamespaceCapture) -> Self {
-        let rows = |kind, key: fn(&namespace::BodyKeys) -> ContentHash| {
-            let mut rows = inputs
-                .iter()
-                .map(|(path, input)| {
-                    (
-                        Self::prefix(namespace.query_id(kind, key(input)).address.0),
-                        DefId::intern(path),
-                    )
-                })
-                .collect::<Vec<_>>();
-            rows.sort_unstable_by_key(|(hash, _)| *hash);
-            rows.into_boxed_slice()
+    pub(super) fn remember(&self, query: QueryId, id: DefId) {
+        let mut index = self.rows.lock().unwrap_or_else(|e| e.into_inner());
+        let PathRows {
+            lower,
+            evaluate,
+            charge,
+        } = &mut *index;
+        let rows = match query.kind {
+            FRONT_LOWER_KIND => lower,
+            FRONT_EVALUATE_KIND => evaluate,
+            _ => return,
         };
-        Self {
-            lower: rows(FRONT_LOWER_KIND, |keys| keys.lower.0),
-            evaluate: rows(FRONT_EVALUATE_KIND, |keys| keys.evaluate.0),
+        let row = (Self::prefix(query.address.0), id);
+        let Err(at) = rows.binary_search(&row) else {
+            return;
+        };
+        if rows.len() == rows.capacity() {
+            let capacity = rows.capacity().max(4);
+            let Some(bytes) = capacity
+                .checked_mul(size_of::<(u32, DefId)>())
+                .and_then(|bytes| u64::try_from(bytes).ok())
+            else {
+                return;
+            };
+            let mut remaining = charge.remaining.lock().unwrap_or_else(|e| e.into_inner());
+            let Some(available) = remaining.checked_sub(bytes) else {
+                return;
+            };
+            *remaining = available;
+            charge.bytes += bytes;
+            rows.reserve_exact(capacity);
         }
+        rows.insert(at, row);
     }
     pub(super) fn get(
         &self,
         (kind, address): &(u32, ContentHash),
         inputs: &Inputs,
         namespace: &NamespaceCapture,
-    ) -> Option<&DefId> {
-        let rows = match *kind {
-            FRONT_LOWER_KIND => &self.lower,
-            FRONT_EVALUATE_KIND => &self.evaluate,
-            _ => return None,
-        };
-        Self::find(rows, *address, |id| {
-            let input = inputs.get_id(id)?;
+    ) -> Option<DefId> {
+        let identity = |input: &namespace::BodyKeys| {
             let key = if *kind == FRONT_LOWER_KIND {
                 input.lower.0
             } else {
                 input.evaluate.0
             };
-            Some(namespace.query_id(*kind, key).address.0)
-        })
-    }
-    pub(super) fn retained_bytes(&self) -> usize {
-        size_of_val(&*self.lower) + size_of_val(&*self.evaluate)
+            namespace.query_id(*kind, key).address.0
+        };
+        {
+            let index = self.rows.lock().unwrap_or_else(|e| e.into_inner());
+            let rows = match *kind {
+                FRONT_LOWER_KIND => &index.lower,
+                FRONT_EVALUATE_KIND => &index.evaluate,
+                _ => return None,
+            };
+            let prefix = Self::prefix(*address);
+            let start = rows.partition_point(|(candidate, _)| *candidate < prefix);
+            if let Some(id) = rows[start..]
+                .iter()
+                .take_while(|(candidate, _)| *candidate == prefix)
+                .find_map(|(_, id)| (identity(inputs.get_id(*id)?) == *address).then_some(*id))
+            {
+                return Some(id);
+            }
+        }
+        let id = inputs
+            .iter()
+            .find_map(|(path, input)| (identity(input) == *address).then(|| DefId::intern(path)))?;
+        self.remember(
+            QueryId {
+                kind: *kind,
+                address: hirsel_artifact_store::Address(*address),
+            },
+            id,
+        );
+        Some(id)
     }
 }

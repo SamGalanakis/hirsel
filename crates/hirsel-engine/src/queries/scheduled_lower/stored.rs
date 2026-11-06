@@ -26,7 +26,6 @@ impl FrontLowerQueries {
         let owner = self
             .paths
             .get(&(id.kind, id.address.0), &self.inputs, &self.namespace)
-            .copied()
             .or_else(|| self.staged.selection(id).map(|selection| selection.owner))?;
         self.namespace
             .manifest_for_reads(owner, reads, self.weight.scratch)

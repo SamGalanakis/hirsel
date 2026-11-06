@@ -113,7 +113,7 @@ impl FrontLowerQueries {
                             )?;
                         }
                     }
-                    for (id, declaration) in &self.staged.declarations {
+                    for (id, declaration) in self.staged.declarations.iter() {
                         if declaration.owner != *path.path()
                             || frame_of(NameSite::Expression(declaration.expression))
                                 .and_then(|region| frames[region as usize].parent)

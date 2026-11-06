@@ -1196,6 +1196,12 @@ impl DemandProducer {
             // An optional carry miss leaves ordinary production active.
             let _ = front.install_carry(carry.clone());
         }
+        let previous = self
+            .state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .current
+            .upgrade();
         let lower = engine.front_lower_queries_in_partition(
             &ready,
             front,
@@ -1204,6 +1210,7 @@ impl DemandProducer {
             &self.lower,
             self.errors,
             None,
+            previous.as_deref(),
         )?;
         lower.bind_demand(self);
         let charge = Self::take(

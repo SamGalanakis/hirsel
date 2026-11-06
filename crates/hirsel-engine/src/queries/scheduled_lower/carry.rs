@@ -222,7 +222,6 @@ impl FrontLowerQueries {
         let Some(owner) = self
             .paths
             .get(&(id.kind, id.address.0), &self.inputs, &self.namespace)
-            .copied()
         else {
             return;
         };

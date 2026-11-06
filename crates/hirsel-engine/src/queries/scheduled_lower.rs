@@ -408,6 +408,21 @@ impl LowerPartition {
 struct LowerInputCharge {
     remaining: Arc<Mutex<u64>>,
     bytes: u64,
+    _allowance: Arc<hirsel_engine_admission::MemoryReservation>,
+}
+impl LowerInputCharge {
+    fn take(partition: &LowerPartition, bytes: u64) -> Option<Self> {
+        let mut remaining = partition
+            .remaining
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        *remaining = remaining.checked_sub(bytes)?;
+        Some(Self {
+            remaining: partition.remaining.clone(),
+            bytes,
+            _allowance: partition.allowance.clone(),
+        })
+    }
 }
 impl Drop for LowerInputCharge {
     fn drop(&mut self) {
@@ -466,7 +481,7 @@ pub struct FrontLowerQueries {
     paths: inputs::Paths,
     /// Implementation hashes of the opaque types a lowered body can read the
     /// private representation of: its LayoutBody inputs.
-    layouts: BTreeMap<DefId, ContentHash>,
+    layouts: Arc<inputs::Shared<BTreeMap<DefId, ContentHash>>>,
     front: Arc<FrontBodyQueries>,
     memo: Arc<hirsel_types::TypeMemo>,
     lowering: Option<Arc<dyn LoweringPhase>>,
@@ -545,18 +560,25 @@ impl FrontLowerQueries {
     /// Compact potential dependency inventory; no Lower/Evaluate output or
     /// maximum continuation is reserved until that query is actually demanded.
     pub fn input_bytes(definitions: &[DefPath]) -> Option<u64> {
-        let fixed = size_of::<Self>()
-            + size_of::<LowerSource>()
-            + size_of::<hirsel_engine_admission::MemoryReservation>()
-            + 4 * size_of::<usize>()
-            + size_of::<Mutex<u64>>()
-            + 2 * size_of::<usize>()
-            + inputs::Waiting::input_bytes();
-        let rows = definitions
-            .len()
-            .checked_mul(size_of::<DefId>())?
-            .checked_add(inputs::Paths::input_bytes(definitions.len())?)?;
-        u64::try_from(fixed.checked_add(rows)?).ok()
+        Self::fixed_input_bytes()?
+            .checked_add(inputs::Inputs::inventory_bytes(definitions.len())? as u64)?
+            .checked_add(
+                (size_of::<inputs::Shared<BTreeMap<DefId, ContentHash>>>()
+                    + size_of::<inputs::Shared<BTreeMap<DefId, crate::comptime::StagedConstant>>>()
+                    + 4 * size_of::<usize>()) as u64,
+            )
+    }
+    fn fixed_input_bytes() -> Option<u64> {
+        u64::try_from(
+            size_of::<Self>()
+                + size_of::<LowerSource>()
+                + size_of::<hirsel_engine_admission::MemoryReservation>()
+                + 4 * size_of::<usize>()
+                + size_of::<Mutex<u64>>()
+                + 2 * size_of::<usize>()
+                + inputs::Waiting::input_bytes(),
+        )
+        .ok()
     }
     /// One completed descriptor plus its independently stored ordinary body,
     /// materialized value, reads/depth and opaque acceptance metadata.
@@ -1093,7 +1115,9 @@ impl FrontLowerQueries {
         } else {
             &input.evaluate
         };
-        Some(self.namespace.query_id(kind, key.0))
+        let query = self.namespace.query_id(kind, key.0);
+        self.paths.remember(query, DefId::intern(path));
+        Some(query)
     }
     fn path(&self, id: QueryId) -> Option<DefPath> {
         self.paths
@@ -2624,7 +2648,7 @@ impl FrontLowerQueries {
                 .waiting
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
-                .set((*path, id.kind), site)
+                .set((path, id.kind), site)
                 .ok_or(self.errors.resource);
         }
         self.staged.with_request_site(id, |pending| *pending = site);
@@ -2639,7 +2663,7 @@ impl FrontLowerQueries {
                 .waiting
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
-                .get((*path, id.kind));
+                .get((path, id.kind));
         }
         self.staged.with_request_site(id, |site| *site).flatten()
     }
@@ -3390,6 +3414,7 @@ impl QueryEngine {
             &partition,
             errors,
             generator,
+            None,
         )?;
         if let Some(admission) = demand_admission {
             generation::demand::DemandProducer::new(
@@ -3413,6 +3438,7 @@ impl QueryEngine {
         partition: &LowerPartition,
         errors: RuntimeErrors,
         generator: Option<(DefId, Span)>,
+        previous: Option<&FrontLowerQueries>,
     ) -> Result<Arc<FrontLowerQueries>, QueryError> {
         front.namespace().require_environment(self)?;
         let refusal = || {
@@ -3428,22 +3454,18 @@ impl QueryEngine {
             }
             refusal()
         };
-        let input_bytes = FrontLowerQueries::input_bytes(definitions).ok_or_else(refusal)?;
-        let retention = partition.remaining.clone();
-        {
-            let mut remaining = retention.lock().unwrap_or_else(|e| e.into_inner());
-            *remaining = remaining.checked_sub(input_bytes).ok_or_else(|| {
-                refuse(format!(
-                    "input rows requested={input_bytes} remaining={} definitions={}",
-                    *remaining,
-                    definitions.len()
-                ))
-            })?;
+        if let Some(previous) = previous {
+            previous.paths.clear();
         }
-        let mut input_charge = LowerInputCharge {
-            remaining: retention.clone(),
-            bytes: input_bytes,
-        };
+        let input_bytes = FrontLowerQueries::fixed_input_bytes().ok_or_else(refusal)?;
+        let retention = partition.remaining.clone();
+        let input_charge = LowerInputCharge::take(partition, input_bytes).ok_or_else(|| {
+            refuse(format!(
+                "capture metadata requested={input_bytes} remaining={} definitions={}",
+                *retention.lock().unwrap_or_else(|e| e.into_inner()),
+                definitions.len()
+            ))
+        })?;
         let store = self
             .result_store
             .clone()
@@ -3478,17 +3500,18 @@ impl QueryEngine {
                 .ok_or_else(|| refuse(format!("missing phase source binding for {path}")))?;
             inputs.push(DefId::intern(path));
         }
-        let inputs = Inputs::new(inputs, front.namespace().clone());
-        if inputs
-            .retained_bytes()
-            .is_none_or(|bytes| bytes > input_bytes)
-        {
-            return Err(refuse(format!(
-                "actual input representation {:?} exceeds planned {input_bytes}; definitions={}",
-                inputs.retained_bytes(),
-                definitions.len()
-            )));
-        }
+        let inputs = Inputs::new(
+            inputs,
+            front.namespace().clone(),
+            previous.map(|owner| &owner.inputs),
+            partition,
+        )
+        .ok_or_else(|| {
+            refuse(format!(
+                "cumulative definition inventory exceeds remaining {} bytes",
+                *retention.lock().unwrap_or_else(|e| e.into_inner())
+            ))
+        })?;
         let namespace = front.namespace().clone();
         let packages: std::collections::BTreeSet<_> =
             definitions.iter().map(|path| &path.0.package).collect();
@@ -3508,43 +3531,30 @@ impl QueryEngine {
                     as u64,
             )
             .ok_or_else(refusal)?;
-        {
-            let mut retention = retention.lock().unwrap_or_else(|e| e.into_inner());
-            *retention = retention.checked_sub(layout_bytes).ok_or_else(|| {
+        let layouts = match previous.filter(|owner| owner.layouts.value == layouts) {
+            Some(previous) => previous.layouts.clone(),
+            None => inputs::Shared::new(layouts, layout_bytes, partition).ok_or_else(|| {
                 refuse(format!(
-                    "layout rows requested={layout_bytes} remaining={}",
-                    *retention
+                    "layout inventory requested={layout_bytes} remaining={}",
+                    *retention.lock().unwrap_or_else(|e| e.into_inner())
                 ))
-            })?;
-            input_charge.bytes += layout_bytes;
-        }
+            })?,
+        };
         let staged = staged::Staged::new(
             namespace
                 .snapshot
                 .header_products()
                 .map_or(&self.staged_constants, |headers| headers.staged_constants()),
-        );
-        {
-            let mut remaining = retention.lock().unwrap_or_else(|error| error.into_inner());
-            *remaining = remaining
-                .checked_sub(staged.retained_bytes())
-                .ok_or_else(|| {
-                    refuse(format!(
-                        "staged rows requested={} remaining={}",
-                        staged.retained_bytes(),
-                        *remaining
-                    ))
-                })?;
-            input_charge.bytes += staged.retained_bytes();
-        }
-        let paths = inputs::Paths::new(&inputs, &namespace);
-        if inputs
-            .retained_bytes()
-            .and_then(|bytes| bytes.checked_add(paths.retained_bytes() as u64))
-            .is_none_or(|bytes| bytes > input_bytes)
-        {
-            return Err(refusal());
-        }
+            previous.map(|owner| &owner.staged),
+            partition,
+        )
+        .ok_or_else(|| {
+            refuse(format!(
+                "staged inventory exceeds remaining {} bytes",
+                *retention.lock().unwrap_or_else(|e| e.into_inner())
+            ))
+        })?;
+        let paths = inputs::Paths::new(partition);
         let allowance = partition.allowance.clone();
         let anchors = (*namespace.anchors).clone();
         let records = crate::NativeRecords::new(self.types.clone(), store.clone());
@@ -3562,7 +3572,7 @@ impl QueryEngine {
             forwarded: Mutex::new(BTreeMap::new()),
             source,
             inputs,
-            waiting: Mutex::new(inputs::Waiting::new(retention.clone())),
+            waiting: Mutex::new(inputs::Waiting::new(partition)),
             generator,
             staged,
             paths,

@@ -70,23 +70,29 @@ impl PartialEq for ReaderReceipt {
 impl Eq for ReaderReceipt {}
 impl ReaderReceipt {
     pub(super) fn capture(store: &dyn ResultStore, reads: &Reads, scratch: u64) -> Option<Self> {
-        let charge = reads
-            .allocations()
-            .try_fold(
-                hirsel_engine_admission::retained_arc_bytes(reads),
-                |bytes, (_, allocation)| bytes.checked_add(allocation as u64),
-            )?
-            .checked_add(hirsel_engine_admission::retained_arc_bytes(
-                &std::mem::MaybeUninit::<ReaderBacking>::uninit(),
-            ))?;
-        if let Some(admission) = store.try_admit_product_memory(charge) {
-            return Some(Self {
-                backing: Arc::new(ReaderBacking::Live {
-                    reads: Arc::new(reads.clone()),
-                    _admission: admission,
-                }),
-                live: None,
-            });
+        // A pooled clone keeps Front's refundable leases alive. Spill those
+        // exact observations to request transport instead of duplicating their
+        // wide native rows in its bounded live partition. Flat rows carry no
+        // producer lease and can keep their existing shared allocation.
+        if !reads.pooled() {
+            let charge = reads
+                .allocations()
+                .try_fold(
+                    hirsel_engine_admission::retained_arc_bytes(reads),
+                    |bytes, (_, allocation)| bytes.checked_add(allocation as u64),
+                )?
+                .checked_add(hirsel_engine_admission::retained_arc_bytes(
+                    &std::mem::MaybeUninit::<ReaderBacking>::uninit(),
+                ))?;
+            if let Some(admission) = store.try_admit_product_memory(charge) {
+                return Some(Self {
+                    backing: Arc::new(ReaderBacking::Live {
+                        reads: Arc::new(reads.clone()),
+                        _admission: admission,
+                    }),
+                    live: None,
+                });
+            }
         }
         let encoded = reads.encoded_bytes()?;
         let native = (reads.len() as u64)
@@ -477,5 +483,41 @@ impl ReadUnion {
                 .max(triples.checked_add(flat)?)
                 <= scratch,
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    #[test]
+    fn completed_reader_receipt_releases_pooled_rows_and_preserves_observation_order() {
+        let reads = Reads::from_vec(vec![
+            (ReadKey::Environment, ContentHash::of_bytes(b"environment")),
+            (ReadKey::UniverseErrors, ContentHash::of_bytes(b"errors")),
+        ])
+        .unwrap();
+        let budget = hirsel_engine_admission::ProcessBudget::new(1 << 20);
+        let mut allowance = budget.reserve(1 << 20).unwrap();
+        let credit = Arc::new(Mutex::new(1 << 20));
+        let mut pool = hirsel_query_products::reads::ReadPool::default();
+        let pooled = pool
+            .intern_tracked(
+                &reads,
+                &mut allowance,
+                &mut credit.lock().unwrap(),
+                credit.clone(),
+            )
+            .unwrap();
+        let store = hirsel_engine_store::MemStore::default();
+        let receipt = ReaderReceipt::capture(&store, &pooled, 1 << 20).unwrap();
+        drop(pooled);
+        *credit.lock().unwrap() += pool.reclaim();
+        assert_eq!(*credit.lock().unwrap(), 1 << 20);
+        let restored = receipt.load(&store).unwrap();
+        assert_eq!(restored.as_ref(), &reads);
+        assert!(restored.observed().eq(reads.observed()));
+        assert_eq!(restored.digest(), reads.digest());
     }
 }

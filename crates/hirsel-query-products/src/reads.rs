@@ -523,6 +523,10 @@ impl Reads {
             observation: self.observation.clone(),
         })
     }
+    /// Whether these reads retain a producer's pooled row leases.
+    pub fn pooled(&self) -> bool {
+        self.rows.shared()
+    }
     /// Detach a selected phase from the complete body's backing rows. Exact
     /// observations, order and encoding stay unchanged.
     pub fn flat_copy(&self) -> Self {

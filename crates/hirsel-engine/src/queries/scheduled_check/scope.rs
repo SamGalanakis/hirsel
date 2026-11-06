@@ -86,10 +86,14 @@ impl FrontCheckQueries {
         }
         for (path, _) in &data.failed_front {
             weight.path(path);
-            let reads = self.completed_front_reads(data, path).ok_or_else(missing)?;
-            weight.add(hirsel_engine_admission::retained_arc_bytes(&*reads) as usize);
+            let reader = data.observations.front_reader(path).ok_or_else(missing)?;
             weight.add(
-                reads
+                usize::try_from(reader.decoding_bytes().ok_or_else(missing)?)
+                    .map_err(|_| missing())?,
+            );
+            weight.add(hirsel_engine_admission::retained_arc_bytes(&Reads::empty()) as usize);
+            weight.add(
+                reader
                     .len()
                     .checked_mul(2 * size_of::<(ReadKey, ContentHash)>())
                     .ok_or_else(missing)?,

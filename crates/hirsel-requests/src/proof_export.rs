@@ -4,8 +4,8 @@ use hirsel_engine::CheckOutput;
 use hirsel_engine::FrontProofExport;
 use hirsel_engine::FrontProofText;
 use hirsel_engine::ToolError;
-use hirsel_engine::store::*;
 use hirsel_engine_runtime::*;
+use hirsel_engine_store::*;
 
 use hirsel_syntax::ContentHash;
 use std::{

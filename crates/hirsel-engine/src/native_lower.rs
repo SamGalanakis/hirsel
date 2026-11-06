@@ -63,7 +63,7 @@ struct BoundOriginal {
     context: Arc<NativeRecordContext>,
     source: Arc<dyn Send + Sync>,
     records: crate::NativeRecords,
-    store: Arc<dyn crate::store::ResultStore>,
+    store: Arc<dyn hirsel_engine_store::ResultStore>,
     working_bytes: u64,
     implementation_revision: ContentHash,
     signature: ContentHash,

@@ -78,10 +78,10 @@ hirsel_guard::install!();
 
 #[cfg(test)]
 fn fixture_product(
-    store: &dyn hirsel_engine::store::ResultStore,
-    address: hirsel_engine::store::Address,
-    action: hirsel_engine::store::Action,
-    reference: hirsel_engine::store::Reference,
+    store: &dyn hirsel_engine_store::ResultStore,
+    address: hirsel_engine_store::Address,
+    action: hirsel_engine_store::Action,
+    reference: hirsel_engine_store::Reference,
 ) -> hirsel_engine_runtime::ProductRef {
     let budget = hirsel_engine_admission::ProcessBudget::new(64 << 20);
     let mut allowance = budget.reserve(64 << 20).unwrap();
@@ -104,7 +104,7 @@ mod scoped_profile_tests;
 mod stage_tests;
 
 #[cfg(test)]
-use hirsel_engine::store::Reference;
+use hirsel_engine_store::Reference;
 #[cfg(test)]
 use hirsel_syntax::ContentHash;
 #[cfg(test)]

@@ -8,8 +8,8 @@ use hirsel_engine::NativeRecordSource;
 use hirsel_engine::NativeRecords;
 use hirsel_engine::Verify;
 use hirsel_engine::native_metadata::NativeMetadataExt;
-use hirsel_engine::store::ResultStore;
-use hirsel_engine::store::{Action, Domain, Reference};
+use hirsel_engine_store::ResultStore;
+use hirsel_engine_store::{Action, Domain, Reference};
 use hirsel_layout::{instance::InstanceKey, layout::LayoutBuilder};
 use hirsel_lir::{
     LayoutKeys,
@@ -383,7 +383,7 @@ pub struct DemandInstances {
     records: NativeRecords,
     record_types: Arc<hirsel_types::TypeInterner>,
     queries: InstanceQueries,
-    verify_store: hirsel_engine::store::VerifyStore,
+    verify_store: hirsel_engine_store::VerifyStore,
     target: hirsel_lir::TargetSpec,
     policy: ContentHash,
     requests: BTreeMap<Vec<u8>, Request>,
@@ -439,7 +439,7 @@ impl DemandInstances {
             records: NativeRecords::new(source.record_types().clone(), store.clone()),
             record_types: source.record_types().clone(),
             queries: InstanceQueries::with_validator(store.clone(), native),
-            verify_store: hirsel_engine::store::VerifyStore::Off,
+            verify_store: hirsel_engine_store::VerifyStore::Off,
             store,
             target,
             policy,
@@ -466,7 +466,7 @@ impl DemandInstances {
         self
     }
     /// Recompute admitted hits without changing their complete semantic action.
-    pub fn with_store_verification(mut self, policy: hirsel_engine::store::VerifyStore) -> Self {
+    pub fn with_store_verification(mut self, policy: hirsel_engine_store::VerifyStore) -> Self {
         self.verify_store = policy;
         self
     }
@@ -1417,7 +1417,7 @@ impl DemandInstances {
             manifest: &manifest,
             discharge: Some(&options.discharge),
         };
-        let recompute = self.verify_store == hirsel_engine::store::VerifyStore::Recompute
+        let recompute = self.verify_store == hirsel_engine_store::VerifyStore::Recompute
             || options.validation == hirsel_native::Validation::EveryStage;
         if previous.is_some()
             && !recompute

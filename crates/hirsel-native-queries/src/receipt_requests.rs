@@ -1,7 +1,7 @@
 //! Receipt request reconstruction from current original source, before C replay.
 use super::{source_inputs::NativeSourceProvider, *};
 use hirsel_engine::NativeRecords;
-use hirsel_engine::store::Domain;
+use hirsel_engine_store::Domain;
 use hirsel_lir::sealed_payload_source::ReceiptSource;
 use hirsel_native::receipt_source::factory::*;
 use hirsel_native::receipt_source::provider::SelectionProvider;
@@ -80,7 +80,7 @@ fn roots(
 pub fn current(
     source: &impl NativeSourceProvider,
     records: &NativeRecords,
-    store: &dyn hirsel_engine::store::ResultStore,
+    store: &dyn hirsel_engine_store::ResultStore,
     target: &TargetSpec,
     reference: Option<Reference>,
 ) -> Result<(NamedGraph, Sources), String> {

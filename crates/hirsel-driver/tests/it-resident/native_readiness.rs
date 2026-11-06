@@ -3,8 +3,8 @@
 use hirsel_artifact_store::Domain;
 use hirsel_driver::resident::ExecutableOutput;
 use hirsel_engine::requests::OutputReadiness;
-use hirsel_engine::store::DirStore;
-use hirsel_engine::store::ResultStore;
+use hirsel_engine_store::DirStore;
+use hirsel_engine_store::ResultStore;
 use hirsel_native::object_queries::*;
 use hirsel_native::query_model::{
     ArenaSummary, ComponentKey, InstanceAddress, InstanceProduct, NativeProducts, ReadyProduct,
@@ -38,7 +38,7 @@ impl NativeProducts for NoNative {
 const SCRIPT: &[u8] = b"#!/bin/sh\nprintf 'ready\\n'\nexit 0\n";
 fn fixture(store: Arc<dyn ResultStore>) -> LinkedProduct {
     let budget = hirsel_engine_admission::ProcessBudget::new(64 << 20);
-    let store: Arc<dyn ResultStore> = Arc::new(hirsel_engine::store::RequestStore::new(
+    let store: Arc<dyn ResultStore> = Arc::new(hirsel_engine_store::RequestStore::new(
         store,
         budget.reserve(64 << 20).unwrap(),
     ));

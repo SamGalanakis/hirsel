@@ -1,5 +1,5 @@
 use super::*;
-use hirsel_engine::store::{DirStore, MAX_RECORD};
+use hirsel_engine_store::{DirStore, MAX_RECORD};
 
 use crate::query_model::*;
 fn output_path(store: &DirStore, reference: Reference) -> std::path::PathBuf {
@@ -8,9 +8,9 @@ fn output_path(store: &DirStore, reference: Reference) -> std::path::PathBuf {
 use hirsel_lir::layout_types::TargetSpec;
 use std::cell::Cell;
 
-fn admitted(backend: Arc<dyn ResultStore>) -> hirsel_engine::store::RequestStore {
+fn admitted(backend: Arc<dyn ResultStore>) -> hirsel_engine_store::RequestStore {
     let budget = hirsel_engine_admission::ProcessBudget::new(64 << 20);
-    hirsel_engine::store::RequestStore::new(backend, budget.reserve(64 << 20).unwrap())
+    hirsel_engine_store::RequestStore::new(backend, budget.reserve(64 << 20).unwrap())
 }
 
 const INPUT: Domain = Domain {
@@ -441,7 +441,7 @@ fn chunk_boundaries_domains_and_complete_lengths_are_checked() {
 
 #[test]
 fn explicit_recompute_checks_exact_cached_bytes() {
-    let store = admitted(Arc::new(hirsel_engine::store::MemStore::default()));
+    let store = admitted(Arc::new(hirsel_engine_store::MemStore::default()));
     let key = key("main");
     let descriptor = ready(&store);
     let cold = codegen(&store, &key, &descriptor, || Ok(object())).unwrap();
@@ -481,21 +481,18 @@ fn explicit_recompute_checks_exact_cached_bytes() {
 #[test]
 fn object_hit_never_reads_ready_body_payload() {
     struct NoBody {
-        inner: hirsel_engine::store::MemStore,
+        inner: hirsel_engine_store::MemStore,
         body: Reference,
     }
     impl ResultStore for NoBody {
-        fn capability(&self) -> hirsel_engine::store::ProviderCapability {
+        fn capability(&self) -> hirsel_engine_store::ProviderCapability {
             self.inner.capability()
         }
 
-        fn get(
-            &self,
-            key: &hirsel_engine::store::EntryKey,
-        ) -> Option<hirsel_artifact_store::Bytes> {
+        fn get(&self, key: &hirsel_engine_store::EntryKey) -> Option<hirsel_artifact_store::Bytes> {
             self.inner.get(key)
         }
-        fn put(&self, key: &hirsel_engine::store::EntryKey, value: &[u8]) {
+        fn put(&self, key: &hirsel_engine_store::EntryKey, value: &[u8]) {
             self.inner.put(key, value)
         }
         fn get_content(&self, r: Reference) -> Option<hirsel_artifact_store::Bytes> {
@@ -509,7 +506,7 @@ fn object_hit_never_reads_ready_body_payload() {
             "fixture-no-body"
         }
     }
-    let inner = hirsel_engine::store::MemStore::default();
+    let inner = hirsel_engine_store::MemStore::default();
     let descriptor = ready(&inner);
     let store = admitted(Arc::new(NoBody {
         inner,
@@ -662,7 +659,7 @@ fn task_snapshot(
 fn codegen_stages_local_ready_while_execution_waits_and_preserves_failure_order() {
     for whole in [false, true] {
         for (execution_ok, ready_ok) in [(true, true), (false, false), (true, false)] {
-            let store = Arc::new(hirsel_engine::store::MemStore::default());
+            let store = Arc::new(hirsel_engine_store::MemStore::default());
             let mut ready = ready(store.as_ref());
             ready.optimizer_reads.clear();
             let key = key("caller");
@@ -748,9 +745,7 @@ fn codegen_stages_local_ready_while_execution_waits_and_preserves_failure_order(
 
 #[test]
 fn codegen_task_create_is_lazy_and_waits_for_complete_optimizer_inventory() {
-    let store = Arc::new(admitted(
-        Arc::new(hirsel_engine::store::MemStore::default()),
-    ));
+    let store = Arc::new(admitted(Arc::new(hirsel_engine_store::MemStore::default())));
     let mut ready = ready(store.as_ref());
     ready.optimizer_reads = vec![
         product(store.as_ref(), "copy1"),
@@ -810,7 +805,7 @@ fn codegen_task_create_is_lazy_and_waits_for_complete_optimizer_inventory() {
 #[test]
 fn codegen_task_rejects_stale_optimizer_and_dependency_failure_before_emission() {
     for stale in [false, true] {
-        let store = Arc::new(hirsel_engine::store::MemStore::default());
+        let store = Arc::new(hirsel_engine_store::MemStore::default());
         let mut ready = ready(store.as_ref());
         let copy = product(store.as_ref(), "old copy");
         ready.optimizer_reads = vec![copy.clone()];
@@ -855,9 +850,7 @@ fn codegen_task_rejects_stale_optimizer_and_dependency_failure_before_emission()
 
 #[test]
 fn link_task_waits_for_manifest_then_all_fragments_and_runtime_inputs() {
-    let store = Arc::new(admitted(
-        Arc::new(hirsel_engine::store::MemStore::default()),
-    ));
+    let store = Arc::new(admitted(Arc::new(hirsel_engine_store::MemStore::default())));
     let ready = ready(store.as_ref());
     let fragment = codegen(store.as_ref(), &key("main"), &ready, || Ok(object())).unwrap();
     let key = link_key();
@@ -916,7 +909,7 @@ fn link_task_waits_for_manifest_then_all_fragments_and_runtime_inputs() {
 
 #[test]
 fn stale_blob_schema_one_is_refused_with_streamed_schema_two() {
-    let store = hirsel_engine::store::MemStore::default();
+    let store = hirsel_engine_store::MemStore::default();
     let mut bytes = vec![0x5a; MAX_RECORD];
     bytes.extend_from_slice(b"old tail");
     let old = put_record(
@@ -949,7 +942,7 @@ fn stale_blob_schema_one_is_refused_with_streamed_schema_two() {
 
 #[test]
 fn execution_plan_identity_controls_object_hits_and_imported_keys() {
-    let store = admitted(Arc::new(hirsel_engine::store::MemStore::default()));
+    let store = admitted(Arc::new(hirsel_engine_store::MemStore::default()));
     let key = key("main");
     let ready = ready(&store);
     let plan_domain = Domain {
@@ -1035,16 +1028,16 @@ fn execution_plan_identity_controls_object_hits_and_imported_keys() {
     }
 }
 
-use hirsel_engine::store::{Action, Address, Domain, Output, Reference, ResultStore, VerifyStore};
 use hirsel_engine_runtime::ArchiveAdmission;
+use hirsel_engine_store::{Action, Address, Domain, Output, Reference, ResultStore, VerifyStore};
 use hirsel_lir::stage::ObjectArtifact;
 use std::path::Path;
 
 fn fixture_product(
-    store: &dyn hirsel_engine::store::ResultStore,
-    address: hirsel_engine::store::Address,
-    action: hirsel_engine::store::Action,
-    reference: hirsel_engine::store::Reference,
+    store: &dyn hirsel_engine_store::ResultStore,
+    address: hirsel_engine_store::Address,
+    action: hirsel_engine_store::Action,
+    reference: hirsel_engine_store::Reference,
 ) -> hirsel_engine_runtime::ProductRef {
     let budget = hirsel_engine_admission::ProcessBudget::new(64 << 20);
     let mut allowance = budget.reserve(64 << 20).unwrap();

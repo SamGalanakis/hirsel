@@ -1,10 +1,10 @@
 //! Original plan forgery vectors applied to actual root and Ready descriptors.
 use hirsel_driver::native;
-use hirsel_engine::store;
-use hirsel_engine::store::ResultStore;
-use hirsel_engine::store::VerifyStore;
 use hirsel_engine::*;
 use hirsel_engine_runtime::*;
+use hirsel_engine_store as store;
+use hirsel_engine_store::ResultStore;
+use hirsel_engine_store::VerifyStore;
 use hirsel_intern::jobs::with_compiler_stack;
 
 use hirsel_front_phases::compiler_adapters;

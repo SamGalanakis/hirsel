@@ -711,7 +711,7 @@ int main(void) {
         use crate::object_queries::capture::CapturedLink;
         use crate::object_queries::capture::FrozenLinker;
         use crate::plan_executable_inputs;
-        use hirsel_engine::store::MemStore;
+        use hirsel_engine_store::MemStore;
         let store = MemStore::default();
         let linker = FrozenLinker::snapshot(&store, &input("HIRSEL_CAPTURE_LINKER")).unwrap();
         let root = tempfile::tempdir().unwrap();
@@ -807,7 +807,7 @@ int main(void) {
         use crate::object_queries::capture::FrozenLinkKit;
         use crate::object_queries::capture::FrozenLinker;
         use crate::plan_frozen_executable_inputs;
-        use hirsel_engine::store::MemStore;
+        use hirsel_engine_store::MemStore;
         use sha2::Digest;
         let store = MemStore::default();
         let linker = FrozenLinker::snapshot(&store, &input("HIRSEL_CAPTURE_LINKER")).unwrap();

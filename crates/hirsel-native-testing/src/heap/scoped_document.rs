@@ -10,8 +10,8 @@ use std::path::Path;
 
 fn load_document(path: &Path, replacement: Option<&str>) -> hirsel_engine::LoadedProgram {
     use std::sync::{Arc, OnceLock};
-    static STORE: OnceLock<Arc<hirsel_engine::store::MemStore>> = OnceLock::new();
-    let store = STORE.get_or_init(|| Arc::new(hirsel_engine::store::MemStore::bounded(256 << 20)));
+    static STORE: OnceLock<Arc<hirsel_engine_store::MemStore>> = OnceLock::new();
+    let store = STORE.get_or_init(|| Arc::new(hirsel_engine_store::MemStore::bounded(256 << 20)));
     hirsel_front_phases::COMPILER
         .with_config(hirsel_engine::CompileConfig {
             store: store.clone(),

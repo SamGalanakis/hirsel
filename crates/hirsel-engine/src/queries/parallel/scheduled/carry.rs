@@ -937,7 +937,7 @@ impl BodyTask {
             &mut facts.checked,
             &mut memo_rows,
         )?;
-        let action = crate::store::query_action(&input.key, input.key.1, &reads);
+        let action = hirsel_engine_store::query_action(&input.key, input.key.1, &reads);
         let outcome = queries
             .publish_compact_facts(cx, self.input, reference, action, reads, facts, memo_rows)?;
         let publication = match &outcome.state {
@@ -1270,7 +1270,7 @@ mod tests {
                     table_keys: facts.table_keys.as_ref(),
                 };
                 let store = Arc::new(persistent::Contents(Arc::new(
-                    crate::store::MemStore::default(),
+                    hirsel_engine_store::MemStore::default(),
                 )));
                 let encoder = persistent::TypeRecords::new(
                     hirsel_types::TypeInterner::new(None),

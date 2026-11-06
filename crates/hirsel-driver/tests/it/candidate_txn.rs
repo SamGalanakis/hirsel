@@ -496,21 +496,21 @@ fn ordinary_store_adoption_and_faults_equal_cache_free_checks() {
     }
 }
 fn store_fault_checks(candidate: bool) -> String {
-    use hirsel_engine::store::{EntryKey, MemStore, ResultStore, VerifyStore};
+    use hirsel_engine_store::{EntryKey, MemStore, ResultStore, VerifyStore};
     use std::sync::{Mutex, atomic::AtomicUsize};
     #[derive(Default)]
     struct FaultStore {
         backing: MemStore,
         mode: AtomicUsize,
         substitutions: AtomicUsize,
-        records: Mutex<Vec<(EntryKey, hirsel_engine::store::Bytes)>>,
+        records: Mutex<Vec<(EntryKey, hirsel_engine_store::Bytes)>>,
     }
     impl ResultStore for FaultStore {
-        fn capability(&self) -> hirsel_engine::store::ProviderCapability {
+        fn capability(&self) -> hirsel_engine_store::ProviderCapability {
             self.backing.capability()
         }
 
-        fn get(&self, key: &EntryKey) -> Option<hirsel_engine::store::Bytes> {
+        fn get(&self, key: &EntryKey) -> Option<hirsel_engine_store::Bytes> {
             let bytes = self.backing.get(key)?;
             match self.mode.load(Ordering::Acquire) {
                 1 => Some(b"corrupt candidate store frame".as_slice().into()),
@@ -539,7 +539,7 @@ fn store_fault_checks(candidate: bool) -> String {
                     Some(damaged.into())
                 }
                 6 => {
-                    let mut entry = hirsel_engine::store::Entry::load(&self.backing, key);
+                    let mut entry = hirsel_engine_store::Entry::load(&self.backing, key);
                     for variant in &mut entry.variants {
                         variant.reads = hirsel_query_products::reads::Reads::empty();
                     }
@@ -619,7 +619,7 @@ fn store_fault_checks(candidate: bool) -> String {
             let (_, cold_products, _) = ordinary(
                 &f,
                 CompileConfig {
-                    store: Arc::new(hirsel_engine::store::NoneStore),
+                    store: Arc::new(hirsel_engine_store::NoneStore),
                     ..config.clone()
                 },
             );
@@ -778,7 +778,7 @@ fn candidate_ordinary_products_keep_snapshots_frozen_and_allow_library_edits() {
             .unwrap();
         let config = CompileConfig {
             store: std::sync::Arc::new(
-                hirsel_engine::store::DirStore::new(f.0.join("reader"))
+                hirsel_engine_store::DirStore::new(f.0.join("reader"))
                     .with_read_only_root(products),
             ),
             ..CompileConfig::for_memory_cap(None)

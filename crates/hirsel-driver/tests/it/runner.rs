@@ -672,12 +672,12 @@ fn ordinary_products_restore_runners_and_images_without_path_or_json_authority()
         let products = root.path().join("products");
         let mut tools = toolchain();
         tools.cache = root.path().join("materialized");
-        tools.products = std::sync::Arc::new(hirsel_engine::store::DirStore::new(products.clone()));
+        tools.products = std::sync::Arc::new(hirsel_engine_store::DirStore::new(products.clone()));
         let target = x86();
         let first = runner(&tools, &target).unwrap();
         let expected_runner = std::fs::read(&first.path).unwrap();
         std::fs::write(&first.path, b"truncated runner").unwrap();
-        tools.products = std::sync::Arc::new(hirsel_engine::store::DirStore::new(products.clone()));
+        tools.products = std::sync::Arc::new(hirsel_engine_store::DirStore::new(products.clone()));
         let restored = runner(&tools, &target).unwrap();
         assert_eq!(restored.build_id, first.build_id);
         assert_eq!(restored.mode, first.mode);
@@ -703,7 +703,7 @@ fn ordinary_products_restore_runners_and_images_without_path_or_json_authority()
         let expected = seen(&run(&image, &target, &tools, &dir));
         std::fs::remove_file(&first_image.path).unwrap();
         std::fs::remove_file(&restored.path).unwrap();
-        tools.products = std::sync::Arc::new(hirsel_engine::store::DirStore::new(products));
+        tools.products = std::sync::Arc::new(hirsel_engine_store::DirStore::new(products));
         let next = link_runnable(
             &compiled.program,
             &compiled.entry,
@@ -727,7 +727,7 @@ fn ordinary_products_restore_runners_and_images_without_path_or_json_authority()
         );
         assert_eq!(seen(&run(&next, &target, &tools, &dir)), expected);
         // Same materialized files under a fresh provider do not constitute hits.
-        tools.products = std::sync::Arc::new(hirsel_engine::store::MemStore::default());
+        tools.products = std::sync::Arc::new(hirsel_engine_store::MemStore::default());
         let recomputed = link_runnable(
             &compiled.program,
             &compiled.entry,

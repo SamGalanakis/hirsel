@@ -1,5 +1,5 @@
 use hirsel_engine::CompileConfig;
-use hirsel_engine::store;
+use hirsel_engine_store as store;
 use hirsel_intern::jobs::with_compiler_stack;
 use hirsel_query_products::QueryKind;
 

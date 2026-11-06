@@ -459,7 +459,7 @@ impl FrontRegistrationQueries {
         }
     }
     fn restore(&self, input: &Input) -> Option<Data> {
-        use crate::store::Entry;
+        use hirsel_engine_store::Entry;
         if self.lower.verify != Verify::On || !self.lower.store.persistence().retains() {
             return None;
         }

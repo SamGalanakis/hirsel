@@ -51,9 +51,9 @@ pub(crate) fn verifying_compiler() -> hirsel_engine::Compiler {
     hirsel_front_phases::COMPILER.with_config(hirsel_engine::CompileConfig {
         retention: hirsel_engine::memo::Retention::Batch,
         store: std::sync::Arc::new(
-            hirsel_engine::store::MemStore::bounded(cache_bytes).with_installed_products(),
+            hirsel_engine_store::MemStore::bounded(cache_bytes).with_installed_products(),
         ),
-        verify_store: hirsel_engine::store::VerifyStore::Recompute,
+        verify_store: hirsel_engine_store::VerifyStore::Recompute,
         ..config
     })
 }

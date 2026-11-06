@@ -5,7 +5,7 @@ use hirsel_engine::FrontNativeDefinitionInputs;
 use hirsel_engine::FrontNativeDefinitionQueries;
 use hirsel_engine::FrontNativeQueries;
 use hirsel_engine::FrontRunQueries;
-use hirsel_engine::store::ResultStore;
+use hirsel_engine_store::ResultStore;
 
 use hirsel_syntax::DefPath;
 use std::sync::Arc;

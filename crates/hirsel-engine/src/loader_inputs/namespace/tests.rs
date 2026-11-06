@@ -727,25 +727,25 @@ fn exact_counts_hardlinks_limits_and_live_lease_release() {
 }
 #[test]
 fn explicit_toolchain_context_loads_sidecar_graph_without_host_discovery() {
-    struct InstalledStd(Arc<crate::store::InstalledPackage>);
-    impl crate::store::ResultStore for InstalledStd {
-        fn capability(&self) -> crate::store::ProviderCapability {
-            crate::store::ProviderCapability::ReadOnly
+    struct InstalledStd(Arc<hirsel_engine_store::InstalledPackage>);
+    impl hirsel_engine_store::ResultStore for InstalledStd {
+        fn capability(&self) -> hirsel_engine_store::ProviderCapability {
+            hirsel_engine_store::ProviderCapability::ReadOnly
         }
 
         fn installed_package(
             &self,
             package: &hirsel_syntax::PackageId,
             compiler: ContentHash,
-        ) -> Result<Arc<crate::store::InstalledPackage>, String> {
+        ) -> Result<Arc<hirsel_engine_store::InstalledPackage>, String> {
             assert_eq!(package, &self.0.package);
             assert_eq!(compiler, self.0.compiler);
             Ok(self.0.clone())
         }
-        fn get(&self, _: &crate::store::EntryKey) -> Option<crate::store::Bytes> {
+        fn get(&self, _: &hirsel_engine_store::EntryKey) -> Option<hirsel_engine_store::Bytes> {
             None
         }
-        fn put(&self, _: &crate::store::EntryKey, _: &[u8]) {}
+        fn put(&self, _: &hirsel_engine_store::EntryKey, _: &[u8]) {}
         fn name(&self) -> &'static str {
             "captured-std-fixture"
         }

@@ -1,6 +1,6 @@
 //! The hard-admission boundary replacing UnitObjects' obsolete soft throttle.
-use hirsel_engine::store::*;
 use hirsel_engine_runtime::*;
+use hirsel_engine_store::*;
 
 use hirsel_intern::jobs::{COMPILER_STACK_BYTES, Jobs};
 use hirsel_syntax::ContentHash;

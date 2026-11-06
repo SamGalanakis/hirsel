@@ -3,7 +3,7 @@ use hirsel_lir::validate::Inputs;
 
 #[test]
 fn arena_query_graph_settles_local_equations_and_reuses_unchanged_components() {
-    use hirsel_engine::store::{MemStore, ResultStore};
+    use hirsel_engine_store::{MemStore, ResultStore};
     use hirsel_native::query_model::InstanceAddress;
     use hirsel_native::query_model::extract_local_arena;
     use hirsel_native_cache::arena::ArenaQueryCounts;
@@ -27,7 +27,7 @@ fn arena_query_graph_settles_local_equations_and_reuses_unchanged_components() {
         discharge: Some(&lowered.native_discharge),
     };
     let budget = hirsel_engine_admission::ProcessBudget::new(64 << 20);
-    let store = hirsel_engine::store::RequestStore::new(
+    let store = hirsel_engine_store::RequestStore::new(
         std::sync::Arc::new(MemStore::default()),
         budget.reserve(64 << 20).unwrap(),
     );

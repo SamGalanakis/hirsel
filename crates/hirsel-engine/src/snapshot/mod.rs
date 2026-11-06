@@ -299,7 +299,7 @@ pub(crate) struct LookupInput {
     pub environment: ContentHash,
     /// The local store this machine's V publishes source dependencies'
     /// summaries to, once it has computed them from their exact sources.
-    pub summaries: Option<Arc<dyn crate::store::ResultStore>>,
+    pub summaries: Option<Arc<dyn hirsel_engine_store::ResultStore>>,
 }
 const _: () = {
     const fn shared<T: Send + Sync>() {}
@@ -2106,7 +2106,7 @@ extern "unused" fn unused()"#
         hirsel_intern::jobs::with_compiler_stack(|| {
             let mut adapters = crate::phases::engine_only_adapters();
             adapters.signature = Some(Arc::new(Header));
-            let store = Arc::new(crate::store::MemStore::default());
+            let store = Arc::new(hirsel_engine_store::MemStore::default());
             let mut engine =
                 QueryEngine::new(default_environment(), adapters).with_result_store(store.clone());
             let context = default_context();
@@ -2503,7 +2503,7 @@ extern "unused" fn unused()"#
     #[test]
     fn local_verdicts_reuse_without_granting_declaration_authority() {
         use hirsel_intern::work::{self, Counter};
-        let store = Arc::new(crate::store::MemStore::default());
+        let store = Arc::new(hirsel_engine_store::MemStore::default());
         let mut original =
             QueryEngine::new(default_environment(), crate::phases::engine_only_adapters())
                 .with_result_store(store.clone());

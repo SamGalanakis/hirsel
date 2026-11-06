@@ -13,7 +13,7 @@ pub mod o5;
 pub mod switches;
 
 use hirsel_engine::ToolError;
-use hirsel_engine::store::{ResultStore, VerifyStore, store_by_name};
+use hirsel_engine_store::{ResultStore, VerifyStore, store_by_name};
 use std::{
     collections::BTreeMap,
     fmt::Write as _,
@@ -33,23 +33,23 @@ pub type Artifacts = BTreeMap<String, Vec<u8>>;
 struct ColdStore(Arc<dyn ResultStore>);
 
 impl ResultStore for ColdStore {
-    fn capability(&self) -> hirsel_engine::store::ProviderCapability {
-        hirsel_engine::store::ProviderCapability::Absent
+    fn capability(&self) -> hirsel_engine_store::ProviderCapability {
+        hirsel_engine_store::ProviderCapability::Absent
     }
 
     fn installed_package(
         &self,
         package: &hirsel_syntax::PackageId,
         compiler: hirsel_syntax::ContentHash,
-    ) -> Result<Arc<hirsel_engine::store::InstalledPackage>, String> {
+    ) -> Result<Arc<hirsel_engine_store::InstalledPackage>, String> {
         self.0.installed_package(package, compiler)
     }
 
-    fn get(&self, _: &hirsel_engine::store::EntryKey) -> Option<hirsel_engine::store::Bytes> {
+    fn get(&self, _: &hirsel_engine_store::EntryKey) -> Option<hirsel_engine_store::Bytes> {
         None
     }
 
-    fn put(&self, _: &hirsel_engine::store::EntryKey, _: &[u8]) {}
+    fn put(&self, _: &hirsel_engine_store::EntryKey, _: &[u8]) {}
 
     fn name(&self) -> &'static str {
         "none@1"

@@ -6,8 +6,8 @@ use super::ownership_admission::Admission;
 use hirsel_engine::FrontLowerQueries;
 use hirsel_engine::FrontNativeProducts;
 use hirsel_engine::FrontNativeQueries;
-use hirsel_engine::store::*;
 use hirsel_engine_runtime::*;
+use hirsel_engine_store::*;
 
 use hirsel_native::query_model as model;
 use hirsel_native::root_source::NativeLinkFacts;

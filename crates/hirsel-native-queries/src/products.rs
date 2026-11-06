@@ -7,7 +7,7 @@ use super::{
     ready::EMISSION_CONTEXT_DOMAIN,
     *,
 };
-use hirsel_engine::store::ResultStore;
+use hirsel_engine_store::ResultStore;
 use hirsel_lir::{
     emission::{EmitInputs, OptLevel},
     products::Binding,
@@ -91,7 +91,7 @@ pub struct NativeSnapshot {
     pub instances: DemandInstances,
     pub arena: SettledArenaGraph,
     pub options: hirsel_native::Options,
-    pub verify_store: hirsel_engine::store::VerifyStore,
+    pub verify_store: hirsel_engine_store::VerifyStore,
     pub emission: EmissionOptions,
     pub context: Reference,
     pub manifest: hirsel_core_contract::Manifest,
@@ -244,7 +244,7 @@ impl NativeSnapshot {
             instances,
             arena,
             options,
-            verify_store: hirsel_engine::store::VerifyStore::Off,
+            verify_store: hirsel_engine_store::VerifyStore::Off,
             emission,
             context,
             manifest,
@@ -264,7 +264,7 @@ impl NativeSnapshot {
     /// A shared snapshot cannot change the policy of an admitted request.
     pub fn with_store_verification(
         mut self: Arc<Self>,
-        policy: hirsel_engine::store::VerifyStore,
+        policy: hirsel_engine_store::VerifyStore,
     ) -> Result<Arc<Self>, String> {
         Arc::get_mut(&mut self)
             .ok_or("native store verification must be selected before sharing")?

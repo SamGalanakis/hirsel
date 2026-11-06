@@ -3,7 +3,7 @@
 use crate::QueryEngine;
 use crate::Verify;
 use crate::memo::Retention;
-use crate::store;
+use hirsel_engine_store as store;
 use hirsel_intern::jobs::Jobs;
 use hirsel_query_products::LoweringPolicy;
 use std::sync::Arc;

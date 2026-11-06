@@ -92,7 +92,7 @@ impl FrontBodyQueries {
             // pooled readers carry the independent, last-reader refund needed
             // to release that producer while an inspection holds its reads.
             if self.read_pool.get().is_none()
-                || self.store.capability() == crate::store::ProviderCapability::Absent
+                || self.store.capability() == hirsel_engine_store::ProviderCapability::Absent
             {
                 return None;
             }
@@ -111,7 +111,7 @@ impl FrontBodyQueries {
                 .map(|(_, reads)| reads)
                 .collect::<Vec<_>>();
             self.store
-                .archive_encoded(crate::store::ArchiveBoundary::RequiredSpill);
+                .archive_encoded(hirsel_engine_store::ArchiveBoundary::RequiredSpill);
             let bytes = bincode::serialize(&reads).ok()?;
             let reference = self.store.put_content(OBSERVATIONS, &bytes)?;
             Some(Rows::Archived {

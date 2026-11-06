@@ -874,7 +874,7 @@ impl QueryEngine {
 #[cfg(test)]
 mod frozen_task_tests {
     use super::*;
-    use crate::store::ResultStore;
+    use hirsel_engine_store::ResultStore;
 
     struct RejectAfterReads;
     impl CheckerPhase for RejectAfterReads {
@@ -1148,7 +1148,7 @@ mod frozen_task_tests {
     }
     fn runtime_errors() -> hirsel_engine_runtime::RuntimeErrors {
         let diagnostic = |text: &[u8]| {
-            crate::store::Domain {
+            hirsel_engine_store::Domain {
                 kind: 0x4600_00ff,
                 schema: 1,
             }
@@ -1171,7 +1171,7 @@ mod frozen_task_tests {
 
         hirsel_intern::jobs::with_compiler_stack(|| {
             let (mut engine, path) = fixture();
-            let store = Arc::new(crate::store::MemStore::default());
+            let store = Arc::new(hirsel_engine_store::MemStore::default());
             engine = engine.with_result_store(store.clone());
             let budget = hirsel_engine_admission::ProcessBudget::new(512 << 20);
             let mut runtime = AdmittedRuntime::new(

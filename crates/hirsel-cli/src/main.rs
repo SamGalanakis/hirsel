@@ -1184,9 +1184,9 @@ fn execute(mut args: Vec<OsString>, start: std::time::Instant) -> u8 {
         .unwrap_or_default()
         .to_owned();
     let verify_store = if verify_cache {
-        hirsel_engine::store::VerifyStore::Recompute
+        hirsel_engine_store::VerifyStore::Recompute
     } else {
-        hirsel_engine::store::VerifyStore::Off
+        hirsel_engine_store::VerifyStore::Off
     };
     let code = execute_command(args, verify, verify_store);
     if let Err(error) = measure.finish(&command, start.elapsed()) {
@@ -1222,7 +1222,7 @@ fn execute_resident(mut args: Vec<OsString>) -> u8 {
         .and_then(|a| a.to_str())
         .unwrap_or_default()
         .to_owned();
-    let code = execute_command(args, verify, hirsel_engine::store::VerifyStore::Off);
+    let code = execute_command(args, verify, hirsel_engine_store::VerifyStore::Off);
     if let Err(error) = measure.finish(&command, started.elapsed()) {
         eprintln!("hirsel: {error}");
         return 2;
@@ -1233,7 +1233,7 @@ fn execute_resident(mut args: Vec<OsString>) -> u8 {
 fn execute_command(
     args: Vec<OsString>,
     verify: Verify,
-    verify_store: hirsel_engine::store::VerifyStore,
+    verify_store: hirsel_engine_store::VerifyStore,
 ) -> u8 {
     // Keep the selected command before the parser consumes its operands.
     let topic = args.first().cloned();
@@ -1279,7 +1279,7 @@ fn execute_command(
             println!(
                 "{}",
                 serde_json::json!({
-                    "products": hirsel_engine::store::DirStore::installed_root(),
+                    "products": hirsel_engine_store::DirStore::installed_root(),
                 })
             );
             return 0;
@@ -1694,7 +1694,7 @@ fn execute_command(
             };
         }
         Command::StoreVerify { root } => {
-            return match hirsel_engine::store::InstalledPackage::verify_store(Path::new(&root)) {
+            return match hirsel_engine_store::InstalledPackage::verify_store(Path::new(&root)) {
                 Ok(()) => 0,
                 Err(error) => {
                     eprintln!(

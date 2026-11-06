@@ -1,7 +1,7 @@
 use hirsel_driver::*;
-use hirsel_engine::store::MemStore;
 use hirsel_engine::*;
 use hirsel_engine_runtime::*;
+use hirsel_engine_store::MemStore;
 use hirsel_intern::jobs::with_compiler_stack;
 
 use hirsel_front_phases::*;
@@ -241,14 +241,14 @@ fn admitted_lower_consumes_many_constant_dependencies_with_original_mailbox_boun
 #[test]
 fn original_body_decode_admission_precedes_provider_reads_and_preserves_scalar_tir() {
     with_compiler_stack(|| {
-        use hirsel_engine::store::{Bytes, EntryKey, ResultStore};
+        use hirsel_engine_store::{Bytes, EntryKey, ResultStore};
         use std::sync::atomic::{AtomicUsize, Ordering};
         struct CountReads {
             inner: MemStore,
             reads: AtomicUsize,
         }
         impl ResultStore for CountReads {
-            fn capability(&self) -> hirsel_engine::store::ProviderCapability {
+            fn capability(&self) -> hirsel_engine_store::ProviderCapability {
                 self.inner.capability()
             }
 

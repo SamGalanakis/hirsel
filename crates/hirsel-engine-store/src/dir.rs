@@ -582,11 +582,11 @@ impl ResultStore for DirStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::store::{Domain, ResultStore};
+    use crate::{Domain, ResultStore};
 
     #[test]
     fn installed_audit_checks_unique_references_once_and_reads_verify_on_demand() {
-        use crate::store::{
+        use crate::{
             Action, Address, InstalledPackage, InstalledSource, installed::InstallationRecords,
         };
         use hirsel_syntax::{ContentHash, FileContext, PackageId};
@@ -611,7 +611,7 @@ mod tests {
             };
             let reference = writer
                 .put(
-                    crate::store::entry_domain(hirsel_query_products::QueryKind::Parse),
+                    crate::entry_domain(hirsel_query_products::QueryKind::Parse),
                     &bytes,
                 )
                 .unwrap();
@@ -620,10 +620,7 @@ mod tests {
                 [&n.to_le_bytes()[..]],
             ));
             let action = Action(ContentHash::of_bytes(&n.to_le_bytes()));
-            for address in [
-                address,
-                Address(crate::store::product_association_key(address).0),
-            ] {
+            for address in [address, Address(crate::product_association_key(address).0)] {
                 writer.associate(address, action, reference).unwrap();
                 records.rows.insert(address.0, (action, reference));
             }
@@ -655,7 +652,7 @@ mod tests {
             assert_eq!(local.put(reference.domain, bytes).unwrap(), *reference);
             for address in [
                 *address,
-                Address(crate::store::product_association_key(*address).0),
+                Address(crate::product_association_key(*address).0),
             ] {
                 local.associate(address, *action, *reference).unwrap();
             }
@@ -697,7 +694,7 @@ mod tests {
             "opening verifies the interface, not the unused closure"
         );
         let source = package_owner.source_records().unwrap();
-        assert!(source.metadata_bytes() >= inputs.len() * size_of::<crate::store::Reference>());
+        assert!(source.metadata_bytes() >= inputs.len() * size_of::<crate::Reference>());
         #[cfg(unix)]
         assert!(
             source.metadata_bytes() < 70 * 5000,
@@ -717,7 +714,7 @@ mod tests {
                 assert_eq!(&*source.get(&key).unwrap(), expected);
                 assert_eq!(
                     operation.lookup_product(*address),
-                    Some(crate::store::Association {
+                    Some(crate::Association {
                         action: *action,
                         reference: *reference
                     })
@@ -766,7 +763,7 @@ mod tests {
 
     #[test]
     fn query_variants_and_product_associations_survive_each_others_publication_and_reopen() {
-        use crate::store::{Action, Address, Entry, VariantRef};
+        use crate::{Action, Address, Entry, VariantRef};
         for kind in [
             hirsel_query_products::QueryKind::Modes,
             hirsel_query_products::QueryKind::Lower,
@@ -918,7 +915,7 @@ mod tests {
             let budget = hirsel_engine_admission::ProcessBudget::new(4096);
             let reader: std::sync::Arc<dyn ResultStore> = if forwarded == 2 {
                 std::sync::Arc::new(
-                    crate::store::RequestStore::with_scratch(
+                    crate::RequestStore::with_scratch(
                         reader,
                         budget.reserve(4096).unwrap(),
                         &directory,
@@ -927,7 +924,7 @@ mod tests {
                     .unwrap(),
                 )
             } else if forwarded == 1 {
-                std::sync::Arc::new(crate::store::RequestStore::new(
+                std::sync::Arc::new(crate::RequestStore::new(
                     reader,
                     budget.reserve(4096).unwrap(),
                 ))
@@ -982,7 +979,7 @@ mod tests {
         let store = std::sync::Arc::new(DirStore::new(directory.path().join("products")));
         let statistics = store.physical.as_ref().unwrap().enable_statistics();
         let budget = hirsel_engine_admission::ProcessBudget::new(64 << 10);
-        let request = crate::store::RequestStore::with_scratch(
+        let request = crate::RequestStore::with_scratch(
             store.clone(),
             budget.reserve(64 << 10).unwrap(),
             directory.path(),

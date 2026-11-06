@@ -1,5 +1,5 @@
-use hirsel_engine::store::{Action, Address, Domain, MemStore, ResultStore};
 use hirsel_engine_runtime::*;
+use hirsel_engine_store::{Action, Address, Domain, MemStore, ResultStore};
 
 use hirsel_lir::operation::{NativeType, Primitive};
 use hirsel_native::query_model::INSTANCE_KIND;
@@ -17,7 +17,7 @@ struct Context {
     changed: bool,
 }
 impl QueryContext for Context {
-    fn read(&mut self, id: QueryId) -> Poll<Result<ProductRef, hirsel_engine::store::Reference>> {
+    fn read(&mut self, id: QueryId) -> Poll<Result<ProductRef, hirsel_engine_store::Reference>> {
         let (expected_kind, mut output) = (self.inputs[&id.address.0]).clone();
         assert_eq!(id.kind, expected_kind);
         if self.pending {
@@ -33,7 +33,7 @@ impl QueryContext for Context {
 #[test]
 fn original_guard_task_waits_for_dependencies_and_keeps_its_existing_grant_with_output() {
     let transport = hirsel_engine_admission::ProcessBudget::new(64 << 20);
-    let store: Arc<dyn ResultStore> = Arc::new(hirsel_engine::store::RequestStore::new(
+    let store: Arc<dyn ResultStore> = Arc::new(hirsel_engine_store::RequestStore::new(
         Arc::new(MemStore::default()),
         transport.reserve(64 << 20).unwrap(),
     ));

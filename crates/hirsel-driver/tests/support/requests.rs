@@ -1,9 +1,9 @@
 //! Request executor fixtures for tests that start with an indexed engine.
 use hirsel_engine::requests::source_graph::InstalledSource;
 use hirsel_engine::requests::source_graph::*;
-use hirsel_engine::store::*;
 use hirsel_engine::*;
 use hirsel_engine_runtime::*;
+use hirsel_engine_store::*;
 
 use hirsel_query_products::reads::Reads;
 use hirsel_query_products::{LoweringPolicy, QueryKind};

@@ -566,7 +566,7 @@ mod tests {
             inputs: inputs.clone().into(),
             operation: CompileOperation::RecomputeCounts { queries: vec![] },
         };
-        let error = hirsel_engine::store::Domain {
+        let error = hirsel_engine_store::Domain {
             kind: 0x4600_00fe,
             schema: 1,
         }
@@ -622,7 +622,7 @@ mod tests {
 
     #[test]
     fn loading_transport_transfer_keeps_one_shared_charge_before_s0() {
-        use hirsel_engine::store::{Domain, NoneStore, RequestStore, ResultStore};
+        use hirsel_engine_store::{Domain, NoneStore, RequestStore, ResultStore};
         let budget = hirsel_engine_admission::ProcessBudget::new(8320);
         let limits = RequestLimits {
             runtime_bytes: 64,
@@ -801,7 +801,7 @@ mod tests {
             |_| Ok::<_, std::io::Error>(()),
         )
         .unwrap();
-        let error = hirsel_engine::store::Domain {
+        let error = hirsel_engine_store::Domain {
             kind: 0x4600_00fe,
             schema: 1,
         }
@@ -928,7 +928,7 @@ mod tests {
                     run: 0,
                 },
             )?;
-            let error = hirsel_engine::store::Domain {
+            let error = hirsel_engine_store::Domain {
                 kind: 0x4600_00fe,
                 schema: 1,
             }

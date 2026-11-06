@@ -4,8 +4,8 @@
 use crate::CheckedSummary;
 use crate::NativeRecordContext;
 use crate::NativeRecordSource;
-use crate::store::{Action, Address, Reference};
 use hirsel_engine_runtime::ProductRef;
+use hirsel_engine_store::{Action, Address, Reference};
 use hirsel_query_products::reads::Reads;
 
 use hirsel_span::Span;
@@ -300,7 +300,7 @@ impl SourceGrowthProducer<'_> {
             definition,
             summary,
             SourceGrowthSelection::Archived(selected),
-            crate::store::payload_reads_hash(reads),
+            hirsel_engine_store::payload_reads_hash(reads),
         )
     }
 

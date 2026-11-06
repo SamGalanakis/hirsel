@@ -7,9 +7,9 @@ use super::{
     source_inputs::{NativeFrontLower, NativeInstanceInputs, NativeSourceProvider},
     *,
 };
-use hirsel_engine::store::ResultStore;
-use hirsel_engine::store::{Action, Address, Domain};
 use hirsel_engine_runtime::*;
+use hirsel_engine_store::ResultStore;
+use hirsel_engine_store::{Action, Address, Domain};
 
 use std::{
     collections::BTreeMap,
@@ -188,7 +188,7 @@ pub struct InstanceTasks {
     front: Option<NativeFrontLower>,
     store: Arc<dyn ResultStore>,
     options: hirsel_native::Options,
-    verify_store: hirsel_engine::store::VerifyStore,
+    verify_store: hirsel_engine_store::VerifyStore,
     policy: ContentHash,
     native: Arc<hirsel_lir::validate::NativeCache>,
     registry: Mutex<Registry>,
@@ -296,7 +296,7 @@ impl InstanceTasks {
             front: None,
             store,
             options,
-            verify_store: hirsel_engine::store::VerifyStore::Off,
+            verify_store: hirsel_engine_store::VerifyStore::Off,
             policy,
             native,
             roots,
@@ -324,7 +324,7 @@ impl InstanceTasks {
     /// with factories. Every worker-local Instance producer receives the policy.
     pub fn with_store_verification(
         mut self: Arc<Self>,
-        policy: hirsel_engine::store::VerifyStore,
+        policy: hirsel_engine_store::VerifyStore,
     ) -> Result<Arc<Self>, String> {
         let tasks = Arc::get_mut(&mut self)
             .ok_or("native tasks were shared before store verification binding")?;
@@ -1426,11 +1426,10 @@ mod retained_tests {
         hirsel_intern::jobs::with_compiler_stack(|| {
             for count in [48, 256] {
                 let transport = hirsel_engine_admission::ProcessBudget::new(64 << 20);
-                let store: Arc<dyn ResultStore> =
-                    Arc::new(hirsel_engine::store::RequestStore::new(
-                        Arc::new(hirsel_engine::store::MemStore::default()),
-                        transport.reserve(64 << 20).unwrap(),
-                    ));
+                let store: Arc<dyn ResultStore> = Arc::new(hirsel_engine_store::RequestStore::new(
+                    Arc::new(hirsel_engine_store::MemStore::default()),
+                    transport.reserve(64 << 20).unwrap(),
+                ));
                 let mut engine = hirsel_engine::QueryEngine::new(
                     hirsel_engine::default_environment(),
                     hirsel_front_phases::compiler_adapters(),
@@ -1522,8 +1521,8 @@ mod retained_tests {
     fn registry_metadata_refuses_one_less_and_releases_its_exact_partition() {
         hirsel_intern::jobs::with_compiler_stack(|| {
             let transport = hirsel_engine_admission::ProcessBudget::new(64 << 20);
-            let store: Arc<dyn ResultStore> = Arc::new(hirsel_engine::store::RequestStore::new(
-                Arc::new(hirsel_engine::store::MemStore::default()),
+            let store: Arc<dyn ResultStore> = Arc::new(hirsel_engine_store::RequestStore::new(
+                Arc::new(hirsel_engine_store::MemStore::default()),
                 transport.reserve(64 << 20).unwrap(),
             ));
             let mut engine = hirsel_engine::QueryEngine::new(

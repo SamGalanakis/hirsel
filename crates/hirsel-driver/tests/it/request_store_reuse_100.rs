@@ -1,9 +1,9 @@
 use hirsel_driver::session::Session;
 use hirsel_engine::CheckCompletion;
 use hirsel_engine::CompileConfig;
-use hirsel_engine::store::DirStore;
-use hirsel_engine::store::MemStore;
-use hirsel_engine::store::ResultStore;
+use hirsel_engine_store::DirStore;
+use hirsel_engine_store::MemStore;
+use hirsel_engine_store::ResultStore;
 use hirsel_query_products::QueryKind;
 use hirsel_syntax::{DefPath, ItemPath, PackageId};
 use std::sync::{
@@ -24,14 +24,14 @@ impl Drop for ReadScope {
     }
 }
 impl ResultStore for ReadScopes {
-    fn capability(&self) -> hirsel_engine::store::ProviderCapability {
+    fn capability(&self) -> hirsel_engine_store::ProviderCapability {
         self.inner.capability()
     }
 
-    fn get(&self, key: &hirsel_engine::store::EntryKey) -> Option<hirsel_engine::store::Bytes> {
+    fn get(&self, key: &hirsel_engine_store::EntryKey) -> Option<hirsel_engine_store::Bytes> {
         self.inner.get(key)
     }
-    fn put(&self, key: &hirsel_engine::store::EntryKey, bytes: &[u8]) {
+    fn put(&self, key: &hirsel_engine_store::EntryKey, bytes: &[u8]) {
         self.inner.put(key, bytes);
     }
     fn name(&self) -> &'static str {
@@ -327,7 +327,7 @@ fn source_operations_share_one_graph_only_for_exact_inputs_and_compiler() {
             std::fs::write(&source, "const N:u8=comptime 7u8; pub fn main()->u8{N}\n").unwrap();
             std::fs::write(&path, r#"{"schema":1,"package":{"name":"graph","version":"1"},"sources":[{"path":"main.hir","module":[]}],"dependencies":[],"entry":{"module":[],"name":"main"}}"#).unwrap();
             let config = CompileConfig {
-                store: hirsel_engine::store::store_by_name(
+                store: hirsel_engine_store::store_by_name(
                     provider,
                     Some(tree.path().join("results")),
                 )

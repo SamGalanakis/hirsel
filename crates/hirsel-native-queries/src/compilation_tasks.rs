@@ -13,8 +13,8 @@ use super::{
     tasks::{CodegenTasks, NativeTaskFactory, NativeTasks},
     *,
 };
-use hirsel_engine::store::{Action, Address, Domain};
 use hirsel_engine_runtime::*;
+use hirsel_engine_store::{Action, Address, Domain};
 use hirsel_native::object_queries::CODEGEN_KIND;
 use hirsel_native::object_queries::CodegenKey;
 use hirsel_native::object_queries::LINK_KIND;
@@ -73,7 +73,7 @@ pub struct CompilationTasks {
     emission: EmissionOptions,
     backends: Vec<CompilationBackend>,
     query: QueryId,
-    verify_store: hirsel_engine::store::VerifyStore,
+    verify_store: hirsel_engine_store::VerifyStore,
     output: CompilationOutput,
     weight: MemoryWeight,
     allowance: Arc<hirsel_engine_admission::MemoryReservation>,
@@ -101,7 +101,7 @@ impl CompilationTasks {
             backends,
             weight,
             allowance,
-            hirsel_engine::store::VerifyStore::Off,
+            hirsel_engine_store::VerifyStore::Off,
         )
     }
     /// Explicit object/Link cache verification, captured before dispatch.
@@ -115,7 +115,7 @@ impl CompilationTasks {
         backends: Vec<CompilationBackend>,
         weight: MemoryWeight,
         mut allowance: hirsel_engine_admission::MemoryReservation,
-        verify_store: hirsel_engine::store::VerifyStore,
+        verify_store: hirsel_engine_store::VerifyStore,
     ) -> Result<Arc<Self>, String> {
         if root.target_abi != instances.options().target.digest()
             || root.policy != instances.policy()
@@ -153,7 +153,7 @@ impl CompilationTasks {
                     roots.address.0.0.as_slice(),
                     selection.as_slice(),
                     &[u8::from(
-                        verify_store == hirsel_engine::store::VerifyStore::Recompute,
+                        verify_store == hirsel_engine_store::VerifyStore::Recompute,
                     )],
                 ],
             )),

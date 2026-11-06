@@ -1,5 +1,5 @@
 use super::*;
-use hirsel_engine::store::{Bytes, DirStore, EntryKey};
+use hirsel_engine_store::{Bytes, DirStore, EntryKey};
 
 fn run(command: &mut Command) {
     let output = command.output().unwrap();
@@ -29,7 +29,7 @@ struct Missing<'a> {
     missing: Reference,
 }
 impl ResultStore for Missing<'_> {
-    fn capability(&self) -> hirsel_engine::store::ProviderCapability {
+    fn capability(&self) -> hirsel_engine_store::ProviderCapability {
         self.inner.capability()
     }
 

@@ -21,7 +21,7 @@ pub struct FrontDemandAdmission {
 pub enum FrontDemandError {
     Generator(FrontRegistrationBootstrapError),
     Front {
-        reference: crate::store::Reference,
+        reference: hirsel_engine_store::Reference,
         error: Option<QueryError>,
         sources: SourceMap,
         owner: Arc<FrontBodyQueries>,

@@ -3,8 +3,8 @@
 //! the exact Lower completion and no native C/Ready authority is constructed.
 use super::*;
 use crate::native_metadata::NativeMetadataExt;
-use crate::store::{Domain, Reference, ResultStore};
 use hirsel_engine_runtime::*;
+use hirsel_engine_store::{Domain, Reference, ResultStore};
 use hirsel_types::{SignatureKind, SignatureRef};
 use std::{sync::Mutex, task::Poll};
 

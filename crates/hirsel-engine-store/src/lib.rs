@@ -5,9 +5,13 @@
 //! deterministic in-memory store with injectable faults for tests. No choice
 //! changes what a program means: a hit is used only when every recorded read
 //! still observes its value, so the store changes only how much is recomputed.
+#[cfg(test)]
+hirsel_guard::install!(test_alloc::Counting: test_alloc::Counting);
 pub use hirsel_artifact_store::{
     Action, Address, Association, Bytes, Contents, Domain, MAX_RECORD, Output, Reference,
 };
+#[cfg(test)]
+use hirsel_engine_admission::test_alloc;
 use hirsel_query_products::reads::{ReadKey, Reads};
 use hirsel_query_products::{LoweringPolicy, QueryKind};
 use hirsel_syntax::{ContentHash, DefPath};

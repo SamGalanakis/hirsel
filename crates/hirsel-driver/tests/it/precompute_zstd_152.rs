@@ -1,6 +1,6 @@
 use hirsel_driver::CompilerRequestsExt;
 use hirsel_engine::CompileConfig;
-use hirsel_engine::store::DirStore;
+use hirsel_engine_store::DirStore;
 use hirsel_front_phases::COMPILER;
 use hirsel_intern::jobs::with_compiler_stack;
 use hirsel_query_products::QueryKind;
@@ -38,7 +38,7 @@ fn precomputed_zstd_zeros_preserves_the_cold_body_and_hash() {
             modules: vec!["zstd".into()],
             name: "zeros".into(),
         });
-        let requests = |store: Arc<dyn hirsel_engine::store::ResultStore>| {
+        let requests = |store: Arc<dyn hirsel_engine_store::ResultStore>| {
             let config = CompileConfig {
                 store,
                 jobs: hirsel_intern::jobs::Jobs::ONE,
@@ -49,7 +49,7 @@ fn precomputed_zstd_zeros_preserves_the_cold_body_and_hash() {
         let mut warm = requests(Arc::new(
             DirStore::new(dir.path().join("reader")).with_read_only_root(products),
         ));
-        let mut cold = requests(Arc::new(hirsel_engine::store::NoneStore));
+        let mut cold = requests(Arc::new(hirsel_engine_store::NoneStore));
         let hash = |requests: &mut CompilerRequests| {
             let output = requests
                 .execute(

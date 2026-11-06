@@ -2,7 +2,7 @@
 //! canonical type components and relocate spans through their lexical owners.
 //! Reads are verified before payload decoding; malformed records are misses.
 use super::*;
-use crate::store::{Entry as StoredEntry, EntryKey, Variant, VariantRef};
+use hirsel_engine_store::{Entry as StoredEntry, EntryKey, Variant, VariantRef};
 use hirsel_span::Anchor;
 use hirsel_types::{OwnershipFacts, TypeId};
 use serde::{Deserialize, Serialize};
@@ -470,12 +470,12 @@ struct LowerRecord {
 struct StoredLowerRecord {
     selections: Vec<crate::comptime::Selection>,
     depth: hirsel_query_products::depth::DepthEvidence<Span>,
-    output: QueryOutput<crate::store::Reference>,
+    output: QueryOutput<hirsel_engine_store::Reference>,
     detail: DependencyReads,
 }
 #[derive(Serialize)]
 struct LowerOutputWire<'a> {
-    value: crate::store::Reference,
+    value: hirsel_engine_store::Reference,
     diagnostics: &'a [Diagnostic],
     dependencies: &'a [SignatureDependency],
 }
@@ -489,7 +489,7 @@ struct LowerRecordWire<'a> {
 fn archive_lower_record(
     records: &TypeRecords,
     owner: impl Fn(Anchor) -> Option<(DefPath, u32)>,
-    store: &dyn crate::store::ResultStore,
+    store: &dyn hirsel_engine_store::ResultStore,
     record: &LowerRecord,
 ) -> Option<Vec<u8>> {
     let bytes = records.encode_tir(&record.output.value, &owner)?;
@@ -515,7 +515,7 @@ fn archive_lower_record(
 /// Unassociated canonical bytes from a worker. Only serial prefix admission
 /// may publish the ordinary query association and its local V completion.
 pub(super) struct CapturedLower {
-    payload: crate::store::Reference,
+    payload: hirsel_engine_store::Reference,
     reads: Reads,
     acceptance: Option<hirsel_validate::ExecutionReceipt>,
 }
@@ -523,7 +523,7 @@ pub(super) struct CapturedLower {
 pub(super) fn capture_lower(
     records: &TypeRecords,
     owner: impl Fn(Anchor) -> Option<(DefPath, u32)>,
-    store: &dyn crate::store::ResultStore,
+    store: &dyn hirsel_engine_store::ResultStore,
     output: &QueryOutput<hirsel_tir::DefinitionRef>,
     detail: &DependencyReads,
     reads: &Reads,
@@ -543,7 +543,7 @@ pub(super) fn capture_lower(
         },
     )?;
     let payload = store.put_content(
-        crate::store::Domain {
+        hirsel_engine_store::Domain {
             kind: 0x4c4f_5752,
             schema: 2,
         },
@@ -736,16 +736,19 @@ pub(super) fn generated_codec_owner(owner: &DefPath, text: &str) -> DefPath {
     );
     identity
 }
-pub(super) struct Contents(pub(super) Arc<dyn crate::store::ResultStore>);
+pub(super) struct Contents(pub(super) Arc<dyn hirsel_engine_store::ResultStore>);
 impl hirsel_artifact_store::Contents for Contents {
-    fn get_content(&self, reference: crate::store::Reference) -> Option<crate::store::Bytes> {
+    fn get_content(
+        &self,
+        reference: hirsel_engine_store::Reference,
+    ) -> Option<hirsel_engine_store::Bytes> {
         self.0.get_content(reference)
     }
     fn put_content(
         &self,
-        domain: crate::store::Domain,
+        domain: hirsel_engine_store::Domain,
         bytes: &[u8],
-    ) -> Option<crate::store::Reference> {
+    ) -> Option<hirsel_engine_store::Reference> {
         self.0.put_content(domain, bytes)
     }
 }
@@ -944,7 +947,7 @@ pub(super) fn restore_frozen_mode(
 /// owns no query state and retains no encoded payload after write returns.
 pub(super) struct EncodedWriter {
     pub(super) types: Arc<TypeRecords>,
-    store: Arc<dyn crate::store::ResultStore>,
+    store: Arc<dyn hirsel_engine_store::ResultStore>,
     key: EntryKey,
     path: DefPath,
     kind: QueryKind,
@@ -974,7 +977,7 @@ impl EncodedWriter {
         &self,
         reads: &Reads,
         payload: Vec<u8>,
-    ) -> Result<Option<crate::store::Reference>, QueryError> {
+    ) -> Result<Option<hirsel_engine_store::Reference>, QueryError> {
         let _batch = self.store.local_product_store().map(|store| store.batch());
         if let Some(expected) = &self.expected {
             let matches = expected.matches(reads, &payload);
@@ -1120,7 +1123,7 @@ impl QueryEngine {
         } else {
             None
         };
-        if self.verify_store == crate::store::VerifyStore::Recompute {
+        if self.verify_store == hirsel_engine_store::VerifyStore::Recompute {
             self.pending_store_checks.insert(
                 (DefId::intern(path), QueryKind::Signature),
                 Expected::capture(variant, &mut self.store_check_spool),
@@ -1191,7 +1194,7 @@ impl QueryEngine {
         {
             return None;
         }
-        if self.verify_store == crate::store::VerifyStore::Recompute {
+        if self.verify_store == hirsel_engine_store::VerifyStore::Recompute {
             self.pending_store_checks.insert(
                 (id, QueryKind::Summary),
                 Expected::capture(variant, &mut self.store_check_spool),
@@ -1312,12 +1315,12 @@ impl QueryEngine {
     }
     /// Select a persistent result store. Library engines default to no store;
     /// CLI engines use dir@1. Injected stores keep integration tests isolated.
-    pub fn with_result_store(mut self, store: Arc<dyn crate::store::ResultStore>) -> Self {
+    pub fn with_result_store(mut self, store: Arc<dyn hirsel_engine_store::ResultStore>) -> Self {
         let selected = match store.capability() {
-            crate::store::ProviderCapability::Absent => None,
-            crate::store::ProviderCapability::ReadOnly
-            | crate::store::ProviderCapability::RequestLocal(_)
-            | crate::store::ProviderCapability::Writable => Some(store),
+            hirsel_engine_store::ProviderCapability::Absent => None,
+            hirsel_engine_store::ProviderCapability::ReadOnly
+            | hirsel_engine_store::ProviderCapability::RequestLocal(_)
+            | hirsel_engine_store::ProviderCapability::Writable => Some(store),
         };
         let previous_verifier = self
             .result_store
@@ -1336,7 +1339,7 @@ impl QueryEngine {
         self
     }
     /// Recompute store hits and compare their canonical bytes (cache oracle).
-    pub fn with_verify_store(mut self, verify: crate::store::VerifyStore) -> Self {
+    pub fn with_verify_store(mut self, verify: hirsel_engine_store::VerifyStore) -> Self {
         self.verify_store = verify;
         self
     }
@@ -1803,7 +1806,9 @@ impl QueryEngine {
         if !record.valid(&syntax) {
             return None;
         }
-        if self.verify_store == crate::store::VerifyStore::Recompute && mode_archive.is_none() {
+        if self.verify_store == hirsel_engine_store::VerifyStore::Recompute
+            && mode_archive.is_none()
+        {
             self.pending_store_checks.insert(
                 (DefId::intern(path), QueryKind::Modes),
                 Expected::capture(variant, &mut self.store_check_spool),
@@ -1936,7 +1941,7 @@ impl QueryEngine {
         if !record.valid(owner, shape, &facts.comptime, &self.types) {
             return None;
         }
-        if self.verify_store == crate::store::VerifyStore::Recompute {
+        if self.verify_store == hirsel_engine_store::VerifyStore::Recompute {
             self.pending_store_checks.insert(
                 (DefId::intern(path), QueryKind::Registration),
                 Expected::capture(variant, &mut self.store_check_spool),
@@ -2109,7 +2114,7 @@ impl QueryEngine {
         {
             return None;
         }
-        if self.verify_store == crate::store::VerifyStore::Recompute {
+        if self.verify_store == hirsel_engine_store::VerifyStore::Recompute {
             self.pending_store_checks.insert(
                 (record.instance, QueryKind::GeneratedRegistration),
                 Expected::capture(variant, &mut self.store_check_spool),
@@ -2363,7 +2368,7 @@ impl QueryEngine {
                     self.load_execution_receipt(evaluation_subject(&key, &variant.payload))
                 )?);
             }
-            if self.verify_store == crate::store::VerifyStore::Recompute {
+            if self.verify_store == hirsel_engine_store::VerifyStore::Recompute {
                 self.pending_store_checks.insert(
                     (DefId::intern(path), QueryKind::Generate),
                     Expected::capture(variant, &mut self.store_check_spool),
@@ -2449,7 +2454,7 @@ impl QueryEngine {
             {
                 return None;
             }
-            if self.verify_store == crate::store::VerifyStore::Recompute {
+            if self.verify_store == hirsel_engine_store::VerifyStore::Recompute {
                 self.pending_store_checks.insert(
                     (record.owner, QueryKind::SemanticBody),
                     Expected::capture(variant, &mut self.store_check_spool),
@@ -2578,7 +2583,7 @@ impl QueryEngine {
             } else {
                 None
             };
-            if self.verify_store == crate::store::VerifyStore::Recompute {
+            if self.verify_store == hirsel_engine_store::VerifyStore::Recompute {
                 self.pending_store_checks.insert(
                     (DefId::intern(path), QueryKind::SourceAudit),
                     Expected::capture(variant, &mut self.store_check_spool),
@@ -2733,7 +2738,7 @@ impl QueryEngine {
             } else {
                 None
             };
-            if self.verify_store == crate::store::VerifyStore::Recompute {
+            if self.verify_store == hirsel_engine_store::VerifyStore::Recompute {
                 self.pending_store_checks.insert(
                     (DefId::intern(path), QueryKind::Lower),
                     Expected::capture(variant, &mut self.store_check_spool),
@@ -2811,7 +2816,7 @@ impl QueryEngine {
                 value.validation = Some(receipt.contexts().to_vec().into());
                 value.acceptance = Some(receipt);
             }
-            if self.verify_store == crate::store::VerifyStore::Recompute {
+            if self.verify_store == hirsel_engine_store::VerifyStore::Recompute {
                 self.pending_store_checks.insert(
                     (DefId::intern(path), QueryKind::Evaluate),
                     Expected::capture(variant, &mut self.store_check_spool),
@@ -2991,7 +2996,7 @@ impl QueryEngine {
                 value.validation = Some(receipt.contexts().to_vec().into());
                 value.acceptance = Some(receipt);
             }
-            if self.verify_store == crate::store::VerifyStore::Recompute {
+            if self.verify_store == hirsel_engine_store::VerifyStore::Recompute {
                 let instance = hirsel_tir::constant_instance_path(path, arguments);
                 self.pending_store_checks.insert(
                     (DefId::intern(&instance), QueryKind::Evaluate),
@@ -3235,7 +3240,7 @@ impl QueryEngine {
         let value = (|| {
             if self.verify != Verify::On
                 || !self.s1.is_empty()
-                || self.verify_store == crate::store::VerifyStore::Recompute
+                || self.verify_store == hirsel_engine_store::VerifyStore::Recompute
             {
                 return None;
             }
@@ -3544,8 +3549,8 @@ mod malformed_tests {
     #[test]
     fn malformed_semantic_bodies_miss_before_adoption_or_comparison() {
         for verify in [
-            crate::store::VerifyStore::Off,
-            crate::store::VerifyStore::Recompute,
+            hirsel_engine_store::VerifyStore::Off,
+            hirsel_engine_store::VerifyStore::Recompute,
         ] {
             for fault in 0..4 {
                 let (mut engine, syntax) = fixture();
@@ -3585,8 +3590,8 @@ mod malformed_tests {
     #[test]
     fn malformed_source_audits_miss_before_signature_demand_or_comparison() {
         for verify in [
-            crate::store::VerifyStore::Off,
-            crate::store::VerifyStore::Recompute,
+            hirsel_engine_store::VerifyStore::Off,
+            hirsel_engine_store::VerifyStore::Recompute,
         ] {
             for fault in 0..7 {
                 let (mut engine, syntax) = fixture();
@@ -3649,8 +3654,8 @@ mod malformed_tests {
     fn generated_registrations_validate_before_installation_and_comparison() {
         use hirsel_types::{GenericArgument, Size};
         for verify in [
-            crate::store::VerifyStore::Off,
-            crate::store::VerifyStore::Recompute,
+            hirsel_engine_store::VerifyStore::Off,
+            hirsel_engine_store::VerifyStore::Recompute,
         ] {
             for fault in 0..7 {
                 let (mut engine, syntax) =
@@ -3693,7 +3698,7 @@ mod malformed_tests {
                 store.put(&key, &entry.encode_for(&key));
                 engine.verify_store = verify;
                 let hit = engine.load_generated_registration(&instance);
-                let accepted = fault == 0 && verify == crate::store::VerifyStore::Off;
+                let accepted = fault == 0 && verify == hirsel_engine_store::VerifyStore::Off;
                 assert_eq!(hit.is_some(), accepted, "fault={fault} verify={verify:?}");
                 assert_eq!(engine.items.contains_key(&instance), accepted);
                 assert_eq!(
@@ -3715,8 +3720,8 @@ mod malformed_tests {
     #[test]
     fn malformed_generation_records_miss_before_source_publication() {
         for verify in [
-            crate::store::VerifyStore::Off,
-            crate::store::VerifyStore::Recompute,
+            hirsel_engine_store::VerifyStore::Off,
+            hirsel_engine_store::VerifyStore::Recompute,
         ] {
             for fault in 0..7 {
                 let (mut engine, syntax) =
@@ -3760,7 +3765,7 @@ mod malformed_tests {
                 let hit = engine.load_generation(path, body).unwrap();
                 assert_eq!(
                     hit.is_some(),
-                    fault == 0 && verify == crate::store::VerifyStore::Off,
+                    fault == 0 && verify == hirsel_engine_store::VerifyStore::Off,
                     "fault={fault} verify={verify:?}"
                 );
                 assert!(
@@ -3942,8 +3947,8 @@ mod malformed_tests {
     #[test]
     fn malformed_staged_values_miss_before_adoption_or_comparison() {
         for verify in [
-            crate::store::VerifyStore::Off,
-            crate::store::VerifyStore::Recompute,
+            hirsel_engine_store::VerifyStore::Off,
+            hirsel_engine_store::VerifyStore::Recompute,
         ] {
             for fault in 0..7 {
                 let (mut engine, syntax) = fixture_source("fn main[n:size]()->u64{comptime n}");
@@ -4026,7 +4031,7 @@ mod malformed_tests {
                 let hit = engine.load_staged_evaluation(&path, &[2]).unwrap();
                 assert_eq!(
                     hit.is_some(),
-                    fault == 0 && verify == crate::store::VerifyStore::Off,
+                    fault == 0 && verify == hirsel_engine_store::VerifyStore::Off,
                     "fault={fault} verify={verify:?}"
                 );
                 assert!(
@@ -4073,8 +4078,8 @@ mod malformed_tests {
     #[test]
     fn malformed_evaluation_owner_reads_depth_and_substitutions_miss_before_adoption() {
         for verify in [
-            crate::store::VerifyStore::Off,
-            crate::store::VerifyStore::Recompute,
+            hirsel_engine_store::VerifyStore::Off,
+            hirsel_engine_store::VerifyStore::Recompute,
         ] {
             for fault in 0..7 {
                 let (mut engine, syntax) = fixture_source("const VALUE:u8=7u8");
@@ -4136,7 +4141,7 @@ mod malformed_tests {
                 let hit = engine.load_evaluation(path).unwrap();
                 assert_eq!(
                     hit.is_some(),
-                    fault == 0 && verify == crate::store::VerifyStore::Off,
+                    fault == 0 && verify == hirsel_engine_store::VerifyStore::Off,
                     "fault {fault}"
                 );
                 if fault != 0 {
@@ -4231,7 +4236,7 @@ mod malformed_tests {
     }
     fn fixture_source(source: &str) -> (QueryEngine, Arc<ItemSyntax>) {
         let mut engine = QueryEngine::new(crate::default_environment(), PhaseAdapters::default())
-            .with_result_store(Arc::new(crate::store::MemStore::default()));
+            .with_result_store(Arc::new(hirsel_engine_store::MemStore::default()));
         let file = engine
             .sources
             .add("cache-record.hir", source.into())
@@ -4488,8 +4493,8 @@ mod malformed_tests {
     #[test]
     fn structurally_invalid_records_miss_before_adoption_or_verification() {
         for verify in [
-            crate::store::VerifyStore::Off,
-            crate::store::VerifyStore::Recompute,
+            hirsel_engine_store::VerifyStore::Off,
+            hirsel_engine_store::VerifyStore::Recompute,
         ] {
             for fault in 0..7 {
                 let (mut engine, syntax) = fixture();
@@ -4531,10 +4536,13 @@ mod malformed_tests {
                 engine.verify_store = verify;
                 let hit = engine.load_mode(path);
                 if fault == 0 {
-                    assert_eq!(hit.is_some(), verify == crate::store::VerifyStore::Off);
+                    assert_eq!(
+                        hit.is_some(),
+                        verify == hirsel_engine_store::VerifyStore::Off
+                    );
                     assert_eq!(
                         engine.pending_store_checks.len(),
-                        usize::from(verify == crate::store::VerifyStore::Recompute)
+                        usize::from(verify == hirsel_engine_store::VerifyStore::Recompute)
                     );
                 } else {
                     assert!(hit.is_none(), "fault {fault}");
@@ -4548,8 +4556,8 @@ mod malformed_tests {
     #[test]
     fn malformed_lower_depth_is_rejected_before_adoption_or_replay() {
         for verify in [
-            crate::store::VerifyStore::Off,
-            crate::store::VerifyStore::Recompute,
+            hirsel_engine_store::VerifyStore::Off,
+            hirsel_engine_store::VerifyStore::Recompute,
         ] {
             for fault in 0..4 {
                 let (mut engine, syntax) = fixture();
@@ -4614,8 +4622,8 @@ mod malformed_tests {
     #[test]
     fn invalid_registration_records_do_not_publish_a_partial_declaration_set() {
         for verify in [
-            crate::store::VerifyStore::Off,
-            crate::store::VerifyStore::Recompute,
+            hirsel_engine_store::VerifyStore::Off,
+            hirsel_engine_store::VerifyStore::Recompute,
         ] {
             for fault in 0..10 {
                 let (mut engine, syntax) = fixture_source("fn main[n:size]()->u64{comptime n}");
@@ -4695,13 +4703,15 @@ mod malformed_tests {
                     .unwrap();
                 engine.verify_store = verify;
                 let hit = engine.load_registrations(path);
-                let accepted = fault == 0 && verify == crate::store::VerifyStore::Off;
+                let accepted = fault == 0 && verify == hirsel_engine_store::VerifyStore::Off;
                 assert_eq!(hit.is_some(), accepted, "fault {fault}, verify {verify:?}");
                 assert_eq!(engine.staged_constants.len(), usize::from(accepted));
                 assert_eq!(engine.store_adoptions(), u64::from(accepted));
                 assert_eq!(
                     engine.pending_store_checks.len(),
-                    usize::from(fault == 0 && verify == crate::store::VerifyStore::Recompute)
+                    usize::from(
+                        fault == 0 && verify == hirsel_engine_store::VerifyStore::Recompute
+                    )
                 );
             }
         }
@@ -4710,8 +4720,8 @@ mod malformed_tests {
     #[test]
     fn invalid_signature_records_miss_before_adoption_or_verification() {
         for verify in [
-            crate::store::VerifyStore::Off,
-            crate::store::VerifyStore::Recompute,
+            hirsel_engine_store::VerifyStore::Off,
+            hirsel_engine_store::VerifyStore::Recompute,
         ] {
             for fault in 0..5 {
                 let (mut engine, syntax) = fixture();
@@ -4761,10 +4771,13 @@ mod malformed_tests {
                 engine.verify_store = verify;
                 let hit = engine.load_signature(path);
                 if fault == 0 {
-                    assert_eq!(hit.is_some(), verify == crate::store::VerifyStore::Off);
+                    assert_eq!(
+                        hit.is_some(),
+                        verify == hirsel_engine_store::VerifyStore::Off
+                    );
                     assert_eq!(
                         engine.pending_store_checks.len(),
-                        usize::from(verify == crate::store::VerifyStore::Recompute)
+                        usize::from(verify == hirsel_engine_store::VerifyStore::Recompute)
                     );
                 } else {
                     assert!(hit.is_none(), "fault {fault}");
@@ -4778,8 +4791,8 @@ mod malformed_tests {
     #[test]
     fn invalid_compact_publications_miss_before_adoption_or_verification() {
         for verify in [
-            crate::store::VerifyStore::Off,
-            crate::store::VerifyStore::Recompute,
+            hirsel_engine_store::VerifyStore::Off,
+            hirsel_engine_store::VerifyStore::Recompute,
         ] {
             for fault in 0..6 {
                 let (mut engine, syntax) = fixture();
@@ -4840,10 +4853,13 @@ mod malformed_tests {
                 engine.verify_store = verify;
                 let hit = engine.load_publication(path);
                 if fault == 0 {
-                    assert_eq!(hit.is_some(), verify == crate::store::VerifyStore::Off);
+                    assert_eq!(
+                        hit.is_some(),
+                        verify == hirsel_engine_store::VerifyStore::Off
+                    );
                     assert_eq!(
                         engine.pending_store_checks.len(),
-                        usize::from(verify == crate::store::VerifyStore::Recompute)
+                        usize::from(verify == hirsel_engine_store::VerifyStore::Recompute)
                     );
                 } else {
                     assert!(hit.is_none(), "fault {fault}");

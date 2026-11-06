@@ -1,10 +1,11 @@
 use hirsel_driver::*;
 use hirsel_engine::products::LIVE_LOWER;
 use hirsel_engine::products::LiveLowerProduct;
-use hirsel_engine::store::MemStore;
-use hirsel_engine::store::ResultStore;
 use hirsel_engine::*;
 use hirsel_engine_runtime::*;
+use hirsel_engine_store as store;
+use hirsel_engine_store::MemStore;
+use hirsel_engine_store::ResultStore;
 use hirsel_intern::jobs::with_compiler_stack;
 
 use hirsel_query_products::QueryKind;
@@ -19,7 +20,7 @@ struct FreshBytes {
     verifier: Arc<hirsel_validate::VerifierCache>,
 }
 impl store::ResultStore for FreshBytes {
-    fn capability(&self) -> hirsel_engine::store::ProviderCapability {
+    fn capability(&self) -> hirsel_engine_store::ProviderCapability {
         self.bytes.capability()
     }
 
@@ -43,9 +44,9 @@ struct LiveStore {
     missing: std::sync::atomic::AtomicBool,
 }
 impl ResultStore for LiveStore {
-    fn capability(&self) -> hirsel_engine::store::ProviderCapability {
-        hirsel_engine::store::ProviderCapability::RequestLocal(
-            hirsel_engine::store::Persistence::Disabled,
+    fn capability(&self) -> hirsel_engine_store::ProviderCapability {
+        hirsel_engine_store::ProviderCapability::RequestLocal(
+            hirsel_engine_store::Persistence::Disabled,
         )
     }
 
@@ -273,7 +274,7 @@ fn persisted_entry_stops_at_first_observed_changed_read() {
         signature_gets: std::sync::atomic::AtomicUsize,
     }
     impl ResultStore for CountReads {
-        fn capability(&self) -> hirsel_engine::store::ProviderCapability {
+        fn capability(&self) -> hirsel_engine_store::ProviderCapability {
             self.inner.capability()
         }
 

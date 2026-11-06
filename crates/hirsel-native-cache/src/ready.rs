@@ -1,8 +1,8 @@
 //! The local Ready miss and descriptor cutoff. Placement/RC/Reuse use the sole
 //! existing pass implementation; actual final C owns every accepted envelope.
 use super::*;
-use hirsel_engine::store::ResultStore;
-use hirsel_engine::store::{Action, Contents, Domain, Reference};
+use hirsel_engine_store::ResultStore;
+use hirsel_engine_store::{Action, Contents, Domain, Reference};
 use hirsel_lir::stage::{Ready, StageKind, ValidatedUnit, Value};
 use hirsel_lir::validate::{Inputs, NativeCache, NativeEnvironment, ValidationContext};
 use hirsel_native::stages::lower_local_raw;
@@ -46,7 +46,7 @@ impl Drop for ValueMemory {
 
 struct SelectedContents(Arc<dyn ResultStore>);
 impl Contents for SelectedContents {
-    fn get_content(&self, reference: Reference) -> Option<hirsel_engine::store::Bytes> {
+    fn get_content(&self, reference: Reference) -> Option<hirsel_engine_store::Bytes> {
         self.0.get_content(reference)
     }
     fn put_content(&self, domain: Domain, bytes: &[u8]) -> Option<Reference> {

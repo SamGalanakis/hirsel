@@ -1,6 +1,7 @@
 //! Current-source factory assembly. These are original graph/profile controls;
 //! no receipt-aware ABI, Some native provider or public seal is activated here.
 use hirsel_engine::*;
+use hirsel_engine_store as store;
 use hirsel_front_phases::compiler_adapters;
 use hirsel_intern::jobs::with_compiler_stack;
 use hirsel_native::receipt_source::factory::closure as factory_closure;

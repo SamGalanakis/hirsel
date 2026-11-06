@@ -113,7 +113,7 @@ mod tests {
     fn packed_tree_preserves_equal_leaves_and_substitutions_with_bounded_decode() {
         let engine = crate::QueryEngine::new(crate::default_environment(), Default::default());
         let anchors = crate::NativeRecordContext::capture(&engine);
-        let store = Arc::new(crate::store::MemStore::default());
+        let store = Arc::new(hirsel_engine_store::MemStore::default());
         let records = crate::NativeRecords::new(engine.types().clone(), store.clone());
         let ty = engine.types().intern(hirsel_types::Type::unit());
         let leaf = hirsel_tir::ValueNode {

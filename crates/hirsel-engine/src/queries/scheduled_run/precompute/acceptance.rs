@@ -82,7 +82,7 @@ impl Task {
         if !queries
             .store
             .publish_root(product.address, product.action, record)
-            && queries.store.persistence() == crate::store::Persistence::Complete
+            && queries.store.persistence() == hirsel_engine_store::Persistence::Complete
         {
             return Err(queries.failure_record(operational(
                 "precompute closure could not be stored durably",

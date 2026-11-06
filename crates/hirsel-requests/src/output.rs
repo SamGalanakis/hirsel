@@ -370,7 +370,7 @@ pub struct NativeExecution {
     pub executable: PathBuf,
     pub product: hirsel_engine_runtime::ProductRef,
     pub(crate) platform: Arc<super::native_link::FrozenPlatform>,
-    pub store: Arc<dyn hirsel_engine::store::ResultStore>,
+    pub store: Arc<dyn hirsel_engine_store::ResultStore>,
     pub observation: NativeObservation,
     pub report: Vec<String>,
     pub entry: DefPath,
@@ -405,10 +405,10 @@ impl NativeExecution {
 pub struct CompilerReadiness {
     pub(crate) read_scope: Option<CompileStoreOperation>,
     pub(crate) materialize: Arc<Materialize>,
-    pub(crate) failure: Arc<dyn Fn(hirsel_engine::store::Reference) -> ToolError + Send + Sync>,
+    pub(crate) failure: Arc<dyn Fn(hirsel_engine_store::Reference) -> ToolError + Send + Sync>,
 }
 pub(crate) struct CompileStoreOperation {
-    pub scope: hirsel_engine::store::StoreOperation,
+    pub scope: hirsel_engine_store::StoreOperation,
     pub completed: Arc<std::sync::atomic::AtomicBool>,
 }
 impl CompileStoreOperation {
@@ -428,7 +428,7 @@ pub(crate) type Materialize = dyn Fn(&[hirsel_engine_runtime::ProductRef]) -> Re
 impl hirsel_engine::requests::OutputReadiness for CompilerReadiness {
     type Output = Arc<CompileOutput>;
     type Error = ToolError;
-    fn failed(&mut self, failure: hirsel_engine::store::Reference) -> Option<Self::Error> {
+    fn failed(&mut self, failure: hirsel_engine_store::Reference) -> Option<Self::Error> {
         let _read_scope = self.read_scope.take();
         Some((self.failure)(failure))
     }
@@ -490,7 +490,7 @@ impl NativeReady {
 pub struct NativeObjectOutput {
     pub products: Vec<hirsel_engine_runtime::ProductRef>,
     pub instances: usize,
-    pub store: Arc<dyn hirsel_engine::store::ResultStore>,
+    pub store: Arc<dyn hirsel_engine_store::ResultStore>,
     pub(super) _owner: Arc<dyn Send + Sync>,
 }
 

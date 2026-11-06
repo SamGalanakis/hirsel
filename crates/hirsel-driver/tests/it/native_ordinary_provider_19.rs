@@ -1,10 +1,11 @@
 //! Ordinary local library donor vectors from the former plan/seed controls.
 use hirsel_driver::native;
-use hirsel_engine::store::DirStore;
-use hirsel_engine::store::RequestStore;
-use hirsel_engine::store::ResultStore;
-use hirsel_engine::store::VerifyStore;
 use hirsel_engine::*;
+use hirsel_engine_store as store;
+use hirsel_engine_store::DirStore;
+use hirsel_engine_store::RequestStore;
+use hirsel_engine_store::ResultStore;
+use hirsel_engine_store::VerifyStore;
 use hirsel_intern::jobs::with_compiler_stack;
 use hirsel_native::Backend;
 
@@ -144,8 +145,8 @@ fn ordinary_provider(backend: Backend) {
         drop(warm);
         struct Imported(DirStore);
         impl ResultStore for Imported {
-            fn capability(&self) -> hirsel_engine::store::ProviderCapability {
-                hirsel_engine::store::ProviderCapability::ReadOnly
+            fn capability(&self) -> hirsel_engine_store::ProviderCapability {
+                hirsel_engine_store::ProviderCapability::ReadOnly
             }
 
             fn get(&self, key: &store::EntryKey) -> Option<store::Bytes> {

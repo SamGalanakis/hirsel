@@ -4,7 +4,6 @@ use hirsel_artifact_store::{Action, Address, Domain};
 use hirsel_driver::resident::{Host, RequestError};
 use hirsel_engine::loader_inputs::{FrozenInputs, InputLimits, LoaderInputs};
 use hirsel_engine::requests::{OutputReadiness, RequestEngine, SelectedRequest, observe_inputs};
-use hirsel_engine::store::{MemStore, ResultStore};
 use hirsel_engine_runtime::AdmittedRuntime;
 use hirsel_engine_runtime::MemoryWeight;
 use hirsel_engine_runtime::ProductRef;
@@ -14,6 +13,7 @@ use hirsel_engine_runtime::QueryId;
 use hirsel_engine_runtime::QueryPoll;
 use hirsel_engine_runtime::QueryTask;
 use hirsel_engine_runtime::RuntimeErrors;
+use hirsel_engine_store::{MemStore, ResultStore};
 
 use hirsel_intern::jobs::Jobs;
 use hirsel_syntax::ContentHash;

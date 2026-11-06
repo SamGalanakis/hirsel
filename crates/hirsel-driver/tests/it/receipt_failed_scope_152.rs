@@ -1,7 +1,7 @@
 //! Rejected source checks retain the same obligations as an independent cold check.
 use hirsel_driver::session;
 use hirsel_engine::CompileConfig;
-use hirsel_engine::store;
+use hirsel_engine_store as store;
 use hirsel_front_phases::COMPILER;
 use hirsel_intern::jobs::with_compiler_stack;
 use std::sync::Arc;

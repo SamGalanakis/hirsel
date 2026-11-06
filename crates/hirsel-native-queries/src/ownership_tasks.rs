@@ -1,8 +1,8 @@
 //! Opt-in diagnostic roots over the same settled instance/arena dependencies
 //! as ordinary Ready. No ordinary request installs or polls these producers.
 use super::{products::DemandProducts, ready::ObservedReady, tasks::NativeTasks, *};
-use hirsel_engine::store::{Action, Address, Domain};
 use hirsel_engine_runtime::*;
+use hirsel_engine_store::{Action, Address, Domain};
 
 use hirsel_lir::{
     ir::LirUnit,

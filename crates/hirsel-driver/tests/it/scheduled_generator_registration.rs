@@ -4,9 +4,9 @@ use hirsel_intern::jobs::with_compiler_stack;
 
 #[test]
 fn admitted_generator_text_waits_on_lower_with_one_worker_and_keeps_detached_evidence() {
-    use hirsel_engine::store::MemStore;
     use hirsel_engine::*;
     use hirsel_engine_runtime::*;
+    use hirsel_engine_store::MemStore;
 
     use hirsel_query_products::reads::ReadKey;
     use hirsel_query_products::{LoweringPolicy, QueryKind};
@@ -155,9 +155,9 @@ fn admitted_generator_text_refuses_zero_depth_before_lowering_or_execution() {
 }
 
 fn generator_refusal_control(zero_depth: bool) {
-    use hirsel_engine::store::MemStore;
     use hirsel_engine::*;
     use hirsel_engine_runtime::*;
+    use hirsel_engine_store::MemStore;
 
     use hirsel_query_products::reads::ReadKey;
     use hirsel_query_products::{LoweringPolicy, QueryKind};
@@ -277,9 +277,9 @@ fn generator_refusal_control(zero_depth: bool) {
 
 #[test]
 fn accepted_generator_view_checks_and_lowers_the_literal_without_changing_raw_source() {
-    use hirsel_engine::store::MemStore;
     use hirsel_engine::*;
     use hirsel_engine_runtime::*;
+    use hirsel_engine_store::MemStore;
 
     use hirsel_query_products::reads::ReadKey;
     use hirsel_query_products::{LoweringPolicy, QueryKind};
@@ -501,9 +501,9 @@ fn accepted_output_control_with(
         hirsel_engine::FrontRegistrationOutput,
     ),
 ) {
-    use hirsel_engine::store::MemStore;
     use hirsel_engine::*;
     use hirsel_engine_runtime::*;
+    use hirsel_engine_store::MemStore;
 
     use hirsel_query_products::reads::ReadKey;
     use hirsel_query_products::{LoweringPolicy, QueryKind};
@@ -900,9 +900,9 @@ fn accepted_generator_view_releases_unused_syntax_grant_and_keeps_clone_owned_by
 
 #[test]
 fn generator_bootstrap_finishes_before_final_admitted_check_and_preserves_its_scalar_result() {
-    use hirsel_engine::store::MemStore;
     use hirsel_engine::*;
     use hirsel_engine_runtime::*;
+    use hirsel_engine_store::MemStore;
 
     use hirsel_query_products::reads::ReadKey;
     use hirsel_query_products::{LoweringPolicy, QueryKind};
@@ -1098,9 +1098,9 @@ fn generator_bootstrap_counts_spare_syntax_grants_before_engine_work() {
 }
 
 fn bootstrap_refusal_control(zero_depth: bool, spare_grants: bool) {
-    use hirsel_engine::store::MemStore;
     use hirsel_engine::*;
     use hirsel_engine_runtime::*;
+    use hirsel_engine_store::MemStore;
 
     use hirsel_query_products::reads::ReadKey;
     use hirsel_query_products::{LoweringPolicy, QueryKind};

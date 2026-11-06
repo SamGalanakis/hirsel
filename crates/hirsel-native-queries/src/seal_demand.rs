@@ -1,8 +1,8 @@
 //! Body-free physical guard selection over settled original instance records.
 //! Neither this ordinary query product nor a true hint authorizes sealing.
 use super::*;
-use hirsel_engine::store::{Action, Address, Domain, ResultStore};
 use hirsel_engine_runtime::QueryId;
+use hirsel_engine_store::{Action, Address, Domain, ResultStore};
 use hirsel_rc::seal_demand::{
     UnitDemand,
     equations::{Function, LocalDemandEquations, solve},

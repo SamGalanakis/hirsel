@@ -41,7 +41,7 @@ impl PublishedCallables {
     pub(crate) fn find(
         &self,
         store: &dyn ResultStore,
-        address: hirsel_engine::store::Address,
+        address: hirsel_engine_store::Address,
     ) -> Result<Option<StoredInstance>, String> {
         let Some(reference) = self.records.get(&address.0) else {
             return Ok(None);
@@ -1007,7 +1007,7 @@ mod tests {
                 "closures": [], "calls": [], "returns": [1024], "seals": [1024]
             }))
             .unwrap();
-        let store: Arc<dyn ResultStore> = Arc::new(hirsel_engine::store::MemStore::default());
+        let store: Arc<dyn ResultStore> = Arc::new(hirsel_engine_store::MemStore::default());
         let bytes = serde_json::to_vec(&serde_json::json!({"seal_demand": &equations})).unwrap();
         let record = store
             .put_content(INSTANCE_DISCOVERY_DOMAIN, &bytes)
@@ -1043,7 +1043,7 @@ mod tests {
         );
         let product = Arc::new(InstanceProduct {
             product: crate::fixture_product_bytes(
-                hirsel_engine::store::Address(record.output.0),
+                hirsel_engine_store::Address(record.output.0),
                 Action(record.output.0),
                 record.domain,
                 &bytes,

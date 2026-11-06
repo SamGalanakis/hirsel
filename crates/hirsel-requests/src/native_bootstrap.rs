@@ -6,8 +6,8 @@ use hirsel_engine::FrontLowerQueries;
 use hirsel_engine::FrontNativeProducts;
 use hirsel_engine::FrontNativeQueries;
 use hirsel_engine::FrontProofExport;
-use hirsel_engine::store::*;
 use hirsel_engine_runtime::*;
+use hirsel_engine_store::*;
 
 use hirsel_native::query_model::NativeRootKey;
 use hirsel_native::root_source::NativeLinkFacts;
@@ -41,7 +41,7 @@ const FAILURE: Domain = Domain {
 pub(super) struct NativePlan {
     pub options: hirsel_native::Options,
     pub policy: ContentHash,
-    pub verify_store: hirsel_engine::store::VerifyStore,
+    pub verify_store: hirsel_engine_store::VerifyStore,
     pub opt: hirsel_lir::emission::OptLevel,
     pub debug: bool,
     pub verify_backend: bool,

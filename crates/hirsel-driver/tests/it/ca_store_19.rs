@@ -2,6 +2,7 @@
 use hirsel_driver::*;
 use hirsel_engine::*;
 use hirsel_engine_runtime::QueryRuntime;
+use hirsel_engine_store as store;
 use hirsel_intern::jobs::with_compiler_stack;
 
 use hirsel_query_products::{LoweringPolicy, QueryKind};
@@ -154,7 +155,7 @@ fn ordinary_catalog_native_roots_survive_fresh_warm_checks() {
     });
 }
 impl store::ResultStore for Observed {
-    fn capability(&self) -> hirsel_engine::store::ProviderCapability {
+    fn capability(&self) -> hirsel_engine_store::ProviderCapability {
         self.inner.capability()
     }
 
@@ -913,7 +914,7 @@ fn lower_producer_records_cannot_mint_or_transfer_verifier_authority() {
     // provider interface supplies no verifier capability.
     struct ProducerOnly(Arc<store::MemStore>);
     impl store::ResultStore for ProducerOnly {
-        fn capability(&self) -> hirsel_engine::store::ProviderCapability {
+        fn capability(&self) -> hirsel_engine_store::ProviderCapability {
             self.0.capability()
         }
 
@@ -1098,7 +1099,7 @@ struct Trusted {
     verifier: Arc<hirsel_validate::VerifierCache>,
 }
 impl store::ResultStore for Trusted {
-    fn capability(&self) -> hirsel_engine::store::ProviderCapability {
+    fn capability(&self) -> hirsel_engine_store::ProviderCapability {
         self.remote.capability()
     }
 

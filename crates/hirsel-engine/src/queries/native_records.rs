@@ -1,7 +1,7 @@
 //! Typed native descriptor transport through the ordinary product codec. The
 //! engine owns anchor rebinding; native producers do not duplicate its catalog.
 use crate::QueryEngine;
-use crate::store::ResultStore;
+use hirsel_engine_store::ResultStore;
 use hirsel_product_codec::TypeRecords;
 use hirsel_span::Anchor;
 use hirsel_syntax::{DefId, DefPath};
@@ -741,7 +741,7 @@ impl NativeRecordSource for NativeRecordContext {
 /// Encoded recipes are ordinary data, never source V or native C authority.
 #[derive(Clone)]
 pub struct NativeRecords {
-    boundary: crate::store::ArchiveBoundary,
+    boundary: hirsel_engine_store::ArchiveBoundary,
     store: Arc<dyn ResultStore>,
     records: Arc<TypeRecords>,
     types: Arc<hirsel_types::TypeInterner>,
@@ -764,13 +764,13 @@ impl NativeRecordEncoder<'_> {
 
     pub(crate) fn encode<T: Serialize>(self, value: &T) -> Option<Vec<u8>> {
         self.store
-            .archive_encoded(crate::store::ArchiveBoundary::Export);
+            .archive_encoded(hirsel_engine_store::ArchiveBoundary::Export);
         self.encoding.encode(value)
     }
 }
 
 impl NativeRecords {
-    pub(crate) fn for_boundary(&self, boundary: crate::store::ArchiveBoundary) -> Self {
+    pub(crate) fn for_boundary(&self, boundary: hirsel_engine_store::ArchiveBoundary) -> Self {
         Self {
             boundary,
             ..self.clone()
@@ -822,7 +822,7 @@ impl NativeRecords {
     }
     pub fn new(types: Arc<hirsel_types::TypeInterner>, store: Arc<dyn ResultStore>) -> Self {
         Self {
-            boundary: crate::store::ArchiveBoundary::Ordinary,
+            boundary: hirsel_engine_store::ArchiveBoundary::Ordinary,
             records: TypeRecords::new(
                 types.clone(),
                 Arc::new(super::persistent::Contents(store.clone())),
@@ -845,7 +845,7 @@ impl NativeRecords {
         &self,
         source: &(impl NativeRecordSource + ?Sized),
         value: &T,
-        boundary: crate::store::ArchiveBoundary,
+        boundary: hirsel_engine_store::ArchiveBoundary,
     ) -> Option<Vec<u8>> {
         if !Arc::ptr_eq(&self.types, source.record_types()) {
             return None;

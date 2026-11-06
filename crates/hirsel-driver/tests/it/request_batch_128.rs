@@ -1,7 +1,7 @@
 use hirsel_driver::session::Session;
 use hirsel_driver::*;
-use hirsel_engine::store::MemStore;
 use hirsel_engine::*;
+use hirsel_engine_store::MemStore;
 use hirsel_front_phases::COMPILER;
 use hirsel_host_io::launch::*;
 use hirsel_intern::jobs::with_compiler_stack;

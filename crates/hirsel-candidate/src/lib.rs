@@ -1424,7 +1424,7 @@ impl CandidateWorkspace {
                 };
                 let selected_config = if inputs.namespace.is_some() {
                     CompileConfig {
-                        store: Arc::new(hirsel_engine::store::NoneStore),
+                        store: Arc::new(hirsel_engine_store::NoneStore),
                         ..selected_config
                     }
                 } else {

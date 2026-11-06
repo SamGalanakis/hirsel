@@ -1,6 +1,6 @@
 use super::*;
-use crate::store::Domain;
 use crate::{DefinitionSummary, GenericParameterRef, ParameterGrowth, QueryEngine};
+use hirsel_engine_store::Domain;
 use hirsel_query_products::reads::ReadsBuilder;
 use hirsel_syntax::LexicalOwner;
 use hirsel_types::{NameSite, TypeParamId, TypeParameterRef};
@@ -172,7 +172,7 @@ fn equal_settled_component_stops_changed_member_and_preserves_unrelated_outputs(
     assert_eq!(first.components[1].product, changed.components[1].product);
     let records = crate::NativeRecords::new(
         source.record_types().clone(),
-        Arc::new(crate::store::MemStore::default()),
+        Arc::new(hirsel_engine_store::MemStore::default()),
     );
     assert_eq!(
         records.encode(&source, &first),
@@ -398,7 +398,7 @@ fn membership_record_reopens_through_the_same_native_codec_as_components() {
         .unwrap();
     let (product, components) = producer.membership_parts(&[fact]).unwrap();
     let membership = producer.membership_value(product, components).unwrap();
-    let store = Arc::new(crate::store::MemStore::default());
+    let store = Arc::new(hirsel_engine_store::MemStore::default());
     let records = crate::NativeRecords::new(engine.types().clone(), store);
     let product = membership.product;
     let data = crate::products::SourceGrowthQueryData::Membership {

@@ -1,8 +1,8 @@
 //! Certified execution is a request dependency of ordinary Codegen and Link.
 //! The complete C-admitted closure binds both planners and final object checks.
 use super::{root_tasks::NativeRootTasks, *};
-use hirsel_engine::store::{Action, Address, Domain};
 use hirsel_engine_runtime::*;
+use hirsel_engine_store::{Action, Address, Domain};
 
 use hirsel_native::ReadyProgram;
 use hirsel_native::execution_plan::ExecutionPlan;
@@ -99,7 +99,7 @@ impl ExecutionTasks {
         bytes: Vec<u8>,
     ) -> Result<ProductRef, String> {
         let store = &self.roots.native.snapshot.store;
-        if self.roots.native.snapshot.verify_store == hirsel_engine::store::VerifyStore::Recompute
+        if self.roots.native.snapshot.verify_store == hirsel_engine_store::VerifyStore::Recompute
             && let Some(previous) = store
                 .lookup_product(query.address)
                 .filter(|p| p.action == action)
@@ -217,7 +217,7 @@ impl ExecutionTasks {
         let product = ProductRef::live(self.query.address, action, plan.clone());
         // An explicitly persisted descriptor is still checked on recomputation.
         // Compare its checked fields with the live identity without encoding.
-        if snapshot.verify_store == hirsel_engine::store::VerifyStore::Recompute
+        if snapshot.verify_store == hirsel_engine_store::VerifyStore::Recompute
             && let Some(previous) = snapshot
                 .store
                 .lookup_product(self.query.address)
@@ -290,7 +290,7 @@ impl ExecutionTasks {
                     snapshot.context.output.0.0.as_slice(),
                 ],
             ));
-            if snapshot.verify_store == hirsel_engine::store::VerifyStore::Off
+            if snapshot.verify_store == hirsel_engine_store::VerifyStore::Off
                 && let Some(previous) = store
                     .lookup_product(query.address)
                     .filter(|p| p.action == action)

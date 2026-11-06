@@ -591,8 +591,8 @@ mod tests {
             }
         }
     }
-    fn reference(text: &[u8]) -> crate::store::Reference {
-        crate::store::Domain {
+    fn reference(text: &[u8]) -> hirsel_engine_store::Reference {
+        hirsel_engine_store::Domain {
             kind: 0x5300_00ff,
             schema: 1,
         }
@@ -611,14 +611,14 @@ mod tests {
     fn query(kind: u32) -> hirsel_engine_runtime::QueryId {
         hirsel_engine_runtime::QueryId {
             kind,
-            address: crate::store::Address(ContentHash::of_bytes(&kind.to_le_bytes())),
+            address: hirsel_engine_store::Address(ContentHash::of_bytes(&kind.to_le_bytes())),
         }
     }
     fn product(query: hirsel_engine_runtime::QueryId) -> hirsel_engine_runtime::ProductRef {
         hirsel_engine_runtime::test_product(
             query.address,
-            crate::store::Action(query.address.0),
-            crate::store::Domain { kind: 1, schema: 1 },
+            hirsel_engine_store::Action(query.address.0),
+            hirsel_engine_store::Domain { kind: 1, schema: 1 },
             &query.address.0.0,
         )
     }
@@ -627,7 +627,8 @@ mod tests {
         fn create(
             &self,
             query: hirsel_engine_runtime::QueryId,
-        ) -> Result<Box<dyn hirsel_engine_runtime::QueryTask>, crate::store::Reference> {
+        ) -> Result<Box<dyn hirsel_engine_runtime::QueryTask>, hirsel_engine_store::Reference>
+        {
             Ok(Box::new(LeafTask {
                 query,
                 fail: self.0,
@@ -666,7 +667,7 @@ mod tests {
         fn weight(
             &self,
             _: hirsel_engine_runtime::QueryId,
-        ) -> Result<hirsel_engine_runtime::MemoryWeight, crate::store::Reference> {
+        ) -> Result<hirsel_engine_runtime::MemoryWeight, hirsel_engine_store::Reference> {
             Ok(hirsel_engine_runtime::MemoryWeight {
                 retained: 1 << 20,
                 scratch: 1 << 20,
@@ -676,7 +677,7 @@ mod tests {
         fn create(
             &self,
             query: hirsel_engine_runtime::QueryId,
-        ) -> Result<Box<dyn hirsel_engine_runtime::LocalQueryTask>, crate::store::Reference>
+        ) -> Result<Box<dyn hirsel_engine_runtime::LocalQueryTask>, hirsel_engine_store::Reference>
         {
             let types = self.types.clone();
             let snapshot = self.snapshot.clone();

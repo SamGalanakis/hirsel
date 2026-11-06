@@ -360,7 +360,7 @@ fn scripted_native(group: u8) {
             hirsel_front_phases::COMPILER
                 .clone()
                 .with_config(hirsel_engine::CompileConfig {
-                    store: hirsel_engine::store::store_by_name(
+                    store: hirsel_engine_store::store_by_name(
                         "dir@1",
                         Some(scratch.path().join("products")),
                     )

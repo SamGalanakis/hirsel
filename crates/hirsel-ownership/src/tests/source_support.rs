@@ -125,9 +125,7 @@ fn std_sources() -> &'static StdSources {
             .join("../hirsel-driver/tests/fixtures/std_source/main.hir");
         let mut loaded = hirsel_front_phases::COMPILER
             .with_config(hirsel_engine::CompileConfig {
-                store: Arc::new(
-                    hirsel_engine::store::MemStore::default().with_installed_products(),
-                ),
+                store: Arc::new(hirsel_engine_store::MemStore::default().with_installed_products()),
                 ..Default::default()
             })
             .load_program(&fixture)

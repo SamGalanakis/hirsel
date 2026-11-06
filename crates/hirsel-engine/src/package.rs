@@ -169,7 +169,7 @@ impl LoadedProgram {
         &self,
         compiler: ContentHash,
         manifest: Vec<u8>,
-    ) -> crate::store::InstalledPackage {
+    ) -> hirsel_engine_store::InstalledPackage {
         let package = self.entry.0.package.clone();
         let sources = self
             .files
@@ -177,7 +177,7 @@ impl LoadedProgram {
             .filter(|(_, context)| context.package == package)
             .map(|(file, context)| {
                 let source = self.engine.sources.file(*file).unwrap();
-                crate::store::InstalledSource {
+                hirsel_engine_store::InstalledSource {
                     path: source.path.clone(),
                     logical: source.logical_path().to_owned(),
                     context: context.clone(),
@@ -191,7 +191,13 @@ impl LoadedProgram {
             .filter(|id| **id != package)
             .cloned()
             .collect();
-        crate::store::InstalledPackage::new(compiler, package, manifest, sources, dependencies)
+        hirsel_engine_store::InstalledPackage::new(
+            compiler,
+            package,
+            manifest,
+            sources,
+            dependencies,
+        )
     }
     pub fn source_files(&self) -> impl Iterator<Item = &(FileId, FileContext)> {
         self.files
@@ -884,7 +890,7 @@ fn logical_source_path(source: &Path, manifest: &Path, package: &PackageId) -> P
 }
 
 struct SelectedPackage {
-    products: Option<std::sync::Arc<crate::store::InstalledPackage>>,
+    products: Option<std::sync::Arc<hirsel_engine_store::InstalledPackage>>,
     path: PathBuf,
     manifest: Vec<u8>,
     sources: Vec<(PathBuf, FileContext)>,
@@ -915,7 +921,7 @@ struct Graph<'a> {
     selections: BTreeMap<PackageId, Vec<slots::Selection>>,
     /// The effective slot maps, once expanded.
     slots: PackageSlots,
-    products: Option<(&'a dyn crate::store::ResultStore, ContentHash)>,
+    products: Option<(&'a dyn hirsel_engine_store::ResultStore, ContentHash)>,
 }
 impl Default for Graph<'static> {
     fn default() -> Self {
@@ -946,7 +952,7 @@ impl<'a> Graph<'a> {
         path: &Path,
         inputs: &'a dyn crate::loader_inputs::LoaderInputs,
         require_link_files: bool,
-        products: Option<(&'a dyn crate::store::ResultStore, ContentHash)>,
+        products: Option<(&'a dyn hirsel_engine_store::ResultStore, ContentHash)>,
     ) -> Result<(Self, PackageId), ToolError> {
         let mut graph = Self::with_inputs(inputs);
         graph.products = products;

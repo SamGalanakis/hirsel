@@ -53,7 +53,7 @@ fn checked_dependency_readers_preserve_the_complete_generated_signature_sequence
         for jobs in [1, 2, 8] {
             let config = CompileConfig {
                 jobs: hirsel_intern::jobs::Jobs::new(jobs),
-                store: Arc::new(hirsel_engine::store::MemStore::default()),
+                store: Arc::new(hirsel_engine_store::MemStore::default()),
                 hold_bytes: 0,
                 ..Default::default()
             };

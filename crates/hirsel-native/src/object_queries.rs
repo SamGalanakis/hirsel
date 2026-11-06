@@ -9,9 +9,9 @@ use crate::query_model::InstanceAddress;
 use crate::query_model::NativeProducts;
 use crate::query_model::ReadyProduct;
 use hirsel_codec::{Snapshot, snapshot_struct};
-use hirsel_engine::store::{Action, Address, Domain, Output, Reference};
-use hirsel_engine::store::{ResultStore, VerifyStore};
 use hirsel_engine_runtime::{ArchiveAdmission, ProductRef};
+use hirsel_engine_store::{Action, Address, Domain, Output, Reference};
+use hirsel_engine_store::{ResultStore, VerifyStore};
 use hirsel_lir::stage::ObjectArtifact;
 use hirsel_syntax::ContentHash;
 use std::path::Path;
@@ -611,7 +611,7 @@ fn action(domain: &str, address: Address, reads: &[Reference]) -> Action {
 fn require(
     store: &dyn ResultStore,
     reference: Reference,
-) -> Result<hirsel_engine::store::Bytes, String> {
+) -> Result<hirsel_engine_store::Bytes, String> {
     store
         .get_content(reference)
         .ok_or_else(|| "missing or corrupt native product content".into())
@@ -993,7 +993,7 @@ pub use tasks::{
 #[cfg(test)]
 mod transport_tests {
     use super::*;
-    use hirsel_engine::store::{DirStore, MAX_RECORD};
+    use hirsel_engine_store::{DirStore, MAX_RECORD};
 
     #[test]
     fn streamed_inputs_preserve_chunk_identity_and_refuse_incomplete_content() {

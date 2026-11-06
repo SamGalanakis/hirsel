@@ -6,7 +6,7 @@ use super::{
     ready::UNIT_SUMMARY_DOMAIN,
     *,
 };
-use hirsel_engine::store::{Action, Domain};
+use hirsel_engine_store::{Action, Domain};
 use hirsel_lir::{fragment::UnitSummary, products::Binding, validate::NativeEnvironment};
 use hirsel_native::root_source::NativeLinkSource;
 use std::collections::BTreeMap;

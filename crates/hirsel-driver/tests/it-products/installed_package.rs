@@ -1,7 +1,7 @@
 use hirsel_driver::CompilerRequestsExt;
 use hirsel_engine::CompileConfig;
 use hirsel_engine::loader_inputs::LoaderInputs;
-use hirsel_engine::store::*;
+use hirsel_engine_store::*;
 use hirsel_front_phases::COMPILER;
 use hirsel_query_products::LoweringPolicy;
 use hirsel_requests::*;

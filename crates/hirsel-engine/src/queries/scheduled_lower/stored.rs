@@ -2,7 +2,7 @@
 //! The variant index follows the front producer's exact-read lookup. V still
 //! validates every restored body and owns execution-reuse authority.
 use super::*;
-use crate::store::Entry;
+use hirsel_engine_store::Entry;
 
 #[derive(serde::Serialize, serde::Deserialize)]
 struct Record {

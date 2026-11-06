@@ -11,9 +11,9 @@ use hirsel_engine::FrontNativeProducts;
 use hirsel_engine::FrontNativeQueries;
 use hirsel_engine::LoadedProgram;
 use hirsel_engine::ToolError;
-use hirsel_engine::store::Reference;
-use hirsel_engine::store::VerifyStore;
 use hirsel_engine_runtime::*;
+use hirsel_engine_store::Reference;
+use hirsel_engine_store::VerifyStore;
 
 use hirsel_native_cache::ready::ObservedReady;
 use hirsel_native_queries::ownership_tasks::OwnershipTasks;

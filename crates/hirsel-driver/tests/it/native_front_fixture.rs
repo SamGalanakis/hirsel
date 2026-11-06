@@ -3,6 +3,7 @@ use hirsel_engine::requests::RequestEngine;
 use hirsel_engine::requests::observe_inputs;
 use hirsel_engine::*;
 use hirsel_engine_runtime::QueryRuntime;
+use hirsel_engine_store as store;
 
 use hirsel_requests::CompileOperation;
 use hirsel_requests::CompileRequest;

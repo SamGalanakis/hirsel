@@ -1,6 +1,7 @@
 use hirsel_engine::memo::MemoKey;
-use hirsel_engine::store::DirStore;
 use hirsel_engine::*;
+use hirsel_engine_store as store;
+use hirsel_engine_store::DirStore;
 use hirsel_front_phases::COMPILER;
 use hirsel_intern::jobs::with_compiler_stack;
 

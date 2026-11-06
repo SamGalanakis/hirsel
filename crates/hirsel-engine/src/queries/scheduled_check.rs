@@ -4,8 +4,8 @@
 //! failed Lower still withholds its publication suffix, never independent work.
 use super::reader_receipts::{ReaderReceipt, ReaderSequence};
 use super::*;
-use crate::store::{Domain, Reference, ResultStore};
 use hirsel_engine_runtime::*;
+use hirsel_engine_store::{Domain, Reference, ResultStore};
 use std::{sync::Mutex, task::Poll};
 mod admission;
 mod products;
@@ -1037,7 +1037,7 @@ impl Task {
                         .map(|(_, p)| p.output.0.0.as_slice()),
                 )
                 .chain(std::iter::once(
-                    crate::store::payload_reads_hash(&reads).0.as_slice(),
+                    hirsel_engine_store::payload_reads_hash(&reads).0.as_slice(),
                 )),
         ));
         let checked = CheckOutput {

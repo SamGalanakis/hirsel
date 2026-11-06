@@ -1,8 +1,8 @@
 //! Native Link continuations with explicit root, fragment, native and byte reads.
 use super::{products::SettledProducts, root_tasks::NativeRootTasks, roots::RootProducts, *};
-use hirsel_engine::store::ResultStore;
-use hirsel_engine::store::{Action, Address, Domain};
 use hirsel_engine_runtime::*;
+use hirsel_engine_store::ResultStore;
+use hirsel_engine_store::{Action, Address, Domain};
 
 use hirsel_native::object_queries::CodegenKey;
 use hirsel_native::object_queries::LinkDependencies;

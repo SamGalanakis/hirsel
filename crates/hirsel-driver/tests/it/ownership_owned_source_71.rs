@@ -17,7 +17,7 @@ fn source_owned_and_resource_selections_keep_distinct_products_in_the_same_sessi
     use hirsel_driver::native;
     use hirsel_driver::resident::ObservedSession;
     use hirsel_engine::CompileConfig;
-    use hirsel_engine::store::MemStore;
+    use hirsel_engine_store::MemStore;
 
     use hirsel_front_phases::COMPILER;
     use hirsel_lir::ownership_trace::{Kind, Selection};

@@ -1,9 +1,9 @@
 use hirsel_driver::*;
-use hirsel_engine::store::Domain;
-use hirsel_engine::store::MemStore;
-use hirsel_engine::store::ResultStore;
 use hirsel_engine::*;
 use hirsel_engine_runtime::*;
+use hirsel_engine_store::Domain;
+use hirsel_engine_store::MemStore;
+use hirsel_engine_store::ResultStore;
 use hirsel_intern::jobs::with_compiler_stack;
 
 use hirsel_query_products::QueryKind;
@@ -31,9 +31,9 @@ pub(super) fn errors() -> RuntimeErrors {
 }
 pub(super) fn imported_fixture(
     store: &dyn ResultStore,
-    address: hirsel_engine::store::Address,
-    action: hirsel_engine::store::Action,
-    reference: hirsel_engine::store::Reference,
+    address: hirsel_engine_store::Address,
+    action: hirsel_engine_store::Action,
+    reference: hirsel_engine_store::Reference,
 ) -> ProductRef {
     let budget = hirsel_engine_admission::ProcessBudget::new(64 << 20);
     let mut allowance = budget.reserve(64 << 20).unwrap();
@@ -42,8 +42,8 @@ pub(super) fn imported_fixture(
 }
 
 pub(super) fn synthetic_fixture(
-    address: hirsel_engine::store::Address,
-    action: hirsel_engine::store::Action,
+    address: hirsel_engine_store::Address,
+    action: hirsel_engine_store::Action,
     domain: Domain,
     bytes: &[u8],
 ) -> ProductRef {
@@ -54,7 +54,7 @@ pub(super) fn synthetic_fixture(
 
 pub(super) struct EvictCompact(pub(super) QueryId, pub(super) MemoryWeight);
 impl QueryFactory for EvictCompact {
-    fn create(&self, _: QueryId) -> Result<Box<dyn QueryTask>, hirsel_engine::store::Reference> {
+    fn create(&self, _: QueryId) -> Result<Box<dyn QueryTask>, hirsel_engine_store::Reference> {
         Ok(Box::new(EvictCompact(self.0, self.1)))
     }
 }
@@ -69,7 +69,7 @@ impl QueryTask for EvictCompact {
         assert!(cx.evict_body());
         QueryPoll::Complete(synthetic_fixture(
             self.0.address,
-            hirsel_engine::store::Action(self.0.address.0),
+            hirsel_engine_store::Action(self.0.address.0),
             Domain {
                 kind: 0x281,
                 schema: 1,
@@ -567,7 +567,7 @@ fn admitted_lower_reserves_outputs_only_for_demanded_definitions() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("main.hir");
         std::fs::write(&path, "pub fn spare()->u8{1u8}\npub fn main()->u8{2u8}\n").unwrap();
-        let store = Arc::new(hirsel_engine::store::MemStore::default().with_installed_products());
+        let store = Arc::new(hirsel_engine_store::MemStore::default().with_installed_products());
         let mut program = COMPILER
             .with_config(CompileConfig {
                 store,
@@ -703,9 +703,9 @@ fn admitted_front_store_hits_validate_signature_reads_before_materializing_bodie
                 .with_config(hirsel_engine::CompileConfig {
                     store: store.clone(),
                     verify_store: if verify_cache {
-                        hirsel_engine::store::VerifyStore::Recompute
+                        hirsel_engine_store::VerifyStore::Recompute
                     } else {
-                        hirsel_engine::store::VerifyStore::Off
+                        hirsel_engine_store::VerifyStore::Off
                     },
                     ..Default::default()
                 })
@@ -799,19 +799,19 @@ fn admitted_front_zero_hold_retains_only_archives_after_settlement() {
         std::fs::write(&path, "pub fn main()->u8{1u8}\n").unwrap();
         struct ContentOnly(MemStore);
         impl ResultStore for ContentOnly {
-            fn capability(&self) -> hirsel_engine::store::ProviderCapability {
+            fn capability(&self) -> hirsel_engine_store::ProviderCapability {
                 self.0.capability()
             }
 
             fn get(
                 &self,
-                key: &hirsel_engine::store::EntryKey,
-            ) -> Option<hirsel_engine::store::Bytes> {
+                key: &hirsel_engine_store::EntryKey,
+            ) -> Option<hirsel_engine_store::Bytes> {
                 (key.2 == QueryKind::Interpret)
                     .then(|| self.0.get(key))
                     .flatten()
             }
-            fn put(&self, key: &hirsel_engine::store::EntryKey, value: &[u8]) {
+            fn put(&self, key: &hirsel_engine_store::EntryKey, value: &[u8]) {
                 if key.2 == QueryKind::Interpret {
                     self.0.put(key, value);
                 }
@@ -916,19 +916,19 @@ fn admitted_front_pressure_refused_citation_caches_nothing_and_recomputes_the_ci
     with_compiler_stack(|| {
         struct Transport(MemStore);
         impl ResultStore for Transport {
-            fn capability(&self) -> hirsel_engine::store::ProviderCapability {
-                hirsel_engine::store::ProviderCapability::RequestLocal(
-                    hirsel_engine::store::Persistence::Disabled,
+            fn capability(&self) -> hirsel_engine_store::ProviderCapability {
+                hirsel_engine_store::ProviderCapability::RequestLocal(
+                    hirsel_engine_store::Persistence::Disabled,
                 )
             }
 
             fn get(
                 &self,
-                key: &hirsel_engine::store::EntryKey,
-            ) -> Option<hirsel_engine::store::Bytes> {
+                key: &hirsel_engine_store::EntryKey,
+            ) -> Option<hirsel_engine_store::Bytes> {
                 self.0.get(key)
             }
-            fn put(&self, key: &hirsel_engine::store::EntryKey, value: &[u8]) {
+            fn put(&self, key: &hirsel_engine_store::EntryKey, value: &[u8]) {
                 self.0.put(key, value);
             }
             fn name(&self) -> &'static str {
@@ -950,21 +950,20 @@ fn admitted_front_pressure_refused_citation_caches_nothing_and_recomputes_the_ci
             scratch: 8 << 20,
             stack: 0,
         };
-        let cites =
-            |front: &Arc<FrontBodyQueries>,
-             body: Result<ProductRef, hirsel_engine::store::Reference>| {
-                let output = front.outcome(body).expect("a computed body has an outcome");
-                match output.outcome.result {
-                    Err(QueryError::Diagnostics(diagnostics)) => diagnostics.iter().any(|d| {
-                        d.rule.as_str() == "MODE-2"
-                            && d.secondary.iter().any(|l| {
-                                l.message
-                                    .contains("`code` no longer returns unique content")
-                            })
-                    }),
-                    other => panic!("main is rejected by MODE-2: {other:?}"),
-                }
-            };
+        let cites = |front: &Arc<FrontBodyQueries>,
+                     body: Result<ProductRef, hirsel_engine_store::Reference>| {
+            let output = front.outcome(body).expect("a computed body has an outcome");
+            match output.outcome.result {
+                Err(QueryError::Diagnostics(diagnostics)) => diagnostics.iter().any(|d| {
+                    d.rule.as_str() == "MODE-2"
+                        && d.secondary.iter().any(|l| {
+                            l.message
+                                .contains("`code` no longer returns unique content")
+                        })
+                }),
+                other => panic!("main is rejected by MODE-2: {other:?}"),
+            }
+        };
         let mut limit = 8 << 20;
         for mode in 0..2 {
             let mut program = COMPILER
@@ -1063,9 +1062,9 @@ fn admitted_front_pressure_evicts_only_unpinned_settled_bodies_and_recomputes_eq
         // recompute instead of being read back.
         struct Transport(Arc<MemStore>, bool);
         impl ResultStore for Transport {
-            fn capability(&self) -> hirsel_engine::store::ProviderCapability {
-                hirsel_engine::store::ProviderCapability::RequestLocal(
-                    hirsel_engine::store::Persistence::Disabled,
+            fn capability(&self) -> hirsel_engine_store::ProviderCapability {
+                hirsel_engine_store::ProviderCapability::RequestLocal(
+                    hirsel_engine_store::Persistence::Disabled,
                 )
             }
 
@@ -1073,7 +1072,7 @@ fn admitted_front_pressure_evicts_only_unpinned_settled_bodies_and_recomputes_eq
                 &self,
                 package: &hirsel_syntax::PackageId,
                 compiler: hirsel_syntax::ContentHash,
-            ) -> Result<Arc<hirsel_engine::store::InstalledPackage>, String> {
+            ) -> Result<Arc<hirsel_engine_store::InstalledPackage>, String> {
                 self.0.installed_package(package, compiler)
             }
             fn verifier(&self) -> Option<Arc<hirsel_validate::VerifierCache>> {
@@ -1081,11 +1080,11 @@ fn admitted_front_pressure_evicts_only_unpinned_settled_bodies_and_recomputes_eq
             }
             fn get(
                 &self,
-                key: &hirsel_engine::store::EntryKey,
-            ) -> Option<hirsel_engine::store::Bytes> {
+                key: &hirsel_engine_store::EntryKey,
+            ) -> Option<hirsel_engine_store::Bytes> {
                 self.0.get(key)
             }
-            fn put(&self, key: &hirsel_engine::store::EntryKey, value: &[u8]) {
+            fn put(&self, key: &hirsel_engine_store::EntryKey, value: &[u8]) {
                 self.0.put(key, value);
             }
             fn name(&self) -> &'static str {
@@ -1290,7 +1289,7 @@ fn admitted_front_pressure_evicts_only_unpinned_settled_bodies_and_recomputes_eq
                     fn create(
                         &self,
                         _: QueryId,
-                    ) -> Result<Box<dyn QueryTask>, hirsel_engine::store::Reference>
+                    ) -> Result<Box<dyn QueryTask>, hirsel_engine_store::Reference>
                     {
                         Ok(Box::new(DependencyTask(self.0.clone(), self.1)))
                     }
@@ -1316,7 +1315,7 @@ fn admitted_front_pressure_evicts_only_unpinned_settled_bodies_and_recomputes_eq
                         }
                         QueryPoll::Complete(synthetic_fixture(
                             self.1.address,
-                            hirsel_engine::store::Action(hirsel_syntax::ContentHash::of_bytes(
+                            hirsel_engine_store::Action(hirsel_syntax::ContentHash::of_bytes(
                                 b"settled-consumer",
                             )),
                             Domain {

@@ -14,7 +14,7 @@ use hirsel_engine::requests::source_graph::host_limits;
 /// their products and reservations independently of this constructor's lifetime.
 pub struct CompilerRequests {
     compiler: Compiler,
-    invocation_store: Option<Arc<dyn hirsel_engine::store::ResultStore>>,
+    invocation_store: Option<Arc<dyn hirsel_engine_store::ResultStore>>,
     ledger: Arc<super::inspection::InspectionLedger>,
     pub(super) graphs: super::host_selector::GraphSelections,
     config: CompileConfig,
@@ -177,7 +177,7 @@ impl CompilerRequests {
             .and_then(|allowance| hirsel_engine::LowerCarry::new(allowance).ok());
         let carry = front
             .zip(lower)
-            .filter(|_| config.verify_store == hirsel_engine::store::VerifyStore::Off)
+            .filter(|_| config.verify_store == hirsel_engine_store::VerifyStore::Off)
             .map(|(front, lower)| super::source_graph::Carry { front, lower });
         let graphs = super::host_selector::GraphSelections::new(&budget, config.hold_bytes != 0);
         let ledger =
@@ -281,8 +281,8 @@ impl CompilerRequests {
     /// Swap the invocation store shared by discovery and graph selection.
     pub fn set_invocation_store(
         &mut self,
-        store: Option<Arc<dyn hirsel_engine::store::ResultStore>>,
-    ) -> Option<Arc<dyn hirsel_engine::store::ResultStore>> {
+        store: Option<Arc<dyn hirsel_engine_store::ResultStore>>,
+    ) -> Option<Arc<dyn hirsel_engine_store::ResultStore>> {
         std::mem::replace(&mut self.invocation_store, store)
     }
 }

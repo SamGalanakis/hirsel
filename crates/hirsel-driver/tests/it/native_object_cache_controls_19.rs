@@ -1,13 +1,13 @@
 //! Original unit-cache warm/recompute vectors using admitted native tasks.
 use hirsel_driver::native;
-use hirsel_engine::store;
-use hirsel_engine::store::Address;
-use hirsel_engine::store::Association;
-use hirsel_engine::store::Bytes;
-use hirsel_engine::store::EntryKey;
-use hirsel_engine::store::ResultStore;
-use hirsel_engine::store::VerifyStore;
 use hirsel_engine::*;
+use hirsel_engine_store as store;
+use hirsel_engine_store::Address;
+use hirsel_engine_store::Association;
+use hirsel_engine_store::Bytes;
+use hirsel_engine_store::EntryKey;
+use hirsel_engine_store::ResultStore;
+use hirsel_engine_store::VerifyStore;
 use hirsel_front_phases::compiler_adapters;
 use hirsel_intern::jobs::with_compiler_stack;
 use hirsel_intern::{
@@ -27,7 +27,7 @@ struct Store {
     fragment_puts: AtomicUsize,
 }
 impl ResultStore for Store {
-    fn capability(&self) -> hirsel_engine::store::ProviderCapability {
+    fn capability(&self) -> hirsel_engine_store::ProviderCapability {
         self.inner.capability()
     }
 

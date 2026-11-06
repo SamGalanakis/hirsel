@@ -1,7 +1,7 @@
 use hirsel_driver::*;
-use hirsel_engine::store::MemStore;
 use hirsel_engine::*;
 use hirsel_engine_runtime::*;
+use hirsel_engine_store::MemStore;
 use hirsel_intern::jobs::with_compiler_stack;
 
 use hirsel_query_products::LoweringPolicy;
@@ -26,14 +26,14 @@ fn export_case_with_ownership(
         std::fs::write(directory.path().join("main.hir"), source).unwrap();
         std::fs::write(&manifest, r#"{"schema":1,"package":{"name":"scope","version":"1"},"sources":[{"path":"main.hir","module":[]}],"dependencies":[],"entry":{"module":[],"name":"main"}}"#).unwrap();
         for jobs in [1, 2] {
-            use hirsel_engine::store::{Bytes, EntryKey, ResultStore};
+            use hirsel_engine_store::{Bytes, EntryKey, ResultStore};
             use std::sync::atomic::{AtomicUsize, Ordering};
             struct CountReads {
                 inner: MemStore,
                 reads: AtomicUsize,
             }
             impl ResultStore for CountReads {
-                fn capability(&self) -> hirsel_engine::store::ProviderCapability {
+                fn capability(&self) -> hirsel_engine_store::ProviderCapability {
                     self.inner.capability()
                 }
 

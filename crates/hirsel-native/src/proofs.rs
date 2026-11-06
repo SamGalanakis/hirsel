@@ -221,7 +221,7 @@ impl Proofs {
         native: &std::sync::Arc<hirsel_engine::FrontNativeQueries>,
         completed: hirsel_engine_runtime::ProductRef,
         evidence: &Evidence,
-        store: std::sync::Arc<dyn hirsel_engine::store::ResultStore>,
+        store: std::sync::Arc<dyn hirsel_engine_store::ResultStore>,
     ) -> Result<Self, super::NativeError> {
         let error = |message| super::NativeError::new(StageName::Import, message);
         let input = export

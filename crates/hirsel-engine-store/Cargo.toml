@@ -1,0 +1,26 @@
+[package]
+name = "hirsel-engine-store"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+hirsel-query-products = { path = "../hirsel-query-products" }
+hirsel-engine-runtime = { path = "../hirsel-engine-runtime" }
+hirsel-engine-admission = { path = "../hirsel-engine-admission" }
+hirsel-artifact-store = { path = "../hirsel-artifact-store" }
+hirsel-product-codec = { path = "../hirsel-product-codec" }
+hirsel-syntax = { path = "../hirsel-syntax" }
+hirsel-types = { path = "../hirsel-types" }
+hirsel-validate = { path = "../hirsel-validate" }
+hirsel-intern = { path = "../hirsel-intern" }
+hirsel-tir = { path = "../hirsel-tir" }
+bincode = "1.3.3"
+serde = { version = "1", features = ["derive", "rc"] }
+serde_json = "1"
+
+[dev-dependencies]
+tempfile = "3"
+hirsel-guard = { path = "../hirsel-guard" }
+hirsel-engine-admission = { path = "../hirsel-engine-admission", features = ["test-alloc"] }

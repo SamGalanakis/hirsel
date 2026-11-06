@@ -7,8 +7,8 @@ use crate::products::{
     WeakAnalyzedProduct,
 };
 use crate::snapshot::OwnedSourceContext;
-use crate::store::{Domain, EntryKey, Reference, ResultStore, VariantRef};
 use hirsel_engine_runtime::*;
+use hirsel_engine_store::{Domain, EntryKey, Reference, ResultStore, VariantRef};
 use std::sync::{
     Mutex, OnceLock,
     atomic::{AtomicU64, Ordering::Relaxed},
@@ -293,7 +293,7 @@ pub struct FrontBodyQueries {
     text_refusals: AtomicU64,
     /// Stored entry validations plus memo rows written.
     memo_operations: AtomicU64,
-    verify_store: crate::store::VerifyStore,
+    verify_store: hirsel_engine_store::VerifyStore,
     slots: Mutex<BTreeMap<Key, FrontSlot>>,
     input_slots: Mutex<(BTreeSet<DefId>, Vec<Arc<LiveSourceBacking>>)>,
     /// Transfer the latest computed body to its immediate consumer. The next
@@ -2276,7 +2276,7 @@ impl BodyTask {
             .store
             .put_content(FAILURE, &bytes)
             .ok_or(queries.errors.resource)?;
-        let action = crate::store::query_action(&input.key, input.key.1, &failure.reads);
+        let action = hirsel_engine_store::query_action(&input.key, input.key.1, &failure.reads);
         let mut cached = queries
             .publish_facts(
                 cx,
@@ -2354,7 +2354,7 @@ impl BodyTask {
                 return Err(queries.errors.resource);
             }
         }
-        let action = crate::store::query_action(&input.key, input.key.1, &reads);
+        let action = hirsel_engine_store::query_action(&input.key, input.key.1, &reads);
         let product = queries
             .admit_body(cx, self.query.address, action, outcome, summary)
             .ok_or(queries.errors.resource)?;
@@ -2384,7 +2384,7 @@ impl BodyTask {
     fn restore_body(&self, cx: &mut dyn QueryContext) -> Option<Result<ProductRef, Reference>> {
         let queries = &self.queries;
         if !queries.store.persistence().retains()
-            || queries.verify_store != crate::store::VerifyStore::Off
+            || queries.verify_store != hirsel_engine_store::VerifyStore::Off
         {
             return None;
         }
@@ -2402,7 +2402,7 @@ impl BodyTask {
                 }
             }
         };
-        if reference.domain != crate::store::product_domain(QueryKind::Modes)
+        if reference.domain != hirsel_engine_store::product_domain(QueryKind::Modes)
             || reference.len > self.weight.scratch
         {
             return None;
@@ -2433,7 +2433,7 @@ impl BodyTask {
     fn load(&self, cx: &mut dyn QueryContext) -> Option<Result<ProductRef, Reference>> {
         let queries = &self.queries;
         let input = queries.inputs.get(&self.input)?;
-        let mut entry = crate::store::Entry::load(&*queries.store, &input.key);
+        let mut entry = hirsel_engine_store::Entry::load(&*queries.store, &input.key);
         if entry.variants.is_empty() {
             return None;
         }
@@ -2556,7 +2556,7 @@ impl BodyTask {
         {
             return body;
         }
-        if !self.materialize && self.queries.verify_store == crate::store::VerifyStore::Off {
+        if !self.materialize && self.queries.verify_store == hirsel_engine_store::VerifyStore::Off {
             if let Some(hit) = self.load_evicted(cx) {
                 return hit;
             }
@@ -2574,8 +2574,8 @@ impl BodyTask {
         }
         let queries = &self.queries;
         let input = &queries.inputs[&self.input];
-        let expected = if queries.verify_store == crate::store::VerifyStore::Recompute {
-            let mut entry = crate::store::Entry::load(&*queries.store, &input.key);
+        let expected = if queries.verify_store == hirsel_engine_store::VerifyStore::Recompute {
+            let mut entry = hirsel_engine_store::Entry::load(&*queries.store, &input.key);
             entry.variants.retain(|variant| {
                 variant.inputs == input.key.1
                     && variant.valid(&input.key)
@@ -2593,7 +2593,7 @@ impl BodyTask {
             None
         };
         if !self.materialize
-            && queries.verify_store == crate::store::VerifyStore::Recompute
+            && queries.verify_store == hirsel_engine_store::VerifyStore::Recompute
             && expected.is_none()
         {
             timings::count(Count::StoreMisses);
@@ -2788,7 +2788,7 @@ impl BodyTask {
                 &bytes,
             )
             .ok_or(queries.errors.resource)?;
-            let mut entry = crate::store::Entry::load(&*queries.store, &input.key);
+            let mut entry = hirsel_engine_store::Entry::load(&*queries.store, &input.key);
             entry.insert(variant.clone());
             queries.store.put_query(
                 input.key.2,
@@ -2800,7 +2800,7 @@ impl BodyTask {
         } else {
             (
                 None,
-                crate::store::query_action(&input.key, input.key.1, &outcome.reads),
+                hirsel_engine_store::query_action(&input.key, input.key.1, &outcome.reads),
             )
         };
         let handoff =
@@ -2936,8 +2936,8 @@ impl QueryEngine {
             let dependencies = if self.installed_definition(definition) {
                 // The immutable package already published exact registrations.
                 // Reading them does not resolve or reconstruct its With body.
-                let Ok(Some(record)) =
-                    self.installed_semantic_input(definition, crate::store::MAX_RECORD as u64)
+                let Ok(Some(record)) = self
+                    .installed_semantic_input(definition, hirsel_engine_store::MAX_RECORD as u64)
                 else {
                     continue;
                 };

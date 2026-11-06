@@ -1,8 +1,8 @@
 //! Local plan ownership and the explicit portable identity boundary. Imported
 //! descriptors describe cache identity only; local C still admits every body.
-use hirsel_engine::store::ResultStore;
-use hirsel_engine::store::{Domain, Reference};
 use hirsel_engine_runtime::*;
+use hirsel_engine_store::ResultStore;
+use hirsel_engine_store::{Domain, Reference};
 use hirsel_syntax::ContentHash;
 use std::{collections::BTreeMap, sync::Arc};
 use std::{io, sync::Mutex};
@@ -96,11 +96,11 @@ pub fn archive_plan(
     store: &dyn ResultStore,
     product: &ProductRef,
     admission: ArchiveAdmission<'_>,
-    verify: hirsel_engine::store::VerifyStore,
+    verify: hirsel_engine_store::VerifyStore,
 ) -> Result<ProductArchive, String> {
     let archive = product.archive(admission).map_err(|e| e.to_string())?;
     let reference = archive.reference();
-    if verify == hirsel_engine::store::VerifyStore::Recompute
+    if verify == hirsel_engine_store::VerifyStore::Recompute
         && let Some(previous) = store
             .lookup_product(product.address)
             .filter(|previous| previous.action == product.action)
@@ -161,11 +161,11 @@ mod retained;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hirsel_engine::store::{self, Bytes, EntryKey};
+    use hirsel_engine_store::{self, Bytes, EntryKey};
     struct NoTransport;
     impl ResultStore for NoTransport {
-        fn capability(&self) -> hirsel_engine::store::ProviderCapability {
-            hirsel_engine::store::ProviderCapability::Writable
+        fn capability(&self) -> hirsel_engine_store::ProviderCapability {
+            hirsel_engine_store::ProviderCapability::Writable
         }
 
         fn get(&self, _: &EntryKey) -> Option<Bytes> {
@@ -286,7 +286,7 @@ mod tests {
                 scratch: &mut scratch,
                 working_bytes: 4096,
             },
-            hirsel_engine::store::VerifyStore::Off,
+            hirsel_engine_store::VerifyStore::Off,
         )
         .unwrap();
         let reference = archive.reference();
@@ -346,8 +346,8 @@ mod tests {
     fn plan_import_refuses_corruption_noncanonical_descriptors_and_wrong_schema() {
         struct Corrupt;
         impl ResultStore for Corrupt {
-            fn capability(&self) -> hirsel_engine::store::ProviderCapability {
-                hirsel_engine::store::ProviderCapability::ReadOnly
+            fn capability(&self) -> hirsel_engine_store::ProviderCapability {
+                hirsel_engine_store::ProviderCapability::ReadOnly
             }
 
             fn get(&self, _: &EntryKey) -> Option<Bytes> {
@@ -398,8 +398,8 @@ mod tests {
 #[test]
 fn plan_admission_refuses_retained_capacity_before_publication() {
     let budget = hirsel_engine_admission::ProcessBudget::new(64 << 10);
-    let store = hirsel_engine::store::RequestStore::new(
-        Arc::new(hirsel_engine::store::MemStore::default()),
+    let store = hirsel_engine_store::RequestStore::new(
+        Arc::new(hirsel_engine_store::MemStore::default()),
         budget.reserve(64 << 10).unwrap(),
     );
     let ordinary = tests::plan(&store, tests::context());
@@ -441,4 +441,4 @@ pub struct ExecutionProduct {
 }
 
 #[cfg(test)]
-use hirsel_engine::store::{Action, Address};
+use hirsel_engine_store::{Action, Address};

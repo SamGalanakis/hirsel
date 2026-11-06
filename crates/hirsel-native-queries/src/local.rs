@@ -8,7 +8,7 @@ use super::{
     ready::{EMISSION_CONTEXT_DOMAIN, ReadyMiss, ReadyQueries},
     *,
 };
-use hirsel_engine::store::{Action, ResultStore, VerifyStore};
+use hirsel_engine_store::{Action, ResultStore, VerifyStore};
 use hirsel_lir::{
     products::{Binding, LayoutClosure, UnitBody},
     stage::Value,

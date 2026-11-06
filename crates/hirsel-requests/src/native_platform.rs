@@ -6,7 +6,7 @@ use super::native_bootstrap::NativePlan;
 use super::native_link::FrozenPlatform;
 use super::native_link::LinkInputs;
 use hirsel_engine::LinkInput;
-use hirsel_engine::store::ResultStore;
+use hirsel_engine_store::ResultStore;
 
 use hirsel_native::NativeError;
 use hirsel_native::StageName;
@@ -91,7 +91,7 @@ pub(super) fn codegen_partition(
 }
 pub(super) struct NativePlatformInputs<'a> {
     pub purpose: NativePurpose,
-    pub verify_store: hirsel_engine::store::VerifyStore,
+    pub verify_store: hirsel_engine_store::VerifyStore,
     pub request: &'a NativeRequest,
     pub entry: &'a DefPath,
     pub tools: &'a Toolchain,
@@ -156,7 +156,7 @@ impl NativePlatformSelection {
                     verify_store: if options.passes.validation
                         == hirsel_native::Validation::EveryStage
                     {
-                        hirsel_engine::store::VerifyStore::Recompute
+                        hirsel_engine_store::VerifyStore::Recompute
                     } else {
                         inputs.verify_store
                     },
@@ -285,7 +285,7 @@ impl NativePlatformSelection {
                 policy: profile_options,
                 verify_store: if options.passes.validation == hirsel_native::Validation::EveryStage
                 {
-                    hirsel_engine::store::VerifyStore::Recompute
+                    hirsel_engine_store::VerifyStore::Recompute
                 } else {
                     inputs.verify_store
                 },

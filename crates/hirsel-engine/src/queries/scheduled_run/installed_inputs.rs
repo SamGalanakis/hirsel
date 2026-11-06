@@ -1,7 +1,7 @@
 //! The Precompute writer publishes one semantic-input record per definition.
 //! It uses NativeRecords' existing type/source relocation and allocation weights.
 use super::*;
-use crate::store::{
+use hirsel_engine_store::{
     InstalledDefinitionOwnership, InstalledSemanticInput, SEMANTIC_BODY, SEMANTIC_HEADER,
     SEMANTIC_INPUT, SEMANTIC_SOURCE,
 };

@@ -120,7 +120,7 @@ impl QueryEngine {
         &self,
         file: FileId,
         context: &FileContext,
-    ) -> Option<crate::store::EntryKey> {
+    ) -> Option<hirsel_engine_store::EntryKey> {
         let mut key = self.catalog_key(file, context)?;
         key.0 = ContentHash::of_parts("hirsel.parse-syntax.address.v1", [key.0.0.as_slice()]);
         Some(key)
@@ -279,7 +279,7 @@ impl QueryEngine {
         let Some(bytes) = self.encode_parse_syntax(file, context, output) else {
             return Ok(());
         };
-        if self.verify_store == crate::store::VerifyStore::Recompute
+        if self.verify_store == hirsel_engine_store::VerifyStore::Recompute
             && let Some(previous) = self.load_parse_syntax(file, context)
             && self.encode_parse_syntax(file, context, &previous).as_ref() != Some(&bytes)
         {
@@ -302,7 +302,7 @@ impl QueryEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::store::{MemStore, ResultStore, VerifyStore};
+    use hirsel_engine_store::{MemStore, ResultStore, VerifyStore};
 
     const SOURCE: &str = "fn value() -> u8 { 1u8 }\n";
     fn engine(store: &Arc<MemStore>) -> QueryEngine {

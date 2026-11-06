@@ -112,7 +112,7 @@ impl Measure {
             return profile_result.map(|_| ());
         }
         let memory = self.memory.then(|| {
-            hirsel_engine::release_shared_caches();
+            hirsel_engine_store::release_shared_caches();
             Memory {
                 peak_rss: peak_rss(),
                 held: memory::records(),

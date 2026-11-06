@@ -903,7 +903,7 @@ fn candidate_receipts_bind_failed_lowerings_to_complete_current_checks() {
                     &tree.0.join("hirsel.json"),
                     CompileConfig {
                         retention,
-                        store: Arc::new(hirsel_engine::store::NoneStore),
+                        store: Arc::new(hirsel_engine_store::NoneStore),
                         ..config(jobs)
                     },
                 );

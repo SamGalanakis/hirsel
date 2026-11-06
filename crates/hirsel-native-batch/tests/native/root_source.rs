@@ -1,6 +1,6 @@
 use super::*;
-use hirsel_engine::store::{Bytes, EntryKey, MemStore, ResultStore};
 use hirsel_engine::{DefinitionQueries, QueryEngine, Verify, default_context, default_environment};
+use hirsel_engine_store::{Bytes, EntryKey, MemStore, ResultStore};
 use hirsel_native::root_source::*;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -10,7 +10,7 @@ struct CountedStore {
     reads: AtomicU64,
 }
 impl ResultStore for CountedStore {
-    fn capability(&self) -> hirsel_engine::store::ProviderCapability {
+    fn capability(&self) -> hirsel_engine_store::ProviderCapability {
         self.inner.capability()
     }
 

@@ -16,10 +16,10 @@ use hirsel_engine::FrontNativeQueries;
 use hirsel_engine::LinkInput;
 use hirsel_engine::LoadedProgram;
 use hirsel_engine::ToolError;
-use hirsel_engine::store::ResultStore;
 use hirsel_engine_runtime::MemoryWeight;
 use hirsel_engine_runtime::QueryId;
 use hirsel_engine_runtime::RuntimeErrors;
+use hirsel_engine_store::ResultStore;
 
 use hirsel_native::NativeError;
 use hirsel_native::object_queries;
@@ -93,7 +93,7 @@ pub(super) struct NativeSelection {
     key: ContentHash,
     request: NativeRequest,
     purpose: NativePurpose,
-    verify_store: hirsel_engine::store::VerifyStore,
+    verify_store: hirsel_engine_store::VerifyStore,
     entry: DefPath,
     tools: Arc<hirsel_native::Toolchain>,
     links: Vec<LinkInput>,
@@ -105,7 +105,7 @@ pub(super) struct NativeSelection {
     runtime_limits: object_queries::runtime::RuntimeLimits,
 }
 impl NativeSelection {
-    pub(super) fn store_operation(&self) -> hirsel_engine::store::StoreOperation {
+    pub(super) fn store_operation(&self) -> hirsel_engine_store::StoreOperation {
         self.store.operation_scope()
     }
     pub fn new(
@@ -113,7 +113,7 @@ impl NativeSelection {
         source: NativeSourceInputs,
         request: NativeRequest,
         purpose: NativePurpose,
-        verify_store: hirsel_engine::store::VerifyStore,
+        verify_store: hirsel_engine_store::VerifyStore,
         tools: Arc<hirsel_native::Toolchain>,
         footprint: &Footprint,
         allowance: &mut hirsel_engine_admission::MemoryReservation,
@@ -322,7 +322,7 @@ pub(super) fn artifacts(
     weight: MemoryWeight,
     root_weight: MemoryWeight,
     errors: RuntimeErrors,
-    verify_store: hirsel_engine::store::VerifyStore,
+    verify_store: hirsel_engine_store::VerifyStore,
 ) -> Result<
     (
         Arc<NativeAssembly>,

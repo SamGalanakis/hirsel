@@ -3,6 +3,7 @@ use hirsel_intern::jobs::with_compiler_stack;
 mod canonical_tir;
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_engine_store as store;
 use hirsel_front_phases::*;
 use hirsel_host_io::launch::*;
 
@@ -128,8 +129,8 @@ fn path_requests_reuse_one_session_per_thread_and_observe_edits() {
 fn session_representation_edit_matches_cold(opaque: bool, reads_field: bool) {
     struct InstalledNone(Arc<dyn store::ResultStore>);
     impl store::ResultStore for InstalledNone {
-        fn capability(&self) -> hirsel_engine::store::ProviderCapability {
-            hirsel_engine::store::ProviderCapability::Absent
+        fn capability(&self) -> hirsel_engine_store::ProviderCapability {
+            hirsel_engine_store::ProviderCapability::Absent
         }
 
         fn installed_package(
@@ -671,8 +672,8 @@ fn disabled_result_provider_skips_store_work_for_scalar_and_frozen_queries() {
         }
     }
     impl store::ResultStore for Off {
-        fn capability(&self) -> hirsel_engine::store::ProviderCapability {
-            hirsel_engine::store::ProviderCapability::Absent
+        fn capability(&self) -> hirsel_engine_store::ProviderCapability {
+            hirsel_engine_store::ProviderCapability::Absent
         }
         fn archive_encoded(&self, boundary: store::ArchiveBoundary) {
             let index = match boundary {
@@ -683,7 +684,7 @@ fn disabled_result_provider_skips_store_work_for_scalar_and_frozen_queries() {
             self.0[index].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
 
-        fn get(&self, _: &store::EntryKey) -> Option<hirsel_engine::store::Bytes> {
+        fn get(&self, _: &store::EntryKey) -> Option<hirsel_engine_store::Bytes> {
             panic!("off provider read")
         }
         fn put(&self, _: &store::EntryKey, _: &[u8]) {
@@ -2107,11 +2108,11 @@ fn durable_front_workers_drain_payloads_before_accepting_another_task() {
         home: std::thread::ThreadId,
     }
     impl store::ResultStore for ObservedStore {
-        fn capability(&self) -> hirsel_engine::store::ProviderCapability {
-            hirsel_engine::store::ProviderCapability::Writable
+        fn capability(&self) -> hirsel_engine_store::ProviderCapability {
+            hirsel_engine_store::ProviderCapability::Writable
         }
 
-        fn get(&self, _: &store::EntryKey) -> Option<hirsel_engine::store::Bytes> {
+        fn get(&self, _: &store::EntryKey) -> Option<hirsel_engine_store::Bytes> {
             None
         }
         fn put(&self, key: &store::EntryKey, _: &[u8]) {

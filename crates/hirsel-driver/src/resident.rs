@@ -89,7 +89,7 @@ pub enum RequestError<E> {
     /// The owning transport host shut down before query completion.
     Cancelled,
     /// Runtime-owned immutable diagnostics. A failed query never runs readiness.
-    Query(hirsel_engine::store::Reference),
+    Query(hirsel_engine_store::Reference),
     Output(E),
 }
 
@@ -186,7 +186,7 @@ impl<O: OutputReadiness> RequestLease<hirsel_engine_runtime::AdmittedRuntime, O>
 /// The descriptor is resolved and output readiness checked on every request;
 /// this adapter owns neither an executable cache nor a linker.
 pub struct ExecutableOutput {
-    pub store: Arc<dyn hirsel_engine::store::ResultStore>,
+    pub store: Arc<dyn hirsel_engine_store::ResultStore>,
     pub destination: std::path::PathBuf,
 }
 impl OutputReadiness for ExecutableOutput {

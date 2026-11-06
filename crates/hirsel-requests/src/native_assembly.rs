@@ -17,12 +17,12 @@ use hirsel_engine::FrontNativeQueries;
 use hirsel_engine::FrontRunQueries;
 use hirsel_engine::LoadedProgram;
 use hirsel_engine::ToolError;
-use hirsel_engine::store::Reference;
-use hirsel_engine::store::ResultStore;
 use hirsel_engine_runtime::MemoryWeight;
 use hirsel_engine_runtime::QueryFactory;
 use hirsel_engine_runtime::QueryId;
 use hirsel_engine_runtime::RuntimeErrors;
+use hirsel_engine_store::Reference;
+use hirsel_engine_store::ResultStore;
 
 use hirsel_native::object_queries;
 use hirsel_native::query_model::{

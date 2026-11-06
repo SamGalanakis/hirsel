@@ -299,7 +299,7 @@ fn private_helper_uniqueness_59_stored_headers_settle_before_body_receipts() {
         )
         .unwrap();
         let config = CompileConfig {
-            store: Arc::new(hirsel_engine::store::MemStore::default()),
+            store: Arc::new(hirsel_engine_store::MemStore::default()),
             retention: hirsel_engine::memo::Retention::Batch,
             ..Default::default()
         };

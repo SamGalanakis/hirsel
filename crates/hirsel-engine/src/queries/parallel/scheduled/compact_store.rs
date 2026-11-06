@@ -38,12 +38,12 @@ fn load_record(
     key: &EntryKey,
     scratch: u64,
     observe: impl FnMut(&ReadKey) -> Option<ContentHash>,
-) -> Option<(crate::store::Variant, u64)> {
+) -> Option<(hirsel_engine_store::Variant, u64)> {
     let key = storage_key(key);
     let bytes = store.get(&key)?;
     let index_bytes = (bytes.len() as u64).checked_mul(8)?;
     let remaining = scratch.checked_sub(index_bytes)?;
-    let mut entry = crate::store::Entry::decode_for(&key, &bytes)?;
+    let mut entry = hirsel_engine_store::Entry::decode_for(&key, &bytes)?;
     entry.variants.retain(|variant| {
         variant
             .output
@@ -61,7 +61,7 @@ pub(in crate::queries) fn load_publication(
     engine: &mut QueryEngine,
     path: &DefPath,
 ) -> Option<PublishedResult> {
-    if engine.verify_store == crate::store::VerifyStore::Recompute {
+    if engine.verify_store == hirsel_engine_store::VerifyStore::Recompute {
         return None;
     }
     let store = engine
@@ -72,7 +72,7 @@ pub(in crate::queries) fn load_publication(
     let (variant, index_bytes) = load_record(
         &*store,
         &key,
-        (crate::store::MAX_RECORD as u64).checked_mul(8)?,
+        (hirsel_engine_store::MAX_RECORD as u64).checked_mul(8)?,
         |read| engine.observe(path, read),
     )?;
     let record: Record = bincode::DefaultOptions::new()
@@ -83,14 +83,14 @@ pub(in crate::queries) fn load_publication(
         .ok()?;
     if record.key != key.0
         || record.body.is_some_and(|body| {
-            body.domain != crate::store::product_domain(QueryKind::Modes)
-                || body.len > crate::store::MAX_RECORD as u64
+            body.domain != hirsel_engine_store::product_domain(QueryKind::Modes)
+                || body.len > hirsel_engine_store::MAX_RECORD as u64
         })
         || (variant.payload.len() as u64)
             .checked_mul(8)?
             .checked_add(record.decode_bytes)?
             .checked_add(index_bytes)?
-            > (crate::store::MAX_RECORD as u64).checked_mul(8)?
+            > (hirsel_engine_store::MAX_RECORD as u64).checked_mul(8)?
         || record.reads != variant.reads
     {
         return None;
@@ -136,7 +136,7 @@ impl FrontBodyQueries {
         // This consumes no second required-transport record. If compaction
         // cannot fit, leave the live terminal in place and refuse admission.
         self.store
-            .archive_encoded(crate::store::ArchiveBoundary::RequiredSpill);
+            .archive_encoded(hirsel_engine_store::ArchiveBoundary::RequiredSpill);
         let bytes = self.encode_terminal(key, outcome, scratch)?;
         let charge = (bytes.len() as u64)
             .checked_add(hirsel_engine_admission::retained_arc_bytes(
@@ -264,7 +264,7 @@ impl BodyTask {
                 .checked_add(record.decode_bytes)?
                 > self.weight.scratch
             || record.body.is_some_and(|body| {
-                body.domain != crate::store::product_domain(QueryKind::Modes)
+                body.domain != hirsel_engine_store::product_domain(QueryKind::Modes)
                     || body.len > self.weight.scratch
             })
         {
@@ -295,7 +295,7 @@ impl BodyTask {
             .ok()?;
         if record.key != self.queries.inputs[&self.input].key.0
             || record.body.is_some_and(|body| {
-                body.domain != crate::store::product_domain(QueryKind::Modes)
+                body.domain != hirsel_engine_store::product_domain(QueryKind::Modes)
                     || body.len > self.weight.scratch
             })
             || (variant.payload.len() as u64)
@@ -324,11 +324,11 @@ mod tests {
     #[test]
     fn scalar_summary_adopts_checked_facts_without_a_body_and_refuses_substitutions() {
         for verify in [
-            crate::store::VerifyStore::Off,
-            crate::store::VerifyStore::Recompute,
+            hirsel_engine_store::VerifyStore::Off,
+            hirsel_engine_store::VerifyStore::Recompute,
         ] {
             for fault in 0..10 {
-                let store = Arc::new(crate::store::MemStore::default());
+                let store = Arc::new(hirsel_engine_store::MemStore::default());
                 let mut engine =
                     QueryEngine::new(crate::default_environment(), PhaseAdapters::default())
                         .with_result_store(store.clone());
@@ -400,7 +400,7 @@ mod tests {
                     key: key.0,
                     // Body-free publication must not fetch this absent archive.
                     body: Some(
-                        crate::store::product_domain(QueryKind::Modes)
+                        hirsel_engine_store::product_domain(QueryKind::Modes)
                             .reference(b"absent body")
                             .unwrap(),
                     ),
@@ -418,7 +418,7 @@ mod tests {
                 }
                 if fault == 9 {
                     record.body.as_mut().unwrap().domain =
-                        crate::store::product_domain(QueryKind::Summary);
+                        hirsel_engine_store::product_domain(QueryKind::Summary);
                 }
                 let storage = storage_key(&key);
                 let mut variant = VariantRef::publish(
@@ -431,13 +431,13 @@ mod tests {
                 if fault == 7 {
                     variant.inputs = ContentHash::default();
                 }
-                let mut entry = crate::store::Entry::default();
+                let mut entry = hirsel_engine_store::Entry::default();
                 entry.insert(variant);
                 store.put(&storage, &entry.encode_for(&storage));
                 assert!(store.get_content(record.body.unwrap()).is_none());
                 engine.verify_store = verify;
                 let hit = engine.load_publication(path);
-                let accepted = fault == 0 && verify == crate::store::VerifyStore::Off;
+                let accepted = fault == 0 && verify == hirsel_engine_store::VerifyStore::Off;
                 assert_eq!(hit.is_some(), accepted, "fault {fault}, {verify:?}");
                 assert_eq!(engine.store_adoptions(), u64::from(accepted));
                 assert_eq!(engine.summaries.is_empty(), !accepted);
@@ -469,7 +469,7 @@ mod tests {
             let legacy = Legacy {
                 key,
                 body: Some(
-                    crate::store::product_domain(QueryKind::Modes)
+                    hirsel_engine_store::product_domain(QueryKind::Modes)
                         .reference(b"body")
                         .unwrap(),
                 ),

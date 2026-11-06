@@ -85,18 +85,18 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     #[derive(Default)]
     struct Counting {
-        inner: crate::store::MemStore,
+        inner: hirsel_engine_store::MemStore,
         gets: AtomicUsize,
     }
     impl ResultStore for Counting {
-        fn capability(&self) -> crate::store::ProviderCapability {
+        fn capability(&self) -> hirsel_engine_store::ProviderCapability {
             self.inner.capability()
         }
 
         fn name(&self) -> &'static str {
             "counting-read-test"
         }
-        fn get(&self, key: &EntryKey) -> Option<crate::store::Bytes> {
+        fn get(&self, key: &EntryKey) -> Option<hirsel_engine_store::Bytes> {
             self.gets.fetch_add(1, Ordering::Relaxed);
             self.inner.get(key)
         }
@@ -264,7 +264,7 @@ mod tests {
                 .load(
                     &records,
                     &anchors,
-                    &crate::store::MemStore::default(),
+                    &hirsel_engine_store::MemStore::default(),
                     bound
                 )
                 .is_none()
@@ -373,7 +373,7 @@ mod tests {
                 .load(
                     &records,
                     &anchors,
-                    &crate::store::MemStore::default(),
+                    &hirsel_engine_store::MemStore::default(),
                     bound
                 )
                 .is_none()

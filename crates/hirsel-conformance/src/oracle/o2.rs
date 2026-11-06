@@ -10,7 +10,7 @@ use super::{
     produce_with_store, request_artifacts, switches,
 };
 use hirsel_driver::session::{FileChange, Session};
-use hirsel_engine::store::MemStore;
+use hirsel_engine_store::MemStore;
 use std::path::Path;
 use std::sync::Arc;
 

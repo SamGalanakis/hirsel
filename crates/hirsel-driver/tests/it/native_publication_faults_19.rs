@@ -1,9 +1,9 @@
 //! Original private plan missing/corrupt/publication-failure vectors over Codegen.
 use hirsel_driver::native;
-use hirsel_engine::store;
-use hirsel_engine::store::ResultStore;
 use hirsel_engine::*;
 use hirsel_engine_runtime::*;
+use hirsel_engine_store as store;
+use hirsel_engine_store::ResultStore;
 use hirsel_intern::jobs::with_compiler_stack;
 
 use hirsel_front_phases::compiler_adapters;
@@ -20,7 +20,7 @@ struct Faults {
     fragment_puts: AtomicUsize,
 }
 impl ResultStore for Faults {
-    fn capability(&self) -> hirsel_engine::store::ProviderCapability {
+    fn capability(&self) -> hirsel_engine_store::ProviderCapability {
         self.disk.capability()
     }
 

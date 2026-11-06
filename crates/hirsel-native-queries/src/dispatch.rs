@@ -1,6 +1,6 @@
 //! Ordinary addressed dispatch recipes. Reopening conveys no C authority.
 use super::*;
-use hirsel_engine::store::{Domain, ResultStore};
+use hirsel_engine_store::{Domain, ResultStore};
 use serde::{Deserialize, Serialize};
 
 const PLAN: Domain = Domain {

@@ -866,7 +866,7 @@ impl QueryEngine {
         let selected = Arc::get_mut(&mut run).ok_or(QueryError::NotImplemented)?;
         selected.records = selected
             .records
-            .for_boundary(crate::store::ArchiveBoundary::Export);
+            .for_boundary(hirsel_engine_store::ArchiveBoundary::Export);
         self.capture_proof_export(
             entry,
             run.query(entry).ok_or(QueryError::NotImplemented)?,
@@ -894,7 +894,7 @@ impl QueryEngine {
         let selected = Arc::get_mut(&mut run).ok_or(QueryError::NotImplemented)?;
         selected.records = selected
             .records
-            .for_boundary(crate::store::ArchiveBoundary::Export);
+            .for_boundary(hirsel_engine_store::ArchiveBoundary::Export);
         self.capture_proof_export(
             entry,
             run.query(entry).ok_or(QueryError::NotImplemented)?,

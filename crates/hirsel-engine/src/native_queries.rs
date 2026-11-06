@@ -71,7 +71,7 @@ impl QueryEngine {
         NativeQueryPolicy {
             source: self.source_verification_policy(),
             reuse: self.verify == Verify::On
-                && self.verify_store != crate::store::VerifyStore::Recompute,
+                && self.verify_store != hirsel_engine_store::VerifyStore::Recompute,
         }
     }
 

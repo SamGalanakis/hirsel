@@ -26,7 +26,7 @@ impl CompilerRequestsExt for Compiler {
         use crate::requests::{CompileOperation, CompileResult, CompilerRequests};
         use hirsel_engine::Verify;
         use hirsel_engine::memo::Retention;
-        use hirsel_engine::store::DirStore;
+        use hirsel_engine_store::DirStore;
         let mut config = self.configuration();
         if config.verify == Verify::Off {
             return Err(ToolError::Runtime(
@@ -98,8 +98,8 @@ impl CompilerRequestsExt for Compiler {
 impl crate::resident::ObservedEngine for crate::requests::CompilerRequests {
     fn set_invocation_store(
         &mut self,
-        store: Option<std::sync::Arc<dyn hirsel_engine::store::ResultStore>>,
-    ) -> Option<std::sync::Arc<dyn hirsel_engine::store::ResultStore>> {
+        store: Option<std::sync::Arc<dyn hirsel_engine_store::ResultStore>>,
+    ) -> Option<std::sync::Arc<dyn hirsel_engine_store::ResultStore>> {
         Self::set_invocation_store(self, store)
     }
 }

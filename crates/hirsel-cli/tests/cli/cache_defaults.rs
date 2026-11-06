@@ -281,7 +281,7 @@ fn native_private_cache_reuses_units_and_unwritable_dir_never_reports_a_hit() {
     assert_eq!(bytes, cached);
     assert!(
         cache
-            .join(format!("hirsel/results-v{}", hirsel_engine::store::FORMAT))
+            .join(format!("hirsel/results-v{}", hirsel_engine_store::FORMAT))
             .is_dir()
     );
     let (_, fresh) = fixture.build(&mut fixture.command());

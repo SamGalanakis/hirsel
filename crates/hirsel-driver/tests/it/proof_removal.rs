@@ -3,6 +3,7 @@
 //! unreplayable record keeps its check. `bump` has a bounds check (MEM-14),
 //! an overflow check (SEM-1) and an `ensures` check (FACT-1).
 use hirsel_engine::*;
+use hirsel_engine_store as store;
 use hirsel_front_phases::compiler_adapters;
 use hirsel_intern::jobs::with_compiler_stack;
 use hirsel_lir::Opcode;

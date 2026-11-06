@@ -278,7 +278,7 @@ impl DemandProducer {
     pub(crate) async fn charge_manifest(
         &self,
         capture: &NamespaceCapture,
-        manifest: crate::store::Reference,
+        manifest: hirsel_engine_store::Reference,
         site: Span,
         reads: &QueryReads,
     ) -> Result<(), QueryError> {
@@ -535,7 +535,8 @@ impl DemandProducer {
     pub(crate) fn task(
         self: &Arc<Self>,
         id: hirsel_engine_runtime::QueryId,
-    ) -> Result<Box<dyn hirsel_engine_runtime::LocalQueryTask>, crate::store::Reference> {
+    ) -> Result<Box<dyn hirsel_engine_runtime::LocalQueryTask>, hirsel_engine_store::Reference>
+    {
         if let Some(scope) = self
             .scopes
             .lock()
@@ -646,7 +647,7 @@ impl DemandProducer {
         &self,
         id: hirsel_engine_runtime::QueryId,
         namespace: &NamespaceCapture,
-    ) -> Result<hirsel_engine_runtime::ProductRef, crate::store::Reference> {
+    ) -> Result<hirsel_engine_runtime::ProductRef, hirsel_engine_store::Reference> {
         let bytes = size_of::<crate::queries::live_record::LiveRecord<ContentHash>>()
             + size_of::<hirsel_engine_admission::MemoryReservation>()
             + 4 * size_of::<usize>();
@@ -656,7 +657,7 @@ impl DemandProducer {
             hirsel_artifact_store::Action(namespace.identity()),
             Arc::new(crate::queries::live_record::LiveRecord {
                 value: namespace.manifest,
-                domain: crate::store::Domain {
+                domain: hirsel_engine_store::Domain {
                     kind: 0x4601_000b,
                     schema: 1,
                 },
@@ -832,7 +833,7 @@ impl DemandProducer {
     pub(crate) async fn reopen_manifest(
         self: &Arc<Self>,
         previous: &Arc<NamespaceCapture>,
-        manifest: crate::store::Reference,
+        manifest: hirsel_engine_store::Reference,
         reads: QueryReads,
     ) -> Option<scheduled_lower::SuccessorCapture> {
         let demands = previous.manifest_demands(manifest, self.weight.scratch)?;

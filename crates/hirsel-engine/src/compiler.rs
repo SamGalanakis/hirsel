@@ -30,10 +30,10 @@ pub struct Compiler {
     jobs: Option<hirsel_intern::jobs::Jobs>,
     hold_bytes: Option<u64>,
     lowering: LoweringPolicy,
-    result_store: Option<Arc<dyn crate::store::ResultStore>>,
+    result_store: Option<Arc<dyn hirsel_engine_store::ResultStore>>,
     /// The store opened when no explicit provider is configured.
     results: Results,
-    verify_store: crate::store::VerifyStore,
+    verify_store: hirsel_engine_store::VerifyStore,
     comptime_limits: Option<crate::ComptimeLimits>,
 }
 impl Compiler {
@@ -51,7 +51,7 @@ impl Compiler {
             lowering: LoweringPolicy::Comptime,
             result_store: None,
             results: Results::Off,
-            verify_store: crate::store::VerifyStore::Off,
+            verify_store: hirsel_engine_store::VerifyStore::Off,
             comptime_limits: None,
         }
     }
@@ -66,7 +66,10 @@ impl Compiler {
         self
     }
     /// Whether this compiler's store hits are recomputed (`--verify-cache`).
-    pub const fn with_verify_store(mut self, verify_store: crate::store::VerifyStore) -> Self {
+    pub const fn with_verify_store(
+        mut self,
+        verify_store: hirsel_engine_store::VerifyStore,
+    ) -> Self {
         self.verify_store = verify_store;
         self
     }
@@ -102,7 +105,7 @@ impl Compiler {
         } else {
             let (store, recompute) = self.default_store();
             if recompute {
-                config.verify_store = crate::store::VerifyStore::Recompute;
+                config.verify_store = hirsel_engine_store::VerifyStore::Recompute;
             }
             if let Some(store) = store {
                 config.store = store;
@@ -115,9 +118,12 @@ impl Compiler {
     }
     /// The default provider (`Results`) and whether `HIRSEL_VERIFY_CACHE`
     /// recomputes its hits.
-    fn default_store(&self) -> (Option<Arc<dyn crate::store::ResultStore>>, bool) {
+    fn default_store(&self) -> (Option<Arc<dyn hirsel_engine_store::ResultStore>>, bool) {
         match self.results {
-            Results::Off => (crate::store::store_by_name("none@1", None).ok(), false),
+            Results::Off => (
+                hirsel_engine_store::store_by_name("none@1", None).ok(),
+                false,
+            ),
             Results::Host => {
                 let name = std::env::var("HIRSEL_RESULTS").unwrap_or_else(|_| "dir@1".into());
                 let recompute = std::env::var_os("HIRSEL_VERIFY_CACHE").is_some_and(|v| v != "0");
@@ -125,7 +131,7 @@ impl Compiler {
                     .filter(|v| !v.is_empty())
                     .map(Into::into);
                 (
-                    crate::store::store_by_name(&name, directory).ok(),
+                    hirsel_engine_store::store_by_name(&name, directory).ok(),
                     recompute,
                 )
             }
@@ -168,7 +174,7 @@ impl Compiler {
         } else {
             let (store, recompute) = self.default_store();
             if recompute {
-                engine.verify_store = crate::store::VerifyStore::Recompute;
+                engine.verify_store = hirsel_engine_store::VerifyStore::Recompute;
             }
             if let Some(store) = store {
                 engine = engine.with_result_store(store);
@@ -536,8 +542,8 @@ pub(crate) mod tests {
             adapters
         }
         with_compiler_stack(|| {
-            let store: Arc<dyn crate::store::ResultStore> =
-                Arc::new(crate::store::MemStore::default());
+            let store: Arc<dyn hirsel_engine_store::ResultStore> =
+                Arc::new(hirsel_engine_store::MemStore::default());
             let config = CompileConfig {
                 jobs: hirsel_intern::jobs::Jobs::new(8),
                 verify: Verify::Off,
@@ -545,7 +551,7 @@ pub(crate) mod tests {
                 lowering: LoweringPolicy::Reachable,
                 hold_bytes: 0,
                 store: store.clone(),
-                verify_store: crate::store::VerifyStore::Recompute,
+                verify_store: hirsel_engine_store::VerifyStore::Recompute,
             };
             let compiler = Compiler::new(phases, [1; 32])
                 .with_config(config)
@@ -558,7 +564,10 @@ pub(crate) mod tests {
             assert_eq!(captured.retention, crate::memo::Retention::Resident);
             assert_eq!(captured.lowering, LoweringPolicy::Reachable);
             assert_eq!(captured.hold_bytes, 0);
-            assert_eq!(captured.verify_store, crate::store::VerifyStore::Recompute);
+            assert_eq!(
+                captured.verify_store,
+                hirsel_engine_store::VerifyStore::Recompute
+            );
             let mut engine = compiler.engine(default_environment());
             assert_eq!(engine.store_identity, ContentHash([2; 32]));
             let file = engine
@@ -665,7 +674,7 @@ pub(crate) mod tests {
     #[test]
     fn declaration_loading_preserves_all_configured_session_policies() {
         let fixture = Fixture::new();
-        let store = Arc::new(crate::store::SimStore::default());
+        let store = Arc::new(hirsel_engine_store::SimStore::default());
         let limits = crate::ComptimeLimits {
             budget: 0,
             call_depth: 1,
@@ -678,7 +687,7 @@ pub(crate) mod tests {
                     retention: crate::memo::Retention::Resident,
                     lowering: LoweringPolicy::Reachable,
                     store: store.clone(),
-                    verify_store: crate::store::VerifyStore::Recompute,
+                    verify_store: hirsel_engine_store::VerifyStore::Recompute,
                     hold_bytes: 0,
                 })
                 .with_comptime_limits(limits);
@@ -694,8 +703,11 @@ pub(crate) mod tests {
             assert_eq!(engine.configured_jobs.unwrap().get(), 3);
             assert_eq!(engine.configured_lowering, LoweringPolicy::Reachable);
             assert_eq!(engine.hold_bytes(), 0);
-            assert_eq!(engine.verify_store, crate::store::VerifyStore::Recompute);
-            let provider: Arc<dyn crate::store::ResultStore> = store.clone();
+            assert_eq!(
+                engine.verify_store,
+                hirsel_engine_store::VerifyStore::Recompute
+            );
+            let provider: Arc<dyn hirsel_engine_store::ResultStore> = store.clone();
             assert!(Arc::ptr_eq(
                 engine.result_store.as_ref().unwrap(),
                 &provider

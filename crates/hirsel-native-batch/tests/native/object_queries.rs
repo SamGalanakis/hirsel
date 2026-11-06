@@ -1,5 +1,5 @@
 use super::*;
-use hirsel_engine::store::{DirStore, MAX_RECORD};
+use hirsel_engine_store::{DirStore, MAX_RECORD};
 use hirsel_native::object_queries::*;
 use hirsel_native::query_model::*;
 fn output_path(store: &DirStore, reference: Reference) -> std::path::PathBuf {
@@ -8,9 +8,9 @@ fn output_path(store: &DirStore, reference: Reference) -> std::path::PathBuf {
 use hirsel_lir::layout_types::TargetSpec;
 use std::cell::Cell;
 
-fn admitted(backend: Arc<dyn ResultStore>) -> hirsel_engine::store::RequestStore {
+fn admitted(backend: Arc<dyn ResultStore>) -> hirsel_engine_store::RequestStore {
     let budget = hirsel_engine_admission::ProcessBudget::new(64 << 20);
-    hirsel_engine::store::RequestStore::new(backend, budget.reserve(64 << 20).unwrap())
+    hirsel_engine_store::RequestStore::new(backend, budget.reserve(64 << 20).unwrap())
 }
 
 const INPUT: Domain = Domain {
@@ -178,9 +178,8 @@ fn actual_ready_fixture_emits_links_restores_and_exits_on_both_backends() {
             ] {
                 let dir = root.path().join(format!("{}-{opt:?}", backend.name()));
                 std::fs::create_dir_all(&dir).unwrap();
-                let store: Arc<dyn hirsel_engine::store::ResultStore> = Arc::new(admitted(
-                    Arc::new(hirsel_engine::store::MemStore::default()),
-                ));
+                let store: Arc<dyn hirsel_engine_store::ResultStore> =
+                    Arc::new(admitted(Arc::new(hirsel_engine_store::MemStore::default())));
                 let mut descriptor = ready(store.as_ref());
                 descriptor.ready = store
                     .put_content(INPUT, hirsel_codec::to_text(unit).as_bytes())
@@ -277,7 +276,7 @@ fn actual_ready_fixture_emits_links_restores_and_exits_on_both_backends() {
     });
 }
 
-use hirsel_engine::store::{Action, Address, Domain, Output, Reference, ResultStore, VerifyStore};
 use hirsel_engine_runtime::ArchiveAdmission;
+use hirsel_engine_store::{Action, Address, Domain, Output, Reference, ResultStore, VerifyStore};
 use hirsel_lir::stage::ObjectArtifact;
 use std::path::Path;

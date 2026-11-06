@@ -5,8 +5,8 @@ use hirsel_engine::FrontNativeDefinitionOutput;
 use hirsel_engine::FrontNativeDefinitionQueries;
 use hirsel_engine::NativeDefinitionProduct;
 use hirsel_engine::NativeOriginalProduct;
-use hirsel_engine::store::*;
 use hirsel_engine_runtime::*;
+use hirsel_engine_store::*;
 use hirsel_query_products::retained::MetadataWeight;
 
 use hirsel_rc::instance::{Requirement, SourceDeclaration};

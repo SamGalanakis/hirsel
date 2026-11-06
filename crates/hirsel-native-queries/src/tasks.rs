@@ -5,8 +5,8 @@ use super::{
     products::{DemandProducts, NativeSnapshot, SettledProducts},
     *,
 };
-use hirsel_engine::store::ResultStore;
 use hirsel_engine_runtime::*;
+use hirsel_engine_store::ResultStore;
 
 use hirsel_native::object_queries::CodegenKey;
 use hirsel_native::object_queries::LinkDependencies;
@@ -23,7 +23,7 @@ use std::{
     task::Poll,
 };
 
-const FAILURE: hirsel_engine::store::Domain = hirsel_engine::store::Domain {
+const FAILURE: hirsel_engine_store::Domain = hirsel_engine_store::Domain {
     kind: 0x4e00_001e,
     schema: 1,
 };
@@ -82,7 +82,7 @@ pub struct NativeTasks {
     pub snapshot: Arc<NativeSnapshot>,
     requests: BTreeMap<Id, Reference>,
     weight: MemoryWeight,
-    fallback: hirsel_engine::store::Reference,
+    fallback: hirsel_engine_store::Reference,
     pub created: AtomicU64,
     pub ready_transformations: AtomicU64,
 }
@@ -165,7 +165,7 @@ impl NativeTasks {
                     (
                         QueryId {
                             kind,
-                            address: hirsel_engine::store::Address(address),
+                            address: hirsel_engine_store::Address(address),
                         },
                         record,
                     )
@@ -173,7 +173,7 @@ impl NativeTasks {
                 .collect(),
             guard: recipe.guard.map(|(kind, address)| QueryId {
                 kind,
-                address: hirsel_engine::store::Address(address),
+                address: hirsel_engine_store::Address(address),
             }),
         })
     }
@@ -462,7 +462,7 @@ impl NativeTasks {
             .get()
             .map(|guard| (guard.query_id(), guard.factory()))
     }
-    pub fn failure(&self, message: &str) -> hirsel_engine::store::Reference {
+    pub fn failure(&self, message: &str) -> hirsel_engine_store::Reference {
         self.snapshot
             .store
             .put_content(FAILURE, message.as_bytes())

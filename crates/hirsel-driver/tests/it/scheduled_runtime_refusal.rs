@@ -1,26 +1,26 @@
 use hirsel_driver::*;
-use hirsel_engine::store::MemStore;
 use hirsel_engine::*;
 use hirsel_engine_runtime::*;
+use hirsel_engine_store::MemStore;
 use hirsel_intern::jobs::with_compiler_stack;
 
 use hirsel_front_phases::*;
 use hirsel_host_io::launch::*;
 use std::sync::Arc;
-struct Refuse(hirsel_engine::store::Reference);
+struct Refuse(hirsel_engine_store::Reference);
 impl LocalQueryFactory for Refuse {
-    fn weight(&self, _: QueryId) -> Result<MemoryWeight, hirsel_engine::store::Reference> {
+    fn weight(&self, _: QueryId) -> Result<MemoryWeight, hirsel_engine_store::Reference> {
         Err(self.0)
     }
     fn create(
         &self,
         _: QueryId,
-    ) -> Result<Box<dyn LocalQueryTask>, hirsel_engine::store::Reference> {
+    ) -> Result<Box<dyn LocalQueryTask>, hirsel_engine_store::Reference> {
         panic!("refused query must never be created")
     }
 }
 impl QueryFactory for Refuse {
-    fn create(&self, _: QueryId) -> Result<Box<dyn QueryTask>, hirsel_engine::store::Reference> {
+    fn create(&self, _: QueryId) -> Result<Box<dyn QueryTask>, hirsel_engine_store::Reference> {
         Err(self.0)
     }
 }

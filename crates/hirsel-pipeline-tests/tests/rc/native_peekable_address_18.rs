@@ -154,7 +154,7 @@ fn original_cleanup_and_upstream_vectors_on_all_engines() {
     let compiler = hirsel_front_phases::COMPILER
         .with_owned_engines()
         .with_config(hirsel_engine::CompileConfig {
-            store: hirsel_engine::store::MemStore::shared(),
+            store: hirsel_engine_store::MemStore::shared(),
             ..Default::default()
         });
     let mut executions = 0;

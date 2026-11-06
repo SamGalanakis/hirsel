@@ -1,5 +1,5 @@
-use hirsel_engine::store::{Action, Address, Domain, MemStore, ResultStore};
 use hirsel_engine_runtime::ProductRef;
+use hirsel_engine_store::{Action, Address, Domain, MemStore, ResultStore};
 
 use hirsel_lir::operation::{NativeType, Primitive};
 use hirsel_native_queries::seal_demand::Input;
@@ -33,7 +33,7 @@ fn guard_query_refuses_missing_roots_and_repairs_malformed_cached_selections() {
     let equations = LocalDemandEquations::extract(&unit).unwrap();
     let owner = equations.owner().clone();
     let budget = hirsel_engine_admission::ProcessBudget::new(64 << 20);
-    let store = hirsel_engine::store::RequestStore::new(
+    let store = hirsel_engine_store::RequestStore::new(
         std::sync::Arc::new(MemStore::default()),
         budget.reserve(64 << 20).unwrap(),
     );
@@ -114,7 +114,7 @@ fn guard_query_refuses_missing_roots_and_repairs_malformed_cached_selections() {
 #[test]
 fn original_scalar_guard_query_uses_only_metadata_and_rechecks_dependency_outputs() {
     let budget = hirsel_engine_admission::ProcessBudget::new(64 << 20);
-    let store = hirsel_engine::store::RequestStore::new(
+    let store = hirsel_engine_store::RequestStore::new(
         std::sync::Arc::new(MemStore::default()),
         budget.reserve(64 << 20).unwrap(),
     );

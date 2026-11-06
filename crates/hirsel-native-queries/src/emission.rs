@@ -29,7 +29,7 @@ struct InlineArchive {
 }
 const MAX_INLINE_MEMBERS: usize =
     hirsel_rc::instance::MAX_INSTANCES + hirsel_rc::closure_calls::MAX_SPECIALIZATIONS;
-const INLINE_SELECTION: hirsel_engine::store::Domain = hirsel_engine::store::Domain {
+const INLINE_SELECTION: hirsel_engine_store::Domain = hirsel_engine_store::Domain {
     kind: 0x4e00_0034,
     schema: 1,
 };
@@ -101,7 +101,7 @@ impl InlineInstances {
     }
     pub fn publish(
         &self,
-        store: &dyn hirsel_engine::store::ResultStore,
+        store: &dyn hirsel_engine_store::ResultStore,
     ) -> Result<Option<Reference>, String> {
         let Some(archive) = self.archive()? else {
             return Ok(None);
@@ -117,7 +117,7 @@ impl InlineInstances {
     }
     fn read(
         reference: Reference,
-        store: &dyn hirsel_engine::store::ResultStore,
+        store: &dyn hirsel_engine_store::ResultStore,
         grant: Option<Arc<hirsel_engine_admission::MemoryReservation>>,
     ) -> Result<Self, String> {
         // A JSON hash array has at most 129 bytes per member plus its
@@ -181,7 +181,7 @@ impl EmissionRecord {
     }
     pub fn read(
         self,
-        store: &dyn hirsel_engine::store::ResultStore,
+        store: &dyn hirsel_engine_store::ResultStore,
         cached: &InlineInstances,
         grant: Option<Arc<hirsel_engine_admission::MemoryReservation>>,
     ) -> Result<EmissionFacts, String> {
@@ -295,12 +295,12 @@ pub fn select(
 #[cfg(test)]
 mod component_tests {
     use super::*;
-    use hirsel_engine::store::{Bytes, EntryKey, MemStore, ResultStore};
+    use hirsel_engine_store::{Bytes, EntryKey, MemStore, ResultStore};
 
     struct ChangedBytes(Vec<u8>);
     impl ResultStore for ChangedBytes {
-        fn capability(&self) -> hirsel_engine::store::ProviderCapability {
-            hirsel_engine::store::ProviderCapability::ReadOnly
+        fn capability(&self) -> hirsel_engine_store::ProviderCapability {
+            hirsel_engine_store::ProviderCapability::ReadOnly
         }
         fn get(&self, _: &EntryKey) -> Option<Bytes> {
             None

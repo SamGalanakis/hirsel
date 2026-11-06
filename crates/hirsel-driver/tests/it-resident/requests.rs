@@ -336,7 +336,7 @@ fn input_limit_is_a_failure_not_an_empty_successful_snapshot() {
 
 #[test]
 fn terminal_diagnostics_are_owned_before_transient_provider_and_lease_drop() {
-    use hirsel_engine::store::{MemStore, ResultStore};
+    use hirsel_engine_store::{MemStore, ResultStore};
     struct Diagnostics {
         runtime: Arc<Mutex<ProbeRuntime>>,
         store: Arc<MemStore>,

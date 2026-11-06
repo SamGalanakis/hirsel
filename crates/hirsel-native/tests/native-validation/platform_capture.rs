@@ -1,5 +1,5 @@
 use super::*;
-use hirsel_engine::store::DirStore;
+use hirsel_engine_store::DirStore;
 use std::process::Command;
 
 fn input(name: &str) -> PathBuf {

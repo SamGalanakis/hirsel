@@ -10,8 +10,8 @@ use super::{
     tasks::NativeTasks,
     *,
 };
-use hirsel_engine::store::{Action, Address, Domain};
 use hirsel_engine_runtime::*;
+use hirsel_engine_store::{Action, Address, Domain};
 
 use std::{
     collections::BTreeMap,
@@ -34,7 +34,7 @@ pub struct OwnershipCompilation {
     query: QueryId,
     weight: MemoryWeight,
     allowance: Mutex<Option<hirsel_engine_admission::MemoryReservation>>,
-    verify_store: hirsel_engine::store::VerifyStore,
+    verify_store: hirsel_engine_store::VerifyStore,
     dispatch: OnceLock<Dispatch>,
     completed: OnceLock<(ProductRef, ProductRef)>,
 }
@@ -45,7 +45,7 @@ impl OwnershipCompilation {
         emission: EmissionOptions,
         weight: MemoryWeight,
         allowance: hirsel_engine_admission::MemoryReservation,
-        verify_store: hirsel_engine::store::VerifyStore,
+        verify_store: hirsel_engine_store::VerifyStore,
     ) -> Result<Arc<Self>, String> {
         Self::new_selected(
             instances,
@@ -64,7 +64,7 @@ impl OwnershipCompilation {
         emission: EmissionOptions,
         weight: MemoryWeight,
         allowance: hirsel_engine_admission::MemoryReservation,
-        verify_store: hirsel_engine::store::VerifyStore,
+        verify_store: hirsel_engine_store::VerifyStore,
     ) -> Result<Arc<Self>, String> {
         let mut query = QueryId {
             kind: OWNERSHIP_COMPILATION_KIND,

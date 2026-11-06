@@ -1,7 +1,7 @@
 //! Immutable VerifyStore expectations outlive preflight, not their heap buffers.
 //! Go's io.copyBuffer (src/io/io.go:407-450) bounds scratch independently of
 //! input size. Here the sink compares exact bytes rather than copying them.
-use crate::store::Variant;
+use hirsel_engine_store::Variant;
 use hirsel_query_products::reads::Reads;
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};

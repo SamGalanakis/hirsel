@@ -5,10 +5,10 @@
 hirsel_guard::install!();
 
 fn imported_fixture(
-    store: &dyn hirsel_engine::store::ResultStore,
-    address: hirsel_engine::store::Address,
-    action: hirsel_engine::store::Action,
-    reference: hirsel_engine::store::Reference,
+    store: &dyn hirsel_engine_store::ResultStore,
+    address: hirsel_engine_store::Address,
+    action: hirsel_engine_store::Action,
+    reference: hirsel_engine_store::Reference,
 ) -> hirsel_engine_runtime::ProductRef {
     let budget = hirsel_engine_admission::ProcessBudget::new(64 << 20);
     let mut allowance = budget.reserve(64 << 20).unwrap();

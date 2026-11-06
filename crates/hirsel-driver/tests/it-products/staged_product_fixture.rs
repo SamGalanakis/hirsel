@@ -94,7 +94,7 @@ impl StagedProducts {
 
 pub(super) fn errors() -> RuntimeErrors {
     let reference = |text: &[u8]| {
-        hirsel_engine::store::Domain {
+        hirsel_engine_store::Domain {
             kind: 0x4600_00ff,
             schema: 1,
         }

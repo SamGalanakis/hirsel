@@ -1,7 +1,7 @@
 use hirsel_driver::*;
-use hirsel_engine::store::*;
 use hirsel_engine::*;
 use hirsel_engine_runtime::*;
+use hirsel_engine_store::*;
 use hirsel_intern::jobs::with_compiler_stack;
 
 use hirsel_query_products::{LoweringPolicy, QueryKind};
@@ -23,7 +23,7 @@ impl Default for Observed {
     }
 }
 impl ResultStore for Observed {
-    fn capability(&self) -> hirsel_engine::store::ProviderCapability {
+    fn capability(&self) -> hirsel_engine_store::ProviderCapability {
         self.inner.capability()
     }
 

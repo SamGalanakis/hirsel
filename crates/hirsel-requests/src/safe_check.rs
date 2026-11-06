@@ -4,9 +4,9 @@ use hirsel_engine::CheckOutput;
 use hirsel_engine::FrontCheckQueries;
 use hirsel_engine::FrontRunQueries;
 use hirsel_engine::ToolError;
-use hirsel_engine::store::ResultStore;
-use hirsel_engine::store::{Action, Address, Domain, Reference};
 use hirsel_engine_runtime::*;
+use hirsel_engine_store::ResultStore;
+use hirsel_engine_store::{Action, Address, Domain, Reference};
 
 use hirsel_syntax::{ContentHash, DefPath};
 use std::{

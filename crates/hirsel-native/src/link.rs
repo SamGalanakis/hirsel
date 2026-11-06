@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 #[derive(Clone)]
 pub struct Toolchain {
     /// The same admitted result provider used by native, object and runtime tasks.
-    pub products: std::sync::Arc<dyn hirsel_engine::store::ResultStore>,
+    pub products: std::sync::Arc<dyn hirsel_engine_store::ResultStore>,
     /// The archive variant `link` links; measurement also selects emitted
     /// inline-edge hooks. `with_runtime` selects another built variant.
     pub runtime_build: RuntimeBuild,
@@ -253,7 +253,7 @@ impl Toolchain {
     /// The runtime cache directory holds artifacts, never another store budget.
     pub fn for_host_request(
         target: &TargetSpec,
-        store: std::sync::Arc<dyn hirsel_engine::store::ResultStore>,
+        store: std::sync::Arc<dyn hirsel_engine_store::ResultStore>,
     ) -> Result<Self, NativeError> {
         let cache = std::env::var_os("HIRSEL_NATIVE_CACHE")
             .map(PathBuf::from)
@@ -319,7 +319,7 @@ impl Toolchain {
         targets: &[&TargetSpec],
         runtime_builds: &[RuntimeBuild],
         inputs: Option<&super::RuntimeInputs>,
-        store: std::sync::Arc<dyn hirsel_engine::store::ResultStore>,
+        store: std::sync::Arc<dyn hirsel_engine_store::ResultStore>,
     ) -> Result<Self, NativeError> {
         Self::in_tree_inputs(build_dir, targets, runtime_builds, inputs, Some(store))
     }
@@ -329,7 +329,7 @@ impl Toolchain {
         targets: &[&TargetSpec],
         runtime_builds: &[RuntimeBuild],
         inputs: Option<&super::RuntimeInputs>,
-        store: Option<std::sync::Arc<dyn hirsel_engine::store::ResultStore>>,
+        store: Option<std::sync::Arc<dyn hirsel_engine_store::ResultStore>>,
     ) -> Result<Self, NativeError> {
         let _timing = hirsel_intern::timings::interval(hirsel_intern::timings::Interval::Link);
         let _phase = hirsel_intern::timings::phase(hirsel_intern::timings::Phase::Link);
@@ -361,8 +361,8 @@ impl Toolchain {
             None => {
                 let (budget, cap) = hirsel_engine::requests::source_graph::host_budget();
                 let bytes = (cap / 8).min(128 << 20);
-                std::sync::Arc::new(hirsel_engine::store::RequestStore::new(
-                    std::sync::Arc::new(hirsel_engine::store::NoneStore),
+                std::sync::Arc::new(hirsel_engine_store::RequestStore::new(
+                    std::sync::Arc::new(hirsel_engine_store::NoneStore),
                     budget
                         .reserve(bytes)
                         .map_err(|e| NativeError::new(StageName::Link, e.to_string()))?,
@@ -2025,7 +2025,7 @@ impl ExecutableLinkPlan {
     /// Capture with the independently selected frozen tool and caller's bounds.
     pub fn capture(
         &self,
-        store: &dyn hirsel_engine::store::ResultStore,
+        store: &dyn hirsel_engine_store::ResultStore,
         linker: super::object_queries::capture::FrozenLinker,
         limits: super::object_queries::capture::CaptureLimits,
     ) -> Result<super::object_queries::capture::CapturedLink, String> {
@@ -2088,7 +2088,7 @@ pub fn plan_captured_executable_link(
 }
 
 pub struct CapturedExecutableLinkInputs<'a> {
-    pub store: &'a dyn hirsel_engine::store::ResultStore,
+    pub store: &'a dyn hirsel_engine_store::ResultStore,
     pub platform: &'a super::object_queries::platform::CapturedPlatform,
     pub loader: Option<(PathBuf, PathBuf)>,
 }
@@ -2123,7 +2123,7 @@ fn data_abi_object(program: &ReadyProgram, dir: &Path) -> Result<Option<PathBuf>
 /// Fully selected kit input. The ordinary reference binds all actual kit leaves
 /// before codegen, including transitive script and archive-member reads.
 pub struct FrozenExecutableLinkInputs<'a> {
-    pub store: &'a dyn hirsel_engine::store::ResultStore,
+    pub store: &'a dyn hirsel_engine_store::ResultStore,
     pub kit: super::object_queries::capture::FrozenLinkKit,
     pub runtime: &'a Path,
     pub foreign: &'a [PathBuf],
@@ -3979,7 +3979,7 @@ mod tests {
     #[test]
     fn floor_launches_run_through_the_release_loader_and_its_libraries_only() {
         let tools = Toolchain {
-            products: std::sync::Arc::new(hirsel_engine::store::NoneStore),
+            products: std::sync::Arc::new(hirsel_engine_store::NoneStore),
             runtime_build: RuntimeBuild::default(),
             clang: "/unused/clang".into(),
             aarch64_cc: None,
@@ -4038,7 +4038,7 @@ mod tests {
             .unwrap();
         let dir = dir_scratch.path().to_path_buf();
         let mut tools = Toolchain {
-            products: std::sync::Arc::new(hirsel_engine::store::NoneStore),
+            products: std::sync::Arc::new(hirsel_engine_store::NoneStore),
             runtime_build: RuntimeBuild::default(),
             clang: "/unused/clang".into(),
             aarch64_cc: Some("/unused/gcc".into()),

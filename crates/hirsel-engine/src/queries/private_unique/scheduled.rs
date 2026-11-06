@@ -1,8 +1,8 @@
 //! Private module proofs run on the demanding compiler worker with the canonical read codec.
 //! The SCC/fixed-point algorithm remains the Modes adapter's implementation.
 use super::*;
-use crate::store::{Entry as StoredEntry, EntryKey, VariantRef};
 use hirsel_engine_runtime::*;
+use hirsel_engine_store::{Entry as StoredEntry, EntryKey, VariantRef};
 use std::sync::{OnceLock, RwLock};
 
 const KIND: u32 = 0x4602_0001;
@@ -37,7 +37,7 @@ struct Inference {
     environment: ContentHash,
     expected: Option<Facts>,
     complete: bool,
-    store: Option<Arc<dyn crate::store::ResultStore>>,
+    store: Option<Arc<dyn hirsel_engine_store::ResultStore>>,
     records: crate::NativeRecords,
 }
 impl Inference {
@@ -67,7 +67,7 @@ impl Inference {
                 .records
                 .encode(&*self.citations.owners, &facts)
                 .ok_or_else(transport)?;
-            crate::store::product_domain(QueryKind::PrivateInference)
+            hirsel_engine_store::product_domain(QueryKind::PrivateInference)
                 .reference(&bytes)
                 .ok_or_else(transport)?;
             if let Some(variant) =
@@ -465,7 +465,7 @@ impl QueryEngine {
             self.signature_query_id(id)?;
         }
         if let Some(entry) = self.signatures.get(&id).cloned() {
-            if self.verify_store == crate::store::VerifyStore::Recompute {
+            if self.verify_store == hirsel_engine_store::VerifyStore::Recompute {
                 // Select the oracle variant only after the module proof is installed.
                 self.pending_store_checks
                     .remove(&(id, QueryKind::Signature));
@@ -614,7 +614,7 @@ impl QueryEngine {
                 }
             }
 
-            if self.verify_store == crate::store::VerifyStore::Off
+            if self.verify_store == hirsel_engine_store::VerifyStore::Off
                 && let Some(facts) = expected
             {
                 self.adopt_inference(facts, &mut inferred);
@@ -842,7 +842,7 @@ impl QueryEngine {
                     self.types.clone(),
                     self.result_store
                         .clone()
-                        .unwrap_or_else(|| Arc::new(crate::store::NoneStore)),
+                        .unwrap_or_else(|| Arc::new(hirsel_engine_store::NoneStore)),
                 ),
             };
             let facts = if selected.is_some() {
@@ -1016,7 +1016,7 @@ impl QueryEngine {
         };
         let kinds = ["resource", "cycle", "cancelled", "protocol", "panicked"];
         let [resource, cycle, cancelled, protocol, panicked] = kinds.map(|kind| {
-            crate::store::Domain {
+            hirsel_engine_store::Domain {
                 kind: KIND,
                 schema: 1,
             }
@@ -1029,7 +1029,7 @@ impl QueryEngine {
             protocol: protocol.ok_or_else(refused)?,
             panicked: panicked.ok_or_else(refused)?,
         };
-        let runtime_failure = |reference: crate::store::Reference| {
+        let runtime_failure = |reference: hirsel_engine_store::Reference| {
             let kind = [
                 errors.resource,
                 errors.cycle,
@@ -1050,11 +1050,11 @@ impl QueryEngine {
         if previous.as_ref().is_none_or(|store| {
             matches!(
                 store.capability(),
-                crate::store::ProviderCapability::Absent
-                    | crate::store::ProviderCapability::ReadOnly
+                hirsel_engine_store::ProviderCapability::Absent
+                    | hirsel_engine_store::ProviderCapability::ReadOnly
             )
         }) {
-            self.result_store = Some(Arc::new(crate::store::MemStore::default()));
+            self.result_store = Some(Arc::new(hirsel_engine_store::MemStore::default()));
             // The temporary store supplies V's local authority too. A snapshot
             // captured before it existed cannot revalidate generator receipts.
             self.retire_snapshot();

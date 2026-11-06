@@ -280,8 +280,8 @@ impl StoredInstance {
         Ok(Self {
             product: Arc::new(InstanceProduct {
                 product: hirsel_engine_runtime::ProductRef::import_archive(
-                    hirsel_engine::store::Address(row.address),
-                    hirsel_engine::store::Action(row.action),
+                    hirsel_engine_store::Address(row.address),
+                    hirsel_engine_store::Action(row.action),
                     archive,
                 ),
                 value: row.value,

@@ -19,9 +19,9 @@ impl std::ops::Deref for ResolverSnapshot {
 /// reference/read metadata after compact retirement, never an analyzed body.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ModeArchive {
-    pub key: crate::store::EntryKey,
+    pub key: hirsel_engine_store::EntryKey,
     pub reads: Arc<hirsel_query_products::reads::Reads>,
-    pub record: crate::store::Reference,
+    pub record: hirsel_engine_store::Reference,
 }
 
 /// Products a single phase invocation publishes with its memo. The sink is

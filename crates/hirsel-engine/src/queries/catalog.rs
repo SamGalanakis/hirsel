@@ -157,7 +157,7 @@ struct Candidate {
 }
 #[derive(Default)]
 pub(crate) struct Catalog {
-    installed: BTreeMap<PackageId, Arc<crate::store::InstalledSourceRecords>>,
+    installed: BTreeMap<PackageId, Arc<hirsel_engine_store::InstalledSourceRecords>>,
     files: super::native_records::SourceTable<FileId, FileContext>,
     candidates: super::native_records::SourceTable<DefPath, Vec<Candidate>>,
     facts_cache:
@@ -168,7 +168,7 @@ pub(super) struct CatalogIdentity {
     candidates: std::sync::Weak<BTreeMap<DefPath, Vec<Candidate>>>,
     installed: Vec<(
         PackageId,
-        std::sync::Weak<crate::store::InstalledSourceRecords>,
+        std::sync::Weak<hirsel_engine_store::InstalledSourceRecords>,
     )>,
 }
 impl CatalogIdentity {
@@ -190,7 +190,7 @@ impl CatalogIdentity {
             weight.add(
                 package.name.capacity()
                     + package.version.capacity()
-                    + size_of::<crate::store::InstalledSourceRecords>()
+                    + size_of::<hirsel_engine_store::InstalledSourceRecords>()
                     + 2 * size_of::<usize>(),
             );
         }
@@ -198,7 +198,7 @@ impl CatalogIdentity {
     }
 }
 pub(super) struct SourceCatalog {
-    installed: BTreeMap<PackageId, Arc<crate::store::InstalledSourceRecords>>,
+    installed: BTreeMap<PackageId, Arc<hirsel_engine_store::InstalledSourceRecords>>,
     files: Box<[(FileId, FileContext)]>,
     candidates: Box<[(DefId, Box<[Candidate]>)]>,
 }
@@ -232,7 +232,7 @@ impl Catalog {
     pub(super) fn installed_owner(
         &self,
         path: &DefPath,
-    ) -> Option<&Arc<crate::store::InstalledSourceRecords>> {
+    ) -> Option<&Arc<hirsel_engine_store::InstalledSourceRecords>> {
         self.installed.get(&path.0.package)
     }
 
@@ -275,7 +275,9 @@ impl Catalog {
     }
 
     fn installed_bytes(&self, weight: &mut hirsel_query_products::retained::MetadataWeight) {
-        weight.tree::<PackageId, Arc<crate::store::InstalledSourceRecords>>(self.installed.len());
+        weight.tree::<PackageId, Arc<hirsel_engine_store::InstalledSourceRecords>>(
+            self.installed.len(),
+        );
         for (package, owner) in &self.installed {
             weight
                 .add(package.name.capacity() + package.version.capacity() + owner.metadata_bytes());
@@ -716,7 +718,7 @@ impl QueryEngine {
         if !self.has_parse_syntax(file, context) {
             return Err(missing());
         }
-        if self.verify_store == crate::store::VerifyStore::Recompute {
+        if self.verify_store == hirsel_engine_store::VerifyStore::Recompute {
             // The explicit cache oracle still compares ordinary Parse records
             // to recomputation from the installed immutable validation input.
             self.index_source(file, context)?;
@@ -830,9 +832,9 @@ impl QueryEngine {
     }
     fn source_record(
         &self,
-        key: &crate::store::EntryKey,
+        key: &hirsel_engine_store::EntryKey,
         context: &FileContext,
-    ) -> Option<crate::store::Bytes> {
+    ) -> Option<hirsel_engine_store::Bytes> {
         if let Some(owner) = self.catalog.installed.get(&context.package) {
             owner.get(key)
         } else {
@@ -841,7 +843,11 @@ impl QueryEngine {
     }
     /// Parse heads and parse syntax are cached only where a provider retains
     /// them; a store-off request neither captures nor encodes them.
-    fn catalog_key(&self, file: FileId, context: &FileContext) -> Option<crate::store::EntryKey> {
+    fn catalog_key(
+        &self,
+        file: FileId,
+        context: &FileContext,
+    ) -> Option<hirsel_engine_store::EntryKey> {
         let source = self.sources.file(file)?;
         if source.path.to_string_lossy().starts_with('<') {
             return None;
@@ -873,7 +879,7 @@ impl QueryEngine {
                     .collect::<String>()
             ),
         });
-        Some(crate::store::EntryKey::new(
+        Some(hirsel_engine_store::EntryKey::new(
             environment,
             &owner,
             ContentHash::of_bytes(source.text().as_bytes()),
@@ -939,7 +945,7 @@ impl QueryEngine {
                 .ok()?;
             self.valid_heads(file, context, &record).then_some(record)
         });
-        if self.verify_store == crate::store::VerifyStore::Off
+        if self.verify_store == hirsel_engine_store::VerifyStore::Off
             && let Some(record) = cached
         {
             self.adopt_heads(file, context, record.heads);
@@ -1136,7 +1142,7 @@ impl QueryEngine {
         }
         if self.declared(path) && self.installed_definition(path) {
             let record = self
-                .installed_semantic_input(path, crate::store::MAX_RECORD as u64)?
+                .installed_semantic_input(path, hirsel_engine_store::MAX_RECORD as u64)?
                 .ok_or(QueryError::NotImplemented)?;
             let owner = self
                 .catalog
@@ -1144,7 +1150,10 @@ impl QueryEngine {
                 .get(&path.0.package)
                 .ok_or(QueryError::NotImplemented)?;
             let bytes = owner
-                .content(record.ownership.body, crate::store::MAX_RECORD as u64)
+                .content(
+                    record.ownership.body,
+                    hirsel_engine_store::MAX_RECORD as u64,
+                )
                 .map_err(|message| {
                     QueryError::Operational(hirsel_types::OperationalFailure {
                         operation: "installed body".into(),
@@ -1258,7 +1267,8 @@ impl QueryEngine {
                 ),
             }));
         }
-        let restored = cached.is_some() && self.verify_store == crate::store::VerifyStore::Off;
+        let restored =
+            cached.is_some() && self.verify_store == hirsel_engine_store::VerifyStore::Off;
         let mut output = if restored {
             cached.unwrap()
         } else {
@@ -1374,12 +1384,12 @@ impl QueryEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::store::ResultStore;
+    use hirsel_engine_store::ResultStore;
 
     #[test]
     fn source_roots_include_unexecuted_declarations_without_demanding_headers() {
         hirsel_intern::jobs::with_compiler_stack(|| {
-            let store = Arc::new(crate::store::MemStore::default());
+            let store = Arc::new(hirsel_engine_store::MemStore::default());
             let create = || {
                 QueryEngine::new(default_environment(), crate::phases::engine_only_adapters())
                     .with_result_store(store.clone())
@@ -1407,7 +1417,7 @@ mod tests {
     #[test]
     fn front_admission_uses_indexed_heads_when_syntax_is_unavailable() {
         hirsel_intern::jobs::with_compiler_stack(|| {
-            let store = Arc::new(crate::store::MemStore::default());
+            let store = Arc::new(hirsel_engine_store::MemStore::default());
             let create = || {
                 QueryEngine::new(default_environment(), crate::phases::engine_only_adapters())
                     .with_result_store(store.clone())
@@ -1424,7 +1434,7 @@ mod tests {
             assert!(engine.items.is_empty());
             // Keep the admitted heads, but deny every way to recover syntax.
             // Planning still succeeds; only a real syntax consumer refuses.
-            engine.result_store = Some(Arc::new(crate::store::MemStore::default()));
+            engine.result_store = Some(Arc::new(hirsel_engine_store::MemStore::default()));
             engine.adapters.lexer = None;
             engine.adapters.parser = None;
             let plan = engine.front_input_footprint(&paths).unwrap();
@@ -1439,7 +1449,7 @@ mod tests {
     #[test]
     fn parse_heads_reuse_signature_and_implementation_declarations_and_reject_unknown_kinds() {
         hirsel_intern::jobs::with_compiler_stack(|| {
-            let store = Arc::new(crate::store::MemStore::default());
+            let store = Arc::new(hirsel_engine_store::MemStore::default());
             let create = || {
                 QueryEngine::new(default_environment(), crate::phases::engine_only_adapters())
                     .with_result_store(store.clone())
@@ -1471,7 +1481,7 @@ mod tests {
         hirsel_intern::jobs::with_compiler_stack(|| {
             let mut engine =
                 QueryEngine::new(default_environment(), crate::phases::engine_only_adapters())
-                    .with_result_store(Arc::new(crate::store::MemStore::default()));
+                    .with_result_store(Arc::new(hirsel_engine_store::MemStore::default()));
             let context = default_context();
             let file = engine
                 .sources
@@ -1496,7 +1506,7 @@ mod tests {
     fn generated_probe_uses_positive_heads_and_preserves_syntax_shadowing() {
         hirsel_intern::jobs::with_compiler_stack(|| {
             for generic in [false, true] {
-                let store = Arc::new(crate::store::MemStore::default());
+                let store = Arc::new(hirsel_engine_store::MemStore::default());
                 let create = || {
                     QueryEngine::new(
                         default_environment(),
@@ -1570,8 +1580,8 @@ mod tests {
     #[test]
     fn parse_heads_refuse_every_single_byte_corruption() {
         hirsel_intern::jobs::with_compiler_stack(|| {
-            use crate::store::ResultStore;
-            let store = Arc::new(crate::store::MemStore::default());
+            use hirsel_engine_store::ResultStore;
+            let store = Arc::new(hirsel_engine_store::MemStore::default());
             let mut engine = QueryEngine::new(
                 default_environment(),
                 PhaseAdapters {
@@ -1617,7 +1627,7 @@ mod tests {
             });
             let source = "fn value() {}\n";
             for mutation in 0..15 {
-                let store = Arc::new(crate::store::MemStore::default());
+                let store = Arc::new(hirsel_engine_store::MemStore::default());
                 let mut engine = QueryEngine::new(default_environment(), PhaseAdapters::default())
                     .with_result_store(store.clone());
                 let file = engine.sources.add("heads.hir", source.into()).unwrap();
@@ -1715,7 +1725,7 @@ impl QueryEngine {
         &self,
         path: &DefPath,
         limit: u64,
-    ) -> Result<Option<crate::store::InstalledSemanticInput>, QueryError> {
+    ) -> Result<Option<hirsel_engine_store::InstalledSemanticInput>, QueryError> {
         let Some(owner) = self.catalog.installed.get(&path.0.package) else {
             return Ok(None);
         };

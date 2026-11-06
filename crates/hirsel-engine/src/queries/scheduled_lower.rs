@@ -19,12 +19,12 @@ mod successor;
 pub(crate) use successor::SuccessorCapture;
 mod stored;
 use crate::comptime::{EvaluationInput, PreparingSource, ValuePreparation};
-use crate::store::{Domain, EntryKey, Reference, ResultStore};
 pub use carry::LowerCarry;
 use constants::Constants;
 use dependencies::{Dependencies, PackedDependencies};
 use evidence::Evidence;
 use hirsel_engine_runtime::*;
+use hirsel_engine_store::{Domain, EntryKey, Reference, ResultStore};
 use hirsel_query_products::depth::{DepthEvidence, dependency_limit};
 use hirsel_syntax::PackageId;
 use hirsel_tir::{DefinitionRef, Materialized, MaterializedRef};
@@ -477,7 +477,7 @@ pub struct FrontLowerQueries {
     verify: Verify,
     /// A recompute-verifying request rebuilds every product through its
     /// producer instead of reopening carried or stored descriptors.
-    verify_store: crate::store::VerifyStore,
+    verify_store: hirsel_engine_store::VerifyStore,
     records: crate::NativeRecords,
     store: Arc<dyn ResultStore>,
     outcomes: Mutex<BTreeMap<(u32, ContentHash), (Option<Reference>, Box<Outcome>, u64)>>,
@@ -1355,7 +1355,7 @@ impl FrontLowerQueries {
         } else {
             true
         };
-        if can_restore && self.verify_store == crate::store::VerifyStore::Off {
+        if can_restore && self.verify_store == hirsel_engine_store::VerifyStore::Off {
             if let Some(product) = self.load_carry(id, &path, key, &reads).await {
                 match product {
                     // The compact descriptor can outlive V's independently
@@ -1583,7 +1583,7 @@ impl FrontLowerQueries {
                     diagnostics: diagnostic_sources.as_deref(),
                 },
                 &(&path, error, &observed, &depth, executed),
-                crate::store::ArchiveBoundary::Ordinary,
+                hirsel_engine_store::ArchiveBoundary::Ordinary,
             )
             .ok_or(self.errors.resource)?;
 
@@ -1648,7 +1648,7 @@ impl FrontLowerQueries {
                         .0
                         .0
                         .as_slice(),
-                    crate::store::payload_reads_hash(&outcome.reads)
+                    hirsel_engine_store::payload_reads_hash(&outcome.reads)
                         .0
                         .as_slice(),
                     domain.kind.to_le_bytes().as_slice(),
@@ -2215,7 +2215,7 @@ impl FrontLowerQueries {
                 key.0.0.as_slice(),
                 key.1.0.as_slice(),
                 self.namespace.manifest.0.as_slice(),
-                crate::store::payload_reads_hash(reads).0.as_slice(),
+                hirsel_engine_store::payload_reads_hash(reads).0.as_slice(),
                 id.kind.to_le_bytes().as_slice(),
             ],
         ))
@@ -2448,7 +2448,7 @@ impl FrontLowerOutput {
         let records = self
             .owner
             .records
-            .for_boundary(crate::store::ArchiveBoundary::RequiredSpill);
+            .for_boundary(hirsel_engine_store::ArchiveBoundary::RequiredSpill);
         let bytes = records.encode_tir(&self.owner.anchors, &self.output.value)?;
         if bytes.len() as u64 > scratch {
             return None;

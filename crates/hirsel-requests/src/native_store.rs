@@ -1,6 +1,6 @@
 //! Native products retain their host-selected cache independently of front results.
 use hirsel_engine::ToolError;
-use hirsel_engine::store::*;
+use hirsel_engine_store::*;
 
 use std::{path::Path, sync::Arc};
 

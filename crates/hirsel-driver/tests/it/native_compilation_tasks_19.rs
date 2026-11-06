@@ -1,8 +1,9 @@
 use hirsel_compiler_identity::COMPILER_IDENTITY;
 use hirsel_driver::*;
-use hirsel_engine::store::ResultStore;
 use hirsel_engine::*;
 use hirsel_engine_runtime::*;
+use hirsel_engine_store as store;
+use hirsel_engine_store::ResultStore;
 use hirsel_intern::jobs::with_compiler_stack;
 
 use hirsel_query_products::QueryKind;
@@ -44,7 +45,7 @@ use std::{
 // reporting the I/O error that its ordinary Option publication seam omits.
 pub(crate) struct DiagnosedStore(pub(crate) store::DirStore);
 impl ResultStore for DiagnosedStore {
-    fn capability(&self) -> hirsel_engine::store::ProviderCapability {
+    fn capability(&self) -> hirsel_engine_store::ProviderCapability {
         self.0.capability()
     }
 

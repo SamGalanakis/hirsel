@@ -1,7 +1,7 @@
 //! Exact per-root observations in request transport. Reductions keep only one
 //! row per key, retaining the first observation and every disagreement.
 use super::*;
-use crate::store::{Domain, Reference, ResultStore};
+use hirsel_engine_store::{Domain, Reference, ResultStore};
 
 const READERS: Domain = Domain {
     kind: 0x4600_003c,
@@ -95,7 +95,7 @@ impl ReaderReceipt {
             .try_fold(0usize, |max, (key, _)| Some(max.max(key.encoded_bytes()?)))?;
         let rows = u32::try_from(reads.len()).ok()?;
         let max_key = u32::try_from(max_key).ok()?;
-        store.archive_encoded(crate::store::ArchiveBoundary::RequiredSpill);
+        store.archive_encoded(hirsel_engine_store::ArchiveBoundary::RequiredSpill);
         let mut bytes = Vec::with_capacity(usize::try_from(encoded).ok()?);
         reads.encode(&mut bytes);
         let reference = store.put_content(READERS, &bytes)?;
@@ -120,7 +120,7 @@ impl ReaderReceipt {
             ReaderBacking::Spilled { rows, max_key, .. } => decoding_bytes(*rows, *max_key),
         }
     }
-    fn bytes(&self, store: &dyn ResultStore) -> Option<crate::store::Bytes> {
+    fn bytes(&self, store: &dyn ResultStore) -> Option<hirsel_engine_store::Bytes> {
         let ReaderBacking::Spilled { reference, .. } = &*self.backing else {
             return None;
         };
@@ -277,7 +277,7 @@ impl serde::Serialize for ArchivedReader {
             ReaderBacking::Live { reads, .. } => {
                 self.source
                     .store
-                    .archive_encoded(crate::store::ArchiveBoundary::Export);
+                    .archive_encoded(hirsel_engine_store::ArchiveBoundary::Export);
                 let mut bytes = Vec::with_capacity(
                     reads
                         .encoded_bytes()
@@ -285,7 +285,7 @@ impl serde::Serialize for ArchivedReader {
                         as usize,
                 );
                 reads.encode(&mut bytes);
-                crate::store::Bytes::from(bytes)
+                hirsel_engine_store::Bytes::from(bytes)
             }
             ReaderBacking::Spilled { .. } => self
                 .receipt

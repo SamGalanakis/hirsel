@@ -22,9 +22,9 @@ use hirsel_engine::requests::source_graph::SourceHost;
 use hirsel_engine::requests::source_graph::SourceSelection;
 use hirsel_engine::requests::source_graph::SourceShape;
 use hirsel_engine::requests::source_graph::registration;
-use hirsel_engine::store::RequestStore;
-use hirsel_engine::store::ResultStore;
 use hirsel_engine_runtime::*;
+use hirsel_engine_store::RequestStore;
+use hirsel_engine_store::ResultStore;
 use hirsel_query_products::LoweringPolicy;
 use hirsel_query_products::QueryKind;
 
@@ -209,7 +209,7 @@ struct SourceProducts {
     )>,
     sources: SourceMap,
     store: Arc<RequestStore>,
-    initial_operation: Mutex<Option<hirsel_engine::store::StoreOperation>>,
+    initial_operation: Mutex<Option<hirsel_engine_store::StoreOperation>>,
     completed_operation: Mutex<Option<Arc<std::sync::atomic::AtomicBool>>>,
     errors: RuntimeErrors,
     meter: Arc<GraphMeter>,
@@ -851,7 +851,7 @@ impl SourceProducts {
     fn failure_reader(
         &self,
         check: Arc<FrontCheckQueries>,
-    ) -> Arc<dyn Fn(hirsel_engine::store::Reference) -> ToolError + Send + Sync> {
+    ) -> Arc<dyn Fn(hirsel_engine_store::Reference) -> ToolError + Send + Sync> {
         let store = self.store.clone();
         let lower = self.lower.clone();
         let front = self.front.clone();
@@ -2138,10 +2138,7 @@ struct CheckRoots {
     errors: RuntimeErrors,
 }
 impl QueryFactory for CheckRoots {
-    fn create(
-        &self,
-        query: QueryId,
-    ) -> Result<Box<dyn QueryTask>, hirsel_engine::store::Reference> {
+    fn create(&self, query: QueryId) -> Result<Box<dyn QueryTask>, hirsel_engine_store::Reference> {
         let check = if query == self.reachable.query() || query == self.reachable.admission_query()
         {
             &self.reachable

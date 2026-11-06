@@ -9,8 +9,8 @@ use crate::products::{
     LiveSourceGrowthProduct, SourceGrowthQueryData,
 };
 use crate::source_components::{SourceGrowthComponents, SourceGrowthQueryRecord, SourceMembership};
-use crate::store::{Domain, Reference, ResultStore};
 use hirsel_engine_runtime::*;
+use hirsel_engine_store::{Domain, Reference, ResultStore};
 use std::{
     sync::{
         Mutex,
@@ -421,7 +421,7 @@ impl FactTask {
                 "hirsel.source-growth.membership.query-action.v1",
                 [
                     inputs.0.0.as_slice(),
-                    crate::store::payload_reads_hash(&reads).0.as_slice(),
+                    hirsel_engine_store::payload_reads_hash(&reads).0.as_slice(),
                 ],
             ));
             let cached = queries
@@ -805,7 +805,7 @@ impl Task {
                 facets.membership.output,
                 &outputs,
                 &diagnostics,
-                crate::store::payload_reads_hash(&reads),
+                hirsel_engine_store::payload_reads_hash(&reads),
             ),
         )
         .ok_or(queries.errors.resource)?;

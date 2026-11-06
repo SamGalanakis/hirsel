@@ -6,8 +6,8 @@ use super::NativeRequest;
 use super::native_bootstrap::NativeBootstrap;
 use hirsel_engine::FrontNativeProducts;
 use hirsel_engine::native_metadata::NativeMetadataExt;
-use hirsel_engine::store::ResultStore;
 use hirsel_engine_runtime::ProductRef;
+use hirsel_engine_store::ResultStore;
 
 use hirsel_native::NativeError;
 use hirsel_native::StageName;

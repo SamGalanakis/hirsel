@@ -67,7 +67,7 @@ impl FrontRegistrationBootstrap {
 pub enum FrontRegistrationBootstrapError {
     Admission(QueryError),
     Runtime {
-        reference: crate::store::Reference,
+        reference: hirsel_engine_store::Reference,
         error: Option<QueryError>,
         sources: SourceMap,
         owner: Arc<FrontRegistrationQueries>,

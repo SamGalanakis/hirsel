@@ -3,8 +3,8 @@
 //! The ordered source transaction decides which declarations become visible.
 use super::*;
 use crate::comptime::{StagedDeclarationInput, StagedRegistration};
-use crate::store::{Domain, Reference, ResultStore};
 use hirsel_engine_runtime::*;
+use hirsel_engine_store::{Domain, Reference, ResultStore};
 use std::{sync::Mutex, task::Poll};
 
 pub const FRONT_STAGE_KIND: u32 = 0x4601_0001;

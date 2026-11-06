@@ -6,7 +6,7 @@
 use hirsel_driver::session::Session;
 use hirsel_engine::CompileConfig;
 use hirsel_engine::memo::Retention;
-use hirsel_engine::store::store_by_name;
+use hirsel_engine_store::store_by_name;
 use hirsel_intern::jobs::Jobs;
 use hirsel_requests::CompileOperation;
 use hirsel_requests::CompileResult;

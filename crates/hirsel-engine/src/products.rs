@@ -489,7 +489,7 @@ pub(crate) enum SourceGrowthQueryData {
 }
 pub(crate) struct GrowthPublicationSource {
     source: ProductSource,
-    pub(crate) store: Arc<dyn crate::store::ResultStore>,
+    pub(crate) store: Arc<dyn hirsel_engine_store::ResultStore>,
     pub(crate) scratch: u64,
     _reservation: hirsel_engine_admission::MemoryReservation,
 }
@@ -518,7 +518,7 @@ impl LiveSourceGrowthProduct {
     }
     pub(crate) fn admit_source(
         source: ProductSourceInput,
-        store: Arc<dyn crate::store::ResultStore>,
+        store: Arc<dyn hirsel_engine_store::ResultStore>,
         scratch: u64,
         allowance: &mut hirsel_engine_admission::MemoryReservation,
     ) -> Option<Arc<GrowthPublicationSource>> {
@@ -1095,14 +1095,14 @@ mod tests {
     ) -> ProductSourceInput {
         let records = NativeRecords::new(
             context.record_types().clone(),
-            Arc::new(crate::store::MemStore::default()),
+            Arc::new(hirsel_engine_store::MemStore::default()),
         );
         ProductSource::prepare(context, records, backing).unwrap()
     }
     fn archived_growth_fixture_reader(
         context: &NativeRecordContext,
     ) -> Arc<crate::queries::ArchivedReader> {
-        let store = Arc::new(crate::store::MemStore::default());
+        let store = Arc::new(hirsel_engine_store::MemStore::default());
         let records = NativeRecords::new(context.record_types().clone(), store.clone());
         let source = ProductSource::prepare(context.clone(), records, Arc::new(())).unwrap();
         let budget = hirsel_engine_admission::ProcessBudget::new(1 << 20);
@@ -1373,7 +1373,7 @@ mod tests {
             .unwrap();
         let records = NativeRecords::new(
             source.record_types().clone(),
-            Arc::new(crate::store::MemStore::default()),
+            Arc::new(hirsel_engine_store::MemStore::default()),
         );
         let decoded: (
             Vec<(Vec<hirsel_syntax::DefId>, Vec<Span>)>,
@@ -1409,11 +1409,11 @@ mod tests {
             .unwrap();
         let records = NativeRecords::new(
             source.record_types().clone(),
-            Arc::new(crate::store::MemStore::default()),
+            Arc::new(hirsel_engine_store::MemStore::default()),
         );
         let foreign = NativeRecords::new(
             foreign.record_types().clone(),
-            Arc::new(crate::store::MemStore::default()),
+            Arc::new(hirsel_engine_store::MemStore::default()),
         );
         assert!(ProductSource::prepare(source.clone(), foreign, backing.clone()).is_none());
         assert_eq!(
@@ -1535,11 +1535,11 @@ mod tests {
                 .unwrap();
             let records = NativeRecords::new(
                 source.record_types().clone(),
-                Arc::new(crate::store::MemStore::default()),
+                Arc::new(hirsel_engine_store::MemStore::default()),
             );
             let foreign = NativeRecords::new(
                 foreign.record_types().clone(),
-                Arc::new(crate::store::MemStore::default()),
+                Arc::new(hirsel_engine_store::MemStore::default()),
             );
             assert!(ProductSource::prepare(source.clone(), foreign, backing.clone()).is_none());
             assert_eq!(
@@ -1681,7 +1681,7 @@ mod source_component_tests {
         };
         let records = NativeRecords::new(
             context.record_types().clone(),
-            Arc::new(crate::store::MemStore::default()),
+            Arc::new(hirsel_engine_store::MemStore::default()),
         );
         let input = ProductSource::prepare(context.clone(), records, Arc::new(())).unwrap();
         let mut allowance = budget
@@ -1689,7 +1689,7 @@ mod source_component_tests {
             .unwrap();
         let source = LiveSourceGrowthProduct::admit_source(
             input,
-            Arc::new(crate::store::MemStore::default()),
+            Arc::new(hirsel_engine_store::MemStore::default()),
             64 << 10,
             &mut allowance,
         )
@@ -1747,21 +1747,21 @@ mod source_component_tests {
 
 #[cfg(test)]
 mod dependency_tests {
-    use crate::store::Bytes;
-    use crate::store::EntryKey;
-    use crate::store::Reference;
-    use crate::store::RequestStore;
-    use crate::store::ResultStore;
     use hirsel_artifact_store::{Action, Address, Domain};
     use hirsel_engine_runtime::{ArchiveAdmission, LiveDependencyProduct, ProductRef};
+    use hirsel_engine_store::Bytes;
+    use hirsel_engine_store::EntryKey;
+    use hirsel_engine_store::Reference;
+    use hirsel_engine_store::RequestStore;
+    use hirsel_engine_store::ResultStore;
     use std::sync::Arc;
 
     use hirsel_syntax::ContentHash;
 
     struct NoTransport;
     impl ResultStore for NoTransport {
-        fn capability(&self) -> crate::store::ProviderCapability {
-            crate::store::ProviderCapability::Absent
+        fn capability(&self) -> hirsel_engine_store::ProviderCapability {
+            hirsel_engine_store::ProviderCapability::Absent
         }
 
         fn get(&self, _: &EntryKey) -> Option<Bytes> {

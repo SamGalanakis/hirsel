@@ -276,11 +276,8 @@ fn pnm_tiles_30_native_record_replay() {
             hirsel_front_phases::COMPILER
                 .clone()
                 .with_config(hirsel_engine::CompileConfig {
-                    store: hirsel_engine::store::store_by_name(
-                        "dir@1",
-                        Some(root.join("products")),
-                    )
-                    .unwrap(),
+                    store: hirsel_engine_store::store_by_name("dir@1", Some(root.join("products")))
+                        .unwrap(),
                     ..hirsel_front_phases::COMPILER.configuration()
                 });
         let record_path = std::env::var_os("PNM_TILES_30_RECORDS")

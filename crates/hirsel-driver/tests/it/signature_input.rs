@@ -1,6 +1,7 @@
 //! Owner bodies validate against the private signature input of their own package.
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_engine_store as store;
 use hirsel_front_phases::*;
 use hirsel_host_io::launch::*;
 use hirsel_intern::jobs::with_compiler_stack;
@@ -905,7 +906,7 @@ fn hello_on_installed_std_answers_v_universe_questions_without_reading_std_rows(
 #[test]
 fn dependency_universe_summary_without_local_verifier_is_ignored() {
     with_compiler_stack(|| {
-        use hirsel_engine::store::ResultStore;
+        use hirsel_engine_store::ResultStore;
         use hirsel_requests::CompileOperation;
         use hirsel_requests::CompileResult;
         use hirsel_requests::CompilerRequests;

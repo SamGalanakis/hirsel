@@ -258,8 +258,8 @@ fn smoke_ladder_rejects_every_stage_and_fault_class() {
                 .all(|fault| counts.keys().any(|(_, f)| *f == fault))
     };
     let mut counts = BTreeMap::new();
-    let store: std::sync::Arc<dyn hirsel_engine::store::ResultStore> =
-        hirsel_engine::store::MemStore::shared();
+    let store: std::sync::Arc<dyn hirsel_engine_store::ResultStore> =
+        hirsel_engine_store::MemStore::shared();
     for path in &smoke_programs() {
         campaign([path], &mut counts, true, Some(store.clone()));
         if complete(&counts) {
@@ -291,14 +291,14 @@ fn campaign<'a>(
     paths: impl IntoIterator<Item = &'a String> + Send,
     counts: &mut BTreeMap<(StageKind, Fault), [usize; 3]>,
     coverage: bool,
-    store: Option<std::sync::Arc<dyn hirsel_engine::store::ResultStore>>,
+    store: Option<std::sync::Arc<dyn hirsel_engine_store::ResultStore>>,
 ) -> usize {
     hirsel_intern::jobs::with_compiler_stack(|| {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         let compiler = hirsel_front_phases::COMPILER
             .with_owned_engines()
             .with_config(hirsel_engine::CompileConfig {
-                store: store.unwrap_or_else(|| hirsel_engine::store::MemStore::shared()),
+                store: store.unwrap_or_else(|| hirsel_engine_store::MemStore::shared()),
                 ..Default::default()
             });
         let mut programs = 0;

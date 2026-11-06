@@ -2,8 +2,8 @@
 use hirsel_driver::native;
 use hirsel_driver::resident::ObservedSession;
 use hirsel_engine::CompileConfig;
-use hirsel_engine::store::MemStore;
-use hirsel_engine::store::ResultStore;
+use hirsel_engine_store::MemStore;
+use hirsel_engine_store::ResultStore;
 
 use hirsel_front_phases::COMPILER;
 use hirsel_lir::ownership_trace::Kind;
@@ -103,7 +103,7 @@ fn source_request(explicit_manifest: bool) {
             "real resource create/drop observations"
         );
         let mut wrong = (execution.units()[0]).clone();
-        wrong.action = hirsel_engine::store::Action(hirsel_syntax::ContentHash::of_bytes(
+        wrong.action = hirsel_engine_store::Action(hirsel_syntax::ContentHash::of_bytes(
             b"another diagnostic output",
         ));
         assert!(execution.with_unit(wrong, |_| Ok(())).is_err());

@@ -1,7 +1,7 @@
 //! Explicit CT-5 registration rounds, independent of the host bootstrap.
-use hirsel_engine::store::MemStore;
 use hirsel_engine::*;
 use hirsel_engine_runtime::*;
+use hirsel_engine_store::MemStore;
 use hirsel_intern::jobs::with_compiler_stack;
 
 use hirsel_query_products::reads::ReadKey;

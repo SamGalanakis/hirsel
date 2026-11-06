@@ -123,7 +123,7 @@ fn identical_generated_sources_rebind_old_sites_but_changed_text_stays_unowned()
     let context = NativeRecordContext::capture(&engine);
     let records = NativeRecords::new(
         engine.types().clone(),
-        Arc::new(crate::store::MemStore::default()),
+        Arc::new(hirsel_engine_store::MemStore::default()),
     );
     let row = |anchor| Row {
         origin: hirsel_span::Span::new(anchor, 0, 4).unwrap(),
@@ -148,7 +148,7 @@ struct Row {
 }
 #[test]
 fn source_records_rebind_real_owners_after_engine_release_and_refuse_another_context() {
-    let store = Arc::new(crate::store::MemStore::default());
+    let store = Arc::new(hirsel_engine_store::MemStore::default());
     let text = "pub fn main()->u64 {7u64}";
     let (source, anchor, ty) = context("first/records.hir", text);
     let records = NativeRecords::new(source.record_types().clone(), store.clone());
@@ -225,7 +225,7 @@ fn generated_source_owner_is_independent_of_codec_identity_and_selector_position
     );
     assert_eq!(context.record_source_anchor(&path, 0), None);
     assert_eq!(context.source_definition(Anchor(u32::MAX)), None);
-    let store = Arc::new(crate::store::MemStore::default());
+    let store = Arc::new(hirsel_engine_store::MemStore::default());
     let records = NativeRecords::new(context.record_types().clone(), store.clone());
     let bytes = records
         .encode(
@@ -368,7 +368,7 @@ fn ownership_product_tracks_removal_reordering_relocation_and_parse_eviction() {
         "retired products are released after their last worker"
     );
     assert!(old.record_owner(gone).is_some());
-    let store = Arc::new(crate::store::MemStore::default());
+    let store = Arc::new(hirsel_engine_store::MemStore::default());
     let create = || {
         QueryEngine::new(
             crate::default_environment(),
@@ -528,7 +528,7 @@ fn a_foreign_source_map_cannot_restore_unplaced_declaration_anchors() {
     let anchor = syntax.anchor;
     let records = NativeRecords::new(
         engine.types().clone(),
-        Arc::new(crate::store::MemStore::default()),
+        Arc::new(hirsel_engine_store::MemStore::default()),
     );
     let ty = engine.types().intern(hirsel_types::Type::unit());
     let bytes = records
@@ -623,7 +623,7 @@ fn lazy_rows_fixture() -> LazyRowsFixture {
     LazyRowsFixture {
         store,
         eager,
-        records: NativeRecords::new(lazy, Arc::new(crate::store::MemStore::default())),
+        records: NativeRecords::new(lazy, Arc::new(hirsel_engine_store::MemStore::default())),
         context: NativeRecordContext::capture(&engine),
         ids,
         references,

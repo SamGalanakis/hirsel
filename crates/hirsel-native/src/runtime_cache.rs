@@ -1,8 +1,8 @@
 //! Runtime archives and derivations are ordinary products in the selected store.
 //! Files here are materializations only; no archive/receipt cache grants reuse.
 use super::{NativeError, StageName, TargetSpec};
-use hirsel_engine::store::ResultStore;
-use hirsel_engine::store::{Action, Address, Domain, Reference};
+use hirsel_engine_store::ResultStore;
+use hirsel_engine_store::{Action, Address, Domain, Reference};
 use hirsel_syntax::ContentHash;
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
@@ -563,7 +563,7 @@ pub fn archive(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hirsel_engine::store::MemStore;
+    use hirsel_engine_store::MemStore;
     const CRATES: &[&str] = &["hirsel-rt", "hirsel-kernels"];
 
     #[test]
@@ -946,11 +946,11 @@ mod tests {
         let store_root = tempfile::tempdir().unwrap();
         let cache = test_cache("ordinary");
         let next = test_cache("ordinary-next");
-        let store = hirsel_engine::store::DirStore::new(store_root.path().join("products"));
+        let store = hirsel_engine_store::DirStore::new(store_root.path().join("products"));
         let archive = build_bytes(&store, cache.path(), "key", b"runtime bytes");
         assert!(!cache.path().join("key.sha256").exists());
         fs::remove_file(&archive).unwrap();
-        let reopened = hirsel_engine::store::DirStore::new(store_root.path().join("products"));
+        let reopened = hirsel_engine_store::DirStore::new(store_root.path().join("products"));
         for directory in [cache.path(), next.path()] {
             let restored = publish(&reopened, directory, "key", |_| {
                 panic!("ordinary product must hit")
@@ -1029,8 +1029,8 @@ mod tests {
         assert!(store.lookup_product(identity("key").0).is_none());
         assert!(!cache.path().join("key.a").exists());
         let budget = hirsel_engine_admission::ProcessBudget::new(0);
-        let denied = hirsel_engine::store::RequestStore::new(
-            std::sync::Arc::new(hirsel_engine::store::NoneStore),
+        let denied = hirsel_engine_store::RequestStore::new(
+            std::sync::Arc::new(hirsel_engine_store::NoneStore),
             budget.reserve(0).unwrap(),
         );
         assert!(

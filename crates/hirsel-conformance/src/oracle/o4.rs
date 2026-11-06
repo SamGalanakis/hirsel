@@ -14,7 +14,7 @@ use super::{
     Config, Report, Verdict, difference, o1::produce_in_child, produce, produce_with_store,
     switches,
 };
-use hirsel_engine::store::MemStore;
+use hirsel_engine_store::MemStore;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 

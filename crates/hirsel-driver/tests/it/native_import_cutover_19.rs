@@ -1,8 +1,9 @@
 //! Import-cache vectors exercised through the demand producer before the old
 //! whole-program replay provider is removed.
 use hirsel_driver::*;
-use hirsel_engine::store::ResultStore;
 use hirsel_engine::*;
+use hirsel_engine_store as store;
+use hirsel_engine_store::ResultStore;
 use hirsel_front_phases::*;
 use hirsel_host_io::launch::*;
 use hirsel_intern::jobs::with_compiler_stack;
@@ -258,7 +259,7 @@ struct FaultStore {
     damaged: std::sync::Mutex<BTreeMap<hirsel_syntax::ContentHash, Vec<u8>>>,
 }
 impl ResultStore for FaultStore {
-    fn capability(&self) -> hirsel_engine::store::ProviderCapability {
+    fn capability(&self) -> hirsel_engine_store::ProviderCapability {
         self.inner.capability()
     }
 

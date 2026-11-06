@@ -1,8 +1,8 @@
 //! Native query descriptors. Content references convey integrity, never proof
 //! authority; materialization independently checks the native stage and inputs.
-use hirsel_engine::store::Reference;
 use hirsel_engine_runtime::ArchiveAdmission;
 pub use hirsel_engine_runtime::ProductRef;
+use hirsel_engine_store::Reference;
 pub use hirsel_rc::arena_credit::equations::LocalArenaEquations;
 use hirsel_syntax::ContentHash;
 use std::sync::Arc;
@@ -44,7 +44,7 @@ impl NativeRootKey {
             .map_err(|e| e.to_string())?;
         Ok(hirsel_engine_runtime::QueryId {
             kind: ROOT_KIND,
-            address: hirsel_engine::store::Address(ContentHash::of_parts(
+            address: hirsel_engine_store::Address(ContentHash::of_parts(
                 "hirsel.native.root-address.v1",
                 [selection.as_slice()],
             )),
@@ -100,8 +100,8 @@ impl InstanceAddress {
             address: self.address(READY_KIND),
         }
     }
-    pub fn address(&self, kind: u32) -> hirsel_engine::store::Address {
-        let address = hirsel_engine::store::Address(ContentHash::of_parts(
+    pub fn address(&self, kind: u32) -> hirsel_engine_store::Address {
+        let address = hirsel_engine_store::Address(ContentHash::of_parts(
             "hirsel.native.instance-address.v1",
             [
                 kind.to_le_bytes().as_slice(),
@@ -145,7 +145,7 @@ pub struct ComponentKey {
 }
 
 impl ComponentKey {
-    pub fn address(&self) -> Result<hirsel_engine::store::Address, String> {
+    pub fn address(&self) -> Result<hirsel_engine_store::Address, String> {
         if self.members.is_empty()
             || self
                 .members
@@ -178,7 +178,7 @@ impl ComponentKey {
             parts.push(a.to_le_bytes().to_vec());
             parts.push(b.to_le_bytes().to_vec());
         }
-        Ok(hirsel_engine::store::Address(ContentHash::of_parts(
+        Ok(hirsel_engine_store::Address(ContentHash::of_parts(
             "hirsel.native.component-address.v1",
             parts.iter().map(Vec::as_slice),
         )))
@@ -394,17 +394,17 @@ pub trait NativeProducts {
 pub fn request_store(
     engine: &hirsel_engine::QueryEngine,
     allowance: hirsel_engine_admission::MemoryReservation,
-) -> Arc<hirsel_engine::store::RequestStore> {
+) -> Arc<hirsel_engine_store::RequestStore> {
     let backend = engine
         .product_store()
-        .unwrap_or_else(|| Arc::new(hirsel_engine::store::NoneStore));
-    Arc::new(hirsel_engine::store::RequestStore::new(backend, allowance))
+        .unwrap_or_else(|| Arc::new(hirsel_engine_store::NoneStore));
+    Arc::new(hirsel_engine_store::RequestStore::new(backend, allowance))
 }
 
 /// Resolve settled descriptor bytes only. This is not a proof capability: the
 /// admitted Ready producer owns independent validation before settling the read.
 pub fn ready_product(
-    store: &dyn hirsel_engine::store::ResultStore,
+    store: &dyn hirsel_engine_store::ResultStore,
     product: ProductRef,
 ) -> Result<ReadyProduct, String> {
     let archive = product
@@ -429,7 +429,7 @@ pub fn ready_product(
         if !seen.insert(address) || record.domain != READY_RECORD_DOMAIN {
             return Err("duplicate or foreign optimizer descriptor".into());
         }
-        let address = hirsel_engine::store::Address(address);
+        let address = hirsel_engine_store::Address(address);
         let current = store
             .lookup_product(address)
             .ok_or("missing optimizer association")?;
@@ -455,7 +455,7 @@ pub fn ready_product(
     })
 }
 
-pub const READY_RECORD_DOMAIN: hirsel_engine::store::Domain = hirsel_engine::store::Domain {
+pub const READY_RECORD_DOMAIN: hirsel_engine_store::Domain = hirsel_engine_store::Domain {
     kind: READY_KIND,
     schema: 1,
 };
@@ -471,9 +471,9 @@ pub type ReadyRecord = (
 /// Ordinary descriptor publication, after the native query has obtained its
 /// own authority. It does not manufacture any native receipt or stage seal.
 pub fn publish_ready_record(
-    store: &dyn hirsel_engine::store::ResultStore,
-    address: hirsel_engine::store::Address,
-    action: hirsel_engine::store::Action,
+    store: &dyn hirsel_engine_store::ResultStore,
+    address: hirsel_engine_store::Address,
+    action: hirsel_engine_store::Action,
     value: &ReadyRecord,
 ) -> Result<ProductRef, String> {
     let bytes = serde_json::to_vec(value).map_err(|e| e.to_string())?;

@@ -287,7 +287,8 @@ mod tests {
     }
     fn fixture() -> (SiblingSources, Vec<Arc<ItemSyntax>>) {
         let (engine, file, written) = parsed();
-        let mut engine = engine.with_result_store(Arc::new(crate::store::MemStore::default()));
+        let mut engine =
+            engine.with_result_store(Arc::new(hirsel_engine_store::MemStore::default()));
         engine.adapters.lexer = None;
         engine.adapters.parser = None;
         engine.adapters.signature = None;

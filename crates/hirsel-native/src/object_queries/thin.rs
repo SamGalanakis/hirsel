@@ -1,7 +1,7 @@
 //! Freeze the complete external member closure of an LLVM thin archive.
 use crate::Toolchain;
-use hirsel_engine::store::ResultStore;
-use hirsel_engine::store::{Action, Address, Domain, Reference};
+use hirsel_engine_store::ResultStore;
+use hirsel_engine_store::{Action, Address, Domain, Reference};
 use hirsel_syntax::ContentHash;
 use std::path::{Path, PathBuf};
 // Prior art: llvm-project 2b6e769dd3add8bbd8d8be60e59f8d7e5f30ec54,
@@ -164,7 +164,7 @@ mod tests {
         hirsel_intern::jobs::with_compiler_stack(|| {
             let root = tempfile::tempdir().unwrap();
             let target = TargetSpec::x86_64_unknown_linux_gnu();
-            let store = Arc::new(hirsel_engine::store::DirStore::new(
+            let store = Arc::new(hirsel_engine_store::DirStore::new(
                 root.path().join("products"),
             ));
             let tools = Toolchain::in_tree_with_products(

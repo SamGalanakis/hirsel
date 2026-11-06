@@ -27,10 +27,10 @@ use hirsel_native_testing::topology_matrix;
 use std::path::PathBuf;
 
 pub(super) fn admitted_native_store(
-    backend: std::sync::Arc<dyn hirsel_engine::store::ResultStore>,
-) -> std::sync::Arc<dyn hirsel_engine::store::ResultStore> {
+    backend: std::sync::Arc<dyn hirsel_engine_store::ResultStore>,
+) -> std::sync::Arc<dyn hirsel_engine_store::ResultStore> {
     let budget = hirsel_engine_admission::ProcessBudget::new(64 << 20);
-    std::sync::Arc::new(hirsel_engine::store::RequestStore::new(
+    std::sync::Arc::new(hirsel_engine_store::RequestStore::new(
         backend,
         budget.reserve(64 << 20).unwrap(),
     ))
@@ -1589,7 +1589,7 @@ fn template_owners_and_objects_are_identical_at_one_and_eight_workers() {
 /// including when cached summaries replace Ready bodies on the second build.
 fn original_callable_values_retain_their_thunk_owners_on_both_backends(path: &str) {
     use hirsel_driver::native;
-    use hirsel_engine::store::{MemStore, ResultStore};
+    use hirsel_engine_store::{MemStore, ResultStore};
     use hirsel_lir::emission::{function_thunk_name, symbol_name};
     use hirsel_native::Backend;
     use hirsel_native::OptLevel;
@@ -1601,7 +1601,7 @@ fn original_callable_values_retain_their_thunk_owners_on_both_backends(path: &st
         let mut config = hirsel_front_phases::COMPILER.configuration();
         config.store = store.clone();
         config.verify = hirsel_engine::Verify::On;
-        config.verify_store = hirsel_engine::store::VerifyStore::Off;
+        config.verify_store = hirsel_engine_store::VerifyStore::Off;
         let mut loaded = hirsel_front_phases::COMPILER
             .with_config(config)
             .with_owned_engines()
@@ -1701,7 +1701,7 @@ fn original_callable_owners_std_container() {
 #[test]
 fn copied_callee_edits_invalidate_warm_owner_objects_at_one_two_eight_workers() {
     use hirsel_driver::native;
-    use hirsel_engine::store::{MemStore, ResultStore, VerifyStore};
+    use hirsel_engine_store::{MemStore, ResultStore, VerifyStore};
     use hirsel_native::Backend;
     use hirsel_native::OptLevel;
     use hirsel_native::Options;
@@ -1807,7 +1807,7 @@ fn copied_callee_edits_invalidate_warm_owner_objects_at_one_two_eight_workers() 
 #[test]
 fn intrinsic_static_objects_survive_unrelated_layouts_and_import_replay() {
     use hirsel_driver::native;
-    use hirsel_engine::store::{MemStore, ResultStore};
+    use hirsel_engine_store::{MemStore, ResultStore};
     use hirsel_native::Backend;
     use hirsel_native::OptLevel;
     use hirsel_native::Options;
@@ -1903,7 +1903,7 @@ fn generated_failure_sources() -> Vec<(&'static str, String, &'static str, u32, 
 #[test]
 fn generated_body_failure_uses_generated_source_in_every_engine() {
     use hirsel_driver::native;
-    use hirsel_engine::store::{MemStore, ResultStore, VerifyStore};
+    use hirsel_engine_store::{MemStore, ResultStore, VerifyStore};
     use hirsel_native::Backend;
     use hirsel_native::Fixture;
     use hirsel_native::OptLevel;
@@ -2042,7 +2042,7 @@ fn generated_body_failure_uses_generated_source_in_every_engine() {
 
 fn generated_request_products(
     source: &str,
-    store: std::sync::Arc<dyn hirsel_engine::store::ResultStore>,
+    store: std::sync::Arc<dyn hirsel_engine_store::ResultStore>,
 ) -> (
     std::sync::Arc<hirsel_engine::FrontNativeProducts>,
     Observation,
@@ -2090,7 +2090,7 @@ fn generated_request_products(
 #[test]
 fn generated_body_sites_and_objects_do_not_depend_on_id_assignment() {
     use hirsel_driver::native;
-    use hirsel_engine::store::{MemStore, ResultStore};
+    use hirsel_engine_store::{MemStore, ResultStore};
     use hirsel_native::Backend;
     use hirsel_native::OptLevel;
     use hirsel_native::Validation;
@@ -2118,7 +2118,7 @@ fn generated_body_sites_and_objects_do_not_depend_on_id_assignment() {
                             options,
                             true,
                             hirsel_intern::jobs::Jobs::new(2),
-                            hirsel_engine::store::VerifyStore::Off,
+                            hirsel_engine_store::VerifyStore::Off,
                             false,
                             |_, _, _| (),
                             |_, _| (),
@@ -2230,7 +2230,7 @@ fn generated_body_origins_follow_item_moves_without_stale_source_names() {
 #[test]
 fn generated_body_objects_rebind_debug_and_failures_after_source_moves() {
     use hirsel_driver::native;
-    use hirsel_engine::store::{MemStore, ResultStore, VerifyStore};
+    use hirsel_engine_store::{MemStore, ResultStore, VerifyStore};
     use hirsel_native::Backend;
     use hirsel_native::OptLevel;
     use hirsel_native::Validation;
@@ -2400,10 +2400,9 @@ fn generated_body_debug_preserves_nested_body_sites() {
     use hirsel_native::OptLevel;
     with_compiler_stack(|| {
         for (name, source, _, line, column) in generated_failure_sources().into_iter().skip(2) {
-            let store: std::sync::Arc<dyn hirsel_engine::store::ResultStore> =
-                admitted_native_store(std::sync::Arc::new(
-                    hirsel_engine::store::MemStore::default(),
-                ));
+            let store: std::sync::Arc<dyn hirsel_engine_store::ResultStore> = admitted_native_store(
+                std::sync::Arc::new(hirsel_engine_store::MemStore::default()),
+            );
             let (facts, _) = generated_request_products(&source, store.clone());
             for backend in [Backend::Cranelift, Backend::Llvm] {
                 let sources = std::cell::RefCell::new(None);
@@ -2416,7 +2415,7 @@ fn generated_body_debug_preserves_nested_body_sites() {
                     hirsel_native::Options::new(x86()),
                     true,
                     hirsel_intern::jobs::Jobs::new(2),
-                    hirsel_engine::store::VerifyStore::Off,
+                    hirsel_engine_store::VerifyStore::Off,
                     false,
                     |view, root, _| {
                         *sources.borrow_mut() = Some(view.profile_sources(root).unwrap())

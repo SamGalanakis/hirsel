@@ -1,7 +1,7 @@
 //! Host Link executor over a selected stored tool, pre-codegen kit snapshot and
 //! ordinary archive references. The shared native planner owns launcher/glue,
 //! manifest and ABI checks; this adapter owns neither compiler bodies nor caches.
-use hirsel_engine::store::ResultStore;
+use hirsel_engine_store::ResultStore;
 
 use hirsel_native::Backend;
 use hirsel_native::object_queries::capture::CaptureLimits;

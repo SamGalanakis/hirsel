@@ -133,14 +133,14 @@ pub struct NativeDiscoveryCounts {
 /// The host passes the same selected request provider used by other native
 /// queries. This is a type/anchor codec and query memo, not another byte store.
 pub struct NativeDiscoveryCache {
-    store: Arc<dyn crate::store::ResultStore>,
+    store: Arc<dyn hirsel_engine_store::ResultStore>,
     records: NativeRecords,
     pub counts: NativeDiscoveryCounts,
 }
 impl NativeDiscoveryCache {
     pub fn new(
         types: Arc<hirsel_types::TypeInterner>,
-        store: Arc<dyn crate::store::ResultStore>,
+        store: Arc<dyn hirsel_engine_store::ResultStore>,
     ) -> Self {
         Self {
             records: NativeRecords::new(types, store.clone()),
@@ -195,7 +195,7 @@ impl NativeDiscoveryCache {
     }
     fn reusable(engine: &QueryEngine, source: &NativeDefinitionProduct) -> bool {
         engine.verify == Verify::On
-            && engine.verify_store != crate::store::VerifyStore::Recompute
+            && engine.verify_store != hirsel_engine_store::VerifyStore::Recompute
             && source.summary_identity.is_some()
             && (!crate::queries::generation::executable(&source.source.syntax)
                 || source.lower.is_some())

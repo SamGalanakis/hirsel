@@ -3,8 +3,8 @@ use hirsel_engine::CheckCompletion;
 use hirsel_engine::CompileConfig;
 use hirsel_engine::QueryError;
 use hirsel_engine::ToolError;
-use hirsel_engine::store;
-use hirsel_engine::store::ResultStore;
+use hirsel_engine_store as store;
+use hirsel_engine_store::ResultStore;
 use hirsel_front_phases::COMPILER;
 use hirsel_intern::jobs::with_compiler_stack;
 use hirsel_query_products::LoweringPolicy;
@@ -21,7 +21,7 @@ struct Observed {
     compact_fault: AtomicUsize,
 }
 impl ResultStore for Observed {
-    fn capability(&self) -> hirsel_engine::store::ProviderCapability {
+    fn capability(&self) -> hirsel_engine_store::ProviderCapability {
         self.inner.capability()
     }
 

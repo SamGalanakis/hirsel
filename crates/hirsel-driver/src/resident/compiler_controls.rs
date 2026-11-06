@@ -507,7 +507,7 @@ fn selected_private_layout_cache_matches_cold_and_preserves_unread_reader_work()
             let selected = request(&entry);
             let budget = hirsel_engine_admission::ProcessBudget::new(768 << 20);
             let mut configured = config();
-            configured.store = Arc::new(hirsel_engine::store::MemStore::default());
+            configured.store = Arc::new(hirsel_engine_store::MemStore::default());
             let make = |configured: CompileConfig| {
                 CompilerRequests::new(
                     crate::COMPILER,

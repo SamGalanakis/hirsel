@@ -4,7 +4,6 @@
 //! generated and staged declarations, and wires the immutable Front, Lower,
 //! Growth, storage and Check producers here. A host adds only the roots its
 //! operation selects on top of the installed source graph.
-use crate::store::{Domain, NoneStore, RequestStore, ResultStore};
 use crate::{
     CheckOutput, FRONT_BODY_KIND, FRONT_CHECK_KIND, FRONT_EVALUATE_KIND, FRONT_GROWTH_KIND,
     FRONT_LOWER_KIND, FRONT_STORAGE_GRAPH_KIND, FrontBodyQueries, FrontCarry, FrontCheckPlan,
@@ -14,6 +13,7 @@ use crate::{
     LowerCarry, QueryEngine, QueryError, ToolError, UnsafeFfiPackage,
 };
 use hirsel_engine_runtime::*;
+use hirsel_engine_store::{Domain, NoneStore, RequestStore, ResultStore};
 use hirsel_intern::jobs::Jobs;
 use hirsel_query_products::LoweringPolicy;
 use hirsel_span::{FileId, SourceMap};
@@ -1383,7 +1383,8 @@ impl QueryEngine {
         };
         // Like a request selector, the engine keeps one carry pair across
         // its fresh graphs; with no store it is a session's only reuse.
-        if self.source_carry.is_none() && self.verify_store == crate::store::VerifyStore::Off {
+        if self.source_carry.is_none() && self.verify_store == hirsel_engine_store::VerifyStore::Off
+        {
             let quarter = limits.transport_bytes / 4;
             let front = budget
                 .reserve(quarter)
@@ -1689,7 +1690,7 @@ pub fn runtime_errors(store: &dyn ResultStore) -> Result<RuntimeErrors, ToolErro
     })
 }
 
-fn runtime_failure(reference: crate::store::Reference, errors: RuntimeErrors) -> ToolError {
+fn runtime_failure(reference: hirsel_engine_store::Reference, errors: RuntimeErrors) -> ToolError {
     let message = if reference == errors.resource {
         "a compiler producer exceeded its admitted resources"
     } else if reference == errors.cycle {

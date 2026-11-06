@@ -89,8 +89,8 @@ fn registered_installation_and_deleted_private_state_preserve_diagnostics_and_ti
             }
             let corrupted = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
             let compiler = if mode == "reuse" || mode == "tamper" {
-                use hirsel_engine::store::ResultStore;
-                let directory = hirsel_engine::store::DirStore::new(std::path::PathBuf::from(
+                use hirsel_engine_store::ResultStore;
+                let directory = hirsel_engine_store::DirStore::new(std::path::PathBuf::from(
                     std::env::var_os("HIRSEL_RESULTS_DIR").unwrap(),
                 ))
                 .with_read_only_root(products.clone());
@@ -209,17 +209,17 @@ pub fn main()->u8 uses {} = comptime make()
 // Refuse persisted private inputs and substitute an ordinary generator output.
 // Request-local input transport remains available for sound recomputation.
 struct GeneratorInputUnavailable {
-    store: std::sync::Arc<dyn hirsel_engine::store::ResultStore>,
+    store: std::sync::Arc<dyn hirsel_engine_store::ResultStore>,
     corrupt_bound: bool,
     corrupted: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
-impl hirsel_engine::store::ResultStore for GeneratorInputUnavailable {
-    fn capability(&self) -> hirsel_engine::store::ProviderCapability {
+impl hirsel_engine_store::ResultStore for GeneratorInputUnavailable {
+    fn capability(&self) -> hirsel_engine_store::ProviderCapability {
         self.store.capability()
     }
 
-    fn get(&self, key: &hirsel_engine::store::EntryKey) -> Option<hirsel_engine::store::Bytes> {
-        use hirsel_engine::store::{Entry, VariantRef};
+    fn get(&self, key: &hirsel_engine_store::EntryKey) -> Option<hirsel_engine_store::Bytes> {
+        use hirsel_engine_store::{Entry, VariantRef};
         if self.corrupt_bound && key.2 == QueryKind::Generate {
             let mut entry = Entry::load(&*self.store, key);
             for variant in &mut entry.variants {
@@ -233,11 +233,11 @@ impl hirsel_engine::store::ResultStore for GeneratorInputUnavailable {
                 {
                     continue;
                 }
-                let original = hirsel_engine::store::Reference {
-                    output: hirsel_engine::store::Output(hirsel_syntax::ContentHash(
+                let original = hirsel_engine_store::Reference {
+                    output: hirsel_engine_store::Output(hirsel_syntax::ContentHash(
                         bytes[48..80].try_into().unwrap(),
                     )),
-                    domain: hirsel_engine::store::Domain {
+                    domain: hirsel_engine_store::Domain {
                         kind: 0x4601_0006,
                         schema: 3,
                     },
@@ -259,13 +259,13 @@ impl hirsel_engine::store::ResultStore for GeneratorInputUnavailable {
         }
         self.store.get(key)
     }
-    fn put(&self, key: &hirsel_engine::store::EntryKey, bytes: &[u8]) {
+    fn put(&self, key: &hirsel_engine_store::EntryKey, bytes: &[u8]) {
         self.store.put(key, bytes)
     }
     fn get_content(
         &self,
-        reference: hirsel_engine::store::Reference,
-    ) -> Option<hirsel_engine::store::Bytes> {
+        reference: hirsel_engine_store::Reference,
+    ) -> Option<hirsel_engine_store::Bytes> {
         if reference.domain.kind == 0x4601_0005 {
             None
         } else {
@@ -274,22 +274,22 @@ impl hirsel_engine::store::ResultStore for GeneratorInputUnavailable {
     }
     fn put_content(
         &self,
-        domain: hirsel_engine::store::Domain,
+        domain: hirsel_engine_store::Domain,
         bytes: &[u8],
-    ) -> Option<hirsel_engine::store::Reference> {
+    ) -> Option<hirsel_engine_store::Reference> {
         self.store.put_content(domain, bytes)
     }
     fn lookup_product(
         &self,
-        address: hirsel_engine::store::Address,
-    ) -> Option<hirsel_engine::store::Association> {
+        address: hirsel_engine_store::Address,
+    ) -> Option<hirsel_engine_store::Association> {
         self.store.lookup_product(address)
     }
     fn associate_product(
         &self,
-        address: hirsel_engine::store::Address,
-        action: hirsel_engine::store::Action,
-        reference: hirsel_engine::store::Reference,
+        address: hirsel_engine_store::Address,
+        action: hirsel_engine_store::Action,
+        reference: hirsel_engine_store::Reference,
     ) {
         self.store.associate_product(address, action, reference)
     }

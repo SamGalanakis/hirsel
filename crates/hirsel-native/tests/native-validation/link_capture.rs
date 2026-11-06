@@ -1,6 +1,6 @@
 use super::*;
-use hirsel_engine::store::MAX_RECORD;
-use hirsel_engine::store::{DirStore, MemStore};
+use hirsel_engine_store::MAX_RECORD;
+use hirsel_engine_store::{DirStore, MemStore};
 
 const LIMITS: CaptureLimits = CaptureLimits {
     archive_bytes: 4 * MAX_RECORD as u64,
@@ -263,8 +263,8 @@ fn packaged_capture_replays_changed_inputs_without_originals() {
 #[test]
 #[ignore = "requires scratch-linker-proof selected linker inputs"]
 fn large_tool_snapshots_and_replays_under_none_and_unwritable_with_original_ram_cap() {
-    use hirsel_engine::store::NoneStore;
-    use hirsel_engine::store::RequestStore;
+    use hirsel_engine_store::NoneStore;
+    use hirsel_engine_store::RequestStore;
 
     let package = PathBuf::from(std::env::var_os("HIRSEL_CAPTURE_LINKER").unwrap());
     let llvm = PathBuf::from(std::env::var_os("LLVM_SYS_231_PREFIX").unwrap());

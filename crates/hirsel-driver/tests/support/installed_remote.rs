@@ -1,4 +1,4 @@
-use hirsel_engine::store::*;
+use hirsel_engine_store::*;
 use hirsel_syntax::{ContentHash, PackageId};
 use std::sync::Arc;
 
@@ -16,7 +16,7 @@ pub fn bind(remote: Arc<dyn ResultStore>) -> Arc<dyn ResultStore> {
 }
 
 impl ResultStore for InstalledRemote {
-    fn capability(&self) -> hirsel_engine::store::ProviderCapability {
+    fn capability(&self) -> hirsel_engine_store::ProviderCapability {
         self.remote.capability()
     }
 

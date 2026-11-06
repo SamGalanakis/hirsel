@@ -1,7 +1,7 @@
 //! Portable records are materialized only by an explicit archive consumer.
 use super::*;
-use crate::store::Domain;
 use hirsel_engine_runtime::*;
+use hirsel_engine_store::Domain;
 
 pub(super) struct LiveRecord<T> {
     pub value: T,

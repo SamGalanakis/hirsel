@@ -3,7 +3,7 @@
 //! deletion strata; no Value collection or mutable global layout table enters.
 use super::arena::{ArenaQueryCounts, EquationProduct, arena_query};
 use super::*;
-use hirsel_engine::store::ResultStore;
+use hirsel_engine_store::ResultStore;
 use hirsel_rc::arena_credit::equations::Function;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -439,7 +439,7 @@ pub fn settle_arena_queries(
 #[cfg(test)]
 mod retained_tests {
     use super::*;
-    use hirsel_engine::store::Action;
+    use hirsel_engine_store::Action;
 
     #[test]
     fn escaped_component_keys_and_summary_keep_the_complete_arena_grant() {
@@ -457,7 +457,7 @@ mod retained_tests {
             target_abi: ContentHash::of_bytes(b"arena target"),
             policy: ContentHash::of_bytes(b"arena policy"),
         };
-        let reference = hirsel_engine::store::Domain { kind: 1, schema: 1 }
+        let reference = hirsel_engine_store::Domain { kind: 1, schema: 1 }
             .reference(b"equations")
             .unwrap();
         let mut plan = ArenaQueryPlan::new(

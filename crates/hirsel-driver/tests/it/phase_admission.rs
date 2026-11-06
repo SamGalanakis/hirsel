@@ -1,7 +1,7 @@
 use hirsel_driver::*;
-use hirsel_engine::store::MemStore;
 use hirsel_engine::*;
 use hirsel_engine_runtime::*;
+use hirsel_engine_store::MemStore;
 use hirsel_intern::jobs::with_compiler_stack;
 
 use hirsel_query_products::LoweringPolicy;
@@ -184,7 +184,7 @@ impl Fixture {
 // real continuation's scheduler reads without a time-dependent slow fixture.
 #[derive(Default)]
 struct PendingContext {
-    ready: Vec<(QueryId, Result<ProductRef, hirsel_engine::store::Reference>)>,
+    ready: Vec<(QueryId, Result<ProductRef, hirsel_engine_store::Reference>)>,
     reads: Vec<QueryId>,
     released: Vec<QueryId>,
 }
@@ -192,7 +192,7 @@ impl QueryContext for PendingContext {
     fn scratch_bytes(&self) -> u64 {
         8 << 20
     }
-    fn read(&mut self, id: QueryId) -> Poll<Result<ProductRef, hirsel_engine::store::Reference>> {
+    fn read(&mut self, id: QueryId) -> Poll<Result<ProductRef, hirsel_engine_store::Reference>> {
         self.reads.push(id);
         self.ready
             .iter()
@@ -340,7 +340,7 @@ fn native_root_demands_a_source_unit_before_run_acceptance() {
 
 #[test]
 fn failed_check_withholds_acceptance_but_independent_lower_still_runs() {
-    use hirsel_engine::store::ResultStore;
+    use hirsel_engine_store::ResultStore;
     with_compiler_stack(|| {
         for jobs in [1, 2, 8] {
             let mut f = Fixture::new("pub fn bad()->u8{true}\npub fn main()->u8{7u8}\n", jobs);
@@ -408,7 +408,7 @@ impl QueryFactory for CompletionFactory {
     fn evict(&self, id: QueryId, product: &ProductRef, scratch: u64) -> bool {
         self.inner.evict(id, product, scratch)
     }
-    fn create(&self, id: QueryId) -> Result<Box<dyn QueryTask>, hirsel_engine::store::Reference> {
+    fn create(&self, id: QueryId) -> Result<Box<dyn QueryTask>, hirsel_engine_store::Reference> {
         Ok(Box::new(CompletionTask {
             inner: self.inner.create(id)?,
             wait: (self.delayed == Some(id)).then(|| self.wait.clone()),
@@ -632,7 +632,7 @@ struct PausingTask {
     release: Arc<std::sync::Mutex<Option<std::sync::mpsc::Receiver<()>>>>,
 }
 impl QueryFactory for PausingFactory {
-    fn create(&self, id: QueryId) -> Result<Box<dyn QueryTask>, hirsel_engine::store::Reference> {
+    fn create(&self, id: QueryId) -> Result<Box<dyn QueryTask>, hirsel_engine_store::Reference> {
         Ok(Box::new(PausingTask {
             inner: self.inner.create(id)?,
             root: self.root,
@@ -668,10 +668,10 @@ impl QueryContext for SpyContext<'_> {
     fn cycle_members(&self, id: QueryId, limit: usize) -> Option<Vec<QueryId>> {
         self.inner.cycle_members(id, limit)
     }
-    fn poll_publication(&mut self) -> Poll<Result<(), hirsel_engine::store::Reference>> {
+    fn poll_publication(&mut self) -> Poll<Result<(), hirsel_engine_store::Reference>> {
         self.inner.poll_publication()
     }
-    fn read(&mut self, id: QueryId) -> Poll<Result<ProductRef, hirsel_engine::store::Reference>> {
+    fn read(&mut self, id: QueryId) -> Poll<Result<ProductRef, hirsel_engine_store::Reference>> {
         self.admission |= id.kind == FRONT_CHECK_KIND;
         self.lower |= id.kind == FRONT_LOWER_KIND;
         self.inner.read(id)
@@ -707,7 +707,7 @@ impl QueryTask for PausingTask {
 
 #[test]
 fn cancellation_in_an_admitted_body_window_releases_claims_and_publishes_no_check() {
-    use hirsel_engine::store::ResultStore;
+    use hirsel_engine_store::ResultStore;
     with_compiler_stack(|| {
         let mut f = Fixture::new("pub fn main()->u8{7u8}\npub fn unrelated()->u8{9u8}\n", 2);
         let first = f.front.query(&f.program.entry).unwrap();

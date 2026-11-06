@@ -1,6 +1,7 @@
 //! Program checking must consume ordinary Lower products through current V.
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_engine_store as store;
 use hirsel_front_phases::*;
 use hirsel_host_io::launch::*;
 use hirsel_intern::jobs::with_compiler_stack;
@@ -124,8 +125,8 @@ fn readonly_comptime_products_reuse_only_the_consumers_local_verifier() {
             verifier: Arc<hirsel_validate::VerifierCache>,
         }
         impl store::ResultStore for ReadOnly {
-            fn capability(&self) -> hirsel_engine::store::ProviderCapability {
-                hirsel_engine::store::ProviderCapability::ReadOnly
+            fn capability(&self) -> hirsel_engine_store::ProviderCapability {
+                hirsel_engine_store::ProviderCapability::ReadOnly
             }
 
             fn read_scope(&self) -> Option<Box<dyn Send + Sync>> {

@@ -1,8 +1,9 @@
 use hirsel_driver::*;
-use hirsel_engine::store::MemStore;
-use hirsel_engine::store::ResultStore;
 use hirsel_engine::*;
 use hirsel_engine_runtime::*;
+use hirsel_engine_store as store;
+use hirsel_engine_store::MemStore;
+use hirsel_engine_store::ResultStore;
 use hirsel_intern::jobs::with_compiler_stack;
 
 use hirsel_query_products::QueryKind;

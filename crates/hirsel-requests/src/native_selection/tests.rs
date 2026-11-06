@@ -6,9 +6,9 @@ use crate::requests::{
 use hirsel_engine::CompileConfig;
 use hirsel_engine::requests::RequestEngine;
 use hirsel_engine::requests::observe_inputs;
-use hirsel_engine::store::MemStore;
-use hirsel_engine::store::ResultStore;
 use hirsel_engine_runtime::*;
+use hirsel_engine_store::MemStore;
+use hirsel_engine_store::ResultStore;
 
 use hirsel_intern::jobs::Jobs;
 use std::task::Poll;

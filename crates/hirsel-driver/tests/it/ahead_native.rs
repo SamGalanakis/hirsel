@@ -49,8 +49,8 @@ fn request_objects(
     hirsel_native::ReadyProgram,
     Vec<hirsel_lir::stage::ObjectArtifact>,
 ) {
-    use hirsel_engine::store::{self, ResultStore};
     use hirsel_engine_runtime::*;
+    use hirsel_engine_store::{self, ResultStore};
 
     use hirsel_native_cache::declarations::NativeDeclarations;
     use hirsel_native_cache::source_inputs::NativeInstanceInputs;
@@ -108,7 +108,7 @@ fn request_objects(
         std::fs::write(&path, SOURCE).unwrap();
         let store: Arc<dyn ResultStore> =
             Arc::new(crate::native_compilation_tasks_19::DiagnosedStore(
-                store::DirStore::new(directory.path().join("products")),
+                hirsel_engine_store::DirStore::new(directory.path().join("products")),
             ));
         let mut session = hirsel_driver::session::Session::open_configured(
             &path,
@@ -131,7 +131,7 @@ fn request_objects(
     });
     let budget = hirsel_engine_admission::ProcessBudget::new(768 << 20);
     let transport = hirsel_engine_admission::ProcessBudget::new(24 << 20);
-    let store: Arc<dyn ResultStore> = Arc::new(store::RequestStore::new(
+    let store: Arc<dyn ResultStore> = Arc::new(hirsel_engine_store::RequestStore::new(
         fixture.store.clone(),
         transport.reserve(24 << 20).unwrap(),
     ));

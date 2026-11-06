@@ -1,7 +1,7 @@
 use hirsel_driver::*;
-use hirsel_engine::store::MemStore;
 use hirsel_engine::*;
 use hirsel_engine_runtime::*;
+use hirsel_engine_store::MemStore;
 use hirsel_intern::jobs::with_compiler_stack;
 
 use hirsel_query_products::{LoweringPolicy, QueryKind};
@@ -289,7 +289,7 @@ fn check_settled_front_eviction(
     edit: u8,
     archive_readers: bool,
 ) {
-    use hirsel_engine::store::{Bytes, EntryKey, Reference, ResultStore};
+    use hirsel_engine_store::{Bytes, EntryKey, Reference, ResultStore};
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     #[derive(Default)]
     struct EvictModes {
@@ -298,7 +298,7 @@ fn check_settled_front_eviction(
         reads_after_eviction: AtomicUsize,
     }
     impl ResultStore for EvictModes {
-        fn capability(&self) -> hirsel_engine::store::ProviderCapability {
+        fn capability(&self) -> hirsel_engine_store::ProviderCapability {
             self.store.capability()
         }
 
@@ -319,7 +319,7 @@ fn check_settled_front_eviction(
         }
         fn put_content(
             &self,
-            domain: hirsel_engine::store::Domain,
+            domain: hirsel_engine_store::Domain,
             bytes: &[u8],
         ) -> Option<Reference> {
             let reference = self.store.put_content(domain, bytes)?;

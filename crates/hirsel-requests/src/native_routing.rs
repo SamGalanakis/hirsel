@@ -1,10 +1,10 @@
 //! Install native query kinds before the runtime's first request. The selected
 //! source continuation attaches one complete factory set after its Run read;
 //! routing itself can neither compile nor reconstruct a source controller.
-use hirsel_engine::store::Reference;
 use hirsel_engine_runtime::QueryFactory;
 use hirsel_engine_runtime::QueryId;
 use hirsel_engine_runtime::QueryTask;
+use hirsel_engine_store::Reference;
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -79,8 +79,8 @@ impl QueryFactory for NativeRouting {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hirsel_engine::store::{Action, Address, Domain};
     use hirsel_engine_runtime::*;
+    use hirsel_engine_store::{Action, Address, Domain};
     use hirsel_intern::jobs::Jobs;
     use hirsel_syntax::ContentHash;
     use std::{

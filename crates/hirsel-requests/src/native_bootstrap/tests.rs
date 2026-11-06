@@ -50,7 +50,7 @@ fn native_emit_only_bootstrap_completes_actual_codegen_without_link_after_loader
 
 fn fixture_store() -> Arc<dyn ResultStore> {
     let budget = hirsel_engine_admission::ProcessBudget::new(64 << 20);
-    Arc::new(hirsel_engine::store::RequestStore::new(
+    Arc::new(hirsel_engine_store::RequestStore::new(
         Arc::new(MemStore::default()),
         budget.reserve(64 << 20).unwrap(),
     ))
@@ -210,7 +210,7 @@ fn bootstrap_link_refusal(test_table: bool, emit_only: bool) {
                 NativePlan {
                     options: hirsel_native::Options::new(target.clone()),
                     policy: ContentHash::of_bytes(b"bootstrap control"),
-                    verify_store: hirsel_engine::store::VerifyStore::Off,
+                    verify_store: hirsel_engine_store::VerifyStore::Off,
                     opt: hirsel_lir::emission::OptLevel::None,
                     debug: false,
                     verify_backend: true,
@@ -633,7 +633,7 @@ fn actual_native_bootstrap_links_both_backends_and_restores_after_runtime_drop()
                 NativePlan {
                     options: hirsel_native::Options::new(target.clone()),
                     policy: ContentHash::of_bytes(b"bootstrap control"),
-                    verify_store: hirsel_engine::store::VerifyStore::Off,
+                    verify_store: hirsel_engine_store::VerifyStore::Off,
                     opt: hirsel_lir::emission::OptLevel::None,
                     debug: false,
                     verify_backend: true,
@@ -1019,7 +1019,7 @@ fn native_bootstrap_policy_case(bind_run: bool) {
             let NativePlatformSelection { mut plan, platform } = NativePlatformSelection::capture(
                 store.clone(),
                 NativePlatformInputs {
-                    verify_store: hirsel_engine::store::VerifyStore::Off,
+                    verify_store: hirsel_engine_store::VerifyStore::Off,
                     purpose: if bind_run {
                         NativePurpose::Run
                     } else {
@@ -1501,7 +1501,7 @@ fn native_bootstrap_assesses_evidence_against_its_settled_source_root_before_ins
         let plan = |calls: &Arc<AtomicU64>| NativePlan {
             options: hirsel_native::Options::new(target.clone()),
             policy: ContentHash::of_bytes(b"proof bootstrap control"),
-            verify_store: hirsel_engine::store::VerifyStore::Off,
+            verify_store: hirsel_engine_store::VerifyStore::Off,
             opt: hirsel_lir::emission::OptLevel::None,
             debug: false,
             verify_backend: true,
@@ -1797,7 +1797,7 @@ fn original_plan_inputs_bind_source_edits_membership_options_and_foreign_bytes()
             let plan = NativePlan {
                 options,
                 policy: ContentHash::of_bytes(b"original plan input controls"),
-                verify_store: hirsel_engine::store::VerifyStore::Off,
+                verify_store: hirsel_engine_store::VerifyStore::Off,
                 opt: hirsel_lir::emission::OptLevel::None,
                 debug: false,
                 verify_backend: true,

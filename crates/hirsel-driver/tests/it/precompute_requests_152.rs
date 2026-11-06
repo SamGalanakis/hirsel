@@ -2,7 +2,7 @@ use hirsel_driver::CompilerRequestsExt;
 use hirsel_engine::CompileConfig;
 use hirsel_engine::QueryError;
 use hirsel_engine::ToolError;
-use hirsel_engine::store::DirStore;
+use hirsel_engine_store::DirStore;
 use hirsel_front_phases::COMPILER;
 use hirsel_intern::jobs::with_compiler_stack;
 use hirsel_requests::*;

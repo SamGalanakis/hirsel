@@ -1,5 +1,6 @@
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_engine_store as store;
 use hirsel_front_phases::*;
 use hirsel_host_io::launch::*;
 use hirsel_intern::jobs::with_compiler_stack;
@@ -635,7 +636,7 @@ fn synthesized_cursor_finalizer_recipes_share_erased_actual_modes() {
 
 #[test]
 fn keyed_value_import_retains_the_original_pretransfer_cleanup() {
-    use hirsel_engine::store::ResultStore;
+    use hirsel_engine_store::ResultStore;
     with_compiler_stack(|| {
         let budget = hirsel_engine_admission::ProcessBudget::new(64 << 20);
         let store: Arc<dyn store::ResultStore> = Arc::new(store::RequestStore::new(

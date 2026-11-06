@@ -243,10 +243,10 @@ pub struct QueryEngine {
     pub(crate) work: crate::WorkStats,
     pub(crate) store_identity: ContentHash,
     store_adoptions: u64,
-    pub(crate) verify_store: crate::store::VerifyStore,
+    pub(crate) verify_store: hirsel_engine_store::VerifyStore,
     pending_store_checks: BTreeMap<(DefId, QueryKind), persistent::Expected>,
     store_check_spool: std::sync::Weak<persistent::Spool>,
-    pub(crate) result_store: Option<Arc<dyn crate::store::ResultStore>>,
+    pub(crate) result_store: Option<Arc<dyn hirsel_engine_store::ResultStore>>,
     /// Successful indexing contexts survive source-only carry independently
     /// of parse product/body tables. FileId identifies an immutable snapshot.
     pub(crate) indexed_sources: BTreeMap<FileId, (FileContext, QueryEnvironment)>,
@@ -307,7 +307,7 @@ pub struct QueryEngine {
     pub(crate) checked_summaries: Table<Arc<CheckedSummary>>,
     portable_type_records: std::sync::Mutex<
         Option<(
-            Arc<dyn crate::store::ResultStore>,
+            Arc<dyn hirsel_engine_store::ResultStore>,
             Arc<persistent::TypeRecords>,
         )>,
     >,
@@ -495,7 +495,7 @@ impl Drop for QueryEngine {
 impl QueryEngine {
     /// The configured product provider shared by front/native/object queries.
     /// Access grants no verifier or native-validator proof authority.
-    pub fn product_store(&self) -> Option<Arc<dyn crate::store::ResultStore>> {
+    pub fn product_store(&self) -> Option<Arc<dyn hirsel_engine_store::ResultStore>> {
         self.result_store.clone()
     }
     /// The session's type interner, which every phase and thread shares.
@@ -681,7 +681,7 @@ impl QueryEngine {
             work: crate::WorkStats::default(),
             store_adoptions: 0,
             store_identity: ContentHash::default(),
-            verify_store: crate::store::VerifyStore::Off,
+            verify_store: hirsel_engine_store::VerifyStore::Off,
             pending_store_checks: BTreeMap::new(),
             store_check_spool: std::sync::Weak::new(),
             result_store: None,
@@ -1118,7 +1118,7 @@ impl QueryEngine {
         // Private inference can demand a header before the producer's module
         // proof is installed. Normalize that provisional header, then select
         // and verify its stored variant in the final publication pass.
-        let provisional = self.verify_store == crate::store::VerifyStore::Recompute
+        let provisional = self.verify_store == hirsel_engine_store::VerifyStore::Recompute
             && self.private_summary_active
             && self
                 .source_facts(definition)

@@ -3,9 +3,9 @@
 //! no legacy Ready/object controller or test implementation supplies products.
 use hirsel_compiler_identity::COMPILER_IDENTITY;
 use hirsel_driver::native;
-use hirsel_engine::store::ResultStore;
 use hirsel_engine::*;
 use hirsel_engine_runtime::*;
+use hirsel_engine_store::ResultStore;
 
 use hirsel_native::object_queries::CodegenKey;
 use hirsel_native::object_queries::ObjectTaskFactory;
@@ -88,7 +88,7 @@ pub(super) fn compile_entry(
         options,
         debug,
         jobs,
-        hirsel_engine::store::VerifyStore::Off,
+        hirsel_engine_store::VerifyStore::Off,
         |_, _| (),
     )
     .0
@@ -103,7 +103,7 @@ pub(super) fn compile_with_context<R>(
     options: hirsel_native::Options,
     debug: bool,
     jobs: hirsel_intern::jobs::Jobs,
-    verification: hirsel_engine::store::VerifyStore,
+    verification: hirsel_engine_store::VerifyStore,
     use_context: impl FnOnce(&hirsel_native::ReadyProgram, &[hirsel_lir::stage::ObjectArtifact]) -> R,
 ) -> (Objects, R) {
     compile_roots(
@@ -131,7 +131,7 @@ pub(super) fn compile_roots<R>(
     options: hirsel_native::Options,
     debug: bool,
     jobs: hirsel_intern::jobs::Jobs,
-    verification: hirsel_engine::store::VerifyStore,
+    verification: hirsel_engine_store::VerifyStore,
     use_context: impl FnOnce(&hirsel_native::ReadyProgram, &[hirsel_lir::stage::ObjectArtifact]) -> R,
 ) -> (Objects, R) {
     compile_roots_inspect(
@@ -159,7 +159,7 @@ pub(super) fn compile_with_context_inspect<R>(
     options: hirsel_native::Options,
     debug: bool,
     jobs: hirsel_intern::jobs::Jobs,
-    verification: hirsel_engine::store::VerifyStore,
+    verification: hirsel_engine_store::VerifyStore,
     inspect: impl FnOnce(
         &mut queries::roots::RootProducts,
         &Arc<hirsel_native::query_model::NativeRootProduct>,
@@ -193,7 +193,7 @@ pub(super) fn compile_roots_inspect<R>(
     options: hirsel_native::Options,
     debug: bool,
     jobs: hirsel_intern::jobs::Jobs,
-    verification: hirsel_engine::store::VerifyStore,
+    verification: hirsel_engine_store::VerifyStore,
     inspect: impl FnOnce(
         &mut queries::roots::RootProducts,
         &Arc<hirsel_native::query_model::NativeRootProduct>,
@@ -243,7 +243,7 @@ pub(super) fn compile_front<R>(
     options: hirsel_native::Options,
     debug: bool,
     jobs: hirsel_intern::jobs::Jobs,
-    verification: hirsel_engine::store::VerifyStore,
+    verification: hirsel_engine_store::VerifyStore,
     execution: bool,
     inspect: impl FnOnce(
         &mut queries::roots::RootProducts,
@@ -288,7 +288,7 @@ fn compile_settled<R>(
     options: hirsel_native::Options,
     debug: bool,
     jobs: hirsel_intern::jobs::Jobs,
-    verification: hirsel_engine::store::VerifyStore,
+    verification: hirsel_engine_store::VerifyStore,
     execution: bool,
     inspect: impl FnOnce(
         &mut queries::roots::RootProducts,

@@ -10,7 +10,7 @@ use hirsel_engine::ToolError;
 use hirsel_engine::loader_inputs::CaptureInputs;
 use hirsel_engine::loader_inputs::FrozenInputs;
 use hirsel_engine::loader_inputs::InputLimits;
-use hirsel_engine::store::MemStore;
+use hirsel_engine_store::MemStore;
 use hirsel_query_products::LoweringPolicy;
 use std::{
     path::{Path, PathBuf},

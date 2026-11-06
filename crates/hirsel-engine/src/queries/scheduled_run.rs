@@ -34,8 +34,8 @@ pub struct FrontRunOutput {
     pub(crate) _owner: Arc<dyn Send + Sync>,
 }
 
-use crate::store::{Domain, Reference, ResultStore};
 use hirsel_engine_runtime::*;
+use hirsel_engine_store::{Domain, Reference, ResultStore};
 use hirsel_proof_export::DefinitionContent;
 use hirsel_types::{SignatureKind, SignatureRef};
 use std::{sync::Mutex, task::Poll};
@@ -68,7 +68,7 @@ struct Input {
     content: Reference,
     content_decode_bytes: u64,
     owned_header_bytes: u64,
-    specializations: Option<Arc<crate::store::InstalledSpecializations>>,
+    specializations: Option<Arc<hirsel_engine_store::InstalledSpecializations>>,
     dependencies: BTreeSet<DefPath>,
     source: bool,
     executable: bool,
@@ -83,7 +83,7 @@ pub struct FrontRunInputs {
     namespace: Arc<NamespaceCapture>,
     source_paths: Vec<DefPath>,
     inputs: BTreeSet<DefPath>,
-    specializations: BTreeMap<DefPath, Arc<crate::store::InstalledSpecializations>>,
+    specializations: BTreeMap<DefPath, Arc<hirsel_engine_store::InstalledSpecializations>>,
     operation: OperationLease,
     store: Arc<dyn ResultStore>,
     required: u64,
@@ -111,7 +111,7 @@ pub struct FrontRunQueries {
     source_products: bool,
     native_roots: Vec<DefPath>,
     inputs: BTreeSet<DefPath>,
-    specializations: BTreeMap<DefPath, Arc<crate::store::InstalledSpecializations>>,
+    specializations: BTreeMap<DefPath, Arc<hirsel_engine_store::InstalledSpecializations>>,
     operation: OperationLease,
     ids: BTreeMap<DefPath, QueryId>,
     semantic_ids: BTreeMap<DefPath, QueryId>,
@@ -1442,7 +1442,7 @@ impl QueryEngine {
             for (id, receipt) in &self.specialization_dependencies {
                 let mut reads = Vec::new();
                 receipt.reads.encode(&mut reads);
-                let receipt = Arc::new(crate::store::InstalledSpecializations {
+                let receipt = Arc::new(hirsel_engine_store::InstalledSpecializations {
                     reads,
                     definitions: receipt.paths.clone(),
                 });
@@ -1453,7 +1453,9 @@ impl QueryEngine {
                 specializations.insert(id.path().clone(), receipt);
             }
         }
-        weight.tree::<DefPath, Arc<crate::store::InstalledSpecializations>>(specializations.len());
+        weight.tree::<DefPath, Arc<hirsel_engine_store::InstalledSpecializations>>(
+            specializations.len(),
+        );
         let required = FrontRunQueries::input_bytes(&paths.iter().cloned().collect::<Vec<_>>())
             .and_then(|bytes| bytes.checked_add(weight.bytes()))
             .ok_or_else(|| operational("Run input inventory overflow"))?;

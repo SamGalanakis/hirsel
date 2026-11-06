@@ -1,11 +1,11 @@
 use hirsel_diag::{Diagnostic, RuleId};
 use hirsel_engine::memo::MemoKey;
-use hirsel_engine::store::MemStore;
 use hirsel_engine::*;
 use hirsel_engine_runtime::AdmittedRuntime;
 use hirsel_engine_runtime::MemoryWeight;
 use hirsel_engine_runtime::QueryRuntime;
 use hirsel_engine_runtime::RuntimeErrors;
+use hirsel_engine_store::MemStore;
 use hirsel_intern::jobs::with_compiler_stack;
 
 use hirsel_query_products::QueryKind;
@@ -541,7 +541,7 @@ fn admitted_front(engine: &mut QueryEngine, definitions: &[DefPath], jobs: usize
 }
 fn runtime_errors() -> RuntimeErrors {
     let reference = |text: &[u8]| {
-        hirsel_engine::store::Domain {
+        hirsel_engine_store::Domain {
             kind: 0x4600_00ff,
             schema: 1,
         }
@@ -679,8 +679,8 @@ fn front_body_handoff_reuses_only_the_latest_admitted_body() {
     with_compiler_stack(|| {
         let (mut engine, _) = make_engine(None, false);
         let transport = hirsel_engine_admission::ProcessBudget::new(8 << 20);
-        engine = engine.with_result_store(Arc::new(hirsel_engine::store::RequestStore::new(
-            Arc::new(hirsel_engine::store::NoneStore),
+        engine = engine.with_result_store(Arc::new(hirsel_engine_store::RequestStore::new(
+            Arc::new(hirsel_engine_store::NoneStore),
             transport.reserve(8 << 20).unwrap(),
         )));
         parse(&mut engine, "fn a () { 1 }\nfn b () { 1 }\n");
@@ -1644,7 +1644,7 @@ impl CheckerPhase for SccChecker {
 fn scheduled_scc_run(
     text: &str,
     calls: &[(&str, &[&str])],
-    store: Arc<dyn hirsel_engine::store::ResultStore>,
+    store: Arc<dyn hirsel_engine_store::ResultStore>,
     jobs: usize,
     output_bytes: u64,
 ) -> (FrontGrowthOutput, u64, u64) {
@@ -1653,7 +1653,7 @@ fn scheduled_scc_run(
 fn scheduled_scc_run_with_capacity(
     text: &str,
     calls: &[(&str, &[&str])],
-    store: Arc<dyn hirsel_engine::store::ResultStore>,
+    store: Arc<dyn hirsel_engine_store::ResultStore>,
     jobs: usize,
     output_bytes: u64,
     capacity: Option<usize>,
@@ -1861,9 +1861,9 @@ fn scheduled_scc_equal_edit_solves_no_downstream_or_unaffected_component() {
 fn scheduled_scc_split_merge_and_durable_reopen_agree_with_cold_solve() {
     let directory = tempfile::tempdir().unwrap();
     let open = || {
-        Arc::new(hirsel_engine::store::DirStore::new(
+        Arc::new(hirsel_engine_store::DirStore::new(
             directory.path().to_path_buf(),
-        )) as Arc<dyn hirsel_engine::store::ResultStore>
+        )) as Arc<dyn hirsel_engine_store::ResultStore>
     };
     let cases: &[(&str, &[(&str, &[&str])])] = &[
         (
@@ -1941,13 +1941,13 @@ fn scheduled_scc_stream_exceeds_8192_with_store_off_and_unchanged_inventory() {
     }
     text.push_str("fn main {}\n");
     let transport = hirsel_engine_admission::ProcessBudget::new(64 << 20);
-    let store = Arc::new(hirsel_engine::store::RequestStore::new(
-        Arc::new(hirsel_engine::store::NoneStore),
+    let store = Arc::new(hirsel_engine_store::RequestStore::new(
+        Arc::new(hirsel_engine_store::NoneStore),
         transport.reserve(64 << 20).unwrap(),
     ));
     assert_eq!(
-        hirsel_engine::store::ResultStore::persistence(&*store),
-        hirsel_engine::store::Persistence::Disabled
+        hirsel_engine_store::ResultStore::persistence(&*store),
+        hirsel_engine_store::Persistence::Disabled
     );
     let (output, solves, memberships) =
         scheduled_scc_run_with_capacity(&text, &[], store, 1, 8 << 20, Some(8192));
@@ -1958,8 +1958,8 @@ fn scheduled_scc_stream_exceeds_8192_with_store_off_and_unchanged_inventory() {
 #[test]
 fn scheduled_scc_store_off_edit_split_merge_and_reopen_agree_with_cold_solve() {
     let transport = hirsel_engine_admission::ProcessBudget::new(8 << 20);
-    let store = Arc::new(hirsel_engine::store::RequestStore::new(
-        Arc::new(hirsel_engine::store::NoneStore),
+    let store = Arc::new(hirsel_engine_store::RequestStore::new(
+        Arc::new(hirsel_engine_store::NoneStore),
         transport.reserve(8 << 20).unwrap(),
     ));
     let cases: &[(&str, &[(&str, &[&str])])] = &[
@@ -2019,7 +2019,7 @@ fn scheduled_scc_cancelled_prefix_reopens_and_records_its_consumed_reads() {
         fn create(
             &self,
             id: QueryId,
-        ) -> Result<Box<dyn QueryTask>, hirsel_engine::store::Reference> {
+        ) -> Result<Box<dyn QueryTask>, hirsel_engine_store::Reference> {
             Ok(Box::new(Task {
                 inner: self.inner.create(id)?,
                 gate: self.gate.clone(),

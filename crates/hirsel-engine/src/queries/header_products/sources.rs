@@ -97,7 +97,7 @@ impl SourceInputs {
     pub(crate) fn installed_owner(
         &self,
         path: &DefPath,
-    ) -> Option<&Arc<crate::store::InstalledSourceRecords>> {
+    ) -> Option<&Arc<hirsel_engine_store::InstalledSourceRecords>> {
         self.catalog.installed_owner(path)
     }
 

@@ -3,8 +3,8 @@
 //! actual callee/constant references extend it. The solver is shared with the
 //! scalar adapter and is never used as a substitute for V's independent proof.
 use super::*;
-use crate::store::{Domain, Reference, ResultStore};
 use hirsel_engine_runtime::*;
+use hirsel_engine_store::{Domain, Reference, ResultStore};
 use hirsel_types::storage::{CallableStorageProfile, graph::*};
 use std::{
     sync::{
@@ -587,7 +587,7 @@ impl Task {
             "hirsel.front.storage-graph.action.v2",
             [
                 self.digest.0.as_slice(),
-                crate::store::payload_reads_hash(&reads).0.as_slice(),
+                hirsel_engine_store::payload_reads_hash(&reads).0.as_slice(),
             ],
         ));
         let product = ProductRef::live(

@@ -84,11 +84,11 @@ fn main() {
     }
     if mode == "disk" {
         config.store = Arc::new(
-            hirsel_engine::store::DirStore::new(PathBuf::from(spec["store"].as_str().unwrap()))
+            hirsel_engine_store::DirStore::new(PathBuf::from(spec["store"].as_str().unwrap()))
                 .with_cap(256 << 20),
         );
     } else if mode != "cold" && mode != "cold-once" {
-        config.store = Arc::new(hirsel_engine::store::MemStore::default());
+        config.store = Arc::new(hirsel_engine_store::MemStore::default());
     }
     let compiler = hirsel_front_phases::COMPILER
         .clone()

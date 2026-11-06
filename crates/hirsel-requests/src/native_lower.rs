@@ -30,12 +30,13 @@ pub(super) fn inputs(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hirsel_engine::store::Domain;
-    use hirsel_engine::store::MemStore;
-    use hirsel_engine::store::Reference;
-    use hirsel_engine::store::ResultStore;
     use hirsel_engine::*;
     use hirsel_engine_runtime::*;
+    use hirsel_engine_store as store;
+    use hirsel_engine_store::Domain;
+    use hirsel_engine_store::MemStore;
+    use hirsel_engine_store::Reference;
+    use hirsel_engine_store::ResultStore;
 
     use hirsel_intern::jobs::Jobs;
 
@@ -69,7 +70,7 @@ mod tests {
         verifier: Arc<hirsel_validate::VerifierCache>,
     }
     impl ResultStore for SelectedStore {
-        fn capability(&self) -> hirsel_engine::store::ProviderCapability {
+        fn capability(&self) -> hirsel_engine_store::ProviderCapability {
             self.products.capability()
         }
 

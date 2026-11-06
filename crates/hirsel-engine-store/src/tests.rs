@@ -576,7 +576,7 @@ fn action_index_admission_does_not_fetch_content_and_missing_outputs_miss() {
         content_reads: AtomicUsize,
     }
     impl ResultStore for Counted {
-        fn capability(&self) -> crate::store::ProviderCapability {
+        fn capability(&self) -> crate::ProviderCapability {
             self.inner.capability()
         }
 
@@ -794,7 +794,7 @@ fn explicit_directory_selection_keeps_installed_products_without_forwarding_auth
     );
     seed.put(&query, b"installed index");
     let output = std::process::Command::new(std::env::current_exe().unwrap())
-        .args(["--exact", "store::tests::explicit_directory_selection_keeps_installed_products_without_forwarding_authority", "--nocapture"])
+        .args(["--exact", "tests::explicit_directory_selection_keeps_installed_products_without_forwarding_authority", "--nocapture"])
         .env(CHILD, &local)
         .env("HIRSEL_PRODUCTS", &packaged)
         .output().unwrap();
@@ -852,7 +852,7 @@ fn disabled_writable_cache_keeps_installed_products_and_never_publishes() {
     let output = std::process::Command::new(std::env::current_exe().unwrap())
         .args([
             "--exact",
-            "store::tests::disabled_writable_cache_keeps_installed_products_and_never_publishes",
+            "tests::disabled_writable_cache_keeps_installed_products_and_never_publishes",
             "--nocapture",
         ])
         .env(CHILD, "1")

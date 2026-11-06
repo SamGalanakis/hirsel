@@ -32,8 +32,8 @@ pub trait ObservedEngine:
 {
     fn set_invocation_store(
         &mut self,
-        store: Option<Arc<dyn hirsel_engine::store::ResultStore>>,
-    ) -> Option<Arc<dyn hirsel_engine::store::ResultStore>>;
+        store: Option<Arc<dyn hirsel_engine_store::ResultStore>>,
+    ) -> Option<Arc<dyn hirsel_engine_store::ResultStore>>;
 }
 
 pub struct ObservedSession<E>
@@ -64,7 +64,7 @@ where
 struct InvocationGuard<'a, E: ObservedEngine> {
     session: &'a mut ObservedSession<E>,
     previous_compiler: Option<Compiler>,
-    previous_store: Option<Arc<dyn hirsel_engine::store::ResultStore>>,
+    previous_store: Option<Arc<dyn hirsel_engine_store::ResultStore>>,
 }
 impl<E: ObservedEngine> Drop for InvocationGuard<'_, E> {
     fn drop(&mut self) {
@@ -549,8 +549,8 @@ mod tests {
     impl ObservedEngine for Checker {
         fn set_invocation_store(
             &mut self,
-            store: Option<Arc<dyn hirsel_engine::store::ResultStore>>,
-        ) -> Option<Arc<dyn hirsel_engine::store::ResultStore>> {
+            store: Option<Arc<dyn hirsel_engine_store::ResultStore>>,
+        ) -> Option<Arc<dyn hirsel_engine_store::ResultStore>> {
             let mut config = self.compiler.configuration();
             let previous = config.store.clone();
             if let Some(store) = store {

@@ -49,7 +49,7 @@ pub type Session = crate::resident::ObservedSession<crate::requests::CompilerReq
 pub struct Policy {
     pub verify: Verify,
     pub results: Results,
-    pub verify_store: hirsel_engine::store::VerifyStore,
+    pub verify_store: hirsel_engine_store::VerifyStore,
 }
 impl Policy {
     /// The library default (no result store) with V `verify`.

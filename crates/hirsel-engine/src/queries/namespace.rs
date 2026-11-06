@@ -1,8 +1,8 @@
 //! Immutable inputs of a source transaction. Consumers retain this capture;
 //! they never refresh its declarations, instance bindings or source owners.
 use super::*;
-use crate::store::{Domain, EntryKey, Reference};
 use crate::{NativeRecordContext, NativeRecords};
+use hirsel_engine_store::{Domain, EntryKey, Reference};
 pub(in crate::queries) mod reopen;
 
 const GENERATION: Domain = Domain {
@@ -46,7 +46,7 @@ pub struct NamespaceCapture {
     pub(crate) roots: Box<[DefId]>,
     pub(crate) sources: SourceMap,
     pub(crate) anchors: Arc<NativeRecordContext>,
-    store: Arc<dyn crate::store::ResultStore>,
+    store: Arc<dyn hirsel_engine_store::ResultStore>,
     pub(crate) instances: Arc<hirsel_tir::InstanceBodies>,
     pub(crate) bodies: operation_inputs::InputIndex<DefId, Arc<BodyInput>>,
     pub(crate) registrations: operation_inputs::InputIndex<DefId, Arc<AcceptedFrontRegistration>>,
@@ -119,7 +119,7 @@ struct CaptureInputs {
     staged: BTreeMap<DefPath, crate::comptime::StagedConstant>,
     instances: hirsel_tir::InstanceBodies,
     selected: BTreeMap<DefId, BTreeSet<hirsel_types::GeneratedActualKey>>,
-    store: Option<std::sync::Weak<dyn crate::store::ResultStore>>,
+    store: Option<std::sync::Weak<dyn hirsel_engine_store::ResultStore>>,
     limit: u64,
 }
 impl CaptureInputs {
@@ -537,7 +537,7 @@ impl NamespaceCapture {
         &self,
         path: &DefPath,
         limit: u64,
-    ) -> Result<Option<crate::store::InstalledSemanticInput>, QueryError> {
+    ) -> Result<Option<hirsel_engine_store::InstalledSemanticInput>, QueryError> {
         let Some(owner) = self.inputs.installed_owner(path) else {
             return Ok(None);
         };
@@ -774,7 +774,7 @@ impl QueryEngine {
         let store = self
             .result_store
             .clone()
-            .unwrap_or_else(|| Arc::new(crate::store::NoneStore));
+            .unwrap_or_else(|| Arc::new(hirsel_engine_store::NoneStore));
         let records = NativeRecords::new(self.types.clone(), store.clone());
         let mut bodies = BTreeMap::new();
         let mut private_sources = BTreeMap::new();
@@ -1183,7 +1183,7 @@ impl QueryEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::store::{MemStore, ResultStore};
+    use hirsel_engine_store::{MemStore, ResultStore};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[derive(Default)]
@@ -1192,14 +1192,14 @@ mod tests {
         writes: AtomicUsize,
     }
     impl ResultStore for StoreOff {
-        fn capability(&self) -> crate::store::ProviderCapability {
-            crate::store::ProviderCapability::Absent
+        fn capability(&self) -> hirsel_engine_store::ProviderCapability {
+            hirsel_engine_store::ProviderCapability::Absent
         }
 
         fn name(&self) -> &'static str {
             "capture-store-off"
         }
-        fn get(&self, key: &EntryKey) -> Option<crate::store::Bytes> {
+        fn get(&self, key: &EntryKey) -> Option<hirsel_engine_store::Bytes> {
             self.installed.get(key)
         }
         fn put(&self, _: &EntryKey, _: &[u8]) {
@@ -1384,7 +1384,7 @@ mod tests {
                         engine.items.is_empty(),
                         "warm indexing must leave syntax undemanded"
                     );
-                    engine.verify_store = crate::store::VerifyStore::Recompute;
+                    engine.verify_store = hirsel_engine_store::VerifyStore::Recompute;
                     engine = engine.with_result_store(store.clone());
                     engine.signature_inputs();
                     engine.sources = engine.sources.clone().retain_owner(Arc::new(()));

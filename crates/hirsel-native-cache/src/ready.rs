@@ -66,7 +66,8 @@ pub(crate) fn admit_layouts(
             + size_of::<LayoutMemory>()
             + 4 * size_of::<usize>(),
     );
-    w.tree::<Reference, Arc<hirsel_lir::products::CheckedLayouts>>(1);
+    w.add(NativeCache::layout_owner_bytes());
+    w.tree::<Reference, std::sync::Weak<hirsel_lir::products::CheckedLayouts>>(1);
     hirsel_native::execution_plan::retained::table(&mut w, &layouts.table);
     w.flat_vec(&layouts.layouts);
     w.flat_vec(&layouts.abis);
@@ -170,6 +171,7 @@ impl ReadyQueries {
     }
     pub fn fresh_validator_bytes() -> u64 {
         (size_of::<NativeCache>()
+            + NativeCache::layout_cache_bytes()
             + size_of::<SelectedContents>()
             + size_of::<Arc<dyn ResultStore>>()
             + 6 * size_of::<usize>()) as u64

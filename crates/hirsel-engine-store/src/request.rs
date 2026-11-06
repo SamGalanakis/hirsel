@@ -481,7 +481,9 @@ impl ResultStore for RequestStore {
             .checked_add(ENTRY_CHARGE)
             .ok_or(ProductArchiveError::LayoutOverflow)?;
         self.memory.archive_charge(working, "archive copy")?;
-        let bytes = Bytes::from(bytes.to_vec());
+        let copied = bytes.to_vec();
+        drop(bytes);
+        let bytes = Bytes::from(copied);
         let charge =
             hirsel_engine_runtime::ProductArchive::checked_import_charge(reference, &bytes)
                 .map_err(ProductArchiveError::InvalidArchive)

@@ -138,6 +138,14 @@ fn native_products_19_only_actual_validation_can_issue_a_local_output() {
         .validate_and_publish(subject, policy, ready, &original, &[], &[])
         .unwrap();
     assert_eq!(ready_output.unwrap().stage(), StageKind::Ready);
+    let expired = Arc::downgrade(&closure);
+    drop(closure);
+    assert!(
+        expired.upgrade().is_none(),
+        "the validator must release layouts after their last consumer"
+    );
+    assert_eq!(Arc::strong_count(&admission), 1);
+    let (closure, _) = cache.read(&output, &target).unwrap();
     drop(cache);
     assert_eq!(
         Arc::strong_count(&admission),

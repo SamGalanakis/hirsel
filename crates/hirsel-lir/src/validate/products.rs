@@ -13,7 +13,7 @@ use hirsel_core_contract::{OperationId, OperationRow};
 use hirsel_syntax::ContentHash;
 use hirsel_syntax::DefPath;
 use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 
 const RECEIPT: Domain = Domain {
     kind: 0x4300_0001,
@@ -217,8 +217,29 @@ impl NativeOutput {
 /// Uses the selected ordinary content provider. The only extra table is local
 /// native proof authority; it is never a semantic invalidation graph/provider.
 type LayoutAdmission = dyn Fn(&CheckedLayouts) -> Option<Arc<dyn Send + Sync>> + Send + Sync;
+type LayoutRows = BTreeMap<Reference, Weak<CheckedLayouts>>;
+struct LayoutLease {
+    cache: Arc<Mutex<LayoutRows>>,
+    reference: Reference,
+    owner: Weak<CheckedLayouts>,
+    _admission: Arc<dyn Send + Sync>,
+}
+impl Drop for LayoutLease {
+    fn drop(&mut self) {
+        let mut rows = self.cache.lock().unwrap_or_else(|e| e.into_inner());
+        if rows
+            .get(&self.reference)
+            .is_some_and(|owner| Weak::ptr_eq(owner, &self.owner))
+        {
+            rows.remove(&self.reference);
+            if rows.is_empty() {
+                *rows = BTreeMap::new();
+            }
+        }
+    }
+}
 pub struct NativeCache {
-    layouts: Mutex<BTreeMap<Reference, Arc<CheckedLayouts>>>,
+    layouts: Arc<Mutex<LayoutRows>>,
     layout_admission: Option<Arc<LayoutAdmission>>,
     contents: Arc<dyn Contents>,
     local: Option<Store>,
@@ -232,7 +253,7 @@ impl NativeCache {
             contents,
             local,
             accepted: Mutex::default(),
-            layouts: Mutex::default(),
+            layouts: Arc::default(),
             layout_admission: None,
         }
     }
@@ -245,6 +266,17 @@ impl NativeCache {
     ) -> Self {
         self.layout_admission = Some(Arc::new(admit));
         self
+    }
+
+    /// Complete shared index allocation, also held by detached layout readers.
+    pub fn layout_cache_bytes() -> usize {
+        size_of::<Mutex<LayoutRows>>() + 2 * size_of::<usize>()
+    }
+
+    /// Lease allocation and shared index backing retained by a layout reader.
+    /// The caller separately admits its tree row and checked layout buffers.
+    pub fn layout_owner_bytes() -> usize {
+        size_of::<LayoutLease>() + 2 * size_of::<usize>() + Self::layout_cache_bytes()
     }
 
     pub fn layouts(
@@ -268,11 +300,12 @@ impl NativeCache {
         // provider range. Verify the complete reference on every boundary read.
         let bytes = self.get(reference).ok_or("missing native layout product")?;
         let mut retained = self.layouts.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(owner) = retained.get(&reference) {
+        if let Some(owner) = retained.get(&reference).and_then(Weak::upgrade) {
+            drop(retained);
             if owner.table.target != target.digest() {
                 return Err("native layout product target differs".into());
             }
-            return Ok(owner.clone());
+            return Ok(owner);
         }
         let closure = match captured {
             Some(closure) => closure,
@@ -281,14 +314,27 @@ impl NativeCache {
                     .map_err(|e| format!("native layout product: {e:?}"))?
             }
         };
+        drop(bytes);
         let mut checked = CheckedLayouts::new(closure, target)?;
         if let Some(admit) = &self.layout_admission {
             checked.admission =
                 Some(admit(&checked).ok_or("native layout metadata exceeds admission")?);
         }
-        let checked = Arc::new(checked);
+        let checked = if let Some(admission) = checked.admission.take() {
+            Arc::new_cyclic(|owner| {
+                checked.admission = Some(Arc::new(LayoutLease {
+                    cache: self.layouts.clone(),
+                    reference,
+                    owner: owner.clone(),
+                    _admission: admission,
+                }));
+                checked
+            })
+        } else {
+            Arc::new(checked)
+        };
         if checked.admission.is_some() {
-            retained.insert(reference, checked.clone());
+            retained.insert(reference, Arc::downgrade(&checked));
         }
         Ok(checked)
     }

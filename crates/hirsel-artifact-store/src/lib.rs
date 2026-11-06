@@ -70,9 +70,52 @@ pub struct Reference {
     pub len: u64,
 }
 
+/// Failure to obtain required content. Absence is distinct from an unreadable
+/// backing or a request refusing the read under its existing allowance.
+#[derive(Debug)]
+pub enum ContentReadError {
+    NotFound,
+    InvalidContent,
+    Unreadable(io::Error),
+    Refused(&'static str),
+    Admission {
+        stage: &'static str,
+        requested: u64,
+        retained: u64,
+        limit: u64,
+    },
+}
+impl std::fmt::Display for ContentReadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotFound => f.write_str("content not found in the selected provider"),
+            Self::InvalidContent => f.write_str("content differs from its complete reference"),
+            Self::Unreadable(error) => write!(f, "content unreadable: {error}"),
+            Self::Refused(reason) => write!(f, "content read refused: {reason}"),
+            Self::Admission {
+                stage,
+                requested,
+                retained,
+                limit,
+            } => write!(
+                f,
+                "{stage} admission refused: requested {requested} bytes, retained {retained}, limit {limit}"
+            ),
+        }
+    }
+}
+impl std::error::Error for ContentReadError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Unreadable(error) => Some(error),
+            _ => None,
+        }
+    }
+}
+
 /// Content access supplies integrity, never query or verifier authority.
 pub trait Contents: Send + Sync {
-    fn get_content(&self, reference: Reference) -> Option<Bytes>;
+    fn get_content(&self, reference: Reference) -> Result<Bytes, ContentReadError>;
     fn put_content(&self, domain: Domain, bytes: &[u8]) -> Option<Reference>;
 }
 
@@ -95,27 +138,33 @@ impl Memory {
 /// sorted by output digest; complete container validation occurs on demand.
 pub struct Embedded(pub &'static [(Reference, &'static [u8])]);
 impl Contents for Embedded {
-    fn get_content(&self, reference: Reference) -> Option<Bytes> {
+    fn get_content(&self, reference: Reference) -> Result<Bytes, ContentReadError> {
         let n = self
             .0
             .binary_search_by_key(&reference.output.0, |(r, _)| r.output.0)
-            .ok()?;
+            .map_err(|_| ContentReadError::NotFound)?;
         let (actual, bytes) = self.0[n];
         if actual != reference {
-            return None;
+            return Err(ContentReadError::InvalidContent);
         }
         checked_content(Arc::new(Region::Static(bytes)), reference)
+            .ok_or(ContentReadError::InvalidContent)
     }
     fn put_content(&self, domain: Domain, bytes: &[u8]) -> Option<Reference> {
         let reference = domain.reference(bytes)?;
-        self.get_content(reference).map(|_| reference)
+        self.get_content(reference).ok().map(|_| reference)
     }
 }
 impl Contents for Memory {
-    fn get_content(&self, reference: Reference) -> Option<Bytes> {
+    fn get_content(&self, reference: Reference) -> Result<Bytes, ContentReadError> {
         let entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
-        let (actual, bytes) = entries.get(&reference.output.0)?;
-        (*actual == reference).then(|| bytes.clone())
+        let (actual, bytes) = entries
+            .get(&reference.output.0)
+            .ok_or(ContentReadError::NotFound)?;
+        if *actual != reference {
+            return Err(ContentReadError::InvalidContent);
+        }
+        Ok(bytes.clone())
     }
     fn put_content(&self, domain: Domain, bytes: &[u8]) -> Option<Reference> {
         let reference = domain.reference(bytes)?;
@@ -383,24 +432,29 @@ pub struct HeldContent {
     reference: Reference,
 }
 impl HeldContent {
-    pub fn get(&self) -> Option<Bytes> {
+    pub fn get(&self) -> Result<Bytes, ContentReadError> {
         let len = usize::try_from(self.reference.len)
-            .ok()?
-            .checked_add(HEADER)?;
-        let file = File::open(&self.path).ok()?;
-        if file.metadata().ok()?.len() != len as u64 {
-            return None;
+            .ok()
+            .and_then(|len| len.checked_add(HEADER))
+            .ok_or(ContentReadError::InvalidContent)?;
+        let file = File::open(&self.path).map_err(ContentReadError::Unreadable)?;
+        if file.metadata().map_err(ContentReadError::Unreadable)?.len() != len as u64 {
+            return Err(ContentReadError::InvalidContent);
         }
         #[cfg(unix)]
         {
             use std::os::unix::fs::FileExt;
             let mut bytes = vec![0; len];
-            file.read_exact_at(&mut bytes, 0).ok()?;
+            file.read_exact_at(&mut bytes, 0)
+                .map_err(ContentReadError::Unreadable)?;
             checked_container(Bytes::from(bytes), self.reference)
+                .ok_or(ContentReadError::InvalidContent)
         }
         #[cfg(not(unix))]
         {
-            None
+            Err(ContentReadError::Refused(
+                "provider inode reads require Unix",
+            ))
         }
     }
     pub fn retained_bytes(&self) -> u64 {
@@ -680,8 +734,9 @@ impl std::fmt::Debug for Store {
     }
 }
 impl Contents for Store {
-    fn get_content(&self, reference: Reference) -> Option<Bytes> {
-        self.get(reference)
+    fn get_content(&self, reference: Reference) -> Result<Bytes, ContentReadError> {
+        checked_container(self.raw_container(reference)?, reference)
+            .ok_or(ContentReadError::InvalidContent)
     }
     fn put_content(&self, domain: Domain, bytes: &[u8]) -> Option<Reference> {
         self.put(domain, bytes).ok()
@@ -946,7 +1001,7 @@ impl Store {
     /// Map a demanded record and validate its complete content at this boundary.
     /// Mapping alone reads no payload pages; integrity checking necessarily does.
     pub fn get(&self, reference: Reference) -> Option<Bytes> {
-        checked_container(self.raw_container(reference)?, reference)
+        Contents::get_content(self, reference).ok()
     }
     /// Lease a standalone provider inode under a caller-owned private path.
     /// Small packed records and cross-filesystem links use the caller's spool.
@@ -982,17 +1037,21 @@ impl Store {
     /// Copy an untrusted container before checking it. Consumers needing an
     /// owned immutable snapshot can validate that snapshot once, rather than
     /// checking a mapping and then checking its copied payload again.
-    pub fn get_owned(&self, reference: Reference) -> Option<Bytes> {
+    pub fn get_owned(&self, reference: Reference) -> Result<Bytes, ContentReadError> {
         let bytes = self.raw_container(reference)?;
         self.count(Counter::ContentChecks, 1);
         if reference.len > MAX_RECORD as u64
-            || usize::try_from(reference.len).ok()?.checked_add(HEADER)? != bytes.len()
+            || usize::try_from(reference.len)
+                .ok()
+                .and_then(|len| len.checked_add(HEADER))
+                != Some(bytes.len())
         {
-            return None;
+            return Err(ContentReadError::InvalidContent);
         }
         checked_container(Bytes::from(bytes.to_vec()), reference)
+            .ok_or(ContentReadError::InvalidContent)
     }
-    fn raw_container(&self, reference: Reference) -> Option<Bytes> {
+    fn raw_container(&self, reference: Reference) -> Result<Bytes, ContentReadError> {
         if reference.len <= pack::SMALL as u64 {
             return self.packed_get(0, reference.output.0);
         }
@@ -1002,7 +1061,7 @@ impl Store {
         match self.open_region(&path, Counter::StandaloneOpens) {
             Ok(region) => {
                 let len = region.bytes().len();
-                Some(Bytes {
+                Ok(Bytes {
                     region,
                     range: 0..len,
                 })
@@ -1010,13 +1069,13 @@ impl Store {
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
                 self.packed_get(0, reference.output.0)
             }
-            Err(_) => None,
+            Err(error) => Err(ContentReadError::Unreadable(error)),
         }
     }
     /// A checked ordinary container, including its header, for embedding the
     /// same representation in a toolchain build. No second codec is involved.
     pub fn container(&self, reference: Reference) -> Option<Bytes> {
-        let bytes = self.raw_container(reference)?;
+        let bytes = self.raw_container(reference).ok()?;
         checked_container(bytes.clone(), reference)?;
         Some(bytes)
     }
@@ -1029,7 +1088,7 @@ impl Store {
     /// Check an owned association snapshot. Its output is demanded separately
     /// by complete reference, so no mutable output view crosses this boundary.
     pub fn lookup_owned(&self, address: Address) -> Option<Association> {
-        let bytes = self.packed_get(1, address.0)?;
+        let bytes = self.packed_get(1, address.0).ok()?;
         if bytes.len() != ROOT_LEN {
             return None;
         }
@@ -1038,9 +1097,10 @@ impl Store {
     /// Carry the same opened output through action checking to consumption,
     /// avoiding an output reopen between association lookup and validation.
     pub fn lookup_open(&self, address: Address) -> Option<OpenedAssociation> {
-        let bytes = self.packed_get(1, address.0)?;
+        let bytes = self.packed_get(1, address.0).ok()?;
         let association = checked_association(&bytes, address)?;
         self.raw_container(association.reference)
+            .ok()
             .filter(|bytes| {
                 bytes.len() as u64
                     == association
@@ -1062,7 +1122,7 @@ impl Store {
         action: Action,
         reference: Reference,
     ) -> io::Result<()> {
-        if self.raw_container(reference).is_none_or(|bytes| {
+        if self.raw_container(reference).map_or(true, |bytes| {
             bytes.len() as u64 != reference.len.checked_add(HEADER as u64).unwrap_or(u64::MAX)
         }) {
             return Err(invalid());

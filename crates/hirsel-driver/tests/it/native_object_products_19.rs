@@ -12,7 +12,7 @@ use hirsel_native::object_queries::ObjectTaskFactory;
 use hirsel_native::object_queries::fragment_product;
 use hirsel_native::object_queries::load_object;
 use hirsel_native::query_model::NativeRootKey;
-use hirsel_native::query_model::NativeRoots;
+use hirsel_native::query_model::{NativeProducts, NativeRoots};
 use hirsel_native::root_source::NativeLinkFacts;
 use hirsel_native::root_source::NativeLinkSource;
 use hirsel_native_cache::declarations::NativeDeclarations;
@@ -571,4 +571,181 @@ fn compile_settled<R>(
         },
         output,
     )
+}
+
+#[test]
+fn native_products_materialize_stored_ready_bodies_with_bounded_live_layout_readers() {
+    hirsel_intern::jobs::with_compiler_stack(|| {
+        let directory = tempfile::tempdir().unwrap();
+        let transport = 64 << 20;
+        let budget = hirsel_engine_admission::ProcessBudget::new(transport);
+        let request = Arc::new(
+            hirsel_engine_store::RequestStore::with_scratch(
+                Arc::new(hirsel_engine_store::NoneStore),
+                budget.reserve(transport).unwrap(),
+                directory.path(),
+                transport,
+            )
+            .unwrap(),
+        );
+        let store: Arc<dyn ResultStore> = request.clone();
+        let mut engine = QueryEngine::new(
+            default_environment(),
+            hirsel_front_phases::compiler_adapters(),
+        )
+        .with_result_store(store.clone());
+        let mut source = String::new();
+        let mut roots = Vec::new();
+        for index in 0..64 {
+            let fields = (0..16)
+                .map(|field| format!("x{field}:u64"))
+                .collect::<Vec<_>>()
+                .join(",");
+            source.push_str(&format!("pub type Payload{index} {{ {fields} }}\npub fn body{index}(value:Payload{index})->u64 {{ {index}u64 }}\n"));
+            let mut owner = entry_path(&default_context());
+            owner.0.name = format!("body{index}");
+            roots.push(owner);
+        }
+        let expected = roots
+            .iter()
+            .enumerate()
+            .map(|(index, owner)| {
+                (
+                    owner.clone(),
+                    hirsel_lir::ir::ConstantValue::Integer(index as u128),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        roots.sort();
+        let file = engine
+            .sources
+            .add("bounded-ready-products.hir", source)
+            .unwrap();
+        engine.parse_file(file, &default_context()).unwrap();
+        let mut options =
+            hirsel_native::Options::new(hirsel_native::TargetSpec::x86_64_unknown_linux_gnu());
+        options.validation = hirsel_native::Validation::Ready;
+        let (_, ()) = compile_roots_inspect(
+            &mut engine,
+            store.clone(),
+            &roots,
+            &roots,
+            hirsel_native::Backend::Cranelift,
+            hirsel_native::OptLevel::None,
+            options,
+            false,
+            hirsel_intern::jobs::Jobs::ONE,
+            hirsel_engine_store::VerifyStore::Off,
+            |products, _, readies| {
+                // Unrelated live transport leaves room for one closure and
+                // read buffer, not the sum of every decoded layout reader.
+                let pressure = request
+                    .admit_product_memory(transport - request.retained_bytes() - (128 << 10))
+                    .unwrap();
+                products
+                    .with_ready(readies, |units, _| {
+                        let mut answers = BTreeMap::new();
+                        for unit in units {
+                            let unit = unit.unit();
+                            let Some(expected_value) = expected.get(&unit.header.definition) else {
+                                continue;
+                            };
+                            let returns = unit
+                                .terminators
+                                .iter()
+                                .filter_map(|term| match term {
+                                    hirsel_lir::ir::Terminator::Return(Some(value)) => Some(*value),
+                                    _ => None,
+                                })
+                                .collect::<Vec<_>>();
+                            assert!(!returns.is_empty());
+                            for returned in returns {
+                                use hirsel_lir::ir::Inst;
+                                let mut pending = vec![returned];
+                                let mut seen = std::collections::BTreeSet::new();
+                                let mut answer = None;
+                                while let Some(value) = pending.pop() {
+                                    if !seen.insert(value) {
+                                        continue;
+                                    }
+                                    if let Some(constant) =
+                                        unit.instructions.iter().find_map(|inst| match inst {
+                                            Inst::Const { result, constant }
+                                                if *result == value =>
+                                            {
+                                                Some(
+                                                    unit.tables.constants[constant.index()]
+                                                        .value
+                                                        .clone(),
+                                                )
+                                            }
+                                            _ => None,
+                                        })
+                                    {
+                                        assert_eq!(&constant, expected_value);
+                                        answer = Some(constant);
+                                        continue;
+                                    }
+                                    let forwarded =
+                                        unit.instructions.iter().find_map(|inst| match inst {
+                                            Inst::Read {
+                                                result, reaching, ..
+                                            }
+                                            | Inst::Copy {
+                                                result, reaching, ..
+                                            } if *result == value => Some(*reaching),
+                                            Inst::CopyValue {
+                                                result,
+                                                value: source,
+                                            } if *result == value => Some(*source),
+                                            Inst::Store {
+                                                version,
+                                                value: source,
+                                                ..
+                                            } if *version == value => Some(*source),
+                                            _ => None,
+                                        });
+                                    if let Some(source) = forwarded {
+                                        pending.push(source);
+                                        continue;
+                                    }
+                                    let (block, ordinal) = unit
+                                        .blocks
+                                        .iter()
+                                        .enumerate()
+                                        .find_map(|(block, data)| {
+                                            data.parameters
+                                                .get(&unit.pools.values)
+                                                .unwrap()
+                                                .iter()
+                                                .position(|parameter| *parameter == value)
+                                                .map(|ordinal| (block, ordinal))
+                                        })
+                                        .unwrap_or_else(|| {
+                                            panic!("unresolved return value {value:?}: {unit:#?}")
+                                        });
+                                    let incoming = unit
+                                        .tables
+                                        .edges
+                                        .iter()
+                                        .filter(|edge| edge.target.index() == block)
+                                        .map(|edge| {
+                                            edge.arguments.get(&unit.pools.values).unwrap()[ordinal]
+                                        })
+                                        .collect::<Vec<_>>();
+                                    assert!(!incoming.is_empty());
+                                    pending.extend(incoming);
+                                }
+                                answers.insert(unit.header.definition.clone(), answer.unwrap());
+                            }
+                        }
+                        assert_eq!(answers, expected);
+                        Ok(())
+                    })
+                    .unwrap();
+                drop(pressure);
+            },
+            |_, _| (),
+        );
+    });
 }

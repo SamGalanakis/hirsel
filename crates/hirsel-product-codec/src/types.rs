@@ -295,7 +295,7 @@ impl TypeRecords {
     }
 }
 pub(super) fn component(store: &dyn Contents, reference: TypeRef) -> Option<CheckedTypeComponent> {
-    CheckedTypeComponent::open(store.get_content(reference.reference())?, reference)
+    CheckedTypeComponent::open(store.get_content(reference.reference()).ok()?, reference)
 }
 pub struct ProductTypes {
     pub records: Arc<TypeRecords>,
@@ -320,7 +320,10 @@ mod tests {
         reads: AtomicUsize,
     }
     impl Contents for Counted {
-        fn get_content(&self, reference: Reference) -> Option<Bytes> {
+        fn get_content(
+            &self,
+            reference: Reference,
+        ) -> Result<Bytes, hirsel_artifact_store::ContentReadError> {
             self.reads.fetch_add(1, Ordering::Relaxed);
             self.inner.get_content(reference)
         }

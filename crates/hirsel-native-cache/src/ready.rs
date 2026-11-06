@@ -89,8 +89,11 @@ pub(crate) fn admit_layouts(
 
 struct SelectedContents(Arc<dyn ResultStore>);
 impl Contents for SelectedContents {
-    fn get_content(&self, reference: Reference) -> Option<hirsel_engine_store::Bytes> {
-        self.0.get_content(reference)
+    fn get_content(
+        &self,
+        reference: Reference,
+    ) -> Result<hirsel_engine_store::Bytes, hirsel_engine_store::ContentReadError> {
+        self.0.read_product_content(reference).map_err(Into::into)
     }
     fn put_content(&self, domain: Domain, bytes: &[u8]) -> Option<Reference> {
         self.0.put_content(domain, bytes)
@@ -325,7 +328,9 @@ impl ReadyQueries {
                 environment,
             )
             .ok_or("Ready materialization lost native output")?;
-        self.native.read(&accepted, environment.target)
+        self.native
+            .read(&accepted, environment.target)
+            .map_err(|e| e.to_string())
     }
 
     fn check_miss(&self, key: &InstanceAddress, miss: &ReadyMiss<'_>) -> Result<(), String> {

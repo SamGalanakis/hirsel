@@ -214,6 +214,39 @@ impl NativeOutput {
     }
 }
 
+/// Failure at a demanded native materialization boundary. The selected
+/// provider's refusal survives intact, with the exact required reference.
+#[derive(Debug)]
+pub enum NativeReadError {
+    EnvironmentChanged,
+    Layout(String),
+    Body {
+        reference: Reference,
+        reason: hirsel_artifact_store::ContentReadError,
+    },
+    Decode(String),
+}
+impl std::fmt::Display for NativeReadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::EnvironmentChanged => f.write_str("native output environment changed"),
+            Self::Layout(reason) => write!(f, "native layout product: {reason}"),
+            Self::Body { reference, reason } => {
+                write!(f, "required native body product {reference:?}: {reason}")
+            }
+            Self::Decode(reason) => write!(f, "native body product decode: {reason}"),
+        }
+    }
+}
+impl std::error::Error for NativeReadError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Body { reason, .. } => Some(reason),
+            _ => None,
+        }
+    }
+}
+
 /// Uses the selected ordinary content provider. The only extra table is local
 /// native proof authority; it is never a semantic invalidation graph/provider.
 type LayoutAdmission = dyn Fn(&CheckedLayouts) -> Option<Arc<dyn Send + Sync>> + Send + Sync;
@@ -340,7 +373,7 @@ impl NativeCache {
     }
 
     fn get(&self, reference: Reference) -> Option<hirsel_artifact_store::Bytes> {
-        let bytes = self.contents.get_content(reference)?;
+        let bytes = self.contents.get_content(reference).ok()?;
         bytes.matches_reference(reference).then_some(bytes)
     }
     fn put(&self, domain: Domain, bytes: &[u8]) -> Option<Reference> {
@@ -595,20 +628,33 @@ impl NativeCache {
         &self,
         output: &NativeOutput,
         target: &TargetSpec,
-    ) -> Result<(Arc<CheckedLayouts>, UnitBody), String> {
+    ) -> Result<(Arc<CheckedLayouts>, UnitBody), NativeReadError> {
         if output.record.target != target.digest()
             || output.record.lir != crate::LIR_VERSION
             || output.record.validator != crate::VALIDATOR_VERSION
         {
-            return Err("native output environment changed".into());
+            return Err(NativeReadError::EnvironmentChanged);
         }
-        let closure = self.layouts(output.layouts(), target)?;
+        let closure = self
+            .layouts(output.layouts(), target)
+            .map_err(NativeReadError::Layout)?;
+        let body_error = |reason| NativeReadError::Body {
+            reference: output.body(),
+            reason,
+        };
         let body = self
-            .get(output.body())
-            .ok_or("missing native body product")?;
-        let body: UnitBody =
-            hirsel_codec::from_text(std::str::from_utf8(&body).map_err(|e| e.to_string())?)
-                .map_err(|e| format!("native body product: {e:?}"))?;
+            .contents
+            .get_content(output.body())
+            .map_err(body_error)?;
+        if !body.matches_reference(output.body()) {
+            return Err(body_error(
+                hirsel_artifact_store::ContentReadError::InvalidContent,
+            ));
+        }
+        let body: UnitBody = hirsel_codec::from_text(
+            std::str::from_utf8(&body).map_err(|e| NativeReadError::Decode(e.to_string()))?,
+        )
+        .map_err(|e| NativeReadError::Decode(format!("{e:?}")))?;
         Ok((closure, body))
     }
 
@@ -621,7 +667,9 @@ impl NativeCache {
         if output.stage() != S::KIND {
             return Err("native output stage differs".into());
         }
-        let (closure, body) = self.read(output, inputs.target)?;
+        let (closure, body) = self
+            .read(output, inputs.target)
+            .map_err(|e| e.to_string())?;
         let binding = closure.binding();
         if &binding.table != inputs.layouts {
             return Err("native materialization needs its bound local table".into());

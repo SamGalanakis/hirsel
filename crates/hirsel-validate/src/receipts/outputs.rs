@@ -367,7 +367,11 @@ mod tests {
             Mutex<HashMap<ContentHash, Reference>>,
         );
         impl hirsel_artifact_store::Contents for Rows {
-            fn get_content(&self, reference: Reference) -> Option<hirsel_artifact_store::Bytes> {
+            fn get_content(
+                &self,
+                reference: Reference,
+            ) -> Result<hirsel_artifact_store::Bytes, hirsel_artifact_store::ContentReadError>
+            {
                 self.0.lock().unwrap().get_content(reference)
             }
             fn put_content(&self, domain: Domain, bytes: &[u8]) -> Option<Reference> {
@@ -618,7 +622,7 @@ mod tests {
                     )
                     .unwrap();
                 assert_eq!(output.reference(), expected);
-                assert!(cache.contents().get_content(expected).is_some());
+                assert!(cache.contents().get_content(expected).is_ok());
                 assert!(
                     cache
                         .read_definition(
@@ -1124,7 +1128,7 @@ impl StoredDefinitionOutput {
         {
             return None;
         }
-        cache.contents().get_content(self.reference)?;
+        cache.contents().get_content(self.reference).ok()?;
         Some(VerifiedDefinitionOutput {
             owner: self.owner,
             reference: self.reference,
@@ -1143,7 +1147,7 @@ impl VerifierCache {
         &self,
         output: &VerifiedDefinitionOutput,
     ) -> Option<(StoredDefinitionOutput, Vec<u8>)> {
-        self.contents().get_content(output.reference)?;
+        self.contents().get_content(output.reference).ok()?;
         let record = Record {
             subject: output.observation_identity(),
             owner: output.owner,
@@ -1290,7 +1294,7 @@ impl VerifierCache {
         {
             return None;
         }
-        self.contents().get_content(record.reference)?;
+        self.contents().get_content(record.reference).ok()?;
         Some(VerifiedDefinitionOutput {
             owner,
             reference: record.reference,
@@ -1322,7 +1326,7 @@ impl VerifierCache {
         {
             return None;
         }
-        let bytes = self.contents().get_content(output.reference)?;
+        let bytes = self.contents().get_content(output.reference).ok()?;
         let record: ReplayRecord = bincode::DefaultOptions::new()
             .with_fixint_encoding()
             .with_limit(bytes.len() as u64)

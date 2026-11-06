@@ -607,7 +607,7 @@ impl InstalledRecords {
     }
     pub(crate) fn content(&self, reference: Reference) -> Option<Bytes> {
         self.contents.binary_search(&reference).ok()?;
-        self.store.get_owned(reference)
+        self.store.get_owned(reference).ok()
     }
     pub fn metadata_bytes(&self) -> usize {
         let mut weight = hirsel_query_products::retained::MetadataWeight::default();
@@ -640,7 +640,7 @@ impl InstalledSourceRecords {
         let reference = *self.rows.get(&key.0)?;
         match self.operation.upgrade() {
             Some(operation) => operation.content(reference),
-            None => self.store.get_owned(reference),
+            None => self.store.get_owned(reference).ok(),
         }
     }
     pub fn metadata_bytes(&self) -> usize {
@@ -826,6 +826,7 @@ impl InstalledPackage {
         }
         let bytes = store
             .get_owned(row.reference)
+            .ok()
             .ok_or("corrupt installed package product")?;
         let mut installed = manifest::decode(&bytes)
             .map_err(|error| format!("corrupt installed package: {error}"))?;

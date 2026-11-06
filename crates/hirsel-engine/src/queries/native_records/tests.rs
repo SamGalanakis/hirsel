@@ -570,16 +570,16 @@ impl hirsel_artifact_store::Contents for LazyRowsContents {
     fn get_content(
         &self,
         reference: hirsel_artifact_store::Reference,
-    ) -> Option<hirsel_artifact_store::Bytes> {
+    ) -> Result<hirsel_artifact_store::Bytes, hirsel_artifact_store::ContentReadError> {
         use std::sync::atomic::Ordering;
         self.reads.fetch_add(1, Ordering::Relaxed);
         let bytes = self.memory.get_content(reference)?;
         if *self.corrupt.lock().unwrap() == Some(reference) {
             let mut bytes = bytes.to_vec();
             bytes[0] ^= 1;
-            Some(bytes.into())
+            Ok(bytes.into())
         } else {
-            Some(bytes)
+            Ok(bytes)
         }
     }
     fn put_content(

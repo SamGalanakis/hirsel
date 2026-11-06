@@ -47,11 +47,16 @@ mod tests {
         missing: std::sync::Mutex<Option<Reference>>,
     }
     impl store::Contents for EvictableVerifier {
-        fn get_content(&self, reference: Reference) -> Option<store::Bytes> {
+        fn get_content(
+            &self,
+            reference: Reference,
+        ) -> Result<store::Bytes, hirsel_artifact_store::ContentReadError> {
             if *self.missing.lock().unwrap() == Some(reference) {
-                return None;
+                return Err(store::ContentReadError::NotFound);
             }
-            self.contents.get_content(reference)
+            self.contents
+                .read_product_content(reference)
+                .map_err(Into::into)
         }
         fn put_content(&self, domain: Domain, bytes: &[u8]) -> Option<Reference> {
             self.contents.put_content(domain, bytes)

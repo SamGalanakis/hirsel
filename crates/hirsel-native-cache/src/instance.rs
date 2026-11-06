@@ -256,7 +256,9 @@ impl InstanceQueries {
                 environment,
             )
             .ok_or("Value materialization lost native output")?;
-        self.native.read(&accepted, environment.target)
+        self.native
+            .read(&accepted, environment.target)
+            .map_err(|e| e.to_string())
     }
 
     /// Actual one-instance miss: C chooses the Value/layout envelopes; equations

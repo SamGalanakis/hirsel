@@ -271,9 +271,11 @@ impl Store {
         index::find(&state.index.as_ref()?.generation, index_key(tag, key)?)
             .map(|l| self.path(l.segment, "packs"))
     }
-    pub(super) fn packed_get(&self, tag: u8, key: ContentHash) -> Option<Bytes> {
+    pub(super) fn packed_get(&self, tag: u8, key: ContentHash) -> Result<Bytes, ContentReadError> {
         let mut state = self.state();
-        let source = self.packed_source_in(&mut state, tag, key)?;
+        let source = self
+            .packed_source_in(&mut state, tag, key)
+            .ok_or(ContentReadError::NotFound)?;
         // Publication renames private segments under this state lock. Open
         // their bytes before releasing it, while published paths stay stable.
         if matches!(source, Source::File { .. }) {
@@ -282,9 +284,9 @@ impl Store {
         drop(state);
         self.read_packed(source)
     }
-    pub(super) fn read_packed(&self, source: Source) -> Option<Bytes> {
+    pub(super) fn read_packed(&self, source: Source) -> Result<Bytes, ContentReadError> {
         let (path, offset, len) = match source {
-            Source::Pending(bytes) => return Some(bytes),
+            Source::Pending(bytes) => return Ok(bytes),
             Source::Published {
                 segment,
                 offset,
@@ -293,8 +295,9 @@ impl Store {
             Source::File { path, offset, len } => (path, offset, len),
         };
         self.open_segment(&path, false)
-            .ok()?
+            .map_err(ContentReadError::Unreadable)?
             .range(u64::from(offset), u64::from(len), 8)
+            .ok_or(ContentReadError::InvalidContent)
     }
     pub(super) fn packed_source(&self, tag: u8, key: ContentHash) -> Option<Source> {
         self.packed_source_in(&mut self.state(), tag, key)

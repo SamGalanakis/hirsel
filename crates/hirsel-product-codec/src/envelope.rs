@@ -238,7 +238,7 @@ impl IndexedEnvelope {
     }
     pub fn type_component(&self, index: u32, store: &dyn Contents) -> Option<CheckedTypeComponent> {
         let reference = self.type_reference(index)?;
-        CheckedTypeComponent::open(store.get_content(reference.reference())?, reference)
+        CheckedTypeComponent::open(store.get_content(reference.reference()).ok()?, reference)
     }
     pub fn payload(&self) -> Bytes {
         self.bytes
@@ -613,8 +613,11 @@ mod tests {
         assert!(envelope.type_component(0, &Memory::default()).is_none());
         struct Lying(Bytes);
         impl Contents for Lying {
-            fn get_content(&self, _: Reference) -> Option<Bytes> {
-                Some(self.0.clone())
+            fn get_content(
+                &self,
+                _: Reference,
+            ) -> Result<Bytes, hirsel_artifact_store::ContentReadError> {
+                Ok(self.0.clone())
             }
             fn put_content(&self, _: Domain, _: &[u8]) -> Option<Reference> {
                 None

@@ -753,7 +753,7 @@ impl NativeRoots for RootProducts {
         let mut captured = Vec::new();
         let mut linkage = Vec::new();
         let mut contexts = Vec::new();
-        for key in &root.instances {
+        let closures = root.instances.iter().map(|key| {
             let product = *selected
                 .get(&key.address(READY_KIND).0)
                 .ok_or("missing selected link Ready")?;
@@ -786,19 +786,17 @@ impl NativeRoots for RootProducts {
                 return Err("link emission context differs from admitted instance".into());
             }
             contexts.push(context);
-            captured.push((product, closure));
+            captured.push(product);
             linkage.push(checked);
-        }
+            Ok(closure)
+        });
+        let binding = Binding::from_checked(environment.target, closures)?;
         hirsel_lir::validate::check_arena_scoped_links(&linkage)?;
-        let binding = Binding::from_checked(
-            environment.target,
-            &captured.iter().map(|(_, c)| c.as_ref()).collect::<Vec<_>>(),
-        )?;
         let keys = hirsel_lir::LayoutKeys::new(&binding.table);
         let mut summaries = Vec::new();
         let mut semantic_owners = BTreeMap::new();
         let mut functions = BTreeMap::new();
-        for (((product, _), checked), key) in captured.iter().zip(&linkage).zip(&root.instances) {
+        for ((product, checked), key) in captured.iter().zip(&linkage).zip(&root.instances) {
             if product.unit_summary.domain != UNIT_SUMMARY_DOMAIN {
                 return Err("wrong link summary domain".into());
             }

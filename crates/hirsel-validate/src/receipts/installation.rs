@@ -31,8 +31,11 @@ pub(super) struct Rows {
     writable: bool,
 }
 impl hirsel_artifact_store::Contents for Rows {
-    fn get_content(&self, reference: Reference) -> Option<hirsel_artifact_store::Bytes> {
-        self.store.get(reference)
+    fn get_content(
+        &self,
+        reference: Reference,
+    ) -> Result<hirsel_artifact_store::Bytes, hirsel_artifact_store::ContentReadError> {
+        hirsel_artifact_store::Contents::get_content(&self.store, reference)
     }
     fn put_content(&self, domain: Domain, bytes: &[u8]) -> Option<Reference> {
         self.writable
@@ -72,10 +75,13 @@ pub(super) struct Contents {
     pub(super) installed: Arc<Rows>,
 }
 impl hirsel_artifact_store::Contents for Contents {
-    fn get_content(&self, reference: Reference) -> Option<hirsel_artifact_store::Bytes> {
+    fn get_content(
+        &self,
+        reference: Reference,
+    ) -> Result<hirsel_artifact_store::Bytes, hirsel_artifact_store::ContentReadError> {
         self.local
             .get_content(reference)
-            .or_else(|| self.installed.get_content(reference))
+            .or_else(|_| self.installed.get_content(reference))
     }
     fn put_content(&self, domain: Domain, bytes: &[u8]) -> Option<Reference> {
         self.local.put_content(domain, bytes)

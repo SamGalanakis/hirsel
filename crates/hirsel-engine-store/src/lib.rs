@@ -8,7 +8,8 @@
 #[cfg(test)]
 hirsel_guard::install!(test_alloc::Counting: test_alloc::Counting);
 pub use hirsel_artifact_store::{
-    Action, Address, Association, Bytes, Contents, Domain, MAX_RECORD, Output, Reference,
+    Action, Address, Association, Bytes, ContentReadError, Contents, Domain, MAX_RECORD, Output,
+    Reference,
 };
 #[cfg(test)]
 use hirsel_engine_admission::test_alloc;
@@ -57,6 +58,7 @@ product_backing!(
 /// Failure to read or copy a complete archive under request admission.
 #[derive(Debug)]
 pub enum ProductArchiveError {
+    Content(ContentReadError),
     Unavailable,
     InvalidContent,
     UnsupportedProvider,
@@ -73,9 +75,41 @@ pub enum ProductArchiveError {
     },
     InvalidArchive(std::io::Error),
 }
+impl From<ProductArchiveError> for hirsel_artifact_store::ContentReadError {
+    fn from(error: ProductArchiveError) -> Self {
+        use hirsel_artifact_store::ContentReadError;
+        match error {
+            ProductArchiveError::Content(error) => error,
+            ProductArchiveError::Unavailable => ContentReadError::NotFound,
+            ProductArchiveError::InvalidContent => ContentReadError::InvalidContent,
+            ProductArchiveError::InvalidArchive(error) => ContentReadError::Unreadable(error),
+            ProductArchiveError::Admission {
+                stage,
+                requested,
+                retained,
+                limit,
+            } => ContentReadError::Admission {
+                stage,
+                requested,
+                retained,
+                limit,
+            },
+            ProductArchiveError::UnsupportedProvider => {
+                ContentReadError::Refused("provider has no archive-copy admission")
+            }
+            ProductArchiveError::LayoutOverflow => {
+                ContentReadError::Refused("content layout overflow")
+            }
+            ProductArchiveError::CopyBound { .. } => {
+                ContentReadError::Refused("archive copy exceeds its working reservation")
+            }
+        }
+    }
+}
 impl std::fmt::Display for ProductArchiveError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::Content(error) => error.fmt(f),
             Self::Unavailable => {
                 f.write_str("archive backing is unavailable (missing, corrupt or unreadable)")
             }
@@ -104,6 +138,7 @@ impl std::fmt::Display for ProductArchiveError {
 impl std::error::Error for ProductArchiveError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
+            Self::Content(error) => Some(error),
             Self::InvalidArchive(error) => Some(error),
             _ => None,
         }

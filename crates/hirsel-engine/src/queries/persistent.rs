@@ -741,8 +741,8 @@ impl hirsel_artifact_store::Contents for Contents {
     fn get_content(
         &self,
         reference: hirsel_engine_store::Reference,
-    ) -> Option<hirsel_engine_store::Bytes> {
-        self.0.get_content(reference)
+    ) -> Result<hirsel_engine_store::Bytes, hirsel_artifact_store::ContentReadError> {
+        self.0.read_product_content(reference).map_err(Into::into)
     }
     fn put_content(
         &self,

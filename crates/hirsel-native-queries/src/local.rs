@@ -383,18 +383,14 @@ impl LocalReadyQueries {
 
         // Metadata for directly consumed ABIs is bound only on a local miss.
         // The only decoded Value body below belongs to this selected owner.
-        let own_closure =
-            instances.layout_metadata(owner.product.layout_closure, environment.target)?;
-        let callee_closures = callees
-            .iter()
-            .map(|(_, instance, _, _, _)| {
-                instances.layout_metadata(instance.product.layout_closure, environment.target)
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        let closures = std::iter::once(own_closure.as_ref())
-            .chain(callee_closures.iter().map(Arc::as_ref))
-            .collect::<Vec<_>>();
-        let mut binding = Binding::from_checked(environment.target, &closures)?;
+        let closures = std::iter::once(owner.product.layout_closure)
+            .chain(
+                callees
+                    .iter()
+                    .map(|(_, instance, _, _, _)| instance.product.layout_closure),
+            )
+            .map(|reference| instances.layout_metadata(reference, environment.target));
+        let mut binding = Binding::from_checked(environment.target, closures)?;
         let body: UnitBody = self.decode(owner.product.value)?;
         let mut value = binding.materialize::<Value>(&body)?;
         let mut callee_bindings = Vec::new();

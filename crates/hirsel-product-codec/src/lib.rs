@@ -684,7 +684,7 @@ mod tests {
                 if !seen.insert(reference.output.0) {
                     return Some(false);
                 }
-                let bytes = source.get_content(reference)?;
+                let bytes = source.get_content(reference).ok()?;
                 (copied.put_content(reference.domain, &bytes)? == reference).then_some(true)
             })
             .unwrap();

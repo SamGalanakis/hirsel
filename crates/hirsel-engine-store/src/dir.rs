@@ -454,16 +454,18 @@ impl ResultStore for DirStore {
     fn verifier(&self) -> Option<std::sync::Arc<hirsel_validate::VerifierCache>> {
         Some(self.verifier.clone())
     }
-    fn get_content(&self, reference: super::Reference) -> Option<super::Bytes> {
-        // Complete references identify the same bytes across namespaces. Reuse
-        // the installed check even when a writable cache has another copy.
+    fn read_product_content(
+        &self,
+        reference: super::Reference,
+    ) -> Result<super::Bytes, super::ProductArchiveError> {
         if let Some(bytes) = self
             .installed_records()
             .and_then(|records| records.content(reference))
         {
             self.record_content(reference);
-            return Some(bytes);
+            return Ok(bytes);
         }
+        let mut refusal = super::ContentReadError::NotFound;
         for (local, store) in self.roots() {
             if !local
                 && self
@@ -472,22 +474,30 @@ impl ResultStore for DirStore {
             {
                 continue;
             }
-            if let Some(bytes) = if local {
-                store.get(reference)
+            let read = if local {
+                hirsel_artifact_store::Contents::get_content(store, reference)
             } else {
                 store.get_owned(reference)
-            } {
-                if local {
-                    store.touch(
-                        hirsel_artifact_store::Address(reference.output.0),
-                        reference,
-                    );
+            };
+            match read {
+                Ok(bytes) => {
+                    if local {
+                        store.touch(
+                            hirsel_artifact_store::Address(reference.output.0),
+                            reference,
+                        );
+                    }
+                    self.record_content(reference);
+                    return Ok(bytes);
                 }
-                self.record_content(reference);
-                return Some(bytes);
+                Err(super::ContentReadError::NotFound) => (),
+                Err(error) => refusal = error,
             }
         }
-        None
+        Err(super::ProductArchiveError::Content(refusal))
+    }
+    fn get_content(&self, reference: super::Reference) -> Option<super::Bytes> {
+        self.read_product_content(reference).ok()
     }
     fn put_content(&self, domain: super::Domain, bytes: &[u8]) -> Option<super::Reference> {
         let store = self.publication_store()?;
@@ -526,7 +536,7 @@ impl ResultStore for DirStore {
                 if row.reference.domain != super::entry_domain(key.2) {
                     continue;
                 }
-                let bytes = store.get_owned(row.reference)?;
+                let bytes = store.get_owned(row.reference).ok()?;
                 self.record_row(
                     hirsel_artifact_store::Address(key.0),
                     row.action,

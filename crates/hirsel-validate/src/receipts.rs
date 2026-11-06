@@ -366,12 +366,17 @@ impl hirsel_artifact_store::Contents for TransportContents {
     fn get_content(
         &self,
         reference: hirsel_artifact_store::Reference,
-    ) -> Option<hirsel_artifact_store::Bytes> {
-        if let Some(bytes) = self.request.get_content(reference) {
-            return Some(bytes);
+    ) -> Result<hirsel_artifact_store::Bytes, hirsel_artifact_store::ContentReadError> {
+        if let Ok(bytes) = self.request.get_content(reference) {
+            return Ok(bytes);
         }
         let bytes = self.selected.get_content(reference)?;
-        (self.request.put_content(reference.domain, &bytes)? == reference).then_some(bytes)
+        if self.request.put_content(reference.domain, &bytes) != Some(reference) {
+            return Err(hirsel_artifact_store::ContentReadError::Refused(
+                "request content retention",
+            ));
+        }
+        Ok(bytes)
     }
     fn put_content(
         &self,
@@ -708,7 +713,7 @@ impl VerifierCache {
             }
             Backend::Hosted(rows, contents) => {
                 let reference = rows.row(key)?;
-                (reference, contents.get_content(reference)?)
+                (reference, contents.get_content(reference).ok()?)
             }
             Backend::Registered(local, installed) => {
                 if let Some(value) = local.row_content(key, domain) {
@@ -717,12 +722,12 @@ impl VerifierCache {
                 let reference = installed.row(key)?;
                 (
                     reference,
-                    hirsel_artifact_store::Contents::get_content(&**installed, reference)?,
+                    hirsel_artifact_store::Contents::get_content(&**installed, reference).ok()?,
                 )
             }
             Backend::Transport(selected, rows, contents) => {
                 if let Some(reference) = rows.row(key) {
-                    (reference, contents.request.get_content(reference)?)
+                    (reference, contents.request.get_content(reference).ok()?)
                 } else {
                     let (reference, bytes) = selected.row_content(key, domain)?;
                     if contents.request.put_content(domain, &bytes)? != reference {
@@ -754,7 +759,7 @@ impl VerifierCache {
                 let Some(reference) = contents.put_content(domain, &bytes) else {
                     return;
                 };
-                let Some(bytes) = contents.get_content(reference) else {
+                let Ok(bytes) = contents.get_content(reference) else {
                     return;
                 };
                 rows.lock()
@@ -921,7 +926,8 @@ impl VerifierCache {
         };
         let archive = hirsel_product_codec::CheckedTir::open(
             self.contents()
-                .get_content(record.body)?
+                .get_content(record.body)
+                .ok()?
                 .retain_owner(owner),
             record.body,
             records.clone(),
@@ -954,7 +960,7 @@ impl VerifierCache {
         let body = self
             .contents()
             .get_content(record.body)
-            .ok_or(crate::FactError::Refused)?;
+            .map_err(|_| crate::FactError::Refused)?;
         let mut bindings = std::collections::BTreeMap::new();
         for (bytes, reference) in [
             (body, record.body),
@@ -1993,7 +1999,7 @@ mod tests {
         let mut references = vec![];
         for n in 0u32..8 {
             let reference = contents.put_content(VIEW_DOMAIN, &n.to_le_bytes()).unwrap();
-            assert!(contents.get_content(reference).is_some());
+            assert!(contents.get_content(reference).is_ok());
             assert!(
                 reader.get(reference).is_none(),
                 "type content escaped its batch"
@@ -2084,7 +2090,8 @@ mod tests {
             fn get_content(
                 &self,
                 reference: hirsel_artifact_store::Reference,
-            ) -> Option<hirsel_artifact_store::Bytes> {
+            ) -> Result<hirsel_artifact_store::Bytes, hirsel_artifact_store::ContentReadError>
+            {
                 self.0.get_content(reference)
             }
             fn put_content(

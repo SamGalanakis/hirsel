@@ -587,10 +587,7 @@ impl DemandInstances {
                     &self.target,
                 )?));
             }
-            let binding = Binding::from_checked(
-                &self.target,
-                &closures.iter().map(Arc::as_ref).collect::<Vec<_>>(),
-            )?;
+            let binding = Binding::from_checked(&self.target, closures.into_iter().map(Ok))?;
             let mut unit = binding.materialize::<Value>(&body)?;
             unit.header.instance = key.instance.digest();
             let mut entries = HashMap::new();

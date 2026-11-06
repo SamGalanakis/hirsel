@@ -229,7 +229,10 @@ mod tests {
         reads: AtomicUsize,
     }
     impl Contents for Counted {
-        fn get_content(&self, reference: Reference) -> Option<Bytes> {
+        fn get_content(
+            &self,
+            reference: Reference,
+        ) -> Result<Bytes, hirsel_artifact_store::ContentReadError> {
             self.reads.fetch_add(1, Ordering::Relaxed);
             self.memory.get_content(reference)
         }

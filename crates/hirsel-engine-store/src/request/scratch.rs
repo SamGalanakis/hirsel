@@ -357,7 +357,7 @@ impl ResultStore for ScratchStore {
         }
         let read = || -> Result<Bytes, ProductArchiveError> {
             match &entry.backing {
-                Backing::Provider(held) => held.get().ok_or(ProductArchiveError::InvalidContent),
+                Backing::Provider(held) => held.get().map_err(ProductArchiveError::Content),
                 Backing::Spool(offset) => {
                     let mut value = vec![
                         0;

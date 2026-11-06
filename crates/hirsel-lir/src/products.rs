@@ -353,102 +353,117 @@ impl Binding {
         Self::merge(target, closures).map(|(binding, _)| binding)
     }
 
-    /// Combine already checked immutable closures without rekeying each input.
-    pub fn from_checked(target: &TargetSpec, closures: &[&CheckedLayouts]) -> Result<Self, String> {
-        if closures
-            .iter()
-            .any(|closure| closure.table.target != target.digest())
-        {
-            return Err("native layout product target differs".into());
+    /// Merge checked closures as they arrive. A reader's original transport
+    /// lease ends before requesting the next closure.
+    pub fn from_checked<C: std::ops::Deref<Target = CheckedLayouts>>(
+        target: &TargetSpec,
+        closures: impl IntoIterator<Item = Result<C, String>>,
+    ) -> Result<Self, String> {
+        let mut binding = Self::empty(target);
+        for closure in closures {
+            let closure = closure?;
+            if closure.table.target != target.digest() {
+                return Err("native layout product target differs".into());
+            }
+            binding.include(&closure.closure)?;
         }
-        Self::merge(
-            target,
-            &closures.iter().map(|c| &c.closure).collect::<Vec<_>>(),
-        )
-        .map(|(binding, _)| binding)
+        binding.finish(target).map(|(binding, _)| binding)
+    }
+
+    fn empty(target: &TargetSpec) -> Self {
+        Self {
+            table: LayoutTable::new(target),
+            layouts: BTreeMap::new(),
+            abis: BTreeMap::new(),
+        }
     }
 
     fn merge(
         target: &TargetSpec,
         closures: &[&LayoutClosure],
     ) -> Result<(Self, LayoutKeys), String> {
-        let mut table = LayoutTable::new(target);
-        let mut layouts = BTreeMap::new();
-        let mut abis: BTreeMap<ContentHash, FnAbiId> = BTreeMap::new();
-        // Merge complete SCCs, never individual equal keys within a recursive
-        // component. Reuse existing graph order: dependencies settle first.
-        for c in closures {
-            let graph: Vec<Vec<_>> = c
-                .table
-                .layouts
+        let mut binding = Self::empty(target);
+        for closure in closures {
+            binding.include(closure)?;
+        }
+        binding.finish(target)
+    }
+
+    fn include(&mut self, c: &LayoutClosure) -> Result<(), String> {
+        let Self {
+            table,
+            layouts,
+            abis,
+        } = self;
+        // Merge complete SCCs in the existing dependency order.
+        let graph: Vec<Vec<_>> = c
+            .table
+            .layouts
+            .iter()
+            .map(|r| r.references().iter().map(|id| id.0 as usize).collect())
+            .collect();
+        for component in hirsel_graph::components(&graph) {
+            if component
                 .iter()
-                .map(|r| r.references().iter().map(|id| id.0 as usize).collect())
-                .collect();
-            for component in hirsel_graph::components(&graph) {
-                if component
-                    .iter()
-                    .all(|&i| layouts.contains_key(&c.layouts[i]))
-                {
-                    continue;
-                }
-                if component
-                    .iter()
-                    .any(|&i| layouts.contains_key(&c.layouts[i]))
-                {
-                    return Err("partial recursive layout component".into());
-                }
-                let local: BTreeMap<_, _> = component
-                    .iter()
-                    .enumerate()
-                    .map(|(at, &i)| (i, LayoutId((table.layouts.len() + at) as u32)))
-                    .collect();
-                for &i in &component {
-                    layouts.entry(c.layouts[i]).or_insert(local[&i]);
-                }
-                for &i in &component {
-                    let mut record = c.table.layouts[i].clone();
-                    record.for_each_reference_mut(&mut |id| {
-                        *id = local
-                            .get(&(id.0 as usize))
-                            .copied()
-                            .unwrap_or_else(|| layouts[&c.layouts[id.0 as usize]]);
-                    });
-                    table.layouts.push(record);
-                }
+                .all(|&i| layouts.contains_key(&c.layouts[i]))
+            {
+                continue;
             }
-            for (key, abi) in c.abis.iter().zip(&c.table.fn_abis) {
-                let mut abi = abi.clone();
-                map_abi(&mut abi, |id| *id = layouts[&c.layouts[id.0 as usize]]);
-                match abis.get(key) {
-                    Some(id) if table.fn_abis[id.0 as usize] != abi => {
-                        return Err("conflicting native ABI product".into());
-                    }
-                    Some(_) => {}
-                    None => {
-                        abis.insert(*key, FnAbiId(table.fn_abis.len() as u32));
-                        table.fn_abis.push(abi);
-                    }
+            if component
+                .iter()
+                .any(|&i| layouts.contains_key(&c.layouts[i]))
+            {
+                return Err("partial recursive layout component".into());
+            }
+            let local: BTreeMap<_, _> = component
+                .iter()
+                .enumerate()
+                .map(|(at, &i)| (i, LayoutId((table.layouts.len() + at) as u32)))
+                .collect();
+            for &i in &component {
+                layouts.entry(c.layouts[i]).or_insert(local[&i]);
+            }
+            for &i in &component {
+                let mut record = c.table.layouts[i].clone();
+                record.for_each_reference_mut(&mut |id| {
+                    *id = local
+                        .get(&(id.0 as usize))
+                        .copied()
+                        .unwrap_or_else(|| layouts[&c.layouts[id.0 as usize]]);
+                });
+                table.layouts.push(record);
+            }
+        }
+        for (key, abi) in c.abis.iter().zip(&c.table.fn_abis) {
+            let mut abi = abi.clone();
+            map_abi(&mut abi, |id| *id = layouts[&c.layouts[id.0 as usize]]);
+            match abis.get(key) {
+                Some(id) if table.fn_abis[id.0 as usize] != abi => {
+                    return Err("conflicting native ABI product".into());
+                }
+                Some(_) => {}
+                None => {
+                    abis.insert(*key, FnAbiId(table.fn_abis.len() as u32));
+                    table.fn_abis.push(abi);
                 }
             }
         }
-        crate::layout_validate::validate_table(&table, target)
+        Ok(())
+    }
+
+    fn finish(self, target: &TargetSpec) -> Result<(Self, LayoutKeys), String> {
+        crate::layout_validate::validate_table(&self.table, target)
             .map_err(|e| format!("bound native layouts: {e:?}"))?;
-        let keys = LayoutKeys::new(&table);
-        if layouts.iter().any(|(key, id)| keys.key(*id).0 != *key)
-            || abis
+        let keys = LayoutKeys::new(&self.table);
+        if self.layouts.iter().any(|(key, id)| keys.key(*id).0 != *key)
+            || self
+                .abis
                 .iter()
-                .any(|(key, id)| keys.fn_abi(&table.fn_abis[id.0 as usize]) != *key)
+                .any(|(key, id)| keys.fn_abi(&self.table.fn_abis[id.0 as usize]) != *key)
         {
             return Err("bound native product content identities differ".into());
         }
-        Ok((
-            Self {
-                table,
-                layouts,
-                abis,
-            },
-            keys,
-        ))
+        Ok((self, keys))
     }
 
     /// Resolve content identities within this binding's temporary table. These

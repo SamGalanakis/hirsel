@@ -51,7 +51,7 @@ fn checked_views_bind_the_mapping_range_and_complete_reference() {
             _ => forged.len -= 1,
         }
         assert!(reader.get(forged).is_none());
-        assert!(reader.get_owned(forged).is_none());
+        assert!(reader.get_owned(forged).is_err());
     }
     let container = reader.raw_container(reference).unwrap();
     let shifted = container.range(8, container.len() as u64 - 8, 1).unwrap();
@@ -63,7 +63,7 @@ fn checked_views_bind_the_mapping_range_and_complete_reference() {
     fs::write(&path, vec![0; HEADER + 5000]).unwrap();
     let operation = reader.request();
     assert!(reader.get(reference).is_none());
-    assert!(reader.get_owned(reference).is_none());
+    assert!(reader.get_owned(reference).is_err());
     assert_eq!(&*copied, &vec![7; 5000]);
     assert_eq!(&*held, &vec![7; 5000]);
     assert_eq!(&*verified.get(reference).unwrap(), &vec![7; 5000]);
@@ -894,12 +894,12 @@ fn embedded_products_use_the_mapped_store_integrity_boundary() {
         assert!(
             embedded(bytes[..len].to_vec())
                 .get_content(reference)
-                .is_none()
+                .is_err()
         );
     }
     let mut corrupt = bytes;
     *corrupt.last_mut().unwrap() ^= 1;
-    assert!(embedded(corrupt).get_content(reference).is_none());
+    assert!(embedded(corrupt).get_content(reference).is_err());
 }
 
 #[test]

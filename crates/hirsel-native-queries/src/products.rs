@@ -611,7 +611,7 @@ impl NativeProducts for DemandProducts {
         let mut captured = Vec::new();
         let mut contexts = Vec::new();
         let mut adapters = Vec::new();
-        for product in products {
+        let closures = products.iter().map(|product| {
             let owner = snapshot
                 .owners
                 .get(&product.product.address.0)
@@ -653,21 +653,20 @@ impl NativeProducts for DemandProducts {
                 operations: &operations,
                 ..environment
             };
-            captured.push(self.local.queries.read(&owner, product, &scoped)?);
+            let (closure, body) = self.local.queries.read(&owner, product, &scoped)?;
+            captured.push(body);
             contexts.push(context);
-        }
+            Ok(closure)
+        });
         let local_binding;
         let local_keys;
         let (binding, keys) = if let Some(execution) = snapshot.execution.get() {
+            for closure in closures {
+                drop(closure?);
+            }
             (execution.plan.binding(), execution.plan.keys())
         } else {
-            local_binding = Binding::from_checked(
-                environment.target,
-                &captured
-                    .iter()
-                    .map(|(closure, _)| closure.as_ref())
-                    .collect::<Vec<_>>(),
-            )?;
+            local_binding = Binding::from_checked(environment.target, closures)?;
             local_keys = hirsel_lir::LayoutKeys::new(&local_binding.table);
             (&local_binding, &local_keys)
         };
@@ -700,7 +699,7 @@ impl NativeProducts for DemandProducts {
             discharge: environment.discharge,
         };
         let mut units = Vec::new();
-        for (_, body) in &captured {
+        for body in &captured {
             let raw = binding.materialize::<Ready>(body)?;
             self.ready_materializations += 1;
             snapshot.materializations.fetch_add(1, Ordering::Relaxed);

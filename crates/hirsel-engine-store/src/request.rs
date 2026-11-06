@@ -243,8 +243,13 @@ impl Drop for RequestVerifierRows {
     }
 }
 impl hirsel_artifact_store::Contents for RequestVerifierRows {
-    fn get_content(&self, reference: Reference) -> Option<Bytes> {
-        self.backend.get_content(reference)
+    fn get_content(
+        &self,
+        reference: Reference,
+    ) -> Result<Bytes, hirsel_artifact_store::ContentReadError> {
+        self.backend
+            .read_product_content(reference)
+            .map_err(Into::into)
     }
     fn put_content(&self, domain: Domain, bytes: &[u8]) -> Option<Reference> {
         self.backend.put_content(domain, bytes)

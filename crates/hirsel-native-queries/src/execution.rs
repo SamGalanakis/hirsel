@@ -151,31 +151,25 @@ impl ExecutionTasks {
                 .map(|u| u.unit().clone())
                 .collect::<Vec<_>>(),
         );
-        let closures = products
-            .iter()
-            .map(|p| {
-                let owner = snapshot
-                    .owners
-                    .get(&p.product.address.0)
-                    .ok_or("missing execution layout owner")?;
-                let operations = snapshot
-                    .instances
-                    .operations(owner, &snapshot.environment())?;
-                let view = super::products::DemandProducts::new(snapshot.clone());
-                view.local.queries.assembly_layouts(
-                    owner,
-                    p,
-                    &hirsel_lir::validate::NativeEnvironment {
-                        operations: &operations,
-                        ..snapshot.environment()
-                    },
-                )
-            })
-            .collect::<Result<Vec<_>, String>>()?;
-        let binding = hirsel_lir::products::Binding::from_checked(
-            &program.target,
-            &closures.iter().map(Arc::as_ref).collect::<Vec<_>>(),
-        )?;
+        let closures = products.iter().map(|p| {
+            let owner = snapshot
+                .owners
+                .get(&p.product.address.0)
+                .ok_or("missing execution layout owner")?;
+            let operations = snapshot
+                .instances
+                .operations(owner, &snapshot.environment())?;
+            let view = super::products::DemandProducts::new(snapshot.clone());
+            view.local.queries.assembly_layouts(
+                owner,
+                p,
+                &hirsel_lir::validate::NativeEnvironment {
+                    operations: &operations,
+                    ..snapshot.environment()
+                },
+            )
+        });
+        let binding = hirsel_lir::products::Binding::from_checked(&program.target, closures)?;
         if binding.table != program.table {
             return Err("execution binding differs from admitted Ready".into());
         }

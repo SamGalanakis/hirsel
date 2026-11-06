@@ -75,6 +75,106 @@ mod tests {
         installed.publish(&store, &records).unwrap();
         (store, compiler, package, reference)
     }
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn required_installed_content_survives_request_publication_pressure() {
+        const CHILD: &str = "HIRSEL_INSTALLED_BACKING_PRESSURE_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let output = std::process::Command::new("/bin/sh")
+                .args(["-c", "ulimit -n 128 && exec \"$@\"", "installed-backing-law"])
+                .arg(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "installed::tests::required_installed_content_survives_request_publication_pressure",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
+            return;
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let (store, compiler, package, reference) = fixture(&directory.path().join("installed"));
+        let installed = InstalledPackage::open(&store, &package, compiler).unwrap();
+        let sources = installed.package.source_records().unwrap();
+        let budget = hirsel_engine_admission::ProcessBudget::new(1 << 20);
+        let request = RequestStore::with_scratch(
+            Arc::new(DirStore::new(directory.path().join("local"))),
+            budget.reserve(1 << 20).unwrap(),
+            directory.path(),
+            8 << 20,
+        )
+        .unwrap();
+        let operation = request.operation_scope();
+        let domain = Domain {
+            kind: 78,
+            schema: 1,
+        };
+        let mut expected = Vec::new();
+        for value in 0..160u32 {
+            let mut bytes = vec![7; 32 << 10];
+            bytes[..4].copy_from_slice(&value.to_le_bytes());
+            let reference = request.put_content(domain, &bytes).unwrap();
+            expected.push((reference, value));
+        }
+        // Every publication fits its existing RAM/disk allowance. Keeping those
+        // required outputs cannot consume the descriptors needed to read an
+        // installed record. The package's original payload is the oracle.
+        assert_eq!(&*sources.content(reference, 4096).unwrap(), b"product");
+        drop(operation);
+        for (reference, value) in expected {
+            let bytes = request.get_content(reference).unwrap();
+            assert_eq!(&bytes[..4], &value.to_le_bytes());
+            assert!(bytes[4..].iter().all(|byte| *byte == 7));
+        }
+        drop(request);
+        assert_eq!(budget.reserved(), 0);
+        drop(sources);
+        drop(installed);
+        // Actual missing backing remains an explicit failure at demand and
+        // installation audit; descriptor pressure never makes it absent-OK.
+        std::fs::remove_file(store.output_path(reference)).unwrap();
+        let reopened = InstalledPackage::open(&store.for_operation(), &package, compiler).unwrap();
+        assert!(
+            reopened
+                .package
+                .source_records()
+                .unwrap()
+                .content(reference, 4096)
+                .unwrap_err()
+                .contains("missing installed semantic content")
+        );
+        assert!(InstalledPackage::verify_store(store.root()).is_err());
+        let records = InstallationRecords {
+            rows: reopened
+                .package
+                .rows
+                .iter()
+                .map(|(address, action, reference)| (*address, (Action(*action), *reference)))
+                .collect(),
+            contents: reopened
+                .package
+                .contents
+                .iter()
+                .map(|reference| (reference.output.0, *reference))
+                .collect(),
+        };
+        assert!(
+            reopened
+                .package
+                .as_ref()
+                .clone()
+                .publish(&store, &records)
+                .is_err()
+        );
+    }
     #[test]
     fn install_and_audit_reject_stale_corrupt_and_partial_products() {
         let directory = tempfile::tempdir().unwrap();

@@ -128,7 +128,7 @@ impl FrontRunQueries {
             executable = generation::executable(&syntax);
             generated = generation::generator(&syntax).is_some();
             implementation = syntax.text_hash;
-            if !matches!(signature.kind, SignatureKind::Type(_)) {
+            if executable || !matches!(signature.kind, SignatureKind::Type(_)) {
                 content.extend(
                     hirsel_fmt::semantic_item(&syntax)
                         .ok_or_else(|| operational("invalid semantic source item"))?,

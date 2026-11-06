@@ -682,7 +682,9 @@ impl Task {
         let mut tir = None;
         let mut source_products = None;
         let mut generated_tokens = None;
-        if input.source && !matches!(input.signature.kind, SignatureKind::Type(_)) {
+        if input.source
+            && (input.executable || !matches!(input.signature.kind, SignatureKind::Type(_)))
+        {
             let Some(id) = queries.front.query(path) else {
                 return Poll::Ready(Err(
                     queries.failure_record(operational(format!("missing P input for {path}")))
@@ -876,7 +878,7 @@ impl Task {
         let content = if matches!(input.signature.kind, SignatureKind::Type(_)) {
             DefinitionContent::Body {
                 signature: input.owner_signature.clone(),
-                tir: None,
+                tir,
             }
         } else if input.executable {
             DefinitionContent::Body {

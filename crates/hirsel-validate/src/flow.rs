@@ -2782,6 +2782,9 @@ impl Checker<'_, '_> {
     /// Typing received these operands of the current site only as deep
     /// Global content; each needs the must-owned Global proof here.
     fn acquisitions(&mut self, state: &State, report: bool) {
+        if !report {
+            return;
+        }
         let Some(block) = self.site.block else {
             return;
         };
@@ -3063,7 +3066,8 @@ impl Checker<'_, '_> {
         report: bool,
     ) {
         let place = operand.place;
-        if matches!(operand.usage, UseKind::Take | UseKind::Copy)
+        if report
+            && matches!(operand.usage, UseKind::Take | UseKind::Copy)
             && !(relocate_view
                 && self.body.locals[self.body.places[place.0 as usize].root.0 as usize].storage
                     == Storage::Temporary)
@@ -3074,7 +3078,8 @@ impl Checker<'_, '_> {
                 self.state_write(model, state, place, report);
             }
         }
-        if self.contract
+        if report
+            && self.contract
             && (operand.usage == UseKind::Mut
                 || operand.usage == UseKind::Take
                     && needs_release(self, self.place_type(place), self.t))
@@ -3093,54 +3098,65 @@ impl Checker<'_, '_> {
                 self.flow_error(report, ViolationKind::InvalidUse(place));
             }
         }
-        if matches!(operand.usage, UseKind::Take | UseKind::Mut) && self.readonly_map_entry(place)
-            || operand.usage == UseKind::Mut && self.readonly_byte_index(place)
+        if report
+            && (matches!(operand.usage, UseKind::Take | UseKind::Mut)
+                && self.readonly_map_entry(place)
+                || operand.usage == UseKind::Mut && self.readonly_byte_index(place))
         {
             self.flow_error(report, ViolationKind::InvalidUse(place));
         }
         self.projection_origin(model, state, place, report);
-        self.indices(model, state, place, report);
-        self.available(model, state, place, operand.usage == UseKind::Take, report);
         let index = model.mapping[place.0 as usize];
-        if state.defused[index] & 2 != 0 {
-            self.flow_error(report, ViolationKind::InvalidUse(place));
-        }
         let root = model.places[index].root.0 as usize;
-        let expired_identity = model
-            .parts(place)
-            .any(|part| !state.origins.expired[part].is_empty());
-        let inactive_payload = expired_identity
-            && (self.inactive_variant_payload(place) || self.inactive_callable_result(place));
-        if !transport
-            && (!inactive_payload && expired_identity
-                || !self.environment(model, state, place).expired().is_empty())
-        {
-            self.flow_error(report, ViolationKind::InvalidOrigin(place));
-        }
-        let expired = self.installed_loans(state, place).expired();
-        for dependency in &expired {
-            self.flow_error(
-                report,
-                ViolationKind::ExpiredLoan {
-                    loan: model.loans[*dependency].0,
-                    place,
-                },
-            );
-        }
+        // Quiet fixed-point transfers need the mutations below. Access and
+        // expiry diagnostics read only the settled state in the reporting pass.
+        let expired = if report {
+            self.indices(model, state, place, report);
+            self.available(model, state, place, operand.usage == UseKind::Take, report);
+            if state.defused[index] & 2 != 0 {
+                self.flow_error(report, ViolationKind::InvalidUse(place));
+            }
+            let expired_identity = model
+                .parts(place)
+                .any(|part| !state.origins.expired[part].is_empty());
+            let inactive_payload = expired_identity
+                && (self.inactive_variant_payload(place) || self.inactive_callable_result(place));
+            if !transport
+                && (!inactive_payload && expired_identity
+                    || !self.environment(model, state, place).expired().is_empty())
+            {
+                self.flow_error(report, ViolationKind::InvalidOrigin(place));
+            }
+            let expired = self.installed_loans(state, place).expired();
+            for dependency in &expired {
+                self.flow_error(
+                    report,
+                    ViolationKind::ExpiredLoan {
+                        loan: model.loans[*dependency].0,
+                        place,
+                    },
+                );
+            }
+            expired
+        } else {
+            BTreeSet::new()
+        };
         match operand.usage {
             UseKind::Take => {
-                self.access_loans(model, state, place, false, report);
-                if needs_release(self, self.place_type(place), self.t)
-                    && (model.borrowed[root]
-                        || state.ownership_conflicts[root]
-                        || (!state.must[root].has(MustFacts::OWNED)
-                            && !(relocate_view
-                                && self.body.locals[root].storage == Storage::Temporary
-                                && self.body.places[place.0 as usize].projection.is_empty())))
-                {
-                    self.flow_error(report, ViolationKind::BorrowedMove(place));
+                if report {
+                    self.access_loans(model, state, place, false, report);
+                    if needs_release(self, self.place_type(place), self.t)
+                        && (model.borrowed[root]
+                            || state.ownership_conflicts[root]
+                            || (!state.must[root].has(MustFacts::OWNED)
+                                && !(relocate_view
+                                    && self.body.locals[root].storage == Storage::Temporary
+                                    && self.body.places[place.0 as usize].projection.is_empty())))
+                    {
+                        self.flow_error(report, ViolationKind::BorrowedMove(place));
+                    }
+                    self.conflict(model, state, place, false, false, report);
                 }
-                self.conflict(model, state, place, false, false, report);
                 // The mutable calling convention copies inline bits when a plain
                 // value is returned; the caller's storage remains initialized.
                 if !model.mutable_parameters[root]
@@ -3149,7 +3165,7 @@ impl Checker<'_, '_> {
                     self.clear(model, state, place, MOVED);
                 }
             }
-            UseKind::Borrow | UseKind::Mut => {
+            UseKind::Borrow | UseKind::Mut if report => {
                 // Plain reads copy bits; borrowed parameter conventions establish
                 // their external loan without a synthetic LoanId.
                 // Match observes storage atomically and produces no borrowed
@@ -3194,22 +3210,28 @@ impl Checker<'_, '_> {
                 {
                     self.mark_shared(model, state, operand);
                 }
-                let permissions = self.access_loans(model, state, place, false, report);
-                if !copyable(self, self.place_type(place), self.t)
-                    && !self.result_read_permission(model, state, operand)
-                {
-                    self.flow_error(report, ViolationKind::InvalidUse(place));
-                }
-                for (i, (loan, source, mutable)) in model.loans.iter().enumerate() {
-                    if *mutable
-                        && !permissions.contains(&i)
-                        && state.loans[i] & LIVE != 0
-                        && model.overlaps(model.mapping[source.0 as usize], index)
+                if report {
+                    let permissions = self.access_loans(model, state, place, false, report);
+                    if !copyable(self, self.place_type(place), self.t)
+                        && !self.result_read_permission(model, state, operand)
                     {
-                        self.flow_error(report, ViolationKind::LoanConflict { loan: *loan, place });
+                        self.flow_error(report, ViolationKind::InvalidUse(place));
+                    }
+                    for (i, (loan, source, mutable)) in model.loans.iter().enumerate() {
+                        if *mutable
+                            && !permissions.contains(&i)
+                            && state.loans[i] & LIVE != 0
+                            && model.overlaps(model.mapping[source.0 as usize], index)
+                        {
+                            self.flow_error(
+                                report,
+                                ViolationKind::LoanConflict { loan: *loan, place },
+                            );
+                        }
                     }
                 }
             }
+            UseKind::Borrow | UseKind::Mut => {}
         }
     }
     fn mark_shared(&self, model: &Model, state: &mut State, operand: &Operand) {

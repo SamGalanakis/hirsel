@@ -204,31 +204,8 @@ impl QueryEngine {
         &mut self,
         path: &DefPath,
     ) -> Result<(Vec<Vec<u8>>, BTreeSet<DefPath>), QueryError> {
-        let signature = self.item_signature(path)?;
-        if has_errors(&signature.diagnostics) {
-            return Err(QueryError::Diagnostics(signature.diagnostics));
-        }
-        self.read_execution_signatures(&signature.dependencies);
-        self.merge_execution(
-            &Reads::from_vec(vec![(
-                ReadKey::Signature(DefId::intern(path)),
-                signature.value.fingerprint,
-            )])
-            .expect("one source signature"),
-        );
-        let mut dependencies: BTreeSet<_> = signature
-            .dependencies
-            .iter()
-            .map(|d| d.definition.path().clone())
-            .collect();
-        let mut content = vec![
-            hirsel_types::encoding::canonical_encoding(
-                &self.types,
-                &signature.value,
-                &signature.dependencies,
-            )
-            .map_err(|e| operational(format!("signature encoding: {e:?}")))?,
-        ];
+        let mut dependencies = BTreeSet::new();
+        let mut body_content = Vec::new();
         self.materialize(path)?;
         if self.items.contains_key(path) {
             if self.semantic_lower_ready(path)? {
@@ -236,7 +213,7 @@ impl QueryEngine {
                     .first()
                     .expect("indexed source item")
                     .clone();
-                content.extend(self.semantic_tokens(&syntax)?);
+                body_content.extend(self.semantic_tokens(&syntax)?);
             } else if let Some(entry) = self.load_lower(path)? {
                 // Demand the ordinary Lower product before reconstructing its
                 // checked body. Its reads and private execution authority have
@@ -252,7 +229,7 @@ impl QueryEngine {
                     .first()
                     .expect("indexed source item")
                     .clone();
-                content.extend(self.semantic_tokens(&syntax)?);
+                body_content.extend(self.semantic_tokens(&syntax)?);
                 self.lowered.insert(DefId::intern(path), entry);
             } else {
                 let analyzed = self.mode_query(path)?;
@@ -260,7 +237,7 @@ impl QueryEngine {
                     return Err(QueryError::Diagnostics(analyzed.diagnostics.clone()));
                 }
                 let syntax = &analyzed.value.typed.syntax;
-                content.extend(self.semantic_tokens(syntax)?);
+                body_content.extend(self.semantic_tokens(syntax)?);
                 if generation::executable(syntax) {
                     let lowered = self.lower_to_tir(path)?;
                     if has_errors(&lowered.diagnostics) {
@@ -298,6 +275,35 @@ impl QueryEngine {
                 dependencies.extend(executed_definitions(&reads));
             }
         }
+        // Generated checking can publish private header facts. Select the
+        // canonical signature only after the body has reached that capture.
+        let signature = self.item_signature(path)?;
+        if has_errors(&signature.diagnostics) {
+            return Err(QueryError::Diagnostics(signature.diagnostics));
+        }
+        self.read_execution_signatures(&signature.dependencies);
+        self.merge_execution(
+            &Reads::from_vec(vec![(
+                ReadKey::Signature(DefId::intern(path)),
+                signature.value.fingerprint,
+            )])
+            .expect("one source signature"),
+        );
+        dependencies.extend(
+            signature
+                .dependencies
+                .iter()
+                .map(|d| d.definition.path().clone()),
+        );
+        let mut content = vec![
+            hirsel_types::encoding::canonical_encoding(
+                &self.types,
+                &signature.value,
+                &signature.dependencies,
+            )
+            .map_err(|e| operational(format!("signature encoding: {e:?}")))?,
+        ];
+        content.extend(body_content);
         Ok((content, dependencies))
     }
 

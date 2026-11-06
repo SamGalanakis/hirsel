@@ -188,6 +188,13 @@ impl LowerProduct {
         })
     }
 }
+fn missing_body(path: &DefPath, message: &str) -> QueryError {
+    QueryError::Operational(hirsel_types::OperationalFailure {
+        operation: "settled Lower body".into(),
+        message: format!("{path}: {message}"),
+    })
+}
+
 fn decode_definition(owner: &FrontLowerQueries, body: Reference) -> Option<DefinitionRef> {
     let source = owner.namespace.anchors.clone();
     Some(Arc::new(
@@ -771,16 +778,14 @@ impl FrontLowerQueries {
         &self,
         path: &DefPath,
     ) -> Result<DefinitionDecodeLayout, QueryError> {
-        let id = self.query(path).ok_or(QueryError::NotImplemented)?;
-        let outcomes = self.outcomes.lock().unwrap_or_else(|e| e.into_inner());
-        let (_, outcome, _) = outcomes
-            .get(&(id.kind, id.address.0))
-            .ok_or(QueryError::NotImplemented)?;
-        match &outcome.result {
-            Ok(Value::Lower(lower)) => Ok(lower.definition_decode_layout),
-            Err(error) => Err(error.clone()),
-            _ => Err(QueryError::NotImplemented),
-        }
+        self.with_settled_outcome(path, QueryKind::Lower, |_, outcome| {
+            Some(match &outcome.result {
+                Ok(Value::Lower(lower)) => Ok(lower.definition_decode_layout),
+                Err(error) => Err(error.clone()),
+                _ => Err(missing_body(path, "settled product is not Lower")),
+            })
+        })
+        .unwrap_or_else(|| Err(missing_body(path, "no settled layout")))
     }
     /// Prospective constant-selection maps captured while original TIR was live.
     /// This reads no archive and reconstructs no body.
@@ -853,21 +858,19 @@ impl FrontLowerQueries {
         self: &Arc<Self>,
         path: &DefPath,
     ) -> Result<DefinitionRef, QueryError> {
-        let id = self.query(path).ok_or(QueryError::NotImplemented)?;
-        let selected = self
-            .outcomes
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(&(id.kind, id.address.0))
-            .cloned()
-            .ok_or(QueryError::NotImplemented)?;
-        match selected.1.result? {
-            Value::Lower(lower) => lower
-                .decode(self)
-                .map(|output| output.value)
-                .ok_or(QueryError::NotImplemented),
-            _ => Err(QueryError::NotImplemented),
-        }
+        self.with_settled_outcome(path, QueryKind::Lower, |owner, outcome| {
+            Some(match &outcome.result {
+                Ok(Value::Lower(lower)) => lower
+                    .decode(owner)
+                    .map(|output| output.value)
+                    .ok_or_else(|| {
+                        missing_body(path, "body is neither live nor decodable from its archive")
+                    }),
+                Err(error) => Err(error.clone()),
+                _ => Err(missing_body(path, "settled product is not Lower")),
+            })
+        })
+        .unwrap_or_else(|| Err(missing_body(path, "no settled body")))
     }
     pub(crate) fn settled_constant_clone_bytes(&self, path: &DefPath) -> Result<u64, QueryError> {
         let id = self

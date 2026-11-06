@@ -773,6 +773,13 @@ impl Task {
                         queries.failure_record(QueryError::Diagnostics(output.output.diagnostics))
                     ));
                 }
+                // Run keeps the settled Lower holder after its runtime cache
+                // is released. Populate that holder's required spill first.
+                if output.spill(queries.weight.scratch).is_none() {
+                    return Poll::Ready(Err(queries.failure_record(operational(format!(
+                        "cannot retain Lower body for {path} within spill admission"
+                    )))));
+                }
                 dependencies.extend(
                     output
                         .output
@@ -1013,7 +1020,7 @@ impl Task {
                 self.entries[&DefId::intern(path)]
                     .content
                     .load(queries, path, decode_allowance)
-                    .map_err(|error| format!("{error:?}"))
+                    .map_err(|error| format!("Run definition content for {path}: {error:?}"))
             })
             .map_err(operational)?,
         );

@@ -40,8 +40,8 @@ mod source_graph;
 mod tir_products;
 pub use output::{
     CompileInspection, CompileOutput, CompileResult, CompilerReadiness, DefinitionWork,
-    NativeExecution, NativeObjectOutput, NativeReady, PrecomputedSources, RequestWork,
-    TirBatchExecution, TirExecution, TirProducts,
+    NativeExecution, NativeObjectOutput, NativeObservation, NativeReady, PrecomputedSources,
+    RequestWork, TirBatchExecution, TirExecution, TirProducts,
 };
 pub use ownership_selection::{OwnershipExecution, OwnershipObjects};
 pub(crate) use selector::host_budget;
@@ -274,8 +274,6 @@ pub enum NativeOutput {
     /// validated execution view (`NativeReady`); no Codegen or Link runs.
     Ready,
 }
-
-use hirsel_native::NativeObservation;
 
 use hirsel_compiler_identity::COMPILER_IDENTITY;
 use hirsel_front_phases::{COMPILER, compiler_adapters};

@@ -113,7 +113,7 @@ impl NativeBuildReadiness {
             return Ok(view.clone());
         }
         let (compilation, product, source) = self.bootstrap.outcome(selected).map_err(failed)?;
-        let view = compilation.ready_view(product).map_err(failed)?;
+        let mut view = compilation.ready_view(product).map_err(failed)?;
         let mut weight = hirsel_query_products::retained::MetadataWeight::default();
         // Envelope plus copied identity, table and source metadata; Ready
         // bodies are charged to their producers' materialization scope.
@@ -139,14 +139,7 @@ impl NativeBuildReadiness {
         weight.path(&source.run.entry);
         weight.source_snapshot(&source.roots.sources);
         weight.callees(&source.run.callees);
-        weight.vec(&view.observation.failure_rules, |w, rule| {
-            w.add(rule.capacity())
-        });
-        weight.tree::<u64, (DefId, hirsel_lir::ir::SiteRange)>(view.observation.sites.len());
-        weight.map(&view.observation.anchors, |w, path, anchors| {
-            w.path(path);
-            w.flat_vec(anchors);
-        });
+        observation_metadata(&mut weight, &mut view.observation);
         request_metadata(&mut weight, &self.request);
         let allowance = self
             .bootstrap
@@ -163,7 +156,10 @@ impl NativeBuildReadiness {
             ready: view.ready,
             program: view.program,
             entry: source.run.entry.clone(),
-            observation: view.observation,
+            observation: Arc::new(super::NativeObservation {
+                tables: view.observation,
+                _owner: owner.clone(),
+            }),
             sources: source.roots.sources.clone().retain_owner(owner.clone()),
             profiles: view.profiles,
             callees: source.run.callees.clone(),
@@ -219,7 +215,7 @@ impl NativeBuildReadiness {
                 "native Build readiness received another source entry".into(),
             ));
         }
-        let observation = compilation.observation(product.clone()).map_err(failed)?;
+        let mut observation = compilation.observation(product.clone()).map_err(failed)?;
         // Report the removals the completed discovery actually validated;
         // the assessed plan alone never certifies a report.
         let report = match (&self.request.evidence, self.bootstrap.proofs()) {
@@ -256,13 +252,8 @@ impl NativeBuildReadiness {
         copied.code_reach(&source.run.code);
         copied.callees(&source.run.callees);
         copied.foreign_use(&source.run.foreign);
-        copied.vec(&observation.failure_rules, |w, rule| w.add(rule.capacity()));
         copied.vec(&report, |w, line| w.add(line.capacity()));
-        copied.tree::<u64, (DefId, hirsel_lir::ir::SiteRange)>(observation.sites.len());
-        copied.map(&observation.anchors, |w, path, anchors| {
-            w.path(path);
-            w.flat_vec(anchors);
-        });
+        observation_metadata(&mut copied, &mut observation);
         request_metadata(&mut copied, &self.request);
         // Readiness retains its own request copy in addition to the returned
         // descriptor's copy. Both backing stores share this original charge.
@@ -284,7 +275,10 @@ impl NativeBuildReadiness {
             product: linked.clone(),
             platform: platform.clone(),
             store: self.store.clone(),
-            observation,
+            observation: Arc::new(super::NativeObservation {
+                tables: observation,
+                _owner: owner.clone(),
+            }),
             report,
             entry: source.run.entry.clone(),
             signature,
@@ -303,6 +297,22 @@ impl NativeBuildReadiness {
         *completed = Some(execution.clone());
         Ok(execution)
     }
+}
+
+fn observation_metadata(
+    weight: &mut hirsel_query_products::retained::MetadataWeight,
+    observation: &mut hirsel_native::NativeObservation,
+) {
+    weight.add(std::mem::size_of::<super::NativeObservation>() + 3 * std::mem::size_of::<usize>());
+    weight.vec(&observation.failure_rules, |w, rule| w.add(rule.capacity()));
+    // The selected summaries already resolved duplicate codes in source order.
+    // Move those exact rows through alloc's bulk collector, then expose only
+    // the immutable output view so its packed construction bound stays valid.
+    weight.packed_map(&mut observation.sites, |_, _, _| {});
+    weight.map(&observation.anchors, |w, path, anchors| {
+        w.path(path);
+        w.flat_vec(anchors);
+    });
 }
 
 /// Canonical identity of selected evidence: every record field in sidecar

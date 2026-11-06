@@ -361,8 +361,19 @@ impl TirProvider for ExecutionProvider<'_> {
         self.0.instance_body(path, actuals)
     }
 }
-/// Compact linked observation tables. Site ordinals use the selected source
-/// anchors, including generated definitions; no Ready/Value body is retained.
+/// Immutable linked observation tables. Detached readers retain the same
+/// output admission and backing allocations as the original execution.
+pub struct NativeObservation {
+    pub(super) tables: hirsel_native::NativeObservation,
+    pub(super) _owner: Arc<dyn Send + Sync>,
+}
+impl std::ops::Deref for NativeObservation {
+    type Target = hirsel_native::NativeObservation;
+    fn deref(&self) -> &Self::Target {
+        &self.tables
+    }
+}
+
 /// Executable readiness includes a materialized executable and frozen launch
 /// metadata. Construction follows successful Link/materialization checks; the
 /// admission/scratch owner lives until the last output user releases it.
@@ -371,7 +382,7 @@ pub struct NativeExecution {
     pub product: hirsel_engine_runtime::ProductRef,
     pub(crate) platform: Arc<super::native_link::FrozenPlatform>,
     pub store: Arc<dyn hirsel_engine_store::ResultStore>,
-    pub observation: NativeObservation,
+    pub observation: Arc<NativeObservation>,
     pub report: Vec<String>,
     pub entry: DefPath,
     pub signature: SignatureRef,
@@ -464,7 +475,7 @@ pub struct NativeReady {
     pub ready: Vec<hirsel_engine_runtime::ProductRef>,
     pub program: hirsel_native::ReadyProgram,
     pub entry: DefPath,
-    pub observation: NativeObservation,
+    pub observation: Arc<NativeObservation>,
     pub sources: SourceMap,
     /// Source profiles, present when the request selected source/debug tables.
     pub profiles: Option<Arc<hirsel_native::ProfileSources>>,

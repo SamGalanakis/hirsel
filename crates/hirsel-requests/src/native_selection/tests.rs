@@ -87,6 +87,7 @@ fn actual_native_selector_coalesces_build_and_bound_run_without_a_retained_contr
             };
             let launch = crate::HostLaunch::empty();
             let mut bound = None;
+            let mut detached_observations = Vec::new();
             for run in [false, true] {
                 let request = CompileRequest {
                     path: manifest.clone(),
@@ -133,6 +134,7 @@ fn actual_native_selector_coalesces_build_and_bound_run_without_a_retained_contr
                 };
                 assert_eq!(execution.entry, output.entry);
                 assert_eq!(execution.request.options.backend, backend);
+                detached_observations.push(execution.observation.clone());
                 let destination = directory.path().join("delivered");
                 native::request_output::materialize_output(execution, &destination).unwrap();
                 assert_eq!(&std::fs::read(&destination).unwrap()[..4], b"\x7fELF");
@@ -191,6 +193,11 @@ fn actual_native_selector_coalesces_build_and_bound_run_without_a_retained_contr
                 drop(second);
             }
             drop(selector);
+            assert!(
+                budget.reserved() > 0,
+                "detached observation readers retain their original output admission"
+            );
+            drop(detached_observations);
             assert_eq!(
                 budget.reserved(),
                 0,

@@ -810,6 +810,9 @@ impl HeaderSources {
             Self::install_items(engine, syntaxes);
             engine.declarations.place_product(&product.declarations);
         }
-        Ok(true)
+        // A closed specialization can share a written source owner without
+        // being one of that file's parsed items. Its ordinary materializer
+        // must still construct the requested body from the captured base.
+        Ok(engine.items.contains_key(path))
     }
 }

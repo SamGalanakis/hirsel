@@ -447,6 +447,11 @@ impl NamespaceCapture {
         self.assembly(adapters)
     }
     pub(crate) fn assembly(&self, adapters: &SourcePhases) -> Result<QueryEngine, QueryError> {
+        let mut engine = self.captured_engine()?;
+        engine.adapters = adapters.adapters();
+        Ok(engine)
+    }
+    fn captured_engine(&self) -> Result<QueryEngine, QueryError> {
         let headers = self
             .snapshot
             .header_products()
@@ -454,7 +459,6 @@ impl NamespaceCapture {
         let mut engine = headers.execution();
         self.inputs.install(&mut engine);
         engine.operation = self.operation.clone();
-        engine.adapters = adapters.adapters();
         engine.verify = self.verify;
         engine.sources = self.sources.clone();
         engine.result_store = Some(self.store.clone());
@@ -650,13 +654,7 @@ impl NamespaceCapture {
     pub(crate) fn source_engine(&self, path: &DefPath) -> Result<QueryEngine, QueryError> {
         #[cfg(test)]
         SOURCE_ENGINES.set(SOURCE_ENGINES.get() + 1);
-        let headers = self
-            .snapshot
-            .header_products()
-            .ok_or_else(|| refused("missing captured source owner"))?;
-        let mut engine = headers.execution();
-        self.inputs.install(&mut engine);
-        engine.sources = self.sources.clone();
+        let mut engine = self.captured_engine()?;
         engine.materialize(path)?;
         Ok(engine)
     }

@@ -2936,15 +2936,31 @@ impl BodyTask {
         }
         let worker = queries.worker();
         queries.release_handoff();
-        let syntax = queries.syntax(input).map_err(|error| {
-            queries.protocol_failure(
-                self.query,
-                &format!(
-                    "syntax recovery failed for {}: {error:?}",
-                    input.definition.path(),
-                ),
-            )
-        })?;
+        let syntax = loop {
+            match queries.syntax(input) {
+                Ok(syntax) => break syntax,
+                Err(error) => {
+                    // Syntax and completed Front products borrow from the same
+                    // allowance. Header eviction alone cannot release those
+                    // products; retry only after reclaiming an actual owner.
+                    if matches!(&error, QueryError::Operational(failure)
+                        if failure.operation == "source syntax admission")
+                        && (cx.evict_body() || queries.evict_idle(cx.scratch_bytes()))
+                    {
+                        continue;
+                    }
+                    return Err(queries
+                        .protocol_failure(
+                            self.query,
+                            &format!(
+                                "syntax recovery failed for {}: {error:?}",
+                                input.definition.path(),
+                            ),
+                        )
+                        .into());
+                }
+            }
+        };
         let SignatureInput {
             signature,
             reads: signature_reads,

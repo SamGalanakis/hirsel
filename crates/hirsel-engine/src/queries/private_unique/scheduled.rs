@@ -271,6 +271,10 @@ impl QueryEngine {
     }
     fn inference_groups(
         &self,
+        selected: Option<(
+            hirsel_query_products::reads::PackageKey,
+            hirsel_query_products::reads::ModuleKey,
+        )>,
     ) -> BTreeMap<
         (
             hirsel_query_products::reads::PackageKey,
@@ -279,14 +283,15 @@ impl QueryEngine {
         Vec<DefPath>,
     > {
         let mut groups = BTreeMap::<_, Vec<_>>::new();
-        for path in self.source_paths() {
-            groups
-                .entry((
-                    hirsel_query_products::reads::PackageKey::of(&path.0.package),
-                    hirsel_query_products::reads::ModuleKey::of(&path.0.modules),
-                ))
-                .or_default()
-                .push(path);
+        for path in self.source_paths_iter() {
+            let module = (
+                hirsel_query_products::reads::PackageKey::of(&path.0.package),
+                hirsel_query_products::reads::ModuleKey::of(&path.0.modules),
+            );
+            if selected.is_some_and(|selected| selected != module) {
+                continue;
+            }
+            groups.entry(module).or_default().push(path.clone());
         }
         groups
     }
@@ -504,7 +509,7 @@ impl QueryEngine {
         });
         let declarations = self.declarations.frozen();
         let complete = self
-            .source_paths()
+            .module_source_paths(owner.path())
             .into_iter()
             .filter(|path| {
                 hirsel_types::unique_summary::same_module(path, owner.path())
@@ -566,10 +571,7 @@ impl QueryEngine {
         let mut pending = Vec::new();
         self.adopted_private = None;
         self.private_summary_reads.clear();
-        for ((package, module), paths) in self.inference_groups() {
-            if selected.is_some_and(|selected| selected != (package, module)) {
-                continue;
-            }
+        for ((package, module), paths) in self.inference_groups(selected) {
             let mut generated = Vec::new();
             for path in &paths {
                 if self.source_facts(path).is_some_and(|f| f.generator) {

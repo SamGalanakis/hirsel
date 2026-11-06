@@ -5457,7 +5457,6 @@ impl Checker<'_, '_> {
                         &|o| self.arena_place(o),
                     );
                     let origin_owners = typing::operands(rvalue)
-                        .into_iter()
                         .filter(|o| o.usage == UseKind::Take)
                         .flat_map(|o| {
                             state.origins.owners[model.mapping[o.place.0 as usize]]
@@ -5490,7 +5489,6 @@ impl Checker<'_, '_> {
                         BTreeSet::new()
                     } else {
                         typing::operands(rvalue)
-                            .into_iter()
                             .flat_map(|o| self.sources(model, state, o))
                             .collect()
                     };
@@ -5545,7 +5543,7 @@ impl Checker<'_, '_> {
                                 | Rvalue::Construct { .. }
                                 | Rvalue::Closure { .. }
                         )
-                        || typing::operands(rvalue).iter().any(|o| {
+                        || typing::operands(rvalue).any(|o| {
                             self.body.places[o.place.0 as usize]
                                 .projection
                                 .iter()

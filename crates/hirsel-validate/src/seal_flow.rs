@@ -191,7 +191,6 @@ impl Checker<'_, '_> {
                                 super::super::typing::operands(
                                     &self.body.rvalues[value.0 as usize],
                                 )
-                                .iter()
                                 .map(|v| root(v.place)),
                             );
                         }

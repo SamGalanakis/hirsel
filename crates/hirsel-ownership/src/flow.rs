@@ -5822,13 +5822,15 @@ impl Checker<'_, '_> {
                 let shared = value.usage == UseKind::Borrow
                     && self.property(*argument).is_some_and(|p| !p.plain);
                 if !value.invalid && (exclusive || shared) {
-                    state.argument_loans.insert(*argument, (lent, *call));
+                    state
+                        .argument_loans
+                        .insert(*argument, (lent.clone(), *call));
                 }
             }
             Op::IterationLoan { source, begin } => {
                 if *begin {
                     if let Some(place) = place(self.body, *source, self.source_rows) {
-                        state.iteration_loans.insert(*source, place);
+                        state.iteration_loans.insert(*source, place.clone());
                     }
                 } else {
                     state.iteration_loans.remove(source);
@@ -6971,7 +6973,7 @@ impl Checker<'_, '_> {
                     }
                     if mode != Context::Take {
                         if let Some(p) = place(self.body, arg.value, self.source_rows) {
-                            loans.push((p, mode == Context::Mut, arg.value));
+                            loans.push((p.clone(), mode == Context::Mut, arg.value));
                         }
                     }
                     // Scoped closure environments and local-result provenance count

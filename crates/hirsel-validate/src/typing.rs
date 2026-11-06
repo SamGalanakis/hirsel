@@ -84,23 +84,25 @@ fn scoped_parameters_valid(
         })
 }
 
-pub(super) fn operands(r: &Rvalue) -> Vec<&Operand> {
-    match r {
-        Rvalue::Use(o) | Rvalue::Unary { value: o, .. } => {
-            vec![o]
-        }
-        Rvalue::Binary { left, right, .. } => vec![left, right],
+pub(super) fn operands(r: &Rvalue) -> impl Iterator<Item = &Operand> {
+    let (prefix, fields, captures): ([Option<&Operand>; 2], &[ConstructField], &[Operand]) = match r
+    {
+        Rvalue::Use(o) | Rvalue::Unary { value: o, .. } => ([Some(o), None], &[], &[]),
+        Rvalue::Binary { left, right, .. } => ([Some(left), Some(right)], &[], &[]),
         Rvalue::Construct {
             constructor: Constructor::SortedMap { by },
             fields,
             ..
-        } => std::iter::once(by)
-            .chain(fields.iter().map(|f| &f.value))
-            .collect(),
-        Rvalue::Construct { fields, .. } => fields.iter().map(|f| &f.value).collect(),
-        Rvalue::Closure { captures, .. } => captures.iter().collect(),
-        _ => vec![],
-    }
+        } => ([Some(by), None], fields, &[]),
+        Rvalue::Construct { fields, .. } => ([None, None], fields, &[]),
+        Rvalue::Closure { captures, .. } => ([None, None], &[], captures),
+        _ => ([None, None], &[], &[]),
+    };
+    prefix
+        .into_iter()
+        .flatten()
+        .chain(fields.iter().map(|field| &field.value))
+        .chain(captures)
 }
 
 pub(super) fn signature_valid(t: &TypeInterner, s: &Signature) -> bool {

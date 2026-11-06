@@ -379,7 +379,14 @@ pub(super) fn binders(
     }
     result
 }
-pub(super) fn place(
+pub(super) fn place<'a>(
+    body: &CheckedBody,
+    expression: ExprId,
+    rows: &'a super::source_rows::SourceRows,
+) -> Option<&'a Place> {
+    rows.place(body, expression)
+}
+pub(super) fn resolve_place(
     body: &CheckedBody,
     expression: ExprId,
     rows: &super::source_rows::SourceRows,

@@ -338,7 +338,7 @@ impl Checker<'_, '_> {
                         .body
                         .rvalues
                         .get(value.0 as usize)
-                        .is_some_and(|r| typing::operands(r).into_iter().any(escapes)),
+                        .is_some_and(|r| typing::operands(r).any(escapes)),
                     InstructionKind::Replace { value, .. }
                     | InstructionKind::Snapshot { value, .. }
                     | InstructionKind::Check {

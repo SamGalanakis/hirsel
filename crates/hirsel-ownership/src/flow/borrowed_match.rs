@@ -169,6 +169,7 @@ fn place_for_match(checker: &Checker<'_, '_>, source: ExprId) -> Option<Place> {
     )
     .then(|| place(checker.body, source, checker.source_rows))
     .flatten()
+    .cloned()
 }
 
 fn contains(outer: Span, inner: Span) -> bool {

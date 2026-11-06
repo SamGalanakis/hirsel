@@ -67,9 +67,8 @@ impl Checker<'_, '_> {
     }
 
     pub(super) fn rvalue_authority(&self, model: &Model, state: &State, value: &Rvalue) -> bool {
-        let inputs = typing::operands(value)
-            .into_iter()
-            .all(|value| self.operand_authority(model, state, value.place));
+        let inputs =
+            typing::operands(value).all(|value| self.operand_authority(model, state, value.place));
         let ambient = match value {
             Rvalue::FunctionReference { definition, arguments } => self.signatures.get(definition).and_then(|signature| match &signature.kind {
                 SignatureKind::Function(function) => {

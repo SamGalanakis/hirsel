@@ -400,7 +400,7 @@ impl Frame {
             .ok_or_else(|| invalid("local out of range"))?;
         for &step in indices.iter() {
             let (index, variant, indexed) = step.parts();
-            let fields = match slot.as_mut() {
+            let field = match slot.as_mut() {
                 // Bytes indexing yields a scalar snapshot, not a storage slot.
                 // Origin probes still need its bounds error to retain the
                 // expression's site until the actual operand read fails.
@@ -413,8 +413,10 @@ impl Frame {
                     if variant.is_none()
                         && !matches!(v, Value::Variant { .. } | Value::ResourceVariant { .. }) =>
                 {
-                    v.fields_mut()
-                        .ok_or_else(|| invalid("projection on scalar"))?
+                    if v.fields().is_none() {
+                        return Err(invalid("projection on scalar").into());
+                    }
+                    v.field_mut(index)
                 }
                 Some(
                     Value::Variant {
@@ -426,7 +428,7 @@ impl Frame {
                         fields,
                         ..
                     },
-                ) if variant == Some(*tag) => fields,
+                ) if variant == Some(*tag) => fields.get_mut(index),
                 Some(
                     Value::Variant { variant: tag, .. }
                     | Value::ResourceVariant { variant: tag, .. },
@@ -435,9 +437,7 @@ impl Frame {
                 }
                 _ => return Err(invalid("projection on dead or incompatible storage").into()),
             };
-            slot = fields
-                .get_mut(index)
-                .ok_or_else(|| AccessStep::missing(indexed))?;
+            slot = field.ok_or_else(|| AccessStep::missing(indexed))?;
         }
         Ok(slot)
     }
@@ -550,11 +550,7 @@ impl Frame {
                 }
             }
             crossed |= value.is_block();
-            let Some(next) = value
-                .fields_mut()
-                .and_then(|fields| fields.get_mut(index))
-                .and_then(Option::as_mut)
-            else {
+            let Some(next) = value.field_mut(index).and_then(Option::as_mut) else {
                 return Ok(None);
             };
             value = next;

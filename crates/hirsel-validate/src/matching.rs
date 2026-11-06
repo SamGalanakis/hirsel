@@ -429,9 +429,7 @@ impl Checker<'_, '_> {
                     }
                     InstructionKind::Assign { destination, value } => {
                         touches(*destination)
-                            || typing::operands(&self.body.rvalues[value.0 as usize])
-                                .into_iter()
-                                .any(consumes)
+                            || typing::operands(&self.body.rvalues[value.0 as usize]).any(consumes)
                     }
                     InstructionKind::Snapshot { destination, value } => {
                         touches(*destination) || consumes(value)

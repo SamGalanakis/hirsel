@@ -11,6 +11,7 @@ pub(super) struct SourceRows {
     pub sites: BTreeMap<NameSite, Vec<usize>>,
     pub bindings: BTreeMap<(NameSite, u8, u32), usize>,
     pub other: Vec<usize>,
+    resolved_places: ExprRows<std::cell::OnceCell<Option<Place>>>,
 }
 impl SourceRows {
     pub fn new(body: &CheckedBody) -> Self {
@@ -23,6 +24,7 @@ impl SourceRows {
             sites: BTreeMap::new(),
             bindings: BTreeMap::new(),
             other: vec![],
+            resolved_places: ExprRows::default(),
         };
         for (i, row) in body.expressions.iter().enumerate() {
             work::count(Counter::OwnershipSourceRows);
@@ -31,6 +33,9 @@ impl SourceRows {
         for (i, row) in body.places.iter().enumerate() {
             work::count(Counter::OwnershipSourceRows);
             out.places.entry(row.expression).get_or_insert(i);
+            out.resolved_places
+                .entry(row.expression)
+                .get_or_insert_with(std::cell::OnceCell::new);
         }
         for (i, row) in body.calls.iter().enumerate() {
             work::count(Counter::OwnershipSourceRows);
@@ -56,6 +61,14 @@ impl SourceRows {
             }
         }
         out
+    }
+    pub fn place(&self, body: &CheckedBody, expression: ExprId) -> Option<&Place> {
+        work::count(Counter::OwnershipSourceRows);
+        self.resolved_places
+            .get(&expression)
+            .expect("H source place")
+            .get_or_init(|| super::cfg::resolve_place(body, expression, self))
+            .as_ref()
     }
     pub fn expression(&self, expression: ExprId) -> Option<usize> {
         work::count(Counter::OwnershipSourceRows);

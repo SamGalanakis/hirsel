@@ -231,6 +231,7 @@ struct BlockData {
     elements: Vec<Option<Value>>,
     dead: usize,
     index: std::sync::OnceLock<Option<std::sync::Arc<keyed::KeyIndex>>>,
+    arena_free: std::sync::OnceLock<Vec<std::sync::OnceLock<()>>>,
 }
 impl Clone for BlockData {
     fn clone(&self) -> Self {
@@ -238,6 +239,7 @@ impl Clone for BlockData {
             elements: self.elements.clone(),
             dead: self.dead,
             index: Default::default(),
+            arena_free: Default::default(),
         }
     }
 }
@@ -300,9 +302,25 @@ impl Block {
     pub(crate) fn take_unique(&mut self) -> Option<Vec<Option<Value>>> {
         let data = std::sync::Arc::get_mut(&mut self.0)?;
         data.index.take();
+        data.arena_free.take();
         Some(std::mem::take(&mut data.elements))
     }
     fn make_mut(&mut self) -> &mut BlockData {
+        let data = self.data_mut();
+        data.arena_free.take();
+        data
+    }
+    fn element_mut(&mut self, index: usize) -> Option<&mut Option<Value>> {
+        let data = self.data_mut();
+        data.index.take();
+        if let Some(rows) = data.arena_free.get_mut()
+            && let Some(row) = rows.get_mut(index / 64)
+        {
+            row.take();
+        }
+        data.elements.get_mut(index)
+    }
+    fn data_mut(&mut self) -> &mut BlockData {
         if std::sync::Arc::get_mut(&mut self.0).is_none() {
             hirsel_intern::work::count_by(
                 hirsel_intern::work::Counter::InterpCopiedValues,
@@ -331,6 +349,7 @@ impl From<Vec<Option<Value>>> for Block {
             elements,
             dead: 0,
             index: Default::default(),
+            arena_free: Default::default(),
         }))
     }
 }
@@ -486,6 +505,13 @@ impl Value {
             | Self::Distinct { fields: f, .. }
             | Self::Closure { captures: f, .. } => Some(f),
             _ => None,
+        }
+    }
+    pub(crate) fn field_mut(&mut self, index: usize) -> Option<&mut Option<Value>> {
+        match self {
+            Self::Map { entries, .. } | Self::Set { entries, .. } => entries.element_mut(index),
+            Self::Sequence { elements, .. } => elements.element_mut(index),
+            _ => self.fields_mut()?.get_mut(index),
         }
     }
     /// The shared element storage of a List, Array, Map or Set.
@@ -997,12 +1023,46 @@ impl Value {
                 .is_some_and(|s| s.logical_block.is_some())
     }
     pub(crate) fn contains_arena_storage(&self) -> bool {
-        let mut pending = vec![self];
-        while let Some(value) = pending.pop() {
+        enum Pending<'a> {
+            Value(&'a Value),
+            Free(&'a std::sync::OnceLock<()>),
+        }
+        let mut pending = vec![Pending::Value(self)];
+        while let Some(next) = pending.pop() {
+            let value = match next {
+                Pending::Value(value) => value,
+                Pending::Free(row) => {
+                    let _ = row.set(());
+                    continue;
+                }
+            };
             if value.is_block() && value.arena_storage().is_some() {
                 return true;
             }
-            pending.extend(value.fields().into_iter().flatten().flatten());
+            if let Some(block) = value.block() {
+                // Only negative answers are retained. Invocation can empty a
+                // shared closure capture, but cannot add an arena allocation.
+                let rows = block.0.arena_free.get_or_init(|| {
+                    (0..block.len().div_ceil(64))
+                        .map(|_| std::sync::OnceLock::new())
+                        .collect()
+                });
+                for (chunk, row) in block.chunks(64).zip(rows).rev() {
+                    if row.get().is_none() {
+                        pending.push(Pending::Free(row));
+                        pending.extend(chunk.iter().flatten().map(Pending::Value));
+                    }
+                }
+            } else {
+                pending.extend(
+                    value
+                        .fields()
+                        .into_iter()
+                        .flatten()
+                        .flatten()
+                        .map(Pending::Value),
+                );
+            }
         }
         false
     }

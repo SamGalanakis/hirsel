@@ -755,10 +755,12 @@ impl SignatureSnapshot {
                 .into_iter()
                 .map(|(package, replaced)| {
                     let base = bases.get(&package).unwrap_or(&views).clone();
-                    Ok((
-                        package,
-                        PackageViews::new(t, base, replaced, &mut validated, old)?,
-                    ))
+                    let views = PackageViews::new(t, base, replaced, &mut validated, old)?;
+                    let views = match self.package_view_lease(&package, &views).ok().flatten() {
+                        Some(lease) => views.retain_owner(lease),
+                        None => views,
+                    };
+                    Ok((package, views))
                 })
                 .collect::<Result<_, hirsel_validate::ViewRefusal>>()?;
             let graph = self.headers.as_ref().map_or_else(
@@ -1218,55 +1220,58 @@ impl SignatureSnapshot {
                         retained: false,
                     }));
                 }
-                let views = if let Some(delta) = views.retained_delta_bytes() {
-                    let bytes = delta
-                        .checked_add(
-                            hirsel_query_products::retained::retained_signature_payload_bytes(
-                                &signature,
-                            ),
-                        )
-                        .and_then(|bytes| {
-                            bytes.checked_add(
-                                (3 * size_of::<((PackageId, ValidationDigest), Arc<PackageViews>)>(
-                                ) + package.name.capacity()
-                                    + package.version.capacity())
-                                    as u64,
-                            )
-                        })
-                        .ok_or_else(|| hirsel_validate::ViewRefusal::Unreadable {
-                            definition: signature.definition,
-                            cause: QueryError::Operational(hirsel_types::OperationalFailure {
-                                operation: "validation overlay retention".into(),
-                                message: "overlay size overflow".into(),
-                            }),
-                        })?;
-                    let lease = match &self.headers {
-                        Some(headers) => match headers.try_validation_lease(bytes) {
-                            Ok(lease) => lease,
-                            Err(_) => {
-                                // The exact transient result is already computed. A
-                                // declined optional retention publishes no cache entry.
-                                validation_retention_refused();
-                                return Ok(Arc::new(RetainedView {
-                                    value: Arc::new(views),
-                                    retained: false,
-                                }));
-                            }
-                        },
-                        None => Arc::new(()) as Arc<dyn Send + Sync>,
-                    };
-                    let views = Arc::new(views.retain_owner(lease));
-                    views
-                } else {
-                    Arc::new(views)
+                let lease = self.package_view_lease(package, &views)?;
+                let retained = lease.is_some();
+                let views = match lease {
+                    Some(lease) => views.retain_owner(lease),
+                    None => views,
                 };
                 Ok(Arc::new(RetainedView {
-                    value: views,
-                    retained: true,
+                    value: Arc::new(views),
+                    retained,
                 }))
             })
             .map_err(refusal)?;
         Ok(value.value.clone())
+    }
+    fn package_view_lease(
+        &self,
+        package: &PackageId,
+        views: &PackageViews,
+    ) -> Result<Option<Arc<dyn Send + Sync>>, QueryError> {
+        let Some(mut bytes) = views.retained_delta_bytes() else {
+            return Ok(None);
+        };
+        let overflow = || {
+            QueryError::Operational(hirsel_types::OperationalFailure {
+                operation: "validation overlay retention".into(),
+                message: "overlay size overflow".into(),
+            })
+        };
+        for signature in views.retained_delta_signatures() {
+            bytes = bytes
+                .checked_add(
+                    hirsel_query_products::retained::retained_signature_payload_bytes(signature),
+                )
+                .ok_or_else(overflow)?;
+        }
+        bytes = bytes
+            .checked_add(
+                (3 * size_of::<((PackageId, ValidationDigest), Arc<PackageViews>)>()
+                    + package.name.capacity()
+                    + package.version.capacity()) as u64,
+            )
+            .ok_or_else(overflow)?;
+        match &self.headers {
+            Some(headers) => match headers.try_validation_lease(bytes) {
+                Ok(lease) => Ok(Some(lease)),
+                Err(_) => {
+                    validation_retention_refused();
+                    Ok(None)
+                }
+            },
+            None => Ok(Some(Arc::new(()))),
+        }
     }
     /// Validation retention is optional, including the single-flight row's lease.
     /// A declined row admission leaves no claim behind; compute the same exact

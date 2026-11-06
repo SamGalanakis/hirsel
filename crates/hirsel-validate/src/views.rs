@@ -488,12 +488,87 @@ impl PackageUniverse {
     }
 }
 
+/// Immutable overlay rows retain their admitted parent allocations.
+struct PreparedRows<V> {
+    rows: DefMap<V>,
+    removed: DefMap<()>,
+    parent: Option<Arc<Self>>,
+    retention: OnceLock<Arc<dyn Send + Sync>>,
+}
+impl<V> PreparedRows<V> {
+    fn new(rows: DefMap<V>, parent: Option<Arc<Self>>, removed: DefMap<()>) -> Arc<Self> {
+        Arc::new(Self {
+            rows,
+            removed,
+            parent,
+            retention: OnceLock::new(),
+        })
+    }
+    fn get(&self, definition: &DefId) -> Option<&V> {
+        let mut layer = self;
+        loop {
+            if let Some(value) = layer.rows.get(definition) {
+                return Some(value);
+            }
+            if layer.removed.contains_key(definition) {
+                return None;
+            }
+            layer = layer.parent.as_deref()?;
+        }
+    }
+    fn iter(&self) -> PreparedRowsIter<'_, V> {
+        PreparedRowsIter {
+            root: self,
+            layer: self,
+            rows: self.rows.iter(),
+        }
+    }
+    fn values(&self) -> impl Iterator<Item = &V> {
+        self.iter().map(|(_, value)| value)
+    }
+    fn parent_retained(&self) -> bool {
+        self.parent
+            .as_ref()
+            .is_none_or(|parent| parent.retention.get().is_some())
+    }
+}
+impl<V> Drop for PreparedRows<V> {
+    fn drop(&mut self) {
+        let mut parent = self.parent.take();
+        while let Some(mut rows) = parent.and_then(Arc::into_inner) {
+            parent = rows.parent.take();
+        }
+    }
+}
+struct PreparedRowsIter<'a, V> {
+    root: &'a PreparedRows<V>,
+    layer: &'a PreparedRows<V>,
+    rows: std::collections::hash_map::Iter<'a, DefId, V>,
+}
+impl<'a, V> Iterator for PreparedRowsIter<'a, V> {
+    type Item = (&'a DefId, &'a V);
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            for (definition, value) in self.rows.by_ref() {
+                if self
+                    .root
+                    .get(definition)
+                    .is_some_and(|current| std::ptr::eq(current, value))
+                {
+                    return Some((definition, value));
+                }
+            }
+            self.layer = self.layer.parent.as_deref()?;
+            self.rows = self.layer.rows.iter();
+        }
+    }
+}
 /// One package's universe: the public table with some views replaced.
 pub struct PackageViews {
     base: Arc<ViewTable>,
-    replaced: DefMap<View>,
+    replaced: Arc<PreparedRows<View>>,
     /// Verdicts checked again under the replacements, by view.
-    verdicts: DefMap<Arc<ViewVerdict>>,
+    verdicts: Arc<PreparedRows<Arc<ViewVerdict>>>,
     first_heap: Option<(DefId, HeapRole)>,
     errors: UniverseErrors,
     input_digest: OnceLock<ContentHash>,
@@ -511,7 +586,14 @@ impl PackageViews {
         old: Option<&ValidatedSignatures>,
     ) -> Result<Self, ViewRefusal> {
         let replaced: DefMap<View> = replacements.into_iter().map(|v| (v.d, v)).collect();
-        Self::over(t, base, replaced, &DefMap::default(), store, old)
+        Self::over(
+            t,
+            base,
+            PreparedRows::new(replaced, None, DefMap::default()),
+            None,
+            store,
+            old,
+        )
     }
     /// This universe with `signature` in place of its view: compile-time
     /// evaluation's materialized owner.
@@ -523,9 +605,12 @@ impl PackageViews {
         old: Option<&ValidatedSignatures>,
     ) -> Result<Self, ViewRefusal> {
         let view = View::new(t, signature, None);
-        let mut replaced = self.replaced.clone();
-        replaced.insert(view.d, view);
-        let mut result = Self::over(t, self.base.clone(), replaced, &self.verdicts, store, old)?;
+        let replaced = PreparedRows::new(
+            [(view.d, view)].into_iter().collect(),
+            Some(self.replaced.clone()),
+            DefMap::default(),
+        );
+        let mut result = Self::over(t, self.base.clone(), replaced, Some(self), store, old)?;
         result.origin_input = self.input_digest();
         Ok(result)
     }
@@ -537,33 +622,54 @@ impl PackageViews {
     /// shared base and signature payloads. Failed verdict payloads stay transient.
     pub fn retained_delta_bytes(&self) -> Option<u64> {
         if !self.base.errors.errors.is_empty()
+            || !self.replaced.parent_retained()
+            || !self.verdicts.parent_retained()
             || !self.errors.errors.is_empty()
             || self.verdicts.values().any(|v| v.error.is_some())
         {
             return None;
         }
         let mut bytes = (size_of::<Self>() + 2 * size_of::<usize>()) as u64;
-        bytes = bytes.checked_add((self.replaced.len() as u64).checked_mul(
+        bytes = bytes.checked_add(
+            (size_of::<PreparedRows<View>>()
+                + size_of::<PreparedRows<Arc<ViewVerdict>>>()
+                + 4 * size_of::<usize>()) as u64,
+        )?;
+        bytes = bytes.checked_add((self.replaced.rows.len() as u64).checked_mul(
             (3 * size_of::<(DefId, View)>() + size_of::<crate::IdentifiedSignature>() + 256) as u64,
         )?)?;
-        bytes = bytes.checked_add((self.verdicts.len() as u64).checked_mul(
+        bytes = bytes.checked_add((self.verdicts.rows.len() as u64).checked_mul(
             (3 * size_of::<(DefId, Arc<ViewVerdict>)>() + size_of::<ViewVerdict>() + 256) as u64,
         )?)?;
-        for verdict in self.verdicts.values() {
+        bytes = bytes.checked_add(
+            ((self.replaced.removed.len() + self.verdicts.removed.len()) as u64)
+                .checked_mul((3 * size_of::<(DefId, ())>() + 1) as u64)?,
+        )?;
+        for verdict in self.verdicts.rows.values() {
             bytes = bytes.checked_add((verdict.reads.capacity() * size_of::<VRead>()) as u64)?;
         }
         if let Some((_, heap)) = &self.first_heap {
             bytes = bytes.checked_add(heap_bytes(heap)?)?;
         }
-        for view in self.replaced.values() {
+        for view in self.replaced.rows.values() {
             if let Some(heap) = view.input.heap() {
                 bytes = bytes.checked_add(heap_bytes(heap)?)?;
             }
         }
         Some(bytes)
     }
+    /// Payloads newly held by this overlay. Its shared parents keep the leases
+    /// which charged their own payloads and control allocations.
+    pub fn retained_delta_signatures(&self) -> impl Iterator<Item = &SignatureRef> {
+        self.replaced
+            .rows
+            .values()
+            .filter_map(|view| view.input.held_signature())
+    }
     /// Retain the host's existing reservation with every shared overlay owner.
     pub fn retain_owner(mut self, owner: Arc<dyn Send + Sync>) -> Self {
+        let _ = self.replaced.retention.set(owner.clone());
+        let _ = self.verdicts.retention.set(owner.clone());
         self._retention = Some(owner);
         self
     }
@@ -601,8 +707,8 @@ impl PackageViews {
     fn over(
         t: &Arc<TypeInterner>,
         base: Arc<ViewTable>,
-        replaced: DefMap<View>,
-        checked: &DefMap<Arc<ViewVerdict>>,
+        replaced: Arc<PreparedRows<View>>,
+        previous: Option<&Self>,
         store: &mut ValidatedSignatures,
         old: Option<&ValidatedSignatures>,
     ) -> Result<Self, ViewRefusal> {
@@ -613,7 +719,7 @@ impl PackageViews {
         // The universe in DefPath order: the base's views and new ones.
         // An installed view's readers are not known, so none is replaced.
         assert!(
-            replaced.keys().all(|d| base
+            replaced.iter().all(|(d, _)| base
                 .installed
                 .as_ref()
                 .is_none_or(|i| !i.views.contains(*d))),
@@ -633,14 +739,14 @@ impl PackageViews {
         );
         // Verdicts to check again: the replaced views and every view whose
         // verdict, public or already checked here, read one of them.
-        let mut again: BTreeSet<DefId> = replaced.keys().copied().collect();
-        for d in replaced.keys() {
+        let mut again: BTreeSet<DefId> = replaced.iter().map(|(d, _)| *d).collect();
+        for (d, _) in replaced.iter() {
             for &i in base.readers.get(d).into_iter().flatten() {
                 again.insert(base.views[i as usize].d);
             }
         }
-        for (d, verdict) in checked {
-            if read_views(verdict).any(|read| replaced.contains_key(&read)) {
+        for (d, verdict) in previous.into_iter().flat_map(|views| views.verdicts.iter()) {
+            if read_views(verdict).any(|read| replaced.get(&read).is_some()) {
                 again.insert(*d);
             }
         }
@@ -653,7 +759,11 @@ impl PackageViews {
             _retention: None,
             base,
             replaced,
-            verdicts: DefMap::default(),
+            verdicts: PreparedRows::new(
+                DefMap::default(),
+                previous.map(|views| views.verdicts.clone()),
+                DefMap::default(),
+            ),
             first_heap: heap,
             errors: UniverseErrors::default(),
             input_digest: OnceLock::new(),
@@ -662,16 +772,32 @@ impl PackageViews {
         let verdicts: DefMap<_> = again
             .iter()
             .map(|&d| Ok((d, store.verdict_from(t, d, &views, old)?)))
+            .filter(|result| match result {
+                Ok((d, verdict)) => previous
+                    .and_then(|views| views.verdicts.get(d))
+                    .is_none_or(|checked| !Arc::ptr_eq(checked, verdict)),
+                Err(_) => true,
+            })
             .collect::<Result<_, ViewRefusal>>()?;
+        let removed = previous
+            .into_iter()
+            .flat_map(|views| views.verdicts.iter())
+            .filter(|(definition, _)| !again.contains(definition))
+            .map(|(definition, _)| (*definition, ()))
+            .collect();
+        views.verdicts = PreparedRows::new(
+            verdicts,
+            previous.map(|views| views.verdicts.clone()),
+            removed,
+        );
         let errors = order
             .iter()
-            .filter_map(|d| match verdicts.get(d) {
+            .filter_map(|d| match views.verdicts.get(d) {
                 Some(verdict) => verdict.error.clone(),
                 None => views.base.verdict(*d).and_then(|v| v.error.clone()),
             })
             .collect();
         views.errors = UniverseErrors::new(errors);
-        views.verdicts = verdicts;
         Ok(views)
     }
 }

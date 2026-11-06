@@ -539,15 +539,9 @@ impl ReaderSequence {
     ) -> Option<Result<Reads, hirsel_query_products::reads::Inconsistent>> {
         let mut union = ReadUnion::default();
         for entry in &self.0 {
-            let live = entry.source.as_ref().and_then(|source| match source {
-                ReaderSource::Front(id, _, owner) => owner.live_reads(*id, false),
-                ReaderSource::Lower(..) | ReaderSource::StagedLower(..) => None,
-            });
-            if let Some(reads) = live {
-                union.merge_live(&reads, scratch)?;
-            } else {
-                entry.receipt.merge(&mut union, store, scratch)?;
-            }
+            // Refresh checked this exact receipt. A live Front slot may have
+            // since acquired different body observations and is not its source.
+            entry.receipt.merge(&mut union, store, scratch)?;
         }
         if !union.fits_scratch(scratch)? {
             return None;

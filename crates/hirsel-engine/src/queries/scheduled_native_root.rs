@@ -741,7 +741,8 @@ impl QueryEngine {
                 None => {
                     self.source_facts(path)
                         .ok_or_else(|| invalid(format!("native declaration facts: {path}")))?
-                        .constant
+                        .body_kind
+                        == BodyKind::Constant
                 }
             };
             if !constant {

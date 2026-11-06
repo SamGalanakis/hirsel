@@ -140,7 +140,9 @@ impl PrivateProducts {
                     .get(path)
                     .is_some_and(|m| !m.public)
                     && engine.source_facts(path).is_some_and(|f| {
-                        (f.body || f.generator) && !f.constant && !f.instance_bodied
+                        (f.body_kind == BodyKind::Function || f.generator)
+                            && f.body_kind != BodyKind::Constant
+                            && !f.instance_bodied
                     })
             })
             .collect()

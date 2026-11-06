@@ -158,7 +158,7 @@ impl QueryEngine {
                 && matches!(&signature.kind, SignatureKind::Function(f) if f.foreign.is_none())
                 && self
                     .source_facts(id.path())
-                    .is_some_and(|facts| facts.body && !facts.constant)
+                    .is_some_and(|facts| facts.body_kind == BodyKind::Function)
         {
             // A declaration normalized without a Modes adapter still observes
             // its conservative proof. It cannot be a wildcard cache variant

@@ -6,7 +6,7 @@ use hirsel_syntax::DefPath;
 
 pub const SEMANTIC_INPUT: Domain = Domain {
     kind: 0x4601_000c,
-    schema: 1,
+    schema: 2,
 };
 pub const SEMANTIC_HEADER: Domain = Domain {
     kind: 0x4601_000d,

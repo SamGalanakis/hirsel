@@ -2145,7 +2145,9 @@ impl QueryEngine {
                 read,
                 ReadKey::ExecutedBody(_) | ReadKey::ValidationUniverse(_)
             )
-        }) || self.source_facts(path).is_some_and(|facts| facts.execution)
+        }) || self
+            .source_facts(path)
+            .is_some_and(|facts| facts.requires_execution())
     }
     fn staged_declaration_owner(&self, path: &DefPath) -> Option<DefPath> {
         if let Some(constant) = self.staged_constants.get(path) {
@@ -2783,7 +2785,7 @@ impl QueryEngine {
             let mut value = record.constant;
             let (owner, shape) = self.lexical_shape(path)?;
             if record.owner != owner.def
-                || !self.source_facts(path)?.constant
+                || self.source_facts(path)?.body_kind != BodyKind::Constant
                 || value.executed != variant.reads
                 || !self.portable_evaluation_reads(&value)
                 || value.depth.first.len() != self.depth_limit() as usize + 1

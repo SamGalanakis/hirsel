@@ -630,9 +630,10 @@ impl QueryEngine {
                         .definitions
                         .get(*path)
                         .is_some_and(|m| !m.public)
-                        && self
-                            .source_facts(path)
-                            .is_some_and(|f| (f.body || f.generator) && !f.constant)
+                        && self.source_facts(path).is_some_and(|f| {
+                            (f.body_kind == BodyKind::Function || f.generator)
+                                && f.body_kind != BodyKind::Constant
+                        })
                 })
                 .cloned()
                 .collect();
@@ -678,9 +679,10 @@ impl QueryEngine {
                     .definitions
                     .get(path)
                     .is_some_and(|m| m.public)
-                    || self
-                        .source_facts(path)
-                        .is_some_and(|f| (!f.body && !f.generator) || f.constant)
+                    || self.source_facts(path).is_some_and(|f| {
+                        (f.body_kind == BodyKind::None && !f.generator)
+                            || f.body_kind == BodyKind::Constant
+                    })
                 {
                     continue;
                 }
@@ -697,7 +699,7 @@ impl QueryEngine {
                     || !matches!(&signature.value.kind, SignatureKind::Function(f) if f.foreign.is_none())
                     || self
                         .source_facts(path)
-                        .is_some_and(|f| !f.body && !f.generator)
+                        .is_some_and(|f| f.body_kind == BodyKind::None && !f.generator)
                 {
                     continue;
                 }

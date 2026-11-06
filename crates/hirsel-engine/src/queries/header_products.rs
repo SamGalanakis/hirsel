@@ -335,7 +335,9 @@ impl HeaderProducts {
                     .get(id.path())
                     .is_some_and(|metadata| !metadata.public)
                     && engine.source_facts(id.path()).is_some_and(|facts| {
-                        (facts.body || facts.generator) && !facts.constant && !facts.instance_bodied
+                        (facts.body_kind == BodyKind::Function || facts.generator)
+                            && facts.body_kind != BodyKind::Constant
+                            && !facts.instance_bodied
                     })
             })
             .map(|(id, summary)| (*id, summary.clone()))

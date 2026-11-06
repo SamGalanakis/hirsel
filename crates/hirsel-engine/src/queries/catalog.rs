@@ -39,7 +39,11 @@ impl LexicalShape {
 pub(crate) fn capture_source_facts(syntax: &ItemSyntax) -> hirsel_query_products::SourceFacts {
     use hirsel_syntax::{AttributeArgument, TypeBody, Visibility};
     let item = &syntax.item;
-    let constant = matches!(item.kind, ItemKind::Const { .. });
+    let body_kind = match item.kind {
+        ItemKind::Const { .. } => BodyKind::Constant,
+        ItemKind::Function { body: Some(_), .. } => BodyKind::Function,
+        _ => BodyKind::None,
+    };
     let arms = match &item.kind {
         ItemKind::Type {
             body: TypeBody::Variants(arms),
@@ -74,9 +78,7 @@ pub(crate) fn capture_source_facts(syntax: &ItemSyntax) -> hirsel_query_products
         generator: generation::generator(syntax).is_some(),
         instance_bodied: generation::instance_bodied(syntax),
         executable: generation::executable(syntax),
-        body: constant || matches!(item.kind, ItemKind::Function { body: Some(_), .. }),
-        constant,
-        execution: constant || !comptime.is_empty(),
+        body_kind,
         specializes: crate::families::closes(syntax),
         staged: super::scheduled_stage::has_staged_body(syntax),
         comptime,
@@ -142,7 +144,7 @@ struct FileHeads {
 }
 fn heads_integrity(heads: &[Head]) -> ContentHash {
     ContentHash::of_parts(
-        "hirsel.parse-heads.payload.v5",
+        "hirsel.parse-heads.payload.v6",
         [&bincode::serialize(heads).expect("source heads encode")[..]],
     )
 }
@@ -855,7 +857,7 @@ impl QueryEngine {
         let scope = bincode::serialize(context).ok()?;
         let e = &self.environment;
         let environment = ContentHash::of_parts(
-            "hirsel.parse-heads.environment.v1",
+            "hirsel.parse-heads.environment.v2",
             [
                 e.interface_version.to_le_bytes().as_slice(),
                 e.compiler_version.as_bytes(),
@@ -998,7 +1000,7 @@ impl QueryEngine {
             .collect();
         heads.sort_by_key(|h| (h.base, h.definition.path().clone()));
         FileHeads {
-            schema: 6,
+            schema: 7,
             integrity: heads_integrity(&heads),
             context: context.clone(),
             source: ContentHash::of_bytes(self.sources.file(file).unwrap().text().as_bytes()),
@@ -1009,7 +1011,7 @@ impl QueryEngine {
         let Some(source) = self.sources.file(file) else {
             return false;
         };
-        record.schema == 6
+        record.schema == 7
             && record.integrity == heads_integrity(&record.heads)
             && record.context == *context
             && record.source == ContentHash::of_bytes(source.text().as_bytes())
@@ -1633,7 +1635,7 @@ mod tests {
                 let file = engine.sources.add("heads.hir", source.into()).unwrap();
                 let key = engine.catalog_key(file, &context).unwrap();
                 let mut record = FileHeads {
-                    schema: 6,
+                    schema: 7,
                     integrity: ContentHash::default(),
                     context: context.clone(),
                     source: ContentHash::of_bytes(source.as_bytes()),
@@ -1650,9 +1652,7 @@ mod tests {
                             generator: false,
                             instance_bodied: false,
                             executable: false,
-                            body: false,
-                            constant: false,
-                            execution: false,
+                            body_kind: BodyKind::None,
                             specializes: false,
                             staged: false,
                             comptime: vec![],

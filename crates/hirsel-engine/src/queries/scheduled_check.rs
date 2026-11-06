@@ -43,7 +43,7 @@ impl DeadArmLint {
                 (item.anchor, item.facts.arms.clone()),
             );
         }
-        if item.facts.body {
+        if item.facts.body_kind != BodyKind::None {
             self.bodies.push(item.definition.clone());
         }
     }
@@ -1194,7 +1194,7 @@ impl QueryEngine {
                     if linted {
                         lint.insert(&item);
                     }
-                    if item.facts.constant {
+                    if item.facts.body_kind == BodyKind::Constant {
                         constants.insert(DefId::intern(&item.definition));
                     }
                     if plan.front.query(&item.definition).is_none() {

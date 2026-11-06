@@ -21,7 +21,7 @@ impl QueryEngine {
                 if !item.facts.arms.is_empty() {
                     declarations.insert(item.definition.clone(), (item.anchor, item.facts.arms));
                 }
-                if item.facts.body {
+                if item.facts.body_kind != BodyKind::None {
                     bodies.push(item.definition);
                 }
             }

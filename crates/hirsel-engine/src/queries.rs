@@ -1,6 +1,7 @@
 mod live_record;
 use crate::memo::{MemoGraph, MemoKey};
 use crate::*;
+use hirsel_query_products::BodyKind;
 use hirsel_query_products::reads::{ReadKey, Reads, ReadsBuilder};
 mod candidate_products;
 mod checked_signatures;
@@ -634,7 +635,7 @@ impl QueryEngine {
                 .flat_map(|_| self.lowered.iter())
                 .filter(|(id, entry)| {
                     self.source_facts(id.path())
-                        .is_some_and(|facts| !facts.execution)
+                        .is_some_and(|facts| !facts.requires_execution())
                         && !self.lower_requires_execution(id.path(), entry.reads())
                 })
                 .map(|(id, _)| *id)
@@ -1122,7 +1123,7 @@ impl QueryEngine {
             && self.private_summary_active
             && self
                 .source_facts(definition)
-                .is_some_and(|facts| facts.body && !facts.constant);
+                .is_some_and(|facts| facts.body_kind == BodyKind::Function);
         // Read the complete previous action before invoking normalization or
         // reconstructing its private view. Active cycles retain the ordinary
         // provisional-group/reentrant path and are never restored as settled.
@@ -2534,7 +2535,7 @@ impl TirProvider for QueryEngine {
                         )
                     }
                     None if self.catalog.body(&path).is_some() => (
-                        self.catalog.facts(&path)?.constant,
+                        self.catalog.facts(&path)?.body_kind == BodyKind::Constant,
                         self.declarations.sites(&path).first()?.name_span,
                     ),
                     None => return None,

@@ -154,19 +154,31 @@ use hirsel_engine_admission::test_alloc;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
 
+/// The executable body declared by a source item.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+pub enum BodyKind {
+    None,
+    Function,
+    Constant,
+}
+
 /// Declaration observations needed by checking without retaining syntax.
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SourceFacts {
     pub generator: bool,
     pub instance_bodied: bool,
     pub executable: bool,
-    pub body: bool,
-    pub constant: bool,
-    pub execution: bool,
+    pub body_kind: BodyKind,
     pub specializes: bool,
     pub staged: bool,
     pub comptime: Vec<(u32, u32, u32)>,
     pub fact: bool,
     pub associations: Vec<(u8, u32, u32)>,
     pub arms: Vec<(String, u32, u32)>,
+}
+
+impl SourceFacts {
+    pub fn requires_execution(&self) -> bool {
+        self.body_kind == BodyKind::Constant || !self.comptime.is_empty()
+    }
 }

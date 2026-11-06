@@ -988,7 +988,11 @@ to the optional provider independently of the host's in-memory carry. One
 Summary address retains the ordinary bounded action variants, so edit/revert
 requests reuse earlier facts after validating their exact reads. Optional writes
 bypass required request transport, including its scratch store; a cache refusal
-only loses reuse. Compact eviction retains admitted phase observations. A
+only loses reuse. Ordinary Lower descriptors and compact Front facts derive
+allocation requirements from their immutable stored bytes before semantic decoding.
+The consumer reserves that requirement; no persisted allocation estimate supplies
+admission. Lower and Front address domains exclude their previous record layouts.
+Compact eviction retains admitted phase observations. A
 missing cached record takes ordinary recomputation. Check and instance bootstrap consume roots in bounded
 groups. Header slots share the Front allowance and release unpinned signature
 payloads and metadata under pressure. Explicit archives keep their own leases.

@@ -6,6 +6,9 @@ hirsel_guard::install!();
 mod base;
 mod bounded;
 mod installed_decode;
+pub mod decode_schema {
+    pub use crate::installed_decode::{Scan, Walk, field, record_decode_requirement};
+}
 pub use bounded::{ArchiveRowRefusal, RecordEncoding};
 pub use installed_decode::{DecodeRequirement, InstalledHeader, InstalledSyntax, RunContent};
 mod envelope;
@@ -24,7 +27,9 @@ use hirsel_types::{TableBuilder, TypeInterner};
 pub use indexed_types::{CheckedTypeComponent, TypeEdge, TypeRow, TypeTag};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-pub use tir::{CheckedTir, TirBlockRows, TirBodyHeader, TirBodyRows, TirHeader, TirMatchRows};
+pub use tir::{
+    CheckedTir, TirBlockRows, TirBodyHeader, TirBodyRows, TirHeader, TirMatchRows, tir_decode_bytes,
+};
 pub use types::{ProductTypes, TypeRecords, TypeRef};
 
 use envelope::EnvelopeLayout;

@@ -841,12 +841,21 @@ impl BodyTask {
     pub(super) fn decode_facts(&self, bytes: &[u8], reads: &Arc<Reads>) -> Option<Facts> {
         let queries = &self.queries;
         let input = &queries.inputs[&self.input];
-        let facts: Facts = queries.records.decode_record(bytes, |path, occurrence| {
-            queries
-                .citations
-                .owners
-                .record_source_anchor(path, occurrence)
-        })?;
+        let requirement = queries
+            .records
+            .record_requirement::<Facts>(bytes.to_vec().into())?;
+        if requirement.required_bytes() > self.weight.scratch {
+            return None;
+        }
+        let facts: Facts = requirement.decode_reserved(
+            |bytes| queries.store.try_admit_product_memory(bytes),
+            |path, occurrence| {
+                queries
+                    .citations
+                    .owners
+                    .record_source_anchor(path, occurrence)
+            },
+        )?;
         let (encoded, roots) = hirsel_types::with_table_collection(|| {
             bincode::serialize_into(std::io::sink(), &facts)
         });
@@ -1338,5 +1347,25 @@ mod tests {
                 );
             }
         });
+    }
+}
+
+hirsel_product_codec::decode_variants!(PackedSummary {
+    Checked { definition, text, reads }, Owned(f0)
+});
+hirsel_product_codec::decode_structure!(PackedFacts {
+    summary,
+    checked,
+    dead_arms,
+    diagnostics,
+    diagnostic_phases,
+    lowering,
+    table_keys
+});
+impl hirsel_product_codec::decode_schema::Walk for Facts {
+    fn walk(scan: &mut hirsel_product_codec::decode_schema::Scan<'_>) -> Option<()> {
+        // try_from also creates the shared publication when PackedSummary::Checked is used.
+        scan.add(size_of::<PublishedSummary>() + 2 * size_of::<usize>())?;
+        PackedFacts::walk(scan)
     }
 }

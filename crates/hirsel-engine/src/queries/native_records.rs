@@ -868,18 +868,6 @@ impl NativeRecords {
         self.records
             .encode_tir(definition, |anchor| source.record_owner(anchor))
     }
-    pub fn encode_tir_with_decode_bytes(
-        &self,
-        source: &(impl NativeRecordSource + ?Sized),
-        definition: &hirsel_tir::Definition,
-    ) -> Option<(Vec<u8>, u64)> {
-        if !Arc::ptr_eq(&self.types, source.record_types()) {
-            return None;
-        }
-        self.store.archive_encoded(self.boundary);
-        self.records
-            .encode_tir_with_decode_bytes(definition, |anchor| source.record_owner(anchor))
-    }
     /// Bind independently checked rows to this consumer's current sources and
     /// type owner. Content and structural validation do not grant V authority.
     pub fn open_tir(
@@ -994,5 +982,43 @@ impl NativeRecords {
             requirement: self.records.installed_syntax(bytes)?,
             source,
         })
+    }
+}
+
+impl NativeRecords {
+    pub(crate) fn decode_admitted<
+        T: hirsel_product_codec::decode_schema::Walk + DeserializeOwned,
+    >(
+        &self,
+        source: &(impl NativeRecordSource + ?Sized),
+        bytes: hirsel_artifact_store::Bytes,
+        scratch: u64,
+    ) -> Option<(T, u64)> {
+        if !Arc::ptr_eq(&self.types, source.record_types()) {
+            return None;
+        }
+        let requirement = self.records.record_requirement::<T>(bytes)?;
+        let required = requirement.required_bytes();
+        if required > scratch {
+            return None;
+        }
+        let value = requirement.decode_reserved(
+            |bytes| self.store.try_admit_product_memory(bytes),
+            |owner, occurrence| source.record_source_anchor(owner, occurrence),
+        )?;
+        Some((value, required))
+    }
+}
+
+impl NativeRecords {
+    pub(crate) fn required_record<T: hirsel_product_codec::decode_schema::Walk>(
+        &self,
+        bytes: hirsel_artifact_store::Bytes,
+    ) -> Option<u64> {
+        Some(
+            self.records
+                .record_requirement::<T>(bytes)?
+                .required_bytes(),
+        )
     }
 }

@@ -89,3 +89,5 @@ mod tests {
         assert!(malformed.values().is_none());
     }
 }
+
+hirsel_product_codec::decode_structure!(OrderedSignatureReads { rows, order });

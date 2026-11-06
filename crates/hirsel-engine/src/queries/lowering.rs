@@ -186,3 +186,9 @@ impl QueryEngine {
         self.prepare_staged_instances()
     }
 }
+
+hirsel_product_codec::decode_structure!(LoweringUse {
+    constant,
+    comptime,
+    referenced
+});

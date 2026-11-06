@@ -273,17 +273,7 @@ impl TypeRecords {
         definition: &Definition,
         owner: impl FnMut(Anchor) -> Option<(DefPath, u32)>,
     ) -> Option<Vec<u8>> {
-        self.encode_tir_with_decode_bytes(definition, owner)
-            .map(|(bytes, _)| bytes)
-    }
-    /// Indexed bytes and the envelope/source/type decode workspace. The
-    /// consumer separately admits the typed rows it retains or transforms.
-    pub fn encode_tir_with_decode_bytes(
-        &self,
-        definition: &Definition,
-        owner: impl FnMut(Anchor) -> Option<(DefPath, u32)>,
-    ) -> Option<(Vec<u8>, u64)> {
-        self.encode_tir_view_with_decode_bytes(crate::TirView::Live(definition), owner)
+        self.encode_tir_view(crate::TirView::Live(definition), owner)
     }
     /// Publish the complete type closure and indexed rows without rebuilding
     /// an archived Definition or Body. Ordinary and V publication share this encoder.
@@ -292,14 +282,6 @@ impl TypeRecords {
         definition: crate::TirView<'_>,
         owner: impl FnMut(Anchor) -> Option<(DefPath, u32)>,
     ) -> Option<Vec<u8>> {
-        self.encode_tir_view_with_decode_bytes(definition, owner)
-            .map(|(bytes, _)| bytes)
-    }
-    fn encode_tir_view_with_decode_bytes(
-        &self,
-        definition: crate::TirView<'_>,
-        owner: impl FnMut(Anchor) -> Option<(DefPath, u32)>,
-    ) -> Option<(Vec<u8>, u64)> {
         let mut types = TableBuilder::new(self.types.clone());
         let mut anchors = AnchorCodec::Collect(vec![]);
         // Collect the semantic first-use order before portable-equivalent
@@ -312,6 +294,7 @@ impl TypeRecords {
         self.indexed_record(types.roots(), anchors, owner, || {
             encode_definition::<Encoded>(definition)
         })
+        .map(|(bytes, _)| bytes)
     }
 }
 
@@ -416,6 +399,88 @@ fn check_body(rows: Rows<'_>, envelope: &mut Validation<'_>) -> Option<()> {
     }
     check_array::<ScopedParameter>(rows.section(12, SCOPED)?, envelope)?;
     Some(())
+}
+
+/// Allocation-free admission for the indexed TIR grammar, before row validation
+/// invokes any serde decoder. Counts are checked against immutable extents.
+pub fn tir_decode_bytes(bytes: &[u8]) -> Option<u64> {
+    use crate::decode_schema::{Scan, Walk};
+    fn scalar<T: Walk>(bytes: &[u8], scan: &mut Scan<'_>) -> Option<()> {
+        let mut row = Scan::raw(bytes, u32::MAX, u32::MAX);
+        T::walk(&mut row)?;
+        scan.add(usize::try_from(row.finish()?).ok()?)
+    }
+    fn array<T: Walk>(rows: Rows<'_>, scan: &mut Scan<'_>) -> Option<()> {
+        scan.add((rows.count as usize).checked_mul(3 * size_of::<T>())?)?;
+        for n in 0..rows.count {
+            scalar::<T>(rows.row(n)?, scan)?;
+        }
+        Some(())
+    }
+    fn walk_match(rows: Rows<'_>, envelope: &mut Scan<'_>) -> Option<()> {
+        if rows.count != 3 {
+            return None;
+        }
+        scalar::<PlaceId>(rows.row(0)?, envelope)?;
+        array::<MatchPattern>(rows.section(1, PATTERNS)?, envelope)?;
+        array::<MatchArm>(rows.section(2, ARMS)?, envelope)
+    }
+    fn walk_block(rows: Rows<'_>, envelope: &mut Scan<'_>) -> Option<()> {
+        if rows.count != 3 {
+            return None;
+        }
+        scalar::<Span>(rows.row(0)?, envelope)?;
+        array::<Instruction>(rows.section(1, INSTRUCTIONS)?, envelope)?;
+        scalar::<Terminator>(rows.row(2)?, envelope)
+    }
+    fn walk_body(rows: Rows<'_>, envelope: &mut Scan<'_>) -> Option<()> {
+        if rows.count != 13 {
+            return None;
+        }
+        scalar::<TirBodyHeader>(rows.row(0)?, envelope)?;
+        array::<Local>(rows.section(1, LOCALS)?, envelope)?;
+        array::<Place>(rows.section(2, PLACES)?, envelope)?;
+        array::<Scope>(rows.section(3, SCOPES)?, envelope)?;
+        let blocks = rows.section(4, BLOCKS)?;
+        envelope.add((blocks.count as usize).checked_mul(3 * size_of::<Block>())?)?;
+        for n in 0..blocks.count {
+            walk_block(Rows::open(blocks.row(n)?, BLOCK)?, envelope)?;
+        }
+        array::<Rvalue>(rows.section(5, RVALUES)?, envelope)?;
+        array::<Cleanup>(rows.section(6, CLEANUPS)?, envelope)?;
+        array::<CleanupNode>(rows.section(7, CLEANUP_NODES)?, envelope)?;
+        array::<LocalId>(rows.section(8, PARAMETERS)?, envelope)?;
+        array::<BorrowCursor>(rows.section(9, CURSORS)?, envelope)?;
+        array::<TailSite>(rows.section(10, TAILS)?, envelope)?;
+        let matches = rows.section(11, MATCHES)?;
+        envelope.add((matches.count as usize).checked_mul(3 * size_of::<MatchTable>())?)?;
+        for n in 0..matches.count {
+            walk_match(Rows::open(matches.row(n)?, MATCH)?, envelope)?;
+        }
+        array::<ScopedParameter>(rows.section(12, SCOPED)?, envelope)?;
+        Some(())
+    }
+
+    let mut scan = Scan::record(bytes)?;
+    // ProductTypes/source directories and scopes are charged by Scan::record.
+    let layout = crate::EnvelopeLayout::open(bytes)?;
+    let rows = Rows::open(&bytes[layout.payload_start..], ROOT)?;
+    if rows.count != 6 {
+        return None;
+    }
+    scan.add(size_of::<Definition>() + 2 * size_of::<usize>())?;
+    scalar::<TirHeader>(rows.row(0)?, &mut scan)?;
+    array::<BodyId>(rows.section(1, CALLERS)?, &mut scan)?;
+    array::<ProtocolAssociationReceipt>(rows.section(2, ASSOCIATIONS)?, &mut scan)?;
+    array::<TypeId>(rows.section(3, TYPES)?, &mut scan)?;
+    let bodies = rows.section(4, BODIES)?;
+    scan.add((bodies.count as usize).checked_mul(3 * size_of::<Body>())?)?;
+    for n in 0..bodies.count {
+        walk_body(Rows::open(bodies.row(n)?, BODY)?, &mut scan)?;
+    }
+    array::<(u32, BodyId)>(rows.section(5, CONTRACTS)?, &mut scan)?;
+    // The payload was traversed as indexed rows rather than a single serde value.
+    Some(scan.required_bytes())
 }
 
 /// An exact-content checked, structurally validated Lower archive. Small row

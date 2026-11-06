@@ -216,3 +216,9 @@ mod tests {
         }
     }
 }
+
+impl hirsel_product_codec::decode_schema::Walk for PackedDependencies {
+    fn walk(scan: &mut hirsel_product_codec::decode_schema::Scan<'_>) -> Option<()> {
+        <(Box<[SignatureDependency]>, Box<[u32]>)>::walk(scan)
+    }
+}

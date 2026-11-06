@@ -13,6 +13,15 @@ pub(super) type Descriptor = (
     staged::Selections,
     Reference,
 );
+pub(super) type ConstantDescriptor = (
+    Materialized,
+    Vec<(hirsel_syntax::ExprId, Materialized)>,
+    Reads,
+    DepthEvidence<Span>,
+    bool,
+    staged::Selections,
+    Reference,
+);
 #[derive(Clone)]
 pub(super) struct Archive {
     pub reference: Reference,
@@ -33,15 +42,8 @@ impl Archive {
                 return None;
             }
             let bytes = store.get_content(self.reference)?;
-            let (_, _, reads, _, _, _, _): (
-                Materialized,
-                Vec<(hirsel_syntax::ExprId, Materialized)>,
-                Reads,
-                DepthEvidence<Span>,
-                bool,
-                staged::Selections,
-                Reference,
-            ) = records.decode(anchors, &bytes)?;
+            let ((_, _, reads, _, _, _, _), _): (ConstantDescriptor, u64) =
+                records.decode_admitted(anchors, bytes, allowance)?;
             return (reads.len() == self.len && self.dependencies == 0).then_some(reads);
         }
         Some(self.descriptor(records, anchors, store, allowance)?.5)
@@ -73,7 +75,8 @@ impl Archive {
             return None;
         }
         let bytes = store.get_content(self.reference)?;
-        let descriptor: Descriptor = records.decode(anchors, &bytes)?;
+        let (descriptor, _): (Descriptor, u64) =
+            records.decode_admitted(anchors, bytes, allowance)?;
         (descriptor.5.len() == self.len && descriptor.3.len() == self.dependencies)
             .then_some(descriptor)
     }
@@ -156,17 +159,10 @@ mod tests {
             Vec::new(),
             body,
         );
-        let (bytes, working) = records
-            .encode_with_decode_bytes(&anchors, &descriptor)
+        let bytes = records.encode(&anchors, &descriptor).unwrap();
+        let bound = records
+            .required_record::<Descriptor>(bytes.clone().into())
             .unwrap();
-        let bound = working
-            + 2 * (size_of::<Descriptor>()
-                + descriptor.3.len() * size_of::<SignatureDependency>()
-                + size_of_val(&*descriptor.6.first)
-                + expected
-                    .allocations()
-                    .map(|(_, bytes)| bytes)
-                    .sum::<usize>()) as u64;
         let reference = store.put_content(LOWER_DESCRIPTOR, &bytes).unwrap();
         let archive = Archive {
             reference,
@@ -310,8 +306,8 @@ mod tests {
         );
         let depth = DepthEvidence::<Span>::leaf(32);
         let (value, substitutions) = constants.decoded(&records, &anchors, &*store, 0).unwrap();
-        let (bytes, working) = records
-            .encode_with_decode_bytes(
+        let bytes = records
+            .encode(
                 &anchors,
                 &(
                     value,
@@ -324,12 +320,11 @@ mod tests {
                 ),
             )
             .unwrap();
-        let metadata = reads
-            .allocations()
-            .map(|(_, bytes)| bytes as u64)
-            .sum::<u64>()
-            + size_of_val(&*depth.first) as u64;
-        constants.set_working_bytes(2 * (constants.retained_bytes() + metadata) + working);
+        constants.set_working_bytes(
+            records
+                .required_record::<ConstantDescriptor>(bytes.clone().into())
+                .unwrap(),
+        );
         let reference = store.put_content(CONSTANT_DESCRIPTOR, &bytes).unwrap();
         let bound = constants.working_bytes();
         let mut outcome = Outcome {

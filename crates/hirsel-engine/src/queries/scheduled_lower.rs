@@ -1217,10 +1217,12 @@ impl FrontLowerQueries {
         let selections = outcome.selections.clone();
         drop(outcomes);
         let output = lower.decode(self)?;
-        let materialized = self.records.decode(
-            &*self.namespace.anchors,
-            &self.store.get_content(*lower.materialized.get()?)?,
-        )?;
+        let (materialized, _): (Vec<(hirsel_syntax::ExprId, Materialized)>, u64) =
+            self.records.decode_admitted(
+                &*self.namespace.anchors,
+                self.store.get_content(*lower.materialized.get()?)?,
+                self.weight.scratch,
+            )?;
         let input = self.inputs.get(lower.definition.path())?;
         let signature = self
             .namespace

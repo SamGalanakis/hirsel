@@ -1,14 +1,12 @@
 //! Ordinary body-free P projections use the same canonical facts as hot carry.
 //! Source text and all reads must still match; Lower retains independent V.
 use super::*;
-use bincode::Options;
 
 #[derive(serde::Serialize, serde::Deserialize)]
 struct Record {
     key: Key,
     body: Option<Reference>,
     reads: Reads,
-    decode_bytes: u64,
     #[serde(
         serialize_with = "hirsel_product_codec::serialize_payload",
         deserialize_with = "hirsel_product_codec::deserialize_payload"
@@ -17,7 +15,6 @@ struct Record {
 }
 #[derive(serde::Serialize)]
 struct RecordTail<'a> {
-    decode_bytes: u64,
     #[serde(serialize_with = "hirsel_product_codec::serialize_payload")]
     facts: &'a [u8],
 }
@@ -37,9 +34,40 @@ fn encode_record(
     bincode::serialize_into(&mut bytes, tail).ok()?;
     Some(bytes)
 }
+impl hirsel_product_codec::decode_schema::Walk for Record {
+    fn walk(scan: &mut hirsel_product_codec::decode_schema::Scan<'_>) -> Option<()> {
+        use hirsel_product_codec::decode_schema::{field, record_decode_requirement};
+        let _: fn(&Self) = |v| {
+            let Self {
+                key: _,
+                body: _,
+                reads: _,
+                facts: _,
+            } = v;
+        };
+        field(|v: &Self| &v.key, scan)?;
+        field(|v: &Self| &v.body, scan)?;
+        field(|v: &Self| &v.reads, scan)?;
+        let n = scan.length()?;
+        scan.add(n)?;
+        let required = record_decode_requirement::<carry::Facts>(scan.take(n)?)?;
+        scan.add(usize::try_from(required).ok()?)
+    }
+}
+fn decode_record(
+    store: &dyn ResultStore,
+    bytes: hirsel_artifact_store::Bytes,
+    scratch: u64,
+) -> Option<Record> {
+    let requirement = hirsel_product_codec::DecodeRequirement::<Record>::plain(bytes)?;
+    if requirement.required_bytes() > scratch {
+        return None;
+    }
+    requirement.decode_reserved(|bytes| store.try_admit_product_memory(bytes), |_, _| None)
+}
 fn address(key: Key) -> hirsel_artifact_store::Address {
     hirsel_artifact_store::Address(ContentHash::of_parts(
-        "hirsel.front.compact.address.v1",
+        "hirsel.front.compact.address.v2",
         [key.0.as_slice()],
     ))
 }
@@ -88,12 +116,13 @@ pub(in crate::queries) fn load_publication(
         (hirsel_engine_store::MAX_RECORD as u64).checked_mul(8)?,
         |read| engine.observe(path, read),
     )?;
-    let record: Record = bincode::DefaultOptions::new()
-        .with_fixint_encoding()
-        .with_limit(variant.payload.len() as u64)
-        .reject_trailing_bytes()
-        .deserialize(&variant.payload)
-        .ok()?;
+    let record = decode_record(
+        &*store,
+        variant.payload.clone(),
+        (hirsel_engine_store::MAX_RECORD as u64)
+            .checked_mul(8)?
+            .checked_sub(index_bytes)?,
+    )?;
     if record.key != key.0
         || record.body.is_some_and(|body| {
             body.domain != hirsel_engine_store::product_domain(QueryKind::Modes)
@@ -101,14 +130,29 @@ pub(in crate::queries) fn load_publication(
         })
         || (variant.payload.len() as u64)
             .checked_mul(8)?
-            .checked_add(record.decode_bytes)?
             .checked_add(index_bytes)?
             > (hirsel_engine_store::MAX_RECORD as u64).checked_mul(8)?
         || record.reads != variant.reads
     {
         return None;
     }
-    let facts: carry::Facts = engine.decode_record(&record.facts)?;
+    let records = engine.type_records()?;
+    let requirement = records.record_requirement::<carry::Facts>(record.facts.into())?;
+    if requirement.required_bytes().checked_add(index_bytes)?
+        > (hirsel_engine_store::MAX_RECORD as u64).checked_mul(8)?
+    {
+        return None;
+    }
+    let facts: carry::Facts = requirement.decode_reserved(
+        |bytes| store.try_admit_product_memory(bytes),
+        |path, occurrence| engine.record_anchor(path, occurrence),
+    )?;
+    let (encoded, roots) =
+        hirsel_types::with_table_collection(|| bincode::serialize_into(std::io::sink(), &facts));
+    encoded.ok()?;
+    if !roots.iter().all(|id| engine.types.get(*id).is_some()) {
+        return None;
+    }
     let summary = facts.summary?;
     if summary.storage.is_some() || has_errors(&facts.diagnostics) {
         return None;
@@ -221,7 +265,6 @@ impl FrontBodyQueries {
         let decode_bytes = outer.checked_add(facts.bytes(true))?;
         let head = (self.inputs.get(&key)?.key.0, archive);
         let tail = RecordTail {
-            decode_bytes,
             facts: &facts_bytes,
         };
         let reads_bytes = outcome.reads.encoded_bytes()?;
@@ -268,17 +311,13 @@ impl BodyTask {
         if (bytes.len() as u64).checked_mul(8)? > self.weight.scratch {
             return None;
         }
-        let record: Record = bincode::DefaultOptions::new()
-            .with_fixint_encoding()
-            .with_limit(bytes.len() as u64)
-            .reject_trailing_bytes()
-            .deserialize(bytes)
-            .ok()?;
+        let record = decode_record(
+            &*self.queries.store,
+            bytes.to_vec().into(),
+            self.weight.scratch,
+        )?;
         if record.key != self.queries.inputs[&self.input].key.0
-            || (bytes.len() as u64)
-                .checked_mul(8)?
-                .checked_add(record.decode_bytes)?
-                > self.weight.scratch
+            || (bytes.len() as u64).checked_mul(8)? > self.weight.scratch
             || record.body.is_some_and(|body| {
                 body.domain != hirsel_engine_store::product_domain(QueryKind::Modes)
                     || body.len > self.weight.scratch
@@ -303,12 +342,11 @@ impl BodyTask {
             load_record(&*queries.store, &input.key, self.weight.scratch, |read| {
                 queries.observe(input.definition.path(), read)
             })?;
-        let record: Record = bincode::DefaultOptions::new()
-            .with_fixint_encoding()
-            .with_limit(variant.payload.len() as u64)
-            .reject_trailing_bytes()
-            .deserialize(&variant.payload)
-            .ok()?;
+        let record = decode_record(
+            &*queries.store,
+            variant.payload.clone(),
+            self.weight.scratch.checked_sub(index_bytes)?,
+        )?;
         if record.key != self.queries.inputs[&self.input].key.0
             || record.body.is_some_and(|body| {
                 body.domain != hirsel_engine_store::product_domain(QueryKind::Modes)
@@ -316,7 +354,6 @@ impl BodyTask {
             })
             || (variant.payload.len() as u64)
                 .checked_mul(8)?
-                .checked_add(record.decode_bytes)?
                 .checked_add(index_bytes)?
                 > self.weight.scratch
             || record.reads != variant.reads
@@ -327,7 +364,11 @@ impl BodyTask {
         let facts = self.decode_facts(&record.facts, &reads)?;
         let completed = self.install_cached_facts(cx, record.body, reads.clone(), facts)?;
         if completed.is_ok() {
-            self.remember_cached_carry(record.body, reads, record.facts, record.decode_bytes);
+            let required = queries
+                .records
+                .record_requirement::<carry::Facts>(record.facts.clone().into())?
+                .required_bytes();
+            self.remember_cached_carry(record.body, reads, record.facts, required);
         }
         Some(completed)
     }
@@ -336,6 +377,39 @@ impl BodyTask {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bincode::Options;
+
+    #[derive(Default)]
+    struct DecodeStore {
+        inner: hirsel_engine_store::MemStore,
+        refuse: std::sync::atomic::AtomicBool,
+        requested: std::sync::atomic::AtomicU64,
+    }
+    impl ResultStore for DecodeStore {
+        fn admit_product_memory(&self, bytes: u64) -> Option<Arc<dyn Send + Sync>> {
+            use std::sync::atomic::Ordering;
+            self.requested.fetch_max(bytes, Ordering::Relaxed);
+            if self.refuse.load(Ordering::Relaxed) {
+                return None;
+            }
+            self.inner.admit_product_memory(bytes)
+        }
+        fn retention_scope(&self) -> Option<Box<dyn Send + Sync>> {
+            self.inner.retention_scope()
+        }
+        fn capability(&self) -> hirsel_engine_store::ProviderCapability {
+            self.inner.capability()
+        }
+        fn get(&self, key: &EntryKey) -> Option<hirsel_engine_store::Bytes> {
+            self.inner.get(key)
+        }
+        fn put(&self, key: &EntryKey, bytes: &[u8]) -> hirsel_engine_store::WriteOutcome {
+            self.inner.put(key, bytes)
+        }
+        fn name(&self) -> &'static str {
+            "decode-demand-law"
+        }
+    }
 
     #[test]
     fn scalar_summary_adopts_checked_facts_without_a_body_and_refuses_substitutions() {
@@ -343,8 +417,8 @@ mod tests {
             hirsel_engine_store::VerifyStore::Off,
             hirsel_engine_store::VerifyStore::Recompute,
         ] {
-            for fault in 0..10 {
-                let store = Arc::new(hirsel_engine_store::MemStore::default());
+            for fault in 0..11 {
+                let store = Arc::new(DecodeStore::default());
                 let mut engine =
                     QueryEngine::new(crate::default_environment(), PhaseAdapters::default())
                         .with_result_store(store.clone());
@@ -421,7 +495,6 @@ mod tests {
                             .unwrap(),
                     ),
                     reads: Reads::empty(),
-                    decode_bytes: 0,
                     facts: engine.encode_record(&facts).unwrap(),
                 };
                 if fault == 6 {
@@ -430,7 +503,7 @@ mod tests {
                             .unwrap();
                 }
                 if fault == 8 {
-                    record.decode_bytes = u64::MAX;
+                    record.facts.truncate(8);
                 }
                 if fault == 9 {
                     record.body.as_mut().unwrap().domain =
@@ -451,10 +524,19 @@ mod tests {
                 entry.insert(variant);
                 store.put(&storage, &entry.encode_for(&storage));
                 assert!(store.get_content(record.body.unwrap()).is_none());
+                store
+                    .refuse
+                    .store(fault == 10, std::sync::atomic::Ordering::Relaxed);
                 engine.verify_store = verify;
                 let hit = engine.load_publication(path);
                 let accepted = fault == 0 && verify == hirsel_engine_store::VerifyStore::Off;
                 assert_eq!(hit.is_some(), accepted, "fault {fault}, {verify:?}");
+                if fault == 10 && verify == hirsel_engine_store::VerifyStore::Off {
+                    assert!(
+                        store.requested.load(std::sync::atomic::Ordering::Relaxed) > 0,
+                        "the persisted size claim cannot bypass decode admission"
+                    );
+                }
                 assert_eq!(engine.store_adoptions(), u64::from(accepted));
                 assert_eq!(engine.summaries.is_empty(), !accepted);
                 assert_eq!(engine.checked_summaries.is_empty(), !accepted);
@@ -473,16 +555,15 @@ mod tests {
     #[test]
     fn compact_fact_bytes_preserve_the_stored_sequence_and_its_bounds() {
         #[derive(serde::Serialize, serde::Deserialize)]
-        struct Legacy {
+        struct Sequence {
             key: Key,
             body: Option<Reference>,
             reads: Reads,
-            decode_bytes: u64,
             facts: Vec<u8>,
         }
         for len in [0, 1, 127, 8192] {
             let key = ContentHash::of_bytes(b"compact-owner");
-            let legacy = Legacy {
+            let sequence = Sequence {
                 key,
                 body: Some(
                     hirsel_engine_store::product_domain(QueryKind::Modes)
@@ -490,10 +571,9 @@ mod tests {
                         .unwrap(),
                 ),
                 reads: Reads::from_vec(vec![(ReadKey::Environment, key)]).unwrap(),
-                decode_bytes: 12345,
                 facts: (0..len).map(|n| n as u8).collect(),
             };
-            let bytes = bincode::serialize(&legacy).unwrap();
+            let bytes = bincode::serialize(&sequence).unwrap();
             let options = || {
                 bincode::DefaultOptions::new()
                     .with_fixint_encoding()
@@ -501,11 +581,10 @@ mod tests {
                     .reject_trailing_bytes()
             };
             let record: Record = options().deserialize(&bytes).unwrap();
-            assert_eq!(record.facts, legacy.facts);
-            assert_eq!(record.reads, legacy.reads);
+            assert_eq!(record.facts, sequence.facts);
+            assert_eq!(record.reads, sequence.reads);
             assert_eq!(bincode::serialize(&record).unwrap(), bytes);
             let tail = RecordTail {
-                decode_bytes: record.decode_bytes,
                 facts: &record.facts,
             };
             let streamed = encode_record(

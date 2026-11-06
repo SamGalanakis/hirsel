@@ -1467,3 +1467,78 @@ mod admission_tests {
         assert_eq!(encoded_def_path_bytes(&path), Some(bytes.len()));
     }
 }
+
+impl hirsel_product_codec::decode_schema::Walk for Reads {
+    fn walk(scan: &mut hirsel_product_codec::decode_schema::Scan<'_>) -> Option<()> {
+        use hirsel_product_codec::decode_schema::Scan;
+        fn text(scan: &mut Scan<'_>) -> Option<()> {
+            let n = scan.word()? as usize;
+            std::str::from_utf8(scan.take(n)?).ok()?;
+            scan.add(n)
+        }
+        fn path(scan: &mut Scan<'_>) -> Option<()> {
+            text(scan)?;
+            text(scan)?;
+            let modules = scan.word()? as usize;
+            scan.add(modules.checked_mul(3 * size_of::<String>())?)?;
+            for _ in 0..modules {
+                text(scan)?;
+            }
+            text(scan)?;
+            scan.add(size_of::<DefPath>())
+        }
+        let n = scan.length()?;
+        // Raw payload plus row/order Vec growth, Arc conversion and path scopes.
+        scan.add(n.checked_mul(2)?)?;
+        let bytes = scan.take(n)?;
+        let mut rows = Scan::raw_reads(bytes);
+        if rows.take(4)? != b"HRD3" {
+            return None;
+        }
+        let count = rows.word()? as usize;
+        if count > bytes.len() / 37 {
+            return None;
+        }
+        scan.add(
+            count.checked_mul(4 * (size_of::<(ReadKey, ContentHash)>() + size_of::<u32>()) + 1)?,
+        )?;
+        for _ in 0..count {
+            let kind = *ReadKind::ALL.get(rows.read_u8()? as usize)?;
+            match kind {
+                ReadKind::Lookup => {
+                    if rows.read_u8()? > 3 {
+                        return None;
+                    }
+                    text(&mut rows)?;
+                    text(&mut rows)?;
+                    match rows.read_u8()? {
+                        0 => (),
+                        1 => text(&mut rows)?,
+                        _ => return None,
+                    }
+                    text(&mut rows)?;
+                }
+                ReadKind::NameSet => {
+                    text(&mut rows)?;
+                    text(&mut rows)?;
+                }
+                ReadKind::ValidationUniverse => text(&mut rows)?,
+                ReadKind::UniverseErrors | ReadKind::FirstHeap | ReadKind::Environment => (),
+                ReadKind::Signature
+                | ReadKind::FailedSignature
+                | ReadKind::Representation
+                | ReadKind::ExecutedBody
+                | ReadKind::ExecutedSignature
+                | ReadKind::CitedText
+                | ReadKind::DeclarationCandidates
+                | ReadKind::ValidationView
+                | ReadKind::LayoutBody
+                | ReadKind::DeclaredSignature
+                | ReadKind::PrivateSummary => path(&mut rows)?,
+            }
+            rows.take(32)?;
+        }
+        rows.take(count.checked_mul(4)?)?;
+        scan.add(usize::try_from(rows.finish()?).ok()?)
+    }
+}

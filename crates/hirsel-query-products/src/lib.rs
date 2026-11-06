@@ -182,3 +182,5 @@ impl SourceFacts {
         self.body_kind == BodyKind::Constant || !self.comptime.is_empty()
     }
 }
+
+mod decode_schema;

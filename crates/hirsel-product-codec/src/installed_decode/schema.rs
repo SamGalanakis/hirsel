@@ -1,5 +1,6 @@
 //! Fixed-int consumer schemas. Accessors witness field types without values.
 use super::*;
+use crate::{decode_structure as structure, decode_variants as variants};
 structure!(ast::TokenRange { start, end });
 structure!(ast::Origin { span, tokens });
 structure!(ast::PackageId { name, version });

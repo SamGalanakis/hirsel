@@ -46,3 +46,30 @@ impl PublishedSummary {
         }
     }
 }
+
+impl hirsel_product_codec::decode_schema::Walk for PublishedSummary {
+    fn walk(scan: &mut hirsel_product_codec::decode_schema::Scan<'_>) -> Option<()> {
+        use hirsel_product_codec::decode_schema::field;
+        let _: fn(&Self) = |v| {
+            let Self {
+                definition: _,
+                summary: _,
+                growth: _,
+                storage: _,
+                checked: _,
+                reads: _,
+                text: _,
+            } = v;
+        };
+        field(|v: &Self| &v.definition, scan)?;
+        field(|v: &Self| &v.summary, scan)?;
+        field(|v: &Self| &v.growth, scan)?;
+        // Compact facts forbid executable storage. Refuse it before decoding.
+        if scan.read_u8()? != 0 {
+            return None;
+        }
+        field(|v: &Self| &v.checked, scan)?;
+        field(|v: &Self| &v.reads, scan)?;
+        field(|v: &Self| &v.text, scan)
+    }
+}

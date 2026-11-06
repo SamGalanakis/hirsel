@@ -224,3 +224,8 @@ mod tests {
         assert!(!products.outcomes.contains_key(&id));
     }
 }
+
+hirsel_product_codec::decode_structure!(DeadArmUse {
+    errors,
+    constructed
+});

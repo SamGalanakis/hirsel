@@ -50,15 +50,8 @@ impl Constants {
                     return None;
                 }
                 let bytes = store.get_content(*record)?;
-                let (value, substitutions, _, _, _, _, _): (
-                    Materialized,
-                    Vec<(hirsel_syntax::ExprId, Materialized)>,
-                    Reads,
-                    DepthEvidence<Span>,
-                    bool,
-                    staged::Selections,
-                    Reference,
-                ) = records.decode(anchors, &bytes)?;
+                let ((value, substitutions, _, _, _, _, _), _): (reads::ConstantDescriptor, u64) =
+                    records.decode_admitted(anchors, bytes, allowance)?;
                 Some((value, substitutions))
             }
         }

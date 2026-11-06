@@ -8,14 +8,11 @@ use hirsel_engine_store::Entry;
 struct Record {
     manifest: Reference,
     descriptor: Reference,
-    reads_decode_bytes: u64,
-    constant_decode_bytes: u64,
-    lower: Option<(DefinitionDecodeLayout, u64)>,
 }
 
 fn stored_key(key: &EntryKey) -> EntryKey {
     EntryKey(
-        ContentHash::of_parts("hirsel.front.lower-variants.v3", [key.0.0.as_slice()]),
+        ContentHash::of_parts("hirsel.front.lower-variants.v4", [key.0.0.as_slice()]),
         key.1,
         key.2,
     )
@@ -68,24 +65,12 @@ impl FrontLowerQueries {
             outcome.reads.clone()
         };
         let depth = outcome.depth.evidence();
-        let mut persisted = outcome.clone();
-        let mut weight = hirsel_query_products::retained::MetadataWeight::default();
-        weight.add(size_of::<reads::Descriptor>());
-        for (_, bytes) in outcome.reads.allocations() {
-            weight.add(bytes);
-        }
-        weight.add(size_of_val(&*depth.first));
-        weight.add(
-            staged::selection_bytes(&outcome.selections)
-                .try_into()
-                .ok()?,
-        );
-        let (domain, bytes, working) = match &mut persisted.result {
+        let (domain, bytes) = match &outcome.result {
             Ok(Value::Lower(lower)) => {
                 let (output, materialized) = raw.as_ref()?;
-                let (body, decoding) = self
+                let body = self
                     .records
-                    .encode_tir_with_decode_bytes(&*self.namespace.anchors, &output.value)?;
+                    .encode_tir(&*self.namespace.anchors, &output.value)?;
                 if body.len() as u64 > self.weight.scratch {
                     return None;
                 }
@@ -99,23 +84,7 @@ impl FrontLowerQueries {
                 let constants = self.store.put_content(LOWER_MATERIALIZED, &constants)?;
                 lower.body.set(body).ok();
                 lower.materialized.set(constants).ok();
-                lower.definition_decode_layout.transient =
-                    lower.definition_decode_layout.transient.max(decoding);
-                weight.add(
-                    hirsel_query_products::retained::retained_lowering_output_bytes(
-                        &lower.diagnostics,
-                        &Vec::new(),
-                    )
-                    .try_into()
-                    .ok()?,
-                );
-                weight.add(
-                    lower
-                        .dependencies
-                        .len()
-                        .checked_mul(size_of::<SignatureDependency>())?,
-                );
-                let (bytes, working) = self.records.encode_with_decode_bytes(
+                let bytes = self.records.encode(
                     &*self.namespace.anchors,
                     &(
                         lower.definition,
@@ -130,7 +99,7 @@ impl FrontLowerQueries {
                         manifest,
                     ),
                 )?;
-                (LOWER_DESCRIPTOR, bytes, working)
+                (LOWER_DESCRIPTOR, bytes)
             }
             Ok(Value::Constant(constants)) => {
                 let (value, substitutions) = constants.decoded(
@@ -139,7 +108,7 @@ impl FrontLowerQueries {
                     &*self.store,
                     self.weight.scratch,
                 )?;
-                let (bytes, working) = self.records.encode_with_decode_bytes(
+                let bytes = self.records.encode(
                     &*self.namespace.anchors,
                     &(
                         value,
@@ -151,27 +120,13 @@ impl FrontLowerQueries {
                         manifest,
                     ),
                 )?;
-                let metadata = outcome
-                    .reads
-                    .allocations()
-                    .map(|(_, bytes)| bytes as u64)
-                    .try_fold(size_of_val(&*depth.first) as u64, u64::checked_add)?;
-                constants.set_working_bytes(
-                    constants
-                        .retained_bytes()
-                        .checked_add(metadata)?
-                        .checked_add(staged::selection_bytes(&outcome.selections))?
-                        .checked_mul(2)?
-                        .checked_add(working)?,
-                );
-                (CONSTANT_DESCRIPTOR, bytes, working)
+                (CONSTANT_DESCRIPTOR, bytes)
             }
             Err(_) => return None,
         };
         if bytes.len() as u64 > self.weight.scratch {
             return None;
         }
-        persisted.reads_decode_bytes = weight.bytes().checked_mul(2)?.checked_add(working)?;
         let descriptor = self.store.put_content(domain, &bytes)?;
         if let Some(evidence) = verification
             && let Some((output, _)) = raw
@@ -196,7 +151,7 @@ impl FrontLowerQueries {
         {
             cache.publish_execution(persistent::evaluation_subject(key, &bytes), receipt);
         }
-        self.remember_stored(id, key, descriptor, &persisted);
+        self.remember_stored(id, key, descriptor, outcome);
         Some(())
     }
 
@@ -210,17 +165,9 @@ impl FrontLowerQueries {
         if !self.store.persistence().retains() {
             return;
         }
-        let (lower, constant_decode_bytes) = match &outcome.result {
-            Ok(Value::Lower(lower)) => (
-                Some((
-                    lower.definition_decode_layout,
-                    lower.constant_selection_bytes,
-                )),
-                0,
-            ),
-            Ok(Value::Constant(value)) => (None, value.working_bytes()),
-            Err(_) => return,
-        };
+        if outcome.result.is_err() {
+            return;
+        }
         // Executed outputs without verifier-owned evidence are deliberately
         // recomputed. An ordinary variant cannot grant execution authority.
         if self.verify == Verify::On && outcome.executed && outcome.execution.is_none() {
@@ -232,9 +179,6 @@ impl FrontLowerQueries {
         let record = Record {
             manifest,
             descriptor,
-            reads_decode_bytes: outcome.reads_decode_bytes,
-            constant_decode_bytes,
-            lower,
         };
         let Ok(bytes) = bincode::serialize(&record) else {
             return;
@@ -360,18 +304,14 @@ impl FrontLowerQueries {
         }
         let variant =
             entry.resolve_current(&*self.store, &storage, |read| self.observe(path, read))?;
-        // This outer record contains only fixed-size references and bounds.
+        // This outer record contains only fixed-size references.
         let record: Record = bincode::deserialize(&variant.payload).ok()?;
         let domain = if id.kind == FRONT_LOWER_KIND {
             LOWER_DESCRIPTOR
         } else {
             CONSTANT_DESCRIPTOR
         };
-        if record.descriptor.domain != domain
-            || record.descriptor.len > self.weight.scratch
-            || record.reads_decode_bytes > self.weight.scratch
-            || record.constant_decode_bytes > self.weight.scratch
-        {
+        if record.descriptor.domain != domain || record.descriptor.len > self.weight.scratch {
             return None;
         }
         let descriptor = self.store.get_content(record.descriptor)?;
@@ -388,23 +328,28 @@ impl FrontLowerQueries {
                 .await
                 .ok()?;
         }
-        let (value, reads, depth, executed, selections) = if id.kind == FRONT_LOWER_KIND {
-            let (layout, constant_selection_bytes) = record.lower?;
-            if layout.total()? > self.weight.scratch {
-                return None;
-            }
+        let (value, reads, depth, executed, selections, reads_decode_bytes) = if id.kind
+            == FRONT_LOWER_KIND
+        {
             let (
-                definition,
-                body,
-                diagnostics,
-                dependencies,
-                materialized,
-                reads,
-                depth,
-                executed,
-                selections,
-                manifest,
-            ): reads::Descriptor = self.records.decode(&*self.namespace.anchors, &descriptor)?;
+                (
+                    definition,
+                    body,
+                    diagnostics,
+                    dependencies,
+                    materialized,
+                    reads,
+                    depth,
+                    executed,
+                    selections,
+                    manifest,
+                ),
+                reads_decode_bytes,
+            ): (reads::Descriptor, u64) = self.records.decode_admitted(
+                &*self.namespace.anchors,
+                descriptor.clone(),
+                self.weight.scratch,
+            )?;
             if !self
                 .namespace
                 .manifest_inputs_hold(manifest, self.weight.scratch)
@@ -416,17 +361,41 @@ impl FrontLowerQueries {
             {
                 return None;
             }
+            let body_bytes = self.store.get_content(body)?;
+            let body_required = hirsel_product_codec::tir_decode_bytes(&body_bytes)?;
+            if reads_decode_bytes.checked_add(body_required)? > self.weight.scratch {
+                return None;
+            }
+            let _body_admission = self.store.try_admit_product_memory(body_required)?;
             let source = self.namespace.anchors.clone();
-            let decoded = Arc::new(self.records.open_tir(
-                source.clone(),
-                self.store.get_content(body)?,
-                body,
-                source,
-            )?);
+            let decoded =
+                Arc::new(
+                    self.records
+                        .open_tir(source.clone(), body_bytes, body, source)?,
+                );
             if decoded.header()?.path != definition {
                 return None;
             }
-            self.store.get_content(materialized)?;
+            let materialized_bytes = self.store.get_content(materialized)?;
+            let materialized_required = self
+                .records
+                .required_record::<Vec<(hirsel_syntax::ExprId, Materialized)>>(
+                    materialized_bytes,
+                )?;
+            if materialized_required > self.weight.scratch {
+                return None;
+            }
+            let definition_value = decoded.materialize()?;
+            let retained = hirsel_query_products::retained::decoded_tir_bytes(&definition_value);
+            let layout = DefinitionDecodeLayout {
+                retained,
+                transient: body_required.max(retained),
+            };
+            if layout.total()? > self.weight.scratch {
+                return None;
+            }
+            let constant_selection_bytes = constant_selection_bytes(&definition_value).ok()?;
+            drop(definition_value);
             let mut verified = None;
             let mut acceptance = None;
             if self.verify == Verify::On {
@@ -507,20 +476,17 @@ impl FrontLowerQueries {
                 depth,
                 executed,
                 selections,
+                reads_decode_bytes,
             )
         } else {
-            if record.lower.is_some() {
-                return None;
-            }
-            let (value, substitutions, reads, depth, executed, selections, manifest): (
-                Materialized,
-                Vec<(hirsel_syntax::ExprId, Materialized)>,
-                Reads,
-                DepthEvidence<Span>,
-                bool,
-                staged::Selections,
-                Reference,
-            ) = self.records.decode(&*self.namespace.anchors, &descriptor)?;
+            let (
+                (value, substitutions, reads, depth, executed, selections, manifest),
+                reads_decode_bytes,
+            ): (reads::ConstantDescriptor, u64) = self.records.decode_admitted(
+                &*self.namespace.anchors,
+                descriptor.clone(),
+                self.weight.scratch,
+            )?;
             if !self
                 .namespace
                 .manifest_inputs_hold(manifest, self.weight.scratch)
@@ -528,13 +494,14 @@ impl FrontLowerQueries {
                 return None;
             }
             let mut constants = Constants::new(value, substitutions);
-            constants.set_working_bytes(record.constant_decode_bytes);
+            constants.set_working_bytes(reads_decode_bytes);
             (
                 Value::Constant(Box::new(constants)),
                 reads,
                 depth,
                 executed,
                 selections,
+                reads_decode_bytes,
             )
         };
         if depth.first.len() != dependency_limit(self.namespace.limits.call_depth) as usize + 1 {
@@ -574,7 +541,7 @@ impl FrontLowerQueries {
                         phase: Some(QueryKind::Lower),
                         result: Err(error),
                         reads,
-                        reads_decode_bytes: record.reads_decode_bytes,
+                        reads_decode_bytes,
                         selections,
                         depth: depth.into(),
                         executed,
@@ -610,7 +577,7 @@ impl FrontLowerQueries {
             phase: Some(QueryKind::Lower),
             result: Ok(value),
             reads,
-            reads_decode_bytes: record.reads_decode_bytes,
+            reads_decode_bytes,
             selections,
             depth: depth.into(),
             executed,

@@ -209,3 +209,14 @@ pub(crate) fn check_uses(
     }
     Ok(errors)
 }
+
+hirsel_product_codec::decode_structure!(TableKeyUse {
+    owner,
+    generics,
+    calls
+});
+hirsel_product_codec::decode_structure!(TableKeyCall {
+    callee,
+    site,
+    arguments
+});

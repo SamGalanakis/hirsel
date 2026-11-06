@@ -101,6 +101,12 @@ impl DefId {
         &self.entry().display
     }
 
+    /// Compare session identities for a private in-memory index. This order
+    /// can differ between processes; use `Ord` for observable or persisted order.
+    pub fn session_cmp(self, other: Self) -> Ordering {
+        self.0.cmp(&other.0)
+    }
+
     /// How many paths this process has interned.
     pub fn count() -> usize {
         DEFS.assigned.load(Atomic::Relaxed) as usize

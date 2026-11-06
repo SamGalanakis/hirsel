@@ -4,13 +4,36 @@ use super::*;
 use std::{borrow::Borrow, collections::BTreeSet, sync::Arc};
 type Row = (ReadKey, ContentHash);
 
+// Dictionary order is private. Compare session identities without resolving
+// paths; the receipt arrays below retain canonical and observation order.
+#[derive(Debug, Eq, PartialEq)]
+struct PoolRow(Row);
+impl Ord for PoolRow {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        let (key, value) = &self.0;
+        let (other_key, other_value) = &other.0;
+        key.kind()
+            .cmp(&other_key.kind())
+            .then_with(|| match (key.definition(), other_key.definition()) {
+                (Some(a), Some(b)) => a.session_cmp(b),
+                _ => key.cmp(other_key),
+            })
+            .then_with(|| value.cmp(other_value))
+    }
+}
+impl PartialOrd for PoolRow {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
 pub struct ChargedRow {
-    pub value: Row,
+    value: PoolRow,
     _allowance: hirsel_engine_admission::MemoryReservation,
 }
 impl std::fmt::Debug for ChargedRow {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        self.value.fmt(f)
+        self.value.0.fmt(f)
     }
 }
 
@@ -18,8 +41,8 @@ impl std::fmt::Debug for ChargedRow {
 // a second copy of the wide key in every dictionary node.
 #[derive(Clone)]
 struct RowRef(Arc<ChargedRow>);
-impl Borrow<Row> for RowRef {
-    fn borrow(&self) -> &Row {
+impl Borrow<PoolRow> for RowRef {
+    fn borrow(&self) -> &PoolRow {
         &self.0.value
     }
 }
@@ -83,7 +106,10 @@ impl ReadPool {
         self.admission(reads).map(|(_, charge, _, _)| charge)
     }
     fn admission(&self, reads: &Reads) -> Option<(u64, u64, u64, u64)> {
-        let missing = reads.iter().filter(|row| !self.rows.contains(*row)).count();
+        let missing = reads
+            .iter()
+            .filter(|row| !self.rows.contains(&PoolRow(**row)))
+            .count();
         let row_bytes = std::alloc::Layout::new::<[usize; 2]>()
             .extend(std::alloc::Layout::new::<ChargedRow>())
             .ok()?
@@ -165,11 +191,11 @@ impl ReadPool {
         }
         let mut rows = Vec::with_capacity(reads.len());
         for row in reads.iter() {
-            let value = if let Some(value) = self.rows.get(row) {
+            let value = if let Some(value) = self.rows.get(&PoolRow(*row)) {
                 value.0.clone()
             } else {
                 let value = Arc::new(ChargedRow {
-                    value: *row,
+                    value: PoolRow(*row),
                     _allowance: allowance.split(row_bytes).expect("pre-admitted read row"),
                 });
                 self.rows.insert(RowRef(value.clone()));
@@ -280,7 +306,7 @@ impl Rows {
     ) -> Result<usize, usize> {
         match self {
             Self::Flat(rows) => rows.binary_search_by(compare),
-            Self::Shared(rows) => rows.values.binary_search_by(|row| compare(&row.value)),
+            Self::Shared(rows) => rows.values.binary_search_by(|row| compare(&row.value.0)),
         }
     }
 }
@@ -289,7 +315,7 @@ impl std::ops::Index<usize> for Rows {
     fn index(&self, at: usize) -> &Row {
         match self {
             Self::Flat(rows) => &rows[at],
-            Self::Shared(rows) => &rows.values[at].value,
+            Self::Shared(rows) => &rows.values[at].value.0,
         }
     }
 }

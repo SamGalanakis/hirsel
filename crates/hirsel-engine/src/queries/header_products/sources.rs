@@ -51,27 +51,34 @@ struct SyntaxOwner {
     live: std::sync::Mutex<Result<Option<LiveSyntax>, QueryError>>,
 }
 struct LiveSyntax {
-    items: Vec<Arc<ItemSyntax>>,
+    declarations: crate::snapshot::DeclarationFile,
     _charge: Charge,
 }
 impl LiveSyntax {
+    fn items(&self) -> &[Arc<ItemSyntax>] {
+        self.declarations.items()
+    }
+
     fn new(
-        mut items: Vec<Arc<ItemSyntax>>,
+        file: FileId,
+        items: Vec<Arc<ItemSyntax>>,
+        sources: &SourceMap,
         charge: impl FnOnce(u64) -> Result<Charge, QueryError>,
     ) -> Result<Self, QueryError> {
-        items.shrink_to_fit();
-        let bytes = items
+        let declarations = crate::snapshot::DeclarationFile::new(file, items, sources);
+        let bytes = declarations
+            .items()
             .iter()
             .try_fold(0u64, |n, syntax| {
                 n.checked_add(hirsel_query_products::retained::retained_syntax_bytes(
                     syntax,
                 ))
             })
-            .and_then(|n| n.checked_add(std::mem::size_of_val(items.as_slice()) as u64))
+            .and_then(|n| n.checked_add(declarations.retained_bytes() as u64))
             .ok_or_else(|| source_refusal("syntax size overflow"))?;
         let charge = charge(bytes)?;
         Ok(Self {
-            items,
+            declarations,
             _charge: charge,
         })
     }
@@ -356,8 +363,9 @@ impl HeaderSources {
                 continue;
             };
             if live._charge.0.is_some()
+                && live.declarations.unpinned()
                 && live
-                    .items
+                    .items()
                     .iter()
                     .all(|syntax| Arc::strong_count(syntax) == 1)
             {
@@ -386,7 +394,7 @@ impl HeaderSources {
                 return Ok(None);
             };
             for syntax in live
-                .items
+                .items()
                 .iter()
                 .filter(|syntax| syntax.item.definition == *id.path())
             {
@@ -489,7 +497,7 @@ impl HeaderSources {
                             written
                                 .remove(&file)
                                 .map(|items| {
-                                    LiveSyntax::new(items, |bytes| {
+                                    LiveSyntax::new(file, items, &engine.sources, |bytes| {
                                         if indexed {
                                             standalone_syntax(bytes)
                                         } else {
@@ -593,7 +601,7 @@ impl HeaderSources {
                 n.saturating_add(live.as_ref().ok().and_then(|live| live.as_ref()).map_or(
                     0,
                     |live| {
-                        live.items.iter().fold(0u64, |n, syntax| {
+                        live.items().iter().fold(0u64, |n, syntax| {
                             n.saturating_add(add(seen, syntax, file.indexed))
                         })
                     },
@@ -635,7 +643,7 @@ impl HeaderSources {
                 .ok()
                 .and_then(|live| live.as_ref())
                 .is_some_and(|live| {
-                    live.items
+                    live.items()
                         .iter()
                         .any(|written| Arc::ptr_eq(written, syntax))
                 })
@@ -679,7 +687,7 @@ impl HeaderSources {
                 continue;
             };
             let syntaxes: Vec<_> = live
-                .items
+                .items()
                 .iter()
                 .filter(|syntax| {
                     engine.catalog.body(&syntax.item.definition) == Some(syntax.text_hash)
@@ -690,10 +698,23 @@ impl HeaderSources {
                 })
                 .cloned()
                 .collect();
-            Self::install_file(engine, *file, &syntaxes);
+            if syntaxes.len() == live.items().len() {
+                Self::install_items(engine, live.items());
+                engine.declarations.place_product(&live.declarations);
+            } else {
+                Self::install_file(engine, *file, &syntaxes);
+            }
         }
     }
     fn install_file(engine: &mut QueryEngine, file: FileId, syntaxes: &[Arc<ItemSyntax>]) {
+        let changed = Self::install_items(engine, syntaxes);
+        if !syntaxes.is_empty() && (changed || !engine.declarations.has_file(file)) {
+            engine
+                .declarations
+                .place_file(file, syntaxes.to_vec(), &engine.sources);
+        }
+    }
+    fn install_items(engine: &mut QueryEngine, syntaxes: &[Arc<ItemSyntax>]) -> bool {
         let mut changed = false;
         let mut owners = None;
         for syntax in syntaxes {
@@ -723,11 +744,7 @@ impl HeaderSources {
             candidates.sort_by_key(|s| s.occurrence);
             changed = true;
         }
-        if !syntaxes.is_empty() && (changed || !engine.declarations.has_file(file)) {
-            engine
-                .declarations
-                .place_file(file, syntaxes.to_vec(), &engine.sources);
-        }
+        changed
     }
     pub(super) fn materialize(
         &self,
@@ -766,14 +783,15 @@ impl HeaderSources {
                 if items.is_empty() {
                     return Err(refused());
                 }
-                *live = Some(LiveSyntax::new(items, |bytes| {
+                *live = Some(LiveSyntax::new(*file, items, &engine.sources, |bytes| {
                     engine.header_products.as_ref().map_or_else(
                         || standalone_syntax(bytes),
                         |headers| headers.admit_source(bytes),
                     )
                 })?);
             }
-            let syntaxes = &live.as_ref().unwrap().items;
+            let product = live.as_ref().unwrap();
+            let syntaxes = product.items();
             if syntaxes.iter().any(|syntax| {
                 syntax.occurrence == 0
                     && engine
@@ -789,7 +807,8 @@ impl HeaderSources {
             }) {
                 return Ok(false);
             }
-            Self::install_file(engine, *file, syntaxes);
+            Self::install_items(engine, syntaxes);
+            engine.declarations.place_product(&product.declarations);
         }
         Ok(true)
     }

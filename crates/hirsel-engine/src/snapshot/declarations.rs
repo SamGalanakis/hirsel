@@ -280,6 +280,43 @@ pub struct DeclarationIndex {
     frozen_rows: OnceLock<Arc<FrozenRows>>,
 }
 
+/// Immutable placement derived once from a header product's source file.
+/// Readers share the sorted item vector; materialization never reindexes it.
+pub(crate) struct DeclarationFile {
+    file: FileId,
+    listed: Arc<[Arc<ItemSyntax>]>,
+    path: std::path::PathBuf,
+}
+impl DeclarationFile {
+    pub(crate) fn new(file: FileId, mut listed: Vec<Arc<ItemSyntax>>, sources: &SourceMap) -> Self {
+        listed.sort_by(|a, b| {
+            sources
+                .anchor(a.anchor)
+                .unwrap()
+                .1
+                .cmp(&sources.anchor(b.anchor).unwrap().1)
+                .then(a.item.definition.cmp(&b.item.definition))
+                .then(a.occurrence.cmp(&b.occurrence))
+        });
+        Self {
+            file,
+            listed: listed.into(),
+            path: sources.file(file).unwrap().path.clone(),
+        }
+    }
+    pub(crate) fn items(&self) -> &[Arc<ItemSyntax>] {
+        &self.listed
+    }
+    pub(crate) fn unpinned(&self) -> bool {
+        Arc::strong_count(&self.listed) == 1
+    }
+    pub(crate) fn retained_bytes(&self) -> usize {
+        self.listed.len() * std::mem::size_of::<Arc<ItemSyntax>>()
+            + 2 * std::mem::size_of::<usize>()
+            + self.path.capacity()
+    }
+}
+
 /// A CT-5 instance's generated item (`instance$<hash>`, generation.rs): its
 /// own source, never indexed, so making one leaves the module input alone.
 fn generated(path: &DefPath) -> bool {
@@ -407,6 +444,55 @@ impl DeclarationIndex {
     ) {
         self.set_file(file, listed, sources);
     }
+    pub(crate) fn place_product(&mut self, product: &DeclarationFile) {
+        let file = product.file;
+        if self
+            .files
+            .get(&file)
+            .is_some_and(|old| Arc::ptr_eq(old, &product.listed))
+        {
+            return;
+        }
+        #[cfg(test)]
+        tests::FILE_UPDATES.set(tests::FILE_UPDATES.get() + 1);
+        if let Some(old) = self.files.get(&file) {
+            let retained: std::collections::BTreeSet<_> =
+                product.items().iter().map(|item| item.anchor).collect();
+            for item in old.iter() {
+                if self.anchors.get(&item.anchor) == Some(&file) && !retained.contains(&item.anchor)
+                {
+                    Arc::make_mut(&mut self.anchors).remove(&item.anchor);
+                }
+            }
+        }
+        for item in product.items() {
+            if self.anchors.get(&item.anchor) != Some(&file) {
+                Arc::make_mut(&mut self.anchors).insert(item.anchor, file);
+            }
+        }
+        if product.listed.is_empty() {
+            if let Some(snapshots) = Arc::make_mut(&mut self.paths).get_mut(&product.path) {
+                snapshots.remove(&file);
+                if snapshots.is_empty() {
+                    Arc::make_mut(&mut self.paths).remove(&product.path);
+                }
+            }
+            Arc::make_mut(&mut self.files).remove(&file);
+        } else {
+            if !self
+                .paths
+                .get(&product.path)
+                .is_some_and(|files| files.contains(&file))
+            {
+                Arc::make_mut(&mut self.paths)
+                    .entry(product.path.clone())
+                    .or_default()
+                    .insert(file);
+            }
+            Arc::make_mut(&mut self.files).insert(file, product.listed.clone());
+        }
+        self.frozen = OnceLock::new();
+    }
     pub(crate) fn has_file(&self, file: FileId) -> bool {
         self.files.contains_key(&file)
     }
@@ -448,58 +534,22 @@ impl DeclarationIndex {
         }
     }
     /// `file`'s items, given in DefPath then occurrence order, by position.
-    fn set_file(&mut self, file: FileId, mut listed: Vec<Arc<ItemSyntax>>, sources: &SourceMap) {
-        let unchanged = |listed: &[Arc<ItemSyntax>]| {
-            self.files.get(&file).map_or(listed.is_empty(), |old| {
-                old.len() == listed.len() && old.iter().zip(listed).all(|(a, b)| Arc::ptr_eq(a, b))
+    fn set_file(&mut self, file: FileId, listed: Vec<Arc<ItemSyntax>>, sources: &SourceMap) {
+        let product = DeclarationFile::new(file, listed, sources);
+        if self
+            .files
+            .get(&file)
+            .map_or(product.listed.is_empty(), |old| {
+                old.len() == product.listed.len()
+                    && old
+                        .iter()
+                        .zip(product.items())
+                        .all(|(a, b)| Arc::ptr_eq(a, b))
             })
-        };
-        let order = |a: &Arc<ItemSyntax>, b: &Arc<ItemSyntax>| {
-            sources
-                .anchor(a.anchor)
-                .unwrap()
-                .1
-                .cmp(&sources.anchor(b.anchor).unwrap().1)
-                .then(a.item.definition.cmp(&b.item.definition))
-                .then(a.occurrence.cmp(&b.occurrence))
-        };
-        if unchanged(&listed) && listed.is_sorted_by(|a, b| order(a, b).is_le()) {
+        {
             return;
         }
-        listed.sort_by(order);
-        if unchanged(&listed) {
-            return;
-        }
-        #[cfg(test)]
-        tests::FILE_UPDATES.set(tests::FILE_UPDATES.get() + 1);
-        if let Some(old) = self.files.get(&file) {
-            for item in old.iter() {
-                if self.anchors.get(&item.anchor) == Some(&file) {
-                    Arc::make_mut(&mut self.anchors).remove(&item.anchor);
-                }
-            }
-        }
-        for item in &listed {
-            Arc::make_mut(&mut self.anchors).insert(item.anchor, file);
-        }
-        let path = sources.file(file).unwrap().path.clone();
-        let snapshots = Arc::make_mut(&mut self.paths)
-            .entry(path.clone())
-            .or_default();
-        if listed.is_empty() {
-            snapshots.remove(&file);
-            if snapshots.is_empty() {
-                Arc::make_mut(&mut self.paths).remove(&path);
-            }
-        } else {
-            snapshots.insert(file);
-        }
-        if listed.is_empty() {
-            Arc::make_mut(&mut self.files).remove(&file);
-        } else {
-            Arc::make_mut(&mut self.files).insert(file, listed.into());
-        }
-        self.frozen = OnceLock::new();
+        self.place_product(&product);
     }
     fn set_row(
         &mut self,

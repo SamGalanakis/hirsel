@@ -15,6 +15,88 @@ use crate::layout_types::{
     DropStep, LayoutId, LayoutKey, LayoutKind, LayoutRecord, LayoutTable, ScanStep,
 };
 use hirsel_syntax::ContentHash;
+use std::{
+    collections::{BTreeMap, hash_map::DefaultHasher},
+    hash::{Hash, Hasher},
+    sync::{Arc, Mutex, OnceLock, Weak},
+};
+
+// Weak hash-consing follows hirsel-types/src/read_names.rs:70-135. The
+// structural row is immutable and equality resolves hash collisions. The last
+// reader removes its weak index row, so the index never owns layout payloads.
+struct ErasedLayout {
+    row: LayoutRecord,
+    encoding: String,
+    hash: u64,
+}
+type ErasedRows = BTreeMap<(u64, usize), Weak<ErasedLayout>>;
+static ERASED: OnceLock<Mutex<ErasedRows>> = OnceLock::new();
+impl ErasedLayout {
+    fn intern(row: LayoutRecord) -> Arc<Self> {
+        let mut hasher = DefaultHasher::new();
+        row.hash(&mut hasher);
+        let hash = hasher.finish();
+        let mut rows = ERASED
+            .get_or_init(Mutex::default)
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        // Keep upgrades alive until the lock is released: their last Drop also
+        // removes an index row.
+        let candidates: Vec<_> = rows
+            .range((hash, 0)..=(hash, usize::MAX))
+            .filter_map(|(_, candidate)| candidate.upgrade())
+            .collect();
+        let found = candidates
+            .iter()
+            .find(|candidate| candidate.row == row)
+            .cloned();
+        let result = found.unwrap_or_else(|| {
+            let encoding = hirsel_codec::to_text(&row);
+            let owner = Arc::new(Self {
+                row,
+                encoding,
+                hash,
+            });
+            rows.insert((hash, Arc::as_ptr(&owner) as usize), Arc::downgrade(&owner));
+            owner
+        });
+        drop(rows);
+        result
+    }
+}
+impl Drop for ErasedLayout {
+    fn drop(&mut self) {
+        if let Some(rows) = ERASED.get() {
+            rows.lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(&(self.hash, self as *const Self as usize));
+        }
+    }
+}
+
+struct KeyNode {
+    identity: Arc<ErasedLayout>,
+    edges: Vec<u32>,
+}
+impl KeyNode {
+    fn new(record: &LayoutRecord) -> Self {
+        let mut row = record.clone();
+        let mut edges = Vec::new();
+        row.for_each_reference_mut(&mut |id| {
+            edges.push(id.0);
+            *id = LayoutId(0);
+        });
+        Self {
+            identity: ErasedLayout::intern(row),
+            edges,
+        }
+    }
+    fn write(&self, version: u32, w: &mut hirsel_graph::KeyWriter) {
+        w.bytes(b"hirsel.layout.v1");
+        w.bytes(&version.to_le_bytes());
+        w.bytes(self.identity.encoding.as_bytes());
+    }
+}
 
 pub fn scan_references_mut(steps: &mut [ScanStep], f: &mut impl FnMut(&mut LayoutId)) {
     for step in steps {
@@ -133,31 +215,43 @@ impl LayoutRecord {
 }
 
 /// The content key of every layout of one table, by `LayoutId`.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone)]
 pub struct LayoutKeys {
     keys: Vec<LayoutKey>,
+    identities: Vec<Arc<ErasedLayout>>,
 }
+impl std::fmt::Debug for LayoutKeys {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LayoutKeys")
+            .field("keys", &self.keys)
+            .finish()
+    }
+}
+impl PartialEq for LayoutKeys {
+    fn eq(&self, other: &Self) -> bool {
+        self.keys == other.keys
+    }
+}
+impl Eq for LayoutKeys {}
 
 impl LayoutKeys {
     /// Key one completed layout and its reachable graph during planning, without
     /// hashing unrelated rows. Uses the same SCC encoding as the finished table.
     pub fn rooted(table: &LayoutTable, root: LayoutId) -> LayoutKey {
+        let mut nodes = BTreeMap::new();
+        let mut pending = vec![root.0];
+        while let Some(id) = pending.pop() {
+            if nodes.contains_key(&id) {
+                continue;
+            }
+            let node = KeyNode::new(&table.layouts[id as usize]);
+            pending.extend(node.edges.iter().copied());
+            nodes.insert(id, node);
+        }
         let keys = hirsel_graph::scc_keys(
             &[root.0],
-            |n| {
-                table.layouts[n as usize]
-                    .references()
-                    .into_iter()
-                    .map(|id| id.0)
-                    .collect()
-            },
-            |n, w| {
-                let mut record = table.layouts[n as usize].clone();
-                record.for_each_reference_mut(&mut |id| *id = LayoutId(0));
-                w.bytes(b"hirsel.layout.v1");
-                w.bytes(&table.layout_version.to_le_bytes());
-                w.bytes(hirsel_codec::to_text(&record).as_bytes());
-            },
+            |n| nodes[&n].edges.clone(),
+            |n, w| nodes[&n].write(table.layout_version, w),
         );
         LayoutKey(keys[&root.0])
     }
@@ -165,37 +259,39 @@ impl LayoutKeys {
     /// Keys every layout of `table`.
     pub fn new(table: &LayoutTable) -> Self {
         let nodes: Vec<u32> = (0..table.layouts.len() as u32).collect();
-        let erased: Vec<String> = table
-            .layouts
-            .iter()
-            .map(|record| {
-                let mut record = record.clone();
-                record.for_each_reference_mut(&mut |id: &mut LayoutId| *id = LayoutId(0));
-                hirsel_codec::to_text(&record)
-            })
-            .collect();
+        let rows: Vec<_> = table.layouts.iter().map(KeyNode::new).collect();
         let keys = hirsel_graph::scc_keys(
             &nodes,
-            |n| {
-                table.layouts[n as usize]
-                    .references()
-                    .into_iter()
-                    .map(|id| id.0)
-                    .collect()
-            },
-            |n, w| {
-                w.bytes(b"hirsel.layout.v1");
-                w.bytes(&table.layout_version.to_le_bytes());
-                w.bytes(erased[n as usize].as_bytes());
-            },
+            |n| rows[n as usize].edges.clone(),
+            |n, w| rows[n as usize].write(table.layout_version, w),
         );
         Self {
             keys: nodes.iter().map(|n| LayoutKey(keys[n])).collect(),
+            identities: rows.into_iter().map(|node| node.identity).collect(),
         }
     }
 
+    /// Key buffers, identity headers, encodings and weak index backing. Owned
+    /// row buffers are visited separately by the native admission visitor.
     pub fn retained_bytes(&self) -> usize {
         self.keys.capacity() * std::mem::size_of::<LayoutKey>()
+            + self.identities.capacity() * std::mem::size_of::<Arc<ErasedLayout>>()
+            + self
+                .identities
+                .iter()
+                .map(|identity| {
+                    std::mem::size_of::<ErasedLayout>()
+                        + 2 * std::mem::size_of::<usize>()
+                        + identity.encoding.capacity()
+                        + 2 * (std::mem::size_of::<((u64, usize), Weak<ErasedLayout>)>()
+                            + 6 * std::mem::size_of::<usize>())
+                })
+                .sum::<usize>()
+    }
+
+    /// Immutable rows retained by the interned identities, for allocation admission.
+    pub fn retained_rows(&self) -> impl Iterator<Item = &LayoutRecord> {
+        self.identities.iter().map(|identity| &identity.row)
     }
 
     /// The key of `id`, which must index the keyed table.

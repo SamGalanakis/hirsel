@@ -73,6 +73,9 @@ pub(crate) fn admit_layouts(
     w.flat_vec(&layouts.abis);
     hirsel_native::execution_plan::retained::binding(&mut w, layouts.binding());
     w.add(layouts.keys().retained_bytes());
+    for row in layouts.keys().retained_rows() {
+        hirsel_native::execution_plan::retained::layout(&mut w, row);
+    }
     let bytes = w.bytes();
     let grant = store.admit_product_memory(bytes)?;
     let active = LAYOUT_BYTES.fetch_add(bytes, Relaxed) + bytes;

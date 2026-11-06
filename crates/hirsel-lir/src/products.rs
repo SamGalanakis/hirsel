@@ -277,6 +277,10 @@ impl LayoutClosure {
     /// Check actual rows and complete recursive keys. Descriptor fields and
     /// content integrity never substitute for independent layout validation.
     pub fn check(&self, target: &TargetSpec) -> Result<(), String> {
+        self.checked_keys(target).map(|_| ())
+    }
+
+    fn checked_keys(&self, target: &TargetSpec) -> Result<LayoutKeys, String> {
         if self.layouts.len() != self.table.layouts.len()
             || self.abis.len() != self.table.fn_abis.len()
             || self.abis.windows(2).any(|w| w[0] >= w[1])
@@ -300,7 +304,7 @@ impl LayoutClosure {
         {
             return Err("native layout product content identity differs".into());
         }
-        Ok(())
+        Ok(keys)
     }
 }
 
@@ -314,8 +318,24 @@ pub struct CheckedLayouts {
 }
 impl CheckedLayouts {
     pub fn new(closure: LayoutClosure, target: &TargetSpec) -> Result<Self, String> {
-        closure.check(target)?;
-        let (binding, keys) = Binding::merge(target, &[&closure])?;
+        let keys = closure.checked_keys(target)?;
+        // A checked closure already has complete, independently validated local
+        // rows. Bind their content names directly, without decoding/reconstructing
+        // a second copy and deriving every key again. Aliases select first use.
+        let mut layouts = BTreeMap::new();
+        for (index, key) in closure.layouts.iter().enumerate() {
+            layouts.entry(*key).or_insert(LayoutId(index as u32));
+        }
+        let binding = Binding {
+            table: closure.table.clone(),
+            layouts,
+            abis: closure
+                .abis
+                .iter()
+                .enumerate()
+                .map(|(index, key)| (*key, FnAbiId(index as u32)))
+                .collect(),
+        };
         Ok(Self {
             closure,
             binding,

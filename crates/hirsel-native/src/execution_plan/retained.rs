@@ -30,7 +30,7 @@ fn drop_steps(w: &mut W, rows: &Vec<DropStep>) {
         _ => (),
     });
 }
-fn layout(w: &mut W, row: &LayoutRecord) {
+pub fn layout(w: &mut W, row: &LayoutRecord) {
     match &row.kind {
         LayoutKind::Environment { movable } => w.flat_vec(movable),
         LayoutKind::Opaque { owner } => w.path(owner),

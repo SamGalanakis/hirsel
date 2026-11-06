@@ -1061,7 +1061,7 @@ fn validate_plans(
     for id in order.iter().rev() {
         let (id, plan) = (id, &plans.plans[id]);
         let u = index[id];
-        if plan.body != *id || plan.digest != digests.units[id] {
+        if plan.body != *id || plan.digest != digests.unit(u) {
             return Err(ContinuationError::Body(*id));
         }
         let effects: Vec<_> = u
@@ -2252,7 +2252,7 @@ pub(super) fn isolate_frame(
         .map(|u| (u.unit().header.instance, u.unit()))
         .collect();
     let digests = PlanDigests::new(&index, inputs);
-    if plan.body != id || plan.digest != digests.units[&id] {
+    if plan.body != id || plan.digest != digests.unit(u) {
         return Err(ContinuationError::Body(id));
     }
     if plan.representation != Representation::Resumable

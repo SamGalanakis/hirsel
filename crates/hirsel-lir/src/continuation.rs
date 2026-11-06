@@ -21,6 +21,7 @@
 //!
 //! [`validate`] recomputes every plan with its own analyses: a plan imported
 //! from a cache or another partition is never trusted by its identity alone.
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 
 use hirsel_core_contract::Passing;
@@ -291,22 +292,36 @@ pub struct PlanInputs<'a> {
 
 /// Digests of the immutable inputs to one planning or validation pass.
 /// Import validation constructs its own set instead of trusting the producer's.
-struct PlanDigests {
-    units: BTreeMap<ContentHash, ContentHash>,
+struct PlanDigests<'a> {
+    units: &'a BTreeMap<ContentHash, &'a LirUnit<Ready>>,
+    digests: RefCell<BTreeMap<*const LirUnit<Ready>, ContentHash>>,
     table: ContentHash,
     target: ContentHash,
 }
 
-impl PlanDigests {
-    fn new(units: &BTreeMap<ContentHash, &LirUnit<Ready>>, inputs: &PlanInputs<'_>) -> Self {
+impl<'a> PlanDigests<'a> {
+    fn new(units: &'a BTreeMap<ContentHash, &'a LirUnit<Ready>>, inputs: &PlanInputs<'_>) -> Self {
         Self {
-            units: units
-                .iter()
-                .map(|(id, unit)| (*id, unit.digest()))
-                .collect(),
+            units,
+            digests: RefCell::new(BTreeMap::new()),
             table: inputs.table.digest(),
             target: inputs.target.digest(),
         }
+    }
+
+    fn unit(&self, unit: &'a LirUnit<Ready>) -> ContentHash {
+        *self
+            .digests
+            .borrow_mut()
+            .entry(std::ptr::from_ref(unit))
+            .or_insert_with(|| unit.digest())
+    }
+
+    fn callee(&self, id: &ContentHash) -> ContentHash {
+        self.units
+            .get(id)
+            .map(|unit| self.unit(unit))
+            .unwrap_or_default()
     }
 }
 
@@ -1468,11 +1483,11 @@ fn states(
 }
 
 /// The certificate binds everything the plan was derived from.
-fn certify(
-    u: &LirUnit<Ready>,
+fn certify<'a>(
+    u: &'a LirUnit<Ready>,
     inputs: &PlanInputs<'_>,
     effects: &[CallEffect],
-    digests: &PlanDigests,
+    digests: &PlanDigests<'a>,
     representation: &Representation,
     (parameters, records): (&[FrameParameter], &[FrameRegion]),
     storage: &[LiveStorage],
@@ -1483,17 +1498,13 @@ fn certify(
 ) -> ValidatedContinuation {
     let mut bytes = Vec::new();
     bytes.extend_from_slice(&u.header.instance.0);
-    bytes.extend_from_slice(&digests.units[&u.header.instance].0);
+    bytes.extend_from_slice(&digests.unit(u).0);
     bytes.extend_from_slice(&digests.table.0);
     bytes.extend_from_slice(&digests.target.0);
     bytes.extend_from_slice(&inputs.runtime.0);
     for effect in effects {
         let text = match effect {
-            CallEffect::Nested(id) => format!(
-                "nested {:?} {:?}",
-                id,
-                digests.units.get(id).copied().unwrap_or_default()
-            ),
+            CallEffect::Nested(id) => format!("nested {:?} {:?}", id, digests.callee(id)),
             other => format!("{other:?}"),
         };
         bytes.extend_from_slice(&(text.len() as u64).to_le_bytes());
@@ -1557,12 +1568,12 @@ pub(crate) fn sites(
     Ok(out)
 }
 
-fn plan_unit(
-    u: &LirUnit<Ready>,
+fn plan_unit<'a>(
+    u: &'a LirUnit<Ready>,
     inputs: &PlanInputs<'_>,
     units: &BTreeMap<ContentHash, &LirUnit<Ready>>,
     suspends: &BTreeSet<ContentHash>,
-    digests: &PlanDigests,
+    digests: &PlanDigests<'a>,
     done: &BTreeMap<ContentHash, ContinuationPlan>,
     admission: Result<Option<isolate::IsolateEvidence>, String>,
     checked: &[&ValidatedUnit<Ready>],
@@ -1731,7 +1742,7 @@ fn plan_unit(
     );
     ContinuationPlan {
         body: u.header.instance,
-        digest: digests.units[&u.header.instance],
+        digest: digests.unit(u),
         representation,
         parameters: fixed.0,
         records: fixed.1,
@@ -1748,12 +1759,12 @@ fn plan_unit(
 /// Callees first, so a caller sees each nested callee's final plan. A body
 /// reached again while being planned is recursive and keeps its stack.
 #[allow(clippy::too_many_arguments)]
-fn plan_in_order(
+fn plan_in_order<'a>(
     id: ContentHash,
     inputs: &PlanInputs<'_>,
-    units: &BTreeMap<ContentHash, &LirUnit<Ready>>,
+    units: &BTreeMap<ContentHash, &'a LirUnit<Ready>>,
     suspends: &BTreeSet<ContentHash>,
-    digests: &PlanDigests,
+    digests: &PlanDigests<'a>,
     active: &mut BTreeSet<ContentHash>,
     done: &mut BTreeMap<ContentHash, ContinuationPlan>,
     checked: &[&ValidatedUnit<Ready>],

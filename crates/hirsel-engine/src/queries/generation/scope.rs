@@ -48,6 +48,7 @@ impl std::fmt::Debug for FrontDemandError {
     }
 }
 pub struct FrontDemandScope {
+    operation: OperationLease,
     carry: Option<Arc<FrontCarry>>,
     definitions: Vec<DefPath>,
     registrations: Vec<Arc<AcceptedFrontRegistration>>,
@@ -72,7 +73,7 @@ impl FrontDemandScope {
         &self.namespace
     }
     pub fn lease(&self) -> OperationLease {
-        self.namespace.lease()
+        self.operation.clone()
     }
     pub(crate) fn front(&self) -> Option<&Arc<FrontBodyQueries>> {
         self.front.as_ref()
@@ -241,6 +242,11 @@ impl QueryEngine {
             }
         };
         let namespace = successor.namespace().clone();
+        let operation = namespace
+            .admit_consumers(query.address.0)
+            .map_err(|error| {
+                FrontDemandError::Generator(FrontRegistrationBootstrapError::Admission(error))
+            })?;
         let failure = producer.front_failure(roots);
         let rounds = producer.rounds();
         let definitions = namespace
@@ -267,6 +273,7 @@ impl QueryEngine {
         // and the optional Front carry cross into the operation.
         drop(producer);
         Ok(FrontDemandScope {
+            operation,
             carry,
             definitions,
             registrations,

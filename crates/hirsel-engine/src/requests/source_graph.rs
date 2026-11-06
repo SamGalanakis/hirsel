@@ -1066,7 +1066,35 @@ pub fn install(
             Err(error) => return Err(loading.failed(engine_error(engine, error))),
         },
     };
-    let operation = operation.unwrap_or_else(|| namespace.lease());
+    let operation = match operation {
+        Some(operation) => operation,
+        None => {
+            let scope = selection.files.iter().try_fold(
+                selection.entry.fingerprint(),
+                |scope, (file, context, policy)| {
+                    Ok::<_, ToolError>(hirsel_syntax::ContentHash::of_parts(
+                        "hirsel.consumer.source-scope.v1",
+                        [
+                            scope.0.as_slice(),
+                            context.package.name.as_bytes(),
+                            context.package.version.as_bytes(),
+                            engine
+                                .sources
+                                .file(*file)
+                                .ok_or_else(uninstalled)?
+                                .logical_path()
+                                .to_string_lossy()
+                                .as_bytes(),
+                            &[u8::from(*policy == LoweringPolicy::Reachable)],
+                        ],
+                    ))
+                },
+            )?;
+            namespace
+                .admit_consumers(scope)
+                .map_err(|error| engine_error(engine, error))?
+        }
+    };
     let footprint;
     // Registration changes the source namespace. Capture every final consumer
     // against the same accepted views, including Run and ownership catalogues.

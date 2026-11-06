@@ -449,6 +449,9 @@ impl FrontBodyQueries {
         Ok(())
     }
     pub(crate) fn demand_producer(&self) -> Option<Arc<generation::demand::DemandProducer>> {
+        if self.namespace.consumers_admitted() {
+            return None;
+        }
         self.demand
             .lock()
             .unwrap_or_else(|e| e.into_inner())

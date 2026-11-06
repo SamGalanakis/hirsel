@@ -552,6 +552,9 @@ impl FrontLowerQueries {
         self.path(id).is_some()
     }
     fn demand_producer(&self) -> Option<Arc<generation::demand::DemandProducer>> {
+        if self.namespace.consumers_admitted() {
+            return None;
+        }
         self.demand.get()?.upgrade()
     }
     fn delegated(
@@ -3484,6 +3487,7 @@ impl QueryEngine {
             })
         };
         let pending = generator.is_none()
+            && !front.namespace().consumers_admitted()
             && !self.private_bootstrap_active
             && (!self.front_staged_roots(definitions)?.is_empty()
                 || !front.namespace().instances.declarations.is_empty()

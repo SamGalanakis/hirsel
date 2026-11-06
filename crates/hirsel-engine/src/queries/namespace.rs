@@ -62,6 +62,7 @@ pub struct NamespaceCapture {
     pub(crate) installation: ContentHash,
     retained: u64,
     admission: std::sync::OnceLock<NamespaceAdmission>,
+    consumer_scope: std::sync::OnceLock<ContentHash>,
     capture_inputs: CaptureInputs,
     pub(crate) operation: Arc<operation_inputs::OperationOwner>,
 }
@@ -93,6 +94,13 @@ pub struct OperationLease {
     capture: Arc<NamespaceCapture>,
 }
 impl OperationLease {
+    pub fn identity(&self) -> ContentHash {
+        self.capture
+            .consumer_scope
+            .get()
+            .copied()
+            .unwrap_or(self.capture.identity())
+    }
     pub fn capture(&self) -> &NamespaceCapture {
         &self.capture
     }
@@ -529,6 +537,25 @@ impl NamespaceCapture {
         OperationLease {
             capture: self.clone(),
         }
+    }
+    /// Discovery owns mutable selection until this boundary. Every subsequent
+    /// consumer retains the same source owners and demand scope.
+    pub(crate) fn admit_consumers(
+        self: &Arc<Self>,
+        scope: ContentHash,
+    ) -> Result<OperationLease, QueryError> {
+        let identity = ContentHash::of_parts(
+            "hirsel.consumer.capture.v1",
+            [self.identity.0.as_slice(), scope.0.as_slice()],
+        );
+        let admitted = self.consumer_scope.get_or_init(|| identity);
+        if *admitted != identity {
+            return Err(refused("capture already admitted for another demand scope"));
+        }
+        Ok(self.lease())
+    }
+    pub(crate) fn consumers_admitted(&self) -> bool {
+        self.consumer_scope.get().is_some()
     }
     pub fn generation_manifest(&self) -> ContentHash {
         self.manifest
@@ -1161,6 +1188,7 @@ impl QueryEngine {
             installation,
             retained,
             admission: std::sync::OnceLock::new(),
+            consumer_scope: std::sync::OnceLock::new(),
             capture_inputs,
             operation: self.operation.clone(),
         });
@@ -1299,6 +1327,22 @@ mod tests {
                 .unwrap();
             assert_ne!(capture.manifest, changed.manifest);
             assert!(!Arc::ptr_eq(&capture, &changed));
+            let scope = ContentHash::of_bytes(b"selected main root");
+            let operation = capture.admit_consumers(scope).unwrap();
+            assert_eq!(
+                operation.identity(),
+                capture.admit_consumers(scope).unwrap().identity()
+            );
+            assert!(
+                capture
+                    .admit_consumers(ContentHash::of_bytes(b"expanded roots"))
+                    .is_err()
+            );
+            assert_ne!(
+                operation.identity(),
+                changed.admit_consumers(scope).unwrap().identity()
+            );
+            assert!(Arc::ptr_eq(operation.namespace(), &capture));
             drop(engine);
             for definition in &definitions {
                 assert_eq!(

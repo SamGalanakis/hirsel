@@ -339,7 +339,9 @@ impl FrontBodyQueries {
         let message = if reference == self.errors.resource {
             format!(
                 "Front producer exceeded its admitted resources; retained {} of {} bytes; refusal {:?}",
-                self.retained_bytes(), self.admitted_bytes(), self.memory_refusal(),
+                self.retained_bytes(),
+                self.admitted_bytes(),
+                self.memory_refusal(),
             )
         } else if reference == self.errors.cycle {
             "Front producer has a query dependency cycle".into()
@@ -351,7 +353,7 @@ impl FrontBodyQueries {
             crate::requests::source_graph::runtime_diagnostic(&*self.store, reference)?
         };
         Some(QueryError::Operational(hirsel_types::OperationalFailure {
-            operation: "compiler query protocol".into(),
+            operation: "compiler query runtime".into(),
             message,
         }))
     }
@@ -608,16 +610,24 @@ impl FrontBodyQueries {
             return (registration.definition() == input.definition.path()
                 && syntax.text_hash == input.implementation)
                 .then(|| syntax.clone())
-                .ok_or_else(|| QueryError::Operational(hirsel_types::OperationalFailure {
-                    operation: "Front syntax recovery".into(),
-                    message: format!("accepted registration differs from the input for {}", input.definition.path()),
-                }));
+                .ok_or_else(|| {
+                    QueryError::Operational(hirsel_types::OperationalFailure {
+                        operation: "Front syntax recovery".into(),
+                        message: format!(
+                            "accepted registration differs from the input for {}",
+                            input.definition.path()
+                        ),
+                    })
+                });
         }
         let syntax = self.namespace.syntax(input.definition.path())?;
         if syntax.text_hash != input.implementation {
             return Err(QueryError::Operational(hirsel_types::OperationalFailure {
                 operation: "Front syntax recovery".into(),
-                message: format!("captured implementation differs from the input for {}", input.definition.path()),
+                message: format!(
+                    "captured implementation differs from the input for {}",
+                    input.definition.path()
+                ),
             }));
         }
         if generation::instance_bodied(&syntax) {
@@ -2667,9 +2677,13 @@ impl BodyTask {
         let worker = queries.worker();
         queries.release_handoff();
         let syntax = queries.syntax(input).map_err(|error| {
-            queries.protocol_failure(self.query, &format!(
-                "syntax recovery failed for {}: {error:?}", input.definition.path(),
-            ))
+            queries.protocol_failure(
+                self.query,
+                &format!(
+                    "syntax recovery failed for {}: {error:?}",
+                    input.definition.path(),
+                ),
+            )
         })?;
         let SignatureInput {
             signature,

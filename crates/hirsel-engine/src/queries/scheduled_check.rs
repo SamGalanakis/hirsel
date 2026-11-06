@@ -168,6 +168,16 @@ pub struct FrontCheckQueries {
     _allowance: Arc<hirsel_engine_admission::MemoryReservation>,
 }
 impl FrontCheckQueries {
+    #[track_caller]
+    fn protocol_refusal(&self) -> Reference {
+        crate::requests::source_graph::protocol_failure(
+            &*self.store,
+            self.errors,
+            Some(self.query()),
+            "Check producer state or selected product is unavailable",
+        )
+    }
+
     pub(super) fn matches_inputs(
         &self,
         front: &Arc<FrontBodyQueries>,
@@ -355,7 +365,7 @@ impl QueryFactory for Factory {
             return Ok(Box::new(admission::Task::new(self.0.clone())));
         }
         if id != self.0.query {
-            return Err(self.0.errors.protocol);
+            return Err(self.0.protocol_refusal());
         }
         self.0.plan.front.compact_retained_reads();
         Ok(Box::new(Task {
@@ -522,7 +532,7 @@ impl Task {
                                 .plan
                                 .front
                                 .query(path)
-                                .ok_or(self.queries.errors.protocol)?;
+                                .ok_or_else(|| self.queries.protocol_refusal())?;
                             if cx.read(id).is_pending() {
                                 pending.push(id);
                             }
@@ -536,7 +546,7 @@ impl Task {
                             .plan
                             .front
                             .query(path)
-                            .ok_or(self.queries.errors.protocol)?;
+                            .ok_or_else(|| self.queries.protocol_refusal())?;
                         let selected = match cx.read(id) {
                             Poll::Pending => return Ok(Some(vec![id])),
                             Poll::Ready(selected) => selected,
@@ -544,7 +554,9 @@ impl Task {
                         let reference = selected.clone();
                         let Some(facts) = self.queries.plan.front.check_facts(reference.clone())
                         else {
-                            return Err(reference.err().unwrap_or(self.queries.errors.protocol));
+                            return Err(reference
+                                .err()
+                                .unwrap_or_else(|| self.queries.protocol_refusal()));
                         };
                         let observed = self
                             .reads
@@ -575,7 +587,7 @@ impl Task {
                                     .queries
                                     .lint
                                     .as_ref()
-                                    .ok_or(self.queries.errors.protocol)?;
+                                    .ok_or_else(|| self.queries.protocol_refusal())?;
                                 self.lint_errors.extend(
                                     uses.errors
                                         .into_iter()
@@ -610,7 +622,7 @@ impl Task {
                                     if facts
                                         .lowering
                                         .as_ref()
-                                        .ok_or(self.queries.errors.protocol)?
+                                        .ok_or_else(|| self.queries.protocol_refusal())?
                                         .needed_with(|id| self.queries.constants.contains(&id))
                                     {
                                         file.comptime.push(path.clone());
@@ -622,7 +634,9 @@ impl Task {
                             Err(error) => {
                                 self.failed_front.push((
                                     path.clone(),
-                                    reference.err().unwrap_or(self.queries.errors.protocol),
+                                    reference
+                                        .err()
+                                        .unwrap_or_else(|| self.queries.protocol_refusal()),
                                 ));
                                 file.error(error, facts.phase);
                                 if file.error.is_none()
@@ -653,7 +667,7 @@ impl Task {
                                     .plan
                                     .growth
                                     .outcome(product)
-                                    .ok_or(self.queries.errors.protocol)?;
+                                    .ok_or_else(|| self.queries.protocol_refusal())?;
                                 self.reads
                                     .record(
                                         &*self.queries.store,
@@ -672,7 +686,10 @@ impl Task {
                                     self.queries.plan.front.check_facts(Err(reference))
                                 {
                                     (
-                                        output.result.err().ok_or(self.queries.errors.protocol)?,
+                                        output
+                                            .result
+                                            .err()
+                                            .ok_or_else(|| self.queries.protocol_refusal())?,
                                         output.phase,
                                     )
                                 } else {
@@ -707,7 +724,7 @@ impl Task {
                                 Ok(product) => {
                                     let output = storage
                                         .outcome(product)
-                                        .ok_or(self.queries.errors.protocol)?;
+                                        .ok_or_else(|| self.queries.protocol_refusal())?;
                                     self.reads
                                         .record(
                                             &*self.queries.store,
@@ -792,7 +809,9 @@ impl Task {
                         }
                         let path = &paths[self.root];
                         let lower = &self.queries.plan.lower;
-                        let id = lower.query(path).ok_or(self.queries.errors.protocol)?;
+                        let id = lower
+                            .query(path)
+                            .ok_or_else(|| self.queries.protocol_refusal())?;
                         let selected = match cx.read(id) {
                             Poll::Pending => return Ok(Some(vec![id])),
                             Poll::Ready(selected) => selected,
@@ -804,7 +823,7 @@ impl Task {
                                     .plan
                                     .lower
                                     .outcome(product.clone())
-                                    .ok_or(self.queries.errors.protocol)?;
+                                    .ok_or_else(|| self.queries.protocol_refusal())?;
                                 self.reads
                                     .record(
                                         &*self.queries.store,
@@ -821,7 +840,7 @@ impl Task {
                                         .plan
                                         .lower
                                         .observation_product(product)
-                                        .ok_or(self.queries.errors.protocol)?,
+                                        .ok_or_else(|| self.queries.protocol_refusal())?,
                                 ));
                                 cx.consume(id);
                             }
@@ -904,7 +923,7 @@ impl Task {
                             .as_ref()
                             .err()
                             .copied()
-                            .unwrap_or(self.queries.errors.protocol);
+                            .unwrap_or_else(|| self.queries.protocol_refusal());
                         let reads = self
                             .queries
                             .plan
@@ -944,7 +963,14 @@ impl Task {
         let reads = std::mem::take(&mut self.reads)
             .finish(&*queries.store, queries.weight.scratch, &queries.plan.front)
             .ok_or(queries.errors.resource)?
-            .map_err(|_| queries.errors.protocol)?;
+            .map_err(|error| {
+                crate::requests::source_graph::protocol_failure(
+                    &*queries.store,
+                    queries.errors,
+                    Some(queries.query()),
+                    &format!("Check observations are inconsistent: {error:?}"),
+                )
+            })?;
         let stopped = self.files.iter().find_map(|file| match &file.error {
             Some(error) if *error != QueryError::NotImplemented => {
                 Some((error.clone(), file.phase))

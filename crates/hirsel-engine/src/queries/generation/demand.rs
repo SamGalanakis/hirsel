@@ -1359,14 +1359,11 @@ impl DemandProducer {
                     if !arguments.is_empty() {
                         return Err(refused("nongeneric generator has actual arguments"));
                     }
-                    if current
-                        .capture()
-                        .registrations
-                        .contains_key(&declaration_id)
+                    if let Some(registration) = current.capture().registrations.get(&declaration_id)
                     {
                         return Ok(s1::DependencyProduct {
                             result: Ok(Some(declaration.clone())),
-                            reads: Reads::empty(),
+                            reads: registration.reads().clone(),
                             successor: (previous.identity() != current.capture().identity())
                                 .then(|| scheduled_lower::SuccessorCapture::new(previous, current))
                                 .transpose()?,
@@ -1401,14 +1398,14 @@ impl DemandProducer {
                     }
                     declaration.clone()
                 };
-                if current
+                if let Some(registration) = current
                     .capture()
                     .registrations
-                    .contains_key(&DefId::intern(&selected))
+                    .get(&DefId::intern(&selected))
                 {
                     return Ok(s1::DependencyProduct {
                         result: Ok(Some(selected)),
-                        reads: Reads::empty(),
+                        reads: registration.reads().clone(),
                         successor: (previous.identity() != current.capture().identity())
                             .then(|| scheduled_lower::SuccessorCapture::new(previous, current))
                             .transpose()?,
@@ -1556,6 +1553,7 @@ impl DemandProducer {
                     .publication()
                     .await
                     .map_err(|_| refused("demand cancelled during acceptance"))?;
+                let observed = accepted.reads().clone();
                 let mut registrations = output_capture
                     .registrations
                     .values()

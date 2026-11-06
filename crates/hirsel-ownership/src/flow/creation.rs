@@ -217,12 +217,16 @@ impl Checker<'_, '_> {
         !declaration.resource && declaration.capability.is_none() && declaration.fact.is_none()
     }
     /// The `@captures` selection of the callable this graph implements.
-    pub(super) fn creation_selectors(&self) -> Option<Vec<RelationPlace>> {
-        let (function, _) = self.graph_callable()?;
-        match &self.t.get(function.result)?.erased_captures {
-            Some(ErasedCaptures::FromArguments(selectors)) => Some(selectors.to_vec()),
-            _ => None,
-        }
+    pub(super) fn creation_selectors(&self) -> Option<&[RelationPlace]> {
+        self.creation_inputs
+            .get_or_init(|| {
+                let (function, _) = self.graph_callable()?;
+                match &self.t.get(function.result)?.erased_captures {
+                    Some(ErasedCaptures::FromArguments(selectors)) => Some(selectors.to_vec()),
+                    _ => None,
+                }
+            })
+            .as_deref()
     }
 
     pub(super) fn inert_creation_input(&self, ty: TypeId) -> bool {

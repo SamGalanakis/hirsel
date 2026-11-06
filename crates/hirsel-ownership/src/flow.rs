@@ -1432,6 +1432,8 @@ struct Checker<'a, 's> {
     constants: BTreeMap<ExprId, Option<Value>>,
     /// The callable type this graph implements, once computed.
     callable: std::cell::OnceCell<Option<(FunctionType, bool)>>,
+    /// Signature-owned creation inputs are constant for this graph.
+    creation_inputs: std::cell::OnceCell<Option<Vec<RelationPlace>>>,
     /// Declared payload paths read only this graph's fixed generic context
     /// and the signatures retained before flow; transfers cannot change them.
     crossing_receipts: std::cell::RefCell<
@@ -1881,6 +1883,7 @@ pub(super) fn check(
         diagnostics,
         emit: false,
         callable: std::cell::OnceCell::new(),
+        creation_inputs: std::cell::OnceCell::new(),
         crossing_receipts: Default::default(),
         proof_error: std::cell::RefCell::new(None),
         unique_parts_cache: Default::default(),
@@ -4631,42 +4634,45 @@ impl Checker<'_, '_> {
     }
     fn transfer_value(&mut self, op: &Op, state: &mut State) {
         self.check_state_operation(op, state);
-        // Address checks fail before an indexed replacement installs fresh
-        // content. Cleanup cannot restore evidence lost by an earlier share.
-        if let Op::Write {
-            place: expression,
-            operation,
-            ..
-        } = op
-            && place(self.body, *expression, self.source_rows).is_some_and(|place| {
-                place
-                    .projections
-                    .iter()
-                    .any(|part| matches!(part, Projection::Elements))
-            })
-        {
-            self.mutable_crossing_exit(state, *operation, &BTreeSet::new());
-        }
-        // MODE-2: releasing a value with user-visible destruction runs code
-        // that may fail (DROP-1/2, FAIL-3), so it is a failure site too.
-        let releases = match op {
-            Op::Kill(bindings) => bindings.iter().any(|binding| {
-                state.slots[*binding].available & LIVE != 0 && self.binding_destroyed(*binding)
-            }),
-            Op::StatementEnd(statement) => self.destroying.contains(statement),
-            Op::Write {
-                place: expression, ..
-            } => place(self.body, *expression, self.source_rows).is_some_and(|place| {
-                state.slots[place.binding].available & LIVE != 0 && self.destroyed(*expression)
-            }),
-            _ => false,
-        };
-        if releases {
-            let site = match op {
-                Op::Write { operation, .. } => *operation,
-                _ => self.graph.nodes[self.node].span,
+        // Failure predicates select diagnostics only; query them when emitting.
+        if self.emit {
+            // Address checks fail before an indexed replacement installs fresh
+            // content. Cleanup cannot restore evidence lost by an earlier share.
+            if let Op::Write {
+                place: expression,
+                operation,
+                ..
+            } = op
+                && place(self.body, *expression, self.source_rows).is_some_and(|place| {
+                    place
+                        .projections
+                        .iter()
+                        .any(|part| matches!(part, Projection::Elements))
+                })
+            {
+                self.mutable_crossing_exit(state, *operation, &BTreeSet::new());
+            }
+            // MODE-2: releasing a value with user-visible destruction runs code
+            // that may fail (DROP-1/2, FAIL-3), so it is a failure site too.
+            let releases = match op {
+                Op::Kill(bindings) => bindings.iter().any(|binding| {
+                    state.slots[*binding].available & LIVE != 0 && self.binding_destroyed(*binding)
+                }),
+                Op::StatementEnd(statement) => self.destroying.contains(statement),
+                Op::Write {
+                    place: expression, ..
+                } => place(self.body, *expression, self.source_rows).is_some_and(|place| {
+                    state.slots[place.binding].available & LIVE != 0 && self.destroyed(*expression)
+                }),
+                _ => false,
             };
-            self.mutable_crossing_exit(state, site, &BTreeSet::new());
+            if releases {
+                let site = match op {
+                    Op::Write { operation, .. } => *operation,
+                    _ => self.graph.nodes[self.node].span,
+                };
+                self.mutable_crossing_exit(state, site, &BTreeSet::new());
+            }
         }
         match op {
             Op::Nop => {}

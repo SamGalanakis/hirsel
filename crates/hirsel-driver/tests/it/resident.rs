@@ -1944,6 +1944,7 @@ fn configured_compilers_and_sessions_share_providers_and_preserve_edit_results()
         let source = fixture.0.join("main.hir");
         let original = "fn helper()->u8{1u8}\nfn main()->u8{helper()}\n";
         std::fs::write(&source, original).unwrap();
+        crate::image_fixture::core_manifest(&source, &source.with_extension("hir.json"));
         let store = Arc::new(store::MemStore::default());
         let config = CompileConfig {
             jobs: Jobs::new(8),
@@ -2406,6 +2407,7 @@ fn evicted_lower_receipts_preserve_program_reuse_and_edit_invalidation() {
         let source = f.0.join("main.hir");
         let initial = "fn helper()->u64{1u64}\nconst N:u64=comptime helper()\nfn main()->u64{N}\n";
         std::fs::write(&source, initial).unwrap();
+        crate::image_fixture::core_manifest(&source, &source.with_extension("hir.json"));
         let config = CompileConfig {
             hold_bytes: 0,
             jobs: hirsel_intern::jobs::Jobs::ONE,

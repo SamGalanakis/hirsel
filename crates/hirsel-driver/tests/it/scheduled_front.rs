@@ -962,6 +962,7 @@ fn admitted_front_pressure_refused_citation_caches_nothing_and_recomputes_the_ci
             "const NAME:String=\"shared\"\nfn code()->String{NAME}\nfn need(take value:unique String){}\npub fn main(){need(code())}\n",
         )
         .unwrap();
+        crate::image_fixture::core_manifest(&path, &path.with_extension("hir.json"));
         let budget = hirsel_engine_admission::ProcessBudget::new(1 << 30);
         let weight = MemoryWeight {
             retained: 1 << 20,

@@ -2110,7 +2110,15 @@ mod tests {
         let entry = f.0.join("main.hir");
         let sidecar = f.0.join("main.hir.json");
         std::fs::remove_file(&sidecar).unwrap();
-        let w = workspace();
+        let w = CandidateWorkspace::new(
+            CompileConfig {
+                store: hirsel_engine_store::store_by_name("none@1", None).unwrap(),
+                ..CompileConfig::for_memory_cap(None)
+            },
+            hirsel_engine::ComptimeLimits::default(),
+            Limits::default(),
+        )
+        .unwrap();
         let base = w.capture(&entry).unwrap();
         assert!(
             base.inputs

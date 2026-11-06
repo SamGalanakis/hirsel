@@ -596,6 +596,25 @@ fn invalid_tir_is_never_published_and_operational_failures_retry_on_compiler_thr
             .count(),
         2
     );
+    let (mut engine, events) = make_engine(Some("invalid-tir"), false);
+    let file = parse(&mut engine, "fn a () { 1 }\n");
+    for request in 1..=2 {
+        let failure = check_snapshot(&mut engine, file, &default_context()).unwrap_err();
+        assert!(
+            matches!(failure, QueryError::Operational(ref e) if e.operation == "TIR validation"),
+            "{failure:?}"
+        );
+        assert_eq!(
+            events
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|phase| phase.as_str() == "lower")
+                .count(),
+            request,
+            "one failed Lower per Check, retried by the next request"
+        );
+    }
 }
 /// `Verify::Off` is the one switch that skips V: the same invalid TIR lowers.
 #[test]

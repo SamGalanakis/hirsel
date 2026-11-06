@@ -812,63 +812,27 @@ impl Task {
                         let id = lower
                             .query(path)
                             .ok_or_else(|| self.queries.protocol_refusal())?;
-                        let selected = match cx.read(id) {
+                        let facts = match lower.poll_check(cx, id) {
                             Poll::Pending => return Ok(Some(vec![id])),
-                            Poll::Ready(selected) => selected,
+                            Poll::Ready(facts) => facts?,
                         };
-                        match selected {
-                            Ok(product) => {
-                                let output = self
-                                    .queries
-                                    .plan
-                                    .lower
-                                    .outcome(product.clone())
-                                    .ok_or_else(|| self.queries.protocol_refusal())?;
-                                self.reads
-                                    .record(
-                                        &*self.queries.store,
-                                        &output.reads,
-                                        self.queries.weight.scratch,
-                                        self.queries.weight.retained,
-                                        None,
-                                    )
-                                    .ok_or(self.queries.errors.resource)?;
-                                file.diagnostics.extend(output.output.diagnostics);
-                                self.lowered.push((
-                                    path.clone(),
-                                    self.queries
-                                        .plan
-                                        .lower
-                                        .observation_product(product)
-                                        .ok_or_else(|| self.queries.protocol_refusal())?,
-                                ));
-                                cx.consume(id);
+                        self.reads
+                            .record(
+                                &*self.queries.store,
+                                &facts.reads,
+                                self.queries.weight.scratch,
+                                self.queries.weight.retained,
+                                None,
+                            )
+                            .ok_or(self.queries.errors.resource)?;
+                        match facts.result {
+                            Ok((diagnostics, observations)) => {
+                                file.diagnostics.extend(diagnostics);
+                                self.lowered.push((path.clone(), observations));
                             }
-                            Err(reference) => {
-                                let reads = self
-                                    .queries
-                                    .plan
-                                    .lower
-                                    .selected_reads(id, Err(reference))
-                                    .ok_or(reference)?;
-                                self.reads
-                                    .record(
-                                        &*self.queries.store,
-                                        &reads,
-                                        self.queries.weight.scratch,
-                                        self.queries.weight.retained,
-                                        None,
-                                    )
-                                    .ok_or(self.queries.errors.resource)?;
+                            Err((reference, error)) => {
                                 self.failed_lowered.push((path.clone(), reference));
-                                file.error(
-                                    self.queries
-                                        .plan
-                                        .lower
-                                        .failure(reference)
-                                        .ok_or(reference)?,
-                                    Some(QueryKind::Lower),
-                                );
+                                file.error(error, Some(QueryKind::Lower));
                             }
                         }
                         self.root += 1;
@@ -915,31 +879,20 @@ impl Task {
                             self.staged = None;
                             continue;
                         };
-                        let selected = match cx.read(id) {
+                        let facts = match self.queries.plan.lower.poll_check(cx, id) {
                             Poll::Pending => return Ok(Some(vec![id])),
-                            Poll::Ready(selected) => selected,
+                            Poll::Ready(facts) => facts?,
                         };
-                        let reference = selected
-                            .as_ref()
-                            .err()
-                            .copied()
-                            .unwrap_or_else(|| self.queries.protocol_refusal());
-                        let reads = self
-                            .queries
-                            .plan
-                            .lower
-                            .selected_reads(id, selected.clone())
-                            .ok_or(reference)?;
                         self.reads
                             .record(
                                 &*self.queries.store,
-                                &reads,
+                                &facts.reads,
                                 self.queries.weight.scratch,
                                 self.queries.weight.retained,
                                 None,
                             )
                             .ok_or(self.queries.errors.resource)?;
-                        if selected.is_err() {
+                        if let Err((reference, _)) = facts.result {
                             file.error(
                                 self.queries
                                     .plan

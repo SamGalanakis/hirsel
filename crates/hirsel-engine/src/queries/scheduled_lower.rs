@@ -5,6 +5,7 @@ use super::*;
 use crate::products::ProductSource;
 use crate::products::{LiveAdmission, LiveLowerProduct, WeakLowerProduct};
 mod carry;
+mod check;
 mod constants;
 mod dependencies;
 mod depth;
@@ -1263,25 +1264,6 @@ impl FrontLowerQueries {
             verified: observations.verified.clone(),
             body,
         })
-    }
-    /// Complete settled query observations for Check. This retains the existing
-    /// compact descriptor, without retaining or archiving the live TIR owner.
-    pub(crate) fn observation_product(&self, product: ProductRef) -> Option<ProductRef> {
-        if let Some(row) = self.delegated(
-            QueryId {
-                kind: FRONT_LOWER_KIND,
-                address: product.address,
-            },
-            &Ok(product.clone()),
-        ) {
-            return row.owner.observation_product(row.selected.ok()?);
-        }
-
-        let id = QueryId {
-            kind: FRONT_LOWER_KIND,
-            address: product.address,
-        };
-        self.selected(id, Ok(product))?.observations
     }
     pub fn failure(&self, reference: Reference) -> Option<QueryError> {
         let local = self

@@ -810,15 +810,21 @@ fn rejected_generator_header_retains_diagnostic_sources_without_namespace_public
     with_compiler_stack(|| {
         let source = ACCEPTED_SOURCE.replace("fn()->u8 uses {} {7u8}", "fn()->u16 uses {} {7u16}");
         for jobs in [1, 2] {
+            let mut retained_budget = None;
             accepted_output_control_with(
                 jobs,
                 hirsel_engine::Verify::On,
                 &source,
                 |program, budget, output| {
+                    retained_budget = Some(budget.clone());
                     let before = program.engine.sources.retained_payload_bytes();
+                    let producer_bytes = budget.reserved();
                     let failure = program
                         .engine
-                        .accept_front_registration(output, budget.reserve(16 << 20).unwrap())
+                        .accept_front_registration(
+                            output.clone(),
+                            budget.reserve(16 << 20).unwrap(),
+                        )
                         .err()
                         .expect("header rejection");
                     let hirsel_engine::QueryError::Diagnostics(diagnostics) = &failure.error else {
@@ -836,13 +842,17 @@ fn rejected_generator_header_retains_diagnostic_sources_without_namespace_public
                     }
                     assert_eq!(program.engine.sources.retained_payload_bytes(), before);
                     assert!(program.engine.generated_source(&program.entry).is_none());
+                    let retained = budget.reserved() - producer_bytes;
+                    assert!(retained > 0 && retained < 16 << 20);
                     let detached = failure.sources.clone();
                     drop(failure);
-                    assert_eq!(budget.reserved(), 16 << 20);
+                    assert_eq!(budget.reserved(), producer_bytes + retained);
                     drop(detached);
-                    assert_eq!(budget.reserved(), 0);
+                    assert_eq!(budget.reserved(), producer_bytes);
+                    drop(output);
                 },
             );
+            assert_eq!(retained_budget.unwrap().reserved(), 0);
         }
     });
 }

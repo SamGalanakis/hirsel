@@ -1644,8 +1644,9 @@ fn frozen_lowering_frontier_keeps_lower_warnings_and_current_hit_metadata() {
                     expected.diagnostics[0].severity,
                     hirsel_diag::Severity::Warning
                 );
+                let (mut depth_control, _) = make();
                 let expected_depth = crate::request_graph::lowers(
-                    &mut control,
+                    &mut depth_control,
                     vec![path("A")],
                     hirsel_intern::jobs::Jobs::new(1),
                 )
@@ -1679,7 +1680,7 @@ fn frozen_lowering_frontier_keeps_lower_warnings_and_current_hit_metadata() {
                         .expect("successful lower returns depth");
                     assert_eq!(
                         placed_evidence(&candidate.sources, format!("{depth:?}")),
-                        placed_evidence(&control.sources, format!("{expected_depth:?}")),
+                        placed_evidence(&depth_control.sources, format!("{expected_depth:?}")),
                         "jobs={jobs} warm={warm}"
                     );
                     assert!(
@@ -1726,7 +1727,7 @@ fn frozen_lowering_frontier_keeps_lower_warnings_and_current_hit_metadata() {
                             &candidate.sources,
                             format!("{:?}", outcome.depth.as_ref().unwrap())
                         ),
-                        placed_evidence(&control.sources, format!("{expected_depth:?}"))
+                        placed_evidence(&depth_control.sources, format!("{expected_depth:?}"))
                     );
                     let output = outcome.result.unwrap();
                     assert_eq!(output.dependencies, expected.dependencies);
@@ -1877,6 +1878,7 @@ fn frozen_lowering_prefix_keeps_demanded_closure_and_final_outcomes_across_edits
                     .unwrap();
                 candidate.parse_file(file, &default_context()).unwrap();
                 let mut control = engine(&revision);
+                let mut depth_control = engine(&revision);
                 let mut expected = vec![];
                 let mut depths = vec![];
                 for root in &roots {
@@ -1887,7 +1889,7 @@ fn frozen_lowering_prefix_keeps_demanded_closure_and_final_outcomes_across_edits
                         None
                     } else {
                         crate::request_graph::lowers(
-                            &mut control,
+                            &mut depth_control,
                             vec![root.clone()],
                             hirsel_intern::jobs::Jobs::ONE,
                         )
@@ -1915,11 +1917,17 @@ fn frozen_lowering_prefix_keeps_demanded_closure_and_final_outcomes_across_edits
                     );
                     for (outcome, depth) in actual.iter().zip(&depths) {
                         assert!(!outcome.reads.is_empty());
-                        assert_eq!(outcome.phase, Some(QueryKind::Lower));
+                        assert_eq!(
+                            outcome.phase,
+                            Some(QueryKind::Lower),
+                            "jobs={jobs} warm={warm} root={} revision={revision} result={:?}",
+                            outcome.definition,
+                            outcome.result
+                        );
 
                         assert_eq!(
                             placed_evidence(&candidate.sources, format!("{:?}", outcome.depth)),
-                            placed_evidence(&control.sources, format!("{depth:?}")),
+                            placed_evidence(&depth_control.sources, format!("{depth:?}")),
                             "jobs={jobs} warm={warm} root={} revision={revision}",
                             outcome.definition
                         );

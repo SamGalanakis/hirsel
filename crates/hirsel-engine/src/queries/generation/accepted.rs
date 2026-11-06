@@ -588,7 +588,6 @@ impl AcceptanceInputs {
         match result {
             Ok(accepted) => Ok((accepted, sources)),
             Err(mut error) => {
-                let allowance = Arc::new(allowance);
                 let mut weight = source_weight(&sources, generated.as_ref(), source_before);
                 weight.path(&definition);
                 weight.add(
@@ -596,9 +595,12 @@ impl AcceptanceInputs {
                         .try_into()
                         .unwrap_or(usize::MAX),
                 );
-                let sources = if matches!(error, QueryError::Diagnostics(_))
-                    && weight.bytes() <= allowance.bytes()
-                {
+                let retained = matches!(error, QueryError::Diagnostics(_))
+                    .then(|| allowance.split(weight.bytes()))
+                    .flatten();
+                let keep_sources = retained.is_some();
+                let allowance = Arc::new(retained.unwrap_or(allowance));
+                let sources = if keep_sources {
                     sources.retain_owner(allowance.clone())
                 } else {
                     if matches!(error, QueryError::Diagnostics(_)) {

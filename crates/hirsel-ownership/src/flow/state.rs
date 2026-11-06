@@ -327,7 +327,7 @@ impl Checker<'_, '_> {
                     return;
                 };
                 let ty = self.ty(*expression);
-                for (selection, relation, _) in self.met(state, &place) {
+                for (selection, relation, _) in self.met(state, place) {
                     if !self.closed_effect(&selection, relation, ty)
                         && !self.owned_data_replacement(state, &selection, relation, ty, *value)
                     {
@@ -356,7 +356,7 @@ impl Checker<'_, '_> {
                     return;
                 };
                 let ty = self.ty(*expression);
-                for (selection, relation, _) in self.met(state, &place) {
+                for (selection, relation, _) in self.met(state, place) {
                     let admitted = match context {
                         // A stable copy shares no ownership or crossing evidence.
                         Context::Copy => ty.is_some_and(|ty| self.stable_creation_copy(ty)),
@@ -394,7 +394,7 @@ impl Checker<'_, '_> {
                         continue;
                     };
                     let ty = self.ty(argument.value);
-                    for (selection, relation, fields) in self.met(state, &place) {
+                    for (selection, relation, fields) in self.met(state, place) {
                         let inert_advance = !selection.advance
                             && relation == Meet::Inside
                             && ty.is_some_and(|ty| self.fixed_inert_content(ty))

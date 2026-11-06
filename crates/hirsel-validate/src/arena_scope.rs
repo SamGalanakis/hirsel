@@ -111,7 +111,7 @@ impl Checker<'_, '_> {
                                 self.error(fail.clone());
                             }
                         }
-                        value if super::typing::operands(value).any(|operand| held(operand)) => {
+                        value if super::typing::operands(value).any(held) => {
                             self.error(fail.clone())
                         }
                         _ => (),

@@ -4803,7 +4803,7 @@ impl Checker<'_, '_> {
                 if environment && current_part == Sendability::Sendable {
                     property.sendable_aliased = true;
                 }
-                value.part_of = self.read_part(&value, &place);
+                value.part_of = self.read_part(&value, place);
                 if let Some(projection) = self.projection_lifetimes.get(expression) {
                     value.modes.relation = self.projection_locality(state, projection);
                     if self.emit {
@@ -4945,7 +4945,7 @@ impl Checker<'_, '_> {
                     _ => UseKind::Borrow,
                 };
                 if matches!(usage, UseKind::Mut | UseKind::Take)
-                    && self.argument_conflict(state, &place, operation_site)
+                    && self.argument_conflict(state, place, operation_site)
                 {
                     value.invalid = true;
                     state.values.insert(*expression, value);
@@ -4975,11 +4975,11 @@ impl Checker<'_, '_> {
                 // entry; later arguments may still read the place (LANG-3).
                 if usage == UseKind::Mut
                     && *context != Context::Address
-                    && (!self.access(&place, state, operation_site)
+                    && (!self.access(place, state, operation_site)
                         || !matches!(
                             self.tree.expressions[operation.0 as usize].kind,
                             ExprKind::Call { .. }
-                        ) && !self.unlent(&place, state, operation_site, true))
+                        ) && !self.unlent(place, state, operation_site, true))
                 {
                     value.invalid = true;
                     state.values.insert(*expression, value);
@@ -4997,14 +4997,14 @@ impl Checker<'_, '_> {
                     {
                         self.access_diagnostic(
                             state,
-                            &place,
+                            place,
                             const { RuleId::of("OWN-1") },
                             operation_site,
                             "an owned result cannot move out of borrowed storage",
                             |c| {
                                 c.borrowed_match_explanation(
                                     state,
-                                    &place,
+                                    place,
                                     &value,
                                     Fact::new(Requirement::OwnedResult, operation_site, &[]),
                                 )
@@ -5016,27 +5016,27 @@ impl Checker<'_, '_> {
                             const { RuleId::of("OWN-8") },
                             operation_site,
                             "destructure the whole owned value to move a part",
-                            |c| c.part_explanation(state, &place, &value, operation_site),
+                            |c| c.part_explanation(state, place, &value, operation_site),
                         );
                         value.invalid = true;
                     } else if value.aliased().is_some() {
                         self.access_diagnostic(
                             state,
-                            &place,
+                            place,
                             const { RuleId::of("OWN-1") },
                             operation_site,
                             "a borrowed value cannot be taken",
                             |c| {
                                 c.borrowed_match_explanation(
                                     state,
-                                    &place,
+                                    place,
                                     &value,
                                     Fact::new(Requirement::Owned, operation_site, &[]),
                                 )
                             },
                         );
                         value.invalid = true;
-                    } else if self.loaned(state, &place) {
+                    } else if self.loaned(state, place) {
                         self.report(
                             const { RuleId::of("MODE-1") },
                             operation_site,
@@ -5044,7 +5044,7 @@ impl Checker<'_, '_> {
                             |c| {
                                 c.lent(
                                     state,
-                                    &place,
+                                    place,
                                     Fact::new(Requirement::Owned, operation_site, &[]),
                                 )
                             },
@@ -6442,7 +6442,7 @@ impl Checker<'_, '_> {
                 if self.property(*expression).is_none() {
                     return;
                 }
-                if self.argument_conflict(state, &place, *operation) {
+                if self.argument_conflict(state, place, *operation) {
                     return;
                 }
                 if !place.projections.is_empty() || *compound {
@@ -6476,11 +6476,11 @@ impl Checker<'_, '_> {
                 {
                     return;
                 }
-                if self.rebind_cursor(state, &place, *expression, *rhs, *operation, *compound) {
+                if self.rebind_cursor(state, place, *expression, *rhs, *operation, *compound) {
                     return;
                 }
-                if !self.access(&place, state, *operation)
-                    || !self.unlent(&place, state, *operation, false)
+                if !self.access(place, state, *operation)
+                    || !self.unlent(place, state, *operation, false)
                 {
                     return;
                 }
@@ -7036,7 +7036,7 @@ impl Checker<'_, '_> {
                             value,
                         } = self.tree.expressions[arg.value.0 as usize].kind
                             && let Some(place) = place(self.body, value, self.source_rows)
-                            && !self.unlent(&place, state, call_site, true)
+                            && !self.unlent(place, state, call_site, true)
                         {
                             failed = true;
                             break;
@@ -7369,7 +7369,7 @@ impl Checker<'_, '_> {
                             let part = self.value(state, arg.value);
                             let mut retained = part.clone();
                             if let Some(source) = place(self.body, arg.value, self.source_rows) {
-                                if let Some(within) = self.field_loan(state, arg.value, &source) {
+                                if let Some(within) = self.field_loan(state, arg.value, source) {
                                     retained.project_content(
                                         &within
                                             .into_iter()
@@ -7473,7 +7473,7 @@ impl Checker<'_, '_> {
                                     }
                                 );
                                 let within = (!computed || copied)
-                                    .then(|| self.field_loan(state, arg.value, &p))
+                                    .then(|| self.field_loan(state, arg.value, p))
                                     .flatten();
                                 if within.is_some() && part.aliased() == Some(p.binding) {
                                     part.set_alias(None);

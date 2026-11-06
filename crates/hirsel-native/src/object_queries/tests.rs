@@ -734,7 +734,9 @@ fn codegen_stages_local_ready_while_execution_waits_and_preserves_failure_order(
                         execution_error
                     }
                 ),
-                QueryPoll::Waiting(_) => panic!("all required inputs settled"),
+                QueryPoll::Waiting(_) | QueryPoll::WaitingAny(_) => {
+                    panic!("all required inputs settled")
+                }
             }
             assert_eq!(
                 snapshot.makes.load(Ordering::SeqCst),

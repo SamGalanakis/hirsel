@@ -55,9 +55,13 @@ pub(crate) struct DemandFailure {
     pub(crate) reads: Arc<Reads>,
     pub(crate) sources: Arc<namespace::DiagnosticSources>,
 }
+struct DemandView {
+    owner: Arc<FrontLowerQueries>,
+    _allowance: hirsel_engine_admission::MemoryReservation,
+}
 struct State {
     current: Weak<FrontLowerQueries>,
-    views: Vec<Arc<FrontLowerQueries>>,
+    views: Vec<DemandView>,
     trace: Vec<(DefId, Vec<hirsel_types::GenericArgument>)>,
     charges: Vec<hirsel_engine_admission::MemoryReservation>,
     selected: Vec<(DefId, hirsel_types::GeneratedActualKey)>,
@@ -208,6 +212,21 @@ impl DemandProducer {
         initial.keep_demand(producer.clone());
         Ok(producer)
     }
+    /// The scope runtime has joined every consumer. Keep its accepted head
+    /// and semantic generation history, not completed engines or request memos.
+    pub(crate) fn finish_scope(self: &Arc<Self>, owner: &Arc<FrontLowerQueries>) {
+        let views = {
+            let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            state.current = Arc::downgrade(owner);
+            std::mem::take(&mut state.views)
+        };
+        let requests =
+            std::mem::take(&mut *self.requests.lock().unwrap_or_else(|e| e.into_inner()));
+        let scopes = std::mem::take(&mut *self.scopes.lock().unwrap_or_else(|e| e.into_inner()));
+        drop((views, requests, scopes));
+        // The head is outside `views`, so this ownership cannot form a cycle.
+        owner.keep_demand(self.clone());
+    }
     pub(crate) fn assembly(&self, capture: &NamespaceCapture) -> Result<QueryEngine, QueryError> {
         capture.assembly(&self.adapters)
     }
@@ -217,7 +236,7 @@ impl DemandProducer {
             .current
             .upgrade()
             .into_iter()
-            .chain(state.views.iter().rev().cloned())
+            .chain(state.views.iter().rev().map(|view| view.owner.clone()))
             .find(|owner| owner.capture().identity() == capture.identity())
     }
     pub(crate) fn take_failure(&self) -> Option<FrontRegistrationBootstrapError> {
@@ -299,7 +318,7 @@ impl DemandProducer {
             .views
             .iter()
             .rev()
-            .map(|view| view.body_front())
+            .map(|view| view.owner.body_front())
             .chain(std::iter::once(initial.body_front()));
         let mut checked = BTreeSet::new();
         for front in fronts {
@@ -332,8 +351,8 @@ impl DemandProducer {
             .views
             .iter()
             .rev()
-            .find(|view| view.owns_query(id))
-            .cloned()
+            .find(|view| view.owner.owns_query(id))
+            .map(|view| view.owner.clone())
     }
     pub(crate) fn front_for(
         &self,
@@ -345,7 +364,7 @@ impl DemandProducer {
             .views
             .iter()
             .rev()
-            .map(|view| view.body_front())
+            .map(|view| view.owner.body_front())
             .find(|front| front.owns_query(id))
             .cloned()
     }
@@ -1150,7 +1169,7 @@ impl DemandProducer {
                 .current
                 .upgrade()
                 .into_iter()
-                .chain(state.views.iter().cloned())
+                .chain(state.views.iter().map(|view| view.owner.clone()))
                 .find(|owner| owner.capture().identity() == namespace.identity());
             if let Some(owner) = existing {
                 return Ok(owner);
@@ -1200,8 +1219,10 @@ impl DemandProducer {
                 + size_of::<hirsel_engine_admission::MemoryReservation>())) as u64,
         )?;
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        state.charges.push(charge);
-        state.views.push(lower.clone());
+        state.views.push(DemandView {
+            owner: lower.clone(),
+            _allowance: charge,
+        });
         Ok(lower)
     }
     /// `previous` is the caller's consumption capture. The only successor

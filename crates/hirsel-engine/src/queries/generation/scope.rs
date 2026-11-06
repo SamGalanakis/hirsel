@@ -266,12 +266,13 @@ impl QueryEngine {
         let front = carry
             .as_ref()
             .map(|_| successor.owner().body_front().clone());
+        producer.finish_scope(successor.owner());
         Ok(FrontDemandScope {
             carry,
             definitions,
             registrations,
             namespace,
-            demand_owner: initial,
+            demand_owner: successor.owner().clone(),
             front,
             rounds,
             stats,

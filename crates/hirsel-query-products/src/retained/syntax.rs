@@ -180,6 +180,7 @@ impl Weight<'_> {
             anchor: _,
             text_hash: _,
             occurrence: _,
+            retention: _,
         } = syntax;
         let ast::Item {
             name_span: _,

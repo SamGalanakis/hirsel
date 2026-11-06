@@ -1,0 +1,390 @@
+//! Allocation-free preflight for demanded installed products. The walk follows
+//! bincode 1.3.3's fixed-int structs, enum tags and sequence lengths
+//! (de/mod.rs:293-350,402-411), without constructing semantic values.
+use crate::{EnvelopeLayout, TypeRecords};
+use hirsel_artifact_store::Bytes;
+use hirsel_engine_admission::MemoryReservation;
+use hirsel_syntax as ast;
+use hirsel_types as ty;
+use std::{marker::PhantomData, sync::Arc};
+
+pub struct InstalledHeader;
+pub struct InstalledSyntax;
+pub struct RunContent;
+
+/// Exact immutable backing, consumer schema and type owner. This value cannot
+/// be deserialized, and decoding never accepts a producer's allocation claim.
+pub struct DecodeRequirement<S> {
+    bytes: Bytes,
+    required: u64,
+    records: Option<Arc<TypeRecords>>,
+    schema: PhantomData<S>,
+}
+impl<S> DecodeRequirement<S> {
+    pub fn required_bytes(&self) -> u64 {
+        self.required
+    }
+}
+struct Scan<'a> {
+    bytes: &'a [u8],
+    required: u64,
+    anchors: u32,
+    types: u32,
+}
+impl<'a> Scan<'a> {
+    fn take(&mut self, n: usize) -> Option<&'a [u8]> {
+        let (head, tail) = self.bytes.split_at_checked(n)?;
+        self.bytes = tail;
+        Some(head)
+    }
+    fn word(&mut self) -> Option<u32> {
+        Some(u32::from_le_bytes(self.take(4)?.try_into().ok()?))
+    }
+    fn length(&mut self) -> Option<usize> {
+        u64::from_le_bytes(self.take(8)?.try_into().ok()?)
+            .try_into()
+            .ok()
+    }
+    fn add(&mut self, n: usize) -> Option<()> {
+        self.required = self.required.checked_add(n.try_into().ok()?)?;
+        Some(())
+    }
+    fn vector<T: Walk>(&mut self) -> Option<usize> {
+        let n = self.length()?;
+        // These installed schemas have no zero-byte sequence element.
+        if n > self.bytes.len() {
+            return None;
+        }
+        if n != 0 {
+            self.add(n.checked_mul(3)?.max(4).checked_mul(size_of::<T>())?)?;
+        }
+        for _ in 0..n {
+            T::walk(self)?;
+        }
+        Some(n)
+    }
+}
+trait Walk {
+    fn walk(scan: &mut Scan<'_>) -> Option<()>;
+}
+fn field<T, F: Walk>(_: impl FnOnce(&T) -> &F, scan: &mut Scan<'_>) -> Option<()> {
+    F::walk(scan)
+}
+macro_rules! structure {
+    ($ty:ty { $($field:ident),* $(,)? } $(skip $($skip:ident),*)?) => {
+        impl Walk for $ty { fn walk(scan: &mut Scan<'_>) -> Option<()> {
+            // Exhaustive destructuring makes added schema fields a compile error.
+            let _: fn(&$ty) = |value| { let Self { $($field: _,)* $($($skip: _,)*)? } = value; };
+            $(field(|value: &$ty| &value.$field, scan)?;)*
+            Some(())
+        }}
+    };
+}
+macro_rules! ignore {
+    ($name:ident) => {
+        _
+    };
+}
+macro_rules! tuple_fields {
+    ($scan:ident, $variant:ident, $pattern:tt; $head:ident $(,$tail:ident)*) => {
+        field(#[allow(unused_variables)] |value: &Self| match value {
+            Self::$variant $pattern => $head, _ => unreachable!()
+        }, $scan)?;
+        tuple_fields!($scan, $variant, $pattern; $($tail),*);
+    };
+    ($scan:ident, $variant:ident, $pattern:tt;) => {};
+}
+macro_rules! variants {
+    ($ty:ty { $($variant:ident $(($($tuple:ident),*))? $({$($named:ident),*})?),* $(,)? }) => {
+        impl Walk for $ty { fn walk(scan: &mut Scan<'_>) -> Option<()> {
+            let _: fn(&Self) = |value| { match value { $(Self::$variant $(($(ignore!($tuple)),*))? $({$($named: _),*})? => (),)* }};
+            let readers: &[fn(&mut Scan<'_>) -> Option<()>] = &[$(|scan| {
+                $(tuple_fields!(scan, $variant, ($($tuple),*); $($tuple),*);)?
+                $($(field(|value: &Self| match value { Self::$variant { $named, .. } => $named, _ => unreachable!() }, scan)?;)*)?
+                let _ = scan;
+                Some(())
+            }),*];
+            readers.get(scan.word()? as usize)?(scan)
+        }}
+    };
+}
+macro_rules! scalar { ($($ty:ty => $n:expr),* $(,)?) => {$(impl Walk for $ty { fn walk(scan: &mut Scan<'_>) -> Option<()> { scan.take($n)?; Some(()) } })*}; }
+scalar!(u8=>1, u16=>2, u32=>4, u64=>8, u128=>16, i8=>1, i16=>2, i32=>4, i64=>8, i128=>16, f32=>4, f64=>8);
+impl Walk for bool {
+    fn walk(scan: &mut Scan<'_>) -> Option<()> {
+        (*scan.take(1)?.first()? <= 1).then_some(())
+    }
+}
+impl<T: Walk> Walk for Option<T> {
+    fn walk(scan: &mut Scan<'_>) -> Option<()> {
+        match scan.take(1)?[0] {
+            0 => Some(()),
+            1 => T::walk(scan),
+            _ => None,
+        }
+    }
+}
+impl<T: Walk> Walk for Vec<T> {
+    fn walk(scan: &mut Scan<'_>) -> Option<()> {
+        scan.vector::<T>()?;
+        Some(())
+    }
+}
+impl<T: Walk> Walk for Box<T> {
+    fn walk(scan: &mut Scan<'_>) -> Option<()> {
+        scan.add(size_of::<T>())?;
+        T::walk(scan)
+    }
+}
+impl<T: Walk> Walk for Arc<T> {
+    fn walk(scan: &mut Scan<'_>) -> Option<()> {
+        scan.add(
+            size_of::<T>()
+                .checked_mul(2)?
+                .checked_add(2 * size_of::<usize>())?,
+        )?;
+        T::walk(scan)
+    }
+}
+impl<T: Walk> Walk for ty::SharedSlice<T> {
+    fn walk(scan: &mut Scan<'_>) -> Option<()> {
+        let n = scan.vector::<T>()?;
+        if n != 0 {
+            scan.add(
+                n.checked_mul(size_of::<T>())?
+                    .checked_add(2 * size_of::<usize>())?,
+            )?;
+        }
+        Some(())
+    }
+}
+impl Walk for String {
+    fn walk(scan: &mut Scan<'_>) -> Option<()> {
+        let n = scan.length()?;
+        std::str::from_utf8(scan.take(n)?).ok()?;
+        scan.add(n)
+    }
+}
+impl<A: Walk, B: Walk> Walk for (A, B) {
+    fn walk(scan: &mut Scan<'_>) -> Option<()> {
+        A::walk(scan)?;
+        B::walk(scan)
+    }
+}
+impl<T: Walk, const N: usize> Walk for [T; N] {
+    fn walk(scan: &mut Scan<'_>) -> Option<()> {
+        for _ in 0..N {
+            T::walk(scan)?;
+        }
+        Some(())
+    }
+}
+impl Walk for hirsel_intern::Symbol {
+    fn walk(scan: &mut Scan<'_>) -> Option<()> {
+        String::walk(scan)
+    }
+}
+impl Walk for ast::DefId {
+    fn walk(scan: &mut Scan<'_>) -> Option<()> {
+        ast::DefPath::walk(scan)
+    }
+}
+impl Walk for ty::TypeId {
+    fn walk(scan: &mut Scan<'_>) -> Option<()> {
+        (scan.word()? < scan.types).then_some(())
+    }
+}
+impl Walk for hirsel_span::Anchor {
+    fn walk(scan: &mut Scan<'_>) -> Option<()> {
+        (scan.word()? <= scan.anchors).then_some(())
+    }
+}
+impl Walk for hirsel_span::Span {
+    fn walk(scan: &mut Scan<'_>) -> Option<()> {
+        hirsel_span::Anchor::walk(scan)?;
+        scan.take(8)?;
+        Some(())
+    }
+}
+impl<P: Walk> Walk for ty::BinderRef<P> {
+    fn walk(scan: &mut Scan<'_>) -> Option<()> {
+        match scan.word()? {
+            0 => {
+                u32::walk(scan)?;
+                P::walk(scan)
+            }
+            1 => {
+                ast::SiteRef::walk(scan)?;
+                P::walk(scan)
+            }
+            _ => None,
+        }
+    }
+}
+impl<T: Walk> Walk for ty::SharedPath<T> {
+    fn walk(scan: &mut Scan<'_>) -> Option<()> {
+        let n = scan.vector::<T>()?;
+        {
+            struct Node<T> {
+                _prefix: ty::SharedPath<T>,
+                _value: T,
+                _len: usize,
+            }
+            let bytes = std::alloc::Layout::new::<[usize; 2]>()
+                .extend(std::alloc::Layout::new::<Node<T>>())
+                .ok()?
+                .0
+                .pad_to_align()
+                .size();
+            scan.add(n.checked_mul(bytes)?)
+        }
+    }
+}
+scalar!(ast::TokenId=>4, ast::ExprId=>4, ast::PatternId=>4, ast::TypeExprId=>4, ast::StmtId=>4, ty::ParamId=>4, ty::FieldId=>4, ty::TypeParamId=>4, ty::SizeParamId=>4);
+impl Walk for hirsel_diag::RuleId {
+    fn walk(scan: &mut Scan<'_>) -> Option<()> {
+        String::walk(scan)
+    }
+}
+structure!(ast::LexicalOwner { def, occurrence });
+structure!(ast::SiteRef { owner, site });
+variants!(ast::NameSite {Expression(f0), Pattern(f0), Type(f0), Statement(f0), Item});
+mod schema;
+
+impl TypeRecords {
+    fn installed_requirement<S, T: Walk>(
+        self: &Arc<Self>,
+        bytes: Bytes,
+    ) -> Option<DecodeRequirement<S>> {
+        let layout = EnvelopeLayout::open(&bytes)?;
+        let mut scan = Scan {
+            bytes: &bytes[layout.payload_start..],
+            required: bytes.len().try_into().ok()?,
+            anchors: layout.anchors,
+            types: layout.types,
+        };
+        scan.required = scan
+            .required
+            .checked_add(hirsel_types::collection_scope_working_bytes(1)?)?
+            .checked_add(ast::def_path_scope_working_bytes(1)?)?
+            .checked_add(hirsel_intern::persist::symbol_scope_working_bytes(1)?)?;
+        // Temporary binding directories, source paths and ProductTypes owner.
+        scan.add(size_of::<crate::ProductTypes>() + 4 * size_of::<usize>())?;
+        scan.add(
+            (layout.types as usize)
+                .checked_mul(2)?
+                .max(4)
+                .checked_mul(size_of::<crate::TypeRef>())?,
+        )?;
+        scan.add(
+            (layout.anchors as usize)
+                .checked_mul(2)?
+                .max(4)
+                .checked_mul(size_of::<hirsel_span::Anchor>())?,
+        )?;
+        for n in 0..layout.anchors {
+            let owner = layout.anchor(&bytes, n)?;
+            scan.add(size_of::<ast::DefPath>())?;
+            scan.add(
+                owner
+                    .package
+                    .len()
+                    .checked_add(owner.version.len())?
+                    .checked_add(owner.name.len())?,
+            )?;
+            scan.add(
+                owner
+                    .modules()
+                    .len()
+                    .checked_mul(2)?
+                    .max(4)
+                    .checked_mul(size_of::<String>())?,
+            )?;
+            for module in owner.modules() {
+                scan.add(module.len())?;
+            }
+        }
+        T::walk(&mut scan)?;
+        if !scan.bytes.is_empty() {
+            return None;
+        }
+        let required = scan.required;
+        Some(DecodeRequirement {
+            bytes,
+            required,
+            records: Some(self.clone()),
+            schema: PhantomData,
+        })
+    }
+    pub fn installed_header(
+        self: &Arc<Self>,
+        bytes: Bytes,
+    ) -> Option<DecodeRequirement<InstalledHeader>> {
+        self.installed_requirement::<InstalledHeader, (ty::SignatureRef, ty::SignatureRef)>(bytes)
+    }
+    pub fn installed_syntax(
+        self: &Arc<Self>,
+        bytes: Bytes,
+    ) -> Option<DecodeRequirement<InstalledSyntax>> {
+        self.installed_requirement::<InstalledSyntax, Arc<ast::ItemSyntax>>(bytes)
+    }
+}
+impl<S> DecodeRequirement<S> {
+    fn decode_record<T: serde::de::DeserializeOwned>(
+        self,
+        reservation: &MemoryReservation,
+        anchor: impl FnMut(&ast::DefPath, u32) -> Option<hirsel_span::Anchor>,
+    ) -> Option<T> {
+        if self.required > reservation.bytes() {
+            return None;
+        }
+        self.records.as_ref()?.decode_record(&self.bytes, anchor)
+    }
+}
+impl DecodeRequirement<InstalledHeader> {
+    pub fn decode(
+        self,
+        reservation: &MemoryReservation,
+        anchor: impl FnMut(&ast::DefPath, u32) -> Option<hirsel_span::Anchor>,
+    ) -> Option<(ty::SignatureRef, ty::SignatureRef)> {
+        self.decode_record::<(ty::SignatureRef, ty::SignatureRef)>(reservation, anchor)
+    }
+}
+impl DecodeRequirement<InstalledSyntax> {
+    pub fn decode(
+        self,
+        reservation: &MemoryReservation,
+        anchor: impl FnMut(&ast::DefPath, u32) -> Option<hirsel_span::Anchor>,
+    ) -> Option<Arc<ast::ItemSyntax>> {
+        self.decode_record::<Arc<ast::ItemSyntax>>(reservation, anchor)
+    }
+}
+impl DecodeRequirement<RunContent> {
+    pub fn open(bytes: Bytes) -> Option<Self> {
+        let mut scan = Scan {
+            bytes: &bytes,
+            required: bytes.len().try_into().ok()?,
+            anchors: 0,
+            types: 0,
+        };
+        Vec::<Vec<u8>>::walk(&mut scan)?;
+        if !scan.bytes.is_empty() {
+            return None;
+        }
+        let required = scan.required;
+        Some(Self {
+            bytes,
+            required,
+            records: None,
+            schema: PhantomData,
+        })
+    }
+    pub fn decode_content(self, reservation: &MemoryReservation) -> Option<Vec<Vec<u8>>> {
+        if self.required > reservation.bytes() {
+            return None;
+        }
+        crate::options(self.bytes.len())
+            .deserialize(&self.bytes)
+            .ok()
+    }
+}

@@ -73,6 +73,7 @@ impl ParserPhase for EmptyFunction {
                 has_syntax_errors: false,
                 file,
                 items: vec![std::sync::Arc::new(ItemSyntax {
+                    retention: Default::default(),
                     item,
                     tree: SyntaxTree {
                         tokens,

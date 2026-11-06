@@ -66,8 +66,6 @@ struct Input {
     signature: SignatureRef,
     owner_signature: SignatureRef,
     content: Reference,
-    content_decode_bytes: u64,
-    owned_header_bytes: u64,
     specializations: Option<Arc<hirsel_engine_store::InstalledSpecializations>>,
     dependencies: BTreeSet<DefPath>,
     source: bool,
@@ -802,30 +800,31 @@ impl Task {
                 }
             }
         }
-        let source_content = (|| -> Result<Vec<Vec<u8>>, QueryError> {
-            use bincode::Options;
-            if input.content.len > queries.weight.scratch
-                || input.content_decode_bytes > queries.weight.scratch
-            {
-                return Err(operational("Run input content exceeds scratch admission"));
-            }
-            let bytes = queries
-                .store
-                .get_content(input.content)
-                .ok_or_else(|| operational("missing Run input content"))?;
-            if INPUT_CONTENT.reference(&bytes) != Some(input.content) {
-                return Err(operational(
-                    "Run input content differs from captured descriptor",
-                ));
-            }
-            bincode::DefaultOptions::new()
-                .with_fixint_encoding()
-                .with_limit(input.content.len)
-                .reject_trailing_bytes()
-                .deserialize(&bytes)
-                .map_err(|_| operational("invalid Run input content"))
-        })();
-        let mut source_content = match source_content {
+        let source_content =
+            (|| -> Result<(Vec<Vec<u8>>, Arc<inputs::InputCharge>), QueryError> {
+                if input.content.len > queries.weight.scratch {
+                    return Err(operational("Run input content exceeds scratch admission"));
+                }
+                let bytes = queries
+                    .store
+                    .get_content(input.content)
+                    .ok_or_else(|| operational("missing Run input content"))?;
+                if INPUT_CONTENT.reference(&bytes) != Some(input.content) {
+                    return Err(operational(
+                        "Run input content differs from captured descriptor",
+                    ));
+                }
+                let requirement = hirsel_product_codec::DecodeRequirement::<
+                    hirsel_product_codec::RunContent,
+                >::open(bytes)
+                .ok_or_else(|| operational("invalid Run input content"))?;
+                let charge = queries.admit_decode(requirement.required_bytes())?;
+                let content = requirement
+                    .decode_content(&queries.ownership._allowance)
+                    .ok_or_else(|| operational("invalid Run input content"))?;
+                Ok((content, charge))
+            })();
+        let (mut source_content, _content_charge) = match source_content {
             Ok(content) => content,
             Err(error) => return Poll::Ready(Err(queries.failure_record(error))),
         };

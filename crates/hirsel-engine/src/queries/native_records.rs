@@ -938,3 +938,61 @@ impl NativeRecords {
 
 #[cfg(test)]
 mod tests;
+
+pub(crate) struct InstalledDecode<'a, S> {
+    requirement: hirsel_product_codec::DecodeRequirement<S>,
+    source: &'a dyn NativeRecordSource,
+}
+impl<S> InstalledDecode<'_, S> {
+    pub(crate) fn required_bytes(&self) -> u64 {
+        self.requirement.required_bytes()
+    }
+}
+impl InstalledDecode<'_, hirsel_product_codec::InstalledHeader> {
+    pub(crate) fn decode(
+        self,
+        reservation: &hirsel_engine_admission::MemoryReservation,
+    ) -> Option<(hirsel_types::SignatureRef, hirsel_types::SignatureRef)> {
+        self.requirement.decode(reservation, |owner, occurrence| {
+            self.source.record_source_anchor(owner, occurrence)
+        })
+    }
+}
+impl InstalledDecode<'_, hirsel_product_codec::InstalledSyntax> {
+    pub(crate) fn decode(
+        self,
+        reservation: &hirsel_engine_admission::MemoryReservation,
+    ) -> Option<Arc<hirsel_syntax::ItemSyntax>> {
+        self.requirement.decode(reservation, |owner, occurrence| {
+            self.source.record_source_anchor(owner, occurrence)
+        })
+    }
+}
+impl NativeRecords {
+    pub(crate) fn installed_header<'a>(
+        &self,
+        source: &'a dyn NativeRecordSource,
+        bytes: hirsel_artifact_store::Bytes,
+    ) -> Option<InstalledDecode<'a, hirsel_product_codec::InstalledHeader>> {
+        if !Arc::ptr_eq(&self.types, source.record_types()) {
+            return None;
+        }
+        Some(InstalledDecode {
+            requirement: self.records.installed_header(bytes)?,
+            source,
+        })
+    }
+    pub(crate) fn installed_syntax<'a>(
+        &self,
+        source: &'a dyn NativeRecordSource,
+        bytes: hirsel_artifact_store::Bytes,
+    ) -> Option<InstalledDecode<'a, hirsel_product_codec::InstalledSyntax>> {
+        if !Arc::ptr_eq(&self.types, source.record_types()) {
+            return None;
+        }
+        Some(InstalledDecode {
+            requirement: self.records.installed_syntax(bytes)?,
+            source,
+        })
+    }
+}

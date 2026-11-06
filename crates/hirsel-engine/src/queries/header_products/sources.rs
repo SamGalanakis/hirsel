@@ -81,7 +81,7 @@ pub(in crate::queries) fn source_refusal(message: impl ToString) -> QueryError {
         message: message.to_string(),
     })
 }
-fn standalone_syntax(bytes: u64) -> Result<Charge, QueryError> {
+pub(super) fn standalone_syntax(bytes: u64) -> Result<Charge, QueryError> {
     let bytes = bytes
         .checked_add(hirsel_engine_admission::retained_arc_bytes(
             &std::mem::MaybeUninit::<std::sync::Mutex<HeaderCharge>>::uninit(),

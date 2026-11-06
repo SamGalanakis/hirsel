@@ -105,6 +105,7 @@ impl Fixture {
         let name = Symbol::intern("example");
         Self {
             syntax: ast::ItemSyntax {
+                retention: Default::default(),
                 item: ast::Item {
                     name_span: Default::default(),
                     origin: origin(),

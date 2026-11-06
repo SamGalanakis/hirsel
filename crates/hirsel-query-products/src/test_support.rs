@@ -40,6 +40,7 @@ pub fn syntax_fixture(width: usize) -> ast::ItemSyntax {
         ..Default::default()
     };
     ast::ItemSyntax {
+        retention: Default::default(),
         item: ast::Item {
             name_span: origin.span,
             origin,

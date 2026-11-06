@@ -251,6 +251,7 @@ impl Tree {
             generated: None,
         };
         self.file.items.push(std::sync::Arc::new(ItemSyntax {
+            retention: Default::default(),
             item,
             tree: std::mem::take(&mut self.tree),
             anchor: self.anchor,

@@ -58,6 +58,7 @@ impl Fixture {
         let result = store.intern(row(kind));
         let name = Symbol::intern("main");
         let syntax = ast::ItemSyntax {
+            retention: Default::default(),
             item: ast::Item {
                 name_span: origin(0).span,
                 origin: origin(0),

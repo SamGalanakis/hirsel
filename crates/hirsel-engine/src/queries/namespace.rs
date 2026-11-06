@@ -561,15 +561,13 @@ impl NamespaceCapture {
             let bytes = owner
                 .content(record.ownership.body, self.capture_inputs.limit)
                 .map_err(|message| refused(&message))?;
-            let syntax: Arc<ItemSyntax> = self
-                .records
-                .decode(&*self.anchors, &bytes)
-                .ok_or_else(|| refused("invalid installed body"))?;
-            if syntax.text_hash != input.implementation
-                || syntax.item.definition != *path
-                || hirsel_query_products::retained::retained_syntax_bytes(&syntax)
-                    > record.ownership.body_decode_bytes
-            {
+            let syntax = header_products::decode_installed_syntax(
+                self.snapshot.header_products().map(Arc::as_ref),
+                &self.records,
+                &*self.anchors,
+                bytes,
+            )?;
+            if syntax.text_hash != input.implementation || syntax.item.definition != *path {
                 return Err(refused("installed body differs from captured binding"));
             }
             return Ok(syntax);

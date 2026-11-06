@@ -597,6 +597,7 @@ impl Parser<'_> {
             })
             .collect();
         ItemSyntax {
+            retention: Default::default(),
             item,
             tree,
             anchor: self.local.expect("an item has an anchor").anchor,

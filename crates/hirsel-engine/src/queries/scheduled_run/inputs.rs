@@ -12,10 +12,7 @@ impl FrontRunQueries {
         for dependency in &input.dependencies {
             weight.path(dependency);
         }
-        let bytes = weight
-            .bytes()
-            .checked_add(input.owned_header_bytes)
-            .ok_or_else(|| operational("Run input size overflow"))?;
+        let bytes = weight.bytes();
         let mut remaining = self
             .retention
             .lock()
@@ -31,14 +28,29 @@ impl FrontRunQueries {
         });
         Ok(Arc::new(input))
     }
+    pub(super) fn admit_decode(&self, bytes: u64) -> Result<Arc<InputCharge>, QueryError> {
+        let bytes = bytes
+            .checked_add(hirsel_engine_admission::retained_arc_bytes(
+                &std::mem::MaybeUninit::<InputCharge>::uninit(),
+            ))
+            .ok_or_else(|| operational("installed decode charge size overflow"))?;
+        if bytes > self.weight.scratch {
+            return Err(operational("installed decode exceeds scratch admission"));
+        }
+        let mut remaining = self.retention.lock().unwrap_or_else(|e| e.into_inner());
+        *remaining = remaining
+            .checked_sub(bytes)
+            .ok_or_else(|| operational("installed decode exceeds retention admission"))?;
+        Ok(Arc::new(InputCharge {
+            remaining: self.retention.clone(),
+            _allowance: self.ownership._allowance.clone(),
+            bytes,
+        }))
+    }
     fn prepare_input(&self, path: &DefPath) -> Result<Input, QueryError> {
         let namespace = self.operation.capture();
         if let Some(record) = namespace.installed_input(path, self.weight.scratch)? {
-            let bound = record.ownership.header_decode_bytes;
-            if bound > self.weight.scratch
-                || record.ownership.header.len > self.weight.scratch
-                || record.ownership.semantic_decode_bytes > self.weight.scratch
-            {
+            if record.ownership.header.len > self.weight.scratch {
                 return Err(operational("installed Run input exceeds scratch admission"));
             }
             let bytes = self
@@ -48,34 +60,21 @@ impl FrontRunQueries {
             if record.ownership.header.domain.reference(&bytes) != Some(record.ownership.header) {
                 return Err(operational("corrupt installed header"));
             }
-            let (signature, owner_signature): (SignatureRef, SignatureRef) = self
+            let requirement = self
                 .records
-                .decode(&self.anchors, &bytes)
+                .installed_header(&self.anchors, bytes)
                 .ok_or_else(|| operational("invalid installed header"))?;
-            if hirsel_query_products::retained::retained_signature_payload_bytes(&signature)
-                .saturating_add(
-                    hirsel_query_products::retained::retained_signature_payload_bytes(
-                        &owner_signature,
-                    ),
-                )
-                > bound
-            {
-                return Err(operational("installed header exceeds ownership descriptor"));
-            }
-            let owned_header_bytes =
-                hirsel_query_products::retained::retained_signature_payload_bytes(&signature)
-                    .saturating_add(
-                        hirsel_query_products::retained::retained_signature_payload_bytes(
-                            &owner_signature,
-                        ),
-                    );
+            let charge = self.admit_decode(requirement.required_bytes())?;
+            let (signature, owner_signature) = requirement
+                .decode(&self.ownership._allowance)
+                .ok_or_else(|| operational("invalid installed header"))?;
+            signature.metadata.retention.retain(charge.clone());
+            owner_signature.metadata.retention.retain(charge);
             return Ok(Input {
                 _charge: None,
                 signature,
                 owner_signature,
                 content: record.ownership.semantic,
-                content_decode_bytes: record.ownership.semantic_decode_bytes,
-                owned_header_bytes,
                 specializations: None,
                 dependencies: record.semantic_dependencies.into_iter().collect(),
                 source: true,
@@ -144,13 +143,6 @@ impl FrontRunQueries {
         let specializations = self.specializations.get(path).cloned();
         let bytes =
             bincode::serialize(&content).map_err(|_| operational("Run input content encoding"))?;
-        let mut content_weight = hirsel_query_products::retained::MetadataWeight::default();
-        content_weight.add(std::mem::size_of::<Vec<Vec<u8>>>());
-        content_weight.vec(&content, |weight, field| weight.flat_vec(field));
-        let content_decode_bytes = content_weight
-            .bytes()
-            .checked_add(bytes.len() as u64)
-            .ok_or_else(|| operational("Run input content size overflow"))?;
         let content = self
             .store
             .put_content(INPUT_CONTENT, &bytes)
@@ -161,8 +153,6 @@ impl FrontRunQueries {
             signature,
             owner_signature,
             content,
-            content_decode_bytes,
-            owned_header_bytes: 0,
             specializations,
             dependencies,
             source,

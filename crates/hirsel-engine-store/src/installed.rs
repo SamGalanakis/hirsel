@@ -16,10 +16,10 @@ use std::sync::OnceLock;
 
 const PACKAGE: Domain = Domain {
     kind: 0x4600_0039,
-    schema: 2,
+    schema: 3,
 };
 fn address() -> Address {
-    Address(ContentHash::of_bytes(b"hirsel.installed-package.v2"))
+    Address(ContentHash::of_bytes(b"hirsel.installed-package.v3"))
 }
 
 #[cfg(test)]
@@ -213,6 +213,77 @@ mod tests {
                 .is_err()
         );
         assert_eq!(store.lookup(address()), Some(old_root));
+    }
+    #[test]
+    fn demanded_expanded_content_refuses_before_allocating_and_remains_usable() {
+        let directory = tempfile::tempdir().unwrap();
+        let (store, compiler, package, _) = fixture(directory.path());
+        let installed = InstalledPackage::open(&store, &package, compiler).unwrap();
+        // Empty fields cost eight transport bytes each, but every decoded field
+        // owns a Vec header. The independently granted transport-sized decode
+        // reservation cannot hold those headers.
+        let expected = vec![Vec::<u8>::new(); 8192];
+        let encoded = bincode::serialize(&expected).unwrap();
+        let reference = store
+            .put(
+                Domain {
+                    kind: 79,
+                    schema: 1,
+                },
+                &encoded,
+            )
+            .unwrap();
+        let mut records = InstallationRecords {
+            rows: installed
+                .package
+                .rows
+                .iter()
+                .map(|(address, action, reference)| (*address, (Action(*action), *reference)))
+                .collect(),
+            contents: installed
+                .package
+                .contents
+                .iter()
+                .map(|r| (r.output.0, *r))
+                .collect(),
+        };
+        records.contents.insert(reference.output.0, reference);
+        installed
+            .package
+            .as_ref()
+            .clone()
+            .publish(&store, &records)
+            .unwrap();
+        let installed = InstalledPackage::open(&store, &package, compiler).unwrap();
+        let budget = hirsel_engine_admission::ProcessBudget::new(2 << 20);
+        let _transport = budget.reserve(encoded.len() as u64).unwrap();
+        let small = budget.reserve(encoded.len() as u64).unwrap();
+        let bytes = installed.records.content(reference).unwrap();
+        let (requirement, scanned) = test_alloc::measured(|| {
+            hirsel_product_codec::DecodeRequirement::<hirsel_product_codec::RunContent>::open(bytes)
+                .unwrap()
+        });
+        assert_eq!(scanned.allocations, 0);
+        let (refused, allocations) = test_alloc::measured(|| requirement.decode_content(&small));
+        assert!(
+            refused.is_none(),
+            "valid transport bytes require decoded-container admission"
+        );
+        assert_eq!(
+            allocations.allocations, 0,
+            "demand refuses before allocating semantic containers"
+        );
+        assert!(allocations.peak <= small.bytes() as isize);
+        let large = budget.reserve(1 << 20).unwrap();
+        let requirement =
+            hirsel_product_codec::DecodeRequirement::<hirsel_product_codec::RunContent>::open(
+                installed.records.content(reference).unwrap(),
+            )
+            .unwrap();
+        let (decoded, allocations) =
+            test_alloc::measured(|| requirement.decode_content(&large).unwrap());
+        assert_eq!(decoded, expected);
+        assert!(allocations.peak <= large.bytes() as isize);
     }
     #[test]
     fn operation_pins_the_manifest_and_rows_across_atomic_publication() {

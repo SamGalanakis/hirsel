@@ -403,10 +403,11 @@ fn ownership_product_tracks_removal_reordering_relocation_and_parse_eviction() {
         "fixture restores declaration heads without bodies"
     );
     let before = consumer.source_records();
-    let syntax: Arc<hirsel_syntax::ItemSyntax> =
-        NativeRecords::new(consumer.types().clone(), store.clone())
-            .decode(&before, &encoded)
-            .unwrap();
+    let records = NativeRecords::new(consumer.types().clone(), store.clone());
+    let requirement = records.installed_syntax(&before, encoded.into()).unwrap();
+    let decode_budget = hirsel_engine_admission::ProcessBudget::new(1 << 20);
+    let decode_reservation = decode_budget.reserve(1 << 20).unwrap();
+    let syntax = requirement.decode(&decode_reservation).unwrap();
     let bytes = before.input_bytes().unwrap();
     let budget = hirsel_engine_admission::ProcessBudget::new(bytes);
     let mut allowance = budget.reserve(bytes).unwrap();

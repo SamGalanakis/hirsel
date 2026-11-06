@@ -95,6 +95,7 @@ impl Fixture {
         };
         let name = Symbol::intern("example");
         let syntax = ItemSyntax {
+            retention: Default::default(),
             item: Item {
                 name_span: origin(0).span,
                 origin: origin(0),

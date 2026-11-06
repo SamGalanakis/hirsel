@@ -105,3 +105,16 @@ lifetime; dropping it frees its rows before that partition returns. There is no
 process-wide lazy-row cache. This reuses the rkyv/Cap'n Proto validation structure
 cited above; the deviation is reader-owned Hirsel SCC rows rather than pointers
 or shared-base publication. Container integrity still supplies no V authority.
+
+Installed header pairs and item syntax use a consumer-schema preflight before
+semantic decoding. The allocation-free walk checks fixed-int tags, lengths,
+source/type positions and complete payload consumption. It accounts for Vec
+and shared-container expansion, binding directories, source paths and codec
+scope scratch. Its nonserializable `DecodeRequirement` retains the exact bytes
+and type owner; NativeRecords also binds the exact source context. Decoding
+requires the caller's live `MemoryReservation`, and raw syntax/signature aliases
+retain the corresponding source or Run admission owner. Independently loaded
+type rows keep their existing admission. Run token content uses the same
+byte-derived requirement. Installed ownership contains content references and
+source bindings, with no serialized allocation estimates. Installed package
+schema 3 and semantic-input schema 2 reject the superseded descriptors.

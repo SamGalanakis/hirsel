@@ -1169,14 +1169,13 @@ impl QueryEngine {
                     .ok_or(QueryError::NotImplemented)?,
             );
             let context = self.source_records();
-            let syntax: Arc<ItemSyntax> = records
-                .decode(&context, &bytes)
-                .ok_or(QueryError::NotImplemented)?;
-            if syntax.item.definition != *path
-                || syntax.text_hash != record.implementation
-                || hirsel_query_products::retained::retained_syntax_bytes(&syntax)
-                    > record.ownership.body_decode_bytes
-            {
+            let syntax = header_products::decode_installed_syntax(
+                self.header_products.as_deref(),
+                &records,
+                &context,
+                bytes,
+            )?;
+            if syntax.item.definition != *path || syntax.text_hash != record.implementation {
                 return Err(QueryError::NotImplemented);
             }
             self.materialize_bound_syntax(path, syntax, &context);

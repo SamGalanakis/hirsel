@@ -47,11 +47,8 @@ impl InstalledDefinitionKey {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct InstalledDefinitionOwnership {
     pub header: Reference,
-    pub header_decode_bytes: u64,
     pub body: Reference,
-    pub body_decode_bytes: u64,
     pub semantic: Reference,
-    pub semantic_decode_bytes: u64,
     pub source: Reference,
     pub source_logical: PathBuf,
     pub source_digest: ContentHash,

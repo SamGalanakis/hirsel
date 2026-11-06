@@ -12,15 +12,15 @@ impl Bytes {
         allowance: u64,
         value: &Vec<Vec<u8>>,
     ) -> Result<Self, QueryError> {
-        let mut weight = hirsel_query_products::retained::MetadataWeight::default();
-        weight.add(std::mem::size_of::<Vec<Vec<u8>>>());
-        weight.vec(value, |weight, field| weight.flat_vec(field));
-        let bytes = bincode::serialize(value).map_err(|_| QueryError::NotImplemented)?;
-        let decode_bytes = weight
-            .bytes()
-            .checked_mul(2)
-            .and_then(|size| size.checked_add(bytes.len() as u64))
+        let bytes: hirsel_artifact_store::Bytes = bincode::serialize(value)
+            .map_err(|_| QueryError::NotImplemented)?
+            .into();
+        let requirement =
+            hirsel_product_codec::DecodeRequirement::<hirsel_product_codec::RunContent>::open(
+                bytes.clone(),
+            )
             .ok_or(QueryError::NotImplemented)?;
+        let decode_bytes = requirement.required_bytes();
         if decode_bytes > allowance {
             return Err(operational("Run content exceeds scratch admission"));
         }
@@ -32,8 +32,12 @@ impl Bytes {
             decode_bytes,
         })
     }
-    fn load(&self, store: &dyn ResultStore, allowance: u64) -> Result<Vec<Vec<u8>>, QueryError> {
-        use bincode::Options;
+    fn load(
+        &self,
+        store: &dyn ResultStore,
+        reservation: &hirsel_engine_admission::MemoryReservation,
+        allowance: u64,
+    ) -> Result<Vec<Vec<u8>>, QueryError> {
         if self.reference.domain != INPUT_CONTENT
             || self.reference.len > allowance
             || self.decode_bytes > allowance
@@ -46,12 +50,17 @@ impl Bytes {
         if INPUT_CONTENT.reference(&bytes) != Some(self.reference) {
             return Err(operational("Run content descriptor changed"));
         }
-        bincode::DefaultOptions::new()
-            .with_fixint_encoding()
-            .with_limit(self.reference.len)
-            .reject_trailing_bytes()
-            .deserialize(&bytes)
-            .map_err(|_| QueryError::NotImplemented)
+        let requirement =
+            hirsel_product_codec::DecodeRequirement::<hirsel_product_codec::RunContent>::open(
+                bytes,
+            )
+            .ok_or(QueryError::NotImplemented)?;
+        if requirement.required_bytes() > allowance {
+            return Err(operational("Run content exceeds decode admission"));
+        }
+        requirement
+            .decode_content(reservation)
+            .ok_or(QueryError::NotImplemented)
     }
 }
 enum Header {
@@ -122,7 +131,6 @@ impl Content {
         let input = queries.input(path)?;
         let mut weight = hirsel_query_products::retained::MetadataWeight::default();
         weight.add(std::mem::size_of::<DefinitionContent>());
-        weight.add(input.owned_header_bytes as usize);
         let working = match &self.header {
             Header::Body if self.body => queries.lower.settled_definition_decode_bytes(path)?,
             Header::Body => 0,
@@ -162,7 +170,7 @@ impl Content {
             },
             Header::Named { source, reads } => DefinitionContent::Named {
                 signature: input.signature.clone(),
-                source: source.load(&*queries.store, allowance)?,
+                source: source.load(&*queries.store, &queries.ownership._allowance, allowance)?,
                 reads: reads.iter().map(|id| id.path().clone()).collect(),
             },
         })
@@ -223,7 +231,11 @@ impl Node {
         dependencies.push("$hirsel/runtime@1".into());
         Ok(hirsel_run_schema::ProgramNode {
             identity: path.to_string(),
-            content: self.content.load(&*queries.store, queries.weight.scratch)?,
+            content: self.content.load(
+                &*queries.store,
+                &queries.ownership._allowance,
+                queries.weight.scratch,
+            )?,
             dependencies,
         })
     }
@@ -270,19 +282,38 @@ mod tests {
         let store = Counting::default();
         let source = vec![vec![7; 8192], vec![], vec![7; 8192], vec![9; 3]];
         let saved = Bytes::new(&store, 1 << 20, &source).unwrap();
+        let budget = hirsel_engine_admission::ProcessBudget::new(1 << 20);
+        let reservation = budget.reserve(1 << 20).unwrap();
         assert!(std::mem::size_of_val(&saved) < source.iter().map(Vec::len).sum::<usize>());
         store.gets.store(0, Ordering::Relaxed);
-        assert!(saved.load(&store, saved.decode_bytes - 1).is_err());
+        assert!(
+            saved
+                .load(&store, &reservation, saved.decode_bytes - 1)
+                .is_err()
+        );
         assert_eq!(store.gets.load(Ordering::Relaxed), 0);
-        assert_eq!(saved.load(&store, saved.decode_bytes).unwrap(), source);
+        assert_eq!(
+            saved
+                .load(&store, &reservation, saved.decode_bytes)
+                .unwrap(),
+            source
+        );
         assert!(store.gets.load(Ordering::Relaxed) > 0);
         let mut wrong = saved.clone();
         wrong.reference.domain = OUTPUT;
         store.gets.store(0, Ordering::Relaxed);
-        assert!(wrong.load(&store, saved.decode_bytes).is_err());
+        assert!(
+            wrong
+                .load(&store, &reservation, saved.decode_bytes)
+                .is_err()
+        );
         assert_eq!(store.gets.load(Ordering::Relaxed), 0);
         let mut missing = saved.clone();
         missing.reference.output.0 = ContentHash([0x91; 32]);
-        assert!(missing.load(&store, saved.decode_bytes).is_err());
+        assert!(
+            missing
+                .load(&store, &reservation, saved.decode_bytes)
+                .is_err()
+        );
     }
 }

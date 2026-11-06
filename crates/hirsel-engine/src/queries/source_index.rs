@@ -735,6 +735,7 @@ mod tests {
                 end: 5,
             };
             let syntax = Arc::new(ItemSyntax {
+                retention: Default::default(),
                 item: Item {
                     name_span: span,
                     origin: Origin {

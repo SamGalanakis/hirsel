@@ -142,6 +142,7 @@ impl Fixture {
     /// The fixture item: a function with `body`, over the arenas built so far.
     pub fn syntax(&self, body: Option<ExprId>) -> hirsel_syntax::ItemSyntax {
         hirsel_syntax::ItemSyntax {
+            retention: Default::default(),
             item: Item {
                 name: Symbol::intern("example"),
                 name_span: node_origin(1).span,

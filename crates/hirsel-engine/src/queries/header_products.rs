@@ -1647,3 +1647,39 @@ impl operation_inputs::OperationOwner {
         projected
     }
 }
+
+/// Demand syntax under the source partition already used by ordinary parsing.
+/// The raw syntax Arc retains that debit beyond the capture or engine lifetime.
+pub(super) fn decode_installed_syntax(
+    headers: Option<&HeaderProducts>,
+    records: &crate::NativeRecords,
+    source: &dyn crate::NativeRecordSource,
+    bytes: hirsel_artifact_store::Bytes,
+) -> Result<Arc<ItemSyntax>, QueryError> {
+    let requirement = records
+        .installed_syntax(source, bytes)
+        .ok_or_else(|| source_refusal("invalid installed body"))?;
+    let charge = match headers {
+        Some(headers) => headers.admit_source(requirement.required_bytes())?,
+        None => sources::standalone_syntax(requirement.required_bytes())?,
+    };
+    let syntax = {
+        let held = charge
+            .0
+            .as_ref()
+            .ok_or_else(|| source_refusal("missing installed body reservation"))?
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let reservation = match &*held {
+            HeaderCharge::Standalone(reservation) | HeaderCharge::Source(reservation) => {
+                reservation
+            }
+            HeaderCharge::Front(front) => &front.allowance,
+        };
+        requirement
+            .decode(reservation)
+            .ok_or_else(|| source_refusal("invalid installed body"))?
+    };
+    syntax.retention.retain(Arc::new(charge));
+    Ok(syntax)
+}

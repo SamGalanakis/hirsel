@@ -140,6 +140,7 @@ impl ParserPhase for Fake {
                 generated: None,
             };
             items.push(Arc::new(ItemSyntax {
+                retention: Default::default(),
                 item,
                 tree,
                 anchor,

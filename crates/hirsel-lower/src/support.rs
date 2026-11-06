@@ -63,6 +63,7 @@ impl Fixture {
         let boolean = types.intern(ty(TypeKind::Primitive(Primitive::Bool)));
         let scalar = types.intern(ty(TypeKind::Primitive(primitive)));
         let syntax = ItemSyntax {
+            retention: Default::default(),
             item: Item {
                 name_span: Span::default(),
                 origin: origin(1),

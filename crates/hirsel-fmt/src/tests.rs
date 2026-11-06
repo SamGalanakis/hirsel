@@ -178,6 +178,7 @@ impl Fixture {
             generated: None,
         };
         self.file.items.push(Arc::new(ItemSyntax {
+            retention: Default::default(),
             item,
             tree,
             anchor: self.anchor,

@@ -5,7 +5,9 @@ hirsel_guard::install!();
 
 mod base;
 mod bounded;
+mod installed_decode;
 pub use bounded::{ArchiveRowRefusal, RecordEncoding};
+pub use installed_decode::{DecodeRequirement, InstalledHeader, InstalledSyntax, RunContent};
 mod envelope;
 mod indexed_types;
 pub use envelope::{AnchorRow, BoundIndexedEnvelope, IndexedEnvelope};

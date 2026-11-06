@@ -160,7 +160,7 @@ fn nominal_authority_22_owner_views_and_client_access() {
                 let input = views.view(public.definition).unwrap();
                 let view = input.signature().unwrap();
                 assert!(
-                    check_view(program.engine.types(), public.definition, &view, views)
+                    check_view(program.engine.types(), public.definition, &view, &*views)
                         .unwrap()
                         .error
                         .is_none()

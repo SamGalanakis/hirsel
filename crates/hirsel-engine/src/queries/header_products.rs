@@ -97,7 +97,7 @@ struct HeaderRowLease {
     output: Weak<QueryOutput<hirsel_types::SignatureRef>>,
     _charge: Charge,
 }
-type ValidationCaches = Arc<std::sync::Mutex<Vec<Weak<crate::snapshot::ValidationState>>>>;
+type ValidationCaches = Arc<std::sync::Mutex<Vec<Weak<crate::snapshot::SignatureSnapshot>>>>;
 #[derive(Clone)]
 struct HeaderAdmission {
     validation_caches: ValidationCaches,
@@ -1234,31 +1234,20 @@ impl HeaderProducts {
     }
     pub(crate) fn retain_validation_cache(
         &self,
-        state: &Arc<crate::snapshot::ValidationState>,
-    ) -> Result<(), hirsel_validate::ViewRefusal> {
-        // Four vector slots per live owner bound minimum/spare allocation.
-        // The live validation state owns its registry allocation charge.
-        let bytes = 4 * size_of::<std::sync::Weak<crate::snapshot::ValidationState>>() + 128;
-        let lease = self.validation_lease(bytes as u64).map_err(|cause| {
-            hirsel_validate::ViewRefusal::Unreadable {
-                definition: self
-                    .rows
-                    .keys()
-                    .next()
-                    .copied()
-                    .unwrap_or_else(|| DefId::intern(&DefPath::core("validation-cache"))),
-                cause,
-            }
-        })?;
+        snapshot: Weak<crate::snapshot::SignatureSnapshot>,
+    ) -> Result<Arc<dyn Send + Sync>, QueryError> {
+        let bytes = 4 * size_of::<Weak<crate::snapshot::SignatureSnapshot>>() + 128;
+        let lease = self.validation_lease(bytes as u64)?;
         let registry = self.validation_cache_registry();
         let mut caches = registry.lock().unwrap();
-        caches.retain(|state| state.strong_count() != 0);
+        caches.retain(|cache| cache.strong_count() != 0);
         if caches.capacity() > 4 * caches.len().max(1) {
             caches.shrink_to_fit();
         }
-        let _ = state.registration.set(lease);
-        caches.push(Arc::downgrade(state));
-        Ok(())
+        if !caches.iter().any(|cache| cache.ptr_eq(&snapshot)) {
+            caches.push(snapshot);
+        }
+        Ok(lease)
     }
     fn validation_cache_registry(&self) -> ValidationCaches {
         self.scope()
@@ -1273,12 +1262,23 @@ impl HeaderProducts {
     }
     fn evict_validation_cache(&self) -> bool {
         let registry = self.validation_cache_registry();
-        let mut caches = registry.lock().unwrap();
-        caches.retain(|state| state.strong_count() != 0);
-        for state in caches.iter() {
-            if let Some(state) = state.upgrade()
-                && state.evict_cached()
-            {
+        let snapshots = {
+            let mut caches = registry.lock().unwrap();
+            caches.retain(|cache| cache.strong_count() != 0);
+            caches.iter().filter_map(Weak::upgrade).collect::<Vec<_>>()
+        };
+        for snapshot in snapshots {
+            if snapshot.evict_cached() {
+                let mut caches = registry.lock().unwrap();
+                caches.retain(|cache| {
+                    cache.upgrade().is_some_and(|snapshot| {
+                        snapshot
+                            .cache_registration
+                            .try_lock()
+                            .map_or(true, |registration| registration.is_some())
+                    })
+                });
+                caches.shrink_to_fit();
                 return true;
             }
         }

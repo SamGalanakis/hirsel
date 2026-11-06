@@ -149,7 +149,7 @@ impl LowerProduct {
             .load(
                 &cache,
                 owner.namespace.snapshot.types(),
-                owner
+                &*owner
                     .namespace
                     .snapshot
                     .validation(&self.definition.path().0.package)
@@ -1675,7 +1675,7 @@ impl FrontLowerQueries {
                             definition,
                             self.namespace.snapshot.types().clone(),
                             self.namespace.snapshot.source_verification_policy(),
-                            views,
+                            &*views,
                             evidence,
                             &[],
                         )

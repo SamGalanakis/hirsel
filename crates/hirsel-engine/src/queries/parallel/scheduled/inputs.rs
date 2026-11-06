@@ -94,8 +94,11 @@ impl Inputs {
     pub(super) fn len(&self) -> usize {
         self.rows.len()
     }
-    pub(super) fn clear_addresses(&self) {
-        self.addresses.clear();
+    pub(super) fn clear_addresses(&self) -> bool {
+        self.addresses.clear()
+    }
+    pub(super) fn key_for(&self, id: DefId) -> Option<Key> {
+        Some(self.key(self.rows.get(&id)?, false))
     }
     pub(super) fn values(&self) -> impl Iterator<Item = &Input> {
         self.rows.values()
@@ -215,7 +218,7 @@ impl Addresses {
         }
         rows.insert(at, row);
     }
-    fn clear(&self) {
+    fn clear(&self) -> bool {
         let mut rows = self.rows.lock().unwrap_or_else(|e| e.into_inner());
         rows.front = Vec::new();
         rows.body = Vec::new();
@@ -226,7 +229,9 @@ impl Addresses {
                     .lock()
                     .unwrap_or_else(|e| e.into_inner()) += charge.bytes();
             }
+            return true;
         }
+        false
     }
 }
 impl Drop for Addresses {

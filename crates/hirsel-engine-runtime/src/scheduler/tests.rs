@@ -2751,3 +2751,30 @@ fn ordered_publication_advances_past_a_released_dormant_body() {
         assert!(nodes.publication_frontier(key(query(0)), next));
     }
 }
+
+#[test]
+fn pressure_reaches_factory_cache_without_a_settled_product() {
+    struct Cache(AtomicUsize);
+    impl QueryFactory for Cache {
+        fn create(&self, _: QueryId) -> Result<Box<dyn QueryTask>, Reference> {
+            Err(errors().protocol)
+        }
+        fn evict_cache(&self, _: u64) -> bool {
+            self.0.swap(0, Ordering::SeqCst) != 0
+        }
+    }
+    let mut rt = runtime(1, 16 << 20);
+    let cache = Arc::new(Cache(AtomicUsize::new(128)));
+    rt.register(1, cache.clone()).unwrap();
+    let generation = rt.shared.lock().ensure(key(query(1))).unwrap();
+    let mut cx = Context {
+        shared: &rt.shared,
+        query: key(query(1)),
+        generation,
+        pending: BTreeSet::new(),
+        admission_wait: false,
+    };
+    assert!(cx.evict_body());
+    assert_eq!(cache.0.load(Ordering::SeqCst), 0);
+    assert!(!cx.evict_body());
+}

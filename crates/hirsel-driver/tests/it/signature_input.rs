@@ -143,7 +143,7 @@ fn hand_built_opaque_construction_needs_the_owner_input_and_checks_fields() {
         let owner_input = snapshot.validation(&context.package).unwrap();
         definition.types = hirsel_tir::definition_types(engine.types(), &definition);
         let report =
-            hirsel_validate::validate(&definition, engine.types(), owner_input, &mut vec![])
+            hirsel_validate::validate(&definition, engine.types(), &*owner_input, &mut vec![])
                 .unwrap();
         assert!(report.violations.is_empty(), "{:?}", report.violations);
         let foreign = hirsel_syntax::PackageId {
@@ -155,7 +155,7 @@ fn hand_built_opaque_construction_needs_the_owner_input_and_checks_fields() {
             !hirsel_validate::validate(
                 &definition,
                 engine.types(),
-                snapshot.validation(&foreign).unwrap(),
+                &*snapshot.validation(&foreign).unwrap(),
                 &mut vec![]
             )
             .unwrap()
@@ -169,7 +169,7 @@ fn hand_built_opaque_construction_needs_the_owner_input_and_checks_fields() {
         fields[0].field = 1;
         forged.types = hirsel_tir::definition_types(engine.types(), &forged);
         assert!(
-            !hirsel_validate::validate(&forged, engine.types(), owner_input, &mut vec![])
+            !hirsel_validate::validate(&forged, engine.types(), &*owner_input, &mut vec![])
                 .unwrap()
                 .violations
                 .is_empty()

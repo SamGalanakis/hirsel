@@ -1240,7 +1240,7 @@ impl VerifierCache {
                     let base = checked
                         .iter()
                         .find(|(p, _)| **p == package)
-                        .map(|(_, input)| *input);
+                        .map(|(_, input)| &**input);
                     match (base, &replay.overlay) {
                         (Some(base), Some(overlay)) => {
                             let views = environment
@@ -1320,7 +1320,7 @@ impl VerifierCache {
                     let base = checked
                         .iter()
                         .find(|(p, _)| **p == package)
-                        .map(|(_, input)| *input);
+                        .map(|(_, input)| &**input);
                     let raw;
                     let inputs = match (&replay.overlay, base, overlay) {
                         (_, _, Some(overlay)) => crate::SignatureInputs::Checked(&**overlay),
@@ -1595,7 +1595,7 @@ pub trait ReplayEnvironment {
     fn checked(
         &self,
         _package: &PackageId,
-    ) -> Result<Option<&dyn crate::CheckedEnvironment>, crate::ViewRefusal> {
+    ) -> Result<Option<Box<dyn crate::CheckedEnvironment + '_>>, crate::ViewRefusal> {
         Ok(None)
     }
     fn base_digest(&self, package: &PackageId) -> Result<Option<ContentHash>, crate::ViewRefusal>;
@@ -2629,8 +2629,9 @@ mod tests {
         fn checked(
             &self,
             package: &PackageId,
-        ) -> Result<Option<&dyn crate::CheckedEnvironment>, crate::ViewRefusal> {
-            Ok((package == self.package).then_some(self.views))
+        ) -> Result<Option<Box<dyn crate::CheckedEnvironment + '_>>, crate::ViewRefusal> {
+            Ok((package == self.package)
+                .then(|| Box::new(self.views) as Box<dyn crate::CheckedEnvironment>))
         }
         fn base_digest(
             &self,
@@ -3342,8 +3343,10 @@ mod tests {
             fn checked(
                 &self,
                 p: &PackageId,
-            ) -> Result<Option<&dyn crate::CheckedEnvironment>, crate::ViewRefusal> {
-                Ok((p == self.package).then_some(self.base))
+            ) -> Result<Option<Box<dyn crate::CheckedEnvironment + '_>>, crate::ViewRefusal>
+            {
+                Ok((p == self.package)
+                    .then(|| Box::new(self.base) as Box<dyn crate::CheckedEnvironment>))
             }
             fn base_digest(
                 &self,

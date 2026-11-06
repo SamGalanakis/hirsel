@@ -482,6 +482,7 @@ fn check_settled_front_eviction(
                 );
                 let evict = eviction.0;
                 runtime.register(evict.kind, Arc::new(eviction)).unwrap();
+                while front.factory().evict_cache(weight.scratch) {}
                 (header, proof, front.retained_bytes(), evict)
             });
             let request = runtime.request(&[front.query(&program.entry).unwrap()]);
@@ -522,7 +523,9 @@ fn check_settled_front_eviction(
                 drop(runtime.wait(request).unwrap());
                 assert_eq!(
                     front.retained_bytes(),
-                    warmed.as_ref().unwrap().2,
+                    // The completed memo index and work counters remain
+                    // inspectable. Their layout is independent of read payloads.
+                    warmed.as_ref().unwrap().2 + front.retained_observation_metadata_bytes(),
                     "completed Check/Growth root readers must not retain Front read arrays or dictionary rows"
                 );
                 let scope = check
@@ -544,7 +547,8 @@ fn check_settled_front_eviction(
                 assert_eq!(front.recompute_count(&program.entry, QueryKind::Modes), 1);
             }
             if demand_lower && (!carry_across_graphs || revision == 1) {
-                let retained = front.retained_bytes();
+                while front.factory().evict_cache(weight.scratch) {}
+                let retained = front.retained_bytes() - front.retained_observation_metadata_bytes();
                 let request = runtime.request(&[lower.query(&program.entry).unwrap()]);
                 let products = runtime
                     .wait(request)
@@ -555,8 +559,11 @@ fn check_settled_front_eviction(
                     front.recompute_count(&program.entry, QueryKind::Modes),
                     if revision == 0 { 2 } else { 1 }
                 );
+                // Header lookups and address hints are reconstructible; leave
+                // the compact product in place while draining only its caches.
+                while front.factory().evict_cache(weight.scratch) {}
                 assert_eq!(
-                    front.retained_bytes(),
+                    front.retained_bytes() - front.retained_observation_metadata_bytes(),
                     retained,
                     "body demand keeps one compact metadata owner"
                 );

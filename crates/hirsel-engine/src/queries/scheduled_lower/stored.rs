@@ -141,7 +141,7 @@ impl FrontLowerQueries {
                 &output.value,
                 self.namespace.snapshot.types().clone(),
                 self.namespace.snapshot.source_verification_policy(),
-                views,
+                &*views,
                 evidence,
                 &[],
             );
@@ -407,14 +407,14 @@ impl FrontLowerQueries {
                         definition,
                         self.namespace.snapshot.types(),
                         self.namespace.snapshot.source_verification_policy(),
-                        views,
+                        &*views,
                     )?;
                     if !output.matches_archive(
                         &decoded,
                         self.namespace.snapshot.types().clone(),
                         |anchor| self.namespace.anchors.record_owner(anchor),
                         self.namespace.snapshot.source_verification_policy(),
-                        views,
+                        &*views,
                     ) {
                         return None;
                     }
@@ -443,7 +443,7 @@ impl FrontLowerQueries {
                         &decoded,
                         self.namespace.snapshot.types().clone(),
                         self.namespace.snapshot.source_verification_policy(),
-                        views,
+                        &*views,
                         &evidence,
                         &[],
                     )

@@ -338,7 +338,7 @@ impl NativeOriginalContext {
                             output.environment_holds(
                                 self.anchors.record_types(),
                                 self.policy,
-                                views,
+                                &*views,
                             )
                         })
                 })
@@ -477,7 +477,7 @@ impl NativeLowerReader {
             self.anchors.record_types().clone(),
             |owner, occurrence| self.anchors.record_source_anchor(owner, occurrence),
             self.policy,
-            self.signatures.validation(&path.0.package).ok()?,
+            &*self.signatures.validation(&path.0.package).ok()?,
             owner,
         )?;
         (archive.header()?.signature_hash == selected.signature).then_some(archive)
@@ -747,14 +747,14 @@ impl NativeOriginalReader {
                         self.verified.anchors.record_types().clone(),
                         |anchor| self.verified.anchors.record_owner(anchor),
                         self.verified.policy,
-                        views()?,
+                        &*views()?,
                     ),
                     _ => output.matches_definition(
                         &raw.definition()?,
                         self.verified.anchors.record_types().clone(),
                         |anchor| self.verified.anchors.record_owner(anchor),
                         self.verified.policy,
-                        views()?,
+                        &*views()?,
                     ),
                 };
                 if !matches {
@@ -776,7 +776,7 @@ impl NativeOriginalReader {
             );
             let (report, ran, _) = hirsel_validate::validate_with_receipt(
                 &artifact,
-                views()?,
+                &*views()?,
                 self.verified.policy,
                 self.verified.cache.as_deref(),
                 &mut vec![],
@@ -903,7 +903,7 @@ impl QueryEngine {
                 definition,
                 input.types.clone(),
                 |anchor| anchors.record_owner(anchor),
-                view,
+                &*view,
                 policy,
                 Some(cache.as_ref()),
             )?;
@@ -918,7 +918,7 @@ impl QueryEngine {
                     definition,
                     input.types.clone(),
                     policy,
-                    view,
+                    &*view,
                     &evidence.ok_or_else(|| {
                         source_transport("sealed source snapshot lacks V evidence")
                     })?,

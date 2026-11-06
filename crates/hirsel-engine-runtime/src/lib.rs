@@ -148,6 +148,11 @@ pub trait QueryTask: Send {
 
 /// Installed by the engine for one immutable input snapshot, never by clients.
 pub trait QueryFactory: Send + Sync {
+    /// Release reconstructible source caches, independently of a settled node.
+    fn evict_cache(&self, _scratch: u64) -> bool {
+        false
+    }
+
     /// Drop a settled compact cache entry after archiving its complete facts
     /// within the active producer's already admitted scratch bound.
     fn evict(&self, _key: QueryId, _product: &ProductRef, _scratch: u64) -> bool {

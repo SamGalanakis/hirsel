@@ -25,6 +25,15 @@ impl Rows {
             Self::Archived { keys, .. } => keys[at],
         })
     }
+    pub(super) fn metadata_bytes(&self) -> u64 {
+        let bytes = match self {
+            Self::Retained(rows) => rows.len() * size_of::<(crate::memo::MemoKey, Arc<Reads>)>(),
+            Self::Archived { keys, .. } => keys.len() * size_of::<crate::memo::MemoKey>(),
+        };
+        hirsel_engine_admission::retained_arc_bytes(
+            &std::mem::MaybeUninit::<FrontObservations>::uninit(),
+        ) + bytes as u64
+    }
     fn load(&self, store: &dyn ResultStore) -> Option<Vec<(crate::memo::MemoKey, Arc<Reads>)>> {
         match self {
             Self::Retained(rows) => Some(rows.to_vec()),
@@ -75,18 +84,15 @@ impl FrontBodyQueries {
         }
         let charge = weight
             .bytes
+            .checked_add(
+                (outcome.memos.len() * size_of::<(crate::memo::MemoKey, Arc<Reads>)>()) as u64,
+            )?
             .checked_add(hirsel_engine_admission::retained_arc_bytes(
                 &std::mem::MaybeUninit::<FrontObservations>::uninit(),
             ))?
             .checked_add(hirsel_engine_admission::retained_arc_bytes(
                 &std::mem::MaybeUninit::<LiveSourceBacking>::uninit(),
             ))?;
-        if let Some(backing) = outcome._backing.split(charge) {
-            return Some(Arc::new(FrontObservations {
-                rows: Rows::Retained(outcome.memos.clone()),
-                _backing: Some(backing),
-            }));
-        }
         let archived = (|| {
             // Flat observations still borrow their producer's lease. Only
             // pooled readers carry the independent, last-reader refund needed
@@ -134,17 +140,34 @@ impl FrontBodyQueries {
                 reference,
             })
         })();
-        let rows = archived?;
-        // The reference-only owner fits the per-root metadata admitted by
-        // input_bytes. It owns no read payload and needs no second lease.
+        let rows = match archived {
+            Some(rows) => rows,
+            None => {
+                if let Some(backing) = outcome._backing.split(charge) {
+                    return Some(Arc::new(FrontObservations {
+                        rows: Rows::Retained(outcome.memos.clone()),
+                        _backing: Some(backing),
+                    }));
+                }
+                return None;
+            }
+        };
+        // The completion index outlives the facts. Transfer its own exact
+        // metadata lease before the analyzed product can release its backing.
         const {
             assert!(
                 size_of::<FrontObservations>() + 2 * size_of::<usize>() <= 32 * size_of::<usize>()
             )
         };
+        let charge =
+            rows.metadata_bytes()
+                .checked_add(hirsel_engine_admission::retained_arc_bytes(
+                    &std::mem::MaybeUninit::<LiveSourceBacking>::uninit(),
+                ))?;
+        let backing = outcome._backing.split(charge)?;
         Some(Arc::new(FrontObservations {
             rows,
-            _backing: None,
+            _backing: Some(backing),
         }))
     }
 }

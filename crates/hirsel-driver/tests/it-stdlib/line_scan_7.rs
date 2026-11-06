@@ -570,7 +570,7 @@ fn constructor_lowering_and_independent_validation() {
             let report = hirsel_validate::validate(
                 &lowered.value,
                 &types,
-                snapshot.validation(&path.0.package).unwrap(),
+                &*snapshot.validation(&path.0.package).unwrap(),
                 &mut Vec::new(),
             )
             .unwrap();

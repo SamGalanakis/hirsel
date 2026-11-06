@@ -202,7 +202,7 @@ impl QueryEngine {
             let snapshot = self.signature_snapshot();
             // A refused universe holds nothing: the receipt is not reused.
             if !snapshot.validation(&path.0.package).is_ok_and(|views| {
-                evidence.environment_holds(self.source_verification_policy(), views)
+                evidence.environment_holds(self.source_verification_policy(), &*views)
             }) {
                 return Ok(false);
             }

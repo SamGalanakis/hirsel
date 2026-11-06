@@ -1393,11 +1393,8 @@ fn admitted_front_pressure_evicts_only_unpinned_settled_bodies_and_recomputes_eq
                         "pressure completes or refuses: {b:?}"
                     );
                     let d = hirsel_syntax::DefId::intern(&definitions[0]);
-                    let view = signatures
-                        .validation(&definitions[0].0.package)
-                        .unwrap()
-                        .view(d)
-                        .unwrap();
+                    let environment = signatures.validation(&definitions[0].0.package).unwrap();
+                    let view = environment.view(d).unwrap();
                     assert_eq!(view.digest(), digest);
                     match view.signature() {
                         Ok(signature) => {

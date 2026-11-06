@@ -1344,7 +1344,15 @@ impl QueryContext for Context<'_> {
         let mut previous = None;
         let key = loop {
             let Some((settled, key)) = state.nodes.eviction_after(previous) else {
-                return false;
+                let evicted = state.factories.values().any(|factory| match factory {
+                    Factory::Send(factory) => factory.evict_cache(scratch),
+                    Factory::Local(_) => false,
+                });
+                if evicted {
+                    state.advance_progress();
+                    self.shared.changed.notify_all();
+                }
+                return evicted;
             };
             previous = Some((settled, key));
             let NodeState::Settled { outcome, .. } = &state.nodes[&key].state else {

@@ -133,7 +133,7 @@ fn ordinary_product_admission_retains_private_views_unreachable_errors_and_posit
                                 hirsel_validate::validate(
                                     &actual.value,
                                     cached.engine.types(),
-                                    actual_views.validation(&path.0.package).unwrap(),
+                                    &*actual_views.validation(&path.0.package).unwrap(),
                                     &mut actual_reads
                                 )
                                 .unwrap()
@@ -144,7 +144,7 @@ fn ordinary_product_admission_retains_private_views_unreachable_errors_and_posit
                                 hirsel_validate::validate(
                                     &expected.value,
                                     fresh.engine.types(),
-                                    expected_views.validation(&path.0.package).unwrap(),
+                                    &*expected_views.validation(&path.0.package).unwrap(),
                                     &mut expected_reads
                                 )
                                 .unwrap()

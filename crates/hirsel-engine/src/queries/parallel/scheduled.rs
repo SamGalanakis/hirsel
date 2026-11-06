@@ -218,6 +218,36 @@ impl LiveSourceBacking {
             .join(allowance)
             .ok()
     }
+    fn charge(&self) -> u64 {
+        self.debit.lock().unwrap_or_else(|e| e.into_inner()).charge
+    }
+    fn absorb(&self, other: Arc<Self>) -> Option<()> {
+        let mut incoming = other.debit.lock().unwrap_or_else(|e| e.into_inner());
+        let mut debit = self.debit.lock().unwrap_or_else(|e| e.into_inner());
+        let bytes = incoming.allowance.bytes();
+        let allowance = incoming.allowance.split(bytes)?;
+        debit.allowance.join(allowance).ok()?;
+        debit.charge = debit.charge.checked_add(incoming.charge)?;
+        incoming.charge = 0;
+        Some(())
+    }
+    fn refund_to(&self, required: u64) -> bool {
+        let mut debit = self.debit.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(bytes) = debit
+            .charge
+            .checked_sub(required)
+            .filter(|bytes| *bytes != 0)
+        else {
+            return false;
+        };
+        let Some(allowance) = debit.allowance.split(bytes) else {
+            return false;
+        };
+        debit.charge = required;
+        *self.retention.lock().unwrap_or_else(|e| e.into_inner()) += bytes;
+        drop(allowance);
+        true
+    }
     fn split(&self, bytes: u64) -> Option<Arc<Self>> {
         let mut debit = self.debit.lock().unwrap_or_else(|e| e.into_inner());
         let next = debit.charge.checked_sub(bytes)?;
@@ -283,7 +313,7 @@ pub struct FrontBodyQueries {
     memo_operations: AtomicU64,
     verify_store: hirsel_engine_store::VerifyStore,
     slots: Mutex<BTreeMap<Key, FrontSlot>>,
-    input_slots: Mutex<(BTreeSet<DefId>, Vec<Arc<LiveSourceBacking>>)>,
+    input_slots: Mutex<(BTreeMap<DefId, usize>, Option<Arc<LiveSourceBacking>>)>,
     /// Transfer the latest computed body to its immediate consumer. The next
     /// body computation drops it before running a phase; compact facts never
     /// keep a growing collection of analyzed bodies.
@@ -851,30 +881,170 @@ impl FrontBodyQueries {
         }
         Some(())
     }
+    fn slot_inventory(len: usize, pending: usize) -> u64 {
+        let mut weight = hirsel_query_products::retained::MetadataWeight::default();
+        if len != 0 {
+            weight.tree::<Key, FrontSlot>(len);
+        }
+        if pending != 0 {
+            weight.tree::<DefId, usize>(pending);
+        }
+        if len != 0 {
+            weight.tree::<(DefId, QueryKind), u64>(3 * len);
+            weight.tree::<crate::memo::MemoKey, ()>(3 * len);
+        }
+        weight.add(
+            len * (3 * size_of::<(crate::memo::MemoKey, Arc<Reads>)>()
+                + 8 * size_of::<crate::memo::MemoKey>()
+                + 32 * size_of::<usize>()
+                + 2 * size_of::<Arc<LiveSourceBacking>>()),
+        );
+        weight.bytes()
+    }
     fn admit_input_slot(&self, cx: &mut dyn QueryContext, definition: DefId) -> Option<()> {
-        let mut slots = self.input_slots.lock().unwrap_or_else(|e| e.into_inner());
-        if slots.0.contains(&definition) {
+        let key = self.inputs.key_for(definition)?;
+        loop {
+            let mut ledger = self.input_slots.lock().unwrap_or_else(|e| e.into_inner());
+            let slots = self.slots.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(readers) = ledger.0.get_mut(&definition) {
+                *readers = readers.checked_add(1)?;
+                return Some(());
+            }
+            let state = (slots.len(), ledger.0.len());
+            let roots = state.0 + state.1 + usize::from(!slots.contains_key(&key));
+            let required = Self::slot_inventory(roots, state.1 + 1).max(
+                self.slot_metadata_bytes(&ledger.0, &slots)
+                    .checked_add(Self::slot_inventory(1, 1))?,
+            );
+            let held = ledger.1.as_ref().map_or(0, |backing| backing.charge());
+            let bytes = required.saturating_sub(held);
+            drop(slots);
+            drop(ledger);
+            let admitted = if bytes != 0 {
+                Some(self.owner_grant(cx, bytes, "Front demand slots")?)
+            } else {
+                None
+            };
+            let mut ledger = self.input_slots.lock().unwrap_or_else(|e| e.into_inner());
+            let slots = self.slots.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(readers) = ledger.0.get_mut(&definition) {
+                *readers = readers.checked_add(1)?;
+                return Some(());
+            }
+            if state != (slots.len(), ledger.0.len())
+                || held != ledger.1.as_ref().map_or(0, |backing| backing.charge())
+            {
+                continue;
+            }
+            if let Some((allowance, backing)) = admitted {
+                backing.add(allowance)?;
+                if let Some(owner) = &ledger.1 {
+                    owner.absorb(backing)?;
+                } else {
+                    ledger.1 = Some(backing);
+                }
+            }
+            ledger.0.insert(definition, 1);
             return Some(());
         }
-        let inventory = |len| {
-            let mut weight = hirsel_query_products::retained::MetadataWeight::default();
-            weight.tree::<Key, FrontSlot>(len);
-            weight.tree::<DefId, ()>(len);
+    }
+    fn slot_metadata_bytes(
+        &self,
+        pending: &BTreeMap<DefId, usize>,
+        slots: &BTreeMap<Key, FrontSlot>,
+    ) -> u64 {
+        let mut weight = hirsel_query_products::retained::MetadataWeight::default();
+        if !slots.is_empty() {
+            weight.tree::<Key, FrontSlot>(slots.len());
+        }
+        if !pending.is_empty() {
+            weight.tree::<DefId, usize>(pending.len());
+        }
+        let work = self.work.lock().unwrap_or_else(|e| e.into_inner());
+        if !work.is_empty() {
+            weight.tree::<(DefId, QueryKind), u64>(work.len());
+        }
+        let clean = self.clean_memos.lock().unwrap_or_else(|e| e.into_inner());
+        if !clean.is_empty() {
+            weight.tree::<crate::memo::MemoKey, ()>(clean.len());
+        }
+        for slot in slots.values() {
+            let observations = match slot {
+                FrontSlot::Archived(archived) => Some(&archived.observations),
+                FrontSlot::Live { observations, .. } => observations.as_ref(),
+            };
+            if let Some(observations) = observations
+                && observations._backing.is_none()
+            {
+                weight.add(observations.rows.metadata_bytes() as usize);
+            }
+        }
+        if weight.bytes() != 0 {
             weight.add(
-                len * (3 * size_of::<(crate::memo::MemoKey, Arc<Reads>)>()
-                    + 8 * size_of::<crate::memo::MemoKey>()
-                    + 32 * size_of::<usize>()
-                    + 2 * size_of::<Arc<LiveSourceBacking>>()),
+                hirsel_engine_admission::retained_arc_bytes(&std::mem::MaybeUninit::<
+                    LiveSourceBacking,
+                >::uninit()) as usize,
             );
-            weight.bytes()
-        };
-        let len = slots.0.len();
-        let bytes = inventory(len + 1).checked_sub(if len == 0 { 0 } else { inventory(len) })?;
-        let (allowance, backing) = self.owner_grant(cx, bytes, "Front demand slots")?;
-        backing.add(allowance)?;
-        slots.0.insert(definition);
-        slots.1.push(backing);
-        Some(())
+        }
+        let bytes = weight.bytes();
+        if pending.is_empty() {
+            bytes
+        } else {
+            // An admitted running task can still add its completion rows and
+            // phase counters. Pressure may only trim the idle planning surplus.
+            bytes.max(Self::slot_inventory(
+                slots.len() + pending.len(),
+                pending.len(),
+            ))
+        }
+    }
+    /// Persistent completion index and work counters. Reconstructible cache
+    /// payloads and pending demand identities are not completed observations.
+    pub fn retained_observation_metadata_bytes(&self) -> u64 {
+        let ledger = self.input_slots.lock().unwrap_or_else(|e| e.into_inner());
+        let slots = self.slots.lock().unwrap_or_else(|e| e.into_inner());
+        let archives = slots
+            .values()
+            .filter_map(|slot| match slot {
+                FrontSlot::Archived(archived) => Some(&archived.observations),
+                FrontSlot::Live { observations, .. } => observations.as_ref(),
+            })
+            .filter(|observations| observations._backing.is_some())
+            .map(|observations| {
+                observations.rows.metadata_bytes()
+                    + hirsel_engine_admission::retained_arc_bytes(&std::mem::MaybeUninit::<
+                        LiveSourceBacking,
+                    >::uninit())
+            })
+            .sum::<u64>();
+        self.slot_metadata_bytes(&ledger.0, &slots) + archives
+    }
+    fn trim_slot_admission(&self) -> bool {
+        let mut ledger = self.input_slots.lock().unwrap_or_else(|e| e.into_inner());
+        let slots = self.slots.lock().unwrap_or_else(|e| e.into_inner());
+        let required = self.slot_metadata_bytes(&ledger.0, &slots);
+        if required == 0 {
+            return ledger.1.take().is_some();
+        }
+        ledger
+            .1
+            .as_ref()
+            .is_some_and(|backing| backing.refund_to(required))
+    }
+    fn release_pending_slot(&self, definition: DefId) {
+        {
+            let mut ledger = self.input_slots.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(readers) = ledger.0.get_mut(&definition) {
+                *readers -= 1;
+                if *readers == 0 {
+                    ledger.0.remove(&definition);
+                }
+            }
+            if ledger.0.is_empty() {
+                ledger.0 = BTreeMap::new();
+            }
+        }
+        self.trim_slot_admission();
     }
     fn retain(
         &self,
@@ -928,6 +1098,7 @@ impl FrontBodyQueries {
                 });
             }
         }
+        drop(slots);
     }
     /// Actual phase invocations, including failed or discarded producers.
     fn completed_product(&self, query: QueryId) -> Option<Result<ProductRef, Reference>> {
@@ -972,7 +1143,7 @@ impl FrontBodyQueries {
         }
         Some(())
     }
-    pub(in crate::queries) fn evict_idle(&self, scratch: u64) -> bool {
+    fn evict_terminal_cache(&self) -> bool {
         let mut slots = self.slots.lock().unwrap_or_else(|e| e.into_inner());
         // Compact payloads are optional too. Keep the completed observations
         // for inspectors, but release an unpinned payload before growing Front.
@@ -987,11 +1158,16 @@ impl FrontBodyQueries {
             }
             _ => None,
         });
-        if let Some(retired) = retired {
-            drop(slots);
-            drop(retired);
+        drop(slots);
+        let removed = retired.is_some();
+        drop(retired);
+        removed
+    }
+    pub(in crate::queries) fn evict_idle(&self, scratch: u64) -> bool {
+        if self.evict_terminal_cache() {
             return true;
         }
+        let mut slots = self.slots.lock().unwrap_or_else(|e| e.into_inner());
         let selected = slots.iter().find_map(|(key, slot)| match slot {
             FrontSlot::Archived(_) => None,
             FrontSlot::Live { outcome, .. } => match &outcome.state {
@@ -1569,6 +1745,11 @@ impl FrontBodyQueries {
                 queries: self,
                 scratch,
             };
+            self.admit_input_slot(&mut context, input.definition)
+                .ok_or_else(|| {
+                    self.runtime_error(self.errors.resource)
+                        .expect("resource error is local")
+                })?;
             let mut task = BodyTask {
                 queries: self.clone(),
                 query,
@@ -1580,6 +1761,7 @@ impl FrontBodyQueries {
                 },
                 terminal: None,
                 demand: None,
+                slot_admitted: true,
             };
             let restored = task.load_evicted(&mut context).unwrap_or_else(|| {
                 task.run(&mut context).map_err(|error| match error {
@@ -1726,6 +1908,7 @@ impl FrontBodyQueries {
             weight: self.inputs.get(&query.address.0)?.weight,
             terminal: None,
             demand: None,
+            slot_admitted: false,
         }))
     }
     pub fn factory(self: &Arc<Self>) -> Arc<dyn QueryFactory> {
@@ -2114,6 +2297,18 @@ impl QueryContext for DetachedFrontContext<'_> {
 }
 struct Factory(Arc<FrontBodyQueries>);
 impl QueryFactory for Factory {
+    fn evict_cache(&self, _scratch: u64) -> bool {
+        self.0
+            .namespace
+            .snapshot
+            .header_products()
+            .is_some_and(|headers| headers.evict())
+            || self.0.namespace.snapshot.evict_cached()
+            || self.0.evict_terminal_cache()
+            || self.0.inputs.clear_addresses()
+            || self.0.trim_slot_admission()
+            || self.0.reclaim_reads()
+    }
     fn evict(&self, query: QueryId, product: &ProductRef, scratch: u64) -> bool {
         if !self.0.has_cached_query(query)
             && let Some(front) = self
@@ -2156,6 +2351,7 @@ impl QueryFactory for Factory {
         slots.insert(query.address.0, FrontSlot::Archived(archived));
         drop(slots);
         self.0.reclaim_reads();
+        while self.evict_cache(scratch) {}
         true
     }
 
@@ -2192,6 +2388,7 @@ impl QueryFactory for Factory {
             weight: input.weight,
             terminal: None,
             demand: None,
+            slot_admitted: false,
         }))
     }
 }
@@ -2203,6 +2400,15 @@ struct BodyTask {
     weight: MemoryWeight,
     terminal: Option<Result<ProductRef, Reference>>,
     demand: Option<DefId>,
+    slot_admitted: bool,
+}
+impl Drop for BodyTask {
+    fn drop(&mut self) {
+        if self.slot_admitted {
+            self.queries
+                .release_pending_slot(self.queries.inputs[&self.input].definition);
+        }
+    }
 }
 enum BodyRunError {
     Refused(Reference),
@@ -2229,8 +2435,11 @@ impl QueryTask for BodyTask {
             return finish(result);
         }
         let definition = self.queries.inputs[&self.input].definition;
-        if self.queries.admit_input_slot(cx, definition).is_none() {
-            return finish(Err(self.queries.resource_refusal()));
+        if !self.slot_admitted {
+            if self.queries.admit_input_slot(cx, definition).is_none() {
+                return finish(Err(self.queries.resource_refusal()));
+            }
+            self.slot_admitted = true;
         }
         let pending = self
             .queries
@@ -3459,7 +3668,7 @@ impl QueryEngine {
             input_records,
             store,
             slots: Mutex::new(BTreeMap::new()),
-            input_slots: Mutex::new((BTreeSet::new(), Vec::new())),
+            input_slots: Mutex::new((BTreeMap::new(), None)),
             handoff: Mutex::new(None),
             handoff_limit: self.hold_bytes,
             carry: Mutex::new(None),

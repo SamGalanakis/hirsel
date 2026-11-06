@@ -890,6 +890,58 @@ pub trait CheckedEnvironment: SignatureLookup + sealed::Environment {
     #[doc(hidden)]
     fn stamp(&self) -> &EnvironmentStamp;
 }
+/// A fixed immutable checked environment with an additional allocation owner.
+/// Keeping the owner alive preserves the cache's admitted metadata while read.
+pub struct OwnedEnvironment {
+    views: Arc<dyn CheckedEnvironment + Send + Sync>,
+    _owner: Arc<dyn Send + Sync>,
+}
+impl OwnedEnvironment {
+    pub fn new(
+        views: Arc<dyn CheckedEnvironment + Send + Sync>,
+        owner: Arc<dyn Send + Sync>,
+    ) -> Self {
+        Self {
+            views,
+            _owner: owner,
+        }
+    }
+}
+impl std::ops::Deref for OwnedEnvironment {
+    type Target = dyn CheckedEnvironment;
+    fn deref(&self) -> &Self::Target {
+        &*self.views
+    }
+}
+impl SignatureLookup for OwnedEnvironment {
+    fn view(&self, d: DefId) -> Option<crate::ViewInput<'_>> {
+        self.views.view(d)
+    }
+    fn first_heap(&self) -> Option<(DefId, HeapRole)> {
+        self.views.first_heap()
+    }
+    fn universe_errors(&self) -> (ContentHash, &[Violation]) {
+        self.views.universe_errors()
+    }
+}
+impl sealed::Environment for OwnedEnvironment {}
+impl CheckedEnvironment for OwnedEnvironment {
+    fn input_digest(&self) -> ContentHash {
+        self.views.input_digest()
+    }
+    fn stamp(&self) -> &EnvironmentStamp {
+        self.views.stamp()
+    }
+}
+impl<T: CheckedEnvironment + ?Sized> sealed::Environment for &T {}
+impl<T: CheckedEnvironment + ?Sized> CheckedEnvironment for &T {
+    fn input_digest(&self) -> ContentHash {
+        (**self).input_digest()
+    }
+    fn stamp(&self) -> &EnvironmentStamp {
+        (**self).stamp()
+    }
+}
 mod sealed {
     pub trait Environment {}
 }

@@ -136,7 +136,9 @@ pub struct SignatureSnapshot {
     /// Each opaque type's private view, which only its own package's bodies see.
     private: DefMap<SignatureRef>,
     /// Signature inputs are sufficient for P; V builds its universe on demand.
-    validation: OnceLock<Arc<ValidationState>>,
+    validation: Mutex<Option<Arc<ValidationState>>>,
+    owner: std::sync::Weak<SignatureSnapshot>,
+    pub(crate) cache_registration: Mutex<Option<Arc<dyn Send + Sync>>>,
     /// Set once this snapshot's source dependencies' summaries are published.
     published: OnceLock<()>,
     validation_inputs: Mutex<Option<ValidationCandidates>>,
@@ -149,6 +151,14 @@ pub struct SignatureSnapshot {
     verifier: Option<Arc<hirsel_validate::VerifierCache>>,
     verifier_policy: ContentHash,
 }
+pub struct SnapshotVerdicts(Arc<ValidationState>);
+impl std::ops::Deref for SnapshotVerdicts {
+    type Target = ValidatedSignatures;
+    fn deref(&self) -> &Self::Target {
+        &self.0.validated
+    }
+}
+pub type SnapshotValidation = hirsel_validate::OwnedEnvironment;
 struct SnapshotMembership {
     definitions: Box<[DefId]>,
     packages: std::collections::BTreeSet<PackageId>,
@@ -177,10 +187,10 @@ struct ValidationCandidates {
     previous: Option<Arc<ValidationState>>,
 }
 pub(crate) struct ValidationState {
-    pub(crate) registration: OnceLock<Arc<dyn Send + Sync>>,
+    _registration: Option<Arc<dyn Send + Sync>>,
     views: Arc<ViewTable>,
     bases: BTreeMap<PackageId, Arc<ViewTable>>,
-    packages: BTreeMap<PackageId, PackageViews>,
+    packages: BTreeMap<PackageId, Arc<PackageViews>>,
     /// Each installed package's own universe: its published summary, with
     /// its views (its opaque types' private ones) read on demand.
     installed: BTreeMap<PackageId, Arc<ViewTable>>,
@@ -407,7 +417,9 @@ impl SignatureSnapshot {
             membership: Mutex::default(),
             headers: None,
             private,
-            validation: OnceLock::new(),
+            validation: Mutex::default(),
+            owner: std::sync::Weak::new(),
+            cache_registration: Mutex::default(),
             published: OnceLock::new(),
             validation_inputs: Mutex::new(Some(candidates)),
             public_views,
@@ -448,20 +460,68 @@ impl SignatureSnapshot {
         self.headers.as_ref()
     }
     fn validation_candidates(&self) -> ValidationCandidates {
-        if let Some(state) = self.validation.get() {
+        if let Some(state) = self.validation.lock().unwrap().clone() {
             return ValidationCandidates {
-                previous: Some(state.clone()),
+                previous: Some(state),
             };
         }
-        let pending = self.validation_inputs.lock().unwrap().clone();
-        pending.unwrap_or_else(|| {
-            // An initializer has taken the inputs but has not yet published.
-            // Join that initializer after releasing the short input lock.
-            let _ = self.validation_state();
-            ValidationCandidates {
-                previous: self.validation.get().cloned(),
-            }
-        })
+        self.validation_inputs
+            .lock()
+            .unwrap()
+            .clone()
+            .unwrap_or_default()
+    }
+    fn register_cache(&self) -> Result<(), QueryError> {
+        let Some(headers) = &self.headers else {
+            return Ok(());
+        };
+        let mut registration = self.cache_registration.lock().unwrap();
+        if registration.is_none() {
+            *registration = Some(headers.retain_validation_cache(self.owner.clone())?);
+        }
+        Ok(())
+    }
+    pub(crate) fn evict_cached(&self) -> bool {
+        // Builders hold their cache lock before registering. Never wait for
+        // them while holding the registration lock during recursive admission.
+        let Ok(mut registration) = self.cache_registration.try_lock() else {
+            return false;
+        };
+        let Ok(mut membership) = self.membership.try_lock() else {
+            return false;
+        };
+        let Ok(mut inputs) = self.validation_inputs.try_lock() else {
+            return false;
+        };
+        let Ok(mut validation) = self.validation.try_lock() else {
+            return false;
+        };
+        let mut removed = false;
+        if membership
+            .as_ref()
+            .is_some_and(|value| Arc::strong_count(value) == 1)
+        {
+            *membership = None;
+            removed = true;
+        }
+        if let Some(previous) = inputs.as_mut().and_then(|inputs| inputs.previous.take()) {
+            drop(previous);
+            removed = true;
+        }
+        if validation
+            .as_ref()
+            .is_some_and(|state| Arc::strong_count(state) == 1)
+        {
+            *validation = None;
+            *inputs = Some(ValidationCandidates::default());
+            removed = true;
+        } else if let Some(state) = validation.as_ref() {
+            removed |= state.evict_cached();
+        }
+        if membership.is_none() && validation.is_none() {
+            removed |= registration.take().is_some();
+        }
+        removed
     }
     /// Every package `package` sees: itself, its dependency closure and the
     /// builtin packages. `None` when the loader graph is incomplete.
@@ -506,10 +566,10 @@ impl SignatureSnapshot {
             Box::new(rows),
         ))
     }
-    fn validation_state(&self) -> Result<&ValidationState, hirsel_validate::ViewRefusal> {
+    fn validation_state(&self) -> Result<Arc<ValidationState>, hirsel_validate::ViewRefusal> {
         let state = self.validation_universe()?;
         self.published
-            .get_or_init(|| self.publish_dependency_universes(state));
+            .get_or_init(|| self.publish_dependency_universes(&state));
         Ok(state)
     }
     /// Publish the summary of every source dependency this snapshot computed
@@ -556,14 +616,14 @@ impl SignatureSnapshot {
     /// V's universe of this snapshot, built once. A build that meets a
     /// refused view read publishes nothing and keeps its inputs, so the next
     /// demand builds it again.
-    fn validation_universe(&self) -> Result<&ValidationState, hirsel_validate::ViewRefusal> {
-        if let Some(state) = self.validation.get() {
-            return Ok(&**state);
+    fn validation_universe(&self) -> Result<Arc<ValidationState>, hirsel_validate::ViewRefusal> {
+        if let Some(state) = self.validation.lock().unwrap().clone() {
+            return Ok(state);
         }
         // The input lock serializes builders; a later one finds the state.
         let mut inputs = self.validation_inputs.lock().unwrap();
-        if let Some(state) = self.validation.get() {
-            return Ok(&**state);
+        if let Some(state) = self.validation.lock().unwrap().clone() {
+            return Ok(state);
         }
         let previous = inputs
             .as_ref()
@@ -572,7 +632,8 @@ impl SignatureSnapshot {
             .clone();
         let state = self.build_validation(previous.as_deref())?;
         *inputs = None;
-        Ok(&**self.validation.get_or_init(|| state))
+        *self.validation.lock().unwrap() = Some(state.clone());
+        Ok(state)
     }
     fn build_validation(
         &self,
@@ -757,7 +818,7 @@ impl SignatureSnapshot {
                         Some(lease) => views.retain_owner(lease),
                         None => views,
                     };
-                    Ok((package, views))
+                    Ok((package, Arc::new(views)))
                 })
                 .collect::<Result<_, hirsel_validate::ViewRefusal>>()?;
             let graph = self.headers.as_ref().map_or_else(
@@ -768,8 +829,18 @@ impl SignatureSnapshot {
                 },
                 |headers| headers.fact_graph(),
             );
+            self.register_cache()
+                .map_err(|cause| hirsel_validate::ViewRefusal::Unreadable {
+                    definition: self
+                        .signatures
+                        .keys()
+                        .next()
+                        .copied()
+                        .unwrap_or_else(|| DefId::intern(&DefPath::core("validation-cache"))),
+                    cause,
+                })?;
             let state = Arc::new(ValidationState {
-                registration: OnceLock::new(),
+                _registration: self.cache_registration.lock().unwrap().clone(),
                 views,
                 bases,
                 packages,
@@ -778,9 +849,6 @@ impl SignatureSnapshot {
                 installed: installed_universes,
                 validated,
             });
-            if let Some(headers) = &self.headers {
-                headers.retain_validation_cache(&state)?;
-            }
             Ok(state)
         }
     }
@@ -839,7 +907,7 @@ impl SignatureSnapshot {
             definition,
             self.types.clone(),
             owner,
-            self.validation(&path.path().0.package)?,
+            &*self.validation(&path.path().0.package)?,
             self.source_verification_policy(),
             self.verifier.as_deref(),
         )
@@ -1023,7 +1091,7 @@ impl SignatureSnapshot {
             _lease: lease,
         });
         // A refused optional memo remains an exact transient computation.
-        if retained {
+        if retained && self.register_cache().is_ok() {
             *resident = Some(membership.clone());
         }
         membership
@@ -1093,7 +1161,7 @@ impl SignatureSnapshot {
         &self,
         d: DefId,
     ) -> Option<Result<Arc<hirsel_validate::IdentifiedSignature>, QueryError>> {
-        if let Some(state) = self.validation.get() {
+        if let Some(state) = self.validation.lock().unwrap().clone() {
             if let Some(own) = state.installed.get(&d.path().0.package) {
                 return match self.signature(d)? {
                     Ok(_) => own.get(d).map(|v| Ok(v.identified().clone())),
@@ -1133,19 +1201,21 @@ impl SignatureSnapshot {
         Some(Ok(product.identified().clone()))
     }
     /// V's verdicts on this snapshot's views.
-    pub fn validated(&self) -> Result<&ValidatedSignatures, hirsel_validate::ViewRefusal> {
-        Ok(&self.validation_state()?.validated)
+    pub fn validated(&self) -> Result<SnapshotVerdicts, hirsel_validate::ViewRefusal> {
+        self.validation_state().map(SnapshotVerdicts)
     }
     /// The universe V validates `package`'s bodies against.
     pub fn validation(
         &self,
         package: &PackageId,
-    ) -> Result<&dyn hirsel_validate::CheckedEnvironment, hirsel_validate::ViewRefusal> {
+    ) -> Result<SnapshotValidation, hirsel_validate::ViewRefusal> {
         let state = self.validation_state()?;
-        Ok(match state.packages.get(package) {
-            Some(views) => views,
-            None => &**state.base(package),
-        })
+        let views: Arc<dyn hirsel_validate::CheckedEnvironment + Send + Sync> =
+            match state.packages.get(package) {
+                Some(views) => views.clone(),
+                None => state.base(package).clone(),
+            };
+        Ok(SnapshotValidation::new(views, state))
     }
     /// The complete input of a package's base V universe. Artifact overlays
     /// record this before replacing an owner, preserving their source context.
@@ -1453,10 +1523,12 @@ impl hirsel_validate::ReplayEnvironment for SignatureSnapshot {
     fn checked(
         &self,
         package: &PackageId,
-    ) -> Result<Option<&dyn hirsel_validate::CheckedEnvironment>, hirsel_validate::ViewRefusal>
-    {
+    ) -> Result<
+        Option<Box<dyn hirsel_validate::CheckedEnvironment + '_>>,
+        hirsel_validate::ViewRefusal,
+    > {
         self.validation(package)
-            .map(|input| Some(input as &dyn hirsel_validate::CheckedEnvironment))
+            .map(|input| Some(Box::new(input) as Box<dyn hirsel_validate::CheckedEnvironment>))
     }
     fn base_digest(
         &self,
@@ -1561,8 +1633,8 @@ impl QueryEngine {
                 .map(|(d, _)| (*d, self.failed_signature_key(d.path())))
                 .collect(),
         };
-        let snapshot = Arc::new(
-            SignatureSnapshot::build(
+        let snapshot = Arc::new_cyclic(|owner| {
+            let mut snapshot = SignatureSnapshot::build(
                 self.snapshot_epoch,
                 self.types.clone(),
                 signatures,
@@ -1580,8 +1652,10 @@ impl QueryEngine {
                         self.store_identity.0.as_slice(),
                     ],
                 ),
-            ),
-        );
+            );
+            snapshot.owner = owner.clone();
+            snapshot
+        });
         self.snapshot = Some((stamp, SnapshotCache::new(&snapshot)));
         self.snapshot_sources = row_sources;
         snapshot

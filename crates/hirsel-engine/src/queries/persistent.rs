@@ -3090,7 +3090,7 @@ impl QueryEngine {
         if let Some(evidence) = self.lowered_verification(definition.path)
             && snapshot
                 .validation(&definition.path.path().0.package)
-                .is_ok_and(|views| evidence.holds(definition, &self.types, policy, views))
+                .is_ok_and(|views| evidence.holds(definition, &self.types, policy, &*views))
         {
             return Ok(Some(evidence.clone()));
         }
@@ -3145,7 +3145,7 @@ impl QueryEngine {
             definition,
             self.types.clone(),
             |anchor| self.record_anchor_owner(anchor),
-            snapshot.validation(&definition.path.path().0.package)?,
+            &*snapshot.validation(&definition.path.path().0.package)?,
             policy,
             cache.as_deref(),
         )?;
@@ -3201,7 +3201,7 @@ impl QueryEngine {
                 &lowered.value,
                 self.types.clone(),
                 self.source_verification_policy(),
-                snapshot.validation(&path.0.package)?,
+                &*snapshot.validation(&path.0.package)?,
                 &evidence,
             )
         } else {
@@ -3225,7 +3225,7 @@ impl QueryEngine {
             self.types.clone(),
             |path, occurrence| self.record_anchor(path, occurrence),
             self.source_verification_policy(),
-            snapshot.validation(&output.owner().path().0.package).ok()?,
+            &*snapshot.validation(&output.owner().path().0.package).ok()?,
         )
     }
     fn verified_lower_output_inner(
@@ -3257,7 +3257,7 @@ impl QueryEngine {
                 DefId::intern(path),
                 &self.types,
                 policy,
-                snapshot.validation(&path.0.package).ok()?,
+                &*snapshot.validation(&path.0.package).ok()?,
             )?;
             let metadata: LowerIdentityMetadata = self.decode_record(output.metadata())?;
             if metadata.depth.first.len() != self.depth_limit() as usize + 1
@@ -3401,7 +3401,7 @@ impl QueryEngine {
                     &definition,
                     self.types.clone(),
                     self.source_verification_policy(),
-                    views,
+                    &*views,
                     &evidence,
                     &metadata,
                 );

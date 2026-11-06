@@ -1,49 +1,27 @@
-//! Interned lookup with source-ordered iteration. Rust's existing DefMap keeps
-//! hot reads independent of path length; the immutable row slice keeps output
-//! ordering independent of the hash table and session's assigned identities.
+//! Compact immutable indexes over interned identities. Binary searches keep
+//! lookups independent of path length without a second per-definition table.
 use super::*;
 
 pub(super) struct Inputs {
     rows: Box<[(DefId, Input)]>,
-    positions: hirsel_syntax::DefMap<usize>,
 }
 impl Inputs {
     pub(super) fn new(mut rows: Vec<(DefId, Input)>) -> Self {
         rows.sort_unstable_by_key(|(id, _)| *id);
         rows.dedup_by_key(|(id, _)| *id);
-        let positions = rows
-            .iter()
-            .enumerate()
-            .map(|(i, (id, _))| (*id, i))
-            .collect();
         Self {
             rows: rows.into_boxed_slice(),
-            positions,
         }
     }
     pub(super) fn retained_bytes(&self) -> Option<u64> {
-        // The same hashbrown bucket bound as source_index::hash. Controls
-        // and the trailing SIMD group are charged alongside every bucket.
-        let layout = std::alloc::Layout::new::<(DefId, usize)>();
-        let buckets = if self.positions.capacity() == 0 {
-            0
-        } else {
-            self.positions
-                .capacity()
-                .checked_add(1)?
-                .checked_next_power_of_two()?
-        };
-        let hash = buckets
-            .checked_mul(layout.size().checked_add(1)?)?
-            .checked_add(layout.align())?
-            .checked_add(32)?;
-        u64::try_from(hash.checked_add(size_of_val(&*self.rows))?).ok()
+        u64::try_from(size_of_val(&*self.rows)).ok()
     }
     pub(super) fn get(&self, path: &DefPath) -> Option<&Input> {
         self.get_id(DefId::get(path)?)
     }
     pub(super) fn get_id(&self, id: DefId) -> Option<&Input> {
-        Some(&self.rows[*self.positions.get(&id)?].1)
+        let at = self.rows.binary_search_by_key(&id, |(id, _)| *id).ok()?;
+        Some(&self.rows[at].1)
     }
     pub(super) fn contains_key(&self, path: &DefPath) -> bool {
         self.get(path).is_some()
@@ -73,5 +51,45 @@ impl<'a> IntoIterator for &'a Inputs {
     type IntoIter = Iter<'a>;
     fn into_iter(self) -> Self::IntoIter {
         self.iter()
+    }
+}
+
+/// Query addresses differ across captures. Keep only their compact reverse
+/// interface, not a tree node and duplicated kind for every definition.
+pub(super) struct Paths {
+    lower: Box<[(ContentHash, DefId)]>,
+    evaluate: Box<[(ContentHash, DefId)]>,
+}
+impl Paths {
+    pub(super) fn new(inputs: &Inputs, namespace: &NamespaceCapture) -> Self {
+        let rows = |kind, key: fn(&namespace::BodyKeys) -> ContentHash| {
+            let mut rows = inputs
+                .iter()
+                .map(|(path, input)| {
+                    (
+                        namespace.query_id(kind, key(&input.captured)).address.0,
+                        DefId::intern(path),
+                    )
+                })
+                .collect::<Vec<_>>();
+            rows.sort_unstable_by_key(|(hash, _)| *hash);
+            rows.into_boxed_slice()
+        };
+        Self {
+            lower: rows(FRONT_LOWER_KIND, |keys| keys.lower.0),
+            evaluate: rows(FRONT_EVALUATE_KIND, |keys| keys.evaluate.0),
+        }
+    }
+    pub(super) fn get(&self, (kind, address): &(u32, ContentHash)) -> Option<&DefId> {
+        let rows = match *kind {
+            FRONT_LOWER_KIND => &self.lower,
+            FRONT_EVALUATE_KIND => &self.evaluate,
+            _ => return None,
+        };
+        let at = rows.binary_search_by_key(address, |(hash, _)| *hash).ok()?;
+        Some(&rows[at].1)
+    }
+    pub(super) fn retained_bytes(&self) -> usize {
+        size_of_val(&*self.lower) + size_of_val(&*self.evaluate)
     }
 }

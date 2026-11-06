@@ -3,9 +3,20 @@ use super::*;
 
 pub(in crate::queries) struct CheckFacts {
     pub query: QueryId,
+    pub producer: CheckProducer,
     pub reads: Arc<Reads>,
     pub phase: Option<QueryKind>,
     pub result: Result<(Vec<Diagnostic>, ProductRef), (Reference, QueryError)>,
+}
+#[derive(Clone)]
+pub(in crate::queries) struct CheckProducer {
+    pub owner: Arc<FrontLowerQueries>,
+    pub query: QueryId,
+}
+pub(in crate::queries) enum CheckRefresh {
+    Joined(Arc<Reads>),
+    Waiting(QueryId),
+    Recomputed(DefPath, CheckFacts),
 }
 impl FrontLowerQueries {
     fn check_failure(&self, id: QueryId) -> Option<Reference> {
@@ -24,10 +35,15 @@ impl FrontLowerQueries {
         *reference
     }
     fn check_facts(
-        &self,
+        self: &Arc<Self>,
         id: QueryId,
         selected: Result<ProductRef, Reference>,
     ) -> Option<CheckFacts> {
+        if let Some(row) = self.delegated(id, &selected) {
+            let mut facts = row.owner.check_facts(row.id, row.selected)?;
+            facts.query = id;
+            return Some(facts);
+        }
         let reference = selected.as_ref().err().copied();
         let outcome = self.selected(id, selected)?;
         let result = match &outcome.result {
@@ -42,6 +58,10 @@ impl FrontLowerQueries {
         };
         Some(CheckFacts {
             query: id,
+            producer: CheckProducer {
+                owner: self.clone(),
+                query: id,
+            },
             reads: Arc::new(outcome.reads(self)?),
             phase: outcome.phase,
             result,
@@ -52,7 +72,7 @@ impl FrontLowerQueries {
     /// Inspecting it does not reopen a consumed producer or retain its TIR.
     /// Its owner stays with Check's observations until their final consumer.
     pub(in crate::queries) fn poll_check(
-        &self,
+        self: &Arc<Self>,
         cx: &mut dyn QueryContext,
         id: QueryId,
     ) -> Poll<Result<CheckFacts, Reference>> {
@@ -78,6 +98,58 @@ impl FrontLowerQueries {
 }
 
 impl FrontLowerQueries {
+    /// A failed join is a reuse miss. Demand the ordinary producer in the
+    /// committed successor, which performs its normal semantic checks and V.
+    pub(in crate::queries) fn refresh_check(
+        self: &Arc<Self>,
+        cx: &mut dyn QueryContext,
+        id: QueryId,
+        reads: Arc<Reads>,
+    ) -> Result<CheckRefresh, Reference> {
+        let error = match self.check_observations(id, reads) {
+            Ok(reads) => return Ok(CheckRefresh::Joined(reads)),
+            Err(error) => error,
+        };
+        let protocol = |error: QueryError| {
+            self.protocol_failure(
+                id,
+                &format!("Check Lower observations cannot join: {error:?}"),
+            )
+        };
+        let current = self
+            .demand_producer()
+            .ok_or_else(|| protocol(error.clone()))?
+            .current()
+            .map_err(protocol)?;
+        let successor = SuccessorCapture::new(&self.namespace, current).map_err(protocol)?;
+        let owner = successor.owner();
+        let path = self.path(id).ok_or_else(|| protocol(error.clone()))?;
+        let actual = match self.staged.selection(id) {
+            Some(selection) => owner
+                .staged_query(selection.declaration.path(), &selection.arguments)
+                .map_err(protocol)?,
+            None => owner
+                .id(&path, id.kind)
+                .ok_or_else(|| protocol(error.clone()))?,
+        };
+        if actual == id {
+            return Err(protocol(error));
+        }
+        let selected = match cx.read(actual) {
+            Poll::Pending => return Ok(CheckRefresh::Waiting(actual)),
+            Poll::Ready(selected) => selected,
+        };
+        let mut facts = owner.check_facts(actual, selected.clone()).ok_or_else(|| {
+            selected
+                .clone()
+                .err()
+                .unwrap_or_else(|| owner.protocol_refusal())
+        })?;
+        cx.consume(actual);
+        facts.query = id;
+        Ok(CheckRefresh::Recomputed(path, facts))
+    }
+
     /// Join the selected producer's observations to the completed demand scope.
     /// V refreshes validation guards only after semantic reads still agree.
     pub(in crate::queries) fn check_observations(

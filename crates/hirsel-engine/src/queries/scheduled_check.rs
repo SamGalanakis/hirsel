@@ -2,7 +2,7 @@
 //! One bounded stream admits and publishes source roots independently of SCC
 //! acceptance. Operational stops fence effectful successors; ordinary bodies
 //! and independent pure evaluations retain their worker window.
-use super::reader_receipts::{ReaderReceipt, ReaderSequence, ReaderSource};
+use super::reader_receipts::{ReaderReceipt, ReaderRefresh, ReaderSequence, ReaderSource};
 use super::*;
 use hirsel_engine_runtime::*;
 use hirsel_engine_store::{Domain, Reference, ResultStore};
@@ -384,7 +384,7 @@ struct File {
     input: FileInput,
     diagnostics: Vec<Diagnostic>,
     error: Option<QueryError>,
-    lower_diagnostics: Vec<Diagnostic>,
+    lower_diagnostics: BTreeMap<(u32, ContentHash), Vec<Diagnostic>>,
     lowered: Vec<(DefPath, ProductRef)>,
     source_rules: bool,
 }
@@ -394,7 +394,7 @@ impl File {
             diagnostics: input.diagnostics.clone(),
             error: input.error.clone(),
             input,
-            lower_diagnostics: Vec::new(),
+            lower_diagnostics: BTreeMap::new(),
             lowered: Vec::new(),
             source_rules: false,
         }
@@ -402,7 +402,10 @@ impl File {
     fn clean(&self) -> bool {
         self.error.is_none()
             && !has_errors(&self.diagnostics)
-            && !has_errors(&self.lower_diagnostics)
+            && !self
+                .lower_diagnostics
+                .values()
+                .any(|diagnostics| has_errors(diagnostics))
     }
     fn error(&mut self, error: QueryError, phase: Option<QueryKind>) {
         match error {
@@ -444,6 +447,7 @@ enum Publication {
     },
     Growth,
     Storage,
+    Join,
     Done,
     Finished(Result<ProductRef, Reference>),
 }
@@ -661,7 +665,12 @@ impl Task {
                             &facts.reads,
                             self.queries.weight.scratch,
                             self.queries.weight.retained,
-                            Some(ReaderSource::Lower(facts.query)),
+                            Some(ReaderSource::StagedLower(
+                                facts.query,
+                                index,
+                                site,
+                                facts.producer.clone(),
+                            )),
                         )
                         .ok_or(self.queries.errors.resource)?;
                     if let Err((reference, _)) = facts.result {
@@ -806,7 +815,56 @@ impl Task {
                             }
                         }
                     }
-                    self.publication = Publication::Done;
+                    self.publication = Publication::Join;
+                }
+                Publication::Join => {
+                    match self
+                        .reads
+                        .refresh_lower(cx, &*self.queries.store, self.queries.weight.scratch)?
+                        .ok_or(self.queries.errors.resource)?
+                    {
+                        ReaderRefresh::Complete => self.publication = Publication::Done,
+                        ReaderRefresh::Waiting(id) => return Ok(Some(vec![id])),
+                        ReaderRefresh::Recomputed {
+                            source,
+                            path,
+                            facts,
+                        } => {
+                            let file = match source {
+                                ReaderSource::Lower(_, file, _) => file,
+                                ReaderSource::StagedLower(_, file, site, _) => {
+                                    if let Err((reference, _)) = facts.result {
+                                        self.files[file].error(
+                                            self.queries
+                                                .plan
+                                                .lower
+                                                .staged_failure(facts.query, reference, site)
+                                                .ok_or(reference)?,
+                                            Some(QueryKind::Lower),
+                                        );
+                                    }
+                                    continue;
+                                }
+                                ReaderSource::Front(..) => {
+                                    return Err(self.queries.protocol_refusal());
+                                }
+                            };
+                            if facts.result.is_ok()
+                                && self.failed_lowered.iter().any(|(old, _)| old == &path)
+                            {
+                                // The earlier failure withheld a source suffix. A
+                                // refreshed success cannot certify those obligations.
+                                self.files[file]
+                                    .error(QueryError::NotImplemented, Some(QueryKind::Check));
+                            }
+                            self.files[file].lowered.retain(|(old, _)| old != &path);
+                            self.failed_lowered.retain(|(old, _)| old != &path);
+                            self.files[file]
+                                .lower_diagnostics
+                                .remove(&(facts.query.kind, facts.query.address.0));
+                            self.accept_lower(file, path, facts);
+                        }
+                    }
                 }
                 Publication::Done | Publication::Finished(_) => return Ok(None),
             }
@@ -934,39 +992,44 @@ impl Task {
                 &facts.reads,
                 self.queries.weight.scratch,
                 self.queries.weight.retained,
-                Some(ReaderSource::Lower(facts.query)),
+                Some(ReaderSource::Lower(
+                    facts.query,
+                    file,
+                    facts.producer.clone(),
+                )),
             )
             .ok_or(self.queries.errors.resource)?;
+        self.accept_lower(file, path, facts);
+        Ok(())
+    }
+    fn accept_lower(
+        &mut self,
+        file: usize,
+        path: DefPath,
+        facts: super::scheduled_lower::check::CheckFacts,
+    ) {
         match facts.result {
             Ok((diagnostics, observations)) => {
-                self.files[file].lower_diagnostics.extend(diagnostics);
+                self.files[file]
+                    .lower_diagnostics
+                    .insert((facts.query.kind, facts.query.address.0), diagnostics);
                 self.files[file].lowered.push((path, observations));
             }
             Err((reference, QueryError::Diagnostics(diagnostics))) => {
                 self.failed_lowered.push((path, reference));
-                self.files[file].lower_diagnostics.extend(diagnostics);
+                self.files[file]
+                    .lower_diagnostics
+                    .insert((facts.query.kind, facts.query.address.0), diagnostics);
             }
             Err((reference, error)) => {
                 self.failed_lowered.push((path, reference));
                 self.files[file].error(error, facts.phase);
             }
         }
-        Ok(())
     }
     fn complete(&mut self) -> Result<ProductRef, Reference> {
         let queries = &self.queries;
         queries.plan.front.release_handoff();
-        self.reads
-            .refresh_lower(&*queries.store, queries.weight.scratch, &queries.plan.lower)
-            .map_err(|error| {
-                crate::requests::source_graph::protocol_failure(
-                    &*queries.store,
-                    queries.errors,
-                    Some(queries.query()),
-                    &format!("Check Lower observations cannot join: {error:?}"),
-                )
-            })?
-            .ok_or(queries.errors.resource)?;
         let reads = self
             .reads
             .finish(&*queries.store, queries.weight.scratch, &queries.plan.front)
@@ -1019,7 +1082,7 @@ impl Task {
             .flat_map(|file| {
                 file.diagnostics
                     .iter()
-                    .chain(&file.lower_diagnostics)
+                    .chain(file.lower_diagnostics.values().flatten())
                     .cloned()
             })
             .collect();

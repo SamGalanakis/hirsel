@@ -29,7 +29,22 @@ impl FrontCheckScope {
         if !self.lowered.contains(path) || self.failed_lowered.contains(path) {
             return Err(QueryError::NotImplemented);
         }
-        self._owner.plan.lower.settled_definition(path)
+        let query = self
+            ._owner
+            .plan
+            .lower
+            .query(path)
+            .ok_or(QueryError::NotImplemented)?;
+        let owner = self
+            ._owner
+            .completed
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .and_then(|(_, data)| data.observations.lower_owner(query))
+            .cloned()
+            .ok_or(QueryError::NotImplemented)?;
+        owner.settled_definition(path)
     }
 }
 impl FrontCheckQueries {

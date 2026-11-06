@@ -62,19 +62,20 @@ fn admitted_private_facts_reuse_unchanged_inputs_and_refuse_body_and_membership_
                 .memo_reads(&value, QueryKind::Signature)
                 .unwrap();
             assert!(signature_reads.iter().any(
-                |(key, _)| matches!(key, memo::ReadKey::PrivateSummary(id) if id.path() == &value)
+                |(key, _)| matches!(key, hirsel_query_products::reads::ReadKey::PrivateSummary(id) if id.path() == &value)
             ));
             let reads = program
                 .engine
                 .memo_reads(&value, QueryKind::PrivateInference)
                 .unwrap();
             assert!(
-                reads
-                    .iter()
-                    .any(|(key, _)| matches!(key, memo::ReadKey::NameSet(..)))
+                reads.iter().any(|(key, _)| matches!(
+                    key,
+                    hirsel_query_products::reads::ReadKey::NameSet(..)
+                ))
             );
             assert!(reads.iter().any(
-                |(key, _)| matches!(key, memo::ReadKey::CitedText(id) if id.path() == &value)
+                |(key, _)| matches!(key, hirsel_query_products::reads::ReadKey::CitedText(id) if id.path() == &value)
             ));
             drop(reservation);
             assert_eq!(budget.reserved(), 0);
@@ -794,7 +795,7 @@ pub fn main() -> u8 { 0u8 }
                 },
                 "{name}"
             );
-            assert!(engine.memo_reads(&path, QueryKind::Signature).unwrap().iter().any(|(key, _)| matches!(key, memo::ReadKey::PrivateSummary(id) if id.path() == &path)));
+            assert!(engine.memo_reads(&path, QueryKind::Signature).unwrap().iter().any(|(key, _)| matches!(key, hirsel_query_products::reads::ReadKey::PrivateSummary(id) if id.path() == &path)));
         }
         drop(reservation);
         let mut relay = entry_path(&context);
@@ -861,11 +862,8 @@ fn rejected_representation_retracts_leaf_and_caller_proofs_and_records_the_priva
                 let reads = engine
                     .memo_reads(&path, QueryKind::PrivateInference)
                     .unwrap();
-                assert!(
-                    reads
-                        .iter()
-                        .any(|(key, _)| *key == memo::ReadKey::Representation(representation))
-                );
+                assert!(reads.iter().any(|(key, _)| *key
+                    == hirsel_query_products::reads::ReadKey::Representation(representation)));
             }
             drop(reservation);
             assert_eq!(budget.reserved(), 0);

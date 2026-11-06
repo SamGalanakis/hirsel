@@ -793,9 +793,9 @@ fn frozen_s1_products_do_not_export_root_validation_universe_receipts() {
             for origin in ["lib", "imager"] {
                 assert!(
                     reads
-                        .get(&memo::ReadKey::ValidationUniverse(memo::PackageKey::of(
-                            &package(origin)
-                        )))
+                        .get(&hirsel_query_products::reads::ReadKey::ValidationUniverse(
+                            hirsel_query_products::reads::PackageKey::of(&package(origin))
+                        ))
                         .is_some(),
                     "missing {origin} V input in {reads:?}"
                 );
@@ -881,11 +881,10 @@ fn image_releases_unrecorded_files_after_parallel_constant_publication() {
             .iter()
             .find_map(|(memo, reads)| (*memo == key).then_some(reads))
             .expect("Inspect returns the constant Lower reads");
-        assert!(
-            reads
-                .iter()
-                .any(|(read, _)| matches!(read, memo::ReadKey::ValidationUniverse(_)))
-        );
+        assert!(reads.iter().any(|(read, _)| matches!(
+            read,
+            hirsel_query_products::reads::ReadKey::ValidationUniverse(_)
+        )));
         let bytes = products(&f, "lib").unwrap();
         let stored = bytes;
         let client = f.program("client", main, &library, "lib");
@@ -1040,13 +1039,13 @@ fn imaged_frontier_replay_budget_matrix() -> String {
                 );
                 assert!(!outcome.reads.is_empty());
                 assert!(outcome.reads.iter().any(|(key, _)| *key
-                    == memo::ReadKey::ExecutedBody(hirsel_syntax::DefId::intern(&path))));
-                assert!(
-                    outcome
-                        .reads
-                        .iter()
-                        .any(|(key, _)| matches!(key, memo::ReadKey::ValidationUniverse(_)))
-                );
+                    == hirsel_query_products::reads::ReadKey::ExecutedBody(
+                        hirsel_syntax::DefId::intern(&path)
+                    )));
+                assert!(outcome.reads.iter().any(|(key, _)| matches!(
+                    key,
+                    hirsel_query_products::reads::ReadKey::ValidationUniverse(_)
+                )));
             }
             for kind in [
                 QueryKind::Resolve,

@@ -1328,9 +1328,9 @@ fn frozen_frontier_generator_helper_edits_refresh_text_and_execution_reads() {
                         .unwrap();
                     assert!(
                         reads.iter().any(|(key, _)| *key
-                            == memo::ReadKey::ExecutedBody(hirsel_syntax::DefId::intern(&path(
-                                "body_text"
-                            )))),
+                            == hirsel_query_products::reads::ReadKey::ExecutedBody(
+                                hirsel_syntax::DefId::intern(&path("body_text"))
+                            )),
                         "jobs={jobs} revision={revision}\nworker={reads:?}\nscalar={:?}",
                         control.memo_reads(&path("chosen"), QueryKind::Check)
                     );
@@ -1536,9 +1536,9 @@ fn frozen_lowering_frontier_matches_scalar_for_nonconstant_comptime_and_edits() 
                         for name in ["A", "helper", "SEED"] {
                             assert!(
                                 outcome.reads.iter().any(|(key, _)| *key
-                                    == memo::ReadKey::ExecutedBody(hirsel_syntax::DefId::intern(
-                                        &path(name)
-                                    ))),
+                                    == hirsel_query_products::reads::ReadKey::ExecutedBody(
+                                        hirsel_syntax::DefId::intern(&path(name))
+                                    )),
                                 "missing execution read {name}"
                             );
                         }
@@ -1694,9 +1694,9 @@ fn frozen_lowering_frontier_keeps_lower_warnings_and_current_hit_metadata() {
                     for (key, value) in scalar_reads.iter() {
                         if matches!(
                             key,
-                            memo::ReadKey::ValidationView(_)
-                                | memo::ReadKey::UniverseErrors
-                                | memo::ReadKey::FirstHeap
+                            hirsel_query_products::reads::ReadKey::ValidationView(_)
+                                | hirsel_query_products::reads::ReadKey::UniverseErrors
+                                | hirsel_query_products::reads::ReadKey::FirstHeap
                         ) {
                             continue;
                         }
@@ -1706,12 +1706,10 @@ fn frozen_lowering_frontier_keeps_lower_warnings_and_current_hit_metadata() {
                             "jobs={jobs} warm={warm} missing {key:?}"
                         );
                     }
-                    assert!(
-                        outcome
-                            .reads
-                            .iter()
-                            .any(|(key, _)| matches!(key, memo::ReadKey::ValidationUniverse(_)))
-                    );
+                    assert!(outcome.reads.iter().any(|(key, _)| matches!(
+                        key,
+                        hirsel_query_products::reads::ReadKey::ValidationUniverse(_)
+                    )));
                 }
                 let compact = crate::request_graph::checked_prefix(
                     &mut candidate,
@@ -1735,12 +1733,10 @@ fn frozen_lowering_frontier_keeps_lower_warnings_and_current_hit_metadata() {
                         placed_evidence(&candidate.sources, format!("{:?}", output.diagnostics)),
                         placed_evidence(&control.sources, format!("{:?}", expected.diagnostics))
                     );
-                    assert!(
-                        outcome
-                            .reads
-                            .iter()
-                            .any(|(key, _)| matches!(key, memo::ReadKey::ValidationUniverse(_)))
-                    );
+                    assert!(outcome.reads.iter().any(|(key, _)| matches!(
+                        key,
+                        hirsel_query_products::reads::ReadKey::ValidationUniverse(_)
+                    )));
                 }
             }
         }

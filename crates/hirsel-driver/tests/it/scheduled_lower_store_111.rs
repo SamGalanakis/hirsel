@@ -539,7 +539,7 @@ fn check_live_lower_observations(live_only: bool) {
             ): (
                 hirsel_types::QueryOutput<hirsel_tir::DefinitionRef>,
                 Reads,
-                memo::DepthEvidence<hirsel_span::Span>,
+                hirsel_query_products::depth::DepthEvidence<hirsel_span::Span>,
                 Vec<(hirsel_syntax::ExprId, hirsel_tir::Materialized)>,
                 hirsel_syntax::ContentHash,
                 hirsel_syntax::ContentHash,

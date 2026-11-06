@@ -1052,7 +1052,8 @@ fn compact_front_results_preserve_diagnostics_after_batch_body_release() {
                         output
                             .reads
                             .iter()
-                            .any(|(key, _)| *key == memo::ReadKey::Environment)
+                            .any(|(key, _)| *key
+                                == hirsel_query_products::reads::ReadKey::Environment)
                     );
                     let (actual, summary) = match output.result {
                         Ok(output) => (output.diagnostics, Some(output.summary)),

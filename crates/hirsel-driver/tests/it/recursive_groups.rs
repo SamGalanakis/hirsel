@@ -94,8 +94,16 @@ fn recursive_header_membership_reads_cover_group_changes() {
             .unwrap();
         for member in ["Tree", "Entry"] {
             let id = hirsel_syntax::DefId::intern(&path(member));
-            assert!(reads.get(&memo::ReadKey::ExecutedBody(id)).is_some());
-            assert!(reads.get(&memo::ReadKey::Signature(id)).is_none());
+            assert!(
+                reads
+                    .get(&hirsel_query_products::reads::ReadKey::ExecutedBody(id))
+                    .is_some()
+            );
+            assert!(
+                reads
+                    .get(&hirsel_query_products::reads::ReadKey::Signature(id))
+                    .is_none()
+            );
         }
         // Removing the return edge breaks the group, so Tree must now read
         // Entry's final signature. Its former group receipt cannot survive.
@@ -108,9 +116,9 @@ fn recursive_header_membership_reads_cover_group_changes() {
             .unwrap();
         assert!(
             reads
-                .get(&memo::ReadKey::Signature(hirsel_syntax::DefId::intern(
-                    &path("Entry")
-                )))
+                .get(&hirsel_query_products::reads::ReadKey::Signature(
+                    hirsel_syntax::DefId::intern(&path("Entry"))
+                ))
                 .is_some()
         );
     });

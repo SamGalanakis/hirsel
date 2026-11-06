@@ -404,7 +404,7 @@ fn fragment_checked(
     };
     let mut cached = None;
     if let Some(previous) = store.lookup_product(address).filter(|p| p.action == action)
-        && let Some(archive) = store.copy_product_archive(previous.reference)
+        && let Ok(archive) = store.copy_product_archive(previous.reference)
     {
         let product = ProductRef::import_archive(address, action, archive);
         if let Ok(fragment) = fragment_product(store, product)
@@ -549,7 +549,7 @@ fn link_checked(
     let action = action("hirsel.link.action.v1", address, &reads);
     let mut cached = None;
     if let Some(previous) = store.lookup_product(address).filter(|p| p.action == action)
-        && let Some(archive) = store.copy_product_archive(previous.reference)
+        && let Ok(archive) = store.copy_product_archive(previous.reference)
     {
         let product = ProductRef::import_archive(address, action, archive);
         if let Ok(linked) = linked_product(store, product) {

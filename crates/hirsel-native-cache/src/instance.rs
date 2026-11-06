@@ -128,7 +128,7 @@ impl InstanceQueries {
             product: ProductRef::import_archive(
                 address,
                 previous.action,
-                self.store.copy_product_archive(previous.reference)?,
+                self.store.copy_product_archive(previous.reference).ok()?,
             ),
             value: record.0,
             layout_closure: record.1,

@@ -54,6 +54,62 @@ product_backing!(
     dyn ResultStore + '_
 );
 
+/// Failure to read or copy a complete archive under request admission.
+#[derive(Debug)]
+pub enum ProductArchiveError {
+    Unavailable,
+    InvalidContent,
+    UnsupportedProvider,
+    LayoutOverflow,
+    Admission {
+        stage: &'static str,
+        requested: u64,
+        retained: u64,
+        limit: u64,
+    },
+    CopyBound {
+        required: u64,
+        reserved: u64,
+    },
+    InvalidArchive(std::io::Error),
+}
+impl std::fmt::Display for ProductArchiveError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Unavailable => {
+                f.write_str("archive backing is unavailable (missing, corrupt or unreadable)")
+            }
+            Self::InvalidContent => {
+                f.write_str("archive backing differs from its complete reference")
+            }
+            Self::UnsupportedProvider => f.write_str("provider has no archive-copy admission"),
+            Self::LayoutOverflow => f.write_str("archive backing layout overflow"),
+            Self::Admission {
+                stage,
+                requested,
+                retained,
+                limit,
+            } => write!(
+                f,
+                "{stage} admission refused: requested {requested} bytes, retained {retained}, limit {limit}"
+            ),
+            Self::CopyBound { required, reserved } => write!(
+                f,
+                "archive copy needs {required} bytes, exceeds its {reserved}-byte working reservation"
+            ),
+            Self::InvalidArchive(error) => write!(f, "archive validation failed: {error}"),
+        }
+    }
+}
+impl std::error::Error for ProductArchiveError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::InvalidArchive(error) => Some(error),
+            _ => None,
+        }
+    }
+}
+
 /// Stable logical address plus explicit source inputs. The address does not
 /// change when the body changes; variants bind inputs and dependency outputs
 /// into complete actions before a payload can be adopted.
@@ -323,8 +379,15 @@ pub trait ResultStore: Send + Sync {
     fn copy_product_archive(
         &self,
         _reference: Reference,
-    ) -> Option<hirsel_engine_runtime::ProductArchive> {
-        None
+    ) -> Result<hirsel_engine_runtime::ProductArchive, ProductArchiveError> {
+        Err(ProductArchiveError::UnsupportedProvider)
+    }
+    /// Read backing for an archive copy, preserving admission failures from
+    /// request transport. Other providers report unavailable backing without
+    /// inferring a cause from a second read.
+    fn read_product_content(&self, reference: Reference) -> Result<Bytes, ProductArchiveError> {
+        self.get_content(reference)
+            .ok_or(ProductArchiveError::Unavailable)
     }
     /// Immutable content and logical action indexes use distinct addresses.
     /// Byte providers share their map; directory providers map content directly.

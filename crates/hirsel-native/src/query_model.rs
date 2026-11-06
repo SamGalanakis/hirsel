@@ -441,7 +441,7 @@ pub fn ready_product(
             current.action,
             store
                 .copy_product_archive(record)
-                .ok_or("native product archive is unavailable or exceeds admission")?,
+                .map_err(|error| format!("native product archive: {error}"))?,
         ));
     }
     Ok(ReadyProduct {

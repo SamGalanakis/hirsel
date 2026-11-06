@@ -61,6 +61,18 @@ impl Admission {
         }
         admitted
     }
+    fn archive_charge(&self, bytes: u64, stage: &'static str) -> Result<(), ProductArchiveError> {
+        if self.charge(bytes) {
+            Ok(())
+        } else {
+            Err(ProductArchiveError::Admission {
+                stage,
+                requested: bytes,
+                retained: self.used.load(Ordering::Acquire),
+                limit: self.memory.bytes(),
+            })
+        }
+    }
     fn release(&self, bytes: u64) {
         let previous = self.used.fetch_sub(bytes, Ordering::AcqRel);
         debug_assert!(previous >= bytes);
@@ -457,29 +469,45 @@ impl ResultStore for RequestStore {
     fn copy_product_archive(
         &self,
         reference: Reference,
-    ) -> Option<hirsel_engine_runtime::ProductArchive> {
-        let bytes = self.get_content(reference)?;
+    ) -> Result<hirsel_engine_runtime::ProductArchive, ProductArchiveError> {
+        let bytes = self.read_product_content(reference)?;
         if !bytes.matches_reference(reference) {
-            return None;
+            return Err(ProductArchiveError::InvalidContent);
         }
         // The existing transport bound covers the buffer, its region header,
         // archive header and lease before allocating the detached payload.
-        let working = reference.len.checked_add(ENTRY_CHARGE)?;
-        if !self.memory.charge(working) {
-            return None;
-        }
+        let working = reference
+            .len
+            .checked_add(ENTRY_CHARGE)
+            .ok_or(ProductArchiveError::LayoutOverflow)?;
+        self.memory.archive_charge(working, "archive copy")?;
         let bytes = Bytes::from(bytes.to_vec());
         let charge =
             hirsel_engine_runtime::ProductArchive::checked_import_charge(reference, &bytes)
-                .ok()
+                .map_err(ProductArchiveError::InvalidArchive)
                 .and_then(|bytes| {
-                    bytes.checked_add(hirsel_engine_admission::retained_arc_bytes(
-                        &std::mem::MaybeUninit::<ArchiveLease>::uninit(),
-                    ))
+                    bytes
+                        .checked_add(hirsel_engine_admission::retained_arc_bytes(
+                            &std::mem::MaybeUninit::<ArchiveLease>::uninit(),
+                        ))
+                        .ok_or(ProductArchiveError::LayoutOverflow)
+                })
+                .and_then(|charge| {
+                    if charge <= working {
+                        Ok(charge)
+                    } else {
+                        Err(ProductArchiveError::CopyBound {
+                            required: charge,
+                            reserved: working,
+                        })
+                    }
                 });
-        let Some(charge) = charge.filter(|charge| *charge <= working) else {
-            self.memory.release(working);
-            return None;
+        let charge = match charge {
+            Ok(charge) => charge,
+            Err(error) => {
+                self.memory.release(working);
+                return Err(error);
+            }
         };
         self.memory.release(working - charge);
         let owner = Arc::new(ArchiveLease {
@@ -489,7 +517,23 @@ impl ResultStore for RequestStore {
         hirsel_engine_runtime::ProductArchive::from_admitted_content(
             reference, bytes, charge, owner,
         )
-        .ok()
+        .map_err(ProductArchiveError::InvalidArchive)
+    }
+    fn read_product_content(&self, reference: Reference) -> Result<Bytes, ProductArchiveError> {
+        if let Some((actual, bytes)) = self
+            .state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contents
+            .get(&reference.output.0)
+        {
+            return if *actual == reference {
+                Ok(bytes.clone())
+            } else {
+                Err(ProductArchiveError::InvalidContent)
+            };
+        }
+        self.backend.read_product_content(reference)
     }
     fn get_content(&self, reference: Reference) -> Option<Bytes> {
         if let Some((actual, bytes)) = self
@@ -832,7 +876,10 @@ mod tests {
         let backend = Arc::new(Backend(Mutex::new(bytes)));
         let budget = hirsel_engine_admission::ProcessBudget::new(working);
         let short = RequestStore::new(backend.clone(), budget.reserve(working - 1).unwrap());
-        assert!(short.copy_product_archive(reference).is_none());
+        assert!(matches!(short.copy_product_archive(reference),
+            Err(ProductArchiveError::Admission {
+                stage: "archive copy", requested, retained: 0, limit,
+            }) if requested == working && limit == working - 1));
         assert_eq!(short.retained_bytes(), 0);
         drop(short);
         let request = RequestStore::new(backend.clone(), budget.reserve(working).unwrap());
@@ -841,6 +888,11 @@ mod tests {
         assert!(archive.retained_bytes() <= working);
         assert_eq!(request.retained_bytes(), archive.retained_bytes());
         *backend.0.lock().unwrap() = Bytes::from(b"evicted".as_slice());
+        assert!(matches!(
+            request.copy_product_archive(reference),
+            Err(ProductArchiveError::InvalidContent)
+        ));
+        assert_eq!(request.retained_bytes(), archive.retained_bytes());
         drop((backend, request));
         assert_eq!(archive.bytes(), b"complete");
         assert_eq!(archive.reference(), reference);

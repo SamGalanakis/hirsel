@@ -400,7 +400,7 @@ impl LinkTasks {
                 .snapshot
                 .store
                 .copy_product_archive(record)
-                .ok_or("Link root archive exceeds admission")?,
+                .map_err(|error| format!("Link root archive: {error}"))?,
         );
         let root = self.root.output(root_ref.clone())?;
         Ok((plan.clone(), root_ref, root))

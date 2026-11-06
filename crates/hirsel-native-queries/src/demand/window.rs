@@ -276,7 +276,7 @@ impl StoredInstance {
     pub(crate) fn from_record(store: &dyn ResultStore, row: StoredRecord) -> Result<Self, String> {
         let archive = store
             .copy_product_archive(row.archive)
-            .ok_or("missing window product archive")?;
+            .map_err(|error| format!("window product archive: {error}"))?;
         Ok(Self {
             product: Arc::new(InstanceProduct {
                 product: hirsel_engine_runtime::ProductRef::import_archive(

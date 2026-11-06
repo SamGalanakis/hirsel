@@ -111,7 +111,7 @@ pub fn arena_query(
                 && xs.windows(2).all(|w| w[0] < w[1])
                 && (key.stratum == ArenaStratum::Candidates || xs.len() <= 1)
         })
-        && let Some(archive) = store.copy_product_archive(previous.reference)
+        && let Ok(archive) = store.copy_product_archive(previous.reference)
     {
         counts.hits += 1;
         return Ok(Arc::new(ArenaSummary::from_descriptor(

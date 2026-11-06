@@ -251,7 +251,7 @@ impl Plan {
             && let Some(bytes) = store.get_content(previous.reference)
             && let Ok(mut units) = serde_json::from_slice::<Vec<UnitDemand>>(&bytes)
             && self.check(&mut units).is_ok()
-            && let Some(archive) = store.copy_product_archive(previous.reference)
+            && let Ok(archive) = store.copy_product_archive(previous.reference)
         {
             return Ok(Selection {
                 product: ProductRef::import_archive(self.query.address, self.action, archive),

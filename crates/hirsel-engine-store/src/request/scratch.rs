@@ -259,39 +259,58 @@ impl ResultStore for ScratchStore {
                 .all(|reference| self.selected.get_content(reference).is_some())
     }
     fn get_content(&self, reference: Reference) -> Option<Bytes> {
+        self.read_product_content(reference).ok()
+    }
+    fn read_product_content(&self, reference: Reference) -> Result<Bytes, ProductArchiveError> {
         let files = self.files.lock().unwrap_or_else(|e| e.into_inner());
         let Some(entry) = files.entries.get(&reference.output.0) else {
             drop(files);
-            return self.selected.get_content(reference);
+            return self.selected.read_product_content(reference);
         };
         if !entry.matches(reference) {
-            return None;
+            return Err(ProductArchiveError::InvalidContent);
         }
-        if files.spool.metadata().ok()?.len() != files.disk {
-            return None;
+        if files
+            .spool
+            .metadata()
+            .map_err(ProductArchiveError::InvalidArchive)?
+            .len()
+            != files.disk
+        {
+            return Err(ProductArchiveError::InvalidContent);
         }
         // Bytes takes the exact Vec backing without copying its payload.
         // The same charge covers the read and every retained child view.
-        let retained = reference.len.checked_add(ENTRY_CHARGE)?;
-        if !self.admission.charge(retained) {
-            return None;
-        }
-        let read = || -> Option<Bytes> {
-            let mut value = vec![0; usize::try_from(reference.len).ok()?];
-            read_at(&files.spool, &mut value, entry.offset).ok()?;
-            Bytes::from(value).checked(reference)
+        let retained = reference
+            .len
+            .checked_add(ENTRY_CHARGE)
+            .ok_or(ProductArchiveError::LayoutOverflow)?;
+        self.admission.archive_charge(retained, "scratch read")?;
+        let read = || -> Result<Bytes, ProductArchiveError> {
+            let mut value = vec![
+                0;
+                usize::try_from(reference.len)
+                    .map_err(|_| ProductArchiveError::LayoutOverflow)?
+            ];
+            read_at(&files.spool, &mut value, entry.offset)
+                .map_err(ProductArchiveError::InvalidArchive)?;
+            Bytes::from(value)
+                .checked(reference)
+                .ok_or(ProductArchiveError::InvalidContent)
         };
-        let value = read();
-        if value.is_none() {
-            self.admission.release(retained);
-            return None;
-        }
+        let value = match read() {
+            Ok(value) => value,
+            Err(error) => {
+                self.admission.release(retained);
+                return Err(error);
+            }
+        };
         let owner = Arc::new(ReadOwner {
             admission: self.admission.clone(),
             _root: self.root.clone(),
             bytes: retained,
         });
-        Some(value.unwrap().retain_owner(owner))
+        Ok(value.retain_owner(owner))
     }
 }
 
@@ -527,6 +546,29 @@ mod tests {
         write_at(&spool, b"corrupted", 0).unwrap();
         let before = request.retained_bytes();
         assert!(request.get_content(first).is_none());
+        assert!(matches!(
+            request.copy_product_archive(first),
+            Err(ProductArchiveError::InvalidContent)
+        ));
+        assert_eq!(request.retained_bytes(), before);
+        let absent = domain().reference(b"missing").unwrap();
+        assert!(matches!(
+            request.copy_product_archive(absent),
+            Err(ProductArchiveError::Unavailable)
+        ));
+        let lease_bytes = hirsel_engine_admission::retained_arc_bytes(&std::mem::MaybeUninit::<
+            ArchiveLease,
+        >::uninit());
+        let held_admission = request
+            .admit_product_memory(ram - before - lease_bytes)
+            .unwrap();
+        assert!(
+            matches!(request.copy_product_archive(second), Err(ProductArchiveError::Admission {
+            stage: "scratch read", requested, retained, limit,
+        }) if requested == second.len + ENTRY_CHARGE && retained == ram && limit == ram)
+        );
+        assert_eq!(request.retained_bytes(), ram);
+        drop(held_admission);
         assert_eq!(request.retained_bytes(), before);
         let held = request.get_content(second).unwrap();
         assert_eq!(&*held, &vec![2; 32 << 10]);

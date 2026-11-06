@@ -234,7 +234,7 @@ impl ExecutionTasks {
             let archive = snapshot
                 .store
                 .copy_product_archive(previous.reference)
-                .ok_or("persisted execution plan is unavailable or corrupt")?;
+                .map_err(|error| format!("persisted execution plan: {error}"))?;
             let imported = ProductRef::import_archive(self.query.address, action, archive);
             if identity(&imported)? != identity(&product)? {
                 return Err("recomputed execution product differs from cached output".into());
@@ -302,7 +302,7 @@ impl ExecutionTasks {
                 && let Some(previous) = store
                     .lookup_product(query.address)
                     .filter(|p| p.action == action)
-                && let Some(archive) = store.copy_product_archive(previous.reference)
+                && let Ok(archive) = store.copy_product_archive(previous.reference)
             {
                 let product = ProductRef::import_archive(query.address, action, archive);
                 if let Ok(objects) = self.load_objects(product.clone()) {

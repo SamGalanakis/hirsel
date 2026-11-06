@@ -237,7 +237,7 @@ impl ReadyQueries {
             ProductRef::import_archive(
                 address,
                 action,
-                self.store.copy_product_archive(previous.reference)?,
+                self.store.copy_product_archive(previous.reference).ok()?,
             ),
         )
         .ok()?;

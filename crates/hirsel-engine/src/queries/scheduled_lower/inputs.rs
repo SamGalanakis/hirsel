@@ -150,12 +150,16 @@ pub(super) struct Waiting {
 }
 impl Waiting {
     const INITIAL: usize = 4;
-    pub(super) fn input_bytes() -> usize {
+    pub(super) fn initial_bytes() -> usize {
         Self::INITIAL * size_of::<((DefId, u32), Span)>() + 2 * size_of::<usize>()
     }
-    pub(super) fn new(partition: &LowerPartition) -> Self {
+    pub(super) fn new(partition: &LowerPartition, initial: bool) -> Self {
         Self {
-            rows: Vec::with_capacity(Self::INITIAL),
+            rows: if initial {
+                Vec::with_capacity(Self::INITIAL)
+            } else {
+                Vec::new()
+            },
             charge: LowerInputCharge {
                 remaining: partition.remaining.clone(),
                 bytes: 0,
@@ -178,10 +182,14 @@ impl Waiting {
             }
         } else if let Some(site) = site {
             if self.rows.len() == self.rows.capacity() {
-                let extra =
-                    self.rows
-                        .capacity()
-                        .checked_mul(size_of::<((DefId, u32), Span)>())? as u64;
+                let growth = self.rows.capacity().max(1);
+                let extra = growth
+                    .checked_mul(size_of::<((DefId, u32), Span)>())?
+                    .checked_add(if self.rows.capacity() == 0 {
+                        2 * size_of::<usize>()
+                    } else {
+                        0
+                    })? as u64;
                 let mut remaining = self
                     .charge
                     .remaining
@@ -189,7 +197,7 @@ impl Waiting {
                     .unwrap_or_else(|e| e.into_inner());
                 *remaining = remaining.checked_sub(extra)?;
                 self.charge.bytes += extra;
-                self.rows.reserve_exact(self.rows.capacity());
+                self.rows.reserve_exact(growth);
             }
             self.rows.push((key, site));
         }

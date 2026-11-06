@@ -94,7 +94,7 @@ impl FrontStorageQueries {
             return None;
         }
         self.front.inputs.iter().find_map(|(address, input)| {
-            (Self::address(*address) == id.address.0).then_some(input.definition)
+            (Self::address(address) == id.address.0).then_some(input.definition)
         })
     }
     // A composed recipe uses its parent's execution grant. Its retained

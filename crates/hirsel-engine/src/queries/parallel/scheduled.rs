@@ -270,8 +270,6 @@ pub struct FrontBodyQueries {
     forwarded: Mutex<BTreeMap<Key, Forwarded>>,
     inputs: Inputs,
     _operation_inputs: Arc<OperationFrontInputs>,
-    by_definition: operation_inputs::InputIndex<DefId, Key>,
-    body_demands: operation_inputs::InputIndex<Key, Key>,
     types: Arc<hirsel_types::TypeInterner>,
     memo: Arc<hirsel_types::TypeMemo>,
     namespace: Arc<NamespaceCapture>,
@@ -436,7 +434,7 @@ impl FrontBodyQueries {
     pub(crate) fn owns_query(&self, query: QueryId) -> bool {
         query.kind == FRONT_BODY_KIND
             && (self.inputs.contains_key(&query.address.0)
-                || self.body_demands.get(&query.address.0).is_some())
+                || self.inputs.demand(&query.address.0).is_some())
     }
     pub(crate) fn diagnostic_phase(&self, diagnostic: &Diagnostic) -> Option<String> {
         let matches = |candidate: &Diagnostic| {
@@ -482,7 +480,7 @@ impl FrontBodyQueries {
         weight: MemoryWeight,
     ) -> bool {
         Arc::ptr_eq(&self.namespace, namespace)
-            && self.by_definition.len() == definitions.len()
+            && self.inputs.len() == definitions.len()
             && definitions.iter().all(|path| self.query(path).is_some())
             && self.inputs.values().all(|input| input.weight == weight)
     }
@@ -1613,7 +1611,7 @@ impl FrontBodyQueries {
                 let key = if self.inputs.contains_key(&product.address.0) {
                     product.address.0
                 } else {
-                    *self.body_demands.get(&product.address.0)?
+                    self.inputs.demand(&product.address.0)?
                 };
                 let outcome = match slots.get(&key)? {
                     FrontSlot::Archived(_) => return None,
@@ -1664,7 +1662,7 @@ impl FrontBodyQueries {
     }
 
     pub fn query(&self, definition: &DefPath) -> Option<QueryId> {
-        let address = *self.by_definition.get(&DefId::get(definition)?)?;
+        let address = self.inputs.address(DefId::get(definition)?, false)?;
         Some(QueryId {
             kind: FRONT_BODY_KIND,
             address: hirsel_artifact_store::Address(address),
@@ -1673,13 +1671,11 @@ impl FrontBodyQueries {
     /// A separately admitted body materialization after the compact P settles.
     /// This address is demanded only when a body consumer lost its archive.
     pub fn body_query(&self, definition: &DefPath) -> Option<QueryId> {
-        let query = self.query(definition)?;
         Some(QueryId {
             kind: FRONT_BODY_KIND,
-            address: hirsel_artifact_store::Address(ContentHash::of_parts(
-                "hirsel.front.body-demand.v1",
-                [query.address.0.0.as_slice()],
-            )),
+            address: hirsel_artifact_store::Address(
+                self.inputs.address(DefId::get(definition)?, true)?,
+            ),
         })
     }
     /// Materialize through the compact Check latch in the consumer's admitted
@@ -1752,11 +1748,11 @@ impl FrontBodyQueries {
         definition: DefId,
         checked: bool,
     ) -> Option<LiveFrontReads> {
-        let key = self.by_definition.get(&definition)?;
+        let key = self.inputs.address(definition, false)?;
         self.live_query_reads(
             QueryId {
                 kind: FRONT_BODY_KIND,
-                address: hirsel_artifact_store::Address(*key),
+                address: hirsel_artifact_store::Address(key),
             },
             checked,
         )
@@ -2032,7 +2028,7 @@ impl FrontBodyQueries {
         path: &DefPath,
     ) -> Option<&Arc<AcceptedFrontRegistration>> {
         self.inputs
-            .get(self.by_definition.get(&DefId::get(path)?)?)?
+            .definition(DefId::get(path)?)?
             .registration
             .as_ref()
     }
@@ -2191,7 +2187,7 @@ impl QueryFactory for Factory {
         let (key, input, materialize) = if let Some(input) = self.0.inputs.get(&query.address.0) {
             (query.address.0, input, false)
         } else {
-            let key = *self.0.body_demands.get(&query.address.0).ok_or_else(|| {
+            let key = self.0.inputs.demand(&query.address.0).ok_or_else(|| {
                 self.0.protocol_failure(
                     query,
                     "Front input is unavailable in the registered immutable views",
@@ -3179,6 +3175,16 @@ impl QueryEngine {
         errors: RuntimeErrors,
         _previous: Option<&FrontBodyQueries>,
     ) -> Result<Arc<FrontBodyQueries>, QueryError> {
+        if let Some(previous) = namespace
+            .operation
+            .front
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .and_then(std::sync::Weak::upgrade)
+        {
+            previous.inputs.clear_addresses();
+        }
         let available = allowance.available_bytes();
         namespace.require_environment(self)?;
         let registrations = namespace
@@ -3291,7 +3297,7 @@ impl QueryEngine {
         for (definition, text, implementation, key, registration) in selected {
             let id = DefId::intern(&definition);
             inputs.insert(
-                namespace.query_id(FRONT_BODY_KIND, key.0).address.0,
+                id,
                 Input {
                     registration,
                     definition: id,
@@ -3309,7 +3315,11 @@ impl QueryEngine {
             .unwrap_or_else(|e| e.into_inner());
         let previous = operation_front.as_ref().and_then(std::sync::Weak::upgrade);
         let previous = previous.as_deref();
-        let inputs = Inputs::new(inputs, previous.map(|previous| &previous.inputs))?;
+        let inputs = Inputs::new(
+            inputs,
+            namespace.clone(),
+            previous.map(|previous| &previous.inputs),
+        )?;
         let arm_fixes = inputs::capture_map(
             arm_fixes::capture(&self.sources, &self.items),
             previous.map(|previous| &previous.arm_fixes),
@@ -3333,29 +3343,8 @@ impl QueryEngine {
                 .collect(),
             previous.map(|previous| &previous.candidates),
         )?;
-        let by_definition = inputs::capture_map(
-            inputs
-                .iter()
-                .map(|(&key, input)| (input.definition, key))
-                .collect(),
-            previous.map(|previous| &previous.by_definition),
-        )?;
-        let body_demands = inputs::capture_map(
-            inputs
-                .keys()
-                .map(|&key| {
-                    (
-                        ContentHash::of_parts("hirsel.front.body-demand.v1", [key.0.as_slice()]),
-                        key,
-                    )
-                })
-                .collect(),
-            previous.map(|previous| &previous.body_demands),
-        )?;
         let indexes = Arc::new(OperationFrontInputs {
             inputs: inputs.clone(),
-            by_definition: by_definition.clone(),
-            body_demands: body_demands.clone(),
             cited: cited.clone(),
             candidates: candidates.clone(),
             arm_fixes: arm_fixes.clone(),
@@ -3388,7 +3377,7 @@ impl QueryEngine {
             .take(required)
             .ok_or_else(|| refusal("shared Front input partition"))?;
         namespace.admit(&mut inputs_allowance, self.sources.clone())?;
-        indexes.admit(&mut inputs_allowance)?;
+        indexes.admit(&mut inputs_allowance, allowance.clone(), retention.clone())?;
         *operation_front = Some(Arc::downgrade(&indexes));
         drop(operation_front);
         let products = ProductSource::admit_shared(
@@ -3419,8 +3408,6 @@ impl QueryEngine {
             forwarded: Mutex::new(BTreeMap::new()),
             inputs,
             _operation_inputs: indexes,
-            by_definition,
-            body_demands,
             types: self.types.clone(),
             memo: self.memo.clone(),
             namespace,

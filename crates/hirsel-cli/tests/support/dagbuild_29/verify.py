@@ -79,15 +79,16 @@ def main(a):
                 actual=dict(exit=p.returncode,rows=[json.loads(l) for l in p.stdout.splitlines()],stderr=stderr)
                 expected={k:case[k] for k in ['exit','rows','stderr']}
                 receipt.update(state='completed',actual=actual,passed=actual==expected)
+                (out/'receipts.json').write_text(json.dumps(receipts,indent=2))
                 if p.returncode==124:
                     assert identity=='llvm-diamond-first-w4',('unexpected live timeout',identity,p)
                     receipt['disposition']='INCOMPLETE: e1-live-hang-29; original 60s cap'
                     receipt['replays']=[dict(engine=e,passed=False,disposition='INCOMPLETE: live tape has no complete trailer') for e in ['reference','llvm','cranelift']]
                     (out/'receipts.json').write_text(json.dumps(receipts,indent=2))
                     continue
+                assert actual==expected,(identity,actual,expected,p.stderr.decode())
                 if case['state'] is not None:
                     assert json.loads((state/'state.json').read_text())==case['state'],identity
-                assert actual==expected,(identity,actual,expected)
                 original=tape.read_bytes();receipt['tape_sha256']=hashlib.sha256(original).hexdigest()
                 project.rename(d/'project-unavailable');state.rename(d/'state-unavailable')
                 # Replay has no mounted original data or executable provider. Full

@@ -581,7 +581,7 @@ impl FrontLowerQueries {
                 + 4 * size_of::<usize>()
                 + size_of::<Mutex<u64>>()
                 + 2 * size_of::<usize>()
-                + inputs::Waiting::input_bytes(),
+                + inputs::Waiting::initial_bytes(),
         )
         .ok()
     }
@@ -3437,7 +3437,17 @@ impl QueryEngine {
         if let Some(previous) = previous {
             previous.paths.clear();
         }
-        let input_bytes = FrontLowerQueries::fixed_input_bytes().ok_or_else(refusal)?;
+        // The initial request window keeps its planning grant. Successor
+        // captures debit request sites only when they suspend.
+        let input_bytes = FrontLowerQueries::fixed_input_bytes()
+            .and_then(|bytes| {
+                bytes.checked_sub(if previous.is_some() {
+                    inputs::Waiting::initial_bytes() as u64
+                } else {
+                    0
+                })
+            })
+            .ok_or_else(refusal)?;
         let retention = partition.remaining.clone();
         let input_charge = LowerInputCharge::take(partition, input_bytes).ok_or_else(|| {
             refuse(format!(
@@ -3552,7 +3562,7 @@ impl QueryEngine {
             forwarded: Mutex::new(BTreeMap::new()),
             source,
             inputs,
-            waiting: Mutex::new(inputs::Waiting::new(partition)),
+            waiting: Mutex::new(inputs::Waiting::new(partition, previous.is_none())),
             generator,
             staged,
             paths,

@@ -309,6 +309,7 @@ fn dagbuild_29_reference_checked_workflows() {
 fn native_workflows(backend: &str) {
     let scratch = scratch("dagbuild-29-host-");
     let root = scratch.path();
+    let _evidence = super::width_capacity_36::Evidence(root.to_owned());
     package(root);
     for (name, body) in [
         (

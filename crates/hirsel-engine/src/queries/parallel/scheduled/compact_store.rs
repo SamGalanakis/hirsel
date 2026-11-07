@@ -2,11 +2,6 @@
 //! Source text and all reads must still match; Lower retains independent V.
 use super::*;
 
-const TERMINAL: Domain = Domain {
-    kind: 0x4600_0042,
-    schema: 1,
-};
-
 #[derive(serde::Serialize, serde::Deserialize)]
 struct Record {
     key: Key,
@@ -182,18 +177,35 @@ pub(in crate::queries) fn load_publication(
 }
 
 impl FrontBodyQueries {
-    pub(super) fn store_compact(&self, key: Key, outcome: &FrontOutcome, scratch: u64) {
-        if !self.store.persistence().retains() {
+    fn retain_terminal(&self, key: Key, reads: &Reads, bytes: &[u8]) -> Option<Reference> {
+        let storage = storage_key(&self.inputs[&key].key);
+        if self.terminal_cache.is_some() {
+            // The provider lease keeps these immutable bytes through this
+            // input view. Reuse their reference even before the optional
+            // query index is published, without a second transport owner.
+            return self.store.cache_query(&storage, reads.clone(), bytes);
+        }
+        let reference = self.store.put_content(
+            hirsel_engine_store::product_domain(QueryKind::Summary),
+            bytes,
+        )?;
+        if self.store.persistence().retains() {
+            self.store.cache_query(&storage, reads.clone(), bytes);
+        }
+        Some(reference)
+    }
+    pub(super) fn store_compact(&self, key: Key, outcome: &mut FrontOutcome, scratch: u64) {
+        if self.store.capability() == hirsel_engine_store::ProviderCapability::Absent {
             return;
         }
         self.store
-            .archive_encoded(hirsel_engine_store::ArchiveBoundary::Ordinary);
+            .archive_encoded(if self.terminal_cache.is_some() {
+                hirsel_engine_store::ArchiveBoundary::Ordinary
+            } else {
+                hirsel_engine_store::ArchiveBoundary::RequiredSpill
+            });
         if let Some(bytes) = self.encode_terminal(key, outcome, scratch) {
-            self.store.cache_query(
-                &storage_key(&self.inputs[&key].key),
-                (*outcome.reads).clone(),
-                &bytes,
-            );
+            outcome.terminal = self.retain_terminal(key, &outcome.reads, &bytes);
         }
     }
 
@@ -209,10 +221,11 @@ impl FrontBodyQueries {
         } else {
             self.archive_observations(outcome, scratch)?
         };
-        // Exact observations survive eviction. The compact terminal is an
-        // optional cache: a missed encoding or retention grant must not keep
-        // a consumed Summary alive. load_evicted already recomputes on a miss.
-        let facts = self.archive_terminal(key, outcome, scratch);
+        // Retire an unchanged producer only after its result is recoverable.
+        // Its observations alone cannot replace the completed Check.
+        let facts = outcome
+            .terminal
+            .or_else(|| self.archive_terminal(key, outcome, scratch))?;
         Some(ArchivedFront {
             facts,
             observations,
@@ -224,13 +237,14 @@ impl FrontBodyQueries {
         outcome: &FrontOutcome,
         scratch: u64,
     ) -> Option<Reference> {
-        if self.store.persistence().retains() {
+        if self.store.capability() == hirsel_engine_store::ProviderCapability::Absent {
             return None;
         }
+        let _reads = self.store.read_scope();
         self.store
             .archive_encoded(hirsel_engine_store::ArchiveBoundary::RequiredSpill);
         let bytes = self.encode_terminal(key, outcome, scratch)?;
-        self.store.put_content(TERMINAL, &bytes)
+        self.retain_terminal(key, &outcome.reads, &bytes)
     }
     fn encode_terminal(&self, key: Key, outcome: &FrontOutcome, scratch: u64) -> Option<Vec<u8>> {
         let temporary = outcome
@@ -306,6 +320,17 @@ impl FrontBodyQueries {
     }
 }
 impl BodyTask {
+    pub(super) fn checkpoint<T>(&self, stage: &str, value: Option<T>) -> Option<T> {
+        if value.is_none() {
+            operation_owner_trace(format_args!(
+                "OWNER CHECKPOINT {} {stage}; scratch {}",
+                self.queries.inputs[&self.input].definition.path(),
+                self.weight.scratch,
+            ));
+        }
+        value
+    }
+
     pub(super) fn load_evicted(
         &self,
         cx: &mut dyn QueryContext,
@@ -318,12 +343,14 @@ impl BodyTask {
             .get(&self.input)?
         {
             FrontSlot::Live { .. } => return None,
-            FrontSlot::Archived(archived) => archived.facts?,
+            FrontSlot::Archived(archived) => archived.facts,
         };
-        if facts.domain != TERMINAL || facts.len.checked_mul(8)? > self.weight.scratch {
+        if facts.domain != hirsel_engine_store::product_domain(QueryKind::Summary)
+            || facts.len.checked_mul(8)? > self.weight.scratch
+        {
             return None;
         }
-        let bytes = self.queries.store.get_content(facts)?;
+        let bytes = self.checkpoint("content", self.queries.store.get_content(facts))?;
         if facts.domain.reference(&bytes)? != facts {
             return None;
         }
@@ -337,18 +364,24 @@ impl BodyTask {
         if (bytes.len() as u64).checked_mul(8)? > self.weight.scratch {
             return None;
         }
-        let record = decode_record(&*self.queries.store, bytes, self.weight.scratch)?;
+        let record = self.checkpoint(
+            "record decode",
+            decode_record(&*self.queries.store, bytes, self.weight.scratch),
+        )?;
         if record.key != self.queries.inputs[&self.input].key.0
             || record.body.is_some_and(|body| {
                 body.domain != hirsel_engine_store::product_domain(QueryKind::Modes)
                     || body.len > self.weight.scratch
             })
         {
-            return None;
+            return self.checkpoint("record identity or body bound", None);
         }
         let reads = Arc::new(record.reads);
-        let facts = self.decode_facts(&record.facts, &reads)?;
-        self.install_cached_facts(cx, record.body, reads, facts)
+        let facts = self.checkpoint("facts", self.decode_facts(&record.facts, &reads))?;
+        self.checkpoint(
+            "publication",
+            self.install_cached_facts(cx, record.body, reads, facts),
+        )
     }
     pub(super) fn load_compact(
         &self,

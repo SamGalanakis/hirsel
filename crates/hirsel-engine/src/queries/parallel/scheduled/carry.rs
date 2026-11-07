@@ -841,20 +841,26 @@ impl BodyTask {
     pub(super) fn decode_facts(&self, bytes: &[u8], reads: &Arc<Reads>) -> Option<Facts> {
         let queries = &self.queries;
         let input = &queries.inputs[&self.input];
-        let requirement = queries
-            .records
-            .record_requirement::<Facts>(bytes.to_vec().into())?;
+        let requirement = self.checkpoint(
+            "facts schema",
+            queries
+                .records
+                .record_requirement::<Facts>(bytes.to_vec().into()),
+        )?;
         if requirement.required_bytes() > self.weight.scratch {
             return None;
         }
-        let facts: Facts = requirement.decode_reserved(
-            |bytes| queries.store.try_admit_product_memory(bytes),
-            |path, occurrence| {
-                queries
-                    .citations
-                    .owners
-                    .record_source_anchor(path, occurrence)
-            },
+        let facts: Facts = self.checkpoint(
+            "facts decode",
+            requirement.decode_reserved(
+                |bytes| queries.store.try_admit_product_memory(bytes),
+                |path, occurrence| {
+                    queries
+                        .citations
+                        .owners
+                        .record_source_anchor(path, occurrence)
+                },
+            ),
         )?;
         let (encoded, roots) = hirsel_types::with_table_collection(|| {
             bincode::serialize_into(std::io::sink(), &facts)
@@ -868,7 +874,7 @@ impl BodyTask {
                     || s.reads.as_ref() != reads.as_ref()
             })
         {
-            return None;
+            return self.checkpoint("facts identity or type roots", None);
         }
         let view = FactsRef {
             summary: facts.summary.clone(),
@@ -879,7 +885,10 @@ impl BodyTask {
             lowering: facts.lowering.as_ref(),
             table_keys: facts.table_keys.as_ref(),
         };
-        (view.bytes(true) <= self.weight.scratch).then_some(facts)
+        self.checkpoint(
+            "facts retained bound",
+            (view.bytes(true) <= self.weight.scratch).then_some(facts),
+        )
     }
     pub(super) fn install_facts(
         &self,
@@ -926,7 +935,7 @@ impl BodyTask {
         mut facts: Facts,
         clean: bool,
     ) -> Option<Result<ProductRef, Reference>> {
-        facts.share_summary_reads(&reads)?;
+        self.checkpoint("shared summary reads", facts.share_summary_reads(&reads))?;
         let queries = &self.queries;
         let input = &queries.inputs[&self.input];
         let mut memo_rows = vec![(
@@ -960,7 +969,7 @@ impl BodyTask {
                 .unwrap_or_else(|e| e.into_inner())
                 .extend(outcome.memos.iter().map(|(key, _)| *key));
         }
-        queries.install_outcome(self.input, outcome);
+        queries.install_outcome(self.input, outcome, self.weight.scratch);
         queries.store_adoptions.fetch_add(1, Relaxed);
         // Compact facts complete this query independently of body
         // storage. Publishing a body association would fetch its archive just

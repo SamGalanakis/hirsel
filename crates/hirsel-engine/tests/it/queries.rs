@@ -697,51 +697,70 @@ fn phases_run_in_order_and_stop_at_every_error_boundary_on_compiler_thread() {
 #[test]
 fn front_compact_terminal_reuses_check_after_eviction() {
     with_compiler_stack(|| {
-        let (mut engine, _) = make_engine(None, false);
-        let transport = hirsel_engine_admission::ProcessBudget::new(8 << 20);
-        engine = engine.with_config(CompileConfig {
-            hold_bytes: 0,
-            store: Arc::new(hirsel_engine_store::RequestStore::new(
-                Arc::new(hirsel_engine_store::NoneStore),
-                transport.reserve(8 << 20).unwrap(),
-            )),
-            ..Default::default()
-        });
-        parse(&mut engine, "fn a () { 1 }\n");
-        let ty = engine.types().intern(hirsel_types::Type::unit());
-        let mut table = hirsel_types::TableBuilder::new(engine.types().clone());
-        let mut front = admitted_front(&mut engine, &[path("a")], 1);
-        front.queries.compact_retained_reads();
-        let query = front.queries.query(&path("a")).unwrap();
-        let request = front.runtime.request(&[query]);
-        let product = front.runtime.wait(request).unwrap().pop().unwrap();
-        let action = product.action;
-        front.runtime.shutdown();
-        assert!(front.queries.factory().evict(query, &product, 8 << 20));
-        drop(product);
-        assert_eq!(front.queries.live_body_count(), 0);
-        table.with_encoding(|| bincode::serialize(&ty)).unwrap();
-        drop(table.finish());
-        let mut runtime = AdmittedRuntime::new(
-            hirsel_intern::jobs::Jobs::ONE,
-            front._budget.reserve(512 << 20).unwrap(),
-            runtime_errors(),
-        )
-        .unwrap();
-        runtime
-            .register(FRONT_BODY_KIND, front.queries.factory())
-            .unwrap();
-        let request = runtime.request(&[query]);
-        let restored = runtime.wait(request).unwrap().pop().unwrap();
-        assert_eq!(restored.action, action);
-        assert_eq!(
-            front.queries.recompute_count(&path("a"), QueryKind::Check),
-            1,
-            "serialization and eviction preserve the Check of an unchanged definition"
-        );
-        runtime.shutdown();
+        for persistent in [false, true] {
+            for order in [["a", "b"], ["b", "a"]] {
+                for scratch in [0, 8 << 20] {
+                    let (mut engine, _) = make_engine(None, false);
+                    let transport = hirsel_engine_admission::ProcessBudget::new(8 << 20);
+                    engine = engine.with_config(CompileConfig {
+                        hold_bytes: 0,
+                        store: Arc::new(hirsel_engine_store::RequestStore::new(
+                            if persistent {
+                                Arc::new(MemStore::default())
+                            } else {
+                                Arc::new(hirsel_engine_store::NoneStore)
+                            },
+                            transport.reserve(8 << 20).unwrap(),
+                        )),
+                        ..Default::default()
+                    });
+                    parse(&mut engine, "fn a () { 1 }\nfn b () { 1 }\n");
+                    let ty = engine.types().intern(hirsel_types::Type::unit());
+                    let mut table = hirsel_types::TableBuilder::new(engine.types().clone());
+                    let mut front = admitted_front(&mut engine, &[path("a"), path("b")], 1);
+                    front.queries.compact_retained_reads();
+                    let mut products = Vec::new();
+                    for name in order {
+                        let query = front.queries.query(&path(name)).unwrap();
+                        let request = front.runtime.request(&[query]);
+                        let product = front.runtime.wait(request).unwrap().pop().unwrap();
+                        products.push((name, query, product));
+                    }
+                    front.runtime.shutdown();
+                    let mut actions = Vec::new();
+                    for (name, query, product) in products.into_iter().rev() {
+                        actions.push((name, query, product.action));
+                        assert!(front.queries.factory().evict(query, &product, scratch));
+                    }
+                    assert_eq!(front.queries.live_body_count(), 0);
+                    table.with_encoding(|| bincode::serialize(&ty)).unwrap();
+                    drop(table.finish());
+                    let mut runtime = AdmittedRuntime::new(
+                        hirsel_intern::jobs::Jobs::ONE,
+                        front._budget.reserve(512 << 20).unwrap(),
+                        runtime_errors(),
+                    )
+                    .unwrap();
+                    runtime
+                        .register(FRONT_BODY_KIND, front.queries.factory())
+                        .unwrap();
+                    for (name, query, action) in actions.into_iter().rev() {
+                        let request = runtime.request(&[query]);
+                        let restored = runtime.wait(request).unwrap().pop().unwrap();
+                        assert_eq!(restored.action, action);
+                        assert_eq!(
+                            front.queries.recompute_count(&path(name), QueryKind::Check),
+                            1,
+                            "unchanged {name} survives eviction order {order:?} with {scratch} scratch"
+                        );
+                    }
+                    runtime.shutdown();
+                }
+            }
+        }
     });
 }
+
 #[test]
 fn front_body_handoff_reuses_admitted_bodies_until_consumed_or_pressure() {
     with_compiler_stack(|| {
@@ -778,7 +797,7 @@ fn front_body_handoff_reuses_admitted_bodies_until_consumed_or_pressure() {
                 for kind in [QueryKind::Check, QueryKind::Modes] {
                     assert_eq!(
                         front.queries.recompute_count(&path(name), kind),
-                        if pressure { 2 } else { 1 },
+                        1,
                         "an admitted unchanged body must survive unrelated Front work"
                     );
                 }
@@ -787,7 +806,7 @@ fn front_body_handoff_reuses_admitted_bodies_until_consumed_or_pressure() {
             assert!(output[0].outcome.result.is_ok());
             assert_eq!(
                 front.queries.recompute_count(&path("b"), QueryKind::Modes),
-                if pressure { 2 } else { 1 }
+                1
             );
             drop(output);
             front.runtime.evict_to(0);

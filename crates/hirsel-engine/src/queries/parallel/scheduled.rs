@@ -61,6 +61,7 @@ struct PendingBody {
 }
 struct FrontOutcome {
     state: FrontState,
+    terminal: Option<Reference>,
     pending_body: Option<PendingBody>,
     facts: Arc<FrontFacts>,
 }
@@ -110,6 +111,7 @@ impl FrontOutcome {
                 record,
                 error: Box::new(error),
             },
+            terminal: None,
             pending_body: None,
             facts,
         }
@@ -129,6 +131,7 @@ impl FrontOutcome {
                 diagnostics,
                 lowering,
             },
+            terminal: None,
             pending_body: None,
             facts,
         }
@@ -163,7 +166,7 @@ impl FrontFacts {
 }
 #[derive(Clone)]
 struct ArchivedFront {
-    facts: Option<Reference>,
+    facts: Reference,
     observations: Arc<FrontObservations>,
 }
 struct FrontObservations {
@@ -311,6 +314,7 @@ pub struct FrontBodyQueries {
     records: Arc<persistent::TypeRecords>,
     input_records: crate::NativeRecords,
     store: Arc<dyn ResultStore>,
+    terminal_cache: Option<Box<dyn Send + Sync>>,
     work: Mutex<BTreeMap<(DefId, QueryKind), u64>>,
     store_adoptions: AtomicU64,
     /// Full-rescan refusals of stored body entries: by the first changed read
@@ -1095,10 +1099,24 @@ impl FrontBodyQueries {
         backing.add(allowance)?;
         Some(backing)
     }
-    fn install_outcome(&self, key: Key, outcome: FrontOutcome) {
+    fn install_outcome(&self, key: Key, mut outcome: FrontOutcome, scratch: u64) {
+        if outcome.terminal.is_none() {
+            outcome.terminal = self
+                .slots
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .get(&key)
+                .and_then(|slot| match slot {
+                    FrontSlot::Live { outcome, .. } => outcome.terminal,
+                    FrontSlot::Archived(archived) => Some(archived.facts),
+                });
+            if outcome.terminal.is_none() {
+                self.store_compact(key, &mut outcome, scratch);
+            }
+        }
         let mut slots = self.slots.lock().unwrap_or_else(|e| e.into_inner());
         if self.body_cache_limit < self._allowance.admitted
-            && let Some(body) = &outcome.pending_body
+            && let Some(charge) = outcome.pending_body.as_ref().map(|body| body.charge)
         {
             let mut used: u64 = slots
                 .iter()
@@ -1109,22 +1127,38 @@ impl FrontBodyQueries {
                     _ => None,
                 })
                 .sum();
-            while body.charge > self.body_cache_limit.saturating_sub(used) {
-                let retired = slots
-                    .iter_mut()
-                    .find_map(|(stored, slot)| match slot {
-                        FrontSlot::Live { outcome, .. } if *stored != key => {
-                            outcome.pending_body.take()
-                        }
-                        _ => None,
-                    })
-                    .expect("pending body charge is held by a cached owner");
+            while charge > self.body_cache_limit.saturating_sub(used) {
+                let retired = slots.iter_mut().find_map(|(stored, slot)| match slot {
+                    FrontSlot::Live { outcome, .. }
+                        if *stored != key
+                            && matches!(
+                                outcome.state,
+                                FrontState::Settled {
+                                    archive: Some(_),
+                                    ..
+                                }
+                            ) =>
+                    {
+                        outcome.pending_body.take()
+                    }
+                    _ => None,
+                });
+                let Some(retired) = retired else {
+                    outcome.pending_body.take();
+                    break;
+                };
                 used -= retired.charge;
                 drop(retired);
             }
         }
         match slots.entry(key) {
             std::collections::btree_map::Entry::Occupied(mut entry) => {
+                // This slot belongs to one immutable input view. Restoring
+                // its facts preserves the original required checkpoint.
+                outcome.terminal = outcome.terminal.or_else(|| match entry.get() {
+                    FrontSlot::Live { outcome, .. } => outcome.terminal,
+                    FrontSlot::Archived(archived) => Some(archived.facts),
+                });
                 let observations = match entry.get() {
                     FrontSlot::Live { observations, .. } => observations.clone(),
                     FrontSlot::Archived(archived) => Some(archived.observations.clone()),
@@ -2260,7 +2294,13 @@ impl FrontBodyQueries {
         let mut slots = self.slots.lock().unwrap_or_else(|e| e.into_inner());
         let retired = slots.values_mut().find_map(|slot| match slot {
             FrontSlot::Live { outcome, .. }
-                if outcome
+                if matches!(
+                    outcome.state,
+                    FrontState::Settled {
+                        archive: Some(_),
+                        ..
+                    }
+                ) && outcome
                     .pending_body
                     .as_ref()
                     .is_some_and(|body| body.product.cache_only()) =>
@@ -2274,10 +2314,19 @@ impl FrontBodyQueries {
         drop(retired);
         removed
     }
+    /// Discard decoded bodies only when their request checkpoint survives.
     pub(crate) fn release_pending_bodies(&self) {
         let mut slots = self.slots.lock().unwrap_or_else(|e| e.into_inner());
         for slot in slots.values_mut() {
-            if let FrontSlot::Live { outcome, .. } = slot {
+            if let FrontSlot::Live { outcome, .. } = slot
+                && matches!(
+                    outcome.state,
+                    FrontState::Settled {
+                        archive: Some(_),
+                        ..
+                    }
+                )
+            {
                 outcome.pending_body.take();
             }
         }
@@ -2687,7 +2736,7 @@ impl BodyTask {
         Arc::get_mut(&mut cached.facts)
             .ok_or_else(|| queries.protocol_refusal())?
             .diagnostic_sources = diagnostic_sources;
-        queries.install_outcome(self.input, cached);
+        queries.install_outcome(self.input, cached, self.weight.scratch);
         Err(reference)
     }
     fn publish_body(
@@ -2698,7 +2747,7 @@ impl BodyTask {
     ) -> Result<ProductRef, Reference> {
         let queries = &self.queries;
         let input = &queries.inputs[&self.input];
-        let (reference, reads, summary) = {
+        let (mut reference, reads, summary) = {
             let slots = queries.slots.lock().unwrap_or_else(|e| e.into_inner());
             let old = match slots
                 .get(&self.input)
@@ -2746,13 +2795,20 @@ impl BodyTask {
             outcome.phase = old.phase;
             (reference, old.reads.clone(), summary)
         };
-        if let (Some(reference), Some(bytes)) = (reference, bytes) {
-            if reference.domain.reference(bytes) != Some(reference) {
+        if let Some(bytes) = bytes {
+            let domain = hirsel_engine_store::product_domain(QueryKind::Modes);
+            let encoded = domain
+                .reference(bytes)
+                .ok_or_else(|| queries.protocol_refusal())?;
+            if reference.is_some_and(|previous| previous != encoded) {
                 return Err(queries.protocol_refusal());
             }
-            if queries.store.put_content(reference.domain, bytes) != Some(reference) {
-                return Err(queries.resource_refusal());
-            }
+            reference = Some(
+                queries
+                    .store
+                    .put_content(domain, bytes)
+                    .ok_or_else(|| queries.resource_refusal())?,
+            );
         }
         let action = hirsel_engine_store::query_action(&input.key, input.key.1, &reads);
         let product = queries
@@ -2771,7 +2827,19 @@ impl BodyTask {
         };
         match &mut current.state {
             FrontState::Failed { .. } => return Err(queries.protocol_refusal()),
-            FrontState::Settled { body: owner, .. } => *owner = Some(body.downgrade()),
+            FrontState::Settled {
+                archive,
+                body: owner,
+                ..
+            } => {
+                let changed = *archive != reference;
+                *archive = reference;
+                *owner = Some(body.downgrade());
+                if changed {
+                    current.terminal = None;
+                    queries.store_compact(self.input, current, self.weight.scratch);
+                }
+            }
         }
         drop(slots);
         if let Some(reference) = reference {
@@ -2786,11 +2854,6 @@ impl BodyTask {
 
     fn restore_body(&self, cx: &mut dyn QueryContext) -> Option<Result<ProductRef, Reference>> {
         let queries = &self.queries;
-        if !queries.store.persistence().retains()
-            || queries.verify_store != hirsel_engine_store::VerifyStore::Off
-        {
-            return None;
-        }
         let input = &queries.inputs[&self.input];
         let (reference, reads) = {
             let slots = queries.slots.lock().unwrap_or_else(|e| e.into_inner());
@@ -2908,7 +2971,7 @@ impl BodyTask {
         queries
             .memo_operations
             .fetch_add(cached.memos.len() as u64, Relaxed);
-        queries.install_outcome(self.input, cached);
+        queries.install_outcome(self.input, cached, self.weight.scratch);
         queries.store_adoptions.fetch_add(1, Relaxed);
         timings::count(Count::StoreHits);
         timings::count(Count::StoreModeHits);
@@ -2954,15 +3017,40 @@ impl BodyTask {
                     .map_err(|_| self.queries.resource_refusal().into());
             }
         }
-        if self.materialize
-            && let Some(body) = self.restore_body(cx)
+        if self.materialize {
+            if let Some(body) = self.restore_body(cx) {
+                return body.map_err(Into::into);
+            }
+            // A carry adopted from a prior request may have only a summary:
+            // its request-private body transport has ended. This run can
+            // compute its first Check, but never repeat a current Check.
+            if self.queries.recompute_count(
+                self.queries.inputs[&self.input].definition.path(),
+                QueryKind::Check,
+            ) != 0
+            {
+                return Err(self.queries.resource_refusal().into());
+            }
+        }
+        if !self.materialize
+            && matches!(
+                self.queries
+                    .slots
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .get(&self.input),
+                Some(FrontSlot::Archived(_))
+            )
         {
-            return body.map_err(Into::into);
+            // A local completion is authoritative in this immutable view,
+            // just like completed_product above, including under verify-cache.
+            // Decode/admission failure cannot authorize a second Check.
+            return self
+                .load_evicted(cx)
+                .ok_or_else(|| self.queries.resource_refusal())?
+                .map_err(Into::into);
         }
         if !self.materialize && self.queries.verify_store == hirsel_engine_store::VerifyStore::Off {
-            if let Some(hit) = self.load_evicted(cx) {
-                return hit.map_err(Into::into);
-            }
             if let Some(hit) = self.load_carry(cx) {
                 return hit.map_err(Into::into);
             }
@@ -3098,16 +3186,24 @@ impl BodyTask {
                 .copied(),
             environment: queries.environment,
         };
+        // A request transport preserves a released body as required content,
+        // independently of whether the backend keeps optional query variants.
+        let capture_body = queries.store.persistence().retains()
+            || matches!(
+                queries.store.capability(),
+                hirsel_engine_store::ProviderCapability::RequestLocal(_)
+            );
+        if capture_body && !queries.store.persistence().retains() {
+            queries
+                .store
+                .archive_encoded(hirsel_engine_store::ArchiveBoundary::RequiredSpill);
+        }
         let mut completed = CompactCompleted::capture(
             done,
             &worker,
             queries.types.clone(),
             &mut source,
-            queries
-                .store
-                .persistence()
-                .retains()
-                .then_some(&*queries.records),
+            capture_body.then_some(&*queries.records),
         );
         // A generated private header is provisional until its accepted body
         // supplies the module proof. Do not publish a caller under that row.
@@ -3212,7 +3308,7 @@ impl BodyTask {
                         vec![],
                     )
                     .ok_or_else(|| queries.resource_refusal())?;
-                queries.install_outcome(self.input, cached);
+                queries.install_outcome(self.input, cached, self.weight.scratch);
                 return Err(record.into());
             }
         }
@@ -3267,7 +3363,7 @@ impl BodyTask {
                 cx, self.input, record, action, outcome, checked, dead_arms, table_keys, memo_rows,
             )
             .ok_or_else(|| queries.resource_refusal())?;
-        queries.store_compact(self.input, &cached, self.weight.scratch);
+        queries.store_compact(self.input, &mut cached, self.weight.scratch);
         if let Some(outcome) = pending_body
             && let FrontState::Settled {
                 publication, body, ..
@@ -3308,7 +3404,7 @@ impl BodyTask {
         queries
             .memo_operations
             .fetch_add(cached.memos.len() as u64, Relaxed);
-        queries.install_outcome(self.input, cached);
+        queries.install_outcome(self.input, cached, self.weight.scratch);
         match terminal {
             Err(reference) => Err(reference.into()),
             Ok(publication) => {
@@ -3547,6 +3643,11 @@ impl QueryEngine {
                 message: "source inputs require a result provider".into(),
             })
         })?;
+        let terminal_cache = store
+            .persistence()
+            .retains()
+            .then(|| store.retention_scope())
+            .flatten();
         for definition in definitions {
             if namespace
                 .bodies
@@ -3753,6 +3854,7 @@ impl QueryEngine {
             records: self.type_records().ok_or_else(|| refusal("type records"))?,
             input_records,
             store,
+            terminal_cache,
             slots: Mutex::new(BTreeMap::new()),
             input_slots: Mutex::new((BTreeMap::new(), None)),
             body_cache_limit: self.hold_bytes,

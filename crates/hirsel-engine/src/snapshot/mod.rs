@@ -694,7 +694,9 @@ impl SignatureSnapshot {
             *validation = None;
             *inputs = Some(ValidationCandidates::default());
             removed = true;
-        } else if let Some(state) = validation.as_ref() {
+        } else if let Some(state) = validation.as_ref()
+            && self.demand.lock().unwrap().strong_count() == 0
+        {
             removed |= state.evict_cached();
         }
         if membership.is_none() && validation.is_none() {
@@ -799,12 +801,6 @@ impl SignatureSnapshot {
     /// refused view read publishes nothing and keeps its inputs, so the next
     /// demand builds it again.
     pub(crate) fn demand_validation(&self) -> Result<Arc<ValidationDemand>, QueryError> {
-        let Some(headers) = &self.headers else {
-            return Ok(Arc::new(ValidationDemand {
-                state: Mutex::default(),
-                _lease: Arc::new(()),
-            }));
-        };
         // Serialize with construction before registering demand. Admission can
         // evict idle snapshots, so never hold their cache mutex across it.
         let _inputs = self.validation_inputs.lock().unwrap();
@@ -812,11 +808,14 @@ impl SignatureSnapshot {
         if let Some(demand) = current.upgrade() {
             return Ok(demand);
         }
-        let lease = headers.validation_demand_lease(
-            (size_of::<ValidationDemand>() + 2 * size_of::<usize>()) as u64,
-        )?;
+        let lease = match &self.headers {
+            Some(headers) => headers.validation_demand_lease(
+                (size_of::<ValidationDemand>() + 2 * size_of::<usize>()) as u64,
+            )?,
+            None => Arc::new(()) as Arc<dyn Send + Sync>,
+        };
         let state = self.validation.lock().unwrap().clone();
-        if let Some(state) = &state {
+        if let (Some(state), Some(headers)) = (&state, &self.headers) {
             state.retain_control(headers)?;
         }
         let demand = Arc::new(ValidationDemand {
@@ -1157,7 +1156,6 @@ impl SignatureSnapshot {
             hirsel_validate::SignatureInputs::Checked(&*views),
             self.verifier_policy,
             self.verifier.as_deref(),
-            &mut vec![],
         )?;
         if ran {
             hirsel_intern::timings::count(hirsel_intern::timings::Count::VRuns);
@@ -2126,6 +2124,35 @@ mod tests {
                 ..Default::default()
             })
         };
+        let group_snapshot = build(&rows, BTreeMap::new());
+        let demand = group_snapshot.demand_validation().unwrap();
+        let issued = group_snapshot
+            .validation_with(&package, rows[0].clone())
+            .unwrap();
+        let issued = Arc::downgrade(&issued);
+        group_snapshot.evict_cached();
+        let before_group = work::read(Counter::ValidationOverlayConstructions);
+        let grouped = group_snapshot
+            .validation_with(&package, rows[0].clone())
+            .unwrap();
+        assert!(
+            issued
+                .upgrade()
+                .is_some_and(|issued| Arc::ptr_eq(&issued, &grouped)),
+            "the active group keeps its exact overlay through optional eviction"
+        );
+        assert_eq!(
+            work::read(Counter::ValidationOverlayConstructions),
+            before_group
+        );
+        drop(grouped);
+        drop(demand);
+        group_snapshot.evict_cached();
+        assert!(
+            issued.upgrade().is_none(),
+            "the finished group releases its overlays"
+        );
+
         let (table, allocation) = crate::test_alloc::measured(|| {
             ViewTable::new(
                 &types,

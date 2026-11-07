@@ -791,7 +791,6 @@ impl NativeOriginalReader {
                 &*views()?,
                 self.verified.policy,
                 self.verified.cache.as_deref(),
-                &mut vec![],
             )
             .ok()?;
             if ran {

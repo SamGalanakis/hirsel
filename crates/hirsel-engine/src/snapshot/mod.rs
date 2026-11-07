@@ -2102,7 +2102,7 @@ mod tests {
     }
 
     #[test]
-    fn installed_registration_overlays_construct_one_table_per_snapshot_and_package() {
+    fn active_validation_group_keeps_exact_overlays_until_its_last_consumer_drops() {
         use hirsel_intern::work::{self, Counter};
         let types = TypeInterner::new(None);
         let rows = [
@@ -2157,6 +2157,19 @@ mod tests {
             work::read(Counter::ValidationOverlayConstructions),
             before_group
         );
+        let mut invalid = (*rows[0]).clone();
+        invalid.kind = SignatureKind::Const {
+            ty: types.intern(Type::with_kind(TypeKind::Error)),
+            generics: Default::default(),
+        };
+        assert!(
+            !group_snapshot
+                .validation_with(&package, Arc::new(invalid))
+                .unwrap()
+                .universe_errors()
+                .1
+                .is_empty()
+        );
         drop(grouped);
         drop(demand);
         group_snapshot.evict_cached();
@@ -2164,7 +2177,31 @@ mod tests {
             issued.upgrade().is_none(),
             "the finished group releases its overlays"
         );
+    }
 
+    #[test]
+    fn installed_registration_overlays_construct_one_table_per_snapshot_and_package() {
+        use hirsel_intern::work::{self, Counter};
+        let types = TypeInterner::new(None);
+        let rows = [
+            constant(&types, "first", hirsel_types::Primitive::U64),
+            constant(&types, "second", hirsel_types::Primitive::U8),
+        ];
+        let package = rows[0].definition.path().0.package.clone();
+        let build = |rows: &[SignatureRef], installed| {
+            SignatureSnapshot::build(
+                Revision::FIRST,
+                types.clone(),
+                rows.iter().map(|row| (row.definition, Ok(row.clone()))),
+                [],
+                None,
+            )
+            .with_lookup(LookupInput {
+                package_dependencies: BTreeMap::from([(package.clone(), vec![])]),
+                installed,
+                ..Default::default()
+            })
+        };
         let (table, allocation) = crate::test_alloc::measured(|| {
             ViewTable::new(
                 &types,

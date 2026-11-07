@@ -234,6 +234,90 @@ fn a_recording_replays_against_an_unchanged_installation() {
 }
 
 #[test]
+fn unchanged_cli_inputs_reuse_acceptance_and_changed_inputs_compile() {
+    let fixture = Fixture::new("accepted-cli-inputs");
+    let data = tempfile::tempdir().unwrap();
+    let source = r#"pub fn main(rt: Io, args: Args) -> Result[(), GrantError] {
+  let output = io.stdout(rt)?
+  let _ = out.print(output, std@1/u64.to_string(settings.value()))
+  Ok(())
+}
+"#;
+    std::fs::write(fixture.source(), source).unwrap();
+    let environment = fixture.0.join("settings.hir");
+    std::fs::write(&environment, "pub fn value() -> u64 { 42u64 }\n").unwrap();
+    let manifest_path = fixture.0.join("main.hir.json");
+    let mut manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&manifest_path).unwrap()).unwrap();
+    manifest["sources"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::json!({"path":"settings.hir","module":["settings"]}));
+    std::fs::write(&manifest_path, manifest.to_string()).unwrap();
+    let invoke = |label: &str, arguments: &[&str], expected: &[u8], compilations: usize| {
+        let phases = tempfile::tempdir().unwrap();
+        let output = hirsel(false, &fixture.source(), &[])
+            .env("HIRSEL_DAEMON", "off")
+            .env("HIRSEL_RESULTS", "none@1")
+            .env("XDG_DATA_HOME", data.path())
+            .env("HIRSEL_TEST_PHASE_DIR", phases.path())
+            .args([
+                "--grants",
+                r#"{"io":{"stdout":"stdout.bytes@1","dirs":[]},"args":[]}"#,
+            ])
+            .args(arguments)
+            .output()
+            .unwrap();
+        assert_replayed(&output, expected, label);
+        let attempts = std::fs::read_dir(phases.path())
+            .unwrap()
+            .map(|entry| std::fs::read_to_string(entry.unwrap().path()).unwrap())
+            .map(|text| {
+                text.lines()
+                    .filter(|line| {
+                        let event: serde_json::Value = serde_json::from_str(line).unwrap();
+                        event["event"] == "start" && event["phase"] == "compiler-attempt"
+                    })
+                    .count()
+            })
+            .sum::<usize>();
+        assert_eq!(
+            attempts, compilations,
+            "{label}: compiler work across processes"
+        );
+    };
+    invoke("cold", &[], b"42", 1);
+    invoke(
+        "unchanged with new runtime args",
+        &["--", "different"],
+        b"42",
+        0,
+    );
+    std::fs::write(&environment, "pub fn value() -> u64 { 43u64 }\n").unwrap();
+    invoke("changed dependency", &[], b"43", 1);
+    invoke("unchanged dependency", &[], b"43", 0);
+    std::fs::write(
+        fixture.source(),
+        source.replace("settings.value()", "settings.value() + 1u64"),
+    )
+    .unwrap();
+    invoke("changed source", &[], b"44", 1);
+    manifest["dependencies"] = serde_json::json!([]);
+    manifest["sources"] = serde_json::json!([{"path":"main.hir","module":[]}]);
+    std::fs::write(&manifest_path, manifest.to_string()).unwrap();
+    std::fs::write(
+        fixture.source(),
+        "pub fn main() -> Result[(), u64] { Ok(()) }\n",
+    )
+    .unwrap();
+    invoke("changed manifest", &[], b"", 1);
+    invoke("unchanged manifest", &[], b"", 0);
+    invoke("recompute requested", &["--verify-cache"], b"", 1);
+    invoke("changed verification option", &["--no-verify"], b"", 1);
+    invoke("unchanged verification option", &["--no-verify"], b"", 0);
+}
+
+#[test]
 fn interpreted_recording_replays_without_its_files_or_socket() {
     let fixture = Fixture::new("interpreted");
     let tape = fixture.tape("tape");

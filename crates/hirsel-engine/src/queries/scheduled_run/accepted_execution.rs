@@ -262,7 +262,6 @@ fn index(revision: &[u8; 32], entry: &DefPath) -> Address {
     ))
 }
 fn input_index(
-    revision: &[u8; 32],
     entry: &DefPath,
     observations: ContentHash,
     imports: ContentHash,
@@ -271,9 +270,8 @@ fn input_index(
     options: ContentHash,
 ) -> Address {
     Address(ContentHash::of_parts(
-        "hirsel.accepted-execution.inputs.v1",
+        "hirsel.accepted-execution.inputs.v2",
         [
-            revision.as_slice(),
             entry.to_string().as_bytes(),
             &observations.0,
             &imports.0,
@@ -281,6 +279,12 @@ fn input_index(
             &policy.0,
             &options.0,
         ],
+    ))
+}
+fn revision_input_index(revision: &[u8; 32], inputs: Address) -> Address {
+    Address(ContentHash::of_parts(
+        "hirsel.accepted-execution.revision-inputs.v1",
+        [revision.as_slice(), &inputs.0.0],
     ))
 }
 fn profile(start: std::time::Instant, phase: &str) {
@@ -711,7 +715,6 @@ impl FrontRunQueries {
             &bincode::serialize(&locator).map_err(|e| failure(e.to_string()))?,
         )?;
         let address = input_index(
-            &output.revision.digest(),
             &output.entry,
             identity.observations,
             self.operation.capture().installation,
@@ -719,6 +722,10 @@ impl FrontRunQueries {
             snapshot.source_verification_policy(),
             identity.options,
         );
+        store
+            .associate(address, Action(address.0), locator)
+            .map_err(|e| failure(e.to_string()))?;
+        let address = revision_input_index(&output.revision.digest(), address);
         store
             .associate(address, Action(address.0), locator)
             .map_err(|e| failure(e.to_string()))?;
@@ -1071,7 +1078,7 @@ fn load(
 /// loader inputs and import identity before it can use this durable product.
 #[allow(clippy::too_many_arguments)]
 pub fn import_execution_product(
-    revision: [u8; 32],
+    revision: Option<[u8; 32]>,
     entry: &DefPath,
     observations: ContentHash,
     imports: ContentHash,
@@ -1081,18 +1088,23 @@ pub fn import_execution_product(
     allowance: hirsel_engine_admission::MemoryReservation,
 ) -> Result<Option<Arc<AcceptedExecutionProduct>>, QueryError> {
     let store = durable_store()?;
-    let association = store
-        .lookup(input_index(
-            &revision,
-            entry,
-            observations,
-            imports,
-            compiler,
-            policy,
-            options,
-        ))
-        .or_else(|| store.lookup(index(&revision, entry)))
-        .ok_or_else(|| failure("recording's accepted product is unavailable"))?;
+    let inputs = input_index(entry, observations, imports, compiler, policy, options);
+    let association = match revision {
+        Some(revision) => store
+            .lookup(revision_input_index(&revision, inputs))
+            .or_else(|| store.lookup(index(&revision, entry))),
+        None => store.lookup(inputs),
+    };
+    let Some(association) = association else {
+        crate::queries::operation_owner_trace(format_args!(
+            "accepted-execution lookup=miss entry={entry}"
+        ));
+        return if revision.is_some() {
+            Err(failure("recording's accepted product is unavailable"))
+        } else {
+            Ok(None)
+        };
+    };
     if association.reference.domain != LOCATOR {
         return Err(failure("locator domain"));
     }
@@ -1143,9 +1155,12 @@ pub fn import_execution_product(
             .map(|reservation| Arc::new(reservation) as Arc<dyn Send + Sync>)
             .ok_or_else(|| failure("import exceeds admission"))
     })?;
-    if execution.revision.digest() != revision {
+    if revision.is_some_and(|revision| execution.revision.digest() != revision) {
         return Err(failure("selected semantic revision differs"));
     }
+    crate::queries::operation_owner_trace(format_args!(
+        "accepted-execution lookup=hit entry={entry}"
+    ));
     Ok(Some(Arc::new(execution)))
 }
 

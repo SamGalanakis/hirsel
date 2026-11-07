@@ -126,6 +126,14 @@ impl CompilerRequests {
         use hirsel_engine::requests::OutputReadiness;
         use hirsel_engine_runtime::QueryRuntime;
 
+        if self.config.verify_store == hirsel_engine_store::VerifyStore::Off
+            && let CompileOperation::Tir { definition } = &request.operation
+            && let Some(output) =
+                super::replay_product::import_request_execution(self, request, definition.as_ref())?
+        {
+            return Ok(output);
+        }
+
         let mut discovery_roots = Vec::new();
         loop {
             let _attempt = hirsel_intern::test_progress::enter("compiler-attempt", || {

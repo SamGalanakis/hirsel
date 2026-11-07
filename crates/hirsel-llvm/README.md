@@ -473,8 +473,7 @@ bodies retain LLVM's cost model; aggregate-result optimizer copies retain their
 existing loop-free inlining policy. This removes small checked forwarding calls
 without removing their failure checks or source anchors.
 
-Direct library calls and non-resumable source calls without an environment or
-aggregate result pass mutable Block/Box roots by value and return the roots
+Direct library calls pass mutable Block/Box roots by value and return the roots
 alongside status, with explicit write-back before either continuation. Required
 external and function-reference entries retain the declared address ABI. Private
 scalar-element sequence roots carry length and a must-unique bit in promotable
@@ -649,3 +648,7 @@ non-checkpoint calls, variable checkpoint paths and unproved bounds retain
 their original checkpoints. Fuel builds also retain that path. LLVM's final
 stack-size records cover chunk exits in the same function's frame; the separate
 certificate checker still derives its bound from the actual final object.
+
+After expanding and inlining runtime fast paths, optimized builds simplify their
+scalar storage and remove checks that dominating guards prove redundant. Unproved
+bounds, overflow and ownership failure edges remain. O0 keeps its existing path.

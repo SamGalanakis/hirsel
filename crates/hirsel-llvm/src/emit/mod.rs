@@ -278,6 +278,17 @@ fn optimize(
     module
         .run_passes("always-inline", machine)
         .map_err(|message| CodegenError::Passes { message })?;
+    // Runtime fast paths become visible only after the main optimization
+    // pipeline. Fold their scalar carriers and checks against the dominating
+    // guards now visible in the caller, retaining every unproved failure edge.
+    if opt != OptLevel::None {
+        module
+            .run_passes(
+                "function(sroa,early-cse,instcombine,correlated-propagation,constraint-elimination,simplifycfg,adce)",
+                machine,
+            )
+            .map_err(|message| CodegenError::Passes { message })?;
+    }
     #[cfg(feature = "native-tsan")]
     module
         .instrument_thread(machine)
@@ -661,22 +672,8 @@ fn lower<T>(
                 && (unit.header.definition.is_core("list.push")
                     || unit.header.definition.is_core("list.reserve")
                     || unit.header.definition.is_core("$native.list_push_spare"));
-            // Source recursion can carry the same checked root companions as
-            // library calls. Keep frame-backed continuations and aggregate or
-            // closure entries on their declared address convention.
-            let source_roots = unit.header.origin == UnitOrigin::Source
-                && !inputs.alternate
-                && !abi.environment
-                && !abi.destination
-                && abi.result.as_ref().is_none_or(|r| r.register.is_some())
-                && !inputs.continuation.is_some_and(|plans| {
-                    plans.get(unit.header.instance).is_some_and(|plan| {
-                        plan.representation == hirsel_lir::continuation::Representation::Resumable
-                    })
-                });
-            let signature = if source_roots
-                || (unit.header.origin == UnitOrigin::Library
-                    && (!inputs.alternate || private_roots))
+            let signature = if unit.header.origin == UnitOrigin::Library
+                && (!inputs.alternate || private_roots)
             {
                 Signature::of(&module, inputs.layouts, abi, &unit.header.definition)?
                     .with_roots(&module, inputs.layouts)
@@ -910,7 +907,7 @@ fn lower<T>(
             if !inputs.alternate && abi.shape == CallableShape::Definition {
                 let thunk =
                     function_thunk_name(&unit.header.definition, Some(&unit.header.instance));
-                define_function_thunk(&module, &thunk, entry, &external);
+                define_function_thunk(&module, &thunk, function, &signature);
                 manifested.exports.insert(
                     thunk.clone(),
                     ObjectSymbol {

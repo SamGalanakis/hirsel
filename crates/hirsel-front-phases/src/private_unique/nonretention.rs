@@ -6,6 +6,14 @@ use hirsel_syntax::{ExprId, ExprKind, ItemKind, PatternId, StmtKind};
 use hirsel_types::{CallTarget, ParamId, PassingMode, ResolvedName, TypeKind};
 use std::collections::BTreeSet;
 
+#[cfg(test)]
+thread_local! {
+    static PROOFS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+#[cfg(test)]
+#[path = "tests.rs"]
+mod tests;
+
 pub(super) fn infer(
     types: &hirsel_types::TypeInterner,
     bodies: &[(Arc<hirsel_query_products::TypedBody>, SignatureRef)],
@@ -32,84 +40,79 @@ pub(super) fn infer(
                 .collect()
         })
         .collect();
-    let cyclic: BTreeSet<_> = hirsel_graph::components(&graph)
-        .into_iter()
-        .filter(|c| c.len() > 1 || graph[c[0]].contains(&c[0]))
-        .flatten()
-        .collect();
-    loop {
-        let mut additions = Vec::new();
-        for (index, (body, declared)) in bodies.iter().enumerate() {
-            if cyclic.contains(&index) {
+    // Tarjan emits callees before their callers. Cycles stay unproved, so
+    // every eligible body's dependencies are settled when its turn arrives.
+    for component in hirsel_graph::components(&graph) {
+        let index = component[0];
+        if component.len() > 1 || graph[index].contains(&index) {
+            continue;
+        }
+        let (body, declared) = &bodies[index];
+        let Some(header) = headers.get(&declared.definition) else {
+            continue;
+        };
+        let hirsel_types::SignatureKind::Function(f) = &header.kind else {
+            continue;
+        };
+        // The expression proof does not cover generated requires/ensures
+        // calls. Their data parameters have no nonretaining entry contract.
+        if !f.contracts.is_empty() {
+            continue;
+        }
+        let mut next = (**header).clone();
+        for (i, parameter) in f.parameters.iter().enumerate() {
+            let parameter_id = ParamId(i as u32);
+            if parameter.passing != PassingMode::Borrow
+                || !concrete_data_parameter(types, parameter.ty)
+                || matches!(&types.row(parameter.ty).kind, TypeKind::Primitive(p) if !matches!(p, hirsel_types::Primitive::Bytes | hirsel_types::Primitive::String))
+                || matches!(&types.row(parameter.ty).kind, TypeKind::Tuple(fields) if fields.is_empty())
+                || next
+                    .metadata
+                    .inferred_unique
+                    .nonretaining
+                    .contains(&parameter_id)
+            {
                 continue;
             }
-            let Some(header) = headers.get(&declared.definition) else {
+            #[cfg(test)]
+            PROOFS.with(|count| count.set(count.get() + 1));
+            let mut proof = Proof {
+                types,
+                body,
+                headers,
+                provider,
+                parameter: parameter_id,
+                locals: BTreeSet::new(),
+                failed: false,
+            };
+            let ItemKind::Function {
+                body: Some(root), ..
+            } = body.syntax.item.kind
+            else {
                 continue;
             };
-            let hirsel_types::SignatureKind::Function(f) = &header.kind else {
-                continue;
-            };
-            // The expression proof does not cover generated requires/ensures
-            // calls. Their data parameters have no nonretaining entry contract.
-            if !f.contracts.is_empty() {
-                continue;
-            }
-            let mut next = (**header).clone();
-            for (i, parameter) in f.parameters.iter().enumerate() {
-                let parameter_id = ParamId(i as u32);
-                if parameter.passing != PassingMode::Borrow
-                    || !concrete_data_parameter(types, parameter.ty)
-                    || matches!(&types.row(parameter.ty).kind, TypeKind::Primitive(p) if !matches!(p, hirsel_types::Primitive::Bytes | hirsel_types::Primitive::String))
-                    || matches!(&types.row(parameter.ty).kind, TypeKind::Tuple(fields) if fields.is_empty())
-                    || next
-                        .metadata
-                        .inferred_unique
-                        .nonretaining
-                        .contains(&parameter_id)
-                {
-                    continue;
+            loop {
+                let previous = proof.locals.clone();
+                if proof.expression(root)? {
+                    proof.failed = true;
                 }
-                let mut proof = Proof {
-                    types,
-                    body,
-                    headers,
-                    provider,
-                    parameter: parameter_id,
-                    locals: BTreeSet::new(),
-                    failed: false,
-                };
-                let ItemKind::Function {
-                    body: Some(root), ..
-                } = body.syntax.item.kind
-                else {
-                    continue;
-                };
-                loop {
-                    let previous = proof.locals.clone();
-                    if proof.expression(root)? {
-                        proof.failed = true;
-                    }
-                    if proof.failed || previous == proof.locals {
-                        break;
-                    }
-                }
-                if !proof.failed {
-                    next.metadata
-                        .inferred_unique
-                        .nonretaining
-                        .push(parameter_id);
+                if proof.failed || previous == proof.locals {
+                    break;
                 }
             }
-            next.metadata.inferred_unique.nonretaining.sort();
-            if next.metadata.inferred_unique != header.metadata.inferred_unique {
-                additions.push((declared.definition, Arc::new(next)));
+            if !proof.failed {
+                next.metadata
+                    .inferred_unique
+                    .nonretaining
+                    .push(parameter_id);
             }
         }
-        if additions.is_empty() {
-            return Ok(());
+        next.metadata.inferred_unique.nonretaining.sort();
+        if next.metadata.inferred_unique != header.metadata.inferred_unique {
+            headers.insert(declared.definition, Arc::new(next));
         }
-        headers.extend(additions);
     }
+    Ok(())
 }
 
 // A physical specialization must not invent an entry contract for a callable

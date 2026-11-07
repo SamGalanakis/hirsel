@@ -7429,3 +7429,5 @@ conformance/STORE/STORE-6-set-key-bad.hir
 conformance/STORE/STORE-6-set-key-ok.hir
 conformance/STORE/STORE-6-simd-key-bad.hir
 conformance/STORE/STORE-6-simd-key-ok.hir
+conformance/MEM/MEM-14-byte-loop-reborrow-shorter-fail.hir
+conformance/MEM/MEM-14-byte-loop-short-table-fail.hir

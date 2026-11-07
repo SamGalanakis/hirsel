@@ -13,3 +13,6 @@ cxx_library(
     exported_linker_flags = ["-l:libstdc++.so.6"],
     visibility = ["PUBLIC"],
 )
+
+export_file(name = "count_loops.cpp", mode = "reference", visibility = ["PUBLIC"])
+export_file(name = "stack_size.cpp", mode = "reference", visibility = ["PUBLIC"])

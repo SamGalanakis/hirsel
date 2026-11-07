@@ -972,6 +972,10 @@ def first_party(meta: dict) -> str:
                 srcs=Raw('glob(["crates/hirsel-registry/build.rs", "crates/hirsel-registry/src/**"])') if name == "hirsel-registry" else [relative(src)],
                 deps=sorted(deps["build"]),
                 inputs=Raw(f"glob({starlark(BUILD_SCRIPT_INPUTS[name], 4)})"),
+                input_paths={f"crates/hirsel-llvm/bridge/{source}.cpp":
+                             f"//crates/hirsel-llvm/bridge:{source}.cpp"
+                             for source in ("count_loops", "stack_size")}
+                            if name == "hirsel-compiler-identity" else None,
                 features=features,
                 **common,
             ))

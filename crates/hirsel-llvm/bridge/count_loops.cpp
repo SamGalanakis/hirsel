@@ -31,6 +31,38 @@
 #include <llvm/Transforms/Utils/ScalarEvolutionExpander.h>
 using namespace llvm;
 
+// Keep the checked loop and every partial-failure exit as the fallback.
+static void versionLoop(Loop &L, Value *Safe, LoopInfo &LI, DominatorTree &DT,
+                        ScalarEvolution &SE, StringRef Preheader,
+                        StringRef Suffix) {
+  BasicBlock *PH = L.getLoopPreheader();
+  formLCSSA(L, DT, &LI, &SE);
+  BasicBlock *Check = PH;
+  PH = SplitBlock(Check, Check->getTerminator(), &DT, &LI, nullptr, Preheader);
+  ValueToValueMapTy Map;
+  SmallVector<BasicBlock *, 16> Cloned;
+  Loop *Slow = cloneLoopWithPreheader(PH, Check, &L, Map, Suffix, &LI,
+                                      &DT, Cloned);
+  remapInstructionsInBlocks(Cloned, Map);
+  // LCSSA already funnels all outside uses through exit PHIs. Clone each
+  // incoming edge, preserving the precise partially updated state on failure.
+  SmallVector<BasicBlock *, 8> Exits;
+  L.getUniqueExitBlocks(Exits);
+  for (BasicBlock *Exit : Exits) for (PHINode &P : Exit->phis()) {
+    unsigned N = P.getNumIncomingValues();
+    for (unsigned I = 0; I < N; ++I) {
+      BasicBlock *From = P.getIncomingBlock(I);
+      if (!L.contains(From)) continue;
+      Value *V = P.getIncomingValue(I);
+      P.addIncoming(Map.count(V) ? static_cast<Value *>(Map[V]) : V,
+                    cast<BasicBlock>(Map[From]));
+    }
+  }
+  Instruction *OldBranch = Check->getTerminator();
+  CondBrInst::Create(Safe, PH, Slow->getLoopPreheader(), OldBranch->getIterator());
+  OldBranch->eraseFromParent();
+}
+
 // Each update is exactly the entry accumulator or its single +1, through
 // PHI/select joins. Anything else, including another arithmetic update, refuses.
 static bool countUpdate(Value *V, PHINode *Count, Value *Sum,
@@ -124,31 +156,7 @@ static bool versionCount(Loop &L, LoopInfo &LI, DominatorTree &DT,
   Value *Total = Builder.CreateAdd(Builder.CreateZExt(Initial, Wide), Limit);
   Value *Safe = Builder.CreateICmpULE(Total, ConstantInt::get(Wide, UINT64_MAX),
                                      "count.headroom");
-  formLCSSA(L, DT, &LI, &SE);
-  BasicBlock *Check = PH;
-  PH = SplitBlock(Check, Check->getTerminator(), &DT, &LI, nullptr, "count.fast.ph");
-  ValueToValueMapTy Map;
-  SmallVector<BasicBlock *, 16> Cloned;
-  Loop *Slow = cloneLoopWithPreheader(PH, Check, &L, Map, ".count.checked", &LI,
-                                      &DT, Cloned);
-  remapInstructionsInBlocks(Cloned, Map);
-  // LCSSA already funnels all outside uses through exit PHIs. Clone each
-  // incoming edge, preserving the precise partially updated state on failure.
-  SmallVector<BasicBlock *, 8> Exits;
-  L.getUniqueExitBlocks(Exits);
-  for (BasicBlock *Exit : Exits) for (PHINode &P : Exit->phis()) {
-    unsigned N = P.getNumIncomingValues();
-    for (unsigned I = 0; I < N; ++I) {
-      BasicBlock *From = P.getIncomingBlock(I);
-      if (!L.contains(From)) continue;
-      Value *V = P.getIncomingValue(I);
-      P.addIncoming(Map.count(V) ? static_cast<Value *>(Map[V]) : V,
-                    cast<BasicBlock>(Map[From]));
-    }
-  }
-  Instruction *OldBranch = Check->getTerminator();
-  CondBrInst::Create(Safe, PH, Slow->getLoopPreheader(), OldBranch->getIterator());
-  OldBranch->eraseFromParent();
+  versionLoop(L, Safe, LI, DT, SE, "count.fast.ph", ".count.checked");
   IRBuilder<> Fast(Add);
   Value *Unchecked = Fast.CreateNUWAdd(Count, One, "count.proven");
   Value *Pair = PoisonValue::get(Add->getType());
@@ -158,6 +166,81 @@ static bool versionCount(Loop &L, LoopInfo &LI, DominatorTree &DT,
   Add->eraseFromParent();
   return true;
 }
+
+// A byte's full unsigned range fits a table of at least 256 elements.
+// The table length must already be SSA-invariant for this loop; a shorter
+// reborrow or a reloaded length gets no promise from its backing allocation.
+static bool versionByteBounds(Loop &L, LoopInfo &LI, DominatorTree &DT,
+                              ScalarEvolution &SE) {
+  if (!L.getLoopPreheader() || !L.getLoopLatch() || !L.isInnermost() ||
+      L.getNumBlocks() > 24) return false;
+  for (BasicBlock *BB : L.blocks()) for (Instruction &I : *BB) {
+    auto *Cmp = dyn_cast<ICmpInst>(&I);
+    if (!Cmp) continue;
+    Value *Index, *Length;
+    if (Cmp->getPredicate() == ICmpInst::ICMP_ULT) {
+      Index = Cmp->getOperand(0); Length = Cmp->getOperand(1);
+    } else if (Cmp->getPredicate() == ICmpInst::ICMP_UGT) {
+      Length = Cmp->getOperand(0); Index = Cmp->getOperand(1);
+    } else continue;
+    auto *Byte = dyn_cast<ZExtInst>(Index);
+    if (!Byte || !Byte->getSrcTy()->isIntegerTy(8) ||
+        !Byte->getDestTy()->isIntegerTy(64) || !L.isLoopInvariant(Length))
+      continue;
+    auto *Branch = dyn_cast<CondBrInst>(BB->getTerminator());
+    if (!Branch || Branch->getCondition() != Cmp ||
+        !L.contains(Branch->getSuccessor(0)) ||
+        L.contains(Branch->getSuccessor(1))) continue;
+    IRBuilder<> Builder(L.getLoopPreheader()->getTerminator());
+    Value *Safe = Builder.CreateFreeze(
+        Builder.CreateICmpUGE(Length, Builder.getInt64(256)),
+        "byte.bounds.covered");
+    versionLoop(L, Safe, LI, DT, SE, "byte.bounds.fast.ph",
+                ".byte.bounds.checked");
+    Cmp->replaceAllUsesWith(Builder.getTrue());
+    Cmp->eraseFromParent();
+    return true;
+  }
+  return false;
+}
+
+class ByteBoundsLoopPass : public PassInfoMixin<ByteBoundsLoopPass> {
+public:
+  PreservedAnalyses run(Function &F, FunctionAnalysisManager &AM) {
+    bool Candidate = false;
+    for (BasicBlock &B : F) for (Instruction &I : B)
+      if (auto *Z = dyn_cast<ZExtInst>(&I))
+        Candidate |= Z->getSrcTy()->isIntegerTy(8) &&
+                     Z->getDestTy()->isIntegerTy(64);
+    if (!Candidate) return PreservedAnalyses::all();
+    bool Versioned = false;
+    bool Simplified = false;
+    {
+      DominatorTree DT(F);
+      LoopInfo LI(DT);
+      AssumptionCache AC(F);
+      TargetLibraryInfoImpl Impl(Triple(F.getParent()->getTargetTriple()));
+      TargetLibraryInfo TLI(Impl);
+      ScalarEvolution SE(F, TLI, AC, DT, LI);
+      for (Loop *L : LI)
+        Simplified |= simplifyLoop(L, &DT, &LI, &SE, &AC, nullptr, false);
+      for (Loop *L : LI.getLoopsInPreorder()) {
+        if (versionByteBounds(*L, LI, DT, SE)) {
+          Versioned = true;
+          break;
+        }
+      }
+    }
+    if (!Versioned)
+      return Simplified ? PreservedAnalyses::none() : PreservedAnalyses::all();
+    AM.invalidate(F, PreservedAnalyses::none());
+    FunctionPassManager Clean;
+    Clean.addPass(InstCombinePass());
+    Clean.addPass(SimplifyCFGPass());
+    Clean.run(F, AM);
+    return PreservedAnalyses::none();
+  }
+};
 
 // Run at VectorizerStart, before partial unrolling duplicates the increment.
 class CountLoopPass : public PassInfoMixin<CountLoopPass> {
@@ -488,6 +571,7 @@ extern "C" void hirsel_llvm_count_pipeline(void *Raw, void *Machine,
   PB.registerVectorizerStartEPCallback(
       [](FunctionPassManager &PM, OptimizationLevel) {
         PM.addPass(CountLoopPass());
+        PM.addPass(ByteBoundsLoopPass());
         PM.addPass(AheadChunkPass());
       });
   auto PM = PB.buildPerModuleDefaultPipeline(

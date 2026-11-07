@@ -726,7 +726,9 @@ hirsel_toolchain_bundle = rule(
 def _workspace_build_script_run_impl(ctx):
     # Lay the declared workspace files out at their repository paths, so the
     # script finds them from CARGO_MANIFEST_DIR as it does under Cargo.
-    tree = ctx.actions.symlinked_dir("workspace", {f.short_path: f for f in ctx.attrs.inputs})
+    inputs = {f.short_path: f for f in ctx.attrs.inputs}
+    inputs.update(ctx.attrs.input_paths)
+    tree = ctx.actions.symlinked_dir("workspace", inputs)
     out_dir = ctx.actions.declare_output("OUT_DIR", dir = True)
     script = ctx.actions.write(
         "run.sh",
@@ -756,6 +758,7 @@ _workspace_build_script_run = rule(
     attrs = {
         "features": attrs.list(attrs.string(), default = []),
         "inputs": attrs.list(attrs.source()),
+        "input_paths": attrs.dict(attrs.string(), attrs.source(), default = {}),
         "manifest_dir": attrs.string(),
         "package_name": attrs.string(),
         "script": attrs.exec_dep(providers = [RunInfo]),
@@ -763,7 +766,7 @@ _workspace_build_script_run = rule(
     },
 )
 
-def hirsel_build_script(name, crate_root, srcs, deps, inputs, features, manifest_dir, package_name, version, edition):
+def hirsel_build_script(name, crate_root, srcs, deps, inputs, features, manifest_dir, package_name, version, edition, input_paths = {}):
     """A Cargo build script: compiled once, then run over its declared inputs.
 
     Its output directory is the library's OUT_DIR. Cargo rerun directives are
@@ -788,6 +791,7 @@ def hirsel_build_script(name, crate_root, srcs, deps, inputs, features, manifest
         name = name,
         script = ":" + name + "-bin",
         inputs = inputs + [manifest_dir + "/Cargo.toml"],
+        input_paths = input_paths,
         features = features,
         manifest_dir = manifest_dir,
         package_name = package_name,

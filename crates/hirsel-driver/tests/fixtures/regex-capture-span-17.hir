@@ -433,6 +433,8 @@ fn traced_replace_accelerated[T](
       pos = subject_next(source_input, pos)
     } else if span.end == pos {
       pos = subject_next(source_input, pos)
+    } else if bound == 18446744073709551615 {
+      pos = span.end
     } else {
       while pos < span.end {
         replacement_afford(re, source_input, mode != 1, 1, pending, mut bound, mut work)?

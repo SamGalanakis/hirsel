@@ -309,8 +309,10 @@ fn dfa_count_laws() -> bool uses {} {
   for (pattern, src, expected) in cases {
     let Ok(re) = compile(pattern, 10000) else { return false }
     for budget in [0u64, 1, 10, 10000000, 18446744073709551615] {
-      let spans = find_all(re, src, 18446744073709551615, budget)
+      let spans = dfa_oracle_all(re, src, 18446744073709551615, budget)
+      if find_all(re, src, 18446744073709551615, budget) != spans { return false }
       let counts = count(re, src, budget)
+      if budget == 18446744073709551615 && is_match(re, src, budget) != Ok(expected != 0) { return false }
       match spans {
         Ok(found) => {
           if counts != Ok(core@1/list.len(found)) { return false }

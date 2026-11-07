@@ -131,10 +131,6 @@ pub enum Counter {
     SourcePathCopies,
     /// Front observation rows visited by full-table accounting.
     FrontSlotCensusRows,
-    /// Local input address lookups, without portable hashing.
-    FrontLocalLookups,
-    FrontSlotReplacements,
-    FrontVictimCandidates,
     /// Cached dependency-node inspections.
     CacheValidationRows,
 }

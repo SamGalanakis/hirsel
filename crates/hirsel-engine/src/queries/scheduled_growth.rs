@@ -26,9 +26,6 @@ const FAILURE: Domain = Domain {
 pub struct FrontGrowthQueries {
     query: QueryId,
     roots: Vec<QueryId>,
-    // Only portable record inputs use this exact boundary index. Live Front
-    // lookup, scheduling and eviction continue to use local slots.
-    portable_inputs: Box<[(ContentHash, u32)]>,
     front: Arc<FrontBodyQueries>,
     items: Arc<crate::NativeRecordContext>,
     records: crate::NativeRecords,
@@ -67,9 +64,9 @@ impl FrontGrowthQueries {
             .checked_add((2 * std::mem::size_of::<usize>()) as u64)?
             .checked_add(hirsel_engine_admission::MemoryReservationPool::metadata_bytes())?
             .checked_add(package as u64)?
-            .checked_add((definitions.len() as u64).checked_mul(
-                (std::mem::size_of::<QueryId>() + std::mem::size_of::<(ContentHash, u32)>()) as u64,
-            )?)
+            .checked_add(
+                (definitions.len() as u64).checked_mul(std::mem::size_of::<QueryId>() as u64)?,
+            )
     }
     fn producer(&self) -> SourceGrowthProducer<'_> {
         SourceGrowthProducer {
@@ -278,33 +275,22 @@ struct FactTask {
     admission: hirsel_engine_admission::MemoryReservation,
 }
 impl FactTask {
-    fn input(&self, i: usize) -> Result<(QueryId, hirsel_artifact_store::Address), Reference> {
-        if let Some((membership, component)) = &self.component {
-            let address = membership.components[*component].inputs[i];
-            let at = self
-                .queries
-                .portable_inputs
-                .binary_search_by_key(&address, |(address, _)| *address)
-                .map_err(|_| self.queries.errors.protocol)?;
-            let root = self.queries.portable_inputs[at].1 as usize;
-            Ok((
-                self.queries.roots[root],
-                hirsel_artifact_store::Address(address),
-            ))
-        } else {
-            let query = self.queries.roots[i];
-            let address = self
-                .queries
-                .front
-                .portable_query_address(query)
-                .ok_or(self.queries.errors.protocol)?;
-            Ok((query, address))
-        }
+    fn input(&self, i: usize) -> QueryId {
+        self.component
+            .as_ref()
+            .map_or(self.queries.roots.get(i).copied(), |(m, index)| {
+                Some(QueryId {
+                    kind: FRONT_BODY_KIND,
+                    address: hirsel_artifact_store::Address(m.components[*index].inputs[i]),
+                })
+            })
+            .unwrap()
     }
     fn advance(&mut self, cx: &mut dyn QueryContext) -> Poll<Result<ProductRef, Reference>> {
         while self.cursor < self.count {
-            let (original, portable) = self.input(self.cursor)?;
-            let input = self.queries.selected_input(&self.front, original)?;
+            let input = self
+                .queries
+                .selected_input(&self.front, self.input(self.cursor))?;
             self.waiting = Some(input);
             let selected = match cx.read(input) {
                 Poll::Pending => return Poll::Pending,
@@ -328,7 +314,7 @@ impl FactTask {
                     .map(|p| p.action.0)
                     .unwrap_or_else(|r| r.output.0);
                 let Some(fact) = self.queries.producer().fact_observed(
-                    portable,
+                    self.input(self.cursor).address,
                     checked.summary,
                     selected.into(),
                     observed,
@@ -942,23 +928,6 @@ impl QueryEngine {
                 })
             })?);
         }
-        let mut portable_inputs = Vec::with_capacity(roots.len());
-        for (i, query) in roots.iter().copied().enumerate() {
-            let index = u32::try_from(i).map_err(|_| refusal())?;
-            let address = front.portable_query_address(query).ok_or_else(refusal)?;
-            portable_inputs.push((address.0, index));
-        }
-        portable_inputs.sort_unstable_by_key(|(address, _)| *address);
-        if portable_inputs
-            .windows(2)
-            .any(|rows| rows[0].0 == rows[1].0)
-        {
-            return Err(QueryError::Operational(hirsel_types::OperationalFailure {
-                operation: "source growth admission".into(),
-                message: "distinct local inputs have a conflicting portable binding".into(),
-            }));
-        }
-        let portable_inputs = portable_inputs.into_boxed_slice();
         // The settled owner retains only root IDs and handles to the exact
         // front source. Charge its real backing before assigning the remainder
         // of this same reservation to its completed output.
@@ -967,7 +936,6 @@ impl QueryEngine {
         let mut retained = hirsel_query_products::retained::MetadataWeight::default();
         retained.add(std::mem::size_of::<FrontGrowthQueries>() + 2 * std::mem::size_of::<usize>());
         retained.flat_vec(&roots);
-        retained.add(std::mem::size_of_val(&*portable_inputs));
         retained.add(package.name.capacity() + package.version.capacity());
         let (allowance, output_pool) = allowance.partition(retained.bytes()).ok_or_else(refusal)?;
         let query = QueryId {
@@ -985,7 +953,6 @@ impl QueryEngine {
             publication_source: Mutex::new(None),
             query,
             roots,
-            portable_inputs,
             front: front.clone(),
             // The front owner remains held here, including its original
             // source/context reservation. No copied anchor/path tables.

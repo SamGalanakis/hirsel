@@ -1,17 +1,13 @@
 use super::*;
 use crate::queries::operation_inputs::InputIndex;
-use hirsel_query_products::local::LocalSlot;
 
+/// The written input rows have one operation owner. Each capture binds those
+/// rows to its own exact query ids without copying the payloads or their grant.
 #[derive(Clone)]
 pub(super) struct Inputs {
-    rows: InputIndex<u32, Input>,
-    index: Arc<Definitions>,
-    generation: u64,
-}
-struct Definitions {
-    ranks: hirsel_syntax::DefMap<u32>,
-    bytes: u64,
-    admission: OnceLock<hirsel_engine_admission::MemoryReservation>,
+    rows: InputIndex<DefId, Input>,
+    namespace: Arc<NamespaceCapture>,
+    addresses: Arc<Addresses>,
 }
 impl PartialEq for Input {
     fn eq(&self, other: &Self) -> bool {
@@ -30,86 +26,67 @@ impl PartialEq for Input {
 impl Inputs {
     pub(super) fn new(
         rows: BTreeMap<DefId, Input>,
+        namespace: Arc<NamespaceCapture>,
         previous: Option<&Self>,
     ) -> Result<Self, QueryError> {
-        let generation = LocalSlot::generation()
-            .ok_or_else(|| header_products::source_refusal("Front input generation overflow"))?;
-        let mut ranks = hirsel_syntax::DefMap::default();
-        let mut ranked = BTreeMap::new();
-        for (rank, (definition, input)) in rows.into_iter().enumerate() {
-            let rank = u32::try_from(rank)
-                .map_err(|_| header_products::source_refusal("Front input rank overflow"))?;
-            ranks.insert(definition, rank);
-            ranked.insert(rank, input);
-        }
-        ranks.shrink_to_fit();
-        // hashbrown raw/mod.rs capacity_to_buckets and calculate_layout_for,
-        // as in retained::MetadataWeight::instance_bodies. This map never grows.
-        let buckets = if ranks.is_empty() {
-            0
-        } else {
-            ranks
-                .len()
-                .saturating_mul(8)
-                .div_ceil(7)
-                .checked_next_power_of_two()
-                .ok_or_else(|| header_products::source_refusal("Front rank index overflow"))?
-                .max(4)
-        };
-        let bytes = (buckets * (size_of::<(DefId, u32)>() + 1)
-            + usize::from(buckets != 0) * (16 + align_of::<(DefId, u32)>() - 1))
-            as u64
-            + hirsel_engine_admission::retained_arc_bytes(
-                &std::mem::MaybeUninit::<Definitions>::uninit(),
-            );
-        let rows =
-            InputIndex::capture(ranked, previous.map(|previous| &previous.rows), |_| Some(0))?;
-        let index =
-            if let Some(previous) = previous.filter(|previous| previous.index.ranks == ranks) {
-                previous.index.clone()
-            } else {
-                Arc::new(Definitions {
-                    ranks,
-                    bytes,
-                    admission: OnceLock::new(),
-                })
-            };
+        let rows = InputIndex::capture(rows, previous.map(|previous| &previous.rows), |_| Some(0))?;
         Ok(Self {
             rows,
-            index,
-            generation,
+            namespace,
+            addresses: Arc::new(Addresses::default()),
         })
     }
-    pub(super) fn generation(&self) -> u64 {
-        self.generation
+    fn key(&self, input: &Input, body: bool) -> Key {
+        let key = self
+            .namespace
+            .query_id(FRONT_BODY_KIND, input.key.0)
+            .address
+            .0;
+        if body { Self::body_key(key) } else { key }
     }
-    fn key(&self, rank: u32, body: bool) -> Key {
-        LocalSlot {
-            rank,
-            generation: self.generation,
-            body,
-        }
-        .address()
+    fn body_key(key: Key) -> Key {
+        ContentHash::of_parts("hirsel.front.body-demand.v1", [key.0.as_slice()])
     }
     pub(super) fn address(&self, id: DefId, body: bool) -> Option<Key> {
-        Some(self.key(*self.index.ranks.get(&id)?, body))
+        let key = self.key(self.rows.get(&id)?, body);
+        self.addresses.remember(key, id, body);
+        Some(key)
     }
     fn lookup(&self, key: &Key, body: bool) -> Option<&Input> {
-        hirsel_intern::work::count(hirsel_intern::work::Counter::FrontLocalLookups);
-        let slot = LocalSlot::decode(*key)?;
-        (slot.generation == self.generation && slot.body == body).then_some(())?;
-        self.rows.get(&slot.rank)
+        {
+            let index = self
+                .addresses
+                .rows
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            let rows = if body { &index.body } else { &index.front };
+            let prefix = Addresses::prefix(*key);
+            let start = rows.partition_point(|(candidate, _)| *candidate < prefix);
+            for (_, id) in rows[start..]
+                .iter()
+                .take_while(|(candidate, _)| *candidate == prefix)
+            {
+                let input = self.rows.get(id)?;
+                if self.key(input, body) == *key {
+                    return Some(input);
+                }
+            }
+        }
+        let input = self
+            .rows
+            .values()
+            .find(|input| self.key(input, body) == *key)?;
+        self.addresses.remember(*key, input.definition, body);
+        Some(input)
     }
     pub(super) fn demand(&self, key: &Key) -> Option<Key> {
-        let slot = LocalSlot::decode(*key)?;
-        self.lookup(key, true)?;
-        Some(self.key(slot.rank, false))
+        Some(self.key(self.lookup(key, true)?, false))
     }
     pub(super) fn get(&self, key: &Key) -> Option<&Input> {
         self.lookup(key, false)
     }
     pub(super) fn definition(&self, id: DefId) -> Option<&Input> {
-        self.rows.get(self.index.ranks.get(&id)?)
+        self.rows.get(&id)
     }
     pub(super) fn contains_key(&self, key: &Key) -> bool {
         self.get(key).is_some()
@@ -117,42 +94,161 @@ impl Inputs {
     pub(super) fn len(&self) -> usize {
         self.rows.len()
     }
+    pub(super) fn clear_addresses(&self) -> bool {
+        self.addresses.clear()
+    }
     pub(super) fn key_for(&self, id: DefId) -> Option<Key> {
-        self.address(id, false)
+        Some(self.key(self.rows.get(&id)?, false))
     }
     pub(super) fn values(&self) -> impl Iterator<Item = &Input> {
         self.rows.values()
     }
     pub(super) fn iter(&self) -> impl Iterator<Item = (Key, &Input)> {
         self.rows
-            .iter()
-            .map(|(rank, input)| (self.key(*rank, false), input))
+            .values()
+            .map(|input| (self.key(input, false), input))
     }
     pub(super) fn unadmitted_bytes(&self) -> u64 {
         self.rows
             .unadmitted_bytes()
-            .saturating_add(if self.index.admission.get().is_some() {
-                0
-            } else {
-                self.index.bytes
-            })
+            .saturating_add(self.addresses.unadmitted_bytes())
     }
     pub(super) fn admit(
         &self,
         allowance: &mut hirsel_engine_admission::MemoryReservation,
+        pool: Arc<hirsel_engine_admission::MemoryReservationPool>,
+        retention: Arc<Mutex<u64>>,
     ) -> Result<(), QueryError> {
         self.rows.admit(allowance)?;
-        if self.index.admission.get().is_none() {
-            let reservation = allowance
-                .split(self.index.bytes)
-                .ok_or_else(|| header_products::source_refusal("Front rank index admission"))?;
-            if let Err(reservation) = self.index.admission.set(reservation) {
-                allowance
-                    .join(reservation)
-                    .map_err(|_| header_products::source_refusal("Front rank index partition"))?;
-            }
+        if self.addresses.admission.get().is_none() {
+            let metadata = allowance
+                .split(self.addresses.unadmitted_bytes())
+                .ok_or_else(|| {
+                    header_products::source_refusal("Front address metadata admission")
+                })?;
+            let _ = self.addresses.admission.set(AddressAdmission {
+                _metadata: metadata,
+                pool,
+                retention,
+            });
         }
         Ok(())
+    }
+}
+
+/// Reverse addresses are hints for demanded definitions. Every prefix hit is
+/// checked against the consuming namespace's complete address. If growth cannot
+/// fit, the immutable rows still provide an exact lookup without an index.
+#[derive(Default)]
+struct Addresses {
+    rows: Mutex<AddressRows>,
+    admission: OnceLock<AddressAdmission>,
+}
+#[derive(Default)]
+struct AddressRows {
+    front: Vec<(u32, DefId)>,
+    body: Vec<(u32, DefId)>,
+    charge: Option<hirsel_engine_admission::MemoryReservation>,
+}
+struct AddressAdmission {
+    _metadata: hirsel_engine_admission::MemoryReservation,
+    pool: Arc<hirsel_engine_admission::MemoryReservationPool>,
+    retention: Arc<Mutex<u64>>,
+}
+impl Addresses {
+    fn prefix(key: Key) -> u32 {
+        u32::from_le_bytes(key.0[..4].try_into().unwrap())
+    }
+    fn unadmitted_bytes(&self) -> u64 {
+        if self.admission.get().is_some() {
+            0
+        } else {
+            hirsel_engine_admission::retained_arc_bytes(self)
+        }
+    }
+    fn remember(&self, key: Key, id: DefId, body: bool) {
+        let Some(admission) = self.admission.get() else {
+            return;
+        };
+        let mut index = self.rows.lock().unwrap_or_else(|e| e.into_inner());
+        let AddressRows {
+            front,
+            body: bodies,
+            charge,
+        } = &mut *index;
+        let rows = if body { bodies } else { front };
+        let row = (Self::prefix(key), id);
+        let Err(at) = rows.binary_search(&row) else {
+            return;
+        };
+        if rows.len() == rows.capacity() {
+            let growth = rows.capacity().max(4);
+            let Some(bytes) = growth
+                .checked_mul(size_of::<(u32, DefId)>())
+                .and_then(|bytes| {
+                    bytes.checked_add(if rows.capacity() == 0 {
+                        2 * size_of::<usize>()
+                    } else {
+                        0
+                    })
+                })
+                .and_then(|bytes| u64::try_from(bytes).ok())
+            else {
+                return;
+            };
+            let mut remaining = admission
+                .retention
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            let Some(next) = remaining.checked_sub(bytes) else {
+                return;
+            };
+            let Some(extra) = admission.pool.take(bytes) else {
+                return;
+            };
+            if let Some(charge) = charge {
+                if charge.join(extra).is_err() {
+                    return;
+                }
+            } else {
+                *charge = Some(extra);
+            }
+            *remaining = next;
+            rows.reserve_exact(growth);
+        }
+        rows.insert(at, row);
+    }
+    fn clear(&self) -> bool {
+        let mut rows = self.rows.lock().unwrap_or_else(|e| e.into_inner());
+        rows.front = Vec::new();
+        rows.body = Vec::new();
+        if let Some(charge) = rows.charge.take() {
+            if let Some(admission) = self.admission.get() {
+                *admission
+                    .retention
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner()) += charge.bytes();
+            }
+            return true;
+        }
+        false
+    }
+}
+impl Drop for Addresses {
+    fn drop(&mut self) {
+        if let Some(admission) = self.admission.get()
+            && let Some(charge) = self
+                .rows
+                .get_mut()
+                .unwrap_or_else(|e| e.into_inner())
+                .charge
+                .take()
+        {
+            *admission
+                .retention
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()) += charge.bytes();
+        }
     }
 }
 impl std::ops::Index<&Key> for Inputs {
@@ -186,8 +282,10 @@ impl OperationFrontInputs {
     pub(super) fn admit(
         &self,
         allowance: &mut hirsel_engine_admission::MemoryReservation,
+        pool: Arc<hirsel_engine_admission::MemoryReservationPool>,
+        retention: Arc<Mutex<u64>>,
     ) -> Result<(), QueryError> {
-        self.inputs.admit(allowance)?;
+        self.inputs.admit(allowance, pool, retention)?;
         self.cited.admit(allowance)?;
         self.candidates.admit(allowance)?;
         self.arm_fixes.admit(allowance)

@@ -440,6 +440,25 @@ fn zero_tiny_overflow_and_oversize_admission_never_raise_cap() {
 }
 #[test]
 fn idle_eviction_recreates_only_evicted_claims() {
+    let mut rt = runtime(1, 4 << 20);
+    let claims = install(&mut rt, &[(0, Spec::deps(&[]))]);
+    let request = rt.request(&[query(0)]);
+    rt.wait(request).unwrap();
+    let request = rt.request(&[query(0)]);
+    rt.wait(request).unwrap();
+    assert_eq!(claims.load(Ordering::SeqCst), 1);
+    rt.evict_to(0);
+    assert_eq!(
+        rt.stats().charged_bytes - rt.stats().bookkeeping_bytes,
+        STACK as u64
+    );
+    let request = rt.request(&[query(0)]);
+    rt.wait(request).unwrap();
+    assert_eq!(claims.load(Ordering::SeqCst), 2);
+    rt.shutdown();
+    assert_eq!(rt.stats().charged_bytes, 0);
+    let request = rt.request(&[query(0)]);
+    assert_eq!(rt.poll(request), Poll::Ready(Err(errors().cancelled)));
     // Equal logical ages retire in demand order, regardless of portable digest.
     for salt in [13u64, 79] {
         let mut identities = [key(query(salt)), key(query(salt + 1))];
@@ -462,25 +481,6 @@ fn idle_eviction_recreates_only_evicted_claims() {
         );
         assert!(state.nodes.get(&identities[1]).is_some());
     }
-    let mut rt = runtime(1, 4 << 20);
-    let claims = install(&mut rt, &[(0, Spec::deps(&[]))]);
-    let request = rt.request(&[query(0)]);
-    rt.wait(request).unwrap();
-    let request = rt.request(&[query(0)]);
-    rt.wait(request).unwrap();
-    assert_eq!(claims.load(Ordering::SeqCst), 1);
-    rt.evict_to(0);
-    assert_eq!(
-        rt.stats().charged_bytes - rt.stats().bookkeeping_bytes,
-        STACK as u64
-    );
-    let request = rt.request(&[query(0)]);
-    rt.wait(request).unwrap();
-    assert_eq!(claims.load(Ordering::SeqCst), 2);
-    rt.shutdown();
-    assert_eq!(rt.stats().charged_bytes, 0);
-    let request = rt.request(&[query(0)]);
-    assert_eq!(rt.poll(request), Poll::Ready(Err(errors().cancelled)));
 }
 struct BlockingFactory {
     entered: mpsc::Sender<()>,
@@ -1903,7 +1903,7 @@ fn bare_node() -> super::Node {
         unsatisfied: 0,
         live: true,
         in_flight: false,
-        used_at: 0,
+        settled_at: 0,
     }
 }
 fn exact_reaches(edges: &[Vec<usize>], from: usize, target: usize) -> bool {
@@ -2374,8 +2374,6 @@ fn node_pressure_spills_results_without_persistence_and_preserves_root_delivery(
             "undelivered root is pinned"
         );
         assert!(state.spill.contains_key(&key(query(2))));
-        assert_eq!(state.spill_order.len(), state.spill.len());
-        assert!(state.spill_order.values().any(|&k| k == key(query(2))));
         assert_eq!(state.max_entries, 3);
         assert_eq!(state.nodes.len(), 3);
     }
@@ -2383,13 +2381,6 @@ fn node_pressure_spills_results_without_persistence_and_preserves_root_delivery(
     let producer_claims = rt.stats().claims;
     let request = rt.request(&[query(2)]);
     assert_eq!(rt.wait(request), Ok(vec![product(query(2))]));
-    assert!(
-        !rt.shared
-            .lock()
-            .spill_order
-            .values()
-            .any(|&k| k == key(query(2)))
-    );
     let reopened = rt.shared.lock().nodes.node_id(key(query(2))).unwrap();
     assert_ne!(old, reopened);
     assert_eq!(
@@ -2456,7 +2447,6 @@ fn body_admission_can_evict_a_spilled_result_after_its_factory_preserves_the_arc
     assert!(cx.evict_body());
     assert_eq!(evictions.load(Ordering::SeqCst), 1);
     assert!(rt.shared.lock().spill.is_empty());
-    assert!(rt.shared.lock().spill_order.is_empty());
     let reopened = rt.request(&[query(0)]);
     assert_eq!(rt.wait(reopened), Ok(vec![product(query(0))]));
 }

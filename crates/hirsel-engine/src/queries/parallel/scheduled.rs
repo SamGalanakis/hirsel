@@ -16,7 +16,6 @@ use std::sync::{
 
 mod carry;
 mod compact_store;
-mod slots;
 pub(in crate::queries) use compact_store::load_publication as load_scheduled_publication;
 mod lint_facts;
 mod observations;
@@ -325,7 +324,7 @@ pub struct FrontBodyQueries {
     /// Stored entry validations plus memo rows written.
     memo_operations: AtomicU64,
     verify_store: hirsel_engine_store::VerifyStore,
-    slots: Mutex<slots::Slots>,
+    slots: Mutex<BTreeMap<Key, FrontSlot>>,
     input_slots: Mutex<(BTreeMap<DefId, usize>, Option<Arc<LiveSourceBacking>>)>,
     /// Optional body retention bound within the existing Front allowance.
     body_cache_limit: u64,
@@ -915,7 +914,9 @@ impl FrontBodyQueries {
     }
     fn slot_inventory(len: usize, pending: usize) -> u64 {
         let mut weight = hirsel_query_products::retained::MetadataWeight::default();
-        slots::Slots::index_bytes(&mut weight, len);
+        if len != 0 {
+            weight.tree::<Key, FrontSlot>(len);
+        }
         if pending != 0 {
             weight.tree::<DefId, usize>(pending);
         }
@@ -978,9 +979,15 @@ impl FrontBodyQueries {
             return Some(());
         }
     }
-    fn slot_metadata_bytes(&self, pending: &BTreeMap<DefId, usize>, slots: &slots::Slots) -> u64 {
+    fn slot_metadata_bytes(
+        &self,
+        pending: &BTreeMap<DefId, usize>,
+        slots: &BTreeMap<Key, FrontSlot>,
+    ) -> u64 {
         let mut weight = hirsel_query_products::retained::MetadataWeight::default();
-        slots::Slots::index_bytes(&mut weight, slots.len());
+        if !slots.is_empty() {
+            weight.tree::<Key, FrontSlot>(slots.len());
+        }
         if !pending.is_empty() {
             weight.tree::<DefId, usize>(pending.len());
         }
@@ -992,7 +999,18 @@ impl FrontBodyQueries {
         if !clean.is_empty() {
             weight.tree::<crate::memo::MemoKey, ()>(clean.len());
         }
-        weight.add(slots.unbacked_bytes() as usize);
+        for slot in slots.values() {
+            hirsel_intern::work::count(hirsel_intern::work::Counter::FrontSlotCensusRows);
+            let observations = match slot {
+                FrontSlot::Archived(archived) => Some(&archived.observations),
+                FrontSlot::Live { observations, .. } => observations.as_ref(),
+            };
+            if let Some(observations) = observations
+                && observations._backing.is_none()
+            {
+                weight.add(observations.rows.metadata_bytes() as usize);
+            }
+        }
         if weight.bytes() != 0 {
             weight.add(
                 hirsel_engine_admission::retained_arc_bytes(&std::mem::MaybeUninit::<
@@ -1017,9 +1035,22 @@ impl FrontBodyQueries {
     pub fn retained_observation_metadata_bytes(&self) -> u64 {
         let ledger = self.input_slots.lock().unwrap_or_else(|e| e.into_inner());
         let slots = self.slots.lock().unwrap_or_else(|e| e.into_inner());
-        self.slot_metadata_bytes(&ledger.0, &slots) + slots.archived_bytes()
+        let archives = slots
+            .values()
+            .filter_map(|slot| match slot {
+                FrontSlot::Archived(archived) => Some(&archived.observations),
+                FrontSlot::Live { observations, .. } => observations.as_ref(),
+            })
+            .filter(|observations| observations._backing.is_some())
+            .map(|observations| {
+                observations.rows.metadata_bytes()
+                    + hirsel_engine_admission::retained_arc_bytes(&std::mem::MaybeUninit::<
+                        LiveSourceBacking,
+                    >::uninit())
+            })
+            .sum::<u64>();
+        self.slot_metadata_bytes(&ledger.0, &slots) + archives
     }
-
     fn trim_slot_admission(&self) -> bool {
         let mut ledger = self.input_slots.lock().unwrap_or_else(|e| e.into_inner());
         let slots = self.slots.lock().unwrap_or_else(|e| e.into_inner());
@@ -1101,22 +1132,27 @@ impl FrontBodyQueries {
             let mut used: u64 = slots
                 .iter()
                 .filter_map(|(stored, slot)| match slot {
-                    FrontSlot::Live { outcome, .. } if stored != key => {
+                    FrontSlot::Live { outcome, .. } if *stored != key => {
                         outcome.pending_body.as_ref().map(|body| body.charge)
                     }
                     _ => None,
                 })
                 .sum();
             while charge > self.body_cache_limit.saturating_sub(used) {
-                let victim = slots.pending_victim(|stored, slot| {
-                    matches!(slot,
-                    FrontSlot::Live { outcome, .. } if stored != key
-                        && matches!(outcome.state, FrontState::Settled { archive: Some(_), .. })
-                        && outcome.pending_body.is_some())
-                });
-                let retired = victim.and_then(|key| match slots.get_mut(&key)? {
-                    FrontSlot::Live { outcome, .. } => outcome.pending_body.take(),
-                    FrontSlot::Archived(_) => None,
+                let retired = slots.iter_mut().find_map(|(stored, slot)| match slot {
+                    FrontSlot::Live { outcome, .. }
+                        if *stored != key
+                            && matches!(
+                                outcome.state,
+                                FrontState::Settled {
+                                    archive: Some(_),
+                                    ..
+                                }
+                            ) =>
+                    {
+                        outcome.pending_body.take()
+                    }
+                    _ => None,
                 });
                 let Some(retired) = retired else {
                     outcome.pending_body.take();
@@ -1126,25 +1162,30 @@ impl FrontBodyQueries {
                 drop(retired);
             }
         }
-        // Replacing a live/archive row preserves its required checkpoint and
-        // immutable observation owner, then updates the cached inventory once.
-        let observations = slots.get(&key).and_then(|slot| {
-            outcome.terminal = outcome.terminal.or_else(|| match slot {
-                FrontSlot::Live { outcome, .. } => outcome.terminal,
-                FrontSlot::Archived(archived) => Some(archived.facts),
-            });
-            match slot {
-                FrontSlot::Live { observations, .. } => observations.clone(),
-                FrontSlot::Archived(archived) => Some(archived.observations.clone()),
+        match slots.entry(key) {
+            std::collections::btree_map::Entry::Occupied(mut entry) => {
+                // This slot belongs to one immutable input view. Restoring
+                // its facts preserves the original required checkpoint.
+                outcome.terminal = outcome.terminal.or_else(|| match entry.get() {
+                    FrontSlot::Live { outcome, .. } => outcome.terminal,
+                    FrontSlot::Archived(archived) => Some(archived.facts),
+                });
+                let observations = match entry.get() {
+                    FrontSlot::Live { observations, .. } => observations.clone(),
+                    FrontSlot::Archived(archived) => Some(archived.observations.clone()),
+                };
+                entry.insert(FrontSlot::Live {
+                    outcome,
+                    observations,
+                });
             }
-        });
-        slots.insert(
-            key,
-            FrontSlot::Live {
-                outcome,
-                observations,
-            },
-        );
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                entry.insert(FrontSlot::Live {
+                    outcome,
+                    observations: None,
+                });
+            }
+        }
         drop(slots);
     }
     /// Actual phase invocations, including failed or discarded producers.
@@ -1189,18 +1230,17 @@ impl FrontBodyQueries {
             return true;
         }
         let mut slots = self.slots.lock().unwrap_or_else(|e| e.into_inner());
-        let selected = slots.victim(|_, slot| match slot {
-            FrontSlot::Archived(_) => false,
+        let selected = slots.iter().find_map(|(key, slot)| match slot {
+            FrontSlot::Archived(_) => None,
             FrontSlot::Live { outcome, .. } => match &outcome.state {
-                FrontState::Failed { .. } => false,
-                FrontState::Settled { publication, .. } => {
-                    publication
-                        .live_value::<crate::products::LiveSummaryProduct>()
-                        .is_some_and(|summary| {
-                            publication.live_owners() == 1 && summary.cache_owners(1)
-                        })
-                        && Arc::strong_count(&outcome.facts) == 2
-                }
+                FrontState::Failed { .. } => None,
+                FrontState::Settled { publication, .. } => (publication
+                    .live_value::<crate::products::LiveSummaryProduct>()
+                    .is_some_and(|summary| {
+                        publication.live_owners() == 1 && summary.cache_owners(1)
+                    })
+                    && Arc::strong_count(&outcome.facts) == 2)
+                    .then_some(*key),
             },
         });
         let Some(key) = selected else {
@@ -1839,13 +1879,13 @@ impl FrontBodyQueries {
     fn selection_key(
         &self,
         selected: &Result<ProductRef, Reference>,
-        slots: &slots::Slots,
+        slots: &BTreeMap<Key, FrontSlot>,
     ) -> Option<Key> {
         match selected {
             Err(reference) => slots.iter().find_map(|(key, slot)| match slot {
                 FrontSlot::Archived(_) => None,
                 FrontSlot::Live { outcome, .. } => match &outcome.state {
-                    FrontState::Failed { record, .. } if record == reference => Some(key),
+                    FrontState::Failed { record, .. } if record == reference => Some(*key),
                     FrontState::Failed { .. } | FrontState::Settled { .. } => None,
                 },
             }),
@@ -1903,20 +1943,6 @@ impl FrontBodyQueries {
         })
     }
 
-    /// Durable GEN-5 records retain their compiler/policy-bound input address.
-    /// This conversion is needed only when a live slot crosses that boundary.
-    pub(in crate::queries) fn portable_query_address(
-        &self,
-        query: QueryId,
-    ) -> Option<hirsel_artifact_store::Address> {
-        (query.kind == FRONT_BODY_KIND).then_some(())?;
-        let input = self.inputs.get(&query.address.0)?;
-        Some(
-            self.namespace
-                .query_id(FRONT_BODY_KIND, input.key.0)
-                .address,
-        )
-    }
     pub fn query(&self, definition: &DefPath) -> Option<QueryId> {
         let address = self.inputs.address(DefId::get(definition)?, false)?;
         Some(QueryId {
@@ -2277,12 +2303,22 @@ impl FrontBodyQueries {
     }
     fn evict_pending_body(&self) -> bool {
         let mut slots = self.slots.lock().unwrap_or_else(|e| e.into_inner());
-        let victim = slots.pending_victim(|_, slot| matches!(slot,
-            FrontSlot::Live { outcome, .. } if matches!(outcome.state, FrontState::Settled { archive: Some(_), .. })
-                && outcome.pending_body.as_ref().is_some_and(|body| body.product.cache_only())));
-        let retired = victim.and_then(|key| match slots.get_mut(&key)? {
-            FrontSlot::Live { outcome, .. } => outcome.pending_body.take(),
-            FrontSlot::Archived(_) => None,
+        let retired = slots.values_mut().find_map(|slot| match slot {
+            FrontSlot::Live { outcome, .. }
+                if matches!(
+                    outcome.state,
+                    FrontState::Settled {
+                        archive: Some(_),
+                        ..
+                    }
+                ) && outcome
+                    .pending_body
+                    .as_ref()
+                    .is_some_and(|body| body.product.cache_only()) =>
+            {
+                outcome.pending_body.take()
+            }
+            _ => None,
         });
         drop(slots);
         let removed = retired.is_some();
@@ -2366,6 +2402,7 @@ impl QueryFactory for Factory {
                 .header_products()
                 .is_some_and(|headers| headers.evict())
             || self.0.namespace.snapshot.evict_cached()
+            || self.0.inputs.clear_addresses()
             || self.0.trim_slot_admission()
             || self.0.reclaim_reads()
     }
@@ -3577,6 +3614,16 @@ impl QueryEngine {
         errors: RuntimeErrors,
         _previous: Option<&FrontBodyQueries>,
     ) -> Result<Arc<FrontBodyQueries>, QueryError> {
+        if let Some(previous) = namespace
+            .operation
+            .front
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .and_then(std::sync::Weak::upgrade)
+        {
+            previous.inputs.clear_addresses();
+        }
         let available = allowance.available_bytes();
         namespace.require_environment(self)?;
         let registrations = namespace
@@ -3709,7 +3756,11 @@ impl QueryEngine {
             .unwrap_or_else(|e| e.into_inner());
         let previous = operation_front.as_ref().and_then(std::sync::Weak::upgrade);
         let previous = previous.as_deref();
-        let inputs = Inputs::new(inputs, previous.map(|previous| &previous.inputs))?;
+        let inputs = Inputs::new(
+            inputs,
+            namespace.clone(),
+            previous.map(|previous| &previous.inputs),
+        )?;
         let arm_fixes = inputs::capture_map(
             arm_fixes::capture(&self.sources, &self.items),
             previous.map(|previous| &previous.arm_fixes),
@@ -3739,11 +3790,7 @@ impl QueryEngine {
             arm_fixes: arm_fixes.clone(),
         });
         required = required
-            .checked_add(
-                slots::Slots::capture_bytes(inputs.len())
-                    .ok_or_else(|| refusal("Front slot index overflow"))?,
-            )
-            .and_then(|required| required.checked_add(indexes.unadmitted_bytes()))
+            .checked_add(indexes.unadmitted_bytes())
             .ok_or_else(|| refusal("input size overflow"))?;
         if std::env::var_os("HIRSEL_OPERATION_OWNER_TRACE").is_some() {
             crate::queries::operation_owner_trace(format_args!(
@@ -3770,7 +3817,7 @@ impl QueryEngine {
             .take(required)
             .ok_or_else(|| refusal("shared Front input partition"))?;
         namespace.admit(&mut inputs_allowance, self.sources.clone())?;
-        indexes.admit(&mut inputs_allowance)?;
+        indexes.admit(&mut inputs_allowance, allowance.clone(), retention.clone())?;
         *operation_front = Some(Arc::downgrade(&indexes));
         drop(operation_front);
         let products = ProductSource::admit_shared(
@@ -3796,7 +3843,6 @@ impl QueryEngine {
             .header_products()
             .map(|headers| headers.configure_source_backing(backing.clone(), retention.clone()));
         let namespace_sources = namespace.sources.clone();
-        let slots = slots::Slots::new(inputs.len(), inputs.generation());
         Ok(Arc::new(FrontBodyQueries {
             demand: Default::default(),
             forwarded: Mutex::new(BTreeMap::new()),
@@ -3826,7 +3872,7 @@ impl QueryEngine {
             input_records,
             store,
             terminal_cache,
-            slots: Mutex::new(slots),
+            slots: Mutex::new(BTreeMap::new()),
             input_slots: Mutex::new((BTreeMap::new(), None)),
             body_cache_limit: self.hold_bytes,
             carry: Mutex::new(None),

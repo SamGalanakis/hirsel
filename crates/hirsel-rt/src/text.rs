@@ -235,7 +235,7 @@ unsafe fn base64_engine(alphabet: *const u32, padding: *const u32) -> base64_sim
     crate::base64::engine(url_safe, padded)
 }
 
-/// Encode a borrowed extent directly into fresh byte storage. Configuration
+/// Encode a borrowed extent directly into fresh String storage. Configuration
 /// values are std's existing Standard/UrlSafe and Required/Omitted variants.
 /// # Safety
 /// Context/output and enum addresses are live; the borrowed extent is initialized.
@@ -259,7 +259,10 @@ pub unsafe extern "C" fn hirsel_rt_v2_bytes_base64_encode(
         })
     };
     let result = unsafe { fresh_bytes(ctx, engine.encoded_length(source.len())) };
-    let encoded = engine.encode(source, unsafe { fresh_byte_output(result) });
+    // The safe codec constructor proves that the initialized output is ASCII,
+    // hence UTF-8. The declaration returns String, so no Bytes-to-String cast
+    // or second validation occurs at the language boundary.
+    let encoded = engine.encode_as_str(source, unsafe { fresh_byte_output(result) });
     debug_assert_eq!(encoded.len(), result.length as usize);
     unsafe { out.write(result) };
     STATUS_OK

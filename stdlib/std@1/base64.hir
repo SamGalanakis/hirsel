@@ -72,14 +72,7 @@ pub fn encode(data: Bytes, alphabet: Alphabet, padding: Padding) -> unique Strin
     remainder + 1
   }
   core@1/failure.check(len / 3 <= (18446744073709551615u64 - tail) / 4, TextInvariant())
-  let encoded = core@1/bytes.base64_encode(data, alphabet, padding)
-  match core@1/string.from_bytes(take encoded) {
-    Ok(s) => take s,
-    Error(_) => {
-      core@1/failure.check(false, TextInvariant())
-      ""
-    },
-  }
+  core@1/bytes.base64_encode(data, alphabet, padding)
 }
 
 @noalloc

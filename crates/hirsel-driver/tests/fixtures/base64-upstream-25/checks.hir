@@ -70,6 +70,10 @@ fn vector(t: Test, id: String, raw: Bytes, input: String, alphabet: std@1/base64
   failure.check(std@1/base64.decode(input, alphabet, padding) == expected, TextInvariant())
   test.log(t, f"{id}/whole-decode")
   if encode {
+    // The codec constructs String directly; Go's literal checks its ASCII bytes,
+    // including both padding tails and both alphabets, without a UTF-8 cast.
+    let constructed: String = core@1/bytes.base64_encode(raw, alphabet, padding)
+    failure.check(constructed == input, TextInvariant())
     failure.check(std@1/base64.encode(raw, alphabet, padding) == input, TextInvariant())
     test.log(t, f"{id}/whole-encode")
   }

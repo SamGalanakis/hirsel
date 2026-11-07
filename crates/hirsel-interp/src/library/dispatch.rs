@@ -2443,7 +2443,7 @@ primary_operations! { library, call, context, name, a, value;
         };
         let data = bytes(arg(a, 0)?)?;
         if call.path.is_core("bytes.base64_encode") {
-            Value::Bytes(engine.encode(data).into_bytes())
+            Value::String(engine.encode(data))
         } else {
             engine.decode(data).ok().map_or_else(none, |data| some(Value::Bytes(data)))
         }

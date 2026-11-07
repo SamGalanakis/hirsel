@@ -319,7 +319,7 @@ N fn string.scalars(s: String) -> ScalarView in s
 N fn string.positions(s: String) -> PositionView of s in s
 N fn string.slice(s: String, start: StrPos of s, end: StrPos of s) -> String in s
 @preserves_unique(bytes) fn string.from_bytes(take bytes: Bytes) -> Result[String, Bytes]
-fn bytes.base64_encode(data: Bytes, alphabet: Base64Alphabet, padding: Base64Padding) -> unique Bytes uses {}
+fn bytes.base64_encode(data: Bytes, alphabet: Base64Alphabet, padding: Base64Padding) -> unique String uses {}
 fn bytes.base64_decode(data: Bytes, alphabet: Base64Alphabet, padding: Base64Padding) -> unique Option[Bytes] uses {}
 N fn bytes.sha1(data: Bytes) -> Inline[u8, 20] uses {}
 N fn bytes.sha224(data: Bytes) -> Inline[u8, 28] uses {}
@@ -1605,10 +1605,11 @@ fixed, inline digest bytes without allocation or owner transfer. RustCrypto
 lengths above 2^61-1 bytes with SEM-1 before reading input. Work charges and
 checkpoints are specified under [long pure primitives](determinism.md).
 
-`bytes.base64_encode` borrows its exact byte extent and returns fresh unique
-ASCII bytes with the selected RFC4648 alphabet and padding. `bytes.base64_decode`
-returns `Some` of fresh unique bytes only for a complete strict success: no
-whitespace, other-alphabet symbols, misplaced/missing padding or nonzero unused
+`bytes.base64_encode` borrows its exact byte extent and returns a fresh unique
+ASCII String with the selected RFC4648 alphabet and padding. The codec's safe
+String constructor establishes UTF-8 before publication; the result needs no
+second byte validation. `bytes.base64_decode` returns `Some` of fresh unique bytes
+only for a complete strict success: no whitespace, other-alphabet symbols, misplaced/missing padding or nonzero unused
 bits. Empty input succeeds as `Some(b"")`. `None` exposes no partial output or
 error: std reruns its existing quantum parser from offset zero to recover the
 precise `DecodeError` and byte offset, including its canonical-bit/padding

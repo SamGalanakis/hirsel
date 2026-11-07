@@ -139,6 +139,16 @@ fn branch(mut nodes: List[Node], depth: u64) -> u64 {
   }
   at
 }
+fn guarded_byte_sum(bytes: Bytes, limit: u64) -> u64 {
+  let mut cursor = 0u64
+  let mut total = 0u64
+  while cursor < limit && cursor < core@1/bytes.len(bytes) {
+    let byte: u64 = int.widen(bytes[cursor])
+    total += byte
+    cursor += 1
+  }
+  total
+}
 fn output_error[E](take e: E) -> () {}
 @noalloc
 fn grant_error(refusal: GrantError) -> () uses {} { () }
@@ -160,7 +170,10 @@ pub fn main(rt: Io, args: Args) -> Result[(), ()] {
   for node in snapshot { links += node.left + node.right }
   // Preorder indices 1..31 have 15 branches, whose child-index sum is 495,
   // and 16 leaves, each contributing 100 + 200. The prefix contributes 36.
-  let valid = root == 1 && list.len(nodes) == 32 && links == 5331 &&
+  let bytes_ok = guarded_byte_sum(b"\x00\x7f\x80\xff", 18446744073709551615u64) == 510 &&
+    guarded_byte_sum(b"\x00\x7f\x80\xff", 2) == 127 &&
+    guarded_byte_sum(b"\xff", 0) == 0 && guarded_byte_sum(b"", 18446744073709551615u64) == 0
+  let valid = bytes_ok && root == 1 && list.len(nodes) == 32 && links == 5331 &&
     snapshot[root].left == 2 && snapshot[root].right == 17 &&
     nodes[root].left == 77 && nodes[root].right == 17 &&
     old_nodes == [Node(left: 17, right: 19)] && count == 33 && total == 3703 && alias == [7] &&

@@ -886,7 +886,7 @@ fn optimized_inlining_keeps_the_leaf_invocation_at_full_foreground_depth() {
         .unwrap();
         let once =
             "fn leaf()->u64 {7u64}\nfn f(n:u64)->u64 {if n==0u64 {leaf()}else{1u64+f(n-1u64)}}";
-        let siblings = "fn leaf()->u64 {7u64}\nfn f(n:u64)->u64 {if n==0u64 {leaf()}else{u64.wrapping_add(f(n-1u64),leaf())}}";
+        let siblings = "fn leaf()->u64 {7u64}\nfn f(n:u64)->u64 {if n==0u64 {leaf()}else{int.wrapping_add(f(n-1u64),leaf())}}";
         for (name, n, rules, body, total) in [
             ("inline-leaf-exact", 1021, &[][..], once, 1028),
             ("inline-leaf-over", 1022, &["LANG-10"][..], once, 0),

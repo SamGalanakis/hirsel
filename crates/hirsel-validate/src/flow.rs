@@ -6,7 +6,6 @@ use hirsel_type_analysis::parametric::{ParametricInput, parametric_inputs, uniqu
 use hirsel_type_analysis::representation::{
     RepresentationError, RepresentationFailure, expand_representation,
 };
-use hirsel_types::indexed::IndexSet;
 use hirsel_types::rows::Rows;
 use hirsel_types::{
     BuiltinType, Origin, OriginArgument, OriginRoot, ParameterRef, Primitive, Relation,
@@ -152,7 +151,7 @@ pub(super) struct State {
     /// each retained permission ends. Access loans remain separate.
     content_loans: Rows<loan_content::Content>,
     /// Borrowed storage roots retained by each value, independently of loan IDs.
-    sources: Rows<IndexSet>,
+    sources: Rows<BTreeSet<usize>>,
     /// May precede relation between temporary evaluations. Writes reset a row
     /// and column and put the new evaluation after all live temporaries.
     before: Shared<BTreeSet<(usize, usize)>>,
@@ -1224,7 +1223,7 @@ impl Model {
                 .with_copy_counter(Counter::ValidateCopiedRows),
             content_loans: Rows::new(loan_content::Content::default(), body.locals.len())
                 .with_copy_counter(Counter::ValidateCopiedRows),
-            sources: Rows::new(IndexSet::new(body.locals.len()), self.places.len())
+            sources: Rows::new(BTreeSet::new(), self.places.len())
                 .with_copy_counter(Counter::ValidateCopiedRows),
             before: BTreeSet::new().into(),
         };
@@ -3467,7 +3466,7 @@ impl Checker<'_, '_> {
             .collect();
         let sources = model
             .parts(operand.place)
-            .flat_map(|part| state.sources[part].iter());
+            .flat_map(|part| state.sources[part].iter().copied());
         (!loans.is_empty() && sources.into_iter().all(|source| lent.contains(&source)))
             .then_some(loans)
     }
@@ -3552,7 +3551,7 @@ impl Checker<'_, '_> {
         let root = model.places[index].root.0 as usize;
         let mut sources = model
             .parts(operand.place)
-            .flat_map(|part| state.sources[part].iter())
+            .flat_map(|part| state.sources[part].iter().copied())
             .collect::<BTreeSet<_>>();
         if self.lifetime(&ty.modes.relation).is_global() && operand.usage == UseKind::Copy {
             // A share of global counted storage acquires its own owner, also
@@ -3570,7 +3569,7 @@ impl Checker<'_, '_> {
                     global = false;
                     break;
                 }
-                pending.extend(state.sources[model.roots[source]].iter());
+                pending.extend(&state.sources[model.roots[source]]);
             }
             if global {
                 sources.clear();
@@ -3595,12 +3594,10 @@ impl Checker<'_, '_> {
         sources: BTreeSet<usize>,
     ) {
         let index = model.mapping[place.0 as usize];
-        let mut row = IndexSet::new(model.roots.len());
-        for source in sources {
-            row.insert(source);
-        }
         for i in model.contents(index) {
-            state.sources.set(i, row.clone());
+            {
+                state.sources[i] = sources.clone();
+            }
         }
     }
     /// Signature-selected result dependencies; argument evaluation order is not
@@ -4410,7 +4407,7 @@ impl Checker<'_, '_> {
             displaced,
             model
                 .parts(destination)
-                .flat_map(|part| incoming.sources[part].iter())
+                .flat_map(|part| incoming.sources[part].iter().copied())
                 .collect(),
         );
         state.origins.parts[old] = incoming.origins.parts[target].clone();
@@ -5228,7 +5225,7 @@ impl Checker<'_, '_> {
                         if ending.contains(&local) || state.places[part] & LIVE == 0 {
                             continue;
                         }
-                        if sources.iter().any(|source| ending.contains(&source))
+                        if sources.iter().any(|source| ending.contains(source))
                             && reported.insert(local)
                         {
                             if let Some(place) = model.body_roots[local] {

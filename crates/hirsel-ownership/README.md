@@ -24,9 +24,3 @@ The ownership forwarding law checks that snapshots copy no temporary payload
 references and preserve the distinct unique/shared predecessor values; the
 loop ownership corpus includes a conditional move that becomes invalid on
 feedback unless every continuing path reinitializes the owner.
-
-Iteration and pending-argument loans use expression-indexed immutable payload
-rows. State snapshots and joins share their place paths; updates replace only
-the affected row. Conflict and active-temporary sets use `indexed::IndexSet`,
-whose sorted iteration preserves expression order. These containers supply no
-ownership judgments.

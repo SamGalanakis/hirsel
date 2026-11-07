@@ -4,17 +4,6 @@ Own semantic types, complete signatures, checked decisions and shared query data
 Allowed dependencies: syntax, intern, span, diag, codec; no implementation crates.
 Wire tests use run-config's shared `hex` formatter as a dev dependency.
 
-`indexed` supplies body-local membership sets and immutable payload rows.
-Sets of at most 64 indices use an inline word. Larger bounded domains use
-flat copy-on-write u64 words with direct membership and wordwise union. Large,
-sparse domains keep eight sorted indices, then persistent sparse word rows;
-they switch to flat words once at least one in 64 bits is present. Empty sets
-allocate nothing. The dense operations follow rustc
-`compiler/rustc_index/src/bit_set.rs:150-178,320-323` at `a7c37f9f`.
-Inline storage, lazy allocation and sparse promotion adapt its eager dense
-allocation to snapshots and large sparse fact matrices. Each analysis owns its
-facts and merge operations.
-
 - `TypeInterner` is the session's one canonical, concurrent type interner
   (design §1a). Every phase and thread interns into it exactly and losslessly
   (`intern`), so one row has one `TypeId` and promotion cannot fork identity.
@@ -555,3 +544,10 @@ source checking and V independently inspect the declared representations.
 `SharedPath::node_allocation_bytes` reports the current tail allocation including
 Arc counters and alignment, or zero for an empty path. Walk `prefix` and deduplicate
 `node_identity` for retained-byte accounting; payload-owned buffers are separate.
+
+The test-only `indexed` module retains the finite-domain storage experiments
+and independent BTreeSet/BTreeMap oracle fixtures. Production flow facts use
+their ordered maps and sets; no indexed storage experiment is compiled into
+the compiler. Dense operations follow rustc a7c37f9f,
+`compiler/rustc_index/src/bit_set.rs:150-178,320-323`; inline words, lazy
+allocation, shared snapshots and sparse promotion adapt its eager dense words.

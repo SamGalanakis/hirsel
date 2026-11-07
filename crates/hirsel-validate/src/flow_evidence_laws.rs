@@ -882,7 +882,10 @@ fn crossing_guarantees_and_bounds_have_separate_must_and_may_orders() {
                 };
                 assert_eq!(left.crossing_parts[1].get(&path), expected);
                 assert_eq!(left.current_unique[1], a == Some(true) && b == Some(true));
-                assert_eq!(left.sources[1].iter().collect::<Vec<_>>(), vec![2, 3]);
+                assert_eq!(
+                    left.sources[1].iter().copied().collect::<Vec<_>>(),
+                    vec![2, 3]
+                );
             }
         }
     });

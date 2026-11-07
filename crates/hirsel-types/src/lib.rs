@@ -11,7 +11,8 @@ pub mod core_roles;
 pub mod encoding;
 pub mod entry;
 pub use encoding::signature_types;
-pub mod indexed;
+#[cfg(test)]
+mod indexed;
 pub mod rows;
 pub mod serialization;
 pub mod storage;

@@ -305,7 +305,7 @@ impl SourceInputs {
             .catalog
             .source_carry_bytes(&engine.items, &engine.indexed_sources)
             .checked_add(HeaderSources::facts_index_bytes(
-                engine.source_paths().len(),
+                engine.source_paths_iter().count(),
             ))?
             .checked_add(engine.declarations.observation_bytes()?)?
             .checked_add((288 + 2 * size_of::<usize>()) as u64)

@@ -127,6 +127,8 @@ pub enum Counter {
     VerifierFactEvictions,
     /// Exact transient validation results declined optional cache retention.
     ValidationRetentionRefusals,
+    /// Owned definition paths copied by source inventory enumeration.
+    SourcePathCopies,
     /// Cached dependency-node inspections.
     CacheValidationRows,
 }

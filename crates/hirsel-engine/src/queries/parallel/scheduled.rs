@@ -3768,9 +3768,8 @@ impl QueryEngine {
             previous.map(|previous| &previous.arm_fixes),
         )?;
         let cited = inputs::capture_map(
-            self.source_paths()
-                .into_iter()
-                .map(|path| (DefId::intern(&path), self.cited_value(&path)))
+            self.source_paths_iter()
+                .map(|path| (DefId::intern(path), self.cited_value(path)))
                 .collect(),
             previous.map(|previous| &previous.cited),
         )?;

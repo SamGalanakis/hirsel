@@ -870,23 +870,24 @@ impl QueryEngine {
     /// Enumerate required source declarations from the index, including
     /// unexecuted declarations and fact helpers, without demanding headers.
     pub fn front_source_roots(&mut self) -> Vec<DefPath> {
-        // The source-only index restores every declaration but no legacy
-        // growth controller. Its pending set therefore contains only edited
-        // declarations, never the complete source Check obligation set.
-        let mut roots: BTreeSet<_> = self
-            .source_paths()
+        self.source_root_ids()
             .into_iter()
+            .map(|id| id.path().clone())
+            .collect()
+    }
+    pub(super) fn source_root_ids(&self) -> BTreeSet<DefId> {
+        let mut roots: BTreeSet<_> = self
+            .source_paths_iter()
             .filter(|path| !self.installed_definition(path))
+            .map(DefId::intern)
             .collect();
-        // A warm source catalog carries only the written declaration. Its fact
-        // helper is still a required body of the source check transaction.
-        for path in roots.clone() {
-            if self.source_facts(&path).is_some_and(|facts| facts.fact) {
-                let helper = hirsel_check_protocol::fact::fact_path(&path);
-                roots.insert(helper);
-            }
-        }
-        roots.into_iter().collect()
+        let helpers: Vec<_> = roots
+            .iter()
+            .filter(|id| self.source_facts(id.path()).is_some_and(|facts| facts.fact))
+            .map(|id| DefId::intern(&hirsel_check_protocol::fact::fact_path(id.path())))
+            .collect();
+        roots.extend(helpers);
+        roots
     }
     /// Capture the complete selected source-root set, including declarations
     /// never executed by the launch entry. A partial front view is refused.

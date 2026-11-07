@@ -858,8 +858,7 @@ impl QueryEngine {
         let mut bodies = BTreeMap::new();
         let mut private_sources = BTreeMap::new();
         let base = self
-            .source_paths()
-            .iter()
+            .source_paths_iter()
             .map(|path| {
                 ContentHash::of_parts(
                     "hirsel.namespace.declaration.v1",
@@ -1149,15 +1148,13 @@ impl QueryEngine {
         *delta_owner = Some(Arc::downgrade(&delta));
         drop(delta_owner);
         let source_paths = self
-            .source_paths()
-            .iter()
+            .source_paths_iter()
             .map(DefId::intern)
             .collect::<Vec<_>>()
             .into_boxed_slice();
         let roots = self
-            .front_source_roots()
-            .iter()
-            .map(DefId::intern)
+            .source_root_ids()
+            .into_iter()
             .collect::<Vec<_>>()
             .into_boxed_slice();
         let mut weight = hirsel_query_products::retained::MetadataWeight::default();

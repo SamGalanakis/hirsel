@@ -150,7 +150,7 @@ impl QueryEngine {
             .map(|(_, file, _)| file)
             .collect::<BTreeSet<_>>()
             .len();
-        let rows = self.source_paths().iter().try_fold(0usize, |rows, path| {
+        let rows = self.source_paths_iter().try_fold(0usize, |rows, path| {
             let candidates = self
                 .items
                 .get(path)
@@ -186,19 +186,10 @@ impl QueryEngine {
         let mut instance_weight = hirsel_query_products::retained::MetadataWeight::default();
         instance_weight
             .instance_bodies(&mut self.instance_bodies(&definitions.iter().cloned().collect()));
-        let paths = self.source_paths();
-        let mut roots = paths
-            .iter()
-            .filter(|path| !self.installed_definition(path))
-            .cloned()
-            .collect::<BTreeSet<_>>();
-        for path in roots.clone() {
-            if self.source_facts(&path).is_some_and(|facts| facts.fact) {
-                roots.insert(hirsel_check_protocol::fact::fact_path(&path));
-            }
-        }
-        let source_rows = paths
-            .len()
+        let roots = self.source_root_ids();
+        let source_rows = self
+            .source_paths_iter()
+            .count()
             .checked_add(roots.len())
             .and_then(|count| count.checked_mul(size_of::<DefId>()))
             .ok_or_else(refused)?;

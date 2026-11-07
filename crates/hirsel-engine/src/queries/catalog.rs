@@ -610,7 +610,9 @@ impl Catalog {
                         })
                 })
                 .collect();
-            items.sort_by_key(|(base, item)| (*base, item.definition.clone()));
+            items.sort_by(|(left_base, left), (right_base, right)| {
+                (left_base, &left.definition).cmp(&(right_base, &right.definition))
+            });
             items
                 .into_iter()
                 .map(|(_, item)| item)
@@ -1037,7 +1039,7 @@ impl QueryEngine {
                 })
             })
             .collect();
-        heads.sort_by_key(|h| (h.base, h.definition.path().clone()));
+        heads.sort_by_key(|h| (h.base, h.definition));
         FileHeads {
             schema: 7,
             integrity: heads_integrity(&heads),
@@ -1445,28 +1447,55 @@ mod tests {
     #[test]
     fn source_roots_include_unexecuted_declarations_without_demanding_headers() {
         hirsel_intern::jobs::with_compiler_stack(|| {
-            let store = Arc::new(hirsel_engine_store::MemStore::default());
-            let create = || {
-                QueryEngine::new(default_environment(), crate::phases::engine_only_adapters())
-                    .with_result_store(store.clone())
-            };
-            let context = default_context();
-            let source = "type Choice = First | Second(u8)\nfn unused()->u8{1u8}\n";
-            let mut seed = create();
-            let file = seed.sources.add("roots.hir", source.into()).unwrap();
-            seed.index_source(file, &context).unwrap();
-            let mut engine = create();
-            let file = engine.sources.add("roots.hir", source.into()).unwrap();
-            engine.index_source(file, &context).unwrap();
-            let indexed = engine.indexed_definitions();
-            engine.adapters.lexer = None;
-            engine.adapters.parser = None;
-            engine.adapters.signature = None;
-            let roots = engine.front_source_roots();
-            assert_eq!(roots, indexed);
-            assert!(roots.iter().any(|p| p.0.name == "unused"));
-            assert!(engine.items.is_empty());
-            assert!(engine.signatures.is_empty());
+            for (source, expected) in [
+                (
+                    "type Choice = First | Second(u8)\nfn unused()->u8{1u8}\n",
+                    &["Choice", "unused"][..],
+                ),
+                (
+                    "distinct type Percent(v: u8) where v <= 100\nfn unused()->u8{1u8}\n",
+                    &["Percent", "Percent$fact$0", "unused"][..],
+                ),
+            ] {
+                let store = Arc::new(hirsel_engine_store::MemStore::default());
+                let create = || {
+                    QueryEngine::new(default_environment(), crate::phases::engine_only_adapters())
+                        .with_result_store(store.clone())
+                };
+                let context = default_context();
+                let mut seed = create();
+                let file = seed.sources.add("roots.hir", source.into()).unwrap();
+                seed.index_source(file, &context).unwrap();
+                let mut engine = create();
+                let file = engine.sources.add("roots.hir", source.into()).unwrap();
+                engine.index_source(file, &context).unwrap();
+                let indexed = engine.indexed_definitions();
+                engine.adapters.lexer = None;
+                engine.adapters.parser = None;
+                engine.adapters.signature = None;
+                let roots = engine.front_source_roots();
+                assert_eq!(
+                    roots
+                        .iter()
+                        .map(|path| path.0.name.as_str())
+                        .collect::<Vec<_>>(),
+                    expected
+                );
+                if expected == ["Choice", "unused"] {
+                    assert_eq!(roots, indexed);
+                }
+                assert_eq!(
+                    engine
+                        .source_root_ids()
+                        .into_iter()
+                        .map(|id| id.path().0.name.as_str())
+                        .collect::<Vec<_>>(),
+                    expected
+                );
+                assert!(roots.iter().any(|p| p.0.name == "unused"));
+                assert!(engine.items.is_empty());
+                assert!(engine.signatures.is_empty());
+            }
         });
     }
 
@@ -1493,8 +1522,22 @@ mod tests {
             engine.result_store = Some(Arc::new(hirsel_engine_store::MemStore::default()));
             engine.adapters.lexer = None;
             engine.adapters.parser = None;
+            assert_eq!(
+                paths
+                    .iter()
+                    .map(|path| path.0.name.as_str())
+                    .collect::<Vec<_>>(),
+                ["Choice", "value"]
+            );
+            let before = hirsel_intern::work::read(hirsel_intern::work::Counter::SourcePathCopies);
             let plan = engine.front_input_footprint(&paths).unwrap();
             assert!(plan.total().is_some());
+            assert_eq!(engine.front_input_footprint(&paths).unwrap(), plan);
+            assert_eq!(
+                hirsel_intern::work::read(hirsel_intern::work::Counter::SourcePathCopies) - before,
+                0,
+                "body-free admission borrows names or keeps definition IDs"
+            );
             assert!(matches!(
                 engine.materialize(&paths[0]),
                 Err(QueryError::NotImplemented)
@@ -1801,7 +1844,12 @@ impl QueryEngine {
             })
     }
     pub(crate) fn source_paths(&self) -> Vec<DefPath> {
-        self.source_paths_iter().cloned().collect()
+        self.source_paths_iter()
+            .map(|path| {
+                hirsel_intern::work::count(hirsel_intern::work::Counter::SourcePathCopies);
+                path.clone()
+            })
+            .collect()
     }
     pub(crate) fn module_source_paths(&self, owner: &DefPath) -> Vec<DefPath> {
         self.source_paths_iter()

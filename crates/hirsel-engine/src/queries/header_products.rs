@@ -352,13 +352,7 @@ impl HeaderProducts {
             .as_ref()
             .filter(|headers| Arc::ptr_eq(&headers.inputs, &inputs))
             .map(|headers| headers.paths.clone())
-            .unwrap_or_else(|| {
-                engine
-                    .source_paths()
-                    .into_iter()
-                    .map(|path| DefId::intern(&path))
-                    .collect()
-            });
+            .unwrap_or_else(|| engine.source_paths_iter().map(DefId::intern).collect());
         let rows = paths
             .iter()
             .copied()
@@ -601,7 +595,7 @@ impl HeaderProducts {
             .map(|output| output.value.clone())
     }
     pub(crate) fn source_fact_index_bytes(engine: &QueryEngine, private: bool) -> u64 {
-        let definitions = engine.source_paths().len();
+        let definitions = engine.source_paths_iter().count();
         HeaderSources::facts_index_bytes(definitions)
             .saturating_add(size_of::<AtomicU64>() as u64)
             .saturating_add((size_of::<Arc<[DefId]>>() + 2 * size_of::<usize>()) as u64)

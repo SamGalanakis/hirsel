@@ -304,7 +304,6 @@ pub struct FrontBodyQueries {
     types: Arc<hirsel_types::TypeInterner>,
     memo: Arc<hirsel_types::TypeMemo>,
     namespace: Arc<NamespaceCapture>,
-    _validation: Arc<crate::snapshot::ValidationDemand>,
     declarations: Arc<Declarations>,
     citations: OwnedSourceContext,
     resolver: Option<Arc<dyn ResolverPhase>>,
@@ -601,6 +600,16 @@ impl FrontBodyQueries {
                 result: Err(QueryError::NotImplemented),
                 reads: Reads::empty(),
             };
+        };
+        let _validation = match self.namespace.demand_validation() {
+            Ok(validation) => validation,
+            Err(error) => {
+                return s1::DependencyProduct {
+                    successor: None,
+                    result: Err(error),
+                    reads: Reads::empty(),
+                };
+            }
         };
         let path = syntax.item.definition.clone();
         // A closed instance is a parser-created single-declaration source. Its
@@ -3018,6 +3027,17 @@ impl BodyTask {
                     .map_err(|_| self.queries.resource_refusal().into());
             }
         }
+        // Pin V only while this synchronous producer consumes it.
+        let _validation = self
+            .queries
+            .namespace
+            .demand_validation()
+            .map_err(|error| {
+                crate::queries::operation_owner_trace(format_args!(
+                    "OWNER RESOURCE Front validation demand: {error:?}"
+                ));
+                self.queries.resource_refusal()
+            })?;
         if self.materialize {
             if let Some(body) = self.restore_body(cx) {
                 return body.map_err(Into::into);
@@ -3825,7 +3845,6 @@ impl QueryEngine {
         let header_allowance = snapshot
             .header_products()
             .map(|headers| headers.configure_source_backing(backing.clone(), retention.clone()));
-        let validation = namespace.demand_validation()?;
         let namespace_sources = namespace.sources.clone();
         Ok(Arc::new(FrontBodyQueries {
             demand: Default::default(),
@@ -3836,7 +3855,6 @@ impl QueryEngine {
             types: self.types.clone(),
             memo: self.memo.clone(),
             namespace,
-            _validation: validation,
             declarations: declarations.with_archived_siblings(sibling_sources),
             citations: OwnedSourceContext {
                 unique_failures: self.private_unique_failures.clone(),

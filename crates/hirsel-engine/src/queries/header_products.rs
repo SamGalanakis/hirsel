@@ -1259,12 +1259,17 @@ impl HeaderProducts {
                         ));
                     }
                     crate::queries::operation_owner_trace(format_args!(
-                        "OWNER HEADER REFUSAL required={} credit={}",
+                        "OWNER HEADER REFUSAL required={} credit={} source_available={}",
                         bytes,
                         *admission
                             .remaining
                             .lock()
-                            .unwrap_or_else(|e| e.into_inner())
+                            .unwrap_or_else(|e| e.into_inner()),
+                        partition.available_header_bytes()
+                    ));
+                    crate::queries::operation_owner_trace(format_args!(
+                        "OWNER HEADER REFUSAL STACK {}",
+                        std::backtrace::Backtrace::force_capture()
                     ));
                 }
                 return Err(QueryError::Operational(hirsel_types::OperationalFailure {
@@ -2032,6 +2037,54 @@ mod retention_tests {
             *remaining.lock().unwrap(),
             before,
             "an immutable capture alias must not retain a finished demand's reservation"
+        );
+    }
+
+    #[test]
+    fn idle_front_factory_does_not_pin_validation_demand() {
+        use hirsel_engine_runtime::{MemoryWeight, RuntimeErrors};
+        let mut engine = QueryEngine::new(default_environment(), PhaseAdapters::default())
+            .with_result_store(Arc::new(hirsel_engine_store::MemStore::default()));
+        let reference = |text: &[u8]| {
+            hirsel_engine_store::Domain {
+                kind: 0x4600_00ff,
+                schema: 1,
+            }
+            .reference(text)
+            .unwrap()
+        };
+        let budget = ProcessBudget::new(1 << 20);
+        let front = engine
+            .front_body_queries(
+                &[],
+                MemoryWeight {
+                    retained: 0,
+                    scratch: 1 << 19,
+                    stack: 0,
+                },
+                budget.reserve(1 << 20).unwrap(),
+                RuntimeErrors {
+                    resource: reference(b"resource"),
+                    cycle: reference(b"cycle"),
+                    cancelled: reference(b"cancelled"),
+                    protocol: reference(b"protocol"),
+                    panicked: reference(b"panicked"),
+                },
+            )
+            .unwrap();
+        let snapshot = front.signatures();
+        let before = front.retained_bytes();
+        let demand = snapshot.demand_validation().unwrap();
+        assert!(
+            front.retained_bytes() > before,
+            "an idle factory must not already own an active validation demand"
+        );
+        drop(demand);
+        while snapshot.header_products().unwrap().evict() {}
+        assert_eq!(
+            front.retained_bytes(),
+            before,
+            "a finished demand returns its reservation while its factory stays reusable"
         );
     }
 

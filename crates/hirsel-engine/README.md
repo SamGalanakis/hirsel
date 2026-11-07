@@ -1006,6 +1006,10 @@ of a header or proof read returns to its demander and is never settled as a row
 or a verdict; a later demand recomputes it. A module proof's semantic failure is
 that module's verdict only. A recomputed signature that disagrees twice with the
 proof that named it is an operational fault, not a diagnostic.
+A synchronous Front body check or generator preparation holds its validation
+demand through execution. Completed tasks, reusable factories and immutable
+captures retain no demand pin. Escaping validation views keep their own charges;
+idle snapshot caches remain evictable.
 `RuntimeStats::body_evictions` counts pressure evictions. Run semantic nodes and source audits retain immutable values under their original
 output admission. Named content shares the node's token allocation. Local readers
 open no portable records while the value is live. Retention pressure spills tokens

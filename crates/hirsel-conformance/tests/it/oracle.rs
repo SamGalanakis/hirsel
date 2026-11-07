@@ -160,17 +160,26 @@ fn o2_warm_runs_equal_cold_after_every_scripted_edit() {
         &selected,
         &work,
     );
-    holds(&report);
-    assert!(report.passed(false), "{}", report.text());
-    assert_eq!(report.checks.len(), 3 * selected.len(), "{}", report.text());
-    let crossed = selected.iter().find(|s| s.name == "body-edit").unwrap();
+    let crossed = selected
+        .iter()
+        .find(|s| s.name == "signature-private")
+        .unwrap();
     assert_eq!(
         (crossed.config_before.jobs, crossed.config_after.jobs),
         (1, 2)
     );
     assert!(crossed.config_before.native && crossed.config_after.native);
+    assert!(
+        report
+            .checks
+            .iter()
+            .filter(|check| check.name.starts_with(&format!("{} [", crossed.name)))
+            .all(|check| check.verdict == Verdict::Pass),
+        "{}",
+        report.text()
+    );
     for mode in ["disk-before", "cold", "mem", "resident", "disk-after"] {
-        let artifacts = work.join("body-edit").join(mode);
+        let artifacts = work.join("signature-private").join(mode);
         require_accepted_export(&artifacts);
         assert!(
             !std::fs::read(artifacts.join("receipts"))
@@ -189,6 +198,9 @@ fn o2_warm_runs_equal_cold_after_every_scripted_edit() {
             }
         }
     }
+    holds(&report);
+    assert!(report.passed(false), "{}", report.text());
+    assert_eq!(report.checks.len(), 3 * selected.len(), "{}", report.text());
     let _ = std::fs::remove_dir_all(&work);
 }
 

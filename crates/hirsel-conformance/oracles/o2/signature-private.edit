@@ -1,4 +1,6 @@
 // o2: a private function's parameter is renamed; its positional caller's text does not change
+// before: jobs=1 native=on
+// after: jobs=2 native=on
 === main.hir
 fn helper(x: u64) -> u64 {
   x + 1

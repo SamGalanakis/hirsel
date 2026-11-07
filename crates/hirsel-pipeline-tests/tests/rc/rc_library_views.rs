@@ -139,6 +139,13 @@ fn branch(mut nodes: List[Node], depth: u64) -> u64 {
   }
   at
 }
+type Chain = End | Link(u32, box Chain)
+fn chain_total(node: box Chain) -> u32 {
+  match node {
+    End => 0,
+    Link(value, next) => u32.wrapping_add(value, chain_total(next)),
+  }
+}
 fn recursive_total(n: u32) -> u32 {
   if n == 0 { 4294967295u32 }
   else { u32.wrapping_add(n, recursive_total(n - 1)) }
@@ -180,9 +187,14 @@ pub fn main(rt: Io, args: Args) -> Result[(), ()] {
   let bytes_ok = guarded_byte_sum(b"\x00\x7f\x80\xff", 18446744073709551615u64) == 510 &&
     guarded_byte_sum(b"\x00\x7f\x80\xff", 2) == 127 &&
     guarded_byte_sum(b"\xff", 0) == 0 && guarded_byte_sum(b"", 18446744073709551615u64) == 0
+  let mut chain: box Chain = box End
+  for value in 1u32..=8u32 { chain = box Link(value, take chain) }
+  let chain_alias = copy chain
+  // A changing borrowed root keeps its call boundary and preserves both holders.
+  let chain_ok = chain_total(chain) == 36 && chain_total(chain_alias) == 36
   // Wrapping sum: -1 + (1 + ... + 32) = 527 mod 2^32.
   // Siblings: 1 + sum(1 + n, n = 1..32) = 561.
-  let valid = recursive_total(32) == 527 && sibling_total(32) == 561 &&
+  let valid = chain_ok && recursive_total(32) == 527 && sibling_total(32) == 561 &&
     bytes_ok && root == 1 && list.len(nodes) == 32 && links == 5331 &&
     snapshot[root].left == 2 && snapshot[root].right == 17 &&
     nodes[root].left == 77 && nodes[root].right == 17 &&

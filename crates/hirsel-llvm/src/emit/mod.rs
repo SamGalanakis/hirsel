@@ -52,6 +52,7 @@ use crate::scalar;
 use crate::{CodegenError, PINNED_LLVM, VerifyStage};
 use hirsel_lir::debug::Profile;
 
+mod accumulator;
 mod ahead;
 mod bindings;
 mod blocks;
@@ -989,6 +990,10 @@ fn lower<T>(
                 specialized.push((*unit, function, signature.clone(), true));
             }
         }
+        let wrapping_adds = std::rc::Rc::new(accumulator::wrapping_adds(
+            units.iter().map(|u| u.unit()),
+            inputs.layouts,
+        ));
         let foreground_functions = std::rc::Rc::new(foreground_functions);
         let functions = functions
             .into_iter()
@@ -1007,6 +1012,7 @@ fn lower<T>(
             } else {
                 emitter.foreground_entry = foreground_functions.get(&name).copied();
             }
+            emitter.wrapping_adds = wrapping_adds.clone();
             emitter.room = hirsel_lir::invocations::room::RoomChecks::of(unit, &depth_leaf);
             // A continuation re-enters with its callee's cleanup mode still
             // live. Its saved admission needs the runtime's retained token.
@@ -1484,6 +1490,8 @@ struct FnEmitter<'m, 'a> {
     no_room: Option<Value<'m>>,
     counters: hirsel_lir::invocations::room::RoomChecks,
     counter_cell: Option<CounterCell<'m>>,
+    accumulator: Option<accumulator::Accumulator<'m>>,
+    wrapping_adds: std::rc::Rc<accumulator::WrappingAdds>,
     depth_mode: Option<(Value<'m>, Value<'m>)>,
     foreground_entry: Option<Function<'m>>,
     foreground_calls: Option<std::rc::Rc<BTreeMap<String, Function<'m>>>>,

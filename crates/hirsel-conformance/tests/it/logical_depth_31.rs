@@ -887,6 +887,13 @@ fn optimized_inlining_keeps_the_leaf_invocation_at_full_foreground_depth() {
         let once =
             "fn leaf()->u64 {7u64}\nfn f(n:u64)->u64 {if n==0u64 {leaf()}else{1u64+f(n-1u64)}}";
         let siblings = "fn leaf()->u64 {7u64}\nfn f(n:u64)->u64 {if n==0u64 {leaf()}else{int.wrapping_add(f(n-1u64),leaf())}}";
+        let wrapping = "fn f(n:u64)->u64 {if n==0u64 {0u64}else{int.wrapping_add(n,f(n-1u64))}}";
+        let spine = "fn f(n:u64)->u64 {if n==0u64 {1u64}else{int.wrapping_add(f(0u64),f(n-1u64))}}";
+        let tail = "fn f(n:u64)->u64 {if n==0u64 {1u64}else{f(n-1u64)}}";
+        let failed = "fn f(n:u64)->u64 {if n==0u64 {1u64/n}else{int.wrapping_add(n,f(n-1u64))}}";
+        let checked = "fn f(n:u64)->u64 {if n==0u64 {18446744073709551615u64}else{1u64+f(n-1u64)}}";
+        let constant = "fn f(n:u64)->u64 {if n==0u64 {18446744073709551615u64}else{int.wrapping_add(7u64,f(n-1u64))}}";
+        let wrapped = "fn add(a:u64,b:u64)->u64 {int.wrapping_add(a,b)}\nfn f(n:u64)->u64 {if n==0u64 {add(n,1u64)}else{add(n,f(n-1u64))}}";
         for (name, n, rules, body, total) in [
             ("inline-leaf-exact", 1021, &[][..], once, 1028),
             ("inline-leaf-over", 1022, &["LANG-10"][..], once, 0),
@@ -898,9 +905,20 @@ fn optimized_inlining_keeps_the_leaf_invocation_at_full_foreground_depth() {
                 siblings,
                 0,
             ),
+            ("wrapping-exact", 1022, &[][..], wrapping, 522753),
+            ("wrapping-over", 1023, &["LANG-10"][..], wrapping, 0),
+            ("right-spine-exact", 1022, &[][..], spine, 1023),
+            ("right-spine-over", 1023, &["LANG-10"][..], spine, 0),
+            ("self-tail-reuses-frame", 4096, &[][..], tail, 1),
+            ("wrapping-callee-failure", 8, &["SEM-1"][..], failed, 0),
+            ("checked-combine-failure", 2, &["SEM-1"][..], checked, 0),
+            ("wrapping-constant", 1022, &[][..], constant, 7153),
+            ("wrapper-exact", 1021, &[][..], wrapped, 521732),
+            ("wrapper-over", 1022, &["LANG-10"][..], wrapped, 0),
         ] {
-            // main + n+1 f activations + leaf = n+3. Sibling leaf calls
-            // must see the restored parent count, on every return.
+            // main + n+1 f activations = n+2; leaf adds one when present.
+            // Siblings restore the parent count. Wrapping sums are 1..1022
+            // (522753), 1023 unit leaves, and -1 + 7*1022 (7153).
             let source = format!(
                 "{body}\npub fn main()->Result[(),()] {{let value=f({n}u64);failure.check(value=={total}u64,TextInvariant());Ok(())}}"
             );

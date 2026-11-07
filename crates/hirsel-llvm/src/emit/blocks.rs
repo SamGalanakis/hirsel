@@ -323,6 +323,11 @@ impl<'m, 'a> FnEmitter<'m, 'a> {
     /// own admission a frame always sees its entry values. One test then serves every
     /// such call, and a loop's is invariant.
     pub(super) fn no_room(&mut self) -> Value<'m> {
+        if self.accumulator.is_some()
+            && let Some(CounterCell::Snapshot { full, .. }) = self.counter_cell
+        {
+            return full;
+        }
         if let Some(full) = self.no_room {
             return full;
         }
@@ -467,7 +472,7 @@ impl<'m, 'a> FnEmitter<'m, 'a> {
 impl<'m, 'a> FnEmitter<'m, 'a> {
     /// This frame's allowance cannot change outside its own admissions: the
     /// selector refuses FinalizeBegin/End and every callee retires its counters.
-    fn counter_cell(&mut self) -> CounterCell<'m> {
+    pub(super) fn counter_cell(&mut self) -> CounterCell<'m> {
         if let Some(cell) = self.counter_cell {
             return cell;
         }
@@ -569,7 +574,8 @@ impl<'m, 'a> FnEmitter<'m, 'a> {
         };
         self.guard(full, failure)?;
         let builder = match cell {
-            CounterCell::Snapshot { .. } => &self.prologue,
+            CounterCell::Snapshot { .. } if self.accumulator.is_none() => &self.prologue,
+            CounterCell::Snapshot { .. } => &self.builder,
             CounterCell::Dynamic { .. } => &self.builder,
         };
         let next = builder.binary(BinOp::Add, count, self.module.const_int(ty, 1));

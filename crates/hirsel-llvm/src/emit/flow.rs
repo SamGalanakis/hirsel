@@ -58,6 +58,7 @@ impl<'m, 'a> FnEmitter<'m, 'a> {
         self.allocate_sequence_states()?;
         self.ahead_init()?;
         self.ownership_init()?;
+        self.accumulator_init()?;
         for b in order {
             self.emit_block(BlockId(b as u32))?;
         }
@@ -66,7 +67,7 @@ impl<'m, 'a> FnEmitter<'m, 'a> {
         // arrives without a sequence state: its caller may have deferred it.
         self.builder.position(self.prologue_block);
         self.settle_unstated_roots()?;
-        self.builder.br(entry);
+        self.builder.br(self.accumulator_entry().unwrap_or(entry));
         Ok(())
     }
 

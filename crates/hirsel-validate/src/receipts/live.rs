@@ -13,9 +13,8 @@ impl VerifierCache {
         if !Arc::ptr_eq(&stamp.types, &artifact.types) {
             return None;
         }
-        let bytes = crate::memory::arc::<LiveAcceptance>().checked_add(
-            (artifact.owners.len() as u64).checked_mul(size_of::<(Anchor, DefId, u32)>() as u64)?,
-        )?;
+        let bytes =
+            LiveAcceptance::allocation_bytes(artifact.owners.len(), artifact.overlay.is_some())?;
         // Optional admission may miss; it cannot turn an operational failure
         // into a semantic verdict or create an uncharged live cache owner.
         let lease = self.retain_fact(bytes).ok().flatten()?;

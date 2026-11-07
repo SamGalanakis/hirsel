@@ -1702,6 +1702,23 @@ struct LiveAcceptance {
     anchors: Box<[(Anchor, hirsel_syntax::DefId, u32)]>,
     _lease: Arc<dyn Send + Sync>,
 }
+impl LiveAcceptance {
+    fn allocation_bytes(anchors: usize, overlay: bool) -> Option<u64> {
+        // Weak owners keep their inline Arc allocations after strong owners
+        // retire. Reserve that backing here until the final live alias drops.
+        let bytes = crate::memory::arc::<Self>()
+            .checked_add(crate::memory::arc::<TypeInterner>())?
+            .checked_add(2 * crate::memory::arc::<()>())?;
+        let bytes = if overlay {
+            bytes.checked_add(crate::memory::arc::<hirsel_types::Signature>())?
+        } else {
+            bytes
+        };
+        bytes.checked_add(
+            (anchors as u64).checked_mul(size_of::<(Anchor, hirsel_syntax::DefId, u32)>() as u64)?,
+        )
+    }
+}
 impl std::fmt::Debug for LiveAcceptance {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("LiveAcceptance")
@@ -1835,9 +1852,10 @@ impl ExecutionReceipt {
                                 .is_some_and(|seen| Arc::ptr_eq(seen, live))
                         })
                     {
-                        bytes = bytes
-                            .checked_add(crate::memory::arc::<LiveAcceptance>())?
-                            .checked_add(size_of_val(&*live.anchors) as u64)?;
+                        bytes = bytes.checked_add(LiveAcceptance::allocation_bytes(
+                            live.anchors.len(),
+                            live.overlay.is_some(),
+                        )?)?;
                     }
                     Some(bytes)
                 })?;
@@ -2353,7 +2371,9 @@ mod tests {
             + crate::input::read_payload_bytes(&original.receipt.reads).unwrap() as usize
             + size_of::<LiveAcceptance>()
             + 2 * size_of::<usize>()
-            + size_of_val(&*live.anchors);
+            + size_of_val(&*live.anchors)
+            + size_of::<TypeInterner>()
+            + 6 * size_of::<usize>();
         let charged = rows.4.load(std::sync::atomic::Ordering::Relaxed);
         assert!(
             charged >= inventory as u64,
@@ -3574,7 +3594,10 @@ mod tests {
                 .unwrap()
         };
         // Equal carriers preserve the ordinary evidence read; replay uses the same guard.
-        let old_heap = reads
+        let old_heap = receipt.artifacts[0]
+            .original
+            .receipt
+            .reads
             .iter()
             .find(|r| matches!(r, VRead::HeapRole(_)))
             .unwrap();

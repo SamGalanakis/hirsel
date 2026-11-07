@@ -81,17 +81,19 @@ fn json_owned_text(data: Bytes, start: u64, end: u64) -> String uses {} {
   }
 }
 
-// Tokens without escapes share the consumed input's immutable storage. Taking
-// `data` makes the slice global; no borrow of the parser's stack escapes.
-fn json_shared_text(take data: Bytes, start: u64, end: u64) -> String uses {} {
-  let token = core@1/bytes.slice(data, start, end)
-  match core@1/string.from_bytes(copy token) {
-    Ok(s) => take s,
-    Error(_) => {
-      core@1/failure.check(false, TextInvariant())
-      ""
-    },
+// serde_json read.rs:538-548 returns a plain token as a source subview.
+// String retains UTF-8 proof; checked scalar boundaries need no token rescan.
+fn json_source_text(take source: String, start: u64, end: u64) -> String uses {} {
+  let Some(first) = core@1/string.position(source, start) else {
+    core@1/failure.check(false, TextInvariant())
+    return ""
   }
+  let Some(last) = core@1/string.position(source, end) else {
+    core@1/failure.check(false, TextInvariant())
+    return ""
+  }
+  let token = core@1/string.slice(source, first, last)
+  copy token
 }
 
 // Adapted serde_json src/read.rs decode_hex_escape/decode_four_hex_digits,
@@ -115,12 +117,13 @@ fn json_hex4(data: Bytes, mut pos: u64) -> Result[u64, JsonError] uses {} {
 
 // The owning DOM parser can retain a plain token as a slice. Escaped text
 // uses the same decoder as the borrowed pull reader.
-fn json_shared_quoted(take data: Bytes, mut pos: u64) -> Result[String, JsonError] uses {} {
+fn json_source_quoted(take source: String, mut pos: u64) -> Result[String, JsonError] uses {} {
+  let data = core@1/string.as_bytes(source)
   let start = pos + 1
   let end = core@1/bytes.find_any(data, JSON_STRING_STOP, start)
   if end < core@1/bytes.len(data) && data[end] == 34 {
     pos = end + 1
-    return Ok(json_shared_text(copy data, start, end))
+    return Ok(json_source_text(copy source, start, end))
   }
   Ok(json_quoted(data, mut pos)?)
 }
@@ -238,10 +241,11 @@ fn json_keyword(data: Bytes, mut pos: u64, word: String) -> Result[(), JsonError
 // ordered-object duplicate rejection. Ordinary owned locals clean up on every ?.
 // Pass the already scanned lookahead into each child. Like serde SeqAccess,
 // each token boundary consumes whitespace once, including empty containers.
-fn json_node(take data: Bytes, mut pos: u64, depth: u64, c: u8) -> Result[
+fn json_node(take source: String, mut pos: u64, depth: u64, c: u8) -> Result[
   Value,
   JsonError
 ] uses {} {
+  let data = core@1/string.as_bytes(source)
   match c {
     110 => {
       json_keyword(data, mut pos, "null")?
@@ -255,7 +259,7 @@ fn json_node(take data: Bytes, mut pos: u64, depth: u64, c: u8) -> Result[
       json_keyword(data, mut pos, "false")?
       return Ok(Bool(false))
     },
-    34 => return Ok(Text(json_shared_quoted(copy data, mut pos)?)),
+    34 => return Ok(Text(json_source_quoted(copy source, mut pos)?)),
     91 => (),
     123 => (),
     _ => {
@@ -264,7 +268,7 @@ fn json_node(take data: Bytes, mut pos: u64, depth: u64, c: u8) -> Result[
       }
       let start = pos
       json_number_end(data, mut pos)?
-      return Ok(Number(json_shared_text(copy data, start, pos)))
+      return Ok(Number(json_source_text(copy source, start, pos)))
     },
   }
   if depth == MAX_NESTING {
@@ -283,7 +287,7 @@ fn json_node(take data: Bytes, mut pos: u64, depth: u64, c: u8) -> Result[
     // capacity before recursion, leaving empty arrays allocation-free.
     core@1/list.reserve(mut items, 4)
     while true {
-      let child = json_node(copy data, mut pos, depth + 1, next)?
+      let child = json_node(copy source, mut pos, depth + 1, next)?
       core@1/list.push(mut items, take child)
       next = json_whitespace(data, mut pos)
       if next == 93 {
@@ -312,14 +316,14 @@ fn json_node(take data: Bytes, mut pos: u64, depth: u64, c: u8) -> Result[
     }
     cursor += 1
     let first = json_whitespace(data, mut cursor)
-    json_node(copy data, mut cursor, depth + 1, first)
+    json_node(copy source, mut cursor, depth + 1, first)
   }
   while true {
     if next != 34 {
       return Error(Syntax(pos))
     }
     let key_pos = pos
-    let key = json_shared_quoted(copy data, mut pos)?
+    let key = json_source_quoted(copy source, mut pos)?
     // Select the entry before consuming the colon or value. This retains
     // duplicate-key precedence even when the duplicate's value is malformed.
     let inserted = std@1/map.try_insert(mut entries, take key, mut pos, initial)?
@@ -347,7 +351,7 @@ pub fn parse(take text: String) -> Result[Value, JsonError] uses {} {
   let data = core@1/string.as_bytes(text)
   let mut pos: u64 = 0
   let first = json_whitespace(data, mut pos)
-  let value = json_node(copy data, mut pos, 0, first)?
+  let value = json_node(copy text, mut pos, 0, first)?
   json_whitespace(data, mut pos)
   if pos != core@1/bytes.len(data) {
     return Error(Syntax(pos))
@@ -950,53 +954,12 @@ pub fn text_owned(value: TextView) -> unique String uses {} {
   }
 }
 
-// Same strict scalar validation as std@1/utf8.decode_lossy's accepted runs.
-// serde_json SliceRead delegates this check to Rust str::from_utf8. Keep it a
-// borrowed-byte scan here because core string.from_bytes consumes owned bytes.
+// Validate the public bytes entry before JSON syntax or typed decoding.
+// The borrowed constructor uses the same strict UTF-8 policy as String without
+// allocating or retaining an owned copy of the document.
 pub fn valid_utf8(data: Bytes) -> bool uses {} {
-  let mut at: u64 = 0
-  let size = core@1/bytes.len(data)
-  while at < size {
-    let first = data[at]
-    if first < 128 {
-      at += 1
-      continue
-    }
-    let width: u64 = if first >= 194 && first <= 223 {
-      2
-    } else if first >= 224 && first <= 239 {
-      3
-    } else if first >= 240 && first <= 244 {
-      4
-    } else {
-      return false
-    }
-    if width > size - at {
-      return false
-    }
-    let mut part: u64 = 1
-    while part < width {
-      let c = data[at + part]
-      let low: u8 = if part == 1 && first == 224 {
-        160
-      } else if part == 1 && first == 240 {
-        144
-      } else {
-        128
-      }
-      let high: u8 = if part == 1 && first == 237 {
-        159
-      } else if part == 1 && first == 244 {
-        143
-      } else {
-        191
-      }
-      if c < low || c > high {
-        return false
-      }
-      part += 1
-    }
-    at += width
+  match core@1/string.view_bytes(data) {
+    Some(_) => true,
+    None => false,
   }
-  true
 }

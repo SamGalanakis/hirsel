@@ -1165,7 +1165,8 @@ pub fn is_match(re: Regex, text: String, work_limit: u64) -> Result[bool, MatchE
     let mut work = work_limit
     let subject = make_subject(text, mut work)?
     let mut cache = dfa_cache(re, true, 65024)
-    return Ok(find_end_from(re, subject, 0, true, subject.bytes, mut cache, mut work)? != None())
+    let program = vm_program(re)
+    return Ok(find_end_from(re, program, subject, 0, true, subject.bytes, mut cache, mut work)? != None())
   }
   match find(re, text, work_limit)? {
     Some(_) => Ok(true),
@@ -1348,11 +1349,13 @@ pub fn count(re: Regex, text: String, work_limit: u64) -> Result[u64, MatchError
   let mut work = work_limit
   let subject = make_subject(text, mut work)?
   let mut cache = dfa_cache(re, accelerated, 65024)
+  // Reuse the immutable VM projection across all endpoint searches.
+  let program = vm_program(re)
   let mut pos = 0u64
   let mut previous_end: Option[u64] = None()
   let mut total = 0u64
   while pos <= subject_len(subject) {
-    let Some(end_at) = find_end_from(re, subject, pos, accelerated, subject.bytes, mut cache, mut work)? else {
+    let Some(end_at) = find_end_from(re, program, subject, pos, accelerated, subject.bytes, mut cache, mut work)? else {
       return Ok(total)
     }
     let (next, accept) = match_progress(subject, pos, end_at, previous_end, accelerated, mut work)?

@@ -445,9 +445,8 @@ fn dfa_scalar_step(re: VmProgram, subject: Subject, cursor: u64, reverse: bool,
   (next_count, matched, eof || next_count == 0 && (reverse || pending || matched))
 }
 
-fn dfa_search_end(re: Regex, subject: Subject, start: u64, haystack: Bytes, mut cache: DfaCache) -> DfaEndResult uses {} {
+fn dfa_search_end(re: Regex, program: VmProgram, subject: Subject, start: u64, haystack: Bytes, mut cache: DfaCache) -> DfaEndResult uses {} {
   if cache.disabled { return DfaEndQuit() }
-  let program = vm_program(re)
   let bytes = subject.bytes
   let size = core@1/bytes.len(bytes)
   // A valid String boundary's preceding byte is ASCII exactly when its
@@ -578,12 +577,12 @@ fn dfa_search_end(re: Regex, subject: Subject, start: u64, haystack: Bytes, mut 
 
 // Start recovery is requested only by callers consuming complete spans.
 fn dfa_search(re: Regex, subject: Subject, start: u64, haystack: Bytes, mut cache: DfaCache) -> DfaResult uses {} {
-  let (end_at, scalar_mode) = match dfa_search_end(re, subject, start, haystack, mut cache) {
+  let program = vm_program(re)
+  let (end_at, scalar_mode) = match dfa_search_end(re, program, subject, start, haystack, mut cache) {
     DfaFound(end_at, scalar_mode) => (end_at, scalar_mode),
     DfaEndMiss() => return DfaMiss(),
     DfaEndQuit() => return DfaQuit(),
   }
-  let program = vm_program(re)
   let bytes = subject.bytes
   let mut scalar = scalar_mode
   let mut state = 0u64
@@ -699,10 +698,10 @@ fn find_from(re: Regex, subject: Subject, start: u64, admitted: bool, haystack: 
 }
 
 // PikeVM carries the start with its ordered threads; it needs no reverse pass.
-fn find_end_from(re: Regex, subject: Subject, start: u64, admitted: bool, haystack: Bytes,
+fn find_end_from(re: Regex, program: VmProgram, subject: Subject, start: u64, admitted: bool, haystack: Bytes,
   mut cache: DfaCache, mut work: u64) -> Result[Option[u64], MatchError] uses {} {
   if admitted && !cache.disabled {
-    match dfa_search_end(re, subject, start, haystack, mut cache) {
+    match dfa_search_end(re, program, subject, start, haystack, mut cache) {
       DfaFound(end_at, _) => return Ok(Some(end_at)),
       DfaEndMiss() => return Ok(None()),
       DfaEndQuit() => { cache.disabled = true; cache.fallbacks += 1 },

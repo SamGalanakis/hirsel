@@ -4,7 +4,7 @@ Generated from manifest-selected public declarations. Do not edit by hand.
 Signatures retain modes, brands, attributes, relations and `uses` clauses.
 Opaque representations stay hidden; bodies are not checked or evaluated.
 
-2293 exported definitions; 1011 variants.
+2294 exported definitions; 1011 variants.
 
 ## Types and roots
 
@@ -3491,7 +3491,7 @@ References: [`core@1/Bytes`](#def-core_401_2fBytes), [`core@1/u64`](#def-core_40
 
 <a id="def-core_401_2fbytes_2fbase64_5fencode"></a>
 
-- `fn bytes.base64_encode(data: Bytes, alphabet: Base64Alphabet, padding: Base64Padding) -> unique Bytes uses {}`
+- `fn bytes.base64_encode(data: Bytes, alphabet: Base64Alphabet, padding: Base64Padding) -> unique String uses {}`
 
 <a id="def-core_401_2fbytes_2fdecimal_5fword"></a>
 
@@ -16531,6 +16531,10 @@ References: [`core@1/String`](#def-core_401_2fString)
 - `@noalloc pub fn string.trim(s: String) -> String in s uses {}`
 
 References: [`core@1/String`](#def-core_401_2fString)
+
+<a id="def-core_401_2fstring_2fview_5fbytes"></a>
+
+- `@noalloc fn string.view_bytes(data: Bytes) -> Option[String] in data`
 
 
 ## table

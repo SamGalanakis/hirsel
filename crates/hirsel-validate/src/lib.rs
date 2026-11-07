@@ -46,7 +46,9 @@ mod generics;
 mod indexed;
 mod input;
 mod memory;
+mod region;
 pub use memory::ValidationMemory;
+pub use region::ValidationRows;
 mod views;
 pub use views::{
     CheckedEnvironment, EnvironmentStamp, Installed, InstalledViews, OwnedEnvironment,

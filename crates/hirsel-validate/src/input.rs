@@ -9,7 +9,6 @@
 //! signature, the selected heap role's selection, and the universe's errors. A
 //! verdict is reusable exactly while its reads still hold (`read_holds`).
 use super::*;
-use crate::hashed::HashMap;
 use hirsel_syntax::{ContentHash, DefId};
 use hirsel_types::{HeapRole, SignatureKind, TypeInterner};
 use std::cell::{OnceCell, RefCell};
@@ -352,10 +351,6 @@ impl IdentifiedSignature {
             },
             digest,
         }
-    }
-    pub(crate) fn retain_owner(&self, owner: Arc<dyn Send + Sync>) {
-        self.payload_retention.set(owner.clone());
-        self.retention.set(owner);
     }
     pub(crate) fn retained_identity_bytes(&self) -> Option<u64> {
         let mut bytes = crate::memory::arc::<Self>();
@@ -867,20 +862,39 @@ impl UniverseErrors {
 /// view again. A revision's store starts empty and takes what still holds
 /// from the previous revision's (`verdict_from`), so it keeps only verdicts
 /// its own views use.
-#[derive(Clone, Default)]
 pub struct ValidatedSignatures {
-    verdicts: HashMap<ValidationDigest, Vec<Arc<ViewVerdict>>>,
+    verdicts: crate::region::Map<ValidationDigest, crate::region::Vector<Arc<ViewVerdict>>>,
     cache: Option<Arc<crate::VerifierCache>>,
     policy: ContentHash,
 }
+impl Default for ValidatedSignatures {
+    fn default() -> Self {
+        Self {
+            verdicts: crate::region::Region::default().map(),
+            cache: None,
+            policy: ContentHash::default(),
+        }
+    }
+}
 impl ValidatedSignatures {
-    pub fn retained_index_bytes(&self) -> Option<u64> {
-        self.verdicts.values().try_fold(
-            crate::memory::map::<ValidationDigest, Vec<Arc<ViewVerdict>>>(
-                self.verdicts.capacity(),
-            )?,
-            |bytes, verdicts| bytes.checked_add(crate::memory::vector(verdicts)?),
-        )
+    pub fn admit_storage(
+        &mut self,
+        memory: &Arc<dyn crate::ValidationMemory>,
+    ) -> Result<(), ViewRefusal> {
+        self.retain_storage(memory)?;
+        if let Some(cache) = &self.cache {
+            self.cache = Some(cache.for_universe(memory.clone())?);
+        }
+        Ok(())
+    }
+    pub fn retain_storage(
+        &self,
+        memory: &Arc<dyn crate::ValidationMemory>,
+    ) -> Result<(), ViewRefusal> {
+        self.verdicts.allocator().retain(memory)
+    }
+    pub(crate) fn memory(&self) -> Option<Arc<dyn crate::ValidationMemory>> {
+        self.verdicts.allocator().memory()
     }
     pub fn retain_verdicts(&self, memory: &dyn crate::ValidationMemory) -> Result<(), ViewRefusal> {
         for verdict in self.verdicts.values().flatten() {
@@ -973,10 +987,18 @@ impl ValidatedSignatures {
                 Some(cache) => cache.view_verdict(t, d, input.clone(), signatures, self.policy)?,
             },
         };
+        let storage = self.verdicts.allocator().clone();
         self.verdicts
+            .try_reserve(1)
+            .map_err(|_| storage.refusal())?;
+        let kept = self
+            .verdicts
             .entry(digest)
-            .or_default()
-            .push(verdict.clone());
+            .or_insert_with(|| storage.vector());
+        storage.push(kept, verdict.clone())?;
+        if let Some(memory) = storage.memory() {
+            verdict.retain_control(&*memory)?;
+        }
         Ok(verdict)
     }
     /// The signature errors of the universe `views` (every view of
@@ -996,7 +1018,7 @@ impl ValidatedSignatures {
     }
     /// How many verdicts the store holds.
     pub fn len(&self) -> usize {
-        self.verdicts.values().map(Vec::len).sum()
+        self.verdicts.values().map(|v| v.len()).sum()
     }
     pub fn is_empty(&self) -> bool {
         self.verdicts.is_empty()

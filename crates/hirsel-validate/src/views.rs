@@ -8,6 +8,7 @@
 //! owner's signature in place of its declared one. Only the replaced views and
 //! the verdicts that read them are checked again.
 mod memory;
+use crate::region::{Map, Region, Vector};
 use crate::{
     SignatureLookup, UniverseErrors, VRead, ValidatedSignatures, ValidationDigest, ViewRefusal,
     ViewVerdict, Violation,
@@ -102,7 +103,7 @@ fn combined(a: Option<HeapRole>, b: Option<HeapRole>) -> Result<Option<HeapRole>
 /// Reads the view of one installed definition when V first asks for it.
 pub trait ViewSource: Send + Sync {
     fn view(&self, d: DefId) -> Result<Option<View>, ViewRefusal>;
-    fn retained_control_bytes(&self) -> Option<u64>;
+    fn retain_control(&self, memory: &Arc<dyn crate::ValidationMemory>) -> Result<(), ViewRefusal>;
 }
 /// The views of read-only installed packages, by definition. Each is
 /// identified on its first read, so a universe that holds them reads only
@@ -124,33 +125,33 @@ impl InstalledCell {
     }
 }
 pub struct InstalledViews {
-    cells: Box<[(DefId, OnceLock<Box<InstalledCell>>)]>,
+    cells: Vector<(DefId, OnceLock<Box<InstalledCell>>)>,
     source: Box<dyn ViewSource>,
     memory: std::sync::RwLock<Option<Arc<dyn crate::ValidationMemory>>>,
     retention: crate::memory::ControlRetention,
 }
 impl InstalledViews {
-    pub fn new(members: impl IntoIterator<Item = DefId>, source: Box<dyn ViewSource>) -> Self {
-        let mut cells = members
-            .into_iter()
-            .map(|d| (d, OnceLock::new()))
-            .collect::<Vec<_>>();
+    pub fn new(
+        members: impl IntoIterator<Item = DefId>,
+        source: Box<dyn ViewSource>,
+    ) -> Result<Self, ViewRefusal> {
+        let storage = Region::default();
+        let mut cells = storage.collect(members.into_iter().map(|d| (d, OnceLock::new())))?;
         cells.sort_unstable_by_key(|(d, _)| *d);
         cells.dedup_by_key(|(d, _)| *d);
-        Self {
-            cells: cells.into_boxed_slice(),
+        Ok(Self {
+            cells,
             source,
             memory: std::sync::RwLock::new(None),
             retention: Default::default(),
-        }
+        })
     }
     fn retain_control(&self, memory: &Arc<dyn crate::ValidationMemory>) -> Result<(), ViewRefusal> {
         let mut admitted = self.memory.write().unwrap();
-        self.retention.retain(&**memory, || {
-            crate::memory::arc::<Self>()
-                .checked_add(size_of_val(&*self.cells) as u64)?
-                .checked_add(self.source.retained_control_bytes()?)
-        })?;
+        self.cells.allocator().retain(memory)?;
+        self.retention
+            .retain(&**memory, || Some(crate::memory::arc::<Self>()))?;
+        self.source.retain_control(memory)?;
         *admitted = Some(memory.clone());
         for cell in self.cells.iter().filter_map(|(_, slot)| slot.get()) {
             cell.retain_control(&**memory)?;
@@ -251,15 +252,16 @@ fn heap_bytes(heap: &HeapRole) -> Option<u64> {
 
 /// The public universe of one snapshot, with V's verdict on every view.
 pub struct ViewTable {
-    views: Vec<View>,
-    index: DefMap<u32>,
+    storage: Region,
+    views: Vector<View>,
+    index: Map<DefId, u32>,
     heap_role: Option<HeapRole>,
     heap_evidence: crate::HeapObservation,
-    verdicts: Vec<Arc<ViewVerdict>>,
+    verdicts: Vector<Arc<ViewVerdict>>,
     /// The views whose verdict read each view (or its absence).
-    readers: DefMap<Vec<u32>>,
+    readers: Map<DefId, Vector<u32>>,
     /// The views whose verdict read the selected heap role.
-    heap_readers: Vec<u32>,
+    heap_readers: Vector<u32>,
     errors: UniverseErrors,
     input_digest: OnceLock<ContentHash>,
     stamp: EnvironmentStamp,
@@ -308,13 +310,19 @@ impl ViewTable {
         old: Option<&ValidatedSignatures>,
     ) -> Result<Self, ViewRefusal> {
         let _batch = store.publication_batch();
-        let mut views: Vec<View> = views.into_iter().collect();
+        let storage = Region::default();
+        if let Some(memory) = store.memory() {
+            storage.retain(&memory)?;
+        }
+        let mut views = storage.collect(views)?;
         views.sort_by_key(|view| view.d);
-        let index = views
-            .iter()
-            .enumerate()
-            .map(|(i, v)| (v.d, i as u32))
-            .collect();
+        let mut index = storage.map();
+        index
+            .try_reserve(views.len())
+            .map_err(|_| storage.refusal())?;
+        for (i, view) in views.iter().enumerate() {
+            index.insert(view.d, i as u32);
+        }
         assert!(
             views
                 .iter()
@@ -334,26 +342,37 @@ impl ViewTable {
             installed,
             views,
             index,
-            verdicts: vec![],
-            readers: DefMap::default(),
-            heap_readers: vec![],
+            verdicts: storage.vector(),
+            readers: storage.map(),
+            heap_readers: storage.vector(),
+            storage,
             errors: UniverseErrors::default(),
             input_digest: OnceLock::new(),
             stamp: EnvironmentStamp::new(t, store),
             _retention: Default::default(),
         };
         table.heap_evidence = crate::input::prepare_heap(&table, store, old)?;
-        let verdicts: Vec<_> = table
-            .views
-            .iter()
-            .map(|v| store.verdict_from(t, v.d, &table, old))
-            .collect::<Result<_, _>>()?;
+        let mut verdicts = table.storage.vector();
+        verdicts
+            .try_reserve(table.views.len())
+            .map_err(|_| table.storage.refusal())?;
+        for view in &table.views {
+            verdicts.push(store.verdict_from(t, view.d, &table, old)?);
+        }
         for (i, verdict) in verdicts.iter().enumerate() {
             for d in read_views(verdict).collect::<BTreeSet<_>>() {
-                table.readers.entry(d).or_default().push(i as u32);
+                table
+                    .readers
+                    .try_reserve(1)
+                    .map_err(|_| table.storage.refusal())?;
+                let readers = table
+                    .readers
+                    .entry(d)
+                    .or_insert_with(|| table.storage.vector());
+                table.storage.push(readers, i as u32)?;
             }
             if reads_heap(verdict) {
-                table.heap_readers.push(i as u32);
+                table.storage.push(&mut table.heap_readers, i as u32)?;
             }
         }
         table.errors =
@@ -361,15 +380,11 @@ impl ViewTable {
         table.verdicts = verdicts;
         Ok(table)
     }
-    /// Control allocations of a complete error-free table. Signature payloads
-    /// held by its identified views are charged separately by the host; sourced
-    /// payloads retain their original cache owners. Installed tables and failed
-    /// verdict payloads are not retained through this optional memo.
-    pub fn retained_control_bytes(&self) -> Option<u64> {
-        if self.installed.is_some() || !self.errors.errors.is_empty() {
-            return None;
-        }
-        let mut bytes = self.table_control_bytes()?;
+    /// Physical chunk allocations and separately owned immutable inputs.
+    pub fn allocated_control_bytes(&self) -> Option<u64> {
+        let mut bytes = self
+            .table_control_bytes()?
+            .checked_add(self.storage.bytes()?)?;
         for verdict in &self.verdicts {
             bytes = bytes.checked_add(verdict.retained_verdict_bytes()?)?;
         }
@@ -377,17 +392,6 @@ impl ViewTable {
             bytes = bytes.checked_add(view.input.retained_identity_bytes()?)?;
         }
         Some(bytes)
-    }
-    /// Keep the host's reservation with every owner of the shared table.
-    pub fn retain_owner(self, owner: Arc<dyn Send + Sync>) -> Self {
-        for view in &self.views {
-            view.input.retain_owner(owner.clone());
-        }
-        for verdict in &self.verdicts {
-            verdict.retention.set(owner.clone());
-        }
-        self._retention.set(owner);
-        self
     }
     pub fn get(&self, d: DefId) -> Result<Option<&View>, ViewRefusal> {
         match self.index.get(&d) {
@@ -524,19 +528,34 @@ impl PackageUniverse {
 
 /// Immutable overlay rows retain their admitted parent allocations.
 struct PreparedRows<V> {
-    rows: DefMap<V>,
-    removed: DefMap<()>,
+    storage: Region,
+    rows: Map<DefId, V>,
+    removed: Map<DefId, ()>,
     parent: Option<Arc<Self>>,
     retention: OnceLock<Arc<dyn Send + Sync>>,
 }
 impl<V> PreparedRows<V> {
-    fn new(rows: DefMap<V>, parent: Option<Arc<Self>>, removed: DefMap<()>) -> Arc<Self> {
-        Arc::new(Self {
-            rows,
-            removed,
+    fn new(
+        rows: DefMap<V>,
+        parent: Option<Arc<Self>>,
+        removed: DefMap<()>,
+    ) -> Result<Arc<Self>, ViewRefusal> {
+        let storage = Region::default();
+        let mut stored_rows = storage.map();
+        let mut stored_removed = storage.map();
+        for (key, value) in rows {
+            storage.insert(&mut stored_rows, key, value)?;
+        }
+        for (key, value) in removed {
+            storage.insert(&mut stored_removed, key, value)?;
+        }
+        Ok(Arc::new(Self {
+            storage,
+            rows: stored_rows,
+            removed: stored_removed,
             parent,
             retention: OnceLock::new(),
-        })
+        }))
     }
     fn get(&self, definition: &DefId) -> Option<&V> {
         let mut layer = self;
@@ -560,11 +579,6 @@ impl<V> PreparedRows<V> {
     fn values(&self) -> impl Iterator<Item = &V> {
         self.iter().map(|(_, value)| value)
     }
-    fn parent_retained(&self) -> bool {
-        self.parent
-            .as_ref()
-            .is_none_or(|parent| parent.retention.get().is_some())
-    }
 }
 impl<V> Drop for PreparedRows<V> {
     fn drop(&mut self) {
@@ -577,7 +591,7 @@ impl<V> Drop for PreparedRows<V> {
 struct PreparedRowsIter<'a, V> {
     root: &'a PreparedRows<V>,
     layer: &'a PreparedRows<V>,
-    rows: std::collections::hash_map::Iter<'a, DefId, V>,
+    rows: hashbrown::hash_map::Iter<'a, DefId, V>,
 }
 impl<'a, V> Iterator for PreparedRowsIter<'a, V> {
     type Item = (&'a DefId, &'a V);
@@ -624,7 +638,7 @@ impl PackageViews {
         Self::over(
             t,
             base,
-            PreparedRows::new(replaced, None, DefMap::default()),
+            PreparedRows::new(replaced, None, DefMap::default())?,
             None,
             store,
             old,
@@ -644,7 +658,7 @@ impl PackageViews {
             [(view.d, view)].into_iter().collect(),
             Some(self.replaced.clone()),
             DefMap::default(),
-        );
+        )?;
         let mut result = Self::over(t, self.base.clone(), replaced, Some(self), store, old)?;
         result.origin_input = self.input_digest();
         Ok(result)
@@ -652,50 +666,6 @@ impl PackageViews {
     /// The independently identified complete universe before this replacement.
     pub fn origin_input(&self) -> ContentHash {
         self.origin_input
-    }
-    /// Incremental control storage of a successful overlay, excluding its
-    /// shared base and signature payloads. Failed verdict payloads stay transient.
-    pub fn retained_delta_bytes(&self) -> Option<u64> {
-        if !self.base.errors.errors.is_empty()
-            || !self.replaced.parent_retained()
-            || !self.verdicts.parent_retained()
-            || !self.errors.errors.is_empty()
-            || self.verdicts.values().any(|v| v.error.is_some())
-        {
-            return None;
-        }
-        let mut bytes = self
-            .package_control_bytes()?
-            .checked_add(self.replaced.layer_control_bytes()?)?
-            .checked_add(self.verdicts.layer_control_bytes()?)?;
-        for verdict in self.verdicts.rows.values() {
-            bytes = bytes.checked_add(verdict.retained_verdict_bytes()?)?;
-        }
-        for view in self.replaced.rows.values() {
-            bytes = bytes.checked_add(view.input.retained_identity_bytes()?)?;
-        }
-        Some(bytes)
-    }
-    /// Payloads newly held by this overlay. Its shared parents keep the leases
-    /// which charged their own payloads and control allocations.
-    pub fn retained_delta_signatures(&self) -> impl Iterator<Item = &SignatureRef> {
-        self.replaced
-            .rows
-            .values()
-            .filter_map(|view| view.input.held_signature())
-    }
-    /// Retain the host's existing reservation with every shared overlay owner.
-    pub fn retain_owner(self, owner: Arc<dyn Send + Sync>) -> Self {
-        let _ = self.replaced.retention.set(owner.clone());
-        let _ = self.verdicts.retention.set(owner.clone());
-        for view in self.replaced.rows.values() {
-            view.input.retain_owner(owner.clone());
-        }
-        for verdict in self.verdicts.rows.values() {
-            verdict.retention.set(owner.clone());
-        }
-        self._retention.set(owner);
-        self
     }
     /// This universe's summary, including its private views' effects.
     pub fn universe(&self) -> PackageUniverse {
@@ -808,7 +778,7 @@ impl PackageViews {
                 DefMap::default(),
                 previous.map(|views| views.verdicts.clone()),
                 DefMap::default(),
-            ),
+            )?,
             heap_role: heap,
             heap_evidence: crate::HeapObservation::None,
             errors: UniverseErrors::default(),
@@ -836,7 +806,7 @@ impl PackageViews {
             verdicts,
             previous.map(|views| views.verdicts.clone()),
             removed,
-        );
+        )?;
         let errors = order
             .iter()
             .filter_map(|d| match views.verdicts.get(d) {

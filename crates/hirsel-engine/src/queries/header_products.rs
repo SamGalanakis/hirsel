@@ -2043,6 +2043,7 @@ mod retention_tests {
         struct Source {
             types: Arc<hirsel_types::TypeInterner>,
             reads: Arc<AtomicU64>,
+            retention: std::sync::OnceLock<Arc<dyn Send + Sync>>,
         }
         fn signature(types: &hirsel_types::TypeInterner, id: DefId) -> hirsel_types::SignatureRef {
             Arc::new(hirsel_types::Signature {
@@ -2064,8 +2065,14 @@ mod retention_tests {
                     None,
                 )))
             }
-            fn retained_control_bytes(&self) -> Option<u64> {
-                Some(size_of::<Self>() as u64)
+            fn retain_control(
+                &self,
+                memory: &Arc<dyn ValidationMemory>,
+            ) -> Result<(), hirsel_validate::ViewRefusal> {
+                if self.retention.get().is_none() {
+                    let _ = self.retention.set(memory.retain(size_of::<Self>() as u64)?);
+                }
+                Ok(())
             }
         }
         let mut bounded = true;
@@ -2097,13 +2104,17 @@ mod retention_tests {
             let reads = Arc::new(AtomicU64::new(0));
             let before = *remaining.lock().unwrap();
             let (table, allocation) = crate::test_alloc::measured(|| {
-                let installed = Arc::new(InstalledViews::new(
-                    ids.iter().copied(),
-                    Box::new(Source {
-                        types: types.clone(),
-                        reads: reads.clone(),
-                    }),
-                ));
+                let installed = Arc::new(
+                    InstalledViews::new(
+                        ids.iter().copied(),
+                        Box::new(Source {
+                            types: types.clone(),
+                            reads: reads.clone(),
+                            retention: std::sync::OnceLock::new(),
+                        }),
+                    )
+                    .unwrap(),
+                );
                 let table = ViewTable::with_installed(
                     &types,
                     [],

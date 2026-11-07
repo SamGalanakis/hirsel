@@ -1,5 +1,6 @@
 //! Local verifier authority, separate from producer query associations. Imported
 //! content can share the physical store but cannot publish through this API.
+mod universe;
 use crate::{SignatureLookup, VRead, Validation};
 mod execution_product;
 mod installation;
@@ -530,6 +531,20 @@ impl VerifierCache {
         ))
     }
 
+    /// A bounded home for new in-memory signature receipts. Durable/hosted
+    /// verifier backends already own their storage. An explicit unbounded
+    /// memory cache cannot receive writes charged to a demanded universe.
+    pub(crate) fn for_universe(
+        self: &Arc<Self>,
+        memory: Arc<dyn crate::ValidationMemory>,
+    ) -> Result<Arc<Self>, crate::ViewRefusal> {
+        match &self.0 {
+            Backend::Memory(..) => Ok(Arc::new(Self::hosted(universe::UniverseReceipts::new(
+                memory,
+            )?))),
+            _ => Ok(self.clone()),
+        }
+    }
     pub fn fact_graph(&self) -> Arc<crate::FactGraph> {
         self.3.graph()
     }

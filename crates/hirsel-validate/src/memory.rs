@@ -51,9 +51,6 @@ impl ControlRetention {
         }
         Ok(())
     }
-    pub(crate) fn set(&self, owner: Arc<dyn Send + Sync>) {
-        self.0.lock().unwrap().get_or_insert(owner);
-    }
 }
 pub(crate) fn overflow() -> ViewRefusal {
     ViewRefusal::Unreadable {
@@ -71,15 +68,6 @@ pub(crate) fn arc<T>() -> u64 {
 }
 pub(crate) fn vector<T>(values: &Vec<T>) -> Option<u64> {
     Some(values.capacity().checked_mul(size_of::<T>())? as u64)
-}
-// hashbrown's table has at most twice capacity's buckets; a third entry and
-// 128 bytes cover control bytes, the terminal group and allocation alignment.
-pub(crate) fn map<K, V>(capacity: usize) -> Option<u64> {
-    Some(
-        capacity
-            .checked_mul(size_of::<(K, V)>().checked_mul(3)?.checked_add(1)?)?
-            .checked_add(128)? as u64,
-    )
 }
 pub(crate) fn violation(value: &Violation) -> Option<u64> {
     match &value.kind {

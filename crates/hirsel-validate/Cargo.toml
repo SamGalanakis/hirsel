@@ -6,6 +6,8 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+allocator-api2 = "0.2.21"
+hashbrown = { version = "0.17.1", default-features = false, features = ["allocator-api2"] }
 sha2 = "0.10"
 bincode = "1.3.3"
 hirsel-artifact-store = { path = "../hirsel-artifact-store" }

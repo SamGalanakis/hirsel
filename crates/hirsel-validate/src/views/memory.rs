@@ -1,21 +1,13 @@
 use super::*;
-use crate::memory::{arc, errors, map, overflow, vector};
+use crate::memory::{arc, errors, overflow};
 impl ViewTable {
     pub(super) fn table_control_bytes(&self) -> Option<u64> {
         let mut bytes = arc::<Self>()
             .checked_add(arc::<EnvironmentFacts>())?
             .checked_add(arc::<()>())?
             .checked_add(arc::<crate::FactGraph>())?
-            .checked_add(vector(&self.views)?)?
-            .checked_add(vector(&self.verdicts)?)?
-            .checked_add(map::<DefId, u32>(self.index.capacity())?)?
-            .checked_add(map::<DefId, Vec<u32>>(self.readers.capacity())?)?
-            .checked_add(vector(&self.heap_readers)?)?
             .checked_add(errors(&self.errors.errors)?)?
             .checked_add(self.heap_evidence.retained_payload_bytes()?)?;
-        for readers in self.readers.values() {
-            bytes = bytes.checked_add(vector(readers)?)?;
-        }
         if let Some(heap) = &self.heap_role {
             bytes = bytes.checked_add(heap_bytes(heap)?)?;
         }
@@ -37,6 +29,7 @@ impl ViewTable {
         &self,
         memory: &Arc<dyn crate::ValidationMemory>,
     ) -> Result<(), ViewRefusal> {
+        self.storage.retain(memory)?;
         self._retention
             .retain(&**memory, || self.table_control_bytes())?;
         if let Some(installed) = &self.installed {
@@ -53,13 +46,12 @@ impl ViewTable {
 }
 impl<V> PreparedRows<V> {
     pub(super) fn layer_control_bytes(&self) -> Option<u64> {
-        arc::<Self>()
-            .checked_add(map::<DefId, V>(self.rows.capacity())?)?
-            .checked_add(map::<DefId, ()>(self.removed.capacity())?)
+        Some(arc::<Self>())
     }
-    fn retain_control(&self, memory: &dyn crate::ValidationMemory) -> Result<(), ViewRefusal> {
+    fn retain_control(&self, memory: &Arc<dyn crate::ValidationMemory>) -> Result<(), ViewRefusal> {
         let mut layer = Some(self);
         while let Some(rows) = layer {
+            rows.storage.retain(memory)?;
             if rows.retention.get().is_none() {
                 let bytes = rows.layer_control_bytes().ok_or_else(overflow)?;
                 let _ = rows.retention.set(memory.retain(bytes)?);
@@ -89,8 +81,8 @@ impl PackageViews {
         self.base.retain_control(memory)?;
         self._retention
             .retain(&**memory, || self.package_control_bytes())?;
-        self.replaced.retain_control(&**memory)?;
-        self.verdicts.retain_control(&**memory)?;
+        self.replaced.retain_control(memory)?;
+        self.verdicts.retain_control(memory)?;
         let mut layer = Some(&*self.replaced);
         while let Some(rows) = layer {
             for view in rows.rows.values() {

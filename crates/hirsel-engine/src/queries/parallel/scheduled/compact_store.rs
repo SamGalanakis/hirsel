@@ -177,75 +177,34 @@ pub(in crate::queries) fn load_publication(
 }
 
 impl FrontBodyQueries {
-    fn retain_terminal(&self, key: Key, reads: &Reads, bytes: &[u8]) -> Option<Reference> {
-        let storage = storage_key(&self.inputs[&key].key);
-        if self.terminal_cache.is_some() {
-            // The provider lease keeps these immutable bytes through this
-            // input view. Reuse their reference even before the optional
-            // query index is published, without a second transport owner.
-            return self.store.cache_query(&storage, reads.clone(), bytes);
-        }
-        let reference = self.store.put_content(
-            hirsel_engine_store::product_domain(QueryKind::Summary),
-            bytes,
-        )?;
-        if self.store.persistence().retains() {
-            self.store.cache_query(&storage, reads.clone(), bytes);
-        }
-        Some(reference)
-    }
+    /// Persist a completed record at the store boundary. A request-local
+    /// store keeps the live outcome itself; nothing reads an encoded copy.
     pub(super) fn store_compact(&self, key: Key, outcome: &mut FrontOutcome, scratch: u64) {
-        if self.store.capability() == hirsel_engine_store::ProviderCapability::Absent {
+        if !self.store.persistence().retains() {
             return;
         }
         self.store
-            .archive_encoded(if self.terminal_cache.is_some() {
-                hirsel_engine_store::ArchiveBoundary::Ordinary
-            } else {
-                hirsel_engine_store::ArchiveBoundary::RequiredSpill
-            });
+            .archive_encoded(hirsel_engine_store::ArchiveBoundary::Ordinary);
         if let Some(bytes) = self.encode_terminal(key, outcome, scratch) {
-            outcome.terminal = self.retain_terminal(key, &outcome.reads, &bytes);
+            let storage = storage_key(&self.inputs[&key].key);
+            outcome.terminal = if self.terminal_cache.is_some() {
+                // The provider lease keeps these immutable bytes through this
+                // input view. Reuse their reference even before the optional
+                // query index is published, without a second transport owner.
+                self.store
+                    .cache_query(&storage, (*outcome.reads).clone(), &bytes)
+            } else {
+                let reference = self.store.put_content(
+                    hirsel_engine_store::product_domain(QueryKind::Summary),
+                    &bytes,
+                );
+                self.store
+                    .cache_query(&storage, (*outcome.reads).clone(), &bytes);
+                reference
+            };
         }
     }
 
-    pub(super) fn archive_facts(
-        &self,
-        key: Key,
-        outcome: &FrontOutcome,
-        existing: Option<Arc<FrontObservations>>,
-        scratch: u64,
-    ) -> Option<ArchivedFront> {
-        let observations = if let Some(existing) = existing {
-            existing
-        } else {
-            self.archive_observations(outcome, scratch)?
-        };
-        // Retire an unchanged producer only after its result is recoverable.
-        // Its observations alone cannot replace the completed Check.
-        let facts = outcome
-            .terminal
-            .or_else(|| self.archive_terminal(key, outcome, scratch))?;
-        Some(ArchivedFront {
-            facts,
-            observations,
-        })
-    }
-    fn archive_terminal(
-        &self,
-        key: Key,
-        outcome: &FrontOutcome,
-        scratch: u64,
-    ) -> Option<Reference> {
-        if self.store.capability() == hirsel_engine_store::ProviderCapability::Absent {
-            return None;
-        }
-        let _reads = self.store.read_scope();
-        self.store
-            .archive_encoded(hirsel_engine_store::ArchiveBoundary::RequiredSpill);
-        let bytes = self.encode_terminal(key, outcome, scratch)?;
-        self.retain_terminal(key, &outcome.reads, &bytes)
-    }
     fn encode_terminal(&self, key: Key, outcome: &FrontOutcome, scratch: u64) -> Option<Vec<u8>> {
         let temporary = outcome
             .dead_arms
@@ -331,58 +290,6 @@ impl BodyTask {
         value
     }
 
-    pub(super) fn load_evicted(
-        &self,
-        cx: &mut dyn QueryContext,
-    ) -> Option<Result<ProductRef, Reference>> {
-        let facts = match self
-            .queries
-            .slots
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(&self.input)?
-        {
-            FrontSlot::Live { .. } => return None,
-            FrontSlot::Archived(archived) => archived.facts,
-        };
-        if facts.domain != hirsel_engine_store::product_domain(QueryKind::Summary)
-            || facts.len.checked_mul(8)? > self.weight.scratch
-        {
-            return None;
-        }
-        let bytes = self.checkpoint("content", self.queries.store.get_content(facts))?;
-        if facts.domain.reference(&bytes)? != facts {
-            return None;
-        }
-        self.load_terminal(cx, bytes)
-    }
-    fn load_terminal(
-        &self,
-        cx: &mut dyn QueryContext,
-        bytes: hirsel_artifact_store::Bytes,
-    ) -> Option<Result<ProductRef, Reference>> {
-        if (bytes.len() as u64).checked_mul(8)? > self.weight.scratch {
-            return None;
-        }
-        let record = self.checkpoint(
-            "record decode",
-            decode_record(&*self.queries.store, bytes, self.weight.scratch),
-        )?;
-        if record.key != self.queries.inputs[&self.input].key.0
-            || record.body.is_some_and(|body| {
-                body.domain != hirsel_engine_store::product_domain(QueryKind::Modes)
-                    || body.len > self.weight.scratch
-            })
-        {
-            return self.checkpoint("record identity or body bound", None);
-        }
-        let reads = Arc::new(record.reads);
-        let facts = self.checkpoint("facts", self.decode_facts(&record.facts, &reads))?;
-        self.checkpoint(
-            "publication",
-            self.install_cached_facts(cx, record.body, reads, facts),
-        )
-    }
     pub(super) fn load_compact(
         &self,
         cx: &mut dyn QueryContext,

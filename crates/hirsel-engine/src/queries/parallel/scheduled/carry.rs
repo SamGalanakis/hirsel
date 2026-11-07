@@ -637,8 +637,7 @@ impl BodyTask {
             return;
         };
         let outcome = match slot {
-            FrontSlot::Archived(_) => return,
-            FrontSlot::Live { outcome, .. } => outcome,
+            outcome => outcome,
         };
         let (reference, summary, diagnostics, lowering) = match &outcome.state {
             FrontState::Failed { .. } => return,

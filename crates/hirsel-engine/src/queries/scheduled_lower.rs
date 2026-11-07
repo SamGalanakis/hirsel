@@ -2067,7 +2067,7 @@ impl FrontLowerQueries {
                     return Ok(observed);
                 }
             }
-            if !self.front.evict_idle(self.weight.scratch) && !query_reads.evict_body().await {
+            if !query_reads.evict_body().await {
                 return Err(self.errors.resource);
             }
         }

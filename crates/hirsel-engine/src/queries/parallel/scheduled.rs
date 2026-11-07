@@ -18,7 +18,6 @@ mod carry;
 mod compact_store;
 pub(in crate::queries) use compact_store::load_publication as load_scheduled_publication;
 mod lint_facts;
-mod observations;
 mod retained;
 use carry::CarryChanges;
 pub use carry::FrontCarry;
@@ -27,8 +26,6 @@ mod inputs;
 mod source;
 use inputs::Inputs;
 pub(in crate::queries) use inputs::OperationFrontInputs;
-mod slots;
-use slots::FrontSlots;
 mod storage;
 pub use source::FrontInputFootprint;
 use source::{SiblingFile, SiblingSources};
@@ -89,13 +86,6 @@ struct FrontFacts {
     memos: Box<[(crate::memo::MemoKey, Arc<Reads>)]>,
     diagnostic_sources: Option<Arc<namespace::DiagnosticSources>>,
     _backing: Arc<LiveSourceBacking>,
-}
-enum FrontSlot {
-    Live {
-        outcome: FrontOutcome,
-        observations: Option<Arc<FrontObservations>>,
-    },
-    Archived(ArchivedFront),
 }
 pub(crate) struct FrontCheckFacts {
     pub result: Result<Vec<Diagnostic>, QueryError>,
@@ -166,23 +156,12 @@ impl FrontFacts {
         })
     }
 }
-#[derive(Clone)]
-struct ArchivedFront {
-    facts: Reference,
-    observations: Arc<FrontObservations>,
-}
-struct FrontObservations {
-    rows: observations::Rows,
-    _backing: Option<Arc<LiveSourceBacking>>,
-}
 #[derive(Clone, Copy, Debug)]
 pub struct FrontMemoryRefusal {
     pub owner: &'static str,
     pub required: u64,
     pub available: u64,
     pub settled: usize,
-    pub archived: usize,
-    pub pinned: usize,
 }
 struct Input {
     definition: DefId,
@@ -326,7 +305,7 @@ pub struct FrontBodyQueries {
     /// Stored entry validations plus memo rows written.
     memo_operations: AtomicU64,
     verify_store: hirsel_engine_store::VerifyStore,
-    slots: Mutex<FrontSlots>,
+    slots: Mutex<BTreeMap<Key, FrontOutcome>>,
     input_slots: Mutex<(BTreeMap<DefId, usize>, Option<Arc<LiveSourceBacking>>)>,
     /// Optional body retention bound within the existing Front allowance.
     body_cache_limit: u64,
@@ -504,10 +483,7 @@ impl FrontBodyQueries {
             candidate.rule == diagnostic.rule && candidate.primary == diagnostic.primary
         };
         let slots = self.slots.lock().unwrap_or_else(|e| e.into_inner());
-        let mut live = slots.values().filter_map(|slot| match slot {
-            FrontSlot::Live { outcome, .. } => Some(outcome),
-            FrontSlot::Archived(_) => None,
-        });
+        let mut live = slots.values().map(|outcome| outcome);
         live.clone()
             .find_map(|outcome| {
                 outcome
@@ -565,10 +541,7 @@ impl FrontBodyQueries {
             return None;
         }
         let slots = self.slots.lock().unwrap_or_else(|e| e.into_inner());
-        let outcome = match slots.get(&product.address.0)? {
-            FrontSlot::Archived(_) => return None,
-            FrontSlot::Live { outcome, .. } => outcome,
-        };
+        let outcome = slots.get(&product.address.0)?;
         let value = match &outcome.state {
             FrontState::Failed { .. } => return None,
             FrontState::Settled { publication, .. } => publication
@@ -755,7 +728,7 @@ impl FrontBodyQueries {
         (definitions.len() as u64)
             .checked_mul(
                 (std::mem::size_of::<Input>()
-                    + std::mem::size_of::<FrontSlot>()
+                    + std::mem::size_of::<FrontOutcome>()
                     + 3 * std::mem::size_of::<(crate::memo::MemoKey, Arc<Reads>)>()
                     + 8 * std::mem::size_of::<crate::memo::MemoKey>()
                     // Includes the per-root archived observation owner.
@@ -917,7 +890,7 @@ impl FrontBodyQueries {
     fn slot_inventory(len: usize, pending: usize) -> u64 {
         let mut weight = hirsel_query_products::retained::MetadataWeight::default();
         if len != 0 {
-            weight.tree::<Key, FrontSlot>(len);
+            weight.tree::<Key, FrontOutcome>(len);
         }
         if pending != 0 {
             weight.tree::<DefId, usize>(pending);
@@ -981,10 +954,14 @@ impl FrontBodyQueries {
             return Some(());
         }
     }
-    fn slot_admission_bytes(&self, pending: &BTreeMap<DefId, usize>, slots: &FrontSlots) -> u64 {
+    fn slot_admission_bytes(
+        &self,
+        pending: &BTreeMap<DefId, usize>,
+        slots: &BTreeMap<Key, FrontOutcome>,
+    ) -> u64 {
         let mut weight = hirsel_query_products::retained::MetadataWeight::default();
         if !slots.is_empty() {
-            weight.tree::<Key, FrontSlot>(slots.len());
+            weight.tree::<Key, FrontOutcome>(slots.len());
         }
         if !pending.is_empty() {
             weight.tree::<DefId, usize>(pending.len());
@@ -997,7 +974,6 @@ impl FrontBodyQueries {
         if !clean.is_empty() {
             weight.tree::<crate::memo::MemoKey, ()>(clean.len());
         }
-        weight.add(slots.shared_observations() as usize);
         if weight.bytes() != 0 {
             weight.add(
                 hirsel_engine_admission::retained_arc_bytes(&std::mem::MaybeUninit::<
@@ -1022,7 +998,7 @@ impl FrontBodyQueries {
     pub fn retained_observation_metadata_bytes(&self) -> u64 {
         let ledger = self.input_slots.lock().unwrap_or_else(|e| e.into_inner());
         let slots = self.slots.lock().unwrap_or_else(|e| e.into_inner());
-        self.slot_admission_bytes(&ledger.0, &slots) + slots.owned_observations()
+        self.slot_admission_bytes(&ledger.0, &slots)
     }
     fn trim_slot_admission(&self) -> bool {
         let mut ledger = self.input_slots.lock().unwrap_or_else(|e| e.into_inner());
@@ -1085,81 +1061,26 @@ impl FrontBodyQueries {
     }
     fn install_outcome(&self, key: Key, mut outcome: FrontOutcome, scratch: u64) {
         if outcome.terminal.is_none() {
+            // Restoring an immutable input preserves its required checkpoint.
             outcome.terminal = self
                 .slots
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .get(&key)
-                .and_then(|slot| match slot {
-                    FrontSlot::Live { outcome, .. } => outcome.terminal,
-                    FrontSlot::Archived(archived) => Some(archived.facts),
-                });
+                .and_then(|slot| slot.terminal);
             if outcome.terminal.is_none() {
                 self.store_compact(key, &mut outcome, scratch);
             }
         }
-        let mut slots = self.slots.lock().unwrap_or_else(|e| e.into_inner());
-        if self.body_cache_limit < self._allowance.admitted
-            && let Some(charge) = outcome.pending_body.as_ref().map(|body| body.charge)
-        {
-            let mut used: u64 = slots
-                .iter()
-                .filter_map(|(stored, slot)| match slot {
-                    FrontSlot::Live { outcome, .. } if *stored != key => {
-                        outcome.pending_body.as_ref().map(|body| body.charge)
-                    }
-                    _ => None,
-                })
-                .sum();
-            while charge > self.body_cache_limit.saturating_sub(used) {
-                let retired = slots.outcomes_mut().find_map(|(stored, outcome)| {
-                    (*stored != key
-                        && matches!(
-                            outcome.state,
-                            FrontState::Settled {
-                                archive: Some(_),
-                                ..
-                            }
-                        ))
-                    .then(|| outcome.pending_body.take())
-                    .flatten()
-                });
-                let Some(retired) = retired else {
-                    outcome.pending_body.take();
-                    break;
-                };
-                used -= retired.charge;
-                drop(retired);
-            }
-        }
-        let observations = slots.get(&key).and_then(|slot| {
-            // Restoring an immutable input preserves its required checkpoint
-            // and the original completion-index owner.
-            outcome.terminal = outcome.terminal.or_else(|| match slot {
-                FrontSlot::Live { outcome, .. } => outcome.terminal,
-                FrontSlot::Archived(archived) => Some(archived.facts),
-            });
-            match slot {
-                FrontSlot::Live { observations, .. } => observations.clone(),
-                FrontSlot::Archived(archived) => Some(archived.observations.clone()),
-            }
-        });
-        slots.insert(
-            key,
-            FrontSlot::Live {
-                outcome,
-                observations,
-            },
-        );
-        drop(slots);
+        self.slots
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(key, outcome);
     }
     /// Actual phase invocations, including failed or discarded producers.
     fn completed_product(&self, query: QueryId) -> Option<Result<ProductRef, Reference>> {
         let slots = self.slots.lock().unwrap_or_else(|e| e.into_inner());
-        let outcome = match slots.get(&query.address.0)? {
-            FrontSlot::Archived(_) => return None,
-            FrontSlot::Live { outcome, .. } => outcome,
-        };
+        let outcome = slots.get(&query.address.0)?;
         Some(match &outcome.state {
             FrontState::Failed { record, .. } => Err(*record),
             FrontState::Settled { publication, .. } => Ok(publication.clone()),
@@ -1174,11 +1095,7 @@ impl FrontBodyQueries {
             if self.reclaim_reads() {
                 continue;
             }
-            if self.evict_pending_body() {
-                continue;
-            }
             if !cx.evict_body()
-                && !self.evict_idle(cx.scratch_bytes())
                 && !self
                     .namespace
                     .snapshot
@@ -1190,70 +1107,11 @@ impl FrontBodyQueries {
         }
         Some(())
     }
-    pub(in crate::queries) fn evict_idle(&self, scratch: u64) -> bool {
-        if self.evict_pending_body() {
-            return true;
-        }
-        let mut slots = self.slots.lock().unwrap_or_else(|e| e.into_inner());
-        let selected = slots.iter().find_map(|(key, slot)| match slot {
-            FrontSlot::Archived(_) => None,
-            FrontSlot::Live { outcome, .. } => match &outcome.state {
-                FrontState::Failed { .. } => None,
-                FrontState::Settled { publication, .. } => (publication
-                    .live_value::<crate::products::LiveSummaryProduct>()
-                    .is_some_and(|summary| {
-                        publication.live_owners() == 1 && summary.cache_owners(1)
-                    })
-                    && Arc::strong_count(&outcome.facts) == 2)
-                    .then_some(*key),
-            },
-        });
-        let Some(key) = selected else {
-            return false;
-        };
-        let (outcome, observations) = match slots.get(&key) {
-            Some(FrontSlot::Archived(_)) | None => return false,
-            Some(FrontSlot::Live {
-                outcome,
-                observations,
-            }) => (outcome, observations),
-        };
-        let Some(archived) = self.archive_facts(key, outcome, observations.clone(), scratch) else {
-            return false;
-        };
-        slots.insert(key, FrontSlot::Archived(archived));
-        drop(slots);
-        self.reclaim_reads();
-        true
-    }
     pub fn memory_refusal(&self) -> Option<FrontMemoryRefusal> {
         *self.refusal.lock().unwrap_or_else(|e| e.into_inner())
     }
     fn record_refusal(&self, owner: &'static str, charge: u64, available: u64) {
-        let slots = self.slots.lock().unwrap_or_else(|e| e.into_inner());
-        let (mut settled, mut archived, mut pinned) = (0, 0, 0);
-        for slot in slots.values() {
-            match slot {
-                FrontSlot::Archived(_) => archived += 1,
-                FrontSlot::Live { outcome, .. } => {
-                    settled += 1;
-                    let pinned_live = match &outcome.state {
-                        FrontState::Failed { .. } => true,
-                        FrontState::Settled { publication, .. } => {
-                            Arc::strong_count(&outcome.facts) != 2
-                                || publication
-                                    .live_value::<crate::products::LiveSummaryProduct>()
-                                    .is_none_or(|summary| {
-                                        publication.live_owners() != 1 || !summary.cache_owners(1)
-                                    })
-                        }
-                    };
-                    if pinned_live {
-                        pinned += 1;
-                    }
-                }
-            }
-        }
+        let settled = self.slots.lock().unwrap_or_else(|e| e.into_inner()).len();
         self.refusal
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -1262,8 +1120,6 @@ impl FrontBodyQueries {
                 required: charge,
                 available,
                 settled,
-                archived,
-                pinned,
             });
     }
     fn owner_grant(
@@ -1682,20 +1538,7 @@ impl FrontBodyQueries {
             .unwrap_or_else(|e| e.into_inner())
             .values()
         {
-            match slot {
-                FrontSlot::Archived(archived) => {
-                    keys.extend(archived.observations.rows.keys());
-                }
-                FrontSlot::Live {
-                    outcome,
-                    observations,
-                } => {
-                    if let Some(observations) = observations {
-                        keys.extend(observations.rows.keys());
-                    }
-                    keys.extend(outcome.memos.iter().map(|(key, _)| *key));
-                }
-            }
+            keys.extend(slot.memos.iter().map(|(key, _)| *key));
         }
         keys.into_iter().collect()
     }
@@ -1707,20 +1550,7 @@ impl FrontBodyQueries {
             .unwrap_or_else(|e| e.into_inner())
             .values()
         {
-            match slot {
-                FrontSlot::Archived(archived) => {
-                    rows.extend(archived.observations.load(&*self.store)?);
-                }
-                FrontSlot::Live {
-                    outcome,
-                    observations,
-                } => {
-                    if let Some(observations) = observations {
-                        rows.extend(observations.load(&*self.store)?);
-                    }
-                    rows.extend(outcome.memos.iter().cloned());
-                }
-            }
+            rows.extend(slot.memos.iter().cloned());
         }
         Some(rows.into_iter().collect())
     }
@@ -1752,7 +1582,6 @@ impl FrontBodyQueries {
         self: &Arc<Self>,
         engine: &mut QueryEngine,
         path: &DefPath,
-        scratch: u64,
     ) -> Result<Option<FrontCheckedOutput>, QueryError> {
         let Some(input) = self
             .inputs
@@ -1761,60 +1590,7 @@ impl FrontBodyQueries {
         else {
             return Ok(None);
         };
-        let query = self.query(path).ok_or(QueryError::NotImplemented)?;
-        let archived = matches!(
-            self.slots
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .get(&query.address.0),
-            Some(FrontSlot::Archived(_))
-        );
-        if self.checked_definition(path).is_none() && archived {
-            let mut context = DetachedFrontContext {
-                queries: self,
-                scratch,
-            };
-            self.admit_input_slot(&mut context, input.definition)
-                .ok_or_else(|| {
-                    self.runtime_error(self.errors.resource)
-                        .expect("resource error is local")
-                })?;
-            let mut task = BodyTask {
-                queries: self.clone(),
-                query,
-                input: query.address.0,
-                materialize: false,
-                weight: MemoryWeight {
-                    scratch: scratch.min(input.weight.scratch),
-                    ..input.weight
-                },
-                terminal: None,
-                demand: None,
-                slot_admitted: true,
-            };
-            let restored = task.load_evicted(&mut context).unwrap_or_else(|| {
-                task.run(&mut context).map_err(|error| match error {
-                    BodyRunError::Refused(reference) => reference,
-                    BodyRunError::Demand(_) => self.protocol_refusal(),
-                })
-            });
-            if let Err(reference) = restored {
-                return Err(self
-                    .outcome(Err(reference))
-                    .and_then(|o| o.outcome.result.err())
-                    .unwrap_or_else(|| {
-                        QueryError::Operational(hirsel_types::OperationalFailure {
-                            operation: "generated instance discovery".into(),
-                            message: format!(
-                                "Front restoration refused: {:?}; retained {}/{} bytes",
-                                self.memory_refusal(),
-                                self.retained_bytes(),
-                                self.admitted_bytes()
-                            ),
-                        })
-                    }));
-            }
-        }
+        self.query(path).ok_or(QueryError::NotImplemented)?;
         let Some(output) = self.checked_definition(path) else {
             return Ok(None);
         };
@@ -1844,12 +1620,11 @@ impl FrontBodyQueries {
     fn selection_key(
         &self,
         selected: &Result<ProductRef, Reference>,
-        slots: &BTreeMap<Key, FrontSlot>,
+        slots: &BTreeMap<Key, FrontOutcome>,
     ) -> Option<Key> {
         match selected {
             Err(reference) => slots.iter().find_map(|(key, slot)| match slot {
-                FrontSlot::Archived(_) => None,
-                FrontSlot::Live { outcome, .. } => match &outcome.state {
+                outcome => match &outcome.state {
                     FrontState::Failed { record, .. } if record == reference => Some(*key),
                     FrontState::Failed { .. } | FrontState::Settled { .. } => None,
                 },
@@ -1860,10 +1635,7 @@ impl FrontBodyQueries {
                 } else {
                     self.inputs.demand(&product.address.0)?
                 };
-                let outcome = match slots.get(&key)? {
-                    FrontSlot::Archived(_) => return None,
-                    FrontSlot::Live { outcome, .. } => outcome,
-                };
+                let outcome = slots.get(&key)?;
                 match &outcome.state {
                     FrontState::Failed { .. } => None,
                     FrontState::Settled { publication, .. } => {
@@ -1894,10 +1666,7 @@ impl FrontBodyQueries {
 
         let slots = self.slots.lock().unwrap_or_else(|e| e.into_inner());
         let key = self.selection_key(&selected, &slots)?;
-        let outcome = match slots.get(&key)? {
-            FrontSlot::Archived(_) => return None,
-            FrontSlot::Live { outcome, .. } => outcome,
-        };
+        let outcome = slots.get(&key)?;
         let (summary, reads, dependencies) = outcome.checked.as_ref()?;
         Some(FrontCheckedOutput {
             table_keys: outcome.table_keys.as_ref()?.clone(),
@@ -1965,7 +1734,7 @@ impl FrontBodyQueries {
         {
             let slots = self.slots.lock().unwrap_or_else(|e| e.into_inner());
             match slots.get(key) {
-                Some(FrontSlot::Live { outcome, .. }) => Some(outcome.facts.clone()),
+                Some(outcome) => Some(outcome.facts.clone()),
                 _ => None,
             }
         } else {
@@ -2001,8 +1770,7 @@ impl FrontBodyQueries {
         let slots = self.slots.lock().unwrap_or_else(|e| e.into_inner());
         let key = self.selection_key(&selected, &slots)?;
         match slots.get(&key)? {
-            FrontSlot::Archived(_) => None,
-            FrontSlot::Live { outcome, .. } => Some(outcome.reads.clone()),
+            outcome => Some(outcome.reads.clone()),
         }
     }
     /// Compact dependency classification for Check's speculative window.
@@ -2012,9 +1780,7 @@ impl FrontBodyQueries {
     ) -> Option<lowering::LoweringUse> {
         let query = self.query(path)?;
         let slots = self.slots.lock().unwrap_or_else(|e| e.into_inner());
-        let FrontSlot::Live { outcome, .. } = slots.get(&query.address.0)? else {
-            return None;
-        };
+        let outcome = slots.get(&query.address.0)?;
         match &outcome.state {
             FrontState::Settled { lowering, .. } => Some(lowering.clone()),
             FrontState::Failed { .. } => None,
@@ -2031,10 +1797,7 @@ impl FrontBodyQueries {
 
         let slots = self.slots.lock().unwrap_or_else(|e| e.into_inner());
         let key = self.selection_key(&selected, &slots)?;
-        let selected = match slots.get(&key)? {
-            FrontSlot::Archived(_) => return None,
-            FrontSlot::Live { outcome, .. } => outcome,
-        };
+        let selected = slots.get(&key)?;
         let (result, source_rules, lowering) = match &selected.state {
             FrontState::Failed { error, .. } => (Err((**error).clone()), false, None),
             FrontState::Settled {
@@ -2088,7 +1851,7 @@ impl FrontBodyQueries {
     ) -> Option<Arc<namespace::DiagnosticSources>> {
         let slots = self.slots.lock().unwrap_or_else(|e| e.into_inner());
         slots.values().find_map(|slot| match slot {
-            FrontSlot::Live { outcome, .. } if matches!(&outcome.state, FrontState::Failed { record, .. } if *record == reference) => outcome.diagnostic_sources.clone(),
+            outcome if matches!(&outcome.state, FrontState::Failed { record, .. } if *record == reference) => outcome.diagnostic_sources.clone(),
             _ => None,
         })
     }
@@ -2104,10 +1867,7 @@ impl FrontBodyQueries {
     pub(crate) fn completed_error(&self, path: &DefPath) -> Option<QueryError> {
         let query = self.query(path)?;
         let outcomes = self.slots.lock().unwrap_or_else(|error| error.into_inner());
-        let outcome = match outcomes.get(&query.address.0)? {
-            FrontSlot::Archived(_) => return None,
-            FrontSlot::Live { outcome, .. } => outcome,
-        };
+        let outcome = outcomes.get(&query.address.0)?;
         match &outcome.state {
             FrontState::Failed { error, .. } => Some((**error).clone()),
             FrontState::Settled { diagnostics, .. } => {
@@ -2122,10 +1882,7 @@ impl FrontBodyQueries {
     ) -> Option<T> {
         let query = self.query(path)?;
         let slots = self.slots.lock().unwrap_or_else(|e| e.into_inner());
-        let outcome = match slots.get(&query.address.0)? {
-            FrontSlot::Archived(_) => return None,
-            FrontSlot::Live { outcome, .. } => outcome,
-        };
+        let outcome = slots.get(&query.address.0)?;
         match &outcome.state {
             FrontState::Failed { .. } => None,
             FrontState::Settled { publication, .. } => Some(read(
@@ -2146,10 +1903,7 @@ impl FrontBodyQueries {
 
         let slots = self.slots.lock().unwrap_or_else(|e| e.into_inner());
         let key = self.selection_key(&selected, &slots)?;
-        let outcome = match slots.get(&key)? {
-            FrontSlot::Archived(_) => return None,
-            FrontSlot::Live { outcome, .. } => outcome,
-        };
+        let outcome = slots.get(&key)?;
         let result = match &outcome.state {
             FrontState::Failed { error, .. } => Err((**error).clone()),
             FrontState::Settled {
@@ -2181,7 +1935,7 @@ impl FrontBodyQueries {
 
         let mut slots = self.slots.lock().unwrap_or_else(|e| e.into_inner());
         let key = self.selection_key(&selected, &slots)?;
-        let outcome = slots.outcome_mut(&key)?;
+        let outcome = slots.get_mut(&key)?;
         let (result, summary, body_owner) = match &outcome.state {
             FrontState::Failed { error, .. } => (Err((**error).clone()), None, None),
             FrontState::Settled {
@@ -2252,8 +2006,7 @@ impl FrontBodyQueries {
             .unwrap_or_else(|e| e.into_inner())
             .values()
             .filter(|slot| match slot {
-                FrontSlot::Archived(_) => false,
-                FrontSlot::Live { outcome, .. } => match &outcome.state {
+                outcome => match &outcome.state {
                     FrontState::Failed { .. } => false,
                     FrontState::Settled { body, .. } => body
                         .as_ref()
@@ -2263,34 +2016,10 @@ impl FrontBodyQueries {
             })
             .count()
     }
-    fn evict_pending_body(&self) -> bool {
-        let mut slots = self.slots.lock().unwrap_or_else(|e| e.into_inner());
-        let retired = slots.outcomes_mut().find_map(|(_, outcome)| {
-            if matches!(
-                outcome.state,
-                FrontState::Settled {
-                    archive: Some(_),
-                    ..
-                }
-            ) && outcome
-                .pending_body
-                .as_ref()
-                .is_some_and(|body| body.product.cache_only())
-            {
-                outcome.pending_body.take()
-            } else {
-                None
-            }
-        });
-        drop(slots);
-        let removed = retired.is_some();
-        drop(retired);
-        removed
-    }
     /// Discard decoded bodies only when their request checkpoint survives.
     pub(crate) fn release_pending_bodies(&self) {
         let mut slots = self.slots.lock().unwrap_or_else(|e| e.into_inner());
-        for (_, outcome) in slots.outcomes_mut() {
+        for outcome in slots.values_mut() {
             if matches!(
                 outcome.state,
                 FrontState::Settled {
@@ -2309,8 +2038,7 @@ impl FrontBodyQueries {
             .unwrap()
             .values()
             .filter_map(|slot| match slot {
-                FrontSlot::Archived(_) => None,
-                FrontSlot::Live { outcome, .. } => match &outcome.state {
+                outcome => match &outcome.state {
                     FrontState::Failed { record, .. } => Some(*record),
                     FrontState::Settled { archive, .. } => *archive,
                 },
@@ -2336,83 +2064,19 @@ impl FrontBodyQueries {
         }
     }
 }
-struct DetachedFrontContext<'a> {
-    queries: &'a FrontBodyQueries,
-    scratch: u64,
-}
-impl QueryContext for DetachedFrontContext<'_> {
-    fn scratch_bytes(&self) -> u64 {
-        self.scratch
-    }
-    fn evict_body(&mut self) -> bool {
-        self.queries.evict_idle(self.scratch)
-    }
-    fn read(&mut self, _: QueryId) -> std::task::Poll<Result<ProductRef, Reference>> {
-        std::task::Poll::Ready(Err(self.queries.protocol_refusal()))
-    }
-}
 struct Factory(Arc<FrontBodyQueries>);
 impl QueryFactory for Factory {
     fn evict_cache(&self, _scratch: u64) -> bool {
-        self.0.evict_pending_body()
-            || self
-                .0
-                .namespace
-                .snapshot
-                .header_products()
-                .is_some_and(|headers| headers.evict())
+        self.0
+            .namespace
+            .snapshot
+            .header_products()
+            .is_some_and(|headers| headers.evict())
             || self.0.namespace.snapshot.evict_cached()
             || self.0.inputs.clear_addresses()
             || self.0.trim_slot_admission()
             || self.0.reclaim_reads()
     }
-    fn evict(&self, query: QueryId, product: &ProductRef, scratch: u64) -> bool {
-        if !self.0.has_cached_query(query)
-            && let Some(front) = self
-                .0
-                .demand_producer()
-                .and_then(|demand| demand.front_for_eviction(query))
-        {
-            return front.factory().evict(query, product, scratch);
-        }
-        let mut slots = self.0.slots.lock().unwrap_or_else(|e| e.into_inner());
-        let (outcome, observations) = match slots.get(&query.address.0) {
-            Some(FrontSlot::Archived(_)) | None => return false,
-            Some(FrontSlot::Live {
-                outcome,
-                observations,
-            }) => (outcome, observations),
-        };
-        let pending = outcome.pending_body.as_ref();
-        let (publication, can_evict) = match &outcome.state {
-            FrontState::Failed { .. } => (None, false),
-            FrontState::Settled { publication, .. } => (
-                Some(publication),
-                publication
-                    .live_value::<crate::products::LiveSummaryProduct>()
-                    .is_some_and(|summary| {
-                        publication.live_owners() == 2
-                            && pending.is_none_or(|body| body.product.cache_only())
-                            && summary.cache_owners(1 + usize::from(pending.is_some()))
-                    })
-                    && Arc::strong_count(&outcome.facts) == 2,
-            ),
-        };
-        if !can_evict || publication != Some(product) {
-            return false;
-        }
-        let Some(archived) =
-            self.0
-                .archive_facts(query.address.0, outcome, observations.clone(), scratch)
-        else {
-            return false;
-        };
-        slots.insert(query.address.0, FrontSlot::Archived(archived));
-        drop(slots);
-        self.0.reclaim_reads();
-        true
-    }
-
     fn create(&self, query: QueryId) -> Result<Box<dyn QueryTask>, Reference> {
         if !self.0.owns_query(query)
             && let Some(front) = self
@@ -2720,13 +2384,9 @@ impl BodyTask {
         let input = &queries.inputs[&self.input];
         let (mut reference, reads, summary) = {
             let slots = queries.slots.lock().unwrap_or_else(|e| e.into_inner());
-            let old = match slots
+            let old = slots
                 .get(&self.input)
-                .ok_or_else(|| queries.protocol_refusal())?
-            {
-                FrontSlot::Archived(_) => return Err(queries.protocol_refusal()),
-                FrontSlot::Live { outcome, .. } => outcome,
-            };
+                .ok_or_else(|| queries.protocol_refusal())?;
             let (reference, publication, diagnostics) = match &old.state {
                 FrontState::Failed { .. } => return Err(queries.protocol_refusal()),
                 FrontState::Settled {
@@ -2790,7 +2450,7 @@ impl BodyTask {
             .ok_or_else(|| queries.protocol_refusal())?;
         let mut slots = queries.slots.lock().unwrap_or_else(|e| e.into_inner());
         let current = slots
-            .outcome_mut(&self.input)
+            .get_mut(&self.input)
             .ok_or_else(|| queries.protocol_refusal())?;
         match &mut current.state {
             FrontState::Failed { .. } => return Err(queries.protocol_refusal()),
@@ -2824,10 +2484,7 @@ impl BodyTask {
         let input = &queries.inputs[&self.input];
         let (reference, reads) = {
             let slots = queries.slots.lock().unwrap_or_else(|e| e.into_inner());
-            let old = match slots.get(&self.input)? {
-                FrontSlot::Archived(_) => return None,
-                FrontSlot::Live { outcome, .. } => outcome,
-            };
+            let old = slots.get(&self.input)?;
             match &old.state {
                 FrontState::Failed { .. } => return None,
                 FrontState::Settled { archive, .. } => {
@@ -2967,8 +2624,8 @@ impl BodyTask {
             let product = {
                 let slots = self.queries.slots.lock().unwrap_or_else(|e| e.into_inner());
                 match slots.get(&self.input) {
-                    Some(FrontSlot::Archived(_)) | None => None,
-                    Some(FrontSlot::Live { outcome, .. }) => match &outcome.state {
+                    None => None,
+                    Some(outcome) => match &outcome.state {
                         FrontState::Failed { .. } => None,
                         FrontState::Settled { body, .. } => {
                             body.as_ref().and_then(WeakAnalyzedProduct::upgrade)
@@ -3009,24 +2666,6 @@ impl BodyTask {
             {
                 return Err(self.queries.resource_refusal().into());
             }
-        }
-        if !self.materialize
-            && matches!(
-                self.queries
-                    .slots
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .get(&self.input),
-                Some(FrontSlot::Archived(_))
-            )
-        {
-            // A local completion is authoritative in this immutable view,
-            // just like completed_product above, including under verify-cache.
-            // Decode/admission failure cannot authorize a second Check.
-            return self
-                .load_evicted(cx)
-                .ok_or_else(|| self.queries.resource_refusal())?
-                .map_err(Into::into);
         }
         if !self.materialize && self.queries.verify_store == hirsel_engine_store::VerifyStore::Off {
             if let Some(hit) = self.load_carry(cx) {
@@ -3078,7 +2717,7 @@ impl BodyTask {
                     // products; retry only after reclaiming an actual owner.
                     if matches!(&error, QueryError::Operational(failure)
                         if failure.operation == "source syntax admission")
-                        && (cx.evict_body() || queries.evict_idle(cx.scratch_bytes()))
+                        && cx.evict_body()
                     {
                         continue;
                     }
@@ -3164,24 +2803,17 @@ impl BodyTask {
                 .copied(),
             environment: queries.environment,
         };
-        // A request transport preserves a released body as required content,
-        // independently of whether the backend keeps optional query variants.
-        let capture_body = queries.store.persistence().retains()
-            || matches!(
-                queries.store.capability(),
-                hirsel_engine_store::ProviderCapability::RequestLocal(_)
-            );
-        if capture_body && !queries.store.persistence().retains() {
-            queries
-                .store
-                .archive_encoded(hirsel_engine_store::ArchiveBoundary::RequiredSpill);
-        }
+        // Only a retaining store persists the encoded body record.
         let mut completed = CompactCompleted::capture(
             done,
             &worker,
             queries.types.clone(),
             &mut source,
-            capture_body.then_some(&*queries.records),
+            queries
+                .store
+                .persistence()
+                .retains()
+                .then_some(&*queries.records),
         );
         // A generated private header is provisional until its accepted body
         // supplies the module proof. Do not publish a caller under that row.
@@ -3828,7 +3460,7 @@ impl QueryEngine {
             input_records,
             store,
             terminal_cache,
-            slots: Mutex::new(FrontSlots::default()),
+            slots: Mutex::new(BTreeMap::new()),
             input_slots: Mutex::new((BTreeMap::new(), None)),
             body_cache_limit: self.hold_bytes,
             carry: Mutex::new(None),

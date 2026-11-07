@@ -311,23 +311,24 @@ impl QueryEngine {
             }
             let mut product = None;
             for front in fronts {
-                if let Some(output) = front
-                    .instance_discovery_summary(self, &path, allowance.bytes())
-                    .map_err(|mut error| {
-                        if let QueryError::Operational(failure) = &mut error
-                            && failure.message.starts_with("stale front summary")
-                            && let Some(output) = front.checked_definition(&path)
-                            && let Some(key) =
-                                output.reads.first_changed(|key| self.observe(&path, key))
-                        {
-                            failure.message.push_str(&format!(
-                                "; changed {key:?}: {:?} -> {:?}",
-                                output.reads.get(&key),
-                                self.observe(&path, &key)
-                            ));
-                        }
-                        error
-                    })?
+                if let Some(output) =
+                    front
+                        .instance_discovery_summary(self, &path)
+                        .map_err(|mut error| {
+                            if let QueryError::Operational(failure) = &mut error
+                                && failure.message.starts_with("stale front summary")
+                                && let Some(output) = front.checked_definition(&path)
+                                && let Some(key) =
+                                    output.reads.first_changed(|key| self.observe(&path, key))
+                            {
+                                failure.message.push_str(&format!(
+                                    "; changed {key:?}: {:?} -> {:?}",
+                                    output.reads.get(&key),
+                                    self.observe(&path, &key)
+                                ));
+                            }
+                            error
+                        })?
                 {
                     product = Some(output);
                     break;

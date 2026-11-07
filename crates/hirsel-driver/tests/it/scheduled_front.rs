@@ -1655,7 +1655,7 @@ fn admitted_front_pressure_evicts_only_unpinned_settled_bodies_and_recomputes_eq
                     let request = runtime.request(&[body]);
                     assert_eq!(runtime.wait(request), Err(errors().resource));
                     let refusal = front.memory_refusal().unwrap();
-                    assert_eq!(refusal.settled + refusal.archived, definitions.len());
+                    assert_eq!(refusal.settled, definitions.len());
                 }
             }
         }

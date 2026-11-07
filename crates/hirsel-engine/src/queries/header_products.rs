@@ -2011,6 +2011,154 @@ mod retention_tests {
     }
 
     #[test]
+    fn installed_closure_header_retention_is_bounded_by_demanded_rows() {
+        use hirsel_validate::{
+            Installed, InstalledViews, ValidationMemory, View, ViewSource, ViewTable,
+        };
+        struct Memory(Arc<HeaderProducts>);
+        impl ValidationMemory for Memory {
+            fn retain(
+                &self,
+                bytes: u64,
+            ) -> Result<Arc<dyn Send + Sync>, hirsel_validate::ViewRefusal> {
+                self.0.validation_demand_lease(bytes).map_err(|cause| {
+                    hirsel_validate::ViewRefusal::Unreadable {
+                        definition: DefId::intern(&DefPath::core("validation-storage")),
+                        cause,
+                    }
+                })
+            }
+            fn retain_signature(
+                &self,
+                signature: &hirsel_types::SignatureRef,
+            ) -> Result<Arc<dyn Send + Sync>, hirsel_validate::ViewRefusal> {
+                self.0
+                    .validation_signature_lease(signature)
+                    .map_err(|cause| hirsel_validate::ViewRefusal::Unreadable {
+                        definition: signature.definition,
+                        cause,
+                    })
+            }
+        }
+        struct Source {
+            types: Arc<hirsel_types::TypeInterner>,
+            reads: Arc<AtomicU64>,
+        }
+        fn signature(types: &hirsel_types::TypeInterner, id: DefId) -> hirsel_types::SignatureRef {
+            Arc::new(hirsel_types::Signature {
+                metadata: Default::default(),
+                definition: id,
+                kind: hirsel_types::SignatureKind::Const {
+                    ty: types.intern(hirsel_types::Type::unit()),
+                    generics: Default::default(),
+                },
+                fingerprint: ContentHash::of_bytes(id.path().to_string().as_bytes()),
+            })
+        }
+        impl ViewSource for Source {
+            fn view(&self, id: DefId) -> Result<Option<View>, hirsel_validate::ViewRefusal> {
+                self.reads.fetch_add(1, Ordering::Relaxed);
+                Ok(Some(View::new(
+                    &self.types,
+                    signature(&self.types, id),
+                    None,
+                )))
+            }
+            fn retained_control_bytes(&self) -> Option<u64> {
+                Some(size_of::<Self>() as u64)
+            }
+        }
+        let mut bounded = true;
+        for count in [64, 4096] {
+            let engine = QueryEngine::new(default_environment(), PhaseAdapters::default());
+            let types = engine.types.clone();
+            let ids = (0..count)
+                .map(|index| DefId::intern(&DefPath::core(&format!("installed_retention_{index}"))))
+                .collect::<Vec<_>>();
+            let summary = ViewTable::new(
+                &types,
+                ids.iter().map(|id| signature(&types, *id)),
+                None,
+                &mut hirsel_validate::ValidatedSignatures::default(),
+                None,
+            )
+            .unwrap()
+            .universe();
+            let headers = HeaderProducts::capture(&engine);
+            let budget = ProcessBudget::new(16 << 20);
+            let backing = Arc::new(Allowance(
+                MemoryReservationPool::new(budget.reserve(16 << 20).unwrap())
+                    .ok()
+                    .unwrap(),
+            ));
+            let remaining = Arc::new(std::sync::Mutex::new(16 << 20));
+            let _partition = headers.configure_source_backing(backing, remaining.clone());
+            let memory: Arc<dyn ValidationMemory> = Arc::new(Memory(headers));
+            let reads = Arc::new(AtomicU64::new(0));
+            let before = *remaining.lock().unwrap();
+            let (table, allocation) = crate::test_alloc::measured(|| {
+                let installed = Arc::new(InstalledViews::new(
+                    ids.iter().copied(),
+                    Box::new(Source {
+                        types: types.clone(),
+                        reads: reads.clone(),
+                    }),
+                ));
+                let table = ViewTable::with_installed(
+                    &types,
+                    [],
+                    Installed::new(installed, [summary]),
+                    &mut hirsel_validate::ValidatedSignatures::default(),
+                    None,
+                )
+                .unwrap();
+                table.retain_control(&memory).unwrap();
+                table
+            });
+            let charged = before - *remaining.lock().unwrap();
+            // Membership needs one ID and one lazy pointer per definition. All
+            // other unopened table/control storage fits an independent 64 KiB.
+            let bound = 64 * 1024 + 16 * count as u64;
+            println!(
+                "installed closure={count} peak={} live={} charged={charged} bound={bound}",
+                allocation.peak, allocation.live
+            );
+            assert_eq!(
+                reads.load(Ordering::Relaxed),
+                0,
+                "unread headers remain unmaterialized"
+            );
+            assert!(
+                allocation.live.max(0) as u64 <= charged,
+                "retained storage must stay admitted"
+            );
+            bounded &= allocation.peak.max(0) as u64 <= bound && charged <= bound;
+            let universe = table.universe();
+            for _ in 0..2 {
+                let read = table.get(ids[0]).unwrap().unwrap();
+                assert_eq!(
+                    read.digest(),
+                    hirsel_validate::digest(&types, &signature(&types, ids[0]))
+                );
+            }
+            assert_eq!(
+                reads.load(Ordering::Relaxed),
+                1,
+                "only the demanded row gets a cache cell"
+            );
+            assert_eq!(
+                table.universe(),
+                universe,
+                "cache construction preserves replay identity"
+            );
+        }
+        assert!(
+            bounded,
+            "unread installed view caches exceed the independent membership/control bound"
+        );
+    }
+
+    #[test]
     fn validation_aliases_retain_one_read_signature_payload() {
         struct Memory(Arc<HeaderProducts>);
         impl hirsel_validate::ValidationMemory for Memory {

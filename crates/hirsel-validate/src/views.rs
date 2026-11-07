@@ -111,20 +111,34 @@ pub trait ViewSource: Send + Sync {
 struct InstalledCell {
     value: OnceLock<View>,
     build: std::sync::Mutex<()>,
+    retention: crate::memory::ControlRetention,
+}
+impl InstalledCell {
+    fn retain_control(&self, memory: &dyn crate::ValidationMemory) -> Result<(), ViewRefusal> {
+        self.retention
+            .retain(memory, || Some(size_of::<Self>() as u64))?;
+        if let Some(view) = self.value.get() {
+            view.input.retain_control(memory)?;
+        }
+        Ok(())
+    }
 }
 pub struct InstalledViews {
-    cells: DefMap<InstalledCell>,
+    cells: Box<[(DefId, OnceLock<Box<InstalledCell>>)]>,
     source: Box<dyn ViewSource>,
     memory: std::sync::RwLock<Option<Arc<dyn crate::ValidationMemory>>>,
     retention: crate::memory::ControlRetention,
 }
 impl InstalledViews {
     pub fn new(members: impl IntoIterator<Item = DefId>, source: Box<dyn ViewSource>) -> Self {
+        let mut cells = members
+            .into_iter()
+            .map(|d| (d, OnceLock::new()))
+            .collect::<Vec<_>>();
+        cells.sort_unstable_by_key(|(d, _)| *d);
+        cells.dedup_by_key(|(d, _)| *d);
         Self {
-            cells: members
-                .into_iter()
-                .map(|d| (d, InstalledCell::default()))
-                .collect(),
+            cells: cells.into_boxed_slice(),
             source,
             memory: std::sync::RwLock::new(None),
             retention: Default::default(),
@@ -134,29 +148,38 @@ impl InstalledViews {
         let mut admitted = self.memory.write().unwrap();
         self.retention.retain(&**memory, || {
             crate::memory::arc::<Self>()
-                .checked_add(crate::memory::map::<DefId, InstalledCell>(
-                    self.cells.capacity(),
-                )?)?
+                .checked_add(size_of_val(&*self.cells) as u64)?
                 .checked_add(self.source.retained_control_bytes()?)
         })?;
         *admitted = Some(memory.clone());
-        for view in self.cells.values().filter_map(|cell| cell.value.get()) {
-            view.input.retain_control(&**memory)?;
+        for cell in self.cells.iter().filter_map(|(_, slot)| slot.get()) {
+            cell.retain_control(&**memory)?;
         }
         Ok(())
     }
     pub fn contains(&self, d: DefId) -> bool {
-        self.cells.contains_key(&d)
+        self.cells.binary_search_by_key(&d, |(id, _)| *id).is_ok()
     }
     /// `d`'s view, identified on its first read.
     pub fn get(&self, d: DefId) -> Result<Option<&View>, ViewRefusal> {
-        let Some(cell) = self.cells.get(&d) else {
+        let Ok(index) = self.cells.binary_search_by_key(&d, |(id, _)| *id) else {
             return Ok(None);
         };
+        let slot = &self.cells[index].1;
+        // Admission and publication share this read lock with retain_control's
+        // writer, including cells first demanded before a universe is admitted.
+        let memory = self.memory.read().unwrap();
+        if slot.get().is_none() {
+            let cell = InstalledCell::default();
+            if let Some(memory) = &*memory {
+                cell.retain_control(&**memory)?;
+            }
+            let _ = slot.set(Box::new(cell));
+        }
+        let cell = slot.get().unwrap();
         if cell.value.get().is_none() {
             let _build = cell.build.lock().unwrap();
             if cell.value.get().is_none() {
-                let memory = self.memory.read().unwrap();
                 let Some(view) = self.source.view(d)? else {
                     return Ok(None);
                 };

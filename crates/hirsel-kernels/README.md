@@ -13,6 +13,14 @@ Invariants:
 - A kernel never reads interpreter `Value`s or native heap blocks; adapters
   convert at the boundary.
 
+`byte_scan::find_any` uses the existing short-string membership walk for the
+first eight bytes of every search, then builds its 256-entry membership table
+only if that prefix has no match. This adapts the Go `strings.IndexAny` structure
+cited in the source: a long document can still have a nearby delimiter. The
+remaining scan starts after the checked prefix and returns offsets relative to
+the original source extent. Exhaustive byte vectors and the runtime's borrowed
+extent ownership law cover both sides of that transition.
+
 `schedule` holds the scheduler policies `fifo@1`, `random@1` and `pct@1`
 (docs/spec/determinism.md, "Scheduler"): a SplitMix64 state, `pct@1`'s depth, horizon and
 change points, priorities for new tasks (`admit`), the change point a scheduling point hits

@@ -463,6 +463,46 @@ fn byte_search_borrows_only_the_selected_extents() {
             }
             release(&ctx, source.owner);
             release(&ctx, needles.owner);
+
+            let source = allocate_bytes(ctx.0, b"x\xff0123456789abcdefghijklmnopqrstuv\xffx");
+            let needles = allocate_bytes(ctx.0, b"x8gp\xffx");
+            let allocations = ctx.stats().backing_allocations;
+            // Matches on each side of the eight-byte prefix/table boundary;
+            // the surrounding 0xff bytes are outside the borrowed source view.
+            for (offset, expected) in [
+                (0, 8),
+                (1, 8),
+                (8, 8),
+                (9, 16),
+                (16, 16),
+                (17, 25),
+                (25, 25),
+                (26, 32),
+                (32, 32),
+                (u64::MAX, 32),
+            ] {
+                let mut found = u64::MAX;
+                assert_eq!(
+                    hirsel_rt_v2_bytes_find_any(
+                        ctx.0,
+                        &mut found,
+                        source.owner,
+                        source.start + 2,
+                        32,
+                        needles.owner,
+                        needles.start + 1,
+                        4,
+                        offset,
+                    ),
+                    0
+                );
+                assert_eq!(found, expected);
+                assert_eq!((*source.owner).count, 1);
+                assert_eq!((*needles.owner).count, 1);
+                assert_eq!(ctx.stats().backing_allocations, allocations);
+            }
+            release(&ctx, source.owner);
+            release(&ctx, needles.owner);
         }
         assert_eq!(ctx.stats().live_blocks, 0);
     }

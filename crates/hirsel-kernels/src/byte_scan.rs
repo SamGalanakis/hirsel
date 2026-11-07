@@ -14,22 +14,27 @@ pub fn find_any(source: &[u8], needles: &[u8], start: u64) -> u64 {
     if needles.is_empty() {
         return source.len() as u64;
     }
-    if rest.len() <= 8 {
-        return rest
-            .iter()
-            .position(|byte| needles.contains(byte))
-            .map_or(source.len(), |at| start + at) as u64;
+    // Use the short-string walk for the prefix of a long extent too. Parsers
+    // often stop at a nearby delimiter even when the remaining document is
+    // long; only a longer unmatched run needs the membership table.
+    let prefix = rest.len().min(8);
+    if let Some(at) = rest[..prefix]
+        .iter()
+        .position(|byte| needles.contains(byte))
+    {
+        return (start + at) as u64;
     }
-    if needles.contains(&rest[0]) {
-        return start as u64;
+    if prefix == rest.len() {
+        return source.len() as u64;
     }
     let mut set = [false; 256];
     for &byte in needles {
         set[usize::from(byte)] = true;
     }
-    rest.iter()
+    rest[prefix..]
+        .iter()
         .position(|&byte| set[usize::from(byte)])
-        .map_or(source.len(), |at| start + at) as u64
+        .map_or(source.len(), |at| start + prefix + at) as u64
 }
 
 #[cfg(test)]

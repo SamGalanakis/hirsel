@@ -362,6 +362,160 @@ impl Value {
         }
         std::ops::DerefMut::deref_mut(self).join(other);
     }
+    /// The binding whose storage this value is, with its issue site.
+    /// The same checked path abstraction as retained content loans. Facts
+    /// beyond every consumed projection cannot grow across recursive wraps:
+    /// discard deep positive evidence and retain negative obligations at their
+    /// prefix. A containment dependency at that prefix applies to any child.
+    fn restrict_crossing_paths(&mut self, depth: usize) {
+        if self.shared_parts.paths().any(|path| path.len() > depth) {
+            self.shared_parts.truncate(depth);
+        }
+        if self
+            .crossing_parts
+            .0
+            .iter()
+            .any(|(path, _)| path.len() > depth)
+        {
+            let entries = self.crossing_parts.0.as_ref().clone();
+            let mut parts = CrossingParts::default();
+            for (path, proof) in entries.iter().filter(|(path, _)| path.len() <= depth) {
+                parts.set(path, proof.clone());
+            }
+            for (path, proof) in entries.iter().filter(|(path, _)| path.len() > depth) {
+                if *proof != Sendability::Sendable {
+                    parts.set(&path[..depth], Sendability::NotSendable);
+                }
+            }
+            self.crossing_parts = parts;
+        }
+        if self
+            .crossing_borrows
+            .iter()
+            .any(|borrow| borrow.within.len() > depth)
+        {
+            let mut borrows = Vec::new();
+            for borrow in self.crossing_borrows.iter() {
+                let mut borrow = borrow.clone();
+                borrow.within.truncate(depth);
+                if !borrows.contains(&borrow) {
+                    borrows.push(borrow);
+                }
+            }
+            self.crossing_borrows = Arc::new(borrows);
+        }
+    }
+    fn install_crossing_borrows(&mut self, prefix: &[Projection], part: &Value) {
+        for borrow in part.crossing_borrows.iter() {
+            let mut borrow = borrow.clone();
+            let mut path = prefix.to_vec();
+            path.extend(borrow.within);
+            borrow.within = path;
+            if !self.crossing_borrows.contains(&borrow) {
+                Arc::make_mut(&mut self.crossing_borrows).push(borrow);
+            }
+        }
+    }
+    /// A counted copy of an alias still depends on the storage it read.
+    fn alias_bound(&mut self) {
+        if let Some((binding, site)) = self.alias() {
+            self.loans.insert(Kind::Bound, On::Binding(binding), site);
+        }
+    }
+    /// Bound by every scope `part`'s content is bound by, and by those it
+    /// only accesses when `access`.
+    fn inherit_crossing_borrows(&mut self, part: &Value) {
+        for borrow in part.crossing_borrows.iter() {
+            let mut borrow = borrow.clone();
+            borrow.within.clear();
+            if !self.crossing_borrows.contains(&borrow) {
+                Arc::make_mut(&mut self.crossing_borrows).push(borrow);
+            }
+        }
+    }
+    fn inherit_callable_captures(&mut self, part: &Value) {
+        for loan in part.loans.iter().filter(|loan| loan.kind == Kind::Read) {
+            self.loans
+                .insert_within(Kind::Read, loan.on, &loan.within, loan.site);
+        }
+    }
+    fn bound_within(&mut self, part: &Value, access: bool) {
+        for (kind, scope, site) in part.content.summary().scopes() {
+            if kind == Kind::Bound || access {
+                self.bound_by(scope, site);
+            }
+        }
+    }
+    /// Reads every binding `part` reaches or its environment reads.
+    fn read_through(&mut self, part: &ValueData) {
+        let content = part.content.summary();
+        for loan in content.iter() {
+            if let On::Binding(_) = loan.on {
+                self.content
+                    .whole
+                    .insert_within(Kind::Read, loan.on, &loan.within, loan.site);
+            }
+        }
+        for loan in part.loans.iter() {
+            if let On::Binding(_) = loan.on {
+                self.content.whole.insert(Kind::Read, loan.on, loan.site);
+            }
+        }
+    }
+    fn project_content(&mut self, path: &[Projection]) {
+        if path.is_empty() {
+            return;
+        }
+        if self.unique_parts.iter().any(|p| path.starts_with(p)) {
+            self.modes.uniqueness = Uniqueness::Unique;
+        }
+        if !self.unique_parts.is_empty() {
+            self.unique_parts = self
+                .unique_parts
+                .iter()
+                .filter_map(|p| p.strip_prefix(path).map(|p| p.to_vec()))
+                .collect();
+        }
+        if !self.crossing_parts.0.is_empty() {
+            self.crossing_parts.project(path);
+        }
+        if !self.shared_parts.is_empty() {
+            self.shared_parts.project(path);
+        }
+        if !self.crossing_borrows.is_empty() {
+            self.crossing_borrows = Arc::new(
+                self.crossing_borrows
+                    .iter()
+                    .filter_map(|borrow| {
+                        if borrow.within.starts_with(path) {
+                            let mut borrow = borrow.clone();
+                            borrow.within = borrow.within[path.len()..].to_vec();
+                            Some(borrow)
+                        } else if path.starts_with(&borrow.within) {
+                            let mut borrow = borrow.clone();
+                            borrow.within.clear();
+                            Some(borrow)
+                        } else {
+                            None
+                        }
+                    })
+                    .collect(),
+            );
+        }
+        let Some(parts) = &self.content.parts else {
+            return;
+        };
+        let mut selected = Vec::new();
+        for (part, loans) in parts.iter() {
+            if part.starts_with(path) {
+                merge_part(&mut selected, part[path.len()..].to_vec(), loans);
+            } else if path.starts_with(part) {
+                // A whole-content dependency also bounds every projected read.
+                merge_part(&mut selected, vec![], loans);
+            }
+        }
+        self.install_content(selected);
+    }
     fn new(modes: Modes) -> Self {
         Self(std::rc::Rc::new(ValueData {
             cursor_views: cursors::Views::default(),
@@ -422,58 +576,6 @@ impl ValueData {
         self.modes.uniqueness = Uniqueness::Aliased;
         self.fresh_receipt = false;
     }
-    /// The binding whose storage this value is, with its issue site.
-    /// The same checked path abstraction as retained content loans. Facts
-    /// beyond every consumed projection cannot grow across recursive wraps:
-    /// discard deep positive evidence and retain negative obligations at their
-    /// prefix. A containment dependency at that prefix applies to any child.
-    fn restrict_crossing_paths(&mut self, depth: usize) {
-        self.shared_parts.truncate(depth);
-        if self
-            .crossing_parts
-            .0
-            .iter()
-            .any(|(path, _)| path.len() > depth)
-        {
-            let entries = self.crossing_parts.0.as_ref().clone();
-            let mut parts = CrossingParts::default();
-            for (path, proof) in entries.iter().filter(|(path, _)| path.len() <= depth) {
-                parts.set(path, proof.clone());
-            }
-            for (path, proof) in entries.iter().filter(|(path, _)| path.len() > depth) {
-                if *proof != Sendability::Sendable {
-                    parts.set(&path[..depth], Sendability::NotSendable);
-                }
-            }
-            self.crossing_parts = parts;
-        }
-        if self
-            .crossing_borrows
-            .iter()
-            .any(|borrow| borrow.within.len() > depth)
-        {
-            let mut borrows = Vec::new();
-            for borrow in self.crossing_borrows.iter() {
-                let mut borrow = borrow.clone();
-                borrow.within.truncate(depth);
-                if !borrows.contains(&borrow) {
-                    borrows.push(borrow);
-                }
-            }
-            self.crossing_borrows = Arc::new(borrows);
-        }
-    }
-    fn install_crossing_borrows(&mut self, prefix: &[Projection], part: &Self) {
-        for borrow in part.crossing_borrows.iter() {
-            let mut borrow = borrow.clone();
-            let mut path = prefix.to_vec();
-            path.extend(borrow.within);
-            borrow.within = path;
-            if !self.crossing_borrows.contains(&borrow) {
-                Arc::make_mut(&mut self.crossing_borrows).push(borrow);
-            }
-        }
-    }
     fn alias(&self) -> Option<(usize, Site)> {
         self.loans.iter().find_map(|loan| match loan.on {
             On::Binding(binding) if loan.kind == Kind::Identity => Some((binding, loan.site)),
@@ -495,12 +597,6 @@ impl ValueData {
         if let Some((binding, site)) = alias {
             self.loans
                 .insert(Kind::Identity, On::Binding(binding), site);
-        }
-    }
-    /// A counted copy of an alias still depends on the storage it read.
-    fn alias_bound(&mut self) {
-        if let Some((binding, site)) = self.alias() {
-            self.loans.insert(Kind::Bound, On::Binding(binding), site);
         }
     }
     fn sources(&self) -> impl Iterator<Item = usize> + '_ {
@@ -548,46 +644,6 @@ impl ValueData {
             .whole
             .insert(Kind::Bound, On::Scope(scope), site);
     }
-    /// Bound by every scope `part`'s content is bound by, and by those it
-    /// only accesses when `access`.
-    fn inherit_crossing_borrows(&mut self, part: &Value) {
-        for borrow in part.crossing_borrows.iter() {
-            let mut borrow = borrow.clone();
-            borrow.within.clear();
-            if !self.crossing_borrows.contains(&borrow) {
-                Arc::make_mut(&mut self.crossing_borrows).push(borrow);
-            }
-        }
-    }
-    fn inherit_callable_captures(&mut self, part: &Value) {
-        for loan in part.loans.iter().filter(|loan| loan.kind == Kind::Read) {
-            self.loans
-                .insert_within(Kind::Read, loan.on, &loan.within, loan.site);
-        }
-    }
-    fn bound_within(&mut self, part: &Value, access: bool) {
-        for (kind, scope, site) in part.content.summary().scopes() {
-            if kind == Kind::Bound || access {
-                self.bound_by(scope, site);
-            }
-        }
-    }
-    /// Reads every binding `part` reaches or its environment reads.
-    fn read_through(&mut self, part: &ValueData) {
-        let content = part.content.summary();
-        for loan in content.iter() {
-            if let On::Binding(_) = loan.on {
-                self.content
-                    .whole
-                    .insert_within(Kind::Read, loan.on, &loan.within, loan.site);
-            }
-        }
-        for loan in part.loans.iter() {
-            if let On::Binding(_) = loan.on {
-                self.content.whole.insert(Kind::Read, loan.on, loan.site);
-            }
-        }
-    }
     /// A read loan on a binding, issued at `site`.
     fn read(&mut self, binding: usize, site: Site) {
         self.read_within(binding, &[], site);
@@ -597,52 +653,6 @@ impl ValueData {
         self.content
             .whole
             .insert_within(Kind::Read, On::Binding(binding), within, site);
-    }
-    fn project_content(&mut self, path: &[Projection]) {
-        if path.is_empty() {
-            return;
-        }
-        if self.unique_parts.iter().any(|p| path.starts_with(p)) {
-            self.modes.uniqueness = Uniqueness::Unique;
-        }
-        self.unique_parts = self
-            .unique_parts
-            .iter()
-            .filter_map(|p| p.strip_prefix(path).map(|p| p.to_vec()))
-            .collect();
-        self.crossing_parts.project(path);
-        self.shared_parts.project(path);
-        self.crossing_borrows = Arc::new(
-            self.crossing_borrows
-                .iter()
-                .filter_map(|borrow| {
-                    if borrow.within.starts_with(path) {
-                        let mut borrow = borrow.clone();
-                        borrow.within = borrow.within[path.len()..].to_vec();
-                        Some(borrow)
-                    } else if path.starts_with(&borrow.within) {
-                        let mut borrow = borrow.clone();
-                        borrow.within.clear();
-                        Some(borrow)
-                    } else {
-                        None
-                    }
-                })
-                .collect(),
-        );
-        let Some(parts) = &self.content.parts else {
-            return;
-        };
-        let mut selected = Vec::new();
-        for (part, loans) in parts.iter() {
-            if part.starts_with(path) {
-                merge_part(&mut selected, part[path.len()..].to_vec(), loans);
-            } else if path.starts_with(part) {
-                // A whole-content dependency also bounds every projected read.
-                merge_part(&mut selected, vec![], loans);
-            }
-        }
-        self.install_content(selected);
     }
     fn install_content(&mut self, parts: Vec<(Vec<Projection>, LoanSet)>) {
         self.content = Content {
@@ -9463,6 +9473,61 @@ mod loan_tests {
         let fixed = left.clone();
         left.get_mut(&1).unwrap().join(&right[&1]);
         assert_eq!(left, fixed);
+        let mut trimmed = base[&1].clone();
+        let path = vec![Projection::Field(0), Projection::Field(1)];
+        trimmed.shared_parts.insert_deep(path.clone(), ExprId(12));
+        trimmed.crossing_parts.set(&path, Sendability::NotSendable);
+        trimmed.crossing_parts.set(
+            &[Projection::Field(2), Projection::Field(1)],
+            Sendability::Sendable,
+        );
+        trimmed.crossing_borrows = Arc::new(vec![CrossingBorrow {
+            within: path.clone(),
+            binding: 6,
+            source: vec![Projection::Field(3)],
+        }]);
+        let retained = trimmed.clone();
+        let empty = Value::new(Modes::global());
+        trimmed.restrict_crossing_paths(2);
+        trimmed.install_crossing_borrows(&[], &empty);
+        trimmed.inherit_crossing_borrows(&empty);
+        trimmed.inherit_callable_captures(&empty);
+        trimmed.bound_within(&empty, true);
+        trimmed.read_through(&empty);
+        trimmed.project_content(&[]);
+        trimmed.alias_bound();
+        assert_eq!(trimmed, retained);
+        assert!(
+            std::rc::Rc::ptr_eq(&trimmed.0, &retained.0),
+            "unchanged evidence checks retain the original flow payload"
+        );
+        trimmed.restrict_crossing_paths(1);
+        assert_eq!(
+            trimmed.shared_parts.paths().collect::<Vec<_>>(),
+            vec![&path[..1]]
+        );
+        assert_eq!(
+            trimmed.crossing_parts.get(&path[..1]),
+            Some(Sendability::NotSendable)
+        );
+        assert_eq!(trimmed.crossing_parts.get(&[Projection::Field(2)]), None);
+        assert_eq!(
+            trimmed.crossing_borrows.as_ref(),
+            &vec![CrossingBorrow {
+                within: path[..1].to_vec(),
+                binding: 6,
+                source: vec![Projection::Field(3)],
+            }]
+        );
+        assert_eq!(
+            retained.shared_parts.paths().collect::<Vec<_>>(),
+            vec![path.as_slice()]
+        );
+        assert_eq!(
+            retained.crossing_parts.get(&path),
+            Some(Sendability::NotSendable)
+        );
+        assert_eq!(retained.crossing_borrows[0].within, path);
         // Branch-map clones must retain only a payload handle per temporary.
         assert!(std::mem::size_of::<Value>() <= 2 * std::mem::size_of::<usize>());
     }

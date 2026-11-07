@@ -163,12 +163,8 @@ impl FrontFacts {
 }
 #[derive(Clone)]
 struct ArchivedFront {
-    facts: Option<Arc<TerminalFront>>,
+    facts: Option<Reference>,
     observations: Arc<FrontObservations>,
-}
-struct TerminalFront {
-    bytes: Box<[u8]>,
-    _backing: Arc<LiveSourceBacking>,
 }
 struct FrontObservations {
     rows: observations::Rows,
@@ -1184,28 +1180,8 @@ impl FrontBodyQueries {
         }
         Some(())
     }
-    fn evict_terminal_cache(&self) -> bool {
-        let mut slots = self.slots.lock().unwrap_or_else(|e| e.into_inner());
-        // Compact payloads are optional too. Keep the completed observations
-        // for inspectors, but release an unpinned payload before growing Front.
-        let retired = slots.values_mut().find_map(|slot| match slot {
-            FrontSlot::Archived(archived)
-                if archived
-                    .facts
-                    .as_ref()
-                    .is_some_and(|facts| Arc::strong_count(facts) == 1) =>
-            {
-                archived.facts.take()
-            }
-            _ => None,
-        });
-        drop(slots);
-        let removed = retired.is_some();
-        drop(retired);
-        removed
-    }
     pub(in crate::queries) fn evict_idle(&self, scratch: u64) -> bool {
-        if self.evict_pending_body() || self.evict_terminal_cache() {
+        if self.evict_pending_body() {
             return true;
         }
         let mut slots = self.slots.lock().unwrap_or_else(|e| e.into_inner());
@@ -2366,7 +2342,6 @@ impl QueryFactory for Factory {
                 .header_products()
                 .is_some_and(|headers| headers.evict())
             || self.0.namespace.snapshot.evict_cached()
-            || self.0.evict_terminal_cache()
             || self.0.inputs.clear_addresses()
             || self.0.trim_slot_admission()
             || self.0.reclaim_reads()

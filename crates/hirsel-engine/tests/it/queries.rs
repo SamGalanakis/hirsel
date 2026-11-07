@@ -708,6 +708,8 @@ fn front_compact_terminal_reuses_check_after_eviction() {
             ..Default::default()
         });
         parse(&mut engine, "fn a () { 1 }\n");
+        let ty = engine.types().intern(hirsel_types::Type::unit());
+        let mut table = hirsel_types::TableBuilder::new(engine.types().clone());
         let mut front = admitted_front(&mut engine, &[path("a")], 1);
         front.queries.compact_retained_reads();
         let query = front.queries.query(&path("a")).unwrap();
@@ -718,6 +720,8 @@ fn front_compact_terminal_reuses_check_after_eviction() {
         assert!(front.queries.factory().evict(query, &product, 8 << 20));
         drop(product);
         assert_eq!(front.queries.live_body_count(), 0);
+        table.with_encoding(|| bincode::serialize(&ty)).unwrap();
+        drop(table.finish());
         let mut runtime = AdmittedRuntime::new(
             hirsel_intern::jobs::Jobs::ONE,
             front._budget.reserve(512 << 20).unwrap(),
@@ -733,7 +737,7 @@ fn front_compact_terminal_reuses_check_after_eviction() {
         assert_eq!(
             front.queries.recompute_count(&path("a"), QueryKind::Check),
             1,
-            "an unchanged definition is checked once per build"
+            "serialization and eviction preserve the Check of an unchanged definition"
         );
         runtime.shutdown();
     });

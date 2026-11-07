@@ -2,6 +2,11 @@
 //! Source text and all reads must still match; Lower retains independent V.
 use super::*;
 
+const TERMINAL: Domain = Domain {
+    kind: 0x4600_0042,
+    schema: 1,
+};
+
 #[derive(serde::Serialize, serde::Deserialize)]
 struct Record {
     key: Key,
@@ -218,22 +223,11 @@ impl FrontBodyQueries {
         key: Key,
         outcome: &FrontOutcome,
         scratch: u64,
-    ) -> Option<Arc<TerminalFront>> {
+    ) -> Option<Reference> {
         self.store
             .archive_encoded(hirsel_engine_store::ArchiveBoundary::RequiredSpill);
         let bytes = self.encode_terminal(key, outcome, scratch)?;
-        let charge = (bytes.len() as u64)
-            .checked_add(hirsel_engine_admission::retained_arc_bytes(
-                &std::mem::MaybeUninit::<TerminalFront>::uninit(),
-            ))?
-            .checked_add(hirsel_engine_admission::retained_arc_bytes(
-                &std::mem::MaybeUninit::<LiveSourceBacking>::uninit(),
-            ))?;
-        let backing = outcome._backing.split(charge)?;
-        Some(Arc::new(TerminalFront {
-            bytes: bytes.into_boxed_slice(),
-            _backing: backing,
-        }))
+        self.store.put_content(TERMINAL, &bytes)
     }
     fn encode_terminal(&self, key: Key, outcome: &FrontOutcome, scratch: u64) -> Option<Vec<u8>> {
         let temporary = outcome
@@ -321,27 +315,27 @@ impl BodyTask {
             .get(&self.input)?
         {
             FrontSlot::Live { .. } => return None,
-            FrontSlot::Archived(archived) => archived.facts.clone()?,
+            FrontSlot::Archived(archived) => archived.facts?,
         };
-        // Restoring optional compact facts can decline decoding or admission.
-        // Recompute from the immutable source on a miss, as for other caches.
-        self.load_terminal(cx, &facts.bytes)
+        if facts.domain != TERMINAL || facts.len.checked_mul(8)? > self.weight.scratch {
+            return None;
+        }
+        let bytes = self.queries.store.get_content(facts)?;
+        if facts.domain.reference(&bytes)? != facts {
+            return None;
+        }
+        self.load_terminal(cx, bytes)
     }
     fn load_terminal(
         &self,
         cx: &mut dyn QueryContext,
-        bytes: &[u8],
+        bytes: hirsel_artifact_store::Bytes,
     ) -> Option<Result<ProductRef, Reference>> {
         if (bytes.len() as u64).checked_mul(8)? > self.weight.scratch {
             return None;
         }
-        let record = decode_record(
-            &*self.queries.store,
-            bytes.to_vec().into(),
-            self.weight.scratch,
-        )?;
+        let record = decode_record(&*self.queries.store, bytes, self.weight.scratch)?;
         if record.key != self.queries.inputs[&self.input].key.0
-            || (bytes.len() as u64).checked_mul(8)? > self.weight.scratch
             || record.body.is_some_and(|body| {
                 body.domain != hirsel_engine_store::product_domain(QueryKind::Modes)
                     || body.len > self.weight.scratch

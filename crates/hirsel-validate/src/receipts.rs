@@ -1329,7 +1329,7 @@ impl VerifierCache {
                     .collect(),
             };
             let compute = || {
-                let mut artifacts = Vec::new();
+                let mut artifacts: Vec<AcceptedArtifact> = Vec::new();
                 let mut covered = std::collections::BTreeSet::new();
                 for ((accepted, replay), overlay) in key
                     .artifacts
@@ -1338,8 +1338,10 @@ impl VerifierCache {
                     .zip(&replayed)
                     .zip(&overlays)
                 {
-                    if artifacts.contains(accepted) {
-                        artifacts.push(accepted.clone());
+                    if let Some(current) = artifacts.iter().find(|current| *current == accepted) {
+                        let mut repeated = accepted.clone();
+                        repeated.live = current.live.clone();
+                        artifacts.push(repeated);
                         continue;
                     }
                     hirsel_intern::work::count(
@@ -3109,6 +3111,27 @@ mod tests {
             package: &package,
             views: &tables[1],
         };
+        let refreshed = cache
+            .revalidate_execution(&original, session(), |_, _| Some(site), &environment)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            refreshed.contexts(),
+            &[(package.clone(), tables[1].input_digest())]
+        );
+        let before_live = work::read(Counter::ExecutionReplayRequests);
+        for _ in 0..3 {
+            let current = cache
+                .revalidate_execution(&refreshed, session(), |_, _| Some(site), &environment)
+                .unwrap()
+                .unwrap();
+            assert_eq!(current.artifacts(), original.artifacts());
+        }
+        assert_eq!(
+            work::read(Counter::ExecutionReplayRequests),
+            before_live,
+            "every refreshed alias keeps V's new exact context without restoring again"
+        );
         assert!(
             cache
                 .revalidate_execution(&original, session(), |_, _| None, &environment)

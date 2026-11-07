@@ -1,7 +1,14 @@
 //! Snapshot-local sharing of exact immutable read observations.
 use super::*;
 
-use std::{borrow::Borrow, collections::BTreeSet, sync::Arc};
+use std::{
+    borrow::Borrow,
+    collections::BTreeSet,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
+};
 type Row = (ReadKey, ContentHash);
 
 // Dictionary order is private. Compare session identities without resolving
@@ -30,6 +37,27 @@ impl PartialOrd for PoolRow {
 pub struct ChargedRow {
     value: PoolRow,
     _allowance: hirsel_engine_admission::MemoryReservation,
+    queued: AtomicBool,
+    next: Mutex<Option<Arc<ChargedRow>>>,
+}
+// Rust a7c37f9f library/alloc/src/rcs/arc.rs:1117-1137 drains shared lists
+// iteratively. Our nodes also belong to the dictionary, so take their links
+// under a lock rather than requiring Arc::into_inner to unwrap the whole row.
+struct Released {
+    head: Mutex<Option<Arc<ChargedRow>>>,
+    _allowance: hirsel_engine_admission::MemoryReservation,
+}
+impl Drop for Released {
+    fn drop(&mut self) {
+        let mut next = self
+            .head
+            .get_mut()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
+        while let Some(row) = next {
+            next = row.next.lock().unwrap_or_else(|e| e.into_inner()).take();
+        }
+    }
 }
 impl std::fmt::Debug for ChargedRow {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -67,12 +95,13 @@ impl Ord for RowRef {
 pub struct ReadPool {
     rows: BTreeSet<RowRef>,
     charged_bytes: u64,
+    released: Option<Arc<Released>>,
 }
 /// An exclusive pool borrow keeps the computed admission current until insertion.
 pub struct TrackedAdmission<'a> {
     pool: &'a mut ReadPool,
     reads: &'a Reads,
-    bytes: (u64, u64, u64, u64),
+    bytes: (u64, u64, u64, u64, u64),
 }
 impl TrackedAdmission<'_> {
     pub fn required_bytes(&self) -> u64 {
@@ -88,6 +117,9 @@ impl TrackedAdmission<'_> {
             .intern_admitted(self.reads, self.bytes, allowance, remaining, Some(credit))
     }
 }
+#[cfg(test)]
+thread_local! { static RECLAIM_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
+
 impl ReadPool {
     /// The caller owns this dictionary's retention partition. Arrays retain
     /// their refundable leases independently; unused rows can now return the
@@ -102,17 +134,33 @@ impl ReadPool {
         };
         let before = tree_bytes(self.rows.len());
         let mut reclaimed = 0;
-        self.rows.retain(|row| {
-            if Arc::strong_count(&row.0) == 1 {
-                reclaimed += row.0._allowance.bytes();
-                false
-            } else {
-                true
-            }
+        let mut next = self.released.as_ref().and_then(|released| {
+            released
+                .head
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .take()
         });
+        while let Some(row) = next {
+            next = row.next.lock().unwrap_or_else(|e| e.into_inner()).take();
+            row.queued.store(false, Ordering::Release);
+            #[cfg(test)]
+            RECLAIM_VISITS.with(|count| count.set(count.get() + 1));
+            // The dictionary and this released reference are the last owners.
+            // Another array or queued release keeps the row alive independently.
+            if Arc::strong_count(&row) == 2 && self.rows.remove(&row.value) {
+                reclaimed += row._allowance.bytes();
+            }
+        }
         if self.rows.is_empty() {
-            // Removing the final key can retain an empty B-tree root.
             self.rows = BTreeSet::new();
+            if self
+                .released
+                .as_ref()
+                .is_some_and(|released| Arc::strong_count(released) == 1)
+            {
+                reclaimed += self.released.take().unwrap()._allowance.bytes();
+            }
         }
         reclaimed + before - tree_bytes(self.rows.len())
     }
@@ -123,9 +171,9 @@ impl ReadPool {
         if reads.is_empty() {
             return Some(0);
         }
-        self.admission(reads).map(|(_, charge, _, _)| charge)
+        self.admission(reads).map(|(_, charge, _, _, _)| charge)
     }
-    fn admission(&self, reads: &Reads) -> Option<(u64, u64, u64, u64)> {
+    fn admission(&self, reads: &Reads) -> Option<(u64, u64, u64, u64, u64)> {
         let missing = reads
             .iter()
             .filter(|row| !self.rows.contains(&PoolRow(**row)))
@@ -155,14 +203,25 @@ impl ReadPool {
             shared_bytes.checked_add(reads.observation.as_ref().map_or(0, |order| {
                 hirsel_engine_admission::retained_arc_bytes(&**order)
             }))?;
+        let queue_bytes = if self.released.is_none() {
+            std::alloc::Layout::new::<[usize; 2]>()
+                .extend(std::alloc::Layout::new::<Released>())
+                .ok()?
+                .0
+                .pad_to_align()
+                .size() as u64
+        } else {
+            0
+        };
         let loaned = (missing as u64)
             .checked_mul(row_bytes)?
-            .checked_add(shared_bytes)?;
+            .checked_add(shared_bytes)?
+            .checked_add(queue_bytes)?;
         let charge = loaned.checked_add(
             tree_bytes(self.rows.len().checked_add(missing)?)
                 .checked_sub(tree_bytes(self.rows.len()))?,
         )?;
-        Some((loaned, charge, row_bytes, shared_bytes))
+        Some((loaned, charge, row_bytes, shared_bytes, queue_bytes))
     }
     pub fn required_tracked_bytes(&self, reads: &Reads) -> Option<u64> {
         self.admission(reads)?
@@ -170,13 +229,14 @@ impl ReadPool {
             .checked_add(hirsel_engine_admission::retained_arc_bytes(reads))
     }
     pub fn prepare_tracked<'a>(&'a mut self, reads: &'a Reads) -> Option<TrackedAdmission<'a>> {
-        let (loaned, charge, row_bytes, shared_bytes) = self.admission(reads)?;
+        let (loaned, charge, row_bytes, shared_bytes, queue_bytes) = self.admission(reads)?;
         let wrapper = hirsel_engine_admission::retained_arc_bytes(reads);
         let bytes = (
             loaned.checked_add(wrapper)?,
             charge.checked_add(wrapper)?,
             row_bytes,
             shared_bytes.checked_add(wrapper)?,
+            queue_bytes,
         );
         Some(TrackedAdmission {
             pool: self,
@@ -199,16 +259,27 @@ impl ReadPool {
     fn intern_admitted(
         &mut self,
         reads: &Reads,
-        bytes: (u64, u64, u64, u64),
+        bytes: (u64, u64, u64, u64, u64),
         allowance: &mut hirsel_engine_admission::MemoryReservation,
         remaining: &mut u64,
         credit: Option<Arc<std::sync::Mutex<u64>>>,
     ) -> Option<Reads> {
-        let (loaned, charge, row_bytes, shared_bytes) = bytes;
+        let (loaned, charge, row_bytes, shared_bytes, queue_bytes) = bytes;
         let after = remaining.checked_sub(charge)?;
         if allowance.bytes() < loaned {
             return None;
         }
+        let released = self
+            .released
+            .get_or_insert_with(|| {
+                Arc::new(Released {
+                    head: Mutex::new(None),
+                    _allowance: allowance
+                        .split(queue_bytes)
+                        .expect("pre-admitted release queue"),
+                })
+            })
+            .clone();
         let mut rows = Vec::with_capacity(reads.len());
         for row in reads.iter() {
             let value = if let Some(value) = self.rows.get(&PoolRow(*row)) {
@@ -216,6 +287,8 @@ impl ReadPool {
             } else {
                 let value = Arc::new(ChargedRow {
                     value: PoolRow(*row),
+                    queued: AtomicBool::new(false),
+                    next: Mutex::new(None),
                     _allowance: allowance.split(row_bytes).expect("pre-admitted read row"),
                 });
                 self.rows.insert(RowRef(value.clone()));
@@ -225,6 +298,7 @@ impl ReadPool {
         }
         let shared = Arc::new(SharedRows {
             values: rows.into_boxed_slice(),
+            released,
             _credit: credit.map(|remaining| ReadCredit {
                 remaining,
                 bytes: shared_bytes,
@@ -256,8 +330,21 @@ impl Drop for ReadCredit {
 }
 pub struct SharedRows {
     values: Box<[Arc<ChargedRow>]>,
+    released: Arc<Released>,
     _allowance: hirsel_engine_admission::MemoryReservation,
     _credit: Option<ReadCredit>,
+}
+
+impl Drop for SharedRows {
+    fn drop(&mut self) {
+        let mut head = self.released.head.lock().unwrap_or_else(|e| e.into_inner());
+        for row in std::mem::take(&mut self.values).into_vec() {
+            if !row.queued.swap(true, Ordering::AcqRel) {
+                *row.next.lock().unwrap_or_else(|e| e.into_inner()) = head.take();
+                *head = Some(row);
+            }
+        }
+    }
 }
 
 impl Reads {
@@ -374,7 +461,7 @@ mod tests {
         let budget = hirsel_engine_admission::ProcessBudget::new(1 << 20);
         let mut allowance = budget.reserve(1 << 20).unwrap();
         let mut remaining = allowance.bytes();
-        let ((pool, pooled), measured) = crate::test_alloc::measured(|| {
+        let ((mut pool, pooled), measured) = crate::test_alloc::measured(|| {
             let mut pool = ReadPool::default();
             let pooled = originals
                 .iter()
@@ -425,6 +512,15 @@ mod tests {
             }
         }
         assert_eq!(pool.rows.len(), 136);
+        let before = RECLAIM_VISITS.with(std::cell::Cell::get);
+        for _ in 0..128 {
+            assert_eq!(pool.reclaim(), 0);
+        }
+        assert_eq!(
+            RECLAIM_VISITS.with(std::cell::Cell::get) - before,
+            0,
+            "retained receipts do not rescan the dictionary without a released array"
+        );
         let held = pooled[0].clone();
         drop(pool);
         drop(pooled);
@@ -592,6 +688,31 @@ mod tests {
             "the last reader and dictionary eviction return the entire original debit"
         );
         assert_eq!(pool.reclaim(), 0, "reclamation refunds each row only once");
+        // Independently owned arrays release the same rows concurrently. A
+        // later round must requeue a row that a held receipt kept alive.
+        for _ in 0..4 {
+            let mut local_remaining = allowance.bytes();
+            let held = pool
+                .intern(&reads, &mut allowance, &mut local_remaining)
+                .unwrap();
+            let arrays: Vec<_> = (0..16)
+                .map(|_| {
+                    pool.intern(&reads, &mut allowance, &mut local_remaining)
+                        .unwrap()
+                })
+                .collect();
+            std::thread::scope(|scope| {
+                for array in arrays {
+                    scope.spawn(move || drop(array));
+                }
+            });
+            assert_eq!(pool.reclaim(), 0, "held rows cannot be refunded");
+            assert_eq!(held, reads);
+            drop(held);
+            assert!(pool.reclaim() > 0);
+            assert!(pool.rows.is_empty());
+            assert_eq!(pool.reclaim(), 0);
+        }
         drop(pool);
         drop(allowance);
         assert_eq!(budget.reserved(), 0);

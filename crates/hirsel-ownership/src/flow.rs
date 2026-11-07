@@ -345,11 +345,12 @@ impl std::ops::DerefMut for Value {
 impl Value {
     fn join(&mut self, other: &Self) {
         // Rust a7c37f9f library/alloc/src/rcs/rc.rs:2782-2794 checks retained
-        // identity before inspecting a payload. Do it before make_mut too:
-        // unchanged branch values need neither a payload copy nor a row walk.
+        // identity before inspecting a payload. Compare before make_mut too:
+        // equal branch values need neither a payload copy nor a row walk,
+        // even when independent transfers produced their allocations.
         // A first join can still install the uniqueness witness or normalize
         // parked-share bookkeeping; those cases use the original operation.
-        if std::rc::Rc::ptr_eq(&self.0, &other.0)
+        if self == other
             && (self.modes.uniqueness != Uniqueness::Aliased
                 || self.uniqueness_site.is_some()
                 || self.site.is_none())

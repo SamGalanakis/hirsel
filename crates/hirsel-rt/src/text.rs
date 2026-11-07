@@ -189,19 +189,12 @@ pub unsafe extern "C" fn hirsel_rt_v2_string_from_bytes(
     STATUS_OK
 }
 
-/// Fresh initialized byte storage, owned solely by the adapter until returned.
+/// Fresh byte storage, owned solely by the adapter until a codec initializes it.
 /// # Safety
 /// `ctx` is a live context; allocation checks the complete sequence extent.
-unsafe fn zeroed_bytes(ctx: *mut TaskCtx, length: usize) -> Slice {
+unsafe fn fresh_bytes(ctx: *mut TaskCtx, length: usize) -> Slice {
     let length = u64::try_from(length).unwrap_or_else(|_| fault("byte length overflow"));
     let owner = unsafe { allocate_sequence(ctx, 0, length, 1, 1) };
-    // SAFETY: the fresh byte sequence has exactly this writable extent and no
-    // aliases. Initializing it permits a safe &mut [u8] for the safe SIMD API.
-    unsafe {
-        payload(owner)
-            .add(sequence_elements_offset(1) as usize)
-            .write_bytes(0, length as usize)
-    };
     Slice {
         owner,
         start: sequence_slice_start(1),
@@ -211,12 +204,17 @@ unsafe fn zeroed_bytes(ctx: *mut TaskCtx, length: usize) -> Slice {
 
 /// # Safety
 /// `value` is fresh byte storage exclusively owned by this adapter.
-unsafe fn fresh_bytes_mut<'a>(value: Slice) -> &'a mut [u8] {
+unsafe fn fresh_byte_output<'a>(value: Slice) -> base64_simd::Out<'a, [u8]> {
+    // base64-simd 0.8.0 lib.rs:234-277 initializes every returned byte through
+    // Out; outref 0.5.2 lib.rs:164-174 accepts uninitialized slice storage.
+    // No initialized u8 reference is formed before the codec succeeds.
     unsafe {
-        std::slice::from_raw_parts_mut(
-            payload(value.owner).add(8 + value.start as usize),
+        base64_simd::Out::from_uninit_slice(std::slice::from_raw_parts_mut(
+            payload(value.owner)
+                .add(8 + value.start as usize)
+                .cast::<std::mem::MaybeUninit<u8>>(),
             value.length as usize,
-        )
+        ))
     }
 }
 
@@ -252,7 +250,6 @@ pub unsafe extern "C" fn hirsel_rt_v2_bytes_base64_encode(
     alphabet: *const u32,
     padding: *const u32,
 ) -> u8 {
-    use base64_simd::AsOut;
     let engine = unsafe { base64_engine(alphabet, padding) };
     let source = unsafe {
         bytes(Slice {
@@ -261,8 +258,8 @@ pub unsafe extern "C" fn hirsel_rt_v2_bytes_base64_encode(
             length,
         })
     };
-    let result = unsafe { zeroed_bytes(ctx, engine.encoded_length(source.len())) };
-    let encoded = engine.encode(source, unsafe { fresh_bytes_mut(result) }.as_out());
+    let result = unsafe { fresh_bytes(ctx, engine.encoded_length(source.len())) };
+    let encoded = engine.encode(source, unsafe { fresh_byte_output(result) });
     debug_assert_eq!(encoded.len(), result.length as usize);
     unsafe { out.write(result) };
     STATUS_OK
@@ -284,7 +281,6 @@ pub unsafe extern "C" fn hirsel_rt_v2_bytes_base64_decode(
     alphabet: *const u32,
     padding: *const u32,
 ) -> u8 {
-    use base64_simd::AsOut;
     let engine = unsafe { base64_engine(alphabet, padding) };
     let source = unsafe {
         bytes(Slice {
@@ -294,8 +290,8 @@ pub unsafe extern "C" fn hirsel_rt_v2_bytes_base64_decode(
         })
     };
     let decoded = engine.decoded_length(source).ok().and_then(|length| {
-        let result = unsafe { zeroed_bytes(ctx, length) };
-        match engine.decode(source, unsafe { fresh_bytes_mut(result) }.as_out()) {
+        let result = unsafe { fresh_bytes(ctx, length) };
+        match engine.decode(source, unsafe { fresh_byte_output(result) }) {
             Ok(decoded) => {
                 debug_assert_eq!(decoded.len(), result.length as usize);
                 Some(result)

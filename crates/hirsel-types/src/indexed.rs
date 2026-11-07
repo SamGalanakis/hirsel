@@ -90,14 +90,14 @@ impl IndexSet {
             }
         }
         self.len += 1;
-        if self.len.saturating_mul(64) >= self.domain {
-            if let SetData::Words(words) = data.as_ref() {
-                let mut dense = vec![0; self.domain.div_ceil(64)];
-                for (i, word) in words.entries() {
-                    dense[i] = *word;
-                }
-                *data = Rc::new(SetData::Dense(dense));
+        if self.len.saturating_mul(64) >= self.domain
+            && let SetData::Words(words) = data.as_ref()
+        {
+            let mut dense = vec![0; self.domain.div_ceil(64)];
+            for (i, word) in words.entries() {
+                dense[i] = *word;
             }
+            *data = Rc::new(SetData::Dense(dense));
         }
         true
     }
@@ -179,20 +179,20 @@ impl IndexSet {
             *self = other.clone();
             return;
         }
-        if let (Storage::Shared(own), Storage::Shared(incoming)) = (&mut self.data, &other.data) {
-            if let (SetData::Dense(a), SetData::Dense(b)) = (own.as_ref(), incoming.as_ref()) {
-                if a.iter().zip(b).all(|(a, b)| b & !a == 0) {
-                    return;
-                }
-                let SetData::Dense(words) = Rc::make_mut(own) else {
-                    unreachable!()
-                };
-                for (a, b) in words.iter_mut().zip(b) {
-                    self.len += (b & !*a).count_ones() as usize;
-                    *a |= b;
-                }
+        if let (Storage::Shared(own), Storage::Shared(incoming)) = (&mut self.data, &other.data)
+            && let (SetData::Dense(a), SetData::Dense(b)) = (own.as_ref(), incoming.as_ref())
+        {
+            if a.iter().zip(b).all(|(a, b)| b & !a == 0) {
                 return;
             }
+            let SetData::Dense(words) = Rc::make_mut(own) else {
+                unreachable!()
+            };
+            for (a, b) in words.iter_mut().zip(b) {
+                self.len += (b & !*a).count_ones() as usize;
+                *a |= b;
+            }
+            return;
         }
         for index in other.iter() {
             self.insert(index);

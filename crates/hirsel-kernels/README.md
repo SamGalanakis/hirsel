@@ -14,8 +14,8 @@ Invariants:
   convert at the boundary.
 
 `byte_scan::find_any` uses the existing short-string membership walk for the
-first eight bytes of every search, then builds its 256-entry membership table
-only if that prefix has no match. This adapts the Go `strings.IndexAny` structure
+first eight bytes of every search. If that prefix has no match, small sets use
+vector equality and larger sets build a 256-entry membership table. This adapts the Go `strings.IndexAny` structure
 cited in the source: a long document can still have a nearby delimiter. The
 remaining scan starts after the checked prefix and returns offsets relative to
 the original source extent. Exhaustive byte vectors and the runtime's borrowed
@@ -34,3 +34,8 @@ same points; `//:hirsel-kernels-test-vectors` pins choices from an independent t
 Numeric formatting, parsing and reductions are ordinary std source; the former
 exact-sum kernel is deleted. Its independent rational vectors remain in
 `native-tests/library/exact-sums.txt` and now test the source superaccumulator.
+
+One-, two-, and three-byte sets use SSE2 on x86-64 after the short prefix,
+following memchr 2.8.3's vector equality and first-set-lane structure. Other
+architectures use eight-byte SWAR comparisons. Larger sets use exact nibble membership with SSSE3 when available and retain
+the scalar membership table elsewhere. Neither path reads beyond the supplied borrowed extent.

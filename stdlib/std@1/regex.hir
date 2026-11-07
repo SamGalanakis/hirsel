@@ -1462,15 +1462,15 @@ fn make_subject(text: String, mut work: u64) -> Result[Subject, MatchError] in t
   }
   let bytes = core@1/string.as_bytes(text)
   let size = core@1/bytes.len(bytes)
-  let mut ascii = true
+  let first_non_ascii = core@1/bytes.find_any(bytes, PREFIX_NON_ASCII, 0)
+  let ascii = first_non_ascii == size
   // util/utf8.rs:115-135: scalar count = byte count - continuation bytes.
   // Start with the ASCII debit, so ASCII bytes need no per-byte count update.
   let mut count = size + 1
-  let mut i = 0u64
+  let mut i = first_non_ascii
   while i < size {
     let byte = bytes[i]
     if byte >= 128 {
-      ascii = false
       if byte < 192 {
         count -= 1
       }

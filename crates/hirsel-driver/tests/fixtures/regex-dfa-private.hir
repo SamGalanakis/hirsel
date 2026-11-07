@@ -131,6 +131,24 @@ fn dfa_golden(pattern: String, src: String, expected: Option[Span]) -> bool uses
 fn dfa_goldens() -> bool uses {} {
   // Supported upstream vectors, retaining their original expected first span.
   let positive: List[(String, String, u64, u64)] = [
+    // An inner literal requires a nonempty class run at the original bound.
+    ("[a-z]+@example", "@example xx@example", 9, 19),
+    ("([a-z]+)@example", "_______abc@example", 7, 18),
+    ("[a-z]+?@example", "_______abc@example", 7, 18),
+    ("[a-z]+@example|fallback", "fallback abc@example", 0, 8),
+    ("[a-z]+@exampl[ex]", "bad@examplq good@example", 12, 24),
+    // Packed prefix candidates at zero, EOF, and across the eight-byte block.
+    ("abcdef|xyzabc", "abcdef_________", 0, 6),
+    ("abcdef|xyzabc", "_________xyzabc", 9, 15),
+    ("abcdef|xyzabc", "_______abcdef__", 7, 13),
+    ("abcdef|abc", "_______abcdef__", 7, 13),
+    ("abc|abcdef", "_______abcdef__", 7, 10),
+    ("(?i)(ask|bark)", "aſk________", 0, 4),
+    ("(?i)(ask|bark)", "_______aſk____", 7, 11),
+    ("(?i)(ask|bark)", "_______BArK____", 7, 11),
+    ("a[bc]def|xyzabc", "_______aBcdef____xyzabc", 17, 23),
+    ("abcdef|", "________abcdef", 0, 0),
+    ("[ab]+[cd]+", "________abccd", 8, 13),
     // Cached runs ending inside a four-transition group or at its tail.
     ("a+", "aaaaaéaaaa", 0, 5),
     ("a+", "aaaaaa😀aaa", 0, 6),

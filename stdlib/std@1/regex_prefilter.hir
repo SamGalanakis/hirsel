@@ -2,18 +2,26 @@
 // rust-lang/regex 80b9d14e, regex-automata/src/meta/strategy.rs:81-153,
 // util/prefilter/mod.rs:584-688 and hybrid/search.rs:50-90.
 // Copyright (c) 2014 The Rust Project Developers. MIT; third-party/NOTICES.md.
-// Single-byte literals use the core scanner; longer strings use Two-Way search.
+// Single-byte literals use the core scanner, strings use Two-Way search,
+// and folded/alternate prefixes use packed byte-pair candidates.
 // Every candidate is confirmed by the ordered engine on the original source.
+const PREFIX_NON_ASCII: Bytes = b"\x80\x81\x82\x83\x84\x85\x86\x87\x88\x89\x8a\x8b\x8c\x8d\x8e\x8f\x90\x91\x92\x93\x94\x95\x96\x97\x98\x99\x9a\x9b\x9c\x9d\x9e\x9f\xa0\xa1\xa2\xa3\xa4\xa5\xa6\xa7\xa8\xa9\xaa\xab\xac\xad\xae\xaf\xb0\xb1\xb2\xb3\xb4\xb5\xb6\xb7\xb8\xb9\xba\xbb\xbc\xbd\xbe\xbf\xc0\xc1\xc2\xc3\xc4\xc5\xc6\xc7\xc8\xc9\xca\xcb\xcc\xcd\xce\xcf\xd0\xd1\xd2\xd3\xd4\xd5\xd6\xd7\xd8\xd9\xda\xdb\xdc\xdd\xde\xdf\xe0\xe1\xe2\xe3\xe4\xe5\xe6\xe7\xe8\xe9\xea\xeb\xec\xed\xee\xef\xf0\xf1\xf2\xf3\xf4\xf5\xf6\xf7\xf8\xf9\xfa\xfb\xfc\xfd\xfe\xff"
+
 type PrefixPlan {
   enabled: bool,
   low: u64,
   high: u64,
   literals: List[String],
+  folds: List[u64],
+  pairs: List[u64],
+  inner: bool,
+  inner_low: u64,
+  inner_high: u64,
   search: Option[internal.substring.Plan],
 }
 
 fn no_prefix() -> PrefixPlan uses {} {
-  PrefixPlan(enabled: false, low: 0, high: 0, literals: [], search: None())
+  PrefixPlan(enabled: false, low: 0, high: 0, literals: [], folds: [], pairs: [], inner: false, inner_low: 0, inner_high: 0, search: None())
 }
 
 fn prefix_bit(mut plan: PrefixPlan, cp: u32) uses {} {
@@ -91,18 +99,20 @@ fn prefix_range(lo: u32, hi: u32) -> u64 uses {} {
 
 // Stop at the first branching/unknown instruction. A nonempty truncated
 // prefix remains necessary; it is never sufficient to return a match.
-fn prefix_literal(code: List[Inst], start: u64) -> String uses {} {
+fn prefix_literal(code: List[Inst], start: u64) -> (String, u64) uses {} {
   let mut pc = start
   let mut needle: List[u8] = []
   let mut steps = 0u64
+  let mut folds = 0u64
   while steps < 64 && core@1/list.len(needle) < 16 {
     steps += 1
     let inst = code[pc]
-    if inst.kind == 1 && !inst.negated && core@1/list.len(inst.ranges) == 1 {
+    if (inst.kind == 1 || inst.kind == 13) && !inst.negated && core@1/list.len(inst.ranges) == 1 {
       let (lo, hi) = inst.ranges[0]
       if lo != hi || lo >= 128 {
         break
       }
+      if inst.kind == 13 { folds |= 1u64 << core@1/list.len(needle) }
       core@1/list.push(mut needle, core@1/int.narrow(lo))
       pc = inst.x
     } else if inst.kind == 0 || inst.kind == 12 {
@@ -111,7 +121,41 @@ fn prefix_literal(code: List[Inst], start: u64) -> String uses {} {
       break
     }
   }
-  text.finish_valid(take needle)
+  (text.finish_valid(take needle), folds)
+}
+
+// regex-automata meta/strategy.rs:1410-1552: find a required inner literal,
+// recover a prefix start, then confirm with the original forward automaton.
+// Here the prefix is one ASCII class repeated one or more times, so its
+// reverse automaton is exactly a backwards class run. The literal's first
+// byte must be outside that class; this makes the run's endpoint unambiguous.
+fn prefix_inner(code: List[Inst], entry: u64) -> Option[(u64, u64, u64)] uses {} {
+  let mut pc = entry
+  let mut steps = 0u64
+  while steps < 64 && (code[pc].kind == 0 || code[pc].kind == 12) {
+    pc = code[pc].x
+    steps += 1
+  }
+  let inst = code[pc]
+  if inst.kind != 1 || inst.negated { return None() }
+  for (lo, hi) in inst.ranges { if hi >= 128 { return None() } }
+  let repeat_inst = code[inst.x]
+  if repeat_inst.kind != 10 { return None() }
+  let mut continuation = if repeat_inst.x == pc { repeat_inst.y }
+    else if repeat_inst.y == pc { repeat_inst.x }
+    else { return None() }
+  steps = 0
+  while steps < 64 && (code[continuation].kind == 0 || code[continuation].kind == 12) {
+    continuation = code[continuation].x
+    steps += 1
+  }
+  let next_inst = code[continuation]
+  if next_inst.kind != 1 || next_inst.negated || core@1/list.len(next_inst.ranges) != 1 { return None() }
+  let (lo, hi) = next_inst.ranges[0]
+  if lo != hi || lo >= 128 { return None() }
+  let mut run = no_prefix()
+  if !prefix_class(mut run, inst) || prefix_has(run, lo) { return None() }
+  Some((continuation, run.low, run.high))
 }
 
 fn prefix_plan(code: List[Inst], entry: u64) -> PrefixPlan uses {} {
@@ -126,7 +170,14 @@ fn prefix_plan(code: List[Inst], entry: u64) -> PrefixPlan uses {} {
     return no_prefix()
   }
   let mut plan = no_prefix()
-  let mut stack: List[u64] = [entry]
+  let mut first = entry
+  if let Some((continuation, low, high)) = prefix_inner(code, entry) {
+    first = continuation
+    plan.inner = true
+    plan.inner_low = low
+    plan.inner_high = high
+  }
+  let mut stack: List[u64] = [first]
   let mut visited: List[u64] = []
   let mut depth = 1u64
   let mut literals = true
@@ -148,11 +199,12 @@ fn prefix_plan(code: List[Inst], entry: u64) -> PrefixPlan uses {} {
       if !prefix_class(mut plan, inst) {
         return no_prefix()
       }
-      let literal = prefix_literal(code, pc)
+      let (literal, folds) = prefix_literal(code, pc)
       if core@1/bytes.len(core@1/string.as_bytes(literal)) == 0 {
         literals = false
       } else {
         core@1/list.push(mut plan.literals, take literal)
+        core@1/list.push(mut plan.folds, folds)
       }
     } else if inst.kind == 0 || inst.kind == 12 || inst.kind == 3 || inst.kind == 4 || inst.kind == 5 || inst.kind == 6 || inst.kind == 15 || inst.kind == 16 || inst.kind == 10 {
       if inst.kind == 10 {
@@ -176,14 +228,27 @@ fn prefix_plan(code: List[Inst], entry: u64) -> PrefixPlan uses {} {
   }
   if !literals {
     plan.literals = []
+    plan.folds = []
   }
-  // <=64 strings, <=16 bytes each: <=3072 bytes including 32-byte string
-  // descriptors, plus fixed fields (<4 KiB). No search-time growing plan.
-  if core@1/list.len(plan.literals) == 1 {
+  // <=64 strings of <=16 bytes, plus folds and pairs: <5 KiB of payload.
+  // No search-time growing plan.
+  if core@1/list.len(plan.literals) == 1 && plan.folds[0] == 0 {
     plan.search = Some(
       internal.substring.prepare(core@1/string.as_bytes(plan.literals[0]))
     )
   }
+  // Teddy's necessary two-position filter, packed into eight byte lanes.
+  // Cross-literal and ASCII-fold false positives are confirmed by prefix_at.
+  let mut paired = core@1/list.len(plan.literals) != 0
+  for literal in plan.literals {
+    let bytes = core@1/string.as_bytes(literal)
+    if core@1/bytes.len(bytes) < 2 { paired = false; break }
+    let pair: u64 = core@1/int.widen(bytes[0] | 32u8) | core@1/int.widen(bytes[1] | 32u8) << 8
+    let mut found = false
+    for old in plan.pairs { if old == pair { found = true } }
+    if !found { core@1/list.push(mut plan.pairs, pair) }
+  }
+  if !paired { plan.pairs = [] }
   plan.enabled = true
   take plan
 }
@@ -201,29 +266,88 @@ fn prefix_has(plan: PrefixPlan, cp: u32) -> bool uses {} {
 }
 
 fn prefix_at(plan: PrefixPlan, haystack: Bytes, at: u64) -> bool uses {} {
-  if core@1/list.len(plan.literals) == 0 {
-    return true
-  }
-  for literal in plan.literals {
-    let needle = core@1/string.as_bytes(literal)
+  if core@1/list.len(plan.literals) == 0 { return true }
+  for n in 0u64..core@1/list.len(plan.literals) {
+    let needle = core@1/string.as_bytes(plan.literals[n])
     let size = core@1/bytes.len(needle)
     if size <= core@1/bytes.len(haystack) - at {
+      let folds = plan.folds[n]
       let mut i = 0u64
-      while i < size && needle[i] == haystack[at + i] {
+      while i < size {
+        let byte = haystack[at + i]
+        if folds >> i & 1u64 != 0 {
+          // A folded ASCII scalar may match a longer UTF-8 scalar. Let the
+          // original engine inspect it, including Kelvin and long-s.
+          if byte >= 128 { return true }
+          if byte | 32u8 != needle[i] | 32u8 { break }
+        } else if byte != needle[i] { break }
         i += 1
       }
-      if i == size {
-        return true
-      }
+      if i == size { return true }
     }
   }
   false
 }
 
+// Checked unaligned little-endian load for packed prefix comparison.
+@noalloc
+fn prefix_word(bytes: Bytes, at: u64) -> u64 uses {} {
+  // Check the furthest byte first, so it dominates every earlier access.
+  let last = bytes[at + 7]
+  core@1/int.widen(bytes[at]) |
+    core@1/int.widen(bytes[at + 1]) << 8 |
+    core@1/int.widen(bytes[at + 2]) << 16 |
+    core@1/int.widen(bytes[at + 3]) << 24 |
+    core@1/int.widen(bytes[at + 4]) << 32 |
+    core@1/int.widen(bytes[at + 5]) << 40 |
+    core@1/int.widen(bytes[at + 6]) << 48 |
+    core@1/int.widen(last) << 56
+}
+
+// memchr arch/generic/packedpair.rs: compare two positions in parallel.
+// A borrow into a neighbouring lane may add a candidate, never remove one.
+@noalloc
+fn prefix_zero(block: u64) -> u64 uses {} {
+  core@1/int.wrapping_sub(block, 72340172838076673) & ~block & 9259542123273814144
+}
+
+fn prefix_packed(plan: PrefixPlan, haystack: Bytes, from: u64) -> Option[u64] uses {} {
+  let size = core@1/bytes.len(haystack)
+  let mut cursor = from
+  while cursor < size {
+    if size - cursor >= 9 {
+      let raw = prefix_word(haystack, cursor)
+      // Either position may be a longer Unicode simple-fold equivalent.
+      let following = prefix_word(haystack, cursor + 1)
+      let mut candidates = (raw | following) & 9259542123273814144
+      let first = raw | 2314885530818453536
+      let second = following | 2314885530818453536
+      for pair in plan.pairs {
+        let a = first ^ (pair & 255) * 72340172838076673
+        let b = second ^ (pair >> 8) * 72340172838076673
+        candidates |= prefix_zero(a) & prefix_zero(b)
+      }
+      if candidates == 0 { cursor += 8; continue }
+      let mut lane = 0u64
+      while lane < 8 {
+        if candidates >> (lane * 8) & 128u64 != 0 && prefix_at(plan, haystack, cursor + lane) {
+          return Some(cursor + lane)
+        }
+        lane += 1
+      }
+      cursor += 8
+    } else {
+      if prefix_at(plan, haystack, cursor) { return Some(cursor) }
+      cursor += 1
+    }
+  }
+  None()
+}
+
 // Called only at a dead start state after whole-operation budget admission.
 // Return an original byte coordinate. Callers recover look-behind only when
 // they need it; the DFA does not decode each skipped ASCII byte.
-fn next_candidate(plan: PrefixPlan, haystack: Bytes, from: u64) -> Option[u64] uses {} {
+fn prefix_candidate(plan: PrefixPlan, haystack: Bytes, from: u64) -> Option[u64] uses {} {
   if let Some(search) = plan.search {
     // The complete extracted literal was found, so no second confirmation
     // or scalar decoding is needed. Its first byte is always ASCII.
@@ -235,6 +359,7 @@ fn next_candidate(plan: PrefixPlan, haystack: Bytes, from: u64) -> Option[u64] u
     }
     return internal.substring.find_from(haystack, needle, search, from)
   }
+  if core@1/list.len(plan.pairs) != 0 { return prefix_packed(plan, haystack, from) }
   let size = core@1/bytes.len(haystack)
   // Class/fold prefixes have no literal to confirm. Keep the predicate outside
   // prefix_at so each candidate needs neither its call nor its borrowed plan.
@@ -246,6 +371,27 @@ fn next_candidate(plan: PrefixPlan, haystack: Bytes, from: u64) -> Option[u64] u
       return Some(cursor)
     }
     cursor += 1
+  }
+  None()
+}
+
+fn next_candidate(plan: PrefixPlan, haystack: Bytes, from: u64) -> Option[u64] uses {} {
+  if !plan.inner { return prefix_candidate(plan, haystack, from) }
+  let size = core@1/bytes.len(haystack)
+  let mut scan = from
+  while scan < size {
+    let Some(candidate) = prefix_candidate(plan, haystack, scan) else { return None() }
+    let mut begin = candidate
+    while begin > from {
+      let byte: u64 = core@1/int.widen(haystack[begin - 1])
+      let contained = if byte < 64 { plan.inner_low >> byte & 1u64 != 0 }
+        else if byte < 128 { plan.inner_high >> (byte - 64) & 1u64 != 0 }
+        else { false }
+      if !contained { break }
+      begin -= 1
+    }
+    if begin < candidate { return Some(begin) }
+    scan = candidate + 1
   }
   None()
 }

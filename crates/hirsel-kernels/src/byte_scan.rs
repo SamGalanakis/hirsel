@@ -27,9 +27,20 @@ pub fn find_any(source: &[u8], needles: &[u8], start: u64) -> u64 {
     if prefix == rest.len() {
         return source.len() as u64;
     }
+    if needles.len() <= 3 {
+        return short_set(&rest[prefix..], needles).map_or(source.len(), |at| start + prefix + at)
+            as u64;
+    }
     let mut set = [false; 256];
     for &byte in needles {
         set[usize::from(byte)] = true;
+    }
+    #[cfg(target_arch = "x86_64")]
+    if std::is_x86_feature_detected!("ssse3") {
+        // SAFETY: runtime feature detection admits SSSE3; the helper guards
+        // every source load and its fixed lookup tables have sixteen bytes.
+        return unsafe { any_set_ssse3(&rest[prefix..], &set) }
+            .map_or(source.len(), |at| start + prefix + at) as u64;
     }
     rest[prefix..]
         .iter()
@@ -37,9 +48,127 @@ pub fn find_any(source: &[u8], needles: &[u8], start: u64) -> u64 {
         .map_or(source.len(), |at| start + prefix + at) as u64
 }
 
+// aho-corasick 1.1.4, src/packed/teddy/generic.rs:218-285: nibble
+// lookup and lane masks. Two eight-bit tables encode exact byte membership,
+// instead of Teddy's approximate multi-literal buckets and byte shifts.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "ssse3")]
+unsafe fn any_set_ssse3(source: &[u8], set: &[bool; 256]) -> Option<usize> {
+    use std::arch::x86_64::*;
+    let mut lower = [0u8; 16];
+    let mut upper = [0u8; 16];
+    for (byte, &present) in set.iter().enumerate() {
+        if present {
+            let row = if byte < 128 { &mut lower } else { &mut upper };
+            row[byte & 15] |= 1 << ((byte >> 4) & 7);
+        }
+    }
+    let bit_values: [u8; 16] = [1, 2, 4, 8, 16, 32, 64, 128, 1, 2, 4, 8, 16, 32, 64, 128];
+    // SAFETY: each lookup table has exactly the sixteen bytes being read.
+    let (low_table, high_table, bit_table) = unsafe {
+        (
+            _mm_loadu_si128(lower.as_ptr().cast()),
+            _mm_loadu_si128(upper.as_ptr().cast()),
+            _mm_loadu_si128(bit_values.as_ptr().cast()),
+        )
+    };
+    let zero = _mm_setzero_si128();
+    let nibble_mask = _mm_set1_epi8(15);
+    let bit_mask = _mm_set1_epi8(7);
+    let mut at = 0;
+    while source.len() - at >= 16 {
+        // SAFETY: the loop guard proves all sixteen bytes are in source.
+        let block = unsafe { _mm_loadu_si128(source.as_ptr().add(at).cast()) };
+        let indices = _mm_and_si128(block, nibble_mask);
+        let low = _mm_shuffle_epi8(low_table, indices);
+        let high = _mm_shuffle_epi8(high_table, indices);
+        let halves = _mm_cmplt_epi8(block, zero);
+        let memberships = _mm_or_si128(_mm_and_si128(halves, high), _mm_andnot_si128(halves, low));
+        let bits = _mm_shuffle_epi8(
+            bit_table,
+            _mm_and_si128(_mm_srli_epi16::<4>(block), bit_mask),
+        );
+        let misses = _mm_cmpeq_epi8(_mm_and_si128(memberships, bits), zero);
+        let mask = !(_mm_movemask_epi8(misses) as u32) & 0xffff;
+        if mask != 0 {
+            return Some(at + mask.trailing_zeros() as usize);
+        }
+        at += 16;
+    }
+    source[at..]
+        .iter()
+        .position(|&byte| set[usize::from(byte)])
+        .map(|offset| at + offset)
+}
+
+// memchr 2.8.3, src/arch/x86_64/sse2/memchr.rs:71-143 and
+// src/arch/generic/memchr.rs:290-321 (MIT/Unlicense). One vector/word at a
+// time replaces upstream's four-vector unroll; the existing short prefix
+// avoids vector setup for nearby parser delimiters.
+fn short_set(source: &[u8], needles: &[u8]) -> Option<usize> {
+    #[cfg(target_arch = "x86_64")]
+    {
+        // SAFETY: SSE2 is part of the x86-64 baseline. All vector reads in
+        // short_set_sse2 are guarded by the remaining source extent.
+        unsafe { short_set_sse2(source, needles) }
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        short_set_word(source, needles)
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "sse2")]
+unsafe fn short_set_sse2(source: &[u8], needles: &[u8]) -> Option<usize> {
+    use std::arch::x86_64::*;
+    let a = _mm_set1_epi8(needles[0] as i8);
+    let b = _mm_set1_epi8(*needles.get(1).unwrap_or(&needles[0]) as i8);
+    let c = _mm_set1_epi8(*needles.get(2).unwrap_or(&needles[0]) as i8);
+    let mut at = 0;
+    while source.len() - at >= 16 {
+        // SAFETY: the loop guard proves all sixteen bytes are in source.
+        let block = unsafe { _mm_loadu_si128(source.as_ptr().add(at).cast()) };
+        let equal = _mm_or_si128(
+            _mm_cmpeq_epi8(block, a),
+            _mm_or_si128(_mm_cmpeq_epi8(block, b), _mm_cmpeq_epi8(block, c)),
+        );
+        let mask = _mm_movemask_epi8(equal) as u32;
+        if mask != 0 {
+            return Some(at + mask.trailing_zeros() as usize);
+        }
+        at += 16;
+    }
+    source[at..]
+        .iter()
+        .position(|byte| needles.contains(byte))
+        .map(|offset| at + offset)
+}
+
+#[cfg(any(not(target_arch = "x86_64"), test))]
+fn short_set_word(source: &[u8], needles: &[u8]) -> Option<usize> {
+    let mut at = 0;
+    while source.len() - at >= 8 {
+        let block = u64::from_le_bytes(source[at..at + 8].try_into().unwrap());
+        let mut mask = 0;
+        for &byte in needles {
+            let equal = block ^ u64::from(byte) * 0x0101_0101_0101_0101;
+            mask |= equal.wrapping_sub(0x0101_0101_0101_0101) & !equal & 0x8080_8080_8080_8080;
+        }
+        if mask != 0 {
+            return Some(at + mask.trailing_zeros() as usize / 8);
+        }
+        at += 8;
+    }
+    source[at..]
+        .iter()
+        .position(|byte| needles.contains(byte))
+        .map(|offset| at + offset)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::find_any;
+    use super::{find_any, short_set_word};
     #[test]
     fn all_bytes_offsets_and_extents() {
         let data: Vec<u8> = (0..=255).collect();
@@ -57,5 +186,41 @@ mod tests {
         assert_eq!(find_any(&data, &[], 0), 256);
         assert_eq!(find_any(&[], &[0], 0), 0);
         assert_eq!(find_any(b"hello\0world", b"\r\n\0", 0), 5);
+        for needles in [
+            vec![29, 63, 129, 255],
+            (128..=255).collect(),
+            (0..=255).filter(|b| b % 3 == 0).collect(),
+        ] {
+            for start in 0..=257 {
+                let expected = data
+                    .get(start..)
+                    .and_then(|rest| rest.iter().position(|b| needles.contains(b)))
+                    .map_or(data.len(), |offset| start + offset);
+                assert_eq!(find_any(&data, &needles, start as u64), expected as u64);
+            }
+        }
+        for needles in [b"a".as_slice(), b"ab", b"abc"] {
+            for length in 0..=65 {
+                for hit in 0..=length {
+                    let mut source = vec![b'x'; length];
+                    if hit < length {
+                        source[hit] = needles[hit % needles.len()];
+                    }
+                    for start in 0..=length + 1 {
+                        let expected = source
+                            .get(start..)
+                            .and_then(|rest| rest.iter().position(|b| needles.contains(b)))
+                            .map_or(length, |offset| start + offset);
+                        assert_eq!(find_any(&source, needles, start as u64), expected as u64);
+                        if start <= length {
+                            assert_eq!(
+                                short_set_word(&source[start..], needles),
+                                (expected < length).then_some(expected - start.min(expected))
+                            );
+                        }
+                    }
+                }
+            }
+        }
     }
 }

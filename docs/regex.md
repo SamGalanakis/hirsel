@@ -13,6 +13,16 @@ recovers the leftmost start after the forward priority decision, including when
 the scalar continuation handles Unicode. Finite work budgets use the ordered
 PikeVM to preserve its exact logical charge and `WorkLimit()` behavior.
 
+Eligible searches use conservative literal prefixes, including ASCII simple-fold
+prefixes, to skip candidate-free input. Alternate prefixes compare two byte
+positions in eight packed lanes, then confirm candidates with the ordered
+engine. A leading ASCII class repeated one or more times can instead search
+for a required inner literal whose first byte is outside that class. A backwards
+class run recovers a possible start before normal forward confirmation.
+Nullable patterns retain a full scan, and Unicode fold candidates remain visible.
+Subject inspection uses the core byte-set scanner to skip its ASCII prefix while
+preserving the exact scalar debit for finite work budgets.
+
 `compile(pattern, max_instructions)` uses Go's default Perl-style matching
 behavior. `compile_flags(pattern, flags, max_instructions)` accepts a `Flags`
 record; start with `default_flags()` and set `fold_case`, `multiline`,

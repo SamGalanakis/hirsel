@@ -61,7 +61,7 @@ fn borrow_view_edges() -> Result[(), u64] uses {} {
   let src = core@1/string.slice(whole, first, last)
   let mut work = 5u64
   let Ok(subject) = make_subject(src, mut work) else { return Error(1000) }
-  if work != 0 || subject_len(subject) != 10 || subject.ascii { return Error(1001) }
+  if work != 0 || subject_len(subject) != 10 { return Error(1001) }
   if subject_scalar(subject, 0) != 'a' || subject_scalar(subject, 1) != 'é' || subject_scalar(subject, 3) != '☃' || subject_scalar(subject, 6) != '😀' { return Error(1002) }
   if subject_before(subject, 10) != 6 || subject_before(subject, 6) != 3 || subject_before(subject, 3) != 1 || subject_before(subject, 1) != 0 { return Error(1003) }
   let Ok(re) = compile("(?P<x>.)", 100) else { return Error(1004) }
@@ -70,7 +70,7 @@ fn borrow_view_edges() -> Result[(), u64] uses {} {
   match expand(re, mut dst, "$0", src, invalid, 1000) { Error(InvalidCaptures()) => (), _ => return Error(1005), }
   let mut empty_work = 1u64
   let Ok(empty) = make_subject("", mut empty_work) else { return Error(1006) }
-  if !empty.ascii || empty_work != 0 || subject_next(empty, 0) != 1 { return Error(1007) }
+  if empty_work != 0 || subject_next(empty, 0) != 1 { return Error(1007) }
   let mut short = 4u64
   match make_subject(src, mut short) { Error(WorkLimit()) => (), _ => return Error(1008), }
   if short != 0 { return Error(1011) }

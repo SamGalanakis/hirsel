@@ -446,9 +446,7 @@ fn dfa_search(re: Regex, subject: Subject, start: u64, haystack: Bytes, mut cach
   let program = vm_program(re)
   let bytes = subject.bytes
   let size = core@1/bytes.len(bytes)
-  let previous = if start == 0 { 128u64 } else if subject.ascii {
-    core@1/int.widen(bytes[start - 1])
-  } else { dfa_byte(subject, subject_before(subject, start)) }
+  let previous = if start == 0 { 128u64 } else { dfa_byte(subject, subject_before(subject, start)) }
   let mut state = dfa_start(program, false, dfa_category(previous), mut cache)
   if state == 0 { return DfaQuit() }
   let mut cursor = start
@@ -464,9 +462,7 @@ fn dfa_search(re: Regex, subject: Subject, start: u64, haystack: Bytes, mut cach
       // Without progress, this empty frontier already has its look-behind.
       if candidate != cursor {
         cursor = candidate
-        let preceding = if cursor == 0 { 128u64 } else if subject.ascii {
-          core@1/int.widen(bytes[cursor - 1])
-        } else { dfa_byte(subject, subject_before(subject, cursor)) }
+        let preceding = if cursor == 0 { 128u64 } else { dfa_byte(subject, subject_before(subject, cursor)) }
         let category = dfa_category(preceding)
         if cache.data[state + 1] != category {
           state = dfa_start(program, false, category, mut cache)

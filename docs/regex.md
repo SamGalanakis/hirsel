@@ -22,8 +22,10 @@ portable scanner loads whole eight-byte words. A leading ASCII class repeated on
 for a required inner literal whose first byte is outside that class. A backwards
 class run recovers a possible start before normal forward confirmation.
 Nullable patterns retain a full scan, and Unicode fold candidates remain visible.
-Subject inspection uses the core byte-set scanner to skip its ASCII prefix while
-preserving the exact scalar debit for finite work budgets.
+String and borrowed String views already guarantee UTF-8 validity. Unlimited
+searches construct a borrowed subject without inspecting it. Finite work budgets
+retain the exact scalar-plus-EOF accounting pass; decoding checks the current
+byte when traversing either ASCII or Unicode text.
 
 `compile(pattern, max_instructions)` uses Go's default Perl-style matching
 behavior. `compile_flags(pattern, flags, max_instructions)` accepts a `Flags`

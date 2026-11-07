@@ -1308,20 +1308,8 @@ pub fn find_all(re: Regex, text: String, max_matches: u64, work_limit: u64) -> R
       }
       // Advance one scalar boundary, including EOF+1.
       spend(mut work)?
-      pos = if subject.ascii {
-        pos + 1
-      } else {
-        subject_next(subject, pos)
-      }
-    } else if subject.ascii {
-      // One historical spend per crossed scalar, with the same exhaustion
-      // result. ASCII byte and scalar distances coincide.
-      let count = span.end - pos
-      if count > work {
-        work = 0
-        return Error(WorkLimit())
-      }
-      work -= count
+      pos = subject_next(subject, pos)
+    } else if accelerated {
       pos = span.end
     } else {
       while pos < span.end {
@@ -1386,7 +1374,6 @@ fn captured(thread: Thread, at: u64, mut work: u64) -> Result[Captures, MatchErr
 // Copyright 2014 The Rust Project Developers. MIT; third-party/NOTICES.md.
 type Subject {
   bytes: Bytes,
-  ascii: bool,
 }
 
 fn subject_len(subject: Subject) -> u64 uses {} {
@@ -1396,7 +1383,7 @@ fn subject_len(subject: Subject) -> u64 uses {} {
 // util/utf8.rs:56-71,79-96: decode only at the current forward/reverse
 // position. Unlike arbitrary upstream byte input, String is already valid.
 fn subject_next(subject: Subject, at: u64) -> u64 uses {} {
-  if at == subject_len(subject) || subject.ascii {
+  if at == subject_len(subject) {
     return at + 1
   }
   let first = subject.bytes[at]
@@ -1413,10 +1400,8 @@ fn subject_next(subject: Subject, at: u64) -> u64 uses {} {
 
 fn subject_before(subject: Subject, at: u64) -> u64 uses {} {
   let mut pos = at - 1
-  if !subject.ascii {
-    while subject.bytes[pos] >= 128 && subject.bytes[pos] < 192 {
-      pos -= 1
-    }
+  while subject.bytes[pos] >= 128 && subject.bytes[pos] < 192 {
+    pos -= 1
   }
   pos
 }
@@ -1424,7 +1409,7 @@ fn subject_before(subject: Subject, at: u64) -> u64 uses {} {
 fn subject_scalar(subject: Subject, at: u64) -> char uses {} {
   let first: u32 = core@1/int.widen(subject.bytes[at])
   let mut cp = first
-  if !subject.ascii && first >= 128 {
+  if first >= 128 {
     let second: u32 = core@1/int.widen(subject.bytes[at + 1])
     if first < 224 {
       cp = (first & 31) << 6 | second & 63
@@ -1456,33 +1441,14 @@ fn subject_previous(subject: Subject, at: u64) -> Option[char] uses {} {
 }
 
 fn make_subject(text: String, mut work: u64) -> Result[Subject, MatchError] in text uses {} {
-  // Even the empty subject needs its EOF debit; no bytes need inspecting.
-  if work == 0 {
-    return Error(WorkLimit())
+  // String and string.view_bytes already prove UTF-8. The unlimited-work
+  // marker admits the whole operation and needs no eager subject traversal.
+  // Finite budgets preserve the exact historical scalar-plus-EOF debit.
+  if work != 18446744073709551615 {
+    for c in core@1/string.scalars(text) { spend(mut work)? }
+    spend(mut work)?
   }
-  let bytes = core@1/string.as_bytes(text)
-  let size = core@1/bytes.len(bytes)
-  let first_non_ascii = core@1/bytes.find_any(bytes, PREFIX_NON_ASCII, 0)
-  let ascii = first_non_ascii == size
-  // util/utf8.rs:115-135: scalar count = byte count - continuation bytes.
-  // Start with the ASCII debit, so ASCII bytes need no per-byte count update.
-  let mut count = size + 1
-  let mut i = first_non_ascii
-  while i < size {
-    let byte = bytes[i]
-    if byte >= 128 {
-      if byte < 192 {
-        count -= 1
-      }
-    }
-    i += 1
-  }
-  if count > work {
-    work = 0
-    return Error(WorkLimit())
-  }
-  work -= count
-  Ok(Subject(bytes: bytes, ascii: ascii))
+  Ok(Subject(bytes: core@1/string.as_bytes(text)))
 }
 
 pub fn find_captures(re: Regex, text: String, work_limit: u64) -> Result[

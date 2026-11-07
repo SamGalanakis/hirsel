@@ -983,15 +983,7 @@ fn replace_accelerated[T](
       pos = subject_next(source_input, pos)
     } else if span.end == pos {
       pos = subject_next(source_input, pos)
-    } else if source_input.ascii && bound == 18446744073709551615 {
-      // As in find_all, ASCII byte and scalar distances coincide. The maximum
-      // bound has no deferred Pike debt to resolve between these exact debits.
-      let count = span.end - pos
-      if count > work {
-        work = 0
-        return Error(WorkLimit())
-      }
-      work -= count
+    } else if bound == 18446744073709551615 {
       pos = span.end
     } else {
       while pos < span.end {

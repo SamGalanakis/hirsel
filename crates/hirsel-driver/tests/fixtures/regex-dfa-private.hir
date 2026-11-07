@@ -5,7 +5,8 @@ fn dfa_test_case(pattern: String, src: String) -> bool uses {} {
   let Ok(re) = compile(pattern, 10000) else { return false }
   let mut work = 1000000000u64
   let Ok(subject) = make_subject(src, mut work) else { return false }
-  let ascii_only = subject.ascii
+  let mut ascii_only = true
+  for c in core@1/string.scalars(src) { if core@1/char.to_u32(c) >= 128 { ascii_only = false } }
   let mut cache = dfa_cache(re, true, 65024)
   let mut tiny = dfa_cache(re, true, 1)
   let mut start = 0u64

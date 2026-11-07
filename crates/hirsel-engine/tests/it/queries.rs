@@ -1903,9 +1903,12 @@ fn scheduled_scc_run_with_capacity(
     });
     let output = growth.outcome(products[0].clone()).unwrap();
     assert!(output.diagnostics.is_empty());
+    // Membership, each SCC and table-key reduction read the same retained
+    // Front products. Each definition is claimed once, plus one task per SCC,
+    // the membership task and the aggregate Growth root.
     assert_eq!(
         runtime.stats().claims as usize,
-        3 * definitions.len() + output.facets.components.len() + 2
+        definitions.len() + output.facets.components.len() + 2
     );
     let solves = growth.component_solves();
     let memberships = growth.membership_solves();

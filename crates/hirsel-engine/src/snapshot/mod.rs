@@ -823,6 +823,12 @@ impl SignatureSnapshot {
             .previous
             .clone();
         let state = self.build_validation(previous.as_deref())?;
+        // Construction has copied the reusable exact views and verdicts. The
+        // preceding universe is no longer a build input when admitting this
+        // one; unpinned old tables can now return their existing reservations.
+        // Keep empty inputs on refusal so a later demand can rebuild normally.
+        inputs.as_mut().unwrap().previous = None;
+        drop(previous);
         if let Some(demand) = self.demand.lock().unwrap().upgrade() {
             if let Some(headers) = &self.headers {
                 state.retain_control(headers)?;

@@ -1025,6 +1025,14 @@ impl HeaderProducts {
         if let Some(payload) = signature.metadata.retention.get::<HeaderPayload>() {
             return Ok(payload);
         }
+        // Shared core payloads are process-owned registry inputs. A request
+        // retains only an alias, not another allocation of their fields.
+        if hirsel_registry::BuiltinRegistry::shared()
+            .get(signature.definition)
+            .is_some_and(|shared| Arc::ptr_eq(&shared, signature))
+        {
+            return Ok(signature.clone());
+        }
         let mut payloads = self
             .operation
             .validation_payloads
@@ -2040,12 +2048,22 @@ mod retention_tests {
         let remaining = Arc::new(std::sync::Mutex::new(1 << 19));
         headers.configure_source_backing(backing.clone(), remaining.clone());
         let memory = Memory(headers);
+        let registry = hirsel_registry::BuiltinRegistry::shared();
+        let shared = registry.signatures().next().unwrap().clone();
+        let initial = *remaining.lock().unwrap();
+        let shared_lease = memory.0.validation_signature_lease(&shared).unwrap();
+        assert_eq!(
+            *remaining.lock().unwrap(),
+            initial,
+            "aliasing a process-owned core payload allocates no request storage"
+        );
+        drop(shared_lease);
         let signature = Arc::new(hirsel_types::Signature {
             metadata: hirsel_types::SignatureMetadata {
                 constant_alias: Some(Box::new(DefPath::core(&"a".repeat(8192)))),
                 ..Default::default()
             },
-            definition: DefId::intern(&DefPath::core("shared-payload")),
+            definition: shared.definition,
             kind: hirsel_types::SignatureKind::Const {
                 ty: engine.types.intern(hirsel_types::Type::unit()),
                 generics: Default::default(),

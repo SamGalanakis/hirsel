@@ -45,6 +45,8 @@ mod flow_origins;
 mod generics;
 mod indexed;
 mod input;
+mod memory;
+pub use memory::ValidationMemory;
 mod views;
 pub use views::{
     CheckedEnvironment, EnvironmentStamp, Installed, InstalledViews, OwnedEnvironment,

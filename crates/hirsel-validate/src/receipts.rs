@@ -814,6 +814,7 @@ impl VerifierCache {
                     kind: crate::ViolationKind::InvalidSignature(definition.path().clone()),
                 }),
                 reads: vec![],
+                retention: Default::default(),
             }));
         }
         let digest = input.digest();
@@ -829,6 +830,7 @@ impl VerifierCache {
             return Ok(Arc::new(crate::ViewVerdict {
                 error: None,
                 reads: receipt.reads,
+                retention: Default::default(),
             }));
         }
         let verdict = crate::check_view(types, definition, &*input.signature()?, signatures)?;
@@ -2216,16 +2218,19 @@ mod tests {
             TypeInterner::new(Some(base)),
             Arc::new(f.signatures.get(f.definition.path).unwrap().clone()),
         );
-        let original = f.signatures.view(f.definition.path).unwrap();
+        let original = f.signatures.view(f.definition.path).unwrap().unwrap();
         assert_eq!(original.digest(), foreign.digest());
         struct Views<'a> {
             foreign: crate::IdentifiedSignature,
             original: &'a crate::SignatureMap,
         }
         impl SignatureLookup for Views<'_> {
-            fn view(&self, d: hirsel_syntax::DefId) -> Option<crate::ViewInput<'_>> {
+            fn view(
+                &self,
+                d: hirsel_syntax::DefId,
+            ) -> Result<Option<crate::ViewInput<'_>>, crate::ViewRefusal> {
                 if d == self.foreign.definition() {
-                    Some(self.foreign.input())
+                    Ok(Some(self.foreign.input()))
                 } else {
                     self.original.view(d)
                 }
@@ -2278,7 +2283,7 @@ mod tests {
                 .view_verdict(
                     &types,
                     f.definition.path,
-                    views.view(f.definition.path).unwrap(),
+                    views.view(f.definition.path).unwrap().unwrap(),
                     &views,
                     ContentHash::default()
                 )
@@ -3283,7 +3288,10 @@ mod tests {
         current.insert(earlier.definition, earlier);
         struct MissingHeap<'a>(&'a dyn SignatureLookup);
         impl SignatureLookup for MissingHeap<'_> {
-            fn view(&self, d: hirsel_syntax::DefId) -> Option<crate::ViewInput<'_>> {
+            fn view(
+                &self,
+                d: hirsel_syntax::DefId,
+            ) -> Result<Option<crate::ViewInput<'_>>, crate::ViewRefusal> {
                 self.0.view(d)
             }
             fn heap_role(&self) -> Result<Option<hirsel_types::HeapRole>, crate::ViewRefusal> {

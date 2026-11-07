@@ -1010,6 +1010,24 @@ impl HeaderProducts {
         };
         Ok(Charge::retained(HeaderCharge::Source(allowance)))
     }
+    pub(crate) fn validation_demand_lease(
+        &self,
+        bytes: u64,
+    ) -> Result<Arc<dyn Send + Sync>, QueryError> {
+        if !self.standalone
+            && self
+                .scope()
+                .admission
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .is_none()
+        {
+            return Err(sources::source_refusal(
+                "validation demand precedes source admission",
+            ));
+        }
+        self.validation_lease(bytes)
+    }
     pub(crate) fn validation_lease(&self, bytes: u64) -> Result<Arc<dyn Send + Sync>, QueryError> {
         self.validation_lease_with(bytes, true)
     }
@@ -1019,6 +1037,18 @@ impl HeaderProducts {
         &self,
         bytes: u64,
     ) -> Result<Arc<dyn Send + Sync>, QueryError> {
+        if !self.standalone
+            && self
+                .scope()
+                .admission
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .is_none()
+        {
+            return Err(sources::source_refusal(
+                "optional validation retention precedes source admission",
+            ));
+        }
         self.validation_lease_with(bytes, false)
     }
     fn validation_lease_with(
@@ -1608,6 +1638,9 @@ impl HeaderProducts {
 /// read as it is, and an evicted one is produced again under admission.
 pub(crate) struct RowSource(pub(crate) Arc<HeaderProducts>);
 impl hirsel_validate::SignatureSource for RowSource {
+    fn retained_control_bytes(&self) -> Option<u64> {
+        Some((size_of::<Self>() + 2 * size_of::<usize>()) as u64)
+    }
     fn reread(&self, id: DefId) -> Result<hirsel_types::SignatureRef, QueryError> {
         let headers = &self.0;
         let output = match headers.ready(id) {

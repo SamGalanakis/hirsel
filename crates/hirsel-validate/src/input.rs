@@ -161,7 +161,7 @@ fn heap_evidence(
     let operation = DefId::intern(&role.operation);
     let evidence = |d| {
         signatures
-            .view(d)
+            .view(d)?
             .ok_or(ViewRefusal::Stale { definition: d })
     };
     let a = evidence(arena)?;
@@ -221,12 +221,16 @@ pub struct IdentifiedSignature {
     /// Part of the identity: universes select their selected heap role without
     /// reading every payload again.
     heap: Option<HeapRole>,
+    retention: crate::memory::ControlRetention,
 }
 /// The cache a sourced view reads its payload back from. A miss recomputes
 /// through the cache's ordinary producer; the result must have the same
 /// V digest.
 pub trait SignatureSource: Send + Sync {
     fn reread(&self, d: DefId) -> Result<hirsel_types::SignatureRef, hirsel_types::QueryError>;
+    /// The source's own Arc allocation and owned control buffers. Shared row
+    /// payloads keep the source cache's existing admission owners.
+    fn retained_control_bytes(&self) -> Option<u64>;
 }
 
 /// Why V could not read a view it holds by identity. A refusal is never a
@@ -308,6 +312,7 @@ impl IdentifiedSignature {
             types,
             definition: signature.definition,
             heap: signature.metadata.roles.heap.clone(),
+            retention: Default::default(),
             payload: Payload::Held(signature),
             digest,
         }
@@ -324,12 +329,44 @@ impl IdentifiedSignature {
             types,
             definition: signature.definition,
             heap: signature.metadata.roles.heap.clone(),
+            retention: Default::default(),
             payload: Payload::Sourced {
                 last: Arc::new(std::sync::Mutex::new(Arc::downgrade(signature))),
                 source,
             },
             digest,
         }
+    }
+    pub(crate) fn retain_owner(&self, owner: Arc<dyn Send + Sync>) {
+        self.retention.set(owner);
+    }
+    pub(crate) fn retained_identity_bytes(&self) -> Option<u64> {
+        let mut bytes = crate::memory::arc::<Self>();
+        if let Some(heap) = &self.heap {
+            bytes = bytes
+                .checked_add(path_bytes(&heap.arena)?)?
+                .checked_add(path_bytes(&heap.operation)?)?;
+        }
+        if let Payload::Sourced { source, .. } = &self.payload {
+            // The weak last-payload pointer retains the Signature Arc backing
+            // after its fields are dropped. The source wrapper has its own Arc.
+            bytes = bytes
+                .checked_add(crate::memory::arc::<
+                    std::sync::Mutex<std::sync::Weak<Signature>>,
+                >())?
+                .checked_add(crate::memory::arc::<Signature>())?
+                .checked_add(source.retained_control_bytes()?)?;
+        }
+        Some(bytes)
+    }
+    pub fn retain_control(&self, memory: &dyn crate::ValidationMemory) -> Result<(), ViewRefusal> {
+        self.retention.retain(memory, || {
+            self.retained_identity_bytes()?
+                .checked_add(match &self.payload {
+                    Payload::Held(signature) => memory.signature_bytes(signature),
+                    Payload::Sourced { .. } => 0,
+                })
+        })
     }
     /// The payload retained by this identity; sourced views retain their
     /// original cache owner instead of pinning a signature payload.
@@ -470,7 +507,7 @@ pub enum VRead {
 /// The signature views V validates against: one universe, as one package's
 /// bodies see it (its own opaque types through their private views).
 pub trait SignatureLookup: Sync {
-    fn view(&self, d: DefId) -> Option<ViewInput<'_>>;
+    fn view(&self, d: DefId) -> Result<Option<ViewInput<'_>>, crate::ViewRefusal>;
     /// The package-visible role. Conflicting claims refuse the observation.
     fn heap_role(&self) -> Result<Option<HeapRole>, ViewRefusal>;
     fn heap_observation(&self) -> Result<HeapObservation, ViewRefusal>;
@@ -479,7 +516,7 @@ pub trait SignatureLookup: Sync {
 }
 
 impl<T: SignatureLookup + ?Sized> SignatureLookup for &T {
-    fn view(&self, d: DefId) -> Option<ViewInput<'_>> {
+    fn view(&self, d: DefId) -> Result<Option<ViewInput<'_>>, crate::ViewRefusal> {
         (**self).view(d)
     }
     fn heap_role(&self) -> Result<Option<HeapRole>, ViewRefusal> {
@@ -494,7 +531,7 @@ impl<T: SignatureLookup + ?Sized> SignatureLookup for &T {
 }
 
 impl<T: SignatureLookup + Send + ?Sized> SignatureLookup for Arc<T> {
-    fn view(&self, d: DefId) -> Option<ViewInput<'_>> {
+    fn view(&self, d: DefId) -> Result<Option<ViewInput<'_>>, crate::ViewRefusal> {
         (**self).view(d)
     }
     fn heap_role(&self) -> Result<Option<HeapRole>, ViewRefusal> {
@@ -572,19 +609,19 @@ pub(crate) fn observe_read(
 ) -> Option<VRead> {
     match read {
         VRead::View(d, _) => {
-            let view = signatures.view(*d)?;
+            let view = signatures.view(*d).ok()??;
             types
                 .is_none_or(|t| view.for_types(t))
                 .then(|| VRead::View(*d, view.digest()))
         }
-        VRead::Missing(d) => signatures.view(*d).is_none().then_some(VRead::Missing(*d)),
+        VRead::Missing(d) => matches!(signatures.view(*d), Ok(None)).then_some(VRead::Missing(*d)),
         VRead::HeapRole(_) => {
             let heap = signatures.heap_observation().ok()?;
             if let Some(types) = types
                 && let Some(role) = heap.role()
             {
                 for path in [&role.arena, &role.operation] {
-                    if !signatures.view(DefId::intern(path))?.for_types(types) {
+                    if !signatures.view(DefId::intern(path)).ok()??.for_types(types) {
                         return None;
                     }
                 }
@@ -652,14 +689,14 @@ impl<'a> Reader<'a> {
     pub(crate) fn get(&self, d: impl Into<DefId>) -> Option<&Signature> {
         let d = d.into();
         match self.signatures.view(d) {
-            Some(view) if !view.for_types(self.types) => {
+            Ok(Some(view)) if !view.for_types(self.types) => {
                 self.foreign.borrow_mut().insert(d);
                 self.reads
                     .borrow_mut()
                     .insert(VRead::View(d, view.digest()));
                 None
             }
-            Some(view) => match view.signature() {
+            Ok(Some(view)) => match view.signature() {
                 Ok(signature) => {
                     self.reads
                         .borrow_mut()
@@ -674,8 +711,12 @@ impl<'a> Reader<'a> {
                     None
                 }
             },
-            None => {
+            Ok(None) => {
                 self.reads.borrow_mut().insert(VRead::Missing(d));
+                None
+            }
+            Err(refusal) => {
+                self.refused.borrow_mut().get_or_insert(refusal);
                 None
             }
         }
@@ -744,6 +785,28 @@ impl<'a> Reader<'a> {
 pub struct ViewVerdict {
     pub error: Option<Violation>,
     pub reads: Vec<VRead>,
+    pub(crate) retention: crate::memory::ControlRetention,
+}
+
+impl ViewVerdict {
+    pub(crate) fn retained_verdict_bytes(&self) -> Option<u64> {
+        crate::memory::arc::<Self>()
+            .checked_add(crate::memory::vector(&self.reads)?)?
+            .checked_add(read_payload_bytes(&self.reads)?)?
+            .checked_add(
+                self.error
+                    .as_ref()
+                    .map_or(Some(0), crate::memory::violation)?,
+            )
+    }
+
+    pub(crate) fn retain_control(
+        &self,
+        memory: &dyn crate::ValidationMemory,
+    ) -> Result<(), ViewRefusal> {
+        self.retention
+            .retain(memory, || self.retained_verdict_bytes())
+    }
 }
 
 /// V's verdict on the view of `d`, read through `signatures`, or the
@@ -759,7 +822,11 @@ pub fn check_view(
         .or_else(|| reader.input_errors().into_iter().next());
     let mut reads = vec![];
     reader.finish(&mut reads)?;
-    Ok(ViewVerdict { error, reads })
+    Ok(ViewVerdict {
+        error,
+        reads,
+        retention: Default::default(),
+    })
 }
 
 /// The signature errors of one universe, with their digest.
@@ -789,6 +856,21 @@ pub struct ValidatedSignatures {
     policy: ContentHash,
 }
 impl ValidatedSignatures {
+    pub fn retained_index_bytes(&self) -> Option<u64> {
+        self.verdicts.values().try_fold(
+            crate::memory::map::<ValidationDigest, Vec<Arc<ViewVerdict>>>(
+                self.verdicts.capacity(),
+            )?,
+            |bytes, verdicts| bytes.checked_add(crate::memory::vector(verdicts)?),
+        )
+    }
+    pub fn retain_verdicts(&self, memory: &dyn crate::ValidationMemory) -> Result<(), ViewRefusal> {
+        for verdict in self.verdicts.values().flatten() {
+            verdict.retain_control(memory)?;
+        }
+        Ok(())
+    }
+
     pub(crate) fn verifier(&self) -> Option<&Arc<crate::VerifierCache>> {
         self.cache.as_ref()
     }
@@ -836,7 +918,7 @@ impl ValidatedSignatures {
         signatures: &dyn SignatureLookup,
         previous: Option<&ValidatedSignatures>,
     ) -> Result<Arc<ViewVerdict>, ViewRefusal> {
-        let input = signatures.view(d).expect("a verdict names a view");
+        let input = signatures.view(d)?.expect("a verdict names a view");
         if !input.for_types(t) {
             return Ok(Arc::new(ViewVerdict {
                 error: Some(Violation {
@@ -846,6 +928,7 @@ impl ValidatedSignatures {
                     kind: ViolationKind::InvalidSignature(d.path().clone()),
                 }),
                 reads: vec![],
+                retention: Default::default(),
             }));
         }
         let digest = input.digest();
@@ -992,15 +1075,15 @@ impl<D: Into<DefId>> Extend<(D, Signature)> for SignatureMap {
     }
 }
 impl SignatureLookup for SignatureMap {
-    fn view(&self, d: DefId) -> Option<ViewInput<'_>> {
-        self.views.get(&d).map(|v| {
+    fn view(&self, d: DefId) -> Result<Option<ViewInput<'_>>, crate::ViewRefusal> {
+        Ok(self.views.get(&d).map(|v| {
             let digest = *v.digest.get_or_init(|| digest(&self.types, &v.signature));
             ViewInput {
                 types: &self.types,
                 payload: ViewPayload::Borrowed(&v.signature),
                 digest,
             }
-        })
+        }))
     }
     fn heap_role(&self) -> Result<Option<HeapRole>, ViewRefusal> {
         select_heap(

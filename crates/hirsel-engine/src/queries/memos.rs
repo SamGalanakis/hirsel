@@ -558,6 +558,7 @@ impl QueryEngine {
                 .validation(&owner.0.package)
                 .ok()?
                 .view(d)
+                .ok()?
                 .map_or_else(ContentHash::default, |input| input.digest().0),
             ReadKey::ValidationUniverse(package) => self
                 .signature_snapshot()

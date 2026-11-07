@@ -1257,6 +1257,7 @@ fn admitted_front_pressure_evicts_only_unpinned_settled_bodies_and_recomputes_eq
                         universe
                             .view(hirsel_syntax::DefId::intern(&definitions[0]))
                             .unwrap()
+                            .unwrap()
                             .digest()
                     });
                     // One universe build reads every row: each module's private
@@ -1394,7 +1395,7 @@ fn admitted_front_pressure_evicts_only_unpinned_settled_bodies_and_recomputes_eq
                     );
                     let d = hirsel_syntax::DefId::intern(&definitions[0]);
                     let environment = signatures.validation(&definitions[0].0.package).unwrap();
-                    let view = environment.view(d).unwrap();
+                    let view = environment.view(d).unwrap().unwrap();
                     assert_eq!(view.digest(), digest);
                     match view.signature() {
                         Ok(signature) => {

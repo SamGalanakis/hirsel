@@ -138,6 +138,7 @@ pub struct SignatureSnapshot {
     private: DefMap<SignatureRef>,
     /// Signature inputs are sufficient for P; V builds its universe on demand.
     validation: Mutex<Option<Arc<ValidationState>>>,
+    demand: Mutex<std::sync::Weak<ValidationDemand>>,
     owner: std::sync::Weak<SignatureSnapshot>,
     pub(crate) cache_registration: Mutex<Option<Arc<dyn Send + Sync>>>,
     /// Set once this snapshot's source dependencies' summaries are published.
@@ -187,7 +188,29 @@ fn view_products<'a>(
 struct ValidationCandidates {
     previous: Option<Arc<ValidationState>>,
 }
+pub(crate) struct ValidationDemand {
+    state: Mutex<Option<Arc<ValidationState>>>,
+    _lease: Arc<dyn Send + Sync>,
+}
+struct ValidationMemory {
+    headers: Arc<crate::queries::header_products::HeaderProducts>,
+    _lease: Arc<dyn Send + Sync>,
+}
+impl hirsel_validate::ValidationMemory for ValidationMemory {
+    fn retain(&self, bytes: u64) -> Result<Arc<dyn Send + Sync>, hirsel_validate::ViewRefusal> {
+        self.headers
+            .validation_demand_lease(bytes)
+            .map_err(|cause| hirsel_validate::ViewRefusal::Unreadable {
+                definition: DefId::intern(&DefPath::core("validation-storage")),
+                cause,
+            })
+    }
+    fn signature_bytes(&self, signature: &SignatureRef) -> u64 {
+        hirsel_query_products::retained::retained_signature_payload_bytes(signature)
+    }
+}
 pub(crate) struct ValidationState {
+    _memory: Mutex<Option<Arc<dyn Send + Sync>>>,
     _registration: Option<Arc<dyn Send + Sync>>,
     views: Arc<ViewTable>,
     bases: BTreeMap<PackageId, Arc<ViewTable>>,
@@ -243,32 +266,67 @@ struct InstalledRows {
     owner: Option<PackageId>,
 }
 impl hirsel_validate::ViewSource for InstalledRows {
-    fn view(&self, d: DefId) -> Option<View> {
+    fn retained_control_bytes(&self) -> Option<u64> {
+        let mut weight = hirsel_query_products::retained::MetadataWeight::default();
+        weight.add(size_of::<Self>());
+        for rows in [&self.signatures, &self.private] {
+            weight.add(
+                rows.capacity()
+                    .checked_mul(3 * size_of::<(DefId, SignatureRef)>() + 1)?
+                    .checked_add(128)?,
+            );
+            for signature in rows.values() {
+                weight.add(
+                    hirsel_query_products::retained::retained_signature_payload_bytes(signature)
+                        .try_into()
+                        .ok()?,
+                );
+            }
+        }
+        if let Some(owner) = &self.owner {
+            weight.add(owner.name.capacity());
+            weight.add(owner.version.capacity());
+        }
+        Some(weight.bytes())
+    }
+
+    fn view(&self, d: DefId) -> Result<Option<View>, hirsel_validate::ViewRefusal> {
         if self.owner.as_ref() == Some(&d.path().0.package)
             && let Some(private) =
                 private_view(&self.types, &self.private, self.headers.as_ref(), d)
         {
-            return Some(View::new(&self.types, private, None));
+            return Ok(Some(View::new(&self.types, private, None)));
         }
         if let Some(signature) = self.signatures.get(&d) {
-            return Some(View::new(&self.types, signature.clone(), None));
+            return Ok(Some(View::new(&self.types, signature.clone(), None)));
         }
-        let headers = self.headers.as_ref()?;
-        let signature = headers
-            .product(d)?
-            .ok()?
-            .result
-            .as_ref()
-            .ok()?
-            .value
-            .clone();
-        Some(View::sourced(
+        let Some(headers) = self.headers.as_ref() else {
+            return Ok(None);
+        };
+        let Some(product) = headers.product(d) else {
+            return Ok(None);
+        };
+        let product = product.map_err(|cause| hirsel_validate::ViewRefusal::Unreadable {
+            definition: d,
+            cause,
+        })?;
+        let signature = match &product.result {
+            Ok(value) => value.value.clone(),
+            Err(cause @ QueryError::Operational(_)) => {
+                return Err(hirsel_validate::ViewRefusal::Unreadable {
+                    definition: d,
+                    cause: cause.clone(),
+                });
+            }
+            Err(_) => return Ok(None),
+        };
+        Ok(Some(View::sourced(
             &self.types,
             &signature,
             &(Arc::new(crate::queries::header_products::RowSource(headers.clone()))
                 as Arc<dyn hirsel_validate::SignatureSource>),
             None,
-        ))
+        )))
     }
 }
 /// `d`'s private view: an opaque type's own representation.
@@ -319,6 +377,78 @@ fn validation_retention_refused() {
 }
 
 impl ValidationState {
+    fn retain_control(
+        &self,
+        headers: &Arc<crate::queries::header_products::HeaderProducts>,
+    ) -> Result<(), hirsel_validate::ViewRefusal> {
+        let mut retained = self._memory.lock().unwrap();
+        if retained.is_some() {
+            return Ok(());
+        }
+        let memory: Arc<dyn hirsel_validate::ValidationMemory> = Arc::new(ValidationMemory {
+            headers: headers.clone(),
+            _lease: headers
+                .validation_demand_lease(
+                    (size_of::<ValidationMemory>() + 2 * size_of::<usize>()) as u64,
+                )
+                .map_err(|cause| hirsel_validate::ViewRefusal::Unreadable {
+                    definition: DefId::intern(&DefPath::core("validation-storage")),
+                    cause,
+                })?,
+        });
+        self.views.retain_control(&memory)?;
+        for table in self.bases.values().chain(self.installed.values()) {
+            table.retain_control(&memory)?;
+        }
+        for table in self.packages.values() {
+            table.retain_control(&memory)?;
+        }
+        self.validated.retain_verdicts(&*memory)?;
+        let mut weight = hirsel_query_products::retained::MetadataWeight::default();
+        weight.add(
+            size_of::<Self>()
+                + 2 * size_of::<usize>()
+                + size_of::<ValidationMemory>()
+                + 2 * size_of::<usize>()
+                + size_of::<hirsel_validate::FactGraph>()
+                + 2 * size_of::<usize>()
+                + 4 * size_of::<std::sync::Weak<SignatureSnapshot>>()
+                + 128,
+        );
+        weight.map(&self.bases, |w, p, _| {
+            w.add(p.name.capacity());
+            w.add(p.version.capacity());
+        });
+        weight.map(&self.installed, |w, p, _| {
+            w.add(p.name.capacity());
+            w.add(p.version.capacity());
+        });
+        weight.map(&self.packages, |w, p, _| {
+            w.add(p.name.capacity());
+            w.add(p.version.capacity());
+        });
+        let bytes = weight
+            .bytes()
+            .checked_add(self.validated.retained_index_bytes().ok_or_else(|| {
+                hirsel_validate::ViewRefusal::Unreadable {
+                    definition: DefId::intern(&DefPath::core("validation-storage")),
+                    cause: QueryError::Operational(hirsel_types::OperationalFailure {
+                        operation: "validation retention".into(),
+                        message: "validation index size overflow".into(),
+                    }),
+                }
+            })?)
+            .ok_or_else(|| hirsel_validate::ViewRefusal::Unreadable {
+                definition: DefId::intern(&DefPath::core("validation-storage")),
+                cause: QueryError::Operational(hirsel_types::OperationalFailure {
+                    operation: "validation retention".into(),
+                    message: "validation state size overflow".into(),
+                }),
+            })?;
+        *retained = Some(memory.retain(bytes)?);
+        Ok(())
+    }
+
     pub(crate) fn evict_cached(&self) -> bool {
         let removed = self
             .overlays
@@ -443,6 +573,7 @@ impl SignatureSnapshot {
             headers: None,
             private,
             validation: Mutex::default(),
+            demand: Mutex::default(),
             owner: std::sync::Weak::new(),
             cache_registration: Mutex::default(),
             published: OnceLock::new(),
@@ -641,6 +772,34 @@ impl SignatureSnapshot {
     /// V's universe of this snapshot, built once. A build that meets a
     /// refused view read publishes nothing and keeps its inputs, so the next
     /// demand builds it again.
+    pub(crate) fn demand_validation(&self) -> Result<Arc<ValidationDemand>, QueryError> {
+        let Some(headers) = &self.headers else {
+            return Ok(Arc::new(ValidationDemand {
+                state: Mutex::default(),
+                _lease: Arc::new(()),
+            }));
+        };
+        // Serialize with construction before registering demand. Admission can
+        // evict idle snapshots, so never hold their cache mutex across it.
+        let _inputs = self.validation_inputs.lock().unwrap();
+        let mut current = self.demand.lock().unwrap();
+        if let Some(demand) = current.upgrade() {
+            return Ok(demand);
+        }
+        let lease = headers.validation_demand_lease(
+            (size_of::<ValidationDemand>() + 2 * size_of::<usize>()) as u64,
+        )?;
+        let state = self.validation.lock().unwrap().clone();
+        if let Some(state) = &state {
+            state.retain_control(headers)?;
+        }
+        let demand = Arc::new(ValidationDemand {
+            state: Mutex::new(state),
+            _lease: lease,
+        });
+        *current = Arc::downgrade(&demand);
+        Ok(demand)
+    }
     fn validation_universe(&self) -> Result<Arc<ValidationState>, hirsel_validate::ViewRefusal> {
         if let Some(state) = self.validation.lock().unwrap().clone() {
             return Ok(state);
@@ -656,6 +815,13 @@ impl SignatureSnapshot {
             .previous
             .clone();
         let state = self.build_validation(previous.as_deref())?;
+        if let Some(demand) = self.demand.lock().unwrap().upgrade() {
+            if let Some(headers) = &self.headers {
+                state.retain_control(headers)?;
+            }
+            *demand.state.lock().unwrap() = Some(state.clone());
+        }
+        hirsel_intern::work::count(hirsel_intern::work::Counter::ValidationBaseBuilds);
         *inputs = None;
         *self.validation.lock().unwrap() = Some(state.clone());
         Ok(state)
@@ -689,7 +855,13 @@ impl SignatureSnapshot {
                 .into_iter()
                 .filter_map(|d| match self.signature(d)? {
                     Ok(s) => Some(Ok(self.public_views[&d]
-                        .get_or_init(|| self.view_of(d, &s, previous.and_then(|p| p.views.get(d))))
+                        .get_or_init(|| {
+                            self.view_of(
+                                d,
+                                &s,
+                                previous.and_then(|p| p.views.get(d).ok().flatten()),
+                            )
+                        })
                         .clone())),
                     Err(cause @ QueryError::Operational(_)) => {
                         Some(Err(hirsel_validate::ViewRefusal::Unreadable {
@@ -735,13 +907,14 @@ impl SignatureSnapshot {
                 {
                     return Ok(table);
                 }
+                let installed_views = members
+                    .iter()
+                    .filter(|d| admits(&d.path().0.package))
+                    .map(|d| public.get(*d).map(|v| v.cloned()))
+                    .collect::<Result<Vec<_>, _>>()?;
                 ViewTable::from_views(
                     t,
-                    views.chain(members.iter().filter_map(|d| {
-                        admits(&d.path().0.package)
-                            .then(|| public.get(*d).cloned())
-                            .flatten()
-                    })),
+                    views.chain(installed_views.into_iter().flatten()),
                     validated,
                     old,
                 )
@@ -849,6 +1022,7 @@ impl SignatureSnapshot {
                     cause,
                 })?;
             let state = Arc::new(ValidationState {
+                _memory: Mutex::default(),
                 _registration: self.cache_registration.lock().unwrap().clone(),
                 views,
                 bases,
@@ -1173,7 +1347,10 @@ impl SignatureSnapshot {
         if let Some(state) = self.validation.lock().unwrap().clone() {
             if let Some(own) = state.installed.get(&d.path().0.package) {
                 return match self.signature(d)? {
-                    Ok(_) => own.get(d).map(|v| Ok(v.identified().clone())),
+                    Ok(_) => match own.get(d) {
+                        Ok(view) => view.map(|v| Ok(v.identified().clone())),
+                        Err(refusal) => Some(Err(refusal.into())),
+                    },
                     Err(error) => Some(Err(error)),
                 };
             }
@@ -1184,7 +1361,10 @@ impl SignatureSnapshot {
             {
                 return Some(Ok(view.identified().clone()));
             }
-            let view = state.views.get(d);
+            let view = match state.views.get(d) {
+                Ok(view) => view,
+                Err(refusal) => return Some(Err(refusal.into())),
+            };
             return match self.signature(d)? {
                 Ok(_) => view.map(|v| Ok(v.identified().clone())),
                 Err(error) => Some(Err(error)),
@@ -1893,6 +2073,7 @@ mod tests {
                 .validation(&dependency)
                 .unwrap()
                 .view(app.definition)
+                .unwrap()
                 .is_none()
         );
         assert!(
@@ -1900,6 +2081,7 @@ mod tests {
                 .validation(&middle)
                 .unwrap()
                 .view(dep.definition)
+                .unwrap()
                 .is_some()
         );
         assert!(
@@ -1907,6 +2089,7 @@ mod tests {
                 .validation(&dependency)
                 .unwrap()
                 .view(core.definition)
+                .unwrap()
                 .is_some()
         );
         let extra = row(&application, "Extra", hirsel_types::Primitive::U8);
@@ -1950,6 +2133,7 @@ mod tests {
                 .validation(&middle)
                 .unwrap()
                 .view(app.definition)
+                .unwrap()
                 .is_some(),
             "incomplete package inputs retain full-world validation"
         );
@@ -1989,7 +2173,12 @@ mod tests {
             .unwrap()
         });
         assert!(allocation.live > 0);
-        assert!(allocation.live as u64 <= table.retained_control_bytes().unwrap());
+        assert!(
+            allocation.live as u64 <= table.retained_control_bytes().unwrap(),
+            "live={} admitted={}",
+            allocation.live,
+            table.retained_control_bytes().unwrap()
+        );
         drop(table);
         let source = build(&rows, BTreeMap::new());
         let installed = BTreeMap::from([(
@@ -2036,10 +2225,13 @@ mod tests {
                         assert!(Arc::ptr_eq(previous, &views));
                     }
                     shared = Some(views.clone());
-                    assert_eq!(views.view(row.definition).unwrap().digest(), expected);
+                    assert_eq!(
+                        views.view(row.definition).unwrap().unwrap().digest(),
+                        expected
+                    );
                     let other = &rows[usize::from(row.definition == rows[0].definition)];
                     assert_eq!(
-                        views.view(other.definition).unwrap().digest(),
+                        views.view(other.definition).unwrap().unwrap().digest(),
                         View::new(&types, other.clone(), None).digest()
                     );
                     assert!(views.universe_errors().1.is_empty());
@@ -2416,14 +2608,20 @@ extern "unused" fn unused()"#
         let state = first.validation_state().unwrap();
         assert!(Arc::ptr_eq(
             &product,
-            state.views.get(d).unwrap().identified()
+            state.views.get(d).unwrap().unwrap().identified()
         ));
-        assert_eq!(reflected, state.views.get(d).unwrap().digest());
+        assert_eq!(reflected, state.views.get(d).unwrap().unwrap().digest());
         let next = build(signature.clone(), Some(&first));
         let next_state = next.validation_state();
         assert!(Arc::ptr_eq(
             &product,
-            next_state.unwrap().views.get(d).unwrap().identified()
+            next_state
+                .unwrap()
+                .views
+                .get(d)
+                .unwrap()
+                .unwrap()
+                .identified()
         ));
 
         let mut changed = (*signature).clone();
@@ -2435,9 +2633,12 @@ extern "unused" fn unused()"#
         let changed_state = changed.validation_state().unwrap();
         assert!(!Arc::ptr_eq(
             &product,
-            changed_state.views.get(d).unwrap().identified()
+            changed_state.views.get(d).unwrap().unwrap().identified()
         ));
-        assert_ne!(reflected, changed_state.views.get(d).unwrap().digest());
+        assert_ne!(
+            reflected,
+            changed_state.views.get(d).unwrap().unwrap().digest()
+        );
         assert!(!changed_state.views.universe_errors().1.is_empty());
     }
 

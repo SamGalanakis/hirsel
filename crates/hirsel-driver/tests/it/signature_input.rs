@@ -896,7 +896,14 @@ fn hello_on_installed_std_answers_v_universe_questions_without_reading_std_rows(
             assert!(!snapshot.header_ready(unused), "V read an unused std row");
             assert!(!snapshot.header_ready(named), "V read an unused std row");
             // A view read demands that row, and not its unused sibling.
-            assert!(snapshot.validation(&hello).unwrap().view(named).is_some());
+            assert!(
+                snapshot
+                    .validation(&hello)
+                    .unwrap()
+                    .view(named)
+                    .unwrap()
+                    .is_some()
+            );
             assert!(snapshot.header_ready(named));
             assert!(!snapshot.header_ready(unused));
             // Oracle: V over each full table, every view identified afresh.
@@ -1005,7 +1012,10 @@ fn dependency_universe_summary_without_local_verifier_is_ignored() {
             .expect("remote store retains the planted summary bytes");
         assert_eq!(planted.as_ref(), forged_bytes.as_slice());
 
-        let old_domain = Arc::new(store::DirStore::new(dir.path().join("old-domain")));
+        let old_domain = Arc::new(
+            store::DirStore::new(dir.path().join("old-domain"))
+                .with_read_only_root(store::DirStore::installed_root().unwrap()),
+        );
         assert!(old_domain.verifier().is_some());
         old_domain.cache_product(
             address,

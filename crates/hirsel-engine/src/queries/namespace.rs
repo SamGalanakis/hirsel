@@ -3,6 +3,7 @@
 use super::*;
 use crate::{NativeRecordContext, NativeRecords};
 use hirsel_engine_store::{Domain, EntryKey, Reference};
+use std::sync::Mutex;
 pub(in crate::queries) mod reopen;
 
 const GENERATION: Domain = Domain {
@@ -62,6 +63,7 @@ pub struct NamespaceCapture {
     pub(crate) installation: ContentHash,
     retained: u64,
     admission: std::sync::OnceLock<NamespaceAdmission>,
+    validation: Mutex<Option<Arc<crate::snapshot::ValidationDemand>>>,
     consumer_scope: std::sync::OnceLock<ContentHash>,
     capture_inputs: CaptureInputs,
     pub(crate) operation: Arc<operation_inputs::OperationOwner>,
@@ -352,6 +354,14 @@ impl Manifest {
 }
 
 impl NamespaceCapture {
+    pub(crate) fn demand_validation(&self) -> Result<(), QueryError> {
+        let mut demand = self.validation.lock().unwrap();
+        if demand.is_none() {
+            *demand = Some(self.snapshot.demand_validation()?);
+        }
+        Ok(())
+    }
+
     fn same_sources(&self, sources: &SourceMap) -> bool {
         if !self.sources.anchors().eq(sources.anchors()) {
             return false;
@@ -1236,6 +1246,7 @@ impl QueryEngine {
             installation,
             retained,
             admission: std::sync::OnceLock::new(),
+            validation: Mutex::default(),
             consumer_scope: std::sync::OnceLock::new(),
             capture_inputs,
             operation: self.operation.clone(),
@@ -1689,6 +1700,28 @@ mod tests {
                 .unwrap(),
             );
             let before = pool.available_bytes();
+            let denied_bytes = hirsel_engine_admission::MemoryReservationPool::metadata_bytes() + 1;
+            let denied_budget = hirsel_engine_admission::ProcessBudget::new(denied_bytes);
+            let denied_pool = Arc::new(
+                hirsel_engine_admission::MemoryReservationPool::new(
+                    denied_budget.reserve(denied_bytes).unwrap(),
+                )
+                .ok()
+                .unwrap(),
+            );
+            let denied = headers.configure_source_backing(
+                Arc::new(Allowance(denied_pool)),
+                Arc::new(std::sync::Mutex::new(1)),
+            );
+            assert!(
+                capture.demand_validation().is_err(),
+                "an unadmitted demand must refuse"
+            );
+            assert!(
+                capture.validation.lock().unwrap().is_none(),
+                "refused admission publishes no demand"
+            );
+            drop(denied);
             let partition = headers.configure_source_backing(
                 Arc::new(Allowance(pool.clone())),
                 Arc::new(std::sync::Mutex::new(before)),
@@ -1714,7 +1747,44 @@ mod tests {
             assert!(retained < before, "the live source owns its syntax charge");
             let signature = capture.snapshot.signature(definition).unwrap().unwrap();
             let expected = hirsel_validate::View::new(&types, signature.clone(), None).digest();
-            capture.snapshot.package_universe(&package).unwrap();
+            let builds =
+                hirsel_intern::work::read(hirsel_intern::work::Counter::ValidationBaseBuilds);
+            let available = pool.available_bytes();
+            let (expected_universe, allocated) = crate::test_alloc::measured(|| {
+                capture.demand_validation().unwrap();
+                capture.snapshot.package_universe(&package).unwrap()
+            });
+            assert!(
+                allocated.live.max(0) as u64 <= available - pool.available_bytes(),
+                "live validation allocation {} exceeds admitted bytes {}",
+                allocated.live,
+                available - pool.available_bytes()
+            );
+            for _ in 0..4 {
+                let pressure = headers
+                    .validation_lease(pool.available_bytes() / 2)
+                    .unwrap();
+                while headers.evict() {}
+                let views = capture.snapshot.validation(&package).unwrap();
+                assert_eq!(views.view(definition).unwrap().unwrap().digest(), expected);
+                assert_eq!(views.universe_errors().1, &[]);
+                assert_eq!(
+                    capture.snapshot.package_universe(&package).unwrap(),
+                    expected_universe
+                );
+                drop(pressure);
+            }
+            assert_eq!(
+                hirsel_intern::work::read(hirsel_intern::work::Counter::ValidationBaseBuilds)
+                    - builds,
+                1
+            );
+            let alias = capture.snapshot.validation(&package).unwrap();
+            let identity = capture
+                .snapshot
+                .representation_identity(definition)
+                .unwrap()
+                .unwrap();
             {
                 let _pinned = definitions
                     .iter()
@@ -1729,7 +1799,7 @@ mod tests {
                         .snapshot
                         .validation_with(&package, signature.clone())
                         .unwrap();
-                    assert_eq!(views.view(definition).unwrap().digest(), expected);
+                    assert_eq!(views.view(definition).unwrap().unwrap().digest(), expected);
                     assert!(views.universe_errors().1.is_empty());
                 }
                 assert_eq!(
@@ -1752,15 +1822,57 @@ mod tests {
             );
             drop(capture);
             drop(headers);
+            assert_eq!(alias.view(definition).unwrap().unwrap().digest(), expected);
+            assert!(
+                pool.available_bytes() < before,
+                "the escaped validation alias keeps its charge"
+            );
+            drop(alias);
             assert!(
                 pool.available_bytes() < before,
                 "the raw signature retains its payload lease"
             );
             drop(signature);
+            assert_eq!(identity.digest(), expected);
+            assert!(
+                pool.available_bytes() < before,
+                "an escaped identity retains its own control charge"
+            );
+            drop(identity);
             assert_eq!(
                 pool.available_bytes(),
                 before,
                 "the final payload lease releases its reservation"
+            );
+            let (mut changed, _) = indexed(Arc::new(MemStore::default()));
+            changed.adapters.signature = Some(Arc::new(Header));
+            let file = changed
+                .sources
+                .add(
+                    "changed.hir",
+                    "pub fn changed()->u8{3u8}
+"
+                    .into(),
+                )
+                .unwrap();
+            changed.index_source(file, &default_context()).unwrap();
+            let changed_definitions = changed.source_paths();
+            let changed_capture = changed
+                .capture_namespace(&changed_definitions, &[], 8 << 20)
+                .unwrap();
+            assert_eq!(
+                hirsel_intern::work::read(hirsel_intern::work::Counter::ValidationBaseBuilds)
+                    - builds,
+                1
+            );
+            assert_ne!(
+                changed_capture.snapshot.package_universe(&package).unwrap(),
+                expected_universe
+            );
+            assert_eq!(
+                hirsel_intern::work::read(hirsel_intern::work::Counter::ValidationBaseBuilds)
+                    - builds,
+                2
             );
         });
     }

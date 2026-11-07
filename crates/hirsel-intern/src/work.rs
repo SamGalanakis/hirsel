@@ -114,6 +114,8 @@ pub enum Counter {
     ExecutionReplayComputations,
     ReplayArtifactDecodes,
     SnapshotMembershipBuilds,
+    /// Successful base validation constructions for exact immutable snapshots.
+    ValidationBaseBuilds,
     ValidationReadComparisons,
     ValidationOverlayConstructions,
     NamespaceConstructions,

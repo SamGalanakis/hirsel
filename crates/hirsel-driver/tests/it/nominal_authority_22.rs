@@ -157,7 +157,7 @@ fn nominal_authority_22_owner_views_and_client_access() {
                 let views = snapshot
                     .validation(&path(package, "probe").0.package)
                     .unwrap();
-                let input = views.view(public.definition).unwrap();
+                let input = views.view(public.definition).unwrap().unwrap();
                 let view = input.signature().unwrap();
                 assert!(
                     check_view(program.engine.types(), public.definition, &view, &*views)

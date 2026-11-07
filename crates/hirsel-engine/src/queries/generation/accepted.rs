@@ -296,6 +296,7 @@ impl AcceptedFrontRegistration {
                         .validation(&definition.0.package)
                         .ok()?
                         .view(*id)
+                        .ok()?
                         .map_or_else(ContentHash::default, |view| view.digest().0),
                 ),
                 ReadKey::UniverseErrors => Some(

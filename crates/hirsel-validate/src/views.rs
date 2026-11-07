@@ -7,6 +7,7 @@
 //! their private views, and, for compile-time evaluation, a materialized
 //! owner's signature in place of its declared one. Only the replaced views and
 //! the verdicts that read them are checked again.
+mod memory;
 use crate::{
     SignatureLookup, UniverseErrors, VRead, ValidatedSignatures, ValidationDigest, ViewRefusal,
     ViewVerdict, Violation,
@@ -96,31 +97,72 @@ fn combined(a: Option<HeapRole>, b: Option<HeapRole>) -> Result<Option<HeapRole>
 
 /// Reads the view of one installed definition when V first asks for it.
 pub trait ViewSource: Send + Sync {
-    fn view(&self, d: DefId) -> Option<View>;
+    fn view(&self, d: DefId) -> Result<Option<View>, ViewRefusal>;
+    fn retained_control_bytes(&self) -> Option<u64>;
 }
 /// The views of read-only installed packages, by definition. Each is
 /// identified on its first read, so a universe that holds them reads only
 /// the rows V's verdicts and lookups name.
+#[derive(Default)]
+struct InstalledCell {
+    value: OnceLock<View>,
+    build: std::sync::Mutex<()>,
+}
 pub struct InstalledViews {
-    cells: DefMap<OnceLock<Option<View>>>,
+    cells: DefMap<InstalledCell>,
     source: Box<dyn ViewSource>,
+    memory: std::sync::RwLock<Option<Arc<dyn crate::ValidationMemory>>>,
+    retention: crate::memory::ControlRetention,
 }
 impl InstalledViews {
     pub fn new(members: impl IntoIterator<Item = DefId>, source: Box<dyn ViewSource>) -> Self {
         Self {
-            cells: members.into_iter().map(|d| (d, OnceLock::new())).collect(),
+            cells: members
+                .into_iter()
+                .map(|d| (d, InstalledCell::default()))
+                .collect(),
             source,
+            memory: std::sync::RwLock::new(None),
+            retention: Default::default(),
         }
+    }
+    fn retain_control(&self, memory: &Arc<dyn crate::ValidationMemory>) -> Result<(), ViewRefusal> {
+        let mut admitted = self.memory.write().unwrap();
+        self.retention.retain(&**memory, || {
+            crate::memory::arc::<Self>()
+                .checked_add(crate::memory::map::<DefId, InstalledCell>(
+                    self.cells.capacity(),
+                )?)?
+                .checked_add(self.source.retained_control_bytes()?)
+        })?;
+        *admitted = Some(memory.clone());
+        for view in self.cells.values().filter_map(|cell| cell.value.get()) {
+            view.input.retain_control(&**memory)?;
+        }
+        Ok(())
     }
     pub fn contains(&self, d: DefId) -> bool {
         self.cells.contains_key(&d)
     }
     /// `d`'s view, identified on its first read.
-    pub fn get(&self, d: DefId) -> Option<&View> {
-        self.cells
-            .get(&d)?
-            .get_or_init(|| self.source.view(d))
-            .as_ref()
+    pub fn get(&self, d: DefId) -> Result<Option<&View>, ViewRefusal> {
+        let Some(cell) = self.cells.get(&d) else {
+            return Ok(None);
+        };
+        if cell.value.get().is_none() {
+            let _build = cell.build.lock().unwrap();
+            if cell.value.get().is_none() {
+                let memory = self.memory.read().unwrap();
+                let Some(view) = self.source.view(d)? else {
+                    return Ok(None);
+                };
+                if let Some(memory) = &*memory {
+                    view.input.retain_control(&**memory)?;
+                }
+                let _ = cell.value.set(view);
+            }
+        }
+        Ok(cell.value.get())
     }
 }
 /// The installed part of a universe: views read on demand, and the
@@ -195,7 +237,7 @@ pub struct ViewTable {
     input_digest: OnceLock<ContentHash>,
     stamp: EnvironmentStamp,
     installed: Option<Installed>,
-    _retention: Option<Arc<dyn Send + Sync>>,
+    _retention: crate::memory::ControlRetention,
 }
 impl ViewTable {
     /// The table of `signatures` (one per path), reusing the digests of
@@ -212,7 +254,7 @@ impl ViewTable {
             t,
             signatures.into_iter().map(|signature| {
                 let d = signature.definition;
-                View::new(t, signature, previous.and_then(|p| p.get(d)))
+                View::new(t, signature, previous.and_then(|p| p.get(d).ok().flatten()))
             }),
             store,
             old,
@@ -271,7 +313,7 @@ impl ViewTable {
             errors: UniverseErrors::default(),
             input_digest: OnceLock::new(),
             stamp: EnvironmentStamp::new(t, store),
-            _retention: None,
+            _retention: Default::default(),
         };
         table.heap_evidence = crate::input::prepare_heap(&table, store, old)?;
         let verdicts: Vec<_> = table
@@ -300,56 +342,37 @@ impl ViewTable {
         if self.installed.is_some() || !self.errors.errors.is_empty() {
             return None;
         }
-        let mut bytes = (size_of::<Self>() + 2 * size_of::<usize>() + 256) as u64;
-        for allocated in [
-            self.views.capacity().checked_mul(size_of::<View>())?,
-            self.verdicts
-                .capacity()
-                .checked_mul(size_of::<Arc<ViewVerdict>>())?,
-            self.index
-                .capacity()
-                .checked_mul(3 * size_of::<(DefId, u32)>() + 1)?,
-            self.readers
-                .capacity()
-                .checked_mul(3 * size_of::<(DefId, Vec<u32>)>() + 1)?,
-            self.heap_readers.capacity().checked_mul(size_of::<u32>())?,
-        ] {
-            bytes = bytes.checked_add(allocated as u64)?;
-        }
-        for readers in self.readers.values() {
-            bytes = bytes.checked_add(readers.capacity().checked_mul(size_of::<u32>())? as u64)?;
-        }
+        let mut bytes = self.table_control_bytes()?;
         for verdict in &self.verdicts {
-            bytes =
-                bytes.checked_add((size_of::<ViewVerdict>() + 2 * size_of::<usize>()) as u64)?;
-            bytes = bytes
-                .checked_add(verdict.reads.capacity().checked_mul(size_of::<VRead>())? as u64)?;
+            bytes = bytes.checked_add(verdict.retained_verdict_bytes()?)?;
         }
-        for verdict in &self.verdicts {
-            bytes = bytes.checked_add(crate::input::read_payload_bytes(&verdict.reads)?)?;
-        }
-        bytes = bytes.checked_add(self.heap_evidence.retained_payload_bytes()?)?;
         for view in &self.views {
-            bytes = bytes.checked_add((size_of::<crate::IdentifiedSignature>() + 128) as u64)?;
-            if let Some(heap) = view.input.heap() {
-                bytes = bytes.checked_add(heap_bytes(heap)?)?;
-            }
-        }
-        if let Some(heap) = &self.heap_role {
-            bytes = bytes.checked_add(heap_bytes(heap)?)?;
+            bytes = bytes.checked_add(view.input.retained_identity_bytes()?)?;
         }
         Some(bytes)
     }
     /// Keep the host's reservation with every owner of the shared table.
-    pub fn retain_owner(mut self, owner: Arc<dyn Send + Sync>) -> Self {
-        self._retention = Some(owner);
+    pub fn retain_owner(self, owner: Arc<dyn Send + Sync>) -> Self {
+        for view in &self.views {
+            view.input.retain_owner(owner.clone());
+        }
+        for verdict in &self.verdicts {
+            verdict.retention.set(owner.clone());
+        }
+        self._retention.set(owner);
         self
     }
-    pub fn get(&self, d: DefId) -> Option<&View> {
+    pub fn get(&self, d: DefId) -> Result<Option<&View>, ViewRefusal> {
         match self.index.get(&d) {
-            Some(&i) => Some(&self.views[i as usize]),
-            None => self.installed.as_ref()?.views.get(d),
+            Some(&i) => Ok(Some(&self.views[i as usize])),
+            None => match &self.installed {
+                Some(installed) => installed.views.get(d),
+                None => Ok(None),
+            },
         }
+    }
+    fn contains(&self, d: DefId) -> bool {
+        self.index.contains_key(&d) || self.installed.as_ref().is_some_and(|i| i.views.contains(d))
     }
     /// Identity of all inputs a private evaluation overlay can observe. This
     /// includes valid rows: an overlay can invalidate a dependent declaration
@@ -404,8 +427,8 @@ impl ViewTable {
     }
 }
 impl SignatureLookup for ViewTable {
-    fn view(&self, d: DefId) -> Option<crate::ViewInput<'_>> {
-        self.get(d).map(|v| v.input.input())
+    fn view(&self, d: DefId) -> Result<Option<crate::ViewInput<'_>>, crate::ViewRefusal> {
+        Ok(self.get(d)?.map(|v| v.input.input()))
     }
     fn heap_role(&self) -> Result<Option<HeapRole>, ViewRefusal> {
         Ok(self.heap_role.clone())
@@ -559,7 +582,7 @@ pub struct PackageViews {
     input_digest: OnceLock<ContentHash>,
     stamp: EnvironmentStamp,
     origin_input: ContentHash,
-    _retention: Option<Arc<dyn Send + Sync>>,
+    _retention: crate::memory::ControlRetention,
 }
 impl PackageViews {
     /// The universe `base` with `replacements` in place of (or beside) its views.
@@ -614,34 +637,15 @@ impl PackageViews {
         {
             return None;
         }
-        let mut bytes = (size_of::<Self>() + 2 * size_of::<usize>()) as u64;
-        bytes = bytes.checked_add(
-            (size_of::<PreparedRows<View>>()
-                + size_of::<PreparedRows<Arc<ViewVerdict>>>()
-                + 4 * size_of::<usize>()) as u64,
-        )?;
-        bytes = bytes.checked_add((self.replaced.rows.len() as u64).checked_mul(
-            (3 * size_of::<(DefId, View)>() + size_of::<crate::IdentifiedSignature>() + 256) as u64,
-        )?)?;
-        bytes = bytes.checked_add((self.verdicts.rows.len() as u64).checked_mul(
-            (3 * size_of::<(DefId, Arc<ViewVerdict>)>() + size_of::<ViewVerdict>() + 256) as u64,
-        )?)?;
-        bytes = bytes.checked_add(
-            ((self.replaced.removed.len() + self.verdicts.removed.len()) as u64)
-                .checked_mul((3 * size_of::<(DefId, ())>() + 1) as u64)?,
-        )?;
+        let mut bytes = self
+            .package_control_bytes()?
+            .checked_add(self.replaced.layer_control_bytes()?)?
+            .checked_add(self.verdicts.layer_control_bytes()?)?;
         for verdict in self.verdicts.rows.values() {
-            bytes = bytes.checked_add((verdict.reads.capacity() * size_of::<VRead>()) as u64)?;
-            bytes = bytes.checked_add(crate::input::read_payload_bytes(&verdict.reads)?)?;
-        }
-        bytes = bytes.checked_add(self.heap_evidence.retained_payload_bytes()?)?;
-        if let Some(heap) = &self.heap_role {
-            bytes = bytes.checked_add(heap_bytes(heap)?)?;
+            bytes = bytes.checked_add(verdict.retained_verdict_bytes()?)?;
         }
         for view in self.replaced.rows.values() {
-            if let Some(heap) = view.input.heap() {
-                bytes = bytes.checked_add(heap_bytes(heap)?)?;
-            }
+            bytes = bytes.checked_add(view.input.retained_identity_bytes()?)?;
         }
         Some(bytes)
     }
@@ -654,10 +658,16 @@ impl PackageViews {
             .filter_map(|view| view.input.held_signature())
     }
     /// Retain the host's existing reservation with every shared overlay owner.
-    pub fn retain_owner(mut self, owner: Arc<dyn Send + Sync>) -> Self {
+    pub fn retain_owner(self, owner: Arc<dyn Send + Sync>) -> Self {
         let _ = self.replaced.retention.set(owner.clone());
         let _ = self.verdicts.retention.set(owner.clone());
-        self._retention = Some(owner);
+        for view in self.replaced.rows.values() {
+            view.input.retain_owner(owner.clone());
+        }
+        for verdict in self.verdicts.rows.values() {
+            verdict.retention.set(owner.clone());
+        }
+        self._retention.set(owner);
         self
     }
     /// This universe's summary, including its private views' effects.
@@ -685,7 +695,7 @@ impl PackageViews {
                 .chain(
                     self.replaced
                         .values()
-                        .filter(|view| self.base.get(view.d).is_none()),
+                        .filter(|view| !self.base.contains(view.d)),
                 );
             universe_input(
                 views,
@@ -722,7 +732,7 @@ impl PackageViews {
             .iter()
             .map(|v| replaced.get(&v.d).unwrap_or(v))
             .collect();
-        order.extend(replaced.values().filter(|v| base.get(v.d).is_none()));
+        order.extend(replaced.values().filter(|v| !base.contains(v.d)));
         order.sort_by(|a, b| a.d.path().cmp(b.d.path()));
         let heap = combined(
             heap_role(order.iter().copied())?,
@@ -764,7 +774,7 @@ impl PackageViews {
         let order: Vec<DefId> = order.iter().map(|v| v.d).collect();
         let mut views = Self {
             origin_input: base.input_digest(),
-            _retention: None,
+            _retention: Default::default(),
             base,
             replaced,
             verdicts: PreparedRows::new(
@@ -812,9 +822,9 @@ impl PackageViews {
     }
 }
 impl SignatureLookup for PackageViews {
-    fn view(&self, d: DefId) -> Option<crate::ViewInput<'_>> {
+    fn view(&self, d: DefId) -> Result<Option<crate::ViewInput<'_>>, crate::ViewRefusal> {
         match self.replaced.get(&d) {
-            Some(v) => Some(v.input.input()),
+            Some(v) => Ok(Some(v.input.input())),
             None => self.base.view(d),
         }
     }
@@ -924,7 +934,7 @@ impl std::ops::Deref for OwnedEnvironment {
     }
 }
 impl SignatureLookup for OwnedEnvironment {
-    fn view(&self, d: DefId) -> Option<crate::ViewInput<'_>> {
+    fn view(&self, d: DefId) -> Result<Option<crate::ViewInput<'_>>, crate::ViewRefusal> {
         self.views.view(d)
     }
     fn heap_role(&self) -> Result<Option<HeapRole>, ViewRefusal> {

@@ -1625,6 +1625,7 @@ impl FrontBodyQueries {
                 .validation(package)
                 .ok()?
                 .view(id)
+                .ok()?
                 .map_or_else(ContentHash::default, |input| input.digest().0),
             ReadKey::ValidationUniverse(package) => self
                 .namespace
@@ -3700,6 +3701,7 @@ impl QueryEngine {
         let header_allowance = snapshot
             .header_products()
             .map(|headers| headers.configure_source_backing(backing.clone(), retention.clone()));
+        namespace.demand_validation()?;
         let namespace_sources = namespace.sources.clone();
         Ok(Arc::new(FrontBodyQueries {
             demand: Default::default(),

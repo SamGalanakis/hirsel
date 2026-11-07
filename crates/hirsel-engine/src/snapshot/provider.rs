@@ -96,7 +96,7 @@ impl<'a> FrozenProvider<'a> {
         let digest = self
             .snapshot
             .validation(&self.owner)?
-            .view(d)
+            .view(d)?
             .map(|input| input.digest());
         self.reads.record(
             ReadKey::ValidationView(d),

@@ -485,12 +485,35 @@ fn dfa_search(re: Regex, subject: Subject, start: u64, haystack: Bytes, mut cach
     // byte loop. Unknown, match, stop and start tags return to slow handling.
     if !scalar {
       let begin = cursor
+      // regex-automata hybrid/search.rs:189-227: four ordered, untagged
+      // transitions per loop. Leave each tagged/unknown/Unicode byte unconsumed.
       while cursor < size {
         let byte: u64 = core@1/int.widen(bytes[cursor])
         if byte >= 128 { break }
         let hit = cache.data[state + 3 + cache.data[cache.classes + byte]]
         if hit == 0 || hit % 8 != 0 { break }
         state = hit / 8
+        cursor += 1
+        if !(cursor < size) { break }
+        let byte1: u64 = core@1/int.widen(bytes[cursor])
+        if byte1 >= 128 { break }
+        let hit1 = cache.data[state + 3 + cache.data[cache.classes + byte1]]
+        if hit1 == 0 || hit1 % 8 != 0 { break }
+        state = hit1 / 8
+        cursor += 1
+        if !(cursor < size) { break }
+        let byte2: u64 = core@1/int.widen(bytes[cursor])
+        if byte2 >= 128 { break }
+        let hit2 = cache.data[state + 3 + cache.data[cache.classes + byte2]]
+        if hit2 == 0 || hit2 % 8 != 0 { break }
+        state = hit2 / 8
+        cursor += 1
+        if !(cursor < size) { break }
+        let byte3: u64 = core@1/int.widen(bytes[cursor])
+        if byte3 >= 128 { break }
+        let hit3 = cache.data[state + 3 + cache.data[cache.classes + byte3]]
+        if hit3 == 0 || hit3 % 8 != 0 { break }
+        state = hit3 / 8
         cursor += 1
       }
       cache.searched += cursor - begin
@@ -552,12 +575,35 @@ fn dfa_search(re: Regex, subject: Subject, start: u64, haystack: Bytes, mut cach
   while true {
     if !scalar {
       let begin = cursor
+      // regex-automata hybrid/search.rs:189-227: four ordered, untagged
+      // transitions per loop. Leave each tagged/unknown/Unicode byte unconsumed.
       while cursor > start {
         let byte: u64 = core@1/int.widen(bytes[cursor - 1])
         if byte >= 128 { break }
         let hit = cache.data[state + 3 + cache.data[cache.classes + byte]]
         if hit == 0 || hit % 8 != 0 { break }
         state = hit / 8
+        cursor -= 1
+        if !(cursor > start) { break }
+        let byte1: u64 = core@1/int.widen(bytes[cursor - 1])
+        if byte1 >= 128 { break }
+        let hit1 = cache.data[state + 3 + cache.data[cache.classes + byte1]]
+        if hit1 == 0 || hit1 % 8 != 0 { break }
+        state = hit1 / 8
+        cursor -= 1
+        if !(cursor > start) { break }
+        let byte2: u64 = core@1/int.widen(bytes[cursor - 1])
+        if byte2 >= 128 { break }
+        let hit2 = cache.data[state + 3 + cache.data[cache.classes + byte2]]
+        if hit2 == 0 || hit2 % 8 != 0 { break }
+        state = hit2 / 8
+        cursor -= 1
+        if !(cursor > start) { break }
+        let byte3: u64 = core@1/int.widen(bytes[cursor - 1])
+        if byte3 >= 128 { break }
+        let hit3 = cache.data[state + 3 + cache.data[cache.classes + byte3]]
+        if hit3 == 0 || hit3 % 8 != 0 { break }
+        state = hit3 / 8
         cursor -= 1
       }
       cache.searched += begin - cursor

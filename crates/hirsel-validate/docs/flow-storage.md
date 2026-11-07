@@ -63,3 +63,22 @@ no structural equality is replaced by unchecked pointer identity. The existing
 projected-transfer law checks the independent uniqueness, crossing and lifetime
 tables while changing these facts, and bounds repeated unchanged transfers to
 one computation.
+
+Flow propagates an unrefined output by reference, and transfers its final edge
+by ownership. Switch/match discrimination and loop expiration request a private
+snapshot only when they modify the edge. Existing entries join the borrowed
+facts in place; a new final entry owns the output. This follows rustc
+[`framework/mod.rs:359-375`](https://github.com/rust-lang/rust/blob/a7c37f9f0ee5e93396106e9de20f4a86b4154e63/compiler/rustc_mir_dataflow/src/framework/mod.rs#L359)
+and [`direction.rs:175-215`](https://github.com/rust-lang/rust/blob/a7c37f9f0ee5e93396106e9de20f4a86b4154e63/compiler/rustc_mir_dataflow/src/framework/direction.rs#L175).
+Hirsel additionally moves outputs into newly reached entries, and retains its
+separate executable/audit classes and origin-expiration effects.
+
+Quiet flow keeps the returns computed on the last fixed-point visit of each
+executable return block. Every changed entry schedules another visit. Capture
+snapshots already accumulate their joins during those visits. Replaying the
+same converged entries without reporting would only recompute these outputs.
+Reporting still transfers every converged entry in arena order, as rustc's
+[`ResultsVisitor`](https://github.com/rust-lang/rust/blob/a7c37f9f0ee5e93396106e9de20f4a86b4154e63/compiler/rustc_mir_dataflow/src/framework/visitor.rs#L30)
+reconstructs intermediate states from block entries. No intermediate iteration
+emits diagnostics. The loop-return law checks the independently known loss of
+uniqueness after a copy and bounds quiet transfers to fixed-point visits.

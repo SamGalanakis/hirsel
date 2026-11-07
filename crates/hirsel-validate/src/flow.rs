@@ -1600,6 +1600,9 @@ impl Checker<'_, '_> {
     }
 }
 
+#[cfg(test)]
+thread_local! { static FLOW_TRANSFERS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) }; }
+
 impl Checker<'_, '_> {
     pub(super) fn flow(&mut self, captures: &[super::flow_origins::CapturedOrigin], report: bool) {
         self.flow_with(captures, report, None);
@@ -1696,18 +1699,33 @@ impl Checker<'_, '_> {
         // nodes until the same monotone fixed point, independently per audit class.
         let mut pending =
             BTreeSet::from([(rank[self.body.entry.0 as usize], self.body.entry.0, 0)]);
+        self.returned.clear();
         while let Some((_, block, class)) = pending.pop_first() {
             let block = BlockId(block);
             work::count(Counter::ValidateFlowSteps);
             let mut state = incoming[block.0 as usize][class].clone().unwrap();
             self.transfer(&model, &mut state, block, false);
-            for &target in &graph[block.0 as usize] {
+            let targets = &graph[block.0 as usize];
+            let tagged = matches!(
+                self.body.blocks[block.0 as usize].terminator,
+                Terminator::Match { .. } | Terminator::Switch { .. }
+            );
+            let mut output = Some(state);
+            // rustc a7c37f9f framework/mod.rs:359-375 borrows the propagated
+            // state. direction.rs:196-215 copies only refined edges and moves
+            // the last one. A fresh final target can own our output as well.
+            for (index, &target) in targets.iter().enumerate() {
                 let target = BlockId(target as u32);
-                let mut edge = state.clone();
-                if !self.tag_edge(&mut edge, block, target) {
+                let mut edge = if index + 1 == targets.len() {
+                    std::borrow::Cow::Owned(output.take().unwrap())
+                } else {
+                    std::borrow::Cow::Borrowed(output.as_ref().unwrap())
+                };
+                if tagged && !self.tag_edge(edge.to_mut(), block, target) {
                     continue;
                 }
                 if let Some(roots) = loop_expirations.get(&(block.0, target.0)) {
+                    let edge = edge.to_mut();
                     edge.widen_cursors(&model, self.body);
                     for origin in roots {
                         edge.expire_origin(origin);
@@ -1717,7 +1735,7 @@ impl Checker<'_, '_> {
                 let changed = if let Some(previous) = &mut incoming[target.0 as usize][class] {
                     previous.join(&edge, &model)
                 } else {
-                    incoming[target.0 as usize][class] = Some(edge);
+                    incoming[target.0 as usize][class] = Some(edge.into_owned());
                     true
                 };
                 if changed {
@@ -1725,10 +1743,16 @@ impl Checker<'_, '_> {
                 }
             }
         }
-        self.returned.clear();
-        for (b, classes) in incoming.into_iter().enumerate() {
-            for mut state in classes.into_iter().flatten() {
-                self.transfer(&model, &mut state, BlockId(b as u32), report);
+        // Every changed executable entry schedules its block again, including
+        // Return blocks. Their last transfer already overwrote `returned` with
+        // the converged value. Captures accumulate the same joins during solve.
+        // Quiet queries need no duplicate replay. Reporting still visits each
+        // converged entry in arena order, like rustc's ResultsVisitor.
+        if report {
+            for (b, classes) in incoming.into_iter().enumerate() {
+                for mut state in classes.into_iter().flatten() {
+                    self.transfer(&model, &mut state, BlockId(b as u32), true);
+                }
             }
         }
         if let Some(started) = started {
@@ -4925,6 +4949,8 @@ impl Checker<'_, '_> {
         }
     }
     fn transfer(&mut self, model: &Model, state: &mut State, block_id: BlockId, report: bool) {
+        #[cfg(test)]
+        FLOW_TRANSFERS.with(|n| n.set(n.get() + 1));
         self.site.block = Some(block_id);
         let block = &self.body.blocks[block_id.0 as usize];
         for (i, instruction) in block.instructions.iter().enumerate() {

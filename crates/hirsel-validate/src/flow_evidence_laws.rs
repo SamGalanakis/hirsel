@@ -969,3 +969,78 @@ fn derived_cleanup_is_rebuilt_from_rows_instead_of_trusting_cached_roots() {
         assert_eq!(rebuilt[2], vec![1]);
     });
 }
+
+#[test]
+fn quiet_flow_keeps_the_last_loop_return_without_a_second_transfer_pass() {
+    use crate::support::{Table, drop, take, ty};
+    use hirsel_types::Uniqueness;
+
+    for share in [false, true] {
+        let mut f = Fixture::unit();
+        let root = param(&mut f, TypeKind::Primitive(Primitive::String));
+        let mut row = interner().row(f.body().places[root as usize].ty).clone();
+        row.modes.uniqueness = Uniqueness::Unique;
+        let unique = f.definition.types.push(row);
+        f.body().locals[root as usize].ty = unique;
+        f.body().places[root as usize].ty = unique;
+        let condition = param(&mut f, TypeKind::Primitive(Primitive::Bool));
+        let alias = f.slot(TypeKind::Primitive(Primitive::String), Storage::Local);
+        let cleanup = f.cleanup(vec![drop(root)]);
+        let mut feedback = vec![];
+        if share {
+            f.assign(alias, Rvalue::Use(copy(root)), cleanup);
+            feedback.push(f.body().blocks[0].instructions.pop().unwrap());
+            feedback.push(inst(
+                InstructionKind::Drop {
+                    place: PlaceId(alias),
+                    if_live: false,
+                },
+                cleanup,
+            ));
+        }
+        f.body().blocks[0].terminator = Terminator::Goto(BlockId(1));
+        f.body().blocks.extend([
+            block(
+                vec![],
+                Terminator::Branch {
+                    condition: copy(condition),
+                    yes: BlockId(2),
+                    no: BlockId(3),
+                },
+            ),
+            block(feedback, Terminator::Goto(BlockId(1))),
+            block(
+                vec![],
+                Terminator::Return {
+                    value: take(root),
+                    cleanup: CleanupId(0),
+                },
+            ),
+        ]);
+        f.body().result = f
+            .definition
+            .types
+            .push(ty(TypeKind::Primitive(Primitive::String)));
+        owner_sig(&mut f, &[PassingMode::Take, PassingMode::Borrow]);
+        f.valid();
+        with_model(&f, |checker, _, _| {
+            let steps = work::read(Counter::ValidateFlowSteps);
+            let transfers = FLOW_TRANSFERS.with(std::cell::Cell::get);
+            checker.flow(&[], false);
+            let steps = work::read(Counter::ValidateFlowSteps) - steps;
+            let transfers = FLOW_TRANSFERS.with(std::cell::Cell::get) - transfers;
+            let expected = if share {
+                Uniqueness::Aliased
+            } else {
+                Uniqueness::Unique
+            };
+            // Zero loop iterations retain one owner. Any iteration copies it;
+            // dropping that copy does not restore deep uniqueness (MODE-2).
+            assert_eq!(checker.returned[&3].modes.uniqueness, expected);
+            assert_eq!(transfers, steps, "quiet flow replayed converged blocks");
+            checker.flow(&[], true);
+            assert_eq!(checker.returned[&3].modes.uniqueness, expected);
+            assert!(checker.errors.is_empty(), "{:?}", checker.errors);
+        });
+    }
+}

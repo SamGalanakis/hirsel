@@ -129,8 +129,6 @@ pub enum Counter {
     ValidationRetentionRefusals,
     /// Owned definition paths copied by source inventory enumeration.
     SourcePathCopies,
-    /// Front observation rows visited by full-table accounting.
-    FrontSlotCensusRows,
     /// Cached dependency-node inspections.
     CacheValidationRows,
 }

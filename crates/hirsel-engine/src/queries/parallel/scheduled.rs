@@ -1000,7 +1000,6 @@ impl FrontBodyQueries {
             weight.tree::<crate::memo::MemoKey, ()>(clean.len());
         }
         for slot in slots.values() {
-            hirsel_intern::work::count(hirsel_intern::work::Counter::FrontSlotCensusRows);
             let observations = match slot {
                 FrontSlot::Archived(archived) => Some(&archived.observations),
                 FrontSlot::Live { observations, .. } => observations.as_ref(),

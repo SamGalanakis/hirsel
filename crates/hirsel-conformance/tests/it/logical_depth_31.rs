@@ -884,16 +884,25 @@ fn optimized_inlining_keeps_the_leaf_invocation_at_full_foreground_depth() {
             &std::env::temp_dir().join("hirsel-logical-depth-31"),
         )
         .unwrap();
-        for (name, n, rules) in [
-            ("inline-leaf-exact", 1021, &[][..]),
-            ("inline-leaf-over", 1022, &["LANG-10"][..]),
+        let once =
+            "fn leaf()->u64 {7u64}\nfn f(n:u64)->u64 {if n==0u64 {leaf()}else{1u64+f(n-1u64)}}";
+        let siblings = "fn leaf()->u64 {7u64}\nfn f(n:u64)->u64 {if n==0u64 {leaf()}else{u64.wrapping_add(f(n-1u64),leaf())}}";
+        for (name, n, rules, body, total) in [
+            ("inline-leaf-exact", 1021, &[][..], once, 1028),
+            ("inline-leaf-over", 1022, &["LANG-10"][..], once, 0),
+            ("recursive-siblings-exact", 1021, &[][..], siblings, 7154),
+            (
+                "recursive-siblings-over",
+                1022,
+                &["LANG-10"][..],
+                siblings,
+                0,
+            ),
         ] {
+            // main + n+1 f activations + leaf = n+3. Sibling leaf calls
+            // must see the restored parent count, on every return.
             let source = format!(
-                r#"
-fn leaf()->u64 {{7u64}}
-fn f(n:u64)->u64 {{if n==0u64 {{leaf()}}else{{1u64+f(n-1u64)}}}}
-pub fn main()->Result[(),()] {{let _=f({n}u64);Ok(())}}
-"#
+                "{body}\npub fn main()->Result[(),()] {{let value=f({n}u64);failure.check(value=={total}u64,TextInvariant());Ok(())}}"
             );
             let result = native::run_source(
                 name,

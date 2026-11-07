@@ -497,7 +497,8 @@ impl<'m, 'a> FnEmitter<'m, 'a> {
                 self.module.const_int(i16_ty, FOREGROUND_LIMIT.into()),
             ),
         };
-        // Repeated compiled calls can amortize keeping the entry count live.
+        // Repeated compiled calls and self recursion amortize keeping the entry
+        // count live. Every child retires to this count, on success and failure.
         // Primitives can inline to short memory operations; do not carry their
         // count across a loop just to replace its local updates.
         let successors: Vec<_> = self
@@ -536,7 +537,15 @@ impl<'m, 'a> FnEmitter<'m, 'a> {
                 .any(|index| !self.room.enters.contains(index))
         });
         let specialized = self.foreground_calls.is_some() || self.foreground_entry.is_some();
-        let cell = if specialized && repeated {
+        let recursive = self.unit.tables.calls.iter().any(|call| {
+            let Callee::Direct(symbol) = call.callee else {
+                return false;
+            };
+            let symbol = &self.unit.tables.symbols[symbol.index()];
+            symbol.instance == Some(self.unit.header.instance)
+                && symbol.definition == self.unit.header.definition
+        });
+        let cell = if specialized && (repeated || recursive) {
             let count = b.load_access(i16_ty, at, 2, Access::Depth);
             let full = b.icmp(IntPredicate::Uge, count, limit);
             CounterCell::Snapshot { at, count, full }

@@ -3947,6 +3947,7 @@ mod malformed_tests {
             &hirsel_validate::SignatureMap::new(engine.types.clone()),
             ContentHash::default(),
             Some(&hirsel_validate::VerifierCache::default()),
+            &mut vec![],
         )
         .unwrap();
         assert!(report.violations.is_empty(), "{:?}", report.violations);

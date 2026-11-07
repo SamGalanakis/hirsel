@@ -236,7 +236,7 @@ mod tests {
             Artifact::new(&definition, session(), |_| Some((path("main"), 0))).identity
         );
         let (direct, ran, accepted_raw) =
-            validate_with_receipt(&raw, &fixture.signatures, policy, None).unwrap();
+            validate_with_receipt(&raw, &fixture.signatures, policy, None, &mut vec![]).unwrap();
         assert!(
             ran,
             "raw indexed V must derive its own verdict without a local receipt"
@@ -280,7 +280,7 @@ mod tests {
         .unwrap();
         let raw = Artifact::new(&malformed, session(), |_| Some((path("main"), 0)));
         let (refused, ran, accepted_raw) =
-            validate_with_receipt(&raw, &fixture.signatures, policy, None).unwrap();
+            validate_with_receipt(&raw, &fixture.signatures, policy, None, &mut vec![]).unwrap();
         assert!(ran);
         assert!(!refused.violations.is_empty());
         assert!(
@@ -970,7 +970,7 @@ pub struct VerifiedDefinitionOutput {
     reference: Reference,
     artifact: ContentHash,
     policy: ContentHash,
-    reads: VerifierReads,
+    reads: Arc<[VRead]>,
     metadata: Arc<[u8]>,
     invocations: Arc<SourceInvocations>,
 }
@@ -981,8 +981,10 @@ impl VerifiedDefinitionOutput {
     pub fn retained_bytes(&self) -> Option<u64> {
         let mut bytes = (std::mem::size_of::<Self>()
             + std::mem::size_of::<SourceInvocations>()
-            + 4 * std::mem::size_of::<usize>()) as u64;
-        bytes = bytes.checked_add(self.reads.retained_bytes()?)?;
+            + 6 * std::mem::size_of::<usize>()) as u64;
+        bytes = bytes.checked_add(
+            (self.reads.len() as u64).checked_mul(std::mem::size_of::<VRead>() as u64)?,
+        )?;
         bytes = bytes.checked_add(self.metadata.len() as u64)?;
         bytes = bytes.checked_add(
             (self.invocations.calls.capacity() as u64)
@@ -1259,7 +1261,7 @@ impl VerifierCache {
             reference,
             artifact: identity,
             policy,
-            reads: evidence.reads.clone(),
+            reads: evidence.reads.clone().into(),
             metadata: metadata.into(),
             invocations: Arc::new(SourceInvocations::observe(
                 definition.view(),

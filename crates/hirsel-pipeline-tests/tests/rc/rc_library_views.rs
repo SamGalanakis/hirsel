@@ -127,6 +127,18 @@ fn fill(mut values: List[u64], depth: u64) -> u64 {
   values[at] = marked(values[at])
   list.len(values)
 }
+type Node { left: u64, right: u64 }
+fn branch(mut nodes: List[Node], depth: u64) -> u64 {
+  let at = list.len(nodes)
+  list.push(mut nodes, Node(left: 100, right: 200))
+  if depth > 0 {
+    let left = branch(mut nodes, depth - 1)
+    let right = branch(mut nodes, depth - 1)
+    nodes[at].left = left
+    nodes[at].right = right
+  }
+  at
+}
 fn output_error[E](take e: E) -> () {}
 @noalloc
 fn grant_error(refusal: GrantError) -> () uses {} { () }
@@ -137,7 +149,21 @@ pub fn main(rt: Io, args: Args) -> Result[(), ()] {
   let mut total: u64 = 0
   for value in values { total += value }
   // The original 7, plus 32 marks of 100 and the sum of 0 through 31.
-  let valid = count == 33 && total == 3703 && alias == [7] &&
+  let mut nodes: List[Node] = [Node(left: 17, right: 19)]
+  let old_nodes = copy nodes
+  // The function-value entry must retain the public address convention.
+  let make = branch
+  let root = make(mut nodes, 4)
+  let snapshot = copy nodes
+  nodes[root].left = 77
+  let mut links: u64 = 0
+  for node in snapshot { links += node.left + node.right }
+  // Preorder indices 1..31 have 15 branches, whose child-index sum is 495,
+  // and 16 leaves, each contributing 100 + 200. The prefix contributes 36.
+  let valid = root == 1 && list.len(nodes) == 32 && links == 5331 &&
+    snapshot[root].left == 2 && snapshot[root].right == 17 &&
+    nodes[root].left == 77 && nodes[root].right == 17 &&
+    old_nodes == [Node(left: 17, right: 19)] && count == 33 && total == 3703 && alias == [7] &&
     values[1] == 131 && values[32] == 100 && marked(32) == 32
   out.print(io.stdout(rt) ? grant_error, if valid { "ok\n" } else { "bad\n" }) ? output_error
   Ok(())

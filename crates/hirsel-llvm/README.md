@@ -473,7 +473,8 @@ bodies retain LLVM's cost model; aggregate-result optimizer copies retain their
 existing loop-free inlining policy. This removes small checked forwarding calls
 without removing their failure checks or source anchors.
 
-Direct library calls pass mutable Block/Box roots by value and return the roots
+Direct library calls and non-resumable source calls without an environment or
+aggregate result pass mutable Block/Box roots by value and return the roots
 alongside status, with explicit write-back before either continuation. Required
 external and function-reference entries retain the declared address ABI. Private
 scalar-element sequence roots carry length and a must-unique bit in promotable

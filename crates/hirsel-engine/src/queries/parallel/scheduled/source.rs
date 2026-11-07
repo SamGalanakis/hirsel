@@ -1,15 +1,11 @@
 //! Demand-owned written siblings. Installing a graph retains declaration
 //! metadata and the shared source owner, without encoding or decoding syntax.
 use super::*;
-use std::sync::OnceLock;
+use crate::snapshot::SiblingView;
 
 #[derive(Default)]
 pub(super) struct SiblingFile {
-    live: OnceLock<Result<LiveSiblings, QueryError>>,
-}
-struct LiveSiblings {
-    items: Arc<[Arc<ItemSyntax>]>,
-    _backing: Arc<LiveSourceBacking>,
+    live: Mutex<Option<SiblingView>>,
 }
 pub(super) struct SiblingSources {
     pub files: BTreeMap<FileId, SiblingFile>,
@@ -18,7 +14,7 @@ pub(super) struct SiblingSources {
     pub retention: Arc<Mutex<u64>>,
 }
 impl crate::snapshot::DeclarationSiblings for SiblingSources {
-    fn siblings(&self, syntax: &ItemSyntax) -> Result<Arc<[Arc<ItemSyntax>]>, QueryError> {
+    fn siblings(&self, syntax: &ItemSyntax) -> Result<SiblingView, QueryError> {
         let refusal = |detail: &str| {
             QueryError::Operational(hirsel_types::OperationalFailure {
                 operation: "front source input".into(),
@@ -31,15 +27,17 @@ impl crate::snapshot::DeclarationSiblings for SiblingSources {
             .anchor(syntax.anchor)
             .and_then(|(file, _)| self.files.get(&file))
             .ok_or_else(|| refusal("missing sibling file inventory"))?;
-        file.live
-            .get_or_init(|| self.load(syntax))
-            .as_ref()
-            .map(|live| live.items.clone())
-            .map_err(Clone::clone)
+        let mut live = file.live.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(view) = &*live {
+            return Ok(view.clone());
+        }
+        let view = self.load(syntax)?;
+        *live = Some(view.clone());
+        Ok(view)
     }
 }
 impl SiblingSources {
-    fn load(&self, syntax: &ItemSyntax) -> Result<LiveSiblings, QueryError> {
+    fn load(&self, syntax: &ItemSyntax) -> Result<SiblingView, QueryError> {
         let refused = |detail: &str| {
             QueryError::Operational(hirsel_types::OperationalFailure {
                 operation: "front source input".into(),
@@ -51,10 +49,9 @@ impl SiblingSources {
             .snapshot
             .header_products()
             .ok_or_else(|| refused("missing live header owner"))?;
-        let mut engine = self.namespace.source_engine(&syntax.item.definition)?;
-        let declarations = engine.frozen_declarations();
-        let items = declarations
-            .siblings(syntax)
+        let items = self
+            .namespace
+            .source_siblings(syntax)?
             .iter()
             .filter(|sibling| {
                 let variant = matches!(
@@ -81,15 +78,27 @@ impl SiblingSources {
                 variant || (value && headers.needs_written_signatures() && !normalized)
             })
             .cloned()
-            .collect::<Vec<_>>()
-            .into();
+            .collect::<Vec<_>>();
         self.admit(items).map_err(refused)
     }
-    fn admit(&self, items: Arc<[Arc<ItemSyntax>]>) -> Result<LiveSiblings, &'static str> {
+    fn admit(&self, items: Vec<Arc<ItemSyntax>>) -> Result<SiblingView, &'static str> {
+        let metadata = hirsel_engine_admission::retained_arc_bytes(items.as_slice())
+            .checked_add(hirsel_engine_admission::retained_arc_bytes(
+                &std::mem::MaybeUninit::<LiveSourceBacking>::uninit(),
+            ))
+            .and_then(|bytes| {
+                bytes.checked_add(
+                    hirsel_engine_admission::retained_arc_bytes(&std::mem::MaybeUninit::<(
+                        Arc<NamespaceCapture>,
+                        Arc<LiveSourceBacking>,
+                    )>::uninit()),
+                )
+            })
+            .ok_or("sibling memory size overflow")?;
         let bytes = items
             .iter()
             .filter(|syntax| !self.namespace.retains_written(syntax))
-            .try_fold(0u64, |bytes, syntax| {
+            .try_fold(metadata, |bytes, syntax| {
                 bytes.checked_add(hirsel_query_products::retained::retained_syntax_bytes(
                     syntax,
                 ))
@@ -106,18 +115,19 @@ impl SiblingSources {
             .ok_or("sibling memory allowance exhausted")?;
         *remaining = next;
         drop(remaining);
-        Ok(LiveSiblings {
-            items,
-            _backing: Arc::new(LiveSourceBacking {
-                _source: self.backing.clone(),
-                retention: self.retention.clone(),
-                debit: Mutex::new(FrontDebit {
-                    charge: bytes,
-                    allowance,
-                    observation: None,
-                }),
+        let backing = Arc::new(LiveSourceBacking {
+            _source: self.backing.clone(),
+            retention: self.retention.clone(),
+            debit: Mutex::new(FrontDebit {
+                charge: bytes,
+                allowance,
+                observation: None,
             }),
-        })
+        });
+        Ok(SiblingView::retained(
+            items.into(),
+            Arc::new((self.namespace.clone(), backing)),
+        ))
     }
 }
 
@@ -135,35 +145,21 @@ impl FrontInputFootprint {
         self.source_headers.checked_add(self.front_inputs)
     }
 }
-pub(super) fn sibling_input_bytes(files: usize, rows: usize) -> Option<u64> {
+pub(super) fn sibling_input_bytes(files: usize) -> Option<u64> {
     let mut weight = hirsel_query_products::retained::MetadataWeight::default();
     weight.tree::<FileId, SiblingFile>(files);
-    weight.add(rows.checked_mul(size_of::<Arc<ItemSyntax>>())?);
-    weight.add(files.checked_mul(4 * size_of::<usize>() + size_of::<LiveSourceBacking>())?);
+    weight.add(hirsel_engine_admission::arc_bytes(
+        &std::mem::MaybeUninit::<SiblingSources>::uninit(),
+    ));
     Some(weight.bytes())
 }
 impl QueryEngine {
-    pub(super) fn front_sibling_inventory(&self) -> Option<(usize, usize)> {
-        let files = self
-            .sources
+    pub(super) fn front_sibling_files(&self) -> usize {
+        self.sources
             .anchors()
             .map(|(_, file, _)| file)
             .collect::<BTreeSet<_>>()
-            .len();
-        let rows = self.source_paths_iter().try_fold(0usize, |rows, path| {
-            let candidates = self
-                .items
-                .get(path)
-                .map_or(0, Vec::len)
-                .max(
-                    self.declarations
-                        .headers(path)
-                        .map_or(0, <[ContentHash]>::len),
-                )
-                .max(1);
-            rows.checked_add(candidates)
-        })?;
-        Some((files, rows))
+            .len()
     }
     /// Bound front backing from indexed metadata. Planning must not demand
     /// syntax or freeze declarations. Source owners use their existing
@@ -181,8 +177,7 @@ impl QueryEngine {
         if self.result_store.is_none() {
             return Err(refused());
         }
-        let (files, siblings) = self.front_sibling_inventory().ok_or_else(refused)?;
-        let sibling_bytes = sibling_input_bytes(files, siblings).ok_or_else(refused)?;
+        let sibling_bytes = sibling_input_bytes(self.front_sibling_files()).ok_or_else(refused)?;
         let mut instance_weight = hirsel_query_products::retained::MetadataWeight::default();
         instance_weight
             .instance_bodies(&mut self.instance_bodies(&definitions.iter().cloned().collect()));
@@ -325,7 +320,9 @@ mod tests {
         for jobs in [1, 8] {
             let (sources, written) = fixture();
             let barrier = std::sync::Barrier::new(jobs);
-            std::thread::scope(|scope| {
+            let retention = sources.retention.clone();
+            let before = *retention.lock().unwrap();
+            let held = std::thread::scope(|scope| {
                 let handles: Vec<_> = (0..jobs)
                     .map(|_| {
                         scope.spawn(|| {
@@ -348,9 +345,55 @@ mod tests {
                     .into_iter()
                     .map(|handle| handle.join().unwrap())
                     .collect();
-                assert!(results.iter().all(|items| Arc::ptr_eq(items, &results[0])));
+                assert!(results.iter().all(|items| items.same_items(&results[0])));
+                results
             });
+            let charged = before - *retention.lock().unwrap();
+            drop(sources);
+            assert_eq!(
+                *retention.lock().unwrap(),
+                before - charged,
+                "detached sibling readers retain their admission"
+            );
+            drop(held);
+            assert_eq!(*retention.lock().unwrap(), before);
         }
+    }
+    #[test]
+    fn live_siblings_reuse_owned_sources_without_a_temporary_engine() {
+        let (sources, written) = fixture();
+        let assemblies = namespace::SOURCE_ENGINES.get();
+        let items = sources.siblings(&written[0]).unwrap();
+        assert_eq!(
+            items
+                .iter()
+                .map(|item| &item.item.definition)
+                .collect::<Vec<_>>(),
+            written
+                .iter()
+                .map(|item| &item.item.definition)
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            namespace::SOURCE_ENGINES.get(),
+            assemblies,
+            "owned syntax needs no temporary source engine"
+        );
+    }
+    #[test]
+    fn live_siblings_retry_operational_admission_refusals() {
+        let (sources, written) = fixture();
+        let available = *sources.retention.lock().unwrap();
+        *sources.retention.lock().unwrap() = 0;
+        assert!(matches!(
+            sources.siblings(&written[0]),
+            Err(QueryError::Operational(_))
+        ));
+        *sources.retention.lock().unwrap() = available;
+        let items = sources
+            .siblings(&written[0])
+            .expect("admission refusal is retryable");
+        assert_eq!(items.len(), written.len());
     }
     #[test]
     fn live_siblings_charge_the_partition_and_release_it_with_the_request() {
@@ -361,7 +404,19 @@ mod tests {
         let available = backing.allowance.available_bytes();
         let items = sources.siblings(&written[0]).unwrap();
         let charged = before - *retention.lock().unwrap();
-        assert!(charged > hirsel_query_products::retained::retained_syntax_bytes(&written[0]));
+        let payload: u64 = written
+            .iter()
+            .map(|syntax| hirsel_query_products::retained::retained_syntax_bytes(syntax))
+            .sum();
+        let array = hirsel_engine_admission::retained_arc_bytes(items.as_ref());
+        let owner = hirsel_engine_admission::retained_arc_bytes(&std::mem::MaybeUninit::<
+            LiveSourceBacking,
+        >::uninit());
+        assert!(
+            charged >= payload + array + owner,
+            "every retained allocation is charged: {charged} < {}",
+            payload + array + owner
+        );
         assert_eq!(backing.allowance.available_bytes(), available - charged);
         drop(items);
         assert_eq!(*retention.lock().unwrap(), before - charged);
@@ -370,6 +425,7 @@ mod tests {
         assert_eq!(backing.allowance.available_bytes(), available);
 
         let (sources, written) = fixture();
+        let available = *sources.retention.lock().unwrap();
         *sources.retention.lock().unwrap() = 0;
         for _ in 0..2 {
             let error = sources.siblings(&written[0]).unwrap_err();
@@ -378,5 +434,10 @@ mod tests {
             );
         }
         assert_eq!(*sources.retention.lock().unwrap(), 0);
+        *sources.retention.lock().unwrap() = available;
+        let retried = sources
+            .siblings(&written[0])
+            .expect("admission refusal is retryable");
+        assert_eq!(retried.len(), written.len());
     }
 }

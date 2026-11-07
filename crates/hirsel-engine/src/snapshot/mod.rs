@@ -20,7 +20,9 @@ mod sources;
 pub use sources::CitationSource;
 pub(crate) use sources::{OwnedSourceContext, SourceContext};
 mod views;
-pub(crate) use declarations::{DeclarationFile, DeclarationHead, DeclarationSiblings, logical};
+pub(crate) use declarations::{
+    DeclarationFile, DeclarationHead, DeclarationSiblings, SiblingView, logical,
+};
 pub use declarations::{DeclarationIndex, Declarations, ModuleInputs};
 pub use provider::FrozenProvider;
 

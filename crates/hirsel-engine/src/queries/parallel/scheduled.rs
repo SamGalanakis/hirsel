@@ -3646,12 +3646,9 @@ impl QueryEngine {
         for (_, file, _) in namespace.sources.anchors() {
             siblings.entry(file).or_insert_with(SiblingFile::default);
         }
-        let (_, sibling_rows) = self
-            .front_sibling_inventory()
-            .ok_or_else(|| refusal("sibling inventory overflow"))?;
         required = required
             .checked_add(
-                source::sibling_input_bytes(siblings.len(), sibling_rows)
+                source::sibling_input_bytes(siblings.len())
                     .ok_or_else(|| refusal("sibling index overflow"))?,
             )
             .ok_or_else(|| refusal("sibling index overflow"))?;

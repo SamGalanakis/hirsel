@@ -157,9 +157,52 @@ impl From<DeclarationRow> for Row {
     }
 }
 
+#[derive(Clone)]
+pub(crate) struct SiblingView {
+    items: Arc<[Arc<ItemSyntax>]>,
+    _owner: Option<Arc<dyn Send + Sync>>,
+}
+impl SiblingView {
+    pub(crate) fn written(items: Arc<[Arc<ItemSyntax>]>) -> Self {
+        Self {
+            items,
+            _owner: None,
+        }
+    }
+    pub(crate) fn retained(
+        items: Arc<[Arc<ItemSyntax>]>,
+        owner: Arc<impl Send + Sync + 'static>,
+    ) -> Self {
+        Self {
+            items,
+            _owner: Some(owner),
+        }
+    }
+    #[cfg(test)]
+    pub(crate) fn same_items(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.items, &other.items)
+    }
+}
+impl std::ops::Deref for SiblingView {
+    type Target = [Arc<ItemSyntax>];
+    fn deref(&self) -> &Self::Target {
+        &self.items
+    }
+}
+impl AsRef<[Arc<ItemSyntax>]> for SiblingView {
+    fn as_ref(&self) -> &[Arc<ItemSyntax>] {
+        &self.items
+    }
+}
+impl std::fmt::Debug for SiblingView {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.items.fmt(f)
+    }
+}
+
 /// The module input resolution and signature normalization read, frozen.
 pub(crate) trait DeclarationSiblings: Send + Sync {
-    fn siblings(&self, syntax: &ItemSyntax) -> Result<Arc<[Arc<ItemSyntax>]>, crate::QueryError>;
+    fn siblings(&self, syntax: &ItemSyntax) -> Result<SiblingView, crate::QueryError>;
 }
 pub struct Declarations {
     archived_siblings: Option<Arc<dyn DeclarationSiblings>>,
@@ -225,10 +268,10 @@ impl Declarations {
     pub(crate) fn try_siblings(
         &self,
         syntax: &ItemSyntax,
-    ) -> Result<Arc<[Arc<ItemSyntax>]>, crate::QueryError> {
+    ) -> Result<SiblingView, crate::QueryError> {
         match &self.archived_siblings {
             Some(source) => source.siblings(syntax),
-            None => Ok(self.siblings(syntax)),
+            None => Ok(SiblingView::written(self.siblings(syntax))),
         }
     }
     /// `package`'s resolution index.
@@ -306,6 +349,9 @@ impl DeclarationFile {
     }
     pub(crate) fn items(&self) -> &[Arc<ItemSyntax>] {
         &self.listed
+    }
+    pub(crate) fn siblings(&self) -> Arc<[Arc<ItemSyntax>]> {
+        self.listed.clone()
     }
     pub(crate) fn unpinned(&self) -> bool {
         Arc::strong_count(&self.listed) == 1

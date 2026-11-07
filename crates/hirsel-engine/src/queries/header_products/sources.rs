@@ -359,6 +359,12 @@ impl SourceInputs {
         }
         Ok(syntax)
     }
+    pub(crate) fn siblings(
+        &self,
+        syntax: &ItemSyntax,
+    ) -> Result<Option<Arc<[Arc<ItemSyntax>]>>, QueryError> {
+        self.syntax.siblings(syntax)
+    }
     pub(crate) fn materialize(
         &self,
         engine: &mut QueryEngine,
@@ -391,6 +397,38 @@ impl HeaderSources {
             }
         }
         self.parent.as_ref().is_some_and(|parent| parent.evict())
+    }
+    fn siblings(&self, syntax: &ItemSyntax) -> Result<Option<Arc<[Arc<ItemSyntax>]>>, QueryError> {
+        let file = self
+            .sources
+            .anchor(syntax.anchor)
+            .map(|(file, _)| file)
+            .ok_or_else(|| source_refusal("sibling anchor outside captured source"))?;
+        let Some(owner) = self.files.get(&file) else {
+            return self
+                .parent
+                .as_ref()
+                .map_or(Ok(None), |parent| parent.siblings(syntax));
+        };
+        let binding = (
+            DefId::intern(&syntax.item.definition),
+            syntax.text_hash,
+            syntax.anchor,
+            syntax.occurrence,
+        );
+        if owner
+            .bindings
+            .binary_search_by(|old| compare_binding(old, &binding))
+            .is_err()
+        {
+            return Err(source_refusal("captured sibling binding changed"));
+        }
+        let guard = owner.live.lock().unwrap_or_else(|e| e.into_inner());
+        Ok(guard
+            .as_ref()
+            .map_err(Clone::clone)?
+            .as_ref()
+            .map(|live| live.declarations.siblings()))
     }
     fn syntax(&self, id: DefId) -> Result<Option<Arc<ItemSyntax>>, QueryError> {
         let Some(files) = self.by_definition.get(&id) else {

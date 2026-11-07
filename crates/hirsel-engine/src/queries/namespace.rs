@@ -667,6 +667,16 @@ impl NamespaceCapture {
         }
         Ok(syntax)
     }
+    pub(crate) fn source_siblings(
+        &self,
+        syntax: &ItemSyntax,
+    ) -> Result<Arc<[Arc<ItemSyntax>]>, QueryError> {
+        if let Some(items) = self.inputs.siblings(syntax)? {
+            return Ok(items);
+        }
+        let mut engine = self.source_engine(&syntax.item.definition)?;
+        Ok(engine.frozen_declarations().siblings(syntax))
+    }
     pub(crate) fn source_engine(&self, path: &DefPath) -> Result<QueryEngine, QueryError> {
         #[cfg(test)]
         SOURCE_ENGINES.set(SOURCE_ENGINES.get() + 1);
@@ -756,7 +766,7 @@ impl NamespaceCapture {
 
 #[cfg(test)]
 thread_local! {
-    static SOURCE_ENGINES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    pub(in crate::queries) static SOURCE_ENGINES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 fn refused(message: &str) -> QueryError {
     QueryError::Operational(hirsel_types::OperationalFailure {

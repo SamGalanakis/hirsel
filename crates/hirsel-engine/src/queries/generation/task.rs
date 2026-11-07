@@ -9,14 +9,16 @@ use super::*;
 /// No ordinary file's sibling transport or namespace is replaced.
 pub(crate) struct InstanceSiblings(pub(crate) Arc<ItemSyntax>);
 impl crate::snapshot::DeclarationSiblings for InstanceSiblings {
-    fn siblings(&self, syntax: &ItemSyntax) -> Result<Arc<[Arc<ItemSyntax>]>, QueryError> {
+    fn siblings(&self, syntax: &ItemSyntax) -> Result<crate::snapshot::SiblingView, QueryError> {
         if syntax.anchor != self.0.anchor {
             return Err(QueryError::Operational(hirsel_types::OperationalFailure {
                 operation: "generated instance source".into(),
                 message: "private generator escaped its registered instance source".into(),
             }));
         }
-        Ok(Arc::from([self.0.clone()]))
+        Ok(crate::snapshot::SiblingView::written(Arc::from([self
+            .0
+            .clone()])))
     }
 }
 

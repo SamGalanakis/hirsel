@@ -505,35 +505,56 @@ fn reserve(ctx: &Ctx, block: &mut *mut Header, size: u64, align: u64, capacity: 
 
 #[test]
 fn seq_reserve_amortizes_incremental_growth() {
-    let ctx = Ctx::diagnostic();
-    let empty = leaf(0);
-    let mut block = bytes_block(&ctx, empty);
-    let limit = SMALL_MAX + 4096;
-    let mut relocations = 0;
-    for wanted in 4..=limit {
-        let before = block;
-        reserve(&ctx, &mut block, 1, 1, wanted);
-        relocations += u32::from(block != before);
+    for (size, align, limit) in [
+        (1, 1, SMALL_MAX + 4096),
+        (8, 8, 900),
+        (16, 16, 900),
+        (24, 8, 1024),
+    ] {
+        let ctx = Ctx::diagnostic();
+        let empty = leaf(0);
+        let mut block = alloc(&ctx, empty, 16 + 3 * size, align.max(8));
+        unsafe {
+            payload(block).cast::<u64>().write(3);
+            payload(block).add(8).cast::<u64>().write(3);
+            for i in 0..3 * size {
+                payload(block).add(16 + i as usize).write((i % 251) as u8);
+            }
+        }
+        let mut relocations = 0;
+        for wanted in 4..=limit {
+            let before = block;
+            reserve(&ctx, &mut block, size, align, wanted);
+            relocations += u32::from(block != before);
+            assert!(
+                relocations <= limit.ilog2() + 2,
+                "incremental reserve must amortize growth: {relocations} relocations at {wanted} elements"
+            );
+            unsafe {
+                let p = payload(block);
+                assert_eq!(p.cast::<u64>().read(), wanted - 1);
+                for i in (wanted - 1) * size..wanted * size {
+                    p.add(16 + i as usize).write((i % 251) as u8);
+                }
+                p.cast::<u64>().write(wanted);
+            }
+        }
+        // A geometric element count bounds retained storage independently of
+        // the allocator's small-class slack. It must not compound that slack.
         assert!(
-            relocations <= limit.ilog2() + 2,
-            "incremental reserve must amortize growth: {relocations} relocations at {wanted} bytes"
+            capacity_word(block) <= limit.next_power_of_two(),
+            "{limit} elements of {size} bytes retain {} slots",
+            capacity_word(block)
         );
         unsafe {
-            let p = payload(block);
-            assert_eq!(p.cast::<u64>().read(), wanted - 1);
-            p.add(16 + wanted as usize - 1).write((wanted % 251) as u8);
-            p.cast::<u64>().write(wanted);
+            let bytes = std::slice::from_raw_parts(payload(block).add(16), (limit * size) as usize);
+            for (i, byte) in bytes.iter().enumerate() {
+                assert_eq!(*byte, (i % 251) as u8);
+            }
         }
+        release(&ctx, block, empty);
+        assert_eq!(ctx.stats().live_blocks, 0);
     }
-    unsafe {
-        let bytes = std::slice::from_raw_parts(payload(block).add(16), limit as usize);
-        assert_eq!(&bytes[..3], &[1, 2, 3]);
-        for (i, byte) in bytes.iter().enumerate().skip(3) {
-            assert_eq!(*byte, ((i + 1) % 251) as u8);
-        }
-    }
-    release(&ctx, block, empty);
-    assert_eq!(ctx.stats().live_blocks, 0);
 }
 
 #[test]

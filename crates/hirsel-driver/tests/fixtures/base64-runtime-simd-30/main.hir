@@ -65,6 +65,16 @@ pub fn main(t: Test) -> Result[(), ()] {
     }
     encode_case(bytes.from_list(take raw))
   }
+  // Cross allocator classes and the large-block transition before freezing.
+  // The preceding source codec checks every byte after each relocation.
+  for length in [900u64, 8192u64] {
+    let mut raw: List[u8] = []
+    for _ in 0u64..length {
+      seed = u32.wrapping_add(u32.wrapping_mul(seed, 1664525), 1013904223)
+      list.push(mut raw, int.truncate(seed >> 24))
+    }
+    encode_case(bytes.from_list(take raw))
+  }
   // Invalid byte, length, padding, noncanonical bits, and combined precedence.
   for input in [
     "",

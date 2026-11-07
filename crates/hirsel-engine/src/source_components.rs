@@ -405,12 +405,14 @@ impl SourceGrowthProducer<'_> {
                     positions.extend_from_slice(&by_owner[start..end]);
                 }
                 positions.sort_unstable();
+                let action =
+                    self.component_action(&members, positions.iter().map(|&i| &facts[i]))?;
                 let inputs = positions
                     .into_iter()
                     .map(|i| facts[i].definition.0)
                     .collect();
                 Some(SourceComponentMembers {
-                    address: self.component_address(&members)?.0,
+                    address: self.component_address(&members, action)?.0,
                     members: members.into_boxed_slice(),
                     inputs,
                 })
@@ -469,35 +471,41 @@ impl SourceGrowthProducer<'_> {
             [self.namespace.0.0.as_slice()],
         ))
     }
-    fn component_address(&self, members: &[DefId]) -> Option<Address> {
+    fn component_address(&self, members: &[DefId], action: Action) -> Option<Address> {
         let members = hash_value("hirsel.source-growth.members.v1", &members)?;
         Some(Address(ContentHash::of_parts(
-            "hirsel.source-growth.component.address.v1",
-            [self.namespace.0.0.as_slice(), members.0.as_slice()],
+            "hirsel.source-growth.component.address.v2",
+            [members.0.as_slice(), action.0.0.as_slice()],
         )))
     }
-    pub(crate) fn component_action(
+    pub(crate) fn component_action<'a>(
         &self,
         members: &[DefId],
-        facts: &[SourceGrowthFact],
+        facts: impl Iterator<Item = &'a SourceGrowthFact>,
     ) -> Option<Action> {
-        // Transport addresses bind the entire namespace capture. Selected
-        // actions and observations already bind each member's actual inputs.
-        let observations: Vec<_> = facts
-            .iter()
+        // Checked selections bind each member's body, signature and complete
+        // observations. Transport addresses carry the whole capture and must
+        // not enter either the component action or its address.
+        let mut observations = facts
             .map(|fact| {
-                (
-                    fact.selected,
-                    fact.observed,
-                    fact.owner,
-                    &fact.calls,
-                    &fact.growth,
+                hash_source_value(
+                    self.source,
+                    "hirsel.source-growth.component.input.v1",
+                    &(
+                        fact.selected,
+                        fact.observed,
+                        fact.owner,
+                        &fact.calls,
+                        &fact.growth,
+                    ),
                 )
             })
-            .collect();
-        Some(Action(hash_source_value(
-            self.source,
-            "hirsel.source-growth.component.action.v6",
+            .collect::<Option<Vec<_>>>()?;
+        // Several selected roots can share a lexical owner. Their transport
+        // addresses must not decide the order of the semantic observations.
+        observations.sort_unstable();
+        Some(Action(hash_value(
+            "hirsel.source-growth.component.action.v7",
             &(members, observations),
         )?))
     }
@@ -521,7 +529,7 @@ impl SourceGrowthProducer<'_> {
         self.component_value(
             members.to_vec().into_boxed_slice(),
             growing.into_boxed_slice(),
-            self.component_action(members, facts)?,
+            self.component_action(members, facts.iter())?,
         )
     }
     pub(crate) fn component_value(
@@ -531,7 +539,7 @@ impl SourceGrowthProducer<'_> {
         action: Action,
     ) -> Option<Arc<SourceGrowthComponent>> {
         let product = SourceGrowthIdentity {
-            address: self.component_address(&members)?,
+            address: self.component_address(&members, action)?,
             action,
             output: hash_source_value(
                 self.source,

@@ -375,7 +375,7 @@ impl FactTask {
         let (identity, data) = if let Some((membership, index)) = &self.component {
             let members = &membership.components[*index].members;
             let action = producer
-                .component_action(members, &self.facts)
+                .component_action(members, self.facts.iter())
                 .ok_or(queries.errors.resource)?;
             let cached = queries
                 .store

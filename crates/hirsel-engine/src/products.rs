@@ -505,11 +505,11 @@ enum SourceGrowthValue {
 pub struct LiveSourceGrowthProduct(SourceGrowthValue, Option<SummaryFacet>);
 pub const LIVE_SOURCE_MEMBERSHIP: Domain = Domain {
     kind: 0x4600_0024,
-    schema: 1,
+    schema: 2,
 };
 pub const LIVE_SOURCE_COMPONENT: Domain = Domain {
     kind: 0x4600_0025,
-    schema: 1,
+    schema: 2,
 };
 impl LiveSourceGrowthProduct {
     pub(crate) fn source_bytes() -> u64 {

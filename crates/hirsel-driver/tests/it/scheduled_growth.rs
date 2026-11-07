@@ -116,8 +116,8 @@ fn admitted_source_growth_demands_unexecuted_required_roots() {
                 assert_eq!(&*output.diagnostics, &expected);
                 assert_eq!(
                     runtime.stats().claims,
-                    (3 * definitions.len() + output.facets.components.len() + 2) as u64,
-                    "membership, independently settled SCCs and three consumed reads per required source root"
+                    (definitions.len() + output.facets.components.len() + 2) as u64,
+                    "one retained Front task per root, membership, independently settled SCCs and the aggregate"
                 );
                 runtime.shutdown();
             }
@@ -217,7 +217,7 @@ fn growth_output_admission_does_not_spend_its_grant_on_the_runtime_frame() {
                     );
                     assert_eq!(
                         runtime.stats().claims,
-                        (3 * definitions.len() + output.facets.components.len() + 2) as u64
+                        (definitions.len() + output.facets.components.len() + 2) as u64
                     );
                     Some(output.clone())
                 };
@@ -299,7 +299,7 @@ fn changed_source_member_stops_at_equal_settled_component() {
             let output = growth.outcome((selected[0]).clone()).unwrap();
             assert_eq!(
                 runtime.stats().claims,
-                (3 * definitions.len() + output.facets.components.len() + 2) as u64,
+                (definitions.len() + output.facets.components.len() + 2) as u64,
                 "every required source root still participates"
             );
             assert_eq!(
@@ -325,7 +325,10 @@ fn changed_source_member_stops_at_equal_settled_component() {
         };
         let before = component(&first, "left");
         let after = component(&changed, "left");
-        assert_eq!(before.address, after.address);
+        assert_ne!(
+            before.address, after.address,
+            "component addresses bind their own changed checked inputs"
+        );
         assert_ne!(
             before.action, after.action,
             "the changed member reaches the SCC"

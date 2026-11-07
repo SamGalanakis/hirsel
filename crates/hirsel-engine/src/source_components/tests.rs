@@ -287,25 +287,30 @@ fn independently_selected_roots_sharing_a_lexical_owner_all_contribute() {
     };
     let reads = ReadsBuilder::new().finish().unwrap();
     let selected = SELECTED.reference(b"accepted checked output").unwrap();
-    let a = producer
-        .fact(
-            Address(ids[0].path().fingerprint()),
-            summary(ids[0], vec![]),
-            &reads,
-            selected,
-        )
-        .unwrap();
-    let b = producer
-        .fact(
-            Address(ids[1].path().fingerprint()),
-            summary(
-                ids[0],
-                vec![(parameter(ids[0]), parameter(ids[0]), true, sites[0])],
-            ),
-            &reads,
-            selected,
-        )
-        .unwrap();
+    let make = |producer: &SourceGrowthProducer<'_>, reversed: bool| {
+        [false, true]
+            .into_iter()
+            .map(|grows| {
+                producer
+                    .fact(
+                        Address(ids[usize::from(grows != reversed)].path().fingerprint()),
+                        summary(
+                            ids[0],
+                            if grows {
+                                vec![(parameter(ids[0]), parameter(ids[0]), true, sites[0])]
+                            } else {
+                                vec![]
+                            },
+                        ),
+                        &reads,
+                        selected,
+                    )
+                    .unwrap()
+            })
+            .collect::<Vec<_>>()
+    };
+    let facts = make(&producer, false);
+    assert_ne!(facts[0].definition, facts[1].definition);
     // The former store-poisoning vector now has no archive lookup path. Keep
     // its single-root source verdict in the live producer law.
     let single = producer
@@ -321,10 +326,18 @@ fn independently_selected_roots_sharing_a_lexical_owner_all_contribute() {
         .unwrap();
     let single = settle(&producer, vec![single]).unwrap();
     assert_eq!(&*single.components[0].growing, &[sites[0]]);
-    assert_ne!(a.definition, b.definition);
-    let facets = settle(&producer, vec![a, b]).unwrap();
+    let facets = settle(&producer, facts).unwrap();
     assert_eq!(facets.components.len(), 1);
     assert_eq!(&*facets.components[0].growing, &[sites[0]]);
+    let recaptured = SourceGrowthProducer {
+        namespace: Address(ContentHash::of_bytes(b"another source capture")),
+        ..producer
+    };
+    let reordered = settle(&recaptured, make(&recaptured, true)).unwrap();
+    assert_eq!(
+        facets.components[0].product, reordered.components[0].product,
+        "equal member inputs ignore the capture and transport-address order"
+    );
     let bounded = SourceGrowthProducer {
         scratch: 1,
         ..producer

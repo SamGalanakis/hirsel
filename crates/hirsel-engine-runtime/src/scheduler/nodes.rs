@@ -49,10 +49,10 @@ impl Recorded {
 }
 #[derive(Default)]
 pub(super) struct Nodes {
-    index: BTreeMap<Key, u32>,
+    index: std::collections::HashMap<Key, u32>,
     // Keep pinned products too: external Arc owners may disappear without a
     // scheduler callback. Eligibility is checked when the ordered entry is read.
-    eviction: BTreeSet<(u64, Key)>,
+    eviction: BTreeSet<(u64, u32, Key)>,
     edges: std::collections::HashMap<(u32, u32), u32>,
     keys: Vec<Option<Key>>,
     rows: Vec<Node>,
@@ -61,6 +61,7 @@ pub(super) struct Nodes {
     // These complement the active edges and retain the same cycle authority.
     history: BTreeMap<Key, Recorded>,
     serial: u32,
+    clock: u64,
     repair_epoch: u32,
     in_flight_roots: Vec<Key>,
     in_flight_reached: Vec<u32>,
@@ -174,7 +175,8 @@ impl Nodes {
                 node.in_flight = true;
                 self.in_flight_reached.push(slot);
                 self.eviction.remove(&(
-                    node.settled_at,
+                    node.used_at,
+                    node.generation,
                     self.keys[slot as usize].expect("live slot"),
                 ));
                 // Completed producers own their results; their historical reads
@@ -198,10 +200,10 @@ impl Nodes {
             && matches!(&node.state, NodeState::Settled { outcome, .. }
             if outcome.as_ref().as_ref().is_ok_and(|product| product.live_owners() != 0))
         {
-            self.eviction.insert((node.settled_at, key));
+            self.eviction.insert((node.used_at, node.generation, key));
         }
     }
-    pub fn eviction_after(&self, previous: Option<(u64, Key)>) -> Option<(u64, Key)> {
+    pub fn eviction_after(&self, previous: Option<(u64, u32, Key)>) -> Option<(u64, u32, Key)> {
         use std::ops::Bound::{Excluded, Unbounded};
         self.eviction
             .range((previous.map_or(Unbounded, Excluded), Unbounded))
@@ -209,9 +211,8 @@ impl Nodes {
             .copied()
     }
     pub fn iter(&self) -> impl Iterator<Item = (&Key, &Node)> {
-        self.index.iter().filter_map(|(key, &slot)| {
-            let node = &self.rows[slot as usize];
-            (!matches!(node.state, NodeState::Dormant)).then_some((key, node))
+        self.keys.iter().zip(&self.rows).filter_map(|(key, node)| {
+            (!matches!(node.state, NodeState::Dormant)).then_some((key.as_ref()?, node))
         })
     }
     pub fn insert(&mut self, key: Key, mut node: Node) -> NodeId {
@@ -261,7 +262,7 @@ impl Nodes {
     pub fn remove(&mut self, key: &Key) -> Option<NodeState> {
         let &slot = self.index.get(key)?;
         let node = &mut self.rows[slot as usize];
-        self.eviction.remove(&(node.settled_at, *key));
+        self.eviction.remove(&(node.used_at, node.generation, *key));
         self.in_flight_dirty |= node.in_flight;
         if !matches!(node.state, NodeState::Settled { .. } | NodeState::Dormant) {
             // Cancellation discards this unfinished generation's reads. Slot
@@ -455,11 +456,17 @@ impl Nodes {
             recorded.pending.len() as u64 * 512 + if recorded.settled.is_empty() { 1024 } else { 0 }
         })
     }
-    pub fn settle_records(&mut self, query: Key, settled_at: u64) {
-        self.in_flight_dirty |= self[&query].in_flight;
-        self.eviction.remove(&(self[&query].settled_at, query));
-        self.get_mut(&query).expect("settled node").settled_at = settled_at;
+    pub fn touch(&mut self, query: Key) {
+        let node = &self[&query];
+        self.eviction
+            .remove(&(node.used_at, node.generation, query));
+        self.clock = self.clock.saturating_add(1);
+        self.get_mut(&query).expect("live query").used_at = self.clock;
         self.index_eviction(query);
+    }
+    pub fn settle_records(&mut self, query: Key) {
+        self.in_flight_dirty |= self[&query].in_flight;
+        self.touch(query);
         if let Some(recorded) = self.history.get_mut(&query) {
             recorded.settled.append(&mut recorded.pending);
         }
@@ -747,6 +754,12 @@ impl Nodes {
         }
     }
     pub fn allocated_bytes(&self) -> u64 {
+        let index_capacity = self.index.capacity();
+        let index_buckets = if index_capacity == 0 {
+            0
+        } else {
+            (index_capacity * 8).div_ceil(7).next_power_of_two().max(4)
+        };
         let capacity = self.edges.capacity();
         let buckets = if capacity == 0 {
             0
@@ -759,8 +772,9 @@ impl Nodes {
         let bytes = self.rows.capacity() * size_of::<Node>()
             + self.keys.capacity() * size_of::<Option<Key>>()
             + self.free.capacity() * size_of::<u32>()
-            + tree_bytes::<Key, u32>(self.index.len())
-            + tree_bytes::<(u64, Key), ()>(self.eviction.len())
+            + index_buckets * (size_of::<(Key, u32)>() + 1)
+            + 32
+            + tree_bytes::<(u64, u32, Key), ()>(self.eviction.len())
             + self.in_flight_roots.capacity() * size_of::<Key>()
             + self.in_flight_reached.capacity() * size_of::<u32>()
             + (2 * (self.in_flight_roots.len() + self.edges.len())).max(4) * size_of::<u32>()

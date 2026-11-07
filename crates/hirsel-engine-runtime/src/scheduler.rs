@@ -297,9 +297,10 @@ struct Node {
     visited: u32,
     live: bool,
     in_flight: bool,
-    settled_at: u64,
+    used_at: u64,
 }
 struct Spilled {
+    rank: u32,
     result: Outcome,
     retained: u64,
 }
@@ -307,7 +308,7 @@ struct State {
     factories: BTreeMap<u32, Factory>,
     nodes: Nodes,
     spill: BTreeMap<Key, Spilled>,
-    ready: BTreeSet<(Reverse<u64>, Key)>,
+    ready: BTreeSet<(Reverse<u64>, u32, Key)>,
     cleanup: Vec<BTreeSet<Key>>,
     costs: BTreeMap<Key, u64>,
     requests: BTreeMap<u64, Vec<Key>>,
@@ -638,7 +639,7 @@ impl AdmittedRuntime {
             + self.workers.capacity() * size_of::<JoinHandle<()>>()) as u64
             + state.nodes.allocated_bytes()
             + tree_bytes::<Key, Spilled>(state.spill.len()) as u64
-            + (tree_bytes::<(Reverse<u64>, Key), ()>(state.ready.len())
+            + (tree_bytes::<(Reverse<u64>, u32, Key), ()>(state.ready.len())
                 + tree_bytes::<Key, u64>(state.costs.len())
                 + tree_bytes::<u32, Factory>(state.factories.len())
                 + tree_bytes::<u64, Vec<Key>>(state.requests.len())
@@ -823,14 +824,19 @@ impl QueryRuntime for AdmittedRuntime {
     }
     fn evict_to(&mut self, retained_bytes: u64) {
         let mut state = self.shared.lock();
-        let idle: Vec<_> = state
+        let mut idle: Vec<_> = state
             .nodes
             .iter()
             .filter_map(|(&key, node)| {
-                (!node.live && matches!(node.state, NodeState::Settled { .. })).then_some(key)
+                (!node.live && matches!(node.state, NodeState::Settled { .. })).then_some((
+                    node.used_at,
+                    node.generation,
+                    key,
+                ))
             })
             .collect();
-        for key in idle {
+        idle.sort_unstable();
+        for (_, _, key) in idle {
             if retained_bytes != 0 && state.retained <= retained_bytes {
                 break;
             }
@@ -942,12 +948,18 @@ impl State {
             .is_none_or(|roots| roots.iter().all(|k| self.result(*k).is_some()))
     }
     fn queue(&mut self, key: Key) {
-        self.ready
-            .insert((Reverse(self.costs.get(&key).copied().unwrap_or(1)), key));
+        self.ready.insert((
+            Reverse(self.costs.get(&key).copied().unwrap_or(1)),
+            self.nodes.get(&key).map_or(0, |node| node.generation),
+            key,
+        ));
     }
     fn unqueue(&mut self, key: Key) {
-        self.ready
-            .remove(&(Reverse(self.costs.get(&key).copied().unwrap_or(1)), key));
+        self.ready.remove(&(
+            Reverse(self.costs.get(&key).copied().unwrap_or(1)),
+            self.nodes.get(&key).map_or(0, |node| node.generation),
+            key,
+        ));
     }
     fn ensure(&mut self, query: Key) -> Result<NodeId, Reference> {
         let known = self.nodes.lookup(query);
@@ -958,6 +970,7 @@ impl State {
             && let Some(node) = self.nodes.get_id_mut(id)
         {
             node.live = true;
+            self.nodes.touch(query);
             return Ok(id);
         }
         if !self.nodes.can_insert(query, self.max_entries) {
@@ -1062,7 +1075,7 @@ impl State {
                 visited: 0,
                 live: true,
                 in_flight: false,
-                settled_at: 0,
+                used_at: 0,
             },
         );
         if ready {
@@ -1102,6 +1115,7 @@ impl State {
             return false;
         }
         self.nodes.release_claims(source);
+        let rank = self.nodes[&query].generation;
         if spill
             && let NodeState::Settled { outcome, retained } =
                 &mut self.nodes.get_mut(&query).unwrap().state
@@ -1109,6 +1123,7 @@ impl State {
             self.spill.insert(
                 query,
                 Spilled {
+                    rank,
                     result: (**outcome).clone(),
                     retained: std::mem::take(retained),
                 },
@@ -1121,18 +1136,30 @@ impl State {
         true
     }
     fn evict_spill(&mut self, scratch: u64) -> bool {
-        let selected = self.spill.iter().find_map(|(&query, spilled)| {
-            let product = spilled.result.as_ref().ok()?;
+        let mut previous = None;
+        let selected = loop {
+            let Some((&query, spilled)) = self
+                .spill
+                .iter()
+                .filter(|(_, spilled)| previous.is_none_or(|rank| spilled.rank > rank))
+                .min_by_key(|(_, spilled)| spilled.rank)
+            else {
+                return false;
+            };
+            previous = Some(spilled.rank);
+            let Some(product) = spilled.result.as_ref().ok() else {
+                continue;
+            };
             let body = product.prepare_eviction(scratch);
             let archived = match self.factories.get(&query.0) {
                 Some(Factory::Send(factory)) if !body => factory.evict(id(query), product, scratch),
                 _ => false,
             };
-            (body || archived).then_some(query)
-        });
-        let Some(query) = selected else {
-            return false;
+            if body || archived {
+                break query;
+            }
         };
+        let query = selected;
         let spilled = self.spill.remove(&query).expect("selected spill");
         self.retained -= spilled.retained;
         self.recorded -= 512;
@@ -1167,7 +1194,7 @@ impl State {
                 self.nodes.reclaimable(**key)
                     && !self.requests.values().any(|roots| roots.contains(key))
             })
-            .min_by_key(|(key, node)| (node.settled_at, **key))
+            .min_by_key(|(_, node)| (node.used_at, node.generation))
             .map(|(key, _)| *key);
         candidate.is_some_and(|query| self.retire_node(query, true))
     }
@@ -1250,7 +1277,7 @@ impl State {
     fn settle(&mut self, query: Key, result: Outcome) {
         let node = self.nodes.get_mut(&query).expect("claimed query");
         node.state = std::mem::take(&mut node.state).settle(result.clone());
-        self.nodes.settle_records(query, self.stats.settled);
+        self.nodes.settle_records(query);
         self.stats.settled += 1;
         self.admission_waiters.remove(&query);
         self.event(RuntimeEvent::Settled {
@@ -1344,7 +1371,7 @@ impl QueryContext for Context<'_> {
         }
         let mut previous = None;
         let key = loop {
-            let Some((settled, key)) = state.nodes.eviction_after(previous) else {
+            let Some((settled, rank, key)) = state.nodes.eviction_after(previous) else {
                 let evicted = state.factories.values().any(|factory| match factory {
                     Factory::Send(factory) => factory.evict_cache(scratch),
                     Factory::Local(_) => false,
@@ -1355,7 +1382,7 @@ impl QueryContext for Context<'_> {
                 }
                 return evicted;
             };
-            previous = Some((settled, key));
+            previous = Some((settled, rank, key));
             let NodeState::Settled { outcome, .. } = &state.nodes[&key].state else {
                 unreachable!("indexed settled product");
             };
@@ -1598,7 +1625,7 @@ fn run_worker(shared: Arc<Shared>, worker: usize, stack: u64, caller: bool) {
                 if state.stopped {
                     return;
                 }
-                let first = state.ready.iter().find_map(|(_, query)| {
+                let first = state.ready.iter().find_map(|(_, _, query)| {
                     let NodeState::Ready(execution) = &state.nodes[query].state else {
                         return None;
                     };

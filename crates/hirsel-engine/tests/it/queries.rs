@@ -727,6 +727,24 @@ fn front_compact_terminal_reuses_check_after_eviction() {
                         products.push((name, query, product));
                     }
                     front.runtime.shutdown();
+                    let census = hirsel_intern::work::read(
+                        hirsel_intern::work::Counter::FrontSlotCensusRows,
+                    );
+                    let metadata = front.queries.retained_observation_metadata_bytes();
+                    for _ in 0..16 {
+                        assert_eq!(
+                            front.queries.retained_observation_metadata_bytes(),
+                            metadata
+                        );
+                    }
+                    assert_eq!(
+                        hirsel_intern::work::read(
+                            hirsel_intern::work::Counter::FrontSlotCensusRows
+                        ) - census,
+                        0,
+                        "accounting a completed slot must not revisit unrelated observations"
+                    );
+
                     let mut actions = Vec::new();
                     for (name, query, product) in products.into_iter().rev() {
                         actions.push((name, query, product.action));

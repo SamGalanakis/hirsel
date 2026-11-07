@@ -2,6 +2,8 @@
 #[cfg(test)]
 hirsel_guard::install!(test_alloc::Counting: test_alloc::Counting);
 
+pub mod local;
+
 use hirsel_syntax::ItemSyntax;
 use hirsel_types::{CheckedBody, NameSite, TypeId};
 use std::sync::Arc;

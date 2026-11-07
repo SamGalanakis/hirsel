@@ -440,6 +440,28 @@ fn zero_tiny_overflow_and_oversize_admission_never_raise_cap() {
 }
 #[test]
 fn idle_eviction_recreates_only_evicted_claims() {
+    // Equal logical ages retire in demand order, regardless of portable digest.
+    for salt in [13u64, 79] {
+        let mut identities = [key(query(salt)), key(query(salt + 1))];
+        identities.sort();
+        identities.reverse();
+        let mut rt = runtime(1, 4 << 20);
+        let mut state = rt.shared.lock();
+        for identity in identities {
+            let mut node = bare_node();
+            node.state = NodeState::Settled {
+                outcome: Box::new(Err(errors().cycle)),
+                retained: 0,
+            };
+            state.nodes.insert(identity, node);
+        }
+        assert!(state.retire_oldest());
+        assert!(
+            state.nodes.get(&identities[0]).is_none(),
+            "identity salt {salt}"
+        );
+        assert!(state.nodes.get(&identities[1]).is_some());
+    }
     let mut rt = runtime(1, 4 << 20);
     let claims = install(&mut rt, &[(0, Spec::deps(&[]))]);
     let request = rt.request(&[query(0)]);
@@ -1881,7 +1903,7 @@ fn bare_node() -> super::Node {
         unsatisfied: 0,
         live: true,
         in_flight: false,
-        settled_at: 0,
+        used_at: 0,
     }
 }
 fn exact_reaches(edges: &[Vec<usize>], from: usize, target: usize) -> bool {

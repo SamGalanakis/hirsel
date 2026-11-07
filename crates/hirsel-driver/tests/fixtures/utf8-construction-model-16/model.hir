@@ -17,7 +17,7 @@ fn builder(data: Bytes) -> List[u8] {
 
 fn accept(take expected: Expected, take composed: Expected) -> () {
   let input = copy expected.data
-  failure.check(std@1/utf8.view(input) == Some(expected.text), TextInvariant())
+  failure.check(core@1/string.view_bytes(input) == Some(expected.text), TextInvariant())
   let Ok(decoded) = string.from_bytes(copy input) else {
     failure.check(false, TextInvariant())
     return
@@ -47,7 +47,7 @@ fn accept(take expected: Expected, take composed: Expected) -> () {
 }
 
 fn reject(take input: Bytes) -> () {
-  failure.check(std@1/utf8.view(input) == None(), TextInvariant())
+  failure.check(core@1/string.view_bytes(input) == None(), TextInvariant())
   match string.from_bytes(copy input) {
     Ok(_) => failure.check(false, TextInvariant()),
     Error(returned) => failure.check(returned == input, TextInvariant()),

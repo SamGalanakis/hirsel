@@ -1,13 +1,13 @@
 @noalloc
 fn borrowed(data: Bytes) -> Option[String] in data uses {} {
-  std@1/utf8.view(data)
+  core@1/string.view_bytes(data)
 }
 
 fn decoded_buffer(source: Bytes) -> Option[String] in source uses {} {
   let mut output: List[u8] = []
   bytes.append(mut output, source)
   let raw = bytes.from_list(take output)
-  std@1/utf8.view(raw)
+  core@1/string.view_bytes(raw)
 }
 
 fn owned() -> String {

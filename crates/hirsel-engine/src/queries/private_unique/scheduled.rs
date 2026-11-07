@@ -257,8 +257,11 @@ impl QueryEngine {
         owner.0.name = "$private-unique".into();
         EntryKey::new(
             ContentHash::of_parts(
-                "hirsel.private-inference.v4",
-                [self.environment_value().0.as_slice()],
+                "hirsel.private-inference.v5",
+                [
+                    self.environment_value().0.as_slice(),
+                    self.store_identity.0.as_slice(),
+                ],
             ),
             &owner,
             ContentHash::default(),

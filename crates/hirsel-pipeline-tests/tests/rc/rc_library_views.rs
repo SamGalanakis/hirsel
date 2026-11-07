@@ -112,6 +112,42 @@ pub(super) fn four_engines(source: String, name: &str) {
     ];
     agree(source, configurations, name, Limits::default());
 }
+
+#[test]
+fn scalar_leaves_and_recursive_list_roots_preserve_aliases_and_writebacks() {
+    four_engines(
+        r#"
+fn marked(value: u64) -> u64 {
+  if value < 32 { value + 100 } else { value }
+}
+fn fill(mut values: List[u64], depth: u64) -> u64 {
+  let at = list.len(values)
+  list.push(mut values, depth)
+  if depth > 0 { let _ = fill(mut values, depth - 1) }
+  values[at] = marked(values[at])
+  list.len(values)
+}
+fn output_error[E](take e: E) -> () {}
+@noalloc
+fn grant_error(refusal: GrantError) -> () uses {} { () }
+pub fn main(rt: Io, args: Args) -> Result[(), ()] {
+  let mut values: List[u64] = [7]
+  let alias = copy values
+  let count = fill(mut values, 31)
+  let mut total: u64 = 0
+  for value in values { total += value }
+  // The original 7, plus 32 marks of 100 and the sum of 0 through 31.
+  let valid = count == 33 && total == 3703 && alias == [7] &&
+    values[1] == 131 && values[32] == 100 && marked(32) == 32
+  out.print(io.stdout(rt) ? grant_error, if valid { "ok\n" } else { "bad\n" }) ? output_error
+  Ok(())
+}
+"#
+        .into(),
+        "scalar-leaf-recursive-list-roots",
+    );
+}
+
 fn native_matrix() -> Vec<Configuration> {
     let mut out = vec![];
     for target in [

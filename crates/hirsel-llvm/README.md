@@ -466,6 +466,13 @@ Fixed elements retain their bytes; slices and variable flat elements carry the
 existing length prefixes. Nested lists use the same layout-driven walks. Extent
 addition is checked before allocation and faults on overflow.
 
+Optimized source helpers with at most 64 LIR instructions and no normal-control
+loop are always inlined, both in complete modules and in optimizer copies. Their
+original entries remain available for external and indirect calls. Larger source
+bodies retain LLVM's cost model; aggregate-result optimizer copies retain their
+existing loop-free inlining policy. This removes small checked forwarding calls
+without removing their failure checks or source anchors.
+
 Direct library calls pass mutable Block/Box roots by value and return the roots
 alongside status, with explicit write-back before either continuation. Required
 external and function-reference entries retain the declared address ABI. Private

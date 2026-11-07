@@ -772,30 +772,40 @@ fn lower<T>(
                 }
                 entry
             };
+            // Keep small, loop-free source helpers in their callers. Their checked
+            // call boundary otherwise outweighs operations such as a parser peek.
+            let small_source = !inputs.alternate
+                && inputs.opt != OptLevel::None
+                && unit.header.origin == UnitOrigin::Source
+                && unit.instructions.len() <= 64;
+            let aggregate_copy = copy
+                && !template
+                && abi
+                    .result
+                    .as_ref()
+                    .is_some_and(|result| result.register.is_none());
+            let loop_free = (small_source || aggregate_copy) && {
+                let successors: Vec<_> = unit
+                    .terminators
+                    .iter()
+                    .map(|terminator| {
+                        terminator
+                            .normal_edges(&unit.pools)
+                            .iter()
+                            .map(|edge| unit.tables.edges[edge.index()].target.index())
+                            .collect()
+                    })
+                    .collect();
+                hirsel_graph::feedback_edges(&successors, unit.entry.index()).is_empty()
+            };
+            if small_source && loop_free {
+                module.add_attribute(function, AttributeSlot::Function, Attribute::AlwaysInline);
+            }
             // A small source unit another object implements and exports: here only an
             // inlinable body. Calls the optimizer keeps stay imports of that export.
             if copy && !template {
                 module.make_available_externally(function);
-                // Remove aggregate call traffic without forcing loop bodies past
-                // LLVM's cost model. Copies already have a bounded source size.
-                let attribute = if abi
-                    .result
-                    .as_ref()
-                    .is_some_and(|result| result.register.is_none())
-                    && {
-                        let successors: Vec<_> = unit
-                            .terminators
-                            .iter()
-                            .map(|terminator| {
-                                terminator
-                                    .normal_edges(&unit.pools)
-                                    .iter()
-                                    .map(|edge| unit.tables.edges[edge.index()].target.index())
-                                    .collect()
-                            })
-                            .collect();
-                        hirsel_graph::feedback_edges(&successors, unit.entry.index()).is_empty()
-                    } {
+                let attribute = if loop_free {
                     Attribute::AlwaysInline
                 } else {
                     Attribute::InlineHint

@@ -233,12 +233,30 @@ pub fn validate_rows(
     {
         return Ok(None);
     }
+    use hirsel_intern::timings::instructions::{self as counted, Owner, Volume};
+    let _scope = counted::scope(Owner::VExecution);
     let started = profile_start();
     let Some(definition) = ReadDefinition::new(definition) else {
         return Ok(None);
     };
+    if counted::active() {
+        let _counting = counted::scope(Owner::Diagnostic);
+        let (mut blocks, mut nodes, mut edges) = (0, 0, 0);
+        for body in definition.bodies.iter() {
+            for block in body.blocks.iter() {
+                blocks += 1;
+                nodes += block.instructions.len() as u64 + 1;
+                edges += body.successors(&block.terminator).len() as u64;
+            }
+        }
+        counted::volume(Volume::TirBlocks, blocks);
+        counted::volume(Volume::TirNodes, nodes);
+        counted::volume(Volume::CfgEdges, edges);
+    }
+    let window = counted::WorkWindow::open();
     let reader = Reader::new(t, signatures);
     let mut validation = validate_input(&definition, t, &reader);
+    window.close();
     validation.violations.extend(reader.input_errors());
     reader.finish(reads)?;
     if let Some(started) = started {
@@ -611,6 +629,10 @@ fn validate_input(
             }
             if index as u32 == definition.entry.0 {
                 for parameter in unique_promises(t, signatures.get(definition.path), signatures) {
+                    hirsel_intern::timings::instructions::volume(
+                        hirsel_intern::timings::instructions::Volume::ProofContexts,
+                        1,
+                    );
                     let mut proof = Checker {
                         definition,
                         body,

@@ -62,6 +62,10 @@ impl ContentHash {
                 Ok(())
             }
         }
+        use hirsel_intern::timings::instructions::{self as counted, Owner, Volume};
+        let _scope = counted::scope(Owner::Hash);
+        counted::volume(Volume::Hashes, 1);
+        counted::volume(Volume::HashedBytes, length);
         let mut hash = Sha256::new();
         hash.update((domain.len() as u64).to_le_bytes());
         hash.update(domain.as_bytes());
@@ -79,11 +83,17 @@ impl ContentHash {
         Ok(Self(stream.hash.finalize().into()))
     }
     pub fn of_parts<'a>(domain: &'a str, parts: impl IntoIterator<Item = &'a [u8]>) -> Self {
+        use hirsel_intern::timings::instructions::{self as counted, Owner, Volume};
+        let _scope = counted::scope(Owner::Hash);
+        let mut bytes = 0;
         let mut hash = Sha256::new();
         for part in std::iter::once(domain.as_bytes()).chain(parts) {
             hash.update((part.len() as u64).to_le_bytes());
             hash.update(part);
+            bytes += part.len() as u64;
         }
+        counted::volume(Volume::Hashes, 1);
+        counted::volume(Volume::HashedBytes, bytes);
         Self(hash.finalize().into())
     }
 }

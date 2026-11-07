@@ -42,7 +42,15 @@ struct Inference {
 }
 impl Inference {
     fn produce(&self) -> Result<Facts, QueryError> {
-        let facts = self.compute()?;
+        let facts = {
+            let _setup = hirsel_intern::timings::instructions::scope(
+                hirsel_intern::timings::instructions::Owner::PrivateSetup,
+            );
+            self.compute()?
+        };
+        let _store = hirsel_intern::timings::instructions::scope(
+            hirsel_intern::timings::instructions::Owner::Store,
+        );
         if self
             .expected
             .as_ref()
@@ -204,9 +212,15 @@ impl Inference {
         let mut observed = ReadsBuilder::new();
         let mut provider =
             FrozenProvider::for_definition(&self.snapshot, owner, &*self.citations, &mut observed);
+        let solve = hirsel_intern::timings::instructions::scope(
+            hirsel_intern::timings::instructions::Owner::PrivateSolve,
+        );
+        let window = hirsel_intern::timings::instructions::WorkWindow::open();
         let result = self
             .modes
             .infer_unique(&self.types, &self.memo, &bodies, &mut provider);
+        window.close();
+        drop(solve);
         let observed = observed.finish().map_err(|e| {
             QueryError::Operational(hirsel_types::OperationalFailure {
                 operation: "private inference reads".into(),

@@ -492,6 +492,9 @@ impl MemoGraph {
             Invalidation::Read(kind) => {
                 self.stats.invalidated[kind as usize] += 1;
                 timings::count(invalidation_count(kind));
+                if matches!(kind, ReadKind::Signature | ReadKind::DeclaredSignature) {
+                    timings::instructions::census_signature_invalidated(key.def.session_index());
+                }
             }
             Invalidation::Text => self.stats.invalidated_text += 1,
         }

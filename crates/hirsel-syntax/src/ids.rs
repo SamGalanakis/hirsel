@@ -107,6 +107,12 @@ impl DefId {
         self.0.cmp(&other.0)
     }
 
+    /// This id's dense assignment position, below [`DefId::count`]. Like the
+    /// id itself it is session-local and never reaches printed output.
+    pub fn session_index(self) -> u32 {
+        DEFS.scramble.decode(self.0)
+    }
+
     /// How many paths this process has interned.
     pub fn count() -> usize {
         DEFS.assigned.load(Atomic::Relaxed) as usize

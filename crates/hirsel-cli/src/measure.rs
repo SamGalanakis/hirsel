@@ -241,6 +241,7 @@ fn table(command: &str, wall: Duration, report: &timings::Report) -> String {
     for (count, value) in &report.counts {
         text += &format!("  {:<18}{value:>10}\n", count.name());
     }
+    text += &instructions_table(&report.instructions);
     let runner = hirsel_native::counts();
     text += &format!(
         "runner\n  {:<18}{:>10}\n  {:<18}{:>10}\n",
@@ -287,6 +288,7 @@ fn json(
             .map(|(count, value)| (count.name().to_string(), (*value).into()))
             .collect::<serde_json::Map<_, _>>(),
     });
+    value["instructions"] = instructions_json(&report.instructions);
     let runner = hirsel_native::counts();
     value["runner"] = serde_json::json!({
         "image_runs": runner.images,
@@ -315,4 +317,52 @@ fn json(
         });
     }
     value
+}
+
+/// Exclusive user-space instructions per owner (diagnostic only).
+fn instructions_json(report: &timings::instructions::Report) -> serde_json::Value {
+    let census = |rows: &[(timings::instructions::Census, u64)]| {
+        rows.iter()
+            .map(|(c, n)| (c.name().to_string(), (*n).into()))
+            .collect::<serde_json::Map<_, _>>()
+    };
+    serde_json::json!({
+        "refused": report.refused,
+        "owners": report.owners.iter().map(|(owner, instructions, entries)| serde_json::json!({
+            "owner": owner.name(),
+            "instructions": instructions,
+            "entries": entries,
+        })).collect::<Vec<_>>(),
+        "threads_total": report.threads_total,
+        "threads": report.threads,
+        "reads": report.reads,
+        "read_cost": report.read_cost,
+        "census": { "ordinary": census(&report.census[0]), "inference": census(&report.census[1]) },
+        "census_overflow": report.census_overflow,
+        "volumes": report.volumes
+            .iter()
+            .map(|(v, n)| (v.name().to_string(), (*n).into()))
+            .collect::<serde_json::Map<_, _>>(),
+    })
+}
+
+fn instructions_table(report: &timings::instructions::Report) -> String {
+    if let Some(why) = &report.refused {
+        return format!("instructions: refused ({why})\n");
+    }
+    if report.threads == 0 {
+        return String::new();
+    }
+    let mut text = format!(
+        "{:<36}{:>16} {:>10}\n",
+        "instructions:u (exclusive)", "instructions", "entries"
+    );
+    for (owner, instructions, entries) in &report.owners {
+        text += &format!("  {:<34}{instructions:>16} {entries:>10}\n", owner.name());
+    }
+    text += &format!(
+        "  {:<34}{:>16} {:>10}\n",
+        "(thread total)", report.threads_total, report.threads
+    );
+    text
 }

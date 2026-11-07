@@ -5,6 +5,7 @@
 //! Here the dependencies are exact provider results rather than dep-node colors.
 //! Signatures passed to Check contain declaration fields, not inferred ownership.
 use super::*;
+use hirsel_intern::timings::instructions::{self as counted, Owner};
 use hirsel_types::{DependencyRead, Signature, TypeInterner};
 use std::hash::{Hash, Hasher};
 use std::sync::{Mutex, OnceLock, Weak};
@@ -234,8 +235,29 @@ impl Worker<'_> {
         mut resolution: Resolution,
         signature: &SignatureRef,
         provider: &mut dyn SignatureProvider,
+        inference: bool,
     ) -> ResultBody {
         let checker = self.checker.ok_or(QueryError::NotImplemented)?;
+        let production = Owner::StructuralProduction { inference };
+        // The census identifies the checked input by its text and declared
+        // signature; a 32-bit digest suffices to tell a changed input apart.
+        let census_input = {
+            let (text, header) = (syntax.text_hash.0, signature.fingerprint.0);
+            u32::from_le_bytes([
+                text[0] ^ header[0],
+                text[1] ^ header[1],
+                text[2] ^ header[2],
+                text[3] ^ header[3],
+            ])
+        };
+        let census = || {
+            counted::census_production(
+                signature.definition.session_index(),
+                inference,
+                census_input,
+            )
+        };
+        let binding = counted::scope(Owner::ReceiptBinding);
         let mut actual = BTreeMap::from([(signature.definition, signature.fingerprint)]);
         // Resolver signature receipts are metadata, not part of the checked
         // relation. Normalize them before comparing the structural input.
@@ -264,6 +286,7 @@ impl Worker<'_> {
                 .collect::<Result<_, QueryError>>()?,
         );
         let declared = declaration(self.types, signature)?;
+        drop(binding);
         let headers = self.snapshot.header_products();
         let cache = headers.and_then(|headers| headers.structural_checks(checker));
         let input = cache.as_ref().map(|(_, checker)| Input {
@@ -274,6 +297,7 @@ impl Worker<'_> {
             signature: declared.clone(),
         });
         if let (Some((checks, _)), Some(input)) = (&cache, &input) {
+            let _hit = counted::scope(Owner::StructuralHit);
             let candidates = checks
                 .recipes
                 .lock()
@@ -319,10 +343,14 @@ impl Worker<'_> {
                 }
                 let headers = headers.expect("structural cache owner");
                 let table = checks.facts(headers.fact_graph());
+                let produced = std::cell::Cell::new(false);
                 let result = table.get_or_try_init(
                     candidate.clone(),
                     || headers.validation_lease(candidate.bytes),
                     || {
+                        let _production = counted::scope(production);
+                        produced.set(true);
+                        census();
                         current.facets.clear();
                         let result = checker.check(
                             self.types,
@@ -348,6 +376,9 @@ impl Worker<'_> {
                     },
                     retain,
                 );
+                if !produced.get() {
+                    counted::census_restored(inference);
+                }
                 return current.restore(result.map(|output| (*output).clone()));
             }
         }
@@ -357,6 +388,8 @@ impl Worker<'_> {
             facets: Vec::new(),
             actual,
         };
+        let production_scope = counted::scope(production);
+        census();
         let result = checker.check(
             self.types,
             self.memo,
@@ -365,6 +398,7 @@ impl Worker<'_> {
             &declared,
             &mut current,
         );
+        drop(production_scope);
         let output = current.restore(result.clone());
         if let (Some((checks, _)), Some(input), Some(headers)) = (cache, input, headers)
             && (result.is_ok() || result.as_ref().is_err_and(|error| error.cacheable()))
@@ -373,6 +407,7 @@ impl Worker<'_> {
                 .iter()
                 .any(|facet| matches!(facet, Facet::Signature(_, Err(error)) | Facet::Unique(_, _, Err(error)) if !error.cacheable()))
         {
+            let _admission = counted::scope(Owner::Store);
             current.facets.shrink_to_fit();
             let bytes = retained_bytes(&input, &current.facets, &result);
             let key = Arc::new(Key {

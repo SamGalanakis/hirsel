@@ -124,7 +124,10 @@ fn map_with_state_spawn<T: Send, R: Send, S>(
     let results: Vec<Mutex<Option<R>>> = (0..slots.len()).map(|_| Mutex::new(None)).collect();
     let next = AtomicUsize::new(0);
     let stopped = AtomicBool::new(false);
+    // Workers carry the spawning thread's instruction owner.
+    let owner = crate::timings::instructions::current();
     let worker = || {
+        let _owner = crate::timings::instructions::carry(owner);
         let mut state = initialize();
         let mut panicked = None;
         while !stopped.load(Ordering::Relaxed) {
@@ -235,12 +238,14 @@ pub fn with_compiler_stack<T: Send>(work: impl FnOnce() -> T + Send) -> T {
     if COMPILER_THREAD.get() {
         return work();
     }
+    let owner = crate::timings::instructions::current();
     std::thread::scope(|scope| {
         let thread = std::thread::Builder::new()
             .name("hirsel-compiler".into())
             .stack_size(COMPILER_STACK_BYTES)
             .spawn_scoped(scope, || {
                 COMPILER_THREAD.set(true);
+                let _owner = crate::timings::instructions::carry(owner);
                 work()
             })
             .unwrap_or_else(|error| hirsel_guard::spawn_failed(COMPILER_STACK_BYTES, error));

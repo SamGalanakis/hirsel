@@ -13,6 +13,8 @@ use std::cell::RefCell;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
 use std::time::{Duration, Instant};
 
+pub mod instructions;
+
 /// A driver interval. Today's driver maps onto them as docs/building.md
 /// describes; an interval it has no step for stays 0.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
@@ -554,6 +556,7 @@ pub fn start_request() {
     }
     CPU_START.store(process_cpu().map_or(0, |d| d.as_nanos() as u64), Relaxed);
     ENABLED.store(true, Relaxed);
+    instructions::start_request();
 }
 
 /// End recording after all work for the request has drained.
@@ -634,7 +637,7 @@ pub fn interval(interval: Interval) -> IntervalGuard {
 #[must_use = "the phase ends when the guard drops"]
 pub fn phase(phase: Phase) -> PhaseGuard {
     if !enabled() {
-        return PhaseGuard(false);
+        return PhaseGuard(false, instructions::Scope::none());
     }
     let frame = PhaseFrame {
         phase,
@@ -644,7 +647,7 @@ pub fn phase(phase: Phase) -> PhaseGuard {
         child_cpu: Duration::ZERO,
     };
     STACKS.with(|s| s.borrow_mut().phases.push(frame));
-    PhaseGuard(true)
+    PhaseGuard(true, instructions::scope(instructions::Owner::Phase(phase)))
 }
 
 /// Record time this thread spends waiting for other threads, until the
@@ -653,7 +656,13 @@ pub fn phase(phase: Phase) -> PhaseGuard {
 #[inline]
 #[must_use = "the wait ends when the guard drops"]
 pub fn wait() -> WaitGuard {
-    WaitGuard(enabled().then(Instant::now))
+    if !enabled() {
+        return WaitGuard(None, instructions::Scope::none());
+    }
+    WaitGuard(
+        Some(Instant::now()),
+        instructions::scope(instructions::Owner::Wait),
+    )
 }
 
 /// Count one `count` event.
@@ -705,8 +714,9 @@ impl Drop for IntervalGuard {
     }
 }
 
-/// An active phase; dropping it ends the phase.
-pub struct PhaseGuard(bool);
+/// An active phase; dropping it ends the phase. Its instruction scope
+/// drops after the phase's own accounting.
+pub struct PhaseGuard(bool, #[allow(dead_code)] instructions::Scope);
 
 impl Drop for PhaseGuard {
     #[inline]
@@ -744,7 +754,7 @@ impl Drop for PhaseGuard {
 }
 
 /// An active wait; dropping it ends the wait.
-pub struct WaitGuard(Option<Instant>);
+pub struct WaitGuard(Option<Instant>, #[allow(dead_code)] instructions::Scope);
 
 impl Drop for WaitGuard {
     #[inline]
@@ -784,10 +794,13 @@ pub struct Report {
     pub comptime_verify: PhaseRow,
     pub wait: Duration,
     pub counts: Vec<(Count, u64)>,
+    /// Exclusive instruction attribution, charged up to this report.
+    pub instructions: instructions::Report,
 }
 
 /// Every interval and phase that has ended so far, on every thread.
 pub fn report() -> Report {
+    instructions::finish_request();
     let nanos = |cell: &AtomicU64| Duration::from_nanos(cell.load(Relaxed));
     Report {
         process_cpu: process_cpu()
@@ -819,6 +832,7 @@ pub fn report() -> Report {
             .iter()
             .map(|&c| (c, TOTALS.counts[c as usize].load(Relaxed)))
             .collect(),
+        instructions: instructions::report(),
     }
 }
 

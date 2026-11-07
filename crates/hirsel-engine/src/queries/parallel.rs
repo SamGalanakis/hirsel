@@ -76,6 +76,9 @@ impl<T> Stage<T> {
         mut result: Result<QueryOutput<T>, QueryError>,
         products: PhaseProducts,
     ) {
+        let _binding = hirsel_intern::timings::instructions::scope(
+            hirsel_intern::timings::instructions::Owner::ReceiptBinding,
+        );
         self.observed.products = Arc::new(products);
         prepare_result(&mut self.detail, &mut result, &self.observed.products);
         self.result = result.map(Arc::new);
@@ -98,6 +101,9 @@ impl<T> Product<T> {
         inherited: &Reads,
         source: &mut impl memos::ReadSource,
     ) -> Result<Reads, hirsel_query_products::reads::Inconsistent> {
+        let _binding = hirsel_intern::timings::instructions::scope(
+            hirsel_intern::timings::instructions::Owner::ReceiptBinding,
+        );
         match self {
             Self::Hit(entry) => Ok(entry.reads().clone()),
             Self::Computed(stage) => {
@@ -181,6 +187,9 @@ impl Completed {
         &self,
         source: &mut impl memos::ReadSource,
     ) -> Result<Reads, hirsel_query_products::reads::Inconsistent> {
+        let _binding = hirsel_intern::timings::instructions::scope(
+            hirsel_intern::timings::instructions::Owner::ReceiptBinding,
+        );
         let mut reads = Reads::empty();
         if let Some(product) = &self.resolution {
             reads = product.complete_reads(&self.definition, &reads, source)?;
@@ -388,6 +397,7 @@ impl Worker<'_> {
                 resolution.value.clone(),
                 &signature.value,
                 &mut provider,
+                inference,
             );
             if let Ok(output) = &mut result {
                 arm_fixes::place_with(
@@ -461,6 +471,7 @@ impl Worker<'_> {
         };
         let mut products = PhaseProducts::default();
         let mut provider = WorkerRecorder::new(self, owner, &mut stage, &mut done.proofs);
+        let window = hirsel_intern::timings::instructions::WorkWindow::open();
         let result = match self.modes {
             Some(adapter) => adapter.check_modes(
                 self.types,
@@ -472,6 +483,7 @@ impl Worker<'_> {
             ),
             None => Err(QueryError::NotImplemented),
         };
+        window.close();
         stage.complete(result, products);
         if matches!(stage.result, Err(QueryError::NotImplemented)) {
             done.phase = stage.unavailable.unwrap_or(done.phase);
@@ -1194,6 +1206,7 @@ mod frozen_task_tests {
                         Resolution::default(),
                         &signature,
                         &mut provider,
+                        false,
                     )
                     .unwrap();
                 assert_eq!(output.value.unit, expected_type);

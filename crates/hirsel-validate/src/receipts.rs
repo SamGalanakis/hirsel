@@ -1824,6 +1824,10 @@ fn validate_with_receipt_in(
     cache: Option<&VerifierCache>,
     reads: &mut Vec<VRead>,
 ) -> Result<(Validation, bool, Option<AcceptedArtifact>), crate::ViewRefusal> {
+    use hirsel_intern::timings::instructions::{Owner, scope};
+    // Receipt lookup and read re-observation are exact reuse; full V below
+    // opens its own execution scope.
+    let _reuse = scope(Owner::VReuse);
     let accept = |receipt: Receipt| match cache {
         Some(cache) => {
             cache
@@ -1891,6 +1895,7 @@ fn validate_with_receipt_in(
             kind: crate::ViolationKind::InvalidTypeGraph,
         }],
     });
+    let _publish = scope(Owner::Store);
     if report.violations.is_empty()
         && let (Some(cache), Some(key), Some(identity)) = (cache, key, artifact.identity)
     {

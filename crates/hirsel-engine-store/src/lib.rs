@@ -468,6 +468,13 @@ pub trait ResultStore: Send + Sync {
     /// Publish a query product with its domain explicit at the provider seam.
     /// The key already binds the kind; byte-only providers share `put`.
     fn put_query(&self, kind: QueryKind, key: &EntryKey, action: Action, value: &[u8]) {
+        let _scope = hirsel_intern::timings::instructions::scope(
+            hirsel_intern::timings::instructions::Owner::Store,
+        );
+        hirsel_intern::timings::instructions::volume(
+            hirsel_intern::timings::instructions::Volume::EncodedBytes,
+            value.len() as u64,
+        );
         assert_eq!(kind, key.2);
         let _ = action;
         self.put(key, value);
@@ -684,6 +691,9 @@ pub struct Variant {
 }
 
 pub fn payload_reads_hash(reads: &Reads) -> ContentHash {
+    let _scope = hirsel_intern::timings::instructions::scope(
+        hirsel_intern::timings::instructions::Owner::Store,
+    );
     // Reads' in-memory ordering is by interned identity. Persisted witnesses
     // sort the canonical key bytes, so another process/salt verifies the same
     // complete set without depending on its DefId assignment order.
@@ -733,6 +743,13 @@ impl VariantRef {
         reads: Reads,
         bytes: &[u8],
     ) -> Option<Self> {
+        let _scope = hirsel_intern::timings::instructions::scope(
+            hirsel_intern::timings::instructions::Owner::Store,
+        );
+        hirsel_intern::timings::instructions::volume(
+            hirsel_intern::timings::instructions::Volume::EncodedBytes,
+            bytes.len() as u64,
+        );
         let output = store.put_content(product_domain(key.2), bytes)?;
         Some(Self::for_output(key, reads, output))
     }
@@ -875,6 +892,9 @@ impl Entry {
     /// query (rustc_middle/src/query/on_disk_cache.rs:468-485). Here the existing
     /// checksum frame additionally detects damaged reads and payload bytes.
     pub fn encode_for(&self, key: &EntryKey) -> Vec<u8> {
+        let _scope = hirsel_intern::timings::instructions::scope(
+            hirsel_intern::timings::instructions::Owner::Store,
+        );
         let mut bytes = b"HRE5".to_vec();
         bytes.extend(key.0.0);
         bytes.extend(self.encode());
@@ -882,6 +902,9 @@ impl Entry {
     }
     /// Reads `key`'s entry from `store`; an undecodable entry is a miss.
     pub fn load(store: &dyn ResultStore, key: &EntryKey) -> Entry {
+        let _scope = hirsel_intern::timings::instructions::scope(
+            hirsel_intern::timings::instructions::Owner::Store,
+        );
         store
             .get(key)
             .and_then(|bytes| Self::decode_for(key, &bytes))

@@ -106,18 +106,21 @@ pub(crate) fn read_payload_bytes(reads: &[VRead]) -> Option<u64> {
 }
 
 pub(crate) fn select_heap<'a>(
-    roles: impl IntoIterator<Item = &'a HeapRole>,
+    roles: impl IntoIterator<Item = (&'a hirsel_syntax::DefPath, &'a hirsel_syntax::DefPath)>,
 ) -> Result<Option<HeapRole>, ViewRefusal> {
-    let mut selected: Option<&HeapRole> = None;
+    let mut selected = None;
     for role in roles {
         if selected.is_some_and(|previous| previous != role) {
             return Err(ViewRefusal::Stale {
-                definition: DefId::intern(&role.arena),
+                definition: DefId::intern(role.0),
             });
         }
         selected = Some(role);
     }
-    Ok(selected.cloned())
+    Ok(selected.map(|(arena, operation)| HeapRole {
+        arena: arena.clone(),
+        operation: operation.clone(),
+    }))
 }
 
 pub(crate) fn observe_heap(
@@ -220,7 +223,7 @@ pub struct IdentifiedSignature {
     digest: ValidationDigest,
     /// Part of the identity: universes select their selected heap role without
     /// reading every payload again.
-    heap: Option<HeapRole>,
+    heap: Option<(HeapPath, HeapPath)>,
     retention: crate::memory::ControlRetention,
 }
 /// The cache a sourced view reads its payload back from. A miss recomputes
@@ -311,7 +314,12 @@ impl IdentifiedSignature {
         Self {
             types,
             definition: signature.definition,
-            heap: signature.metadata.roles.heap.clone(),
+            heap: signature.metadata.roles.heap.as_ref().map(|role| {
+                (
+                    HeapPath(DefId::intern(&role.arena)),
+                    HeapPath(DefId::intern(&role.operation)),
+                )
+            }),
             retention: Default::default(),
             payload: Payload::Held(signature),
             digest,
@@ -328,7 +336,12 @@ impl IdentifiedSignature {
         Self {
             types,
             definition: signature.definition,
-            heap: signature.metadata.roles.heap.clone(),
+            heap: signature.metadata.roles.heap.as_ref().map(|role| {
+                (
+                    HeapPath(DefId::intern(&role.arena)),
+                    HeapPath(DefId::intern(&role.operation)),
+                )
+            }),
             retention: Default::default(),
             payload: Payload::Sourced {
                 last: Arc::new(std::sync::Mutex::new(Arc::downgrade(signature))),
@@ -342,11 +355,6 @@ impl IdentifiedSignature {
     }
     pub(crate) fn retained_identity_bytes(&self) -> Option<u64> {
         let mut bytes = crate::memory::arc::<Self>();
-        if let Some(heap) = &self.heap {
-            bytes = bytes
-                .checked_add(path_bytes(&heap.arena)?)?
-                .checked_add(path_bytes(&heap.operation)?)?;
-        }
         if let Payload::Sourced { source, .. } = &self.payload {
             // The weak last-payload pointer retains the Signature Arc backing
             // after its fields are dropped. The source wrapper has its own Arc.
@@ -382,8 +390,14 @@ impl IdentifiedSignature {
     pub fn definition(&self) -> DefId {
         self.definition
     }
-    pub fn heap(&self) -> Option<&HeapRole> {
-        self.heap.as_ref()
+    pub(crate) fn heap(
+        &self,
+    ) -> Option<(
+        &'static hirsel_syntax::DefPath,
+        &'static hirsel_syntax::DefPath,
+    )> {
+        self.heap
+            .map(|(arena, operation)| (arena.path(), operation.path()))
     }
     /// Whether `signature` is the exact payload this identity was made from.
     pub fn is(&self, signature: &hirsel_types::SignatureRef) -> bool {
@@ -1089,7 +1103,8 @@ impl SignatureLookup for SignatureMap {
         select_heap(
             self.views
                 .values()
-                .filter_map(|v| v.signature.metadata.roles.heap.as_ref()),
+                .filter_map(|v| v.signature.metadata.roles.heap.as_ref())
+                .map(|role| (&role.arena, &role.operation)),
         )
     }
     fn heap_observation(&self) -> Result<HeapObservation, ViewRefusal> {

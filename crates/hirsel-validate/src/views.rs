@@ -92,7 +92,11 @@ fn heap_role<'a>(views: impl Iterator<Item = &'a View>) -> Result<Option<HeapRol
     crate::input::select_heap(views.filter_map(|v| v.input.heap()))
 }
 fn combined(a: Option<HeapRole>, b: Option<HeapRole>) -> Result<Option<HeapRole>, ViewRefusal> {
-    crate::input::select_heap(a.iter().chain(b.iter()))
+    crate::input::select_heap(
+        a.iter()
+            .chain(b.iter())
+            .map(|role| (&role.arena, &role.operation)),
+    )
 }
 
 /// Reads the view of one installed definition when V first asks for it.
@@ -195,7 +199,7 @@ impl Installed {
             .iter()
             .filter_map(|part| part.heap.role())
             .collect();
-        crate::input::select_heap(roles.iter())
+        crate::input::select_heap(roles.iter().map(|role| (&role.arena, &role.operation)))
     }
     /// The identity of a universe of `views` beside these installed parts.
     /// A universe that is exactly one published universe has its identity.

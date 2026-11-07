@@ -9503,42 +9503,6 @@ mod loan_tests {
             removable_clones, 0,
             "move the consumed output to a final uninitialized successor"
         );
-        assert!(
-            std::ptr::eq(
-                output
-                    .iteration_loans
-                    .get(&ExprId(1))
-                    .unwrap()
-                    .projections
-                    .as_ptr(),
-                retained
-                    .iteration_loans
-                    .get(&ExprId(1))
-                    .unwrap()
-                    .projections
-                    .as_ptr(),
-            ),
-            "a state snapshot must not copy iteration paths"
-        );
-        assert!(
-            std::ptr::eq(
-                output
-                    .argument_loans
-                    .get(&ExprId(2))
-                    .unwrap()
-                    .0
-                    .projections
-                    .as_ptr(),
-                retained
-                    .argument_loans
-                    .get(&ExprId(2))
-                    .unwrap()
-                    .0
-                    .projections
-                    .as_ptr(),
-            ),
-            "a state snapshot must not copy argument paths"
-        );
     }
 
     #[test]

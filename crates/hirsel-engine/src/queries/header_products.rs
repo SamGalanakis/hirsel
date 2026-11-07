@@ -2011,6 +2011,31 @@ mod retention_tests {
     }
 
     #[test]
+    fn released_validation_demand_does_not_pin_its_capture() {
+        let mut engine = QueryEngine::new(default_environment(), PhaseAdapters::default());
+        let capture = engine.capture_namespace(&[], &[], 1 << 20).unwrap();
+        let headers = capture.snapshot.header_products().unwrap();
+        let budget = ProcessBudget::new(1 << 20);
+        let backing: Arc<dyn HeaderAllowance> = Arc::new(Allowance(
+            MemoryReservationPool::new(budget.reserve(1 << 20).unwrap())
+                .ok()
+                .unwrap(),
+        ));
+        let remaining = Arc::new(std::sync::Mutex::new(1 << 19));
+        let _partition = headers.configure_source_backing(backing, remaining.clone());
+        let before = *remaining.lock().unwrap();
+        let demand = Box::new(capture.demand_validation().unwrap());
+        assert!(*remaining.lock().unwrap() < before);
+        drop(demand);
+        while headers.evict() {}
+        assert_eq!(
+            *remaining.lock().unwrap(),
+            before,
+            "an immutable capture alias must not retain a finished demand's reservation"
+        );
+    }
+
+    #[test]
     fn installed_closure_header_retention_is_bounded_by_demanded_rows() {
         use hirsel_validate::{
             Installed, InstalledViews, ValidationMemory, View, ViewSource, ViewTable,

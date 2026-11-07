@@ -304,6 +304,7 @@ pub struct FrontBodyQueries {
     types: Arc<hirsel_types::TypeInterner>,
     memo: Arc<hirsel_types::TypeMemo>,
     namespace: Arc<NamespaceCapture>,
+    _validation: Arc<crate::snapshot::ValidationDemand>,
     declarations: Arc<Declarations>,
     citations: OwnedSourceContext,
     resolver: Option<Arc<dyn ResolverPhase>>,
@@ -3824,7 +3825,7 @@ impl QueryEngine {
         let header_allowance = snapshot
             .header_products()
             .map(|headers| headers.configure_source_backing(backing.clone(), retention.clone()));
-        namespace.demand_validation()?;
+        let validation = namespace.demand_validation()?;
         let namespace_sources = namespace.sources.clone();
         Ok(Arc::new(FrontBodyQueries {
             demand: Default::default(),
@@ -3835,6 +3836,7 @@ impl QueryEngine {
             types: self.types.clone(),
             memo: self.memo.clone(),
             namespace,
+            _validation: validation,
             declarations: declarations.with_archived_siblings(sibling_sources),
             citations: OwnedSourceContext {
                 unique_failures: self.private_unique_failures.clone(),

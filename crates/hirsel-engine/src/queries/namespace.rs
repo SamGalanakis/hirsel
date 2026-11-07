@@ -3,7 +3,6 @@
 use super::*;
 use crate::{NativeRecordContext, NativeRecords};
 use hirsel_engine_store::{Domain, EntryKey, Reference};
-use std::sync::Mutex;
 pub(in crate::queries) mod reopen;
 
 const GENERATION: Domain = Domain {
@@ -63,7 +62,6 @@ pub struct NamespaceCapture {
     pub(crate) installation: ContentHash,
     retained: u64,
     admission: std::sync::OnceLock<NamespaceAdmission>,
-    validation: Mutex<Option<Arc<crate::snapshot::ValidationDemand>>>,
     consumer_scope: std::sync::OnceLock<ContentHash>,
     capture_inputs: CaptureInputs,
     pub(crate) operation: Arc<operation_inputs::OperationOwner>,
@@ -354,12 +352,10 @@ impl Manifest {
 }
 
 impl NamespaceCapture {
-    pub(crate) fn demand_validation(&self) -> Result<(), QueryError> {
-        let mut demand = self.validation.lock().unwrap();
-        if demand.is_none() {
-            *demand = Some(self.snapshot.demand_validation()?);
-        }
-        Ok(())
+    pub(crate) fn demand_validation(
+        &self,
+    ) -> Result<Arc<crate::snapshot::ValidationDemand>, QueryError> {
+        self.snapshot.demand_validation()
     }
 
     fn same_sources(&self, sources: &SourceMap) -> bool {
@@ -1246,7 +1242,6 @@ impl QueryEngine {
             installation,
             retained,
             admission: std::sync::OnceLock::new(),
-            validation: Mutex::default(),
             consumer_scope: std::sync::OnceLock::new(),
             capture_inputs,
             operation: self.operation.clone(),
@@ -1718,8 +1713,8 @@ mod tests {
                 "an unadmitted demand must refuse"
             );
             assert!(
-                capture.validation.lock().unwrap().is_none(),
-                "refused admission publishes no demand"
+                capture.demand_validation().is_err(),
+                "refused admission must not publish a reusable demand"
             );
             drop(denied);
             let partition = headers.configure_source_backing(
@@ -1750,9 +1745,10 @@ mod tests {
             let builds =
                 hirsel_intern::work::read(hirsel_intern::work::Counter::ValidationBaseBuilds);
             let available = pool.available_bytes();
-            let (expected_universe, allocated) = crate::test_alloc::measured(|| {
-                capture.demand_validation().unwrap();
-                capture.snapshot.package_universe(&package).unwrap()
+            let ((validation, expected_universe), allocated) = crate::test_alloc::measured(|| {
+                let validation = capture.demand_validation().unwrap();
+                let universe = capture.snapshot.package_universe(&package).unwrap();
+                (validation, universe)
             });
             assert!(
                 allocated.live.max(0) as u64 <= available - pool.available_bytes(),
@@ -1820,6 +1816,7 @@ mod tests {
                 pool.available_bytes() < retained,
                 "live syntax and signature leases keep their reservations"
             );
+            drop(validation);
             drop(capture);
             drop(headers);
             assert_eq!(alias.view(definition).unwrap().unwrap().digest(), expected);

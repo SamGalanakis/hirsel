@@ -166,10 +166,9 @@ pub fn probe(source: &str) -> Result<Probed, String> {
 /// What one variant gave: `produce`'s artifacts, with the export's
 /// annotations moved out of `tir` into `annotations`, then `hashes` and
 /// `evaluation`.
-fn observe(path: &Path, expect: &Expect, native: bool) -> Artifacts {
+fn observe(path: &Path, expect: &Expect, native: bool) -> Result<Artifacts, super::ProduceError> {
     let config = Config::default();
-    let mut artifacts =
-        super::produce(path, &config).expect("the default configuration needs no switch");
+    let mut artifacts = super::produce(path, &config)?.into_artifacts();
     if let Some(text) = artifacts.get("tir").cloned() {
         let text = String::from_utf8_lossy(&text).into_owned();
         match split_export(&text) {
@@ -200,7 +199,7 @@ fn observe(path: &Path, expect: &Expect, native: bool) -> Artifacts {
         )
         .into_bytes(),
     );
-    artifacts
+    Ok(artifacts)
 }
 
 /// The export re-encoded without its annotations, the annotations as text
@@ -305,11 +304,17 @@ pub fn compare(
     if let Err(why) = write(annotated) {
         return Verdict::Fail(why);
     }
-    let with = observe(path, expect, native);
+    let with = match observe(path, expect, native) {
+        Ok(artifacts) => artifacts,
+        Err(error) => return Verdict::from(error),
+    };
     if let Err(why) = write(blanked) {
         return Verdict::Fail(why);
     }
-    let mut without = observe(path, expect, native);
+    let mut without = match observe(path, expect, native) {
+        Ok(artifacts) => artifacts,
+        Err(error) => return Verdict::from(error),
+    };
     // Non-vacuous: an exported program carries every probe.
     if let (Some(a), Some(b)) = (with.get("annotations"), without.get("annotations")) {
         let a = String::from_utf8_lossy(a);

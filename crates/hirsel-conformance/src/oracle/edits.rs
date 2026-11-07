@@ -12,7 +12,8 @@
 //! Directives: `// o2: <what>` or `// o3: <what>` (first line), `// entry:
 //! <path>` (default `main.hir`), `// with: std` (a copy of `stdlib/std@1` at
 //! `std@1/`, so edits can touch std), `// before:` and `// after:` with
-//! `limits=budget=<n>,depth=<n>` and `verify=on|off`, and for O3
+//! `limits=budget=<n>,depth=<n>`, `verify=on|off`, `jobs=<positive n>`
+//! and `native=on|off`, and for O3
 //! `// unchanged: <names>` and `// recomputed: <names>`.
 use super::{Config, Limits};
 use std::{
@@ -220,6 +221,14 @@ fn configure(config: &mut Config, value: &str) -> Result<(), String> {
             Some(("limits", limits)) => config.limits = Some(limits.parse::<Limits>()?),
             Some(("verify", "on")) => config.verify = true,
             Some(("verify", "off")) => config.verify = false,
+            Some(("jobs", jobs)) => {
+                config.jobs = jobs
+                    .parse::<std::num::NonZeroUsize>()
+                    .map_err(|_| format!("jobs must be a positive integer: {jobs}"))?
+                    .get();
+            }
+            Some(("native", "on")) => config.native = true,
+            Some(("native", "off")) => config.native = false,
             _ => return Err(format!("unknown setting: {setting}")),
         }
     }

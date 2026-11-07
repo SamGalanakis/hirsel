@@ -159,12 +159,7 @@ impl QueryTask for Task {
                 Poll::Ready(Ok(product)) => owner.assembly.bootstrap().outcome(product),
             };
             match built {
-                Err(error) => {
-                    native = Some(host_selector::NativeArtifacts {
-                        receipts: format!("build: {error}\n").into_bytes(),
-                        objects: vec![],
-                    })
-                }
+                Err(error) => return QueryPoll::Failed(owner.fail(error)),
                 Ok((compilation, product, _source)) => {
                     let Ok(tasks) = compilation.native(product.clone()) else {
                         return QueryPoll::Failed(owner.errors.protocol);
@@ -221,7 +216,10 @@ impl QueryTask for Task {
                 }
             }
         }
-        let artifacts = host_selector::completed_artifacts(&check, tir, native);
+        let artifacts = match host_selector::completed_artifacts(&check, tir, native) {
+            Ok(artifacts) => artifacts,
+            Err(error) => return QueryPoll::Failed(owner.fail(error)),
+        };
         let bytes = artifacts.iter().try_fold(0u64, |n, (key, value)| {
             n.checked_add((key.capacity() + value.capacity() + 128) as u64)
         });

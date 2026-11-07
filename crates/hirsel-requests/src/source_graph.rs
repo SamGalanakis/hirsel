@@ -683,9 +683,10 @@ impl GraphProducts for SourceProducts {
                                         .map_err(|error| ToolError::Runtime(error.to_string()))?,
                                 )
                             } else {
-                                CompileResult::Artifacts(super::host_selector::completed_artifacts(
-                                    &checked, tir, None,
-                                ))
+                                CompileResult::Artifacts(
+                                    super::host_selector::completed_artifacts(&checked, tir, None)
+                                        .map_err(ToolError::Runtime)?,
+                                )
                             }
                         }
                         CompileOperation::Precompute => {

@@ -586,7 +586,8 @@ HIRSEL_ORACLE_CLI=/path/to/matching/hirsel "$oracle" o4 --path conformance/PROG/
 A scenario file (format in `src/oracle/edits.rs`) holds the tree before the
 edit as `=== <path>` sections and the edit as `+++` (replace or add), `---`
 (delete) and `~~~` (`- old` / `+ new` line) sections. Its `//` directives give
-the entry, comptime limits and verification before and after, and O3's claims.
+the entry, comptime limits, verification, positive worker count (`jobs=N`)
+and native artifact export (`native=on|off`) before and after, and O3's claims.
 
 `tools/arch_deletions.py` lists what survives of the design's deletion list
 (zero at the cutover); `--present` checks that every mechanical entry finds

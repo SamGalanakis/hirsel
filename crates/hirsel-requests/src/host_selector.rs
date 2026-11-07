@@ -490,48 +490,34 @@ pub(super) fn completed_artifacts(
     checked: &CheckOutput,
     tir: Result<Vec<u8>, String>,
     native: Option<NativeArtifacts>,
-) -> BTreeMap<String, Vec<u8>> {
+) -> Result<BTreeMap<String, Vec<u8>>, String> {
     use std::fmt::Write;
+    if let CheckCompletion::Incomplete { phase } = checked.completion {
+        return Err(format!("incomplete: {}", phase.phase_name()));
+    }
     let mut artifacts = BTreeMap::new();
     let mut diagnostics = String::new();
     for diagnostic in &checked.diagnostics {
         writeln!(diagnostics, "{}", diagnostic.to_json(&checked.sources)).unwrap();
     }
-    if let CheckCompletion::Incomplete { phase } = checked.completion {
-        writeln!(diagnostics, "incomplete: {}", phase.phase_name()).unwrap();
-    }
     artifacts.insert("diagnostics".into(), diagnostics.into_bytes());
-    if checked.completion != CheckCompletion::Complete
-        || checked
-            .diagnostics
-            .iter()
-            .any(|diagnostic| diagnostic.severity == hirsel_diag::Severity::Error)
+    if checked
+        .diagnostics
+        .iter()
+        .any(|d| d.severity == hirsel_diag::Severity::Error)
     {
-        return artifacts;
+        return Ok(artifacts);
     }
-    artifacts.insert(
-        "tir".into(),
-        tir.unwrap_or_else(|error| format!("export: {error}").into_bytes()),
-    );
+    artifacts.insert("tir".into(), tir?);
     if let Some(native) = native {
         artifacts.insert("receipts".into(), native.receipts);
         for (backend, objects) in native.objects {
-            match objects {
-                Ok(objects) => {
-                    for (index, bytes) in objects.into_iter().enumerate() {
-                        artifacts.insert(format!("objects/{}/{index:04}.o", backend.name()), bytes);
-                    }
-                }
-                Err(error) => {
-                    artifacts.insert(
-                        format!("objects/{}/error", backend.name()),
-                        error.into_bytes(),
-                    );
-                }
+            for (index, bytes) in objects?.into_iter().enumerate() {
+                artifacts.insert(format!("objects/{}/{index:04}.o", backend.name()), bytes);
             }
         }
     }
-    artifacts
+    Ok(artifacts)
 }
 
 #[cfg(test)]
@@ -1088,30 +1074,45 @@ mod tests {
                 receipts: b"canonical receipts\n".to_vec(),
                 objects: vec![
                     (hirsel_native::Backend::Llvm, Ok(vec![vec![1, 2], vec![3]])),
-                    (
-                        hirsel_native::Backend::Cranelift,
-                        Err("unsupported operation".into()),
-                    ),
+                    (hirsel_native::Backend::Cranelift, Ok(vec![vec![4, 5]])),
                 ],
             }),
-        );
+        )
+        .unwrap();
         assert_eq!(artifacts["tir"], b"canonical TIR");
         assert_eq!(artifacts["receipts"], b"canonical receipts\n");
         assert_eq!(artifacts["objects/llvm/0000.o"], [1, 2]);
         assert_eq!(artifacts["objects/llvm/0001.o"], [3]);
-        assert_eq!(
-            artifacts["objects/cranelift/error"],
-            b"unsupported operation"
-        );
+        assert_eq!(artifacts["objects/cranelift/0000.o"], [4, 5]);
         let incomplete = CheckOutput {
             completion: CheckCompletion::Incomplete {
                 phase: hirsel_query_products::QueryKind::Lower,
             },
             ..Default::default()
         };
-        let artifacts = completed_artifacts(&incomplete, Ok(b"must not leak".to_vec()), None);
-        assert_eq!(artifacts.len(), 1);
-        assert_eq!(artifacts["diagnostics"], b"incomplete: TIR lowering\n");
+        assert_eq!(
+            completed_artifacts(&incomplete, Ok(b"must not leak".to_vec()), None).unwrap_err(),
+            "incomplete: TIR lowering"
+        );
+        assert_eq!(
+            completed_artifacts(&checked, Err("export refused".into()), None).unwrap_err(),
+            "export refused"
+        );
+        assert_eq!(
+            completed_artifacts(
+                &checked,
+                Ok(vec![]),
+                Some(NativeArtifacts {
+                    receipts: vec![],
+                    objects: vec![(
+                        hirsel_native::Backend::Cranelift,
+                        Err("unsupported operation".into())
+                    )],
+                })
+            )
+            .unwrap_err(),
+            "unsupported operation"
+        );
     }
 }
 #[test]

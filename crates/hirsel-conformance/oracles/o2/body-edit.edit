@@ -1,4 +1,6 @@
 // o2: a callee's body changes; its callers and a constant that executes it are cached
+// before: jobs=1 native=on
+// after: jobs=2 native=on
 === main.hir
 fn callee(x: u64) -> u64 {
   x + 1

@@ -96,6 +96,37 @@ fn o1_cells_agree_with_the_baseline_including_native_artifacts() {
     let _ = std::fs::remove_dir_all(&work);
 }
 
+/// Identical I/O failures are unavailable compilations, never agreement.
+#[test]
+fn identical_tool_failures_fail_oracle_cells() {
+    let work = work("tool-failure");
+    let program = work.join("missing/hirsel.json");
+    let cells = oracle::o1::cells(&[1], &[None], false);
+    let report = oracle::o1::run(
+        Path::new(env!("CARGO_BIN_EXE_oracle")),
+        &work,
+        &[program],
+        &cells,
+        &work.join("o1"),
+    );
+    assert_eq!(report.failures().len(), 2, "{}", report.text());
+    assert!(!report.passed(false));
+    let scenario = Scenario::parse(
+        "tool-failure",
+        "// o2: identical invalid manifests across an edit\n// entry: hirsel.json\n=== hirsel.json\ninvalid manifest\n=== unused.txt\nbefore\n+++ unused.txt\nafter\n",
+        &root(),
+    ).unwrap();
+    let report = o2::run(
+        Path::new(env!("CARGO_BIN_EXE_oracle")),
+        &root(),
+        &[scenario],
+        &work.join("o2"),
+    );
+    assert_eq!(report.failures().len(), 3, "{}", report.text());
+    assert!(!report.passed(false));
+    std::fs::remove_dir_all(work).unwrap();
+}
+
 /// Every scenario except those that copy std (which check std from source:
 /// about 270 s and 2.5 GB today; run them with `oracle o2 --scenario`).
 #[test]
@@ -132,6 +163,32 @@ fn o2_warm_runs_equal_cold_after_every_scripted_edit() {
     holds(&report);
     assert!(report.passed(false), "{}", report.text());
     assert_eq!(report.checks.len(), 3 * selected.len(), "{}", report.text());
+    let crossed = selected.iter().find(|s| s.name == "body-edit").unwrap();
+    assert_eq!(
+        (crossed.config_before.jobs, crossed.config_after.jobs),
+        (1, 2)
+    );
+    assert!(crossed.config_before.native && crossed.config_after.native);
+    for mode in ["disk-before", "cold", "mem", "resident", "disk-after"] {
+        let artifacts = work.join("body-edit").join(mode);
+        require_accepted_export(&artifacts);
+        assert!(
+            !std::fs::read(artifacts.join("receipts"))
+                .unwrap()
+                .is_empty()
+        );
+        for backend in ["llvm", "cranelift"] {
+            let objects: Vec<_> = std::fs::read_dir(artifacts.join("objects").join(backend))
+                .unwrap()
+                .collect();
+            assert!(!objects.is_empty(), "{mode}/{backend}");
+            for object in objects {
+                let object = object.unwrap().path();
+                assert_eq!(object.extension().unwrap(), "o");
+                assert!(std::fs::read(object).unwrap().starts_with(b"\x7fELF"));
+            }
+        }
+    }
     let _ = std::fs::remove_dir_all(&work);
 }
 
@@ -340,6 +397,14 @@ fn scenarios_refuse_ambiguous_or_empty_edits() {
         assert!(error_text.contains(error), "{edit}: {error_text}");
     }
     assert!(parse("=== main.hir\n").unwrap_err().contains("first line"));
+    for setting in ["jobs=0", "jobs=abc", "native=maybe"] {
+        assert!(
+            parse(&format!(
+                "// o2: config\n// after: {setting}\n=== main.hir\nfn a() {{}}\n"
+            ))
+            .is_err()
+        );
+    }
     let scenario = parse(&format!("{base}--- main.hir\n+++ lib.hir\nfn c() {{}}\n")).unwrap();
     assert_eq!(scenario.after.keys().collect::<Vec<_>>(), ["lib.hir"]);
     assert_eq!(scenario.before["main.hir"], "fn a() {}\nfn a() {}\n");

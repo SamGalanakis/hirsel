@@ -6,8 +6,8 @@
 //! - `resident`: one `Session` across the edit.
 //! - `disk`: two processes sharing a `dir@1` store.
 use super::{
-    Artifacts, Config, Report, Verdict, difference, edits::Scenario, o1::produce_in_child, produce,
-    produce_with_store, request_artifacts, switches,
+    Config, ProduceResult, Production, Report, Verdict, edits::Scenario, o1::produce_in_child,
+    produce, produce_with_store, request_artifacts, switches,
 };
 use hirsel_driver::session::{FileChange, Session};
 use hirsel_engine_store::MemStore;
@@ -41,7 +41,7 @@ fn one(
     let warmed = produce_with_store(&entry, before, store.clone());
     let resident_store = before.result_store();
     let mut resident = Session::open_with_compiler(&entry, before.compiler(resident_store.clone()));
-    let _resident_before = resident_artifacts(&mut resident, before);
+    let resident_before = resident_artifacts(&mut resident, before);
     let disk = base.join("store");
     let disk_before = Config {
         store: Some(disk.clone()),
@@ -72,24 +72,25 @@ fn one(
             .collect(),
     );
     if before != after {
-        // A changed verification or compile-time policy selects new immutable
+        // A changed worker count, verification or compile-time policy selects new immutable
         // factories, while the same Session keeps its delivered input cursor.
         resident.configure(after.compiler(resident_store));
     }
     let cold = match produce(&entry, after) {
         Ok(cold) => cold,
-        Err(switch) => {
+        Err(error) => {
+            let verdict = Verdict::from(error);
             for mode in ["mem", "resident", "disk"] {
-                report.add(format!("{} [{mode}]", scenario.name), Verdict::Todo(switch));
+                report.add(format!("{} [{mode}]", scenario.name), verdict.clone());
             }
             return Ok(());
         }
     };
     // Kept for reading under `--work`.
-    super::write_artifacts(&base.join("cold"), &cold).map_err(|e| e.to_string())?;
+    cold.write(&base.join("cold")).map_err(|e| e.to_string())?;
     let name = |mode: &str| format!("{} [{mode}]", scenario.name);
-    let compare = |warm: Result<Artifacts, Verdict>| match warm {
-        Ok(warm) => match difference(&cold, &warm) {
+    let compare = |warm: Result<Production, Verdict>| match warm {
+        Ok(warm) => match cold.difference(&warm) {
             None => Verdict::Pass,
             Some(why) => Verdict::Fail(format!("warm differs from cold: {why}")),
         },
@@ -99,17 +100,24 @@ fn one(
         name("mem"),
         compare(
             warmed
-                .map_err(Verdict::Todo)
-                .and_then(|_| produce_with_store(&entry, after, store).map_err(Verdict::Todo)),
+                .map_err(Verdict::from)
+                .and_then(|_| produce_with_store(&entry, after, store).map_err(Verdict::from))
+                .and_then(|artifacts| {
+                    artifacts
+                        .write(&base.join("mem"))
+                        .map_err(|e| Verdict::Fail(e.to_string()))?;
+                    Ok(artifacts)
+                }),
         ),
     );
     report.add(
         name("resident"),
-        compare(Ok({
-            let artifacts = resident_artifacts(&mut resident, after);
-            super::write_artifacts(&base.join("resident"), &artifacts)
-                .map_err(|e| e.to_string())?;
+        compare(resident_before.map_err(Verdict::from).and_then(|_| {
+            let artifacts = resident_artifacts(&mut resident, after).map_err(Verdict::from)?;
             artifacts
+                .write(&base.join("resident"))
+                .map_err(|e| Verdict::Fail(e.to_string()))?;
+            Ok(artifacts)
         })),
     );
     let disk_after = Config {
@@ -126,6 +134,6 @@ fn one(
     Ok(())
 }
 
-fn resident_artifacts(session: &mut Session, config: &Config) -> Artifacts {
+fn resident_artifacts(session: &mut Session, config: &Config) -> ProduceResult {
     hirsel_intern::jobs::with_compiler_stack(|| request_artifacts(session, config))
 }

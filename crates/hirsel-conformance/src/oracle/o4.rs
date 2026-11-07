@@ -10,10 +10,7 @@
 //!
 //! Conformance and agreement campaigns select `VerifyStore::Recompute`
 //! explicitly in their compiler wiring.
-use super::{
-    Config, Report, Verdict, difference, o1::produce_in_child, produce, produce_with_store,
-    switches,
-};
+use super::{Config, Report, Verdict, o1::produce_in_child, produce, produce_with_store, switches};
 use hirsel_engine_store::MemStore;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -29,8 +26,8 @@ pub fn run(exe: &Path, root: &Path, programs: &[PathBuf], work: &Path) -> Report
         let config = Config::default();
         let cold = match produce(program, &config) {
             Ok(cold) => cold,
-            Err(switch) => {
-                report.add(format!("{name} [cold]"), Verdict::Todo(switch));
+            Err(error) => {
+                report.add(format!("{name} [cold]"), Verdict::from(error));
                 continue;
             }
         };
@@ -40,11 +37,11 @@ pub fn run(exe: &Path, root: &Path, programs: &[PathBuf], work: &Path) -> Report
         report.add(
             format!("{name} [mem hit]"),
             match hit {
-                Ok(hit) => match difference(&cold, &hit) {
+                Ok(hit) => match cold.difference(&hit) {
                     None => Verdict::Pass,
                     Some(why) => Verdict::Fail(format!("hit differs from cold: {why}")),
                 },
-                Err(switch) => Verdict::Todo(switch),
+                Err(error) => Verdict::from(error),
             },
         );
         let base = work.join(index.to_string());
@@ -59,7 +56,7 @@ pub fn run(exe: &Path, root: &Path, programs: &[PathBuf], work: &Path) -> Report
                 let runs = produce_in_child(exe, program, &stored, &base.join("populate"))
                     .and_then(|_| produce_in_child(exe, program, &stored, &base.join("hit")));
                 match runs {
-                    Ok(hit) => match difference(&cold, &hit) {
+                    Ok(hit) => match cold.difference(&hit) {
                         None => Verdict::Pass,
                         Some(why) => Verdict::Fail(format!("hit differs from cold: {why}")),
                     },

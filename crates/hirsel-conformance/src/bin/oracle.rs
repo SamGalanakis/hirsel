@@ -167,16 +167,19 @@ fn produce(options: Options) -> ExitCode {
         hirsel_intern::salt_ids(seed);
     }
     match oracle::produce(&program, &options.config) {
-        Ok(artifacts) => match write_artifacts(&out, &artifacts) {
+        Ok(artifacts) => match artifacts.write(&out) {
             Ok(()) => ExitCode::SUCCESS,
             Err(error) => {
                 eprintln!("produce: {}: {error}", out.display());
                 ExitCode::FAILURE
             }
         },
-        Err(switch) => {
-            eprintln!("produce: {switch}");
-            ExitCode::from(TODO)
+        Err(error) => {
+            eprintln!("produce: {error}");
+            match error {
+                oracle::ProduceError::Unavailable(_) => ExitCode::from(TODO),
+                oracle::ProduceError::Operational(_) => ExitCode::FAILURE,
+            }
         }
     }
 }

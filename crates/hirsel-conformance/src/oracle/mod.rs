@@ -30,6 +30,84 @@ pub const SCENARIOS: &str = "crates/hirsel-conformance/oracles";
 /// byte-identical.
 pub type Artifacts = BTreeMap<String, Vec<u8>>;
 
+/// Only completed compiler outcomes may participate in artifact equality.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Production {
+    Complete(Artifacts),
+    Rejected(Artifacts),
+}
+
+impl Production {
+    pub fn artifacts(&self) -> &Artifacts {
+        match self {
+            Self::Complete(artifacts) | Self::Rejected(artifacts) => artifacts,
+        }
+    }
+
+    pub fn into_artifacts(self) -> Artifacts {
+        match self {
+            Self::Complete(artifacts) | Self::Rejected(artifacts) => artifacts,
+        }
+    }
+
+    pub fn difference(&self, actual: &Self) -> Option<String> {
+        if std::mem::discriminant(self) != std::mem::discriminant(actual) {
+            return Some("completed acceptance and language rejection differ".into());
+        }
+        difference(self.artifacts(), actual.artifacts())
+    }
+
+    pub fn write(&self, dir: &Path) -> std::io::Result<()> {
+        write_artifacts(dir, self.artifacts())?;
+        std::fs::write(
+            dir.join(".oracle-outcome"),
+            match self {
+                Self::Complete(_) => "complete",
+                Self::Rejected(_) => "rejected",
+            },
+        )
+    }
+
+    fn read(dir: &Path) -> Result<Self, String> {
+        let mut artifacts = read_artifacts(dir).map_err(|e| e.to_string())?;
+        match artifacts.remove(".oracle-outcome").as_deref() {
+            Some(b"complete") => Ok(Self::Complete(artifacts)),
+            Some(b"rejected") => Ok(Self::Rejected(artifacts)),
+            _ => Err("produce did not report a completed outcome".into()),
+        }
+    }
+}
+
+#[derive(Debug)]
+pub enum ProduceError {
+    Unavailable(Switch),
+    Operational(String),
+}
+
+impl From<Switch> for ProduceError {
+    fn from(switch: Switch) -> Self {
+        Self::Unavailable(switch)
+    }
+}
+impl From<ProduceError> for Verdict {
+    fn from(error: ProduceError) -> Self {
+        match error {
+            ProduceError::Unavailable(switch) => Self::Todo(switch),
+            ProduceError::Operational(why) => Self::Fail(why),
+        }
+    }
+}
+impl std::fmt::Display for ProduceError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Unavailable(switch) => write!(f, "{switch}"),
+            Self::Operational(why) => write!(f, "{why}"),
+        }
+    }
+}
+
+pub type ProduceResult = Result<Production, ProduceError>;
+
 struct ColdStore(Arc<dyn ResultStore>);
 
 impl ResultStore for ColdStore {
@@ -229,7 +307,7 @@ impl std::str::FromStr for Limits {
 /// Compile `program` under `config` with `cache`, as `hirsel check --json`
 /// renders it, then export the entry's TIR and, with `native`, its Ready
 /// receipts and objects. Refuses before compiling when a switch is missing.
-pub fn produce(program: &Path, config: &Config) -> Result<Artifacts, Switch> {
+pub fn produce(program: &Path, config: &Config) -> ProduceResult {
     produce_with_store(program, config, config.result_store())
 }
 
@@ -237,14 +315,12 @@ fn produce_with_store(
     program: &Path,
     config: &Config,
     store: Arc<dyn ResultStore>,
-) -> Result<Artifacts, Switch> {
+) -> ProduceResult {
     switches::missing(config.switches())?;
-    Ok(hirsel_intern::jobs::with_compiler_stack(|| {
-        artifacts(program, config, store)
-    }))
+    hirsel_intern::jobs::with_compiler_stack(|| artifacts(program, config, store))
 }
 
-fn artifacts(path: &Path, config: &Config, store: Arc<dyn ResultStore>) -> Artifacts {
+fn artifacts(path: &Path, config: &Config, store: Arc<dyn ResultStore>) -> ProduceResult {
     let mut session =
         hirsel_driver::session::Session::open_with_compiler(path, config.compiler(store));
     request_artifacts(&mut session, config)
@@ -252,36 +328,44 @@ fn artifacts(path: &Path, config: &Config, store: Arc<dyn ResultStore>) -> Artif
 
 /// Fresh, store-warm and resident oracle cells consume the same selected
 /// products. Exporting artifacts never exposes a mutable resident compiler.
-fn request_artifacts(session: &mut hirsel_driver::session::Session, config: &Config) -> Artifacts {
-    let selected = session.request(hirsel_requests::CompileOperation::Artifacts {
+fn request_artifacts(
+    session: &mut hirsel_driver::session::Session,
+    config: &Config,
+) -> ProduceResult {
+    match session.request(hirsel_requests::CompileOperation::Artifacts {
         native: config.native,
-    });
-    match selected {
+    }) {
         Ok(selected) => match &selected.result {
-            hirsel_requests::CompileResult::Artifacts(artifacts) => artifacts.clone(),
-            _ => [(
-                "diagnostics".into(),
-                b"tool error: artifacts request returned another operation\n".to_vec(),
-            )]
-            .into(),
+            hirsel_requests::CompileResult::Artifacts(artifacts) => {
+                // The request rejects incomplete checks and failed exports before
+                // delivery. Only completed language rejections lack a TIR export.
+                Ok(if artifacts.contains_key("tir") {
+                    Production::Complete(artifacts.clone())
+                } else {
+                    Production::Rejected(artifacts.clone())
+                })
+            }
+            _ => Err(ProduceError::Operational(
+                "artifacts request returned another operation".into(),
+            )),
         },
-        Err(error) => [("diagnostics".into(), tool_error(&error).into_bytes())].into(),
-    }
-}
-
-/// A tool error as `hirsel check --json` reports it: the diagnostics it carries,
-/// else its message.
-fn tool_error(error: &ToolError) -> String {
-    match error {
-        ToolError::Query {
+        Err(ToolError::Query {
             error: hirsel_engine::QueryError::Diagnostics(diagnostics),
             sources,
             ..
-        } => diagnostics
+        }) if diagnostics
             .iter()
-            .map(|d| format!("{}\n", d.to_json(sources)))
-            .collect(),
-        error => format!("tool error: {error}\n"),
+            .any(|d| d.severity == hirsel_diag::Severity::Error) =>
+        {
+            let text: String = diagnostics
+                .iter()
+                .map(|d| format!("{}\n", d.to_json(&sources)))
+                .collect();
+            Ok(Production::Rejected(
+                [("diagnostics".into(), text.into_bytes())].into(),
+            ))
+        }
+        Err(error) => Err(ProduceError::Operational(error.to_string())),
     }
 }
 

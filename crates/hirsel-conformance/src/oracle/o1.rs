@@ -5,7 +5,7 @@
 //!
 //! The cells are the baseline (one job, unsalted), a repeat of it in another
 //! process, then every `jobs × salts` pair; each is compared with the baseline.
-use super::{Config, Report, Verdict, difference, read_artifacts};
+use super::{Config, Production, Report, Verdict};
 use std::{
     path::{Path, PathBuf},
     process::Command,
@@ -58,7 +58,7 @@ pub fn run(exe: &Path, root: &Path, programs: &[PathBuf], cells: &[Cell], work: 
             .unwrap_or(program)
             .display()
             .to_string();
-        let mut baseline = None;
+        let mut baseline: Option<Production> = None;
         for cell in cells {
             let check = format!("{name} [{}]", cell.label);
             if let Err(switch) = super::switches::missing(cell.config.switches()) {
@@ -80,7 +80,7 @@ pub fn run(exe: &Path, root: &Path, programs: &[PathBuf], cells: &[Cell], work: 
                 }
                 Some(expected) => report.add(
                     check,
-                    match difference(expected, &artifacts) {
+                    match expected.difference(&artifacts) {
                         None => Verdict::Pass,
                         Some(why) => Verdict::Fail(format!("differs from baseline: {why}")),
                     },
@@ -97,7 +97,7 @@ pub fn produce_in_child(
     program: &Path,
     config: &Config,
     out: &Path,
-) -> Result<super::Artifacts, String> {
+) -> Result<Production, String> {
     let _ = std::fs::remove_dir_all(out);
     std::fs::create_dir_all(out).map_err(|e| format!("{}: {e}", out.display()))?;
     let output = Command::new(exe)
@@ -119,5 +119,5 @@ pub fn produce_in_child(
             tail.into_iter().rev().collect::<Vec<_>>().join(" | ")
         ));
     }
-    read_artifacts(out).map_err(|e| format!("{}: {e}", out.display()))
+    Production::read(out).map_err(|e| format!("{}: {e}", out.display()))
 }

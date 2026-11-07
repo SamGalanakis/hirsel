@@ -1336,6 +1336,7 @@ mod frozen_task_tests {
             assert_eq!(runtime.stats().claims, 1);
             assert_eq!(runtime.stats().polls, 1);
             runtime.shutdown();
+            queries.assert_slot_accounting_transitions();
             drop(queries);
             assert_eq!(
                 budget.reserved(),

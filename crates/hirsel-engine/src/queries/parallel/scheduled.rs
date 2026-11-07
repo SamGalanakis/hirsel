@@ -27,6 +27,8 @@ mod inputs;
 mod source;
 use inputs::Inputs;
 pub(in crate::queries) use inputs::OperationFrontInputs;
+mod slots;
+use slots::FrontSlots;
 mod storage;
 pub use source::FrontInputFootprint;
 use source::{SiblingFile, SiblingSources};
@@ -324,7 +326,7 @@ pub struct FrontBodyQueries {
     /// Stored entry validations plus memo rows written.
     memo_operations: AtomicU64,
     verify_store: hirsel_engine_store::VerifyStore,
-    slots: Mutex<BTreeMap<Key, FrontSlot>>,
+    slots: Mutex<FrontSlots>,
     input_slots: Mutex<(BTreeMap<DefId, usize>, Option<Arc<LiveSourceBacking>>)>,
     /// Optional body retention bound within the existing Front allowance.
     body_cache_limit: u64,
@@ -944,7 +946,7 @@ impl FrontBodyQueries {
             let state = (slots.len(), ledger.0.len());
             let roots = state.0 + state.1 + usize::from(!slots.contains_key(&key));
             let required = Self::slot_inventory(roots, state.1 + 1).max(
-                self.slot_metadata_bytes(&ledger.0, &slots)
+                self.slot_admission_bytes(&ledger.0, &slots)
                     .checked_add(Self::slot_inventory(1, 1))?,
             );
             let held = ledger.1.as_ref().map_or(0, |backing| backing.charge());
@@ -979,11 +981,7 @@ impl FrontBodyQueries {
             return Some(());
         }
     }
-    fn slot_metadata_bytes(
-        &self,
-        pending: &BTreeMap<DefId, usize>,
-        slots: &BTreeMap<Key, FrontSlot>,
-    ) -> u64 {
+    fn slot_admission_bytes(&self, pending: &BTreeMap<DefId, usize>, slots: &FrontSlots) -> u64 {
         let mut weight = hirsel_query_products::retained::MetadataWeight::default();
         if !slots.is_empty() {
             weight.tree::<Key, FrontSlot>(slots.len());
@@ -999,17 +997,7 @@ impl FrontBodyQueries {
         if !clean.is_empty() {
             weight.tree::<crate::memo::MemoKey, ()>(clean.len());
         }
-        for slot in slots.values() {
-            let observations = match slot {
-                FrontSlot::Archived(archived) => Some(&archived.observations),
-                FrontSlot::Live { observations, .. } => observations.as_ref(),
-            };
-            if let Some(observations) = observations
-                && observations._backing.is_none()
-            {
-                weight.add(observations.rows.metadata_bytes() as usize);
-            }
-        }
+        weight.add(slots.shared_observations() as usize);
         if weight.bytes() != 0 {
             weight.add(
                 hirsel_engine_admission::retained_arc_bytes(&std::mem::MaybeUninit::<
@@ -1034,26 +1022,12 @@ impl FrontBodyQueries {
     pub fn retained_observation_metadata_bytes(&self) -> u64 {
         let ledger = self.input_slots.lock().unwrap_or_else(|e| e.into_inner());
         let slots = self.slots.lock().unwrap_or_else(|e| e.into_inner());
-        let archives = slots
-            .values()
-            .filter_map(|slot| match slot {
-                FrontSlot::Archived(archived) => Some(&archived.observations),
-                FrontSlot::Live { observations, .. } => observations.as_ref(),
-            })
-            .filter(|observations| observations._backing.is_some())
-            .map(|observations| {
-                observations.rows.metadata_bytes()
-                    + hirsel_engine_admission::retained_arc_bytes(&std::mem::MaybeUninit::<
-                        LiveSourceBacking,
-                    >::uninit())
-            })
-            .sum::<u64>();
-        self.slot_metadata_bytes(&ledger.0, &slots) + archives
+        self.slot_admission_bytes(&ledger.0, &slots) + slots.owned_observations()
     }
     fn trim_slot_admission(&self) -> bool {
         let mut ledger = self.input_slots.lock().unwrap_or_else(|e| e.into_inner());
         let slots = self.slots.lock().unwrap_or_else(|e| e.into_inner());
-        let required = self.slot_metadata_bytes(&ledger.0, &slots);
+        let required = self.slot_admission_bytes(&ledger.0, &slots);
         if required == 0 {
             return ledger.1.take().is_some();
         }
@@ -1138,20 +1112,17 @@ impl FrontBodyQueries {
                 })
                 .sum();
             while charge > self.body_cache_limit.saturating_sub(used) {
-                let retired = slots.iter_mut().find_map(|(stored, slot)| match slot {
-                    FrontSlot::Live { outcome, .. }
-                        if *stored != key
-                            && matches!(
-                                outcome.state,
-                                FrontState::Settled {
-                                    archive: Some(_),
-                                    ..
-                                }
-                            ) =>
-                    {
-                        outcome.pending_body.take()
-                    }
-                    _ => None,
+                let retired = slots.outcomes_mut().find_map(|(stored, outcome)| {
+                    (*stored != key
+                        && matches!(
+                            outcome.state,
+                            FrontState::Settled {
+                                archive: Some(_),
+                                ..
+                            }
+                        ))
+                    .then(|| outcome.pending_body.take())
+                    .flatten()
                 });
                 let Some(retired) = retired else {
                     outcome.pending_body.take();
@@ -1161,30 +1132,25 @@ impl FrontBodyQueries {
                 drop(retired);
             }
         }
-        match slots.entry(key) {
-            std::collections::btree_map::Entry::Occupied(mut entry) => {
-                // This slot belongs to one immutable input view. Restoring
-                // its facts preserves the original required checkpoint.
-                outcome.terminal = outcome.terminal.or_else(|| match entry.get() {
-                    FrontSlot::Live { outcome, .. } => outcome.terminal,
-                    FrontSlot::Archived(archived) => Some(archived.facts),
-                });
-                let observations = match entry.get() {
-                    FrontSlot::Live { observations, .. } => observations.clone(),
-                    FrontSlot::Archived(archived) => Some(archived.observations.clone()),
-                };
-                entry.insert(FrontSlot::Live {
-                    outcome,
-                    observations,
-                });
+        let observations = slots.get(&key).and_then(|slot| {
+            // Restoring an immutable input preserves its required checkpoint
+            // and the original completion-index owner.
+            outcome.terminal = outcome.terminal.or_else(|| match slot {
+                FrontSlot::Live { outcome, .. } => outcome.terminal,
+                FrontSlot::Archived(archived) => Some(archived.facts),
+            });
+            match slot {
+                FrontSlot::Live { observations, .. } => observations.clone(),
+                FrontSlot::Archived(archived) => Some(archived.observations.clone()),
             }
-            std::collections::btree_map::Entry::Vacant(entry) => {
-                entry.insert(FrontSlot::Live {
-                    outcome,
-                    observations: None,
-                });
-            }
-        }
+        });
+        slots.insert(
+            key,
+            FrontSlot::Live {
+                outcome,
+                observations,
+            },
+        );
         drop(slots);
     }
     /// Actual phase invocations, including failed or discarded producers.
@@ -2215,10 +2181,7 @@ impl FrontBodyQueries {
 
         let mut slots = self.slots.lock().unwrap_or_else(|e| e.into_inner());
         let key = self.selection_key(&selected, &slots)?;
-        let outcome = match slots.get_mut(&key)? {
-            FrontSlot::Archived(_) => return None,
-            FrontSlot::Live { outcome, .. } => outcome,
-        };
+        let outcome = slots.outcome_mut(&key)?;
         let (result, summary, body_owner) = match &outcome.state {
             FrontState::Failed { error, .. } => (Err((**error).clone()), None, None),
             FrontState::Settled {
@@ -2302,22 +2265,22 @@ impl FrontBodyQueries {
     }
     fn evict_pending_body(&self) -> bool {
         let mut slots = self.slots.lock().unwrap_or_else(|e| e.into_inner());
-        let retired = slots.values_mut().find_map(|slot| match slot {
-            FrontSlot::Live { outcome, .. }
-                if matches!(
-                    outcome.state,
-                    FrontState::Settled {
-                        archive: Some(_),
-                        ..
-                    }
-                ) && outcome
-                    .pending_body
-                    .as_ref()
-                    .is_some_and(|body| body.product.cache_only()) =>
+        let retired = slots.outcomes_mut().find_map(|(_, outcome)| {
+            if matches!(
+                outcome.state,
+                FrontState::Settled {
+                    archive: Some(_),
+                    ..
+                }
+            ) && outcome
+                .pending_body
+                .as_ref()
+                .is_some_and(|body| body.product.cache_only())
             {
                 outcome.pending_body.take()
+            } else {
+                None
             }
-            _ => None,
         });
         drop(slots);
         let removed = retired.is_some();
@@ -2327,16 +2290,14 @@ impl FrontBodyQueries {
     /// Discard decoded bodies only when their request checkpoint survives.
     pub(crate) fn release_pending_bodies(&self) {
         let mut slots = self.slots.lock().unwrap_or_else(|e| e.into_inner());
-        for slot in slots.values_mut() {
-            if let FrontSlot::Live { outcome, .. } = slot
-                && matches!(
-                    outcome.state,
-                    FrontState::Settled {
-                        archive: Some(_),
-                        ..
-                    }
-                )
-            {
+        for (_, outcome) in slots.outcomes_mut() {
+            if matches!(
+                outcome.state,
+                FrontState::Settled {
+                    archive: Some(_),
+                    ..
+                }
+            ) {
                 outcome.pending_body.take();
             }
         }
@@ -2415,7 +2376,7 @@ impl QueryFactory for Factory {
             return front.factory().evict(query, product, scratch);
         }
         let mut slots = self.0.slots.lock().unwrap_or_else(|e| e.into_inner());
-        let (outcome, observations) = match slots.get_mut(&query.address.0) {
+        let (outcome, observations) = match slots.get(&query.address.0) {
             Some(FrontSlot::Archived(_)) | None => return false,
             Some(FrontSlot::Live {
                 outcome,
@@ -2828,13 +2789,9 @@ impl BodyTask {
             .live_value::<crate::products::LiveAnalyzedProduct>()
             .ok_or_else(|| queries.protocol_refusal())?;
         let mut slots = queries.slots.lock().unwrap_or_else(|e| e.into_inner());
-        let current = match slots
-            .get_mut(&self.input)
-            .ok_or_else(|| queries.protocol_refusal())?
-        {
-            FrontSlot::Archived(_) => return Err(queries.protocol_refusal()),
-            FrontSlot::Live { outcome, .. } => outcome,
-        };
+        let current = slots
+            .outcome_mut(&self.input)
+            .ok_or_else(|| queries.protocol_refusal())?;
         match &mut current.state {
             FrontState::Failed { .. } => return Err(queries.protocol_refusal()),
             FrontState::Settled {
@@ -3871,7 +3828,7 @@ impl QueryEngine {
             input_records,
             store,
             terminal_cache,
-            slots: Mutex::new(BTreeMap::new()),
+            slots: Mutex::new(FrontSlots::default()),
             input_slots: Mutex::new((BTreeMap::new(), None)),
             body_cache_limit: self.hold_bytes,
             carry: Mutex::new(None),

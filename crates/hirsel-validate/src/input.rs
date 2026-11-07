@@ -108,16 +108,16 @@ pub(crate) fn read_payload_bytes(reads: &[VRead]) -> Option<u64> {
 pub(crate) fn select_heap<'a>(
     roles: impl IntoIterator<Item = &'a HeapRole>,
 ) -> Result<Option<HeapRole>, ViewRefusal> {
-    let mut selected = None;
+    let mut selected: Option<&HeapRole> = None;
     for role in roles {
-        if selected.as_ref().is_some_and(|previous| previous != role) {
+        if selected.is_some_and(|previous| previous != role) {
             return Err(ViewRefusal::Stale {
                 definition: DefId::intern(&role.arena),
             });
         }
-        selected = Some(role.clone());
+        selected = Some(role);
     }
-    Ok(selected)
+    Ok(selected.cloned())
 }
 
 pub(crate) fn observe_heap(

@@ -500,8 +500,15 @@ impl ResultStore for DirStore {
         self.read_product_content(reference).ok()
     }
     fn put_content(&self, domain: super::Domain, bytes: &[u8]) -> Option<super::Reference> {
+        self.put_identified_content(domain.identify(bytes)?)
+    }
+    fn put_identified_content(
+        &self,
+        content: super::IdentifiedContent<'_>,
+    ) -> Option<super::Reference> {
         let store = self.publication_store()?;
-        let reference = store.put(domain, bytes).ok()?;
+        let bytes = content.bytes();
+        let reference = store.put_identified(content).ok()?;
         if !store.get(reference).is_some_and(|stored| &*stored == bytes) {
             return None;
         }

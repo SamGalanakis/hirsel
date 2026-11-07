@@ -386,11 +386,17 @@ impl hirsel_artifact_store::Contents for TransportContents {
         domain: Domain,
         bytes: &[u8],
     ) -> Option<hirsel_artifact_store::Reference> {
-        let reference = domain.reference(bytes)?;
-        if self.request.put_content(domain, bytes)? != reference {
+        self.put_identified_content(domain.identify(bytes)?)
+    }
+    fn put_identified_content(
+        &self,
+        content: hirsel_artifact_store::IdentifiedContent<'_>,
+    ) -> Option<hirsel_artifact_store::Reference> {
+        let reference = content.reference();
+        if self.request.put_identified_content(content)? != reference {
             return None;
         }
-        let _ = self.selected.put_content(domain, bytes);
+        let _ = self.selected.put_identified_content(content);
         Some(reference)
     }
 }
@@ -773,10 +779,20 @@ impl VerifierCache {
         self.publish_bytes(key, domain, &bytes);
     }
     fn publish_bytes(&self, key: ContentHash, domain: Domain, bytes: &[u8]) {
+        let Some(content) = domain.identify(bytes) else {
+            return;
+        };
+        self.publish_identified(key, content);
+    }
+    fn publish_identified(
+        &self,
+        key: ContentHash,
+        content: hirsel_artifact_store::IdentifiedContent<'_>,
+    ) {
         match &self.0 {
             Backend::Memory(rows, contents) => {
                 use hirsel_artifact_store::Contents;
-                let Some(reference) = contents.put_content(domain, &bytes) else {
+                let Some(reference) = contents.put_identified_content(content) else {
                     return;
                 };
                 let Ok(bytes) = contents.get_content(reference) else {
@@ -788,25 +804,23 @@ impl VerifierCache {
             }
             Backend::Directory(store) => {
                 let _batch = store.batch();
-                if let Ok(reference) = store.put(domain, &bytes) {
+                if let Ok(reference) = store.put_identified(content) {
                     let _ = store.associate(Address(key), Action(key), reference);
                 }
             }
             Backend::Hosted(rows, contents) => {
-                if let Some(reference) = contents.put_content(domain, &bytes) {
+                if let Some(reference) = contents.put_identified_content(content) {
                     rows.set_row(key, reference);
                 }
             }
-            Backend::Registered(local, _) => local.publish_bytes(key, domain, bytes),
+            Backend::Registered(local, _) => local.publish_identified(key, content),
             Backend::Transport(selected, rows, contents) => {
-                let Some(reference) = domain.reference(bytes) else {
-                    return;
-                };
-                if contents.request.put_content(domain, bytes) != Some(reference) {
+                let reference = content.reference();
+                if contents.request.put_identified_content(content) != Some(reference) {
                     return;
                 }
                 rows.set_row(key, reference);
-                selected.publish_bytes(key, domain, bytes);
+                selected.publish_identified(key, content);
             }
         }
     }

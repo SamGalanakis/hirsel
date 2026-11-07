@@ -38,8 +38,14 @@ impl hirsel_artifact_store::Contents for Rows {
         hirsel_artifact_store::Contents::get_content(&self.store, reference)
     }
     fn put_content(&self, domain: Domain, bytes: &[u8]) -> Option<Reference> {
+        self.put_identified_content(domain.identify(bytes)?)
+    }
+    fn put_identified_content(
+        &self,
+        content: hirsel_artifact_store::IdentifiedContent<'_>,
+    ) -> Option<Reference> {
         self.writable
-            .then(|| self.store.put(domain, bytes).ok())
+            .then(|| self.store.put_identified(content).ok())
             .flatten()
     }
 }
@@ -85,6 +91,12 @@ impl hirsel_artifact_store::Contents for Contents {
     }
     fn put_content(&self, domain: Domain, bytes: &[u8]) -> Option<Reference> {
         self.local.put_content(domain, bytes)
+    }
+    fn put_identified_content(
+        &self,
+        content: hirsel_artifact_store::IdentifiedContent<'_>,
+    ) -> Option<Reference> {
+        self.local.put_identified_content(content)
     }
 }
 /// A fresh local verifier run whose rows can be registered only after its

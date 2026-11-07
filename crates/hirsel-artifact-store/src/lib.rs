@@ -70,6 +70,25 @@ pub struct Reference {
     pub len: u64,
 }
 
+/// A digest bound to an immutable borrow of the exact bytes it names.
+/// Construction checks the ordinary record bound and every payload byte.
+/// This supplies content integrity, never query or verifier acceptance.
+#[derive(Clone, Copy)]
+pub struct IdentifiedContent<'a> {
+    bytes: &'a [u8],
+    reference: Reference,
+}
+impl<'a> IdentifiedContent<'a> {
+    /// The exact immutable bytes hashed at construction.
+    pub fn bytes(self) -> &'a [u8] {
+        self.bytes
+    }
+    /// The complete domain, digest and length of these bytes.
+    pub fn reference(self) -> Reference {
+        self.reference
+    }
+}
+
 /// Failure to obtain required content. Absence is distinct from an unreadable
 /// backing or a request refusing the read under its existing allowance.
 #[derive(Debug)]
@@ -117,6 +136,11 @@ impl std::error::Error for ContentReadError {
 pub trait Contents: Send + Sync {
     fn get_content(&self, reference: Reference) -> Result<Bytes, ContentReadError>;
     fn put_content(&self, domain: Domain, bytes: &[u8]) -> Option<Reference>;
+    /// Preserve an already computed byte identity through publication layers.
+    fn put_identified_content(&self, content: IdentifiedContent<'_>) -> Option<Reference> {
+        self.put_content(content.reference().domain, content.bytes())
+            .filter(|reference| *reference == content.reference())
+    }
 }
 
 #[derive(Default)]
@@ -151,7 +175,10 @@ impl Contents for Embedded {
             .ok_or(ContentReadError::InvalidContent)
     }
     fn put_content(&self, domain: Domain, bytes: &[u8]) -> Option<Reference> {
-        let reference = domain.reference(bytes)?;
+        self.put_identified_content(domain.identify(bytes)?)
+    }
+    fn put_identified_content(&self, content: IdentifiedContent<'_>) -> Option<Reference> {
+        let reference = content.reference();
         self.get_content(reference).ok().map(|_| reference)
     }
 }
@@ -167,7 +194,11 @@ impl Contents for Memory {
         Ok(bytes.clone())
     }
     fn put_content(&self, domain: Domain, bytes: &[u8]) -> Option<Reference> {
-        let reference = domain.reference(bytes)?;
+        self.put_identified_content(domain.identify(bytes)?)
+    }
+    fn put_identified_content(&self, content: IdentifiedContent<'_>) -> Option<Reference> {
+        let reference = content.reference();
+        let bytes = content.bytes();
         self.entries
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -177,6 +208,13 @@ impl Contents for Memory {
 }
 
 impl Domain {
+    /// Hash once and retain the immutable borrow for layered publication.
+    pub fn identify(self, bytes: &[u8]) -> Option<IdentifiedContent<'_>> {
+        Some(IdentifiedContent {
+            bytes,
+            reference: self.reference(bytes)?,
+        })
+    }
     /// The canonical reference to these bytes, without publication or authority.
     pub fn reference(self, bytes: &[u8]) -> Option<Reference> {
         (bytes.len() <= MAX_RECORD).then(|| Reference {
@@ -186,6 +224,8 @@ impl Domain {
         })
     }
     fn output(self, bytes: &[u8]) -> Output {
+        #[cfg(test)]
+        CONTENT_HASHES.with(|count| count.set(count.get() + 1));
         let mut hash = self.digest(bytes.len() as u64);
         hash.update(bytes);
         Output(ContentHash(hash.finalize().into()))
@@ -206,6 +246,11 @@ impl Domain {
         hash.update(prefix);
         hash
     }
+}
+
+#[cfg(test)]
+thread_local! {
+    static CONTENT_HASHES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
 mod window;
@@ -821,6 +866,9 @@ impl Contents for Store {
     fn put_content(&self, domain: Domain, bytes: &[u8]) -> Option<Reference> {
         self.put(domain, bytes).ok()
     }
+    fn put_identified_content(&self, content: IdentifiedContent<'_>) -> Option<Reference> {
+        self.put_identified(content).ok()
+    }
 }
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct GcReport {
@@ -1050,14 +1098,13 @@ impl Store {
     /// Publish a bounded immutable output. No action/verification claim is
     /// accepted here: imported content gets the same integrity checks.
     pub fn put(&self, domain: Domain, bytes: &[u8]) -> io::Result<Reference> {
-        if bytes.len() > MAX_RECORD {
-            return Err(invalid());
-        }
-        let reference = Reference {
-            output: domain.output(bytes),
-            domain,
-            len: bytes.len() as u64,
-        };
+        self.put_identified(domain.identify(bytes).ok_or_else(invalid)?)
+    }
+    /// Publish the exact immutable bytes identified by their producer.
+    pub fn put_identified(&self, content: IdentifiedContent<'_>) -> io::Result<Reference> {
+        let reference = content.reference();
+        let domain = reference.domain;
+        let bytes = content.bytes();
         let mut header = Vec::with_capacity(HEADER);
         header.extend(MAGIC);
         header.extend(domain.kind.to_le_bytes());

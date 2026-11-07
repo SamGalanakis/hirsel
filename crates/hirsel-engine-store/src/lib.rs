@@ -8,8 +8,8 @@
 #[cfg(test)]
 hirsel_guard::install!(test_alloc::Counting: test_alloc::Counting);
 pub use hirsel_artifact_store::{
-    Action, Address, Association, Bytes, ContentReadError, Contents, Domain, MAX_RECORD, Output,
-    Reference,
+    Action, Address, Association, Bytes, ContentReadError, Contents, Domain, IdentifiedContent,
+    MAX_RECORD, Output, Reference,
 };
 #[cfg(test)]
 use hirsel_engine_admission::test_alloc;
@@ -459,6 +459,11 @@ pub trait ResultStore: Send + Sync {
             WriteOutcome::Refused => None,
             WriteOutcome::Stored(_) => Some(reference),
         }
+    }
+    /// Carry a checked immutable borrow through layered stores without rehashing.
+    fn put_identified_content(&self, content: IdentifiedContent<'_>) -> Option<Reference> {
+        self.put_content(content.reference().domain, content.bytes())
+            .filter(|reference| *reference == content.reference())
     }
     /// Publish a query product with its domain explicit at the provider seam.
     /// The key already binds the kind; byte-only providers share `put`.

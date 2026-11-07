@@ -867,6 +867,19 @@ fn embedded_products_use_the_mapped_store_integrity_boundary() {
                 ],
             );
             assert_eq!(domain.reference(&payload).unwrap().output.0, expected);
+            let before = CONTENT_HASHES.with(std::cell::Cell::get);
+            let content = domain.identify(&payload).unwrap();
+            let memory = Memory::default();
+            for _ in 0..8 {
+                let reference = memory.put_identified_content(content).unwrap();
+                assert_eq!(reference.output.0, expected);
+                assert_eq!(&*memory.get_content(reference).unwrap(), &payload);
+            }
+            assert_eq!(
+                CONTENT_HASHES.with(std::cell::Cell::get) - before,
+                1,
+                "publication preserves the digest of its immutable bytes"
+            );
         }
     }
     let dir = tempfile::tempdir().unwrap();

@@ -45,7 +45,14 @@ impl Contents for UniverseReceipts {
         Ok(bytes.clone())
     }
     fn put_content(&self, domain: Domain, bytes: &[u8]) -> Option<Reference> {
-        let reference = domain.reference(bytes)?;
+        self.put_identified_content(domain.identify(bytes)?)
+    }
+    fn put_identified_content(
+        &self,
+        content: hirsel_artifact_store::IdentifiedContent<'_>,
+    ) -> Option<Reference> {
+        let reference = content.reference();
+        let bytes = content.bytes();
         let mut contents = self.contents.lock().unwrap();
         if let Some((actual, _)) = contents.get(&reference.output.0) {
             return (*actual == reference).then_some(reference);

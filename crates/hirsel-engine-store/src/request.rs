@@ -280,6 +280,9 @@ impl hirsel_artifact_store::Contents for RequestVerifierRows {
     fn put_content(&self, domain: Domain, bytes: &[u8]) -> Option<Reference> {
         self.backend.put_content(domain, bytes)
     }
+    fn put_identified_content(&self, content: IdentifiedContent<'_>) -> Option<Reference> {
+        self.backend.put_identified_content(content)
+    }
 }
 impl hirsel_validate::VerifierRows for RequestVerifierRows {
     fn retain_fact(
@@ -645,12 +648,16 @@ impl ResultStore for RequestStore {
         self.backend.get_content(reference)
     }
     fn put_content(&self, domain: Domain, bytes: &[u8]) -> Option<Reference> {
+        self.put_identified_content(domain.identify(bytes)?)
+    }
+    fn put_identified_content(&self, content: IdentifiedContent<'_>) -> Option<Reference> {
         if self.memory.scratch.get().is_some()
-            && let Some(reference) = self.backend.put_content(domain, bytes)
+            && let Some(reference) = self.backend.put_identified_content(content)
         {
             return Some(reference);
         }
-        let expected = domain.reference(bytes)?;
+        let expected = content.reference();
+        let bytes = content.bytes();
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         if let Some((actual, _)) = state.contents.get(&expected.output.0) {
             return (*actual == expected).then_some(expected);
@@ -667,7 +674,7 @@ impl ResultStore for RequestStore {
             .contents
             .insert(expected.output.0, (expected, bytes.clone()));
         drop(state);
-        self.backend.put_content(domain, &bytes);
+        self.backend.put_identified_content(content);
         Some(expected)
     }
     fn lookup_product(&self, address: Address) -> Option<Association> {

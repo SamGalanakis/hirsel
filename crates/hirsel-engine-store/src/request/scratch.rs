@@ -267,7 +267,11 @@ impl ResultStore for ScratchStore {
         self.selected.associate_product(address, action, reference);
     }
     fn put_content(&self, domain: Domain, bytes: &[u8]) -> Option<Reference> {
-        let expected = domain.reference(bytes)?;
+        self.put_identified_content(domain.identify(bytes)?)
+    }
+    fn put_identified_content(&self, content: IdentifiedContent<'_>) -> Option<Reference> {
+        let expected = content.reference();
+        let bytes = content.bytes();
         let mut files = self.files.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(entry) = files.entries.get(&expected.output.0) {
             return entry.matches(expected).then_some(expected);
@@ -284,7 +288,7 @@ impl ResultStore for ScratchStore {
         }
         // A private hard link retains the provider inode across eviction and
         // abort without keeping a descriptor open for every produced record.
-        let held = if self.selected.put_content(domain, bytes) == Some(expected)
+        let held = if self.selected.put_identified_content(content) == Some(expected)
             && self.admission.try_charge(ENTRY_CHARGE)
         {
             let held = self

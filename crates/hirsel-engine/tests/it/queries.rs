@@ -713,6 +713,10 @@ fn front_body_handoff_reuses_admitted_bodies_until_consumed_or_pressure() {
             }
             if pressure {
                 let retained = front.queries.retained_bytes();
+                let factory = front.queries.factory();
+                while front.queries.live_body_count() != 0 {
+                    assert!(factory.evict_cache(8 << 20));
+                }
                 front.runtime.evict_to(0);
                 assert_eq!(front.queries.live_body_count(), 0);
                 assert!(front.queries.retained_bytes() < retained);

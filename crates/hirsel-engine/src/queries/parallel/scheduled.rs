@@ -2261,7 +2261,7 @@ impl FrontBodyQueries {
         Some((self.syntax(input).ok()?, self.signature(input).ok()?))
     }
 
-    /// Distinct decoded bodies currently owned by active output consumers.
+    /// Distinct decoded bodies held for demand or by active output consumers.
     /// Settled archives and compact checked summaries contain no body owner.
     pub fn live_body_count(&self) -> usize {
         self.slots

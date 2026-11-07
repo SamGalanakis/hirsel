@@ -166,6 +166,12 @@ fn dfa_goldens() -> bool uses {} {
     ("\\babcd", "xabcd abcd", 6, 10),
     ("(?i)ask", "ax aſk", 3, 7),
     ("[a-z]+@example", "ab@exzz cd@example", 8, 18),
+    // Match-only cached transitions retain greedy priority and the last
+    // endpoint before a Unicode quit, including several unrolled groups.
+    ("a+b|a+", "aaaaaaaaXaaaab", 0, 8),
+    ("a+?|a+b", "aaaaab", 0, 1),
+    ("(?:ab)+|a", "ababababa", 0, 8),
+    ("a+z|a+", "aaaaaaaaéaaaaz", 0, 8),
     // Cached runs ending inside a four-transition group or at its tail.
     ("a+", "aaaaaéaaaa", 0, 5),
     ("a+", "aaaaaa😀aaa", 0, 6),
@@ -313,6 +319,7 @@ fn dfa_count_laws() -> bool uses {} {
     ("(?i)ss|s", "ſs", 1), ("(?m)^|$", "a\nb", 4),
     ("abq|bcr", "abcr abq", 2), ("abq|xyr", "ayq abq xyr", 2),
     ("(?i)ask", "ax aſk ASK", 2),
+    ("a+|b", "aaaaaaaa b aaa", 3),
     ("a+", "aa aa", 2), ("z+", "aa aa", 0)
   ]
   for (pattern, src, expected) in cases {

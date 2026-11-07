@@ -490,38 +490,44 @@ fn dfa_search_end(re: Regex, subject: Subject, start: u64, haystack: Bytes, mut 
         }
       }
     }
-    // hybrid/search.rs:197-239: ordinary cached transitions stay in one
-    // byte loop. Unknown, match, stop and start tags return to slow handling.
+    // hybrid/search.rs:197-239: cached transitions stay in one byte loop.
+    // This single-pattern endpoint engine can record match-only tags here,
+    // including every byte of a greedy repetition. Unknown, stop and start
+    // tags still return to slow handling before consuming their byte.
     if !scalar {
       let begin = cursor
-      // regex-automata hybrid/search.rs:189-227: four ordered, untagged
+      // regex-automata hybrid/search.rs:189-227: four ordered cached
       // transitions per loop. Leave each tagged/unknown/Unicode byte unconsumed.
       while cursor < size {
         let byte: u64 = core@1/int.widen(bytes[cursor])
         if byte >= 128 { break }
         let hit = cache.data[state + cache.data[cache.classes + byte]]
-        if hit == 0 || hit % 8 != 0 { break }
+        if hit == 0 || hit % 8 >= 2 { break }
+        if hit % 2 == 1 { end = Some(cursor) }
         state = hit / 8
         cursor += 1
         if !(cursor < size) { break }
         let byte1: u64 = core@1/int.widen(bytes[cursor])
         if byte1 >= 128 { break }
         let hit1 = cache.data[state + cache.data[cache.classes + byte1]]
-        if hit1 == 0 || hit1 % 8 != 0 { break }
+        if hit1 == 0 || hit1 % 8 >= 2 { break }
+        if hit1 % 2 == 1 { end = Some(cursor) }
         state = hit1 / 8
         cursor += 1
         if !(cursor < size) { break }
         let byte2: u64 = core@1/int.widen(bytes[cursor])
         if byte2 >= 128 { break }
         let hit2 = cache.data[state + cache.data[cache.classes + byte2]]
-        if hit2 == 0 || hit2 % 8 != 0 { break }
+        if hit2 == 0 || hit2 % 8 >= 2 { break }
+        if hit2 % 2 == 1 { end = Some(cursor) }
         state = hit2 / 8
         cursor += 1
         if !(cursor < size) { break }
         let byte3: u64 = core@1/int.widen(bytes[cursor])
         if byte3 >= 128 { break }
         let hit3 = cache.data[state + cache.data[cache.classes + byte3]]
-        if hit3 == 0 || hit3 % 8 != 0 { break }
+        if hit3 == 0 || hit3 % 8 >= 2 { break }
+        if hit3 % 2 == 1 { end = Some(cursor) }
         state = hit3 / 8
         cursor += 1
       }

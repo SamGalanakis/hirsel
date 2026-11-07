@@ -1161,6 +1161,12 @@ pub fn find(re: Regex, text: String, work_limit: u64) -> Result[
 }
 
 pub fn is_match(re: Regex, text: String, work_limit: u64) -> Result[bool, MatchError] uses {} {
+  if prefix_admitted(re, text, false, work_limit) {
+    let mut work = work_limit
+    let subject = make_subject(text, mut work)?
+    let mut cache = dfa_cache(re, true, 65024)
+    return Ok(find_end_from(re, subject, 0, true, subject.bytes, mut cache, mut work)? != None())
+  }
   match find(re, text, work_limit)? {
     Some(_) => Ok(true),
     None() => Ok(false),
@@ -1301,22 +1307,8 @@ pub fn find_all(re: Regex, text: String, max_matches: u64, work_limit: u64) -> R
     let Some(span) = matched else {
       return Ok(take matches)
     }
-    let mut accept = true
-    if span.end == pos {
-      if previous_end == Some(span.start) {
-        accept = false
-      }
-      // Advance one scalar boundary, including EOF+1.
-      spend(mut work)?
-      pos = subject_next(subject, pos)
-    } else if accelerated {
-      pos = span.end
-    } else {
-      while pos < span.end {
-        spend(mut work)?
-        pos = subject_next(subject, pos)
-      }
-    }
+    let (next, accept) = match_progress(subject, pos, span.end, previous_end, accelerated, mut work)?
+    pos = next
     previous_end = Some(span.end)
     if accept {
       core@1/list.push(mut matches, copy span)
@@ -1326,6 +1318,49 @@ pub fn find_all(re: Regex, text: String, max_matches: u64, work_limit: u64) -> R
     }
   }
   Ok(take matches)
+}
+
+// Go regexp.go:746-802. End positions suffice for empty-match progression:
+// a match ending at the search cursor necessarily also starts there.
+fn match_progress(subject: Subject, cursor: u64, end_at: u64, previous_end: Option[u64],
+  accelerated: bool, mut work: u64) -> Result[(u64, bool), MatchError] uses {} {
+  let mut pos = cursor
+  let mut accept = true
+  if end_at == pos {
+    if previous_end == Some(end_at) { accept = false }
+    spend(mut work)?
+    pos = subject_next(subject, pos)
+  } else if accelerated {
+    pos = end_at
+  } else {
+    while pos < end_at {
+      spend(mut work)?
+      pos = subject_next(subject, pos)
+    }
+  }
+  Ok((pos, accept))
+}
+
+// regex-automata 0.4.18 meta/regex.rs:2120-2132: count using forward ends.
+// This follows find_all's original-source empty-match rules without spans.
+pub fn count(re: Regex, text: String, work_limit: u64) -> Result[u64, MatchError] uses {} {
+  let accelerated = prefix_admitted(re, text, false, work_limit)
+  let mut work = work_limit
+  let subject = make_subject(text, mut work)?
+  let mut cache = dfa_cache(re, accelerated, 65024)
+  let mut pos = 0u64
+  let mut previous_end: Option[u64] = None()
+  let mut total = 0u64
+  while pos <= subject_len(subject) {
+    let Some(end_at) = find_end_from(re, subject, pos, accelerated, subject.bytes, mut cache, mut work)? else {
+      return Ok(total)
+    }
+    let (next, accept) = match_progress(subject, pos, end_at, previous_end, accelerated, mut work)?
+    pos = next
+    previous_end = Some(end_at)
+    if accept { total += 1 }
+  }
+  Ok(total)
 }
 
 pub fn num_subexp(re: Regex) -> u64 uses {} {

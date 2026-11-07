@@ -1858,3 +1858,5 @@ Git idx/MIDX and RocksDB/Lucene policies are conceptual references only;
 no Git (GPL-2.0), RocksDB or Lucene implementation code is copied here.
 
 - Native adjacent byte-set search adapts memchr 2.8.3 `src/arch/x86_64/sse2/packedpair.rs:139-158`, `src/arch/generic/packedpair.rs:269-283`, and aho-corasick 1.1.4 `src/packed/teddy/generic.rs:1030-1080` (MIT/Unlicense, `LICENSE.byte-search`). Prepared exact nibble membership replaces approximate literal buckets; overlapping guarded loads replace shifts and boundary carries; one vector at a time replaces unrolling. Its scalar oracle covers byte sets, offsets and tails.
+
+- Regex count and forward-only match ends follow regex-automata 0.4.18 `src/meta/regex.rs:2120-2132`; iteration retains Go regexp `regexp.go:746-802` empty-match suppression. Finite-budget searches retain Hirsel ordered-Pike accounting.

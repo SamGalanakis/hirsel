@@ -129,14 +129,14 @@ fn empty_utf8_case(pattern: String, src: String) -> bool uses {} {
   if find_captures(re, src, limit) != find_captures(re, src, oracle) {
     return false
   }
-  for count in [0u64, 1, 100] {
-    if find_all(re, src, count, limit) != find_all(re, src, count, oracle) {
+  for tally in [0u64, 1, 100] {
+    if find_all(re, src, tally, limit) != find_all(re, src, tally, oracle) {
       return false
     }
-    if find_all_captures(re, src, count, limit) != find_all_captures(
+    if find_all_captures(re, src, tally, limit) != find_all_captures(
       re,
       src,
-      count,
+      tally,
       oracle
     ) {
       return false

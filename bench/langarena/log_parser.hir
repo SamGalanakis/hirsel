@@ -25,16 +25,15 @@ fn step(mut s: State, iteration: u64) {
     "peak_hours"
   ]
   for i in 0u64..list.len(s.patterns) {
-    let Ok(matches) = regex.find_all(
+    let Ok(count) = regex.count(
       s.patterns[i],
       s.log,
-      18446744073709551615,
       18446744073709551615
     ) else {
       check(false)
       return
     }
-    map.insert(mut counts, copy names[i], list.len(matches))
+    map.insert(mut counts, copy names[i], count)
   }
   let mut total = 0u64
   for (name, count) in counts {

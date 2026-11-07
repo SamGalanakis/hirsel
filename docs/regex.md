@@ -9,7 +9,7 @@ At the maximum work budget, searches use a bounded lazy DFA for compiled
 programs up to 512 instructions. Admission depends on the pattern and cache
 capacity. Subject length never disables it. The cache reuses its allocation on
 clearing; after three clears, fewer than ten searched bytes per cached state
-triggers scalar continuation from the current ordered frontier. A reverse search
+triggers scalar continuation from the current ordered frontier. Span consumers run a reverse search that
 recovers the leftmost start after the forward priority decision, including when
 the scalar continuation handles Unicode. Finite work budgets use the ordered
 PikeVM to preserve its exact logical charge and `WorkLimit()` behavior.
@@ -35,6 +35,12 @@ flags, `(?-i)`, and scoped forms such as `(?im-s:...)` follow Go's rules.
 `\A` and `\z` always anchor the entire original text, including in multiline
 mode. Folding and expansion-name properties use Go's pinned Unicode 17 tables;
 they do not change std unicode's separate Unicode 16 tables.
+
+`count(re, text, work_limit)` returns `Result[u64, MatchError]` and follows
+`find_all`'s non-overlapping and empty-match rules. Count and `is_match` consume
+forward match ends, so they neither recover starts nor materialize match spans
+on the DFA path. The ordered Pike fallback carries starts with its threads and
+requires no separate start-recovery search.
 
 `find_captures(re, text, work_limit)` returns `Result[Option[Captures],
 MatchError]`. `Captures.spans[0]` is the whole match; subsequent elements follow

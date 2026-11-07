@@ -123,9 +123,9 @@ fn capture_replace_case(pattern: String, src: String, output_size: u64) -> bool 
   }
   let mut exact = work
   let mut pos = 0u64
-  let mut count = 0u64
+  let mut tally = 0u64
   while pos <= subject_len(subject) {
-    count += 1
+    tally += 1
     let Ok((matched, _)) = pike_find_from(re, subject, pos, true, mut exact) else {
       return false
     }
@@ -144,7 +144,7 @@ fn capture_replace_case(pattern: String, src: String, output_size: u64) -> bool 
   }
   let bound = work - exact
   let mut replay_work = work
-  if replacement_resolve(re, subject, count, true, mut replay_work) != Ok(()) || replay_work != exact {
+  if replacement_resolve(re, subject, tally, true, mut replay_work) != Ok(()) || replay_work != exact {
     return false
   }
   let mut budget = 0u64

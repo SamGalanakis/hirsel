@@ -53,6 +53,7 @@ pub fn dfa_test_main() -> Result[(), DfaTestFailure] uses {} {
       if !dfa_test_case(pattern, src) { return Error(DfaTestFailure(pattern: pattern, src: src, stage: 1)) }
     }
   }
+  if !dfa_count_laws() { return Error(DfaTestFailure(pattern: "count-laws", src: "overlaps/empty/Unicode", stage: 7)) }
   if !dfa_public_sweeps() { return Error(DfaTestFailure(pattern: "public-work-sweeps", src: "aaa and 64-byte ASCII", stage: 5)) }
   if !dfa_scalar_retry() { return Error(DfaTestFailure(pattern: "scalar-retry", src: "ASCII prefix/Unicode folds", stage: 6)) }
   if !dfa_forced_quits() { return Error(DfaTestFailure(pattern: "forced-quit", src: "aaa/axq", stage: 2)) }
@@ -291,6 +292,32 @@ fn dfa_public_sweeps() -> bool uses {} {
       // Subject creation has extra logical charges only in this test oracle;
       // compare it when both are admitted, or clearly out of work.
       if supplied >= 1000000000000000000 && find(re, long, supplied) != expected { return false }
+    }
+  }
+  true
+}
+
+// Independent ordered Pike spans and hand-derived counts catch skipped empty
+// matches and overlapping candidates in endpoint APIs.
+fn dfa_count_laws() -> bool uses {} {
+  let cases: List[(String, String, u64)] = [
+    ("", "é😀", 3), ("a*", "baa", 2), ("a*?", "baa", 4),
+    ("ab|aba", "ababa", 2), ("aba|ba", "ababa", 2),
+    ("(?i)ss|s", "ſs", 1), ("(?m)^|$", "a\nb", 4),
+    ("a+", "aa aa", 2), ("z+", "aa aa", 0)
+  ]
+  for (pattern, src, expected) in cases {
+    let Ok(re) = compile(pattern, 10000) else { return false }
+    for budget in [0u64, 1, 10, 10000000, 18446744073709551615] {
+      let spans = find_all(re, src, 18446744073709551615, budget)
+      let counts = count(re, src, budget)
+      match spans {
+        Ok(found) => {
+          if counts != Ok(core@1/list.len(found)) { return false }
+          if core@1/list.len(found) != expected { return false }
+        },
+        Error(error) => if counts != Error(error) { return false },
+      }
     }
   }
   true

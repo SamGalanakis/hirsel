@@ -48,14 +48,14 @@ fn fixed_width(node: Node) -> u64 uses {} {
 }
 
 fn fixed_capture_plan(tree: Tree, root: u64) -> List[u64] uses {} {
-  let count = core@1/list.len(tree.nodes)
+  let tally = core@1/list.len(tree.nodes)
   let groups = core@1/list.len(tree.names)
-  if count > 512 || groups > 128 || groups <= 1 {
+  if tally > 512 || groups > 128 || groups <= 1 {
     return []
   }
   let slots = groups * 2
   let mut widths: List[u64] = []
-  for index in 0u64..count {
+  for index in 0u64..tally {
     let node = tree.nodes[index]
     let mut width = fixed_width(node)
     if node.kind == 7 || node.kind == 8 || node.kind == 9 || node.kind == 17 {
@@ -215,7 +215,7 @@ fn capture_closure(
   left: u64,
   right: u64,
   mut scratch: CaptureScratch,
-  mut count: u64
+  mut tally: u64
 ) -> bool uses {} {
   let m = core@1/list.len(re.code)
   let s = core@1/list.len(re.names) * 2
@@ -239,9 +239,9 @@ fn capture_closure(
     scratch.data[tag] = at + 1
     let inst = re.code[tag]
     if dfa_consumes(inst.kind) || inst.kind == 11 {
-      scratch.data[ready + count] = tag
-      capture_row(mut scratch, rows + count * s, current, s)
-      count += 1
+      scratch.data[ready + tally] = tag
+      capture_row(mut scratch, rows + tally * s, current, s)
+      tally += 1
       if inst.kind == 11 {
         return true
       }
@@ -307,19 +307,19 @@ fn capture_pike(re: Regex, subject: Subject, span: Span, mut scratch: CaptureScr
       dfa_category(dfa_byte(subject, subject_before(subject, cursor)))
     }
     let right = dfa_category(dfa_byte(subject, cursor))
-    let mut count = 0u64
+    let mut tally = 0u64
     i = 0
     while i < seed_count {
       let pc = scratch.data[seeds + i]
       capture_row(mut scratch, current, seed_rows + i * s, s)
-      if capture_closure(program, pc, at, left, right, mut scratch, mut count) {
+      if capture_closure(program, pc, at, left, right, mut scratch, mut tally) {
         break
       }
       i += 1
     }
     seed_count = 0
     i = 0
-    while i < count {
+    while i < tally {
       let pc = scratch.data[ready + i]
       let inst = re.code[pc]
       if inst.kind == 11 {
@@ -808,13 +808,13 @@ fn capture_find_from(
 fn replacement_resolve(
   re: Regex,
   subject: Subject,
-  count: u64,
+  tally: u64,
   capture: bool,
   mut work: u64
 ) -> Result[(), MatchError] uses {} {
   let mut pos = 0u64
   let mut i = 0u64
-  while i < count {
+  while i < tally {
     let (matched, _) = pike_find_from(re, subject, pos, capture, mut work)?
     let Some(span) = matched else {
       break

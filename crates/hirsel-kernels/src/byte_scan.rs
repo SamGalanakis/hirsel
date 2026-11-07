@@ -166,9 +166,126 @@ fn short_set_word(source: &[u8], needles: &[u8]) -> Option<usize> {
         .map(|offset| at + offset)
 }
 
+/// First adjacent pair at or after `start` in the two byte sets, or the extent length.
+pub fn find_pair(source: &[u8], firsts: &[u8], seconds: &[u8], start: u64) -> u64 {
+    let Ok(start) = usize::try_from(start) else {
+        return source.len() as u64;
+    };
+    let Some(rest) = source.get(start..) else {
+        return source.len() as u64;
+    };
+    if firsts.is_empty() || seconds.is_empty() {
+        return source.len() as u64;
+    }
+    #[cfg(target_arch = "x86_64")]
+    if std::is_x86_feature_detected!("ssse3") {
+        // SAFETY: SSSE3 was detected. The helper bounds both overlapping loads.
+        return unsafe { pair_ssse3(rest, firsts, seconds) }.map_or(source.len(), |at| start + at)
+            as u64;
+    }
+    pair_word(rest, firsts, seconds).map_or(source.len(), |at| start + at) as u64
+}
+
+// memchr 2.8.3 arch/generic/packedpair.rs: two overlapping whole-word loads.
+// Exact scalar membership confirms lanes on architectures without SSSE3.
+fn pair_word(source: &[u8], firsts: &[u8], seconds: &[u8]) -> Option<usize> {
+    let mut at = 0;
+    while source.len() - at >= 9 {
+        let first = u64::from_le_bytes(source[at..at + 8].try_into().unwrap());
+        let second = u64::from_le_bytes(source[at + 1..at + 9].try_into().unwrap());
+        for lane in 0..8 {
+            if firsts.contains(&((first >> (lane * 8)) as u8))
+                && seconds.contains(&((second >> (lane * 8)) as u8))
+            {
+                return Some(at + lane);
+            }
+        }
+        at += 8;
+    }
+    source[at..]
+        .windows(2)
+        .position(|pair| firsts.contains(&pair[0]) && seconds.contains(&pair[1]))
+        .map(|offset| at + offset)
+}
+
+// aho-corasick 1.1.4 packed/teddy/generic.rs:1030-1080 and memchr 2.8.3
+// arch/x86_64/sse2/packedpair.rs:139-158. Exact byte-set membership replaces
+// Teddy buckets; overlapping loads replace shifts and their boundary carry.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "ssse3")]
+unsafe fn pair_ssse3(source: &[u8], firsts: &[u8], seconds: &[u8]) -> Option<usize> {
+    use std::arch::x86_64::*;
+    let tables = |set: &[u8]| {
+        let mut lower = [0u8; 16];
+        let mut upper = [0u8; 16];
+        for &byte in set {
+            let row = if byte < 128 { &mut lower } else { &mut upper };
+            row[usize::from(byte & 15)] |= 1 << ((byte >> 4) & 7);
+        }
+        (lower, upper)
+    };
+    let (first_low, first_high) = tables(firsts);
+    let (second_low, second_high) = tables(seconds);
+    let bit_values: [u8; 16] = [1, 2, 4, 8, 16, 32, 64, 128, 1, 2, 4, 8, 16, 32, 64, 128];
+    // SAFETY: all five lookup tables contain exactly sixteen initialized bytes.
+    let (fl, fh, sl, sh, bits) = unsafe {
+        (
+            _mm_loadu_si128(first_low.as_ptr().cast()),
+            _mm_loadu_si128(first_high.as_ptr().cast()),
+            _mm_loadu_si128(second_low.as_ptr().cast()),
+            _mm_loadu_si128(second_high.as_ptr().cast()),
+            _mm_loadu_si128(bit_values.as_ptr().cast()),
+        )
+    };
+    let mut at = 0;
+    while source.len() - at >= 17 {
+        // SAFETY: seventeen remaining bytes prove both overlapping sixteen-byte loads.
+        let (first, second) = unsafe {
+            (
+                _mm_loadu_si128(source.as_ptr().add(at).cast()),
+                _mm_loadu_si128(source.as_ptr().add(at + 1).cast()),
+            )
+        };
+        let a = unsafe { pair_members(first, fl, fh, bits) };
+        let b = unsafe { pair_members(second, sl, sh, bits) };
+        let mask = _mm_movemask_epi8(_mm_and_si128(a, b)) as u32;
+        if mask != 0 {
+            return Some(at + mask.trailing_zeros() as usize);
+        }
+        at += 16;
+    }
+    pair_word(&source[at..], firsts, seconds).map(|offset| at + offset)
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "ssse3")]
+unsafe fn pair_members(
+    block: std::arch::x86_64::__m128i,
+    low: std::arch::x86_64::__m128i,
+    high: std::arch::x86_64::__m128i,
+    bits: std::arch::x86_64::__m128i,
+) -> std::arch::x86_64::__m128i {
+    use std::arch::x86_64::*;
+    let zero = _mm_setzero_si128();
+    let indices = _mm_and_si128(block, _mm_set1_epi8(15));
+    let halves = _mm_cmplt_epi8(block, zero);
+    let members = _mm_or_si128(
+        _mm_and_si128(halves, _mm_shuffle_epi8(high, indices)),
+        _mm_andnot_si128(halves, _mm_shuffle_epi8(low, indices)),
+    );
+    let bit = _mm_shuffle_epi8(
+        bits,
+        _mm_and_si128(_mm_srli_epi16::<4>(block), _mm_set1_epi8(7)),
+    );
+    _mm_andnot_si128(
+        _mm_cmpeq_epi8(_mm_and_si128(members, bit), zero),
+        _mm_set1_epi8(-1),
+    )
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{find_any, short_set_word};
+    use super::{find_any, find_pair, pair_word, short_set_word};
     #[test]
     fn all_bytes_offsets_and_extents() {
         let data: Vec<u8> = (0..=255).collect();
@@ -220,6 +337,59 @@ mod tests {
                         }
                     }
                 }
+            }
+        }
+    }
+    #[test]
+    fn pair_boundaries_and_byte_sets() {
+        for (firsts, seconds) in [
+            (b"a".as_slice(), b"b".as_slice()),
+            (b"abc", b"bcd"),
+            (b"\x00\x80\xff", b"\xff\x81\x00"),
+            (b"", b"a"),
+        ] {
+            for length in 0..=65 {
+                for hit in 0..=length {
+                    let mut source = vec![b'x'; length];
+                    if hit + 1 < length && !firsts.is_empty() {
+                        source[hit] = firsts[hit % firsts.len()];
+                        source[hit + 1] = seconds[hit % seconds.len()];
+                    }
+                    for start in 0..=length + 1 {
+                        let expected = source
+                            .get(start..)
+                            .and_then(|rest| {
+                                rest.windows(2)
+                                    .position(|p| firsts.contains(&p[0]) && seconds.contains(&p[1]))
+                            })
+                            .map_or(length, |at| start + at);
+                        assert_eq!(
+                            find_pair(&source, firsts, seconds, start as u64),
+                            expected as u64
+                        );
+                        if start <= length {
+                            assert_eq!(
+                                pair_word(&source[start..], firsts, seconds),
+                                (expected < length).then(|| expected - start)
+                            );
+                        }
+                    }
+                    assert_eq!(find_pair(&source, firsts, seconds, u64::MAX), length as u64);
+                }
+            }
+        }
+        let all: Vec<u8> = (0..=255).collect();
+        for first in 0..=255u8 {
+            for second in 0..=255u8 {
+                let source = [first, second];
+                assert_eq!(find_pair(&source, &[first], &[second], 0), 0);
+                assert_eq!(find_pair(&source, &[first.wrapping_add(1)], &all, 0), 2);
+                let mut block = [b'x'; 34];
+                block[16] = first;
+                block[17] = second;
+                let expected = block.windows(2).position(|p| p == [first, second]).unwrap();
+                assert_eq!(find_pair(&block, &[first], &[second], 0), expected as u64);
+                assert_eq!(pair_word(&block, &[first], &[second]), Some(expected));
             }
         }
     }

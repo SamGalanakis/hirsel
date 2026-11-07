@@ -13,7 +13,8 @@ type PrefixPlan {
   high: u64,
   literals: List[String],
   folds: List[u64],
-  pairs: List[u64],
+  firsts: Bytes,
+  seconds: Bytes,
   inner: bool,
   inner_low: u64,
   inner_high: u64,
@@ -21,7 +22,7 @@ type PrefixPlan {
 }
 
 fn no_prefix() -> PrefixPlan uses {} {
-  PrefixPlan(enabled: false, low: 0, high: 0, literals: [], folds: [], pairs: [], inner: false, inner_low: 0, inner_high: 0, search: None())
+  PrefixPlan(enabled: false, low: 0, high: 0, literals: [], folds: [], firsts: b"", seconds: b"", inner: false, inner_low: 0, inner_high: 0, search: None())
 }
 
 fn prefix_bit(mut plan: PrefixPlan, cp: u32) uses {} {
@@ -237,18 +238,25 @@ fn prefix_plan(code: List[Inst], entry: u64) -> PrefixPlan uses {} {
       internal.substring.prepare(core@1/string.as_bytes(plan.literals[0]))
     )
   }
-  // Teddy's necessary two-position filter, packed into eight byte lanes.
-  // Cross-literal and ASCII-fold false positives are confirmed by prefix_at.
+  // Necessary two-position sets. Unicode fold equivalents remain candidates;
+  // prefix_at and the ordered engine resolve cross-literal false positives.
   let mut paired = core@1/list.len(plan.literals) != 0
+  let mut firsts: List[u8] = []
+  let mut seconds: List[u8] = []
   for literal in plan.literals {
     let bytes = core@1/string.as_bytes(literal)
     if core@1/bytes.len(bytes) < 2 { paired = false; break }
-    let pair: u64 = core@1/int.widen(bytes[0] | 32u8) | core@1/int.widen(bytes[1] | 32u8) << 8
-    let mut found = false
-    for old in plan.pairs { if old == pair { found = true } }
-    if !found { core@1/list.push(mut plan.pairs, pair) }
+    core@1/list.push(mut firsts, bytes[0] | 32u8)
+    core@1/list.push(mut firsts, bytes[0] & 223u8)
+    core@1/list.push(mut seconds, bytes[1] | 32u8)
+    core@1/list.push(mut seconds, bytes[1] & 223u8)
   }
-  if !paired { plan.pairs = [] }
+  if paired {
+    core@1/bytes.append(mut firsts, PREFIX_NON_ASCII)
+    core@1/bytes.append(mut seconds, PREFIX_NON_ASCII)
+    plan.firsts = core@1/bytes.from_list(take firsts)
+    plan.seconds = core@1/bytes.from_list(take seconds)
+  }
   plan.enabled = true
   take plan
 }
@@ -289,57 +297,14 @@ fn prefix_at(plan: PrefixPlan, haystack: Bytes, at: u64) -> bool uses {} {
   false
 }
 
-// Checked unaligned little-endian load for packed prefix comparison.
-@noalloc
-fn prefix_word(bytes: Bytes, at: u64) -> u64 uses {} {
-  // Check the furthest byte first, so it dominates every earlier access.
-  let last = bytes[at + 7]
-  core@1/int.widen(bytes[at]) |
-    core@1/int.widen(bytes[at + 1]) << 8 |
-    core@1/int.widen(bytes[at + 2]) << 16 |
-    core@1/int.widen(bytes[at + 3]) << 24 |
-    core@1/int.widen(bytes[at + 4]) << 32 |
-    core@1/int.widen(bytes[at + 5]) << 40 |
-    core@1/int.widen(bytes[at + 6]) << 48 |
-    core@1/int.widen(last) << 56
-}
-
-// memchr arch/generic/packedpair.rs: compare two positions in parallel.
-// A borrow into a neighbouring lane may add a candidate, never remove one.
-@noalloc
-fn prefix_zero(block: u64) -> u64 uses {} {
-  core@1/int.wrapping_sub(block, 72340172838076673) & ~block & 9259542123273814144
-}
-
 fn prefix_packed(plan: PrefixPlan, haystack: Bytes, from: u64) -> Option[u64] uses {} {
   let size = core@1/bytes.len(haystack)
   let mut cursor = from
   while cursor < size {
-    if size - cursor >= 9 {
-      let raw = prefix_word(haystack, cursor)
-      // Either position may be a longer Unicode simple-fold equivalent.
-      let following = prefix_word(haystack, cursor + 1)
-      let mut candidates = (raw | following) & 9259542123273814144
-      let first = raw | 2314885530818453536
-      let second = following | 2314885530818453536
-      for pair in plan.pairs {
-        let a = first ^ (pair & 255) * 72340172838076673
-        let b = second ^ (pair >> 8) * 72340172838076673
-        candidates |= prefix_zero(a) & prefix_zero(b)
-      }
-      if candidates == 0 { cursor += 8; continue }
-      let mut lane = 0u64
-      while lane < 8 {
-        if candidates >> (lane * 8) & 128u64 != 0 && prefix_at(plan, haystack, cursor + lane) {
-          return Some(cursor + lane)
-        }
-        lane += 1
-      }
-      cursor += 8
-    } else {
-      if prefix_at(plan, haystack, cursor) { return Some(cursor) }
-      cursor += 1
-    }
+    cursor = core@1/bytes.find_pair(haystack, plan.firsts, plan.seconds, cursor)
+    if cursor == size { return None() }
+    if prefix_at(plan, haystack, cursor) { return Some(cursor) }
+    cursor += 1
   }
   None()
 }
@@ -359,7 +324,7 @@ fn prefix_candidate(plan: PrefixPlan, haystack: Bytes, from: u64) -> Option[u64]
     }
     return internal.substring.find_from(haystack, needle, search, from)
   }
-  if core@1/list.len(plan.pairs) != 0 { return prefix_packed(plan, haystack, from) }
+  if core@1/bytes.len(plan.firsts) != 0 { return prefix_packed(plan, haystack, from) }
   let size = core@1/bytes.len(haystack)
   // Class/fold prefixes have no literal to confirm. Keep the predicate outside
   // prefix_at so each candidate needs neither its call nor its borrowed plan.

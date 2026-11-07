@@ -330,6 +330,7 @@ N fn bytes.sha512(data: Bytes) -> Inline[u8, 64] uses {}
 N fn bytes.sha512_256(data: Bytes) -> Inline[u8, 32] uses {}
 N fn bytes.len(src: Bytes) -> u64
 N fn bytes.find_any(src: Bytes, needles: Bytes, start: u64) -> u64
+N fn bytes.find_pair(src: Bytes, firsts: Bytes, seconds: Bytes, start: u64) -> u64
 N fn bytes.json_number_end(src: Bytes, start: u64) -> (u64, u64)
 N fn bytes.integer(src: Bytes, radix: u8, signed: bool, positive_hi: u64, positive_lo: u64, negative_hi: u64, negative_lo: u64) -> (u64, u64, u64)
 N fn bytes.decimal_word(value: u64, mut buffer: Inline[u8, 20]) -> u64
@@ -1844,6 +1845,12 @@ validation failures with no partially decoded value. Operational refusal is sepa
 sets and starts at or beyond the extent have no match. It borrows both extents,
 allocates nothing and treats all 256 byte values equally.
 
+
+`bytes.find_pair(src, firsts, seconds, start)` returns the first relative byte
+offset at or after `start` whose byte occurs in `firsts` and whose following
+byte occurs in `seconds`, or `bytes.len(src)` if none exists. Empty sets, a
+one-byte tail and starts outside the extent have no match. All extents are
+borrowed, no allocation occurs, and every byte value is supported.
 
 The numeric byte leaves back std's existing lossless JSON and scalar APIs.
 `bytes.json_number_end` returns the cursor immediately after a strict JSON number

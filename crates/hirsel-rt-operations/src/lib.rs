@@ -158,6 +158,7 @@ pub fn classify(mut row: OperationRow) -> Result<OperationRow, String> {
         | "bytes.integer"
         | "bytes.decimal_word"
         | "bytes.find_any"
+        | "bytes.find_pair"
         | "bytes.base64_encode"
         | "bytes.base64_decode"
         | "bytes.sha1"
@@ -1574,6 +1575,24 @@ pub const HIRSEL_ABI_EXPORTS: &[AbiExport] = &[
     },
     AbiExport {
         caller_site: false,
+        symbol: "hirsel_rt_v2_bytes_find_pair",
+        destination: false,
+        result: Some((8, 8)),
+        parameters: &[
+            Physical::Pointer,
+            Physical::I64,
+            Physical::I64,
+            Physical::Pointer,
+            Physical::I64,
+            Physical::I64,
+            Physical::Pointer,
+            Physical::I64,
+            Physical::I64,
+            Physical::I64,
+        ],
+    },
+    AbiExport {
+        caller_site: false,
         symbol: "hirsel_rt_v2_bytes_sha1",
         destination: false,
         result: Some((20, 1)),
@@ -2658,6 +2677,7 @@ pub const NATIVE_PATHS: &[&str] = &[
     "bytes.integer",
     "bytes.decimal_word",
     "bytes.find_any",
+    "bytes.find_pair",
     "bytes.base64_encode",
     "bytes.base64_decode",
     "bytes.sha1",

@@ -624,6 +624,53 @@ pub unsafe extern "C" fn hirsel_rt_v2_bytes_find_any(
     STATUS_OK
 }
 
+/// Search exactly the borrowed extents without retaining any owner.
+/// # Safety
+/// All extents are initialized byte slices; `out` is writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_rt_v2_bytes_find_pair(
+    _ctx: *mut TaskCtx,
+    out: *mut u64,
+    owner: *mut Header,
+    start: u64,
+    length: u64,
+    needles_owner: *mut Header,
+    needles_start: u64,
+    needles_length: u64,
+    seconds_owner: *mut Header,
+    seconds_start: u64,
+    seconds_length: u64,
+    offset: u64,
+) -> u8 {
+    let source = unsafe {
+        bytes(Slice {
+            owner,
+            start,
+            length,
+        })
+    };
+    let needles = unsafe {
+        bytes(Slice {
+            owner: needles_owner,
+            start: needles_start,
+            length: needles_length,
+        })
+    };
+    let seconds = unsafe {
+        bytes(Slice {
+            owner: seconds_owner,
+            start: seconds_start,
+            length: seconds_length,
+        })
+    };
+    unsafe {
+        out.write(hirsel_kernels::byte_scan::find_pair(
+            source, needles, seconds, offset,
+        ))
+    };
+    STATUS_OK
+}
+
 /// Strict JSON grammar over a borrowed extent; no lexeme allocation/conversion.
 /// # Safety
 /// The extent is live and initialized; `out` holds two writable u64 words.

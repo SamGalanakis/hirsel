@@ -2,7 +2,8 @@
 
 `std@1/regex` ports Go regexp's ordered Thompson/Pike engine at
 `ebe2feefc400f813aefdc8a036e66d2619da6649`. Compilation and matching remain
-ordinary Hirsel source, with explicit stacks and no host hooks.
+ordinary Hirsel source, with explicit stacks. Byte candidate scans use native
+leaf operations shared with the interpreter.
 
 At the maximum work budget, searches use a bounded lazy DFA for compiled
 programs up to 512 instructions. Admission depends on the pattern and cache
@@ -15,8 +16,9 @@ PikeVM to preserve its exact logical charge and `WorkLimit()` behavior.
 
 Eligible searches use conservative literal prefixes, including ASCII simple-fold
 prefixes, to skip candidate-free input. Alternate prefixes compare two byte
-positions in eight packed lanes, then confirm candidates with the ordered
-engine. A leading ASCII class repeated one or more times can instead search
+positions with guarded, overlapping sixteen-byte native loads, then confirm
+candidates with the ordered engine. SSSE3 uses exact nibble membership; the
+portable scanner loads whole eight-byte words. A leading ASCII class repeated one or more times can instead search
 for a required inner literal whose first byte is outside that class. A backwards
 class run recovers a possible start before normal forward confirmation.
 Nullable patterns retain a full scan, and Unicode fold candidates remain visible.

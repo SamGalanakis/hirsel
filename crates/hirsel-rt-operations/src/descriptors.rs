@@ -1022,6 +1022,7 @@ pub const ENTRIES: &[Entry] = &[
     entry("hirsel_rt_v2_bytes_integer", Local),
     entry("hirsel_rt_v2_bytes_decimal_word", Local),
     entry("hirsel_rt_v2_bytes_find_any", Local),
+    entry("hirsel_rt_v2_bytes_find_pair", Local),
     entry("hirsel_rt_v2_bytes_base64_encode", Local),
     entry("hirsel_rt_v2_bytes_base64_decode", Local),
     entry("hirsel_rt_v2_bytes_sha1", Local),

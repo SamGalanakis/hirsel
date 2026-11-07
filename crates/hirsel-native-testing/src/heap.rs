@@ -2002,6 +2002,32 @@ fn text(module: Option<&str>, name: &str, args: &[OpValue]) -> Option<OpOutcome>
         }
         (
             Some("bytes"),
+            "find_pair",
+            [
+                OpValue::Bytes(source),
+                OpValue::Bytes(firsts),
+                OpValue::Bytes(seconds),
+                OpValue::Bits {
+                    scalar: ScalarKind::U64,
+                    bits: start,
+                },
+            ],
+        ) => {
+            // Independent scalar oracle for the native byte-pair scan.
+            let offset = usize::try_from(*start).ok().and_then(|start| {
+                source
+                    .get(start..)?
+                    .windows(2)
+                    .position(|pair| firsts.contains(&pair[0]) && seconds.contains(&pair[1]))
+                    .map(|at| start + at)
+            });
+            OpValue::Bits {
+                scalar: ScalarKind::U64,
+                bits: offset.unwrap_or(source.len()) as u128,
+            }
+        }
+        (
+            Some("bytes"),
             name @ ("base64_encode" | "base64_decode"),
             [
                 OpValue::Bytes(bytes),

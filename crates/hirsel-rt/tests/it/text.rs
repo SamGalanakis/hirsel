@@ -492,6 +492,31 @@ fn byte_search_borrows_only_the_selected_extents() {
                 assert_eq!((*needles.owner).count, 1);
                 assert_eq!(ctx.stats().backing_allocations, allocations);
             }
+            // Pair hits are relative to the borrowed view, including its final pair.
+            for (offset, expected) in [(0, 1), (2, 3), (4, 5), (u64::MAX, 5)] {
+                let mut found = u64::MAX;
+                assert_eq!(
+                    hirsel_rt_v2_bytes_find_pair(
+                        ctx.0,
+                        &mut found,
+                        source.owner,
+                        source.start + 6,
+                        5,
+                        needles.owner,
+                        needles.start + 1,
+                        2,
+                        source.owner,
+                        source.start + 8,
+                        3,
+                        offset
+                    ),
+                    0
+                );
+                assert_eq!(found, expected);
+                assert_eq!((*source.owner).count, 1);
+                assert_eq!((*needles.owner).count, 1);
+                assert_eq!(ctx.stats().backing_allocations, allocations);
+            }
             release(&ctx, source.owner);
             release(&ctx, needles.owner);
 

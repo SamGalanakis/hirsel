@@ -57,6 +57,7 @@ enum FrontState {
 }
 struct FrontOutcome {
     state: FrontState,
+    pending_body: Option<LiveAnalyzedProduct>,
     facts: Arc<FrontFacts>,
 }
 impl std::ops::Deref for FrontOutcome {
@@ -105,6 +106,7 @@ impl FrontOutcome {
                 record,
                 error: Box::new(error),
             },
+            pending_body: None,
             facts,
         }
     }
@@ -123,6 +125,7 @@ impl FrontOutcome {
                 diagnostics,
                 lowering,
             },
+            pending_body: None,
             facts,
         }
     }
@@ -319,11 +322,8 @@ pub struct FrontBodyQueries {
     verify_store: hirsel_engine_store::VerifyStore,
     slots: Mutex<BTreeMap<Key, FrontSlot>>,
     input_slots: Mutex<(BTreeMap<DefId, usize>, Option<Arc<LiveSourceBacking>>)>,
-    /// Transfer the latest computed body to its immediate consumer. The next
-    /// body computation drops it before running a phase; compact facts never
-    /// keep a growing collection of analyzed bodies.
-    handoff: Mutex<Option<LiveAnalyzedProduct>>,
-    handoff_limit: u64,
+    /// Per-body optional retention bound within the existing Front allowance.
+    body_cache_limit: u64,
     carry: Mutex<Option<Arc<FrontCarry>>>,
     /// Subscription generations validated against this immutable source view.
     carry_changes: Mutex<Option<Arc<CarryChanges>>>,
@@ -1138,13 +1138,7 @@ impl FrontBodyQueries {
             if self.reclaim_reads() {
                 continue;
             }
-            if self
-                .handoff
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .take()
-                .is_some()
-            {
+            if self.evict_pending_body() {
                 continue;
             }
             if !cx.evict_body()
@@ -1181,7 +1175,7 @@ impl FrontBodyQueries {
         removed
     }
     pub(in crate::queries) fn evict_idle(&self, scratch: u64) -> bool {
-        if self.evict_terminal_cache() {
+        if self.evict_pending_body() || self.evict_terminal_cache() {
             return true;
         }
         let mut slots = self.slots.lock().unwrap_or_else(|e| e.into_inner());
@@ -2169,9 +2163,9 @@ impl FrontBodyQueries {
             return row.owner.outcome(row.selected);
         }
 
-        let slots = self.slots.lock().unwrap_or_else(|e| e.into_inner());
+        let mut slots = self.slots.lock().unwrap_or_else(|e| e.into_inner());
         let key = self.selection_key(&selected, &slots)?;
-        let outcome = match slots.get(&key)? {
+        let outcome = match slots.get_mut(&key)? {
             FrontSlot::Archived(_) => return None,
             FrontSlot::Live { outcome, .. } => outcome,
         };
@@ -2186,10 +2180,6 @@ impl FrontBodyQueries {
                     .live_value::<crate::products::LiveAnalyzedProduct>()
                     .cloned()
                     .or_else(|| body.as_ref()?.upgrade())?;
-                let mut handoff = self.handoff.lock().unwrap_or_else(|e| e.into_inner());
-                if handoff.as_ref().is_some_and(|held| held.same_owner(&owner)) {
-                    handoff.take();
-                }
                 (
                     Ok(owner.output().clone()),
                     Some(
@@ -2201,6 +2191,7 @@ impl FrontBodyQueries {
                 )
             }
         };
+        outcome.pending_body.take();
         Some(FrontBodyOutput {
             outcome: ModeResult {
                 definition: outcome.definition.path().clone(),
@@ -2259,11 +2250,31 @@ impl FrontBodyQueries {
             })
             .count()
     }
-    pub(crate) fn release_handoff(&self) {
-        self.handoff
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .take();
+    fn evict_pending_body(&self) -> bool {
+        let mut slots = self.slots.lock().unwrap_or_else(|e| e.into_inner());
+        let retired = slots.values_mut().find_map(|slot| match slot {
+            FrontSlot::Live { outcome, .. }
+                if outcome
+                    .pending_body
+                    .as_ref()
+                    .is_some_and(LiveAnalyzedProduct::cache_only) =>
+            {
+                outcome.pending_body.take()
+            }
+            _ => None,
+        });
+        drop(slots);
+        let removed = retired.is_some();
+        drop(retired);
+        removed
+    }
+    pub(crate) fn release_pending_bodies(&self) {
+        let mut slots = self.slots.lock().unwrap_or_else(|e| e.into_inner());
+        for slot in slots.values_mut() {
+            if let FrontSlot::Live { outcome, .. } = slot {
+                outcome.pending_body.take();
+            }
+        }
     }
     #[cfg(test)]
     pub(super) fn outcomes_for_test(&self) -> Vec<Reference> {
@@ -2317,11 +2328,13 @@ impl QueryContext for DetachedFrontContext<'_> {
 struct Factory(Arc<FrontBodyQueries>);
 impl QueryFactory for Factory {
     fn evict_cache(&self, _scratch: u64) -> bool {
-        self.0
-            .namespace
-            .snapshot
-            .header_products()
-            .is_some_and(|headers| headers.evict())
+        self.0.evict_pending_body()
+            || self
+                .0
+                .namespace
+                .snapshot
+                .header_products()
+                .is_some_and(|headers| headers.evict())
             || self.0.namespace.snapshot.evict_cached()
             || self.0.evict_terminal_cache()
             || self.0.inputs.clear_addresses()
@@ -2337,15 +2350,15 @@ impl QueryFactory for Factory {
         {
             return front.factory().evict(query, product, scratch);
         }
-        self.0.release_handoff();
         let mut slots = self.0.slots.lock().unwrap_or_else(|e| e.into_inner());
-        let (outcome, observations) = match slots.get(&query.address.0) {
+        let (outcome, observations) = match slots.get_mut(&query.address.0) {
             Some(FrontSlot::Archived(_)) | None => return false,
             Some(FrontSlot::Live {
                 outcome,
                 observations,
             }) => (outcome, observations),
         };
+        outcome.pending_body.take();
         let (publication, can_evict) = match &outcome.state {
             FrontState::Failed { .. } => (None, false),
             FrontState::Settled { publication, .. } => (
@@ -2983,7 +2996,6 @@ impl BodyTask {
             timings::count(Count::StoreModeMisses);
         }
         let worker = queries.worker();
-        queries.release_handoff();
         let syntax = loop {
             match queries.syntax(input) {
                 Ok(syntax) => break syntax,
@@ -3240,8 +3252,8 @@ impl BodyTask {
             )
         };
         drop(bytes);
-        let handoff =
-            (!failed && queries.handoff_limit != 0 && !queries.store.persistence().retains())
+        let pending_body =
+            (!failed && queries.body_cache_limit != 0 && !queries.store.persistence().retains())
                 .then(|| outcome.clone());
         let mut cached = queries
             .publish_facts(
@@ -3249,7 +3261,7 @@ impl BodyTask {
             )
             .ok_or_else(|| queries.resource_refusal())?;
         queries.store_compact(self.input, &cached, self.weight.scratch);
-        if let Some(outcome) = handoff
+        if let Some(outcome) = pending_body
             && let FrontState::Settled {
                 publication, body, ..
             } = &mut cached.state
@@ -3261,7 +3273,7 @@ impl BodyTask {
                 ))
             });
             if charge.is_some_and(|bytes| {
-                bytes <= queries.handoff_limit
+                bytes <= queries.body_cache_limit
                     && bytes <= *queries.retention.lock().unwrap_or_else(|e| e.into_inner())
             }) && let Some(product) = queries.admit_body(
                 cx,
@@ -3276,7 +3288,7 @@ impl BodyTask {
                 product.live_value::<crate::products::LiveAnalyzedProduct>()
             {
                 *body = Some(analyzed.downgrade());
-                *queries.handoff.lock().unwrap_or_else(|e| e.into_inner()) = Some(analyzed.clone());
+                cached.pending_body = Some(analyzed.clone());
             }
         }
         let terminal = match &cached.state {
@@ -3733,8 +3745,7 @@ impl QueryEngine {
             store,
             slots: Mutex::new(BTreeMap::new()),
             input_slots: Mutex::new((BTreeMap::new(), None)),
-            handoff: Mutex::new(None),
-            handoff_limit: self.hold_bytes,
+            body_cache_limit: self.hold_bytes,
             carry: Mutex::new(None),
             carry_changes: Mutex::new(None),
             clean_memos: Mutex::new(BTreeSet::new()),

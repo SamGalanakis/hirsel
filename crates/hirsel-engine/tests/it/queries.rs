@@ -695,7 +695,7 @@ fn phases_run_in_order_and_stop_at_every_error_boundary_on_compiler_thread() {
     );
 }
 #[test]
-fn front_body_handoff_reuses_only_the_latest_admitted_body() {
+fn front_body_handoff_reuses_admitted_bodies_until_consumed_or_pressure() {
     with_compiler_stack(|| {
         let (mut engine, _) = make_engine(None, false);
         let transport = hirsel_engine_admission::ProcessBudget::new(8 << 20);
@@ -709,7 +709,17 @@ fn front_body_handoff_reuses_only_the_latest_admitted_body() {
             let query = front.queries.query(&path(name)).unwrap();
             let request = front.runtime.request(&[query]);
             front.runtime.wait(request).unwrap();
-            assert_eq!(front.queries.live_body_count(), 1);
+        }
+        for name in ["a", "b"] {
+            let output = front.request(&[path(name)]);
+            assert!(output[0].outcome.result.is_ok());
+            for kind in [QueryKind::Check, QueryKind::Modes] {
+                assert_eq!(
+                    front.queries.recompute_count(&path(name), kind),
+                    1,
+                    "an admitted unchanged body must survive unrelated Front work"
+                );
+            }
         }
         let output = front.request(&[path("b")]);
         assert!(output[0].outcome.result.is_ok());

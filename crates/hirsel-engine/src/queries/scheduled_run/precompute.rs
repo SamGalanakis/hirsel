@@ -11,7 +11,7 @@ const OUTPUT: Domain = Domain {
 // 0x4600_0037 is the compact Check store's domain.
 pub(crate) const UNIVERSE: Domain = Domain {
     kind: 0x4600_0038,
-    schema: 1,
+    schema: 2,
 };
 #[derive(Clone, Copy)]
 pub struct FrontPrecomputeOutput {
@@ -138,7 +138,7 @@ pub fn universe_query(
     QueryId {
         kind: FRONT_RUN_KIND,
         address: hirsel_artifact_store::Address(ContentHash::of_parts(
-            "hirsel.front.universe.address.v2",
+            "hirsel.front.universe.address.v3",
             [
                 environment.0.as_slice(),
                 package.name.as_bytes(),

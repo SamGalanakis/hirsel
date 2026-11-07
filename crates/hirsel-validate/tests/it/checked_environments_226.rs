@@ -199,7 +199,7 @@ fn foreign_interner_cannot_reuse_a_clean_environment() {
 }
 
 #[test]
-fn checked_environment_revalidates_first_heap_even_when_all_prior_views_hold() {
+fn checked_environment_preserves_equal_heap_roles_and_rejects_changed_evidence() {
     use super::support::arena_slot;
     let mut f = Fixture::call();
     arena_slot(&mut f, hirsel_tir::Storage::Temporary);
@@ -220,11 +220,10 @@ fn checked_environment_revalidates_first_heap_even_when_all_prior_views_hold() {
     .unwrap();
     assert!(report.violations.is_empty(), "{report:?}");
     let evidence = evidence.unwrap();
-    assert!(
-        evidence
-            .reads()
-            .contains(&VRead::FirstHeap(Some(id("Arena"))))
-    );
+    assert!(evidence.reads().iter().any(|read| matches!(
+        read,
+        VRead::HeapRole(hirsel_validate::HeapObservation::SelectedHeap { .. })
+    )));
     let mut earlier = function_signature("0provider", vec![], TypeKind::Tuple(vec![].into()));
     earlier.metadata.roles = rows
         .iter()
@@ -233,7 +232,7 @@ fn checked_environment_revalidates_first_heap_even_when_all_prior_views_hold() {
         .metadata
         .roles
         .clone();
-    let changed = table(&types, rows.into_iter().chain([Arc::new(earlier)]));
+    let changed = table(&types, rows.iter().cloned().chain([Arc::new(earlier)]));
     assert!(changed.universe_errors().1.is_empty());
     assert!(
         evidence
@@ -242,11 +241,77 @@ fn checked_environment_revalidates_first_heap_even_when_all_prior_views_hold() {
             .filter(|r| matches!(r, VRead::View(_, _)))
             .all(|r| hirsel_validate::read_holds(r, &*changed))
     );
-    assert!(!evidence.environment_holds(
+    assert!(evidence.environment_holds(
         policy,
         &*changed as &dyn hirsel_validate::CheckedEnvironment
     ));
     assert!(
         evidence.environment_holds(policy, &*first as &dyn hirsel_validate::CheckedEnvironment)
     );
+    for mutation in [
+        "arena",
+        "operation",
+        "private shape",
+        "version",
+        "absence",
+        "arity",
+    ] {
+        let mut changed: Vec<_> = rows.iter().map(|row| (**row).clone()).collect();
+        for row in &mut changed {
+            if mutation == "absence" {
+                Arc::make_mut(&mut row.metadata.roles).heap = None;
+            } else if mutation == "version" {
+                if let Some(role) = Arc::make_mut(&mut row.metadata.roles).heap.as_mut() {
+                    role.arena.0.package.version = "different".into();
+                    role.operation.0.package.version = "different".into();
+                }
+            } else if row.definition
+                == id(if mutation == "operation" {
+                    "heap"
+                } else {
+                    "Arena"
+                })
+            {
+                match mutation {
+                    "private shape" => {
+                        let hirsel_types::SignatureKind::Type(declaration) = &mut row.kind else {
+                            unreachable!()
+                        };
+                        declaration.representation = Some(types.intern(hirsel_types::Type::unit()));
+                    }
+                    "arity" => {
+                        let hirsel_types::SignatureKind::Type(declaration) = &mut row.kind else {
+                            unreachable!()
+                        };
+                        declaration.generics =
+                            vec![hirsel_types::GenericParameter::Size { name: "N".into() }];
+                    }
+                    _ => row.metadata.visibility = hirsel_syntax::Visibility::Public,
+                }
+            }
+        }
+        if let Ok(changed) = ViewTable::new(
+            &types,
+            changed.into_iter().map(Arc::new),
+            None,
+            &mut ValidatedSignatures::default(),
+            None,
+        ) {
+            assert!(
+                !evidence.environment_holds(
+                    policy,
+                    &changed as &dyn hirsel_validate::CheckedEnvironment
+                ),
+                "changed {mutation}"
+            );
+        }
+    }
+    let base = hirsel_types::TypeBase::build(types.len(), |_| {
+        types.ids().map(|id| types.row(id).clone()).collect()
+    });
+    let foreign = table(&TypeInterner::new(Some(base)), rows);
+    assert!(!evidence.environment_holds(
+        policy,
+        &*foreign as &dyn hirsel_validate::CheckedEnvironment
+    ));
 }

@@ -393,7 +393,7 @@ impl MemoGraph {
             Arc::make_mut(self.subscribers.entry(*read).or_default()).insert(key);
             if matches!(
                 read,
-                ReadKey::ValidationUniverse(_) | ReadKey::UniverseErrors | ReadKey::FirstHeap
+                ReadKey::ValidationUniverse(_) | ReadKey::UniverseErrors | ReadKey::HeapRole
             ) {
                 work::count(Counter::MemoContextVisits);
                 self.validation_contexts.entry(*read).or_default();
@@ -439,7 +439,7 @@ impl MemoGraph {
         for (read, _) in &changes.reads {
             if matches!(
                 read,
-                ReadKey::ValidationUniverse(_) | ReadKey::UniverseErrors | ReadKey::FirstHeap
+                ReadKey::ValidationUniverse(_) | ReadKey::UniverseErrors | ReadKey::HeapRole
             ) {
                 contexts.insert(*read);
                 continue;
@@ -839,7 +839,7 @@ pub fn invalidation_count(kind: ReadKind) -> Count {
         ReadKind::DeclarationCandidates => Count::InvalidatedDeclarationCandidates,
         ReadKind::ValidationView => Count::InvalidatedValidationView,
         ReadKind::UniverseErrors => Count::InvalidatedUniverseErrors,
-        ReadKind::FirstHeap => Count::InvalidatedFirstHeap,
+        ReadKind::HeapRole => Count::InvalidatedHeapRole,
         ReadKind::Environment => Count::InvalidatedEnvironment,
         ReadKind::ValidationUniverse => Count::InvalidatedValidationUniverse,
     }
@@ -1051,7 +1051,7 @@ mod tests {
         let c = MemoKey::new(QueryKind::Lower, def("c"));
         let keys = [
             (ReadKey::UniverseErrors, "old"),
-            (ReadKey::FirstHeap, "heap"),
+            (ReadKey::HeapRole, "heap"),
         ];
         let first = graph.adopt_value(a, h("a"), Ok(Arc::new(())), reads(&keys), Durability::Low);
         graph.adopt(b, reads(&keys[..1]), Durability::Low);
@@ -1077,7 +1077,7 @@ mod tests {
         assert_eq!(graph.dirty_definitions(), vec![a.def]);
         graph.confirm(&first);
         let mut heap = ChangeSet::default();
-        heap.read(ReadKey::FirstHeap, Durability::Low);
+        heap.read(ReadKey::HeapRole, Durability::Low);
         graph.apply(&heap);
         assert!(graph.is_dirty(&a));
         assert!(!graph.is_dirty(&b));
@@ -1105,7 +1105,7 @@ mod tests {
         graph.apply(&change);
         graph.adopt(
             b,
-            reads(&[(ReadKey::FirstHeap, "new heap")]),
+            reads(&[(ReadKey::HeapRole, "new heap")]),
             Durability::Low,
         );
         assert_eq!(

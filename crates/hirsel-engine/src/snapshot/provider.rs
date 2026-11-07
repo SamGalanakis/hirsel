@@ -121,17 +121,10 @@ impl<'a> FrozenProvider<'a> {
         self.reads.record(ReadKey::UniverseErrors, digest);
         Ok(digest)
     }
-    /// The owner universe's first heap role, recording `FirstHeap`.
-    pub fn first_heap(&mut self) -> Result<Option<DefId>, QueryError> {
-        let heap = self
-            .snapshot
-            .validation(&self.owner)?
-            .first_heap()
-            .map(|(d, _)| d);
-        self.reads.record(
-            ReadKey::FirstHeap,
-            heap.map_or_else(ContentHash::default, |d| d.path().fingerprint()),
-        );
+    /// The owner's selected heap and checked declaration evidence.
+    pub fn heap_role(&mut self) -> Result<hirsel_validate::HeapObservation, QueryError> {
+        let heap = self.snapshot.validation(&self.owner)?.heap_observation()?;
+        self.reads.record(ReadKey::HeapRole, heap.fingerprint());
         Ok(heap)
     }
     /// `DeclarationCandidates(d)`, recorded.

@@ -204,8 +204,8 @@ pub enum Count {
     InvalidatedValidationView,
     /// Memos invalidated by a changed universe errors read.
     InvalidatedUniverseErrors,
-    /// Memos invalidated by a changed first heap read.
-    InvalidatedFirstHeap,
+    /// Memos invalidated by a changed heap role read.
+    InvalidatedHeapRole,
     /// Memos invalidated by a changed environment read.
     InvalidatedEnvironment,
     /// Proofs and comparisons the mode passes asked their query's `ContextMemo`.
@@ -331,7 +331,7 @@ impl Count {
         Count::InvalidatedDeclarationCandidates,
         Count::InvalidatedValidationView,
         Count::InvalidatedUniverseErrors,
-        Count::InvalidatedFirstHeap,
+        Count::InvalidatedHeapRole,
         Count::InvalidatedEnvironment,
         Count::ModeMemoQueries,
         Count::ModeMemoHits,
@@ -462,7 +462,7 @@ impl Count {
             Count::InvalidatedDeclarationCandidates => "invalidated by declaration candidates",
             Count::InvalidatedValidationView => "invalidated by validation view",
             Count::InvalidatedUniverseErrors => "invalidated by universe errors",
-            Count::InvalidatedFirstHeap => "invalidated by first heap",
+            Count::InvalidatedHeapRole => "invalidated by heap role",
             Count::InvalidatedEnvironment => "invalidated by environment",
             Count::ModeMemoQueries => "mode memo queries",
             Count::ModeMemoHits => "mode memo hits",

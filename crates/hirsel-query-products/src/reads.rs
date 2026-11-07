@@ -150,8 +150,8 @@ pub enum ReadKey {
     ValidationView(DefId),
     /// The aggregate digest of the signature universe's V errors.
     UniverseErrors,
-    /// The selected first heap role.
-    FirstHeap,
+    /// The selected selected heap role.
+    HeapRole,
     /// The query environment's hash.
     Environment,
     /// All V input views in the originating package's private universe.
@@ -179,7 +179,7 @@ pub enum ReadKind {
     DeclarationCandidates,
     ValidationView,
     UniverseErrors,
-    FirstHeap,
+    HeapRole,
     Environment,
     ValidationUniverse,
     LayoutBody,
@@ -199,7 +199,7 @@ impl ReadKind {
         ReadKind::DeclarationCandidates,
         ReadKind::ValidationView,
         ReadKind::UniverseErrors,
-        ReadKind::FirstHeap,
+        ReadKind::HeapRole,
         ReadKind::Environment,
         ReadKind::ValidationUniverse,
         ReadKind::LayoutBody,
@@ -222,7 +222,7 @@ impl ReadKind {
             ReadKind::DeclarationCandidates => "declaration candidates",
             ReadKind::ValidationView => "validation view",
             ReadKind::UniverseErrors => "universe errors",
-            ReadKind::FirstHeap => "first heap",
+            ReadKind::HeapRole => "heap role",
             ReadKind::Environment => "environment",
             ReadKind::ValidationUniverse => "validation universe",
         }
@@ -246,7 +246,7 @@ impl ReadKey {
             ReadKey::DeclarationCandidates(_) => ReadKind::DeclarationCandidates,
             ReadKey::ValidationView(_) => ReadKind::ValidationView,
             ReadKey::UniverseErrors => ReadKind::UniverseErrors,
-            ReadKey::FirstHeap => ReadKind::FirstHeap,
+            ReadKey::HeapRole => ReadKind::HeapRole,
             ReadKey::Environment => ReadKind::Environment,
             ReadKey::ValidationUniverse(_) => ReadKind::ValidationUniverse,
         }
@@ -306,7 +306,7 @@ impl ReadKey {
             }
             Self::NameSet(p, m) => text(p.0.as_str())?.checked_add(text(m.0.as_str())?)?,
             Self::ValidationUniverse(p) => text(p.0.as_str())?,
-            Self::UniverseErrors | Self::FirstHeap | Self::Environment => 0,
+            Self::UniverseErrors | Self::HeapRole | Self::Environment => 0,
         };
         payload.checked_add(1)
     }
@@ -350,7 +350,7 @@ impl ReadKey {
                 text(out, m.0.as_str());
             }
             ReadKey::ValidationUniverse(package) => text(out, package.0.as_str()),
-            ReadKey::UniverseErrors | ReadKey::FirstHeap | ReadKey::Environment => {}
+            ReadKey::UniverseErrors | ReadKey::HeapRole | ReadKey::Environment => {}
         }
     }
 }
@@ -886,7 +886,7 @@ fn decode_key(input: &mut &[u8]) -> Option<ReadKey> {
             ModuleKey(Symbol::intern(take_text(input)?)),
         ),
         ReadKind::UniverseErrors => ReadKey::UniverseErrors,
-        ReadKind::FirstHeap => ReadKey::FirstHeap,
+        ReadKind::HeapRole => ReadKey::HeapRole,
         ReadKind::Environment => ReadKey::Environment,
         ReadKind::ValidationUniverse => {
             ReadKey::ValidationUniverse(PackageKey(Symbol::intern(take_text(input)?)))
@@ -1101,7 +1101,7 @@ mod tests {
             ReadKey::DeclarationCandidates(b),
             ReadKey::ValidationView(a),
             ReadKey::UniverseErrors,
-            ReadKey::FirstHeap,
+            ReadKey::HeapRole,
             ReadKey::Environment,
             ReadKey::ValidationUniverse(package),
         ];
@@ -1443,7 +1443,7 @@ mod admission_tests {
             ReadKey::NameSet(package, ModuleKey::of(&ctx.modules)),
             ReadKey::ValidationUniverse(package),
             ReadKey::UniverseErrors,
-            ReadKey::FirstHeap,
+            ReadKey::HeapRole,
             ReadKey::Environment,
         ];
         for source in [
@@ -1527,7 +1527,7 @@ impl hirsel_product_codec::decode_schema::Walk for Reads {
                     text(&mut rows)?;
                 }
                 ReadKind::ValidationUniverse => text(&mut rows)?,
-                ReadKind::UniverseErrors | ReadKind::FirstHeap | ReadKind::Environment => (),
+                ReadKind::UniverseErrors | ReadKind::HeapRole | ReadKind::Environment => (),
                 ReadKind::Signature
                 | ReadKind::FailedSignature
                 | ReadKind::Representation

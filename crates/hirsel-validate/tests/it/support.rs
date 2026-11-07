@@ -477,7 +477,23 @@ pub(crate) fn arena_slot(f: &mut Fixture, storage: Storage) -> u32 {
         captures: None,
         destructor_allocation: Allocation::NoAlloc,
     }));
+    let heap_roles = arena.metadata.roles.clone();
     f.signatures.insert(id("Arena"), arena);
+    let mut operation = function_signature(
+        "heap",
+        vec![],
+        TypeKind::Named {
+            definition: id("Arena"),
+            arguments: vec![].into(),
+        },
+    );
+    operation.metadata.roles = heap_roles;
+    if let SignatureKind::Function(function) = &mut operation.kind {
+        let mut result = interner().get(function.result).unwrap().clone();
+        result.allocation_target = Some(hirsel_types::AllocationTarget::Heap);
+        function.result = interner().intern(result);
+    }
+    f.signatures.insert(id("heap"), operation);
     f.slot(
         TypeKind::Named {
             definition: id("Arena"),

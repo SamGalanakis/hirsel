@@ -6,13 +6,13 @@
 //! view, private shape included, so a producer that leaves a field out of its
 //! fingerprint (a malformed row, a private field) still changes the digest.
 //! Every lookup V makes is recorded as a `VRead`: a view by digest, a missing
-//! signature, the first heap role's selection, and the universe's errors. A
+//! signature, the selected heap role's selection, and the universe's errors. A
 //! verdict is reusable exactly while its reads still hold (`read_holds`).
 use super::*;
 use crate::hashed::HashMap;
 use hirsel_syntax::{ContentHash, DefId};
-use hirsel_types::{HeapRole, TypeInterner};
-use std::cell::RefCell;
+use hirsel_types::{HeapRole, SignatureKind, TypeInterner};
+use std::cell::{OnceCell, RefCell};
 use std::sync::{Arc, OnceLock};
 
 /// V's identity of one signature view: a hash over every field it holds.
@@ -20,6 +20,150 @@ use std::sync::{Arc, OnceLock};
     serde::Serialize, serde::Deserialize, Clone, Copy, Debug, Eq, PartialEq, Hash, Ord, PartialOrd,
 )]
 pub struct ValidationDigest(pub ContentHash);
+
+/// Canonical evidence for the ambient heap in one exact signature environment.
+#[derive(
+    serde::Serialize, serde::Deserialize, Clone, Debug, Eq, PartialEq, Hash, Ord, PartialOrd,
+)]
+pub enum HeapObservation {
+    None,
+    SelectedHeap {
+        arena_path: hirsel_syntax::DefPath,
+        operation_path: hirsel_syntax::DefPath,
+        arena_view_digest: ValidationDigest,
+        operation_view_digest: ValidationDigest,
+    },
+}
+impl HeapObservation {
+    pub(crate) fn retained_payload_bytes(&self) -> Option<u64> {
+        match self {
+            Self::None => Some(0),
+            Self::SelectedHeap {
+                arena_path,
+                operation_path,
+                ..
+            } => path_bytes(arena_path)?.checked_add(path_bytes(operation_path)?),
+        }
+    }
+    pub fn role(&self) -> Option<HeapRole> {
+        match self {
+            Self::None => None,
+            Self::SelectedHeap {
+                arena_path,
+                operation_path,
+                ..
+            } => Some(HeapRole {
+                arena: arena_path.clone(),
+                operation: operation_path.clone(),
+            }),
+        }
+    }
+    pub fn fingerprint(&self) -> ContentHash {
+        let bytes = bincode::serialize(self).expect("heap evidence encodes paths and digests");
+        ContentHash::of_parts("hirsel.validate.heap-role.v1", [bytes.as_slice()])
+    }
+}
+
+fn path_bytes(path: &hirsel_syntax::DefPath) -> Option<u64> {
+    let item = &path.0;
+    let bytes = item
+        .package
+        .name
+        .capacity()
+        .checked_add(item.package.version.capacity())?
+        .checked_add(item.name.capacity())?
+        .checked_add(item.modules.capacity().checked_mul(size_of::<String>())?)?;
+    item.modules.iter().try_fold(bytes as u64, |bytes, module| {
+        bytes.checked_add(module.capacity() as u64)
+    })
+}
+
+pub(crate) fn read_payload_bytes(reads: &[VRead]) -> Option<u64> {
+    reads.iter().try_fold(0u64, |bytes, read| {
+        bytes.checked_add(match read {
+            VRead::HeapRole(heap) => heap.retained_payload_bytes()?,
+            _ => 0,
+        })
+    })
+}
+
+pub(crate) fn select_heap<'a>(
+    roles: impl IntoIterator<Item = &'a HeapRole>,
+) -> Result<Option<HeapRole>, ViewRefusal> {
+    let mut selected = None;
+    for role in roles {
+        if selected.as_ref().is_some_and(|previous| previous != role) {
+            return Err(ViewRefusal::Stale {
+                definition: DefId::intern(&role.arena),
+            });
+        }
+        selected = Some(role.clone());
+    }
+    Ok(selected)
+}
+
+pub(crate) fn observe_heap(
+    types: Option<&TypeInterner>,
+    signatures: &dyn SignatureLookup,
+) -> Result<HeapObservation, ViewRefusal> {
+    heap_evidence(types, signatures, |_| {})
+}
+fn heap_evidence(
+    types: Option<&TypeInterner>,
+    signatures: &dyn SignatureLookup,
+    mut record: impl FnMut(VRead),
+) -> Result<HeapObservation, ViewRefusal> {
+    let Some(role) = signatures.heap_role()? else {
+        return Ok(HeapObservation::None);
+    };
+    let arena = DefId::intern(&role.arena);
+    let operation = DefId::intern(&role.operation);
+    let evidence = |d| {
+        signatures
+            .view(d)
+            .ok_or(ViewRefusal::Stale { definition: d })
+    };
+    let a = evidence(arena)?;
+    let o = evidence(operation)?;
+    if !std::ptr::eq(a.types, o.types) || types.is_some_and(|t| !a.for_types(t)) {
+        return Err(ViewRefusal::Stale { definition: arena });
+    }
+    let a_signature = a.signature()?;
+    let o_signature = o.signature()?;
+    let arena_valid = matches!(&a_signature.kind,
+        SignatureKind::Type(declaration) if declaration.generics.is_empty());
+    let operation_valid = matches!(&o_signature.kind,
+        SignatureKind::Function(function) if function.generics.is_empty()
+            && function.parameters.is_empty() && function.error.is_none()
+            && a.types.get(function.result).is_some_and(|ty|
+                ty.allocation_target == Some(hirsel_types::AllocationTarget::Heap)
+                && matches!(&ty.kind, TypeKind::Named { definition, arguments }
+                    if *definition == arena && arguments.is_empty())));
+    if !arena_valid || a_signature.definition != arena {
+        return Err(ViewRefusal::Stale { definition: arena });
+    }
+    if !operation_valid || o_signature.definition != operation {
+        return Err(ViewRefusal::Stale {
+            definition: operation,
+        });
+    }
+    // Declaration evidence is checked here in the observing environment.
+    for (d, signature) in [(arena, &*a_signature), (operation, &*o_signature)] {
+        let verdict = check_view(a.types, d, signature, signatures)?;
+        if verdict.error.is_some() {
+            return Err(ViewRefusal::Stale { definition: d });
+        }
+        for read in verdict.reads {
+            record(read);
+        }
+    }
+    Ok(HeapObservation::SelectedHeap {
+        arena_path: role.arena,
+        operation_path: role.operation,
+        arena_view_digest: a.digest(),
+        operation_view_digest: o.digest(),
+    })
+}
 
 /// An immutable signature independently identified by V. No producer digest
 /// enters this constructor, and the signature cannot be edited through it.
@@ -33,7 +177,7 @@ pub struct IdentifiedSignature {
     definition: DefId,
     payload: Payload,
     digest: ValidationDigest,
-    /// Part of the identity: universes select their first heap role without
+    /// Part of the identity: universes select their selected heap role without
     /// reading every payload again.
     heap: Option<HeapRole>,
 }
@@ -276,8 +420,8 @@ pub enum VRead {
     View(DefId, ValidationDigest),
     /// A signature V looked for and did not find.
     Missing(DefId),
-    /// Which signature supplies the first heap role, if any.
-    FirstHeap(Option<DefId>),
+    /// The selected role and the exact declarations that establish it.
+    HeapRole(HeapObservation),
     /// The aggregate of every signature error in the universe.
     UniverseErrors(ContentHash),
 }
@@ -286,8 +430,9 @@ pub enum VRead {
 /// bodies see it (its own opaque types through their private views).
 pub trait SignatureLookup: Sync {
     fn view(&self, d: DefId) -> Option<ViewInput<'_>>;
-    /// The heap role of the first signature in DefPath order that has one.
-    fn first_heap(&self) -> Option<(DefId, HeapRole)>;
+    /// The package-visible role. Conflicting claims refuse the observation.
+    fn heap_role(&self) -> Result<Option<HeapRole>, ViewRefusal>;
+    fn heap_observation(&self) -> Result<HeapObservation, ViewRefusal>;
     /// Every signature error of the universe, in DefPath order, and their digest.
     fn universe_errors(&self) -> (ContentHash, &[Violation]);
 }
@@ -296,8 +441,11 @@ impl<T: SignatureLookup + ?Sized> SignatureLookup for &T {
     fn view(&self, d: DefId) -> Option<ViewInput<'_>> {
         (**self).view(d)
     }
-    fn first_heap(&self) -> Option<(DefId, HeapRole)> {
-        (**self).first_heap()
+    fn heap_role(&self) -> Result<Option<HeapRole>, ViewRefusal> {
+        (**self).heap_role()
+    }
+    fn heap_observation(&self) -> Result<HeapObservation, ViewRefusal> {
+        (**self).heap_observation()
     }
     fn universe_errors(&self) -> (ContentHash, &[Violation]) {
         (**self).universe_errors()
@@ -308,8 +456,11 @@ impl<T: SignatureLookup + Send + ?Sized> SignatureLookup for Arc<T> {
     fn view(&self, d: DefId) -> Option<ViewInput<'_>> {
         (**self).view(d)
     }
-    fn first_heap(&self) -> Option<(DefId, HeapRole)> {
-        (**self).first_heap()
+    fn heap_role(&self) -> Result<Option<HeapRole>, ViewRefusal> {
+        (**self).heap_role()
+    }
+    fn heap_observation(&self) -> Result<HeapObservation, ViewRefusal> {
+        (**self).heap_observation()
     }
     fn universe_errors(&self) -> (ContentHash, &[Violation]) {
         (**self).universe_errors()
@@ -386,7 +537,7 @@ pub(crate) fn observe_read(
                 .then(|| VRead::View(*d, view.digest()))
         }
         VRead::Missing(d) => signatures.view(*d).is_none().then_some(VRead::Missing(*d)),
-        VRead::FirstHeap(_) => Some(VRead::FirstHeap(signatures.first_heap().map(|(d, _)| d))),
+        VRead::HeapRole(_) => observe_heap(types, signatures).ok().map(VRead::HeapRole),
         VRead::UniverseErrors(_) => Some(VRead::UniverseErrors(signatures.universe_errors().0)),
     }
 }
@@ -418,6 +569,7 @@ pub(crate) struct Reader<'a> {
     /// A set: a check reads the same views many times, and V's verdict reads
     /// each once.
     reads: RefCell<crate::hashed::HashSet<VRead>>,
+    heap: OnceCell<Option<HeapRole>>,
     foreign: RefCell<BTreeSet<DefId>>,
     /// Scoped views this validation read: each pins its cache row until the
     /// validation ends, and never longer.
@@ -432,6 +584,7 @@ impl<'a> Reader<'a> {
             types,
             signatures,
             reads: RefCell::default(),
+            heap: OnceCell::new(),
             foreign: RefCell::default(),
             pins: RefCell::default(),
             refused: RefCell::default(),
@@ -486,16 +639,25 @@ impl<'a> Reader<'a> {
             })
             .collect()
     }
-    /// The first heap role. The selection is a read, and so is the view that
-    /// supplies the role.
-    pub(crate) fn first_heap(&self) -> Option<HeapRole> {
-        let first = self.signatures.first_heap();
-        let selected = first.as_ref().map(|(d, _)| *d);
-        self.reads.borrow_mut().insert(VRead::FirstHeap(selected));
-        if let Some(d) = selected {
-            self.get(d);
-        }
-        first.map(|(_, role)| role)
+    /// Selection consumes declaration evidence, independent of equal carriers.
+    pub(crate) fn heap_role(&self) -> Option<HeapRole> {
+        self.heap
+            .get_or_init(|| {
+                match heap_evidence(Some(self.types), self.signatures, |read| {
+                    self.reads.borrow_mut().insert(read);
+                }) {
+                    Ok(observation) => {
+                        let role = observation.role();
+                        self.reads.borrow_mut().insert(VRead::HeapRole(observation));
+                        role
+                    }
+                    Err(refusal) => {
+                        self.refused.borrow_mut().get_or_insert(refusal);
+                        None
+                    }
+                }
+            })
+            .clone()
     }
     pub(crate) fn universe_errors(&self) -> &'a [Violation] {
         let (digest, errors) = self.signatures.universe_errors();
@@ -780,15 +942,15 @@ impl SignatureLookup for SignatureMap {
             }
         })
     }
-    fn first_heap(&self) -> Option<(DefId, HeapRole)> {
-        self.views.iter().find_map(|(d, v)| {
-            v.signature
-                .metadata
-                .roles
-                .heap
-                .clone()
-                .map(|role| (*d, role))
-        })
+    fn heap_role(&self) -> Result<Option<HeapRole>, ViewRefusal> {
+        select_heap(
+            self.views
+                .values()
+                .filter_map(|v| v.signature.metadata.roles.heap.as_ref()),
+        )
+    }
+    fn heap_observation(&self) -> Result<HeapObservation, ViewRefusal> {
+        observe_heap(None, self)
     }
     fn universe_errors(&self) -> (ContentHash, &[Violation]) {
         let universe = self.errors.get_or_init(|| {

@@ -47,7 +47,7 @@ pub(super) fn inherited_registration_read(key: &ReadKey) -> bool {
         ReadKey::ValidationView(_)
             | ReadKey::ValidationUniverse(_)
             | ReadKey::UniverseErrors
-            | ReadKey::FirstHeap
+            | ReadKey::HeapRole
     )
 }
 

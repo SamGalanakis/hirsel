@@ -917,7 +917,7 @@ impl Producer<'_> {
             let reviewed = signature.definition.path() == path
                 && function.parameters.len() == 2 && function.generics.len() == 1
                 && function.parameters.iter().all(|parameter| parameter.passing == PassingMode::Borrow)
-                && self.signatures.first_heap().is_some_and(|heap| is_arena_type(self.types, function.parameters[0].ty, &heap.arena))
+                && self.signatures.heap_role().is_some_and(|heap| is_arena_type(self.types, function.parameters[0].ty, &heap.arena))
                 && matches!(&function.generics[0], GenericParameter::Type { bounds, .. } if bounds.contains(&Bound::Copyable))
                 && matches!((&self.types.row(function.parameters[1].ty).kind, &self.types.row(function.result).kind), (TypeKind::Parameter(left), TypeKind::Parameter(right)) if left == right)
                 && self.types.row(function.result).modes.relation.reaches().iter().any(|reach| matches!(reach,

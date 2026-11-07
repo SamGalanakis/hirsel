@@ -389,7 +389,7 @@ impl QueryEngine {
     pub(crate) fn environment_value(&self) -> ContentHash {
         let e = &self.environment;
         tag(
-            "hirsel.read.environment",
+            "hirsel.read.environment.v2",
             &[
                 &e.interface_version.to_le_bytes(),
                 e.compiler_version.as_bytes(),
@@ -570,12 +570,13 @@ impl QueryEngine {
                     .universe_errors()
                     .0
             }
-            ReadKey::FirstHeap => self
+            ReadKey::HeapRole => self
                 .signature_snapshot()
                 .validation(&owner.0.package)
                 .ok()?
-                .first_heap()
-                .map_or_else(ContentHash::default, |(d, _)| d.path().fingerprint()),
+                .heap_observation()
+                .ok()?
+                .fingerprint(),
             ReadKey::NameSet(package, module) => {
                 self.declarations.frozen().name_set(package, module)
             }

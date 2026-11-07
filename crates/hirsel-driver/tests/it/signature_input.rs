@@ -807,8 +807,8 @@ fn installed_std_publishes_the_universe_summary_its_full_table_computes() {
         assert_eq!(published.input, table.input_digest());
         assert_eq!(published.errors.0, errors);
         assert_eq!(&*published.errors.1, violations);
-        assert_eq!(published.first_heap, table.first_heap());
-        assert!(published.first_heap.is_some(), "std declares the heap");
+        assert_eq!(published.heap, table.heap_observation().unwrap());
+        assert!(published.heap.role().is_some(), "std declares the heap");
     });
 }
 
@@ -833,73 +833,100 @@ fn hello_on_installed_std_answers_v_universe_questions_without_reading_std_rows(
             .with_config(config)
             .precompute_package(&manifest, &products)
             .unwrap();
-        let path = dir.path().join("main.hir");
-        std::fs::write(&path, "pub fn main()->u64{7u64}\n").unwrap();
-        let mut program = COMPILER
-            .with_config(CompileConfig {
-                store: Arc::new(
-                    store::DirStore::new(dir.path().join("reader")).with_read_only_root(products),
-                ),
-                jobs: hirsel_intern::jobs::Jobs::ONE,
-                hold_bytes: 0,
-                ..Default::default()
-            })
-            .load_program(&path)
-            .unwrap();
-        let hello = program.entry.0.package.clone();
-        let std = hirsel_syntax::PackageId {
-            name: "std".into(),
-            version: "1".into(),
-        };
-        let snapshot = program.engine.signature_snapshot();
-        let std_row = |name: &str| {
-            let mut path = hirsel_syntax::DefPath::core(name);
-            path.0.package = std.clone();
-            path.0.modules = vec!["aes_gcm".into()];
-            hirsel_syntax::DefId::intern(&path)
-        };
-        // Hello names nothing of std's AES-GCM: V's universe questions about
-        // hello and about installed std read neither of these rows.
-        let (unused, named) = (std_row("seal"), std_row("open"));
-        assert!(snapshot.definitions().contains(&unused));
-        let hello_heap = snapshot.validation(&hello).unwrap().first_heap();
-        let hello_errors = snapshot.validation(&hello).unwrap().universe_errors().0;
-        let std_heap = snapshot.validation(&std).unwrap().first_heap();
-        let std_errors = snapshot.validation(&std).unwrap().universe_errors().0;
-        let std_input = snapshot.validation_input_digest(&std).unwrap();
-        assert!(!snapshot.header_ready(unused), "V read an unused std row");
-        assert!(!snapshot.header_ready(named), "V read an unused std row");
-        // A view read demands that row, and not its unused sibling.
-        assert!(snapshot.validation(&hello).unwrap().view(named).is_some());
-        assert!(snapshot.header_ready(named));
-        assert!(!snapshot.header_ready(unused));
-        // Oracle: V over each full table, every view identified afresh.
-        let types = snapshot.types();
-        let full = |package: &hirsel_syntax::PackageId,
-                    admits: &dyn Fn(&hirsel_syntax::PackageId) -> bool| {
-            ViewTable::from_views(
-                types,
-                snapshot
-                    .definitions()
-                    .into_iter()
-                    .filter(|d| admits(&d.path().0.package))
-                    .filter_map(|d| {
-                        let signature = snapshot.body_view(package, d)?.ok()?;
-                        Some(View::new(types, signature, None))
-                    }),
-                &mut ValidatedSignatures::default(),
-                None,
+        for name in ["aaa", "zzz"] {
+            let package_dir = dir.path().join(name);
+            std::fs::create_dir(&package_dir).unwrap();
+            let path = package_dir.join("main.hir");
+            std::fs::write(&path, "pub fn main()->u64{7u64}\n").unwrap();
+            let package_manifest = package_dir.join("hirsel.json");
+            std::fs::write(
+                &package_manifest,
+                serde_json::to_vec(&serde_json::json!({
+                    "schema": 1,
+                    "package": { "name": name, "version": "1" },
+                    "sources": [{ "module": [], "path": "main.hir" }],
+                    "entry": { "module": [], "name": "main" },
+                    "dependencies": [{ "package": { "name": "std", "version": "1" },
+                        "manifest": manifest, "expose": [] }]
+                }))
+                .unwrap(),
             )
-            .unwrap()
-        };
-        let everything = full(&hello, &|_| true);
-        assert_eq!(hello_heap, everything.first_heap());
-        assert_eq!(hello_errors, everything.universe_errors().0);
-        let std_table = full(&std, &|package| *package != hello);
-        assert_eq!(std_heap, std_table.first_heap());
-        assert!(std_heap.is_some(), "std declares the heap");
-        assert_eq!(std_errors, std_table.universe_errors().0);
-        assert_eq!(std_input, std_table.input_digest());
+            .unwrap();
+            let mut program = COMPILER
+                .with_config(CompileConfig {
+                    store: Arc::new(
+                        store::DirStore::new(dir.path().join("reader"))
+                            .with_read_only_root(products.clone()),
+                    ),
+                    jobs: hirsel_intern::jobs::Jobs::ONE,
+                    hold_bytes: 0,
+                    ..Default::default()
+                })
+                .load_program(&package_manifest)
+                .unwrap();
+            let hello = program.entry.0.package.clone();
+            let std = hirsel_syntax::PackageId {
+                name: "std".into(),
+                version: "1".into(),
+            };
+            let snapshot = program.engine.signature_snapshot();
+            let std_row = |name: &str| {
+                let mut path = hirsel_syntax::DefPath::core(name);
+                path.0.package = std.clone();
+                path.0.modules = vec!["aes_gcm".into()];
+                hirsel_syntax::DefId::intern(&path)
+            };
+            // Hello names nothing of std's AES-GCM: V's universe questions about
+            // hello and about installed std read neither of these rows.
+            let (unused, named) = (std_row("seal"), std_row("open"));
+            assert!(snapshot.definitions().contains(&unused));
+            let hello_heap = snapshot
+                .validation(&hello)
+                .unwrap()
+                .heap_observation()
+                .unwrap();
+            let hello_errors = snapshot.validation(&hello).unwrap().universe_errors().0;
+            let std_heap = snapshot
+                .validation(&std)
+                .unwrap()
+                .heap_observation()
+                .unwrap();
+            let std_errors = snapshot.validation(&std).unwrap().universe_errors().0;
+            let std_input = snapshot.validation_input_digest(&std).unwrap();
+            assert!(!snapshot.header_ready(unused), "V read an unused std row");
+            assert!(!snapshot.header_ready(named), "V read an unused std row");
+            // A view read demands that row, and not its unused sibling.
+            assert!(snapshot.validation(&hello).unwrap().view(named).is_some());
+            assert!(snapshot.header_ready(named));
+            assert!(!snapshot.header_ready(unused));
+            // Oracle: V over each full table, every view identified afresh.
+            let types = snapshot.types();
+            let full = |package: &hirsel_syntax::PackageId,
+                        admits: &dyn Fn(&hirsel_syntax::PackageId) -> bool| {
+                ViewTable::from_views(
+                    types,
+                    snapshot
+                        .definitions()
+                        .into_iter()
+                        .filter(|d| admits(&d.path().0.package))
+                        .filter_map(|d| {
+                            let signature = snapshot.body_view(package, d)?.ok()?;
+                            Some(View::new(types, signature, None))
+                        }),
+                    &mut ValidatedSignatures::default(),
+                    None,
+                )
+                .unwrap()
+            };
+            let everything = full(&hello, &|_| true);
+            assert_eq!(hello_heap, everything.heap_observation().unwrap());
+            assert_eq!(hello_errors, everything.universe_errors().0);
+            let std_table = full(&std, &|package| *package != hello);
+            assert_eq!(std_heap, std_table.heap_observation().unwrap());
+            assert!(std_heap.role().is_some(), "std declares the heap");
+            assert_eq!(std_errors, std_table.universe_errors().0);
+            assert_eq!(std_input, std_table.input_digest());
+        }
     });
 }
 
@@ -935,10 +962,10 @@ fn dependency_universe_summary_without_local_verifier_is_ignored() {
             version: "1".into(),
         };
         let published = sources.universe(&std).expect("std publishes its universe");
-        let expected_heap = published.first_heap.clone();
-        assert!(expected_heap.is_some(), "std declares the heap");
+        let expected_heap = published.heap.clone();
+        assert!(expected_heap.role().is_some(), "std declares the heap");
         let mut forged = published.clone();
-        forged.first_heap = None;
+        forged.heap = hirsel_validate::HeapObservation::None;
         let summary = forged.encode().unwrap();
         let forged_bytes = bincode::serialize(&(summary.clone(), summary)).unwrap();
         let mut universe_products = products
@@ -978,36 +1005,49 @@ fn dependency_universe_summary_without_local_verifier_is_ignored() {
             .expect("remote store retains the planted summary bytes");
         assert_eq!(planted.as_ref(), forged_bytes.as_slice());
 
-        let path = dir.path().join("main.hir");
-        std::fs::write(&path, "pub fn main()->u64{7u64}\n").unwrap();
-        let mut program = COMPILER
-            .with_config(CompileConfig {
-                store: remote,
-                jobs: hirsel_intern::jobs::Jobs::ONE,
-                hold_bytes: 0,
-                ..Default::default()
-            })
-            .load_program(&path)
-            .unwrap();
-        let root = program.entry.0.package.clone();
-        let snapshot = program.engine.signature_snapshot();
-        let root_validation = snapshot.validation(&root).unwrap();
-        let std_validation = snapshot.validation(&std).unwrap();
-        assert!(root_validation.first_heap().is_some());
-        assert_eq!(root_validation.first_heap(), expected_heap);
-        assert!(root_validation.universe_errors().1.is_empty());
-        assert!(std_validation.first_heap().is_some());
-        assert_eq!(std_validation.first_heap(), expected_heap);
-        assert!(std_validation.universe_errors().1.is_empty());
-        for definition in snapshot
-            .definitions()
-            .into_iter()
-            .filter(|definition| definition.path().0.package == std)
-        {
-            assert!(snapshot.header_ready(definition), "{definition:?}");
+        let old_domain = Arc::new(store::MemStore::default());
+        assert!(old_domain.verifier().is_some());
+        old_domain.cache_product(
+            address,
+            store::Action(action),
+            store::Domain {
+                kind: reference.domain.kind,
+                schema: 1,
+            },
+            &forged_bytes,
+        );
+        for selected in [remote, old_domain as Arc<dyn store::ResultStore>] {
+            let path = dir.path().join("main.hir");
+            std::fs::write(&path, "pub fn main()->u64{7u64}\n").unwrap();
+            let mut program = COMPILER
+                .with_config(CompileConfig {
+                    store: selected,
+                    jobs: hirsel_intern::jobs::Jobs::ONE,
+                    hold_bytes: 0,
+                    ..Default::default()
+                })
+                .load_program(&path)
+                .unwrap();
+            let root = program.entry.0.package.clone();
+            let snapshot = program.engine.signature_snapshot();
+            let root_validation = snapshot.validation(&root).unwrap();
+            let std_validation = snapshot.validation(&std).unwrap();
+            assert!(root_validation.heap_observation().unwrap().role().is_some());
+            assert_eq!(root_validation.heap_observation().unwrap(), expected_heap);
+            assert!(root_validation.universe_errors().1.is_empty());
+            assert!(std_validation.heap_observation().unwrap().role().is_some());
+            assert_eq!(std_validation.heap_observation().unwrap(), expected_heap);
+            assert!(std_validation.universe_errors().1.is_empty());
+            for definition in snapshot
+                .definitions()
+                .into_iter()
+                .filter(|definition| definition.path().0.package == std)
+            {
+                assert!(snapshot.header_ready(definition), "{definition:?}");
+            }
+            let checked = program.check(LoweringPolicy::Reachable).unwrap();
+            assert_eq!(checked.completion, CheckCompletion::Complete);
+            assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
         }
-        let checked = program.check(LoweringPolicy::Reachable).unwrap();
-        assert_eq!(checked.completion, CheckCompletion::Complete);
-        assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
     });
 }

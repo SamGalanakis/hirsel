@@ -728,26 +728,10 @@ impl SignatureSnapshot {
                     validated,
                     old,
                 )?;
-                let heap = |package: &PackageId| {
-                    let closure = self.visible(package)?;
-                    let views = checked
-                        .iter()
-                        .filter(|v| closure.contains(&v.d.path().0.package));
-                    let own = installed
-                        .iter()
-                        .filter(|(p, _)| closure.contains(*p))
-                        .filter_map(|(_, u)| u.exported.first_heap.clone());
-                    Some(
-                        views
-                            .filter_map(|v| v.identified().heap().map(|_| v.d))
-                            .chain(own.map(|(d, _)| d))
-                            .min(),
-                    )
-                };
-                let first = table.first_heap().map(|(d, _)| d);
+                let heap = table.heap_observation()?;
                 if parts
                     .iter()
-                    .all(|(package, _)| heap(package) == Some(first))
+                    .all(|(_, universe)| universe.exported.heap == heap)
                 {
                     return Ok(table);
                 }
@@ -1746,6 +1730,9 @@ impl QueryEngine {
                 let query =
                     crate::queries::universe_query(environment, package, *sources.get(package)?);
                 let association = store.lookup_product(query.address)?;
+                if association.reference.domain != crate::queries::UNIVERSE {
+                    return None;
+                }
                 let bytes = store.get_content(association.reference)?;
                 Some((package.clone(), InstalledUniverse::decode(&bytes)?))
             })
@@ -2659,7 +2646,7 @@ extern "unused" fn unused()"#
         provider.declaration_candidates(absent);
         provider.validation_view(failed);
         provider.universe_errors();
-        provider.first_heap();
+        provider.heap_role();
         let reads = reads.finish().unwrap();
         for (key, value) in reads.iter() {
             assert_eq!(engine.observe(&owner, key), Some(*value), "{key:?}");

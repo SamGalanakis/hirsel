@@ -78,30 +78,20 @@ impl View {
 fn read_views(verdict: &ViewVerdict) -> impl Iterator<Item = DefId> + '_ {
     verdict.reads.iter().filter_map(|read| match read {
         VRead::View(d, _) | VRead::Missing(d) => Some(*d),
-        VRead::FirstHeap(_) | VRead::UniverseErrors(_) => None,
+        VRead::HeapRole(_) | VRead::UniverseErrors(_) => None,
     })
 }
 fn reads_heap(verdict: &ViewVerdict) -> bool {
     verdict
         .reads
         .iter()
-        .any(|read| matches!(read, VRead::FirstHeap(_)))
+        .any(|read| matches!(read, VRead::HeapRole(_)))
 }
-fn first_heap<'a>(views: impl Iterator<Item = &'a View>) -> Option<(DefId, HeapRole)> {
-    views
-        .into_iter()
-        .find_map(|v| v.input.heap().cloned().map(|role| (v.d, role)))
+fn heap_role<'a>(views: impl Iterator<Item = &'a View>) -> Result<Option<HeapRole>, ViewRefusal> {
+    crate::input::select_heap(views.filter_map(|v| v.input.heap()))
 }
-/// The earlier, in DefPath order, of two first heap roles.
-fn earlier(
-    a: Option<(DefId, HeapRole)>,
-    b: Option<&(DefId, HeapRole)>,
-) -> Option<(DefId, HeapRole)> {
-    match (a, b) {
-        (Some(a), Some(b)) if b.0 < a.0 => Some(b.clone()),
-        (None, b) => b.cloned(),
-        (a, _) => a,
-    }
+fn combined(a: Option<HeapRole>, b: Option<HeapRole>) -> Result<Option<HeapRole>, ViewRefusal> {
+    crate::input::select_heap(a.iter().chain(b.iter()))
 }
 
 /// Reads the view of one installed definition when V first asks for it.
@@ -157,11 +147,13 @@ impl Installed {
             parts: parts.into(),
         })
     }
-    fn first_heap(&self) -> Option<&(DefId, HeapRole)> {
-        self.parts
+    fn heap_role(&self) -> Result<Option<HeapRole>, ViewRefusal> {
+        let roles: Vec<_> = self
+            .parts
             .iter()
-            .filter_map(|part| part.first_heap.as_ref())
-            .min_by_key(|(d, _)| *d)
+            .filter_map(|part| part.heap.role())
+            .collect();
+        crate::input::select_heap(roles.iter())
     }
     /// The identity of a universe of `views` beside these installed parts.
     /// A universe that is exactly one published universe has its identity.
@@ -176,7 +168,7 @@ impl Installed {
                     bytes.extend(part.input.0);
                 }
                 ContentHash::of_parts(
-                    "hirsel.validate.universe-input.installed.v1",
+                    "hirsel.validate.universe-input.installed.v2",
                     [bytes.as_slice()],
                 )
             }
@@ -205,11 +197,12 @@ fn heap_bytes(heap: &HeapRole) -> Option<u64> {
 pub struct ViewTable {
     views: Vec<View>,
     index: DefMap<u32>,
-    first_heap: Option<(DefId, HeapRole)>,
+    heap_role: Option<HeapRole>,
+    heap_evidence: crate::HeapObservation,
     verdicts: Vec<Arc<ViewVerdict>>,
     /// The views whose verdict read each view (or its absence).
     readers: DefMap<Vec<u32>>,
-    /// The views whose verdict read the first heap role.
+    /// The views whose verdict read the selected heap role.
     heap_readers: Vec<u32>,
     errors: UniverseErrors,
     input_digest: OnceLock<ContentHash>,
@@ -273,10 +266,15 @@ impl ViewTable {
             "a checked view is not also an installed one"
         );
         let mut table = Self {
-            first_heap: earlier(
-                first_heap(views.iter()),
-                installed.as_ref().and_then(Installed::first_heap),
-            ),
+            heap_role: combined(
+                heap_role(views.iter())?,
+                installed
+                    .as_ref()
+                    .map(Installed::heap_role)
+                    .transpose()?
+                    .flatten(),
+            )?,
+            heap_evidence: crate::HeapObservation::None,
             installed,
             views,
             index,
@@ -288,6 +286,7 @@ impl ViewTable {
             stamp: EnvironmentStamp::new(t, store),
             _retention: None,
         };
+        table.heap_evidence = table.heap_observation()?;
         let verdicts: Vec<_> = table
             .views
             .iter()
@@ -339,13 +338,17 @@ impl ViewTable {
             bytes = bytes
                 .checked_add(verdict.reads.capacity().checked_mul(size_of::<VRead>())? as u64)?;
         }
+        for verdict in &self.verdicts {
+            bytes = bytes.checked_add(crate::input::read_payload_bytes(&verdict.reads)?)?;
+        }
+        bytes = bytes.checked_add(self.heap_evidence.retained_payload_bytes()?)?;
         for view in &self.views {
             bytes = bytes.checked_add((size_of::<crate::IdentifiedSignature>() + 128) as u64)?;
             if let Some(heap) = view.input.heap() {
                 bytes = bytes.checked_add(heap_bytes(heap)?)?;
             }
         }
-        if let Some((_, heap)) = &self.first_heap {
+        if let Some(heap) = &self.heap_role {
             bytes = bytes.checked_add(heap_bytes(heap)?)?;
         }
         Some(bytes)
@@ -368,7 +371,7 @@ impl ViewTable {
         *self.input_digest.get_or_init(|| {
             universe_input(
                 self.views.iter(),
-                self.first_heap.as_ref(),
+                &self.heap_evidence,
                 self.errors.digest,
                 self.installed.as_ref(),
             )
@@ -392,22 +395,22 @@ impl ViewTable {
         let own: Vec<usize> = (0..self.views.len())
             .filter(|&i| &self.views[i].d.path().0.package == package)
             .collect();
-        let heap = first_heap(own.iter().map(|&i| &self.views[i]));
+        let heap = self.heap_evidence.clone();
         let errors = UniverseErrors::new(
             own.iter()
                 .filter_map(|&i| self.verdicts[i].error.clone())
                 .collect(),
         );
-        let input = input_digest(
-            own.iter().map(|&i| &self.views[i]),
-            heap.as_ref(),
-            errors.digest,
-        );
-        PackageUniverse::of(input, &errors, heap.as_ref())
+        let input = input_digest(own.iter().map(|&i| &self.views[i]), &heap, errors.digest);
+        PackageUniverse::of(input, &errors, heap)
     }
     /// This universe's summary for importers that do not read its views.
     pub fn universe(&self) -> PackageUniverse {
-        PackageUniverse::of(self.input_digest(), &self.errors, self.first_heap.as_ref())
+        PackageUniverse::of(
+            self.input_digest(),
+            &self.errors,
+            self.heap_evidence.clone(),
+        )
     }
     pub fn verdict(&self, d: DefId) -> Option<&Arc<ViewVerdict>> {
         self.index.get(&d).map(|&i| &self.verdicts[i as usize])
@@ -417,8 +420,11 @@ impl SignatureLookup for ViewTable {
     fn view(&self, d: DefId) -> Option<crate::ViewInput<'_>> {
         self.get(d).map(|v| v.input.input())
     }
-    fn first_heap(&self) -> Option<(DefId, HeapRole)> {
-        self.first_heap.clone()
+    fn heap_role(&self) -> Result<Option<HeapRole>, ViewRefusal> {
+        Ok(self.heap_role.clone())
+    }
+    fn heap_observation(&self) -> Result<crate::HeapObservation, ViewRefusal> {
+        crate::input::observe_heap(None, self)
     }
     fn universe_errors(&self) -> (ContentHash, &[Violation]) {
         (self.errors.digest, &self.errors.errors)
@@ -427,31 +433,27 @@ impl SignatureLookup for ViewTable {
 
 /// The facts an importer's V reads from one package's universe without
 /// reading its views: the universe's complete input identity, its signature
-/// errors and its first heap role. A read-only installed package publishes
+/// errors and its selected heap role. A read-only installed package publishes
 /// this summary, so a dependent need not identify every signature again.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PackageUniverse {
     pub input: ContentHash,
     pub errors: (ContentHash, Arc<[Violation]>),
-    pub first_heap: Option<(DefId, HeapRole)>,
+    pub heap: crate::HeapObservation,
 }
 /// The archived form: definitions by path, since `DefId`s are process-local.
 #[derive(serde::Serialize, serde::Deserialize)]
 struct ArchivedUniverse {
     input: ContentHash,
     errors: ContentHash,
-    first_heap: Option<(hirsel_syntax::DefPath, HeapRole)>,
+    heap: crate::HeapObservation,
 }
 impl PackageUniverse {
-    fn of(
-        input: ContentHash,
-        errors: &UniverseErrors,
-        first_heap: Option<&(DefId, HeapRole)>,
-    ) -> Self {
+    fn of(input: ContentHash, errors: &UniverseErrors, heap: crate::HeapObservation) -> Self {
         Self {
             input,
             errors: (errors.digest, errors.errors.iter().cloned().collect()),
-            first_heap: first_heap.cloned(),
+            heap,
         }
     }
     /// The archived bytes of this summary. Violations have no durable codec,
@@ -464,10 +466,7 @@ impl PackageUniverse {
         bincode::serialize(&ArchivedUniverse {
             input: self.input,
             errors: self.errors.0,
-            first_heap: self
-                .first_heap
-                .as_ref()
-                .map(|(d, role)| (d.path().clone(), role.clone())),
+            heap: self.heap.clone(),
         })
         .ok()
     }
@@ -481,9 +480,7 @@ impl PackageUniverse {
         Some(Self {
             input: archived.input,
             errors: (archived.errors, Arc::from([])),
-            first_heap: archived
-                .first_heap
-                .map(|(path, role)| (DefId::intern(&path), role)),
+            heap: archived.heap,
         })
     }
 }
@@ -569,7 +566,8 @@ pub struct PackageViews {
     replaced: Arc<PreparedRows<View>>,
     /// Verdicts checked again under the replacements, by view.
     verdicts: Arc<PreparedRows<Arc<ViewVerdict>>>,
-    first_heap: Option<(DefId, HeapRole)>,
+    heap_role: Option<HeapRole>,
+    heap_evidence: crate::HeapObservation,
     errors: UniverseErrors,
     input_digest: OnceLock<ContentHash>,
     stamp: EnvironmentStamp,
@@ -647,8 +645,10 @@ impl PackageViews {
         )?;
         for verdict in self.verdicts.rows.values() {
             bytes = bytes.checked_add((verdict.reads.capacity() * size_of::<VRead>()) as u64)?;
+            bytes = bytes.checked_add(crate::input::read_payload_bytes(&verdict.reads)?)?;
         }
-        if let Some((_, heap)) = &self.first_heap {
+        bytes = bytes.checked_add(self.heap_evidence.retained_payload_bytes()?)?;
+        if let Some(heap) = &self.heap_role {
             bytes = bytes.checked_add(heap_bytes(heap)?)?;
         }
         for view in self.replaced.rows.values() {
@@ -675,7 +675,11 @@ impl PackageViews {
     }
     /// This universe's summary, including its private views' effects.
     pub fn universe(&self) -> PackageUniverse {
-        PackageUniverse::of(self.input_digest(), &self.errors, self.first_heap.as_ref())
+        PackageUniverse::of(
+            self.input_digest(),
+            &self.errors,
+            self.heap_evidence.clone(),
+        )
     }
     /// The view this universe has in place of `d`'s public one.
     pub fn replacement(&self, d: DefId) -> Option<&View> {
@@ -698,7 +702,7 @@ impl PackageViews {
                 );
             universe_input(
                 views,
-                self.first_heap.as_ref(),
+                &self.heap_evidence,
                 self.errors.digest,
                 self.base.installed.as_ref(),
             )
@@ -733,10 +737,14 @@ impl PackageViews {
             .collect();
         order.extend(replaced.values().filter(|v| base.get(v.d).is_none()));
         order.sort_by(|a, b| a.d.path().cmp(b.d.path()));
-        let heap = earlier(
-            first_heap(order.iter().copied()),
-            base.installed.as_ref().and_then(Installed::first_heap),
-        );
+        let heap = combined(
+            heap_role(order.iter().copied())?,
+            base.installed
+                .as_ref()
+                .map(Installed::heap_role)
+                .transpose()?
+                .flatten(),
+        )?;
         // Verdicts to check again: the replaced views and every view whose
         // verdict, public or already checked here, read one of them.
         let mut again: BTreeSet<DefId> = replaced.iter().map(|(d, _)| *d).collect();
@@ -750,8 +758,21 @@ impl PackageViews {
                 again.insert(*d);
             }
         }
-        if heap.as_ref().map(|h| h.0) != base.first_heap.as_ref().map(|h| h.0) {
+        if heap != base.heap_role
+            || replaced.iter().any(|(d, _)| {
+                heap.as_ref().is_some_and(|h| {
+                    *d == DefId::intern(&h.arena) || *d == DefId::intern(&h.operation)
+                })
+            })
+        {
             again.extend(base.heap_readers.iter().map(|&i| base.views[i as usize].d));
+            again.extend(
+                previous
+                    .into_iter()
+                    .flat_map(|views| views.verdicts.iter())
+                    .filter(|(_, verdict)| reads_heap(verdict))
+                    .map(|(d, _)| *d),
+            );
         }
         let order: Vec<DefId> = order.iter().map(|v| v.d).collect();
         let mut views = Self {
@@ -764,11 +785,13 @@ impl PackageViews {
                 previous.map(|views| views.verdicts.clone()),
                 DefMap::default(),
             ),
-            first_heap: heap,
+            heap_role: heap,
+            heap_evidence: crate::HeapObservation::None,
             errors: UniverseErrors::default(),
             input_digest: OnceLock::new(),
             stamp: EnvironmentStamp::new(t, store),
         };
+        views.heap_evidence = views.heap_observation()?;
         let verdicts: DefMap<_> = again
             .iter()
             .map(|&d| Ok((d, store.verdict_from(t, d, &views, old)?)))
@@ -808,8 +831,11 @@ impl SignatureLookup for PackageViews {
             None => self.base.view(d),
         }
     }
-    fn first_heap(&self) -> Option<(DefId, HeapRole)> {
-        self.first_heap.clone()
+    fn heap_role(&self) -> Result<Option<HeapRole>, ViewRefusal> {
+        Ok(self.heap_role.clone())
+    }
+    fn heap_observation(&self) -> Result<crate::HeapObservation, ViewRefusal> {
+        crate::input::observe_heap(None, self)
     }
     fn universe_errors(&self) -> (ContentHash, &[Violation]) {
         (self.errors.digest, &self.errors.errors)
@@ -820,7 +846,7 @@ impl SignatureLookup for PackageViews {
 /// parts' published identities.
 fn universe_input<'a>(
     views: impl Iterator<Item = &'a View>,
-    heap: Option<&(DefId, HeapRole)>,
+    heap: &crate::HeapObservation,
     errors: ContentHash,
     installed: Option<&Installed>,
 ) -> ContentHash {
@@ -843,7 +869,7 @@ fn universe_input<'a>(
 /// error-only receipt or recording O(N) inputs for every evaluation.
 fn input_digest<'a>(
     views: impl Iterator<Item = &'a View>,
-    heap: Option<&(DefId, HeapRole)>,
+    heap: &crate::HeapObservation,
     errors: ContentHash,
 ) -> ContentHash {
     // GEN-6 specializations are left out: one materializing in a program must
@@ -859,12 +885,9 @@ fn input_digest<'a>(
         encode_def_path(&mut bytes, view.d.path());
         bytes.extend(view.digest().0.0);
     }
-    bytes.push(u8::from(heap.is_some()));
-    if let Some((d, _)) = heap {
-        encode_def_path(&mut bytes, d.path());
-    }
+    bytes.extend(bincode::serialize(heap).expect("heap evidence encodes"));
     bytes.extend(errors.0);
-    ContentHash::of_parts("hirsel.validate.universe-input.v1", [bytes.as_slice()])
+    ContentHash::of_parts("hirsel.validate.universe-input.v2", [bytes.as_slice()])
 }
 
 fn encode_def_path(out: &mut Vec<u8>, path: &hirsel_syntax::DefPath) {
@@ -917,8 +940,11 @@ impl SignatureLookup for OwnedEnvironment {
     fn view(&self, d: DefId) -> Option<crate::ViewInput<'_>> {
         self.views.view(d)
     }
-    fn first_heap(&self) -> Option<(DefId, HeapRole)> {
-        self.views.first_heap()
+    fn heap_role(&self) -> Result<Option<HeapRole>, ViewRefusal> {
+        self.views.heap_role()
+    }
+    fn heap_observation(&self) -> Result<crate::HeapObservation, ViewRefusal> {
+        self.views.heap_observation()
     }
     fn universe_errors(&self) -> (ContentHash, &[Violation]) {
         self.views.universe_errors()

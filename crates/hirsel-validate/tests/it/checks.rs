@@ -5036,35 +5036,14 @@ fn erased_capture_results_are_proved_from_actual_parameters() {
 #[test]
 fn heap_allocator_evidence_requires_the_declared_result_and_canonical_arena() {
     let mut f = Fixture::call();
-    let roles = NominalRoles {
-        heap: Some(HeapRole {
-            arena: path("Arena"),
-            operation: path("heap"),
-        }),
-        ..Default::default()
-    };
-    let mut arena = function_signature("Arena", vec![], TypeKind::Tuple(vec![].into()));
-    arena.metadata.roles = roles.clone().into();
-    arena.kind = SignatureKind::Type(Box::new(TypeDefinition {
-        loop_source: None,
-        format: None,
-        generics: vec![],
-        representation: None,
-        bounds: vec![],
-        authority: AuthoritySummary::Known(vec![AuthorityTerm::Capability(path("Arena"))].into()),
-        capability: Some(CapabilityKind::Scoped),
-        implementation_authority: None,
-        serializable: false,
-        serializable_check: None,
-        layout: Layout::default(),
-        distinct: false,
-        resource: false,
-        drop: None,
-        fact: None,
-        captures: None,
-        destructor_allocation: Allocation::NoAlloc,
-    }));
-    f.signatures.insert(id("Arena"), arena);
+    arena_slot(&mut f, Storage::Temporary);
+    let roles = f
+        .signatures
+        .get(path("Arena"))
+        .unwrap()
+        .metadata
+        .roles
+        .clone();
     let mut row = ty(TypeKind::Named {
         definition: id("Arena"),
         arguments: vec![].into(),

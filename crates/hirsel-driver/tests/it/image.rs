@@ -620,7 +620,7 @@ fn explicit_image_syntax_requests_materialize_the_source() {
 
 /// Imported producer receipts are not V authority (soundness repair 9d683676).
 /// Each consumer independently validates once, then reuses its local evidence,
-/// whether or not its FirstHeap selection matches the producer's.
+/// whether or not its HeapRole selection matches the producer's.
 #[test]
 fn imaged_lowering_reuses_validated_evidence() {
     let run = || {
@@ -635,7 +635,7 @@ fn imaged_lowering_reuses_validated_evidence() {
                 name: "value".into(),
             });
             // Both roots use the same source. Only `aaa` sorts before core's
-            // heap-role declaration, changing V's FirstHeap read.
+            // heap-role declaration, changing V's HeapRole read.
             for name in ["zzz", "aaa"] {
                 let client = f.program(name, CLIENT, &library, "lib");
                 let mut program = load(&client, Some(&image));

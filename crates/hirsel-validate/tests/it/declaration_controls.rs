@@ -1432,22 +1432,30 @@ fn a_change_in_heap_role_selection_invalidates() {
         &f.signatures,
         &mut reads,
     );
-    assert!(reads.contains(&VRead::FirstHeap(Some(id("Arena")))));
-    assert!(reads_view(
-        &ViewVerdict {
-            error: None,
-            reads: reads.clone()
-        },
-        "Arena"
-    ));
+    assert!(reads.iter().any(|r| matches!(
+        r,
+        VRead::HeapRole(hirsel_validate::HeapObservation::SelectedHeap { .. })
+    )));
+    assert!(
+        reads
+            .iter()
+            .filter(|r| matches!(r, VRead::HeapRole(_)))
+            .all(|r| read_holds(r, &f.signatures))
+    );
     // A role earlier in path order is selected instead.
     f.signatures.insert(id("Aaa"), heap("Aaa"));
     assert!(!reads.iter().all(|read| read_holds(read, &f.signatures)));
     // Without any role, the selection is a read of absence.
     let mut none = SignatureMap::new(session());
-    assert!(read_holds(&VRead::FirstHeap(None), &none));
+    assert!(read_holds(
+        &VRead::HeapRole(hirsel_validate::HeapObservation::None),
+        &none
+    ));
     none.insert(id("Zzz"), heap("Zzz"));
-    assert!(!read_holds(&VRead::FirstHeap(None), &none));
+    assert!(!read_holds(
+        &VRead::HeapRole(hirsel_validate::HeapObservation::None),
+        &none
+    ));
 }
 
 #[test]

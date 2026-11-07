@@ -209,18 +209,18 @@ pub fn validate_definition<'a, 'input>(
 
 const VIEW_DOMAIN: Domain = Domain {
     kind: 0x5600_0003,
-    schema: 2,
+    schema: 3,
 };
 fn view_key(digest: crate::ValidationDigest, policy: ContentHash) -> ContentHash {
     ContentHash::of_parts(
-        "hirsel.validate.signature-receipt.v2",
+        "hirsel.validate.signature-receipt.v3",
         [digest.0.0.as_slice(), policy.0.as_slice()],
     )
 }
 
 const DOMAIN: Domain = Domain {
     kind: 0x5600_0001,
-    schema: 2,
+    schema: 3,
 };
 
 /// An exact artifact identity computed here from every field and reachable type
@@ -318,7 +318,7 @@ fn receipt_action(artifact: ContentHash, policy: ContentHash, reads: &[VRead]) -
     // VRead's DefIds encode stable DefPaths; order is V's canonical read order.
     let encoded = bincode::serialize(reads).expect("verifier reads are encodable");
     ContentHash::of_parts(
-        "hirsel.validate.action.v2",
+        "hirsel.validate.action.v3",
         [
             artifact.0.as_slice(),
             policy.0.as_slice(),
@@ -575,7 +575,8 @@ impl VerifierCache {
 
     fn retain_receipt(&self, receipt: Receipt) -> Result<AcceptedArtifact, crate::FactError> {
         let bytes = (size_of::<OriginalReceipt>() + 4 * size_of::<usize>()) as u64
-            + (receipt.reads.capacity() * size_of::<VRead>()) as u64;
+            + (receipt.reads.capacity() * size_of::<VRead>()) as u64
+            + crate::input::read_payload_bytes(&receipt.reads).ok_or(crate::FactError::Refused)?;
         let lease = self
             .retain_fact(bytes)
             .map_err(|_| crate::FactError::Admission)?;
@@ -619,7 +620,9 @@ impl VerifierCache {
         let bytes = (4 * size_of::<VRead>()
             + size_of::<crate::views::EnvironmentFacts>()
             + 4 * size_of::<EnvironmentOwner>()
-            + 512) as u64;
+            + 512) as u64
+            + 4 * crate::input::read_payload_bytes(std::slice::from_ref(read))
+                .ok_or(crate::FactError::Admission)?;
         let holds = stamp.facts.reads.get_or_try_init(
             read.clone(),
             || {
@@ -1333,7 +1336,6 @@ impl VerifierCache {
                             crate::SignatureInputs::Raw(&*raw)
                         }
                     };
-                    let views = inputs.lookup();
                     let original = &accepted.original.receipt;
                     if original.artifact != accepted.artifact
                         || original.policy != accepted.policy
@@ -1344,23 +1346,7 @@ impl VerifierCache {
                         return Err(FactError::Refused);
                     }
                     for read in &original.reads {
-                        if self.read_holds(&types, read, inputs)? {
-                            continue;
-                        }
-                        let nominal = match read {
-                            VRead::FirstHeap(Some(previous)) => {
-                                let old = views
-                                    .view(*previous)
-                                    .map(|view| view.signature())
-                                    .transpose()
-                                    .map_err(FactError::View)?
-                                    .and_then(|view| view.metadata.roles.heap.clone());
-                                let current = views.first_heap().map(|(_, role)| role);
-                                old.is_some() && old == current
-                            }
-                            _ => false,
-                        };
-                        if !nominal {
+                        if !self.read_holds(&types, read, inputs)? {
                             return Err(FactError::Refused);
                         }
                     }
@@ -1723,12 +1709,16 @@ impl ExecutionReceipt {
     pub fn retained_bytes(&self) -> Option<u64> {
         let slots = (std::mem::size_of::<Self>() + 4 * std::mem::size_of::<usize>()) as u64;
         let originals = self.artifacts.iter().try_fold(0u64, |bytes, artifact| {
-            bytes.checked_add(
-                (size_of::<OriginalReceipt>()
-                    + 4 * size_of::<usize>()
-                    + artifact.original.receipt.reads.capacity() * size_of::<VRead>())
-                    as u64,
-            )
+            bytes
+                .checked_add(
+                    (size_of::<OriginalReceipt>()
+                        + 4 * size_of::<usize>()
+                        + artifact.original.receipt.reads.capacity() * size_of::<VRead>())
+                        as u64,
+                )?
+                .checked_add(crate::input::read_payload_bytes(
+                    &artifact.original.receipt.reads,
+                )?)
         })?;
         slots
             .checked_add(originals)?
@@ -1772,7 +1762,7 @@ struct ExecutionRecord {
 }
 
 /// Reuse only this verifier's successful terminal record, after independently
-/// observing its complete view/private/absence/universe/FirstHeap inputs. The
+/// observing its complete view/private/absence/universe/HeapRole inputs. The
 /// returned boolean says whether full V executed. An unencodable artifact still
 /// receives full V; it simply cannot acquire a portable receipt.
 pub fn validate_cached(
@@ -1820,7 +1810,7 @@ fn validate_with_receipt_in(
     };
     let key = artifact.identity.map(|identity| {
         ContentHash::of_parts(
-            "hirsel.validate.receipt.v2",
+            "hirsel.validate.receipt.v3",
             [identity.0.as_slice(), policy.0.as_slice()],
         )
     });
@@ -2025,7 +2015,7 @@ mod tests {
     }
     fn key(artifact: &Artifact<'_>, policy: ContentHash) -> ContentHash {
         ContentHash::of_parts(
-            "hirsel.validate.receipt.v2",
+            "hirsel.validate.receipt.v3",
             [artifact.identity.unwrap().0.as_slice(), policy.0.as_slice()],
         )
     }
@@ -2240,8 +2230,11 @@ mod tests {
                     self.original.view(d)
                 }
             }
-            fn first_heap(&self) -> Option<(hirsel_syntax::DefId, hirsel_types::HeapRole)> {
-                self.original.first_heap()
+            fn heap_role(&self) -> Result<Option<hirsel_types::HeapRole>, crate::ViewRefusal> {
+                self.original.heap_role()
+            }
+            fn heap_observation(&self) -> Result<crate::HeapObservation, crate::ViewRefusal> {
+                crate::input::observe_heap(None, self)
             }
             fn universe_errors(&self) -> (ContentHash, &[crate::Violation]) {
                 self.original.universe_errors()
@@ -2762,7 +2755,7 @@ mod tests {
         );
         cache.evict_facts();
         let verdict_key = ContentHash::of_parts(
-            "hirsel.validate.receipt.v2",
+            "hirsel.validate.receipt.v3",
             [accepted.artifact.0.as_slice(), accepted.policy.0.as_slice()],
         );
         let recorded: Receipt = cache.load(verdict_key, DOMAIN).unwrap();
@@ -3253,7 +3246,7 @@ mod tests {
     }
 
     #[test]
-    fn execution_replay_heap_provider_equivalence_requires_all_old_views_and_complete_role() {
+    fn execution_replay_uses_checked_heap_evidence_across_equal_carriers() {
         use crate::support::{arena_slot, function_signature};
         let mut f = Fixture::call();
         arena_slot(&mut f, hirsel_tir::Storage::Temporary);
@@ -3270,11 +3263,10 @@ mod tests {
         )
         .unwrap();
         assert!(report.violations.is_empty(), "{report:?}");
-        assert!(
-            reads.contains(&VRead::FirstHeap(Some(hirsel_syntax::DefId::intern(
-                &path("Arena")
-            ))))
-        );
+        assert!(reads.iter().any(|r| matches!(
+            r,
+            VRead::HeapRole(crate::HeapObservation::SelectedHeap { .. })
+        )));
         let accepted = accepted.unwrap();
         let package = path("main").0.package;
         let old = ContentHash::of_bytes(b"original heap universe");
@@ -3294,8 +3286,11 @@ mod tests {
             fn view(&self, d: hirsel_syntax::DefId) -> Option<crate::ViewInput<'_>> {
                 self.0.view(d)
             }
-            fn first_heap(&self) -> Option<(hirsel_syntax::DefId, hirsel_types::HeapRole)> {
-                None
+            fn heap_role(&self) -> Result<Option<hirsel_types::HeapRole>, crate::ViewRefusal> {
+                Ok(None)
+            }
+            fn heap_observation(&self) -> Result<crate::HeapObservation, crate::ViewRefusal> {
+                crate::input::observe_heap(None, self)
             }
             fn universe_errors(&self) -> (ContentHash, &[crate::Violation]) {
                 self.0.universe_errors()
@@ -3317,10 +3312,12 @@ mod tests {
                 )
                 .unwrap()
         };
-        // The ordinary read guard stays exact. Only verifier replay compares
-        // the complete role and validates the retained artifact again.
-        let old_heap = VRead::FirstHeap(Some(hirsel_syntax::DefId::intern(&path("Arena"))));
-        assert!(!crate::read_holds(&old_heap, &current));
+        // Equal carriers preserve the ordinary evidence read; replay uses the same guard.
+        let old_heap = reads
+            .iter()
+            .find(|r| matches!(r, VRead::HeapRole(_)))
+            .unwrap();
+        assert!(crate::read_holds(old_heap, &current));
         assert!(attempt(&MissingHeap(&current)).is_none());
         for field in ["arena", "operation"] {
             let mut changed = current.clone();
@@ -3337,6 +3334,60 @@ mod tests {
             }
             assert!(attempt(&changed).is_none(), "changed {field}");
         }
+        for field in [
+            "operation declaration",
+            "private shape",
+            "package version",
+            "absence",
+        ] {
+            let mut changed = current.clone();
+            match field {
+                "operation declaration" => {
+                    changed.get_mut(path("heap")).unwrap().metadata.visibility =
+                        hirsel_syntax::Visibility::Public;
+                }
+                "private shape" => {
+                    let hirsel_types::SignatureKind::Type(declaration) =
+                        &mut changed.get_mut(path("Arena")).unwrap().kind
+                    else {
+                        unreachable!()
+                    };
+                    declaration.representation = Some(session().intern(hirsel_types::Type::unit()));
+                }
+                "package version" => {
+                    let ids: Vec<_> = changed.iter().map(|(id, _)| id).collect();
+                    for id in ids {
+                        let signature = changed.get_mut(id).unwrap();
+                        if let Some(role) = std::sync::Arc::make_mut(&mut signature.metadata.roles)
+                            .heap
+                            .as_mut()
+                        {
+                            role.arena.0.package.version = "different".into();
+                            role.operation.0.package.version = "different".into();
+                        }
+                    }
+                }
+                _ => {
+                    let ids: Vec<_> = changed.iter().map(|(id, _)| id).collect();
+                    for id in ids {
+                        let signature = changed.get_mut(id).unwrap();
+                        std::sync::Arc::make_mut(&mut signature.metadata.roles).heap = None;
+                    }
+                }
+            }
+            assert!(attempt(&changed).is_none(), "changed {field}");
+        }
+        let types = session();
+        let base = hirsel_types::TypeBase::build(types.len(), |_| {
+            types.ids().map(|id| types.row(id).clone()).collect()
+        });
+        let mut foreign = crate::SignatureMap::new(TypeInterner::new(Some(base)));
+        foreign.extend(
+            current
+                .iter()
+                .map(|(id, signature)| (id, signature.clone())),
+        );
+        assert!(attempt(&foreign).is_none(), "foreign type interner");
         let mut missing = current.clone();
         missing.remove(path("Arena"));
         assert!(attempt(&missing).is_none());

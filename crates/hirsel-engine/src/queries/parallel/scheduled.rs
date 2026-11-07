@@ -1639,13 +1639,14 @@ impl FrontBodyQueries {
                     .universe_errors()
                     .0
             }
-            ReadKey::FirstHeap => self
+            ReadKey::HeapRole => self
                 .namespace
                 .snapshot
                 .validation(package)
                 .ok()?
-                .first_heap()
-                .map_or_else(ContentHash::default, |(id, _)| id.path().fingerprint()),
+                .heap_observation()
+                .ok()?
+                .fingerprint(),
             // A front product must not execute a dependency to decide a hit.
             // Unknown source/registration facts safely miss this ordinary codec.
             ReadKey::NameSet(package, module) => self.declarations.name_set(package, module),

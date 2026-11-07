@@ -305,12 +305,13 @@ impl AcceptedFrontRegistration {
                         .universe_errors()
                         .0,
                 ),
-                ReadKey::FirstHeap => Some(
+                ReadKey::HeapRole => Some(
                     snapshot
                         .validation(&definition.0.package)
                         .ok()?
-                        .first_heap()
-                        .map_or_else(ContentHash::default, |(id, _)| id.path().fingerprint()),
+                        .heap_observation()
+                        .ok()?
+                        .fingerprint(),
                 ),
                 _ => engine.observe(definition, key),
             },

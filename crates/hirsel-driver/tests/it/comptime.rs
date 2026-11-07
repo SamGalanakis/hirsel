@@ -1709,7 +1709,7 @@ fn frozen_lowering_frontier_keeps_lower_warnings_and_current_hit_metadata() {
                             key,
                             hirsel_query_products::reads::ReadKey::ValidationView(_)
                                 | hirsel_query_products::reads::ReadKey::UniverseErrors
-                                | hirsel_query_products::reads::ReadKey::FirstHeap
+                                | hirsel_query_products::reads::ReadKey::HeapRole
                         ) {
                             continue;
                         }

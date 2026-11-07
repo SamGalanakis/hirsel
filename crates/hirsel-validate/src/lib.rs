@@ -82,9 +82,9 @@ mod typing;
 mod variant_brands;
 use input::Reader;
 pub use input::{
-    IdentifiedSignature, Pin, SignatureLookup, SignatureMap, SignatureSource, UniverseErrors,
-    VRead, ValidatedSignatures, ValidationDigest, ViewInput, ViewRefusal, ViewVerdict, check_view,
-    digest, errors_digest, read_holds,
+    HeapObservation, IdentifiedSignature, Pin, SignatureLookup, SignatureMap, SignatureSource,
+    UniverseErrors, VRead, ValidatedSignatures, ValidationDigest, ViewInput, ViewRefusal,
+    ViewVerdict, check_view, digest, errors_digest, read_holds,
 };
 pub use instances::{
     InstanceViolation, validate_instance_bodies, validate_instance_catalog, validate_instance_rows,
@@ -859,7 +859,7 @@ impl<'a, 'input> Checker<'a, 'input> {
         function: &hirsel_types::FunctionType,
         relation: &hirsel_types::Relation,
     ) -> hirsel_types::Relation {
-        let Some(heap) = self.signatures.first_heap() else {
+        let Some(heap) = self.signatures.heap_role() else {
             return relation.clone();
         };
         relation.retain(|r| {
@@ -870,7 +870,7 @@ impl<'a, 'input> Checker<'a, 'input> {
     /// Whether a value of this body row is the registry's Arena.
     fn arena_type(&self, ty: TypeId) -> bool {
         self.signatures
-            .first_heap()
+            .heap_role()
             .is_some_and(|h| hirsel_types::is_arena_type(self.t, ty, &h.arena))
     }
     /// Whether a relation place is an Arena binding (PROV-4): a parameter or a
@@ -882,7 +882,7 @@ impl<'a, 'input> Checker<'a, 'input> {
         if !origin.fields.is_empty() {
             return false;
         }
-        let Some(heap) = self.signatures.first_heap() else {
+        let Some(heap) = self.signatures.heap_role() else {
             return false;
         };
         let arena = |body: &ReadBody<'_>, local: LocalId| {

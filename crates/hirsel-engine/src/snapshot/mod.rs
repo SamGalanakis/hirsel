@@ -2126,10 +2126,22 @@ mod tests {
         };
         let group_snapshot = build(&rows, BTreeMap::new());
         let demand = group_snapshot.demand_validation().unwrap();
-        let issued = group_snapshot
-            .validation_with(&package, rows[0].clone())
-            .unwrap();
-        let issued = Arc::downgrade(&issued);
+        let issued = {
+            let views = group_snapshot
+                .validation_with(&package, rows[0].clone())
+                .unwrap();
+            assert_eq!(
+                views
+                    .view(rows[0].definition)
+                    .unwrap()
+                    .unwrap()
+                    .signature()
+                    .unwrap()
+                    .kind,
+                rows[0].kind
+            );
+            Arc::downgrade(&views)
+        };
         group_snapshot.evict_cached();
         let before_group = work::read(Counter::ValidationOverlayConstructions);
         let grouped = group_snapshot

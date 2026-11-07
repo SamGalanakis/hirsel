@@ -2052,9 +2052,12 @@ fn scheduled_scc_split_merge_and_durable_reopen_agree_with_cold_solve() {
         ),
     ];
     let mut previous_membership = None;
+    let mut seen_inputs = std::collections::BTreeSet::new();
     for (text, calls) in cases {
         let (resident, _, memberships) = run(text, calls, 1);
-        assert_eq!(memberships, 1);
+        // The final merge revisits the first case's exact text and call edges.
+        // Its durable membership already exists; only distinct inputs solve.
+        assert_eq!(memberships, u64::from(seen_inputs.insert((*text, *calls))));
         if let Some(previous) = previous_membership {
             assert_ne!(resident.facets.membership.output, previous);
         }

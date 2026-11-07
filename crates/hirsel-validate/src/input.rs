@@ -106,21 +106,18 @@ pub(crate) fn read_payload_bytes(reads: &[VRead]) -> Option<u64> {
 }
 
 pub(crate) fn select_heap<'a>(
-    roles: impl IntoIterator<Item = (&'a hirsel_syntax::DefPath, &'a hirsel_syntax::DefPath)>,
+    roles: impl IntoIterator<Item = &'a HeapRole>,
 ) -> Result<Option<HeapRole>, ViewRefusal> {
     let mut selected = None;
     for role in roles {
-        if selected.is_some_and(|previous| previous != role) {
+        if selected.as_ref().is_some_and(|previous| previous != role) {
             return Err(ViewRefusal::Stale {
-                definition: DefId::intern(role.0),
+                definition: DefId::intern(&role.arena),
             });
         }
-        selected = Some(role);
+        selected = Some(role.clone());
     }
-    Ok(selected.map(|(arena, operation)| HeapRole {
-        arena: arena.clone(),
-        operation: operation.clone(),
-    }))
+    Ok(selected)
 }
 
 pub(crate) fn observe_heap(
@@ -223,7 +220,7 @@ pub struct IdentifiedSignature {
     digest: ValidationDigest,
     /// Part of the identity: universes select their selected heap role without
     /// reading every payload again.
-    heap: Option<(HeapPath, HeapPath)>,
+    heap: Option<HeapRole>,
     retention: crate::memory::ControlRetention,
     payload_retention: crate::memory::ControlRetention,
 }
@@ -315,12 +312,7 @@ impl IdentifiedSignature {
         Self {
             types,
             definition: signature.definition,
-            heap: signature.metadata.roles.heap.as_ref().map(|role| {
-                (
-                    HeapPath(DefId::intern(&role.arena)),
-                    HeapPath(DefId::intern(&role.operation)),
-                )
-            }),
+            heap: signature.metadata.roles.heap.clone(),
             retention: Default::default(),
             payload_retention: Default::default(),
             payload: Payload::Held(signature),
@@ -338,12 +330,7 @@ impl IdentifiedSignature {
         Self {
             types,
             definition: signature.definition,
-            heap: signature.metadata.roles.heap.as_ref().map(|role| {
-                (
-                    HeapPath(DefId::intern(&role.arena)),
-                    HeapPath(DefId::intern(&role.operation)),
-                )
-            }),
+            heap: signature.metadata.roles.heap.clone(),
             retention: Default::default(),
             payload_retention: Default::default(),
             payload: Payload::Sourced {
@@ -359,6 +346,11 @@ impl IdentifiedSignature {
     }
     pub(crate) fn retained_identity_bytes(&self) -> Option<u64> {
         let mut bytes = crate::memory::arc::<Self>();
+        if let Some(heap) = &self.heap {
+            bytes = bytes
+                .checked_add(path_bytes(&heap.arena)?)?
+                .checked_add(path_bytes(&heap.operation)?)?;
+        }
         if let Payload::Sourced { source, .. } = &self.payload {
             // The weak last-payload pointer retains the Signature Arc backing
             // after its fields are dropped. The source wrapper has its own Arc.
@@ -394,14 +386,8 @@ impl IdentifiedSignature {
     pub fn definition(&self) -> DefId {
         self.definition
     }
-    pub(crate) fn heap(
-        &self,
-    ) -> Option<(
-        &'static hirsel_syntax::DefPath,
-        &'static hirsel_syntax::DefPath,
-    )> {
-        self.heap
-            .map(|(arena, operation)| (arena.path(), operation.path()))
+    pub fn heap(&self) -> Option<&HeapRole> {
+        self.heap.as_ref()
     }
     /// Whether `signature` is the exact payload this identity was made from.
     pub fn is(&self, signature: &hirsel_types::SignatureRef) -> bool {
@@ -1107,8 +1093,7 @@ impl SignatureLookup for SignatureMap {
         select_heap(
             self.views
                 .values()
-                .filter_map(|v| v.signature.metadata.roles.heap.as_ref())
-                .map(|role| (&role.arena, &role.operation)),
+                .filter_map(|v| v.signature.metadata.roles.heap.as_ref()),
         )
     }
     fn heap_observation(&self) -> Result<HeapObservation, ViewRefusal> {

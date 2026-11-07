@@ -3316,6 +3316,37 @@ pub fn parse(text: String, fraction: u64, bias: i32) -> Result[u64, scalar.Parse
 const CLINGER64: Inline[f64, 23] = [1e0f64, 1e1f64, 1e2f64, 1e3f64, 1e4f64, 1e5f64, 1e6f64, 1e7f64, 1e8f64, 1e9f64, 1e10f64, 1e11f64, 1e12f64, 1e13f64, 1e14f64, 1e15f64, 1e16f64, 1e17f64, 1e18f64, 1e19f64, 1e20f64, 1e21f64, 1e22f64]
 const CLINGER32: Inline[f32, 11] = [1e0f32, 1e1f32, 1e2f32, 1e3f32, 1e4f32, 1e5f32, 1e6f32, 1e7f32, 1e8f32, 1e9f32, 1e10f32]
 
+// Rust core ea137335 dec2flt/parse.rs:15-30 and common.rs:60-66 (MIT).
+// Checked byte loads assemble the little-endian word; validation precedes the
+// three packed multiplications. No partial group is consumed on a non-digit.
+@noalloc
+fn eight_digits(bytes: Bytes, at: u64) -> Option[u64] uses {} {
+  let length = core@1/bytes.len(bytes)
+  if at > length || length - at < 8 {
+    return None()
+  }
+  let b7: u64 = core@1/int.widen(bytes[at + 7])
+  let b6: u64 = core@1/int.widen(bytes[at + 6])
+  let b5: u64 = core@1/int.widen(bytes[at + 5])
+  let b4: u64 = core@1/int.widen(bytes[at + 4])
+  let b3: u64 = core@1/int.widen(bytes[at + 3])
+  let b2: u64 = core@1/int.widen(bytes[at + 2])
+  let b1: u64 = core@1/int.widen(bytes[at + 1])
+  let b0: u64 = core@1/int.widen(bytes[at])
+  let word = b0 | b1 << 8 | b2 << 16 | b3 << 24 | b4 << 32 | b5 << 40 | b6 << 48 | b7 << 56
+  let upper = core@1/int.wrapping_add(word, 0x4646464646464646)
+  let digits = core@1/int.wrapping_sub(word, 0x3030303030303030)
+  if (upper | digits) & 0x8080808080808080 != 0 {
+    return None()
+  }
+  let pairs = digits * 10 + (digits >> 8)
+  let first = core@1/int.wrapping_mul(pairs & 0x000000ff000000ff, 0x000f424000000064)
+  let second = core@1/int.wrapping_mul((pairs >> 16) & 0x000000ff000000ff, 0x0000271000000001)
+  let combined = core@1/int.wrapping_add(first, second)
+  let value: u32 = core@1/int.truncate(combined >> 32)
+  Some(core@1/int.widen(value))
+}
+
 // The same parser over a borrowed interval, for typed JSON numeric tokens.
 @noalloc
 pub fn parse_bytes(bytes: Bytes, fraction: u64, bias: i32) -> Result[
@@ -3342,6 +3373,18 @@ pub fn parse_bytes(bytes: Bytes, fraction: u64, bias: i32) -> Result[
   }
   let integer_significant_start = at
   let mut leading: u64 = 0
+  // At most eleven existing significant digits can accept eight more without
+  // exceeding the original nineteen-digit accumulator. Longer inputs retain
+  // the same scalar scan and exact Eisel-Lemire/decimal fallback below.
+  // A leading-zero scan often stops at the decimal point; do not probe a
+  // complete checked group when its first byte is already a separator.
+  while length - at >= 8 && leading < 100000000000 && bytes[at] >= 48 && bytes[at] <= 57 {
+    let Some(digits) = eight_digits(bytes, at) else {
+      break
+    }
+    leading = leading * 100000000 + digits
+    at += 8
+  }
   while at < length && leading < 1000000000000000000 {
     let byte = bytes[at]
     if byte < 48 || byte > 57 {
@@ -3370,6 +3413,13 @@ pub fn parse_bytes(bytes: Bytes, fraction: u64, bias: i32) -> Result[
       }
     }
     let fractional_significant_start = at
+    while length - at >= 8 && leading < 100000000000 {
+      let Some(digits) = eight_digits(bytes, at) else {
+        break
+      }
+      leading = leading * 100000000 + digits
+      at += 8
+    }
     while at < length && leading < 1000000000000000000 {
       let byte = bytes[at]
       if byte < 48 || byte > 57 {

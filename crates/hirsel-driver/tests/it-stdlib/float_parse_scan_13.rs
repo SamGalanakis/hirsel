@@ -60,8 +60,18 @@ fn independent_bits_and_strict_grammar_on_h_llvm_and_cranelift() {
   }
 "#;
         let mut insertions = String::from("let invalid_insertions: List[String] = [\n");
-        for text in ["123", "666.0", "0.1", "5e1", "7e-3", "0.0e+1"] {
-            for bad in ['r', ',', '?', '<', 'j'] {
+        for text in [
+            "123",
+            "666.0",
+            "0.1",
+            "5e1",
+            "7e-3",
+            "0.0e+1",
+            "123456789",
+            "0.123456789012",
+            "123456789012345678901",
+        ] {
+            for bad in ['r', ',', '?', '<', 'j', '/', ':', 'é'] {
                 for at in 0..=text.len() {
                     let mut input = text.to_owned();
                     input.insert(at, bad);

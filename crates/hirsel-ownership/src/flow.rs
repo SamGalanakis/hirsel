@@ -9491,6 +9491,32 @@ mod loan_tests {
                 );
                 let clones = FORWARD_STATE_CLONES.with(std::cell::Cell::get) - before;
                 assert_eq!(inputs, expected, "mask {mask} route {next:?}");
+                for &successor in next {
+                    let input = inputs[successor].as_ref().unwrap();
+                    assert_eq!(
+                        input
+                            .iteration_loans
+                            .iter()
+                            .map(|(id, p)| (id, p.binding, p.projections.clone()))
+                            .collect::<Vec<_>>(),
+                        vec![(ExprId(1), 1, vec![Projection::Elements])],
+                    );
+                    assert_eq!(
+                        input
+                            .argument_loans
+                            .iter()
+                            .map(|(id, (p, source))| (
+                                id,
+                                p.binding,
+                                p.projections.clone(),
+                                *source
+                            ))
+                            .collect::<Vec<_>>(),
+                        vec![(ExprId(2), 2, vec![Projection::Field(3)], ExprId(3))],
+                    );
+                    assert_eq!(input.argument_conflicts.iter().collect::<Vec<_>>(), vec![9]);
+                }
+
                 assert_eq!(pending, reference_pending);
                 assert_eq!(output, retained);
                 for value in initial.iter().flatten() {

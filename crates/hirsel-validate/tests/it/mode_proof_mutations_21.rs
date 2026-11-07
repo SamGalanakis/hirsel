@@ -93,7 +93,14 @@ fn current_unique(forged: bool) -> Fixture {
 
 // Both sources have the same physical row. Only one has a fresh current value.
 fn crossing_supplier(forged: bool) -> Fixture {
+    crossing_supplier_at(forged, 0)
+}
+
+fn crossing_supplier_at(forged: bool, padding: usize) -> Fixture {
     let mut f = Fixture::string();
+    for _ in 0..padding {
+        f.slot(TypeKind::Primitive(Primitive::Bool), Storage::Local);
+    }
     let stale = f.slot(string(), Storage::Local);
     f.assign(stale, Rvalue::Constant(Constant::String("stale".into())), 1);
     let cleanup = f.cleanup(vec![drop(stale), drop(1)]);
@@ -395,7 +402,7 @@ fn check(f: &Fixture, expected: Expected) {
 }
 
 fn matrix() -> String {
-    let cases: [(&str, fn(bool) -> Fixture, Expected); 8] = [
+    let cases: [(&str, fn(bool) -> Fixture, Expected); 9] = [
         (
             "current unique after share",
             current_unique,
@@ -404,6 +411,11 @@ fn matrix() -> String {
         (
             "crossing supplier",
             crossing_supplier,
+            Expected::Mismatch("call argument"),
+        ),
+        (
+            "crossing supplier across a word boundary",
+            |forged| crossing_supplier_at(forged, 63),
             Expected::Mismatch("call argument"),
         ),
         (
@@ -445,7 +457,7 @@ fn matrix() -> String {
         &incoming_branch(true, true),
         Expected::Mismatch("call argument"),
     );
-    out += "9 pairs; 18 fixtures; 48 direct/decoded/body-permuted verdicts\n";
+    out += "10 pairs; 20 fixtures; 52 direct/decoded/body-permuted verdicts\n";
     out
 }
 

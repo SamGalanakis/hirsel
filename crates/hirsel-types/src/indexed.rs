@@ -1,19 +1,26 @@
-//! Body-local indices with bounded copy-on-write pages. No flow operations live here.
-//! Word packing follows rustc_index/src/bit_set.rs:16-30,70-94 at a7c37f9f.
-//! Unlike its flat allocation, large sets use sparse persistent word rows.
+//! Body-local memberships and immutable payload rows, without flow judgments.
+//! Dense words follow rustc_index/src/bit_set.rs:150-178,320-323 at a7c37f9f.
 use crate::rows::Rows;
 use std::rc::Rc;
 
 const SMALL: usize = 8;
+const DENSE_DOMAIN: usize = 2048;
+
 #[derive(Clone, Debug)]
 pub struct IndexSet {
     domain: usize,
     len: usize,
-    data: Option<Rc<SetData>>,
+    data: Storage,
+}
+#[derive(Clone, Debug)]
+enum Storage {
+    Inline(u64),
+    Shared(Rc<SetData>),
 }
 #[derive(Clone, Debug)]
 enum SetData {
     Small(Vec<usize>),
+    Dense(Vec<u64>),
     Words(Rows<u64>),
 }
 impl IndexSet {
@@ -21,7 +28,7 @@ impl IndexSet {
         Self {
             domain,
             len: 0,
-            data: None,
+            data: Storage::Inline(0),
         }
     }
     pub fn len(&self) -> usize {
@@ -32,21 +39,38 @@ impl IndexSet {
     }
     pub fn contains(&self, index: &usize) -> bool {
         assert!(*index < self.domain);
-        match self.data.as_deref() {
-            None => false,
-            Some(SetData::Small(rows)) => rows.binary_search(index).is_ok(),
-            Some(SetData::Words(words)) => words[*index / 64] & (1 << (*index % 64)) != 0,
+        match &self.data {
+            Storage::Inline(bits) => *index < 64 && bits & (1 << *index) != 0,
+            Storage::Shared(data) => match data.as_ref() {
+                SetData::Small(rows) => rows.binary_search(index).is_ok(),
+                SetData::Dense(words) => words[*index / 64] & (1 << (*index % 64)) != 0,
+                SetData::Words(words) => words[*index / 64] & (1 << (*index % 64)) != 0,
+            },
         }
     }
     pub fn insert(&mut self, index: usize) -> bool {
         assert!(index < self.domain);
+        if let Storage::Inline(bits) = &mut self.data {
+            if self.domain <= 64 {
+                let next = *bits | (1 << index);
+                let changed = next != *bits;
+                *bits = next;
+                self.len += usize::from(changed);
+                return changed;
+            }
+            self.data = Storage::Shared(Rc::new(if self.domain <= DENSE_DOMAIN {
+                SetData::Dense(vec![0; self.domain.div_ceil(64)])
+            } else {
+                SetData::Small(Vec::new())
+            }));
+        }
         if self.contains(&index) {
             return false;
         }
-        match Rc::make_mut(
-            self.data
-                .get_or_insert_with(|| Rc::new(SetData::Small(Vec::new()))),
-        ) {
+        let Storage::Shared(data) = &mut self.data else {
+            unreachable!()
+        };
+        match Rc::make_mut(data) {
             SetData::Small(rows) => {
                 let at = rows.binary_search(&index).unwrap_err();
                 if rows.len() < SMALL {
@@ -56,82 +80,122 @@ impl IndexSet {
                     for i in rows.iter().copied().chain([index]) {
                         words.set(i / 64, words[i / 64] | (1 << (i % 64)));
                     }
-                    self.data = Some(Rc::new(SetData::Words(words)));
+                    *data = Rc::new(SetData::Words(words));
                 }
             }
+            SetData::Dense(words) => words[index / 64] |= 1 << (index % 64),
             SetData::Words(words) => {
                 let word = words[index / 64];
-                let next = word | (1 << (index % 64));
-                words.set(index / 64, next);
+                words.set(index / 64, word | (1 << (index % 64)));
             }
         }
         self.len += 1;
+        if self.len.saturating_mul(64) >= self.domain {
+            if let SetData::Words(words) = data.as_ref() {
+                let mut dense = vec![0; self.domain.div_ceil(64)];
+                for (i, word) in words.entries() {
+                    dense[i] = *word;
+                }
+                *data = Rc::new(SetData::Dense(dense));
+            }
+        }
         true
     }
     pub fn remove(&mut self, index: &usize) -> bool {
         assert!(*index < self.domain);
+        if let Storage::Inline(bits) = &mut self.data {
+            if *index >= 64 {
+                return false;
+            }
+            let next = *bits & !(1 << *index);
+            let changed = next != *bits;
+            *bits = next;
+            self.len -= usize::from(changed);
+            return changed;
+        }
         if !self.contains(index) {
             return false;
         }
-        match Rc::make_mut(self.data.as_mut().unwrap()) {
+        let Storage::Shared(data) = &mut self.data else {
+            unreachable!()
+        };
+        match Rc::make_mut(data) {
             SetData::Small(rows) => {
-                let at = rows.binary_search(index).unwrap();
-                rows.remove(at);
+                rows.remove(rows.binary_search(index).unwrap());
             }
+            SetData::Dense(words) => words[*index / 64] &= !(1 << (*index % 64)),
             SetData::Words(words) => {
                 let word = words[*index / 64];
-                let next = word & !(1 << (*index % 64));
-                words.set(*index / 64, next);
+                words.set(*index / 64, word & !(1 << (*index % 64)));
             }
         }
         self.len -= 1;
+        if self.len == 0 {
+            self.data = Storage::Inline(0);
+        }
         true
     }
     pub fn iter(&self) -> impl Iterator<Item = usize> + '_ {
-        let (small, words): (&[usize], _) = match self.data.as_deref() {
-            None => (&[][..], Vec::new()),
-            Some(SetData::Small(rows)) => (rows.as_slice(), Vec::new()),
-            Some(SetData::Words(words)) => (&[][..], words.entries()),
-        };
-        small
-            .iter()
-            .copied()
-            .chain(words.into_iter().flat_map(|(index, word)| {
-                let mut word = *word;
-                std::iter::from_fn(move || {
-                    if word == 0 {
-                        return None;
-                    }
-                    let bit = word.trailing_zeros() as usize;
-                    word &= word - 1;
-                    Some(index * 64 + bit)
-                })
-            }))
+        let (inline, small, dense, pages): (Option<(usize, u64)>, &[usize], &[u64], _) =
+            match &self.data {
+                Storage::Inline(bits) => (Some((0, *bits)), &[], &[], Vec::new()),
+                Storage::Shared(data) => match data.as_ref() {
+                    SetData::Small(rows) => (None, rows, &[], Vec::new()),
+                    SetData::Dense(words) => (None, &[], words, Vec::new()),
+                    SetData::Words(words) => (None, &[], &[], words.entries()),
+                },
+            };
+        small.iter().copied().chain(
+            inline
+                .into_iter()
+                .chain(dense.iter().copied().enumerate())
+                .chain(pages.into_iter().map(|(i, word)| (i, *word)))
+                .flat_map(|(index, mut word)| {
+                    std::iter::from_fn(move || {
+                        if word == 0 {
+                            return None;
+                        }
+                        let bit = word.trailing_zeros() as usize;
+                        word &= word - 1;
+                        Some(index * 64 + bit)
+                    })
+                }),
+        )
     }
     pub fn extend(&mut self, other: &Self) {
         assert_eq!(self.domain, other.domain);
-        if other.is_empty() || self == other {
+        if other.is_empty() {
+            return;
+        }
+        if let (Storage::Inline(own), Storage::Inline(incoming)) = (&mut self.data, &other.data) {
+            *own |= incoming;
+            self.len = own.count_ones() as usize;
+            return;
+        }
+        if self == other {
             return;
         }
         if self.is_empty() {
             *self = other.clone();
             return;
         }
-        if let (SetData::Words(own), SetData::Words(incoming)) = (
-            Rc::make_mut(self.data.as_mut().unwrap()),
-            other.data.as_deref().unwrap(),
-        ) {
-            let added: usize = own
-                .differences(incoming)
-                .into_iter()
-                .map(|i| (incoming[i] & !own[i]).count_ones() as usize)
-                .sum();
-            own.union(incoming, |a, b| *a |= b);
-            self.len += added;
-        } else {
-            for index in other.iter() {
-                self.insert(index);
+        if let (Storage::Shared(own), Storage::Shared(incoming)) = (&mut self.data, &other.data) {
+            if let (SetData::Dense(a), SetData::Dense(b)) = (own.as_ref(), incoming.as_ref()) {
+                if a.iter().zip(b).all(|(a, b)| b & !a == 0) {
+                    return;
+                }
+                let SetData::Dense(words) = Rc::make_mut(own) else {
+                    unreachable!()
+                };
+                for (a, b) in words.iter_mut().zip(b) {
+                    self.len += (b & !*a).count_ones() as usize;
+                    *a |= b;
+                }
+                return;
             }
+        }
+        for index in other.iter() {
+            self.insert(index);
         }
     }
 }
@@ -143,17 +207,19 @@ impl PartialEq for IndexSet {
         if self.is_empty() {
             return true;
         }
-        if self
-            .data
-            .as_ref()
-            .zip(other.data.as_ref())
-            .is_some_and(|(a, b)| Rc::ptr_eq(a, b))
-        {
-            return true;
-        }
-        match (self.data.as_deref(), other.data.as_deref()) {
-            (Some(SetData::Small(a)), Some(SetData::Small(b))) => a == b,
-            (Some(SetData::Words(a)), Some(SetData::Words(b))) => a == b,
+        match (&self.data, &other.data) {
+            (Storage::Inline(a), Storage::Inline(b)) => a == b,
+            (Storage::Shared(a), Storage::Shared(b)) => {
+                if Rc::ptr_eq(a, b) {
+                    return true;
+                }
+                match (a.as_ref(), b.as_ref()) {
+                    (SetData::Small(a), SetData::Small(b)) => a == b,
+                    (SetData::Dense(a), SetData::Dense(b)) => a == b,
+                    (SetData::Words(a), SetData::Words(b)) => a == b,
+                    _ => self.iter().eq(other.iter()),
+                }
+            }
             _ => self.iter().eq(other.iter()),
         }
     }
@@ -196,14 +262,13 @@ impl<T: Clone + PartialEq> IndexMap<T> {
     }
     /// Replace only present incoming rows; absent rows retain their old values.
     pub fn overwrite(&mut self, other: &Self) -> bool {
-        let previous = self.rows.clone();
-        self.rows.union(&other.rows, |a, b| {
+        let changed = self.rows.union(&other.rows, |a, b| {
             if b.is_some() {
                 *a = b.clone();
             }
         });
         self.active.extend(&other.active);
-        self.rows != previous
+        changed
     }
 
     pub fn retain(&mut self, mut keep: impl FnMut(usize, &T) -> bool) {
@@ -223,7 +288,7 @@ mod tests {
     use std::collections::BTreeSet;
     #[test]
     fn memberships_snapshots_and_union_match_independent_sets() {
-        for domain in [0, 1, 8, 9, 63, 64, 65, 513, 4097] {
+        for domain in [0, 1, 8, 9, 63, 64, 65, 513, 2048, 2049, 4097, 8193] {
             let mut a = IndexSet::new(domain);
             let mut oracle = BTreeSet::new();
             for i in (0..domain).rev().step_by(3) {
@@ -253,7 +318,7 @@ mod tests {
                 a.iter().collect::<Vec<_>>(),
                 oracle.iter().copied().collect::<Vec<_>>()
             );
-            // Equality depends on membership, even after a paged set becomes small.
+            // Equality depends on membership, even after a dense set becomes small.
             let mut small = IndexSet::new(domain);
             for i in a.iter() {
                 small.insert(i);

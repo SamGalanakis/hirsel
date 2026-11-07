@@ -216,8 +216,9 @@ impl<T: Clone + PartialEq> Rows<T> {
         self.merge(None, other, false, &mut join, None);
     }
     /// Union whose default row is an identity. Entire disjoint subtrees share.
-    pub fn union(&mut self, other: &Self, mut join: impl FnMut(&mut T, &T)) {
-        self.merge(None, other, true, &mut join, None);
+    /// Returns whether any row changed, without a second comparison walk.
+    pub fn union(&mut self, other: &Self, mut join: impl FnMut(&mut T, &T)) -> bool {
+        self.merge(None, other, true, &mut join, None)
     }
     /// `join` of an `other` that is `base` changed in place, into rows that
     /// already joined `base`. Only rows where `other` differs from `base` are

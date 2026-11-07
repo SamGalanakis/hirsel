@@ -55,9 +55,13 @@ enum FrontState {
         lowering: lowering::LoweringUse,
     },
 }
+struct PendingBody {
+    product: LiveAnalyzedProduct,
+    charge: u64,
+}
 struct FrontOutcome {
     state: FrontState,
-    pending_body: Option<LiveAnalyzedProduct>,
+    pending_body: Option<PendingBody>,
     facts: Arc<FrontFacts>,
 }
 impl std::ops::Deref for FrontOutcome {
@@ -322,7 +326,7 @@ pub struct FrontBodyQueries {
     verify_store: hirsel_engine_store::VerifyStore,
     slots: Mutex<BTreeMap<Key, FrontSlot>>,
     input_slots: Mutex<(BTreeMap<DefId, usize>, Option<Arc<LiveSourceBacking>>)>,
-    /// Per-body optional retention bound within the existing Front allowance.
+    /// Optional body retention bound within the existing Front allowance.
     body_cache_limit: u64,
     carry: Mutex<Option<Arc<FrontCarry>>>,
     /// Subscription generations validated against this immutable source view.
@@ -1097,6 +1101,32 @@ impl FrontBodyQueries {
     }
     fn install_outcome(&self, key: Key, outcome: FrontOutcome) {
         let mut slots = self.slots.lock().unwrap_or_else(|e| e.into_inner());
+        if self.body_cache_limit < self._allowance.admitted
+            && let Some(body) = &outcome.pending_body
+        {
+            let mut used: u64 = slots
+                .iter()
+                .filter_map(|(stored, slot)| match slot {
+                    FrontSlot::Live { outcome, .. } if *stored != key => {
+                        outcome.pending_body.as_ref().map(|body| body.charge)
+                    }
+                    _ => None,
+                })
+                .sum();
+            while body.charge > self.body_cache_limit.saturating_sub(used) {
+                let retired = slots
+                    .iter_mut()
+                    .find_map(|(stored, slot)| match slot {
+                        FrontSlot::Live { outcome, .. } if *stored != key => {
+                            outcome.pending_body.take()
+                        }
+                        _ => None,
+                    })
+                    .expect("pending body charge is held by a cached owner");
+                used -= retired.charge;
+                drop(retired);
+            }
+        }
         match slots.entry(key) {
             std::collections::btree_map::Entry::Occupied(mut entry) => {
                 let observations = match entry.get() {
@@ -2257,7 +2287,7 @@ impl FrontBodyQueries {
                 if outcome
                     .pending_body
                     .as_ref()
-                    .is_some_and(LiveAnalyzedProduct::cache_only) =>
+                    .is_some_and(|body| body.product.cache_only()) =>
             {
                 outcome.pending_body.take()
             }
@@ -3288,7 +3318,10 @@ impl BodyTask {
                 product.live_value::<crate::products::LiveAnalyzedProduct>()
             {
                 *body = Some(analyzed.downgrade());
-                cached.pending_body = Some(analyzed.clone());
+                cached.pending_body = Some(PendingBody {
+                    product: analyzed.clone(),
+                    charge: charge.expect("body admission checked its charge"),
+                });
             }
         }
         let terminal = match &cached.state {

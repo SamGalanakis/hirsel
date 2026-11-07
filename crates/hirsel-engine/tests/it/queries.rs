@@ -697,39 +697,47 @@ fn phases_run_in_order_and_stop_at_every_error_boundary_on_compiler_thread() {
 #[test]
 fn front_body_handoff_reuses_admitted_bodies_until_consumed_or_pressure() {
     with_compiler_stack(|| {
-        let (mut engine, _) = make_engine(None, false);
-        let transport = hirsel_engine_admission::ProcessBudget::new(8 << 20);
-        engine = engine.with_result_store(Arc::new(hirsel_engine_store::RequestStore::new(
-            Arc::new(hirsel_engine_store::NoneStore),
-            transport.reserve(8 << 20).unwrap(),
-        )));
-        parse(&mut engine, "fn a () { 1 }\nfn b () { 1 }\n");
-        let mut front = admitted_front(&mut engine, &[path("a"), path("b")], 1);
-        for name in ["a", "b"] {
-            let query = front.queries.query(&path(name)).unwrap();
-            let request = front.runtime.request(&[query]);
-            front.runtime.wait(request).unwrap();
-        }
-        for name in ["a", "b"] {
-            let output = front.request(&[path(name)]);
-            assert!(output[0].outcome.result.is_ok());
-            for kind in [QueryKind::Check, QueryKind::Modes] {
-                assert_eq!(
-                    front.queries.recompute_count(&path(name), kind),
-                    1,
-                    "an admitted unchanged body must survive unrelated Front work"
-                );
+        for pressure in [false, true] {
+            let (mut engine, _) = make_engine(None, false);
+            let transport = hirsel_engine_admission::ProcessBudget::new(8 << 20);
+            engine = engine.with_result_store(Arc::new(hirsel_engine_store::RequestStore::new(
+                Arc::new(hirsel_engine_store::NoneStore),
+                transport.reserve(8 << 20).unwrap(),
+            )));
+            parse(&mut engine, "fn a () { 1 }\nfn b () { 1 }\n");
+            let mut front = admitted_front(&mut engine, &[path("a"), path("b")], 1);
+            for name in ["a", "b"] {
+                let query = front.queries.query(&path(name)).unwrap();
+                let request = front.runtime.request(&[query]);
+                front.runtime.wait(request).unwrap();
             }
+            if pressure {
+                let retained = front.queries.retained_bytes();
+                front.runtime.evict_to(0);
+                assert_eq!(front.queries.live_body_count(), 0);
+                assert!(front.queries.retained_bytes() < retained);
+            }
+            for name in ["a", "b"] {
+                let output = front.request(&[path(name)]);
+                assert!(output[0].outcome.result.is_ok());
+                for kind in [QueryKind::Check, QueryKind::Modes] {
+                    assert_eq!(
+                        front.queries.recompute_count(&path(name), kind),
+                        if pressure { 2 } else { 1 },
+                        "an admitted unchanged body must survive unrelated Front work"
+                    );
+                }
+            }
+            let output = front.request(&[path("b")]);
+            assert!(output[0].outcome.result.is_ok());
+            assert_eq!(
+                front.queries.recompute_count(&path("b"), QueryKind::Modes),
+                if pressure { 2 } else { 1 }
+            );
+            drop(output);
+            front.runtime.evict_to(0);
+            assert_eq!(front.queries.live_body_count(), 0);
         }
-        let output = front.request(&[path("b")]);
-        assert!(output[0].outcome.result.is_ok());
-        assert_eq!(
-            front.queries.recompute_count(&path("b"), QueryKind::Modes),
-            1
-        );
-        drop(output);
-        front.runtime.evict_to(0);
-        assert_eq!(front.queries.live_body_count(), 0);
     });
 }
 #[test]

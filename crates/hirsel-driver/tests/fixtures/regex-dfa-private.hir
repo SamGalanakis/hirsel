@@ -159,6 +159,13 @@ fn dfa_goldens() -> bool uses {} {
     ("a[bc]def|xyzabc", "_______aBcdef____xyzabc", 17, 23),
     ("abcdef|", "________abcdef", 0, 0),
     ("[ab]+[cd]+", "________abccd", 8, 13),
+    // Conservative pair candidates must not hide an overlapping later start,
+    // mix alternatives into a match, erase look-behind, or skip a Unicode fold.
+    ("abq|bcr", "abcr", 1, 4),
+    ("abq|xyr", "ayq abx xyr", 8, 11),
+    ("\\babcd", "xabcd abcd", 6, 10),
+    ("(?i)ask", "ax aſk", 3, 7),
+    ("[a-z]+@example", "ab@exzz cd@example", 8, 18),
     // Cached runs ending inside a four-transition group or at its tail.
     ("a+", "aaaaaéaaaa", 0, 5),
     ("a+", "aaaaaa😀aaa", 0, 6),
@@ -304,6 +311,8 @@ fn dfa_count_laws() -> bool uses {} {
     ("", "é😀", 3), ("a*", "baa", 2), ("a*?", "baa", 4),
     ("ab|aba", "ababa", 2), ("aba|ba", "ababa", 2),
     ("(?i)ss|s", "ſs", 1), ("(?m)^|$", "a\nb", 4),
+    ("abq|bcr", "abcr abq", 2), ("abq|xyr", "ayq abq xyr", 2),
+    ("(?i)ask", "ax aſk ASK", 2),
     ("a+", "aa aa", 2), ("z+", "aa aa", 0)
   ]
   for (pattern, src, expected) in cases {

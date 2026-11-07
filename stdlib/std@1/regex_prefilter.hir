@@ -2,8 +2,8 @@
 // rust-lang/regex 80b9d14e, regex-automata/src/meta/strategy.rs:81-153,
 // util/prefilter/mod.rs:584-688 and hybrid/search.rs:50-90.
 // Copyright (c) 2014 The Rust Project Developers. MIT; third-party/NOTICES.md.
-// Single-byte literals use the core scanner, strings use Two-Way search,
-// and folded/alternate prefixes use packed byte-pair candidates.
+// Prefixes use packed byte-pair candidates without confirming a literal
+// that the ordered engine will scan again. Single bytes use the core scanner.
 // Every candidate is confirmed by the ordered engine on the original source.
 
 type PrefixPlan {
@@ -16,11 +16,10 @@ type PrefixPlan {
   inner: bool,
   inner_low: u64,
   inner_high: u64,
-  search: Option[internal.substring.Plan],
 }
 
 fn no_prefix() -> PrefixPlan uses {} {
-  PrefixPlan(enabled: false, low: 0, high: 0, literals: [], folds: [], pair_sets: b"", inner: false, inner_low: 0, inner_high: 0, search: None())
+  PrefixPlan(enabled: false, low: 0, high: 0, literals: [], folds: [], pair_sets: b"", inner: false, inner_low: 0, inner_high: 0)
 }
 
 fn prefix_bit(mut plan: PrefixPlan, cp: u32) uses {} {
@@ -231,13 +230,12 @@ fn prefix_plan(code: List[Inst], entry: u64) -> PrefixPlan uses {} {
   }
   // <=64 strings of <=16 bytes, plus folds and byte sets: <5 KiB of payload.
   // No search-time growing plan.
-  if core@1/list.len(plan.literals) == 1 && plan.folds[0] == 0 {
-    plan.search = Some(
-      internal.substring.prepare(core@1/string.as_bytes(plan.literals[0]))
-    )
-  }
-  // Necessary two-position sets. Unicode fold equivalents remain candidates;
-  // prefix_at and the ordered engine resolve cross-literal false positives.
+  // memchr 2.8.2 arch/x86_64/sse2/packedpair.rs:141-152 and
+  // regex-automata 0.4.11 hybrid/search.rs:245-271: report necessary
+  // byte pairs and let the automaton confirm them. Unlike Teddy's exact
+  // literal search, independent sets may combine different alternatives.
+  // Such false positives are safe because neither engine returns a match
+  // without running its original ordered program.
   let mut paired = core@1/list.len(plan.literals) != 0
   let mut sets: List[u8] = []
   for i in 0u64..64 { core@1/list.push(mut sets, 0u8) }
@@ -277,70 +275,31 @@ fn prefix_has(plan: PrefixPlan, cp: u32) -> bool uses {} {
   }
 }
 
-fn prefix_at(plan: PrefixPlan, haystack: Bytes, at: u64) -> bool uses {} {
-  if core@1/list.len(plan.literals) == 0 { return true }
-  for n in 0u64..core@1/list.len(plan.literals) {
-    let needle = core@1/string.as_bytes(plan.literals[n])
-    let size = core@1/bytes.len(needle)
-    if size <= core@1/bytes.len(haystack) - at {
-      let folds = plan.folds[n]
-      let mut i = 0u64
-      while i < size {
-        let byte = haystack[at + i]
-        if folds >> i & 1u64 != 0 {
-          // A folded ASCII scalar may match a longer UTF-8 scalar. Let the
-          // original engine inspect it, including Kelvin and long-s.
-          if byte >= 128 { return true }
-          if byte | 32u8 != needle[i] | 32u8 { break }
-        } else if byte != needle[i] { break }
-        i += 1
-      }
-      if i == size { return true }
-    }
-  }
-  false
-}
-
 fn prefix_packed(plan: PrefixPlan, haystack: Bytes, from: u64) -> Option[u64] uses {} {
-  let size = core@1/bytes.len(haystack)
   let sets = plan.pair_sets
-  let middle = core@1/bytes.len(sets) / 2
-  let firsts = core@1/bytes.slice(sets, 0, middle)
-  let seconds = core@1/bytes.slice(sets, middle, core@1/bytes.len(sets))
-  let mut cursor = from
-  while cursor < size {
-    cursor = core@1/bytes.find_pair(haystack, firsts, seconds, cursor)
-    if cursor == size { return None() }
-    if prefix_at(plan, haystack, cursor) { return Some(cursor) }
-    cursor += 1
-  }
-  None()
+  let firsts = core@1/bytes.slice(sets, 0, 32)
+  let seconds = core@1/bytes.slice(sets, 32, 64)
+  let cursor = core@1/bytes.find_pair(haystack, firsts, seconds, from)
+  if cursor < core@1/bytes.len(haystack) { Some(cursor) } else { None() }
 }
 
 // Called only at a dead start state after whole-operation budget admission.
 // Return an original byte coordinate. Callers recover look-behind only when
 // they need it; the DFA does not decode each skipped ASCII byte.
 fn prefix_candidate(plan: PrefixPlan, haystack: Bytes, from: u64) -> Option[u64] uses {} {
-  if let Some(search) = plan.search {
-    // The complete extracted literal was found, so no second confirmation
-    // or scalar decoding is needed. Its first byte is always ASCII.
+  if core@1/bytes.len(plan.pair_sets) != 0 { return prefix_packed(plan, haystack, from) }
+  if core@1/list.len(plan.literals) == 1 && plan.folds[0] == 0 {
     let needle = core@1/string.as_bytes(plan.literals[0])
-    // util/prefilter/memchr.rs:18-73: one byte needs only a byte scan.
     if core@1/bytes.len(needle) == 1 {
       let at = core@1/bytes.find_any(haystack, needle, from)
       return if at < core@1/bytes.len(haystack) { Some(at) } else { None() }
     }
-    return internal.substring.find_from(haystack, needle, search, from)
   }
-  if core@1/bytes.len(plan.pair_sets) != 0 { return prefix_packed(plan, haystack, from) }
   let size = core@1/bytes.len(haystack)
-  // Class/fold prefixes have no literal to confirm. Keep the predicate outside
-  // prefix_at so each candidate needs neither its call nor its borrowed plan.
-  let literals = core@1/list.len(plan.literals) != 0
   let mut cursor = from
   while cursor < size {
     let byte = haystack[cursor]
-    if (byte < 128 || byte >= 192) && prefix_has(plan, core@1/int.widen(byte)) && (!literals || prefix_at(plan, haystack, cursor)) {
+    if (byte < 128 || byte >= 192) && prefix_has(plan, core@1/int.widen(byte)) {
       return Some(cursor)
     }
     cursor += 1

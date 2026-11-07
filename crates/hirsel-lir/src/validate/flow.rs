@@ -153,6 +153,8 @@ pub(super) fn solve<T: Clone + PartialEq>(
 /// The predecessor solver with unchanged balanced join subtrees retained
 /// across visits. Edge and block equality still determine convergence exactly;
 /// no old contribution is accumulated and no lattice identity is assumed.
+/// Finish each SCC before its successors, retaining reverse-postorder priority
+/// within it, so a loop does not repeatedly visit downstream cleanup blocks.
 pub(super) fn solve_cached<T: Clone>(
     cfg: &Cfg,
     init: T,
@@ -168,8 +170,23 @@ pub(super) fn solve_cached<T: Clone>(
     }
     let mut dirty = vec![false; cfg.source.len()];
     let mut joins: Vec<Joins<T>> = (0..cfg.succ.len()).map(|_| Joins::default()).collect();
-    let mut work = BTreeSet::from([0usize]);
-    while let Some(next) = work.pop_first() {
+    let adjacent: Vec<Vec<usize>> = cfg
+        .succ
+        .iter()
+        .map(|outs| outs.iter().map(|out| out.target.index()).collect())
+        .collect();
+    let mut component = vec![0; cfg.succ.len()];
+    for (order, members) in hirsel_graph::components(&adjacent)
+        .into_iter()
+        .rev()
+        .enumerate()
+    {
+        for member in members {
+            component[member] = order;
+        }
+    }
+    let mut work = BTreeSet::from([(component[cfg.entry.index()], 0usize)]);
+    while let Some((_, next)) = work.pop_first() {
         let block = cfg.rpo[next];
         let arriving = (block == cfg.entry)
             .then(|| (cfg.source.len(), init.clone(), false))
@@ -205,7 +222,7 @@ pub(super) fn solve_cached<T: Clone>(
             dirty[edge.index()] = true;
             let target = targets[edge.index()].expect("an edge of this block");
             if let Some(order) = cfg.order[target.index()] {
-                work.insert(order);
+                work.insert((component[target.index()], order));
             }
         }
     }

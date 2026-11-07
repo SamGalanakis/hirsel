@@ -256,6 +256,44 @@ impl ReadPool {
             bytes,
         })
     }
+    /// Admit one tracked receipt against a shared allowance and its retention
+    /// credit. `make_room` may reclaim this pool, so each attempt recomputes
+    /// the exact charge under the pool lock and checks both limits before
+    /// interning. `Err(Some(bytes))` names the charge `make_room` refused.
+    pub fn admit_tracked(
+        pool: &Mutex<Self>,
+        reads: &Reads,
+        allowance: &hirsel_engine_admission::MemoryReservationPool,
+        remaining: &Arc<Mutex<u64>>,
+        mut make_room: impl FnMut(u64) -> bool,
+    ) -> Result<Arc<Reads>, Option<u64>> {
+        let mut charge = pool
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .required_tracked_bytes(reads)
+            .ok_or(None)?;
+        loop {
+            if !make_room(charge) {
+                return Err(Some(charge));
+            }
+            let mut pool = pool.lock().unwrap_or_else(|e| e.into_inner());
+            let admission = pool.prepare_tracked(reads).ok_or(None)?;
+            charge = admission.required_bytes();
+            let mut credit = remaining.lock().unwrap_or_else(|e| e.into_inner());
+            let available = allowance.available_bytes();
+            if *credit < charge || available < charge {
+                continue;
+            }
+            let mut lease = allowance.take(available).ok_or(None)?;
+            let retained = Arc::new(
+                admission
+                    .intern(&mut lease, &mut credit, remaining.clone())
+                    .ok_or(None)?,
+            );
+            Reads::bind_tracked_owner(&retained);
+            return Ok(retained);
+        }
+    }
     pub fn intern(
         &mut self,
         reads: &Reads,
@@ -624,6 +662,69 @@ mod tests {
         assert_eq!(pool.rows.len(), 2);
         assert_eq!(changed, second);
         assert_ne!(accepted.get(&key), changed.get(&key));
+    }
+    #[test]
+    fn tracked_admission_makes_room_for_rows_its_own_reclaim_released() {
+        // A reclaim inside make_room drops the released rows this receipt
+        // re-reads, so its exact charge grows past the estimate it made room
+        // for. Oracle: the evictable owner covers the whole first-time charge,
+        // so admission must evict it rather than refuse.
+        let reads = Reads::from_vec(
+            (0..8)
+                .map(|index| {
+                    (
+                        ReadKey::Signature(DefId::intern(&DefPath::core(&format!(
+                            "reclaimed_{index}"
+                        )))),
+                        ContentHash::of_bytes(b"observed"),
+                    )
+                })
+                .collect(),
+        )
+        .unwrap();
+        let budget = hirsel_engine_admission::ProcessBudget::new(1 << 20);
+        let allowance =
+            hirsel_engine_admission::MemoryReservationPool::new(budget.reserve(1 << 20).unwrap())
+                .ok()
+                .unwrap();
+        let credit = Arc::new(Mutex::new(1 << 20));
+        let pool = Mutex::new(ReadPool::default());
+        let first_time = pool.lock().unwrap().required_tracked_bytes(&reads).unwrap();
+        drop(ReadPool::admit_tracked(&pool, &reads, &allowance, &credit, |_| true).unwrap());
+        let repeat = pool.lock().unwrap().required_tracked_bytes(&reads).unwrap();
+        assert!(
+            repeat < first_time,
+            "released rows still discount a re-read"
+        );
+        // Leave one byte less than the discounted estimate; an evictable owner
+        // holds the rest of the allowance.
+        let mut evictable = Some(
+            allowance
+                .take(allowance.available_bytes() - (repeat - 1))
+                .unwrap(),
+        );
+        assert!(evictable.as_ref().unwrap().bytes() >= first_time);
+        let admitted = ReadPool::admit_tracked(&pool, &reads, &allowance, &credit, |charge| {
+            loop {
+                if allowance.available_bytes() >= charge && *credit.lock().unwrap() >= charge {
+                    return true;
+                }
+                let reclaimed = pool.lock().unwrap().reclaim();
+                if reclaimed != 0 {
+                    *credit.lock().unwrap() += reclaimed;
+                } else if evictable.take().is_none() {
+                    return false;
+                }
+            }
+        })
+        .expect("an evictable owner covers the charge");
+        assert_eq!(admitted.as_ref(), &reads);
+        assert!(admitted.observed().eq(reads.observed()));
+        assert!(Reads::tracked_by(&admitted, &credit));
+        drop(admitted);
+        drop(pool);
+        drop(allowance);
+        assert_eq!(budget.reserved(), 0);
     }
     #[test]
     fn tracked_receipts_refuse_n_minus_one_and_refund_only_the_last_array_owner() {

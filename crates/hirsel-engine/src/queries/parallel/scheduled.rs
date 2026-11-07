@@ -777,34 +777,21 @@ impl FrontBodyQueries {
         if Reads::tracked_by(reads, &self.retention) {
             return Some(reads.clone());
         }
-        loop {
-            let charge = pool
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .required_tracked_bytes(reads)?;
-            if self.make_room(cx, charge).is_none() {
+        hirsel_query_products::reads::ReadPool::admit_tracked(
+            pool,
+            reads,
+            &self._allowance.allowance,
+            &self.retention,
+            |charge| self.make_room(cx, charge).is_some(),
+        )
+        .map_err(|refused| {
+            if let Some(charge) = refused {
                 let available = (*self.retention.lock().unwrap_or_else(|e| e.into_inner()))
                     .min(self._allowance.allowance.available_bytes());
                 self.record_refusal("read observations", charge, available);
-                return None;
             }
-            let mut pool = pool.lock().unwrap_or_else(|e| e.into_inner());
-            let admission = pool.prepare_tracked(reads)?;
-            let charge = admission.required_bytes();
-            let mut remaining = self.retention.lock().unwrap_or_else(|e| e.into_inner());
-            if *remaining < charge {
-                continue;
-            }
-            let available = self._allowance.allowance.available_bytes();
-            let mut allowance = self._allowance.allowance.take(available)?;
-            let retained = Arc::new(admission.intern(
-                &mut allowance,
-                &mut remaining,
-                self.retention.clone(),
-            )?);
-            Reads::bind_tracked_owner(&retained);
-            return Some(retained);
-        }
+        })
+        .ok()
     }
     fn reclaim_reads(&self) -> bool {
         let Some(pool) = self.read_pool.get() else {

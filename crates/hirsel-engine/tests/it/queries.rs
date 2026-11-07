@@ -697,6 +697,45 @@ fn phases_run_in_order_and_stop_at_every_error_boundary_on_compiler_thread() {
 #[test]
 fn front_body_handoff_reuses_admitted_bodies_until_consumed_or_pressure() {
     with_compiler_stack(|| {
+        let (mut engine, _) = make_engine(None, false);
+        let transport = hirsel_engine_admission::ProcessBudget::new(8 << 20);
+        engine = engine.with_config(CompileConfig {
+            hold_bytes: 0,
+            store: Arc::new(hirsel_engine_store::RequestStore::new(
+                Arc::new(hirsel_engine_store::NoneStore),
+                transport.reserve(8 << 20).unwrap(),
+            )),
+            ..Default::default()
+        });
+        parse(&mut engine, "fn a () { 1 }\n");
+        let mut front = admitted_front(&mut engine, &[path("a")], 1);
+        front.queries.compact_retained_reads();
+        let query = front.queries.query(&path("a")).unwrap();
+        let request = front.runtime.request(&[query]);
+        let product = front.runtime.wait(request).unwrap().pop().unwrap();
+        let action = product.action;
+        front.runtime.shutdown();
+        assert!(front.queries.factory().evict(query, &product, 8 << 20));
+        drop(product);
+        assert_eq!(front.queries.live_body_count(), 0);
+        let mut runtime = AdmittedRuntime::new(
+            hirsel_intern::jobs::Jobs::ONE,
+            front._budget.reserve(512 << 20).unwrap(),
+            runtime_errors(),
+        )
+        .unwrap();
+        runtime
+            .register(FRONT_BODY_KIND, front.queries.factory())
+            .unwrap();
+        let request = runtime.request(&[query]);
+        let restored = runtime.wait(request).unwrap().pop().unwrap();
+        assert_eq!(restored.action, action);
+        assert_eq!(
+            front.queries.recompute_count(&path("a"), QueryKind::Check),
+            1,
+            "an unchanged definition is checked once per build"
+        );
+        runtime.shutdown();
         for pressure in [false, true] {
             let (mut engine, _) = make_engine(None, false);
             let transport = hirsel_engine_admission::ProcessBudget::new(8 << 20);
@@ -709,7 +748,10 @@ fn front_body_handoff_reuses_admitted_bodies_until_consumed_or_pressure() {
             for name in ["a", "b"] {
                 let query = front.queries.query(&path(name)).unwrap();
                 let request = front.runtime.request(&[query]);
-                front.runtime.wait(request).unwrap();
+                let product = front.runtime.wait(request).unwrap().pop().unwrap();
+                if !pressure {
+                    assert!(!front.queries.factory().evict(query, &product, 0));
+                }
             }
             if pressure {
                 let retained = front.queries.retained_bytes();

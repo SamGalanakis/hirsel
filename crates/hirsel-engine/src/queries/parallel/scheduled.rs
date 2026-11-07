@@ -1280,6 +1280,21 @@ impl FrontBodyQueries {
                 pinned,
             });
     }
+    fn cache_backing(&self, charge: u64) -> Option<Arc<LiveSourceBacking>> {
+        let mut remaining = self.retention.lock().unwrap_or_else(|e| e.into_inner());
+        let next = remaining.checked_sub(charge)?;
+        let allowance = self._allowance.allowance.take(charge)?;
+        *remaining = next;
+        Some(Arc::new(LiveSourceBacking {
+            _source: self._allowance.clone(),
+            retention: self.retention.clone(),
+            debit: Mutex::new(FrontDebit {
+                charge,
+                allowance,
+                observation: None,
+            }),
+        }))
+    }
     fn owner_grant(
         &self,
         cx: &mut dyn QueryContext,
@@ -2388,7 +2403,7 @@ impl QueryFactory for Factory {
                 observations,
             }) => (outcome, observations),
         };
-        outcome.pending_body.take();
+        let pending = outcome.pending_body.as_ref();
         let (publication, can_evict) = match &outcome.state {
             FrontState::Failed { .. } => (None, false),
             FrontState::Settled { publication, .. } => (
@@ -2396,7 +2411,9 @@ impl QueryFactory for Factory {
                 publication
                     .live_value::<crate::products::LiveSummaryProduct>()
                     .is_some_and(|summary| {
-                        publication.live_owners() == 2 && summary.cache_owners(1)
+                        publication.live_owners() == 2
+                            && pending.is_none_or(|body| body.product.cache_only())
+                            && summary.cache_owners(1 + usize::from(pending.is_some()))
                     })
                     && Arc::strong_count(&outcome.facts) == 2,
             ),

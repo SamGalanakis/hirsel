@@ -315,9 +315,26 @@ impl NativeRecordSource for Bindings {
         self.anchors.get(&(path.clone(), occurrence)).copied()
     }
 }
+type ExecutionRetention =
+    Arc<dyn Fn(u64) -> Result<Arc<dyn Send + Sync>, QueryError> + Send + Sync>;
+struct BodyImports {
+    definitions: BTreeMap<DefPath, DefinitionRef>,
+    owners: Vec<Arc<dyn Send + Sync>>,
+    environments: BTreeMap<hirsel_syntax::PackageId, hirsel_validate::PackageViews>,
+    validations: hirsel_validate::ValidatedSignatures,
+}
 struct Products {
     types: Arc<TypeInterner>,
-    definitions: BTreeMap<DefPath, DefinitionRef>,
+    bodies: BTreeMap<DefPath, Reference>,
+    imports: Mutex<BodyImports>,
+    records: Arc<TypeRecords>,
+    anchors: Bindings,
+    public: Arc<hirsel_validate::ViewTable>,
+    private: BTreeMap<DefPath, SignatureRef>,
+    store: Store,
+    inputs: hirsel_validate::ExecutionProductInputs,
+    limit: u64,
+    retain: ExecutionRetention,
     constants: BTreeMap<DefPath, MaterializedRef>,
     order: Vec<DefPath>,
     instances: hirsel_tir::InstanceBodies,
@@ -325,10 +342,77 @@ struct Products {
 }
 impl ExecutionProducts for Products {
     fn definition(&self, path: &DefPath) -> Result<DefinitionRef, QueryError> {
-        self.definitions
+        let mut imports = self.imports.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(definition) = imports.definitions.get(path) {
+            return Ok(definition.clone());
+        }
+        let reference = *self
+            .bodies
             .get(path)
-            .cloned()
-            .ok_or_else(|| failure(format!("missing body {path}")))
+            .ok_or_else(|| failure(format!("missing body {path}")))?;
+        let bytes = get(&self.store, reference)?;
+        let needed = hirsel_product_codec::tir_decode_bytes(&bytes)
+            .ok_or_else(|| failure("invalid TIR layout"))?;
+        if needed > self.limit {
+            return Err(failure("TIR exceeds admission"));
+        }
+        let decode_owner = (self.retain)(needed)?;
+        let archive = Arc::new(
+            hirsel_product_codec::CheckedTir::open(
+                bytes,
+                reference,
+                self.records.clone(),
+                |path, occurrence| self.anchors.record_source_anchor(path, occurrence),
+            )
+            .ok_or_else(|| failure("invalid TIR"))?,
+        );
+        let package = &path.0.package;
+        if !imports.environments.contains_key(package) {
+            let replacements = self
+                .private
+                .iter()
+                .filter(|(path, _)| &path.0.package == package)
+                .map(|(_, sig)| hirsel_validate::View::new(&self.types, sig.clone(), None));
+            let views = hirsel_validate::PackageViews::new(
+                &self.types,
+                self.public.clone(),
+                replacements,
+                &mut imports.validations,
+                None,
+            )
+            .map_err(|e| failure(format!("private declarations: {e:?}")))?;
+            imports.environments.insert(package.clone(), views);
+        }
+        let verifier = hirsel_validate::VerifierCache::directory_store(self.store.clone());
+        let verified = verifier
+            .import_execution_definition(
+                &self.inputs,
+                &archive,
+                self.types.clone(),
+                |anchor| self.anchors.record_owner(anchor),
+                &imports.environments[package],
+            )
+            .map_err(|e| failure(format!("V refusal: {e:?}")))?;
+        if verified.is_none() {
+            return Err(failure(format!("V rejected {path}")));
+        }
+        drop(verified);
+        let definition = archive
+            .materialize()
+            .ok_or_else(|| failure("invalid TIR payload"))?;
+        if definition.path.path() != path {
+            return Err(failure("body membership"));
+        }
+        let retained = hirsel_query_products::retained::decoded_tir_bytes(&definition);
+        drop(archive);
+        drop(decode_owner);
+        imports.owners.push((self.retain)(retained)?);
+        crate::queries::operation_owner_trace(format_args!(
+            "accepted-execution demanded body={path} peak={needed} retained={retained}"
+        ));
+        let definition = Arc::new(definition);
+        imports.definitions.insert(path.clone(), definition.clone());
+        Ok(definition)
     }
     fn constant(&self, path: &DefPath, actuals: &[u64]) -> Result<MaterializedRef, QueryError> {
         let selected = if actuals.is_empty() {
@@ -376,14 +460,14 @@ impl FrontRunOutput {
         if let Some(execution) = loaded.as_ref() {
             return Ok(execution.clone());
         }
+        let admission = published.admission.clone();
         let execution = load(
             &Store::new(published.directory.clone()),
             published.root,
             &published.inputs,
             published.admission.scratch,
-            |bytes| {
-                published
-                    .admission
+            move |bytes| {
+                admission
                     .reserve(bytes)
                     .map(|owner| owner as Arc<dyn Send + Sync>)
             },
@@ -682,8 +766,7 @@ impl FrontRunQueries {
 
 struct RuntimeRows {
     builtins: BTreeSet<DefPath>,
-    private: BTreeMap<DefPath, SignatureRef>,
-    finalizers: BTreeMap<DefPath, hirsel_tir::BodyId>,
+    products: Arc<Products>,
 }
 impl hirsel_interp::aggregate::TypeRows for RuntimeRows {
     fn view(
@@ -691,6 +774,7 @@ impl hirsel_interp::aggregate::TypeRows for RuntimeRows {
         path: &DefPath,
     ) -> Result<Option<(hirsel_interp::aggregate::SerializedView, ContentHash)>, QueryError> {
         Ok(self
+            .products
             .private
             .get(path)
             .cloned()
@@ -700,8 +784,8 @@ impl hirsel_interp::aggregate::TypeRows for RuntimeRows {
         &self,
         path: &DefPath,
     ) -> Result<Option<(DefPath, hirsel_tir::BodyId)>, QueryError> {
-        if let Some(body) = self.finalizers.get(path) {
-            Ok(Some((path.clone(), *body)))
+        if self.products.bodies.contains_key(path) {
+            Ok(Some((path.clone(), self.products.definition(path)?.entry)))
         } else if self.builtins.contains(path) {
             Ok(None)
         } else {
@@ -713,7 +797,7 @@ fn decode<T: Walk + serde::de::DeserializeOwned>(
     records: &Arc<TypeRecords>,
     bytes: hirsel_artifact_store::Bytes,
     anchors: &Bindings,
-    reserve: &mut impl FnMut(u64) -> Result<Arc<dyn Send + Sync>, QueryError>,
+    reserve: &dyn Fn(u64) -> Result<Arc<dyn Send + Sync>, QueryError>,
     owners: &mut Vec<Arc<dyn Send + Sync>>,
 ) -> Result<T, QueryError> {
     let backing = bytes.len();
@@ -744,8 +828,9 @@ fn load(
     root: Reference,
     current: &hirsel_validate::ExecutionProductInputs,
     limit: u64,
-    mut reserve: impl FnMut(u64) -> Result<Arc<dyn Send + Sync>, QueryError>,
+    reserve: impl Fn(u64) -> Result<Arc<dyn Send + Sync>, QueryError> + Send + Sync + 'static,
 ) -> Result<AcceptedExecutionProduct, QueryError> {
+    let reserve: ExecutionRetention = Arc::new(reserve);
     let started = std::time::Instant::now();
     profile(started, "import start");
     let verifier = hirsel_validate::VerifierCache::directory_store(store.clone());
@@ -764,7 +849,7 @@ fn load(
         &records,
         get(store, root)?,
         &anchors,
-        &mut reserve,
+        &*reserve,
         &mut owners,
     )?;
     profile(started, "root decoded");
@@ -806,7 +891,7 @@ fn load(
             &records,
             get(store, row.header)?,
             &anchors,
-            &mut reserve,
+            &*reserve,
             &mut header_owners,
         )?;
         if exported.definition.path() != &row.path
@@ -823,75 +908,13 @@ fn load(
             .map_err(|e| failure(format!("declarations: {e:?}")))?,
     );
     profile(started, "declarations checked");
-    let mut environments = BTreeMap::new();
-    let mut definitions = BTreeMap::new();
+    let bodies = product
+        .rows
+        .iter()
+        .filter_map(|row| row.body.map(|reference| (row.path.clone(), reference)))
+        .collect();
     let mut constants = BTreeMap::new();
     for row in &product.rows {
-        if let Some(reference) = row.body {
-            let bytes = get(store, reference)?;
-            let needed = hirsel_product_codec::tir_decode_bytes(&bytes)
-                .ok_or_else(|| failure("invalid TIR layout"))?;
-            if needed > limit {
-                return Err(failure("TIR exceeds admission"));
-            }
-            let decode_owner = reserve(needed)?;
-            let archive = Arc::new(
-                hirsel_product_codec::CheckedTir::open(
-                    bytes,
-                    reference,
-                    records.clone(),
-                    |path, occurrence| anchors.record_source_anchor(path, occurrence),
-                )
-                .ok_or_else(|| failure("invalid TIR"))?,
-            );
-            let package = &row.path.0.package;
-            if !environments.contains_key(package) {
-                let replacements = private
-                    .iter()
-                    .filter(|(path, _)| &path.0.package == package)
-                    .map(|(_, sig)| hirsel_validate::View::new(&types, sig.clone(), None));
-                let views = hirsel_validate::PackageViews::new(
-                    &types,
-                    base.clone(),
-                    replacements,
-                    &mut validations,
-                    None,
-                )
-                .map_err(|e| failure(format!("private declarations: {e:?}")))?;
-                environments.insert(package.clone(), views);
-            }
-            let views = &environments[package];
-            // The trusted root binds this exact body's reference. V remains
-            // independent and runs without a cache for every imported body.
-            let verified = verifier
-                .import_execution_definition(
-                    current,
-                    &archive,
-                    types.clone(),
-                    |anchor| anchors.record_owner(anchor),
-                    views,
-                )
-                .map_err(|e| failure(format!("V refusal: {e:?}")))?;
-            if verified.is_none() {
-                return Err(failure(format!("V rejected {}", row.path)));
-            }
-            drop(verified);
-            let definition = archive
-                .materialize()
-                .ok_or_else(|| failure("invalid TIR payload"))?;
-            if definition.path.path() != &row.path {
-                return Err(failure("body membership"));
-            }
-            let retained = hirsel_query_products::retained::decoded_tir_bytes(&definition);
-            drop(archive);
-            drop(decode_owner);
-            owners.push(reserve(retained)?);
-            crate::queries::operation_owner_trace(format_args!(
-                "accepted-execution body peak={needed} retained={retained} released={}",
-                needed.saturating_sub(retained)
-            ));
-            definitions.insert(row.path.clone(), Arc::new(definition));
-        }
         if let Some(reference) = row.constant {
             if reference.domain != CONSTANT {
                 return Err(failure("constant domain"));
@@ -900,23 +923,13 @@ fn load(
                 &records,
                 get(store, reference)?,
                 &anchors,
-                &mut reserve,
+                &*reserve,
                 &mut owners,
             )?;
             constants.insert(row.path.clone(), Arc::new(value));
         }
     }
-    // Public validation views and their private overlays are import scratch.
-    // Runtime retains only the accepted private declaration allocations.
-    drop(environments);
-    drop(base);
-    drop(validations);
-    drop(header_owners);
-    let header_bytes = private
-        .values()
-        .map(hirsel_query_products::retained::retained_signature_payload_bytes)
-        .sum::<u64>();
-    owners.push(reserve(header_bytes)?);
+    owners.extend(header_owners);
     if product.constants.iter().collect::<BTreeSet<_>>().len() != product.constants.len()
         || product
             .constants
@@ -952,7 +965,7 @@ fn load(
             }
         }
     }
-    profile(started, "bodies checked");
+    profile(started, "body descriptors loaded");
     let revision = ProgramRevision::encode(
         &product.entry.to_string(),
         product
@@ -971,14 +984,36 @@ fn load(
         private.values().cloned(),
         Some(&DefPath::core(hirsel_interp::library::FORGET_OPERATION)),
     ));
-    let finalizers = definitions
-        .iter()
-        .map(|(path, definition)| (path.clone(), definition.entry))
-        .collect();
+    let signature = private
+        .get(&product.entry)
+        .cloned()
+        .ok_or_else(|| failure("missing entry declaration"))?;
+    let products = Arc::new(Products {
+        types: types.clone(),
+        bodies,
+        imports: Mutex::new(BodyImports {
+            definitions: BTreeMap::new(),
+            owners: Vec::new(),
+            environments: BTreeMap::new(),
+            validations,
+        }),
+        records,
+        anchors,
+        public: base,
+        private,
+        store: store.clone(),
+        inputs: current.clone(),
+        limit,
+        retain: reserve,
+        constants,
+        order: product.constants,
+        instances,
+        _admission: Arc::new(owners),
+    });
     let runtime = Arc::new(crate::queries::runtime_types_over(
-        types.clone(),
+        types,
         hirsel_interp::aggregate::Serialization::demanded(
-            types.clone(),
+            products.types.clone(),
             Arc::new(RuntimeRows {
                 builtins: product
                     .rows
@@ -986,31 +1021,11 @@ fn load(
                     .filter(|row| row.builtin)
                     .map(|row| row.path.clone())
                     .collect(),
-                private: private.clone(),
-                finalizers,
+                products: products.clone(),
             }),
         ),
     ));
-    let definition = definitions
-        .get(&product.entry)
-        .cloned()
-        .ok_or_else(|| failure("missing entry body"))?;
-    let signature = private
-        .get(&product.entry)
-        .cloned()
-        .ok_or_else(|| failure("missing entry declaration"))?;
-    crate::queries::operation_owner_trace(format_args!(
-        "accepted-execution live types={} bodies={} headers={}",
-        types.retained_local_bytes(),
-        definitions
-            .values()
-            .map(|definition| hirsel_query_products::retained::decoded_tir_bytes(definition))
-            .sum::<u64>(),
-        private
-            .values()
-            .map(hirsel_query_products::retained::retained_signature_payload_bytes)
-            .sum::<u64>()
-    ));
+    let definition = products.definition(&product.entry)?;
     profile(started, "runtime rebuilt");
     Ok(AcceptedExecutionProduct {
         entry: product.entry,
@@ -1048,14 +1063,7 @@ fn load(
             externs: product.externs,
             unmodeled: product.unmodeled,
         },
-        products: Arc::new(Products {
-            types,
-            definitions,
-            constants,
-            order: product.constants,
-            instances,
-            _admission: Arc::new(owners),
-        }),
+        products,
     })
 }
 
@@ -1130,7 +1138,7 @@ pub fn import_execution_product(
     let root = product.root;
     drop(product);
     let limit = pool.available_bytes();
-    let execution = load(&store, root, &current, limit, |bytes| {
+    let execution = load(&store, root, &current, limit, move |bytes| {
         pool.take(bytes)
             .map(|reservation| Arc::new(reservation) as Arc<dyn Send + Sync>)
             .ok_or_else(|| failure("import exceeds admission"))

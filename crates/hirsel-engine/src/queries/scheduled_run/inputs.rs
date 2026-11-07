@@ -159,6 +159,7 @@ impl FrontRunQueries {
 }
 
 /// Independent of the query owner, so a published handle cannot form a cycle.
+#[derive(Clone)]
 pub(super) struct ExecutionAdmission {
     remaining: Arc<Mutex<u64>>,
     allowance: Arc<hirsel_engine_admission::MemoryReservation>,

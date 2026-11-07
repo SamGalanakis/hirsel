@@ -21,6 +21,7 @@ pub(crate) struct OperationOwner {
     pub(crate) captures: Mutex<Vec<Weak<NamespaceCapture>>>,
     pub(crate) inputs: Mutex<Option<Weak<header_products::SourceInputs>>>,
     pub(crate) payloads: Mutex<Vec<Weak<header_products::HeaderPayload>>>,
+    pub(crate) validation_payloads: Mutex<Vec<header_products::ValidationPayloadRegistration>>,
     pub(crate) bodies: Mutex<Option<WeakInputIndex<DefId, Arc<namespace::BodyInput>>>>,
     pub(crate) delta: Mutex<Option<Weak<namespace::CaptureDelta>>>,
     pub(crate) front: Mutex<Option<Weak<parallel::OperationFrontInputs>>>,

@@ -94,6 +94,14 @@ pub(in crate::queries) struct HeaderPayload {
     charge: Charge,
     rows: std::sync::Mutex<HeaderRows>,
 }
+struct ValidationPayload {
+    signature: Weak<hirsel_types::Signature>,
+    _charge: Charge,
+}
+pub(in crate::queries) struct ValidationPayloadRegistration {
+    owner: Weak<ValidationPayload>,
+    _charge: Charge,
+}
 struct HeaderRowLease {
     entry: Weak<Entry<hirsel_types::SignatureRef>>,
     output: Weak<QueryOutput<hirsel_types::SignatureRef>>,
@@ -1010,6 +1018,59 @@ impl HeaderProducts {
         };
         Ok(Charge::retained(HeaderCharge::Source(allowance)))
     }
+    pub(crate) fn validation_signature_lease(
+        &self,
+        signature: &hirsel_types::SignatureRef,
+    ) -> Result<Arc<dyn Send + Sync>, QueryError> {
+        if let Some(payload) = signature.metadata.retention.get::<HeaderPayload>() {
+            return Ok(payload);
+        }
+        let mut payloads = self
+            .operation
+            .validation_payloads
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        payloads.retain(|registration| registration.owner.strong_count() != 0);
+        if payloads.capacity() > 4 * payloads.len() {
+            payloads.shrink_to_fit();
+        }
+        if let Some(owner) = payloads
+            .iter()
+            .filter_map(|registration| registration.owner.upgrade())
+            .find(|owner| std::ptr::eq(owner.signature.as_ptr(), Arc::as_ptr(signature)))
+        {
+            return Ok(owner);
+        }
+        // The registry keeps the weak allocation and its vector slots charged
+        // until pressure reclaims them, even after the last view drops.
+        let registration = self.admit(
+            (size_of::<ValidationPayload>()
+                + 2 * size_of::<usize>()
+                + 4 * size_of::<ValidationPayloadRegistration>()) as u64,
+        )?;
+        let charge = self
+            .admit(hirsel_query_products::retained::retained_signature_payload_bytes(signature))?;
+        let owner = Arc::new(ValidationPayload {
+            signature: Arc::downgrade(signature),
+            _charge: charge,
+        });
+        payloads.push(ValidationPayloadRegistration {
+            owner: Arc::downgrade(&owner),
+            _charge: registration,
+        });
+        Ok(owner)
+    }
+    fn reclaim_validation_payloads(&self) -> bool {
+        let Ok(mut payloads) = self.operation.validation_payloads.try_lock() else {
+            return false;
+        };
+        let before = payloads.len();
+        payloads.retain(|registration| registration.owner.strong_count() != 0);
+        if payloads.capacity() > 4 * payloads.len() {
+            payloads.shrink_to_fit();
+        }
+        before != payloads.len()
+    }
     pub(crate) fn validation_demand_lease(
         &self,
         bytes: u64,
@@ -1458,7 +1519,8 @@ impl HeaderProducts {
     }
     /// Evict one unpinned settled entry: a header row, else a module proof.
     pub(crate) fn evict(&self) -> bool {
-        if self.operation.structural.evict()
+        if self.reclaim_validation_payloads()
+            || self.operation.structural.evict()
             || self.evict_validation_cache()
             || self.evict_row()
             || self.evict_proof()
@@ -1938,6 +2000,87 @@ mod retention_tests {
         fn available_header_bytes(&self) -> u64 {
             self.0.available_bytes()
         }
+    }
+
+    #[test]
+    fn validation_aliases_retain_one_read_signature_payload() {
+        struct Memory(Arc<HeaderProducts>);
+        impl hirsel_validate::ValidationMemory for Memory {
+            fn retain(
+                &self,
+                bytes: u64,
+            ) -> Result<Arc<dyn Send + Sync>, hirsel_validate::ViewRefusal> {
+                self.0.validation_demand_lease(bytes).map_err(|cause| {
+                    hirsel_validate::ViewRefusal::Unreadable {
+                        definition: DefId::intern(&DefPath::core("validation-storage")),
+                        cause,
+                    }
+                })
+            }
+            fn retain_signature(
+                &self,
+                signature: &hirsel_types::SignatureRef,
+            ) -> Result<Arc<dyn Send + Sync>, hirsel_validate::ViewRefusal> {
+                self.0
+                    .validation_signature_lease(signature)
+                    .map_err(|cause| hirsel_validate::ViewRefusal::Unreadable {
+                        definition: signature.definition,
+                        cause,
+                    })
+            }
+        }
+        let engine = QueryEngine::new(default_environment(), PhaseAdapters::default());
+        let headers = HeaderProducts::capture(&engine);
+        let budget = ProcessBudget::new(1 << 20);
+        let backing: Arc<dyn HeaderAllowance> = Arc::new(Allowance(
+            MemoryReservationPool::new(budget.reserve(1 << 20).unwrap())
+                .ok()
+                .unwrap(),
+        ));
+        let remaining = Arc::new(std::sync::Mutex::new(1 << 19));
+        headers.configure_source_backing(backing.clone(), remaining.clone());
+        let memory = Memory(headers);
+        let signature = Arc::new(hirsel_types::Signature {
+            metadata: hirsel_types::SignatureMetadata {
+                constant_alias: Some(Box::new(DefPath::core(&"a".repeat(8192)))),
+                ..Default::default()
+            },
+            definition: DefId::intern(&DefPath::core("shared-payload")),
+            kind: hirsel_types::SignatureKind::Const {
+                ty: engine.types.intern(hirsel_types::Type::unit()),
+                generics: Default::default(),
+            },
+            fingerprint: ContentHash::of_bytes(b"shared-payload"),
+        });
+        let first = hirsel_validate::View::new(&engine.types, signature.clone(), None);
+        let second = hirsel_validate::View::new(&engine.types, signature, None);
+        let initial = *remaining.lock().unwrap();
+        first.identified().retain_control(&memory).unwrap();
+        let after_first = *remaining.lock().unwrap();
+        second.identified().retain_control(&memory).unwrap();
+        let after_second = *remaining.lock().unwrap();
+        assert!(
+            after_first - after_second <= initial - after_first - 8192,
+            "a second identity must not debit the shared 8192-byte signature field twice"
+        );
+        drop(first);
+        assert!(*remaining.lock().unwrap() < initial);
+        assert_eq!(
+            second
+                .signature()
+                .unwrap()
+                .metadata
+                .constant_alias
+                .as_ref()
+                .unwrap()
+                .0
+                .name
+                .len(),
+            8192
+        );
+        drop(second);
+        while memory.0.evict() {}
+        assert_eq!(*remaining.lock().unwrap(), initial);
     }
 
     #[test]

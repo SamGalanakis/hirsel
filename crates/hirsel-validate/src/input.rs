@@ -225,6 +225,7 @@ pub struct IdentifiedSignature {
     /// reading every payload again.
     heap: Option<(HeapPath, HeapPath)>,
     retention: crate::memory::ControlRetention,
+    payload_retention: crate::memory::ControlRetention,
 }
 /// The cache a sourced view reads its payload back from. A miss recomputes
 /// through the cache's ordinary producer; the result must have the same
@@ -321,6 +322,7 @@ impl IdentifiedSignature {
                 )
             }),
             retention: Default::default(),
+            payload_retention: Default::default(),
             payload: Payload::Held(signature),
             digest,
         }
@@ -343,6 +345,7 @@ impl IdentifiedSignature {
                 )
             }),
             retention: Default::default(),
+            payload_retention: Default::default(),
             payload: Payload::Sourced {
                 last: Arc::new(std::sync::Mutex::new(Arc::downgrade(signature))),
                 source,
@@ -351,6 +354,7 @@ impl IdentifiedSignature {
         }
     }
     pub(crate) fn retain_owner(&self, owner: Arc<dyn Send + Sync>) {
+        self.payload_retention.set(owner.clone());
         self.retention.set(owner);
     }
     pub(crate) fn retained_identity_bytes(&self) -> Option<u64> {
@@ -368,13 +372,13 @@ impl IdentifiedSignature {
         Some(bytes)
     }
     pub fn retain_control(&self, memory: &dyn crate::ValidationMemory) -> Result<(), ViewRefusal> {
-        self.retention.retain(memory, || {
-            self.retained_identity_bytes()?
-                .checked_add(match &self.payload {
-                    Payload::Held(signature) => memory.signature_bytes(signature),
-                    Payload::Sourced { .. } => 0,
-                })
-        })
+        self.retention
+            .retain(memory, || self.retained_identity_bytes())?;
+        if let Payload::Held(signature) = &self.payload {
+            self.payload_retention
+                .retain_with(|| memory.retain_signature(signature))?;
+        }
+        Ok(())
     }
     /// The payload retained by this identity; sourced views retain their
     /// original cache owner instead of pinning a signature payload.

@@ -5,7 +5,10 @@ use std::sync::{Arc, Mutex};
 /// The host's existing working-memory allowance and signature allocation visitor.
 pub trait ValidationMemory: Send + Sync {
     fn retain(&self, bytes: u64) -> Result<Arc<dyn Send + Sync>, ViewRefusal>;
-    fn signature_bytes(&self, signature: &hirsel_types::SignatureRef) -> u64;
+    fn retain_signature(
+        &self,
+        signature: &hirsel_types::SignatureRef,
+    ) -> Result<Arc<dyn Send + Sync>, ViewRefusal>;
 }
 
 #[derive(Default)]
@@ -35,6 +38,16 @@ impl ControlRetention {
         let mut retained = self.0.lock().unwrap();
         if retained.is_none() {
             *retained = Some(memory.retain(bytes().ok_or_else(overflow)?)?);
+        }
+        Ok(())
+    }
+    pub(crate) fn retain_with(
+        &self,
+        make: impl FnOnce() -> Result<Arc<dyn Send + Sync>, ViewRefusal>,
+    ) -> Result<(), ViewRefusal> {
+        let mut retained = self.0.lock().unwrap();
+        if retained.is_none() {
+            *retained = Some(make()?);
         }
         Ok(())
     }

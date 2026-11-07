@@ -205,8 +205,16 @@ impl hirsel_validate::ValidationMemory for ValidationMemory {
                 cause,
             })
     }
-    fn signature_bytes(&self, signature: &SignatureRef) -> u64 {
-        hirsel_query_products::retained::retained_signature_payload_bytes(signature)
+    fn retain_signature(
+        &self,
+        signature: &SignatureRef,
+    ) -> Result<Arc<dyn Send + Sync>, hirsel_validate::ViewRefusal> {
+        self.headers
+            .validation_signature_lease(signature)
+            .map_err(|cause| hirsel_validate::ViewRefusal::Unreadable {
+                definition: signature.definition,
+                cause,
+            })
     }
 }
 pub(crate) struct ValidationState {

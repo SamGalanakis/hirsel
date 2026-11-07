@@ -74,7 +74,10 @@ The selected value borrows `document`. Keep that document alive while using the
 selection. `unique selected` would explicitly detach a copy if it must outlive
 the document; a shallow `copy` does not erase the relation.
 
+<a id="recipe-object"></a>
+
 <!-- recipe:object -->
+<!-- recipe-api: std@1/json_access/member -->
 ```hirsel
 pub fn main() -> Result[(), ()] uses {} {
   let mut fields: Map[String, json.Value] = map.empty()
@@ -97,7 +100,10 @@ pub fn main() -> Result[(), ()] uses {} {
 Indices are zero based `u64`. Both the element and the list observation retain
 the array's lifetime. Wrong-kind and missing-index checks are distinct.
 
+<a id="recipe-array"></a>
+
 <!-- recipe:array -->
+<!-- recipe-api: std@1/json_access/element std@1/json_access/as_array core@1/list/len -->
 ```hirsel
 pub fn main() -> Result[(), ()] uses {} {
   let document: json.Value = Array([Text("first"), Null()])
@@ -121,7 +127,10 @@ The `json.Value` annotation supplies the expected variant type. Passing bare
 parameter. Encoding handles quotes, backslashes, control characters and Unicode;
 interpolating raw user text into JSON does not do that encoding.
 
+<a id="recipe-json-text"></a>
+
 <!-- recipe:json-text -->
+<!-- recipe-api: std@1/json/Value#Text std@1/json/stringify std@1/json/write_text_into -->
 ```hirsel
 pub fn main() -> Result[(), ()] uses {} {
   let value: json.Value = Text("quote: \" slash: \\ line:\n雪 💖")
@@ -141,7 +150,10 @@ owned read-only bytes. `take data` then transfers those bytes to the checked
 constructor. Borrowed `string.as_bytes` alone does not supply an owned move;
 use an explicit independent copy when the source must remain live.
 
+<a id="recipe-utf8-valid"></a>
+
 <!-- recipe:utf8-valid -->
+<!-- recipe-api: core@1/string/from_bytes core@1/bytes/from_list -->
 ```hirsel
 pub fn main() -> Result[(), ()] uses {} {
   let mut builder: List[u8] = [104, 101, 108, 108, 111]
@@ -160,7 +172,10 @@ pub fn main() -> Result[(), ()] uses {} {
 The error payload is `Bytes`, not a replacement string or a decoder-error
 record. Inspect or retain it by matching `Error(original)`.
 
+<a id="recipe-utf8-invalid"></a>
+
 <!-- recipe:utf8-invalid -->
+<!-- recipe-api: core@1/string/from_bytes -->
 ```hirsel
 pub fn main() -> Result[(), ()] uses {} {
   let mut builder: List[u8] = [104, 101, 108, 108, 111, 255]
@@ -187,7 +202,10 @@ For a timestamp use
 `time.broken_down(value: time.Timestamp, offset: i32) -> Result[time.BrokenDownTime, time.TimeError] uses {}`;
 its error is `OutOfRange`. This function, too, is registered under `time`.
 
+<a id="recipe-time"></a>
+
 <!-- recipe:time -->
+<!-- recipe-api: std@1/time/format std@1/time/BrokenDownTime -->
 ```hirsel
 pub fn main() -> Result[(), ()] uses {} {
   let Some(day) = date.new(2024, 7, 14) else { return Error(()) }

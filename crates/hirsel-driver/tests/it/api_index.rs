@@ -100,6 +100,36 @@ fn published_index_matches_every_core_and_std_export() {
             "export count"
         );
         assert_eq!(actual, exports, "export identities (including variants)");
+        // Each published recipe is discoverable at the API it teaches.
+        for (identity, recipe) in [
+            ("std@1/json_access/member", "object"),
+            ("std@1/json_access/element", "array"),
+            ("std@1/json/stringify", "json-text"),
+            ("core@1/string/from_bytes", "utf8-valid"),
+            ("core@1/string/from_bytes", "utf8-invalid"),
+            ("std@1/time/format", "time"),
+        ] {
+            let entry = entries.iter().find(|e| e.identity == identity).unwrap();
+            let url = format!("std-api-recipes.md#recipe-{recipe}");
+            let link = entry
+                .recipes
+                .iter()
+                .find(|r| r.url == url)
+                .unwrap_or_else(|| panic!("{identity}: missing {recipe}"));
+            assert!(
+                api_index::render(std::slice::from_ref(entry))
+                    .contains(&format!("[{}]({url})", link.title))
+            );
+            let json: serde_json::Value =
+                serde_json::from_str(&api_index::render_json(std::slice::from_ref(entry))).unwrap();
+            assert!(
+                json["entries"][0]["recipes"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|r| r["url"] == url)
+            );
+        }
         let page = api_index::render(&entries);
         let headings: Vec<_> = page
             .lines()

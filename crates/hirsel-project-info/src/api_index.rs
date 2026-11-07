@@ -14,6 +14,7 @@ pub struct Entry {
     pub declaration: String,
     pub description: String,
     pub links: Vec<Link>,
+    pub recipes: Vec<Recipe>,
 }
 
 /// A resolved definition used by a public declaration.
@@ -22,6 +23,40 @@ pub struct Link {
     pub name: String,
     pub identity: String,
     pub url: String,
+}
+
+/// A complete, tested example from the recipe document.
+#[derive(Debug)]
+pub struct Recipe {
+    pub title: String,
+    pub url: String,
+}
+
+fn associate_recipes(entries: &mut [Entry]) {
+    let mut title = "";
+    let mut recipe = "";
+    for line in include_str!("../../../docs/std-api-recipes.md").lines() {
+        if let Some(heading) = line.strip_prefix("## ") {
+            title = heading;
+        } else if let Some(name) = line
+            .strip_prefix("<!-- recipe:")
+            .and_then(|s| s.strip_suffix(" -->"))
+        {
+            recipe = name;
+        } else if let Some(identities) = line
+            .strip_prefix("<!-- recipe-api: ")
+            .and_then(|s| s.strip_suffix(" -->"))
+        {
+            for identity in identities.split_whitespace() {
+                if let Some(entry) = entries.iter_mut().find(|e| e.identity == identity) {
+                    entry.recipes.push(Recipe {
+                        title: title.into(),
+                        url: format!("std-api-recipes.md#recipe-{recipe}"),
+                    });
+                }
+            }
+        }
+    }
 }
 
 /// Injective, HTML-safe encoding of the versioned definition path.
@@ -88,6 +123,9 @@ pub fn entries(manifest: &Path) -> Result<Vec<Entry>, ToolError> {
         out.extend(core_entries(&catalogue("core-library.md")));
     }
     source_entries(&mut package, &std_docs, &mut out)?;
+    if std {
+        associate_recipes(&mut out);
+    }
     out.sort_by(|a, b| {
         module(&a.identity)
             .cmp(&module(&b.identity))
@@ -221,6 +259,7 @@ fn core_entries(core_docs: &str) -> Vec<Entry> {
             identity: s.definition.to_string(),
             description: catalogue_sentence(core_docs, &name),
             links: Vec::new(),
+            recipes: Vec::new(),
             name: name.clone(),
             declaration,
         });
@@ -243,6 +282,7 @@ fn core_entries(core_docs: &str) -> Vec<Entry> {
                             ),
                             description: format!("Variant of {name}."),
                             links: Vec::new(),
+                            recipes: Vec::new(),
                         });
                     }
                 }
@@ -350,6 +390,7 @@ fn source_entries(
                 declaration,
                 description,
                 links,
+                recipes: Vec::new(),
             });
             if let ItemKind::Type {
                 body: ast::TypeBody::Variants(variants),
@@ -386,6 +427,7 @@ fn source_entries(
                         declaration: format!("{text} -> {name}{args}"),
                         description: format!("Variant of {name}."),
                         links: source_links(package, &context, syntax, item, start, end),
+                        recipes: Vec::new(),
                     });
                 }
             }
@@ -620,6 +662,16 @@ pub fn render(entries: &[Entry]) -> String {
                 .join(", ");
             page += "\n";
         }
+        if !entry.recipes.is_empty() {
+            page += "\nRecipes: ";
+            page += &entry
+                .recipes
+                .iter()
+                .map(|r| format!("[{}]({})", r.title, r.url))
+                .collect::<Vec<_>>()
+                .join(", ");
+            page += "\n";
+        }
         page += "\n";
     }
     page.truncate(page.trim_end().len());
@@ -643,6 +695,7 @@ pub fn render_json(entries: &[Entry]) -> String {
     let entries: Vec<_> = entries.iter().map(|e| serde_json::json!({
         "identity": e.identity, "anchor": anchor(&e.identity), "name": e.name,
         "declaration": e.declaration, "description": e.description,
+        "recipes": e.recipes.iter().map(|r| serde_json::json!({"title": r.title, "url": r.url})).collect::<Vec<_>>(),
         "links": e.links.iter().map(|l| serde_json::json!({"name": l.name, "identity": l.identity, "url": l.url})).collect::<Vec<_>>()
     })).collect();
     format!(

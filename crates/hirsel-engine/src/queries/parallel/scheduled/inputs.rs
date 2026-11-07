@@ -80,6 +80,9 @@ impl Inputs {
             generation,
         })
     }
+    pub(super) fn generation(&self) -> u64 {
+        self.generation
+    }
     fn key(&self, rank: u32, body: bool) -> Key {
         LocalSlot {
             rank,

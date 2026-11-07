@@ -3739,7 +3739,11 @@ impl QueryEngine {
             arm_fixes: arm_fixes.clone(),
         });
         required = required
-            .checked_add(indexes.unadmitted_bytes())
+            .checked_add(
+                slots::Slots::capture_bytes(inputs.len())
+                    .ok_or_else(|| refusal("Front slot index overflow"))?,
+            )
+            .and_then(|required| required.checked_add(indexes.unadmitted_bytes()))
             .ok_or_else(|| refusal("input size overflow"))?;
         if std::env::var_os("HIRSEL_OPERATION_OWNER_TRACE").is_some() {
             crate::queries::operation_owner_trace(format_args!(
@@ -3792,6 +3796,7 @@ impl QueryEngine {
             .header_products()
             .map(|headers| headers.configure_source_backing(backing.clone(), retention.clone()));
         let namespace_sources = namespace.sources.clone();
+        let slots = slots::Slots::new(inputs.len(), inputs.generation());
         Ok(Arc::new(FrontBodyQueries {
             demand: Default::default(),
             forwarded: Mutex::new(BTreeMap::new()),
@@ -3821,7 +3826,7 @@ impl QueryEngine {
             input_records,
             store,
             terminal_cache,
-            slots: Mutex::default(),
+            slots: Mutex::new(slots),
             input_slots: Mutex::new((BTreeMap::new(), None)),
             body_cache_limit: self.hold_bytes,
             carry: Mutex::new(None),

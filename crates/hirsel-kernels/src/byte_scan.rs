@@ -180,6 +180,12 @@ pub fn find_pair(source: &[u8], firsts: &[u8], seconds: &[u8], start: u64) -> u6
         return source.len() as u64;
     };
     #[cfg(target_arch = "x86_64")]
+    if rest.len() >= 33 && std::is_x86_feature_detected!("avx2") {
+        // SAFETY: AVX2 was detected. The helper bounds both overlapping loads.
+        return unsafe { pair_avx2(rest, firsts, seconds) }.map_or(source.len(), |at| start + at)
+            as u64;
+    }
+    #[cfg(target_arch = "x86_64")]
     if std::is_x86_feature_detected!("ssse3") {
         // SAFETY: SSSE3 was detected. The helper bounds both overlapping loads.
         return unsafe { pair_ssse3(rest, firsts, seconds) }.map_or(source.len(), |at| start + at)
@@ -275,6 +281,73 @@ unsafe fn pair_members(
     _mm_andnot_si128(
         _mm_cmpeq_epi8(_mm_and_si128(members, bit), zero),
         _mm_set1_epi8(-1),
+    )
+}
+
+// memchr 2.8.3 arch/x86_64/avx2/packedpair.rs:149-176 and
+// arch/generic/packedpair.rs:222-276: use two overlapping full-width loads,
+// report the first set lane, and keep the narrower scanner for the tail.
+// Exact nibble membership retains the SSSE3 contract for arbitrary byte sets.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn pair_avx2(source: &[u8], firsts: &[u8; 32], seconds: &[u8; 32]) -> Option<usize> {
+    use std::arch::x86_64::*;
+    let bit_values: [u8; 16] = [1, 2, 4, 8, 16, 32, 64, 128, 1, 2, 4, 8, 16, 32, 64, 128];
+    // SAFETY: each table load reads sixteen initialized bytes. Broadcasting
+    // repeats the table in both independent AVX2 shuffle lanes.
+    let (fl, fh, sl, sh, bits) = unsafe {
+        (
+            _mm256_broadcastsi128_si256(_mm_loadu_si128(firsts.as_ptr().cast())),
+            _mm256_broadcastsi128_si256(_mm_loadu_si128(firsts.as_ptr().add(16).cast())),
+            _mm256_broadcastsi128_si256(_mm_loadu_si128(seconds.as_ptr().cast())),
+            _mm256_broadcastsi128_si256(_mm_loadu_si128(seconds.as_ptr().add(16).cast())),
+            _mm256_broadcastsi128_si256(_mm_loadu_si128(bit_values.as_ptr().cast())),
+        )
+    };
+    let mut at = 0;
+    while source.len() - at >= 33 {
+        // SAFETY: thirty-three remaining bytes bound both thirty-two-byte loads.
+        let (first, second) = unsafe {
+            (
+                _mm256_loadu_si256(source.as_ptr().add(at).cast()),
+                _mm256_loadu_si256(source.as_ptr().add(at + 1).cast()),
+            )
+        };
+        let a = unsafe { pair_members_avx2(first, fl, fh, bits) };
+        let b = unsafe { pair_members_avx2(second, sl, sh, bits) };
+        let mask = _mm256_movemask_epi8(_mm256_and_si256(a, b)) as u32;
+        if mask != 0 {
+            return Some(at + mask.trailing_zeros() as usize);
+        }
+        at += 32;
+    }
+    // SAFETY: AVX2 detection also admits SSSE3; this helper checks its own tail.
+    unsafe { pair_ssse3(&source[at..], firsts, seconds) }.map(|offset| at + offset)
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn pair_members_avx2(
+    block: std::arch::x86_64::__m256i,
+    low: std::arch::x86_64::__m256i,
+    high: std::arch::x86_64::__m256i,
+    bits: std::arch::x86_64::__m256i,
+) -> std::arch::x86_64::__m256i {
+    use std::arch::x86_64::*;
+    let zero = _mm256_setzero_si256();
+    let indices = _mm256_and_si256(block, _mm256_set1_epi8(15));
+    let halves = _mm256_cmpgt_epi8(zero, block);
+    let members = _mm256_or_si256(
+        _mm256_and_si256(halves, _mm256_shuffle_epi8(high, indices)),
+        _mm256_andnot_si256(halves, _mm256_shuffle_epi8(low, indices)),
+    );
+    let bit = _mm256_shuffle_epi8(
+        bits,
+        _mm256_and_si256(_mm256_srli_epi16::<4>(block), _mm256_set1_epi8(7)),
+    );
+    _mm256_andnot_si256(
+        _mm256_cmpeq_epi8(_mm256_and_si256(members, bit), zero),
+        _mm256_set1_epi8(-1),
     )
 }
 
@@ -375,6 +448,36 @@ mod tests {
                                 pair_word(&source[start..], &first_mask, &second_mask),
                                 (expected < length).then(|| expected - start)
                             );
+                            #[cfg(target_arch = "x86_64")]
+                            {
+                                let wanted = (expected < length).then(|| expected - start);
+                                if std::is_x86_feature_detected!("ssse3") {
+                                    // SAFETY: the feature is detected and all extents are live.
+                                    assert_eq!(
+                                        unsafe {
+                                            super::pair_ssse3(
+                                                &source[start..],
+                                                &first_mask,
+                                                &second_mask,
+                                            )
+                                        },
+                                        wanted
+                                    );
+                                }
+                                if std::is_x86_feature_detected!("avx2") {
+                                    // SAFETY: the feature is detected and all extents are live.
+                                    assert_eq!(
+                                        unsafe {
+                                            super::pair_avx2(
+                                                &source[start..],
+                                                &first_mask,
+                                                &second_mask,
+                                            )
+                                        },
+                                        wanted
+                                    );
+                                }
+                            }
                         }
                     }
                     assert_eq!(

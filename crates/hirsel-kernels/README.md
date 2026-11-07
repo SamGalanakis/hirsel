@@ -41,7 +41,7 @@ architectures use eight-byte SWAR comparisons. Larger sets use exact nibble memb
 the scalar membership table elsewhere. Neither path reads beyond the supplied borrowed extent.
 
 `byte_scan::find_pair` searches adjacent positions using two prepared 32-byte membership masks.
-SSSE3 uses exact nibble membership and overlapping sixteen-byte loads; the
+AVX2 and SSSE3 use exact nibble membership and overlapping thirty-two- or sixteen-byte loads; the
 portable path loads whole eight-byte words. Both guard the second load and
 retain every boundary and tail candidate. An independent scalar window oracle
 covers offsets, all byte pairs, overlapping candidates and lengths through 65.

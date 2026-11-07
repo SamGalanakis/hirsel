@@ -262,11 +262,22 @@ impl<T: Clone + PartialEq> IndexMap<T> {
     }
     /// Replace only present incoming rows; absent rows retain their old values.
     pub fn overwrite(&mut self, other: &Self) -> bool {
-        let changed = self.rows.union(&other.rows, |a, b| {
-            if b.is_some() {
-                *a = b.clone();
+        assert_eq!(self.rows.len(), other.rows.len());
+        if other.active.is_empty() {
+            return false;
+        }
+        if self.active.is_empty() {
+            *self = other.clone();
+            return true;
+        }
+        let mut changed = false;
+        for index in other.active.iter() {
+            let incoming = &other.rows[index];
+            if &self.rows[index] != incoming {
+                self.rows.set(index, incoming.clone());
+                changed = true;
             }
-        });
+        }
         self.active.extend(&other.active);
         changed
     }
@@ -362,6 +373,27 @@ mod tests {
         );
         changed.retain(|i, _| i % 2 == 0);
         assert!(changed.iter().all(|(i, _)| i % 2 == 0));
+        for domain in [1, 17, 257, 4097] {
+            let mut a = IndexMap::new(domain);
+            let mut b = IndexMap::new(domain);
+            b.insert(0, 11);
+            b.remove(0);
+            let mut oracle = std::collections::BTreeMap::new();
+            assert!(!a.overwrite(&b), "cleared domain {domain}");
+            assert_eq!(a.iter().map(|(i, v)| (i, *v)).collect::<Vec<_>>(), vec![]);
+            a.insert(domain - 1, 37);
+            b.insert(domain - 1, 37);
+            oracle.insert(domain - 1, 37);
+            assert!(!a.overwrite(&b), "unchanged domain {domain}");
+            b.insert(0, 23);
+            let before = oracle.clone();
+            oracle.insert(0, 23);
+            assert_eq!(a.overwrite(&b), before != oracle);
+            assert_eq!(
+                a.iter().map(|(i, v)| (i, *v)).collect::<Vec<_>>(),
+                oracle.into_iter().collect::<Vec<_>>()
+            );
+        }
         for left in 0..16usize {
             for right in 0..16usize {
                 let mut a = IndexMap::new(4);

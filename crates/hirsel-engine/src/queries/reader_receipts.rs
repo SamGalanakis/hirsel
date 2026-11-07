@@ -511,12 +511,9 @@ mod tests {
         let credit = Arc::new(Mutex::new(1 << 20));
         let mut pool = hirsel_query_products::reads::ReadPool::default();
         let pooled = pool
-            .intern_tracked(
-                &reads,
-                &mut allowance,
-                &mut credit.lock().unwrap(),
-                credit.clone(),
-            )
+            .prepare_tracked(&reads)
+            .unwrap()
+            .intern(&mut allowance, &mut credit.lock().unwrap(), credit.clone())
             .unwrap();
         let store = hirsel_engine_store::MemStore::default();
         let receipt = ReaderReceipt::capture(&store, &pooled, 1 << 20).unwrap();

@@ -68,6 +68,26 @@ pub struct ReadPool {
     rows: BTreeSet<RowRef>,
     charged_bytes: u64,
 }
+/// An exclusive pool borrow keeps the computed admission current until insertion.
+pub struct TrackedAdmission<'a> {
+    pool: &'a mut ReadPool,
+    reads: &'a Reads,
+    bytes: (u64, u64, u64, u64),
+}
+impl TrackedAdmission<'_> {
+    pub fn required_bytes(&self) -> u64 {
+        self.bytes.1
+    }
+    pub fn intern(
+        self,
+        allowance: &mut hirsel_engine_admission::MemoryReservation,
+        remaining: &mut u64,
+        credit: Arc<std::sync::Mutex<u64>>,
+    ) -> Option<Reads> {
+        self.pool
+            .intern_admitted(self.reads, self.bytes, allowance, remaining, Some(credit))
+    }
+}
 impl ReadPool {
     /// The caller owns this dictionary's retention partition. Arrays retain
     /// their refundable leases independently; unused rows can now return the
@@ -149,14 +169,20 @@ impl ReadPool {
             .1
             .checked_add(hirsel_engine_admission::retained_arc_bytes(reads))
     }
-    pub fn intern_tracked(
-        &mut self,
-        reads: &Reads,
-        allowance: &mut hirsel_engine_admission::MemoryReservation,
-        remaining: &mut u64,
-        credit: Arc<std::sync::Mutex<u64>>,
-    ) -> Option<Reads> {
-        self.intern_inner(reads, allowance, remaining, Some(credit))
+    pub fn prepare_tracked<'a>(&'a mut self, reads: &'a Reads) -> Option<TrackedAdmission<'a>> {
+        let (loaned, charge, row_bytes, shared_bytes) = self.admission(reads)?;
+        let wrapper = hirsel_engine_admission::retained_arc_bytes(reads);
+        let bytes = (
+            loaned.checked_add(wrapper)?,
+            charge.checked_add(wrapper)?,
+            row_bytes,
+            shared_bytes.checked_add(wrapper)?,
+        );
+        Some(TrackedAdmission {
+            pool: self,
+            reads,
+            bytes,
+        })
     }
     pub fn intern(
         &mut self,
@@ -164,27 +190,21 @@ impl ReadPool {
         allowance: &mut hirsel_engine_admission::MemoryReservation,
         remaining: &mut u64,
     ) -> Option<Reads> {
-        self.intern_inner(reads, allowance, remaining, None)
+        if reads.is_empty() {
+            return Some(Reads::empty());
+        }
+        let bytes = self.admission(reads)?;
+        self.intern_admitted(reads, bytes, allowance, remaining, None)
     }
-    fn intern_inner(
+    fn intern_admitted(
         &mut self,
         reads: &Reads,
+        bytes: (u64, u64, u64, u64),
         allowance: &mut hirsel_engine_admission::MemoryReservation,
         remaining: &mut u64,
         credit: Option<Arc<std::sync::Mutex<u64>>>,
     ) -> Option<Reads> {
-        if reads.is_empty() && credit.is_none() {
-            return Some(Reads::empty());
-        }
-        let (loaned, charge, row_bytes, shared_bytes) = self.admission(reads)?;
-        let wrapper = if credit.is_some() {
-            hirsel_engine_admission::retained_arc_bytes(reads)
-        } else {
-            0
-        };
-        let loaned = loaned.checked_add(wrapper)?;
-        let charge = charge.checked_add(wrapper)?;
-        let shared_bytes = shared_bytes.checked_add(wrapper)?;
+        let (loaned, charge, row_bytes, shared_bytes) = bytes;
         let after = remaining.checked_sub(charge)?;
         if allowance.bytes() < loaned {
             return None;
@@ -520,26 +540,28 @@ mod tests {
         let remaining = Arc::new(std::sync::Mutex::new(required - 1));
         let before = allowance.bytes();
         assert!(
-            pool.intern_tracked(
-                &reads,
-                &mut allowance,
-                &mut remaining.lock().unwrap(),
-                remaining.clone()
-            )
-            .is_none()
+            pool.prepare_tracked(&reads)
+                .unwrap()
+                .intern(
+                    &mut allowance,
+                    &mut remaining.lock().unwrap(),
+                    remaining.clone()
+                )
+                .is_none()
         );
         assert_eq!(*remaining.lock().unwrap(), required - 1);
         assert_eq!(allowance.bytes(), before);
         assert!(pool.rows.is_empty());
         *remaining.lock().unwrap() = before;
         let receipt = Arc::new(
-            pool.intern_tracked(
-                &reads,
-                &mut allowance,
-                &mut remaining.lock().unwrap(),
-                remaining.clone(),
-            )
-            .unwrap(),
+            pool.prepare_tracked(&reads)
+                .unwrap()
+                .intern(
+                    &mut allowance,
+                    &mut remaining.lock().unwrap(),
+                    remaining.clone(),
+                )
+                .unwrap(),
         );
         Reads::bind_tracked_owner(&receipt);
         assert!(Reads::tracked_by(&receipt, &remaining));

@@ -800,15 +800,15 @@ impl FrontBodyQueries {
                 return None;
             }
             let mut pool = pool.lock().unwrap_or_else(|e| e.into_inner());
-            let charge = pool.required_tracked_bytes(reads)?;
+            let admission = pool.prepare_tracked(reads)?;
+            let charge = admission.required_bytes();
             let mut remaining = self.retention.lock().unwrap_or_else(|e| e.into_inner());
             if *remaining < charge {
                 continue;
             }
             let available = self._allowance.allowance.available_bytes();
             let mut allowance = self._allowance.allowance.take(available)?;
-            let retained = Arc::new(pool.intern_tracked(
-                reads,
+            let retained = Arc::new(admission.intern(
                 &mut allowance,
                 &mut remaining,
                 self.retention.clone(),

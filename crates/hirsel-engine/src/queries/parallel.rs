@@ -61,7 +61,7 @@ pub(crate) struct Task {
     /// as the scalar Check of generated text inherits its generation.
     pub(crate) registration: Option<Arc<AcceptedFrontRegistration>>,
     pub(crate) resolution: Option<Arc<Entry<Resolution>>>,
-    pub(crate) checked: Option<Arc<Entry<TypedBody>>>,
+    pub(crate) checked: Option<Arc<Entry<Arc<TypedBody>>>>,
     pub(crate) text: ContentHash,
 }
 pub(crate) struct Stage<T> {
@@ -125,11 +125,12 @@ pub(crate) struct Completed {
     pub(crate) definition: DefPath,
     pub(crate) text: ContentHash,
     pub(crate) resolution: Option<Product<Resolution>>,
-    pub(crate) checked: Option<Product<TypedBody>>,
+    pub(crate) checked: Option<Product<Arc<TypedBody>>>,
     pub(crate) modes: Option<Product<AnalyzedBody>>,
     pub(crate) result: Result<Arc<QueryOutput<AnalyzedBody>>, QueryError>,
     pub(crate) phase: QueryKind,
     signature_reads: Arc<Reads>,
+    proofs: header_products::ConsumerProofs,
 }
 
 impl Completed {
@@ -161,6 +162,10 @@ impl Completed {
         stage(&self.resolution)
             .or_else(|| stage(&self.checked))
             .or_else(|| stage(&self.modes))
+            .or_else(|| match &self.result {
+                Err(QueryError::Operational(failure)) => Some(failure),
+                _ => None,
+            })
     }
     /// Modes carries the final successful output. `result` otherwise records
     /// the earlier phase that stopped the task before modes was produced.
@@ -265,8 +270,13 @@ impl Worker<'_> {
             result: Err(QueryError::NotImplemented),
             phase: QueryKind::Resolve,
             signature_reads: task.signature_reads.clone(),
+            proofs: Default::default(),
         };
         let owner = DefId::intern(&task.definition);
+        if let Err(error) = done.proofs.retain(self.snapshot.header_products(), owner) {
+            done.result = Err(error);
+            return done;
+        }
         // A checked memo already includes the complete resolution reads. A
         // partial hit needs no resolver work, but remains the same task path.
         let mut resolution_provider_reads = None;
@@ -284,7 +294,7 @@ impl Worker<'_> {
                     unavailable: None,
                 };
                 let mut products = PhaseProducts::default();
-                let mut provider = WorkerRecorder::new(self, owner, &mut stage);
+                let mut provider = WorkerRecorder::new(self, owner, &mut stage, &mut done.proofs);
                 let result = match self.resolver {
                     Some(adapter) => adapter.resolve(
                         self.types,
@@ -372,7 +382,7 @@ impl Worker<'_> {
                 unavailable: None,
             };
             let initial_signatures = stage.detail.signatures.len();
-            let mut provider = WorkerRecorder::new(self, owner, &mut stage);
+            let mut provider = WorkerRecorder::new(self, owner, &mut stage, &mut done.proofs);
             let mut result = self.structural_check(
                 task.syntax,
                 resolution.value.clone(),
@@ -403,7 +413,7 @@ impl Worker<'_> {
                 prefix.extend(signatures);
                 prefix
             });
-            stage.complete(result, PhaseProducts::default());
+            stage.complete(result.map(shared_output), PhaseProducts::default());
             if let Some(dependencies) = exact {
                 stage.detail.signatures = dependencies.clone();
                 if let Ok(output) = &mut stage.result {
@@ -450,12 +460,12 @@ impl Worker<'_> {
             unavailable: None,
         };
         let mut products = PhaseProducts::default();
-        let mut provider = WorkerRecorder::new(self, owner, &mut stage);
+        let mut provider = WorkerRecorder::new(self, owner, &mut stage, &mut done.proofs);
         let result = match self.modes {
             Some(adapter) => adapter.check_modes(
                 self.types,
                 self.memo,
-                Arc::new(body.value.clone()),
+                body.value.clone(),
                 &signature.value,
                 &mut products,
                 &mut provider,
@@ -480,9 +490,15 @@ struct WorkerRecorder<'a> {
     snapshot: &'a SignatureSnapshot,
     detail: &'a mut DependencyReads,
     unavailable: &'a mut Option<QueryKind>,
+    proofs: &'a mut header_products::ConsumerProofs,
 }
 impl<'a> WorkerRecorder<'a> {
-    fn new<T>(worker: &'a Worker<'_>, owner: DefId, stage: &'a mut Stage<T>) -> Self {
+    fn new<T>(
+        worker: &'a Worker<'_>,
+        owner: DefId,
+        stage: &'a mut Stage<T>,
+        proofs: &'a mut header_products::ConsumerProofs,
+    ) -> Self {
         Self {
             provider: FrozenProvider::for_definition(
                 worker.snapshot,
@@ -493,12 +509,17 @@ impl<'a> WorkerRecorder<'a> {
             snapshot: worker.snapshot,
             detail: &mut stage.detail,
             unavailable: &mut stage.unavailable,
+            proofs,
         }
     }
 }
 impl SignatureProvider for WorkerRecorder<'_> {
     fn signature(&mut self, definition: DefId) -> Result<SignatureRef, QueryError> {
-        let result = self.provider.signature(definition);
+        let result = self.provider.signature(definition).and_then(|signature| {
+            self.proofs
+                .retain(self.snapshot.header_products(), definition)?;
+            Ok(signature)
+        });
         if matches!(result, Err(QueryError::NotImplemented))
             && self.snapshot.signature(definition).is_some()
         {
@@ -529,7 +550,18 @@ impl SignatureProvider for WorkerRecorder<'_> {
         definition: &DefPath,
         claim: hirsel_types::UniqueClaim,
     ) -> Result<Option<hirsel_types::UniqueFailure>, QueryError> {
-        let failure = self.provider.cite_unique_failure(definition, claim)?;
+        let result = self
+            .provider
+            .cite_unique_failure(definition, claim)
+            .and_then(|failure| {
+                self.proofs
+                    .retain(self.snapshot.header_products(), DefId::intern(definition))?;
+                Ok(failure)
+            });
+        if let Err(QueryError::Operational(error)) = &result {
+            self.detail.operational_failure = Some(error.clone());
+        }
+        let failure = result?;
         self.detail
             .citations
             .push((definition.clone(), failure.as_ref().map(|f| f.span)));
@@ -867,6 +899,94 @@ impl QueryEngine {
 mod frozen_task_tests {
     use super::*;
     use hirsel_engine_store::ResultStore;
+
+    #[test]
+    fn modes_borrows_the_completed_check_product_on_acceptance_and_rejection() {
+        struct Modes(std::sync::atomic::AtomicUsize, bool);
+        impl ModesPhase for Modes {
+            fn check_modes(
+                &self,
+                _: &hirsel_types::TypeInterner,
+                _: &hirsel_types::TypeMemo,
+                body: Arc<TypedBody>,
+                _: &Signature,
+                _: &mut PhaseProducts,
+                _: &mut dyn SignatureProvider,
+            ) -> Result<QueryOutput<AnalyzedBody>, QueryError> {
+                self.0.store(
+                    Arc::as_ptr(&body) as usize,
+                    std::sync::atomic::Ordering::Relaxed,
+                );
+                if self.1 {
+                    return Err(QueryError::Diagnostics(vec![Diagnostic::error(
+                        const { hirsel_diag::RuleId::of("OWN-1") },
+                        body.syntax.item.name_span,
+                        "independent rejection",
+                    )]));
+                }
+                Ok(output(AnalyzedBody {
+                    typed: body,
+                    ownership: Default::default(),
+                    results: vec![],
+                    call_allocations: vec![],
+                }))
+            }
+        }
+        hirsel_intern::jobs::with_compiler_stack(|| {
+            let mut shares = Vec::new();
+            for reject in [false, true] {
+                let (mut engine, path) = fixture();
+                let id = DefId::intern(&path);
+                let checker = CountStructural(std::sync::atomic::AtomicUsize::new(0), id);
+                let modes = Modes(std::sync::atomic::AtomicUsize::new(0), reject);
+                let snapshot = engine.signature_inputs();
+                let declarations = engine.frozen_declarations();
+                let citations = engine.citation_source();
+                let worker = Worker {
+                    owners: engine.source_records(),
+                    types: &engine.types,
+                    memo: &engine.memo,
+                    snapshot: &snapshot,
+                    declarations: &declarations,
+                    citations: &citations,
+                    sources: &engine.sources,
+                    items: &engine.items,
+                    resolver: engine.adapters.resolver.as_deref(),
+                    checker: Some(&checker),
+                    modes: Some(&modes),
+                };
+                let done = worker.run(Task {
+                    index: 0,
+                    definition: path.clone(),
+                    syntax: engine.items[&path][0].clone(),
+                    signature: engine.signatures[&id].result(),
+                    signature_reads: engine.signatures[&id].memo.reads.clone(),
+                    registration: None,
+                    resolution: None,
+                    checked: None,
+                    text: ContentHash::default(),
+                });
+                let checked = done.checked.as_ref().unwrap().result().unwrap();
+                let body: &TypedBody = std::borrow::Borrow::borrow(&checked.value);
+                assert_eq!(body.unit, engine.types.intern(hirsel_types::Type::unit()));
+                assert_eq!(done.result().is_ok(), !reject);
+                if reject {
+                    assert!(
+                        matches!(done.result(), Err(QueryError::Diagnostics(diagnostics)) if diagnostics[0].rule.as_str() == "OWN-1" && diagnostics[0].message == "independent rejection")
+                    );
+                }
+                shares.push(
+                    modes.0.load(std::sync::atomic::Ordering::Relaxed)
+                        == std::ptr::from_ref(body) as usize,
+                );
+            }
+            assert_eq!(
+                shares,
+                [true, true],
+                "Modes borrows the completed Check allocation"
+            );
+        });
+    }
 
     struct RejectAfterReads;
     impl CheckerPhase for RejectAfterReads {

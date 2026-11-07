@@ -780,6 +780,91 @@ fn front_compact_terminal_reuses_check_after_eviction() {
 }
 
 #[test]
+fn front_keeps_module_proofs_until_their_modes_consumer_finishes() {
+    struct Modes {
+        inner: Arc<dyn ModesPhase>,
+        front: Arc<Mutex<std::sync::Weak<FrontBodyQueries>>>,
+        pinned: Arc<std::sync::atomic::AtomicBool>,
+    }
+    impl ModesPhase for Modes {
+        fn infers_private_unique(&self) -> bool {
+            true
+        }
+        fn infer_unique(
+            &self,
+            _: &TypeInterner,
+            _: &TypeMemo,
+            bodies: &[(Arc<hirsel_query_products::TypedBody>, SignatureRef)],
+            _: &mut dyn SignatureProvider,
+        ) -> Result<Vec<(DefId, UniqueInference)>, QueryError> {
+            Ok(bodies
+                .iter()
+                .map(|(_, signature)| {
+                    (
+                        signature.definition,
+                        UniqueInference {
+                            summary: Default::default(),
+                            failures: vec![],
+                        },
+                    )
+                })
+                .collect())
+        }
+        fn check_modes(
+            &self,
+            types: &TypeInterner,
+            memo: &TypeMemo,
+            body: Arc<hirsel_query_products::TypedBody>,
+            signature: &Signature,
+            products: &mut PhaseProducts,
+            provider: &mut dyn SignatureProvider,
+        ) -> Result<QueryOutput<hirsel_query_products::AnalyzedBody>, QueryError> {
+            let front = self.front.lock().unwrap().upgrade().unwrap();
+            let definition = &body.syntax.item.definition;
+            assert!(front.module_proof_resident(definition));
+            let factory = front.factory();
+            while factory.evict_cache(0) {}
+            self.pinned.store(
+                front.module_proof_resident(definition),
+                std::sync::atomic::Ordering::Relaxed,
+            );
+            self.inner
+                .check_modes(types, memo, body, signature, products, provider)
+        }
+    }
+    with_compiler_stack(|| {
+        let mut pinned_results = Vec::new();
+        for reject in [None, Some("modes")] {
+            let (engine, _) = make_engine(reject, false);
+            let mut engine = engine.with_result_store(Arc::new(MemStore::default()));
+            let selected = Arc::new(Mutex::new(std::sync::Weak::new()));
+            let pinned = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            engine.adapters.modes = Some(Arc::new(Modes {
+                inner: engine.adapters.modes.take().unwrap(),
+                front: selected.clone(),
+                pinned: pinned.clone(),
+            }));
+            parse(&mut engine, "fn a () { 1 }\n");
+            let mut front = admitted_front(&mut engine, &[path("a")], 1);
+            *selected.lock().unwrap() = Arc::downgrade(&front.queries);
+            let output = front.request(&[path("a")]);
+            assert_eq!(output[0].outcome.result.is_ok(), reject.is_none());
+            pinned_results.push(pinned.load(std::sync::atomic::Ordering::Relaxed));
+            let factory = front.queries.factory();
+            while factory.evict_cache(0) {}
+            assert!(
+                !front.queries.module_proof_resident(&path("a")),
+                "the proof becomes evictable when its consumer ends"
+            );
+        }
+        assert_eq!(
+            pinned_results,
+            [true, true],
+            "the active Modes consumer pins its module proof on acceptance and rejection"
+        );
+    });
+}
+#[test]
 fn front_body_handoff_reuses_admitted_bodies_until_consumed_or_pressure() {
     with_compiler_stack(|| {
         for pressure in [false, true] {

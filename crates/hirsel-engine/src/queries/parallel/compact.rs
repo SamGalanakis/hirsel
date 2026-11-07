@@ -87,6 +87,7 @@ pub(crate) struct CompactCompleted {
     store_write: Option<Result<(), QueryError>>,
     mode_archive: Option<crate::semantic::ModeArchive>,
     outcome: PublishedResult,
+    _proofs: header_products::ConsumerProofs,
 }
 impl CompactCompleted {
     /// The package dead-arm lint's facts, for a producer that retains them.
@@ -326,6 +327,7 @@ impl CompactCompleted {
         Self {
             index: done.index,
             text: done.text,
+            _proofs: done.proofs,
             resolution: done.resolution,
             resolution_reads,
             checked,

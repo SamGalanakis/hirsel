@@ -9,6 +9,7 @@ use std::sync::{
 mod private;
 mod sources;
 pub(crate) use private::AdoptedPrivate;
+pub(in crate::queries) use private::ConsumerProofs;
 pub use private::ModuleProof;
 use sources::HeaderSources;
 pub(super) use sources::source_refusal;

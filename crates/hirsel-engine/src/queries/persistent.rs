@@ -761,7 +761,7 @@ pub(super) fn capture_mode(
     types: Arc<hirsel_types::TypeInterner>,
     owner: impl Fn(Anchor) -> Option<(DefPath, u32)>,
     result: &Result<Arc<QueryOutput<AnalyzedBody>>, QueryError>,
-    checked: Option<(&QueryOutput<TypedBody>, &DependencyReads)>,
+    checked: Option<(&QueryOutput<Arc<TypedBody>>, &DependencyReads)>,
     phases: Vec<(Diagnostic, String)>,
     detail: DependencyReads,
 ) -> Option<Vec<u8>> {
@@ -1907,7 +1907,7 @@ impl QueryEngine {
                 path,
                 QueryKind::Check,
                 variant.clone(),
-                Ok(checked),
+                Ok(shared_output(checked)),
                 c.detail,
             );
             self.checked.insert(DefId::intern(path), entry);
@@ -4684,7 +4684,7 @@ mod malformed_tests {
             let entry = engine.record(
                 MemoKey::new(QueryKind::Check, id),
                 text,
-                Err::<Arc<QueryOutput<TypedBody>>, _>(QueryError::NotImplemented),
+                Err::<Arc<QueryOutput<Arc<TypedBody>>>, _>(QueryError::NotImplemented),
                 Default::default(),
                 &observed,
             );

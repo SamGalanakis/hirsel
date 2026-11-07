@@ -867,6 +867,11 @@ metadata. Programs without table calls build no schema for this check.
 `FrontBodyQueries` runs source requests on the admitted executor at every worker
 count. Workers share immutable declarations, type tables, phase handles and the
 signature snapshot; each owns its dependency collector and phase products.
+Completed Check products share their immutable typed body through Modes, private
+inference and Lower. The public owned Check API copies at its caller boundary.
+Source sibling views read captured file owners directly, admit their array and
+backing on demand, and retain source admission until their final reader drops.
+An operational source admission refusal leaves the view retryable.
 Repeated paths share one producer. Compact publications retain summaries,
 complete reads, diagnostics and stopping phases. Body materialization uses a
 separate request. Staged source registration settles before the final immutable
@@ -998,7 +1003,10 @@ groups. Header slots share the Front allowance and release unpinned signature
 payloads and metadata under pressure. Explicit archives keep their own leases.
 Settled module proofs are entries of the same cache: holding a `ModuleProof`
 pins one, and pressure evicts unpinned proofs, which recompute through the
-ordinary producer on their next demand. A header row and a module proof hold one
+ordinary producer on their next demand. A Front worker pins the resident proofs
+it consumes through Check, Modes and publication. The group's buffer capacity
+uses the same header partition; creating a group never infers an inactive module.
+A header row and a module proof hold one
 kind of charge: engine-retained (uncharged, never evicted), standalone, or lent
 by a live Front partition. When the partition ends, every charge it lent returns
 exactly once and its entries stay as uncharged engine rows. A resource refusal

@@ -31,6 +31,60 @@ impl ModuleProduct {
             .map(|index| &self.identities[index].1)
     }
 }
+/// One synchronous Front consumer group. Only proofs actually read by this
+/// worker are pinned; buffer capacity is admitted in the same header partition.
+#[derive(Default)]
+pub(in crate::queries) struct ConsumerProofs {
+    products: Vec<Arc<ModuleProduct>>,
+    _charge: Option<Charge>,
+}
+impl ConsumerProofs {
+    pub(in crate::queries) fn retain(
+        &mut self,
+        headers: Option<&Arc<HeaderProducts>>,
+        id: DefId,
+    ) -> Result<(), QueryError> {
+        let Some(headers) = headers else {
+            return Ok(());
+        };
+        let Some((_, slot)) = headers
+            .private
+            .as_ref()
+            .and_then(|private| private.module(id))
+        else {
+            return Ok(());
+        };
+        let Some(Ok(product)) = slot.current() else {
+            return Ok(());
+        };
+        if self
+            .products
+            .iter()
+            .any(|current| Arc::ptr_eq(current, &product))
+        {
+            return Ok(());
+        }
+        if self.products.len() == self.products.capacity() {
+            let capacity = self
+                .products
+                .capacity()
+                .checked_mul(2)
+                .map(|capacity| capacity.max(4))
+                .ok_or_else(private_refusal)?;
+            let bytes = capacity
+                .checked_mul(size_of::<Arc<ModuleProduct>>())
+                .and_then(|bytes| u64::try_from(bytes).ok())
+                .ok_or_else(private_refusal)?;
+            let charge = headers.admit(bytes)?;
+            let mut products = Vec::with_capacity(capacity);
+            products.append(&mut self.products);
+            self.products = products;
+            self._charge = Some(charge);
+        }
+        self.products.push(product);
+        Ok(())
+    }
+}
 /// One module's proof. A settled proof is an evictable entry of the admitted
 /// front cache: it is pinned only while a consumer holds its Arc, and an
 /// evicted proof recomputes through the ordinary producer on its next demand.

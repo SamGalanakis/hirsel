@@ -191,10 +191,7 @@ impl Inference {
                     .iter()
                     .any(|d| d.severity == hirsel_diag::Severity::Error)
             {
-                bodies.push((
-                    Arc::new(checked.value.clone()),
-                    input.signature.value.clone(),
-                ));
+                bodies.push((checked.value.clone(), input.signature.value.clone()));
             }
         }
         let owner = self

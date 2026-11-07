@@ -380,7 +380,7 @@ impl QueryEngine {
         definition: &DefPath,
         snapshot: Arc<ItemSyntax>,
         body: ExprId,
-    ) -> Result<Arc<QueryOutput<TypedBody>>, QueryError> {
+    ) -> Result<Arc<QueryOutput<Arc<TypedBody>>>, QueryError> {
         if instance_bodied(&snapshot) {
             return self.declaration_check_query(definition, snapshot);
         }
@@ -451,7 +451,13 @@ impl QueryEngine {
         reads.observed.merged.extend(executed);
         let (_, acceptance, selections) = self.end_evaluation_validation();
         let key = MemoKey::new(QueryKind::Check, id);
-        let mut entry = self.finish(key, text, reads.reads, result, reads.observed);
+        let mut entry = self.finish(
+            key,
+            text,
+            reads.reads,
+            result.map(shared_output),
+            reads.observed,
+        );
         entry.depth = Some(depth.clone());
         entry.acceptance = acceptance;
         entry.selections = selections;
@@ -664,7 +670,7 @@ impl QueryEngine {
             MemoKey::new(QueryKind::Check, DefId::intern(definition)),
             text,
             reads.reads,
-            result,
+            result.map(shared_output),
             reads.observed,
         );
         entry.depth = Some(depth);
@@ -904,7 +910,7 @@ impl QueryEngine {
         &mut self,
         definition: &DefPath,
         snapshot: Arc<ItemSyntax>,
-    ) -> Result<Arc<QueryOutput<TypedBody>>, QueryError> {
+    ) -> Result<Arc<QueryOutput<Arc<TypedBody>>>, QueryError> {
         let signature = self.signature_output(definition)?;
         let _timing = timings::phase(Phase::Check);
         let id = DefId::intern(definition);
@@ -956,7 +962,13 @@ impl QueryEngine {
                 })
             });
         let key = MemoKey::new(QueryKind::Check, id);
-        let entry = Arc::new(self.finish(key, text, reads.reads, result, reads.observed));
+        let entry = Arc::new(self.finish(
+            key,
+            text,
+            reads.reads,
+            result.map(shared_output),
+            reads.observed,
+        ));
         keep(
             &mut self.checked,
             &mut self.graph,

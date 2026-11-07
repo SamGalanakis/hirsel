@@ -300,7 +300,7 @@ pub struct QueryEngine {
     header_refusal: std::sync::Mutex<Option<QueryError>>,
     resolutions: Table<Resolution>,
     specialization_dependencies: BTreeMap<DefId, parallel::SpecializationDependencies>,
-    checked: Table<TypedBody>,
+    checked: Table<Arc<TypedBody>>,
     modes: Table<AnalyzedBody>,
     lowered: Table<hirsel_tir::DefinitionRef>,
     lower_receipts: hirsel_syntax::DefMap<Arc<retention::LowerReceipt>>,
@@ -1826,7 +1826,7 @@ impl QueryEngine {
                 let result = adapter.check_modes(
                     &types,
                     &memo,
-                    Arc::new(checked.value.clone()),
+                    checked.value.clone(),
                     &signature.value,
                     &mut products,
                     &mut recorder,
@@ -1873,7 +1873,7 @@ impl QueryEngine {
     fn check_query(
         &mut self,
         definition: &DefPath,
-    ) -> Result<Arc<QueryOutput<TypedBody>>, QueryError> {
+    ) -> Result<Arc<QueryOutput<Arc<TypedBody>>>, QueryError> {
         self.materialize(definition)?;
         let snapshot = self.snapshot(definition)?;
         if let Some(body) = generation::generator(&snapshot) {
@@ -1947,7 +1947,7 @@ impl QueryEngine {
             self.place_arm_fixes(output, &mut observed.representations);
         }
         let key = MemoKey::new(QueryKind::Check, id);
-        let entry = Arc::new(self.finish(key, text, reads, result, observed));
+        let entry = Arc::new(self.finish(key, text, reads, result.map(shared_output), observed));
         keep(
             &mut self.checked,
             &mut self.graph,
@@ -1959,7 +1959,7 @@ impl QueryEngine {
     /// GEN-5 owns these body snapshots independently of per-definition cache keys.
     pub(crate) fn instantiation_bodies(
         &mut self,
-    ) -> Result<Vec<(DefPath, Arc<QueryOutput<TypedBody>>)>, QueryError> {
+    ) -> Result<Vec<(DefPath, Arc<QueryOutput<Arc<TypedBody>>>)>, QueryError> {
         let mut bodies = vec![];
         // An image package reaches no definition outside its closure, so it closes no
         // instantiation cycle through one, and its own verdict is in its image.
@@ -2440,7 +2440,11 @@ impl DefinitionQueries for QueryEngine {
         &mut self,
         definition: &DefPath,
     ) -> Result<QueryOutput<TypedBody>, QueryError> {
-        self.check_query(definition).map(|output| (*output).clone())
+        self.check_query(definition).map(|output| QueryOutput {
+            value: (*output.value).clone(),
+            diagnostics: output.diagnostics.clone(),
+            dependencies: output.dependencies.clone(),
+        })
     }
     fn lower_to_tir(
         &mut self,

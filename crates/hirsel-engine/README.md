@@ -604,16 +604,26 @@ query errors are always emitted without normalization. The comparison regression
 checks duplicate sharing, a changed qualifier, recursive graphs and a definition
 whose name resembles a type token.
 
-## Native stages (`src/native/`)
+## Native source products and stages
 
-`native::build` lowers a validated snapshot to a Ready program for one target:
-the snapshot is adapted to the plain program the native passes read (`adapt`),
-then import, placement, insertion, elision, reuse and Ready lowering run per
-unit, and each stage's output is used only after that stage's validator in
-`hirsel-lir` sealed it. `Options` selects the target and whether regions,
-elision, reuse and flat walking run; none changes what a program observably does. The driver
-depends on `hirsel-llvm` unconditionally, so building it needs LLVM 23.1.5 at
-`tools/buck2/toolchains/llvm-files` (or `LLVM_SYS_231_PREFIX`).
+The engine's native owners are `src/native_queries.rs`, `src/native_lower.rs`
+and `src/native_input.rs`. `native_queries` demands source products and
+revalidates their Lower reads and V source envelopes. `native_lower` supplies
+owned lowering products and their readers. `native_input` assembles the
+validated input exported to native consumers. These products retain their
+source, query and validation identities.
+
+`hirsel-native` owns validated stages, backend emission, content transport and
+linking. Its `ReadyProgram` retains private source and validation bindings.
+Import, placement, insertion, elision, reuse and Ready lowering consume only
+outputs sealed by the corresponding `hirsel-lir` validator. Native options
+select the target, regions, elision, reuse and flat walking.
+`hirsel-native-queries` owns source reconstruction and query continuations;
+`hirsel-native-batch` drives batch builds; `hirsel-native-testing` owns checked
+heap execution and differential campaigns. Source-path entry points remain in
+`hirsel-driver`, and `hirsel-requests` selects keyed artifact requests.
+The LLVM backend requires LLVM 23.1.5 at
+`tools/buck2/toolchains/llvm-files` or `LLVM_SYS_231_PREFIX`.
 
 A native failure is a `NativeError` naming the stage, the definition and whether
 a validator (rather than a pass) refused. It is a tool outcome, never a source

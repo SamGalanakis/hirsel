@@ -9275,6 +9275,9 @@ mod loan_tests {
             std::ops::DerefMut::deref_mut(&mut reference).join(&original);
             value.join(&original);
             assert_eq!(value, reference, "bits {bits}");
+            let mut separate = Value(std::rc::Rc::new(original.0.as_ref().clone()));
+            separate.join(&original);
+            assert_eq!(separate, reference, "separate bits {bits}");
             retained += usize::from(std::rc::Rc::ptr_eq(&value.0, &original.0));
             // Distinct payloads must still enter the ordinary merge and
             // select the earliest witness, even when their summaries match.
@@ -9298,16 +9301,21 @@ mod loan_tests {
         original.read_within(1, &[2, 3], Site::Binding(4));
         let mut before = 0;
         let mut after = 0;
-        for _ in 0..128 {
-            let mut reference = original.clone();
-            std::ops::DerefMut::deref_mut(&mut reference).join(&original);
-            before += usize::from(!std::rc::Rc::ptr_eq(&reference.0, &original.0));
-            let mut value = original.clone();
-            value.join(&original);
-            after += usize::from(!std::rc::Rc::ptr_eq(&value.0, &original.0));
-            assert_eq!(value, reference);
+        for incoming in [
+            original.clone(),
+            Value(std::rc::Rc::new(original.0.as_ref().clone())),
+        ] {
+            for _ in 0..128 {
+                let mut reference = original.clone();
+                std::ops::DerefMut::deref_mut(&mut reference).join(&incoming);
+                before += usize::from(!std::rc::Rc::ptr_eq(&reference.0, &original.0));
+                let mut value = original.clone();
+                value.join(&incoming);
+                after += usize::from(!std::rc::Rc::ptr_eq(&value.0, &original.0));
+                assert_eq!(value, reference);
+            }
         }
-        assert_eq!((before, after), (128, 0));
+        assert_eq!((before, after), (256, 0));
         eprintln!("unchanged branch joins: payload allocations {before} -> {after}");
     }
 

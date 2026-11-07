@@ -611,6 +611,45 @@ impl FrontLowerQueries {
     /// Input rows plus actual settled metadata/receipt debits. Historical
     /// provider archive traffic and live runtime futures are separate owners.
     pub fn retained_bytes(&self) -> u64 {
+        if std::env::var_os("HIRSEL_OPERATION_OWNER_TRACE").is_some() {
+            let outcomes = self.outcomes.lock().unwrap_or_else(|e| e.into_inner());
+            let mut live_bytes = 0;
+            let mut outcome_bytes = 0;
+            let mut read_bytes = 0;
+            for (_, outcome, bytes) in outcomes.values() {
+                outcome_bytes += bytes;
+                read_bytes += outcome
+                    .reads
+                    .allocations()
+                    .map(|(_, n)| n as u64)
+                    .sum::<u64>();
+                if let Ok(Value::Lower(lower)) = &outcome.result
+                    && let Some(live) = lower.live.as_ref().and_then(WeakLowerProduct::upgrade)
+                {
+                    live_bytes += live.retained_bytes();
+                    crate::queries::operation_owner_trace(format_args!(
+                        "OWNER LOWER BODY {:?} bytes={} reads={} owner_counts={:?}",
+                        live.output().value.path,
+                        live.retained_bytes(),
+                        live.reads().len(),
+                        live.owner_counts()
+                    ));
+                }
+            }
+            let forwarded = self.forwarded.lock().unwrap_or_else(|e| e.into_inner());
+            crate::queries::operation_owner_trace(format_args!(
+                "OWNER LOWER SET owner={:p} outcomes={} metadata={} reads={} live_bodies={} forwarded={} fixed={} table={} total={}",
+                self,
+                outcomes.len(),
+                outcome_bytes,
+                read_bytes,
+                live_bytes,
+                forwarded.len(),
+                self.source._inputs.bytes,
+                outcome_table_bytes(outcomes.len()),
+                self._allowance.bytes() - *self.retention.lock().unwrap_or_else(|e| e.into_inner())
+            ));
+        }
         self._allowance.bytes() - *self.retention.lock().unwrap_or_else(|e| e.into_inner())
     }
 

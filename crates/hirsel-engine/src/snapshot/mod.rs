@@ -231,6 +231,17 @@ impl hirsel_validate::ValidationMemory for ValidationMemory {
             cause,
         })
     }
+    fn retain_read(
+        &self,
+        bytes: u64,
+    ) -> Result<Arc<dyn Send + Sync>, hirsel_validate::ViewRefusal> {
+        self.headers
+            .validation_demand_lease(bytes)
+            .map_err(|cause| hirsel_validate::ViewRefusal::Unreadable {
+                definition: DefId::intern(&DefPath::core("validation-storage")),
+                cause,
+            })
+    }
     fn retain_signature(
         &self,
         signature: &SignatureRef,

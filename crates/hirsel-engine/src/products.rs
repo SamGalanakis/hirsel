@@ -703,6 +703,12 @@ impl LiveLowerProduct {
     pub(super) fn prepare_eviction(&self, scratch: u64) -> bool {
         self.observations().spill(scratch).is_some()
     }
+    pub(crate) fn owner_counts(&self) -> (usize, usize) {
+        (
+            Arc::strong_count(&self.0),
+            Arc::strong_count(&self.output().value),
+        )
+    }
     pub(crate) fn downgrade(&self) -> WeakLowerProduct {
         WeakLowerProduct(Arc::downgrade(&self.0))
     }

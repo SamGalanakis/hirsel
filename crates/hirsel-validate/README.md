@@ -61,6 +61,11 @@ The driver's mode-before-lowering and publication guards remain its responsibili
 
 ## Input (`src/input.rs`)
 
+Installed view reads use `ValidationMemory::retain_read` to reclaim idle cache
+storage within the existing allowance. Optional control retention uses `retain`;
+a refused optional publication does not change the admission policy of later
+required reads. Both paths retain each allocation until its final reader drops.
+
 V never trusts the producer's fingerprint. Each view V reads is identified by
 a `ValidationDigest` that V's own encoder computes over every field of the
 view, private shape and malformed rows included (`digest`). Its v3 binary

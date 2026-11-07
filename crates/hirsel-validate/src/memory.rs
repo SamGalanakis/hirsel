@@ -5,10 +5,29 @@ use std::sync::{Arc, Mutex};
 /// The host's existing working-memory allowance and signature allocation visitor.
 pub trait ValidationMemory: Send + Sync {
     fn retain(&self, bytes: u64) -> Result<Arc<dyn Send + Sync>, ViewRefusal>;
+    /// Admit a demanded view after reclaiming optional cached allocations.
+    fn retain_read(&self, bytes: u64) -> Result<Arc<dyn Send + Sync>, ViewRefusal> {
+        self.retain(bytes)
+    }
     fn retain_signature(
         &self,
         signature: &hirsel_types::SignatureRef,
     ) -> Result<Arc<dyn Send + Sync>, ViewRefusal>;
+}
+
+/// Required view reads retain against the same allowance as optional caching,
+/// with permission to reclaim idle entries before refusing the read.
+pub(crate) struct ReadMemory<'a>(pub(crate) &'a dyn ValidationMemory);
+impl ValidationMemory for ReadMemory<'_> {
+    fn retain(&self, bytes: u64) -> Result<Arc<dyn Send + Sync>, ViewRefusal> {
+        self.0.retain_read(bytes)
+    }
+    fn retain_signature(
+        &self,
+        signature: &hirsel_types::SignatureRef,
+    ) -> Result<Arc<dyn Send + Sync>, ViewRefusal> {
+        self.0.retain_signature(signature)
+    }
 }
 
 #[derive(Default)]

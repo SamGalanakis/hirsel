@@ -169,11 +169,12 @@ impl InstalledViews {
         let slot = &self.cells[index].1;
         // Admission and publication share this read lock with retain_control's
         // writer, including cells first demanded before a universe is admitted.
-        let memory = self.memory.read().unwrap();
+        let admitted = self.memory.read().unwrap();
+        let memory = admitted.as_deref().map(crate::memory::ReadMemory);
         if slot.get().is_none() {
             let cell = InstalledCell::default();
-            if let Some(memory) = &*memory {
-                cell.retain_control(&**memory)?;
+            if let Some(memory) = &memory {
+                cell.retain_control(memory)?;
             }
             let _ = slot.set(Box::new(cell));
         }
@@ -184,8 +185,8 @@ impl InstalledViews {
                 let Some(view) = self.source.view(d)? else {
                     return Ok(None);
                 };
-                if let Some(memory) = &*memory {
-                    view.input.retain_control(&**memory)?;
+                if let Some(memory) = &memory {
+                    view.input.retain_control(memory)?;
                 }
                 let _ = cell.value.set(view);
             }

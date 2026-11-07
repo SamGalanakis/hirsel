@@ -2093,6 +2093,17 @@ mod retention_tests {
                 &self,
                 bytes: u64,
             ) -> Result<Arc<dyn Send + Sync>, hirsel_validate::ViewRefusal> {
+                self.0.try_validation_lease(bytes).map_err(|cause| {
+                    hirsel_validate::ViewRefusal::Unreadable {
+                        definition: DefId::intern(&DefPath::core("validation-storage")),
+                        cause,
+                    }
+                })
+            }
+            fn retain_read(
+                &self,
+                bytes: u64,
+            ) -> Result<Arc<dyn Send + Sync>, hirsel_validate::ViewRefusal> {
                 self.0.validation_demand_lease(bytes).map_err(|cause| {
                     hirsel_validate::ViewRefusal::Unreadable {
                         definition: DefId::intern(&DefPath::core("validation-storage")),
@@ -2149,7 +2160,7 @@ mod retention_tests {
         }
         let mut bounded = true;
         for count in [64, 4096] {
-            let engine = QueryEngine::new(default_environment(), PhaseAdapters::default());
+            let mut engine = QueryEngine::new(default_environment(), PhaseAdapters::default());
             let types = engine.types.clone();
             let ids = (0..count)
                 .map(|index| DefId::intern(&DefPath::core(&format!("installed_retention_{index}"))))
@@ -2163,7 +2174,11 @@ mod retention_tests {
             )
             .unwrap()
             .universe();
-            let headers = HeaderProducts::capture(&engine);
+            let donor = DefId::intern(&DefPath::core("installed_pressure_donor"));
+            let mut headers = HeaderProducts::capture(&engine);
+            let mutable = Arc::get_mut(&mut headers).unwrap();
+            mutable.paths = Arc::from([donor]);
+            mutable.rows.insert(donor, HeaderSlot::default());
             let budget = ProcessBudget::new(16 << 20);
             let backing = Arc::new(Allowance(
                 MemoryReservationPool::new(budget.reserve(16 << 20).unwrap())
@@ -2171,8 +2186,8 @@ mod retention_tests {
                     .unwrap(),
             ));
             let remaining = Arc::new(std::sync::Mutex::new(16 << 20));
-            let _partition = headers.configure_source_backing(backing, remaining.clone());
-            let memory: Arc<dyn ValidationMemory> = Arc::new(Memory(headers));
+            let _partition = headers.configure_source_backing(backing.clone(), remaining.clone());
+            let memory: Arc<dyn ValidationMemory> = Arc::new(Memory(headers.clone()));
             let reads = Arc::new(AtomicU64::new(0));
             let before = *remaining.lock().unwrap();
             let (table, allocation) = crate::test_alloc::measured(|| {
@@ -2234,6 +2249,25 @@ mod retention_tests {
                 universe,
                 "cache construction preserves replay identity"
             );
+            let donor_signature = signature(&types, donor);
+            let entry = Arc::new(engine.record(
+                MemoKey::new(QueryKind::Signature, donor),
+                donor_signature.fingerprint,
+                Ok(Arc::new(output(donor_signature))),
+                DependencyReads::default(),
+                &Observed::default(),
+            ));
+            headers.seed(donor, entry);
+            assert!(headers.ready(donor).is_some());
+            let pressure = backing.0.take(backing.0.available_bytes() - 128).unwrap();
+            let demanded = table.get(ids[1]).unwrap().unwrap();
+            assert_eq!(
+                demanded.digest(),
+                hirsel_validate::digest(&types, &signature(&types, ids[1]))
+            );
+            assert_eq!(table.universe(), universe);
+            assert_eq!(reads.load(Ordering::Relaxed), 2);
+            drop(pressure);
         }
         assert!(
             bounded,

@@ -6,7 +6,7 @@ use hirsel_diag::{Obligation, RuleId};
 use hirsel_syntax::{DefId, ExprKind, PassingMode, UnaryOp};
 use hirsel_type_analysis::parametric::{ParametricInput, parametric_inputs, unique_rows};
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 
 mod borrowed_match;
 mod causes;
@@ -67,8 +67,14 @@ impl Eq for Content {}
 /// unique (J types an inferred part by its operand). The root's own
 /// uniqueness stays `Modes::uniqueness`, which joins its parts. Paths travel
 /// with values; I checks nested `unique` contracts and publishes rows by them.
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct SharedParts(Arc<Vec<(Vec<Projection>, ExprId, bool)>>);
+impl Default for SharedParts {
+    fn default() -> Self {
+        static EMPTY: LazyLock<SharedParts> = LazyLock::new(|| SharedParts(Arc::new(Vec::new())));
+        EMPTY.clone()
+    }
+}
 impl SharedParts {
     fn is_empty(&self) -> bool {
         self.0.is_empty()
@@ -161,8 +167,15 @@ fn projection_key(p: &Projection) -> (u8, u32, u32) {
 
 /// Current part evidence overrides physical declarations after a share or
 /// replacement. Paths travel with values; defaults never repair a lost proof.
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 struct CrossingParts(Arc<Vec<(Vec<Projection>, Sendability)>>);
+impl Default for CrossingParts {
+    fn default() -> Self {
+        static EMPTY: LazyLock<CrossingParts> =
+            LazyLock::new(|| CrossingParts(Arc::new(Vec::new())));
+        EMPTY.clone()
+    }
+}
 impl CrossingParts {
     fn get(&self, path: &[Projection]) -> Option<Sendability> {
         self.0
@@ -249,6 +262,12 @@ struct CrossingBorrow {
     binding: usize,
     source: Vec<Projection>,
 }
+
+// Empty evidence shares immutable backing; Arc::make_mut isolates each edit.
+static NO_CROSSING_BORROWS: LazyLock<Arc<Vec<CrossingBorrow>>> =
+    LazyLock::new(|| Arc::new(Vec::new()));
+static NO_PARKED_SHARES: LazyLock<Arc<BTreeSet<ExprId>>> =
+    LazyLock::new(|| Arc::new(BTreeSet::new()));
 
 /// A mutable loop's element is a place of its source (SEM-4): copying it, or
 /// storing an unsendable value into it, shares a part of the binding that
@@ -356,7 +375,7 @@ impl Value {
             crossing_parts: CrossingParts::default(),
             shared_parts: SharedParts::default(),
             unique_parts: BTreeSet::new(),
-            crossing_borrows: Arc::new(Vec::new()),
+            crossing_borrows: NO_CROSSING_BORROWS.clone(),
             invalid: false,
             deep_copy: false,
             site: None,
@@ -366,7 +385,7 @@ impl Value {
             fresh_receipt: false,
             part_of: None,
             borrow_only: false,
-            parked: Arc::default(),
+            parked: NO_PARKED_SHARES.clone(),
         }))
     }
 }
@@ -381,12 +400,12 @@ impl ValueData {
     fn restore_borrowed(&mut self) {
         self.modes.uniqueness = Uniqueness::Unique;
         self.borrow_only = false;
-        self.parked = Arc::default();
+        self.parked = NO_PARKED_SHARES.clone();
     }
     fn share_root(&mut self) {
         self.unique_parts.clear();
         self.borrow_only = false;
-        self.parked = Arc::default();
+        self.parked = NO_PARKED_SHARES.clone();
         self.modes.uniqueness = Uniqueness::Aliased;
         self.fresh_receipt = false;
     }
@@ -398,7 +417,7 @@ impl ValueData {
             self.shared_parts.insert_deep(vec![], site);
         }
         self.borrow_only = false;
-        self.parked = Arc::default();
+        self.parked = NO_PARKED_SHARES.clone();
         self.modes.uniqueness = Uniqueness::Aliased;
         self.fresh_receipt = false;
     }
@@ -786,7 +805,7 @@ impl ValueData {
             && (self.borrow_only || unique(self))
             && (other.borrow_only || unique(other));
         if !self.borrow_only {
-            self.parked = Arc::default();
+            self.parked = NO_PARKED_SHARES.clone();
         } else if !other.parked.is_subset(&self.parked) {
             Arc::make_mut(&mut self.parked).extend(other.parked.iter().copied());
         }
@@ -3251,7 +3270,7 @@ impl Checker<'_, '_> {
             value.modes.sendability = Sendability::Sendable;
             value.set_alias(None);
             value.content = Content::default();
-            value.crossing_borrows = Arc::new(Vec::new());
+            value.crossing_borrows = NO_CROSSING_BORROWS.clone();
         }
         if self.arenas.global(&value.modes.relation) {
             value
@@ -5620,7 +5639,7 @@ impl Checker<'_, '_> {
                             let mut retained = Vec::new();
                             value.crossing_parts = CrossingParts::default();
                             value.shared_parts = SharedParts::default();
-                            value.crossing_borrows = Arc::new(Vec::new());
+                            value.crossing_borrows = NO_CROSSING_BORROWS.clone();
                             for (index, child) in children.iter().enumerate() {
                                 let projection = if sequence {
                                     Projection::Elements
@@ -5698,7 +5717,7 @@ impl Checker<'_, '_> {
                                     *child,
                                     &part,
                                 );
-                                value.crossing_borrows = Arc::new(Vec::new());
+                                value.crossing_borrows = NO_CROSSING_BORROWS.clone();
                                 value.install_crossing_borrows(&[Projection::Field(0)], &part);
                                 value
                                     .crossing_parts
@@ -7257,7 +7276,7 @@ impl Checker<'_, '_> {
                         .map(|i| &self.body.calls[i])
                     {
                         let mut retained = Vec::new();
-                        value.crossing_borrows = Arc::new(Vec::new());
+                        value.crossing_borrows = NO_CROSSING_BORROWS.clone();
                         for argument in &call.arguments {
                             if let Some((ordinal, _)) = &argument.parameter {
                                 let projection = match &call.target {

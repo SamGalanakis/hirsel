@@ -870,7 +870,9 @@ impl BodyTask {
             || facts.summary.as_ref().is_none_or(|s| {
                 s.definition != input.definition
                     || s.storage.is_some()
-                    || s.text != input.key.1
+                    // The publication names source text; a generated query's
+                    // input key also binds its execution and checked prefix.
+                    || s.text != input.text
                     || s.reads.as_ref() != reads.as_ref()
             })
         {

@@ -491,7 +491,7 @@ fn accepted_output_control(
     accepted_output_control_with(jobs, hirsel_engine::Verify::On, ACCEPTED_SOURCE, run);
 }
 
-fn accepted_output_control_with(
+pub(super) fn accepted_output_control_with(
     jobs: usize,
     verify: hirsel_engine::Verify,
     source: &str,

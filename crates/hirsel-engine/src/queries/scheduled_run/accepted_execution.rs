@@ -76,7 +76,7 @@ const ROOT: Domain = Domain {
 };
 const HEADER: Domain = Domain {
     kind: 0x4603_0002,
-    schema: 1,
+    schema: 2,
 };
 const CONSTANT: Domain = Domain {
     kind: 0x4603_0003,
@@ -451,7 +451,7 @@ pub(super) struct PublishedExecution {
     inputs: hirsel_validate::ExecutionProductInputs,
     revision: [u8; 32],
     admission: inputs::ExecutionAdmission,
-    loaded: Mutex<Option<Arc<AcceptedExecutionProduct>>>,
+    loaded: Mutex<std::sync::Weak<AcceptedExecutionProduct>>,
     _charge: Arc<inputs::InputCharge>,
 }
 impl FrontRunOutput {
@@ -461,8 +461,8 @@ impl FrontRunOutput {
             .get()
             .ok_or_else(|| failure("product not published"))?;
         let mut loaded = published.loaded.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(execution) = loaded.as_ref() {
-            return Ok(execution.clone());
+        if let Some(execution) = loaded.upgrade() {
+            return Ok(execution);
         }
         let admission = published.admission.clone();
         let execution = load(
@@ -480,7 +480,7 @@ impl FrontRunOutput {
             return Err(failure("semantic revision differs at publication"));
         }
         let execution = Arc::new(execution);
-        *loaded = Some(execution.clone());
+        *loaded = Arc::downgrade(&execution);
         Ok(execution)
     }
 }
@@ -525,6 +525,7 @@ impl FrontRunQueries {
         };
         for path in paths {
             let (public, private) = snapshot.execution_declaration(&path)?;
+            let private = (!Arc::ptr_eq(&public, &private)).then_some(private);
             let materialized = constants.contains(&path)
                 || (output.semantic.definitions().contains(&path)
                     && matches!(public.kind, SignatureKind::Const { .. }));
@@ -764,7 +765,7 @@ impl FrontRunQueries {
             inputs,
             revision: output.revision.digest(),
             admission: self.execution_admission(),
-            loaded: Mutex::new(None),
+            loaded: Mutex::new(std::sync::Weak::new()),
             _charge: charge,
         }));
         Ok(())
@@ -894,13 +895,14 @@ fn load(
         if row.header.domain != HEADER {
             return Err(failure("declaration domain"));
         }
-        let (exported, owner): (SignatureRef, SignatureRef) = decode(
+        let (exported, owner): (SignatureRef, Option<SignatureRef>) = decode(
             &records,
             get(store, row.header)?,
             &anchors,
             &*reserve,
             &mut header_owners,
         )?;
+        let owner = owner.unwrap_or_else(|| exported.clone());
         if exported.definition.path() != &row.path
             || owner.definition.path() != &row.path
             || private.insert(row.path.clone(), owner).is_some()

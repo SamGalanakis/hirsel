@@ -6,7 +6,7 @@ use std::{
     collections::BTreeSet,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicPtr, Ordering},
     },
 };
 type Row = (ReadKey, ContentHash);
@@ -37,12 +37,12 @@ impl PartialOrd for PoolRow {
 pub struct ChargedRow {
     value: PoolRow,
     _allowance: hirsel_engine_admission::MemoryReservation,
-    queued: AtomicBool,
-    next: Mutex<Option<Arc<ChargedRow>>>,
+    // Null is idle, self is a queued tail, otherwise one owned Arc::into_raw.
+    next: AtomicPtr<ChargedRow>,
 }
 // Rust a7c37f9f library/alloc/src/rcs/arc.rs:1117-1137 drains shared lists
-// iteratively. Our nodes also belong to the dictionary, so take their links
-// under a lock rather than requiring Arc::into_inner to unwrap the whole row.
+// iteratively. Rows also belong to the dictionary; their links transfer one
+// Arc through into_raw/from_raw (the same file:1668-1733).
 struct Released {
     head: Mutex<Option<Arc<ChargedRow>>>,
     _allowance: hirsel_engine_admission::MemoryReservation,
@@ -55,7 +55,20 @@ impl Drop for Released {
             .unwrap_or_else(|e| e.into_inner())
             .take();
         while let Some(row) = next {
-            next = row.next.lock().unwrap_or_else(|e| e.into_inner()).take();
+            next = row.take_next();
+        }
+    }
+}
+impl ChargedRow {
+    fn take_next(&self) -> Option<Arc<Self>> {
+        let next = self.next.swap(std::ptr::null_mut(), Ordering::AcqRel);
+        if next.is_null() || std::ptr::eq(next, self) {
+            None
+        } else {
+            // SAFETY: enqueue stores one Arc::into_raw reference in a unique
+            // queued node. Only its owner pops it, and this swap consumes the
+            // link exactly once. Null/self never represent an owned reference.
+            Some(unsafe { Arc::from_raw(next) })
         }
     }
 }
@@ -142,8 +155,7 @@ impl ReadPool {
                 .take()
         });
         while let Some(row) = next {
-            next = row.next.lock().unwrap_or_else(|e| e.into_inner()).take();
-            row.queued.store(false, Ordering::Release);
+            next = row.take_next();
             #[cfg(test)]
             RECLAIM_VISITS.with(|count| count.set(count.get() + 1));
             // The dictionary and this released reference are the last owners.
@@ -287,8 +299,7 @@ impl ReadPool {
             } else {
                 let value = Arc::new(ChargedRow {
                     value: PoolRow(*row),
-                    queued: AtomicBool::new(false),
-                    next: Mutex::new(None),
+                    next: AtomicPtr::new(std::ptr::null_mut()),
                     _allowance: allowance.split(row_bytes).expect("pre-admitted read row"),
                 });
                 self.rows.insert(RowRef(value.clone()));
@@ -339,8 +350,21 @@ impl Drop for SharedRows {
     fn drop(&mut self) {
         let mut head = self.released.head.lock().unwrap_or_else(|e| e.into_inner());
         for row in std::mem::take(&mut self.values).into_vec() {
-            if !row.queued.swap(true, Ordering::AcqRel) {
-                *row.next.lock().unwrap_or_else(|e| e.into_inner()) = head.take();
+            let tail = Arc::as_ptr(&row).cast_mut();
+            if row
+                .next
+                .compare_exchange(
+                    std::ptr::null_mut(),
+                    tail,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                )
+                .is_ok()
+            {
+                let next = head
+                    .take()
+                    .map_or(tail, |next| Arc::into_raw(next).cast_mut());
+                row.next.store(next, Ordering::Release);
                 *head = Some(row);
             }
         }
@@ -704,6 +728,7 @@ mod tests {
             std::thread::scope(|scope| {
                 for array in arrays {
                     scope.spawn(move || drop(array));
+                    assert_eq!(pool.reclaim(), 0, "held rows survive concurrent drains");
                 }
             });
             assert_eq!(pool.reclaim(), 0, "held rows cannot be refunded");

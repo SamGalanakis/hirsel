@@ -3,7 +3,6 @@ use hirsel_driver::native::*;
 use hirsel_engine::RunConfiguration;
 use hirsel_intern::jobs::with_compiler_stack;
 use hirsel_native::*;
-use hirsel_native_batch::*;
 use hirsel_native_testing::*;
 use hirsel_run_schema::{Access, FileReadScript};
 use serde_json::{Value, json};
@@ -399,13 +398,7 @@ fn native(partition: &str) {
         let _evidence = Evidence(root.clone());
         let manifest = package(&root);
         let cases = cases(&root, partition);
-        let mut loaded =
-            hirsel_front_phases::load_program(&manifest).unwrap_or_else(|e| panic!("{e}"));
-        loaded
-            .check_for_execution()
-            .unwrap_or_else(|e| panic!("{e}"));
-        let input = loaded.engine.export_native_input().unwrap();
-        let input = loaded.engine.import_native_input(input).unwrap();
+        let loaded = hirsel_front_phases::load_program(&manifest).unwrap_or_else(|e| panic!("{e}"));
         let options = Options::new(TargetSpec::x86_64_unknown_linux_gnu());
         let matrix = [
             Engine::Native {
@@ -437,12 +430,14 @@ fn native(partition: &str) {
             "--cpu=60:61".into(),
         ];
         tools.launch_timeout = std::time::Duration::from_secs(75);
-        let ready = build(&input, &options).unwrap();
-        let sites = Sites::new(input.snapshot());
+        let execution =
+            crate::native_ready::supplier(&manifest, &loaded.entry, &tools)(&options).unwrap();
+        let ready = &execution.program;
+        let sites = execution.sites();
         let mut objects = vec![];
         for backend in [Backend::Llvm, Backend::Cranelift] {
             let emitted = emit_backend_objects(
-                &ready,
+                ready,
                 backend,
                 OptLevel::None,
                 Partition::Whole,
@@ -478,8 +473,7 @@ fn native(partition: &str) {
                 let dir = root.join(format!("{id}-{backend:?}"));
                 fs::create_dir(&dir).unwrap();
                 linked.push((
-                    link_fixture_runnable(&ready, &loaded.entry, objects, &tools, &dir, &f)
-                        .unwrap(),
+                    link_fixture_runnable(ready, &loaded.entry, objects, &tools, &dir, &f).unwrap(),
                     dir,
                 ));
             }
@@ -502,7 +496,7 @@ fn native(partition: &str) {
                         &f,
                     )
                     .unwrap();
-                    let observation = observe(&recorded, &ready, &sites).unwrap();
+                    let observation = observe(&recorded, ready, &sites).unwrap();
                     expected(&row, &observation);
                     receipt(&root, id, &format!("{stage}-record"), "PASS");
                     let bytes = fs::read(&tape).unwrap();
@@ -531,7 +525,7 @@ fn native(partition: &str) {
                             &absent,
                         )
                         .unwrap();
-                        assert_eq!(observe(&replayed, &ready, &sites).unwrap(), observation);
+                        assert_eq!(observe(&replayed, ready, &sites).unwrap(), observation);
                         receipt(&root, id, &replay_stage, "PASS");
                     }
                     for (name, replay) in [

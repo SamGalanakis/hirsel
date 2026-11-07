@@ -188,7 +188,7 @@ fn cooperating_child() {
         }
         return;
     }
-    let stale = load_pinned(&root).unwrap();
+    let stale = load_pinned(&root, crate::Durability::Rebuildable).unwrap();
     let mut record = entry(if mode == "overwrite" { 1 } else { id });
     if mode == "overwrite" {
         record.location.offset = id as u32 * 64;
@@ -268,7 +268,7 @@ fn multiprocess_common_pin_publication_and_live_staging_gc_owner() {
     }
     a.finish();
     b.finish();
-    let pin = load_pinned(root).unwrap();
+    let pin = load_pinned(root, crate::Durability::Rebuildable).unwrap();
     for id in [1, 2] {
         assert_eq!(find(&pin, entry(id).key), Some(entry(id).location));
     }
@@ -291,7 +291,7 @@ fn multiprocess_append_survives_off_lock_compaction() {
         compact(root, budget(), crate::Durability::Rebuildable).unwrap(),
         CompactOutcome::Published { layers: 2, .. }
     ));
-    let pin = load_pinned(root).unwrap();
+    let pin = load_pinned(root, crate::Durability::Rebuildable).unwrap();
     for n in [1, 2, 3] {
         assert_eq!(find(&pin, entry(n).key), Some(entry(n).location));
     }
@@ -319,7 +319,7 @@ fn fully_shadowed_inputs_reuse_selected_inode_and_free_a_slot() {
         compact(root, budget(), crate::Durability::Rebuildable).unwrap(),
         CompactOutcome::Published { layers: 1, .. }
     ));
-    let pin = load_pinned(root).unwrap();
+    let pin = load_pinned(root, crate::Durability::Rebuildable).unwrap();
     for n in [1, 2] {
         assert_eq!(find(&pin, entry(n).key), Some(entry(n).location));
     }
@@ -334,7 +334,7 @@ fn concurrently_appended_identical_output_cannot_create_duplicate_descriptors() 
     observe_compaction(move || write(&path, &[entry(1), entry(2)]));
     assert_eq!(compact(root, budget(), crate::Durability::Rebuildable).unwrap(), CompactOutcome::Conflict);
     assert_eq!(current_layer_ids_locked(root).unwrap().len(), 3);
-    let pin = load_pinned(root).unwrap();
+    let pin = load_pinned(root, crate::Durability::Rebuildable).unwrap();
     for n in [1, 2] {
         assert_eq!(find(&pin, entry(n).key), Some(entry(n).location));
     }
@@ -352,7 +352,7 @@ fn multiprocess_gc_cannot_enter_reader_open_gap_and_unlinked_pin_survives() {
     observe_pin(move || {
         child(&path, "gc-reader-gap", 0).finish();
     });
-    let old = load_pinned(root).unwrap();
+    let old = load_pinned(root, crate::Durability::Rebuildable).unwrap();
     write(root, &[entry(2)]);
     assert!(matches!(
         compact(root, budget(), crate::Durability::Rebuildable).unwrap(),
@@ -369,7 +369,7 @@ fn multiprocess_gc_cannot_enter_reader_open_gap_and_unlinked_pin_survives() {
     );
     assert_eq!(find(&old, entry(1).key), Some(entry(1).location));
     assert_eq!(find(&old, entry(2).key), None);
-    let current = load_pinned(root).unwrap();
+    let current = load_pinned(root, crate::Durability::Rebuildable).unwrap();
     for id in [1, 2] {
         assert_eq!(find(&current, entry(id).key), Some(entry(id).location));
     }
@@ -399,7 +399,7 @@ fn multiprocess_same_address_precedence_follows_publication_order() {
     a.finish();
     b.finish();
     assert_eq!(
-        find(&load_pinned(root).unwrap(), entry(1).key),
+        find(&load_pinned(root, crate::Durability::Rebuildable).unwrap(), entry(1).key),
         Some(expected)
     );
 }
@@ -410,7 +410,7 @@ fn concurrent_writer_during_plane_construction_preserves_newer_locator_and_old_p
     let root = dir.path();
     write(root, &[entry(1)]);
     write(root, &[entry(2)]);
-    let old = load_pinned(root).unwrap();
+    let old = load_pinned(root, crate::Durability::Rebuildable).unwrap();
     let path = root.to_owned();
     let mut newer = entry(1);
     newer.location.offset = 128;
@@ -421,7 +421,7 @@ fn concurrent_writer_during_plane_construction_preserves_newer_locator_and_old_p
         CompactOutcome::Published { layers: 2, .. }
     ));
     assert_eq!(find(&old, newer.key), Some(entry(1).location));
-    let current = load_pinned(root).unwrap();
+    let current = load_pinned(root, crate::Durability::Rebuildable).unwrap();
     assert_eq!(find(&current, newer.key), Some(newer.location));
     assert_eq!(find(&current, entry(2).key), Some(entry(2).location));
 }

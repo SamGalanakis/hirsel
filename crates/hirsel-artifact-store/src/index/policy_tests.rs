@@ -72,7 +72,7 @@ fn protocol_epoch_factory_observes_pin_and_compaction_lock_order() {
             -1
         );
     });
-    let old = load_pinned(root).unwrap();
+    let old = load_pinned(root, crate::Durability::Rebuildable).unwrap();
     write(root, 2);
     let path = root.to_owned();
     observe_compaction(move || {
@@ -104,7 +104,7 @@ fn protocol_epoch_factory_observes_pin_and_compaction_lock_order() {
     ));
     assert_eq!(find(&old, entry(1).key), Some(entry(1).location));
     assert_eq!(find(&old, entry(3).key), None);
-    let current = load_pinned(root).unwrap();
+    let current = load_pinned(root, crate::Durability::Rebuildable).unwrap();
     for n in [1, 2, 3] {
         assert_eq!(find(&current, entry(n).key), Some(entry(n).location));
     }

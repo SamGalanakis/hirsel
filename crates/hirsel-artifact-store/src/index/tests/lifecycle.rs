@@ -43,16 +43,16 @@ fn published(outcome: PublishOutcome) {
 fn pins_cache_absence_clone_and_hold_unlinked_backings() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
-    let absent = load_pinned(root).unwrap();
+    let absent = load_pinned(root, crate::Durability::Rebuildable).unwrap();
     assert!(absent.retained_bytes() > 0);
     assert_eq!(absent.retained_bytes(), absent.clone().retained_bytes());
     published(publish(root, &[entry(1)]));
     assert_eq!(find(&absent, entry(1).key), None);
-    let old = load_pinned(root).unwrap();
+    let old = load_pinned(root, crate::Durability::Rebuildable).unwrap();
     let cloned = old.clone();
     assert!(old.retained_bytes() > 128);
     published(publish(root, &[entry(2)]));
-    let current = load_pinned(root).unwrap();
+    let current = load_pinned(root, crate::Durability::Rebuildable).unwrap();
     assert_eq!(find(&old, entry(2).key), None);
     assert_eq!(find(&current, entry(2).key), Some(entry(2).location));
     for path in fs::read_dir(root.join("index"))
@@ -70,7 +70,7 @@ fn pins_cache_absence_clone_and_hold_unlinked_backings() {
         }
     }
     assert_eq!(find(&cloned, entry(1).key), Some(entry(1).location));
-    assert_eq!(find(&load_pinned(root).unwrap(), entry(1).key), None);
+    assert_eq!(find(&load_pinned(root, crate::Durability::Rebuildable).unwrap(), entry(1).key), None);
 }
 
 #[test]
@@ -130,7 +130,7 @@ fn ratio_equality_accumulated_suffix_and_newest_duplicate_compact() {
         compact(root, budget(), crate::Durability::Rebuildable).unwrap(),
         CompactOutcome::Published { layers: 1, .. }
     ));
-    let pin = load_pinned(root).unwrap();
+    let pin = load_pinned(root, crate::Durability::Rebuildable).unwrap();
     assert_eq!(find(&pin, newest.key), Some(newest.location));
     for e in &old[1..] {
         assert_eq!(find(&pin, e.key), Some(e.location));
@@ -210,7 +210,7 @@ fn lock_contention_is_bounded_and_live_staging_has_owner() {
         .unwrap();
     // SAFETY: valid local fd, no pointers.
     assert_eq!(unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX) }, 0);
-    assert_eq!(find(&load_pinned(root).unwrap(), entry(1).key), None);
+    assert_eq!(find(&load_pinned(root, crate::Durability::Rebuildable).unwrap(), entry(1).key), None);
     assert_eq!(
         publish_delta(root, delta, &epoch).unwrap(),
         PublishOutcome::Skipped(SkipReason::Contended)
@@ -238,7 +238,7 @@ fn layer_installed_but_manifest_write_failure_never_changes_root_or_recovers_orp
     assert!(publish_delta(root, delta, &index_benchmark_epoch(root).unwrap()).is_err());
     assert_eq!(fs::read(root.join("index/MANIFEST")).unwrap(), original);
     assert!(!stage.exists());
-    let pin = load_pinned(root).unwrap();
+    let pin = load_pinned(root, crate::Durability::Rebuildable).unwrap();
     assert_eq!(find(&pin, entry(1).key), Some(entry(1).location));
     assert_eq!(find(&pin, entry(2).key), None);
     assert_eq!(
@@ -250,7 +250,7 @@ fn layer_installed_but_manifest_write_failure_never_changes_root_or_recovers_orp
         2
     );
     fs::remove_file(root.join("index/MANIFEST")).unwrap();
-    assert_eq!(find(&load_pinned(root).unwrap(), entry(1).key), None);
+    assert_eq!(find(&load_pinned(root, crate::Durability::Rebuildable).unwrap(), entry(1).key), None);
 }
 
 #[test]
@@ -291,7 +291,7 @@ fn explicit_old_new_missing_torn_manifest_and_layer_survivor_permutations() {
                         .unwrap(),
                     }
                 }
-                let pin = load_pinned(case.path()).unwrap();
+                let pin = load_pinned(case.path(), crate::Durability::Rebuildable).unwrap();
                 if manifest == 0 || manifest == 3 {
                     assert_eq!(find(&pin, entry(1).key), None);
                     assert_eq!(find(&pin, entry(2).key), None);
@@ -319,12 +319,12 @@ fn diagnostics_distinguish_invalid_absence_and_count_each_bad_block_once_per_pin
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
     assert_eq!(
-        load_pinned(root).unwrap().diagnostics(),
+        load_pinned(root, crate::Durability::Rebuildable).unwrap().diagnostics(),
         IndexDiagnostics::default()
     );
     fs::create_dir_all(root.join("index")).unwrap();
     fs::write(root.join("index/MANIFEST"), b"corrupt root").unwrap();
-    let invalid = load_pinned(root).unwrap();
+    let invalid = load_pinned(root, crate::Durability::Rebuildable).unwrap();
     assert!(invalid.diagnostics().invalid_root);
     published(publish(root, &[entry(1)]));
     assert!(invalid.clone().diagnostics().invalid_root);
@@ -340,7 +340,7 @@ fn diagnostics_distinguish_invalid_absence_and_count_each_bad_block_once_per_pin
     let fingerprint = u32::from_le_bytes(bad[40..44].try_into().unwrap()) as usize;
     bad[fingerprint] ^= 1;
     fs::write(&path, bad).unwrap();
-    let pin = load_pinned(root).unwrap();
+    let pin = load_pinned(root, crate::Durability::Rebuildable).unwrap();
     assert_eq!(pin.diagnostics(), IndexDiagnostics::default());
     for _ in 0..4 {
         assert_eq!(find(&pin, entry(1).key), None);
@@ -358,7 +358,7 @@ fn diagnostics_distinguish_invalid_absence_and_count_each_bad_block_once_per_pin
     file.write_all_at(&good, 0).unwrap();
     assert_eq!(find(&pin, entry(1).key), None);
     assert_eq!(pin.diagnostics().bad_blocks, 1);
-    let fresh = load_pinned(root).unwrap();
+    let fresh = load_pinned(root, crate::Durability::Rebuildable).unwrap();
     assert_eq!(find(&fresh, entry(1).key), Some(entry(1).location));
     assert_eq!(fresh.diagnostics(), IndexDiagnostics::default());
 }
@@ -390,7 +390,7 @@ fn bounded_construction_scales_and_reopens_eight_layer_publication() {
         let mut duplicate = entry(0);
         duplicate.location.offset = 1024;
         let manifest = format::Manifest::read(root).unwrap();
-        let pin = load_pinned(root).unwrap();
+        let pin = load_pinned(root, crate::Durability::Rebuildable).unwrap();
         let scratch = compaction_scratch(&manifest.layers).unwrap();
         let old_root = fs::read(root.join("index/MANIFEST")).unwrap();
         assert_eq!(
@@ -420,7 +420,7 @@ fn bounded_construction_scales_and_reopens_eight_layer_publication() {
         assert!(actual.get() > 0);
         assert!(actual.get() <= format::construction_scratch(capacity).unwrap());
         observed.push(actual.get());
-        let merged = load_pinned(root).unwrap();
+        let merged = load_pinned(root, crate::Durability::Rebuildable).unwrap();
         merged.0.layers[0].validate_all().unwrap();
         assert_eq!(merged.0.layers[0].rows(), capacity / 2);
         // Every key keeps the newest locator; the old pin stays readable.
@@ -435,7 +435,7 @@ fn bounded_construction_scales_and_reopens_eight_layer_publication() {
         }
         published(publish(root, &[duplicate]));
         assert_eq!(
-            find(&load_pinned(root).unwrap(), duplicate.key),
+            find(&load_pinned(root, crate::Durability::Rebuildable).unwrap(), duplicate.key),
             Some(duplicate.location)
         );
         assert_ne!(find(&pin, duplicate.key), Some(duplicate.location));
@@ -454,7 +454,7 @@ fn interrupted_plane_construction_preserves_root_pins_and_cleans_workspace() {
     published(publish(root, &[entry(1)]));
     published(publish(root, &[entry(2)]));
     let before = fs::read(root.join("index/MANIFEST")).unwrap();
-    let old = load_pinned(root).unwrap();
+    let old = load_pinned(root, crate::Durability::Rebuildable).unwrap();
     CONSTRUCTION_OBSERVER.with(|slot| *slot.borrow_mut() = Some(Box::new(|_| panic!("cancel construction"))));
     assert!(std::panic::catch_unwind(|| compact(root, budget(), crate::Durability::Rebuildable)).is_err());
     assert_eq!(fs::read(root.join("index/MANIFEST")).unwrap(), before);

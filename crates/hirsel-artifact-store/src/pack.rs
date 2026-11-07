@@ -209,7 +209,7 @@ impl Store {
         // Observing before selection may cause an extra refresh if a publisher
         // races us. Observing afterwards can mark an old generation current.
         let stamp = observe_stamp.then(|| self.index_stamp()).flatten();
-        let generation = index::load_pinned(&self.root).unwrap_or_default();
+        let generation = index::load_pinned(&self.root, self.durability).unwrap_or_default();
         #[cfg(test)]
         INDEX_LOADED.with(|slot| {
             let callback = slot.borrow_mut().take();

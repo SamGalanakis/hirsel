@@ -203,11 +203,11 @@ fn pin(root: &Path, manifest: &Manifest) -> io::Result<PinnedGeneration> {
     })))
 }
 
-pub(crate) fn load_pinned(root: &Path) -> io::Result<PinnedGeneration> {
+pub(crate) fn load_pinned(root: &Path, durability: Durability) -> io::Result<PinnedGeneration> {
     if !root.exists() {
         return Ok(PinnedGeneration::default());
     }
-    let Some(_lock) = Lock::publication(root, false)? else {
+    let Some(_lock) = Lock::for_store(root, false, durability)? else {
         return Ok(PinnedGeneration::default());
     };
     let (manifest, invalid_root) = Manifest::read_with_status(root)?;

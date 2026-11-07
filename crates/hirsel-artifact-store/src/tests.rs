@@ -1113,12 +1113,29 @@ fn strict_batch_finish_waits_for_publication_lock() {
             .unwrap()
             .unwrap();
     });
-    let reopened = Store::new(root);
-    assert_eq!(reopened.lookup(address).unwrap().reference, reference);
-    assert_eq!(
-        &*reopened.get(reference).unwrap(),
-        b"committed after contention"
-    );
+    let publication = pack::Lock::try_root(&root, true).unwrap();
+    std::thread::scope(|scope| {
+        let (done, result) = std::sync::mpsc::channel();
+        scope.spawn(move || {
+            let reopened = Store::new(root);
+            let association = reopened.lookup(address);
+            let content = reopened.get_owned(reference);
+            done.send((association, content)).unwrap();
+        });
+        assert!(
+            matches!(
+                result.recv_timeout(std::time::Duration::from_millis(100)),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+            ),
+            "a strict reader must wait rather than cache a contended index as absent"
+        );
+        drop(publication);
+        let (association, content) = result
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+        assert_eq!(association.unwrap().reference, reference);
+        assert_eq!(&*content.unwrap(), b"committed after contention");
+    });
 }
 
 #[test]
@@ -1169,7 +1186,9 @@ fn bounded_layer_maintenance_keeps_later_publication_and_checked_access() {
             <= 420
     );
     assert!(
-        index::load_pinned(dir.path()).unwrap().retained_bytes()
+        index::load_pinned(dir.path(), crate::Durability::Rebuildable)
+            .unwrap()
+            .retained_bytes()
             <= index::MAX_BYTES as u64 + (4 << 20)
     );
     let next = store.put(DOMAIN, b"after bounded eviction").unwrap();
@@ -1197,7 +1216,7 @@ fn coherently_forged_routing_cannot_accept_another_content_domain_or_association
         .associate(address_b, Action(hash(b"other")), b)
         .unwrap();
     batch.finish().unwrap();
-    let pin = index::load_pinned(root).unwrap();
+    let pin = index::load_pinned(root, crate::Durability::Rebuildable).unwrap();
     let content = |r: Reference| index::Key {
         kind: index::KeyKind::Content,
         digest: r.output.0,

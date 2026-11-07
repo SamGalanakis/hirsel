@@ -63,14 +63,14 @@ fn nonlexical_layers_merge_uniquely_to_canonical_bytes_with_held_epoch_and_pin()
     let original = Manifest::read(root).unwrap();
     assert!(original.layers.windows(2).any(|w| w[0].id < w[1].id));
     assert!(original.layers.windows(2).any(|w| w[0].id > w[1].id));
-    let held = load_pinned(root).unwrap();
+    let held = load_pinned(root, crate::Durability::Rebuildable).unwrap();
     let expected: Vec<_> = expected.into_values().collect();
     assert_eq!(expected.len(), 480);
     assert!(matches!(
         compact(root, budget(), crate::Durability::Rebuildable).unwrap(),
         CompactOutcome::Published { layers: 1, .. }
     ));
-    let current = load_pinned(root).unwrap();
+    let current = load_pinned(root, crate::Durability::Rebuildable).unwrap();
     assert_eq!(current.0.layers[0].rows(), expected.len());
     let output = Manifest::read(root).unwrap().layers[0];
     assert_eq!(
@@ -107,7 +107,7 @@ fn shadowed_corrupt_layer_is_lazy_on_lookup_but_refuses_compaction() {
         let start = u32::from_le_bytes(bytes[32 + plane * 8..36 + plane * 8].try_into().unwrap());
         bytes[start as usize] ^= 1;
         fs::write(path, bytes).unwrap();
-        let pin = load_pinned(root).unwrap();
+        let pin = load_pinned(root, crate::Durability::Rebuildable).unwrap();
         assert_eq!(pin.diagnostics(), IndexDiagnostics::default());
         for entry in entries(3) {
             assert_eq!(find(&pin, entry.key), Some(entry.location));
@@ -170,7 +170,7 @@ fn merge_orders_late_digest_bytes_and_kinds_with_newest_tie_precedence() {
         fs::read(storage::layer_path(root, output)).unwrap(),
         format::encode_layer(&expected).unwrap()
     );
-    let pin = load_pinned(root).unwrap();
+    let pin = load_pinned(root, crate::Durability::Rebuildable).unwrap();
     for entry in expected {
         assert_eq!(find(&pin, entry.key), Some(entry.location));
     }

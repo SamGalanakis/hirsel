@@ -338,7 +338,8 @@ std::thread_local! {
     static REFERENCE_OWNERSHIP: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
-pub(crate) fn reference_ownership_enabled() -> bool {
+/// Whether existing ownership corpus checks request the original solver oracle.
+pub fn reference_ownership_enabled() -> bool {
     REFERENCE_OWNERSHIP.get()
 }
 

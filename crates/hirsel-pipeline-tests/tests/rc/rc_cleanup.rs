@@ -116,7 +116,7 @@ fn validate_driver_ready(source: &'static str) {
 
 /// Lower to Rc (regions on, elision on), then to Ready.
 fn try_build(source: &str) -> Result<Built, String> {
-    try_build_with(source, false)
+    hirsel_lir::testing::with_reference_ownership(|| try_build_with(source, false))
 }
 
 /// As `try_build`; with `reuse`, through drop specialization and reuse

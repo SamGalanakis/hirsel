@@ -1814,6 +1814,37 @@ pub(crate) struct State {
 }
 
 impl State {
+    fn same(&self, other: &Self) -> bool {
+        let Self {
+            slots,
+            loans,
+            regions,
+            credits,
+            invocation,
+        } = self;
+        slots.state_eq(&other.slots)
+            && loans.state_eq(&other.loans)
+            && regions.state_eq(&other.regions)
+            && credits == &other.credits
+            && invocation == &other.invocation
+    }
+
+    #[cfg(feature = "testing")]
+    fn reference_join(&mut self, other: &Self) {
+        if self.invocation != other.invocation {
+            self.invocation = Invocation::Ambiguous;
+        }
+        for i in 0..self.slots.len() {
+            self.slots[i].join(&other.slots[i]);
+        }
+        for i in 0..self.loans.len() {
+            self.loans[i] = self.loans[i].join(other.loans[i]);
+        }
+        for i in 0..self.regions.len() {
+            self.regions[i] = self.regions[i].join(other.regions[i]);
+        }
+    }
+
     fn join(&mut self, other: &State) {
         if self.invocation != other.invocation {
             self.invocation = Invocation::Ambiguous;
@@ -1952,8 +1983,8 @@ impl<S: Stage> Flow<'_, S> {
     /// Every block's entry state, to a fixpoint over normal and failure
     /// edges. A block's state is the join of the states its predecessors
     /// last sent along their edges, computed when the block is visited, and
-    /// blocks are visited in reverse postorder, earliest first: a block is
-    /// walked again only when a feedback edge changed what reaches it.
+    /// predecessor SCCs finish before successors, with reverse-postorder
+    /// priority within each component. Equality reuses immutable node proofs.
     pub fn solve(&self) -> Vec<Option<State>> {
         self.solve_counted(|_| {})
     }
@@ -1961,6 +1992,78 @@ impl<S: Stage> Flow<'_, S> {
     /// The same fixed point, reporting the instruction and terminator rows of
     /// each actual block transfer for deterministic work measurements.
     pub(crate) fn solve_counted(&self, mut transferred: impl FnMut(usize)) -> Vec<Option<State>> {
+        let n = self.unit.blocks.len();
+        let entry = self.unit.entry;
+        let succ = self.successors();
+        let mut rank = vec![usize::MAX; n];
+        let adjacent: Vec<Vec<usize>> = succ
+            .iter()
+            .map(|ts| ts.iter().map(|b| b.index()).collect())
+            .collect();
+        let post: Vec<_> = hirsel_graph::reverse_postorder(&adjacent, entry.index())
+            .into_iter()
+            .map(|b| BlockId(b as u32))
+            .collect();
+        for (i, b) in post.iter().enumerate() {
+            rank[b.index()] = i;
+        }
+        let component = hirsel_graph::component_ranks(&adjacent);
+        let mut ins: Vec<Option<State>> = vec![None; n];
+        // Per block, the state it last sent along each of its edges, and per
+        // block, where its incoming states are: (source, index in its list).
+        let mut outs: Vec<Vec<(EdgeId, State)>> = vec![Vec::new(); n];
+        let mut incoming: Vec<Vec<(BlockId, usize)>> = vec![Vec::new(); n];
+        let mut work = BTreeSet::from([(component[entry.index()], 0usize)]);
+        while let Some((_, next)) = work.pop_first() {
+            let b = post[next];
+            let arriving = (b == entry).then(|| self.entry_state()).into_iter().chain(
+                incoming[b.index()]
+                    .iter()
+                    .map(|&(p, i)| outs[p.index()][i].1.clone()),
+            );
+            let joined = join_all(arriving.collect());
+            if match (&joined, &ins[b.index()]) {
+                (Some(a), Some(b)) => a.same(b),
+                (None, None) => true,
+                _ => false,
+            } {
+                continue;
+            }
+            ins[b.index()] = joined;
+            let Some(state) = ins[b.index()].clone() else {
+                continue;
+            };
+            transferred(self.code[b.index()].len() + 1);
+            let new = self.block_after(b, state, |_, _| {});
+            let first = outs[b.index()].is_empty();
+            for (i, (edge, out)) in new.iter().enumerate() {
+                let target = self.unit.tables.edges[edge.index()].target;
+                if first {
+                    incoming[target.index()].push((b, i));
+                    // Original RPO discovers sources in rank order. Keep its
+                    // exact join pairing and first credits across SCC visits.
+                    incoming[target.index()]
+                        .sort_by_key(|&(source, index)| (rank[source.index()], index));
+                } else if outs[b.index()][i].1.same(out) {
+                    continue;
+                }
+                work.insert((component[target.index()], rank[target.index()]));
+            }
+            outs[b.index()] = new;
+        }
+        #[cfg(feature = "testing")]
+        if hirsel_lir::testing::reference_ownership_enabled() {
+            assert_eq!(
+                ins,
+                self.solve_reference(),
+                "RC flow differs from the original solver"
+            );
+        }
+        ins
+    }
+
+    #[cfg(feature = "testing")]
+    fn solve_reference(&self) -> Vec<Option<State>> {
         let n = self.unit.blocks.len();
         let entry = self.unit.entry;
         let succ = self.successors();
@@ -1989,7 +2092,18 @@ impl<S: Stage> Flow<'_, S> {
                     .iter()
                     .map(|&(p, i)| outs[p.index()][i].1.clone()),
             );
-            let joined = join_all(arriving.collect());
+            let mut states: Vec<_> = arriving.collect();
+            while states.len() > 1 {
+                let mut pairs = states.into_iter();
+                states = Vec::with_capacity(pairs.len().div_ceil(2));
+                while let Some(mut a) = pairs.next() {
+                    if let Some(b) = pairs.next() {
+                        a.reference_join(&b);
+                    }
+                    states.push(a);
+                }
+            }
+            let joined = states.pop();
             if joined == ins[b.index()] {
                 continue;
             }
@@ -1997,7 +2111,6 @@ impl<S: Stage> Flow<'_, S> {
             let Some(state) = ins[b.index()].clone() else {
                 continue;
             };
-            transferred(self.code[b.index()].len() + 1);
             let new = self.block_after(b, state, |_, _| {});
             let first = outs[b.index()].is_empty();
             for (i, (edge, out)) in new.iter().enumerate() {

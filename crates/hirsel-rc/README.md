@@ -32,6 +32,11 @@ Invariants:
   and a `maybe` bitset over the field paths `Facts` interns once per unit,
   the first 64 inline. Copying or joining a slot state copies and combines
   words, never paths; output that follows path order sorts by path.
+- Forward ownership flow shares proven immutable-node equality with LIR and
+  predecessor-first SCC ranking with `hirsel-graph`. RPO arrival order keeps
+  balanced join pairing and first credits stable. The existing Perceus and
+  cleanup corpora compare final states with the original solver and element-wise
+  joins under the `testing` feature.
 
 ## Append fusion (`append_into`)
 

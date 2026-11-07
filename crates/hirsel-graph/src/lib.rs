@@ -165,6 +165,18 @@ pub fn components(succ: &[Vec<usize>]) -> Vec<Vec<usize>> {
     components_of(&(0..succ.len()).collect::<Vec<_>>(), |b| succ[b].clone())
 }
 
+/// Each node's SCC rank in predecessor-first order. Nodes in one component
+/// share a rank; reverse postorder can break ties within the component.
+pub fn component_ranks(succ: &[Vec<usize>]) -> Vec<usize> {
+    let mut ranks = vec![0; succ.len()];
+    for (rank, members) in components(succ).into_iter().rev().enumerate() {
+        for member in members {
+            ranks[member] = rank;
+        }
+    }
+    ranks
+}
+
 // The same iterative Tarjan walk also handles induced subgraphs during loop
 // decomposition. `next` must stay inside `nodes`.
 fn components_of(nodes: &[usize], next: impl Fn(usize) -> Vec<usize>) -> Vec<Vec<usize>> {

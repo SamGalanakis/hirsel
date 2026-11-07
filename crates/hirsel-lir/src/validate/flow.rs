@@ -175,16 +175,7 @@ pub(super) fn solve_cached<T: Clone>(
         .iter()
         .map(|outs| outs.iter().map(|out| out.target.index()).collect())
         .collect();
-    let mut component = vec![0; cfg.succ.len()];
-    for (order, members) in hirsel_graph::components(&adjacent)
-        .into_iter()
-        .rev()
-        .enumerate()
-    {
-        for member in members {
-            component[member] = order;
-        }
-    }
+    let component = hirsel_graph::component_ranks(&adjacent);
     let mut work = BTreeSet::from([(component[cfg.entry.index()], 0usize)]);
     while let Some((_, next)) = work.pop_first() {
         let block = cfg.rpo[next];

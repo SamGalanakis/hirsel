@@ -70,35 +70,37 @@ fn check_stage<S: Stage>(
 
 /// Lower, place, insert (and elide when optimizing), checking every stage.
 fn build(source: &str, mode: Mode) -> Built {
-    let (program, lowered) = lower_valid(source);
-    let operations = lowered.operation_registry(&program);
-    let table = lowered.table.clone();
-    assert_eq!(lowered.units.len(), lowered.unit_origins.len());
-    let placed: Vec<_> = lowered
-        .units
-        .into_iter()
-        .zip(&lowered.unit_origins)
-        .map(|(u, &origin)| {
-            let options = Options::for_instance(mode.regions, &lowered.instances, origin);
-            hirsel_rc::placement::place(u, &table, &options).expect("placement")
-        })
-        .collect();
-    check_stage(&program, &operations, &table, &placed, source);
-    let mut rc = Vec::new();
-    for (u, &origin) in placed.iter().zip(&lowered.unit_origins) {
-        let proofs = Proofs::for_instance(&lowered.instances, origin);
-        let mut r = hirsel_rc::insert::insert(u.clone(), &table, &proofs).expect("insertion");
-        if mode.optimize {
-            r = hirsel_rc::elide::elide(r, &table).expect("elision");
+    hirsel_lir::testing::with_reference_ownership(|| {
+        let (program, lowered) = lower_valid(source);
+        let operations = lowered.operation_registry(&program);
+        let table = lowered.table.clone();
+        assert_eq!(lowered.units.len(), lowered.unit_origins.len());
+        let placed: Vec<_> = lowered
+            .units
+            .into_iter()
+            .zip(&lowered.unit_origins)
+            .map(|(u, &origin)| {
+                let options = Options::for_instance(mode.regions, &lowered.instances, origin);
+                hirsel_rc::placement::place(u, &table, &options).expect("placement")
+            })
+            .collect();
+        check_stage(&program, &operations, &table, &placed, source);
+        let mut rc = Vec::new();
+        for (u, &origin) in placed.iter().zip(&lowered.unit_origins) {
+            let proofs = Proofs::for_instance(&lowered.instances, origin);
+            let mut r = hirsel_rc::insert::insert(u.clone(), &table, &proofs).expect("insertion");
+            if mode.optimize {
+                r = hirsel_rc::elide::elide(r, &table).expect("elision");
+            }
+            rc.push(r);
         }
-        rc.push(r);
-    }
-    check_stage(&program, &operations, &table, &rc, source);
-    Built {
-        operations,
-        rc,
-        table,
-    }
+        check_stage(&program, &operations, &table, &rc, source);
+        Built {
+            operations,
+            rc,
+            table,
+        }
+    })
 }
 
 fn execute(built: &Built) -> hirsel_heapcheck::Run {

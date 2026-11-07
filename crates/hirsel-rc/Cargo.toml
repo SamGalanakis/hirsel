@@ -5,6 +5,9 @@ edition.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 
+[features]
+testing = ["hirsel-lir/testing"]
+
 [dependencies]
 hirsel-codec = { path = "../hirsel-codec" }
 hirsel-validate = { path = "../hirsel-validate" }

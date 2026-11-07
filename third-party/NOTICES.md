@@ -1857,4 +1857,4 @@ POSSIBILITY OF SUCH DAMAGE.
 Git idx/MIDX and RocksDB/Lucene policies are conceptual references only;
 no Git (GPL-2.0), RocksDB or Lucene implementation code is copied here.
 
-- Native adjacent byte-set search adapts memchr 2.8.3 `src/arch/x86_64/sse2/packedpair.rs:139-158`, `src/arch/generic/packedpair.rs`, and aho-corasick 1.1.4 `src/packed/teddy/generic.rs:1030-1080` (MIT/Unlicense, `LICENSE.byte-search`). Exact nibble membership replaces approximate literal buckets; overlapping guarded loads replace shifts and boundary carries; one vector at a time replaces unrolling. Its scalar oracle covers byte sets, offsets and tails.
+- Native adjacent byte-set search adapts memchr 2.8.3 `src/arch/x86_64/sse2/packedpair.rs:139-158`, `src/arch/generic/packedpair.rs:269-283`, and aho-corasick 1.1.4 `src/packed/teddy/generic.rs:1030-1080` (MIT/Unlicense, `LICENSE.byte-search`). Exact nibble membership replaces approximate literal buckets; overlapping guarded loads replace shifts and boundary carries; one vector at a time replaces unrolling. Its scalar oracle covers byte sets, offsets and tails.

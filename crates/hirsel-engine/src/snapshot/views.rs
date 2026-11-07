@@ -22,7 +22,12 @@ mod tests {
             Arc::new(
                 ViewTable::new(
                     &types,
-                    rows,
+                    rows.into_iter()
+                        .chain(["Arena", "$intrinsic.heap"].map(|name| {
+                            registry
+                                .get(DefId::intern(&hirsel_syntax::DefPath::core(name)))
+                                .unwrap()
+                        })),
                     None,
                     &mut ValidatedSignatures::default(),
                     None,

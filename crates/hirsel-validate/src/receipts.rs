@@ -3265,7 +3265,7 @@ mod tests {
         assert!(report.violations.is_empty(), "{report:?}");
         assert!(reads.iter().any(|r| matches!(
             r,
-            VRead::HeapRole(crate::HeapObservation::SelectedHeap { .. })
+            VRead::HeapRole(heap) if matches!(**heap, crate::HeapObservation::SelectedHeap { .. })
         )));
         let accepted = accepted.unwrap();
         let package = path("main").0.package;

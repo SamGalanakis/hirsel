@@ -21,6 +21,28 @@ use std::sync::{Arc, OnceLock};
 )]
 pub struct ValidationDigest(pub ContentHash);
 
+/// A canonical path whose in-memory names belong to the session interner.
+/// The codec always writes the complete path, including package and version,
+/// independently of any surrounding process-local definition numbering scope.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Ord, PartialOrd)]
+pub struct HeapPath(DefId);
+impl HeapPath {
+    pub fn path(&self) -> &'static hirsel_syntax::DefPath {
+        self.0.path()
+    }
+}
+impl serde::Serialize for HeapPath {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serde::Serialize::serialize(self.path(), serializer)
+    }
+}
+impl<'de> serde::Deserialize<'de> for HeapPath {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let path = <hirsel_syntax::DefPath as serde::Deserialize>::deserialize(deserializer)?;
+        Ok(Self(DefId::intern(&path)))
+    }
+}
+
 /// Canonical evidence for the ambient heap in one exact signature environment.
 #[derive(
     serde::Serialize, serde::Deserialize, Clone, Debug, Eq, PartialEq, Hash, Ord, PartialOrd,
@@ -28,22 +50,16 @@ pub struct ValidationDigest(pub ContentHash);
 pub enum HeapObservation {
     None,
     SelectedHeap {
-        arena_path: hirsel_syntax::DefPath,
-        operation_path: hirsel_syntax::DefPath,
+        arena_path: HeapPath,
+        operation_path: HeapPath,
         arena_view_digest: ValidationDigest,
         operation_view_digest: ValidationDigest,
     },
 }
 impl HeapObservation {
     pub(crate) fn retained_payload_bytes(&self) -> Option<u64> {
-        match self {
-            Self::None => Some(0),
-            Self::SelectedHeap {
-                arena_path,
-                operation_path,
-                ..
-            } => path_bytes(arena_path)?.checked_add(path_bytes(operation_path)?),
-        }
+        // Interned path backing is session-owned, as for ordinary V view reads.
+        Some(0)
     }
     pub fn role(&self) -> Option<HeapRole> {
         match self {
@@ -53,8 +69,8 @@ impl HeapObservation {
                 operation_path,
                 ..
             } => Some(HeapRole {
-                arena: arena_path.clone(),
-                operation: operation_path.clone(),
+                arena: arena_path.path().clone(),
+                operation: operation_path.path().clone(),
             }),
         }
     }
@@ -64,7 +80,7 @@ impl HeapObservation {
     }
 }
 
-fn path_bytes(path: &hirsel_syntax::DefPath) -> Option<u64> {
+pub(crate) fn path_bytes(path: &hirsel_syntax::DefPath) -> Option<u64> {
     let item = &path.0;
     let bytes = item
         .package
@@ -81,7 +97,9 @@ fn path_bytes(path: &hirsel_syntax::DefPath) -> Option<u64> {
 pub(crate) fn read_payload_bytes(reads: &[VRead]) -> Option<u64> {
     reads.iter().try_fold(0u64, |bytes, read| {
         bytes.checked_add(match read {
-            VRead::HeapRole(heap) => heap.retained_payload_bytes()?,
+            VRead::HeapRole(heap) => {
+                (size_of::<HeapObservation>() as u64).checked_add(heap.retained_payload_bytes()?)?
+            }
             _ => 0,
         })
     })
@@ -106,12 +124,35 @@ pub(crate) fn observe_heap(
     types: Option<&TypeInterner>,
     signatures: &dyn SignatureLookup,
 ) -> Result<HeapObservation, ViewRefusal> {
-    heap_evidence(types, signatures, |_| {})
+    heap_evidence(
+        types,
+        signatures,
+        |_| {},
+        |t, d, s, lookup| check_view(t, d, s, lookup),
+    )
+}
+pub(crate) fn prepare_heap(
+    signatures: &dyn SignatureLookup,
+    store: &mut ValidatedSignatures,
+    old: Option<&ValidatedSignatures>,
+) -> Result<HeapObservation, ViewRefusal> {
+    heap_evidence(
+        None,
+        signatures,
+        |_| {},
+        |t, d, _, lookup| store.verdict_from(t, d, lookup, old).map(|v| (*v).clone()),
+    )
 }
 fn heap_evidence(
     types: Option<&TypeInterner>,
     signatures: &dyn SignatureLookup,
     mut record: impl FnMut(VRead),
+    mut verdict: impl FnMut(
+        &TypeInterner,
+        DefId,
+        &Signature,
+        &dyn SignatureLookup,
+    ) -> Result<ViewVerdict, ViewRefusal>,
 ) -> Result<HeapObservation, ViewRefusal> {
     let Some(role) = signatures.heap_role()? else {
         return Ok(HeapObservation::None);
@@ -149,7 +190,7 @@ fn heap_evidence(
     }
     // Declaration evidence is checked here in the observing environment.
     for (d, signature) in [(arena, &*a_signature), (operation, &*o_signature)] {
-        let verdict = check_view(a.types, d, signature, signatures)?;
+        let verdict = verdict(a.types, d, signature, signatures)?;
         if verdict.error.is_some() {
             return Err(ViewRefusal::Stale { definition: d });
         }
@@ -158,8 +199,8 @@ fn heap_evidence(
         }
     }
     Ok(HeapObservation::SelectedHeap {
-        arena_path: role.arena,
-        operation_path: role.operation,
+        arena_path: HeapPath(arena),
+        operation_path: HeapPath(operation),
         arena_view_digest: a.digest(),
         operation_view_digest: o.digest(),
     })
@@ -421,7 +462,7 @@ pub enum VRead {
     /// A signature V looked for and did not find.
     Missing(DefId),
     /// The selected role and the exact declarations that establish it.
-    HeapRole(HeapObservation),
+    HeapRole(Box<HeapObservation>),
     /// The aggregate of every signature error in the universe.
     UniverseErrors(ContentHash),
 }
@@ -537,7 +578,19 @@ pub(crate) fn observe_read(
                 .then(|| VRead::View(*d, view.digest()))
         }
         VRead::Missing(d) => signatures.view(*d).is_none().then_some(VRead::Missing(*d)),
-        VRead::HeapRole(_) => observe_heap(types, signatures).ok().map(VRead::HeapRole),
+        VRead::HeapRole(_) => {
+            let heap = signatures.heap_observation().ok()?;
+            if let Some(types) = types
+                && let Some(role) = heap.role()
+            {
+                for path in [&role.arena, &role.operation] {
+                    if !signatures.view(DefId::intern(path))?.for_types(types) {
+                        return None;
+                    }
+                }
+            }
+            Some(VRead::HeapRole(Box::new(heap)))
+        }
         VRead::UniverseErrors(_) => Some(VRead::UniverseErrors(signatures.universe_errors().0)),
     }
 }
@@ -643,12 +696,19 @@ impl<'a> Reader<'a> {
     pub(crate) fn heap_role(&self) -> Option<HeapRole> {
         self.heap
             .get_or_init(|| {
-                match heap_evidence(Some(self.types), self.signatures, |read| {
-                    self.reads.borrow_mut().insert(read);
-                }) {
+                match heap_evidence(
+                    Some(self.types),
+                    self.signatures,
+                    |read| {
+                        self.reads.borrow_mut().insert(read);
+                    },
+                    |t, d, s, lookup| check_view(t, d, s, lookup),
+                ) {
                     Ok(observation) => {
                         let role = observation.role();
-                        self.reads.borrow_mut().insert(VRead::HeapRole(observation));
+                        self.reads
+                            .borrow_mut()
+                            .insert(VRead::HeapRole(Box::new(observation)));
                         role
                     }
                     Err(refusal) => {

@@ -1434,7 +1434,7 @@ fn a_change_in_heap_role_selection_invalidates() {
     );
     assert!(reads.iter().any(|r| matches!(
         r,
-        VRead::HeapRole(hirsel_validate::HeapObservation::SelectedHeap { .. })
+        VRead::HeapRole(heap) if matches!(**heap, hirsel_validate::HeapObservation::SelectedHeap { .. })
     )));
     assert!(
         reads
@@ -1442,18 +1442,32 @@ fn a_change_in_heap_role_selection_invalidates() {
             .filter(|r| matches!(r, VRead::HeapRole(_)))
             .all(|r| read_holds(r, &f.signatures))
     );
+    let observation = reads
+        .iter()
+        .find_map(|read| match read {
+            VRead::HeapRole(heap) => Some(&**heap),
+            _ => None,
+        })
+        .unwrap();
+    let encoded = bincode::serialize(observation).unwrap();
+    let mut numbering = hirsel_intern::persist::Numbering::default();
+    assert_eq!(
+        encoded,
+        hirsel_syntax::with_def_numbering(&mut numbering, || bincode::serialize(observation)
+            .unwrap())
+    );
     // A role earlier in path order is selected instead.
     f.signatures.insert(id("Aaa"), heap("Aaa"));
     assert!(!reads.iter().all(|read| read_holds(read, &f.signatures)));
     // Without any role, the selection is a read of absence.
     let mut none = SignatureMap::new(session());
     assert!(read_holds(
-        &VRead::HeapRole(hirsel_validate::HeapObservation::None),
+        &VRead::HeapRole(Box::new(hirsel_validate::HeapObservation::None)),
         &none
     ));
     none.insert(id("Zzz"), heap("Zzz"));
     assert!(!read_holds(
-        &VRead::HeapRole(hirsel_validate::HeapObservation::None),
+        &VRead::HeapRole(Box::new(hirsel_validate::HeapObservation::None)),
         &none
     ));
 }

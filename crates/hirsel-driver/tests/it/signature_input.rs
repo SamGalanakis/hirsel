@@ -968,9 +968,9 @@ fn dependency_universe_summary_without_local_verifier_is_ignored() {
         forged.heap = hirsel_validate::HeapObservation::None;
         let summary = forged.encode().unwrap();
         let forged_bytes = bincode::serialize(&(summary.clone(), summary)).unwrap();
-        let mut universe_products = products
-            .take()
-            .into_values()
+        let stored = products.take();
+        let mut universe_products = stored
+            .values()
             .filter_map(|bytes| {
                 let (address, action, reference): (
                     hirsel_syntax::ContentHash,
@@ -1005,7 +1005,7 @@ fn dependency_universe_summary_without_local_verifier_is_ignored() {
             .expect("remote store retains the planted summary bytes");
         assert_eq!(planted.as_ref(), forged_bytes.as_slice());
 
-        let old_domain = Arc::new(store::MemStore::default());
+        let old_domain = Arc::new(store::DirStore::new(dir.path().join("old-domain")));
         assert!(old_domain.verifier().is_some());
         old_domain.cache_product(
             address,
@@ -1014,7 +1014,10 @@ fn dependency_universe_summary_without_local_verifier_is_ignored() {
                 kind: reference.domain.kind,
                 schema: 1,
             },
-            &forged_bytes,
+            stored
+                .values()
+                .find(|bytes| reference.domain.reference(bytes) == Some(reference))
+                .expect("original universe bytes"),
         );
         for selected in [remote, old_domain as Arc<dyn store::ResultStore>] {
             let path = dir.path().join("main.hir");

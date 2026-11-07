@@ -177,20 +177,7 @@ impl Installed {
 }
 
 fn heap_bytes(heap: &HeapRole) -> Option<u64> {
-    [&heap.arena, &heap.operation]
-        .into_iter()
-        .try_fold(0u64, |n, path| {
-            let n = n.checked_add(
-                (path.0.package.name.capacity()
-                    + path.0.package.version.capacity()
-                    + path.0.name.capacity()
-                    + path.0.modules.capacity() * size_of::<String>()) as u64,
-            )?;
-            path.0
-                .modules
-                .iter()
-                .try_fold(n, |n, module| n.checked_add(module.capacity() as u64))
-        })
+    crate::input::path_bytes(&heap.arena)?.checked_add(crate::input::path_bytes(&heap.operation)?)
 }
 
 /// The public universe of one snapshot, with V's verdict on every view.
@@ -286,7 +273,7 @@ impl ViewTable {
             stamp: EnvironmentStamp::new(t, store),
             _retention: None,
         };
-        table.heap_evidence = table.heap_observation()?;
+        table.heap_evidence = crate::input::prepare_heap(&table, store, old)?;
         let verdicts: Vec<_> = table
             .views
             .iter()
@@ -424,7 +411,7 @@ impl SignatureLookup for ViewTable {
         Ok(self.heap_role.clone())
     }
     fn heap_observation(&self) -> Result<crate::HeapObservation, ViewRefusal> {
-        crate::input::observe_heap(None, self)
+        Ok(self.heap_evidence.clone())
     }
     fn universe_errors(&self) -> (ContentHash, &[Violation]) {
         (self.errors.digest, &self.errors.errors)
@@ -791,7 +778,7 @@ impl PackageViews {
             input_digest: OnceLock::new(),
             stamp: EnvironmentStamp::new(t, store),
         };
-        views.heap_evidence = views.heap_observation()?;
+        views.heap_evidence = crate::input::prepare_heap(&views, store, old)?;
         let verdicts: DefMap<_> = again
             .iter()
             .map(|&d| Ok((d, store.verdict_from(t, d, &views, old)?)))
@@ -835,7 +822,7 @@ impl SignatureLookup for PackageViews {
         Ok(self.heap_role.clone())
     }
     fn heap_observation(&self) -> Result<crate::HeapObservation, ViewRefusal> {
-        crate::input::observe_heap(None, self)
+        Ok(self.heap_evidence.clone())
     }
     fn universe_errors(&self) -> (ContentHash, &[Violation]) {
         (self.errors.digest, &self.errors.errors)

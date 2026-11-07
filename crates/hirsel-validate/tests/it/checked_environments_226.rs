@@ -222,7 +222,7 @@ fn checked_environment_preserves_equal_heap_roles_and_rejects_changed_evidence()
     let evidence = evidence.unwrap();
     assert!(evidence.reads().iter().any(|read| matches!(
         read,
-        VRead::HeapRole(hirsel_validate::HeapObservation::SelectedHeap { .. })
+        VRead::HeapRole(heap) if matches!(**heap, hirsel_validate::HeapObservation::SelectedHeap { .. })
     )));
     let mut earlier = function_signature("0provider", vec![], TypeKind::Tuple(vec![].into()));
     earlier.metadata.roles = rows

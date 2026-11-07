@@ -82,9 +82,9 @@ mod typing;
 mod variant_brands;
 use input::Reader;
 pub use input::{
-    HeapObservation, IdentifiedSignature, Pin, SignatureLookup, SignatureMap, SignatureSource,
-    UniverseErrors, VRead, ValidatedSignatures, ValidationDigest, ViewInput, ViewRefusal,
-    ViewVerdict, check_view, digest, errors_digest, read_holds,
+    HeapObservation, HeapPath, IdentifiedSignature, Pin, SignatureLookup, SignatureMap,
+    SignatureSource, UniverseErrors, VRead, ValidatedSignatures, ValidationDigest, ViewInput,
+    ViewRefusal, ViewVerdict, check_view, digest, errors_digest, read_holds,
 };
 pub use instances::{
     InstanceViolation, validate_instance_bodies, validate_instance_catalog, validate_instance_rows,

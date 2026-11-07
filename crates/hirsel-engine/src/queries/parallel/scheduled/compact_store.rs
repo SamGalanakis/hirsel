@@ -224,6 +224,9 @@ impl FrontBodyQueries {
         outcome: &FrontOutcome,
         scratch: u64,
     ) -> Option<Reference> {
+        if self.store.persistence().retains() {
+            return None;
+        }
         self.store
             .archive_encoded(hirsel_engine_store::ArchiveBoundary::RequiredSpill);
         let bytes = self.encode_terminal(key, outcome, scratch)?;

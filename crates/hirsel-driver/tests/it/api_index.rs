@@ -59,12 +59,11 @@ fn published_index_matches_every_core_and_std_export() {
                 }
             }
         }
-        // Use the real package loader, independently of the generator's manifest reader.
-        let program = hirsel_front_phases::load_program_source(
-            &root.join("crates/hirsel-driver/tests/fixtures/std_source/main.hir"),
-            Some(""),
-        )
-        .unwrap();
+        // Enumerate source exports through the package loader without a launch
+        // dependency on installed executable products. Documentation reads headers.
+        let program = hirsel_front_phases::COMPILER
+            .load_package_declarations(&root.join("stdlib/std@1/hirsel.json"))
+            .unwrap();
         let mut engine = program.engine;
         for (file, context) in program.files {
             if !context.package.package_is("std", "1")

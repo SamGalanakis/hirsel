@@ -1037,6 +1037,76 @@ fn demanded_private_headers_preserve_canonical_records_under_cache_verification(
             assert_eq!(output.completion, CheckCompletion::Complete);
             assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
         }
+
+        // Native preparation follows Check and TIR through an installed
+        // dependency. Its indexed variant match must retain the source proof's
+        // complete sibling inputs, including the unrelated public variant.
+        let source = "pub type Unused = Left | Right\ntype Occurrence = Absent | Present\nfn number(status:List[Occurrence])->u32{match status[0]{Absent()=>1u32,Present()=>2u32}}\nfn helper()->String{if number([Absent()])==1u32{\"one\"}else{\"\"}}\npub fn main()->unique String{helper()}\n";
+        std::fs::write(directory.path().join("main.hir"), source).unwrap();
+        let products = directory.path().join("products");
+        std::fs::write(&manifest, r#"{"schema":1,"package":{"name":"std","version":"1"},"sources":[{"path":"main.hir","module":[]}],"dependencies":[],"entry":{"module":[],"name":"main"}}"#).unwrap();
+        COMPILER.precompute_package(&manifest, &products).unwrap();
+        let client = directory.path().join("client.json");
+        std::fs::write(
+            directory.path().join("client.hir"),
+            "pub fn main()->unique String{std@1/main()}\n",
+        )
+        .unwrap();
+        std::fs::write(&client, serde_json::json!({
+            "schema":1,"package":{"name":"client","version":"1"},
+            "sources":[{"path":"client.hir","module":[]}],
+            "dependencies":[{"manifest":manifest,"package":{"name":"std","version":"1"},"expose":[]}],
+            "entry":{"module":[],"name":"main"}
+        }).to_string()).unwrap();
+        let config = CompileConfig {
+            store: Arc::new(
+                store::DirStore::new(directory.path().join("reader")).with_read_only_root(products),
+            ),
+            verify_store: store::VerifyStore::Recompute,
+            retention: hirsel_engine::memo::Retention::Batch,
+            jobs: hirsel_intern::jobs::Jobs::new(1),
+            ..Default::default()
+        };
+        let compiler = COMPILER.with_config(config.clone()).with_owned_engines();
+        let matrix = hirsel_native_testing::smoke_matrix();
+        let toolchain =
+            hirsel_native_testing::toolchain_for_matrix(&directory.path().join("runtime"), &matrix)
+                .unwrap();
+        let selector = CompilerRequests::for_host(compiler.clone(), config.clone())
+            .with_toolchain(Arc::new(toolchain));
+        let limits = selector.input_limits();
+        let mut session = ObservedSession::new(client, compiler, config, selector, limits, 3);
+        for operation in [
+            CompileOperation::Check {
+                lowering: LoweringPolicy::Reachable,
+            },
+            CompileOperation::Tir { definition: None },
+            CompileOperation::NativeBuild(NativeRequest {
+                definition: None,
+                test_entries: vec![],
+                supplemental_sources: vec![],
+                output: NativeOutput::Ready,
+                options: hirsel_native::BuildOptions::new(
+                    matrix[0].options.clone(),
+                    hirsel_native::Backend::Llvm,
+                    hirsel_native::OptLevel::Default,
+                ),
+                run: None,
+                fuel: false,
+                evidence: None,
+            }),
+        ] {
+            let output = session.request(operation).unwrap();
+            match &output.result {
+                CompileResult::Check(checked) => {
+                    assert_eq!(checked.completion, CheckCompletion::Complete);
+                    assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
+                }
+                CompileResult::Tir(_) | CompileResult::NativeReady(_) => {}
+                CompileResult::NativeError(error) => panic!("{error:?}"),
+                _ => panic!("unexpected cache-verification result"),
+            }
+        }
     });
 }
 

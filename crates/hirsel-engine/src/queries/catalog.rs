@@ -1180,62 +1180,16 @@ impl QueryEngine {
         self.retire_snapshot();
     }
     pub(crate) fn materialize(&mut self, path: &DefPath) -> Result<(), QueryError> {
-        if self.items.contains_key(path) {
-            let files: BTreeSet<_> = self
-                .catalog
-                .candidates
-                .get(path)
-                .into_iter()
-                .flatten()
-                .filter(|candidate| {
-                    !self.items[path]
-                        .iter()
-                        .any(|item| item.anchor == candidate.head.name.anchor)
+        if let Some(items) = self.items.get(path)
+            && self.catalog.candidates.get(path).is_none_or(|candidates| {
+                candidates.iter().all(|candidate| {
+                    self.declarations.has_file(candidate.file)
+                        && items
+                            .iter()
+                            .any(|item| item.anchor == candidate.head.name.anchor)
                 })
-                .map(|candidate| candidate.file)
-                .collect();
-            for file in files {
-                self.materialize_source(file)?;
-            }
-            return Ok(());
-        }
-        if self.declared(path) && self.installed_definition(path) {
-            let record = self
-                .installed_semantic_input(path, hirsel_engine_store::MAX_RECORD as u64)?
-                .ok_or(QueryError::NotImplemented)?;
-            let owner = self
-                .catalog
-                .installed
-                .get(&path.0.package)
-                .ok_or(QueryError::NotImplemented)?;
-            let bytes = owner
-                .content(
-                    record.ownership.body,
-                    hirsel_engine_store::MAX_RECORD as u64,
-                )
-                .map_err(|message| {
-                    QueryError::Operational(hirsel_types::OperationalFailure {
-                        operation: "installed body".into(),
-                        message,
-                    })
-                })?;
-            let records = crate::NativeRecords::new(
-                self.types.clone(),
-                self.result_store
-                    .clone()
-                    .ok_or(QueryError::NotImplemented)?,
-            );
-            let context = self.source_records();
-            let syntax = header_products::decode_installed_syntax(
-                self.header_products.as_deref(),
-                &records,
-                &context,
-                bytes,
-            )?;
-            if syntax.item.definition != *path || syntax.text_hash != record.implementation {
-                return Err(QueryError::NotImplemented);
-            }
-            self.materialize_bound_syntax(path, syntax, &context);
+            })
+        {
             return Ok(());
         }
         if let Some(inputs) = self.source_inputs.clone()

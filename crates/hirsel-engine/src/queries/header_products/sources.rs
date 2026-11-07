@@ -537,20 +537,25 @@ impl HeaderSources {
                     let indexed = engine.indexed_sources.contains_key(&file)
                         && engine.adapters.lexer.is_some()
                         && engine.adapters.parser.is_some();
+                    let written = written.remove(&file);
+                    let transport = written.as_ref().is_some_and(|items| {
+                        items.iter().any(|syntax| {
+                            syntax.item.generated.is_some()
+                                || engine.adapters.lexer.is_none()
+                                || engine.adapters.parser.is_none()
+                                || !engine.indexed_sources.contains_key(&file)
+                        })
+                    });
+                    // Reparseable sibling products must cover the full file.
+                    // Sparse installed bodies retain their individual owners.
+                    let written =
+                        written.filter(|items| transport || items.len() == bindings.len());
                     Arc::new(SyntaxOwner {
                         indexed,
                         bindings,
-                        transport: written.get(&file).is_some_and(|items| {
-                            items.iter().any(|syntax| {
-                                syntax.item.generated.is_some()
-                                    || engine.adapters.lexer.is_none()
-                                    || engine.adapters.parser.is_none()
-                                    || !engine.indexed_sources.contains_key(&file)
-                            })
-                        }),
+                        transport,
                         live: std::sync::Mutex::new(
                             written
-                                .remove(&file)
                                 .map(|items| {
                                     LiveSyntax::new(file, items, &engine.sources, |bytes| {
                                         if indexed {
@@ -806,9 +811,6 @@ impl HeaderSources {
         engine: &mut QueryEngine,
         path: &DefPath,
     ) -> Result<bool, QueryError> {
-        if engine.items.contains_key(path) {
-            return Ok(true);
-        }
         let Some(files) = self.by_definition.get(&DefId::intern(path)) else {
             return self
                 .parent

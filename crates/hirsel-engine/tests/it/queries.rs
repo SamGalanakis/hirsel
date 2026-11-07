@@ -738,7 +738,9 @@ fn front_compact_terminal_reuses_check_after_eviction() {
                             metadata
                         );
                     }
-                    census_rows += hirsel_intern::work::read(hirsel_intern::work::Counter::FrontSlotCensusRows) - census;
+                    census_rows += hirsel_intern::work::read(
+                        hirsel_intern::work::Counter::FrontSlotCensusRows,
+                    ) - census;
 
                     let mut actions = Vec::new();
                     for (name, query, product) in products.into_iter().rev() {
@@ -771,8 +773,10 @@ fn front_compact_terminal_reuses_check_after_eviction() {
                 }
             }
         }
-        assert_eq!(census_rows, 0,
-            "accounting a completed slot must not revisit unrelated observations");
+        assert_eq!(
+            census_rows, 0,
+            "accounting a completed slot must not revisit unrelated observations"
+        );
     });
 }
 

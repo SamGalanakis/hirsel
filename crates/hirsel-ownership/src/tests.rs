@@ -89,13 +89,36 @@ fn branch_moves_join_but_early_returns_do_not_reach_the_join() {
 }
 #[test]
 fn loops_reach_a_fixed_point_and_reinitialisation_repairs_a_move() {
-    for reinitialise in [false, true] {
+    for (reinitialise, conditional) in [(false, false), (true, false), (false, true), (true, true)]
+    {
         let mut f = Fixture::new();
         let fresh = f.literal(f.bytes);
         let x = f.bind(fresh, true);
         let read = f.read(x);
         let take = f.unary(UnaryOp::Take, read);
         let statement = f.stmt(hirsel_syntax::StmtKind::Expr(take));
+        let statement = if conditional {
+            let branch = f.expr(
+                ExprKind::Block {
+                    label: None,
+                    statements: vec![statement],
+                    tail: None,
+                },
+                f.unit,
+            );
+            let condition = f.literal(f.scalar);
+            let branch = f.expr(
+                ExprKind::If {
+                    condition,
+                    then_branch: branch,
+                    else_branch: None,
+                },
+                f.unit,
+            );
+            f.stmt(hirsel_syntax::StmtKind::Expr(branch))
+        } else {
+            statement
+        };
         let mut statements = vec![statement];
         if reinitialise {
             let read = f.read(x);

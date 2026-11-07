@@ -17,9 +17,11 @@ mod loans;
 mod parameter_parts;
 mod sealed;
 mod state;
+mod temporaries;
 mod worklist;
 use hirsel_modes::explain::{Cause, Explanation, Fact, Requirement};
 use loans::{Kind, Loan, LoanSet, On, Site};
+use temporaries::Temporaries;
 use worklist::Pending;
 
 const LIVE: u8 = 1;
@@ -930,7 +932,7 @@ impl std::ops::DerefMut for Slot {
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct State {
     slots: hirsel_types::rows::Rows<Slot>,
-    values: BTreeMap<ExprId, Value>,
+    values: Temporaries,
     iteration_loans: BTreeMap<ExprId, Place>,
     /// Storage an evaluated argument of a call not yet entered names: a
     /// `mut` place is reserved and a borrowed place is lent, and the call.
@@ -988,13 +990,13 @@ impl State {
         // The slot join reports its change directly. Compare only the values
         // we merge rather than deep-cloning every map in the incoming state.
         let mut changed = self.slots.join_cached(&other.slots, slots);
-        for (key, value) in &other.values {
-            if let Some(old) = self.values.get_mut(key) {
+        for (key, value) in other.values.iter() {
+            if let Some(old) = self.values.get_mut(&key) {
                 let before = old.clone();
                 old.join(value);
                 changed |= *old != before;
             } else {
-                self.values.insert(*key, value.clone());
+                self.values.insert(key, value.clone());
                 changed = true;
             }
         }
@@ -1365,7 +1367,7 @@ impl InitialStorage {
         }
         State {
             slots,
-            values: BTreeMap::new(),
+            values: Temporaries::new(checker.tree.expressions.len()),
             iteration_loans: BTreeMap::new(),
             argument_loans: BTreeMap::new(),
             argument_conflicts: BTreeSet::new(),
@@ -2832,7 +2834,7 @@ impl Checker<'_, '_> {
                 _ => None,
             };
             let consumed = matches!(plan.root, super::properties::ProjectionRoot::Value(root)
-                if !state.values.contains_key(&root) && self.tail_root_modes(state, root).is_none());
+                if state.values.get(&root).is_none() && self.tail_root_modes(state, root).is_none());
             let modes = if !consumed {
                 Some(self.physical_projection_modes(state, plan))
             } else {
@@ -3742,7 +3744,6 @@ impl Checker<'_, '_> {
         let released: Vec<ExprId> = state
             .values
             .keys()
-            .copied()
             .filter(|key| !live.contains(&Holder::Temporary(*key)))
             .collect();
         for key in released {
@@ -3782,8 +3783,8 @@ impl Checker<'_, '_> {
                 );
             }
         }
-        for (key, value) in &state.values {
-            if !self.property(*key).is_some_and(|p| p.plain) {
+        for (key, value) in state.values.iter() {
+            if !self.property(key).is_some_and(|p| p.plain) {
                 held.extend(self.reached_bindings(state, value));
             }
         }
@@ -7064,7 +7065,7 @@ impl Checker<'_, '_> {
                     // other above.
                     let evaluated: Vec<_> = arguments
                         .iter()
-                        .filter_map(|a| state.values.remove_entry(&a.value))
+                        .filter_map(|a| state.values.remove(&a.value).map(|value| (a.value, value)))
                         .collect();
                     for arg in arguments {
                         if let ExprKind::Unary {
@@ -7078,7 +7079,9 @@ impl Checker<'_, '_> {
                             break;
                         }
                     }
-                    state.values.extend(evaluated);
+                    for (expression, value) in evaluated {
+                        state.values.insert(expression, value);
+                    }
                 }
                 if !failed {
                     for (arg, requirement) in arguments.iter().zip(requirements) {
@@ -9334,11 +9337,18 @@ mod loan_tests {
     fn successor_forwarding_moves_last_new_state_and_keeps_original_joins() {
         let mut output = State {
             slots: hirsel_types::rows::Rows::new(Slot::default(), 4),
-            values: BTreeMap::from([(ExprId(3), Value::new(Modes::global()))]),
+            values: Temporaries::new(4),
             iteration_loans: BTreeMap::new(),
             argument_loans: BTreeMap::new(),
             argument_conflicts: BTreeSet::from([ExprId(9)]),
         };
+        output.values.insert(
+            ExprId(3),
+            Value::new(Modes {
+                uniqueness: Uniqueness::Unique,
+                ..Modes::global()
+            }),
+        );
         output.slots[1].available = LIVE;
         output.slots[1].value.modes.uniqueness = Uniqueness::Unique;
         output.slots[1].value.bound_by(2, Site::Frame);
@@ -9351,7 +9361,21 @@ mod loan_tests {
         previous.slots[1].available = MOVED;
         previous.slots[1].value.share();
         previous.values.get_mut(&ExprId(3)).unwrap().share();
+        assert_eq!(
+            output.values.get(&ExprId(3)).unwrap().modes.uniqueness,
+            Uniqueness::Unique
+        );
+        assert_eq!(
+            previous.values.get(&ExprId(3)).unwrap().modes.uniqueness,
+            Uniqueness::Aliased
+        );
+        let value_refs = std::rc::Rc::strong_count(&output.values.get(&ExprId(3)).unwrap().0);
         let retained = output.clone();
+        assert_eq!(
+            std::rc::Rc::strong_count(&output.values.get(&ExprId(3)).unwrap().0),
+            value_refs,
+            "a state snapshot must share its temporary rows",
+        );
         let rank = [3, 2, 1, 0];
         let routes: &[&[usize]] = &[
             &[],

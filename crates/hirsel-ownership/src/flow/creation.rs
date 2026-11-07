@@ -183,16 +183,22 @@ impl Checker<'_, '_> {
                 state.slots[index].value.envelope = None;
             }
         }
-        for value in state.values.values_mut() {
-            if value
-                .envelope
-                .as_ref()
-                .is_some_and(|other| !other.is_disjoint(&inputs))
-            {
-                value.envelope = None;
-            }
+        let invalidated: Vec<_> = state
+            .values
+            .iter()
+            .filter_map(|(expression, value)| {
+                value
+                    .envelope
+                    .as_ref()
+                    .is_some_and(|other| !other.is_disjoint(&inputs))
+                    .then_some(expression)
+            })
+            .collect();
+        for expression in invalidated {
+            state.values.get_mut(&expression).unwrap().envelope = None;
         }
     }
+
     fn transparent_creation(&self, expression: ExprId) -> bool {
         let Some(call) = self
             .source_rows

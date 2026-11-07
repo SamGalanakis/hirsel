@@ -159,7 +159,7 @@ impl Checker<'_, '_> {
                 .iter()
                 .any(|r| !state.slots[*r].value.parked.is_empty())
                 || state.values.iter().any(|(e, v)| {
-                    !self.property(*e).is_some_and(|p| p.plain)
+                    !self.property(e).is_some_and(|p| p.plain)
                         && !self.reached_bindings(state, v).is_disjoint(&roots)
                 })
             {

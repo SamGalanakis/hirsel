@@ -590,9 +590,13 @@ pub fn slice_reader(text: String, config: Config) -> Result[SliceReader, CsvErro
   if !delimiter_valid(config.delimiter) {
     return Error(InvalidDelimiter())
   }
-  // csv-core reader.rs:1254-1272 scans ordinary runs before resuming the DFA.
-  // The existing byte-set kernel performs that scan over a borrowed interval.
-  let special: List[u8] = [config.delimiter, b'\n', b'\r', b'"']
+  // csv-core reader.rs:1220-1237: classify the alphabet once per reader.
+  // Delimiters remain ordinary while inside a quoted field.
+  let mut special: List[u8] = std@1/list.filled(256, 0u8)
+  special[core@1/int.widen(config.delimiter)] = 2
+  special[10] = 1
+  special[13] = 1
+  special[34] = 1
   Ok(
     SliceReader(
       text: text,
@@ -716,14 +720,60 @@ fn slice_record(mut r: SliceReader) -> Result[bool, CsvError] uses {} {
       r.decoded = value
       return slice_width(r)
     }
-    // Delimiters are ordinary inside quotes. Stop before every byte that can
-    // change state; the strict transition below still consumes it individually.
-    if mode != 3 && byte != b'"' && byte != b'\r' && byte != b'\n' && (mode == 2 || byte != delimiter) {
-      let stop = core@1/bytes.find_any(
-        data,
-        if mode == 2 { b"\r\n\"" } else { special },
-        at + 1
-      )
+    // csv-core's class scan: ordinary bytes cannot change the state. Account
+    // for a whole run before returning to the delimiter/quote/CR/LF DFA.
+    let class = special[core@1/int.widen(byte)]
+    if mode != 3 && (class == 0 || mode == 2 && class == 2) {
+      let mut stop = at + 1
+      if mode == 2 {
+        // Four checked bytes share one remaining-length guard. A special
+        // byte stays unconsumed for the strict transition on the next pass.
+        while length - stop >= 4 {
+          if special[core@1/int.widen(data[stop])] == 1 {
+            break
+          }
+          if special[core@1/int.widen(data[stop + 1])] == 1 {
+            stop += 1
+            break
+          }
+          if special[core@1/int.widen(data[stop + 2])] == 1 {
+            stop += 2
+            break
+          }
+          if special[core@1/int.widen(data[stop + 3])] == 1 {
+            stop += 3
+            break
+          }
+          stop += 4
+        }
+        while stop < length && special[core@1/int.widen(data[stop])] != 1 {
+          stop += 1
+        }
+      } else {
+        // Four checked bytes share one remaining-length guard. A special
+        // byte stays unconsumed for the strict transition on the next pass.
+        while length - stop >= 4 {
+          if special[core@1/int.widen(data[stop])] != 0 {
+            break
+          }
+          if special[core@1/int.widen(data[stop + 1])] != 0 {
+            stop += 1
+            break
+          }
+          if special[core@1/int.widen(data[stop + 2])] != 0 {
+            stop += 2
+            break
+          }
+          if special[core@1/int.widen(data[stop + 3])] != 0 {
+            stop += 3
+            break
+          }
+          stop += 4
+        }
+        while stop < length && special[core@1/int.widen(data[stop])] == 0 {
+          stop += 1
+        }
+      }
       let count = stop - at
       if count > r.config.max_record_bytes - record_bytes {
         return Error(RecordTooLarge())

@@ -117,6 +117,35 @@ fn program(part: usize, only: Option<usize>) -> (String, hirsel_native::Observat
             &mut source,
         );
     }
+    if part == 0 && only.is_none_or(|wanted| wanted == 0) {
+        // Hand-derived rows catch shared-buffer offsets, a decoded field followed
+        // by an unchanged field, and multibyte boundaries on both sides of a comma.
+        let input = literal("é,\"a\"\"β\",界,\r\nx,\"y\"\"z\",é,tail");
+        let answer = format!(
+            "Ok([[\"é\", {}, \"界\", \"\"], [\"x\", {}, \"é\", \"tail\"]])",
+            literal("a\"β"),
+            literal("y\"z")
+        );
+        add(
+            "r587/borrowed-record-boundaries".into(),
+            format!("borrowed({input}, std@1/csv.default_config()) == {answer}"),
+            &mut source,
+        );
+        let data =
+            byte_literal("c3a92c22612222ceb2222ce7958c2c0d0a782c227922227a222cc3a92c7461696c");
+        add(
+            "r587/stream-record-boundaries".into(),
+            format!("fed({data}, [1u64, 1u64, 31u64], std@1/csv.default_config()) == {answer}"),
+            &mut source,
+        );
+        // C3 and A9 would join into valid UTF-8 if field ranges were concatenated
+        // without the ASCII boundary. Each individual field is invalid.
+        add(
+            "r587/invalid-across-fields".into(),
+            "fed(bytes.from_list([195u8, 44u8, 169u8, 10u8]), [4u64], std@1/csv.default_config()) == Error(InvalidUtf8())".into(),
+            &mut source,
+        );
+    }
     if part < 48 {
         for (index, case) in manifest["cases"]
             .as_array()

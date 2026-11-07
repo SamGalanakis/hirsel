@@ -34,7 +34,7 @@ pub type ReadError[E] = Source(E) | Csv(CsvError) | InvalidRead
 pub opaque type Reader: copyable + inert + noalloc_drop uses {} {
   config: Config,
   input: bufio.Reader,
-  row: List[String],
+  row: List[u64],
   field: List[u8],
   mode: u8,
   record_bytes: u64,
@@ -92,18 +92,21 @@ pub fn reader(config: Config) -> Result[Reader, CsvError] uses {} {
   )
 }
 
+// Go reader.go:439-459 / rust-csv StringRecord: validate one record buffer,
+// then retain byte ranges. ASCII separators prevent UTF-8 from joining across fields.
 fn finish_field(mut r: Reader) -> Result[(), CsvError] uses {} {
-  let field = replace(mut r.field, [])
-  let Ok(value) = core@1/string.from_bytes(core@1/bytes.from_list(take field)) else {
-    return Error(InvalidUtf8())
-  }
-  core@1/list.push(mut r.row, take value)
+  core@1/list.push(mut r.row, core@1/list.len(r.field))
+  core@1/list.push(mut r.field, r.config.delimiter)
   r.mode = 0
   Ok(())
 }
 
 fn finish_row(mut r: Reader) -> Result[Option[List[String]], CsvError] uses {} {
   finish_field(mut r)?
+  let data = core@1/bytes.from_list(replace(mut r.field, []))
+  let Some(record) = core@1/string.view_bytes(data) else {
+    return Error(InvalidUtf8())
+  }
   if let Some(width) = r.config.fields_per_record {
     if core@1/list.len(r.row) != width {
       return Error(
@@ -113,7 +116,17 @@ fn finish_row(mut r: Reader) -> Result[Option[List[String]], CsvError] uses {} {
       )
     }
   }
-  let row = replace(mut r.row, [])
+  let ends = replace(mut r.row, [])
+  let mut row: List[String] = []
+  let mut start: u64 = 0
+  for stop in ends {
+    let Some(field) = slice_text(record, start, stop) else {
+      core@1/failure.check(false, TextInvariant())
+      return Error(InvalidUtf8())
+    }
+    core@1/list.push(mut row, take field)
+    start = stop + 1
+  }
   r.record_bytes = 0
   Ok(Some(take row))
 }
@@ -701,7 +714,10 @@ fn slice_record(mut r: SliceReader) -> Result[bool, CsvError] uses {} {
       } else {
         slice_field(mut r.fields, mut r.count, start, stop, false)
       }
-      r.decoded = text.finish_valid(take output)
+      let Some(value) = core@1/string.view_bytes(core@1/bytes.from_list(take output)) else {
+        return Error(InvalidUtf8())
+      }
+      r.decoded = value
       return slice_width(r)
     }
     // csv-core's class scan: ordinary bytes cannot change the state. Account
@@ -826,7 +842,10 @@ fn slice_record(mut r: SliceReader) -> Result[bool, CsvError] uses {} {
   } else {
     slice_field(mut r.fields, mut r.count, start, stop, false)
   }
-  r.decoded = text.finish_valid(take output)
+  let Some(value) = core@1/string.view_bytes(core@1/bytes.from_list(take output)) else {
+    return Error(InvalidUtf8())
+  }
+  r.decoded = value
   slice_width(r)
 }
 

@@ -267,6 +267,9 @@ impl TableBuilder {
         builder
     }
     fn position(&mut self, id: TypeId) -> u32 {
+        if let Some(&position) = self.index.get(&id) {
+            return position;
+        }
         if !self.types.contains(id) {
             return MISSING;
         }
@@ -474,21 +477,20 @@ impl TypeId {
 
 impl serde::Serialize for TypeId {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        let types = SCOPE.with_borrow(|scopes| match scopes.last() {
-            Some(Scope::Grow(builder)) => Some(builder.types.clone()),
-            _ => None,
-        });
-        // Lazy rows may decode under another type scope. Resolve them before
-        // borrowing the growing table to assign their positions.
-        if let Some(types) = types
-            && !types.contains(*self)
-        {
-            return serializer.serialize_u32(MISSING);
-        }
+        let mut unresolved = None;
         let mut exhausted = false;
-        let position = SCOPE.with_borrow_mut(|scopes| match scopes.last_mut() {
+        let mut position = SCOPE.with_borrow_mut(|scopes| match scopes.last_mut() {
             Some(Scope::Encode(index)) => Some(index.get(self).copied().unwrap_or(MISSING)),
-            Some(Scope::Grow(builder)) => Some(builder.number(*self)),
+            Some(Scope::Grow(builder)) => {
+                if let Some(&position) = builder.index.get(self) {
+                    Some(position)
+                } else if builder.types.get_if_loaded(*self).is_some() {
+                    Some(builder.number(*self))
+                } else {
+                    unresolved = Some(builder.types.clone());
+                    None
+                }
+            }
             Some(Scope::Raw) => Some(self.raw_index()),
             Some(Scope::Collect {
                 ids,
@@ -506,6 +508,18 @@ impl serde::Serialize for TypeId {
             }
             _ => None,
         });
+        // Lazy rows can decode under another type scope. Only unnumbered,
+        // unloaded rows need to leave the scope borrow to resolve membership.
+        if let Some(types) = unresolved {
+            position = Some(if types.contains(*self) {
+                SCOPE.with_borrow_mut(|scopes| match scopes.last_mut() {
+                    Some(Scope::Grow(builder)) => builder.number(*self),
+                    _ => unreachable!("the growing table scope is restored after resolution"),
+                })
+            } else {
+                MISSING
+            });
+        }
         if exhausted {
             return Err(serde::ser::Error::custom(
                 "type collection admission exhausted",

@@ -14,6 +14,21 @@ pub(super) enum Transformation {
 }
 pub(super) type Transformations = crate::hashed::HashMap<(TypeId, Transformation), TypeId>;
 
+/// The live inputs read by transferred_type, operand_unique and global_operand.
+/// The place fixes its type, projection and receiving storage within one body.
+#[derive(Clone, Copy, Eq, Hash, PartialEq)]
+pub(super) struct OperandTransfer {
+    pub(super) place: u32,
+    pub(super) usage: u8,
+    pub(super) must: u8,
+    pub(super) shared: bool,
+    pub(super) current_unique: bool,
+    pub(super) ownership_conflict: bool,
+    pub(super) crossing: Option<bool>,
+    pub(super) unique_part: bool,
+    pub(super) receipt_path: bool,
+}
+
 pub(super) type Acquisitions =
     std::collections::BTreeMap<(u32, Option<u32>), Vec<(hirsel_tir::PlaceId, &'static str)>>;
 
@@ -45,6 +60,8 @@ pub(super) struct Scratch {
     pub(super) variant_inputs: Vec<std::cell::OnceCell<super::variant_brands::Inputs>>,
     /// Successful immutable row transformations, with a separate environment per body.
     pub(super) transformations: Vec<RefCell<Transformations>>,
+    /// Successful operand transformations, owned by this validation and body.
+    pub(super) transfers: Vec<RefCell<crate::hashed::HashMap<OperandTransfer, TypeId>>>,
     /// Per body: its structural property proofs (`proofs`).
     pub(super) proofs: Vec<RefCell<super::proofs::Proofs>>,
     /// Canonical Plain rows (`Checker::canonical_plain`), for every body.
@@ -77,6 +94,7 @@ impl Scratch {
             parameter_authorities: (0..bodies).map(|_| std::cell::OnceCell::new()).collect(),
             variant_inputs: (0..bodies).map(|_| std::cell::OnceCell::new()).collect(),
             transformations: (0..bodies).map(|_| RefCell::default()).collect(),
+            transfers: (0..bodies).map(|_| RefCell::default()).collect(),
             proofs: (0..bodies).map(|_| RefCell::default()).collect(),
             layouts: (0..bodies).map(|_| RefCell::default()).collect(),
             relations: (0..bodies).map(|_| RefCell::default()).collect(),

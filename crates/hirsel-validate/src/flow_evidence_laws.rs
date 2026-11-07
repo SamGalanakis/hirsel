@@ -112,10 +112,16 @@ fn projected_unique_transfers_keep_current_crossing_evidence() {
         with_model(&f, |checker, _, initial| {
             for proof in [None, Some(false), Some(true)] {
                 for usage in [UseKind::Take, UseKind::Copy] {
-                    for shared in [false, true] {
+                    for (shared, current_unique, unique_part) in
+                        (0..8).map(|bits| (bits & 1 != 0, bits & 2 != 0, bits & 4 != 0))
+                    {
                         let mut state = initial.clone();
                         state.shared.set(root as usize, shared);
-                        state.unique_parts[root as usize].set(&[crossing::Part::Field(1)], true);
+                        state.current_unique.set(root as usize, current_unique);
+                        if unique_part {
+                            state.unique_parts[root as usize]
+                                .set(&[crossing::Part::Field(1)], true);
+                        }
                         if let Some(proof) = proof {
                             state.crossing_parts[root as usize]
                                 .set(&[crossing::Part::Field(1)], proof);
@@ -127,18 +133,23 @@ fn projected_unique_transfers_keep_current_crossing_evidence() {
                             );
                         }
                         assert!(!state.must[root as usize].has(MustFacts::SENDABLE));
-                        assert!(!state.current_unique[root as usize]);
                         let value = Operand {
                             place: projected,
                             usage,
                         };
+                        let before = uniqueness::TRANSFER_COMPUTATIONS.with(std::cell::Cell::get);
                         let actual = checker.transferred_type(&state, &value, checker.t);
+                        assert_eq!(checker.transferred_type(&state, &value, checker.t), actual);
+                        let work =
+                            uniqueness::TRANSFER_COMPUTATIONS.with(std::cell::Cell::get) - before;
+                        assert!(work <= 1, "unchanged transfer computed {work} times");
                         let modes = &checker.t.row(actual).modes;
-                        let unique = usage == UseKind::Take && !shared;
+                        let unique =
+                            usage == UseKind::Take && !shared && (current_unique || unique_part);
                         assert_eq!(modes.uniqueness == Uniqueness::Unique, unique);
                         assert_eq!(
                             modes.sendability == Sendability::Sendable,
-                            unique && proof == Some(true),
+                            usage == UseKind::Take && !shared && proof == Some(true),
                             "{relation:?}, {proof:?}, {usage:?}, shared={shared}"
                         );
                         assert_eq!(modes.relation, relation);
@@ -147,6 +158,40 @@ fn projected_unique_transfers_keep_current_crossing_evidence() {
             }
         });
     }
+    let mut f = Fixture::unit();
+    let mut local = ty(TypeKind::Primitive(Primitive::String));
+    local.modes.relation = Relation::environment();
+    let local = f.definition.types.push(local);
+    let root = f.slot(TypeKind::Primitive(Primitive::String), Storage::Local);
+    f.body().locals[root as usize].ty = local;
+    f.body().places[root as usize].ty = local;
+    owner_sig(&mut f, &[]);
+    with_model(&f, |checker, _, initial| {
+        for bits in 0..8 {
+            let owned = bits & 1 != 0;
+            let global = bits & 2 != 0;
+            let conflict = bits & 4 != 0;
+            let mut state = initial.clone();
+            state.must.set_fact(root as usize, MustFacts::OWNED, owned);
+            state
+                .must
+                .set_fact(root as usize, MustFacts::GLOBAL, global);
+            state.ownership_conflicts.set(root as usize, conflict);
+            let value = Operand {
+                place: PlaceId(root),
+                usage: UseKind::Take,
+            };
+            let actual = checker.transferred_type(&state, &value, checker.t);
+            assert_eq!(
+                checker.t.row(actual).modes.relation,
+                if owned && global && !conflict {
+                    Relation::global()
+                } else {
+                    Relation::environment()
+                }
+            );
+        }
+    });
 }
 
 fn refresh(model: &Model, state: &mut State) {

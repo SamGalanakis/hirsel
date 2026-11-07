@@ -14,6 +14,11 @@ fn update_type(store: &TypeInterner, original: TypeId, row: hirsel_types::Type) 
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    pub(super) static TRANSFER_COMPUTATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 impl Checker<'_, '_> {
     fn transformed(
         &self,
@@ -147,6 +152,44 @@ impl Checker<'_, '_> {
         value: &Operand,
         store: &TypeInterner,
     ) -> TypeId {
+        if !std::ptr::eq(store, self.t) {
+            return self.compute_transferred_type(state, value, store);
+        }
+        let access = &self.body.places[value.place.0 as usize];
+        let root = access.root.0 as usize;
+        let path = crossing::path(&access.projection);
+        let input = crate::scratch::OperandTransfer {
+            place: value.place.0,
+            usage: value.usage as u8,
+            must: state.must[root].0,
+            shared: state.shared[root],
+            current_unique: state.current_unique[root],
+            ownership_conflict: state.ownership_conflicts[root],
+            crossing: state.crossing_parts[root].get(&path),
+            unique_part: state.unique_parts[root].get(&path) == Some(true),
+            receipt_path: self.scratch.receipt_paths[self.site.body.0 as usize]
+                .get()
+                .is_some_and(|paths| paths[value.place.0 as usize]),
+        };
+        let cache = &self.scratch.transfers[self.site.body.0 as usize];
+        if let Some(&answer) = cache.borrow().get(&input) {
+            return answer;
+        }
+        let answer = self.compute_transferred_type(state, value, store);
+        // Resource failures must be reported at each use, as in transformed.
+        if self.proof_errors.borrow().is_empty() {
+            cache.borrow_mut().insert(input, answer);
+        }
+        answer
+    }
+    fn compute_transferred_type(
+        &self,
+        state: &State,
+        value: &Operand,
+        store: &TypeInterner,
+    ) -> TypeId {
+        #[cfg(test)]
+        TRANSFER_COMPUTATIONS.with(|count| count.set(count.get() + 1));
         let root = self.body.places[value.place.0 as usize].root.0 as usize;
         let ty = self.place_type(value.place);
         let mut row = store.get(ty).unwrap().clone();

@@ -42,3 +42,24 @@ and reporting replay; they exclude the final model destructor, the enclosing
 definition's type checks and read finalization. Nested body invocations remain
 separate rows and can overlap their parent's interval. The timer is
 observational and never changes the validation policy.
+
+Operand type transfers reuse successful interned `TypeId` answers inside one
+validation and body. The key contains the place and use mode, the root's must
+facts, sharing, current uniqueness and ownership conflict, and the queried
+projection's crossing, unique-part and receipt-path facts. These are the live
+inputs read by `transferred_type`, `operand_unique` and `global_operand`.
+The place fixes the declared type, projection and receiving storage; signature
+views, generic declarations and static content eligibility stay fixed for the
+validation. An update to any keyed fact selects another answer. No entry state,
+producer certificate or inference memo is reused. Other type stores bypass the
+memo; tooling failures are not cached and still report at each use.
+
+The lookup/compute/publish structure follows Rust
+[`execution.rs:279-332`](https://github.com/rust-lang/rust/blob/a7c37f9f0ee5e93396106e9de20f4a86b4154e63/compiler/rustc_query_impl/src/execution.rs#L279).
+Unlike rustc's session query cache, this memo is single-threaded and dies with
+V's scratch store. Its key includes live operand facts instead of only a type
+and typing environment. Answers use the existing type interner's full equality;
+no structural equality is replaced by unchecked pointer identity. The existing
+projected-transfer law checks the independent uniqueness, crossing and lifetime
+tables while changing these facts, and bounds repeated unchanged transfers to
+one computation.

@@ -726,50 +726,10 @@ fn slice_record(mut r: SliceReader) -> Result[bool, CsvError] uses {} {
     if mode != 3 && (class == 0 || mode == 2 && class == 2) {
       let mut stop = at + 1
       if mode == 2 {
-        // Four checked bytes share one remaining-length guard. A special
-        // byte stays unconsumed for the strict transition on the next pass.
-        while length - stop >= 4 {
-          if special[core@1/int.widen(data[stop])] == 1 {
-            break
-          }
-          if special[core@1/int.widen(data[stop + 1])] == 1 {
-            stop += 1
-            break
-          }
-          if special[core@1/int.widen(data[stop + 2])] == 1 {
-            stop += 2
-            break
-          }
-          if special[core@1/int.widen(data[stop + 3])] == 1 {
-            stop += 3
-            break
-          }
-          stop += 4
-        }
         while stop < length && special[core@1/int.widen(data[stop])] != 1 {
           stop += 1
         }
       } else {
-        // Four checked bytes share one remaining-length guard. A special
-        // byte stays unconsumed for the strict transition on the next pass.
-        while length - stop >= 4 {
-          if special[core@1/int.widen(data[stop])] != 0 {
-            break
-          }
-          if special[core@1/int.widen(data[stop + 1])] != 0 {
-            stop += 1
-            break
-          }
-          if special[core@1/int.widen(data[stop + 2])] != 0 {
-            stop += 2
-            break
-          }
-          if special[core@1/int.widen(data[stop + 3])] != 0 {
-            stop += 3
-            break
-          }
-          stop += 4
-        }
         while stop < length && special[core@1/int.widen(data[stop])] == 0 {
           stop += 1
         }

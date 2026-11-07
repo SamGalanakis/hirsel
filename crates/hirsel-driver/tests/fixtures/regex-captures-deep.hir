@@ -23,5 +23,25 @@ pub fn main() -> Result[(), ()] {
   for span in caps.spans {
     failure.check(span == Some(regex.Span(start: 0, end: 1)), TextInvariant())
   }
+  // Class-only prefilters have no literal list. They must still reach the
+  // ordered matcher after false candidates and across ASCII/UTF-8 boundaries.
+  let Ok(classes) = regex.compile("[A-Z]suffix|[a-z]suffix|~suffix", 1000) else {
+    return Error(())
+  }
+  failure.check(
+    regex.find_all(classes, "\0!@\u{7f}Awrong?asuffix", 8, 18446744073709551615) == Ok(
+      [regex.Span(start: 11, end: 18)]
+    ),
+    TextInvariant()
+  )
+  let Ok(folded) = regex.compile("(?i)kzebra|szebra", 1000) else {
+    return Error(())
+  }
+  failure.check(
+    regex.find_all(folded, "\0_Kzebra", 8, 18446744073709551615) == Ok(
+      [regex.Span(start: 2, end: 10)]
+    ),
+    TextInvariant()
+  )
   Ok(())
 }

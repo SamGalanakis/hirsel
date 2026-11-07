@@ -236,10 +236,13 @@ fn next_candidate(plan: PrefixPlan, haystack: Bytes, from: u64) -> Option[u64] u
     return internal.substring.find_from(haystack, needle, search, from)
   }
   let size = core@1/bytes.len(haystack)
+  // Class/fold prefixes have no literal to confirm. Keep the predicate outside
+  // prefix_at so each candidate needs neither its call nor its borrowed plan.
+  let literals = core@1/list.len(plan.literals) != 0
   let mut cursor = from
   while cursor < size {
     let byte = haystack[cursor]
-    if (byte < 128 || byte >= 192) && prefix_has(plan, core@1/int.widen(byte)) && prefix_at(plan, haystack, cursor) {
+    if (byte < 128 || byte >= 192) && prefix_has(plan, core@1/int.widen(byte)) && (!literals || prefix_at(plan, haystack, cursor)) {
       return Some(cursor)
     }
     cursor += 1

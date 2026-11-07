@@ -21,21 +21,22 @@ Generated manifests, the registry, binaries and raw measurements live in ignored
 case-insensitive substring filter. Checksums include warmup and timed iterations;
 only timed iterations contribute to the printed duration. A mismatch exits 1.
 
-## Current compiler blocker
+## Current build status
 
 The runner uses the complete compiler bundle, pinned linker and runtime auditor.
 The Buck gate declares the installed std products its compiler needs.
 
-The full release package still stops while accepting the comptime JSON
-registrations with `generated syntax validation: V refused private execution in
-the current environment`. The first unreadable input is `langarena@1/invalid`;
-header source admission cannot retain 3849 bytes. A shared-cache reclamation
-candidate passed that contract but failed qualification and was not retained.
+The full 50-task release package remains unqualified. The retention repair
+measured as `63a6dff9` reaches CPU60 after 60.55 s without an executable, so
+incremental rebuilding and all 50 checksums remain pending. It does not
+reproduce the former 240-byte header refusal before the limit.
 
-The gate using installed std products separately stops at
-`native source selection: generated native catalogue input:
-langarena@1/json/point_from_json_reader`. CLBG and Json checksums remain blocked.
-Keep all five derivations, all 50 tasks and their checksum checks in place.
+The JSON-only registry builds successfully with that repair. `Json::Generate`,
+`Json::ParseDom` and `Json::ParseMapping` each pass their full-size checksum;
+the reported 1,009,097-byte header refusal is not reproduced in this
+fresh-cache subset build. These
+results use distinct registry and std-object policies. See the compile section
+of `RESULTS.md` for the measured source, limits and remaining boundary.
 
 ## Add a group
 

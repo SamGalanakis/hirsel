@@ -89,7 +89,44 @@ The shepherd reported that modes-flow-2 pinned CPU31 without the timing lock at 
 
 ## Compile observations
 
-### Current main, 2026-11-07
+### Retention repair, 2026-11-07
+
+Measured implementation `63a6dff9` on base `da9cc68f`, before rebasing the
+same ownership change over std-once-572. The introduced lifetime is traced to
+`02e2175d`; the build bisect is inconclusive because historical points hit
+CPU60 or could not prepare matching std products. This is not a proved first
+failing LangArena commit.
+
+| Full 50-task package | Hirsel cold wall s | Hirsel incremental | Cargo cold wall s | Cargo incremental wall s |
+| --- | ---: | --- | ---: | ---: |
+| First lifetime fix `92bcf81d` | 30.63, header refusal | not attempted | 27.637 | 3.783 |
+| Synchronous demand scopes `63a6dff9` | 60.55, CPU60/exit 137 | not attempted | 27.637 | 3.783 |
+
+Cargo values reuse compile-rust-576's completed single observations below;
+Cargo was not rerun. The final Hirsel attempt uses a fresh cache,
+`HIRSEL_STD_OBJECTS=none`, release LLVM, two jobs, CPUs 0-11/16-27,
+`tools/capped`, CPU60/process, 2 GiB and wall300. Matching std products were
+produced by the same release compiler under 2 GiB/jobs1/wall300; the checked
+producer was stopped after an incomplete long run. The release std producer
+succeeded in 120.0 s. Toolchain production is outside compile timing.
+
+No full-package executable was produced, so there is no accepted incremental
+rebuild, full 50-task checksum pass, or completed H/cargo ratio. The former
+240-byte refusal was not reproduced before the final CPU limit; that does
+not prove full-build clearance. Final cold instructions:u are 373,161,086,102
+and peak process RSS is 531,824 KiB.
+
+The separate JSON-only registry from runtime-std-575 now builds successfully
+in 34.98 s, with its original one-job/default-std-object policy. It includes
+`Json::Generate`, `Json::ParseDom` and `Json::ParseMapping`; each passes its
+unchanged full-size `run.js` checksum once. The reported 1,009,097-byte header
+refusal is not reproduced in this fresh-cache subset run. Shared causality
+with runtime-std-575's cache state was not isolated. This subset proof does
+not qualify the full package.
+Evidence and the remaining CPU-limit boundary are recorded under
+`/workspace/code/hirsel-briefs/langarena-build-577/REPORT.md`.
+
+### Baseline main, 2026-11-07
 
 Measured `7b6863844fcaf0eaba37c9305a2da232acc2a3e8` on the same Ryzen 9
 5950X host. One release attempt per cell follows `compare.py`: fresh Hirsel

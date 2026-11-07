@@ -89,6 +89,41 @@ The shepherd reported that modes-flow-2 pinned CPU31 without the timing lock at 
 
 ## Compile observations
 
+### Header-repaired optimization comparison, 2026-11-07
+
+The header lifetime repair submitted as `4f395a1c` landed as `bc68a7048cc5`.
+Source anchor `63377e5f` replays the ownership optimization on that base.
+The control reverses only compile-owners-579's read-reclamation and ownership
+copy-on-write changes; the optimized variant restores them. Benchmark inputs,
+release profile and pinned native inputs are unchanged within this pair.
+
+| Cold attempt | Wall s | instructions:u | Peak process RSS KiB | Result |
+| --- | ---: | ---: | ---: | --- |
+| Hirsel control | 3.606 | 20,261,363,198 | 261180 | V refused private artifacts; no executable |
+| Hirsel optimized | 3.473 | 20,256,298,153 | 263096 | V refused private artifacts; no executable |
+| Cargo, pinned upstream `3c9f84dd` / Rust 1.99.0 | 22.291 | 221,124,590,605 | 460704 | completed executable |
+
+Both Hirsel attempts use fresh caches, `HIRSEL_STD_OBJECTS=none`, release LLVM,
+two jobs, CPUs 0-11/16-27, `nice -n 10`, `tools/capped`, CPU60/process, 2 GiB
+and wall300. Each uses ordinary std products prepared by its exact release
+compiler under the existing 2 GiB/jobs1/wall300 setup recipe, outside timing.
+The control also refuses with the normal checked-produced bundle, after
+8.824 s and 60,349,977,197 instructions. Release preparation therefore does
+not resolve this boundary. Cargo dependencies are fetched outside timing;
+its target directory is initially absent.
+
+The common diagnostic is `generated syntax validation: V refused the private
+artifacts in the current environment`, emitted at
+`crates/hirsel-engine/src/queries/generation/accepted.rs:186` when execution
+receipt revalidation returns no acceptance. The underlying reason remains
+unlocalized. This is the first observed contract in this pair, before CPU60;
+no common cause with the historical CPU60 result is established. Refusal costs
+are not completed compile costs, so no H/cargo ratio or compile speedup is
+reported. Incremental builds are not attempted and zero of 50 full-package
+checksum bodies run. The earlier retention/CPU-limit receipts below remain
+historical evidence. Commands and statuses are under
+`/workspace/code/hirsel-briefs/compile-owners-579/REPORT.md`.
+
 ### Retention repair, 2026-11-07
 
 Measured implementation `63a6dff9` on base `da9cc68f`, before rebasing the

@@ -417,17 +417,23 @@ impl HeaderSources {
                 .as_ref()
                 .map_or(Ok(None), |parent| parent.siblings(syntax));
         };
-        let binding = (
-            DefId::intern(&syntax.item.definition),
-            syntax.text_hash,
-            syntax.anchor,
-            syntax.occurrence,
-        );
-        if owner
-            .bindings
-            .binary_search_by(|old| compare_binding(old, &binding))
-            .is_err()
-        {
+        // Siblings belong to the written declaration the requester stands at.
+        // Derived syntax (a generated body, its normalized header, a generator
+        // constant, a specialization) keeps that declaration's anchor but may
+        // rename it; only a generated body rehashes, folding the written hash
+        // into its generated text, so it is bound by its unchanged definition
+        // and occurrence instead.
+        let id = DefId::intern(&syntax.item.definition);
+        let stands = |&(definition, body, anchor, occurrence): &SyntaxBinding| {
+            anchor == syntax.anchor
+                && match syntax.item.generated {
+                    Some(hirsel_syntax::Generated::Body(_)) => {
+                        definition == id && occurrence == syntax.occurrence
+                    }
+                    _ => body == syntax.text_hash,
+                }
+        };
+        if !owner.bindings.iter().any(stands) {
             return Err(source_refusal("captured sibling binding changed"));
         }
         let guard = owner.live.lock().unwrap_or_else(|e| e.into_inner());

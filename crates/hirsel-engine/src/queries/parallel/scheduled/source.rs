@@ -381,6 +381,45 @@ mod tests {
         );
     }
     #[test]
+    fn live_siblings_admit_syntax_derived_from_a_captured_declaration() {
+        // Shaped as generation/syntax.rs Literal::finish and parse_literal make
+        // a `= comptime` body and its normalized header: the written anchor,
+        // a rehashed body or a renamed definition. Both stand in the captured
+        // file, so they read its written siblings.
+        let definitions = |items: &[Arc<ItemSyntax>]| {
+            items
+                .iter()
+                .map(|item| item.item.definition.clone())
+                .collect::<Vec<_>>()
+        };
+        for generated in [true, false] {
+            let (sources, written) = fixture();
+            let mut derived = (*written[2]).clone();
+            if generated {
+                derived.item.generated = Some(hirsel_syntax::Generated::Body(vec![]));
+                derived.text_hash = hirsel_syntax::ContentHash::of_parts(
+                    "hirsel.generated-item.v1",
+                    [written[2].text_hash.0.as_slice(), b"fn() -> u8 { 1u8 }"],
+                );
+            } else {
+                derived.item.definition.0.name = "answer$header".into();
+                derived.occurrence = 0;
+            }
+            let items = sources
+                .siblings(&derived)
+                .expect("derived syntax reads its declaration's siblings");
+            assert_eq!(definitions(&items), definitions(&written));
+        }
+
+        let (sources, written) = fixture();
+        let mut changed = (*written[2]).clone();
+        changed.text_hash = hirsel_syntax::ContentHash::of_bytes(b"pub fn answer() -> u8 { 2u8 }");
+        assert!(matches!(
+            sources.siblings(&changed),
+            Err(QueryError::Operational(failure)) if failure.message.contains("captured sibling binding changed")
+        ));
+    }
+    #[test]
     fn live_siblings_retry_operational_admission_refusals() {
         let (sources, written) = fixture();
         let available = *sources.retention.lock().unwrap();

@@ -248,19 +248,56 @@ fn grow(cx: &mut Cx<'_>) -> Result<LirUnit<Value>, PassError> {
     let (view, loan) = b.borrow(list.address, false)?;
     let capacity = b.seq_capacity(view)?;
     b.end_loan(loan);
-    let twice = b.add(ArithMode::Saturating, capacity, capacity);
     let four = b.u64(4)?;
-    let small = b.compare(BinaryOp::Lt, twice, four)?;
+    let small = b.compare(BinaryOp::Lt, capacity, four)?;
     let minimum = b.block(BlockKind::Body, &[]);
-    let doubled = b.block(BlockKind::Body, &[]);
+    let geometric = b.block(BlockKind::Body, &[]);
     let layout = b.u64_layout()?;
     let wanted = b.value(layout, Holding::Plain);
     let reserve = b.block(BlockKind::Body, &[wanted]);
-    b.branch(small, minimum, doubled);
+    b.branch(small, minimum, geometric);
     b.at(minimum);
     b.jump(reserve, &[four]);
-    b.at(doubled);
-    b.jump(reserve, &[twice]);
+    b.at(geometric);
+    // Rust 1.99.0 core/src/num/uint_macros.rs:3905-3917, applied to capacity + 1.
+    // Saturate overflow before shifting, as the preceding grow body did.
+    // Capacity includes allocator slack. Use the next geometric element
+    // count, in both checked H and native code, rather than double that slack.
+    let leading = b.value(layout, Holding::Plain);
+    b.push(Inst::ScalarUnary {
+        result: leading,
+        op: ScalarUnaryOp::LeadingZeros,
+        operand: capacity,
+    });
+    let width = b.u64(64)?;
+    let bits = b.value(layout, Holding::Plain);
+    let failure = b.failure(None);
+    b.push(Inst::Binary {
+        result: bits,
+        op: BinaryOp::Sub,
+        left: width,
+        right: leading,
+        failure,
+    });
+    let overflow = b.compare(BinaryOp::Eq, bits, width)?;
+    let maximum = b.block(BlockKind::Body, &[]);
+    let rounded = b.block(BlockKind::Body, &[]);
+    b.branch(overflow, maximum, rounded);
+    b.at(maximum);
+    let max = b.u64(u64::MAX)?;
+    b.jump(reserve, &[max]);
+    b.at(rounded);
+    let one = b.u64(1)?;
+    let next = b.value(layout, Holding::Plain);
+    let failure = b.failure(None);
+    b.push(Inst::Binary {
+        result: next,
+        op: BinaryOp::Shl,
+        left: one,
+        right: bits,
+        failure,
+    });
+    b.jump(reserve, &[next]);
     b.at(reserve);
     b.seq_reserve(list.address, wanted)?;
     ret_unit(&mut b);

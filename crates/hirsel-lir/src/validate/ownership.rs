@@ -189,6 +189,35 @@ pub(super) struct State {
     flag_phases: Rc<BTreeMap<(SlotId, Vec<Step>), Option<BTreeMap<Vec<Step>, u8>>>>,
 }
 
+/// The solver's exact equality with persistent-node proofs. Derived equality
+/// remains the independent comparison with the reference solver.
+fn same(a: &State, b: &State) -> bool {
+    let State {
+        defusing,
+        slots,
+        receipt_slots,
+        loans,
+        regions,
+        stale,
+        unplaced,
+        order,
+        parts,
+        flags,
+        flag_phases,
+    } = a;
+    defusing == &b.defusing
+        && slots.state_eq(&b.slots)
+        && receipt_slots == &b.receipt_slots
+        && loans.state_eq(&b.loans)
+        && regions.state_eq(&b.regions)
+        && stale == &b.stale
+        && unplaced == &b.unplaced
+        && order == &b.order
+        && parts == &b.parts
+        && flags == &b.flags
+        && flag_phases == &b.flag_phases
+}
+
 /// Whether a slot holds content: live and initialized.
 fn content(s: &SlotState) -> Tri {
     match (s.live, s.init) {
@@ -653,7 +682,7 @@ pub(super) fn check<S: Stage>(cx: &Cx<'_, S>, facts: &Facts, report: &mut Report
     #[cfg(feature = "testing")]
     let reference = crate::testing::reference_ownership_enabled()
         .then(|| flow::solve(&facts.cfg, init.clone(), &mut *transfer, reference_join));
-    let ins = flow::solve_cached(&facts.cfg, init, transfer, join);
+    let ins = flow::solve_cached(&facts.cfg, init, transfer, join, same);
     #[cfg(feature = "testing")]
     if let Some(reference) = reference {
         assert_eq!(

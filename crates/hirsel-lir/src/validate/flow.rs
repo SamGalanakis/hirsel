@@ -153,11 +153,12 @@ pub(super) fn solve<T: Clone + PartialEq>(
 /// The predecessor solver with unchanged balanced join subtrees retained
 /// across visits. Edge and block equality still determine convergence exactly;
 /// no old contribution is accumulated and no lattice identity is assumed.
-pub(super) fn solve_cached<T: Clone + PartialEq>(
+pub(super) fn solve_cached<T: Clone>(
     cfg: &Cfg,
     init: T,
     mut transfer: impl FnMut(BlockId, &T) -> Vec<(EdgeId, T)>,
     join: impl Fn(&mut T, &T),
+    same: impl Fn(&T, &T) -> bool,
 ) -> Vec<Option<T>> {
     let mut ins: Vec<Option<T>> = vec![None; cfg.succ.len()];
     let mut outs: Vec<Option<T>> = vec![None; cfg.source.len()];
@@ -182,7 +183,11 @@ pub(super) fn solve_cached<T: Clone + PartialEq>(
         for &(_, edge) in &cfg.preds[block.index()] {
             dirty[edge.index()] = false;
         }
-        if joined == ins[block.index()] {
+        if match (&joined, &ins[block.index()]) {
+            (Some(a), Some(b)) => same(a, b),
+            (None, None) => true,
+            _ => false,
+        } {
             continue;
         }
         ins[block.index()] = joined;
@@ -190,7 +195,10 @@ pub(super) fn solve_cached<T: Clone + PartialEq>(
             continue;
         };
         for (edge, out) in transfer(block, state) {
-            if outs[edge.index()].as_ref() == Some(&out) {
+            if outs[edge.index()]
+                .as_ref()
+                .is_some_and(|old| same(old, &out))
+            {
                 continue;
             }
             outs[edge.index()] = Some(out);

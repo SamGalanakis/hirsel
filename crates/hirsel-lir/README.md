@@ -24,7 +24,10 @@ options.
 between native backends.
 `persistent.rs` is the structure-sharing vector that
 dataflow states are built from, here and in `hirsel-rc`: a state costs what it
-changes, so an analysis stays near-linear in the size of a function.
+changes, so an analysis stays near-linear in the size of a function. Immutable
+rows can reuse structurally proven node equality between fixed-point visits.
+The proofs hold weak references and expire on writes; ordinary equality stays
+independent for differential checks against the reference solver.
 
 Allowed dependencies: the dependency-free `hirsel-graph` utility and shared data crates (`hirsel-span`, `hirsel-syntax`, `hirsel-core-contract`, `hirsel-codec`); no external production
 dependency. Never an implementation crate or `hirsel-driver`: the driver will

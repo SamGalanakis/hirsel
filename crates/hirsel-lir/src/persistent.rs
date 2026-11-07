@@ -23,7 +23,7 @@ use std::collections::HashSet;
 use std::fmt;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::ops::{Index, IndexMut};
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
 
 const BITS: u32 = 5;
 const WIDTH: usize = 1 << BITS;
@@ -54,7 +54,8 @@ fn size<T>(height: u32) -> usize {
     leaf_width::<T>() << (height * BITS)
 }
 
-/// An element of a joined state.
+/// An immutable dataflow row. Equality and flags stay unchanged until a
+/// write through the vector; shared references must not mutate the row.
 pub trait Element: Clone + PartialEq {
     /// The properties of this element that operations skip by, as bits
     /// below `0x80`: dead storage, an inactive loan, storage holding nothing.
@@ -67,7 +68,6 @@ pub trait Element: Clone + PartialEq {
 /// Set in a cached summary: the flags beside it are computed.
 const KNOWN: u8 = 0x80;
 
-#[derive(Clone)]
 struct Node<T> {
     kind: Kind<T>,
     /// `KNOWN` and the flags every element below has, computed on demand;
@@ -75,6 +75,21 @@ struct Node<T> {
     summary: Cell<u8>,
     /// The hash of everything below, computed on demand; zero after a write.
     hash: Cell<u64>,
+    /// A node found structurally equal. A weak reference keeps its address
+    /// valid without retaining its contents. `Rc::make_mut` detaches weak
+    /// references before any write, and `touch` clears this node's proof.
+    equal_to: Cell<Weak<Node<T>>>,
+}
+
+impl<T: Clone> Clone for Node<T> {
+    fn clone(&self) -> Self {
+        Self {
+            kind: self.kind.clone(),
+            summary: Cell::new(self.summary.get()),
+            hash: Cell::new(self.hash.get()),
+            equal_to: Cell::default(),
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -84,11 +99,19 @@ enum Kind<T> {
 }
 
 impl<T> Node<T> {
+    fn remembers(&self, other: &Rc<Self>) -> bool {
+        let peer = self.equal_to.take();
+        let same = peer.as_ptr() == Rc::as_ptr(other);
+        self.equal_to.set(peer);
+        same
+    }
+
     fn new(kind: Kind<T>) -> Rc<Self> {
         Rc::new(Self {
             kind,
             summary: Cell::new(0),
             hash: Cell::new(0),
+            equal_to: Cell::default(),
         })
     }
 
@@ -107,6 +130,7 @@ fn touch<T: Clone>(node: &mut Rc<Node<T>>) -> &mut Node<T> {
     let node = Rc::make_mut(node);
     node.summary.set(0);
     node.hash.set(0);
+    node.equal_to.set(Weak::new());
     node
 }
 
@@ -327,6 +351,12 @@ impl<T: Clone> PVec<T> {
 }
 
 impl<T: Element> PVec<T> {
+    /// Exact equality, remembering proven node pairs between fixed-point
+    /// visits. Unlike `PartialEq`, this uses the row's immutability contract.
+    pub fn state_eq(&self, other: &Self) -> bool {
+        self.len == other.len && equal::<T, true>(&self.root, &other.root, &mut None)
+    }
+
     /// Every element without `flag`, with its index, in order. Subtrees
     /// that have it throughout are skipped whole.
     pub fn lacking(&self, flag: u8) -> Vec<(usize, &T)> {
@@ -375,8 +405,13 @@ impl<T: Element> PVec<T> {
     }
 }
 
+/// Exact equality already proved for these immutable nodes, in either order.
+fn known_equal<T>(a: &Rc<Node<T>>, b: &Rc<Node<T>>) -> bool {
+    Rc::ptr_eq(a, b) || a.remembers(b) || b.remembers(a)
+}
+
 fn join<T: Element>(a: &mut Rc<Node<T>>, b: &Rc<Node<T>>, f: &mut impl FnMut(&mut T, &T)) -> bool {
-    if Rc::ptr_eq(a, b) || T::absorbs(a.flags(), b.flags()) {
+    if known_equal(a, b) || T::absorbs(a.flags(), b.flags()) {
         return false;
     }
     match (&a.kind, &b.kind) {
@@ -485,16 +520,16 @@ impl<T: PartialEq> PVec<T> {
     /// Equality, skipping every pair of nodes `matched` already holds and
     /// adding the pairs this comparison finds equal.
     pub fn matches<'a>(&'a self, other: &'a Self, matched: &mut Matched<'a, T>) -> bool {
-        self.len == other.len && equal(&self.root, &other.root, &mut Some(matched))
+        self.len == other.len && equal::<T, false>(&self.root, &other.root, &mut Some(matched))
     }
 }
 
-fn equal<T: PartialEq>(
+fn equal<T: PartialEq, const CACHED: bool>(
     a: &Rc<Node<T>>,
     b: &Rc<Node<T>>,
     matched: &mut Option<&mut Matched<'_, T>>,
 ) -> bool {
-    if Rc::ptr_eq(a, b) {
+    if Rc::ptr_eq(a, b) || (CACHED && (a.remembers(b) || b.remembers(a))) {
         return true;
     }
     let pair = (Rc::as_ptr(a), Rc::as_ptr(b));
@@ -504,19 +539,29 @@ fn equal<T: PartialEq>(
     let same = match (&a.kind, &b.kind) {
         (Kind::Leaf(xs), Kind::Leaf(ys)) => xs == ys,
         (Kind::Inner(xs), Kind::Inner(ys)) => {
-            xs.len() == ys.len() && xs.iter().zip(ys).all(|(x, y)| equal(x, y, matched))
+            xs.len() == ys.len()
+                && xs
+                    .iter()
+                    .zip(ys)
+                    .all(|(x, y)| equal::<T, CACHED>(x, y, matched))
         }
         _ => false,
     };
-    if same && let Some(matched) = matched {
-        matched.pairs.insert(pair);
+    if same {
+        if CACHED {
+            a.equal_to.set(Rc::downgrade(b));
+            b.equal_to.set(Rc::downgrade(a));
+        }
+        if let Some(matched) = matched {
+            matched.pairs.insert(pair);
+        }
     }
     same
 }
 
 impl<T: PartialEq> PartialEq for PVec<T> {
     fn eq(&self, other: &Self) -> bool {
-        self.len == other.len && equal(&self.root, &other.root, &mut None)
+        self.len == other.len && equal::<T, false>(&self.root, &other.root, &mut None)
     }
 }
 

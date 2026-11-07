@@ -232,6 +232,37 @@ fn from_bytes_transfers_the_same_nonzero_slice_on_both_utf8_outcomes() {
             unsafe {
                 let source = allocate_bytes(ctx.0, bytes);
                 let allocations = ctx.stats().backing_allocations;
+                let mut view = std::mem::MaybeUninit::uninit();
+                assert_eq!(
+                    hirsel_rt_v2_string_view_bytes(
+                        ctx.0,
+                        std::ptr::null_mut(),
+                        view.as_mut_ptr(),
+                        source.owner,
+                        source.start + start,
+                        length
+                    ),
+                    0
+                );
+                let view = view.assume_init();
+                if tag == 0 {
+                    assert_eq!(
+                        (view.owner, view.start, view.length),
+                        (source.owner, source.start + start, length)
+                    );
+                    assert_eq!(
+                        shown(view),
+                        &bytes[start as usize..(start + length) as usize]
+                    );
+                    assert_eq!((*source.owner).count, 2);
+                    release(&ctx, view.owner);
+                } else {
+                    assert!(view.owner.is_null());
+                    assert_eq!((view.start, view.length), (0, 0));
+                }
+                assert_eq!((*source.owner).count, 1);
+                assert_eq!(shown(source), bytes);
+                assert_eq!(ctx.stats().backing_allocations, allocations);
                 let mut out = std::mem::MaybeUninit::uninit();
                 assert_eq!(
                     hirsel_rt_v2_string_from_bytes(

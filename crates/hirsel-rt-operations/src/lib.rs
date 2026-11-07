@@ -167,6 +167,7 @@ pub fn classify(mut row: OperationRow) -> Result<OperationRow, String> {
         | "bytes.sha512"
         | "bytes.sha512_256"
         | "string.from_bytes"
+        | "string.view_bytes"
         | "string.slice"
         | "io.stdout"
         | "bytes.append"
@@ -1641,6 +1642,13 @@ pub const HIRSEL_ABI_EXPORTS: &[AbiExport] = &[
     },
     AbiExport {
         caller_site: false,
+        symbol: "hirsel_rt_v2_string_view_bytes",
+        destination: true,
+        result: Some((24, 8)),
+        parameters: &[Physical::Pointer, Physical::I64, Physical::I64],
+    },
+    AbiExport {
+        caller_site: false,
         symbol: "hirsel_rt_v2_string_from_bytes",
         destination: true,
         result: Some((32, 8)),
@@ -2840,6 +2848,7 @@ pub const NATIVE_PATHS: &[&str] = &[
     "string.positions",
     "string.scalars",
     "string.slice",
+    "string.view_bytes",
     "task.add",
     "task.async",
     "task.await",

@@ -319,6 +319,7 @@ N fn string.scalars(s: String) -> ScalarView in s
 N fn string.positions(s: String) -> PositionView of s in s
 N fn string.slice(s: String, start: StrPos of s, end: StrPos of s) -> String in s
 @preserves_unique(bytes) fn string.from_bytes(take bytes: Bytes) -> Result[String, Bytes]
+N fn string.view_bytes(data: Bytes) -> Option[String] in data
 fn bytes.base64_encode(data: Bytes, alphabet: Base64Alphabet, padding: Base64Padding) -> unique String uses {}
 fn bytes.base64_decode(data: Bytes, alphabet: Base64Alphabet, padding: Base64Padding) -> unique Option[Bytes] uses {}
 N fn bytes.sha1(data: Bytes) -> Inline[u8, 20] uses {}
@@ -1594,6 +1595,14 @@ allocates nothing and forwards no caller site. This is how source libraries, the
 library included, raise language failures; `bytes.replace`'s empty-pattern SEM-3, for
 example, is reported at its check site in the std source. A failure during cleanup keeps
 FAIL-3 shielding.
+
+`string.view_bytes` checks a borrowed byte interval once and returns a String
+view of exactly that interval on valid UTF-8, or `None` on invalid input. It
+allocates no storage and preserves the input's lifetime relation. Empty input
+succeeds. The String type carries the validation proof; `string.position` and
+`string.slice` then select boundary-aligned subviews without validating the
+buffer again. This constructor accepts borrowed input, including record buffers
+whose lifetime is tied to an input reader.
 
 **Low-level Base64 leaves.** `Base64Alphabet = Standard() | UrlSafe()` and
 `Base64Padding = Required() | Omitted()` are serializable plain configuration

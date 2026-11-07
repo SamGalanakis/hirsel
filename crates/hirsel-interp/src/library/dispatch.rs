@@ -2448,6 +2448,8 @@ primary_operations! { library, call, context, name, a, value;
             engine.decode(data).ok().map_or_else(none, |data| some(Value::Bytes(data)))
         }
     },
+    Primitive: "string.view_bytes" => std::str::from_utf8(bytes(arg(a, 0)?)?)
+        .ok().map_or_else(none, |text| some(Value::String(text.to_owned()))),
     Primitive: "string.from_bytes" => match String::from_utf8(bytes(arg(a, 0)?)?.to_vec()) {
                 Ok(s) => ok(Value::String(s)),
                 Err(e) => error(Value::Bytes(e.into_bytes())),

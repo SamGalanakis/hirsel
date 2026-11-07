@@ -1,3 +1,15 @@
+@noalloc
+fn borrowed(data: Bytes) -> Option[String] in data uses {} {
+  std@1/utf8.view(data)
+}
+
+fn decoded_buffer(source: Bytes) -> Option[String] in source uses {} {
+  let mut output: List[u8] = []
+  bytes.append(mut output, source)
+  let raw = bytes.from_list(take output)
+  std@1/utf8.view(raw)
+}
+
 fn owned() -> String {
   let mut input: List[u8] = [0u8, 194u8, 128u8, 239u8, 191u8, 189u8]
   let Ok(finished) = std@1/text.finish(copy input) else {
@@ -16,6 +28,16 @@ fn owned() -> String {
 }
 
 pub fn main() -> Result[(), ()] {
+  let source = b"prefix\xc3\xa9\xf0\x90\x80\x80TAIL"
+  let Some(validated) = borrowed(bytes.slice(source, 6, 12)) else { return Error(()) }
+  failure.check(validated == "é𐀀", TextInvariant())
+  failure.check(decoded_buffer(bytes.slice(source, 6, 12)) == Some("é𐀀"), TextInvariant())
+  let Some(first) = string.position(validated, 2) else { return Error(()) }
+  let Some(last) = string.position(validated, 6) else { return Error(()) }
+  failure.check(string.slice(validated, first, last) == "𐀀", TextInvariant())
+  failure.check(string.position(validated, 1) == None(), TextInvariant())
+  failure.check(borrowed(bytes.slice(source, 7, 12)) == None(), TextInvariant())
+  failure.check(source == b"prefix\xc3\xa9\xf0\x90\x80\x80TAIL", TextInvariant())
   let value = owned()
   failure.check(value == "é\0\u{80}�𐀀", TextInvariant())
   let raw = bytes.from_list([240u8, 144u8, 128u8, 128u8])

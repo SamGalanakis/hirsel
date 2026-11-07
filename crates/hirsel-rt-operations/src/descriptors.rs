@@ -1031,6 +1031,7 @@ pub const ENTRIES: &[Entry] = &[
     entry("hirsel_rt_v2_bytes_sha512", Local),
     entry("hirsel_rt_v2_bytes_sha512_256", Local),
     entry("hirsel_rt_v2_string_from_bytes", Local),
+    entry("hirsel_rt_v2_string_view_bytes", Local),
     entry("hirsel_rt_v2_string_slice", Local),
     entry("hirsel_rt_v2_bytes_append", Local),
     entry("hirsel_rt_v2_bytes_replace_range", Local),

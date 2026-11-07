@@ -313,7 +313,46 @@ fn large_buffers_return_pages_even_when_libc_would_retain_them() {
     assert_eq!(unsafe { *payload(guard) }, 0x71);
     assert_eq!(unsafe { *payload(guard).add(bytes as usize - 1) }, 0x71);
     assert_eq!(ctx.stats().live_blocks, 1);
+    let backing = ctx.stats().backing_allocations;
+    for byte in [0x15, 0x9b, 0xe7] {
+        let reused = alloc(&ctx, empty, bytes, 16);
+        // The bounded mapping reservation is reused without a backing call.
+        // It is not a live block while cached, and every release still returns
+        // its physical pages. This fails on the old mmap-per-buffer path.
+        assert_eq!(ctx.stats().backing_allocations, backing);
+        assert_eq!(ctx.stats().live_blocks, 2);
+        unsafe { ptr::write_bytes(payload(reused), byte, bytes as usize) };
+        let reused_base = (reused.addr() & !(page - 1)) as *mut libc::c_void;
+        release(&ctx, reused, empty);
+        let result = unsafe { libc::mincore(reused_base, bytes as usize, residency.as_mut_ptr()) };
+        if result == 0 {
+            assert!(
+                residency.iter().all(|b| b & 1 == 0),
+                "cached pages remain resident"
+            );
+        } else {
+            assert_eq!(
+                std::io::Error::last_os_error().raw_os_error(),
+                Some(libc::ENOMEM)
+            );
+        }
+        assert_eq!(unsafe { *payload(guard) }, 0x71);
+        assert_eq!(unsafe { *payload(guard).add(bytes as usize - 1) }, 0x71);
+        assert_eq!(ctx.stats().live_blocks, 1);
+    }
     release(&ctx, guard, empty);
+    let mut audit = Audit::default();
+    unsafe { hirsel_rt_v2_task_exit(ctx.0, &mut audit) };
+    assert_eq!(audit.live_blocks, 0);
+    assert_eq!(audit.retained_bytes, 0);
+    assert_eq!(
+        unsafe { libc::mincore(base, bytes as usize, residency.as_mut_ptr()) },
+        -1
+    );
+    assert_eq!(
+        std::io::Error::last_os_error().raw_os_error(),
+        Some(libc::ENOMEM)
+    );
 }
 
 // Both sides of the original backing threshold, including prefix/padding and

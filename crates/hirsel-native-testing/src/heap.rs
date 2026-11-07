@@ -2042,6 +2042,23 @@ fn text(module: Option<&str>, name: &str, args: &[OpValue]) -> Option<OpOutcome>
             .unwrap();
             OpValue::Plain(digest[..algorithm.output_size()].to_vec())
         }
+        (Some("string"), "view_bytes", [OpValue::Bytes(bytes)]) => {
+            if std::str::from_utf8(bytes).is_ok() {
+                OpValue::Variant {
+                    tag: 1,
+                    value: Box::new(OpValue::Slice {
+                        argument: 0,
+                        start: 0,
+                        length: bytes.len() as u64,
+                    }),
+                }
+            } else {
+                OpValue::Variant {
+                    tag: 0,
+                    value: Box::new(OpValue::Unit),
+                }
+            }
+        }
         (Some("string"), "from_bytes", [OpValue::Bytes(bytes)]) => OpValue::Variant {
             tag: u32::from(hirsel_rt::kernels::string_from_bytes(bytes.clone()).is_err()),
             value: Box::new(OpValue::Slice {

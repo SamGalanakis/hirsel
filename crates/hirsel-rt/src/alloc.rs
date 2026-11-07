@@ -684,6 +684,18 @@ impl View {
     }
 }
 
+// One dead Linux mapping in the existing idle allowance. An admitted CPU
+// heap keeps its reservation charged and reuses the physical pages. Other
+// heaps discard every physical page, including the prefix, with MADV_DONTNEED.
+// Metadata lives here so neither path reads the dead mapping before reuse.
+#[cfg(all(target_os = "linux", not(feature = "system-allocator")))]
+struct IdleLarge {
+    base: *mut u8,
+    total: u64,
+    capacity: u64,
+    align: u64,
+}
+
 /// One worker's heap domain.
 pub(crate) struct Heap {
     /// The worker's own [`Compiled`] words. While a task runs its bound view holds the live
@@ -715,6 +727,8 @@ pub(crate) struct Heap {
     bare_layouts: Box<[BareLayout]>,
     classes: [Class; POOL_COUNT],
     large: *mut LargePrefix,
+    #[cfg(all(target_os = "linux", not(feature = "system-allocator")))]
+    idle_large: Option<IdleLarge>,
     diag: std::sync::Mutex<Diag>,
     pub(crate) diagnostic: bool,
     pub(crate) idle_cap: u64,
@@ -878,6 +892,15 @@ impl Heap {
                 large = (*large).next;
             }
         }
+        #[cfg(all(target_os = "linux", not(feature = "system-allocator")))]
+        if let Some(cached) = &self.idle_large {
+            writeln!(
+                out,
+                "hirsel-rss idle-large {} {}",
+                cached.base.addr(),
+                cached.total
+            )?;
+        }
         self.regions.write_residency(out)
     }
     #[cfg(any(feature = "diagnostic", feature = "measurement"))]
@@ -927,6 +950,8 @@ impl Heap {
             layouts,
             classes: [EMPTY_CLASS; POOL_COUNT],
             large: ptr::null_mut(),
+            #[cfg(all(target_os = "linux", not(feature = "system-allocator")))]
+            idle_large: None,
             diag: Default::default(),
             diagnostic,
             idle_cap,
@@ -1342,6 +1367,14 @@ impl Heap {
         }
         let _ = index;
         if cfg!(feature = "system-allocator") || extent > SMALL_MAX || align > SMALL_ALIGN_MAX {
+            #[cfg(all(target_os = "linux", not(feature = "system-allocator")))]
+            if self.idle_large.as_ref().is_some_and(|cached| {
+                cached.capacity == request_capacity(extent, align) && cached.align == align.max(8)
+            }) {
+                return 0;
+            }
+            #[cfg(all(target_os = "linux", not(feature = "system-allocator")))]
+            self.release_idle_large();
             return cpu_large_charge(request_capacity(extent, align), align.max(8));
         }
         self.collect();
@@ -1358,6 +1391,8 @@ impl Heap {
         {
             0
         } else {
+            #[cfg(all(target_os = "linux", not(feature = "system-allocator")))]
+            self.release_idle_large();
             cpu_slab_charge(self.diagnostic)
         }
     }
@@ -1650,14 +1685,44 @@ impl Heap {
         };
         self.meter
             .charge_allocation(crate::budget::large_charge(capacity));
-        self.charge_cpu_backing(cpu_large_charge(capacity, align));
+        #[cfg(all(target_os = "linux", not(feature = "system-allocator")))]
+        let cached = if self
+            .idle_large
+            .as_ref()
+            .is_some_and(|cached| cached.capacity == capacity && cached.align == align)
+        {
+            self.idle_large.take()
+        } else {
+            self.release_idle_large();
+            None
+        };
+        #[cfg(all(target_os = "linux", not(feature = "system-allocator")))]
+        let reused = cached.is_some();
+        #[cfg(not(all(target_os = "linux", not(feature = "system-allocator"))))]
+        let reused = false;
+        if !reused {
+            self.charge_cpu_backing(cpu_large_charge(capacity, align));
+        }
         #[cfg(not(feature = "system-allocator"))]
         let Ok(host) = HostLayout::from_size_align(total as usize, align as usize) else {
             environmental("a large allocation exceeds the host address space")
         };
         // SAFETY: nonzero size.
         #[cfg(not(feature = "system-allocator"))]
-        let base = unsafe { allocate_large(host) };
+        let base = {
+            #[cfg(all(target_os = "linux", not(feature = "system-allocator")))]
+            if let Some(cached) = cached {
+                cached.base
+            } else {
+                // SAFETY: nonzero validated layout.
+                unsafe { allocate_large(host) }
+            }
+            #[cfg(not(target_os = "linux"))]
+            // SAFETY: nonzero validated layout.
+            unsafe {
+                allocate_large(host)
+            }
+        };
         // malloc's alignment is sufficient for the prefix; overallocate to align the payload
         // ourselves, retaining the original allocation for exactly one matching free.
         #[cfg(feature = "system-allocator")]
@@ -1674,7 +1739,9 @@ impl Heap {
         }
         #[cfg(any(feature = "diagnostic", feature = "measurement"))]
         {
-            self.record_backing_allocation();
+            if !reused {
+                self.record_backing_allocation();
+            }
         }
         let prefix = base.cast::<LargePrefix>();
         let block = base.wrapping_add(offset as usize).cast::<Header>();
@@ -1708,7 +1775,9 @@ impl Heap {
         self.large = prefix;
         #[cfg(any(feature = "diagnostic", feature = "measurement"))]
         {
-            self.large_bytes += total;
+            if !reused {
+                self.large_bytes += total;
+            }
         }
         #[cfg(feature = "measurement")]
         self.measurement.allocate(capacity);
@@ -1937,6 +2006,7 @@ impl Heap {
         unsafe {
             let align = (*prefix).align;
             let total = (*prefix).total;
+            let capacity = (*prefix).capacity;
             if (*prefix).prev.is_null() {
                 self.large = (*prefix).next;
             } else {
@@ -1945,14 +2015,53 @@ impl Heap {
             if !(*prefix).next.is_null() {
                 (*(*prefix).next).prev = (*prefix).prev;
             }
+            #[cfg(all(target_os = "linux", not(feature = "system-allocator")))]
+            if self.idle_large.is_none() && mapped_large(total, align) && total <= self.idle_cap {
+                let cached = IdleLarge {
+                    base: prefix.cast(),
+                    total,
+                    capacity,
+                    align,
+                };
+                // The admitted ledger still holds this entire reservation;
+                // free credited only the logical block. Reuse its pages within
+                // that scope. Unadmitted storage follows mimalloc 31d034d94cdb
+                // src/prim/unix/prim.c:549-558: immediate MADV_DONTNEED returns
+                // every physical page, including the old prefix. These pages
+                // hold no live neighbor or metadata needed after this point.
+                if self.meter.cpu.get().is_some()
+                    || libc::madvise(prefix.cast(), total as usize, libc::MADV_DONTNEED) == 0
+                {
+                    self.idle_large = Some(cached);
+                    return;
+                }
+            }
             #[cfg(any(feature = "diagnostic", feature = "measurement"))]
             {
                 self.large_bytes -= total;
             }
             if let Some(cpu) = self.meter.cpu.get() {
-                cpu.credit_heap(cpu_large_charge((*prefix).capacity, align));
+                cpu.credit_heap(cpu_large_charge(capacity, align));
             }
             release_large(prefix, total, align);
+        }
+    }
+
+    #[cfg(all(target_os = "linux", not(feature = "system-allocator")))]
+    fn release_idle_large(&mut self) {
+        if let Some(cached) = self.idle_large.take() {
+            #[cfg(any(feature = "diagnostic", feature = "measurement"))]
+            {
+                self.large_bytes -= cached.total;
+            }
+            if let Some(cpu) = self.meter.cpu.get() {
+                cpu.credit_heap(cpu_large_charge(cached.capacity, cached.align));
+            }
+            // SAFETY: the cached extent is still mapped, exclusively owned and
+            // has no live prefix or payload to read or drop.
+            if unsafe { libc::munmap(cached.base.cast(), cached.total as usize) } != 0 {
+                fault("cannot unmap an idle large block");
+            }
         }
     }
 
@@ -1960,7 +2069,19 @@ impl Heap {
     /// slabs leave their class free lists; no other free block moves.
     pub(crate) fn trim(&mut self) {
         self.collect();
-        let keep = self.idle_cap / SLAB_SIZE as u64;
+        #[cfg(all(target_os = "linux", not(feature = "system-allocator")))]
+        if self
+            .idle_large
+            .as_ref()
+            .is_some_and(|cached| cached.total > self.idle_cap)
+        {
+            self.release_idle_large();
+        }
+        #[cfg(all(target_os = "linux", not(feature = "system-allocator")))]
+        let cached_bytes = self.idle_large.as_ref().map_or(0, |cached| cached.total);
+        #[cfg(not(all(target_os = "linux", not(feature = "system-allocator"))))]
+        let cached_bytes = 0;
+        let keep = self.idle_cap.saturating_sub(cached_bytes) / SLAB_SIZE as u64;
         let idle_slabs = self.view().idle_slabs;
         if idle_slabs <= keep {
             return;
@@ -2113,6 +2234,8 @@ impl Heap {
             }
         }
         self.large = ptr::null_mut();
+        #[cfg(all(target_os = "linux", not(feature = "system-allocator")))]
+        self.release_idle_large();
         #[cfg(any(feature = "diagnostic", feature = "measurement"))]
         {
             self.slab_count = 0;

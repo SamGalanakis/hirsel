@@ -84,6 +84,12 @@ Invariants and boundary:
   tombstones are cold side records; production stores no lifecycle byte. Idle slabs above
   the cap (1 MiB default) return at region exits and worker collection points,
   including runs with long-lived tasks; task exit returns every backing block.
+  On Linux one idle large mapping may share this same allowance. An admitted
+  CPU heap reuses its physical pages while its full reservation stays charged.
+  Outside an admitted CPU heap, `MADV_DONTNEED` returns every physical page
+  immediately and only the virtual extent is reused. Size/alignment must match
+  exactly. A different backing request evicts the idle reservation before CPU
+  admission; task exit unmaps it. Other large frees return backing immediately.
 - One immutable descriptor registry belongs to a run context. The driver assigns it before
   partitioning the linked program and every emitted object receives the same assignment.
   Runtime-owned bytes/file-walk descriptors reserve indices 0/1, empty environments use 2,

@@ -135,6 +135,54 @@ fn cpu_large_preflight_charges_once_and_refusal_can_retry_after_free() {
             drop(topology);
         }
     }
+    #[cfg(all(target_os = "linux", not(feature = "system-allocator")))]
+    for diagnostic in [false, true] {
+        let extent = 512 * 1024;
+        let bytes = cpu_large_charge(request_capacity(extent, 8), 8);
+        let ledger = Ledger::new(&grant(bytes));
+        let topology = ledger.topology(4).unwrap();
+        let mut ctx = ptr::null_mut();
+        let config = crate::Config {
+            flags: if diagnostic {
+                crate::context::CONFIG_DIAGNOSTIC
+            } else {
+                0
+            },
+            ..crate::Config::new()
+        };
+        // SAFETY: this test owns the context, its ordinary idle pool and every
+        // allocated block. The ledger's fixed grant fits one mapping only.
+        unsafe {
+            assert_eq!(
+                crate::context::hirsel_rt_v2_ctx_create(&config, &mut ctx),
+                0
+            );
+            (*ctx)
+                .heap_ref()
+                .meter
+                .cpu
+                .set(ledger.clone())
+                .ok()
+                .unwrap();
+            for _ in 0..3 {
+                let block = hirsel_rt_v2_alloc(ctx, 0, extent, 8, DOMAIN_HEAP, 0);
+                ptr::write_bytes(payload(block), 0x39, extent as usize);
+                assert_room(&ledger, 0);
+                (*ctx).heap().free(block);
+                // Idle pages stay within the admitted physical reservation.
+                // Reuse consumes no second reservation.
+                assert_room(&ledger, 0);
+            }
+            // A different request must evict the unused reservation before
+            // preflight; its allocation can then fit the same unchanged grant.
+            let other = hirsel_rt_v2_alloc(ctx, 0, 5000, 8, DOMAIN_HEAP, 0);
+            (*ctx).heap().free(other);
+            assert_room(&ledger, bytes);
+            crate::context::hirsel_rt_v2_ctx_destroy(ctx);
+        }
+        assert_room(&ledger, bytes);
+        drop(topology);
+    }
 }
 
 #[test]

@@ -281,6 +281,7 @@ N fn string.scalars(s: String) -> ScalarView in s
 N fn string.positions(s: String) -> PositionView of s in s
 N fn string.slice(s: String, start: StrPos of s, end: StrPos of s) -> String in s
 @preserves_unique(bytes) fn string.from_bytes(take bytes: Bytes) -> Result[String, Bytes]
+N fn string.view_bytes(data: Bytes) -> Option[String] in data
 fn bytes.base64_encode(data: Bytes, alphabet: Base64Alphabet, padding: Base64Padding) -> unique String uses {}
 fn bytes.base64_decode(data: Bytes, alphabet: Base64Alphabet, padding: Base64Padding) -> unique Option[Bytes] uses {}
 N fn bytes.sha1(data: Bytes) -> Inline[u8, 20] uses {}

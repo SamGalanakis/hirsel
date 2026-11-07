@@ -189,6 +189,40 @@ pub unsafe extern "C" fn hirsel_rt_v2_string_from_bytes(
     STATUS_OK
 }
 
+/// Validate one borrowed extent and return a String view with one owner credit.
+/// The safe UTF-8 constructor establishes the invariant before publication.
+/// `None` uses Slice's null-owner niche and exposes no unchecked String.
+/// # Safety
+/// The context/output are live; the borrowed slice contains initialized bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_rt_v2_string_view_bytes(
+    ctx: *mut TaskCtx,
+    _destination: *mut c_void,
+    out: *mut Slice,
+    owner: *mut Header,
+    start: u64,
+    length: u64,
+) -> u8 {
+    let value = Slice {
+        owner,
+        start,
+        length,
+    };
+    let checked = simdutf8::basic::from_utf8(unsafe { bytes(value) });
+    let result = if checked.is_ok() {
+        unsafe { hirsel_rt_v2_dup(ctx, owner) };
+        value
+    } else {
+        Slice {
+            owner: std::ptr::null_mut(),
+            start: 0,
+            length: 0,
+        }
+    };
+    unsafe { out.write(result) };
+    STATUS_OK
+}
+
 /// Fresh byte storage, owned solely by the adapter until a codec initializes it.
 /// # Safety
 /// `ctx` is a live context; allocation checks the complete sequence extent.

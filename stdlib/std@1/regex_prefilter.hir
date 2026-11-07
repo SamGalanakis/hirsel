@@ -13,8 +13,7 @@ type PrefixPlan {
   high: u64,
   literals: List[String],
   folds: List[u64],
-  firsts: Bytes,
-  seconds: Bytes,
+  pair_sets: Bytes,
   inner: bool,
   inner_low: u64,
   inner_high: u64,
@@ -22,7 +21,7 @@ type PrefixPlan {
 }
 
 fn no_prefix() -> PrefixPlan uses {} {
-  PrefixPlan(enabled: false, low: 0, high: 0, literals: [], folds: [], firsts: b"", seconds: b"", inner: false, inner_low: 0, inner_high: 0, search: None())
+  PrefixPlan(enabled: false, low: 0, high: 0, literals: [], folds: [], pair_sets: b"", inner: false, inner_low: 0, inner_high: 0, search: None())
 }
 
 fn prefix_bit(mut plan: PrefixPlan, cp: u32) uses {} {
@@ -231,7 +230,7 @@ fn prefix_plan(code: List[Inst], entry: u64) -> PrefixPlan uses {} {
     plan.literals = []
     plan.folds = []
   }
-  // <=64 strings of <=16 bytes, plus folds and pairs: <5 KiB of payload.
+  // <=64 strings of <=16 bytes, plus folds and byte sets: <5 KiB of payload.
   // No search-time growing plan.
   if core@1/list.len(plan.literals) == 1 && plan.folds[0] == 0 {
     plan.search = Some(
@@ -254,8 +253,8 @@ fn prefix_plan(code: List[Inst], entry: u64) -> PrefixPlan uses {} {
   if paired {
     core@1/bytes.append(mut firsts, PREFIX_NON_ASCII)
     core@1/bytes.append(mut seconds, PREFIX_NON_ASCII)
-    plan.firsts = core@1/bytes.from_list(take firsts)
-    plan.seconds = core@1/bytes.from_list(take seconds)
+    for byte in seconds { core@1/list.push(mut firsts, byte) }
+    plan.pair_sets = core@1/bytes.from_list(take firsts)
   }
   plan.enabled = true
   take plan
@@ -299,9 +298,13 @@ fn prefix_at(plan: PrefixPlan, haystack: Bytes, at: u64) -> bool uses {} {
 
 fn prefix_packed(plan: PrefixPlan, haystack: Bytes, from: u64) -> Option[u64] uses {} {
   let size = core@1/bytes.len(haystack)
+  let sets = plan.pair_sets
+  let middle = core@1/bytes.len(sets) / 2
+  let firsts = core@1/bytes.slice(sets, 0, middle)
+  let seconds = core@1/bytes.slice(sets, middle, core@1/bytes.len(sets))
   let mut cursor = from
   while cursor < size {
-    cursor = core@1/bytes.find_pair(haystack, plan.firsts, plan.seconds, cursor)
+    cursor = core@1/bytes.find_pair(haystack, firsts, seconds, cursor)
     if cursor == size { return None() }
     if prefix_at(plan, haystack, cursor) { return Some(cursor) }
     cursor += 1
@@ -324,7 +327,7 @@ fn prefix_candidate(plan: PrefixPlan, haystack: Bytes, from: u64) -> Option[u64]
     }
     return internal.substring.find_from(haystack, needle, search, from)
   }
-  if core@1/bytes.len(plan.firsts) != 0 { return prefix_packed(plan, haystack, from) }
+  if core@1/bytes.len(plan.pair_sets) != 0 { return prefix_packed(plan, haystack, from) }
   let size = core@1/bytes.len(haystack)
   // Class/fold prefixes have no literal to confirm. Keep the predicate outside
   // prefix_at so each candidate needs neither its call nor its borrowed plan.

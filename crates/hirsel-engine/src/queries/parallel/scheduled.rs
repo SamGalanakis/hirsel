@@ -1108,7 +1108,7 @@ impl FrontBodyQueries {
                 })
                 .sum();
             while charge > self.body_cache_limit.saturating_sub(used) {
-                let victim = slots.victim(|stored, slot| {
+                let victim = slots.pending_victim(|stored, slot| {
                     matches!(slot,
                     FrontSlot::Live { outcome, .. } if stored != key
                         && matches!(outcome.state, FrontState::Settled { archive: Some(_), .. })
@@ -2277,7 +2277,7 @@ impl FrontBodyQueries {
     }
     fn evict_pending_body(&self) -> bool {
         let mut slots = self.slots.lock().unwrap_or_else(|e| e.into_inner());
-        let victim = slots.victim(|_, slot| matches!(slot,
+        let victim = slots.pending_victim(|_, slot| matches!(slot,
             FrontSlot::Live { outcome, .. } if matches!(outcome.state, FrontState::Settled { archive: Some(_), .. })
                 && outcome.pending_body.as_ref().is_some_and(|body| body.product.cache_only())));
         let retired = victim.and_then(|key| match slots.get_mut(&key)? {

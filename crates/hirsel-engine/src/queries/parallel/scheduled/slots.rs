@@ -17,27 +17,60 @@ struct Link {
     next: usize,
 }
 struct Recency {
+    queues: [Queue; 2],
+}
+const ALL: usize = 0;
+const PENDING: usize = 1;
+struct Queue {
     links: Box<[Link]>,
     first: usize,
     last: usize,
 }
-impl Recency {
-    // The intrusive queue follows Rust's LinkedList unlink/push_back structure,
-    // library/alloc/src/collections/linked_list.rs:219-285 at a7c37f9f, using rank indices
-    // instead of pointers. No allocation, comparison tree or clock per touch.
+impl Queue {
+    fn new(len: usize) -> Self {
+        Self {
+            links: vec![
+                Link {
+                    previous: ABSENT,
+                    next: ABSENT
+                };
+                len
+            ]
+            .into_boxed_slice(),
+            first: ABSENT,
+            last: ABSENT,
+        }
+    }
+    fn contains(&self, rank: usize) -> bool {
+        self.first == rank || self.links[rank].previous != ABSENT || self.links[rank].next != ABSENT
+    }
+    // Rust LinkedList, library/alloc/src/collections/linked_list.rs:219-285
+    // at a7c37f9f. Admitted rank indices replace pointers and allocations.
+    fn remove(&mut self, rank: usize) {
+        if !self.contains(rank) {
+            return;
+        }
+        let Link { previous, next } = self.links[rank];
+        if previous == ABSENT {
+            self.first = next;
+        } else {
+            self.links[previous].next = next;
+        }
+        if next == ABSENT {
+            self.last = previous;
+        } else {
+            self.links[next].previous = previous;
+        }
+        self.links[rank] = Link {
+            previous: ABSENT,
+            next: ABSENT,
+        };
+    }
     fn touch(&mut self, rank: usize) {
         if self.last == rank {
             return;
         }
-        let Link { previous, next } = self.links[rank];
-        if previous != ABSENT {
-            self.links[previous].next = next;
-        } else if self.first == rank {
-            self.first = next;
-        }
-        if next != ABSENT {
-            self.links[next].previous = previous;
-        }
+        self.remove(rank);
         self.links[rank] = Link {
             previous: self.last,
             next: ABSENT,
@@ -48,6 +81,26 @@ impl Recency {
             self.links[self.last].next = rank;
         }
         self.last = rank;
+    }
+}
+impl Recency {
+    fn touch(&mut self, rank: usize) {
+        for queue in &mut self.queues {
+            if queue.contains(rank) {
+                queue.touch(rank);
+            }
+        }
+    }
+    fn replace(&mut self, rank: usize, slot: &FrontSlot) {
+        let pending =
+            matches!(slot, FrontSlot::Live { outcome, .. } if outcome.pending_body.is_some());
+        for (queue, retain) in self.queues.iter_mut().zip([true, pending]) {
+            if retain {
+                queue.touch(rank);
+            } else {
+                queue.remove(rank);
+            }
+        }
     }
 }
 impl FrontSlot {
@@ -75,7 +128,7 @@ impl FrontSlot {
 }
 impl Slots {
     pub(super) fn capture_bytes(len: usize) -> Option<u64> {
-        len.checked_mul(size_of::<Option<Box<FrontSlot>>>() + size_of::<Link>())
+        len.checked_mul(size_of::<Option<Box<FrontSlot>>>() + 2 * size_of::<Link>())
             .and_then(|bytes| u64::try_from(bytes).ok())
     }
     pub(super) fn new(len: usize, generation: u64) -> Self {
@@ -84,16 +137,7 @@ impl Slots {
             generation,
             len: 0,
             recency: Mutex::new(Recency {
-                links: vec![
-                    Link {
-                        previous: ABSENT,
-                        next: ABSENT
-                    };
-                    len
-                ]
-                .into_boxed_slice(),
-                first: ABSENT,
-                last: ABSENT,
+                queues: std::array::from_fn(|_| Queue::new(len)),
             }),
             unbacked: 0,
             archived: 0,
@@ -170,18 +214,43 @@ impl Slots {
         self.recency
             .get_mut()
             .unwrap_or_else(|e| e.into_inner())
-            .touch(rank);
+            .replace(rank, self.rows[rank].as_deref().expect("inserted slot"));
     }
-    pub(super) fn victim(&self, mut eligible: impl FnMut(Key, &FrontSlot) -> bool) -> Option<Key> {
-        let recency = self.recency.lock().unwrap_or_else(|e| e.into_inner());
-        let mut rank = recency.first;
+    pub(super) fn victim(&self, eligible: impl FnMut(Key, &FrontSlot) -> bool) -> Option<Key> {
+        self.select(ALL, eligible)
+    }
+    pub(super) fn pending_victim(
+        &self,
+        eligible: impl FnMut(Key, &FrontSlot) -> bool,
+    ) -> Option<Key> {
+        self.select(PENDING, eligible)
+    }
+    fn select(
+        &self,
+        list: usize,
+        mut eligible: impl FnMut(Key, &FrontSlot) -> bool,
+    ) -> Option<Key> {
+        let mut recency = self.recency.lock().unwrap_or_else(|e| e.into_inner());
+        let queue = &mut recency.queues[list];
+        let mut rank = queue.first;
         while rank != ABSENT {
-            hirsel_intern::work::count(hirsel_intern::work::Counter::FrontVictimCandidates);
-            let key = self.key(rank);
-            if eligible(key, self.rows[rank].as_deref().expect("queued Front slot")) {
-                return Some(key);
+            let next = queue.links[rank].next;
+            let slot = self.rows[rank].as_deref().expect("queued Front slot");
+            // Mutable payload release can clear a pending body. Remove that
+            // stale membership once; external pins remain candidates because
+            // their owners can disappear without a callback.
+            if list == PENDING
+                && !matches!(slot, FrontSlot::Live { outcome, .. } if outcome.pending_body.is_some())
+            {
+                queue.remove(rank);
+            } else {
+                hirsel_intern::work::count(hirsel_intern::work::Counter::FrontVictimCandidates);
+                let key = self.key(rank);
+                if eligible(key, slot) {
+                    return Some(key);
+                }
             }
-            rank = recency.links[rank].next;
+            rank = next;
         }
         None
     }
@@ -241,7 +310,7 @@ mod tests {
             let mut slots = Slots::new(5, generation);
             assert_eq!(
                 Slots::capture_bytes(5),
-                Some((5 * (size_of::<usize>() + 2 * size_of::<usize>())) as u64)
+                Some((5 * (size_of::<usize>() + 4 * size_of::<usize>())) as u64)
             );
             slots.insert(keys[2], archived(&memos));
             slots.insert(keys[0], archived(&[]));
@@ -291,6 +360,17 @@ mod tests {
             }
             assert_eq!(slots.len(), 3);
             assert_eq!(slots.victim(|_, _| true), Some(keys[2]));
+            let candidates =
+                hirsel_intern::work::read(hirsel_intern::work::Counter::FrontVictimCandidates);
+            for _ in 0..17 {
+                assert_eq!(slots.pending_victim(|_, _| true), None);
+            }
+            assert_eq!(
+                hirsel_intern::work::read(hirsel_intern::work::Counter::FrontVictimCandidates)
+                    - candidates,
+                0,
+                "archived checkpoints must not be revisited while searching for an evictable payload"
+            );
             let independent: u64 = slots
                 .values()
                 .map(|slot| match slot {

@@ -2374,6 +2374,8 @@ fn node_pressure_spills_results_without_persistence_and_preserves_root_delivery(
             "undelivered root is pinned"
         );
         assert!(state.spill.contains_key(&key(query(2))));
+        assert_eq!(state.spill_order.len(), state.spill.len());
+        assert!(state.spill_order.values().any(|&k| k == key(query(2))));
         assert_eq!(state.max_entries, 3);
         assert_eq!(state.nodes.len(), 3);
     }
@@ -2381,6 +2383,13 @@ fn node_pressure_spills_results_without_persistence_and_preserves_root_delivery(
     let producer_claims = rt.stats().claims;
     let request = rt.request(&[query(2)]);
     assert_eq!(rt.wait(request), Ok(vec![product(query(2))]));
+    assert!(
+        !rt.shared
+            .lock()
+            .spill_order
+            .values()
+            .any(|&k| k == key(query(2)))
+    );
     let reopened = rt.shared.lock().nodes.node_id(key(query(2))).unwrap();
     assert_ne!(old, reopened);
     assert_eq!(
@@ -2447,6 +2456,7 @@ fn body_admission_can_evict_a_spilled_result_after_its_factory_preserves_the_arc
     assert!(cx.evict_body());
     assert_eq!(evictions.load(Ordering::SeqCst), 1);
     assert!(rt.shared.lock().spill.is_empty());
+    assert!(rt.shared.lock().spill_order.is_empty());
     let reopened = rt.request(&[query(0)]);
     assert_eq!(rt.wait(reopened), Ok(vec![product(query(0))]));
 }

@@ -308,6 +308,7 @@ struct State {
     factories: BTreeMap<u32, Factory>,
     nodes: Nodes,
     spill: BTreeMap<Key, Spilled>,
+    spill_order: BTreeMap<u32, Key>,
     ready: BTreeSet<(Reverse<u64>, u32, Key)>,
     cleanup: Vec<BTreeSet<Key>>,
     costs: BTreeMap<Key, u64>,
@@ -490,6 +491,7 @@ impl AdmittedRuntime {
                 factories: BTreeMap::new(),
                 nodes: Nodes::default(),
                 spill: BTreeMap::new(),
+                spill_order: BTreeMap::new(),
                 ready: BTreeSet::new(),
                 cleanup: (0..count).map(|_| BTreeSet::new()).collect(),
                 costs: BTreeMap::new(),
@@ -639,6 +641,7 @@ impl AdmittedRuntime {
             + self.workers.capacity() * size_of::<JoinHandle<()>>()) as u64
             + state.nodes.allocated_bytes()
             + tree_bytes::<Key, Spilled>(state.spill.len()) as u64
+            + tree_bytes::<u32, Key>(state.spill_order.len()) as u64
             + (tree_bytes::<(Reverse<u64>, u32, Key), ()>(state.ready.len())
                 + tree_bytes::<Key, u64>(state.costs.len())
                 + tree_bytes::<u32, Factory>(state.factories.len())
@@ -695,6 +698,7 @@ impl AdmittedRuntime {
         state.nodes.clear();
         state.edges = 0;
         state.spill.clear();
+        state.spill_order.clear();
         state.ready.clear();
         state.retained = 0;
         state.stacks = 0;
@@ -983,7 +987,8 @@ impl State {
             return Err(self.errors.resource);
         }
         let spilled = self.spill.remove(&query);
-        if spilled.is_some() {
+        if let Some(spilled) = &spilled {
+            self.spill_order.remove(&spilled.rank);
             self.recorded -= 512;
             self.metadata =
                 self.bookkeeping(self.recorded, self.nodes.next_arena_len(query), self.edges);
@@ -1120,6 +1125,7 @@ impl State {
             && let NodeState::Settled { outcome, retained } =
                 &mut self.nodes.get_mut(&query).unwrap().state
         {
+            self.spill_order.insert(rank, query);
             self.spill.insert(
                 query,
                 Spilled {
@@ -1136,17 +1142,9 @@ impl State {
         true
     }
     fn evict_spill(&mut self, scratch: u64) -> bool {
-        let mut previous = None;
-        let selected = loop {
-            let Some((&query, spilled)) = self
-                .spill
-                .iter()
-                .filter(|(_, spilled)| previous.is_none_or(|rank| spilled.rank > rank))
-                .min_by_key(|(_, spilled)| spilled.rank)
-            else {
-                return false;
-            };
-            previous = Some(spilled.rank);
+        let mut selected = None;
+        for (&rank, &query) in &self.spill_order {
+            let spilled = &self.spill[&query];
             let Some(product) = spilled.result.as_ref().ok() else {
                 continue;
             };
@@ -1156,10 +1154,14 @@ impl State {
                 _ => false,
             };
             if body || archived {
-                break query;
+                selected = Some((rank, query));
+                break;
             }
+        }
+        let Some((rank, query)) = selected else {
+            return false;
         };
-        let query = selected;
+        self.spill_order.remove(&rank);
         let spilled = self.spill.remove(&query).expect("selected spill");
         self.retained -= spilled.retained;
         self.recorded -= 512;

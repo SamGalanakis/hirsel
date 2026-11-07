@@ -695,7 +695,7 @@ fn phases_run_in_order_and_stop_at_every_error_boundary_on_compiler_thread() {
     );
 }
 #[test]
-fn front_body_handoff_reuses_admitted_bodies_until_consumed_or_pressure() {
+fn front_compact_terminal_reuses_check_after_eviction() {
     with_compiler_stack(|| {
         let (mut engine, _) = make_engine(None, false);
         let transport = hirsel_engine_admission::ProcessBudget::new(8 << 20);
@@ -736,6 +736,11 @@ fn front_body_handoff_reuses_admitted_bodies_until_consumed_or_pressure() {
             "an unchanged definition is checked once per build"
         );
         runtime.shutdown();
+    });
+}
+#[test]
+fn front_body_handoff_reuses_admitted_bodies_until_consumed_or_pressure() {
+    with_compiler_stack(|| {
         for pressure in [false, true] {
             let (mut engine, _) = make_engine(None, false);
             let transport = hirsel_engine_admission::ProcessBudget::new(8 << 20);

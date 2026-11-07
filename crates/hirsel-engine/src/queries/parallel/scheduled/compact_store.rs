@@ -229,10 +229,7 @@ impl FrontBodyQueries {
             .checked_add(hirsel_engine_admission::retained_arc_bytes(
                 &std::mem::MaybeUninit::<LiveSourceBacking>::uninit(),
             ))?;
-        let backing = outcome
-            ._backing
-            .split(charge)
-            .or_else(|| self.cache_backing(charge))?;
+        let backing = outcome._backing.split(charge)?;
         Some(Arc::new(TerminalFront {
             bytes: bytes.into_boxed_slice(),
             _backing: backing,

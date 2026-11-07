@@ -1280,21 +1280,6 @@ impl FrontBodyQueries {
                 pinned,
             });
     }
-    fn cache_backing(&self, charge: u64) -> Option<Arc<LiveSourceBacking>> {
-        let mut remaining = self.retention.lock().unwrap_or_else(|e| e.into_inner());
-        let next = remaining.checked_sub(charge)?;
-        let allowance = self._allowance.allowance.take(charge)?;
-        *remaining = next;
-        Some(Arc::new(LiveSourceBacking {
-            _source: self._allowance.clone(),
-            retention: self.retention.clone(),
-            debit: Mutex::new(FrontDebit {
-                charge,
-                allowance,
-                observation: None,
-            }),
-        }))
-    }
     fn owner_grant(
         &self,
         cx: &mut dyn QueryContext,

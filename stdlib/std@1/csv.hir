@@ -569,6 +569,7 @@ pub opaque type SliceReader: copyable + inert + noalloc_drop uses {} {
   fields: List[SliceField],
   count: u64,
   decoded: String,
+  special: Bytes,
 }
 
 /// Borrow UTF-8 input. Each next_record replaces the current record's views.
@@ -576,6 +577,13 @@ pub fn slice_reader(text: String, config: Config) -> Result[SliceReader, CsvErro
   if !delimiter_valid(config.delimiter) {
     return Error(InvalidDelimiter())
   }
+  // csv-core reader.rs:1220-1237: classify the alphabet once per reader.
+  // Delimiters remain ordinary while inside a quoted field.
+  let mut special: List[u8] = std@1/list.filled(256, 0u8)
+  special[core@1/int.widen(config.delimiter)] = 2
+  special[10] = 1
+  special[13] = 1
+  special[34] = 1
   Ok(
     SliceReader(
       text: text,
@@ -587,7 +595,8 @@ pub fn slice_reader(text: String, config: Config) -> Result[SliceReader, CsvErro
       failed: false,
       fields: [],
       count: 0,
-      decoded: ""
+      decoded: "",
+      special: core@1/bytes.from_list(take special)
     )
   )
 }
@@ -631,6 +640,7 @@ fn slice_record(mut r: SliceReader) -> Result[bool, CsvError] uses {} {
   let data = core@1/string.as_bytes(r.text)
   let length = core@1/bytes.len(data)
   let delimiter = r.config.delimiter
+  let special = r.special
   let mut mode: u8 = 0
   let mut record_bytes: u64 = 0
   let mut start = r.pos
@@ -652,7 +662,7 @@ fn slice_record(mut r: SliceReader) -> Result[bool, CsvError] uses {} {
     // readLine discards CR before LF/EOF in every state. Count only normalized
     // record bytes, and retain the last normalized byte's EOF error position.
     if byte == b'\r' && (at + 1 == length || data[at + 1] == b'\n') {
-      if mode != 3 {
+      if mode == 2 {
         core@1/bytes.append(mut output, core@1/bytes.slice(data, segment, at))
         decoded = true
         segment = at + 1
@@ -674,6 +684,8 @@ fn slice_record(mut r: SliceReader) -> Result[bool, CsvError] uses {} {
       }
       let stop = if mode == 3 {
         close
+      } else if at > start && data[at - 1] == b'\r' {
+        at - 1
       } else {
         at
       }
@@ -694,10 +706,17 @@ fn slice_record(mut r: SliceReader) -> Result[bool, CsvError] uses {} {
     }
     // csv-core's class scan: ordinary bytes cannot change the state. Account
     // for a whole run before returning to the delimiter/quote/CR/LF DFA.
-    if byte != delimiter && byte != b'"' && byte != b'\r' && byte != b'\n' && mode != 3 {
+    let class = special[core@1/int.widen(byte)]
+    if mode != 3 && (class == 0 || mode == 2 && class == 2) {
       let mut stop = at + 1
-      while stop < length && data[stop] != delimiter && data[stop] != b'"' && data[stop] != b'\r' && data[stop] != b'\n' {
-        stop += 1
+      if mode == 2 {
+        while stop < length && special[core@1/int.widen(data[stop])] != 1 {
+          stop += 1
+        }
+      } else {
+        while stop < length && special[core@1/int.widen(data[stop])] == 0 {
+          stop += 1
+        }
       }
       let count = stop - at
       if count > r.config.max_record_bytes - record_bytes {
@@ -796,6 +815,8 @@ fn slice_record(mut r: SliceReader) -> Result[bool, CsvError] uses {} {
   }
   let stop = if mode == 3 {
     close
+  } else if length > start && data[length - 1] == b'\r' {
+    length - 1
   } else {
     length
   }

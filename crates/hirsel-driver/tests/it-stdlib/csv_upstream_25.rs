@@ -104,6 +104,19 @@ fn program(part: usize, only: Option<usize>) -> (String, hirsel_native::Observat
         source.push_str(&format!("check(t, {}, {condition})\n", literal(&label)));
         labels.push(label);
     };
+    if part == 0 && only.is_none_or(|wanted| wanted == 0) {
+        // Hand-derived strict CSV result: the quoted delimiter is data, the
+        // doubled quote is one quote, and CRLF/EOF CR normalize independently.
+        let input = literal("\"a;\"\"é\r\nb\";c\r\nx;y\r");
+        add(
+            "r580/borrowed-classes-normalization".into(),
+            format!(
+                "borrowed({input}, std@1/csv.Config(delimiter: 59u8, fields_per_record: None(), max_record_bytes: 256)) == Ok([[{}, \"c\"], [\"x\", \"y\"]])",
+                literal("a;\"é\nb")
+            ),
+            &mut source,
+        );
+    }
     if part < 48 {
         for (index, case) in manifest["cases"]
             .as_array()

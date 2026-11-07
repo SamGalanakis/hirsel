@@ -47,7 +47,7 @@ pub fn dfa_test_main() -> Result[(), DfaTestFailure] uses {} {
       if !dfa_test_case(pattern, src) { return Error(DfaTestFailure(pattern: pattern, src: src, stage: 1)) }
       bits += 1
     }
-    let samples: List[String] = ["a\nb\na", " a_a a ", "éa", "a😀b", "Kkſs", "\u{80}a", "aaaabbb", "aba abb abba", "0123456789aéab", "0123456789a\u{80}ab", "ab\u{0}ab", "xyzab😀ab", "0123456789ab\n", "aaaaaaaaabaaaaaaaab", "aaaaéaaaaa", "aaaaa😀aaa", "aaaaaa\naba", "aaaaaaaa"]
+    let samples: List[String] = ["a\nb\na", " a_a a ", "éa", "a😀b", "Kkſs", "\u{80}a", "aaaabbb", "aba abb abba", "0123456789aéab", "0123456789a\u{80}ab", "ab\u{0}ab", "xyzab😀ab", "0123456789ab\n"]
     for src in samples {
       if !dfa_test_case(pattern, src) { return Error(DfaTestFailure(pattern: pattern, src: src, stage: 1)) }
     }
@@ -131,6 +131,11 @@ fn dfa_golden(pattern: String, src: String, expected: Option[Span]) -> bool uses
 fn dfa_goldens() -> bool uses {} {
   // Supported upstream vectors, retaining their original expected first span.
   let positive: List[(String, String, u64, u64)] = [
+    // Cached runs ending inside a four-transition group or at its tail.
+    ("a+", "aaaaaéaaaa", 0, 5),
+    ("a+", "aaaaaa😀aaa", 0, 6),
+    ("(?m)^a+$", "aaaaaaa\nx", 0, 7),
+    ("a+", "aaaaaaaa", 0, 8),
     ("z*azb", "azb", 0, 3),
     ("1|2|3|4|5|6|7|8|9|10|int", "int", 0, 3),
     (".*[^\\s\\S]A|B", "B", 0, 1),

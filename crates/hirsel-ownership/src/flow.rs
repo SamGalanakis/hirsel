@@ -933,12 +933,12 @@ impl std::ops::DerefMut for Slot {
 struct State {
     slots: hirsel_types::rows::Rows<Slot>,
     values: Temporaries,
-    iteration_loans: BTreeMap<ExprId, Place>,
+    iteration_loans: temporaries::Facts<Place>,
     /// Storage an evaluated argument of a call not yet entered names: a
     /// `mut` place is reserved and a borrowed place is lent, and the call.
-    argument_loans: BTreeMap<ExprId, (Place, ExprId)>,
+    argument_loans: temporaries::Facts<(Place, ExprId)>,
     /// Calls with an argument loan already reported as violated.
-    argument_conflicts: BTreeSet<ExprId>,
+    argument_conflicts: hirsel_types::indexed::IndexSet,
 }
 type SlotJoins = hirsel_types::rows::JoinCache<Slot, fn(&mut Slot, &Slot)>;
 impl Slot {
@@ -1000,13 +1000,9 @@ impl State {
                 changed = true;
             }
         }
-        for (source, place) in &other.iteration_loans {
-            changed |= self.iteration_loans.insert(*source, place.clone()).as_ref() != Some(place);
-        }
-        for (argument, loan) in &other.argument_loans {
-            changed |= self.argument_loans.insert(*argument, loan.clone()).as_ref() != Some(loan);
-        }
-        for &conflict in &other.argument_conflicts {
+        changed |= self.iteration_loans.overwrite(&other.iteration_loans);
+        changed |= self.argument_loans.overwrite(&other.argument_loans);
+        for conflict in other.argument_conflicts.iter() {
             changed |= self.argument_conflicts.insert(conflict);
         }
         changed
@@ -1368,9 +1364,11 @@ impl InitialStorage {
         State {
             slots,
             values: Temporaries::new(checker.tree.expressions.len()),
-            iteration_loans: BTreeMap::new(),
-            argument_loans: BTreeMap::new(),
-            argument_conflicts: BTreeSet::new(),
+            iteration_loans: temporaries::Facts::new(checker.tree.expressions.len()),
+            argument_loans: temporaries::Facts::new(checker.tree.expressions.len()),
+            argument_conflicts: hirsel_types::indexed::IndexSet::new(
+                checker.tree.expressions.len(),
+            ),
         }
     }
 }
@@ -3329,11 +3327,11 @@ impl Checker<'_, '_> {
             .argument_loans
             .iter()
             .find(|(_, (lent, _))| lent.overlaps(place))
-            .map(|(argument, (_, call))| (*argument, *call))
+            .map(|(argument, (_, call))| (argument, *call))
         else {
             return false;
         };
-        if state.argument_conflicts.insert(call) {
+        if state.argument_conflicts.insert(call.0 as usize) {
             self.report(
                 const { RuleId::of("OWN-3") },
                 self.span_of(call),
@@ -3455,9 +3453,9 @@ impl Checker<'_, '_> {
             .iteration_loans
             .iter()
             .find(|(source, loan)| {
-                loan.overlaps(place) && self.holder_live(Holder::Iteration(**source))
+                loan.overlaps(place) && self.holder_live(Holder::Iteration(*source))
             })
-            .map(|(source, _)| *source)
+            .map(|(source, _)| source)
     }
     fn iterated(&self, state: &State, place: &Place) -> bool {
         self.iteration(state, place).is_some()
@@ -6871,7 +6869,7 @@ impl Checker<'_, '_> {
                     );
                 }
                 state.argument_loans.retain(|_, loan| loan.1 != *expression);
-                let mut failed = state.argument_conflicts.remove(expression)
+                let mut failed = state.argument_conflicts.remove(&(expression.0 as usize))
                     || arguments.iter().any(|a| self.value(state, a.value).invalid);
                 if !self.seal_entry(state, *expression, arguments, requirements) {
                     failed = true;
@@ -9338,9 +9336,13 @@ mod loan_tests {
         let mut output = State {
             slots: hirsel_types::rows::Rows::new(Slot::default(), 4),
             values: Temporaries::new(4),
-            iteration_loans: BTreeMap::new(),
-            argument_loans: BTreeMap::new(),
-            argument_conflicts: BTreeSet::from([ExprId(9)]),
+            iteration_loans: temporaries::Facts::new(16),
+            argument_loans: temporaries::Facts::new(16),
+            argument_conflicts: {
+                let mut set = hirsel_types::indexed::IndexSet::new(16);
+                set.insert(9);
+                set
+            },
         };
         output.values.insert(
             ExprId(3),
@@ -9369,12 +9371,73 @@ mod loan_tests {
             previous.values.get(&ExprId(3)).unwrap().modes.uniqueness,
             Uniqueness::Aliased
         );
+        output.iteration_loans.insert(
+            ExprId(1),
+            Place {
+                binding: 1,
+                projections: vec![Projection::Elements],
+            },
+        );
+        output.argument_loans.insert(
+            ExprId(2),
+            (
+                Place {
+                    binding: 2,
+                    projections: vec![Projection::Field(3)],
+                },
+                ExprId(3),
+            ),
+        );
         let value_refs = std::rc::Rc::strong_count(&output.values.get(&ExprId(3)).unwrap().0);
         let retained = output.clone();
         assert_eq!(
             std::rc::Rc::strong_count(&output.values.get(&ExprId(3)).unwrap().0),
             value_refs,
             "a state snapshot must share its temporary rows",
+        );
+        assert_eq!(
+            output.iteration_loans.get(&ExprId(1)).unwrap().projections,
+            vec![Projection::Elements]
+        );
+        assert_eq!(
+            retained.argument_loans.get(&ExprId(2)).unwrap().0.binding,
+            2
+        );
+        assert!(
+            std::ptr::eq(
+                output
+                    .iteration_loans
+                    .get(&ExprId(1))
+                    .unwrap()
+                    .projections
+                    .as_ptr(),
+                retained
+                    .iteration_loans
+                    .get(&ExprId(1))
+                    .unwrap()
+                    .projections
+                    .as_ptr(),
+            ),
+            "a state snapshot must not copy iteration paths"
+        );
+        assert!(
+            std::ptr::eq(
+                output
+                    .argument_loans
+                    .get(&ExprId(2))
+                    .unwrap()
+                    .0
+                    .projections
+                    .as_ptr(),
+                retained
+                    .argument_loans
+                    .get(&ExprId(2))
+                    .unwrap()
+                    .0
+                    .projections
+                    .as_ptr(),
+            ),
+            "a state snapshot must not copy argument paths"
         );
         let rank = [3, 2, 1, 0];
         let routes: &[&[usize]] = &[

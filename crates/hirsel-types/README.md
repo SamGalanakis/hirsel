@@ -4,6 +4,14 @@ Own semantic types, complete signatures, checked decisions and shared query data
 Allowed dependencies: syntax, intern, span, diag, codec; no implementation crates.
 Wire tests use run-config's shared `hex` formatter as a dev dependency.
 
+`indexed` supplies body-local membership sets and immutable payload rows.
+Sets keep up to eight sorted indices, then use lazily allocated radix pages of
+u64 words. Empty sets allocate nothing. Snapshots share their storage, and a
+write copies only the small row or changed radix path. This adapts the finite
+word domains in rustc `compiler/rustc_index/src/bit_set.rs:16-30,70-94` at
+`a7c37f9f`; sparse pages replace its flat allocation to avoid quadratic backing
+for sparse fact matrices. Each analysis owns its facts and merge operations.
+
 - `TypeInterner` is the session's one canonical, concurrent type interner
   (design §1a). Every phase and thread interns into it exactly and losslessly
   (`intern`), so one row has one `TypeId` and promotion cannot fork identity.

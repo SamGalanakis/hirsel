@@ -270,6 +270,9 @@ impl TableBuilder {
         if !self.types.contains(id) {
             return MISSING;
         }
+        self.number(id)
+    }
+    fn number(&mut self, id: TypeId) -> u32 {
         let next = self.order.len() as u32;
         *self.index.entry(id).or_insert_with(|| {
             self.order.push(id);
@@ -471,10 +474,21 @@ impl TypeId {
 
 impl serde::Serialize for TypeId {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let types = SCOPE.with_borrow(|scopes| match scopes.last() {
+            Some(Scope::Grow(builder)) => Some(builder.types.clone()),
+            _ => None,
+        });
+        // Lazy rows may decode under another type scope. Resolve them before
+        // borrowing the growing table to assign their positions.
+        if let Some(types) = types
+            && !types.contains(*self)
+        {
+            return serializer.serialize_u32(MISSING);
+        }
         let mut exhausted = false;
         let position = SCOPE.with_borrow_mut(|scopes| match scopes.last_mut() {
             Some(Scope::Encode(index)) => Some(index.get(self).copied().unwrap_or(MISSING)),
-            Some(Scope::Grow(builder)) => Some(builder.position(*self)),
+            Some(Scope::Grow(builder)) => Some(builder.number(*self)),
             Some(Scope::Raw) => Some(self.raw_index()),
             Some(Scope::Collect {
                 ids,

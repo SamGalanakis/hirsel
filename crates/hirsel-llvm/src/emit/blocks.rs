@@ -323,11 +323,6 @@ impl<'m, 'a> FnEmitter<'m, 'a> {
     /// own admission a frame always sees its entry values. One test then serves every
     /// such call, and a loop's is invariant.
     pub(super) fn no_room(&mut self) -> Value<'m> {
-        if self.accumulator.is_some()
-            && let Some(CounterCell::Snapshot { full, .. }) = self.counter_cell
-        {
-            return full;
-        }
         if let Some(full) = self.no_room {
             return full;
         }
@@ -472,7 +467,7 @@ impl<'m, 'a> FnEmitter<'m, 'a> {
 impl<'m, 'a> FnEmitter<'m, 'a> {
     /// This frame's allowance cannot change outside its own admissions: the
     /// selector refuses FinalizeBegin/End and every callee retires its counters.
-    pub(super) fn counter_cell(&mut self) -> CounterCell<'m> {
+    fn counter_cell(&mut self) -> CounterCell<'m> {
         if let Some(cell) = self.counter_cell {
             return cell;
         }
@@ -502,8 +497,7 @@ impl<'m, 'a> FnEmitter<'m, 'a> {
                 self.module.const_int(i16_ty, FOREGROUND_LIMIT.into()),
             ),
         };
-        // Repeated compiled calls and self recursion amortize keeping the entry
-        // count live. Every child retires to this count, on success and failure.
+        // Repeated compiled calls can amortize keeping the entry count live.
         // Primitives can inline to short memory operations; do not carry their
         // count across a loop just to replace its local updates.
         let successors: Vec<_> = self
@@ -542,15 +536,7 @@ impl<'m, 'a> FnEmitter<'m, 'a> {
                 .any(|index| !self.room.enters.contains(index))
         });
         let specialized = self.foreground_calls.is_some() || self.foreground_entry.is_some();
-        let recursive = self.unit.tables.calls.iter().any(|call| {
-            let Callee::Direct(symbol) = call.callee else {
-                return false;
-            };
-            let symbol = &self.unit.tables.symbols[symbol.index()];
-            symbol.instance == Some(self.unit.header.instance)
-                && symbol.definition == self.unit.header.definition
-        });
-        let cell = if specialized && (repeated || recursive) {
+        let cell = if specialized && repeated {
             let count = b.load_access(i16_ty, at, 2, Access::Depth);
             let full = b.icmp(IntPredicate::Uge, count, limit);
             CounterCell::Snapshot { at, count, full }
@@ -574,8 +560,7 @@ impl<'m, 'a> FnEmitter<'m, 'a> {
         };
         self.guard(full, failure)?;
         let builder = match cell {
-            CounterCell::Snapshot { .. } if self.accumulator.is_none() => &self.prologue,
-            CounterCell::Snapshot { .. } => &self.builder,
+            CounterCell::Snapshot { .. } => &self.prologue,
             CounterCell::Dynamic { .. } => &self.builder,
         };
         let next = builder.binary(BinOp::Add, count, self.module.const_int(ty, 1));

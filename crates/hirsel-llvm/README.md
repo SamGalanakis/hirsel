@@ -149,18 +149,6 @@ Invariants:
   `Propagate` returns 1. A rule without a code is an error, never an invented code.
   A diverging call (LIR revision 19) is not `noreturn`: its failure still returns
   status 1. A zero status branches to `unreachable`; nonzero takes the failure edge.
-- Foreground source recursion keeps the parent depth count live across child calls.
-  A self-call whose successful continuation only adds wrapping integers can reuse
-  a physical frame, with parameter and accumulator phis (`emit/accumulator.rs`).
-  Its arguments pass by value under borrowed conventions; non-scalar parameters
-  stay invariant so prologue storage facts stay valid. Checked combines and
-  pending effects, cleanup, contracts or frame borrows retain ordinary calls.
-  The register return ABI stays the same. LANG-10 counts pending combines as
-  semantic activations even in a physical loop; one counter restoration retires
-  those activations on success or failure. Guaranteed source self-tail loops
-  continue to reuse one activation. The parameter/identity-phi construction follows
-  LLVM's `TailRecursionElimination.cpp:777-800,850-940`, with Ready status
-  continuations and exact logical depth in place of LLVM's scalar return matcher.
 - ABI v3 (`FnAbi`): context, [environment], [caller site, operation site], [caller destination], [result pointer], then
   each declared parameter's physical slots. Emitted code provides the declared scalar
   extension (call-site attributes) but never assumes it from a caller or callee, because

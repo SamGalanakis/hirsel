@@ -29,7 +29,6 @@ impl<'m, 'a> FnEmitter<'m, 'a> {
 
     /// Returns `status` and, on success with a register result, `value`.
     pub(super) fn return_status(&mut self, status: u128, value: Option<Value<'m>>) -> Emitted {
-        let value = self.accumulator_return(status, value);
         self.ownership_leave()?;
         self.ahead_point(false)?;
         if self.signature.ahead.is_none() {
@@ -344,7 +343,6 @@ impl<'m, 'a> FnEmitter<'m, 'a> {
             return self.invalid("a call outside the call table");
         };
         let abi = fn_abi(self.inputs.layouts, site.abi, self.definition())?;
-        self.accumulator_call(call)?;
         self.call_with_abi(call, normal, failure, abi)
     }
 

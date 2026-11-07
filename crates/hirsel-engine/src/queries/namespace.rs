@@ -681,7 +681,7 @@ impl NamespaceCapture {
         #[cfg(test)]
         SOURCE_ENGINES.set(SOURCE_ENGINES.get() + 1);
         let mut engine = self.captured_engine()?;
-        engine.materialize(path)?;
+        engine.materialize_resolution_input(path)?;
         Ok(engine)
     }
     pub(crate) fn header(&self, path: &DefPath) -> Result<HeaderInput, QueryError> {

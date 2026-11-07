@@ -1180,16 +1180,62 @@ impl QueryEngine {
         self.retire_snapshot();
     }
     pub(crate) fn materialize(&mut self, path: &DefPath) -> Result<(), QueryError> {
-        if let Some(items) = self.items.get(path)
-            && self.catalog.candidates.get(path).is_none_or(|candidates| {
-                candidates.iter().all(|candidate| {
-                    self.declarations.has_file(candidate.file)
-                        && items
-                            .iter()
-                            .any(|item| item.anchor == candidate.head.name.anchor)
+        if self.items.contains_key(path) {
+            let files: BTreeSet<_> = self
+                .catalog
+                .candidates
+                .get(path)
+                .into_iter()
+                .flatten()
+                .filter(|candidate| {
+                    !self.items[path]
+                        .iter()
+                        .any(|item| item.anchor == candidate.head.name.anchor)
                 })
-            })
-        {
+                .map(|candidate| candidate.file)
+                .collect();
+            for file in files {
+                self.materialize_source(file)?;
+            }
+            return Ok(());
+        }
+        if self.declared(path) && self.installed_definition(path) {
+            let record = self
+                .installed_semantic_input(path, hirsel_engine_store::MAX_RECORD as u64)?
+                .ok_or(QueryError::NotImplemented)?;
+            let owner = self
+                .catalog
+                .installed
+                .get(&path.0.package)
+                .ok_or(QueryError::NotImplemented)?;
+            let bytes = owner
+                .content(
+                    record.ownership.body,
+                    hirsel_engine_store::MAX_RECORD as u64,
+                )
+                .map_err(|message| {
+                    QueryError::Operational(hirsel_types::OperationalFailure {
+                        operation: "installed body".into(),
+                        message,
+                    })
+                })?;
+            let records = crate::NativeRecords::new(
+                self.types.clone(),
+                self.result_store
+                    .clone()
+                    .ok_or(QueryError::NotImplemented)?,
+            );
+            let context = self.source_records();
+            let syntax = header_products::decode_installed_syntax(
+                self.header_products.as_deref(),
+                &records,
+                &context,
+                bytes,
+            )?;
+            if syntax.item.definition != *path || syntax.text_hash != record.implementation {
+                return Err(QueryError::NotImplemented);
+            }
+            self.materialize_bound_syntax(path, syntax, &context);
             return Ok(());
         }
         if let Some(inputs) = self.source_inputs.clone()
@@ -1222,6 +1268,46 @@ impl QueryEngine {
             .collect();
         for file in files {
             self.materialize_source(file)?;
+        }
+        Ok(())
+    }
+    /// Resolution consumes the written sibling inventory as well as its owner.
+    /// Installed runtime syntax can still be demanded independently.
+    pub(crate) fn materialize_resolution_input(
+        &mut self,
+        path: &DefPath,
+    ) -> Result<(), QueryError> {
+        if !self.installed_definition(path) {
+            return self.materialize(path);
+        }
+        if let Some(syntax) = self.items.get(path).and_then(|items| items.first())
+            && self.declarations.has_file(self.item_file(syntax))
+        {
+            return Ok(());
+        }
+        if let Some(inputs) = self.source_inputs.clone()
+            && inputs.materialize_siblings(self, path)?
+        {
+            return Ok(());
+        }
+        if let Some(headers) = self.header_products.clone()
+            && headers.materialize_siblings(self, path)?
+        {
+            return Ok(());
+        }
+        self.materialize(path)?;
+        let syntax = self
+            .items
+            .get(path)
+            .and_then(|items| items.first())
+            .ok_or(QueryError::NotImplemented)?;
+        let file = self.item_file(syntax);
+        self.materialize_source(file)?;
+        if !self.declarations.has_file(file) {
+            return Err(QueryError::Operational(hirsel_types::OperationalFailure {
+                operation: "source sibling input".into(),
+                message: format!("cannot reconstruct the written file for {path}"),
+            }));
         }
         Ok(())
     }

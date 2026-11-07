@@ -658,6 +658,13 @@ impl HeaderProducts {
     ) -> Result<bool, QueryError> {
         self.syntax.materialize(engine, path)
     }
+    pub(crate) fn materialize_siblings(
+        &self,
+        engine: &mut QueryEngine,
+        path: &DefPath,
+    ) -> Result<bool, QueryError> {
+        self.syntax.materialize_siblings(engine, path)
+    }
     pub(crate) fn contains(&self, id: DefId) -> bool {
         self.rows.contains_key(&id)
     }

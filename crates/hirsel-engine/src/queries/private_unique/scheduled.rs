@@ -652,7 +652,7 @@ impl QueryEngine {
             .collect();
         self.register_specializations(&potential);
         for path in &potential {
-            self.materialize(path)?;
+            self.materialize_resolution_input(path)?;
         }
         let snapshot = (!pending.is_empty()).then(|| self.signature_inputs());
         if let Some(headers) = snapshot

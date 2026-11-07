@@ -372,6 +372,13 @@ impl SourceInputs {
     ) -> Result<bool, QueryError> {
         self.syntax.materialize(engine, path)
     }
+    pub(crate) fn materialize_siblings(
+        &self,
+        engine: &mut QueryEngine,
+        path: &DefPath,
+    ) -> Result<bool, QueryError> {
+        self.syntax.materialize_siblings(engine, path)
+    }
 }
 impl HeaderSources {
     /// Reparseable syntax is optional once every consumer releases its item.
@@ -811,11 +818,28 @@ impl HeaderSources {
         engine: &mut QueryEngine,
         path: &DefPath,
     ) -> Result<bool, QueryError> {
+        self.materialize_input(engine, path, false)
+    }
+    pub(super) fn materialize_siblings(
+        &self,
+        engine: &mut QueryEngine,
+        path: &DefPath,
+    ) -> Result<bool, QueryError> {
+        self.materialize_input(engine, path, true)
+    }
+    fn materialize_input(
+        &self,
+        engine: &mut QueryEngine,
+        path: &DefPath,
+        siblings: bool,
+    ) -> Result<bool, QueryError> {
+        if !siblings && engine.items.contains_key(path) {
+            return Ok(true);
+        }
         let Some(files) = self.by_definition.get(&DefId::intern(path)) else {
-            return self
-                .parent
-                .as_ref()
-                .map_or(Ok(false), |parent| parent.materialize(engine, path));
+            return self.parent.as_ref().map_or(Ok(false), |parent| {
+                parent.materialize_input(engine, path, siblings)
+            });
         };
         let refused = || {
             QueryError::Operational(hirsel_types::OperationalFailure {

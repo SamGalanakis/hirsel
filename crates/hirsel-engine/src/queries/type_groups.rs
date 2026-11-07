@@ -201,6 +201,7 @@ impl Recorder<'_> {
             .ok_or(QueryError::NotImplemented)?;
         let mut members = vec![];
         for member in group.members.iter().filter(|m| *m != definition) {
+            self.engine.materialize_resolution_input(member)?;
             let candidates = self.engine.definition_items(member)?;
             let (types, memo) = (self.engine.types.clone(), self.engine.memo.clone());
             let declarations = self.engine.frozen_declarations();

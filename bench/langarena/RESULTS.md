@@ -89,6 +89,62 @@ The shepherd reported that modes-flow-2 pinned CPU31 without the timing lock at 
 
 ## Compile observations
 
+### Current main, 2026-11-07
+
+Measured `7b6863844fcaf0eaba37c9305a2da232acc2a3e8` on the same Ryzen 9
+5950X host. One release attempt per cell follows `compare.py`: fresh Hirsel
+`XDG_CACHE_HOME`, `HIRSEL_STD_OBJECTS=none`, fetched Rust dependencies outside
+timing, and `RECOMPILE_MARKER_0` changed to `RECOMPILE_MARKER_1` in one file.
+Hirsel registers all 50 current tasks; Rust is unchanged upstream
+`3c9f84ddaeec834c0631747cb789e8cfd602f993`, toolchain 1.99.0.
+Both use CPUs 0-11/16-27, two jobs, `nice -n 10`, `tools/capped`,
+60 CPU seconds per process, 2 GiB and the existing 300-second wall limit.
+The developer release compiler and pinned runtime/link inputs come from Buck2;
+compiler builds and downloads are excluded.
+
+| Attempt | Hirsel wall s | Hirsel peak RSS KiB | Hirsel result | Cargo wall s | Cargo peak RSS KiB | Cargo result | Completed H/cargo |
+| --- | ---: | ---: | --- | ---: | ---: | --- | --- |
+| cold | 39.555 | 268792 | refused header admission | 27.637 | 460180 | success | unavailable |
+| one-file marker edit | 37.312 | 268756 | refused header admission | 3.783 | 267948 | success | unavailable |
+
+Both Hirsel attempts stop with `header source allowance cannot retain 240 bytes`
+and produce no executable. The second follows a failed cold attempt, so it is
+not a successful incremental rebuild. These refusal durations cannot replace
+completed compile times or establish a compile-speed ratio. RSS is the largest
+process high-water mark, including compiler children for cargo; it differs from
+scope-charged peak memory. Evidence is under
+`/workspace/code/hirsel-briefs/compile-rust-576/`, including per-cell commands,
+exit status, RSS and process-tree `instructions:u`. No optimized after sample
+has been taken. The top owner is the evictable Front module-proof producer,
+`HeaderProducts::private_product` (`header_products/private.rs:335`). Its proofs
+share the Front allowance and are recomputed after eviction, as documented in
+`crates/hirsel-engine/README.md:999`. The compile-rust-576 brief excludes the
+Front Check/eviction path and requires stopping when it is the top owner.
+
+Separate diagnostic profiles run incremental first, then a fresh-cache cold
+attempt. Both reproduce the refusal. These are observed inclusive user-cycle
+shares from 99 Hz `perf record` with 8 KiB DWARF stacks; nested rows overlap.
+Some ancestor stacks are unresolved, so these are attribution samples, not an
+exhaustive partition or evidence that eviction caused every inference.
+
+| Ranked compiler owner | Marker-edit attempt % | Cold attempt % |
+| --- | ---: | ---: |
+| `HeaderProducts::private_product` | 46.03 | 43.90 |
+| `QueryEngine::infer_private_module` | 44.30 | 42.65 |
+| `HeaderProducts::capture` | 25.02 | 23.08 |
+| `SourceInputs::capture` | 22.04 | 20.41 |
+| `SourceInputs::reusable` candidate scan | 21.95 | 20.36 |
+
+The incremental profile records 44.27 seconds in front preparation,
+4 completed definition checks, 58 V runs, 146 snapshot membership builds,
+96 validation retention refusals and 52 verifier-fact evictions. Native units,
+object hits and object misses are all zero. Cold records the same counts and
+42.04 seconds in front preparation. Scheduler captures are complete and
+untruncated. No runtime emission, linker, or unchanged-object optimization was
+reached.
+
+### Historical observations, 2026-10-22
+
 | Build | LLVM release s | Rust release s | Cranelift debug s |
 | --- | ---: | ---: | ---: |
 | cold | 44.780 | 29.880 | 31.040 |

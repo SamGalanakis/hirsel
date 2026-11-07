@@ -12,14 +12,15 @@ type PrefixPlan {
   high: u64,
   literals: List[String],
   folds: List[u64],
-  pair_sets: Bytes,
+  firsts: Bytes,
+  seconds: Bytes,
   inner: bool,
   inner_low: u64,
   inner_high: u64,
 }
 
 fn no_prefix() -> PrefixPlan uses {} {
-  PrefixPlan(enabled: false, low: 0, high: 0, literals: [], folds: [], pair_sets: b"", inner: false, inner_low: 0, inner_high: 0)
+  PrefixPlan(enabled: false, low: 0, high: 0, literals: [], folds: [], firsts: b"", seconds: b"", inner: false, inner_low: 0, inner_high: 0)
 }
 
 fn prefix_bit(mut plan: PrefixPlan, cp: u32) uses {} {
@@ -249,7 +250,9 @@ fn prefix_plan(code: List[Inst], entry: u64) -> PrefixPlan uses {} {
   }
   if paired {
     for i in 0u64..16 { sets[16 + i] = 255u8; sets[48 + i] = 255u8 }
-    plan.pair_sets = core@1/bytes.from_list(take sets)
+    let masks = core@1/bytes.from_list(take sets)
+    plan.firsts = core@1/bytes.slice(masks, 0, 32)
+    plan.seconds = core@1/bytes.slice(masks, 32, 64)
   }
   plan.enabled = true
   take plan
@@ -275,44 +278,29 @@ fn prefix_has(plan: PrefixPlan, cp: u32) -> bool uses {} {
   }
 }
 
-fn prefix_packed(plan: PrefixPlan, haystack: Bytes, from: u64) -> Option[u64] uses {} {
-  let sets = plan.pair_sets
-  let firsts = core@1/bytes.slice(sets, 0, 32)
-  let seconds = core@1/bytes.slice(sets, 32, 64)
-  let cursor = core@1/bytes.find_pair(haystack, firsts, seconds, from)
-  if cursor < core@1/bytes.len(haystack) { Some(cursor) } else { None() }
-}
-
-// Called only at a dead start state after whole-operation budget admission.
-// Return an original byte coordinate. Callers recover look-behind only when
-// they need it; the DFA does not decode each skipped ASCII byte.
-fn prefix_candidate(plan: PrefixPlan, haystack: Bytes, from: u64) -> Option[u64] uses {} {
-  if core@1/bytes.len(plan.pair_sets) != 0 { return prefix_packed(plan, haystack, from) }
-  if core@1/list.len(plan.literals) == 1 && plan.folds[0] == 0 {
-    let needle = core@1/string.as_bytes(plan.literals[0])
-    if core@1/bytes.len(needle) == 1 {
-      let at = core@1/bytes.find_any(haystack, needle, from)
-      return if at < core@1/bytes.len(haystack) { Some(at) } else { None() }
-    }
-  }
-  let size = core@1/bytes.len(haystack)
-  let mut cursor = from
-  while cursor < size {
-    let byte = haystack[cursor]
-    if (byte < 128 || byte >= 192) && prefix_has(plan, core@1/int.widen(byte)) {
-      return Some(cursor)
-    }
-    cursor += 1
-  }
-  None()
-}
-
+// hybrid/search.rs:245-271 and memchr packedpair's find_prefilter: the
+// scanner returns a necessary candidate, then the original ordered engine
+// confirms it. Prepare borrowed mask views once rather than slicing at every
+// dead state. Inner literals alone need the backwards class-run recovery.
 fn next_candidate(plan: PrefixPlan, haystack: Bytes, from: u64) -> Option[u64] uses {} {
-  if !plan.inner { return prefix_candidate(plan, haystack, from) }
   let size = core@1/bytes.len(haystack)
   let mut scan = from
   while scan < size {
-    let Some(candidate) = prefix_candidate(plan, haystack, scan) else { return None() }
+    let mut candidate = size
+    if core@1/bytes.len(plan.firsts) != 0 {
+      candidate = core@1/bytes.find_pair(haystack, plan.firsts, plan.seconds, scan)
+    } else if core@1/list.len(plan.literals) == 1 && plan.folds[0] == 0 {
+      candidate = core@1/bytes.find_any(haystack, core@1/string.as_bytes(plan.literals[0]), scan)
+    } else {
+      candidate = scan
+      while candidate < size {
+        let byte = haystack[candidate]
+        if (byte < 128 || byte >= 192) && prefix_has(plan, core@1/int.widen(byte)) { break }
+        candidate += 1
+      }
+    }
+    if candidate == size { return None() }
+    if !plan.inner { return Some(candidate) }
     let mut begin = candidate
     while begin > from {
       let byte: u64 = core@1/int.widen(haystack[begin - 1])

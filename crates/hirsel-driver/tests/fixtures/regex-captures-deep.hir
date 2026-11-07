@@ -43,5 +43,25 @@ pub fn main() -> Result[(), ()] {
     ),
     TextInvariant()
   )
+  // A long skipped prefix, adjacent matches, and an unmatched suffix exercise
+  // replacement cursor advancement. UTF-8 keeps the scalar-boundary path.
+  let Ok(replace) = regex.compile("(abc|xyz)", 1000) else {
+    return Error(())
+  }
+  let prefix = "________________________________________________________________"
+  for budget in [1000000u64, 18446744073709551615u64] {
+    failure.check(
+      regex.replace_all_literal(replace, string.concat(prefix, "abcabc?xyz!"), "X", budget) == Ok(
+        string.concat(prefix, "XX?X!")
+      ),
+      TextInvariant()
+    )
+    failure.check(
+      regex.replace_all_literal(replace, string.concat(prefix, "éabcabc?xyz!"), "X", budget) == Ok(
+        string.concat(prefix, "éXX?X!")
+      ),
+      TextInvariant()
+    )
+  }
   Ok(())
 }

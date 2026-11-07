@@ -240,24 +240,30 @@ fn prefix_plan(code: List[Inst], entry: u64) -> PrefixPlan uses {} {
   // Necessary two-position sets. Unicode fold equivalents remain candidates;
   // prefix_at and the ordered engine resolve cross-literal false positives.
   let mut paired = core@1/list.len(plan.literals) != 0
-  let mut firsts: List[u8] = []
-  let mut seconds: List[u8] = []
+  let mut sets: List[u8] = []
+  for i in 0u64..64 { core@1/list.push(mut sets, 0u8) }
   for literal in plan.literals {
     let bytes = core@1/string.as_bytes(literal)
     if core@1/bytes.len(bytes) < 2 { paired = false; break }
-    core@1/list.push(mut firsts, bytes[0] | 32u8)
-    core@1/list.push(mut firsts, bytes[0] & 223u8)
-    core@1/list.push(mut seconds, bytes[1] | 32u8)
-    core@1/list.push(mut seconds, bytes[1] & 223u8)
+    prefix_pair_bit(mut sets, 0, bytes[0] | 32u8)
+    prefix_pair_bit(mut sets, 0, bytes[0] & 223u8)
+    prefix_pair_bit(mut sets, 32, bytes[1] | 32u8)
+    prefix_pair_bit(mut sets, 32, bytes[1] & 223u8)
   }
   if paired {
-    core@1/bytes.append(mut firsts, PREFIX_NON_ASCII)
-    core@1/bytes.append(mut seconds, PREFIX_NON_ASCII)
-    for byte in seconds { core@1/list.push(mut firsts, byte) }
-    plan.pair_sets = core@1/bytes.from_list(take firsts)
+    for i in 0u64..16 { sets[16 + i] = 255u8; sets[48 + i] = 255u8 }
+    plan.pair_sets = core@1/bytes.from_list(take sets)
   }
   plan.enabled = true
   take plan
+}
+
+// Exact nibble membership, prepared once with the compiled prefix plan.
+fn prefix_pair_bit(mut sets: List[u8], base: u64, byte: u8) uses {} {
+  let value: u64 = core@1/int.widen(byte)
+  let row = base + (value & 15) + if value >= 128 { 16u64 } else { 0u64 }
+  let shift: u8 = core@1/int.narrow((value >> 4) & 7)
+  sets[row] |= 1u8 << shift
 }
 
 fn prefix_has(plan: PrefixPlan, cp: u32) -> bool uses {} {

@@ -492,6 +492,16 @@ fn byte_search_borrows_only_the_selected_extents() {
                 assert_eq!((*needles.owner).count, 1);
                 assert_eq!(ctx.stats().backing_allocations, allocations);
             }
+            let mut masks = [0u8; 66];
+            masks[0] = 255;
+            masks[65] = 255;
+            masks[1] = 1;
+            masks[32] = 128;
+            masks[35] = 64;
+            masks[36] = 64;
+            masks[64] = 128;
+            let masks = allocate_bytes(ctx.0, &masks);
+            let pair_allocations = ctx.stats().backing_allocations;
             // Pair hits are relative to the borrowed view, including its final pair.
             for (offset, expected) in [(0, 1), (2, 3), (4, 5), (u64::MAX, 5)] {
                 let mut found = u64::MAX;
@@ -502,12 +512,12 @@ fn byte_search_borrows_only_the_selected_extents() {
                         source.owner,
                         source.start + 6,
                         5,
-                        needles.owner,
-                        needles.start + 1,
-                        2,
-                        source.owner,
-                        source.start + 8,
-                        3,
+                        masks.owner,
+                        masks.start + 1,
+                        32,
+                        masks.owner,
+                        masks.start + 33,
+                        32,
                         offset
                     ),
                     0
@@ -515,8 +525,10 @@ fn byte_search_borrows_only_the_selected_extents() {
                 assert_eq!(found, expected);
                 assert_eq!((*source.owner).count, 1);
                 assert_eq!((*needles.owner).count, 1);
-                assert_eq!(ctx.stats().backing_allocations, allocations);
+                assert_eq!(ctx.stats().backing_allocations, pair_allocations);
             }
+            assert_eq!((*masks.owner).count, 1);
+            release(&ctx, masks.owner);
             release(&ctx, source.owner);
             release(&ctx, needles.owner);
 

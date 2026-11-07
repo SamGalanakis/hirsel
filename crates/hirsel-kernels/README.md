@@ -40,7 +40,7 @@ following memchr 2.8.3's vector equality and first-set-lane structure. Other
 architectures use eight-byte SWAR comparisons. Larger sets use exact nibble membership with SSSE3 when available and retain
 the scalar membership table elsewhere. Neither path reads beyond the supplied borrowed extent.
 
-`byte_scan::find_pair` searches adjacent positions in two arbitrary byte sets.
+`byte_scan::find_pair` searches adjacent positions using two prepared 32-byte membership masks.
 SSSE3 uses exact nibble membership and overlapping sixteen-byte loads; the
 portable path loads whole eight-byte words. Both guard the second load and
 retain every boundary and tail candidate. An independent scalar window oracle

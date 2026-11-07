@@ -1846,11 +1846,14 @@ sets and starts at or beyond the extent have no match. It borrows both extents,
 allocates nothing and treats all 256 byte values equally.
 
 
-`bytes.find_pair(src, firsts, seconds, start)` returns the first relative byte
-offset at or after `start` whose byte occurs in `firsts` and whose following
-byte occurs in `seconds`, or `bytes.len(src)` if none exists. Empty sets, a
-one-byte tail and starts outside the extent have no match. All extents are
-borrowed, no allocation occurs, and every byte value is supported.
+`bytes.find_pair(src, firsts, seconds, start)` searches two adjacent byte positions
+using prepared 32-byte membership masks. For byte `b`, mask index
+`(b & 15) + 16 * (b >> 7)` contains bit `1 << ((b >> 4) & 7)` exactly when `b`
+is a member. It returns the first relative matching pair offset at or after
+`start`, or `bytes.len(src)` if none exists. Masks of other lengths, a one-byte
+tail and starts outside the extent have no match. All extents are borrowed,
+no allocation occurs, and every byte value is supported. Regex prepares these
+Teddy-style nibble tables once per compiled prefix plan.
 
 The numeric byte leaves back std's existing lossless JSON and scalar APIs.
 `bytes.json_number_end` returns the cursor immediately after a strict JSON number

@@ -125,7 +125,8 @@ fn dfa_golden(pattern: String, src: String, expected: Option[Span]) -> bool uses
   let Ok(subject) = make_subject(src, mut work) else { return false }
   let mut cache = dfa_cache(re, true, 65024)
   let Ok((matched, _)) = find_from(re, subject, 0, true, core@1/string.as_bytes(src), mut cache, mut work) else { return false }
-  matched == expected
+  let Ok((scalar, _)) = pike_find_from(re, subject, 0, false, mut work) else { return false }
+  matched == expected && scalar == expected
 }
 
 fn dfa_goldens() -> bool uses {} {
@@ -141,6 +142,13 @@ fn dfa_goldens() -> bool uses {} {
     ("abcdef|xyzabc", "abcdef_________", 0, 6),
     ("abcdef|xyzabc", "_________xyzabc", 9, 15),
     ("abcdef|xyzabc", "_______abcdef__", 7, 13),
+    ("abcdef|xyzabc", "_______________xyzabc", 15, 21),
+    ("abcdef|xyzabc", "________________abcdef", 16, 22),
+    ("abcdef|xyzabc", "_______________________________abcdef", 31, 37),
+    ("abcdef|xyzabc", "________________________________abcdef", 32, 38),
+    ("(?i)(ask|bark)", "_______________aſk", 15, 19),
+    ("(?i)(skip|done)", "________________ſkip", 16, 21),
+    ("(?i)(absk|kelvin)", "_______________KELVIN", 15, 23),
     ("abcdef|abc", "_______abcdef__", 7, 13),
     ("abc|abcdef", "_______abcdef__", 7, 10),
     ("(?i)(ask|bark)", "aſk________", 0, 4),

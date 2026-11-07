@@ -2018,7 +2018,15 @@ fn text(module: Option<&str>, name: &str, args: &[OpValue]) -> Option<OpOutcome>
                 source
                     .get(start..)?
                     .windows(2)
-                    .position(|pair| firsts.contains(&pair[0]) && seconds.contains(&pair[1]))
+                    .position(|pair| {
+                        let member = |mask: &[u8], byte: u8| {
+                            mask.len() == 32
+                                && mask[usize::from(byte & 15) + usize::from(byte >> 7) * 16]
+                                    & (1 << ((byte >> 4) & 7))
+                                    != 0
+                        };
+                        member(firsts, pair[0]) && member(seconds, pair[1])
+                    })
                     .map(|at| start + at)
             });
             OpValue::Bits {

@@ -22,6 +22,40 @@ struct Entry {
     path: DefPath,
     fingerprint: ContentHash,
     display: Box<str>,
+    order: Box<[u8]>,
+}
+
+/// Bytes whose lexicographic order is `DefPath`'s derived order: every string
+/// is self-delimiting (0 escaped as 0 0xff, ended by 0 0), and each module
+/// segment is introduced by 1 while the list ends with 0, so a shorter list
+/// sorts before its extensions exactly as `Vec` does.
+fn order_key(path: &DefPath) -> Box<[u8]> {
+    fn text(out: &mut Vec<u8>, text: &str) {
+        for &byte in text.as_bytes() {
+            out.push(byte);
+            if byte == 0 {
+                out.push(0xff);
+            }
+        }
+        out.extend([0, 0]);
+    }
+    let item = &path.0;
+    let mut out = Vec::with_capacity(
+        item.package.name.len()
+            + item.package.version.len()
+            + item.name.len()
+            + item.modules.iter().map(|m| m.len() + 3).sum::<usize>()
+            + 7,
+    );
+    text(&mut out, &item.package.name);
+    text(&mut out, &item.package.version);
+    for module in &item.modules {
+        out.push(1);
+        text(&mut out, module);
+    }
+    out.push(0);
+    text(&mut out, &item.name);
+    out.into_boxed_slice()
 }
 
 const SHARDS: usize = 16;
@@ -65,6 +99,7 @@ impl DefId {
             path: path.clone(),
             fingerprint: path.fingerprint(),
             display: path.to_string().into(),
+            order: order_key(path),
         }));
         DEFS.entries.set(position, entry);
         let id = DefId(DEFS.scramble.encode(position));
@@ -140,7 +175,7 @@ impl Ord for DefId {
         if self == other {
             return Ordering::Equal;
         }
-        self.path().cmp(other.path())
+        self.entry().order.cmp(&other.entry().order)
     }
 }
 

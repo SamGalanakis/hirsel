@@ -130,8 +130,22 @@ pub fn main(t: Test) -> Result[(), ()] {
   let Ok(label) = label_from_json_bytes(b"{\"label\":\"\\u00e9\\uD834\\uDD1E\"}") else { return Error(()) }
   test.equal(t, label.label, "é𝄞")
   test.equal(t, x_from_json_bytes(b"{}"), Error("missing field `x`"))
+  let Ok(reordered) = point_from_json_bytes(b"{\"z\":0.25, \"y\" :0.5,\"x\":0.125}") else { return Error(()) }
+  test.equal(t, (reordered.x, reordered.y, reordered.z), (0.125, 0.5, 0.25))
+  let duplicate_positions: List[(Bytes, u64)] = [
+    (b"{\"x\":1,\"x\" ?}", 10),
+    (b"{\"x\":1,\"\\u0078\" ?}", 15)
+  ]
+  for (input, position) in duplicate_positions {
+    let mut duplicate_cursor = json.reader(input)
+    test.equal(t, x_from_json_reader(mut duplicate_cursor), Error("not JSON"))
+    test.equal(t, duplicate_cursor.pos, position)
+  }
   test.equal(t, parent_from_json_bytes(b"{\"alpha\":0,\"child\":null,\"alpha\":0}"), Error("not JSON"))
   let duplicates: List[String] = [
+    "{\"x\":1\"x\":2}",
+    "{\"x\":1 \"a\":null}",
+    "{\"x\":1,}",
     "{\"x\":1,\"x\":2}",
     "{\"x\":1,\"\\u0078\":2}",
     "{\"x\":1,\"a\":0,\"a\":1}",

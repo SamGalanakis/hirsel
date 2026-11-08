@@ -13,9 +13,11 @@ pub(super) enum ReaderSource {
     StagedLower(hirsel_engine_runtime::QueryId),
 }
 
+/// Rows hash by interned identity; the one key sort happens at `finish`
+/// instead of a path comparison per merged row.
 #[derive(Default)]
 pub(super) struct ReadUnion {
-    rows: BTreeMap<ReadKey, (ContentHash, usize)>,
+    rows: std::collections::HashMap<ReadKey, (ContentHash, usize), hirsel_intern::IdHasher>,
     conflict: Option<ReadKey>,
 }
 impl ReadUnion {
@@ -27,9 +29,8 @@ impl ReadUnion {
         union
     }
     pub(super) fn merge(&mut self, reads: &Reads) {
-        use std::collections::btree_map::Entry;
-        // Rust alloc btree/map/entry.rs: insertion preserves the first ordinal.
-        // The final codec performs the existing canonical key sort.
+        use std::collections::hash_map::Entry;
+        // An occupied entry keeps its first ordinal.
         for &(key, value) in reads.observed() {
             let ordinal = self.rows.len();
             match self.rows.entry(key) {
@@ -48,11 +49,12 @@ impl ReadUnion {
         if let Some(key) = self.conflict {
             return Err(hirsel_query_products::reads::Inconsistent(key));
         }
-        let rows = self
+        let mut rows: Vec<_> = self
             .rows
             .into_iter()
             .map(|(key, (value, ordinal))| (key, value, ordinal))
             .collect();
+        rows.sort_unstable_by_key(|&(key, ..)| key);
         Ok(Reads::from_canonical_observations(rows))
     }
 }

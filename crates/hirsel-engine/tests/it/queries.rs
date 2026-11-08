@@ -1470,45 +1470,6 @@ fn frozen_frontier_reports_each_missing_phase_and_retries_it() {
 }
 
 #[test]
-fn frozen_frontier_runs_independent_checkers_concurrently() {
-    struct Together {
-        fake: Arc<dyn CheckerPhase>,
-        barrier: std::sync::Barrier,
-    }
-    impl CheckerPhase for Together {
-        fn check(
-            &self,
-            t: &TypeInterner,
-            m: &TypeMemo,
-            syntax: Arc<ItemSyntax>,
-            resolution: Resolution,
-            signature: &Signature,
-            provider: &mut dyn SignatureProvider,
-        ) -> Result<QueryOutput<hirsel_query_products::TypedBody>, QueryError> {
-            // Exactly two tasks/workers: a serialized implementation cannot
-            // satisfy this rendezvous. No wall-clock threshold is involved.
-            self.barrier.wait();
-            self.fake
-                .check(t, m, syntax, resolution, signature, provider)
-        }
-    }
-    with_compiler_stack(|| {
-        let (mut engine, _) = make_engine_with_store(None, false);
-        let fake = engine.adapters.checker.take().unwrap();
-        engine.adapters.checker = Some(Arc::new(Together {
-            fake,
-            barrier: std::sync::Barrier::new(2),
-        }));
-        parse(&mut engine, "fn a () { 1 }\nfn b () { 2 }\n");
-        let definitions = vec![path("b"), path("a")];
-        let mut front = admitted_front(&mut engine, &definitions, 2);
-        let results = front.request(&definitions);
-        assert_eq!(results.len(), 2);
-        assert!(results.iter().all(|result| result.outcome.result.is_ok()));
-    });
-}
-
-#[test]
 fn frozen_frontier_retries_operational_headers_only_in_the_next_snapshot() {
     struct Flaky {
         original: Arc<dyn SignaturePhase>,

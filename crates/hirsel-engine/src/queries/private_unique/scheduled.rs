@@ -794,12 +794,13 @@ impl QueryEngine {
             let citations = match &record_context {
                 Some((previous, context)) if *previous == stamp => Arc::clone(context),
                 _ => {
+                    // The context owns this engine's sources, items and
+                    // catalog, so it derives every other citation itself;
+                    // only header-captured texts differ from that derivation.
                     let cited = self
-                        .source_paths()
-                        .into_iter()
-                        .map(|path| {
-                            let id = DefId::intern(&path);
-                            (id, self.cited_value(&path))
+                        .source_paths_iter()
+                        .filter_map(|path| {
+                            Some((DefId::intern(path), self.captured_text(path)?.cited))
                         })
                         .collect();
                     let context = Arc::new(crate::snapshot::OwnedSourceContext {

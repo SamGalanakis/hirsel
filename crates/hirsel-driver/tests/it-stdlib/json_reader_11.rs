@@ -33,6 +33,17 @@ fn point_from_json_bytes(data: Bytes) -> Result[unique Point, String] uses {} = 
 type Label { label: String }
 fn label_from_json_reader(mut cursor: json.Reader) -> Result[unique Label, String] uses {} = comptime derive.from_json_reader(shape(Label))
 fn label_from_json_bytes(data: Bytes) -> Result[unique Label, String] uses {} = comptime derive.from_json_bytes(shape(Label))
+// A nominal reader may replace the public cursor's input. Retained unknown
+// names belong to the input at their read, even when later fields change it.
+type Child { ok: bool }
+fn child_from_json_reader(mut cursor: json.Reader) -> Result[unique Child, String] uses {} {
+  derive.read_null(mut cursor)?
+  cursor.data = b"{\"bravo\":0,\"child\":null,\"alpha\":0}"
+  Ok(Child(ok: true))
+}
+type Parent { child: Child }
+fn parent_from_json_reader(mut cursor: json.Reader) -> Result[unique Parent, String] uses {} = comptime derive.from_json_reader(shape(Parent))
+fn parent_from_json_bytes(data: Bytes) -> Result[unique Parent, String] uses {} = comptime derive.from_json_bytes(shape(Parent))
 fn validate(data: Bytes) -> Result[(), json.JsonError] uses {} {
   let mut cursor = json.reader(data)
   json.skip(mut cursor)?
@@ -119,6 +130,7 @@ pub fn main(t: Test) -> Result[(), ()] {
   let Ok(label) = label_from_json_bytes(b"{\"label\":\"\\u00e9\\uD834\\uDD1E\"}") else { return Error(()) }
   test.equal(t, label.label, "é𝄞")
   test.equal(t, x_from_json_bytes(b"{}"), Error("missing field `x`"))
+  test.equal(t, parent_from_json_bytes(b"{\"alpha\":0,\"child\":null,\"alpha\":0}"), Error("not JSON"))
   let duplicates: List[String] = [
     "{\"x\":1,\"x\":2}",
     "{\"x\":1,\"\\u0078\":2}",

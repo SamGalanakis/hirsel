@@ -1786,9 +1786,9 @@ pub fn remember_unknown_key(mut keys: Option[Set[String]], take key: String) -> 
 
 // SmallVec 4999262d672a92b1b6a4aab7bef43b3d788f3d83 (MIT/Apache-2.0),
 // src/lib.rs:586-615,674-703 keeps bounded inline
-// storage before allocating spill storage. The reader must own retained keys:
-// cursor-borrowed TextViews cannot survive the next mutable cursor operation.
-// Keep two owned spellings inline and hash only subsequent unknown keys.
+// storage before allocating spill storage. Source-relative key offsets survive
+// cursor mutation without retaining borrowed views. Keep two descriptors inline
+// and materialize a spelling only when spilling into the hashed tracker.
 fn reader_members(
   mut w: Writer,
   names: List[String],
@@ -1805,6 +1805,19 @@ fn reader_members(
     put(mut w, f" let mut {slots[i]}: core@1/Option[{ty}] = None\n")
     i += 1
   }
+  // Scalar readers and skip mutate only pos/depth. A user nominal reader may
+  // replace cursor.data, so its containing record must retain owned spellings.
+  let mut retain_spans = true
+  for ty in types {
+    if ty != "bool" && ty != "String" && !float(ty) && !integer(ty) {
+      retain_spans = false
+    }
+  }
+  let key_type = if retain_spans {
+    "std@1/json.ObjectKey"
+  } else {
+    "String"
+  }
   let keys = fresh(mut w, "keys")
   let first_unknown = fresh(mut w, "unknown")
   let second_unknown = fresh(mut w, "unknown")
@@ -1812,19 +1825,28 @@ fn reader_members(
   let key = fresh(mut w, "key")
   put(
     mut w,
-    f" let mut {keys}: Option[Set[String]] = None\n let mut {first_unknown}: Option[String] = None\n let mut {second_unknown}: Option[String] = None\n let mut {first} = true\n while true {{\n let Some({key}) = (match std@1/json.object_key(mut cursor, mut {first}) {{ Ok(k) => k, Error(_) => return Error(\"not JSON\") }}) else {{ break }}\n"
+    f" let mut {keys}: Option[Set[String]] = None\n let mut {first_unknown}: Option[{key_type}] = None\n let mut {second_unknown}: Option[{key_type}] = None\n let mut {first} = true\n while true {{\n let Some({key}) = (match std@1/json.object_key(mut cursor, mut {first}) {{ Ok(k) => k, Error(_) => return Error(\"not JSON\") }}) else {{ break }}\n"
   )
   // serde_derive 1.0.228 de/identifier.rs:199-219,449-470 dispatches a
   // borrowed byte identifier once. Decode only escaped keys; retain the
   // original key for Hirsel's unknown-field duplicate checks below.
   let field = fresh(mut w, "field")
   let unknown = list.len(names)
-  put(mut w, f" let {field}: u64 = match {key} {{\n Unescaped(raw) => {{\n")
+  put(mut w, f" let {field}: u64 = match {key} {{\n ByteKey(byte) => {{\n")
   i = 0
   for name in names {
     let raw = core@1/string.as_bytes(name)
     if core@1/bytes.len(raw) == 1 {
-      put(mut w, f" if core@1/bytes.len(raw) == 1 && raw[0] == {raw[0]}u8 {{ {i}u64 }} else ")
+      put(mut w, f" if byte == {raw[0]}u8 {{ {i}u64 }} else ")
+    }
+    i += 1
+  }
+  put(mut w, f" {{ {unknown}u64 }}\n }},\n KeySpan(start, end) => {{\n")
+  i = 0
+  for name in names {
+    let raw = core@1/string.as_bytes(name)
+    if core@1/bytes.len(raw) == 1 {
+      put(mut w, f" if end - start == 1 && cursor.data[start] == {raw[0]}u8 {{ {i}u64 }} else ")
     } else {
       let digits: Bytes = b"0123456789abcdef"
       let mut byte_spelling: List[u8] = [98, 34]
@@ -1835,11 +1857,11 @@ fn reader_members(
       }
       core@1/list.push(mut byte_spelling, 34)
       let spelling = text.finish_valid(take byte_spelling)
-      put(mut w, f" if raw == {spelling} {{ {i}u64 }} else ")
+      put(mut w, f" if core@1/bytes.slice(cursor.data, start, end) == {spelling} {{ {i}u64 }} else ")
     }
     i += 1
   }
-  put(mut w, f" {{ {unknown}u64 }}\n }},\n Escaped(decoded) => {{\n")
+  put(mut w, f" {{ {unknown}u64 }}\n }},\n DecodedKey(decoded) => {{\n")
   i = 0
   for name in names {
     let mut quoted: List[u8] = []
@@ -1859,9 +1881,24 @@ fn reader_members(
     put(mut w, ")\n continue\n }\n")
     i += 1
   }
+  let retained_key = if retain_spans {
+    f"copy {key}"
+  } else {
+    f"std@1/json.key_owned(cursor.data, {key})"
+  }
+  let first_equal = if retain_spans {
+    f"std@1/json.keys_equal(cursor.data, {key}, previous_first)"
+  } else {
+    f"std@1/json.key_is(cursor.data, {key}, previous_first)"
+  }
+  let second_equal = if retain_spans {
+    f"std@1/json.keys_equal(cursor.data, {key}, previous_second)"
+  } else {
+    f"std@1/json.key_is(cursor.data, {key}, previous_second)"
+  }
   put(
     mut w,
-    f" match {first_unknown} {{\n None => {{ {first_unknown} = Some(std@1/json.text_owned({key})) }},\n Some(previous_first) => {{\n if std@1/json.text_is({key}, previous_first) {{ return Error(\"not JSON\") }}\n match {second_unknown} {{\n None => {{ {second_unknown} = Some(std@1/json.text_owned({key})) }},\n Some(previous_second) => {{\n if std@1/json.text_is({key}, previous_second) {{ return Error(\"not JSON\") }}\n let unknown_key = std@1/json.text_owned({key})\n if !std@1/derive.remember_unknown_key(mut {keys}, take unknown_key) {{ return Error(\"not JSON\") }}\n }},\n }}\n }},\n }}\n std@1/derive.read_json(std@1/json.colon(mut cursor))?\n std@1/derive.read_json(std@1/json.skip(mut cursor))?\n }}\n"
+    f" match {first_unknown} {{\n None => {{ {first_unknown} = Some({retained_key}) }},\n Some(previous_first) => {{\n if {first_equal} {{ return Error(\"not JSON\") }}\n match {second_unknown} {{\n None => {{ {second_unknown} = Some({retained_key}) }},\n Some(previous_second) => {{\n if {second_equal} {{ return Error(\"not JSON\") }}\n let unknown_key = std@1/json.key_owned(cursor.data, {key})\n if !std@1/derive.remember_unknown_key(mut {keys}, take unknown_key) {{ return Error(\"not JSON\") }}\n }},\n }}\n }},\n }}\n std@1/derive.read_json(std@1/json.colon(mut cursor))?\n std@1/derive.read_json(std@1/json.skip(mut cursor))?\n }}\n"
   )
   let mut arguments: List[String] = []
   i = 0

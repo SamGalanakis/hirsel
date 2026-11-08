@@ -533,6 +533,10 @@ pub type Reader {
 
 pub type TextView = Unescaped(Bytes) | Escaped(String)
 
+// Source offsets retain no borrowed owner across mutable cursor operations.
+// Only escaped keys need independent decoded storage.
+pub type ObjectKey = ByteKey(u8) | KeySpan(u64, u64) | DecodedKey(String)
+
 pub type Token = NullToken | BoolToken(bool) | NumberToken(Bytes) | TextToken(TextView) | ArrayStart | ArrayEnd | ObjectStart | ObjectEnd | Colon | Comma
 
 pub fn reader(data: Bytes) -> Reader in data uses {} {
@@ -677,9 +681,9 @@ pub fn array_next(mut cursor: Reader, mut first: bool) -> Result[bool, JsonError
 /// Next object key without allocating a key set. Generated records check their
 /// declared field slots and keep a set only for unknown fields.
 pub fn object_key(mut cursor: Reader, mut first: bool) -> Result[
-  Option[TextView],
+  Option[ObjectKey],
   JsonError
-] in cursor uses {} {
+] uses {} {
   let mut c = peek(mut cursor)
   if c == 125 {
     if cursor.depth == 0 {
@@ -700,7 +704,82 @@ pub fn object_key(mut cursor: Reader, mut first: bool) -> Result[
   if c != 34 {
     return Error(Syntax(cursor.pos))
   }
-  Ok(Some(reader_text(cursor.data, mut cursor.pos)?))
+  // serde_json read.rs:521-566 borrows an unescaped key and serde_derive
+  // de/identifier.rs:199-219 selects its field. Fuse the one-byte ASCII case:
+  // the quotes prove its complete extent, so no scan or owned subview is needed.
+  let at = cursor.pos
+  if core@1/bytes.len(cursor.data) - at >= 3 && cursor.data[at + 2] == 34 {
+    let byte = cursor.data[at + 1]
+    if byte >= 32 && byte < 128 && byte != 34 && byte != 92 {
+      cursor.pos = at + 3
+      return Ok(Some(ByteKey(byte)))
+    }
+  }
+  let end = core@1/bytes.find_any(cursor.data, JSON_STRING_STOP, at + 1)
+  if end < core@1/bytes.len(cursor.data) && cursor.data[end] == 34 {
+    cursor.pos = end + 1
+    return Ok(Some(KeySpan(at + 1, end)))
+  }
+  Ok(Some(DecodedKey(json_quoted(cursor.data, mut cursor.pos)?)))
+}
+
+// Compare retained key spans against this reader's immutable input. Like
+// serde_json's borrowed keys, plain keys never require a scratch allocation.
+pub fn key_is(data: Bytes, key: ObjectKey, expected: String) -> bool uses {} {
+  match key {
+    ByteKey(byte) => core@1/string.byte_len(expected) == 1 && core@1/string.as_bytes(expected)[0] == byte,
+    KeySpan(start, end) => {
+      if end - start != core@1/string.byte_len(expected) {
+        return false
+      }
+      core@1/bytes.slice(data, start, end) == core@1/string.as_bytes(expected)
+    },
+    DecodedKey(decoded) => decoded == expected,
+  }
+}
+
+pub fn keys_equal(data: Bytes, first: ObjectKey, second: ObjectKey) -> bool uses {} {
+  match first {
+    ByteKey(byte) => match second {
+      ByteKey(other) => byte == other,
+      KeySpan(start, end) => end - start == 1 && data[start] == byte,
+      DecodedKey(decoded) => key_is(data, first, decoded),
+    },
+    DecodedKey(decoded) => key_is(data, second, decoded),
+    KeySpan(start, end) => match second {
+      ByteKey(byte) => end - start == 1 && data[start] == byte,
+      DecodedKey(decoded) => key_is(data, first, decoded),
+      KeySpan(other_start, other_end) => {
+        if end - start != other_end - other_start {
+          return false
+        }
+        let mut left = start
+        let mut right = other_start
+        while left < end {
+          if data[left] != data[right] {
+            return false
+          }
+          left += 1
+          right += 1
+        }
+        true
+      },
+    },
+  }
+}
+
+pub fn key_owned(data: Bytes, key: ObjectKey) -> unique String uses {} {
+  match key {
+    ByteKey(byte) => match text.finish([byte]) {
+      Ok(decoded) => unique decoded,
+      Error(_) => {
+        core@1/failure.check(false, TextInvariant())
+        ""
+      },
+    },
+    KeySpan(start, end) => json_owned_text(data, start, end),
+    DecodedKey(decoded) => unique decoded,
+  }
 }
 
 pub fn colon(mut cursor: Reader) -> Result[(), JsonError] uses {} {

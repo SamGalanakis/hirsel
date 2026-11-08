@@ -1,12 +1,11 @@
 //! The per-definition query memos (design §1b). Each holds its value, the
-//! adapter-level detail of what it read, and the typed `Reads` the memo
-//! graph subscribes it to. Indexing diffs each definition's inputs and marks
-//! exactly the subscribers of what changed; a marked memo is deep-verified by
-//! observing every read again, and an unmarked one is valid as it stands.
+//! adapter-level detail of what it read, and its typed `Reads`. Indexing
+//! diffs each definition's inputs; every memo that read a changed input is
+//! forgotten and recomputed on demand.
 use super::*;
-use crate::memo::{ChangeSet, Memo, MemoKey, Verdict};
+use crate::memo::{Changes, Memo, MemoKey};
 use hirsel_query_products::reads::{
-    Durability, LookupKey, LookupSource, ModuleKey, PackageKey, ReadKey, Reads, ReadsBuilder,
+    LookupKey, LookupSource, ModuleKey, PackageKey, ReadKey, Reads, ReadsBuilder,
 };
 use hirsel_syntax::DefId;
 use hirsel_types::LookupError;
@@ -359,28 +358,6 @@ impl ReadSource for QueryEngine {
 }
 
 impl QueryEngine {
-    /// The durability of what a read observes: std and core are High,
-    /// dependency packages Medium, the program's own package Low.
-    pub(crate) fn durability_of(&self, read: &ReadKey) -> Durability {
-        // A package's V universe can contain root-package inputs even when
-        // the artifact itself belongs to a stable dependency package.
-        if matches!(read, ReadKey::ValidationUniverse(_)) {
-            return Durability::Low;
-        }
-        match read.package() {
-            None => Durability::High,
-            Some(p) => {
-                let id = p.id();
-                if id.name_is("std") || id.name_is("core") {
-                    Durability::High
-                } else if self.package_manifests.contains_key(&id) {
-                    Durability::Medium
-                } else {
-                    Durability::Low
-                }
-            }
-        }
-    }
     /// The session's compiler and explicit build inputs. Package manifests
     /// describe discovery; their semantic dependencies are reads.
     /// Include the comptime limits and charging version
@@ -488,7 +465,7 @@ impl QueryEngine {
                     && self
                         .private_summary_failure
                         .as_ref()
-                        .is_some_and(|(revision, _)| *revision == self.graph.revision())
+                        .is_some_and(|(revision, _)| *revision == self.revision)
                 {
                     return None;
                 }
@@ -584,42 +561,15 @@ impl QueryEngine {
         })
     }
 
-    /// Whether `entry` is valid now for a query whose own content is `text`.
-    /// An unmarked memo is valid and stamped; a memo marked by a changed read
-    /// is deep-verified; a memo whose own definition changed is recomputed.
-    pub(crate) fn memo_valid<T>(
-        &mut self,
-        owner: &DefPath,
-        entry: &Entry<T>,
-        text: ContentHash,
-    ) -> bool {
+    /// Whether `entry` is valid now for a query whose own content is `text`:
+    /// its text is current and no change it observed has forgotten it.
+    pub(crate) fn memo_valid<T>(&mut self, entry: &Entry<T>, text: ContentHash) -> bool {
         if entry.memo.text != text {
             hirsel_intern::work::count(hirsel_intern::work::Counter::CacheValidationRows);
             return false;
         }
         self.note_environment();
-        match self.graph.check(&entry.memo) {
-            Verdict::Valid => true,
-            Verdict::Missing => false,
-            // The definition's own items changed: an item replaced rather than
-            // moved has a new anchor, which the cached spans do not name.
-            Verdict::Dirty(crate::memo::Invalidation::Text) => false,
-            // The definition's own text is compared above; its other inputs
-            // (candidates, cited text) are reads.
-            Verdict::Dirty(crate::memo::Invalidation::Read(_)) => {
-                hirsel_intern::work::count(hirsel_intern::work::Counter::CacheValidationRows);
-                let reads = entry.memo.reads.clone();
-                if reads
-                    .first_changed(|read| self.observe(owner, read))
-                    .is_none()
-                {
-                    self.graph.confirm(&entry.memo);
-                    true
-                } else {
-                    false
-                }
-            }
-        }
+        !entry.memo.is_stale()
     }
 
     /// Records a freshly computed query. Inconsistent reads (an input changed
@@ -643,10 +593,8 @@ impl QueryEngine {
             Ok(reads) => (reads, true),
             Err(_) => (Reads::empty(), false),
         };
-        let durability = reads.durability(|r| self.durability_of(r));
-        let memo = self
-            .graph
-            .insert(key, text, result, Arc::new(reads), durability, false);
+        *self.recorded.entry(key.kind).or_default() += 1;
+        let memo = Memo::new(key, text, result, Arc::new(reads));
         Entry {
             products: observed.products.clone(),
             memo,
@@ -662,7 +610,7 @@ impl QueryEngine {
 
     /// Check rejection stops the pipeline before its descendants can validate their
     /// reads. Their earlier successful products no longer describe this check.
-    /// Retire them through the graph as well as the typed/aggregate tables;
+    /// Retire them from the typed/aggregate tables;
     /// unrelated definitions and independently usable predecessors survive.
     pub(super) fn retire_after_check_rejection(&mut self, definition: DefId) {
         for kind in [
@@ -701,12 +649,12 @@ impl QueryEngine {
         })
     }
 
-    /// Diffs the inputs of `paths` against what was last indexed and marks
-    /// the subscribers of every changed read (S0's change set). Removed
+    /// Diffs the inputs of `paths` against what was last indexed and forgets
+    /// every memo that read a changed input (S0's change set). Removed
     /// definitions forget their memos.
     pub(crate) fn note_inputs(&mut self, paths: impl IntoIterator<Item = DefPath>) {
         self.adopt_completed_headers();
-        let mut changes = ChangeSet::default();
+        let mut changes = Changes::default();
         let mut any_names_changed = false;
         let mut private_body_changed = false;
         for path in paths {
@@ -726,8 +674,7 @@ impl QueryEngine {
             }
             self.source_growth.changed(id, now.is_some());
             self.front_changes.changed(id, now.is_some());
-            let durability = self.durability_of(&ReadKey::DeclarationCandidates(id));
-            let mut read = |k| changes.read(k, durability);
+            let mut read = |k| changes.read(k);
             match (&before, &now) {
                 (Some(b), Some(n)) => {
                     if b.body != n.body {
@@ -778,7 +725,7 @@ impl QueryEngine {
                     // body-only edit marks nothing here; each body memo compares
                     // its own text when read.
                     if b.anchors != n.anchors || b.header != n.header {
-                        changes.text(id, durability);
+                        changes.text(id);
                     }
                 }
                 _ => {
@@ -797,7 +744,7 @@ impl QueryEngine {
                     ] {
                         read(k);
                     }
-                    changes.text(id, durability);
+                    changes.text(id);
                 }
             }
             match now {
@@ -807,28 +754,20 @@ impl QueryEngine {
                 None => {
                     self.inputs.remove(&id);
                     self.specialization_dependencies.remove(&id);
-                    let keys: Vec<MemoKey> = self.graph.memos_of(id).copied().collect();
-                    for key in keys {
-                        self.forget(&key);
-                    }
+                    self.forget_definition(id);
                 }
             }
             // A GEN-6 specialization's name is never written in source, so no
             // lookup can observe it appearing.
             if names_changed && hirsel_types::specialization_parts(&path).is_none() {
                 any_names_changed = true;
-                changes.read(
-                    ReadKey::NameSet(
-                        PackageKey::of(&path.0.package),
-                        ModuleKey::of(&path.0.modules),
-                    ),
-                    durability,
-                );
+                changes.read(ReadKey::NameSet(
+                    PackageKey::of(&path.0.package),
+                    ModuleKey::of(&path.0.modules),
+                ));
             }
         }
-        if any_names_changed {
-            self.mark_lookups(&mut changes);
-        }
+        changes.lookups |= any_names_changed;
         self.apply_changes(&changes);
         if private_body_changed {
             // Declared headers can survive a body edit; their immutable
@@ -837,79 +776,39 @@ impl QueryEngine {
         }
     }
 
-    /// A name appeared, disappeared or changed kind or visibility. Mark only
-    /// lookup receipts whose observed value changed: frozen workers cannot
-    /// deep-verify a conservative mark and would otherwise repeat body work.
-    fn mark_lookups(&mut self, changes: &mut ChangeSet) {
-        for key in self.graph.read_keys() {
-            if let ReadKey::Lookup(_) = key {
-                let Some(owner) = self.graph.subscribers(&key).next().map(|memo| memo.def) else {
-                    continue;
-                };
-                let value = self.observe(owner.path(), &key);
-                let changed = self.graph.subscribers(&key).any(|memo| {
-                    self.memo_reads(memo.def.path(), memo.kind)
-                        .and_then(|reads| reads.get(&key))
-                        != value
-                });
-                if changed {
-                    changes.read(key, self.durability_of(&key));
-                }
-            }
-        }
-    }
-
-    /// S0's signature step: recomputes every marked signature memo in DefPath
+    /// S0's signature step: recomputes every forgotten signature in DefPath
     /// order (each reads its own dependencies first) and, where a signature's
-    /// observed value changed, marks its readers, until no signature memo is
-    /// marked. A recomputed signature whose value did not change marks
-    /// nothing, so its readers stay valid.
+    /// observed value changed, forgets its readers, until none is pending. A
+    /// recomputed signature whose value did not change forgets nothing, so
+    /// its readers stay valid.
     pub(crate) fn settle_signatures(&mut self) {
         // Settling is S0 bookkeeping, not a phase the caller asked for.
         let (last_phase, unavailable) = (self.last_phase, self.unavailable);
-        self.settle_signature_marks();
-        self.last_phase = last_phase;
-        self.unavailable = unavailable;
-    }
-    fn settle_signature_marks(&mut self) {
-        loop {
-            let dirty: Vec<DefId> = self
-                .graph
-                .dirty_definitions()
-                .into_iter()
-                .filter(|d| self.graph.is_dirty(&MemoKey::new(QueryKind::Signature, *d)))
-                .collect();
-            if dirty.is_empty() {
-                return;
-            }
-            let mut changes = ChangeSet::default();
-            for id in dirty {
+        while !self.pending_signatures.is_empty() {
+            let pending = std::mem::take(&mut self.pending_signatures);
+            let mut changes = Changes::default();
+            for (id, before) in pending {
                 let path = id.path();
-                let before = self.signature_value_of(path);
                 let _ = self.signature_query(path);
-                let key = MemoKey::new(QueryKind::Signature, id);
-                if self.graph.is_dirty(&key) {
-                    // Not cacheable: forget it, so it is computed on demand.
-                    self.forget(&key);
-                }
                 if self.signature_value_of(path) != before {
-                    let d = self.durability_of(&ReadKey::Signature(id));
                     for k in [
                         ReadKey::Signature(id),
                         ReadKey::DeclaredSignature(id),
                         ReadKey::FailedSignature(id),
                         ReadKey::ExecutedSignature(id),
                     ] {
-                        changes.read(k, d);
+                        changes.read(k);
                     }
                 }
             }
             self.apply_changes(&changes);
         }
+        self.last_phase = last_phase;
+        self.unavailable = unavailable;
     }
     /// A signature memo's observed value without computing it: its
     /// fingerprint, or its failed key.
-    fn signature_value_of(&self, path: &DefPath) -> Option<ContentHash> {
+    pub(super) fn signature_value_of(&self, path: &DefPath) -> Option<ContentHash> {
         let entry = self.signatures.get(&DefId::intern(path))?;
         Some(match &entry.memo.value {
             Ok(output) => output.value.fingerprint,
@@ -917,8 +816,8 @@ impl QueryEngine {
         })
     }
 
-    /// The environment is a public input: a change since the last query marks
-    /// every memo that read it.
+    /// The environment is a public input: a change since the last query
+    /// forgets every memo that read it.
     pub(crate) fn note_environment(&mut self) {
         let now = (
             self.environment.clone(),
@@ -928,33 +827,20 @@ impl QueryEngine {
         );
         if self.environment_seen.as_ref() != Some(&now) {
             self.selected_instances.clear();
-            if let Some((previous, ..)) = &self.environment_seen {
-                let mut changes = ChangeSet::default();
-                changes.read(ReadKey::Environment, Durability::High);
-                if previous.package_manifest_hash != now.0.package_manifest_hash {
-                    // An explicit environment edit retires local memos. The
-                    // durable key still follows content and observed reads,
-                    // independently of graph ownership or discovery order.
-                    let definitions = self
-                        .graph
-                        .subscribers(&ReadKey::Environment)
-                        .map(|key| key.def)
-                        .collect::<BTreeSet<_>>();
-                    for definition in definitions {
-                        changes.text(definition, Durability::High);
-                    }
-                }
+            if self.environment_seen.is_some() {
+                let mut changes = Changes::default();
+                changes.read(ReadKey::Environment);
                 self.apply_changes(&changes);
             }
             self.environment_seen = Some(now);
         }
     }
 
-    /// Marks the readers of definitions whose signatures appeared or changed
+    /// Forgets the readers of definitions whose signatures appeared or changed
     /// outside indexing (staged constants, generated instances).
     pub(crate) fn note_signatures(&mut self, paths: &[DefPath]) {
         let mut changes = self.signature_value_changes(paths);
-        self.mark_lookups(&mut changes);
+        changes.lookups = true;
         self.apply_changes(&changes);
         self.settle_signatures();
     }
@@ -967,8 +853,8 @@ impl QueryEngine {
         self.settle_signatures();
     }
 
-    fn signature_value_changes(&mut self, paths: &[DefPath]) -> ChangeSet {
-        let mut changes = ChangeSet::default();
+    fn signature_value_changes(&mut self, paths: &[DefPath]) -> Changes {
+        let mut changes = Changes::default();
         for path in paths {
             let id = DefId::intern(path);
             self.source_growth.invalidate(id);
@@ -976,7 +862,6 @@ impl QueryEngine {
                 id,
                 self.declared(path) || self.staged_constants.contains_key(path),
             );
-            let d = self.durability_of(&ReadKey::Signature(id));
             for k in [
                 ReadKey::Signature(id),
                 ReadKey::DeclaredSignature(id),
@@ -985,7 +870,7 @@ impl QueryEngine {
                 ReadKey::ExecutedSignature(id),
                 ReadKey::DeclarationCandidates(id),
             ] {
-                changes.read(k, d);
+                changes.read(k);
             }
         }
         changes
@@ -993,10 +878,10 @@ impl QueryEngine {
 
     /// Definitions whose only items were dropped and wait to be adopted by
     /// another file: they are gone for every reader, so their readers and all
-    /// lookups are marked as for a removal, but their own memos and recorded
+    /// lookups are forgotten as for a removal, but their own memos and recorded
     /// inputs stay until the next index adopts or expires them.
     pub(crate) fn note_detached(&mut self, paths: impl IntoIterator<Item = DefPath>) {
-        let mut changes = ChangeSet::default();
+        let mut changes = Changes::default();
         let mut any = false;
         for path in paths {
             let id = DefId::intern(&path);
@@ -1006,7 +891,6 @@ impl QueryEngine {
             self.source_growth.changed(id, false);
             self.front_changes.changed(id, false);
             any = true;
-            let durability = self.durability_of(&ReadKey::DeclarationCandidates(id));
             for k in [
                 ReadKey::Signature(id),
                 ReadKey::DeclaredSignature(id),
@@ -1022,19 +906,33 @@ impl QueryEngine {
                     ModuleKey::of(&path.0.modules),
                 ),
             ] {
-                changes.read(k, durability);
+                changes.read(k);
             }
         }
         if any {
-            self.mark_lookups(&mut changes);
+            changes.lookups = true;
             self.apply_changes(&changes);
         }
     }
 
-    /// Forgets one memo from its table and the graph.
+    /// Forgets every memo of `definition`.
+    pub(crate) fn forget_definition(&mut self, definition: DefId) {
+        for kind in [
+            QueryKind::Signature,
+            QueryKind::Resolve,
+            QueryKind::Check,
+            QueryKind::Summary,
+            QueryKind::CheckedSummary,
+            QueryKind::Modes,
+            QueryKind::Lower,
+        ] {
+            self.forget(&MemoKey::new(kind, definition));
+        }
+    }
+
+    /// Forgets one memo from its table.
     pub(crate) fn forget(&mut self, key: &MemoKey) {
         self.front_products.forget(key);
-        self.graph.remove(key);
         match key.kind {
             QueryKind::Signature => {
                 self.signatures.remove(&key.def);
@@ -1048,6 +946,7 @@ impl QueryEngine {
             }
             QueryKind::Summary => {
                 self.summaries.remove(&key.def);
+                self.settled_summaries.remove(&key.def);
             }
             QueryKind::CheckedSummary => {
                 self.checked_summaries.remove(&key.def);

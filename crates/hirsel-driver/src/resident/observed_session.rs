@@ -9,7 +9,6 @@ use crate::{
 use hirsel_engine::{
     CheckOutput, CompileConfig, Compiler, ToolError, WorkStats,
     loader_inputs::{InputLimits, LoaderInputs, Operation},
-    memo::MemoKey,
     requests::{InputObserver, RequestEngine},
 };
 use hirsel_engine_runtime::AdmittedRuntime;
@@ -59,7 +58,6 @@ where
     store_adoptions: u64,
     recomputations: u64,
     polled_metadata: RefCell<BTreeSet<PathBuf>>,
-    touched: Vec<MemoKey>,
     delivery_error: Option<std::io::Error>,
     pending_discovery_delivery: bool,
     logical_entry: Option<hirsel_syntax::DefPath>,
@@ -111,7 +109,6 @@ where
             store_adoptions: 0,
             recomputations: 0,
             polled_metadata: RefCell::new(BTreeSet::new()),
-            touched: vec![],
             delivery_error: None,
             pending_discovery_delivery: false,
             logical_entry: None,
@@ -157,9 +154,6 @@ where
     }
     pub fn recomputations(&self) -> u64 {
         self.recomputations
-    }
-    pub fn touched_memos(&self) -> &[MemoKey] {
-        &self.touched
     }
     pub fn watched(&self) -> impl Iterator<Item = &Path> {
         std::iter::once(self.entry.as_path())
@@ -365,9 +359,6 @@ where
     /// Explicitly delivered source bytes select their own immutable graph,
     /// without polling newer unrelated filesystem state.
     pub fn check_applied(&mut self) -> Result<CheckOutput, ToolError> {
-        self.stats.touched = 0;
-        self.stats.memo_operations = 0;
-        self.touched.clear();
         self.check_applied_inner().or_else(check_error)
     }
     fn check_applied_inner(&mut self) -> Result<CheckOutput, ToolError> {
@@ -379,9 +370,6 @@ where
                 "check request returned another operation".into(),
             ));
         };
-        self.stats.touched = output.work.touched_memos.len() as u64;
-        self.stats.memo_operations = output.work.memo_operations;
-        self.touched = output.work.touched_memos.clone();
         Ok(checked.clone())
     }
     pub fn request(

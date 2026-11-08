@@ -1986,7 +1986,6 @@ pub(super) fn install(
         dropped_engines: 1,
         peak_type_bytes,
         front: program.engine.work_stats(),
-        memo_operations: program.engine.memo_stats().touched,
         input_operations,
         input_bytes,
         ..Default::default()
@@ -2005,11 +2004,6 @@ pub(super) fn install(
             )
         })
         .collect();
-    let touched_memos = program.engine.take_touched_memos();
-    let initial = RequestWork {
-        touched_memos,
-        ..initial
-    };
     let meter = GraphMeter::new(
         ledger,
         front.clone(),
@@ -2017,7 +2011,6 @@ pub(super) fn install(
         SourceInspection {
             counts,
             memos: program.engine.memo_snapshot(),
-            stats: program.engine.memo_stats().clone(),
             initial,
             owner: source,
         },

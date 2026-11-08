@@ -5,7 +5,6 @@ use hirsel_engine::FrontBodyQueries;
 use hirsel_engine::FrontLowerQueries;
 use hirsel_engine::ToolError;
 use hirsel_engine::memo::MemoKey;
-use hirsel_engine::memo::MemoStats;
 use hirsel_engine_runtime::RuntimeEvent;
 use hirsel_engine_runtime::RuntimeObserver;
 use hirsel_query_products::QueryKind;
@@ -56,7 +55,6 @@ impl Counters {
 struct State {
     memory: Option<hirsel_engine_admission::MemoryReservation>,
     counts: BTreeMap<DefPath, Counters>,
-    stats: MemoStats,
     complete: bool,
 }
 pub(super) struct InspectionLedger {
@@ -72,7 +70,6 @@ impl InspectionLedger {
             state: Mutex::new(State {
                 memory: None,
                 counts: BTreeMap::new(),
-                stats: MemoStats::default(),
                 complete: true,
             }),
         })
@@ -102,11 +99,7 @@ impl InspectionLedger {
         Ok(())
     }
 
-    fn add(
-        &self,
-        delta: &BTreeMap<DefPath, Counters>,
-        stats: Option<&MemoStats>,
-    ) -> Result<(), ToolError> {
+    fn add(&self, delta: &BTreeMap<DefPath, Counters>) -> Result<(), ToolError> {
         let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
         if !state.complete || state.memory.is_none() {
             return Err(unavailable());
@@ -132,16 +125,6 @@ impl InspectionLedger {
             for (path, counts) in delta {
                 state.counts.entry(path.clone()).or_default().add(*counts)?;
             }
-            if let Some(stats) = stats {
-                state.stats.touched = state.stats.touched.checked_add(stats.touched)?;
-                state.stats.invalidated_text = state
-                    .stats
-                    .invalidated_text
-                    .checked_add(stats.invalidated_text)?;
-                for (total, delta) in state.stats.invalidated.iter_mut().zip(stats.invalidated) {
-                    *total = total.checked_add(delta)?;
-                }
-            }
             Some(())
         })();
         if update.is_none() {
@@ -154,7 +137,7 @@ impl InspectionLedger {
         &self,
         queries: &[(DefPath, QueryKind)],
     ) -> Result<Vec<(DefPath, QueryKind, u64)>, ToolError> {
-        let (_, definitions) = self.definitions(
+        let definitions = self.definitions(
             &queries
                 .iter()
                 .map(|(path, _)| path.clone())
@@ -175,20 +158,10 @@ impl InspectionLedger {
             .collect()
     }
 
-    fn definitions(
-        &self,
-        paths: &[DefPath],
-    ) -> Result<(MemoStats, Vec<DefinitionWork>), ToolError> {
+    fn definitions(&self, paths: &[DefPath]) -> Result<Vec<DefinitionWork>, ToolError> {
         let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
         if !state.complete {
             return Err(unavailable());
-        }
-        let mut stats = state.stats.clone();
-        for counts in state.counts.values() {
-            for (kind, count) in KINDS.into_iter().zip(counts.phases) {
-                let total = stats.recomputed.entry(kind).or_default();
-                *total = total.checked_add(count).ok_or_else(unavailable)?;
-            }
         }
         let definitions = paths
             .iter()
@@ -202,23 +175,19 @@ impl InspectionLedger {
                 }
             })
             .collect();
-        Ok((stats, definitions))
+        Ok(definitions)
     }
 }
 pub(super) struct SourceInspection {
     pub counts: BTreeMap<DefPath, Counters>,
     pub memos: Vec<(MemoKey, Arc<Reads>)>,
-    pub stats: MemoStats,
     pub initial: RequestWork,
     pub owner: Arc<hirsel_engine_admission::MemoryReservation>,
 }
 struct Previous {
     store_adoptions: u64,
-    /// Cumulative front refusals and memo operations already reported.
-    refusals: (MemoStats, u64),
     counts: BTreeMap<DefPath, Counters>,
     initial: Option<RequestWork>,
-    stats: Option<MemoStats>,
 }
 pub(super) struct GraphMeter {
     ledger: Arc<InspectionLedger>,
@@ -264,10 +233,8 @@ impl GraphMeter {
             hold_bytes,
             previous: Mutex::new(Previous {
                 store_adoptions: 0,
-                refusals: Default::default(),
                 counts: BTreeMap::new(),
                 initial: Some(source.initial),
-                stats: Some(source.stats),
             }),
             _source: source.owner,
         })
@@ -323,71 +290,17 @@ impl GraphMeter {
                     .ok_or_else(unavailable)
             })
             .collect::<Result<BTreeMap<_, _>, _>>()?;
-        // Front refusals are this graph's invalidations; S0's own stats and
-        // touched rows are reported once, with the graph's first request.
-        let (refusals, operations) = self.front.refusal_stats();
-        let mut stats = previous.stats.take().unwrap_or_default();
-        stats.invalidated_text = refusals
-            .invalidated_text
-            .checked_sub(previous.refusals.0.invalidated_text)
-            .and_then(|delta| stats.invalidated_text.checked_add(delta))
-            .ok_or_else(unavailable)?;
-        for ((total, now), before) in stats
-            .invalidated
-            .iter_mut()
-            .zip(refusals.invalidated)
-            .zip(previous.refusals.0.invalidated)
-        {
-            *total = now
-                .checked_sub(before)
-                .and_then(|delta| total.checked_add(delta))
-                .ok_or_else(unavailable)?;
-        }
-        self.ledger.add(&delta, Some(&stats))?;
-        let operation_delta = operations
-            .checked_sub(previous.refusals.1)
-            .ok_or_else(unavailable)?;
-        previous.refusals = (refusals, operations);
-        let first = previous.initial.is_some();
+        self.ledger.add(&delta)?;
         let adoptions = self.front.store_adoptions();
         let adoption_delta = adoptions
             .checked_sub(previous.store_adoptions)
             .ok_or_else(unavailable)?;
         let mut work = previous.initial.take().unwrap_or_default();
-        work.memo_operations = work
-            .memo_operations
-            .checked_add(operation_delta)
-            .ok_or_else(unavailable)?;
-        if first {
-            // Every front and Lower memo this graph validated, refused and
-            // recomputed, or computed. Front rows the carry adopted unscanned,
-            // because no change reached their reads, are not touched.
-            let mut touched: std::collections::BTreeSet<MemoKey> =
-                std::mem::take(&mut work.touched_memos)
-                    .into_iter()
-                    .collect();
-            let clean = self.front.clean_memos();
-            touched.extend(
-                self.front
-                    .memo_keys()
-                    .into_iter()
-                    .filter(|key| !clean.contains(key)),
-            );
-            let clean_lower = self.lower.clean_memos();
-            touched.extend(
-                self.lower
-                    .memo_keys()
-                    .into_iter()
-                    .filter(|key| !clean_lower.contains(key)),
-            );
-            work.touched_memos = touched.into_iter().collect();
-        }
         work.store_adoptions = work
             .store_adoptions
             .checked_add(adoption_delta)
             .ok_or_else(unavailable)?;
         previous.store_adoptions = adoptions;
-        previous.stats = None;
         previous.counts = current;
         work.hold_bytes = self.hold_bytes;
         work.recomputations = delta
@@ -398,12 +311,12 @@ impl GraphMeter {
         Ok(work)
     }
     pub fn inspect(&self, definitions: &[DefPath]) -> Result<Arc<CompileInspection>, ToolError> {
-        let (stats, definitions) = self.ledger.definitions(definitions)?;
+        let definitions = self.ledger.definitions(definitions)?;
         let mut memos: BTreeMap<_, _> = self.memos.iter().cloned().collect();
         memos.extend(self.front.memo_snapshot().ok_or_else(unavailable)?);
         memos.extend(self.lower.memo_snapshot().ok_or_else(unavailable)?);
         Ok(Arc::new(
-            CompileInspection::new(stats, memos.into_iter().collect(), definitions)
+            CompileInspection::new(memos.into_iter().collect(), definitions)
                 .with_observations(self.lower.clone()),
         ))
     }

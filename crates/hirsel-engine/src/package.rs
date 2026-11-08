@@ -714,7 +714,6 @@ pub(crate) fn load_program_inputs_with_source_index(
             .as_deref()
             .map(|products| (package, products))
     }));
-    engine.begin_memo_touch_tracking();
     engine.comptime_limits = limits;
     engine.package_manifests = manifests;
     engine.package_sources = package_sources;

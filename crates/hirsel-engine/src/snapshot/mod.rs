@@ -1896,10 +1896,7 @@ impl QueryEngine {
     fn retained_snapshot_signature(&self, d: DefId) -> Option<Result<SignatureRef, QueryError>> {
         let source = self.snapshot_sources.get(&d)?.upgrade()?;
         let current = self.signature_memo_source(d)?;
-        if !Arc::ptr_eq(&source, current)
-            || !current.consistent
-            || self.graph.is_dirty(&current.memo.key)
-        {
+        if !Arc::ptr_eq(&source, current) || !current.consistent || current.memo.is_stale() {
             return None;
         }
         self.snapshot.as_ref()?.1.get()?.signature(d)
@@ -1907,10 +1904,7 @@ impl QueryEngine {
 
     pub(crate) fn unmarked_signature(&self, d: DefId) -> Option<Result<SignatureRef, QueryError>> {
         let current = self.signature_memo_source(d)?;
-        if !current.consistent
-            || self.graph.is_dirty(&current.memo.key)
-            || !self.graph.memos_of(d).any(|key| *key == current.memo.key)
-        {
+        if !current.consistent || current.memo.is_stale() {
             return None;
         }
         // A source-index carry owns the current header memo and its reverse
@@ -2424,15 +2418,9 @@ extern "unused" fn unused()"#
                 .unwrap()
                 .fingerprint,
         ));
-        let before = engine.memo_stats().touched;
         assert_eq!(engine.observe(&owner, &key), Some(expected));
         let executed = ReadKey::ExecutedSignature(DefId::intern(&owner));
         assert_eq!(engine.observe(&owner, &executed), Some(expected));
-        assert_eq!(
-            engine.memo_stats().touched,
-            before,
-            "settled observation reads the snapshot, not phase memos"
-        );
         let budget = hirsel_engine_admission::ProcessBudget::new(64 << 20);
         let bytes = engine.source_index_bytes().unwrap();
         let state = engine
@@ -2442,12 +2430,6 @@ extern "unused" fn unused()"#
         adapters.signature = Some(Arc::new(Header));
         let mut engine = QueryEngine::new(default_environment(), adapters);
         assert!(state.restore(&mut engine).is_ok());
-        assert_eq!(
-            engine.memo_stats().touched,
-            0,
-            "a fresh engine counts only new work"
-        );
-        let before = engine.memo_stats().touched;
         let rebuilt = engine.signature_snapshot();
         assert_eq!(
             rebuilt
@@ -2460,11 +2442,6 @@ extern "unused" fn unused()"#
                 .unwrap()
                 .unwrap()
                 .fingerprint,
-        );
-        assert_eq!(
-            engine.memo_stats().touched,
-            before,
-            "source-only carry rebuilds the universe without touching unchanged headers"
         );
 
         let file = engine

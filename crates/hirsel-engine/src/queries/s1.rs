@@ -398,6 +398,7 @@ impl<S: AsyncDependencySource> hirsel_interp::AsyncTirProvider for EvaluationPro
 #[cfg(test)]
 mod tests {
     use super::*;
+    use hirsel_query_products::reads::Revision;
     use hirsel_tir::BodyId;
 
     struct Failed {

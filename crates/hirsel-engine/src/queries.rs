@@ -1,5 +1,5 @@
 mod live_record;
-use crate::memo::{MemoGraph, MemoKey};
+use crate::memo::MemoKey;
 use crate::*;
 use hirsel_query_products::BodyKind;
 use hirsel_query_products::reads::{ReadKey, Reads, ReadsBuilder};
@@ -312,8 +312,14 @@ pub struct QueryEngine {
             Arc<persistent::TypeRecords>,
         )>,
     >,
-    /// The memo records, the reverse subscriber index and the dirty marks.
-    pub(crate) graph: MemoGraph,
+    /// Advances whenever a change forgets memos.
+    pub(crate) revision: hirsel_query_products::reads::Revision,
+    /// Signatures a change forgot, with their observed value before it:
+    /// settling recomputes each and forgets its readers if the value changed.
+    pub(super) pending_signatures: BTreeMap<DefId, Option<ContentHash>>,
+    /// Summaries recorded once every summary was settled: only these have a
+    /// reusable output identity.
+    settled_summaries: BTreeSet<DefId>,
     front_changes: frontier::FrontTracker,
     pub(crate) front_products: crate::tools::FrontProducts,
     /// Each indexed definition's inputs as last indexed (S0's diff).
@@ -390,6 +396,8 @@ pub struct QueryEngine {
     private_summary_failure: Option<(hirsel_query_products::reads::Revision, QueryError)>,
     signature_stack: Vec<DefPath>,
     recomputes: BTreeMap<(DefPath, QueryKind), usize>,
+    /// Memos recorded (computed, not reused), by query kind.
+    recorded: BTreeMap<QueryKind, u64>,
     scalar_lower_calls: hirsel_syntax::DefMap<u64>,
     scalar_validation_runs: hirsel_syntax::DefMap<u64>,
     catalog: catalog::Catalog,
@@ -453,7 +461,10 @@ impl Drop for QueryEngine {
         released("engine: signatures", take(&mut self.signatures));
         self.adopted_headers = None;
         self.adopted_private = None;
-        released("engine: memo graph", take(&mut self.graph));
+        released(
+            "engine: pending signatures",
+            take(&mut self.pending_signatures),
+        );
         released(
             "engine: pending front changes",
             take(&mut self.front_changes),
@@ -512,7 +523,7 @@ impl QueryEngine {
     /// first query: every memo is keyed by ids from one interner.
     pub fn with_types(mut self, types: Arc<hirsel_types::TypeInterner>) -> Self {
         assert!(
-            self.graph.is_empty(),
+            self.signatures.is_empty() && self.checked.is_empty() && self.lowered.is_empty(),
             "an engine changes interner only before its first query"
         );
         self.types = types;
@@ -729,7 +740,9 @@ impl QueryEngine {
             summaries: Default::default(),
             checked_summaries: Default::default(),
             portable_type_records: Default::default(),
-            graph: MemoGraph::default(),
+            revision: hirsel_query_products::reads::Revision::FIRST,
+            pending_signatures: BTreeMap::new(),
+            settled_summaries: BTreeSet::new(),
             front_changes: Default::default(),
             front_products: Default::default(),
             inputs: Default::default(),
@@ -770,6 +783,7 @@ impl QueryEngine {
             private_summary_failure: None,
             signature_stack: vec![],
             recomputes: BTreeMap::new(),
+            recorded: BTreeMap::new(),
             scalar_lower_calls: Default::default(),
             scalar_validation_runs: Default::default(),
             catalog: catalog::Catalog::with_ownership(source_ownership.clone()),
@@ -791,6 +805,10 @@ impl QueryEngine {
             environment.package_manifest_hash = *manifest;
         }
         environment
+    }
+    /// Memos this engine computed rather than reused, by query kind.
+    pub fn recorded_counts(&self) -> BTreeMap<QueryKind, u64> {
+        self.recorded.clone()
     }
     /// Every definition this session has computed `kind` for.
     pub fn recomputed(&self, kind: QueryKind) -> BTreeSet<DefPath> {
@@ -883,13 +901,23 @@ impl QueryEngine {
             _ => None,
         }
     }
-    /// The memo graph's counters: memos touched and invalidations by read kind.
-    pub fn memo_stats(&self) -> &crate::memo::MemoStats {
-        self.graph.stats()
-    }
-    /// Read-only memo/read inventory for independent affected-set checks.
+    /// Read-only memo/read inventory of every kept memo.
     pub fn memo_snapshot(&self) -> Vec<(crate::memo::MemoKey, Arc<Reads>)> {
-        self.graph.snapshot()
+        fn rows<T>(table: &Table<T>) -> impl Iterator<Item = (MemoKey, Arc<Reads>)> + '_ {
+            table
+                .values()
+                .map(|entry| (entry.memo.key, entry.memo.reads.clone()))
+        }
+        let mut memos: Vec<_> = rows(&self.signatures)
+            .chain(rows(&self.resolutions))
+            .chain(rows(&self.checked))
+            .chain(rows(&self.modes))
+            .chain(rows(&self.lowered))
+            .chain(rows(&self.summaries))
+            .chain(rows(&self.checked_summaries))
+            .collect();
+        memos.sort_by_key(|(key, _)| *key);
+        memos
     }
     /// Physical body V runs, including cache-hit work and discarded S1 attempts.
     pub fn body_validation_runs(&self, definition: &DefPath) -> u64 {
@@ -906,16 +934,6 @@ impl QueryEngine {
             .get(&DefId::intern(path))
             .copied()
             .unwrap_or_default()
-    }
-
-    /// Inventory the distinct query records read or written by one host request.
-    /// Raw per-operation `memo_stats().touched` remains unchanged.
-    pub fn begin_memo_touch_tracking(&mut self) {
-        self.graph.begin_touch_tracking();
-    }
-    pub fn take_touched_memos(&mut self) -> Vec<crate::memo::MemoKey> {
-        self.adopt_completed_headers();
-        self.graph.take_touched_memos()
     }
 
     fn missing<T>(&mut self, kind: QueryKind) -> Result<T, QueryError> {
@@ -1031,7 +1049,7 @@ impl QueryEngine {
         }
         self.private_summary_failure
             .as_ref()
-            .filter(|(revision, _)| *revision == self.graph.revision())
+            .filter(|(revision, _)| *revision == self.revision)
             .map(|(_, error)| error)
     }
 
@@ -1075,14 +1093,11 @@ impl QueryEngine {
         if let Some(error) = self.current_private_summary_failure() {
             return Err(error.clone());
         }
-        // Indexing marks each changed header/candidate and its subscribers.
-        // An unmarked memo needs neither a text hash nor a path-based probe;
-        // the graph stamps its own verified-at revision when it is read.
+        // Indexing forgets each signature that read a changed header or
+        // candidate. A kept memo needs neither a text hash nor a path-based probe.
+        self.note_environment();
         if let Some(entry) = self.signatures.get(&id).cloned() {
-            self.note_environment();
-            if matches!(self.graph.check(&entry.memo), crate::memo::Verdict::Valid) {
-                return entry.result();
-            }
+            return entry.result();
         }
         let definition = id.path();
         if let Some(constant) = self.staged_constants.get(definition) {
@@ -1109,7 +1124,7 @@ impl QueryEngine {
             }
             self.active
                 .insert((definition.clone(), QueryKind::Signature));
-            let valid = self.memo_valid(definition, &entry, text);
+            let valid = self.memo_valid(&entry, text);
             self.active
                 .remove(&(definition.clone(), QueryKind::Signature));
             if valid {
@@ -1208,7 +1223,6 @@ impl QueryEngine {
         self.adopted_headers = None;
         keep(
             &mut self.signatures,
-            &mut self.graph,
             entry.clone(),
             self.s1.failure_is_own(),
         );
@@ -1593,9 +1607,10 @@ impl QueryEngine {
             .into_iter()
             .filter(|(_, owner)| {
                 let current = self.key_text(owner, QueryKind::Modes).ok();
-                !self.modes.get(&DefId::intern(owner)).is_some_and(|entry| {
-                    !self.graph.is_dirty(&entry.memo.key) && current == Some(entry.memo.text)
-                })
+                !self
+                    .modes
+                    .get(&DefId::intern(owner))
+                    .is_some_and(|entry| !entry.memo.is_stale() && current == Some(entry.memo.text))
             })
             .map(|(path, _)| path)
             .collect();
@@ -1616,15 +1631,18 @@ impl QueryEngine {
             };
             self.constant_values
                 .retain(|_, value| !uses_retired(&value.executed));
-            let mut lowers = BTreeSet::new();
-            for id in &retired {
-                lowers.extend(
-                    self.graph
-                        .subscribers(&ReadKey::Signature(*id))
-                        .filter(|key| key.kind == QueryKind::Lower)
-                        .copied(),
-                );
-            }
+            let lowers: BTreeSet<MemoKey> = self
+                .lowered
+                .values()
+                .filter(|entry| uses_retired(&entry.memo.reads))
+                .map(|entry| entry.memo.key)
+                .chain(
+                    self.lower_receipts
+                        .values()
+                        .filter(|receipt| uses_retired(&receipt.memo.reads))
+                        .map(|receipt| receipt.memo.key),
+                )
+                .collect();
             for key in lowers {
                 self.forget(&key);
             }
@@ -1712,7 +1730,7 @@ impl QueryEngine {
         let id = DefId::intern(definition);
         let text = self.key_text(definition, QueryKind::Resolve)?;
         if let Some(entry) = self.resolutions.get(&id).cloned()
-            && self.memo_valid(definition, &entry, text)
+            && self.memo_valid(&entry, text)
         {
             return entry.result();
         }
@@ -1749,7 +1767,6 @@ impl QueryEngine {
         let entry = Arc::new(self.finish(key, text, reads, result.map(|o| o), observed));
         keep(
             &mut self.resolutions,
-            &mut self.graph,
             entry.clone(),
             self.s1.failure_is_own(),
         );
@@ -1769,7 +1786,7 @@ impl QueryEngine {
         let id = DefId::intern(definition);
         let text = self.key_text(definition, QueryKind::Modes)?;
         if let Some(entry) = self.modes.get(&id).cloned()
-            && self.memo_valid(definition, &entry, text)
+            && self.memo_valid(&entry, text)
         {
             // Checking a generated declaration owns an S1 frame even when
             // its analyzed body is retained. Preserve that request on a hit.
@@ -1796,7 +1813,7 @@ impl QueryEngine {
         let text = self.key_text(definition, QueryKind::Modes)?;
         let cached = self.modes.get(&id).cloned();
         let entry = match cached {
-            Some(entry) if self.memo_valid(definition, &entry, text) => entry,
+            Some(entry) if self.memo_valid(&entry, text) => entry,
             _ => {
                 // An unavailable phase performs no transformation. Preserve
                 // earlier Check/signature diagnostics without counting a Modes
@@ -1838,12 +1855,7 @@ impl QueryEngine {
                 let key = MemoKey::new(QueryKind::Modes, id);
                 let entry = Arc::new(self.finish(key, text, reads, result, observed));
                 self.store_mode(definition, &entry)?;
-                keep(
-                    &mut self.modes,
-                    &mut self.graph,
-                    entry.clone(),
-                    self.s1.failure_is_own(),
-                );
+                keep(&mut self.modes, entry.clone(), self.s1.failure_is_own());
                 entry
             }
         };
@@ -1883,7 +1895,7 @@ impl QueryEngine {
         let id = DefId::intern(definition);
         let text = self.key_text(definition, QueryKind::Check)?;
         if let Some(entry) = self.checked.get(&id).cloned()
-            && self.memo_valid(definition, &entry, text)
+            && self.memo_valid(&entry, text)
         {
             return entry.result();
         }
@@ -1891,7 +1903,7 @@ impl QueryEngine {
         if let Some(modes) = self.load_mode(definition) {
             self.modes.insert(id, modes);
             if let Some(entry) = self.checked.get(&id).cloned()
-                && self.memo_valid(definition, &entry, text)
+                && self.memo_valid(&entry, text)
             {
                 return entry.result();
             }
@@ -1902,7 +1914,7 @@ impl QueryEngine {
         let id = DefId::intern(definition);
         let text = self.key_text(definition, QueryKind::Check)?;
         if let Some(entry) = self.checked.get(&id).cloned()
-            && self.memo_valid(definition, &entry, text)
+            && self.memo_valid(&entry, text)
         {
             return entry.result();
         }
@@ -1949,12 +1961,7 @@ impl QueryEngine {
         }
         let key = MemoKey::new(QueryKind::Check, id);
         let entry = Arc::new(self.finish(key, text, reads, result.map(shared_output), observed));
-        keep(
-            &mut self.checked,
-            &mut self.graph,
-            entry.clone(),
-            self.s1.failure_is_own(),
-        );
+        keep(&mut self.checked, entry.clone(), self.s1.failure_is_own());
         entry.result()
     }
     /// GEN-5 owns these body snapshots independently of per-definition cache keys.
@@ -2023,7 +2030,7 @@ impl QueryEngine {
             // warning, even if its old summary awaits adoption/retirement.
             if entry.products.mode_diagnostics.is_empty()
                 || !entry.consistent
-                || self.graph.is_dirty(&entry.memo.key)
+                || entry.memo.is_stale()
             {
                 continue;
             }
@@ -2235,7 +2242,7 @@ impl QueryEngine {
                 .depth
                 .as_ref()
                 .is_none_or(|depth| depth.limit() == self.depth_limit())
-            && self.memo_valid(definition, &entry, text)
+            && self.memo_valid(&entry, text)
             && self.lower_acceptance_holds(entry.acceptance.as_ref())
             && self.replay_selections(&entry.selections)?.is_some()
         {
@@ -2366,12 +2373,7 @@ impl QueryEngine {
         entry.verification = std::sync::Mutex::new(verification);
         let entry = Arc::new(entry);
         self.store_lower(definition, &entry)?;
-        keep(
-            &mut self.lowered,
-            &mut self.graph,
-            entry.clone(),
-            self.s1.failure_is_own(),
-        );
+        keep(&mut self.lowered, entry.clone(), self.s1.failure_is_own());
         if !self.lowered.contains_key(&id) {
             self.lower_holds.forget(&key);
         }
@@ -2774,11 +2776,10 @@ fn prepare_result<T>(
 /// missing phase), or a failure that met a compile-time cycle or the depth
 /// limit outside its own frames (`own` false), which another stack would not
 /// meet.
-fn keep<T>(table: &mut Table<T>, graph: &mut MemoGraph, entry: Arc<Entry<T>>, own: bool) {
+fn keep<T>(table: &mut Table<T>, entry: Arc<Entry<T>>, own: bool) {
     let key = entry.memo.key;
     let value = entry.memo.value.as_ref();
     if !entry.consistent || value.is_err_and(|e| !e.cacheable()) || (value.is_err() && !own) {
-        graph.remove(&key);
         table.remove(&key.def);
     } else {
         table.insert(key.def, entry);

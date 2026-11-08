@@ -483,10 +483,7 @@ impl HeaderProducts {
         engine.sources = self.sources.clone();
         engine.source_ownership = Arc::default();
         engine.private_summary_active = self.provisional;
-        engine.private_summary_failure = self
-            .failure
-            .clone()
-            .map(|error| (engine.graph.revision(), error));
+        engine.private_summary_failure = self.failure.clone().map(|error| (engine.revision, error));
         engine.items = native_records::SourceTable::new(engine.source_ownership.clone());
         engine.declarations = self.declarations.clone();
         engine.catalog = self.catalog.clone();
@@ -957,11 +954,6 @@ impl HeaderProducts {
         if engine.header_products.is_none() {
             engine.adopt_header_product(id, product);
         } else if let Some(entry) = &product.entry {
-            engine.graph.adopt(
-                entry.memo.key,
-                entry.memo.reads.clone(),
-                entry.memo.durability,
-            );
             if product.charge.evictable()
                 && !engine.private_summary_active
                 && product.result.is_ok()
@@ -1802,11 +1794,6 @@ impl QueryEngine {
         if same {
             return;
         }
-        self.graph.adopt(
-            entry.memo.key,
-            entry.memo.reads.clone(),
-            entry.memo.durability,
-        );
         self.signatures.insert(id, entry.clone());
         if self.private_summary_active {
             if product.publication {

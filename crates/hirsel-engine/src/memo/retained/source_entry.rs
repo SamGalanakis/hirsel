@@ -385,13 +385,11 @@ mod tests {
             // Warm only the process-owned weak index. Its strong name payload
             // is still created and released inside the measured region.
             drop(snapshot(width, &path, symbol));
-            let mut graph = crate::memo::MemoGraph::default();
-            let base = graph.adopt_value(
+            let base = crate::memo::Memo::new(
                 crate::memo::MemoKey::new(QueryKind::Signature, owner),
                 ContentHash::default(),
                 Ok(Arc::new(())),
                 Arc::default(),
-                hirsel_query_products::reads::Durability::Low,
             );
             let ((entry, actual_snapshot), actual) = crate::test_alloc::measured(|| {
                 let resolver = snapshot(width, &path, symbol);

@@ -175,7 +175,7 @@ impl QueryEngine {
         self.note_environment();
         if !self.private_summary_active
             && !self.private_bootstrap_active
-            && self.private_summary_revision != Some(self.graph.revision())
+            && self.private_summary_revision != Some(self.revision)
         {
             match self.private_inference_allowance.take() {
                 Some(Ok(allowance)) => {

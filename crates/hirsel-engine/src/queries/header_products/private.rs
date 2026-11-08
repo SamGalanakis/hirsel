@@ -211,7 +211,7 @@ impl PrivateProducts {
     }
     pub(super) fn capture(engine: &QueryEngine) -> Option<Self> {
         if engine.private_summary_active
-            || engine.private_summary_revision == Some(engine.graph.revision())
+            || engine.private_summary_revision == Some(engine.revision)
             || engine
                 .adapters
                 .modes
@@ -626,7 +626,7 @@ impl HeaderProducts {
             adopted.owner.ptr_eq(&Arc::downgrade(self))
                 && adopted.revision == revision
                 && adopted.inputs == engine.snapshot_inputs_revision
-                && adopted.graph == engine.graph.revision()
+                && adopted.graph == engine.revision
         }) {
             return Ok(());
         }
@@ -696,14 +696,14 @@ impl HeaderProducts {
         if changed {
             engine.publish_private_summaries(inferred)?;
             if complete {
-                engine.private_summary_revision = Some(engine.graph.revision());
+                engine.private_summary_revision = Some(engine.revision);
             }
         }
         engine.adopted_private = Some(AdoptedPrivate {
             owner: Arc::downgrade(self),
             revision,
             inputs: engine.snapshot_inputs_revision,
-            graph: engine.graph.revision(),
+            graph: engine.revision,
         });
         Ok(())
     }
@@ -923,17 +923,11 @@ mod adoption_tests {
         let (headers, mut engine, _) = fixture();
         headers.adopt_private_products(&mut engine).unwrap();
         let previous = engine.private_summary_revision;
-        let mut changes = crate::memo::ChangeSet::default();
-        changes.read(
-            ReadKey::Environment,
-            hirsel_query_products::reads::Durability::High,
-        );
+        let mut changes = crate::memo::Changes::default();
+        changes.reads.insert(ReadKey::Environment);
         engine.apply_changes(&changes);
-        assert_ne!(previous, Some(engine.graph.revision()));
+        assert_ne!(previous, Some(engine.revision));
         headers.adopt_private_products(&mut engine).unwrap();
-        assert_eq!(
-            engine.private_summary_revision,
-            Some(engine.graph.revision())
-        );
+        assert_eq!(engine.private_summary_revision, Some(engine.revision));
     }
 }

@@ -1,7 +1,6 @@
 use hirsel_engine::CompileConfig;
 use hirsel_engine_store as store;
 use hirsel_intern::jobs::with_compiler_stack;
-use hirsel_query_products::QueryKind;
 
 const SOURCE: &str = r#"@loop_source(open, next)
 type View { source: String }
@@ -89,14 +88,6 @@ fn association_preflight_reuses_unchanged_headers_and_rechecks_an_edited_target(
             bytes: Some(changed.as_bytes().to_vec()),
         }]);
         assert!(session.check_applied().unwrap().diagnostics.is_empty());
-        assert!(
-            session.touched_memos().iter().all(|key| {
-                key.kind != QueryKind::Signature
-                    || !matches!(key.def.path().0.name.as_str(), "View" | "render")
-            }),
-            "{:?}",
-            session.touched_memos()
-        );
 
         let invalid = changed.replace("render(v:View", "render(take v:View");
         std::fs::write(&file, &invalid).unwrap();

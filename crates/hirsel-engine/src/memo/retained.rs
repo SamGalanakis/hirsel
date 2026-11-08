@@ -93,7 +93,6 @@ mod tests {
     #[test]
     fn lower_entry_weight_includes_lookup_failures_and_spare_receipt_buffers() {
         use std::sync::Arc;
-        let mut graph = crate::memo::MemoGraph::default();
         let output = crate::QueryOutput {
             value: Arc::new(definition()),
             diagnostics: vec![],
@@ -102,13 +101,11 @@ mod tests {
         let key =
             crate::memo::MemoKey::new(hirsel_query_products::QueryKind::Lower, output.value.path);
         let mut entry = crate::queries::Entry {
-            memo: graph.insert(
+            memo: crate::memo::Memo::new(
                 key,
                 Default::default(),
                 Ok(Arc::new(output)),
                 Arc::new(Reads::empty()),
-                super::super::Durability::Low,
-                false,
             ),
             detail: Default::default(),
             products: Default::default(),

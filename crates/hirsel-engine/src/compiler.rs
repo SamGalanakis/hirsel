@@ -636,13 +636,7 @@ pub(crate) mod tests {
             "root and dependency indexed without an entry"
         );
         assert_eq!(engine.work_stats().parsed_definitions, 5);
-        assert!(
-            engine
-                .memo_stats()
-                .recomputed
-                .keys()
-                .all(|kind| matches!(kind, QueryKind::Lex | QueryKind::Parse))
-        );
+        assert!(engine.memo_snapshot().is_empty());
         assert!(engine.constant_values.is_empty());
         assert!(engine.staged_values.is_empty());
         assert!(engine.staged_constants.is_empty());

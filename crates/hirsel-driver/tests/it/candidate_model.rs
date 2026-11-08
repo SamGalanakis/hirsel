@@ -136,18 +136,3 @@ mod tests {
         BTreeMap::from([("main.hir".into(), format!("pub fn main() -> u64 {{ {n} }}"))])
     }
 }
-
-/// Union-and-lookup oracle, deliberately independent of the ordered merge.
-pub fn read_difference<K: Clone + Ord, V: Copy + Eq>(
-    before: &BTreeMap<K, V>,
-    after: &BTreeMap<K, V>,
-) -> Vec<(K, Option<V>, Option<V>)> {
-    let keys: std::collections::BTreeSet<_> = before.keys().chain(after.keys()).collect();
-    keys.into_iter()
-        .filter_map(|key| {
-            let old = before.get(key).copied();
-            let new = after.get(key).copied();
-            (old != new).then(|| (key.clone(), old, new))
-        })
-        .collect()
-}

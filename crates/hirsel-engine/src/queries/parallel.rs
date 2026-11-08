@@ -711,11 +711,12 @@ impl QueryEngine {
     fn remember_front_facts(&mut self, id: DefId) {
         if let Some(entry) = self.checked.get(&id)
             && entry.consistent
-            && !self.graph.is_dirty(&entry.memo.key)
+            && !entry.memo.is_stale()
             && let Ok(output) = entry.result()
-            && self.checked_summaries.get(&id).is_some_and(|summary| {
-                summary.consistent && !self.graph.is_dirty(&summary.memo.key)
-            })
+            && self
+                .checked_summaries
+                .get(&id)
+                .is_some_and(|summary| summary.consistent && !summary.memo.is_stale())
         {
             let signature = self
                 .signatures
@@ -730,11 +731,12 @@ impl QueryEngine {
         }
         if let Some(entry) = self.modes.get(&id)
             && entry.consistent
-            && !self.graph.is_dirty(&entry.memo.key)
+            && !entry.memo.is_stale()
             && let Ok(output) = entry.result()
-            && self.summaries.get(&id).is_some_and(|summary| {
-                summary.consistent && !self.graph.is_dirty(&summary.memo.key)
-            })
+            && self
+                .summaries
+                .get(&id)
+                .is_some_and(|summary| summary.consistent && !summary.memo.is_stale())
         {
             self.front_products
                 .lowering_inputs
@@ -822,12 +824,7 @@ impl QueryEngine {
                 None,
             );
             inherited = Some(entry.memo.reads.clone());
-            keep(
-                &mut self.resolutions,
-                &mut self.graph,
-                entry,
-                self.s1.failure_is_own(),
-            );
+            keep(&mut self.resolutions, entry, self.s1.failure_is_own());
         }
         if let Some(product) = done.checked {
             let entry = self.merge_stage(
@@ -838,12 +835,7 @@ impl QueryEngine {
                 inherited.as_deref(),
             );
             inherited = Some(entry.memo.reads.clone());
-            keep(
-                &mut self.checked,
-                &mut self.graph,
-                entry,
-                self.s1.failure_is_own(),
-            );
+            keep(&mut self.checked, entry, self.s1.failure_is_own());
         }
         let result = if let Some(product) = done.modes {
             let entry = self.merge_stage(
@@ -863,12 +855,7 @@ impl QueryEngine {
                     DefId::intern(&done.definition),
                 ));
             } else {
-                keep(
-                    &mut self.modes,
-                    &mut self.graph,
-                    entry,
-                    self.s1.failure_is_own(),
-                );
+                keep(&mut self.modes, entry, self.s1.failure_is_own());
             }
             result
         } else {

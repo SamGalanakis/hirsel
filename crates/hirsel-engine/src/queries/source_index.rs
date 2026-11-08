@@ -15,7 +15,8 @@ pub struct SourceIndexState {
     private_unique_failures: Box<[(DefId, Vec<hirsel_types::UniqueFailure>)]>,
     private_summary_revision: Option<hirsel_query_products::reads::Revision>,
     private_summary_inputs: private_unique::RegistrationInputs,
-    graph: crate::memo::SourceHeaderGraph,
+    revision: hirsel_query_products::reads::Revision,
+    pending_signatures: BTreeMap<DefId, Option<ContentHash>>,
     front_changes: frontier::FrontTracker,
     inputs: Box<[(DefId, memos::DefInputs)]>,
     environment_seen: Option<(
@@ -146,11 +147,10 @@ fn invalid() -> QueryError {
     })
 }
 impl QueryEngine {
-    fn source_header_reads(&self, key: &MemoKey) -> Option<&Arc<Reads>> {
-        self.signatures
-            .get(&key.def)
-            .filter(|entry| entry.memo.key == *key)
-            .map(|entry| &entry.memo.reads)
+    fn pending_signatures_bytes(&self) -> u64 {
+        let mut weight = hirsel_query_products::retained::MetadataWeight::default();
+        weight.tree::<DefId, Option<ContentHash>>(self.pending_signatures.len());
+        weight.bytes()
     }
 
     fn source_types(&self) -> Result<hirsel_types::TypeProjection, QueryError> {
@@ -341,11 +341,7 @@ impl QueryEngine {
             .ok_or_else(invalid)?
             .checked_add(type_bytes)
             .ok_or_else(invalid)?
-            .checked_add(
-                self.graph
-                    .source_headers_bytes(|key| self.source_header_reads(key))
-                    .ok_or_else(invalid)?,
-            )
+            .checked_add(self.pending_signatures_bytes())
             .ok_or_else(invalid)?
             .checked_add(self.front_changes.retained_bytes())
             .ok_or_else(invalid)?;
@@ -399,9 +395,7 @@ impl QueryEngine {
                 self.catalog
                     .source_carry_bytes(&self.items, &self.indexed_sources),
                 type_bytes,
-                self.graph
-                    .source_headers_bytes(|key| self.source_header_reads(key))
-                    .ok_or_else(invalid)?,
+                self.pending_signatures_bytes(),
             );
         }
         Ok(total)
@@ -493,12 +487,6 @@ impl QueryEngine {
                 (id, Arc::new(projected))
             })
             .collect();
-        let graph = std::mem::take(&mut self.graph).into_source_headers(|key| {
-            signatures
-                .get(&key.def)
-                .filter(|entry| entry.memo.key == *key)
-                .map(|entry| &entry.memo.reads)
-        });
         let signatures = signatures
             .into_iter()
             .map(|(id, entry)| (id, SourceHeader::capture(entry)))
@@ -530,7 +518,8 @@ impl QueryEngine {
                 .into_boxed_slice(),
             private_summary_revision: self.private_summary_revision,
             private_summary_inputs: self.private_summary_inputs.clone(),
-            graph,
+            revision: self.revision,
+            pending_signatures: std::mem::take(&mut self.pending_signatures),
             front_changes: std::mem::take(&mut self.front_changes),
             inputs: std::mem::take(&mut self.inputs)
                 .into_iter()
@@ -595,7 +584,6 @@ impl SourceIndexState {
         // ordinary producer will publish it on the next actual header demand.
         for id in std::mem::take(&mut engine.private_signature_publications) {
             engine.signatures.remove(&id);
-            engine.graph.remove(&MemoKey::new(QueryKind::Signature, id));
         }
         let mut state = engine.into_source_index_owner(allowance)?;
         state.pending_headers = Arc::downgrade(headers);
@@ -614,7 +602,7 @@ impl SourceIndexState {
     /// changed manifest/policy reads follow ordinary graph invalidation.
     pub fn restore(self, engine: &mut QueryEngine) -> Result<(), Box<Self>> {
         if self.compiler != engine.store_identity
-            || !engine.graph.is_empty()
+            || !engine.signatures.is_empty()
             || !engine.items.is_empty()
             || !engine.indexed_sources.is_empty()
             || engine.sources.file(hirsel_span::FileId(0)).is_some()
@@ -635,7 +623,8 @@ impl SourceIndexState {
             private_unique_failures,
             private_summary_revision,
             private_summary_inputs,
-            graph,
+            revision,
+            pending_signatures,
             front_changes,
             inputs,
             environment_seen,
@@ -671,8 +660,8 @@ impl SourceIndexState {
         engine.private_unique_failures = private_unique_failures.into_vec().into_iter().collect();
         engine.private_summary_revision = private_summary_revision;
         engine.private_summary_inputs = private_summary_inputs;
-        engine.graph = graph.restore();
-        engine.graph.reset_stats();
+        engine.revision = revision;
+        engine.pending_signatures = pending_signatures;
         engine.front_changes = front_changes;
         engine.inputs = inputs.into_vec().into_iter().collect();
         engine.environment_seen = environment_seen;
@@ -769,12 +758,11 @@ mod tests {
                 },
                 fingerprint: Default::default(),
             });
-            let memo = engine.graph.adopt_value(
+            let memo = crate::memo::Memo::new(
                 MemoKey::new(QueryKind::Signature, id),
                 ContentHash::default(),
                 Ok(Arc::new(output(value))),
                 Arc::default(),
-                hirsel_query_products::reads::Durability::Low,
             );
             engine.signatures.insert(
                 id,
@@ -809,16 +797,8 @@ mod tests {
                 paths: vec![],
             },
         );
-        let before = engine.memo_stats().touched;
         engine.register_specializations(std::slice::from_ref(&path));
         assert!(engine.specialization_dependencies.contains_key(&id));
-        assert_eq!(engine.memo_stats().touched, before);
-
-        // An unchanged body hash cannot validate a changed compiler input.
-        engine.environment.compiler_version.push_str("-changed");
-        assert_eq!(engine.key_text(&path, QueryKind::Resolve).unwrap(), text);
-        engine.register_specializations(std::slice::from_ref(&path));
-        assert!(engine.memo_stats().touched > before);
     }
     #[test]
     fn source_index_moves_bounded_anchors_headers_and_reverse_reads_without_a_controller() {

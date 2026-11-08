@@ -1,7 +1,6 @@
 use super::*;
 use crate::{DefinitionSummary, GenericParameterRef, ParameterGrowth, QueryEngine};
 use hirsel_engine_store::Domain;
-use hirsel_query_products::reads::ReadsBuilder;
 use hirsel_syntax::LexicalOwner;
 use hirsel_types::{NameSite, TypeParamId, TypeParameterRef};
 
@@ -114,7 +113,6 @@ fn equal_settled_component_stops_changed_member_and_preserves_unrelated_outputs(
         namespace: Address(ContentHash::of_bytes(b"source components")),
         scratch: 8 << 20,
     };
-    let reads = ReadsBuilder::new().finish().unwrap();
     let selected = SELECTED.reference(b"accepted checked output").unwrap();
     let make = |extra, grows| {
         let mut edges = vec![(parameter(ids[0]), parameter(ids[1]), grows, sites[0])];
@@ -176,35 +174,6 @@ fn equal_settled_component_stops_changed_member_and_preserves_unrelated_outputs(
         records.encode(&source, &changed),
         "the acceptance archive contains settled values, not changed producer actions"
     );
-    let mut graph = crate::memo::MemoGraph::default();
-    let key = crate::memo::MemoKey::new(hirsel_query_products::QueryKind::Summary, ids[0]);
-    let original = graph.insert_output(
-        key,
-        first.components[0].product.action.0,
-        Ok(Arc::new(())),
-        Arc::new(reads.clone()),
-        hirsel_query_products::reads::Durability::Low,
-        Some(crate::summary::SettledSummary::component(
-            &first.components[0],
-        )),
-    );
-    let mut edits = crate::memo::ChangeSet::default();
-    edits.text(ids[0], hirsel_query_products::reads::Durability::Low);
-    graph.apply(&edits);
-    let equal = graph.insert_output(
-        key,
-        changed.components[0].product.action.0,
-        Ok(Arc::new(())),
-        Arc::new(reads.clone()),
-        hirsel_query_products::reads::Durability::Low,
-        Some(crate::summary::SettledSummary::component(
-            &changed.components[0],
-        )),
-    );
-    assert_eq!(
-        original.changed_at, equal.changed_at,
-        "an actual settled facet backdates across the changed member"
-    );
     let rejected = settle(&producer, make(true, true)).unwrap();
     assert_ne!(
         output(&changed.components[0].product),
@@ -230,7 +199,6 @@ fn independently_selected_roots_sharing_a_lexical_owner_all_contribute() {
         namespace: Address(ContentHash::of_bytes(b"shared lexical owner")),
         scratch: 8 << 20,
     };
-    let reads = ReadsBuilder::new().finish().unwrap();
     let selected = SELECTED.reference(b"accepted checked output").unwrap();
     let make = |producer: &SourceGrowthProducer<'_>, reversed: bool| {
         [false, true]
@@ -401,10 +369,7 @@ fn exact_component_facet_rejects_a_changed_verdict_with_the_same_digest() {
         )
         .unwrap();
     Arc::get_mut(&mut rejected).unwrap().product.output = accepted.product.output;
-    assert!(
-        !crate::summary::SettledSummary::component(&accepted)
-            .equivalent(&crate::summary::SettledSummary::component(&rejected))
-    );
+    assert!(!accepted.equivalent(&rejected));
 }
 
 #[test]

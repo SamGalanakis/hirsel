@@ -5,7 +5,7 @@ hirsel_guard::install!(test_alloc::Counting: test_alloc::Counting);
 
 #[cfg(test)]
 use hirsel_engine_admission::test_alloc;
-use hirsel_query_products::reads::{ReadKey, Reads, ReadsBuilder, Revision};
+use hirsel_query_products::reads::{Reads, ReadsBuilder};
 use hirsel_query_products::{DependencyReads, LoweringPolicy, QueryKind};
 mod work;
 pub use work::WorkStats;

@@ -23,10 +23,6 @@ pub struct SessionStats {
     pub loads: u64,
     /// Source observations replaced by an explicit edit or disk refresh.
     pub replaced: u64,
-    /// Distinct query memos read or written since the first apply through the last check (O3).
-    pub touched: u64,
-    /// Every raw memo operation in that interval, including repeated operations on one memo.
-    pub memo_operations: u64,
 }
 
 /// Input work at the resident boundary, independent of query counters.

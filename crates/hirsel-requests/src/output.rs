@@ -23,8 +23,6 @@ pub struct RequestWork {
     pub dropped_engines: u64,
     pub peak_type_bytes: u64,
     pub front: WorkStats,
-    pub touched_memos: Vec<hirsel_engine::memo::MemoKey>,
-    pub memo_operations: u64,
     pub input_operations: u64,
     pub input_bytes: u64,
 }
@@ -40,7 +38,6 @@ pub struct DefinitionWork {
 /// neither runs compilation nor changes memo validity or retention.
 #[derive(Clone)]
 pub struct CompileInspection {
-    pub stats: hirsel_engine::memo::MemoStats,
     pub memos: Vec<(
         hirsel_engine::memo::MemoKey,
         Arc<hirsel_query_products::reads::Reads>,
@@ -67,7 +64,6 @@ impl CompileInspection {
         self
     }
     pub(crate) fn new(
-        stats: hirsel_engine::memo::MemoStats,
         memos: Vec<(
             hirsel_engine::memo::MemoKey,
             Arc<hirsel_query_products::reads::Reads>,
@@ -75,7 +71,6 @@ impl CompileInspection {
         definitions: Vec<DefinitionWork>,
     ) -> Self {
         Self {
-            stats,
             memos,
             definitions,
             observations: None,
@@ -87,7 +82,6 @@ impl std::fmt::Debug for CompileInspection {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("CompileInspection")
-            .field("stats", &self.stats)
             .field("memos", &self.memos)
             .field("definitions", &self.definitions)
             .finish()

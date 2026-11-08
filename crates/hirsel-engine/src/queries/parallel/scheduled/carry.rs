@@ -834,7 +834,7 @@ impl BodyTask {
         let reads = row.reads.clone();
         // Completion takes the slots lock, while capture takes it before carry.
         drop(rows);
-        self.install_facts(cx, reference, reads, facts, clean)
+        self.install_facts(cx, reference, reads, facts)
     }
     pub(super) fn decode_facts(&self, bytes: &[u8], reads: &Arc<Reads>) -> Option<Facts> {
         let queries = &self.queries;
@@ -896,9 +896,8 @@ impl BodyTask {
         reference: Option<Reference>,
         reads: Arc<Reads>,
         facts: Facts,
-        clean: bool,
     ) -> Option<Result<ProductRef, Reference>> {
-        self.install_facts_inner(cx, reference, reads, facts, clean)
+        self.install_facts_inner(cx, reference, reads, facts)
     }
     pub(super) fn install_cached_facts(
         &self,
@@ -925,7 +924,7 @@ impl BodyTask {
                 summary.checked = Some(checked.clone());
             }
         }
-        self.install_facts_inner(cx, reference, reads, facts, false)
+        self.install_facts_inner(cx, reference, reads, facts)
     }
     fn install_facts_inner(
         &self,
@@ -933,7 +932,6 @@ impl BodyTask {
         reference: Option<Reference>,
         mut reads: Arc<Reads>,
         mut facts: Facts,
-        clean: bool,
     ) -> Option<Result<ProductRef, Reference>> {
         self.checkpoint("shared summary reads", facts.share_summary_reads(&reads))?;
         let queries = &self.queries;
@@ -962,13 +960,6 @@ impl BodyTask {
             FrontState::Failed { record, .. } => return Some(Err(*record)),
             FrontState::Settled { publication, .. } => publication.clone(),
         };
-        if clean {
-            queries
-                .clean_memos
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .extend(outcome.memos.iter().map(|(key, _)| *key));
-        }
         queries.install_outcome(self.input, outcome, self.weight.scratch);
         queries.store_adoptions.fetch_add(1, Relaxed);
         // Compact facts complete this query independently of body

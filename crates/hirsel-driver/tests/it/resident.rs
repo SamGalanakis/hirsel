@@ -983,13 +983,7 @@ fn front_changes_survive_early_query_recomputation_and_selective_acknowledgment(
         let edited = source.replace("fn a() -> u8 { 1u8 }", "fn a() -> u8 { 2u8 }");
         let file = engine.sources.add("resident.hir", edited.clone()).unwrap();
         engine.parse_file(file, &default_context()).unwrap();
-        let before = engine.memo_stats().touched;
         let body = engine.frontier_changes();
-        assert_eq!(
-            engine.memo_stats().touched,
-            before,
-            "collecting a body-only frontier reads no body memos"
-        );
         assert_eq!(
             body.changed,
             BTreeSet::from([hirsel_syntax::DefId::intern(&path("a"))])
@@ -1155,14 +1149,9 @@ fn compact_program_front_refreshes_only_changed_definitions_and_signature_subscr
         let body = text.replace("{ x }", "{ x + 1u8 }");
         std::fs::write(&source, &body).unwrap();
         let actual = session.check().unwrap();
-        let touched = session.stats().touched;
         assert_eq!(
             diagnostics(&actual),
             diagnostics(&check_path(&source, hirsel_driver::session::Policy::default()).unwrap())
-        );
-        assert!(
-            touched < 100,
-            "one body edit touched {touched} memos among 515 definitions"
         );
         assert_eq!(
             session
@@ -1181,11 +1170,6 @@ fn compact_program_front_refreshes_only_changed_definitions_and_signature_subscr
         assert_eq!(
             diagnostics(&actual),
             diagnostics(&check_path(&source, hirsel_driver::session::Policy::default()).unwrap())
-        );
-        assert!(
-            session.stats().touched < 200,
-            "signature edit touched {} memos",
-            session.stats().touched
         );
         std::fs::write(&source, &body).unwrap();
         let accepted = session.check().unwrap();
@@ -1223,15 +1207,10 @@ fn compact_program_lower_products_keep_execution_subscriptions_without_scanning_
             let edited = text.replace("{ 1u8 }", &format!("{{ {expression} }}"));
             std::fs::write(&source, edited).unwrap();
             let actual = session.check().unwrap();
-            let touched = session.stats().touched;
             let cold = check_path(&source, hirsel_driver::session::Policy::default()).unwrap();
             assert_eq!(diagnostics(&actual), diagnostics(&cold));
             assert_eq!(actual.completion, cold.completion);
             assert_eq!(actual.diagnostics.is_empty(), expression == "3u8");
-            assert!(
-                touched < 100,
-                "one executed helper edit touched {touched} memos among 129 constants"
-            );
         }
     });
 }
@@ -1296,7 +1275,6 @@ fn compact_dead_arm_inputs_follow_edits_without_scanning_unchanged_body_memos() 
         ] {
             std::fs::write(&source, &edited).unwrap();
             let actual = session.check().unwrap();
-            let touched = session.stats().touched;
             let cold = check_path(&source, hirsel_driver::session::Policy::default()).unwrap();
             assert_eq!(diagnostics(&actual), diagnostics(&cold));
             assert_eq!(actual.completion, cold.completion);
@@ -1312,10 +1290,6 @@ fn compact_dead_arm_inputs_follow_edits_without_scanning_unchanged_body_memos() 
                 }
                 None => assert!(lint.is_empty()),
             }
-            assert!(
-                touched < 100,
-                "one lint input edit touched {touched} memos among 259 definitions: {warning:?}"
-            );
         }
     });
 }
@@ -1613,11 +1587,11 @@ fn batch_publication_releases_completed_worker_bodies_before_the_next_task() {
             for path in paths {
                 assert_eq!(candidate.recompute_count(&path, QueryKind::Check), 1);
                 assert_eq!(candidate.recompute_count(&path, QueryKind::Modes), 1);
-                let before = candidate.memo_stats().recomputed.clone();
+                let before = candidate.recorded_counts();
                 candidate
                     .definition_summary(hirsel_syntax::DefId::intern(&path))
                     .unwrap();
-                assert_eq!(candidate.memo_stats().recomputed, before);
+                assert_eq!(candidate.recorded_counts(), before);
             }
         }
     });
@@ -1808,11 +1782,11 @@ fn production_batch_preserves_lint_and_lowering_facts_after_front_bodies_drop() 
                     .is_some()
             );
         }
-        let before = batch.engine.memo_stats().recomputed.clone();
+        let before = batch.engine.recorded_counts();
         let warm = batch.check(LoweringPolicy::Comptime).unwrap();
         assert_eq!(diagnostics(&warm), diagnostics(&first));
         assert_eq!(
-            batch.engine.memo_stats().recomputed,
+            batch.engine.recorded_counts(),
             before,
             "unchanged compact inputs must need no body demand"
         );
@@ -2100,7 +2074,7 @@ fn batch_serial_compile_time_demands_release_bodies_after_each_root() {
                 }
             }
         }
-        let before = candidate.memo_stats().recomputed.clone();
+        let before = candidate.recorded_counts();
         for i in 0..64 {
             assert_eq!(
                 candidate
@@ -2109,7 +2083,7 @@ fn batch_serial_compile_time_demands_release_bodies_after_each_root() {
                 hirsel_tir::Constant::Integer(i)
             );
         }
-        assert_eq!(candidate.memo_stats().recomputed, before);
+        assert_eq!(candidate.recorded_counts(), before);
     });
 }
 
@@ -2436,11 +2410,11 @@ fn evicted_lower_receipts_preserve_program_reuse_and_edit_invalidation() {
             .unwrap();
         let first = program.check(LoweringPolicy::Reachable).unwrap();
         assert!(first.diagnostics.is_empty());
-        let before = program.engine.memo_stats().recomputed.clone();
+        let before = program.engine.recorded_counts();
         let again = program.check(LoweringPolicy::Reachable).unwrap();
         assert_eq!(diagnostics(&first), diagnostics(&again));
         assert_eq!(
-            program.engine.memo_stats().recomputed,
+            program.engine.recorded_counts(),
             before,
             "compact lower receipts retain unchanged program results"
         );
@@ -2655,7 +2629,7 @@ fn program_dynamic_lower_frontiers_use_workers_and_retain_compact_results() {
                         guard.lowerings.load(Ordering::Relaxed) as u64,
                         "successful Lower work must be counted independently of retention"
                     );
-                    let before = candidate.memo_stats().recomputed.clone();
+                    let before = candidate.recorded_counts();
                     let modes_before: std::collections::BTreeMap<_, _> = candidate
                         .recomputed(QueryKind::Modes)
                         .into_iter()
@@ -2669,7 +2643,7 @@ fn program_dynamic_lower_frontiers_use_workers_and_retain_compact_results() {
                         source_check_request(&mut candidate, file, &default_context()).unwrap();
                     assert_eq!(diagnostics(&again), diagnostics(&actual));
                     assert_eq!(
-                        candidate.memo_stats().recomputed,
+                        candidate.recorded_counts(),
                         before,
                         "unchanged compact production results must be reused; jobs={jobs}, repeated={:?}",
                         modes_before
@@ -2776,7 +2750,6 @@ fn explicitly_delivered_changes_check_the_applied_snapshot_without_repolling_dis
             diagnostics(&session.check_applied().unwrap()),
             diagnostics(&actual)
         );
-        assert_eq!(session.stats().touched, 0);
         // The ordinary filesystem-owning entry point still observes disk.
         assert!(session.check().unwrap().diagnostics.is_empty());
         assert_eq!(session.stats().revision, revision + 1);
@@ -2809,22 +2782,17 @@ fn accepted_ten_thousand_definition_body_edit_reports_actual_index_and_aggregate
         let output = session.check_applied().unwrap();
         assert!(output.diagnostics.is_empty());
         assert_eq!(output.completion, CheckCompletion::Complete);
-        let touched = session.stats().touched;
         let work = session.work_stats().since(before);
         assert_eq!(work.parsed_bytes, edit.len() as u64);
         assert_eq!(work.parsed_definitions, 10_000);
         assert_eq!(work.index_occurrence_visits, 10_000);
         assert!(work.index_anchor_visits <= 10_001, "{work:?}");
-        assert!(touched < 100, "{touched} memo touches");
         // GEN-5 now demands pending roots. Parsing/indexing and lint still
         // report their real whole-file/program work independently.
         assert!((1..100).contains(&work.gen5_visits), "{work:?}");
         assert_eq!(work.growth_components, 0, "equal growth output: {work:?}");
         assert!(work.lint_definition_visits >= 10_000, "{work:?}");
-        eprintln!(
-            "accepted10k touched={touched} work={}",
-            serde_json::to_string(&work).unwrap()
-        );
+        eprintln!("accepted10k work={}", serde_json::to_string(&work).unwrap());
         std::fs::write(&source, edit).unwrap();
         let cold = check_path(&source, hirsel_driver::session::Policy::default()).unwrap();
         assert_eq!(diagnostics(&output), diagnostics(&cold));

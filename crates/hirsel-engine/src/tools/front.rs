@@ -159,7 +159,7 @@ impl QueryEngine {
                 .get(&summary.definition)
                 .is_some_and(|entry| {
                     entry.consistent
-                        && !self.graph.is_dirty(&entry.memo.key)
+                        && !entry.memo.is_stale()
                         && entry
                             .result()
                             .is_ok_and(|output| std::sync::Arc::ptr_eq(&output.value, summary))

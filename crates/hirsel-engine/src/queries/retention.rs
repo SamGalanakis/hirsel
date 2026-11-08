@@ -88,14 +88,14 @@ impl QueryEngine {
         // follows normal demand; the complete earlier outcome reads held above.
         if entry.consistent
             && entry.memo.text == text
-            && !self.graph.is_dirty(&entry.memo.key)
+            && !entry.memo.is_stale()
             && entry
                 .result()
                 .is_ok_and(|output| Arc::ptr_eq(&output.value, summary))
         {
             return Some(summary.clone());
         }
-        if !self.execution_valid(path, reads) || !self.memo_valid(path, &entry, text) {
+        if !self.execution_valid(path, reads) || !self.memo_valid(&entry, text) {
             return None;
         }
         Some(entry.result().ok()?.value.clone())
@@ -126,7 +126,6 @@ impl QueryEngine {
         *total = total.saturating_add(count);
         for _ in 0..count {
             timings::count(Count::Recomputes);
-            self.graph.record_recompute(kind);
         }
     }
 
@@ -188,7 +187,7 @@ impl QueryEngine {
                 .depth
                 .as_ref()
                 .is_some_and(|depth| depth.limit() != self.depth_limit())
-            || !self.memo_valid(path, &receipt, text)
+            || !self.memo_valid(&receipt, text)
         {
             return Ok(false);
         }
@@ -315,21 +314,14 @@ mod tests {
             reads: Arc::new(Reads::empty()),
             text: engine.key_text(&path, QueryKind::Summary).unwrap(),
         });
-        engine.record_summary(summary.clone(), Default::default(), false);
-        let before = engine.memo_stats().touched;
+        engine.record_summary(summary.clone(), Default::default());
         let reused = engine
             .revalidate_front_summary(&summary, &summary.reads)
             .unwrap();
         assert!(Arc::ptr_eq(&reused, &summary));
-        assert_eq!(
-            engine.memo_stats().touched,
-            before,
-            "an unchanged immutable summary needs no memo query"
-        );
 
         let replacement = Arc::new((*summary).clone());
-        engine.record_summary(replacement.clone(), Default::default(), false);
-        let before = engine.memo_stats().touched;
+        engine.record_summary(replacement.clone(), Default::default());
         let reused = engine
             .revalidate_front_summary(&summary, &summary.reads)
             .unwrap();
@@ -337,18 +329,17 @@ mod tests {
             Arc::ptr_eq(&reused, &replacement),
             "a replaced producer follows normal demand"
         );
-        assert!(engine.memo_stats().touched > before);
 
-        let mut changed = crate::memo::ChangeSet::default();
-        changed.text(id, hirsel_query_products::reads::Durability::Low);
-        engine.graph.apply(&changed);
+        let mut changed = crate::memo::Changes::default();
+        changed.texts.insert(id);
+        engine.apply_changes(&changed);
         assert!(
             engine
                 .revalidate_front_summary(&replacement, &replacement.reads)
                 .is_none()
         );
 
-        engine.record_summary(replacement.clone(), Default::default(), false);
+        engine.record_summary(replacement.clone(), Default::default());
         let file = engine
             .sources
             .add("front.hir", "fn probe() { 2 }".into())

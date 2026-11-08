@@ -1,11 +1,7 @@
-//! The memo engine's data model: typed reads, revisions and durability
-//! (design §1b).
-use hirsel_query_products::reads::{Durability, ReadKey, ReadKind, Reads, Revision};
-mod graph;
-pub(crate) use graph::SourceHeaderGraph;
-pub use graph::{
-    ChangeSet, Invalidation, Memo, MemoGraph, MemoKey, MemoStats, Verdict, invalidation_count,
-};
+//! The memo engine's data model: typed reads and memo records (design §1b).
+use hirsel_query_products::reads::{ReadKey, Reads};
+mod record;
+pub use record::{Changes, Memo, MemoKey};
 mod coordinator;
 pub use coordinator::{CoordinatorStats, Entered, Frame, S1Coordinator, S1Worker, WorkerId};
 mod holds;

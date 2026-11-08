@@ -224,10 +224,7 @@ impl SummaryFacet {
                         b.source.context().record_types(),
                     )
             }
-            (SummaryFacetOwner::Component(a), SummaryFacetOwner::Component(b)) => {
-                crate::summary::SettledSummary::component(a)
-                    .equivalent(&crate::summary::SettledSummary::component(b))
-            }
+            (SummaryFacetOwner::Component(a), SummaryFacetOwner::Component(b)) => a.equivalent(b),
             _ => false,
         }
     }

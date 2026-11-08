@@ -2,59 +2,6 @@
 //! the published source product; this projection grants no body/V authority.
 use super::*;
 use std::collections::HashMap;
-use std::sync::{Arc, Weak};
-
-/// The memo graph observes the value owned by its existing typed memo table.
-/// Evicting that owner makes equality unavailable rather than retaining a body
-/// or an unadmitted history in a second table.
-#[derive(Clone)]
-pub(crate) enum SettledSummary {
-    Published(Weak<PublishedSummary>, Weak<TypeInterner>),
-    Checked(Weak<CheckedSummary>, Weak<TypeInterner>),
-    Component(Weak<crate::SourceGrowthComponent>),
-    #[cfg(test)]
-    Test(ContentHash),
-}
-impl SettledSummary {
-    pub(crate) fn published(value: &Arc<PublishedSummary>, types: &Arc<TypeInterner>) -> Self {
-        Self::Published(Arc::downgrade(value), Arc::downgrade(types))
-    }
-    pub(crate) fn checked(value: &Arc<CheckedSummary>, types: &Arc<TypeInterner>) -> Self {
-        Self::Checked(Arc::downgrade(value), Arc::downgrade(types))
-    }
-    pub(crate) fn component(value: &Arc<crate::SourceGrowthComponent>) -> Self {
-        Self::Component(Arc::downgrade(value))
-    }
-    pub(crate) fn equivalent(&self, other: &Self) -> bool {
-        match (self, other) {
-            (Self::Published(a, at), Self::Published(b, bt)) => {
-                let (Some(a), Some(b), Some(at), Some(bt)) =
-                    (a.upgrade(), b.upgrade(), at.upgrade(), bt.upgrade())
-                else {
-                    return false;
-                };
-                (Arc::ptr_eq(&a, &b) && Arc::ptr_eq(&at, &bt))
-                    || SummaryView::from(&*a).equivalent(&at, SummaryView::from(&*b), &bt)
-            }
-            (Self::Checked(a, at), Self::Checked(b, bt)) => {
-                let (Some(a), Some(b), Some(at), Some(bt)) =
-                    (a.upgrade(), b.upgrade(), at.upgrade(), bt.upgrade())
-                else {
-                    return false;
-                };
-                (Arc::ptr_eq(&a, &b) && Arc::ptr_eq(&at, &bt))
-                    || SummaryView::from(&*a).equivalent(&at, SummaryView::from(&*b), &bt)
-            }
-            (Self::Component(a), Self::Component(b)) => match (a.upgrade(), b.upgrade()) {
-                (Some(a), Some(b)) => a.equivalent(&b),
-                _ => false,
-            },
-            #[cfg(test)]
-            (Self::Test(a), Self::Test(b)) => a == b,
-            _ => false,
-        }
-    }
-}
 
 #[derive(Clone, Copy)]
 pub struct SummaryView<'a> {

@@ -1311,12 +1311,10 @@ impl QueryEngine {
             record.summary.text,
             checked.1,
             record.detail.clone(),
-            true,
         );
         self.record_summary_products(
             record.summary.clone(),
             record.detail,
-            true,
             Arc::new(PhaseProducts {
                 mode_diagnostics: record.phases.clone(),
                 ..Default::default()
@@ -1363,7 +1361,7 @@ impl QueryEngine {
         let Some(entry) = self.summaries.get(&id).cloned() else {
             return Ok(());
         };
-        if !entry.consistent || self.graph.is_dirty(&entry.memo.key) {
+        if !entry.consistent || entry.memo.is_stale() {
             return Ok(());
         }
         self.write_record(
@@ -1875,11 +1873,8 @@ impl QueryEngine {
             self.front_products.forget(&key);
         }
         let reads = Arc::new(variant.reads);
-        let durability = reads.durability(|read| self.durability_of(read));
         let text = self.key_text(path, kind).expect("indexed");
-        let memo = self
-            .graph
-            .adopt_value(key, text, value.map(Arc::new), reads, durability);
+        let memo = crate::memo::Memo::new(key, text, value.map(Arc::new), reads);
         Arc::new(Entry {
             memo,
             detail,
@@ -1918,7 +1913,7 @@ impl QueryEngine {
         let candidate = self
             .summaries
             .get(&DefId::intern(path))
-            .filter(|entry| entry.consistent && !self.graph.is_dirty(&entry.memo.key))
+            .filter(|entry| entry.consistent && !entry.memo.is_stale())
             .and_then(|entry| entry.products.mode_archive.clone());
         let own = candidate
             .filter(|archive| archive.key == key)
@@ -2112,7 +2107,7 @@ impl QueryEngine {
             .or_else(|| {
                 self.summaries
                     .get(&DefId::intern(path))
-                    .filter(|entry| entry.consistent && !self.graph.is_dirty(&entry.memo.key))
+                    .filter(|entry| entry.consistent && !entry.memo.is_stale())
                     .map(|entry| entry.reads().clone())
             });
         let Some(reads) = reads else {
@@ -2386,7 +2381,7 @@ impl QueryEngine {
                         let valid = old.is_some_and(|entry| {
                             self.key_text(id.path(), QueryKind::Check)
                                 .ok()
-                                .is_some_and(|text| self.memo_valid(id.path(), &entry, text))
+                                .is_some_and(|text| self.memo_valid(&entry, text))
                                 && self.lower_acceptance_holds(entry.acceptance.as_ref())
                                 && entry.result().is_ok()
                         });
@@ -3019,7 +3014,7 @@ impl QueryEngine {
                 .signatures
                 .get(&id)
                 .cloned()
-                .filter(|entry| entry.consistent && !self.graph.is_dirty(&entry.memo.key))
+                .filter(|entry| entry.consistent && !entry.memo.is_stale())
             else {
                 continue;
             };

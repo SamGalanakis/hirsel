@@ -396,7 +396,6 @@ impl CandidateWorkspace {
         let mut state = w.state.lock().unwrap();
         let generation = state.generation.checked_add(1).ok_or("ResourceLimit")?;
         let inputs = Arc::new(Inputs {
-            checked: Mutex::new(None),
             token: BaseToken {
                 workspace: w.id,
                 generation,
@@ -618,7 +617,6 @@ impl CandidateWorkspace {
                     .reserve(child.usage().charged_bytes + 512)
                     .ok_or("ResourceLimit")?;
                 let inputs = Arc::new(Inputs {
-                    checked: Mutex::new(None),
                     token: BaseToken {
                         workspace: w.id,
                         generation: supplied.generation,
@@ -655,7 +653,6 @@ impl CandidateWorkspace {
         let waiter = Arc::new(Waiter {
             id,
             parent: supplied,
-            parent_inputs: base.inputs.clone(),
             work,
             state: Mutex::new(WaiterState::Pending),
             owner: Arc::downgrade(w),

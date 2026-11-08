@@ -408,8 +408,7 @@ impl QueryEngine {
     ) -> Result<hirsel_engine_admission::MemoryReservation, QueryError> {
         self.note_environment();
         if self.private_summary_active
-            || (registrations.is_empty()
-                && self.private_summary_revision == Some(self.graph.revision()))
+            || (registrations.is_empty() && self.private_summary_revision == Some(self.revision))
         {
             return Ok(reservation);
         }
@@ -439,20 +438,18 @@ impl QueryEngine {
                         self.retire_snapshot();
                     }
                 }
-                self.private_summary_revision = Some(self.graph.revision());
+                self.private_summary_revision = Some(self.revision);
                 Ok(reservation)
             });
         self.private_summary_active = false;
         if result.is_err() {
-            let mut changes = crate::memo::ChangeSet::default();
+            let mut changes = crate::memo::Changes::default();
             for id in self.private_summaries.keys() {
-                for read in [
+                changes.reads.extend([
                     ReadKey::PrivateSummary(*id),
                     ReadKey::Signature(*id),
                     ReadKey::ExecutedSignature(*id),
-                ] {
-                    changes.read(read, self.durability_of(&read));
-                }
+                ]);
             }
             self.apply_changes(&changes);
             self.retire_snapshot();
@@ -460,7 +457,7 @@ impl QueryEngine {
         self.private_summary_failure = result
             .as_ref()
             .err()
-            .map(|error| (self.graph.revision(), error.clone()));
+            .map(|error| (self.revision, error.clone()));
         result
     }
     pub(in crate::queries) fn publish_private_signature(
@@ -730,7 +727,7 @@ impl QueryEngine {
                     if let Some(registration) = registration {
                         registration.syntax.clone()
                     } else if let Some(entry) = self.checked.get(&DefId::intern(path)).cloned()
-                        && self.memo_valid(path, &entry, generated_text)
+                        && self.memo_valid(&entry, generated_text)
                         && self.lower_acceptance_holds(entry.acceptance.as_ref())
                         && let Ok(checked) = entry.result()
                     {
@@ -891,7 +888,7 @@ impl QueryEngine {
         self.adopt_completed_headers();
         self.publish_private_summaries(inferred)?;
         if selected.is_none() {
-            self.private_summary_revision = Some(self.graph.revision());
+            self.private_summary_revision = Some(self.revision);
         }
         Ok(())
     }
@@ -949,7 +946,7 @@ impl QueryEngine {
         };
         self.private_bootstrap_active = false;
         if let Err(error) = result {
-            self.private_summary_failure = Some((self.graph.revision(), error));
+            self.private_summary_failure = Some((self.revision, error));
         }
     }
     fn inference_input_bytes(&self, inputs: usize) -> u64 {

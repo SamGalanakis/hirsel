@@ -138,65 +138,83 @@ impl QueryEngine {
     pub fn acknowledge_frontier(&mut self, observed: &FrontChanges, definitions: &[DefId]) {
         self.front_changes.acknowledge(observed, definitions);
     }
-    pub(super) fn apply_changes(&mut self, changes: &crate::memo::ChangeSet) {
-        if !changes.is_empty() {
-            // STORE-6 can demand private schema signatures beyond the checked
-            // call graph. Keep its own result conservative until those reads
-            // are an independently recorded query product.
-            self.source_growth.invalidate_table();
+    /// Starts the next revision: forgets every memo that observed a change
+    /// and remembers each forgotten signature's value, so settling recomputes
+    /// it and forgets its readers only if the value changed.
+    pub(super) fn apply_changes(&mut self, changes: &crate::memo::Changes) {
+        if changes.is_empty() {
+            return;
         }
-        let signatures: BTreeSet<_> = changes
-            .reads
-            .iter()
-            .filter_map(|(read, _)| match read {
-                ReadKey::Signature(definition) | ReadKey::FailedSignature(definition) => {
-                    Some(*definition)
-                }
-                _ => None,
-            })
-            .collect();
-        let expanded;
-        let changes = if signatures.is_empty() {
-            changes
-        } else {
-            // Body-only changes deliberately do not mark broad V inputs.
-            // Header/candidate/signature changes can affect every overlay's
-            // verdict, even when the base universe remains error-free.
-            let mut next = changes.clone();
-            for definition in signatures {
-                next.read(
-                    ReadKey::ValidationView(definition),
-                    self.durability_of(&ReadKey::Signature(definition)),
-                );
+        // STORE-6 can demand private schema signatures beyond the checked
+        // call graph. Keep its own result conservative until those reads
+        // are an independently recorded query product.
+        self.source_growth.invalidate_table();
+        let mut changes = changes.clone();
+        // Body-only changes deliberately do not touch broad V inputs.
+        // Header/candidate/signature changes can affect every overlay's
+        // verdict, even when the base universe remains error-free.
+        for read in changes.reads.clone() {
+            if let ReadKey::Signature(definition) | ReadKey::FailedSignature(definition) = read {
+                changes.read(ReadKey::ValidationView(definition));
+                changes.validation_contexts = true;
             }
-            for read in self.graph.validation_context_reads() {
-                next.read(read, hirsel_query_products::reads::Durability::Low);
-            }
-            expanded = next;
-            &expanded
-        };
-        let mut affected = BTreeSet::new();
-        for (read, _) in &changes.reads {
-            for key in self.graph.subscribers(read).filter(|key| {
-                matches!(
-                    key.kind,
-                    QueryKind::Check | QueryKind::CheckedSummary | QueryKind::Summary
-                )
-            }) {
+        }
+        self.revision = self.revision.next();
+        let stale = self.stale_memos(&changes);
+        for key in &stale {
+            if matches!(
+                key.kind,
+                QueryKind::Check | QueryKind::CheckedSummary | QueryKind::Summary
+            ) {
                 self.source_growth.invalidate(key.def);
             }
-            affected.extend(self.graph.subscribers(read).map(|key| key.def));
+            if key.kind == QueryKind::Signature {
+                let before = self.signature_value_of(key.def.path());
+                self.pending_signatures.entry(key.def).or_insert(before);
+            }
         }
-        for (definition, _) in &changes.texts {
+        for definition in &changes.texts {
             self.source_growth.invalidate(*definition);
-            affected.extend(self.graph.memos_of(*definition).map(|key| key.def));
         }
-        self.graph.apply(changes);
+        for key in &stale {
+            self.forget(key);
+        }
         if self.front_changes.active {
-            for definition in affected {
+            for definition in stale.iter().map(|key| key.def) {
                 self.front_changes.affected(definition);
             }
         }
+    }
+    /// Every memo that observed one of `changes`, each marked stale for the
+    /// holders of its value outside the tables.
+    fn stale_memos(&self, changes: &crate::memo::Changes) -> BTreeSet<crate::memo::MemoKey> {
+        fn scan<T>(
+            table: &Table<T>,
+            changes: &crate::memo::Changes,
+            stale: &mut BTreeSet<crate::memo::MemoKey>,
+        ) {
+            for entry in table.values() {
+                if changes.stales(&entry.memo.key, &entry.memo.reads) {
+                    entry.memo.mark_stale();
+                    stale.insert(entry.memo.key);
+                }
+            }
+        }
+        let mut stale = BTreeSet::new();
+        scan(&self.signatures, changes, &mut stale);
+        scan(&self.resolutions, changes, &mut stale);
+        scan(&self.checked, changes, &mut stale);
+        scan(&self.modes, changes, &mut stale);
+        scan(&self.lowered, changes, &mut stale);
+        scan(&self.summaries, changes, &mut stale);
+        scan(&self.checked_summaries, changes, &mut stale);
+        for receipt in self.lower_receipts.values() {
+            if changes.stales(&receipt.memo.key, &receipt.memo.reads) {
+                receipt.memo.mark_stale();
+                stale.insert(receipt.memo.key);
+            }
+        }
+        stale
     }
 }
 
@@ -214,58 +232,54 @@ mod tests {
         }))
     }
     #[test]
-    fn validation_context_subscribers_are_marked_by_signatures_but_not_body_edits() {
-        use crate::memo::ChangeSet;
-        use hirsel_query_products::reads::{Durability, PackageKey, ReadKind};
+    fn validation_context_readers_are_forgotten_by_signatures_but_not_body_edits() {
+        use hirsel_query_products::reads::PackageKey;
         let mut engine = QueryEngine::new(default_environment(), PhaseAdapters::default());
         let (source, dependent, ordinary) =
             (owner("source"), owner("dependent"), owner("ordinary"));
         engine.front_changes.activate();
         let context = ReadKey::ValidationUniverse(PackageKey::of(&dependent.path().0.package));
-        let key = MemoKey::new(QueryKind::Lower, dependent);
-        let other = MemoKey::new(QueryKind::Lower, ordinary);
         let digest = ContentHash::of_bytes(b"old universe");
-        engine.graph.adopt(
-            key,
-            Arc::new(Reads::from_vec(vec![(context, digest)]).unwrap()),
-            Durability::Low,
-        );
-        engine.graph.adopt(
-            other,
-            Arc::new(Reads::from_vec(vec![(ReadKey::Signature(ordinary), digest)]).unwrap()),
-            Durability::Low,
-        );
-        let mut body = ChangeSet::default();
-        body.read(ReadKey::ExecutedBody(source), Durability::Low);
+        for (definition, read) in [
+            (dependent, context),
+            (ordinary, ReadKey::Signature(ordinary)),
+        ] {
+            let memo = crate::memo::Memo::new(
+                MemoKey::new(QueryKind::Lower, definition),
+                ContentHash::default(),
+                Err(QueryError::NotImplemented),
+                Arc::new(Reads::from_vec(vec![(read, digest)]).unwrap()),
+            );
+            engine.lowered.insert(
+                definition,
+                Arc::new(Entry {
+                    memo,
+                    detail: Default::default(),
+                    products: Default::default(),
+                    covered: vec![],
+                    depth: None,
+                    acceptance: None,
+                    verification: Default::default(),
+                    selections: vec![],
+                    consistent: true,
+                }),
+            );
+        }
+        let held = engine.lowered[&dependent].clone();
+        let mut body = crate::memo::Changes::default();
+        body.read(ReadKey::ExecutedBody(source));
         engine.apply_changes(&body);
-        assert!(!engine.graph.is_dirty(&key));
+        assert!(engine.lowered.contains_key(&dependent));
         assert!(engine.front_changes.snapshot().affected.is_empty());
-        let mut signature = ChangeSet::default();
-        signature.read(ReadKey::Signature(source), Durability::Low);
+        let mut signature = crate::memo::Changes::default();
+        signature.read(ReadKey::Signature(source));
         engine.apply_changes(&signature);
-        assert!(engine.graph.is_dirty(&key));
-        assert!(!engine.graph.is_dirty(&other));
+        assert!(!engine.lowered.contains_key(&dependent));
+        assert!(held.memo.is_stale());
+        assert!(engine.lowered.contains_key(&ordinary));
         assert_eq!(
             engine.front_changes.snapshot().affected,
             BTreeSet::from([dependent])
-        );
-        assert_eq!(
-            engine.graph.stats().invalidated[ReadKind::ValidationUniverse as usize],
-            1
-        );
-        engine.graph.remove(&key);
-        assert!(engine.graph.validation_context_reads().next().is_none());
-        engine.graph.adopt(
-            key,
-            Arc::new(Reads::from_vec(vec![(context, digest)]).unwrap()),
-            Durability::Low,
-        );
-        engine
-            .graph
-            .adopt(key, Arc::new(Reads::empty()), Durability::Low);
-        assert!(
-            engine.graph.validation_context_reads().next().is_none(),
-            "replacing a memo retires its contextual key"
         );
     }
 

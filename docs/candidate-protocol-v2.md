@@ -82,11 +82,7 @@ products. LoadManifest and LoadIo are Incomplete(ToolFailure)/Undecided;
 uncaptured inputs are Incomplete(InputUnavailable)/Unavailable. Source diagnostics
 are Complete/Reject. Only Complete/Pass is eligible for promotion.
 
-Checked-read deltas keep the existing hirsel.checked-read-delta.v1 schema and
-exact canonical owner/key/value semantics when both complete endpoints are
-available. Missing compatible evidence stays Unknown; filenames imply no test
-impact. Absolute products may coalesce, but each waiter retains its own parent,
-cancellation and delta. Live old receipts retain deleted-source maps and bytes.
+Each waiter retains its own cancellation. Live old receipts retain deleted-source maps and bytes.
 Namespace tables/source bytes, result maps and request records remain charged;
 decoded image metadata and in-flight compiler allocations have the separately
 reported/existing host limits. Live leases are never evicted to admit a request.

@@ -243,7 +243,6 @@ fn candidate_v2_h1_h2_atomic_create_delete_and_recomputed_scope() {
     );
     let r = result(&w, &c);
     assert_eq!(r.verdict, Verdict::Pass, "{:?}", r.loader_error);
-    assert!(matches!(r.dependencies, DependencyDelta::Known { .. }));
     assert!(matches!(promote(&w, &b1, &c, 2), Promotion::Promoted(_)));
     let b2 = w.head_lease().unwrap();
     assert_eq!(b2.token().inputs, b.token().inputs);

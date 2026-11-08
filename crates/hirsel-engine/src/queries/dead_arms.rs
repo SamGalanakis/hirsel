@@ -56,11 +56,11 @@ impl QueryEngine {
         if self
             .checked
             .get(&id)
-            .is_some_and(|entry| entry.consistent && !self.graph.is_dirty(&entry.memo.key))
+            .is_some_and(|entry| entry.consistent && !entry.memo.is_stale())
             && self
                 .checked_summaries
                 .get(&id)
-                .is_some_and(|entry| entry.consistent && !self.graph.is_dirty(&entry.memo.key))
+                .is_some_and(|entry| entry.consistent && !entry.memo.is_stale())
         {
             self.front_products.dead_arms.insert(id, inputs.clone());
         }

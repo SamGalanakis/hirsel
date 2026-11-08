@@ -400,7 +400,7 @@ impl QueryEngine {
         let id = DefId::intern(definition);
         let text = self.key_text(definition, QueryKind::Check)?;
         if let Some(entry) = self.checked.get(&id).cloned()
-            && self.memo_valid(definition, &entry, text)
+            && self.memo_valid(&entry, text)
             && self.lower_acceptance_holds(entry.acceptance.as_ref())
         {
             if let Some(depth) = &entry.depth {
@@ -462,7 +462,7 @@ impl QueryEngine {
         // Its own frame is on the stack still: stored before leaving, so a
         // waiting worker finds it.
         let own = self.s1.failure_is_own();
-        keep(&mut self.checked, &mut self.graph, entry.clone(), own);
+        keep(&mut self.checked, entry.clone(), own);
         self.s1.leave();
         self.merge_execution(entry.reads());
         self.depth_requested(&depth, site);
@@ -675,7 +675,7 @@ impl QueryEngine {
         entry.selections = product.selections;
         let retry = entry.result().err().filter(|error| !error.cacheable());
         let own = self.s1.failure_is_own();
-        keep(&mut self.checked, &mut self.graph, Arc::new(entry), own);
+        keep(&mut self.checked, Arc::new(entry), own);
         self.s1.leave();
         if let Some(error) = retry {
             return Err(error);
@@ -913,7 +913,7 @@ impl QueryEngine {
         let id = DefId::intern(definition);
         let text = self.key_text(definition, QueryKind::Check)?;
         if let Some(entry) = self.checked.get(&id).cloned()
-            && self.memo_valid(definition, &entry, text)
+            && self.memo_valid(&entry, text)
         {
             return entry.result();
         }
@@ -966,12 +966,7 @@ impl QueryEngine {
             result.map(shared_output),
             reads.observed,
         ));
-        keep(
-            &mut self.checked,
-            &mut self.graph,
-            entry.clone(),
-            self.s1.failure_is_own(),
-        );
+        keep(&mut self.checked, entry.clone(), self.s1.failure_is_own());
         entry.result()
     }
 

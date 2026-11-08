@@ -436,6 +436,7 @@ fn require_identity(kind: &TypeKind, path: &DefPath) -> Result<(), QueryError> {
 #[cfg(test)]
 mod source_tests {
     use super::*;
+    use hirsel_query_products::reads::{ReadKey, Revision};
     use std::sync::Arc;
 
     #[test]

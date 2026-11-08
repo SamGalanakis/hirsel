@@ -6,7 +6,6 @@ use hirsel_syntax::DefId;
 use hirsel_types::TypeKind;
 use hirsel_types::{GenericArgument, TypeId, TypeInterner};
 mod facet;
-pub(crate) use facet::SettledSummary;
 pub use facet::SummaryView;
 
 /// The compact published input of CT-5, staged selection and GEN-5. Its reads

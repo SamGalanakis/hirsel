@@ -10,16 +10,17 @@ impl QueryEngine {
     ) -> Result<Option<ContentHash>, QueryError> {
         let summary = self.definition_summary(definition)?;
         Ok(self
-            .graph
-            .output(&MemoKey::new(QueryKind::Summary, definition))
-            .and_then(|_| {
+            .settled_summaries
+            .contains(&definition)
+            .then(|| {
                 summary_archive_identity(
                     self.types.clone(),
                     &summary.summary,
                     &summary.growth,
                     summary.checked.as_deref(),
                 )
-            }))
+            })
+            .flatten())
     }
 
     fn summary_is_settled(&self) -> bool {
@@ -85,7 +86,7 @@ impl QueryEngine {
         extended.storage = Some(Arc::new(output.value));
         extended.reads = Arc::new(reads);
         let extended = Arc::new(extended);
-        self.record_summary_products(extended.clone(), detail, false, observed.products);
+        self.record_summary_products(extended.clone(), detail, observed.products);
         Ok(extended)
     }
     /// Publish the compact summary before releasing intermediate bodies whose
@@ -121,7 +122,7 @@ impl QueryEngine {
                     .get(&definition)
                     .map(|entry| entry.detail.clone())
                     .unwrap_or_default();
-                self.record_summary(summary.clone(), detail, true);
+                self.record_summary(summary.clone(), detail);
             }
             for kind in [QueryKind::Check, QueryKind::Modes] {
                 self.forget(&crate::memo::MemoKey::new(kind, definition));
@@ -138,7 +139,7 @@ impl QueryEngine {
         let path = definition.path();
         let text = self.key_text(path, QueryKind::Summary)?;
         if let Some(entry) = self.summaries.get(&definition).cloned()
-            && self.memo_valid(path, &entry, text)
+            && self.memo_valid(&entry, text)
         {
             return entry.result().map(|output| output.value.clone());
         }
@@ -187,7 +188,7 @@ impl QueryEngine {
         let path = definition.path();
         let text = self.key_text(path, QueryKind::Summary)?;
         if let Some(entry) = self.summaries.get(&definition).cloned()
-            && self.memo_valid(path, &entry, text)
+            && self.memo_valid(&entry, text)
         {
             return entry.result().map(|o| o.value.clone());
         }
@@ -224,7 +225,7 @@ impl QueryEngine {
             reads,
             text,
         });
-        self.record_summary_products(published.clone(), completed.detail.clone(), false, products);
+        self.record_summary_products(published.clone(), completed.detail.clone(), products);
         self.active.remove(&(path.clone(), QueryKind::Summary));
         Ok(published)
     }
@@ -238,12 +239,13 @@ impl QueryEngine {
         let id = DefId::intern(definition);
         if let Some(checked) = self.checked.get(&id).cloned()
             && checked.consistent
-            && !self.graph.is_dirty(&checked.memo.key)
+            && !checked.memo.is_stale()
             && self.key_text(definition, QueryKind::CheckedSummary).ok() == Some(checked.memo.text)
             && let Ok(output) = checked.result()
-            && !self.checked_summaries.get(&id).is_some_and(|entry| {
-                entry.memo.text == checked.memo.text && !self.graph.is_dirty(&entry.memo.key)
-            })
+            && !self
+                .checked_summaries
+                .get(&id)
+                .is_some_and(|entry| entry.memo.text == checked.memo.text && !entry.memo.is_stale())
         {
             let (summary, growth) = summarize(self.types(), &output.value);
             self.start(definition, QueryKind::CheckedSummary)?;
@@ -253,7 +255,6 @@ impl QueryEngine {
                 checked.memo.text,
                 checked.memo.reads.clone(),
                 checked.detail.clone(),
-                false,
             );
             self.active
                 .remove(&(definition.clone(), QueryKind::CheckedSummary));
@@ -280,7 +281,7 @@ impl QueryEngine {
         {
             return false;
         }
-        self.record_summary(summary, Default::default(), true);
+        self.record_summary(summary, Default::default());
         true
     }
 
@@ -288,43 +289,31 @@ impl QueryEngine {
         &mut self,
         summary: std::sync::Arc<PublishedSummary>,
         detail: DependencyReads,
-        adopted: bool,
     ) {
-        self.record_summary_products(summary, detail, adopted, Default::default());
+        self.record_summary_products(summary, detail, Default::default());
     }
 
     pub(super) fn record_summary_products(
         &mut self,
         summary: Arc<PublishedSummary>,
         detail: DependencyReads,
-        adopted: bool,
         products: Arc<PhaseProducts>,
     ) {
         let definition = summary.definition;
-        let durability = summary
-            .reads
-            .iter()
-            .map(|(read, _)| self.durability_of(read))
-            .min()
-            .unwrap_or(hirsel_query_products::reads::Durability::High);
         let reads = summary.reads.clone();
         let key = crate::memo::MemoKey::new(QueryKind::Summary, definition);
         let text = summary.text;
-        let output = self
-            .summary_is_settled()
-            .then(|| crate::summary::SettledSummary::published(&summary, &self.types));
+        if self.summary_is_settled() {
+            self.settled_summaries.insert(definition);
+        } else {
+            self.settled_summaries.remove(&definition);
+        }
         let value = Ok(std::sync::Arc::new(QueryOutput {
             value: summary,
             diagnostics: vec![],
             dependencies: detail.signatures.clone(),
         }));
-        let memo = if adopted {
-            self.graph
-                .adopt_output(key, text, value, reads, durability, output)
-        } else {
-            self.graph
-                .insert_output(key, text, value, reads, durability, output)
-        };
+        let memo = crate::memo::Memo::new(key, text, value, reads);
         self.summaries.insert(
             definition,
             std::sync::Arc::new(crate::queries::Entry {
@@ -356,7 +345,7 @@ impl QueryEngine {
         // to silently replace GEN-5's result.
         if let Some(entry) = self.summaries.get(&definition).cloned()
             && let Ok(text) = self.key_text(path, QueryKind::Summary)
-            && self.memo_valid(path, &entry, text)
+            && self.memo_valid(&entry, text)
             && let Ok(output) = entry.result()
             && let Some(checked) = &output.value.checked
         {
@@ -367,7 +356,6 @@ impl QueryEngine {
                 text,
                 entry.memo.reads.clone(),
                 entry.detail.clone(),
-                true,
             );
             return Ok((checked.summary.clone(), checked.growth.clone()));
         }
@@ -383,7 +371,6 @@ impl QueryEngine {
                 text,
                 entry.memo.reads.clone(),
                 entry.detail.clone(),
-                false,
             );
             self.active
                 .remove(&(path.clone(), QueryKind::CheckedSummary));
@@ -395,7 +382,7 @@ impl QueryEngine {
         let text = self
             .key_text(definition.path(), QueryKind::CheckedSummary)
             .ok()?;
-        self.memo_valid(definition.path(), &entry, text)
+        self.memo_valid(&entry, text)
             .then(|| entry.result().ok().map(|output| output.value.clone()))
             .flatten()
     }
@@ -406,25 +393,14 @@ impl QueryEngine {
         text: ContentHash,
         reads: Arc<Reads>,
         detail: DependencyReads,
-        adopted: bool,
     ) {
         let key = MemoKey::new(QueryKind::CheckedSummary, definition);
-        let durability = reads.durability(|read| self.durability_of(read));
-        let output = self
-            .summary_is_settled()
-            .then(|| crate::summary::SettledSummary::checked(&summary, &self.types));
         let value = Ok(Arc::new(QueryOutput {
             value: summary,
             diagnostics: vec![],
             dependencies: detail.signatures.clone(),
         }));
-        let memo = if adopted {
-            self.graph
-                .adopt_output(key, text, value, reads, durability, output)
-        } else {
-            self.graph
-                .insert_output(key, text, value, reads, durability, output)
-        };
+        let memo = crate::memo::Memo::new(key, text, value, reads);
         self.checked_summaries.insert(
             definition,
             Arc::new(Entry {

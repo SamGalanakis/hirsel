@@ -260,19 +260,12 @@ pub struct FrontBodyQueries {
     terminal_cache: Option<Box<dyn Send + Sync>>,
     work: Mutex<BTreeMap<(DefId, QueryKind), u64>>,
     store_adoptions: AtomicU64,
-    /// Refusals of stored body entries bound to other inputs.
-    text_refusals: AtomicU64,
-    /// Stored entry validations plus memo rows written.
-    memo_operations: AtomicU64,
     verify_store: hirsel_engine_store::VerifyStore,
     slots: Mutex<BTreeMap<Key, FrontOutcome>>,
     input_slots: Mutex<(BTreeMap<DefId, usize>, Option<Arc<LiveSourceBacking>>)>,
     carry: Mutex<Option<Arc<FrontCarry>>>,
     /// Subscription generations validated against this immutable source view.
     carry_changes: Mutex<Option<Arc<CarryChanges>>>,
-    /// Memo rows adopted from the carry without validation. They were neither
-    /// marked nor scanned, so inspection does not count them as touched.
-    clean_memos: Mutex<BTreeSet<crate::memo::MemoKey>>,
     errors: RuntimeErrors,
     refusal: Mutex<Option<FrontMemoryRefusal>>,
     // Own immutable snapshot and output metadata admission until every task and
@@ -828,10 +821,6 @@ impl FrontBodyQueries {
         if !work.is_empty() {
             weight.tree::<(DefId, QueryKind), u64>(work.len());
         }
-        let clean = self.clean_memos.lock().unwrap_or_else(|e| e.into_inner());
-        if !clean.is_empty() {
-            weight.tree::<crate::memo::MemoKey, ()>(clean.len());
-        }
         if weight.bytes() != 0 {
             weight.add(
                 hirsel_engine_admission::retained_arc_bytes(&std::mem::MaybeUninit::<
@@ -1151,13 +1140,6 @@ impl FrontBodyQueries {
     pub fn store_adoptions(&self) -> u64 {
         self.store_adoptions.load(Relaxed)
     }
-    /// Cumulative refusals, as `MemoStats` invalidation counters, and raw memo
-    /// operations. Each refused entry is one memo identity.
-    pub fn refusal_stats(&self) -> (crate::memo::MemoStats, u64) {
-        let mut stats = crate::memo::MemoStats::default();
-        stats.invalidated_text = self.text_refusals.load(Relaxed);
-        (stats, self.memo_operations.load(Relaxed))
-    }
     /// Successful lookup targets are semantic closure edges even when a
     /// primitive/alias adds no normalized signature fingerprint dependency.
     pub(crate) fn lookup_definition(
@@ -1352,26 +1334,6 @@ impl FrontBodyQueries {
                 return None;
             }
         })
-    }
-    /// Memo rows adopted through unchanged input subscriptions.
-    pub fn clean_memos(&self) -> BTreeSet<crate::memo::MemoKey> {
-        self.clean_memos
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone()
-    }
-    /// Actual completed phase reads. This inspection executes no query.
-    pub fn memo_keys(&self) -> Vec<crate::memo::MemoKey> {
-        let mut keys = BTreeSet::new();
-        for slot in self
-            .slots
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .values()
-        {
-            keys.extend(slot.memos.iter().map(|(key, _)| *key));
-        }
-        keys.into_iter().collect()
     }
     pub fn memo_snapshot(&self) -> Option<Vec<(crate::memo::MemoKey, Arc<Reads>)>> {
         let mut rows = BTreeMap::new();
@@ -2293,15 +2255,11 @@ impl BodyTask {
     fn load(&self, cx: &mut dyn QueryContext) -> Option<Result<ProductRef, Reference>> {
         let queries = &self.queries;
         let input = queries.inputs.get(&self.input)?;
-        let mut entry = hirsel_engine_store::Entry::load(&*queries.store, &input.key);
+        let entry = hirsel_engine_store::Entry::load(&*queries.store, &input.key);
         if entry.variants.is_empty() {
             return None;
         }
-        queries.memo_operations.fetch_add(1, Relaxed);
-        let Some(variant) = entry.current(&input.key) else {
-            queries.text_refusals.fetch_add(1, Relaxed);
-            return None;
-        };
+        let variant = entry.current(&input.key)?;
         if variant.output.len > self.weight.scratch {
             return None;
         }
@@ -2352,9 +2310,6 @@ impl BodyTask {
             FrontState::Failed { record, .. } => Err(*record),
             FrontState::Settled { publication, .. } => Ok(publication.clone()),
         };
-        queries
-            .memo_operations
-            .fetch_add(cached.memos.len() as u64, Relaxed);
         queries.install_outcome(self.input, cached, self.weight.scratch);
         queries.store_adoptions.fetch_add(1, Relaxed);
         timings::count(Count::StoreHits);
@@ -2752,9 +2707,6 @@ impl BodyTask {
             FrontState::Failed { record, .. } => Err(*record),
             FrontState::Settled { publication, .. } => Ok(publication.clone()),
         };
-        queries
-            .memo_operations
-            .fetch_add(cached.memos.len() as u64, Relaxed);
         queries.install_outcome(self.input, cached, self.weight.scratch);
         match terminal {
             Err(reference) => Err(reference.into()),
@@ -2807,7 +2759,7 @@ impl QueryEngine {
         if !has_errors(&output.diagnostics)
             && let Some(entry) = self.resolutions.get(&id)
             && entry.consistent
-            && !self.graph.is_dirty(&entry.memo.key)
+            && !entry.memo.is_stale()
         {
             self.specialization_dependencies.insert(
                 id,
@@ -3195,11 +3147,8 @@ impl QueryEngine {
             input_slots: Mutex::new((BTreeMap::new(), None)),
             carry: Mutex::new(None),
             carry_changes: Mutex::new(None),
-            clean_memos: Mutex::new(BTreeSet::new()),
             work: Mutex::new(BTreeMap::new()),
             store_adoptions: AtomicU64::new(0),
-            text_refusals: AtomicU64::new(0),
-            memo_operations: AtomicU64::new(0),
             verify_store: self.verify_store,
             errors,
             refusal: Mutex::new(None),

@@ -90,7 +90,7 @@ impl QueryEngine {
             && self
                 .summaries
                 .get(&id)
-                .is_some_and(|entry| entry.consistent && !self.graph.is_dirty(&entry.memo.key))
+                .is_some_and(|entry| entry.consistent && !entry.memo.is_stale())
         {
             return inputs.needed(self);
         }

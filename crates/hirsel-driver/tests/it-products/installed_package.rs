@@ -89,19 +89,6 @@ fn installed_std_compiles_without_its_source_files_and_never_checks_unused_items
                 name: "unused".into(),
             });
             if verify_store == VerifyStore::Off {
-                assert!(
-                    !output.work.touched_memos.iter().any(|key| {
-                        key.def.path() == &unused
-                            && matches!(
-                                key.kind,
-                                hirsel_query_products::QueryKind::Modes
-                                    | hirsel_query_products::QueryKind::Check
-                                    | hirsel_query_products::QueryKind::Resolve
-                            )
-                    }),
-                    "a matching installed product must not become an unrelated source Front root: {:?}",
-                    output.work.touched_memos,
-                );
                 assert_eq!(
                     requests
                         .recompute_counts(&[(unused, hirsel_query_products::QueryKind::Check)])

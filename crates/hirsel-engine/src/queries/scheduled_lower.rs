@@ -514,7 +514,6 @@ pub struct FrontLowerQueries {
     >,
     carry: Mutex<Option<Arc<LowerCarry>>>,
     carry_changes: Mutex<Option<Arc<carry::CarryChanges>>>,
-    clean_memos: Mutex<BTreeSet<crate::memo::MemoKey>>,
     /// Physical work spans every admitted successor of this operation.
     work: Arc<Mutex<BTreeMap<DefPath, FrontLowerWork>>>,
     weight: MemoryWeight,
@@ -697,15 +696,6 @@ impl FrontLowerQueries {
                 return Err(self.errors.resource);
             }
         }
-    }
-
-    /// Outcomes adopted through an unchanged subscription generation, without
-    /// inspecting the carried memo's individual reads.
-    pub fn clean_memos(&self) -> BTreeSet<crate::memo::MemoKey> {
-        self.clean_memos
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone()
     }
 
     /// Settled memo identities for work accounting. No read archive or body
@@ -3670,7 +3660,6 @@ impl QueryEngine {
             outcomes: Mutex::new(BTreeMap::new()),
             carry: Mutex::new(None),
             carry_changes: Mutex::new(None),
-            clean_memos: Mutex::new(BTreeSet::new()),
             work: previous.map_or_else(
                 || Arc::new(Mutex::new(BTreeMap::new())),
                 |owner| owner.work.clone(),

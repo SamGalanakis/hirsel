@@ -345,6 +345,15 @@ fn dfa_count_laws() -> bool uses {} {
 // A hand-derived table checks borrowed byte coordinates, repeated match tags,
 // EOF and an unknown cell through the real primitive in all three engines.
 fn dfa_cached_views() -> bool uses {} {
+  // Offset candidates must preserve UTF-8 boundaries, overlaps and EOF.
+  for (pattern, src, expected) in [
+    ("sessionid", "xxxxéxxxxxxid__sessionid", Some(Span(start: 16, end: 25))),
+    ("abababc", "abababababc", Some(Span(start: 4, end: 11))),
+    ("sessionid", "sessioni", None()),
+    ("(?i)abkxyz", "__abKxyz", Some(Span(start: 2, end: 10)))
+  ] {
+    if !dfa_golden(pattern, src, expected) { return false }
+  }
   // With no prefilter, warmed empty frontiers must stay in the cached scan.
   // z+ cannot match any byte of this ASCII subject. Previously its start
   // tags returned cursor zero even after every transition was cached.

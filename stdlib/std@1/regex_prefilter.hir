@@ -11,6 +11,8 @@ type PrefixPlan {
   low: u64,
   high: u64,
   literals: List[String],
+  // Low 16 bits are literal fold flags; upper bits hold an exact singleton
+  // pair offset. Prefix extraction already limits literals to sixteen bytes.
   folds: List[u64],
   firsts: Bytes,
   seconds: Bytes,
@@ -238,21 +240,46 @@ fn prefix_plan(code: List[Inst], entry: u64) -> PrefixPlan uses {} {
   // Such false positives are safe because neither engine returns a match
   // without running its original ordered program.
   let mut paired = core@1/list.len(plan.literals) != 0
+  // memchr 2.8.3 arch/all/packedpair/{mod.rs:163-192,default_rank.rs:1-130}.
+  // Keep adjacency and a fixed byte offset only for exact single ASCII literals.
+  let mut pair_offset = 0u64
+  if paired && core@1/list.len(plan.literals) == 1 && (plan.folds[0] & 65535u64) == 0 {
+    let bytes = core@1/string.as_bytes(plan.literals[0])
+    let ranks: Bytes = b"\x37\x34\x33\x32\x31\x30\x2f\x2e\x2d\x67\xf2\x42\x43\xe5\x2c\x2b\x2a\x29\x28\x27\x26\x25\x24\x23\x22\x21\x38\x20\x1f\x1e\x1d\x1c\xff\x94\xa4\x95\x88\xa0\x9b\xad\xdd\xde\x86\x7a\xe8\xca\xd7\xe0\xd0\xdc\xcc\xbb\xb7\xb3\xb1\xa8\xb2\xc8\xe2\xc3\x9a\xb8\xae\x7e\x78\xbf\x9d\xc2\xaa\xbd\xa2\xa1\x96\xc1\x8e\x89\xab\xb0\xb9\xa7\xba\x70\xaf\xc0\xbc\x9c\x8c\x8f\x7b\x85\x80\x93\x8a\x92\x72\xdf\x97\xf9\xd8\xee\xec\xfd\xe3\xda\xe6\xf7\x87\xb4\xf1\xe9\xf6\xf4\xe7\x8b\xf5\xf3\xfb\xeb\xc9\xc4\xf0\xd6\x98\xb6\xcd\xb5\x7f\x1b"
+    let mut best = 512u64
+    let mut i = 0u64
+    while i + 1 < core@1/bytes.len(bytes) {
+      let a = bytes[i]
+      let b = bytes[i + 1]
+      if (a | 32u8) != (b | 32u8) {
+        // The prepared masks admit both bit-5 variants, so rank each union by
+        // its more frequent member. Distinct bytes avoid correlated repeats.
+        let a0: u64 = core@1/int.widen(ranks[core@1/int.widen(a | 32u8)])
+        let a1: u64 = core@1/int.widen(ranks[core@1/int.widen(a & 223u8)])
+        let b0: u64 = core@1/int.widen(ranks[core@1/int.widen(b | 32u8)])
+        let b1: u64 = core@1/int.widen(ranks[core@1/int.widen(b & 223u8)])
+        let score = (if a0 > a1 { a0 } else { a1 }) + (if b0 > b1 { b0 } else { b1 })
+        if score < best { best = score; pair_offset = i }
+      }
+      i += 1
+    }
+  }
   let mut sets: List[u8] = []
   for i in 0u64..64 { core@1/list.push(mut sets, 0u8) }
   for literal in plan.literals {
     let bytes = core@1/string.as_bytes(literal)
     if core@1/bytes.len(bytes) < 2 { paired = false; break }
-    prefix_pair_bit(mut sets, 0, bytes[0] | 32u8)
-    prefix_pair_bit(mut sets, 0, bytes[0] & 223u8)
-    prefix_pair_bit(mut sets, 32, bytes[1] | 32u8)
-    prefix_pair_bit(mut sets, 32, bytes[1] & 223u8)
+    prefix_pair_bit(mut sets, 0, bytes[pair_offset] | 32u8)
+    prefix_pair_bit(mut sets, 0, bytes[pair_offset] & 223u8)
+    prefix_pair_bit(mut sets, 32, bytes[pair_offset + 1] | 32u8)
+    prefix_pair_bit(mut sets, 32, bytes[pair_offset + 1] & 223u8)
   }
   if paired {
     for i in 0u64..16 { sets[16 + i] = 255u8; sets[48 + i] = 255u8 }
     let masks = core@1/bytes.from_list(take sets)
     plan.firsts = core@1/bytes.slice(masks, 0, 32)
     plan.seconds = core@1/bytes.slice(masks, 32, 64)
+    if pair_offset != 0 { plan.folds[0] |= pair_offset << 16 }
   }
   plan.enabled = true
   take plan
@@ -284,12 +311,14 @@ fn prefix_has(plan: PrefixPlan, cp: u32) -> bool uses {} {
 // dead state. Inner literals alone need the backwards class-run recovery.
 fn next_candidate(plan: PrefixPlan, haystack: Bytes, from: u64) -> Option[u64] uses {} {
   let size = core@1/bytes.len(haystack)
-  let mut scan = from
+  let pair_offset = if core@1/list.len(plan.literals) == 1 { plan.folds[0] >> 16 } else { 0u64 }
+  if from >= size || pair_offset >= size - from { return None() }
+  let mut scan = from + pair_offset
   while scan < size {
     let mut candidate = size
     if core@1/bytes.len(plan.firsts) != 0 {
       candidate = core@1/bytes.find_pair(haystack, plan.firsts, plan.seconds, scan)
-    } else if core@1/list.len(plan.literals) == 1 && plan.folds[0] == 0 {
+    } else if core@1/list.len(plan.literals) == 1 && (plan.folds[0] & 65535u64) == 0 {
       candidate = core@1/bytes.find_any(haystack, core@1/string.as_bytes(plan.literals[0]), scan)
     } else {
       candidate = scan
@@ -300,6 +329,15 @@ fn next_candidate(plan: PrefixPlan, haystack: Bytes, from: u64) -> Option[u64] u
       }
     }
     if candidate == size { return None() }
+    let found = candidate
+    candidate -= pair_offset
+    // Offset plans require an exact ASCII literal prefix. A non-ASCII byte
+    // cannot start it and may be a continuation byte after subtracting the
+    // offset. Reject it before the ordered engine observes a start boundary.
+    if pair_offset != 0 && haystack[candidate] >= 128 {
+      scan = found + 1
+      continue
+    }
     if !plan.inner { return Some(candidate) }
     let mut begin = candidate
     while begin > from {
@@ -311,7 +349,7 @@ fn next_candidate(plan: PrefixPlan, haystack: Bytes, from: u64) -> Option[u64] u
       begin -= 1
     }
     if begin < candidate { return Some(begin) }
-    scan = candidate + 1
+    scan = found + 1
   }
   None()
 }

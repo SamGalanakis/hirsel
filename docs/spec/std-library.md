@@ -822,15 +822,9 @@ Structured consumers use `begin_array` / `array_next` and `begin_object` /
 `object_next`. Each container has its own mutable `first: bool` initialized to
 `true`; objects also have a fresh `Set[String]` of decoded keys. These operations
 check commas, colons, duplicate keys (including unknown members), and closing
-delimiters. Generated records use `object_field` with an inline table of field
-names and fresh presence flags. It returns the known field ordinal after checking
-its duplicate flag and consuming its colon; duplicate detection leaves the cursor
-at the key end before consuming the colon. Ordinal `n` places an unknown
-`ObjectKey` in the caller's pending slot, leaving its duplicate check and colon to
-the caller; `n + 1` closes the object. Plain key spans are retained only while the
-input is unchanged; generated records with nominal or container readers retain
-independent spellings instead. `skip` validates one complete value without a DOM;
-`finish_reader` requires only whitespace after the root.
+delimiters. `object_key` plus `colon` lets generated code check known field slots
+without hashing their names; its caller must reject duplicates. `skip` validates
+one complete value without a DOM; `finish_reader` requires only whitespace after the root.
 These structured operations return the same `JsonError` byte offsets as `parse`
 on UTF-8 input. Container opening uses `check_depth` with the same nesting limit,
 reporting the input position for reader errors. Lexical `next_token` alone does not

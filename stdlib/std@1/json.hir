@@ -885,15 +885,25 @@ fn remember_skipped_key(
 
 /// Validate and skip one value, retaining only object key sets, never a DOM.
 pub fn skip(mut cursor: Reader) -> Result[(), JsonError] uses {} {
-  let c = peek(mut cursor)
+  // serde_json 1.0.150 de.rs:1102-1155 ignores scalars directly instead
+  // of constructing deserializer tokens. Retain Hirsel's delimiter errors.
+  let c = if cursor.pos < core@1/bytes.len(cursor.data) && cursor.data[cursor.pos] > 32 {
+    cursor.data[cursor.pos]
+  } else {
+    peek(mut cursor)
+  }
   if c == 91 {
-    begin_array(mut cursor)?
+    if cursor.depth >= MAX_NESTING { return Error(Nesting(cursor.pos)) }
+    cursor.pos += 1
+    cursor.depth += 1
     let mut first = true
     while array_next(mut cursor, mut first)? {
       skip(mut cursor)?
     }
   } else if c == 123 {
-    begin_object(mut cursor)?
+    if cursor.depth >= MAX_NESTING { return Error(Nesting(cursor.pos)) }
+    cursor.pos += 1
+    cursor.depth += 1
     let mut first = true
     let mut first_key: Option[String] = None
     let mut second_key: Option[String] = None
@@ -906,14 +916,25 @@ pub fn skip(mut cursor: Reader) -> Result[(), JsonError] uses {} {
       colon(mut cursor)?
       skip(mut cursor)?
     }
-  } else {
-    match next_token(mut cursor)? {
-      NullToken => (),
-      BoolToken(_) => (),
-      NumberToken(_) => (),
-      TextToken(_) => (),
-      _ => return Error(Syntax(cursor.pos - 1)),
+  } else if c == 34 {
+    let end = core@1/bytes.find_any(cursor.data, JSON_STRING_STOP, cursor.pos + 1)
+    if end < core@1/bytes.len(cursor.data) && cursor.data[end] == 34 {
+      cursor.pos = end + 1
+    } else {
+      let _ = json_quoted(cursor.data, mut cursor.pos)?
     }
+  } else if c == 45 || c >= 48 && c <= 57 {
+    json_number_end(cursor.data, mut cursor.pos)?
+  } else if c == 110 {
+    json_keyword(cursor.data, mut cursor.pos, "null")?
+  } else if c == 116 {
+    json_keyword(cursor.data, mut cursor.pos, "true")?
+  } else if c == 102 {
+    json_keyword(cursor.data, mut cursor.pos, "false")?
+  } else {
+    // Preserve the public reader's cursor/depth effects for invalid delimiters.
+    let _ = next_token(mut cursor)?
+    return Error(Syntax(cursor.pos - 1))
   }
   Ok(())
 }

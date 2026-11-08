@@ -53,6 +53,8 @@ fn syntax(t: Test, source: String, position: u64) -> () {
   test.equal(t, validate(string.as_bytes(source)), Error(Syntax(position)))
   let mut cursor = json.reader(string.as_bytes(source))
   test.equal(t, json.read_owned_text(mut cursor), Error(Syntax(position)))
+  let mut skipped = json.reader(string.as_bytes(source))
+  test.equal(t, json.skip(mut skipped), Error(Syntax(position)))
 }
 pub fn main(t: Test) -> Result[(), ()] {
   syntax(t, "\"", 1)
@@ -85,7 +87,38 @@ pub fn main(t: Test) -> Result[(), ()] {
     let Ok(owned_value) = json.read_owned_text(mut owned) else { return Error(()) }
     test.equal(t, owned_value, expected)
     test.equal(t, json.finish_reader(mut owned), Ok(()))
+    let mut skipped = json.reader(string.as_bytes(input))
+    test.equal(t, json.skip(mut skipped), Ok(()))
+    test.equal(t, json.finish_reader(mut skipped), Ok(()))
   }
+  let skipped_scalars: List[(Bytes, u64)] = [
+    (b"null,", 4),
+    (b" true]", 5),
+    (b"false}", 5),
+    (b"-12.5e+2,", 8),
+    (b"\"raw\",", 5),
+    (b"\"\\u0061\",", 8),
+    (b"\"\\uD834\\uDD1E\",", 14)
+  ]
+  for (input, position) in skipped_scalars {
+    let mut skipped = json.reader(input)
+    test.equal(t, json.skip(mut skipped), Ok(()))
+    test.equal(t, skipped.pos, position)
+  }
+  for input in [b"[]", b"{}"] {
+    let mut below = json.reader(input)
+    below.depth = 127
+    test.equal(t, json.skip(mut below), Ok(()))
+    test.equal(t, below.depth, 127u64)
+    let mut full = json.reader(input)
+    full.depth = 128
+    test.equal(t, json.skip(mut full), Error(Nesting(0)))
+    test.equal(t, (full.pos, full.depth), (0u64, 128u64))
+  }
+  let mut closing = json.reader(b"]")
+  closing.depth = 1
+  test.equal(t, json.skip(mut closing), Error(Syntax(0)))
+  test.equal(t, (closing.pos, closing.depth), (1u64, 0u64))
   // Hand-derived IEEE encodings guard token boundaries, negative zero and
   // nearest-even rounding when numeric grammar and conversion share a scan.
   let numbers: List[(Bytes, u64, u32)] = [

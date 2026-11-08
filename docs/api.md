@@ -4,7 +4,7 @@ Generated from manifest-selected public declarations. Do not edit by hand.
 Signatures retain modes, brands, attributes, relations and `uses` clauses.
 Opaque representations stay hidden; bodies are not checked or evaluated.
 
-2296 exported definitions; 1011 variants.
+2297 exported definitions; 1011 variants.
 
 ## Types and roots
 
@@ -3496,6 +3496,10 @@ References: [`core@1/Bytes`](#def-core_401_2fBytes), [`core@1/u64`](#def-core_40
 <a id="def-core_401_2fbytes_2fdecimal_5fword"></a>
 
 - `@noalloc fn bytes.decimal_word(value: u64, mut buffer: Inline[u8, 20]) -> u64`
+
+<a id="def-core_401_2fbytes_2fdfa_5frun"></a>
+
+- `@noalloc fn bytes.dfa_run(src: Bytes, table: List[u64], classes: u64, state: u64, start: u64) -> (u64, u64, u64)`
 
 <a id="def-core_401_2fbytes_2ffind_5fany"></a>
 

@@ -2435,9 +2435,14 @@ primary_operations! { library, call, context, name, a, value;
             let Value::Integer(word) = elements.get(usize::try_from(at).ok()?)?.as_ref()? else { return None; };
             Some(word.bits() as u64)
         };
+        let transition = |state, column| {
+            let row = elements.get(usize::try_from(state).ok()?..)?;
+            let Value::Integer(word) = row.get(usize::try_from(column).ok()?)?.as_ref()? else { return None; };
+            Some(word.bits() as u64)
+        };
         let alphabet_valid = classes.checked_add(128).is_some_and(|end| end <= elements.len() as u64);
         let result = if alphabet_valid {
-            hirsel_kernels::byte_scan::scan_dfa(bytes(arg(a, 0)?)?, |byte| get(classes.checked_add(u64::from(byte))?), get, start, state)
+            hirsel_kernels::byte_scan::scan_dfa(bytes(arg(a, 0)?)?, |byte| get(classes.checked_add(u64::from(byte))?), transition, start, state)
         } else { None };
         let Some(result) = result else {
             return Ok(Some(OperationResult::Failed(fail(&call, context, "SEM-3", "invalid cached DFA table or range"))));

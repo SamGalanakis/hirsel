@@ -398,28 +398,28 @@ unsafe fn pair_members_avx2(
 /// cached run. Zero means unknown. Return state, cursor and the latest match
 /// offset, or u64::MAX when no match was observed. Invalid arithmetic/table
 /// accesses return None so adapters report a resource-independent failure.
+/// Transition lookups validate the row and column as separate borrowed ranges;
+/// they must return None when their combined index is outside the table.
 /// The lookup closures keep interpreter values borrowed without copying a slab.
 pub fn scan_dfa(
     source: &[u8],
     class: impl Fn(u8) -> Option<u64>,
-    transition: impl Fn(u64) -> Option<u64>,
+    transition: impl Fn(u64, u64) -> Option<u64>,
     start: u64,
     mut state: u64,
 ) -> Option<[u64; 3]> {
     let mut cursor = usize::try_from(start).ok()?;
-    if cursor > source.len() {
-        return None;
-    }
+    let mut remaining = source.get(cursor..)?;
     let mut matched = u64::MAX;
     // hybrid/search.rs:189-239: one bounds decision admits four dependent
     // transitions. Each stop still returns the exact unconsumed byte.
     macro_rules! advance {
-        () => {{
-            let byte = source[cursor];
+        ($byte:expr) => {{
+            let byte = $byte;
             if byte >= 128 {
                 return Some([state, cursor as u64, matched]);
             }
-            let hit = transition(state.checked_add(class(byte)?)?)?;
+            let hit = transition(state, class(byte)?)?;
             if hit == 0 || hit & 6 != 0 {
                 return Some([state, cursor as u64, matched]);
             }
@@ -430,14 +430,16 @@ pub fn scan_dfa(
             cursor += 1;
         }};
     }
-    while source.len() - cursor >= 4 {
-        advance!();
-        advance!();
-        advance!();
-        advance!();
+    while let Some((chunk, tail)) = remaining.split_first_chunk::<4>() {
+        advance!(chunk[0]);
+        advance!(chunk[1]);
+        advance!(chunk[2]);
+        advance!(chunk[3]);
+        remaining = tail;
     }
-    while cursor < source.len() {
-        advance!();
+    while let Some((&byte, tail)) = remaining.split_first() {
+        advance!(byte);
+        remaining = tail;
     }
     Some([state, cursor as u64, matched])
 }
@@ -619,10 +621,10 @@ mod tests {
                 _ => 2,
             })
         };
-        let transition = |at| {
-            usize::try_from(at)
-                .ok()
-                .and_then(|at| rows.get(at).copied())
+        let transition = |state, column| {
+            rows.get(usize::try_from(state).ok()?..)?
+                .get(usize::try_from(column).ok()?)
+                .copied()
         };
         for (source, start, state, expected) in [
             (b"abbb!".as_slice(), 0, 128, Some([136, 4, 3])),
@@ -644,10 +646,10 @@ mod tests {
         }
         for flags in 2..8 {
             rows[138] = 136 * 8 + flags;
-            let transition = |at| {
-                usize::try_from(at)
-                    .ok()
-                    .and_then(|at| rows.get(at).copied())
+            let transition = |state, column| {
+                rows.get(usize::try_from(state).ok()?..)?
+                    .get(usize::try_from(column).ok()?)
+                    .copied()
             };
             assert_eq!(
                 super::scan_dfa(b"ab!", class, transition, 0, 128),

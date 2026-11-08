@@ -723,10 +723,11 @@ pub unsafe extern "C" fn hirsel_rt_v2_bytes_dfa_run(
     let Some(result) = hirsel_kernels::byte_scan::scan_dfa(
         source,
         |byte| Some(alphabet[usize::from(byte)]),
-        |at| {
-            usize::try_from(at)
-                .ok()
-                .and_then(|at| words.get(at).copied())
+        |state, column| {
+            words
+                .get(usize::try_from(state).ok()?..)?
+                .get(usize::try_from(column).ok()?)
+                .copied()
         },
         offset,
         state,

@@ -18,7 +18,6 @@ fn from_project(variable: &str) -> PathBuf {
 }
 
 // Files drain both streams while the child runs, including a failing compiler.
-// Killing our own process group also bounds compiler/linker descendants.
 fn phase(command: &mut Command, root: &Path, label: &str) -> Result<Output, String> {
     let stem = label.replace(' ', "-");
     let stdout = root.join(format!("{stem}.stdout"));

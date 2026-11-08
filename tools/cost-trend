@@ -4,7 +4,7 @@
     tools/cost-trend --toolchain DIR --commit SHA [--main-only]
 
 The caller supplies the commit built into DIR. The checkout must be that commit.
-Each process uses tools/capped, 2 GiB, 60 CPU seconds and an allowed CPU. Three
+Each process uses tools/capped, 2 GiB and an allowed CPU. Three
 seeded interleaved rounds produce medians; a refused workload is recorded once
 and omitted from later rounds. A timer never retries a recorded commit/contract.
 """

@@ -83,7 +83,7 @@ def verify(hirsel, root, output):
                                 HIRSEL_MEMORY_LIMIT='2G', HIRSEL_JOBS='1')
         if runtime:
             # Separate the tool's stderr from capped's resource report. One scope
-            # and one CLI/native fixture at a time, with a 60-second runtime cap.
+            # and one CLI/native fixture at a time, with the memory cap intact.
             wrapper = ('import subprocess,sys; '
                        'o=open(sys.argv[1],"wb"); e=open(sys.argv[2],"wb"); '
                        'p=subprocess.run(sys.argv[3:],stdin=subprocess.DEVNULL,stdout=o,stderr=e); '

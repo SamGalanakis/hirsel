@@ -473,7 +473,7 @@ fn tiny_commit_denied_and_affected_native_build() {
 #[test]
 #[ignore = "original full-main recovery, run once after provider qualification"]
 fn treelearn_original_commit_denied() {
-    // Preserve the original full-main 60 CPU-s / 2 GiB / 120 s cell caps.
+    // Preserve the original full-main 2 GiB memory cap.
     // Setup/build is supplied by Buck; only the runtime child is capped here.
     if std::env::var_os("HIRSEL_HEAP_TREELEARN_CHILD").is_none() {
         let cap = tempfile::NamedTempFile::new().unwrap();

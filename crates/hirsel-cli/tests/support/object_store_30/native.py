@@ -1,5 +1,5 @@
 """Production Ordered full-app launches, immutable tapes and real-file effects.
-Each measured process has independent 60 CPU-s/2GiB caps. Builds are separate.
+Each measured process has an independent 2 GiB memory cap. Builds are separate.
 """
 import argparse
 import hashlib

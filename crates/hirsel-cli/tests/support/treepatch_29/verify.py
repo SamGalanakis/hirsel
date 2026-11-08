@@ -1,6 +1,6 @@
 """Whole patchctl; independent byte targets and pinned similar newline vector.
 
-Runtime caps stay 60 CPU seconds / 2 GiB. A tooling stop is never a semantic
+The runtime memory cap stays 2 GiB. A tooling stop is never a semantic
 pass. Host directories are unavailable during all replay observations.
 """
 import hashlib

@@ -31,7 +31,7 @@ pub struct FrontCheckPlan {
 /// error-type declarations with their arms, and every body that may use them.
 struct DeadArmLint {
     declarations: BTreeMap<DefPath, (hirsel_span::Anchor, Vec<(String, u32, u32)>)>,
-    bodies: Vec<DefPath>,
+    bodies: BTreeSet<DefPath>,
 }
 impl DeadArmLint {
     fn insert(&mut self, item: &super::catalog::SourceItem) {
@@ -42,7 +42,7 @@ impl DeadArmLint {
             );
         }
         if item.facts.body_kind != BodyKind::None {
-            self.bodies.push(item.definition.clone());
+            self.bodies.insert(item.definition.clone());
         }
     }
     fn bytes(&self) -> u64 {
@@ -63,7 +63,10 @@ impl DeadArmLint {
             }
             weight.vec(arms, |weight, (name, _, _)| weight.add(name.capacity()));
         }
-        weight.vec(&self.bodies, |weight, path| weight.path(path));
+        weight.tree::<DefPath, ()>(self.bodies.len());
+        for path in &self.bodies {
+            weight.path(path);
+        }
         weight.bytes()
     }
 }
@@ -1047,7 +1050,7 @@ impl QueryEngine {
         let mut definitions = BTreeSet::new();
         let mut lint = DeadArmLint {
             declarations: BTreeMap::new(),
-            bodies: Vec::new(),
+            bodies: BTreeSet::new(),
         };
         for (file, context) in files {
             for item in self.source_items(*file) {
@@ -1107,7 +1110,7 @@ impl QueryEngine {
         let mut constants = BTreeSet::new();
         let mut lint = DeadArmLint {
             declarations: BTreeMap::new(),
-            bodies: Vec::new(),
+            bodies: BTreeSet::new(),
         };
         for (file, context, lowering) in &plan.files {
             if !capture.file_holds(&self.sources, *file) {

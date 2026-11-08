@@ -1,0 +1,10 @@
+load("//tools/buck2:profile.bzl", "RELEASE_FLAGS")
+
+rust_binary(
+    name = "micro-reference",
+    crate_root = "main.rs",
+    srcs = ["main.rs"],
+    edition = "2021",
+    rustc_flags = RELEASE_FLAGS,
+    visibility = ["PUBLIC"],
+)

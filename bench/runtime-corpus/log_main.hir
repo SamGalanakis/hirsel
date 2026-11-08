@@ -1,0 +1,22 @@
+// Use the existing LogParser and measurement harness with no warmup.
+pub fn main(rt: Io, args: Args) -> Result[(), String] {
+  let raw_lines = arg.text(args, 0)
+  let raw_iterations = arg.text(args, 1)
+  let (Ok(lines), Ok(iterations)) = (raw_lines, raw_iterations) else {
+    return Error("arguments")
+  }
+  let mut config: harness.Config = map.empty()
+  map.insert(mut config, "lines_count", Number(lines))
+  map.insert(mut config, "iterations", Number(iterations))
+  map.insert(mut config, "warmup_iterations", Number("0"))
+  let Ok(report) = log_parser.execute(rt, "Etc::LogParser", config) else {
+    return Error("log parser")
+  }
+  let Ok(stdout) = io.stdout(rt) else {
+    return Error("stdout")
+  }
+  let Ok(()) = out.print(stdout, f"{report.actual}\n") else {
+    return Error("output")
+  }
+  Ok(())
+}

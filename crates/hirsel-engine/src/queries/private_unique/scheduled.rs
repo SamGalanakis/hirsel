@@ -17,6 +17,19 @@ pub(in crate::queries) struct Facts {
     pub proofs: Proofs,
     pub reads: Reads,
 }
+/// A private-inference module: its package and module path keys.
+pub(in crate::queries) type InferenceModule = (
+    hirsel_query_products::reads::PackageKey,
+    hirsel_query_products::reads::ModuleKey,
+);
+/// One module's proof facts and whether they cover every generated body.
+pub(in crate::queries) type ModuleInference = Result<(Facts, bool), QueryError>;
+pub(in crate::queries) fn inference_module(path: &DefPath) -> InferenceModule {
+    (
+        hirsel_query_products::reads::PackageKey::of(&path.0.package),
+        hirsel_query_products::reads::ModuleKey::of(&path.0.modules),
+    )
+}
 struct Input {
     syntax: Arc<ItemSyntax>,
     signature: Arc<QueryOutput<hirsel_types::SignatureRef>>,
@@ -282,10 +295,7 @@ impl QueryEngine {
     }
     fn inference_groups(
         &self,
-        selected: Option<(
-            hirsel_query_products::reads::PackageKey,
-            hirsel_query_products::reads::ModuleKey,
-        )>,
+        selected: Option<&BTreeMap<InferenceModule, DefId>>,
     ) -> BTreeMap<
         (
             hirsel_query_products::reads::PackageKey,
@@ -299,7 +309,7 @@ impl QueryEngine {
                 hirsel_query_products::reads::PackageKey::of(&path.0.package),
                 hirsel_query_products::reads::ModuleKey::of(&path.0.modules),
             );
-            if selected.is_some_and(|selected| selected != module) {
+            if selected.is_some_and(|selected| !selected.contains_key(&module)) {
                 continue;
             }
             groups.entry(module).or_default().push(path.clone());
@@ -505,40 +515,49 @@ impl QueryEngine {
         )?;
         Ok(reservation)
     }
-    pub(in crate::queries) fn infer_private_module(
+    /// Infer the selected modules' proofs in one pass over this engine's
+    /// declared universe. Every module's fixed point reads the declared
+    /// snapshot captured before any of them runs, so modules are independent
+    /// of one another and of their order. A failure is its module's verdict.
+    pub(in crate::queries) fn infer_private_module_set(
         &mut self,
         working_bytes: u64,
         registrations: &[Arc<AcceptedFrontRegistration>],
-        owner: DefId,
-    ) -> Result<(Facts, bool), QueryError> {
+        owners: &BTreeMap<InferenceModule, DefId>,
+    ) -> Result<BTreeMap<InferenceModule, ModuleInference>, QueryError> {
         self.private_summary_active = true;
-        let module = (
-            hirsel_query_products::reads::PackageKey::of(&owner.path().0.package),
-            hirsel_query_products::reads::ModuleKey::of(&owner.path().0.modules),
-        );
-        self.infer_private_modules(working_bytes, registrations, Some(module))?;
-        let facts = self.local_inference().remove(&module).unwrap_or(Facts {
-            proofs: vec![],
-            reads: Reads::empty(),
-        });
+        let mut failed = self.infer_private_modules(working_bytes, registrations, Some(owners))?;
+        let mut local = self.local_inference();
         let declarations = self.declarations.frozen();
-        let complete = self
-            .module_source_paths(owner.path())
-            .into_iter()
-            .filter(|path| {
-                hirsel_types::unique_summary::same_module(path, owner.path())
-                    && declarations
-                        .metadata()
-                        .definitions
-                        .get(path)
-                        .is_some_and(|metadata| !metadata.public)
-                    && self
-                        .source_facts(path)
-                        .is_some_and(|facts| facts.generator && !facts.instance_bodied)
-            })
-            .all(|path| facts.proofs.iter().any(|(id, _)| id.path() == &path));
+        let mut results = BTreeMap::new();
+        for (module, owner) in owners {
+            if let Some(error) = failed.remove(module) {
+                results.insert(*module, Err(error));
+                continue;
+            }
+            let facts = local.remove(module).unwrap_or(Facts {
+                proofs: vec![],
+                reads: Reads::empty(),
+            });
+            let complete = self
+                .module_source_paths(owner.path())
+                .into_iter()
+                .filter(|path| {
+                    hirsel_types::unique_summary::same_module(path, owner.path())
+                        && declarations
+                            .metadata()
+                            .definitions
+                            .get(path)
+                            .is_some_and(|metadata| !metadata.public)
+                        && self
+                            .source_facts(path)
+                            .is_some_and(|facts| facts.generator && !facts.instance_bodied)
+                })
+                .all(|path| facts.proofs.iter().any(|(id, _)| id.path() == &path));
+            results.insert(*module, Ok((facts, complete)));
+        }
         // The inference view contains conservative declared rows. Replace it
-        // before selecting settled signature variants for this module.
+        // before selecting settled signature variants for these modules.
         let headers = header_products::HeaderProducts::capture(self);
         headers.configure_private(working_bytes, registrations);
         self.header_products = Some(headers);
@@ -547,30 +566,46 @@ impl QueryEngine {
             .private_signature_publications
             .iter()
             .copied()
-            .filter(|id| hirsel_types::unique_summary::same_module(id.path(), owner.path()))
+            .filter_map(|id| {
+                let module = inference_module(id.path());
+                matches!(results.get(&module), Some(Ok(_))).then_some((module, id))
+            })
             .collect();
-        for id in publications {
-            self.publish_private_signature(id)?;
+        for (module, id) in publications {
+            if matches!(results.get(&module), Some(Ok(_)))
+                && let Err(error) = self.publish_private_signature(id)
+            {
+                results.insert(module, Err(error));
+            }
         }
         self.adopt_completed_headers();
-        Ok((facts, complete))
+        Ok(results)
     }
     fn infer_private_modules(
         &mut self,
         working_bytes: u64,
         registrations: &[Arc<AcceptedFrontRegistration>],
-        selected: Option<(
-            hirsel_query_products::reads::PackageKey,
-            hirsel_query_products::reads::ModuleKey,
-        )>,
-    ) -> Result<(), QueryError> {
+        selected: Option<&BTreeMap<InferenceModule, DefId>>,
+    ) -> Result<BTreeMap<InferenceModule, QueryError>, QueryError> {
+        let mut failed = BTreeMap::new();
         let Some(modes) = self
             .adapters
             .modes
             .clone()
             .filter(|m| m.infers_private_unique())
         else {
-            return Ok(());
+            return Ok(failed);
+        };
+        // A selected module's failure is its own verdict; the complete
+        // universe fails as a whole.
+        let fail = |failed: &mut BTreeMap<InferenceModule, QueryError>,
+                    module: InferenceModule,
+                    error: QueryError| {
+            if selected.is_none() {
+                return Err(error);
+            }
+            failed.insert(module, error);
+            Ok(())
         };
         // Immutable module producers receive the exact registrations validated
         // by front capture. Mutable complete-universe callers validate here.
@@ -586,19 +621,13 @@ impl QueryEngine {
         self.adopted_private = None;
         self.private_summary_reads.clear();
         for ((package, module), paths) in self.inference_groups(selected) {
-            let mut generated = Vec::new();
-            for path in &paths {
-                if self.source_facts(path).is_some_and(|f| f.generator) {
-                    self.materialize(path)?;
-                    let syntax = self.snapshot(path)?;
-                    if syntax.item.visibility == hirsel_syntax::Visibility::Private
-                        && !generation::instance_bodied(&syntax)
-                        && generation::generator(&syntax).is_some()
-                    {
-                        generated.push(DefId::intern(path));
-                    }
+            let generated = match self.generated_private(&paths) {
+                Ok(generated) => generated,
+                Err(error) => {
+                    fail(&mut failed, (package, module), error)?;
+                    continue;
                 }
-            }
+            };
             let previous = local.remove(&(package, module));
             let previous = previous.filter(|facts| {
                 generated
@@ -674,197 +703,215 @@ impl QueryEngine {
         }
         let declarations = self.frozen_declarations();
         for (package, module, paths, potential, expected) in pending {
-            let mut complete = true;
-            let snapshot = snapshot.as_ref().expect("pending inference snapshot");
-            let mut base = ReadsBuilder::new();
-            base.record(
-                ReadKey::NameSet(package, module),
-                declarations.name_set(package, module),
-            );
-            base.record(ReadKey::Environment, self.environment_value());
-            let mut inputs = Vec::new();
-            for path in &potential {
-                // Eligibility comes from declaration/source heads, without
-                // normalizing unrelated public or generated declarations.
-                if declarations
-                    .metadata()
-                    .definitions
-                    .get(path)
-                    .is_some_and(|m| m.public)
-                    || self.source_facts(path).is_some_and(|f| {
-                        (f.body_kind == BodyKind::None && !f.generator)
-                            || f.body_kind == BodyKind::Constant
-                    })
-                {
-                    continue;
-                }
-                let id = DefId::intern(path);
-                let retained = self
-                    .unmarked_signature(id)
-                    .and_then(|_| self.signatures.get(&id).map(|entry| entry.result()));
-                let signature = match retained.unwrap_or_else(|| self.signature_query(path)) {
-                    Ok(signature) => signature,
-                    Err(QueryError::Diagnostics(_) | QueryError::NotImplemented) => continue,
-                    Err(error) => return Err(error),
-                };
-                if signature.value.metadata.visibility != hirsel_syntax::Visibility::Private
-                    || !matches!(&signature.value.kind, SignatureKind::Function(f) if f.foreign.is_none())
-                    || self
-                        .source_facts(path)
-                        .is_some_and(|f| f.body_kind == BodyKind::None && !f.generator)
-                {
-                    continue;
-                }
-                self.materialize(path)?;
-                let original = self.snapshot(path)?;
-                let registration = registrations.iter().find(|r| r.definition() == path);
-                if generation::instance_bodied(&original) {
-                    continue;
-                }
-                let generated_text = self.key_text(path, QueryKind::Check)?;
-                let mut generated_reads = None;
-                let syntax = if generation::generator(&original).is_some() {
-                    if let Some(registration) = registration {
-                        registration.syntax.clone()
-                    } else if let Some(entry) = self.checked.get(&DefId::intern(path)).cloned()
-                        && self.memo_valid(&entry, generated_text)
-                        && self.lower_acceptance_holds(entry.acceptance.as_ref())
-                        && let Ok(checked) = entry.result()
+            let outcome = (|| -> Result<Option<Inference>, QueryError> {
+                let mut complete = true;
+                let snapshot = snapshot.as_ref().expect("pending inference snapshot");
+                let mut base = ReadsBuilder::new();
+                base.record(
+                    ReadKey::NameSet(package, module),
+                    declarations.name_set(package, module),
+                );
+                base.record(ReadKey::Environment, self.environment_value());
+                let mut inputs = Vec::new();
+                for path in &potential {
+                    // Eligibility comes from declaration/source heads, without
+                    // normalizing unrelated public or generated declarations.
+                    if declarations
+                        .metadata()
+                        .definitions
+                        .get(path)
+                        .is_some_and(|m| m.public)
+                        || self.source_facts(path).is_some_and(|f| {
+                            (f.body_kind == BodyKind::None && !f.generator)
+                                || f.body_kind == BodyKind::Constant
+                        })
                     {
-                        generated_reads = Some(entry.memo.reads.clone());
-                        checked.value.syntax.clone()
-                    } else {
-                        complete = false;
                         continue;
                     }
-                } else {
-                    original
+                    let id = DefId::intern(path);
+                    let retained = self
+                        .unmarked_signature(id)
+                        .and_then(|_| self.signatures.get(&id).map(|entry| entry.result()));
+                    let signature = match retained.unwrap_or_else(|| self.signature_query(path)) {
+                        Ok(signature) => signature,
+                        Err(QueryError::Diagnostics(_) | QueryError::NotImplemented) => continue,
+                        Err(error) => return Err(error),
+                    };
+                    if signature.value.metadata.visibility != hirsel_syntax::Visibility::Private
+                        || !matches!(&signature.value.kind, SignatureKind::Function(f) if f.foreign.is_none())
+                        || self
+                            .source_facts(path)
+                            .is_some_and(|f| f.body_kind == BodyKind::None && !f.generator)
+                    {
+                        continue;
+                    }
+                    self.materialize(path)?;
+                    let original = self.snapshot(path)?;
+                    let registration = registrations.iter().find(|r| r.definition() == path);
+                    if generation::instance_bodied(&original) {
+                        continue;
+                    }
+                    let generated_text = self.key_text(path, QueryKind::Check)?;
+                    let mut generated_reads = None;
+                    let syntax = if generation::generator(&original).is_some() {
+                        if let Some(registration) = registration {
+                            registration.syntax.clone()
+                        } else if let Some(entry) = self.checked.get(&DefId::intern(path)).cloned()
+                            && self.memo_valid(&entry, generated_text)
+                            && self.lower_acceptance_holds(entry.acceptance.as_ref())
+                            && let Ok(checked) = entry.result()
+                        {
+                            generated_reads = Some(entry.memo.reads.clone());
+                            checked.value.syntax.clone()
+                        } else {
+                            complete = false;
+                            continue;
+                        }
+                    } else {
+                        original
+                    };
+                    if syntax
+                        .item
+                        .attributes
+                        .iter()
+                        .any(|a| a.name.as_str() == "test")
+                        || !matches!(syntax.item.kind, ItemKind::Function { body: Some(_), .. })
+                    {
+                        continue;
+                    }
+                    base.record(
+                        ReadKey::CitedText(DefId::intern(path)),
+                        self.cited_value(path),
+                    );
+                    inputs.push(Input {
+                        syntax,
+                        signature: Arc::new(QueryOutput {
+                            value: snapshot
+                                .signature(DefId::intern(path))
+                                .and_then(Result::ok)
+                                .ok_or(QueryError::NotImplemented)?,
+                            dependencies: vec![],
+                            diagnostics: vec![],
+                        }),
+                        reads: {
+                            let mut reads = ReadsBuilder::new();
+                            if let Some(signature) =
+                                self.shared_memo_reads(path, QueryKind::Signature)
+                            {
+                                reads.merge(&signature);
+                            }
+                            let mut inherit = |source: &Reads| {
+                                for &(key, value) in source.iter() {
+                                    if super::inherited_registration_read(&key) {
+                                        reads.record(key, value);
+                                    }
+                                }
+                            };
+                            if let Some(registration) = registration {
+                                inherit(registration.reads());
+                            }
+                            if let Some(generated_reads) = generated_reads {
+                                inherit(&generated_reads);
+                            }
+                            Arc::new(reads.finish().map_err(|_| QueryError::NotImplemented)?)
+                        },
+                    });
+                }
+                if inputs.is_empty() {
+                    return Ok(None);
+                }
+                let key = self.inference_key(&paths[0]);
+                let stamp = (self.declarations.revision(), self.sources.anchors().count());
+                let citations = match &record_context {
+                    Some((previous, context)) if *previous == stamp => Arc::clone(context),
+                    _ => {
+                        // The context owns this engine's sources, items and
+                        // catalog, so it derives every other citation itself;
+                        // only header-captured texts differ from that derivation.
+                        let cited = self
+                            .source_paths_iter()
+                            .filter_map(|path| {
+                                Some((DefId::intern(path), self.captured_text(path)?.cited))
+                            })
+                            .collect();
+                        let context = Arc::new(crate::snapshot::OwnedSourceContext {
+                            unique_failures: BTreeMap::new(),
+                            sources: self.sources.clone(),
+                            items: Arc::new((*self.items).clone()),
+                            declarations: self.declarations.observations(),
+                            catalog: self.catalog.clone(),
+                            owners: Arc::new(crate::NativeRecordContext::capture(self)),
+                            cited,
+                            arm_fixes: BTreeMap::new().into(),
+                        });
+                        record_context = Some((stamp, context.clone()));
+                        context
+                    }
                 };
-                if syntax
-                    .item
-                    .attributes
-                    .iter()
-                    .any(|a| a.name.as_str() == "test")
-                    || !matches!(syntax.item.kind, ItemKind::Function { body: Some(_), .. })
-                {
+                // The same per-module fixed point runs with declarations captured
+                // by the existing worker. It never enters a scalar body query.
+                let working = working_bytes;
+                if self.inference_input_bytes(inputs.capacity()) > working / 2 {
+                    return Err(QueryError::Operational(hirsel_types::OperationalFailure {
+                        operation: "private inference admission".into(),
+                        message: "module inputs exceed the retained partition".into(),
+                    }));
+                }
+                let inference = Inference {
+                    key,
+                    inputs,
+                    base: base.finish().map_err(|_| QueryError::NotImplemented)?,
+                    types: self.types.clone(),
+                    memo: self.memo.clone(),
+                    snapshot: snapshot.clone(),
+                    declarations: declarations.clone(),
+                    citations,
+                    resolver: self
+                        .adapters
+                        .resolver
+                        .clone()
+                        .ok_or(QueryError::NotImplemented)?,
+                    checker: self
+                        .adapters
+                        .checker
+                        .clone()
+                        .ok_or(QueryError::NotImplemented)?,
+                    modes: modes.clone(),
+                    environment: self.environment_value(),
+                    // Written-only bootstrap has a different proof inventory.
+                    // Compare the settled cache after generated registrations
+                    // restore the full module, as required for publication below.
+                    expected: expected.filter(|_| complete),
+                    complete,
+                    store: self.result_store.clone(),
+                    records: crate::NativeRecords::new(
+                        self.types.clone(),
+                        self.result_store
+                            .clone()
+                            .unwrap_or_else(|| Arc::new(hirsel_engine_store::NoneStore)),
+                    ),
+                };
+                Ok(Some(inference))
+            })();
+            let inference = match outcome {
+                Ok(Some(inference)) => inference,
+                Ok(None) => continue,
+                Err(error) => {
+                    fail(&mut failed, (package, module), error)?;
                     continue;
                 }
-                base.record(
-                    ReadKey::CitedText(DefId::intern(path)),
-                    self.cited_value(path),
-                );
-                inputs.push(Input {
-                    syntax,
-                    signature: Arc::new(QueryOutput {
-                        value: snapshot
-                            .signature(DefId::intern(path))
-                            .and_then(Result::ok)
-                            .ok_or(QueryError::NotImplemented)?,
-                        dependencies: vec![],
-                        diagnostics: vec![],
-                    }),
-                    reads: {
-                        let mut reads = ReadsBuilder::new();
-                        if let Some(signature) = self.shared_memo_reads(path, QueryKind::Signature)
-                        {
-                            reads.merge(&signature);
-                        }
-                        let mut inherit = |source: &Reads| {
-                            for &(key, value) in source.iter() {
-                                if super::inherited_registration_read(&key) {
-                                    reads.record(key, value);
-                                }
-                            }
-                        };
-                        if let Some(registration) = registration {
-                            inherit(registration.reads());
-                        }
-                        if let Some(generated_reads) = generated_reads {
-                            inherit(&generated_reads);
-                        }
-                        Arc::new(reads.finish().map_err(|_| QueryError::NotImplemented)?)
-                    },
-                });
-            }
-            if inputs.is_empty() {
-                continue;
-            }
-            let key = self.inference_key(&paths[0]);
-            let stamp = (self.declarations.revision(), self.sources.anchors().count());
-            let citations = match &record_context {
-                Some((previous, context)) if *previous == stamp => Arc::clone(context),
-                _ => {
-                    // The context owns this engine's sources, items and
-                    // catalog, so it derives every other citation itself;
-                    // only header-captured texts differ from that derivation.
-                    let cited = self
-                        .source_paths_iter()
-                        .filter_map(|path| {
-                            Some((DefId::intern(path), self.captured_text(path)?.cited))
-                        })
-                        .collect();
-                    let context = Arc::new(crate::snapshot::OwnedSourceContext {
-                        unique_failures: BTreeMap::new(),
-                        sources: self.sources.clone(),
-                        items: Arc::new((*self.items).clone()),
-                        declarations: self.declarations.observations(),
-                        catalog: self.catalog.clone(),
-                        owners: Arc::new(crate::NativeRecordContext::capture(self)),
-                        cited,
-                        arm_fixes: BTreeMap::new().into(),
-                    });
-                    record_context = Some((stamp, context.clone()));
-                    context
-                }
             };
-            // The same per-module fixed point runs with declarations captured
-            // by the existing worker. It never enters a scalar body query.
-            let working = working_bytes;
-            if self.inference_input_bytes(inputs.capacity()) > working / 2 {
-                return Err(QueryError::Operational(hirsel_types::OperationalFailure {
-                    operation: "private inference admission".into(),
-                    message: "module inputs exceed the retained partition".into(),
-                }));
-            }
-            let inference = Inference {
-                key,
-                inputs,
-                base: base.finish().map_err(|_| QueryError::NotImplemented)?,
-                types: self.types.clone(),
-                memo: self.memo.clone(),
-                snapshot: snapshot.clone(),
-                declarations: declarations.clone(),
-                citations,
-                resolver: self
-                    .adapters
-                    .resolver
-                    .clone()
-                    .ok_or(QueryError::NotImplemented)?,
-                checker: self
-                    .adapters
-                    .checker
-                    .clone()
-                    .ok_or(QueryError::NotImplemented)?,
-                modes: modes.clone(),
-                environment: self.environment_value(),
-                // Written-only bootstrap has a different proof inventory.
-                // Compare the settled cache after generated registrations
-                // restore the full module, as required for publication below.
-                expected: expected.filter(|_| complete),
-                complete,
-                store: self.result_store.clone(),
-                records: crate::NativeRecords::new(
-                    self.types.clone(),
-                    self.result_store
-                        .clone()
-                        .unwrap_or_else(|| Arc::new(hirsel_engine_store::NoneStore)),
-                ),
-            };
-            let facts = if selected.is_some() {
+            let facts = match if selected.is_some() {
                 // Immutable demand runs on its already admitted compiler worker.
-                inference.produce()?
+                inference.produce()
             } else {
-                hirsel_intern::jobs::with_compiler_stack(|| inference.produce())?
+                hirsel_intern::jobs::with_compiler_stack(|| inference.produce())
+            } {
+                Ok(facts) => facts,
+                Err(error) => {
+                    fail(&mut failed, (package, module), error)?;
+                    continue;
+                }
             };
             let mut private_work = self
                 .operation
@@ -891,7 +938,24 @@ impl QueryEngine {
         if selected.is_none() {
             self.private_summary_revision = Some(self.revision);
         }
-        Ok(())
+        Ok(failed)
+    }
+    /// The private generated definitions of one module, materialized.
+    fn generated_private(&mut self, paths: &[DefPath]) -> Result<Vec<DefId>, QueryError> {
+        let mut generated = Vec::new();
+        for path in paths {
+            if self.source_facts(path).is_some_and(|f| f.generator) {
+                self.materialize(path)?;
+                let syntax = self.snapshot(path)?;
+                if syntax.item.visibility == hirsel_syntax::Visibility::Private
+                    && !generation::instance_bodied(&syntax)
+                    && generation::generator(&syntax).is_some()
+                {
+                    generated.push(DefId::intern(path));
+                }
+            }
+        }
+        Ok(generated)
     }
     pub(super) fn standalone_private_inference(&mut self) {
         if self

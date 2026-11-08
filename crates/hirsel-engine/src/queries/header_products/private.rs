@@ -1,10 +1,7 @@
 use super::*;
-use crate::queries::private_unique::scheduled::Facts;
+use crate::queries::private_unique::scheduled::InferenceModule as Module;
+use crate::queries::private_unique::scheduled::{Facts, inference_module};
 use std::sync::{Mutex, atomic::AtomicU64};
-type Module = (
-    hirsel_query_products::reads::PackageKey,
-    hirsel_query_products::reads::ModuleKey,
-);
 /// The immutable proof owner and loader inputs whose facts are already adopted.
 pub(crate) struct AdoptedPrivate {
     owner: std::sync::Weak<HeaderProducts>,
@@ -183,7 +180,11 @@ impl PrivateProducts {
     }
     pub(super) fn index_bytes(engine: &QueryEngine) -> u64 {
         let paths = Self::candidate_paths(engine);
-        let modules = paths.iter().map(module_of).collect::<BTreeSet<_>>().len();
+        let modules = paths
+            .iter()
+            .map(|path| inference_module(path))
+            .collect::<BTreeSet<_>>()
+            .len();
         let mut weight = hirsel_query_products::retained::MetadataWeight::default();
         weight.add(size_of::<Self>() + 4 * size_of::<usize>());
         weight.tree::<DefId, Candidate>(paths.len());
@@ -223,7 +224,7 @@ impl PrivateProducts {
         let candidates = Self::candidate_paths(engine)
             .into_iter()
             .map(|path| {
-                let module = module_of(&path);
+                let module = inference_module(&path);
                 let id = DefId::intern(&path);
                 let declared = engine
                     .unmarked_signature(id)
@@ -285,12 +286,6 @@ impl PrivateProducts {
         }
         false
     }
-}
-fn module_of(path: &DefPath) -> Module {
-    (
-        hirsel_query_products::reads::PackageKey::of(&path.0.package),
-        hirsel_query_products::reads::ModuleKey::of(&path.0.modules),
-    )
 }
 /// The value a signature read observes: what equal-output cutoff and
 /// invalidation compare.
@@ -406,31 +401,54 @@ impl HeaderProducts {
         if let Some(error) = &self.failure {
             return Err(error.clone());
         }
-        let refusal = |reason: &str| {
+        let refusal = |owner: DefId, reason: &str| {
             QueryError::Operational(hirsel_types::OperationalFailure {
                 operation: "private inference admission".into(),
                 message: format!(
                     "demanded module proof exceeds its existing front partition; owner {}; {reason}",
-                    id.path()
+                    owner.path()
                 ),
             })
         };
         let scope = self.scope();
         let working = scope.working.load(Ordering::Relaxed);
         if working == 0 {
-            return Err(refusal("private working partition is not configured"));
+            return Err(refusal(id, "private working partition is not configured"));
         }
+        // One demand proves every module without a proof in one pass. A
+        // module another producer holds stays with that producer.
+        let mut batch = vec![(module, slot, producing)];
+        for (other, other_slot) in &private.modules {
+            if *other == module {
+                continue;
+            }
+            let guard = match other_slot.producing.try_lock() {
+                Ok(guard) => guard,
+                Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner(),
+                Err(std::sync::TryLockError::WouldBlock) => continue,
+            };
+            if other_slot.current().is_none() {
+                batch.push((*other, other_slot, guard));
+            }
+        }
+        let mut owners = BTreeMap::from([(module, id)]);
+        for (candidate_id, candidate) in &private.candidates {
+            if batch.iter().any(|(member, ..)| *member == candidate.module) {
+                owners.entry(candidate.module).or_insert(*candidate_id);
+            }
+        }
+        batch.retain(|(member, ..)| owners.contains_key(member));
         // This fixed point reads declared headers only. It cannot demand
         // another settled module while its own publication is in progress.
         let declared = self.declared();
         let mut engine = declared.execution();
-        // The module's previous proof, with its reads and failures, is
+        // Each module's previous proof, with its reads and failures, is
         // revalidated by the ordinary previous-facts check.
         for (id, summary) in self.summaries.iter().filter(|(id, _)| {
             private
                 .candidates
                 .get(id)
-                .is_some_and(|candidate| candidate.module == module)
+                .is_some_and(|candidate| owners.contains_key(&candidate.module))
         }) {
             engine.private_summaries.insert(*id, summary.clone());
             if let Some(reads) = self.summary_reads.get(id) {
@@ -441,114 +459,152 @@ impl HeaderProducts {
             }
         }
         // Counted before inference: a refused proof was still inferred.
-        slot.inferences.fetch_add(1, Ordering::Relaxed);
+        for (_, member, _) in &batch {
+            member.inferences.fetch_add(1, Ordering::Relaxed);
+        }
         let registrations = scope
             .registrations
             .iter()
             .map(Weak::upgrade)
             .collect::<Option<Vec<_>>>()
-            .ok_or_else(|| refusal("accepted inference input lease has ended"))?;
-        let (facts, complete) = match engine.infer_private_module(working, &registrations, id) {
-            Ok(result) => result,
+            .ok_or_else(|| refusal(id, "accepted inference input lease has ended"))?;
+        let mut results = match engine.infer_private_module_set(working, &registrations, &owners) {
+            Ok(results) => results,
             Err(error @ QueryError::Operational(_)) => return Err(error),
             Err(error) => {
                 private.publish(slot, ProofState::Failed(error.clone()));
                 return Err(error);
             }
         };
-        let mut weight = hirsel_query_products::retained::MetadataWeight::default();
-        weight.add(
-            size_of::<ModuleProduct>()
-                + facts.proofs.capacity() * size_of::<(DefId, hirsel_types::UniqueInference)>(),
-        );
-        for (_, bytes) in facts.reads.allocations() {
-            weight.add(bytes);
-        }
-        for (_, proof) in &facts.proofs {
-            weight.flat_vec(&proof.summary.preserves_unique);
-            weight.flat_vec(&proof.summary.results);
-            weight.flat_vec(&proof.summary.nonretaining);
-            weight.vec(&proof.failures, |weight, failure| {
-                weight.add(failure.message.capacity())
-            });
-        }
-        let signatures: Vec<_> = engine
-            .signatures
-            .iter()
-            .filter(|(definition, entry)| {
-                complete
-                    && self.store.is_some()
-                    && private
+        // A settled signature is offered to its module's header row only when
+        // it reads no other module's private proof.
+        let mut signatures = BTreeMap::<Module, Vec<_>>::new();
+        for (definition, entry) in &engine.signatures {
+            let Some(candidate) = private.candidates.get(definition) else {
+                continue;
+            };
+            if self.store.is_some()
+                && matches!(results.get(&candidate.module), Some(Ok((_, true))))
+                && engine.unmarked_signature(*definition).is_some()
+                && entry.reads().iter().all(|(read, _)| match read {
+                    ReadKey::PrivateSummary(dependency)
+                    | ReadKey::Signature(dependency)
+                    | ReadKey::ExecutedSignature(dependency)
+                    | ReadKey::FailedSignature(dependency) => private
                         .candidates
-                        .get(definition)
-                        .is_some_and(|candidate| candidate.module == module)
-                    && engine.unmarked_signature(**definition).is_some()
-                    && entry.reads().iter().all(|(read, _)| match read {
-                        ReadKey::PrivateSummary(dependency)
-                        | ReadKey::Signature(dependency)
-                        | ReadKey::ExecutedSignature(dependency)
-                        | ReadKey::FailedSignature(dependency) => private
-                            .candidates
-                            .get(dependency)
-                            .is_none_or(|candidate| candidate.module == module),
-                        _ => true,
-                    })
-            })
-            .map(|(definition, entry)| (*definition, self.operation.project_header(entry)))
-            .collect();
-        let mut identities: Vec<_> = signatures
-            .iter()
-            .map(|(definition, entry)| (*definition, identity(&entry.result())))
-            .collect();
-        identities.sort_by_key(|(id, _)| *id);
-        let identities = identities.into_boxed_slice();
-        weight.add(std::mem::size_of_val(&*identities));
-        let work = engine
-            .recomputes
-            .iter()
-            .map(|((path, kind), count)| ((DefId::intern(path), *kind), *count))
-            .collect::<Vec<_>>()
-            .into_boxed_slice();
-        weight.add(std::mem::size_of_val(&*work));
-        weight.add(2 * size_of::<usize>());
+                        .get(dependency)
+                        .is_none_or(|dependency| dependency.module == candidate.module),
+                    _ => true,
+                })
+            {
+                signatures
+                    .entry(candidate.module)
+                    .or_default()
+                    .push((*definition, self.operation.project_header(entry)));
+            }
+        }
+        // Work on a definition outside the proved modules was done for the
+        // demanded one.
+        let mut work = BTreeMap::<Module, Vec<_>>::new();
+        for ((path, kind), count) in &engine.recomputes {
+            let owner = Some(inference_module(path))
+                .filter(|owner| owners.contains_key(owner))
+                .unwrap_or(module);
+            work.entry(owner)
+                .or_default()
+                .push(((DefId::intern(path), *kind), *count));
+        }
         drop(engine);
         drop(declared);
         // The proof is charged like any settled header row: unpinned rows and
         // proofs are evicted first, and a refusal stays a resource failure.
         if !self.standalone && !self.admitted() {
-            return Err(refusal("module proof has no admitted source owner"));
+            return Err(refusal(id, "module proof has no admitted source owner"));
         }
-        let charge = self.admit(weight.bytes()).map_err(|error| {
-            QueryError::Operational(hirsel_types::OperationalFailure {
-                operation: "private inference admission".into(),
-                message: format!(
-                    "demanded module proof exceeds its existing front partition; owner {}; required {} bytes; {}",
-                    id.path(),
-                    weight.bytes(),
-                    match error {
-                        QueryError::Operational(failure) => failure.message,
-                        other => format!("{other:?}"),
+        let mut demanded = Err(refusal(id, "module proof was not produced"));
+        for (member, member_slot, guard) in batch {
+            let (facts, complete) = match results.remove(&member) {
+                Some(Ok(result)) => result,
+                Some(Err(error)) => {
+                    if !matches!(error, QueryError::Operational(_)) {
+                        private.publish(member_slot, ProofState::Failed(error.clone()));
                     }
-                ),
-            })
-        })?;
-        let product = Arc::new(ModuleProduct {
-            facts,
-            complete,
-            work,
-            identities,
-            accounted: AtomicBool::new(false),
-            charge,
-        });
-        private.publish(slot, ProofState::Settled(product.clone()));
-        drop(producing);
-        self.generation.fetch_add(1, Ordering::Relaxed);
-        // Offer the payloads to the admitted header rows outside the proof's
-        // production. A row that is not admitted recomputes on demand.
-        for (definition, entry) in signatures {
-            self.seed(definition, entry);
+                    if member == module {
+                        demanded = Err(error);
+                    }
+                    continue;
+                }
+                None => continue,
+            };
+            let signatures = signatures.remove(&member).unwrap_or_default();
+            let work = work.remove(&member).unwrap_or_default().into_boxed_slice();
+            let mut weight = hirsel_query_products::retained::MetadataWeight::default();
+            weight.add(
+                size_of::<ModuleProduct>()
+                    + facts.proofs.capacity() * size_of::<(DefId, hirsel_types::UniqueInference)>(),
+            );
+            for (_, bytes) in facts.reads.allocations() {
+                weight.add(bytes);
+            }
+            for (_, proof) in &facts.proofs {
+                weight.flat_vec(&proof.summary.preserves_unique);
+                weight.flat_vec(&proof.summary.results);
+                weight.flat_vec(&proof.summary.nonretaining);
+                weight.vec(&proof.failures, |weight, failure| {
+                    weight.add(failure.message.capacity())
+                });
+            }
+            let mut identities: Vec<_> = signatures
+                .iter()
+                .map(|(definition, entry)| (*definition, identity(&entry.result())))
+                .collect();
+            identities.sort_by_key(|(id, _)| *id);
+            let identities = identities.into_boxed_slice();
+            weight.add(std::mem::size_of_val(&*identities));
+            weight.add(std::mem::size_of_val(&*work));
+            weight.add(2 * size_of::<usize>());
+            let charge = match self.admit(weight.bytes()) {
+                Ok(charge) => charge,
+                Err(error) => {
+                    if member == module {
+                        demanded = Err(QueryError::Operational(hirsel_types::OperationalFailure {
+                            operation: "private inference admission".into(),
+                            message: format!(
+                                "demanded module proof exceeds its existing front partition; owner {}; required {} bytes; {}",
+                                id.path(),
+                                weight.bytes(),
+                                match error {
+                                    QueryError::Operational(failure) => failure.message,
+                                    other => format!("{other:?}"),
+                                }
+                            ),
+                        }));
+                    }
+                    continue;
+                }
+            };
+            let product = Arc::new(ModuleProduct {
+                facts,
+                complete,
+                work,
+                identities,
+                accounted: AtomicBool::new(false),
+                charge,
+            });
+            private.publish(member_slot, ProofState::Settled(product.clone()));
+            drop(guard);
+            self.generation.fetch_add(1, Ordering::Relaxed);
+            // Offer the payloads to the admitted header rows outside the
+            // proof's production. A row that is not admitted recomputes on
+            // demand.
+            for (definition, entry) in signatures {
+                self.seed(definition, entry);
+            }
+            if member == module {
+                demanded = Ok(Some(product));
+            }
         }
-        Ok(Some(product))
+        demanded
     }
     /// The settled proof of a module that has settled before, recomputed if
     /// it was evicted. `None` only for a module no demand has proved yet.
@@ -816,7 +872,7 @@ mod adoption_tests {
         let engine = QueryEngine::new(default_environment(), PhaseAdapters::default());
         let mut headers = HeaderProducts::capture(&engine);
         let id = DefId::intern(&crate::tools::entry_path(&crate::tools::default_context()));
-        let module = module_of(id.path());
+        let module = inference_module(id.path());
         let slot = ModuleSlot::default();
         *slot.state.lock().unwrap() = ProofState::Settled(Arc::new(ModuleProduct {
             facts: Facts {

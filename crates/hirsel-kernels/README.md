@@ -39,7 +39,8 @@ Numeric formatting, parsing and reductions are ordinary std source; the former
 exact-sum kernel is deleted. Its independent rational vectors remain in
 `native-tests/library/exact-sums.txt` and now test the source superaccumulator.
 
-One-, two-, and three-byte sets use SSE2 on x86-64 after the short prefix,
+One-, two-, and three-byte sets use SSE2 on x86-64 after the short prefix.
+The loop specializes by set length so each vector compares only the supplied needles,
 following memchr 2.8.3's vector equality and first-set-lane structure. Other
 architectures use eight-byte SWAR comparisons. Larger sets use exact nibble membership with SSSE3 when available and retain
 the scalar membership table elsewhere. Neither path reads beyond the supplied borrowed extent.

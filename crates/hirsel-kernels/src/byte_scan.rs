@@ -145,7 +145,13 @@ fn short_set(source: &[u8], needles: &[u8]) -> Option<usize> {
     {
         // SAFETY: SSE2 is part of the x86-64 baseline. All vector reads in
         // short_set_sse2 are guarded by the remaining source extent.
-        unsafe { short_set_sse2(source, needles) }
+        unsafe {
+            match needles.len() {
+                1 => short_set_sse2::<1>(source, needles),
+                2 => short_set_sse2::<2>(source, needles),
+                _ => short_set_sse2::<3>(source, needles),
+            }
+        }
     }
     #[cfg(not(target_arch = "x86_64"))]
     {
@@ -155,7 +161,7 @@ fn short_set(source: &[u8], needles: &[u8]) -> Option<usize> {
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "sse2")]
-unsafe fn short_set_sse2(source: &[u8], needles: &[u8]) -> Option<usize> {
+unsafe fn short_set_sse2<const N: usize>(source: &[u8], needles: &[u8]) -> Option<usize> {
     use std::arch::x86_64::*;
     let a = _mm_set1_epi8(needles[0] as i8);
     let b = _mm_set1_epi8(*needles.get(1).unwrap_or(&needles[0]) as i8);
@@ -164,10 +170,13 @@ unsafe fn short_set_sse2(source: &[u8], needles: &[u8]) -> Option<usize> {
     while source.len() - at >= 16 {
         // SAFETY: the loop guard proves all sixteen bytes are in source.
         let block = unsafe { _mm_loadu_si128(source.as_ptr().add(at).cast()) };
-        let equal = _mm_or_si128(
-            _mm_cmpeq_epi8(block, a),
-            _mm_or_si128(_mm_cmpeq_epi8(block, b), _mm_cmpeq_epi8(block, c)),
-        );
+        let mut equal = _mm_cmpeq_epi8(block, a);
+        if N >= 2 {
+            equal = _mm_or_si128(equal, _mm_cmpeq_epi8(block, b));
+        }
+        if N >= 3 {
+            equal = _mm_or_si128(equal, _mm_cmpeq_epi8(block, c));
+        }
         let mask = _mm_movemask_epi8(equal) as u32;
         if mask != 0 {
             return Some(at + mask.trailing_zeros() as usize);

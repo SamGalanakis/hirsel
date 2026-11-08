@@ -748,7 +748,7 @@ mod tests {
         }
     }
     #[test]
-    fn validated_private_evaluation_suspends_on_s5_with_one_worker_and_complete_failure_reads() {
+    fn validated_private_evaluation_reads_s5_once_with_complete_failure_reads() {
         use hirsel_engine_runtime::AdmittedRuntime;
         use hirsel_engine_runtime::QueryRuntime;
 
@@ -790,7 +790,6 @@ mod tests {
                 let request = runtime.request(&[query(2)]);
                 assert_eq!(runtime.wait(request), Ok(vec![product(query(2))]));
                 assert_eq!(runtime.stats().claims, 2);
-                assert_eq!(runtime.stats().waits, 1);
                 assert_eq!(
                     calls.load(std::sync::atomic::Ordering::SeqCst),
                     1,

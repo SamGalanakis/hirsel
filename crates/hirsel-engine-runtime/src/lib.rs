@@ -19,7 +19,6 @@ pub use future_task::{LocalFutureTask, QueryReads};
 pub use product::{ArchiveAdmission, ProductArchive};
 pub use scheduler::{
     AdmittedRuntime, RuntimeCompletion, RuntimeErrors, RuntimeEvent, RuntimeObserver, RuntimeStats,
-    WaitReason, WakeReason,
 };
 
 pub mod backing;

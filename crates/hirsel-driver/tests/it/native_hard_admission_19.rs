@@ -79,20 +79,12 @@ fn one_byte_short_refuses_with_resource_error_and_exact_need_executes() {
         scratch: 4096,
         stack: 0,
     };
-    let need = COMPILER_STACK_BYTES as u64
-        + AdmittedRuntime::query_capacity_bytes(1).unwrap()
-        + weight.retained
-        + weight.scratch;
+    let need = COMPILER_STACK_BYTES as u64 + weight.retained + weight.scratch;
     for bytes in [need - 1, need] {
         let budget = hirsel_engine_admission::ProcessBudget::new(need);
         let polls = Arc::new(AtomicUsize::new(0));
-        let mut runtime = AdmittedRuntime::with_query_capacity(
-            Jobs::ONE,
-            budget.reserve(bytes).unwrap(),
-            errors,
-            1,
-        )
-        .unwrap();
+        let mut runtime =
+            AdmittedRuntime::new(Jobs::ONE, budget.reserve(bytes).unwrap(), errors).unwrap();
         runtime
             .register(
                 query.kind,

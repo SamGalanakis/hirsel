@@ -1790,20 +1790,11 @@ fn scheduled_scc_run_with_capacity(
             errors,
         )
         .unwrap();
-    let mut runtime = if let Some(capacity) = capacity {
-        AdmittedRuntime::with_query_capacity(
-            hirsel_intern::jobs::Jobs::new(jobs),
-            budget.reserve(512 << 20).unwrap(),
-            errors,
-            capacity,
-        )
-    } else {
-        AdmittedRuntime::new(
-            hirsel_intern::jobs::Jobs::new(jobs),
-            budget.reserve(512 << 20).unwrap(),
-            errors,
-        )
-    }
+    let mut runtime = AdmittedRuntime::new(
+        hirsel_intern::jobs::Jobs::new(jobs),
+        budget.reserve(512 << 20).unwrap(),
+        errors,
+    )
     .unwrap();
     runtime.register(FRONT_BODY_KIND, front.factory()).unwrap();
     runtime

@@ -94,10 +94,6 @@ impl FrontRunInputs {
     pub fn input_bytes(&self) -> u64 {
         self.required
     }
-    /// All source and core semantic addresses in this exact input namespace.
-    pub fn semantic_query_count(&self) -> usize {
-        self.inputs.len()
-    }
 }
 
 /// One immutable input namespace, shared across selected Run roots. Each task

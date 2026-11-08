@@ -145,11 +145,10 @@ fn check_case(
             scratch: 8 << 20,
             stack: 0,
         };
-        let mut runtime = AdmittedRuntime::with_query_capacity(
+        let mut runtime = AdmittedRuntime::new(
             hirsel_intern::jobs::Jobs::new(jobs),
             budget.reserve(512 << 20).unwrap(),
             errors,
-            definitions.len() * 3 + 2,
         )
         .unwrap();
         let front = program

@@ -979,13 +979,12 @@ fn admitted_front_pressure_refused_citation_caches_nothing_and_recomputes_the_ci
                 definition.0.name = name.into();
                 definition
             });
-            let mut runtime = AdmittedRuntime::with_query_capacity(
+            let mut runtime = AdmittedRuntime::new(
                 hirsel_intern::jobs::Jobs::ONE,
                 budget
                     .reserve(hirsel_intern::jobs::COMPILER_STACK_BYTES as u64 + 2 * weight.scratch)
                     .unwrap(),
                 errors(),
-                6,
             )
             .unwrap();
             let front = program
@@ -1149,7 +1148,7 @@ fn admitted_front_pressure_evicts_only_unpinned_settled_bodies_and_recomputes_eq
                     definition.0.name = name.into();
                     definition
                 });
-                let mut runtime = AdmittedRuntime::with_query_capacity(
+                let mut runtime = AdmittedRuntime::new(
                     hirsel_intern::jobs::Jobs::ONE,
                     budget
                         .reserve(
@@ -1157,7 +1156,6 @@ fn admitted_front_pressure_evicts_only_unpinned_settled_bodies_and_recomputes_eq
                         )
                         .unwrap(),
                     errors(),
-                    6,
                 )
                 .unwrap();
                 let front = program
@@ -1494,13 +1492,12 @@ fn admitted_front_pressure_evicts_only_unpinned_settled_bodies_and_recomputes_eq
             // Their settled module proof is pinned too, so pressure here
             // can only evict compact owners.
             let proof_pin = front.module_proof(&definitions[0]).unwrap().unwrap();
-            let mut runtime = AdmittedRuntime::with_query_capacity(
+            let mut runtime = AdmittedRuntime::new(
                 hirsel_intern::jobs::Jobs::ONE,
                 budget
                     .reserve(hirsel_intern::jobs::COMPILER_STACK_BYTES as u64 + 2 * weight.scratch)
                     .unwrap(),
                 errors(),
-                6,
             )
             .unwrap();
             runtime.register(FRONT_BODY_KIND, front.factory()).unwrap();
@@ -1901,11 +1898,10 @@ fn archived_front_releases_observation_arrays_when_their_readers_finish() {
                 .front_body_queries(&[program.entry.clone()], weight, &budget, errors())
                 .unwrap();
             front.compact_retained_reads();
-            let mut runtime = AdmittedRuntime::with_query_capacity(
+            let mut runtime = AdmittedRuntime::new(
                 hirsel_intern::jobs::Jobs::ONE,
                 budget.reserve(512 << 20).unwrap(),
                 errors(),
-                2,
             )
             .unwrap();
             runtime.register(FRONT_BODY_KIND, front.factory()).unwrap();

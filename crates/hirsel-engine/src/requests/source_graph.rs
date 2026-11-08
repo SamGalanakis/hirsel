@@ -286,8 +286,6 @@ const BODY_CONTINUATIONS: u64 = 32;
 /// Runtime scratch is separate, and shared across the admitted worker width.
 pub struct Plan {
     pub snapshots: SnapshotPlan,
-    pub query_inventory: usize,
-    pub query_capacity: usize,
     pub source_index_bytes: u64,
     pub body: MemoryWeight,
     pub root: MemoryWeight,
@@ -305,7 +303,6 @@ struct PlanInputs<'a> {
     shape: SourceShape,
     footprint: FrontInputFootprint,
     run_input_bytes: u64,
-    semantic_queries: usize,
     catalogue_bytes: u64,
     inspection_bytes: u64,
     source_index_bytes: u64,
@@ -321,7 +318,6 @@ impl Plan {
             shape,
             footprint,
             run_input_bytes,
-            semantic_queries,
             catalogue_bytes,
             inspection_bytes,
             source_index_bytes,
@@ -403,67 +399,13 @@ impl Plan {
             (0, 0)
         };
         let run = extension_bytes + run_inventory;
-        // Each definition can name P, Lower, Evaluate and, when selected,
-        // Run and a semantic node; native selection adds its definition rows. Growth/
-        // Check, the selected SafeCheck root and the native bootstrap and
-        // source roots have separate slots.
-        // Reserve the same row bound here and in the runtime constructor so
-        // task grants cannot spend the scheduler's bookkeeping allocation.
-        // The storage root polls one retained recipe continuation itself;
-        // recipe identities do not allocate independent scheduler nodes.
-        // Native source factories expose one selected whole-program Run,
-        // independently of all per-definition semantic producers. Reserving a
-        // whole-program Run for every source would reserve thousands of roots
-        // this graph cannot request, before admitting any actual compiler work.
-        let per_definition = if extended {
-            5
-        } else {
-            4 + 2 * usize::from(needs_run)
-        };
-        let roots = 2
-            + usize::from(shape.check_variants)
-            + usize::from(shape.safe)
-            + usize::from(shape.export)
-            + usize::from(shape.export && needs_native)
-            + usize::from(shape.storage)
-            + usize::from(shape.batch)
-            + 3 * usize::from(extended);
-        let inventory = definitions
-            .len()
-            .checked_mul(per_definition)
-            .and_then(|entries| entries.checked_add(roots))
-            .and_then(|entries| entries.checked_add(if extended { semantic_queries } else { 0 }))
-            .ok_or_else(|| uninstalled())?;
-        let default_capacity = AdmittedRuntime::default_query_capacity(jobs, limits.runtime_bytes)
-            .ok_or_else(|| uninstalled())?;
-        let query_inventory = inventory.max(default_capacity);
-        let nominal_working = AdmittedRuntime::working_bytes(jobs, limits.runtime_bytes)
+        // Demand runs on one compiler stack; the rest is producer memory.
+        let working = limits
+            .runtime_bytes
+            .checked_sub(hirsel_intern::jobs::COMPILER_STACK_BYTES as u64)
             .filter(|bytes| *bytes != 0)
             .ok_or_else(|| {
-                ToolError::Runtime(
-                    "compiler runtime cannot admit its worker stacks and query inventory".into(),
-                )
-            })?;
-        let requested_metadata =
-            AdmittedRuntime::query_capacity_bytes(query_inventory).ok_or_else(|| uninstalled())?;
-        let query_capacity = if requested_metadata < nominal_working {
-            query_inventory
-        } else {
-            usize::try_from(
-                (nominal_working / 2)
-                    / AdmittedRuntime::query_capacity_bytes(1).ok_or_else(|| uninstalled())?,
-            )
-            .map_err(|_| uninstalled())?
-        };
-        let bookkeeping =
-            AdmittedRuntime::query_capacity_bytes(query_capacity).ok_or_else(|| uninstalled())?;
-        let working = nominal_working
-            .checked_sub(bookkeeping)
-            .filter(|bytes| *bytes != 0)
-            .ok_or_else(|| {
-                ToolError::Runtime(
-                    "compiler runtime cannot admit its worker stacks and query inventory".into(),
-                )
+                ToolError::Runtime("compiler runtime cannot admit its compiler stack".into())
             })?;
         // Every admitted worker may hold one active scratch frame. Suspended
         // continuations keep only their retained grant, so they share what
@@ -490,8 +432,6 @@ impl Plan {
         Ok(Self {
             source_index_bytes,
             snapshots: SnapshotPlan { source, run },
-            query_inventory,
-            query_capacity,
             body: MemoryWeight {
                 retained: body_bound,
                 scratch,
@@ -598,9 +538,6 @@ impl SourcePlanner<'_> {
                 shape: self.shape,
                 footprint,
                 run_input_bytes: run_inputs.as_ref().map_or(0, |inputs| inputs.input_bytes()),
-                semantic_queries: run_inputs
-                    .as_ref()
-                    .map_or(0, |inputs| inputs.semantic_query_count()),
                 catalogue_bytes: catalogue.as_ref().map_or(0, |inputs| inputs.input_bytes()),
                 inspection_bytes,
                 source_index_bytes,
@@ -1295,13 +1232,8 @@ impl QueryEngine {
         let runtime = self
             .release_private_inference_admission()
             .map_err(|error| installed.query_error(error))?;
-        let mut runtime = AdmittedRuntime::with_query_capacity(
-            jobs,
-            runtime,
-            installed.errors,
-            installed.plan.query_capacity,
-        )
-        .map_err(ToolError::Io)?;
+        let mut runtime =
+            AdmittedRuntime::new(jobs, runtime, installed.errors).map_err(ToolError::Io)?;
         installed.register(&mut runtime, &check)?;
         let front_before = front_work(&installed.front);
         let lower_before = installed

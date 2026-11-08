@@ -339,15 +339,13 @@ impl GraphSelections {
             (None, Some(metadata)) => {
                 // Empty roots need only scheduler bookkeeping, with no producer
                 // factories or retained worker stacks from the retired graph.
-                let bytes = hirsel_intern::jobs::COMPILER_STACK_BYTES as u64
-                    + AdmittedRuntime::query_capacity_bytes(16).unwrap();
+                let bytes = hirsel_intern::jobs::COMPILER_STACK_BYTES as u64;
                 let reservation = GraphBudget::reserve_product(&self.retention.budget, bytes)
                     .map_err(ToolError::Io)?;
-                let runtime = AdmittedRuntime::with_query_capacity(
+                let runtime = AdmittedRuntime::new(
                     hirsel_intern::jobs::Jobs::ONE,
                     reservation,
                     metadata.errors,
-                    16,
                 )
                 .map_err(ToolError::Io)?;
                 let graph = Arc::new(InstalledGraph {

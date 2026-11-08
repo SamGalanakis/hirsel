@@ -1,7 +1,7 @@
 //! Optional request-scoped JSONL capture. The scheduler writes only to a fixed
 //! memory buffer; the CLI takes it after compilation and performs all file IO.
 //! serde_json supplies the codec. A failed bounded write rolls back its line.
-use super::{QueryId, RuntimeEvent, WaitReason, WakeReason};
+use super::{QueryId, RuntimeEvent};
 use serde::Serialize;
 use std::io::{self, Write};
 use std::sync::{
@@ -155,10 +155,6 @@ struct Event<'a> {
     roots: Option<Roots<'a>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     success: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    wait_reason: Option<WaitReason>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    wake_reason: Option<WakeReason>,
 }
 pub(super) fn record(runtime: u64, event: &RuntimeEvent) {
     if !ENABLED.load(Relaxed) {
@@ -203,26 +199,6 @@ pub(super) fn record(runtime: u64, event: &RuntimeEvent) {
             row.elapsed_ns = Some(*elapsed_ns);
             row.cpu_ns = Some(*cpu_ns);
             row.charged = Some(*charged);
-        }
-        RuntimeEvent::Waiting {
-            query,
-            elapsed_ns,
-            reason,
-        } => {
-            row.event = "waiting";
-            row.query = Some((*query).into());
-            row.elapsed_ns = Some(*elapsed_ns);
-            row.wait_reason = Some(*reason);
-        }
-        RuntimeEvent::Wake {
-            query,
-            elapsed_ns,
-            reason,
-        } => {
-            row.event = "wake";
-            row.query = Some((*query).into());
-            row.elapsed_ns = Some(*elapsed_ns);
-            row.wake_reason = Some(*reason);
         }
         RuntimeEvent::Settled { query, result } => {
             row.event = "settled";

@@ -1889,10 +1889,6 @@ pub(super) fn install(
     } else {
         None
     };
-    // The ordinary source namespace is immutable before the first request.
-    // Preserve the original small-graph subscription/factory headroom while
-    // admitting every actual P/Lower/Evaluate/Run address of larger packages.
-    let mut inventory = std::collections::BTreeSet::new();
     for path in &definitions {
         for query in [
             front.query(path),
@@ -1905,67 +1901,14 @@ pub(super) fn install(
         .flatten()
         {
             hirsel_engine_runtime::profile::definition(query, path);
-            inventory.insert((query.kind, query.address.0));
         }
-    }
-    for query in [
-        Some(growth.query()),
-        Some(check.query()),
-        comptime_check.as_ref().map(|check| check.query()),
-        safe.as_ref().map(|safe| safe.query()),
-        export_products.as_ref().map(|export| export.query()),
-    ]
-    .into_iter()
-    .flatten()
-    {
-        inventory.insert((query.kind, query.address.0));
-    }
-    if let Some(artifacts) = &native_artifacts {
-        inventory.insert((artifacts.query().kind, artifacts.query().address.0));
-        for query in artifacts.assembly.queries(&definitions) {
-            inventory.insert((query.kind, query.address.0));
-        }
-    }
-    if let Some(native) = &native {
-        for query in native.assembly.queries(&definitions) {
-            inventory.insert((query.kind, query.address.0));
-        }
-    }
-    if let Some(ownership) = &ownership {
-        for query in ownership.queries(&definitions) {
-            inventory.insert((query.kind, query.address.0));
-        }
-    }
-    if let Some((_, source)) = &native_sources {
-        inventory.insert((source.query().kind, source.query().address.0));
-        for query in source.run_query_inventory() {
-            inventory.insert((query.kind, query.address.0));
-        }
-        for path in &definitions {
-            for query in [source.definition_query(path)].into_iter().flatten() {
-                inventory.insert((query.kind, query.address.0));
-            }
-        }
-    }
-    if let Some((_, graph)) = &storage {
-        inventory.insert((graph.query().kind, graph.query().address.0));
-    }
-    if let Some(query) = run.as_ref().and_then(|run| run.batch_query()) {
-        inventory.insert((query.kind, query.address.0));
-    }
-    if inventory.len() > plan.query_inventory {
-        return Err(ToolError::Runtime(
-            "compiler query inventory exceeds its planned admission".into(),
-        ));
     }
     let runtime = program
         .engine
         .release_private_inference_admission()
         .map_err(query_error)?;
     let native_budget = runtime.bytes();
-    let mut runtime =
-        AdmittedRuntime::with_query_capacity(config.jobs, runtime, errors, plan.query_capacity)
-            .map_err(ToolError::Io)?;
+    let mut runtime = AdmittedRuntime::new(config.jobs, runtime, errors).map_err(ToolError::Io)?;
     if (native.is_some() || native_artifacts.is_some()) && hirsel_intern::timings::enabled() {
         use hirsel_intern::timings::{Count, count_peak};
         let workers = runtime.stats().workers as u64;

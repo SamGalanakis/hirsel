@@ -106,13 +106,7 @@ impl Graph {
             }
         };
         let allowance = engine.release_private_inference_admission().unwrap();
-        let mut runtime = AdmittedRuntime::with_query_capacity(
-            jobs,
-            allowance,
-            installed.errors,
-            installed.plan.query_capacity,
-        )
-        .unwrap();
+        let mut runtime = AdmittedRuntime::new(jobs, allowance, installed.errors).unwrap();
         installed.register(&mut runtime, &check).unwrap();
         let owned = std::mem::replace(
             engine,

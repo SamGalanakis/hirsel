@@ -463,14 +463,12 @@ fn native_catalogue_allows_lower_pressure_eviction_and_scoped_cold_reads() {
                 stack: 0,
             };
             let entries = definitions.len() * 6;
-            let runtime_bytes = hirsel_intern::jobs::COMPILER_STACK_BYTES as u64
-                + 2 * weight.scratch
-                + AdmittedRuntime::query_capacity_bytes(entries).unwrap();
-            let mut runtime = AdmittedRuntime::with_query_capacity(
+            let runtime_bytes =
+                hirsel_intern::jobs::COMPILER_STACK_BYTES as u64 + 2 * weight.scratch;
+            let mut runtime = AdmittedRuntime::new(
                 hirsel_intern::jobs::Jobs::ONE,
                 budget.reserve(runtime_bytes).unwrap(),
                 errors,
-                entries,
             )
             .unwrap();
             let front = program

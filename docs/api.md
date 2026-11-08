@@ -4,7 +4,7 @@ Generated from manifest-selected public declarations. Do not edit by hand.
 Signatures retain modes, brands, attributes, relations and `uses` clauses.
 Opaque representations stay hidden; bodies are not checked or evaluated.
 
-2297 exported definitions; 1011 variants.
+2301 exported definitions; 1014 variants.
 
 ## Types and roots
 
@@ -9444,6 +9444,36 @@ References: [`core@1/u64`](#def-core_401_2fu64)
 
 References: [`core@1/u64`](#def-core_401_2fu64)
 
+<a id="def-std_401_2fjson_2fObjectKey"></a>
+
+- `pub type json.ObjectKey = ByteKey(u8) | KeySpan(u64, u64) | DecodedKey(String)`
+
+References: [`core@1/String`](#def-core_401_2fString), [`core@1/u64`](#def-core_401_2fu64), [`core@1/u8`](#def-core_401_2fu8)
+
+<a id="def-std_401_2fjson_2fObjectKey_23ByteKey"></a>
+
+- `ByteKey(u8) -> json.ObjectKey`
+
+Variant of json.ObjectKey.
+
+References: [`core@1/u8`](#def-core_401_2fu8)
+
+<a id="def-std_401_2fjson_2fObjectKey_23DecodedKey"></a>
+
+- `DecodedKey(String) -> json.ObjectKey`
+
+Variant of json.ObjectKey.
+
+References: [`core@1/String`](#def-core_401_2fString)
+
+<a id="def-std_401_2fjson_2fObjectKey_23KeySpan"></a>
+
+- `KeySpan(u64, u64) -> json.ObjectKey`
+
+Variant of json.ObjectKey.
+
+References: [`core@1/u64`](#def-core_401_2fu64)
+
 <a id="def-std_401_2fjson_2fReadTextBoundedError"></a>
 
 - `pub type json.ReadTextBoundedError = Json(JsonError) | Limit`
@@ -9660,6 +9690,24 @@ Require only whitespace after the decoded root.
 
 References: [`core@1/Result`](#def-core_401_2fResult), [`std@1/json/JsonError`](#def-std_401_2fjson_2fJsonError), [`std@1/json/Reader`](#def-std_401_2fjson_2fReader)
 
+<a id="def-std_401_2fjson_2fkey_5fis"></a>
+
+- `pub fn json.key_is(data: Bytes, key: ObjectKey, expected: String) -> bool uses {}`
+
+References: [`core@1/Bytes`](#def-core_401_2fBytes), [`core@1/String`](#def-core_401_2fString), [`core@1/bool`](#def-core_401_2fbool), [`std@1/json/ObjectKey`](#def-std_401_2fjson_2fObjectKey)
+
+<a id="def-std_401_2fjson_2fkey_5fowned"></a>
+
+- `pub fn json.key_owned(data: Bytes, key: ObjectKey) -> unique String uses {}`
+
+References: [`core@1/Bytes`](#def-core_401_2fBytes), [`core@1/String`](#def-core_401_2fString), [`std@1/json/ObjectKey`](#def-std_401_2fjson_2fObjectKey)
+
+<a id="def-std_401_2fjson_2fkeys_5fequal"></a>
+
+- `pub fn json.keys_equal(data: Bytes, first: ObjectKey, second: ObjectKey) -> bool uses {}`
+
+References: [`core@1/Bytes`](#def-core_401_2fBytes), [`core@1/bool`](#def-core_401_2fbool), [`std@1/json/ObjectKey`](#def-std_401_2fjson_2fObjectKey)
+
 <a id="def-std_401_2fjson_2fnext_5ftoken"></a>
 
 - `pub fn json.next_token(mut cursor: Reader) -> Result[Token, JsonError] in cursor uses {}`
@@ -9679,12 +9727,12 @@ References: [`core@1/Bytes`](#def-core_401_2fBytes), [`core@1/String`](#def-core
 
 <a id="def-std_401_2fjson_2fobject_5fkey"></a>
 
-- `pub fn json.object_key(mut cursor: Reader, mut first: bool) -> Result[ Option[TextView], JsonError ] in cursor uses {}`
+- `pub fn json.object_key(mut cursor: Reader, mut first: bool) -> Result[ Option[ObjectKey], JsonError ] uses {}`
 
 Next object key without allocating a key set. Generated records check their
 declared field slots and keep a set only for unknown fields.
 
-References: [`core@1/Option`](#def-core_401_2fOption), [`core@1/Result`](#def-core_401_2fResult), [`core@1/bool`](#def-core_401_2fbool), [`std@1/json/JsonError`](#def-std_401_2fjson_2fJsonError), [`std@1/json/Reader`](#def-std_401_2fjson_2fReader), [`std@1/json/TextView`](#def-std_401_2fjson_2fTextView)
+References: [`core@1/Option`](#def-core_401_2fOption), [`core@1/Result`](#def-core_401_2fResult), [`core@1/bool`](#def-core_401_2fbool), [`std@1/json/JsonError`](#def-std_401_2fjson_2fJsonError), [`std@1/json/ObjectKey`](#def-std_401_2fjson_2fObjectKey), [`std@1/json/Reader`](#def-std_401_2fjson_2fReader)
 
 <a id="def-std_401_2fjson_2fobject_5fnext"></a>
 

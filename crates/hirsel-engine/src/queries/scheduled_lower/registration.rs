@@ -419,7 +419,7 @@ impl FrontRegistrationQueries {
         failure.map_or(Ok(product), Err)
     }
     pub(in crate::queries) fn commit(&self, product: &ProductRef) {
-        if !self.lower.store.persistence().retains() {
+        if !self.lower.store.persistence().publishes() {
             return;
         }
         let Some(input) = self.inputs.get(&product.address.0) else {
@@ -564,7 +564,7 @@ impl FrontRegistrationQueries {
         decode_bytes: u64,
         manifest: ContentHash,
     ) {
-        if !self.lower.store.persistence().retains() || data.acceptance.is_none() {
+        if !self.lower.store.persistence().publishes() || data.acceptance.is_none() {
             return;
         }
         let Some(reads) =

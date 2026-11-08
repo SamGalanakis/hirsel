@@ -269,7 +269,7 @@ impl QueryEngine {
         if !self
             .result_store
             .as_ref()
-            .is_some_and(|store| store.persistence().retains())
+            .is_some_and(|store| store.persistence().publishes())
         {
             return Ok(());
         }

@@ -63,7 +63,7 @@ impl Inference {
         }
         if self.complete
             && let Some(store) = &self.store
-            && store.persistence().retains()
+            && store.persistence().publishes()
         {
             let transport = || {
                 QueryError::Operational(hirsel_types::OperationalFailure {

@@ -38,7 +38,7 @@ impl FrontLowerQueries {
         raw: &Option<RawLowerOutput>,
         verification: Option<&hirsel_validate::VerifiedDefinition>,
     ) -> Option<()> {
-        if !self.store.persistence().retains() {
+        if !self.store.persistence().publishes() {
             return None;
         }
         let manifest = self.manifest_for_outcome(id, &outcome.reads)?;
@@ -162,7 +162,7 @@ impl FrontLowerQueries {
         descriptor: Reference,
         outcome: &Outcome,
     ) {
-        if !self.store.persistence().retains() {
+        if !self.store.persistence().publishes() {
             return;
         }
         if outcome.result.is_err() {

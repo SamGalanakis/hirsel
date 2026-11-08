@@ -554,7 +554,7 @@ impl FrontGrowthQueries {
             .decode(&*self.items, &self.store.get_content(reference)?)
     }
     fn persist(&self, product: &ProductRef) {
-        if !self.store.persistence().retains() {
+        if !self.store.persistence().publishes() {
             return;
         }
         let Some(value) = product.live_value::<crate::products::LiveSourceGrowthProduct>() else {

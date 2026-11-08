@@ -64,11 +64,17 @@ pub(super) struct Scratch {
     pub(super) transfers: Vec<RefCell<crate::hashed::HashMap<OperandTransfer, TypeId>>>,
     /// Per body: its structural property proofs (`proofs`).
     pub(super) proofs: Vec<RefCell<super::proofs::Proofs>>,
+    /// Types whose value graph has a written owned requirement
+    /// (`Checker::has_crossing_receipt`), for every body.
+    pub(super) crossing_receipt_types: RefCell<crate::hashed::HashMap<hirsel_types::TypeId, bool>>,
     /// Canonical Plain rows (`Checker::canonical_plain`), for every body.
     pub(super) canonical:
         RefCell<crate::hashed::HashMap<hirsel_types::TypeId, hirsel_types::TypeId>>,
     /// Per body: the type relations `Checker::related` proved.
     pub(super) relations: Vec<RefCell<super::typing::Relations>>,
+    /// Per body: the cleanup allocation `Checker::resolved_cleanup` proved.
+    pub(super) cleanups:
+        Vec<RefCell<crate::hashed::HashMap<hirsel_types::TypeId, hirsel_types::DropAllocation>>>,
     /// Per body: the layouts `Checker::layout` found.
     pub(super) layouts:
         Vec<RefCell<crate::hashed::HashMap<hirsel_types::TypeId, hirsel_types::TypeKind>>>,
@@ -99,10 +105,12 @@ impl Scratch {
             transfers: (0..bodies).map(|_| RefCell::default()).collect(),
             proofs: (0..bodies).map(|_| RefCell::default()).collect(),
             layouts: (0..bodies).map(|_| RefCell::default()).collect(),
+            cleanups: (0..bodies).map(|_| RefCell::default()).collect(),
             relations: (0..bodies).map(|_| RefCell::default()).collect(),
             receipt_paths: (0..bodies).map(|_| std::cell::OnceCell::new()).collect(),
             plans: (0..bodies).map(|_| std::cell::OnceCell::new()).collect(),
             canonical: RefCell::default(),
+            crossing_receipt_types: RefCell::default(),
         }
     }
     pub(super) fn definition_inputs(

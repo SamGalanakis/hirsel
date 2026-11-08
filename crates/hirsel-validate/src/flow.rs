@@ -329,6 +329,8 @@ pub(super) struct Plan {
     protocol_holders: BTreeSet<usize>,
     canonical: crate::hashed::HashMap<(u32, hirsel_types::SharedPath<Projection>), usize>,
     root_parts: Vec<Vec<usize>>,
+    /// Per canonical place: the canonical places it contains, in `root_parts` order.
+    place_contents: Vec<Box<[u32]>>,
     roots: Vec<usize>,
     loans: Vec<(LoanId, PlaceId, bool)>,
     borrowed: Vec<bool>,
@@ -357,6 +359,16 @@ pub(super) struct Plan {
     rank: Vec<usize>,
     /// Origins a loop back edge expires, by (source, target) block.
     loop_expirations: BTreeMap<(u32, u32), BTreeSet<Origin>>,
+}
+/// `a` is `b` or a prefix of it; all elements of a sequence are one place.
+fn place_contains(a: &Place, b: &Place) -> bool {
+    work::count(Counter::ValidatePlaceRows);
+    a.root == b.root
+        && a.projection.len() <= b.projection.len()
+        && a.projection
+            .iter()
+            .zip(&b.projection)
+            .all(|(a, b)| a == b || matches!((a, b), (Projection::Index(_), Projection::Index(_))))
 }
 /// One solve over a body's [`Plan`].
 struct Model {
@@ -549,6 +561,16 @@ impl Plan {
         for (index, place) in places.iter().enumerate() {
             root_parts[place.root.0 as usize].push(index);
         }
+        let place_contents = places
+            .iter()
+            .map(|whole| {
+                root_parts[whole.root.0 as usize]
+                    .iter()
+                    .filter(|&&part| place_contains(whole, &places[part]))
+                    .map(|&part| part as u32)
+                    .collect()
+            })
+            .collect();
         let loans: Vec<_> = body
             .blocks
             .iter()
@@ -1076,6 +1098,7 @@ impl Plan {
             captured_origins,
             root_accesses,
             root_parts,
+            place_contents,
             roots,
             loans,
             borrowed,
@@ -1215,14 +1238,7 @@ impl Model {
         true
     }
     fn contains(&self, a: usize, b: usize) -> bool {
-        work::count(Counter::ValidatePlaceRows);
-        let a = &self.places[a];
-        let b = &self.places[b];
-        a.root == b.root
-            && a.projection.len() <= b.projection.len()
-            && a.projection.iter().zip(&b.projection).all(|(a, b)| {
-                a == b || matches!((a, b), (Projection::Index(_), Projection::Index(_)))
-            })
+        place_contains(&self.places[a], &self.places[b])
     }
     /// A whole-value access observes every tracked component, without
     /// invalidating a disjoint sibling when only one field is accessed.
@@ -1231,10 +1247,7 @@ impl Model {
         self.contents(index)
     }
     fn contents(&self, index: usize) -> impl Iterator<Item = usize> + '_ {
-        self.root_parts[self.places[index].root.0 as usize]
-            .iter()
-            .copied()
-            .filter(move |part| self.contains(index, *part))
+        self.place_contents[index].iter().map(|&part| part as usize)
     }
     fn initial(
         &self,
@@ -1675,19 +1688,31 @@ impl Checker<'_, '_> {
 #[cfg(test)]
 thread_local! { static FLOW_TRANSFERS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) }; }
 
+/// The converged entry states of a flow solve, by block and audit class.
+pub(super) struct Converged(Vec<[Option<State>; 2]>);
 impl Checker<'_, '_> {
-    pub(super) fn flow(&mut self, captures: &[super::flow_origins::CapturedOrigin], report: bool) {
-        self.flow_with(captures, report, None);
+    pub(super) fn flow(
+        &mut self,
+        captures: &[super::flow_origins::CapturedOrigin],
+        report: bool,
+    ) -> Converged {
+        self.flow_with(captures, report, None, None)
     }
     /// With `proof`, re-prove a `@preserves_unique` body (MODE-2): the selected
     /// parameter and every counted taken parameter enter unique, other `mut`
     /// parameters as declared, and the selected parameter must leave unique.
+    ///
+    /// With `converged`, the fixed point of an earlier solve of this body with
+    /// the same captures and proof: every entry is scheduled once and, being
+    /// already a fixed point, no join changes, so each is transferred exactly
+    /// once. A reporting solve reads the same converged inputs either way.
     pub(super) fn flow_with(
         &mut self,
         captures: &[super::flow_origins::CapturedOrigin],
         report: bool,
         proof: Option<hirsel_types::ParamId>,
-    ) {
+        converged: Option<Converged>,
+    ) -> Converged {
         let started = super::profile_start();
         let mut model = Model::for_body(self);
         model.unique_proof = proof
@@ -1749,6 +1774,18 @@ impl Checker<'_, '_> {
         // nodes until the same monotone fixed point, independently per audit class.
         let mut pending =
             BTreeSet::from([(rank[self.body.entry.0 as usize], self.body.entry.0, 0)]);
+        if let Some(Converged(entries)) = converged {
+            incoming = entries;
+            pending = incoming
+                .iter()
+                .enumerate()
+                .flat_map(|(block, entries)| {
+                    (0..2)
+                        .filter(|&class| entries[class].is_some())
+                        .map(move |class| (rank[block], block as u32, class))
+                })
+                .collect();
+        }
         self.returned.clear();
         // A reporting solve reports from every transfer and keeps, per entry,
         // only its last one. Any later change to an entry's input schedules it
@@ -1827,6 +1864,7 @@ impl Checker<'_, '_> {
                 started.elapsed().as_nanos()
             );
         }
+        Converged(incoming)
     }
 
     fn flow_successors(&mut self, terminator: &Terminator) -> Vec<BlockId> {

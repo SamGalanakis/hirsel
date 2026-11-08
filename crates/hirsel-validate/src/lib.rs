@@ -547,6 +547,9 @@ fn validate_input(
             .iter()
             .all(|value| !matches!(value, Rvalue::Closure { .. }));
     let mut environments = BTreeMap::<u32, Vec<flow_origins::CapturedOrigin>>::new();
+    // A changed environment schedules its body again, so each body's last
+    // solve here ran with its final environment: reporting starts from it.
+    let mut converged = BTreeMap::<u32, flow::Converged>::new();
     let mut pending = VecDeque::new();
     environments.insert(definition.entry.0, vec![]);
     pending.push_back(definition.entry.0);
@@ -581,7 +584,7 @@ fn validate_input(
             unique_parts_cache: Default::default(),
             flow_reports: None,
         };
-        checker.flow(&environments[&index], false);
+        converged.insert(index, checker.flow(&environments[&index], false));
         if !checker.proof_errors.borrow().is_empty() {
             return Validation {
                 violations: checker.proof_errors.into_inner(),
@@ -623,7 +626,8 @@ fn validate_input(
             flow_reports: None,
         };
         if let Some(captures) = environments.get(&(index as u32)) {
-            checker.flow(captures, true);
+            let seed = converged.remove(&(index as u32));
+            checker.flow_with(captures, true, None, seed);
             // Preserve the preliminary pass's early tooling-limit outcome.
             if entry_only && !checker.proof_errors.borrow().is_empty() {
                 return Validation {
@@ -658,7 +662,7 @@ fn validate_input(
                         unique_parts_cache: Default::default(),
                         flow_reports: None,
                     };
-                    proof.flow_with(captures, true, Some(parameter));
+                    proof.flow_with(captures, true, Some(parameter), None);
                     checker.errors.extend(proof.errors.into_iter().filter(|v| {
                         matches!(v.kind, ViolationKind::TypeMismatch { entity }
                             if entity == flow::UNIQUE_PROOF_FAILED)

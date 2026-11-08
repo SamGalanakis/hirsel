@@ -1162,9 +1162,22 @@ impl<'a, 'input> Checker<'a, 'input> {
         self.error(ViolationKind::TypeMismatch { entity });
     }
     fn resolved_cleanup(&self, ty: TypeId) -> DropAllocation {
-        let resolved = instantiate_cleanup_bounds(self.t, ty, self.generic_declarations())
-            .unwrap_or_else(|error| self.proof_failure(error, ty));
-        self.t.get(resolved).unwrap().drop_allocation.clone()
+        let cleanups = &self.scratch.cleanups[self.site.body.0 as usize];
+        if let Some(known) = cleanups.borrow().get(&ty) {
+            return known.clone();
+        }
+        // A tooling-limit failure is reported at each site, so only proofs are kept.
+        match instantiate_cleanup_bounds(self.t, ty, self.generic_declarations()) {
+            Ok(resolved) => {
+                let allocation = self.t.get(resolved).unwrap().drop_allocation.clone();
+                cleanups.borrow_mut().insert(ty, allocation.clone());
+                allocation
+            }
+            Err(error) => {
+                let resolved = self.proof_failure(error, ty);
+                self.t.get(resolved).unwrap().drop_allocation.clone()
+            }
+        }
     }
     pub(super) fn received_type(
         &self,

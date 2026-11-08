@@ -452,6 +452,17 @@ impl Checker<'_, '_> {
         .collect()
     }
     fn has_crossing_receipt(&self, store: &TypeInterner, root: TypeId) -> bool {
+        if let Some(&known) = self.scratch.crossing_receipt_types.borrow().get(&root) {
+            return known;
+        }
+        let found = self.find_crossing_receipt(store, root);
+        self.scratch
+            .crossing_receipt_types
+            .borrow_mut()
+            .insert(root, found);
+        found
+    }
+    fn find_crossing_receipt(&self, store: &TypeInterner, root: TypeId) -> bool {
         // A graph with no written owned requirement owes no part receipt.
         // Inspect declarations before expanding recursive generic instances.
         let mut pending = vec![root];

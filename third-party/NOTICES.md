@@ -1863,3 +1863,5 @@ no Git (GPL-2.0), RocksDB or Lucene implementation code is copied here.
 - Regex count and forward-only match ends follow regex-automata 0.4.18 `src/meta/regex.rs:2120-2132`; iteration retains Go regexp `regexp.go:746-802` empty-match suppression. Finite-budget searches retain Hirsel ordered-Pike accounting.
 
 - JSON string byte-set search ports serde_json 1.0.154 `src/read.rs:459-507`, `SliceRead::skip_to_escape` (MIT OR Apache-2.0, existing serde_json licenses). Exact set equality selects its control/quote/backslash predicate inside the general byte-set search. The portable eight-byte path is used on every target; Hirsel retains its public offset and borrowed-extent contract and does not add serde_json's optional control-character mode.
+
+- Derived JSON record field dispatch follows serde_derive 1.0.228 `src/de/identifier.rs:199-219,449-470` (MIT OR Apache-2.0). Borrowed byte names and decoded escaped names select one ordinal before field decoding. Hirsel emits equality branches, including direct single-byte comparisons, instead of Rust literal match arms, and retains its existing duplicate and unknown-field policy.

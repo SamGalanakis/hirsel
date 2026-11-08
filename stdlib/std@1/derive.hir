@@ -1812,14 +1812,46 @@ fn reader_members(
     mut w,
     f" let mut {keys}: Option[Set[String]] = None\n let mut {first_unknown}: Option[String] = None\n let mut {second_unknown}: Option[String] = None\n let mut {first} = true\n while true {{\n let Some({key}) = (match std@1/json.object_key(mut cursor, mut {first}) {{ Ok(k) => k, Error(_) => return Error(\"not JSON\") }}) else {{ break }}\n"
   )
+  // serde_derive 1.0.228 de/identifier.rs:199-219,449-470 dispatches a
+  // borrowed byte identifier once. Decode only escaped keys; retain the
+  // original key for Hirsel's unknown-field duplicate checks below.
+  let field = fresh(mut w, "field")
+  let unknown = list.len(names)
+  put(mut w, f" let {field}: u64 = match {key} {{\n Unescaped(raw) => {{\n")
+  i = 0
+  for name in names {
+    let raw = core@1/string.as_bytes(name)
+    if core@1/bytes.len(raw) == 1 {
+      put(mut w, f" if core@1/bytes.len(raw) == 1 && raw[0] == {raw[0]}u8 {{ {i}u64 }} else ")
+    } else {
+      let digits: Bytes = b"0123456789abcdef"
+      let mut byte_spelling: List[u8] = [98, 34]
+      for byte in raw {
+        core@1/bytes.append(mut byte_spelling, b"\\x")
+        core@1/list.push(mut byte_spelling, digits[core@1/int.widen(byte >> 4)])
+        core@1/list.push(mut byte_spelling, digits[core@1/int.widen(byte & 15u8)])
+      }
+      core@1/list.push(mut byte_spelling, 34)
+      let spelling = text.finish_valid(take byte_spelling)
+      put(mut w, f" if raw == {spelling} {{ {i}u64 }} else ")
+    }
+    i += 1
+  }
+  put(mut w, f" {{ {unknown}u64 }}\n }},\n Escaped(decoded) => {{\n")
   i = 0
   for name in names {
     let mut quoted: List[u8] = []
     json.write_text_into(name, mut quoted)
     let spelling = text.finish_valid(take quoted)
+    put(mut w, f" if decoded == {spelling} {{ {i}u64 }} else ")
+    i += 1
+  }
+  put(mut w, f" {{ {unknown}u64 }}\n }},\n }}\n")
+  i = 0
+  for name in names {
     put(
       mut w,
-      f" if std@1/json.text_is({key}, {spelling}) {{\n if option.is_some({slots[i]}) {{ return Error(\"not JSON\") }}\n std@1/derive.read_json(std@1/json.colon(mut cursor))?\n {slots[i]} = Some("
+      f" if {field} == {i}u64 {{\n if option.is_some({slots[i]}) {{ return Error(\"not JSON\") }}\n std@1/derive.read_json(std@1/json.colon(mut cursor))?\n {slots[i]} = Some("
     )
     from_reader_of(mut w, types[i])?
     put(mut w, ")\n continue\n }\n")

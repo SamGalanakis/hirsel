@@ -3360,40 +3360,6 @@ const CLINGER32: Inline[f32, 11] = [
   1e10f32
 ]
 
-// Rust core ea137335 dec2flt/parse.rs:15-30 and common.rs:60-66 (MIT).
-// Checked byte loads assemble the little-endian word; validation precedes the
-// three packed multiplications. No partial group is consumed on a non-digit.
-@noalloc
-fn eight_digits(bytes: Bytes, at: u64) -> Option[u64] uses {} {
-  let length = core@1/bytes.len(bytes)
-  if at > length || length - at < 8 {
-    return None()
-  }
-  let b7: u64 = core@1/int.widen(bytes[at + 7])
-  let b6: u64 = core@1/int.widen(bytes[at + 6])
-  let b5: u64 = core@1/int.widen(bytes[at + 5])
-  let b4: u64 = core@1/int.widen(bytes[at + 4])
-  let b3: u64 = core@1/int.widen(bytes[at + 3])
-  let b2: u64 = core@1/int.widen(bytes[at + 2])
-  let b1: u64 = core@1/int.widen(bytes[at + 1])
-  let b0: u64 = core@1/int.widen(bytes[at])
-  let word = b0 | b1 << 8 | b2 << 16 | b3 << 24 | b4 << 32 | b5 << 40 | b6 << 48 | b7 << 56
-  let upper = core@1/int.wrapping_add(word, 0x4646464646464646)
-  let digits = core@1/int.wrapping_sub(word, 0x3030303030303030)
-  if (upper | digits) & 0x8080808080808080 != 0 {
-    return None()
-  }
-  let pairs = digits * 10 + (digits >> 8)
-  let first = core@1/int.wrapping_mul(pairs & 0x000000ff000000ff, 0x000f424000000064)
-  let second = core@1/int.wrapping_mul(
-    pairs >> 16 & 0x000000ff000000ff,
-    0x0000271000000001
-  )
-  let combined = core@1/int.wrapping_add(first, second)
-  let value: u32 = core@1/int.truncate(combined >> 32)
-  Some(core@1/int.widen(value))
-}
-
 @noalloc
 // Rust core dec2flt's RawFloat specializes the width and its constants. Size
 // arguments give source numeric readers the same fixed-width specialization;
@@ -3415,7 +3381,8 @@ pub fn parse_decimal[fraction: size, exponent_bias: size, json_mode: size](
     at += 1
   }
   let start = at
-  if json && at < length && bytes[at] == 48 && length - at > 1 && bytes[at + 1] >= 48 && bytes[at + 1] <= 57 {
+  let zero_integer = json && at < length && bytes[at] == 48
+  if zero_integer && length - at > 1 && bytes[at + 1] >= 48 && bytes[at + 1] <= 57 {
     pos = at + 1
     return Error(Invalid)
   }
@@ -3423,38 +3390,66 @@ pub fn parse_decimal[fraction: size, exponent_bias: size, json_mode: size](
   // through the nineteenth significant digit, then only validate/count digits.
   // Separate integer/fraction phases retain Hirsel's required integer and
   // nonempty fraction. Checked byte loads and the original fallback bounds stay.
-  while at < length && bytes[at] == 48 {
-    at += 1
-  }
-  let integer_significant_start = at
   let mut leading: u64 = 0
-  // At most eleven existing significant digits can accept eight more without
-  // exceeding the original nineteen-digit accumulator. Longer inputs retain
-  // the same scalar scan and exact Eisel-Lemire/decimal fallback below.
-  // A leading-zero scan often stops at the decimal point; do not probe a
-  // complete checked group when its first byte is already a separator.
-  while length - at >= 8 && leading < 100000000000 && bytes[at] >= 48 && bytes[at] <= 57 {
-    let Some(digits) = eight_digits(bytes, at) else {
-      break
-    }
-    leading = leading * 100000000 + digits
-    at += 8
-  }
-  while at < length && leading < 1000000000000000000 {
-    let byte = bytes[at]
-    if byte < 48 || byte > 57 {
-      break
-    }
-    leading = leading * 10 + core@1/int.widen(byte - 48)
+  let mut significant: u64 = 0
+  if zero_integer {
     at += 1
-  }
-  if leading >= 1000000000000000000 {
-    while at < length && bytes[at] >= 48 && bytes[at] <= 57 {
+  } else {
+    while at < length && bytes[at] == 48 {
       at += 1
     }
+    let integer_significant_start = at
+    // At most eleven existing significant digits can accept eight more without
+    // exceeding the original nineteen-digit accumulator. Longer inputs retain
+    // the same scalar scan and exact Eisel-Lemire/decimal fallback below.
+    // A leading-zero scan often stops at the decimal point; do not probe a
+    // complete checked group when its first byte is already a separator.
+    // Rust core ea137335 dec2flt/parse.rs:15-30, common.rs:60-66 (MIT).
+    // Validate the packed word before the three multiplications. Keeping this
+    // at each scan avoids a helper boundary and repeated extent checks.
+    while length - at >= 8 && leading < 100000000000 && bytes[at] >= 48 && bytes[at] <= 57 {
+      let b7: u64 = core@1/int.widen(bytes[at + 7])
+      let b6: u64 = core@1/int.widen(bytes[at + 6])
+      let b5: u64 = core@1/int.widen(bytes[at + 5])
+      let b4: u64 = core@1/int.widen(bytes[at + 4])
+      let b3: u64 = core@1/int.widen(bytes[at + 3])
+      let b2: u64 = core@1/int.widen(bytes[at + 2])
+      let b1: u64 = core@1/int.widen(bytes[at + 1])
+      let b0: u64 = core@1/int.widen(bytes[at])
+      let word = b0 | b1 << 8 | b2 << 16 | b3 << 24 | b4 << 32 | b5 << 40 | b6 << 48 | b7 << 56
+      let upper = core@1/int.wrapping_add(word, 0x4646464646464646)
+      let digits = core@1/int.wrapping_sub(word, 0x3030303030303030)
+      if (upper | digits) & 0x8080808080808080 != 0 {
+        break
+      }
+      let pairs = digits * 10 + (digits >> 8)
+      let first = core@1/int.wrapping_mul(pairs & 0x000000ff000000ff, 0x000f424000000064)
+      let second = core@1/int.wrapping_mul(
+        pairs >> 16 & 0x000000ff000000ff,
+        0x0000271000000001
+      )
+      let combined = core@1/int.wrapping_add(first, second)
+      let value: u32 = core@1/int.truncate(combined >> 32)
+      let parsed: u64 = core@1/int.widen(value)
+      leading = leading * 100000000 + parsed
+      at += 8
+    }
+    while at < length && leading < 1000000000000000000 {
+      let byte = bytes[at]
+      if byte < 48 || byte > 57 {
+        break
+      }
+      leading = leading * 10 + core@1/int.widen(byte - 48)
+      at += 1
+    }
+    if leading >= 1000000000000000000 {
+      while at < length && bytes[at] >= 48 && bytes[at] <= 57 {
+        at += 1
+      }
+    }
+    significant = at - integer_significant_start
   }
   let integer_digits = at - start
-  let mut significant = at - integer_significant_start
   if integer_digits == 0 {
     pos = at
     return Error(Invalid)
@@ -3472,10 +3467,30 @@ pub fn parse_decimal[fraction: size, exponent_bias: size, json_mode: size](
     // In a JSON source extent, more document bytes follow the number. Reject
     // a separator at either edge before calling the full eight-digit decoder.
     while length - at >= 8 && leading < 100000000000 && bytes[at] >= 48 && bytes[at] <= 57 && bytes[at + 7] >= 48 && bytes[at + 7] <= 57 {
-      let Some(digits) = eight_digits(bytes, at) else {
+      let b7: u64 = core@1/int.widen(bytes[at + 7])
+      let b6: u64 = core@1/int.widen(bytes[at + 6])
+      let b5: u64 = core@1/int.widen(bytes[at + 5])
+      let b4: u64 = core@1/int.widen(bytes[at + 4])
+      let b3: u64 = core@1/int.widen(bytes[at + 3])
+      let b2: u64 = core@1/int.widen(bytes[at + 2])
+      let b1: u64 = core@1/int.widen(bytes[at + 1])
+      let b0: u64 = core@1/int.widen(bytes[at])
+      let word = b0 | b1 << 8 | b2 << 16 | b3 << 24 | b4 << 32 | b5 << 40 | b6 << 48 | b7 << 56
+      let upper = core@1/int.wrapping_add(word, 0x4646464646464646)
+      let digits = core@1/int.wrapping_sub(word, 0x3030303030303030)
+      if (upper | digits) & 0x8080808080808080 != 0 {
         break
       }
-      leading = leading * 100000000 + digits
+      let pairs = digits * 10 + (digits >> 8)
+      let first = core@1/int.wrapping_mul(pairs & 0x000000ff000000ff, 0x000f424000000064)
+      let second = core@1/int.wrapping_mul(
+        pairs >> 16 & 0x000000ff000000ff,
+        0x0000271000000001
+      )
+      let combined = core@1/int.wrapping_add(first, second)
+      let value: u32 = core@1/int.truncate(combined >> 32)
+      let parsed: u64 = core@1/int.widen(value)
+      leading = leading * 100000000 + parsed
       at += 8
     }
     while at < length && leading < 1000000000000000000 {

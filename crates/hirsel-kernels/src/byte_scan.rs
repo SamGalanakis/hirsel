@@ -14,6 +14,9 @@ pub fn find_any(source: &[u8], needles: &[u8], start: u64) -> u64 {
     if needles.is_empty() {
         return source.len() as u64;
     }
+    if needles == JSON_STRING_STOP {
+        return (start + json_string_stop(rest)) as u64;
+    }
     // Use the short-string walk for the prefix of a long extent too. Parsers
     // often stop at a nearby delimiter even when the remaining document is
     // long; only a longer unmatched run needs the membership table.
@@ -46,6 +49,38 @@ pub fn find_any(source: &[u8], needles: &[u8], start: u64) -> u64 {
         .iter()
         .position(|&byte| set[usize::from(byte)])
         .map_or(source.len(), |at| start + prefix + at) as u64
+}
+
+const JSON_STRING_STOP: &[u8] = b"\x00\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\x0c\x0d\x0e\x0f\x10\x11\x12\x13\x14\x15\x16\x17\x18\x19\x1a\x1b\x1c\x1d\x1e\x1f\"\\";
+
+// serde_json 1.0.154 src/read.rs:459-507, SliceRead::skip_to_escape
+// (MIT OR Apache-2.0). Exact membership above admits its control/quote/slash
+// predicate; other sets retain the generic search. All loads stay in bounds.
+fn json_string_stop(source: &[u8]) -> usize {
+    let Some(&first) = source.first() else {
+        return 0;
+    };
+    if first < 32 || first == b'"' || first == b'\\' {
+        return 0;
+    }
+    let mut at = 1;
+    for chunk in source[at..].chunks_exact(8) {
+        let word = u64::from_le_bytes(chunk.try_into().unwrap());
+        let controls = word.wrapping_sub(0x2020202020202020) & !word;
+        let quotes = word ^ 0x2222222222222222;
+        let quotes = quotes.wrapping_sub(0x0101010101010101) & !quotes;
+        let slashes = word ^ 0x5c5c5c5c5c5c5c5c;
+        let slashes = slashes.wrapping_sub(0x0101010101010101) & !slashes;
+        let stops = (controls | quotes | slashes) & 0x8080808080808080;
+        if stops != 0 {
+            return at + stops.trailing_zeros() as usize / 8;
+        }
+        at += 8;
+    }
+    source[at..]
+        .iter()
+        .position(|&byte| byte < 32 || byte == b'"' || byte == b'\\')
+        .map_or(source.len(), |offset| at + offset)
 }
 
 // aho-corasick 1.1.4, src/packed/teddy/generic.rs:218-285: nibble
@@ -431,6 +466,7 @@ mod tests {
             vec![29, 63, 129, 255],
             (128..=255).collect(),
             (0..=255).filter(|b| b % 3 == 0).collect(),
+            super::JSON_STRING_STOP.to_vec(),
         ] {
             for start in 0..=257 {
                 let expected = data
@@ -440,7 +476,7 @@ mod tests {
                 assert_eq!(find_any(&data, &needles, start as u64), expected as u64);
             }
         }
-        for needles in [b"a".as_slice(), b"ab", b"abc"] {
+        for needles in [b"a".as_slice(), b"ab", b"abc", super::JSON_STRING_STOP] {
             for length in 0..=65 {
                 for hit in 0..=length {
                     let mut source = vec![b'x'; length];

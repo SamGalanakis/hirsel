@@ -21,6 +21,10 @@ remaining scan starts after the checked prefix and returns offsets relative to
 the original source extent. Exhaustive byte vectors and the runtime's borrowed
 extent ownership law cover both sides of that transition.
 
+The exact JSON control/quote/backslash set uses serde_json's eight-byte
+`SliceRead::skip_to_escape` scanner without a membership table. It preserves
+non-ASCII bytes and returns the first stop within the supplied extent.
+
 `schedule` holds the scheduler policies `fifo@1`, `random@1` and `pct@1`
 (docs/spec/determinism.md, "Scheduler"): a SplitMix64 state, `pct@1`'s depth, horizon and
 change points, priorities for new tasks (`admit`), the change point a scheduling point hits

@@ -154,6 +154,11 @@ pub struct SignatureSnapshot {
     /// Local verifier authority is never part of a serialized snapshot/product.
     verifier: Option<Arc<hirsel_validate::VerifierCache>>,
     verifier_policy: ContentHash,
+    /// Each signature product's structural declaration (its declaration
+    /// without inferred uniqueness) in this snapshot's type interner. Keyed by
+    /// the product itself, which the entry keeps alive: a public and a private
+    /// view share a definition and fingerprint but not a product.
+    structural: Mutex<std::collections::HashMap<usize, (SignatureRef, SignatureRef)>>,
 }
 pub struct SnapshotVerdicts(Arc<ValidationState>);
 impl std::ops::Deref for SnapshotVerdicts {
@@ -606,6 +611,7 @@ impl SignatureSnapshot {
             verifier: None,
             verifier_policy: ContentHash::default(),
             lookup: LookupInput::default(),
+            structural: Mutex::default(),
         }
     }
     fn with_headers(
@@ -1227,6 +1233,22 @@ impl SignatureSnapshot {
     /// The session interner every view's rows live in.
     pub fn types(&self) -> &Arc<TypeInterner> {
         &self.types
+    }
+    /// The structural declaration of the `signature` product in this
+    /// snapshot's interner, derived by `derive` on its first demand.
+    pub(crate) fn structural_declaration<E>(
+        &self,
+        signature: &SignatureRef,
+        derive: impl FnOnce() -> Result<SignatureRef, E>,
+    ) -> Result<SignatureRef, E> {
+        let key = Arc::as_ptr(signature) as usize;
+        let lock = || self.structural.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((_, declared)) = lock().get(&key) {
+            return Ok(declared.clone());
+        }
+        let declared = derive()?;
+        lock().insert(key, (signature.clone(), declared.clone()));
+        Ok(declared)
     }
     /// Whether `d`'s header row has been produced in this snapshot and is
     /// still held: what a demand trace observes.

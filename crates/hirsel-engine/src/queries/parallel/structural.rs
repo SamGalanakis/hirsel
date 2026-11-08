@@ -99,17 +99,32 @@ impl Checks {
 fn retain(result: &Result<Arc<QueryOutput<TypedBody>>, QueryError>) -> bool {
     result.is_ok() || result.as_ref().is_err_and(|error| error.cacheable())
 }
-fn declaration(types: &TypeInterner, signature: &Signature) -> Result<SignatureRef, QueryError> {
-    let mut signature = signature.clone();
-    signature.metadata.inferred_unique = Default::default();
-    signature.fingerprint =
-        hirsel_types::encoding::fingerprint(types, &signature, &[]).map_err(|error| {
-            header_products::source_refusal(format!("structural signature: {error:?}"))
-        })?;
-    Ok(Arc::new(signature))
+/// `signature` without inferred uniqueness, as the checked relation reads
+/// it. Derived once per signature identity when `types` is the snapshot's own
+/// interner.
+fn declaration(
+    snapshot: &SignatureSnapshot,
+    types: &TypeInterner,
+    signature: &SignatureRef,
+) -> Result<SignatureRef, QueryError> {
+    let derive = || {
+        let mut signature = (**signature).clone();
+        signature.metadata.inferred_unique = Default::default();
+        signature.fingerprint = hirsel_types::encoding::fingerprint(types, &signature, &[])
+            .map_err(|error| {
+                header_products::source_refusal(format!("structural signature: {error:?}"))
+            })?;
+        Ok(Arc::new(signature))
+    };
+    if std::ptr::eq(types, &**snapshot.types()) {
+        snapshot.structural_declaration(signature, derive)
+    } else {
+        derive()
+    }
 }
 struct Provider<'a> {
     inner: &'a mut dyn SignatureProvider,
+    snapshot: &'a SignatureSnapshot,
     types: &'a TypeInterner,
     facets: Vec<Facet>,
     actual: BTreeMap<DefId, ContentHash>,
@@ -118,7 +133,7 @@ impl SignatureProvider for Provider<'_> {
     fn signature(&mut self, id: DefId) -> Result<SignatureRef, QueryError> {
         let result = self.inner.signature(id).and_then(|signature| {
             self.actual.insert(id, signature.fingerprint);
-            declaration(self.types, &signature)
+            declaration(self.snapshot, self.types, &signature)
         });
         self.facets.push(Facet::Signature(id, result.clone()));
         result
@@ -277,7 +292,9 @@ impl Worker<'_> {
                         actual.insert(*definition, signature.fingerprint);
                         Ok(DependencyRead::Signature {
                             definition: *definition,
-                            fingerprint: Some(declaration(self.types, &signature)?.fingerprint),
+                            fingerprint: Some(
+                                declaration(self.snapshot, self.types, &signature)?.fingerprint,
+                            ),
                         }
                         .shared())
                     }
@@ -285,7 +302,7 @@ impl Worker<'_> {
                 })
                 .collect::<Result<_, QueryError>>()?,
         );
-        let declared = declaration(self.types, signature)?;
+        let declared = declaration(self.snapshot, self.types, signature)?;
         drop(binding);
         let headers = self.snapshot.header_products();
         let cache = headers.and_then(|headers| headers.structural_checks(checker));
@@ -323,6 +340,7 @@ impl Worker<'_> {
                 );
                 let mut probe = Provider {
                     inner: &mut frozen,
+                    snapshot: self.snapshot,
                     types: self.types,
                     facets: Vec::new(),
                     actual: actual.clone(),
@@ -332,6 +350,7 @@ impl Worker<'_> {
                 }
                 let mut current = Provider {
                     inner: provider,
+                    snapshot: self.snapshot,
                     types: self.types,
                     facets: Vec::new(),
                     actual: actual.clone(),
@@ -384,6 +403,7 @@ impl Worker<'_> {
         }
         let mut current = Provider {
             inner: provider,
+            snapshot: self.snapshot,
             types: self.types,
             facets: Vec::new(),
             actual,

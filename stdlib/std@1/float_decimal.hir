@@ -3528,9 +3528,34 @@ fn parse_decimal[fraction: size, exponent_bias: size, json_mode: size](
       return Error(Invalid)
     }
   }
+  let sign: u64 = if negative {
+    1u64 << fraction + if bias == 127 {
+      8
+    } else {
+      11
+    }
+  } else {
+    0
+  }
+  // Rust core dec2flt/mod.rs:211-232 (f6c1107f, MIT) uses Clinger's
+  // exact small-significand path. Without an explicit exponent, the fractional
+  // digit count supplies its power directly; avoid wide exponent arithmetic.
+  let has_exponent = at < length && (bytes[at] == 101 || bytes[at] == 69)
+  if !has_exponent && (json || at == length) && significant <= 19 {
+    if fraction == 52 && bias == 1023 && leading <= 9007199254740992 && fractional_digits <= 22 {
+      let value: f64 = core@1/float.from_int(leading)
+      pos = at
+      return Ok(sign | core@1/f64.bits(value / CLINGER64[fractional_digits]))
+    }
+    if fraction == 23 && bias == 127 && leading <= 16777216 && fractional_digits <= 10 {
+      let value: f32 = core@1/float.from_int(leading)
+      pos = at
+      return Ok(sign | core@1/int.widen(core@1/f32.bits(value / CLINGER32[fractional_digits])))
+    }
+  }
   let digits_end = at
   let mut decimal_exponent: i128 = 0
-  if at < length && (bytes[at] == 101 || bytes[at] == 69) {
+  if has_exponent {
     at += 1
     let mut exponent_negative: bool = false
     if at < length && (bytes[at] == 45 || bytes[at] == 43) {
@@ -3557,15 +3582,6 @@ fn parse_decimal[fraction: size, exponent_bias: size, json_mode: size](
     return Error(Invalid)
   }
   pos = at
-  let sign: u64 = if negative {
-    1u64 << fraction + if bias == 127 {
-      8
-    } else {
-      11
-    }
-  } else {
-    0
-  }
   if significant == 0 {
     return Ok(sign)
   }

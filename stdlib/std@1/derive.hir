@@ -1534,14 +1534,15 @@ pub fn write_json_f64(value: f64, mut out: List[u8]) -> () uses {} {
 // serde_json src/de.rs:462-576 converts the token without an owned String.
 // Reuse Hirsel's exact decimal parser and keep its public String wrapper.
 pub fn read_json_f64(mut cursor: json.Reader) -> Result[f64, String] uses {} {
-  if json.peek(mut cursor) == 34 {
+  let next = json.peek(mut cursor)
+  if next == 34 {
     let spelling = read_json(json.read_owned_text(mut cursor))?
     if !non_finite(spelling) {
       return Error("expected a JSON number")
     }
     return parsed(f64.parse(spelling), "f64")
   }
-  if json.peek(mut cursor) != 45 && !ascii.is_digit(json.peek(mut cursor)) {
+  if next != 45 && !ascii.is_digit(next) {
     return Error("expected a JSON number")
   }
   let raw = match json.read_number(mut cursor) {
@@ -1565,14 +1566,15 @@ pub fn write_json_f32(value: f32, mut out: List[u8]) -> () uses {} {
 // serde_json src/de.rs:462-576 converts the token without an owned String.
 // Reuse Hirsel's exact decimal parser and keep its public String wrapper.
 pub fn read_json_f32(mut cursor: json.Reader) -> Result[f32, String] uses {} {
-  if json.peek(mut cursor) == 34 {
+  let next = json.peek(mut cursor)
+  if next == 34 {
     let spelling = read_json(json.read_owned_text(mut cursor))?
     if !non_finite(spelling) {
       return Error("expected a JSON number")
     }
     return parsed(f32.parse(spelling), "f32")
   }
-  if json.peek(mut cursor) != 45 && !ascii.is_digit(json.peek(mut cursor)) {
+  if next != 45 && !ascii.is_digit(next) {
     return Error("expected a JSON number")
   }
   let raw = match json.read_number(mut cursor) {

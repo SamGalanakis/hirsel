@@ -544,26 +544,37 @@ pub fn peek(mut cursor: Reader) -> u8 uses {} {
   json_whitespace(cursor.data, mut cursor.pos)
 }
 
+// The caller has consumed whitespace and checked the opening quote. Keep the
+// immutable input separate from the mutable position, as serde_json SliceRead
+// does, rather than passing the complete Reader through another token boundary.
+fn reader_text(data: Bytes, mut pos: u64) -> Result[TextView, JsonError] in data uses {} {
+  let end = core@1/bytes.find_any(data, JSON_STRING_STOP, pos + 1)
+  if end < core@1/bytes.len(data) && data[end] == 34 {
+    let value = core@1/bytes.slice(data, pos + 1, end)
+    pos = end + 1
+    return Ok(Unescaped(value))
+  }
+  // Keep the DOM parser's exact escape, surrogate and control-byte errors.
+  Ok(Escaped(json_quoted(data, mut pos)?))
+}
+
 /// A quoted string: a view when unescaped, independent storage otherwise.
 pub fn read_text(mut cursor: Reader) -> Result[TextView, JsonError] in cursor uses {} {
   if peek(mut cursor) != 34 {
     return Error(Syntax(cursor.pos))
   }
-  let end = core@1/bytes.find_any(cursor.data, JSON_STRING_STOP, cursor.pos + 1)
-  if end < core@1/bytes.len(cursor.data) && cursor.data[end] == 34 {
-    let value = core@1/bytes.slice(cursor.data, cursor.pos + 1, end)
-    cursor.pos = end + 1
-    return Ok(Unescaped(value))
-  }
-  // Keep the DOM parser's exact escape, surrogate and control-byte errors.
-  Ok(Escaped(json_quoted(cursor.data, mut cursor.pos)?))
+  reader_text(cursor.data, mut cursor.pos)
 }
 
 /// A lossless number spelling as a view of the cursor.
 pub fn read_number(mut cursor: Reader) -> Result[Bytes, JsonError] in cursor uses {} {
   let _ = peek(mut cursor)
   let start = cursor.pos
-  json_number_end(cursor.data, mut cursor.pos)?
+  let (end, valid) = core@1/bytes.json_number_end(cursor.data, start)
+  cursor.pos = end
+  if valid == 0 {
+    return Error(Syntax(end))
+  }
   Ok(core@1/bytes.slice(cursor.data, start, cursor.pos))
 }
 
@@ -643,9 +654,9 @@ pub fn begin_object(mut cursor: Reader) -> Result[(), JsonError] uses {} {
 
 // serde_json SeqAccess/MapAccess: the first item has no comma. After a comma
 // a value/key is mandatory, so trailing commas fail at the closing delimiter.
-fn reader_more(mut cursor: Reader, mut first: bool, end: u8) -> Result[bool, JsonError] uses {} {
+pub fn array_next(mut cursor: Reader, mut first: bool) -> Result[bool, JsonError] uses {} {
   let c = peek(mut cursor)
-  if c == end {
+  if c == 93 {
     if cursor.depth == 0 {
       return Error(Syntax(cursor.pos))
     }
@@ -663,20 +674,33 @@ fn reader_more(mut cursor: Reader, mut first: bool, end: u8) -> Result[bool, Jso
   Ok(true)
 }
 
-pub fn array_next(mut cursor: Reader, mut first: bool) -> Result[bool, JsonError] uses {} {
-  reader_more(mut cursor, mut first, 93)
-}
-
 /// Next object key without allocating a key set. Generated records check their
 /// declared field slots and keep a set only for unknown fields.
 pub fn object_key(mut cursor: Reader, mut first: bool) -> Result[
   Option[TextView],
   JsonError
 ] in cursor uses {} {
-  if !reader_more(mut cursor, mut first, 125)? {
+  let mut c = peek(mut cursor)
+  if c == 125 {
+    if cursor.depth == 0 {
+      return Error(Syntax(cursor.pos))
+    }
+    cursor.pos += 1
+    cursor.depth -= 1
     return Ok(None)
   }
-  Ok(Some(read_text(mut cursor)?))
+  if !first {
+    if c != 44 {
+      return Error(Syntax(cursor.pos))
+    }
+    cursor.pos += 1
+    c = peek(mut cursor)
+  }
+  first = false
+  if c != 34 {
+    return Error(Syntax(cursor.pos))
+  }
+  Ok(Some(reader_text(cursor.data, mut cursor.pos)?))
 }
 
 pub fn colon(mut cursor: Reader) -> Result[(), JsonError] uses {} {
@@ -688,7 +712,7 @@ pub fn colon(mut cursor: Reader) -> Result[(), JsonError] uses {} {
 }
 
 // Shared lexical member boundary. Preserve the key-start offset after comma
-// whitespace without changing reader_more's delimiter and depth behavior.
+// whitespace while retaining the reader's delimiter and depth behavior.
 fn owned_member_start(mut cursor: Reader, mut first: bool) -> Result[
   Option[u64],
   JsonError
@@ -699,9 +723,22 @@ fn owned_member_start(mut cursor: Reader, mut first: bool) -> Result[
     start += 1
     let _ = json_whitespace(cursor.data, mut start)
   }
-  if !reader_more(mut cursor, mut first, 125)? {
+  let c = peek(mut cursor)
+  if c == 125 {
+    if cursor.depth == 0 {
+      return Error(Syntax(cursor.pos))
+    }
+    cursor.pos += 1
+    cursor.depth -= 1
     return Ok(None)
   }
+  if !first {
+    if c != 44 {
+      return Error(Syntax(cursor.pos))
+    }
+    cursor.pos += 1
+  }
+  first = false
   Ok(Some(start))
 }
 

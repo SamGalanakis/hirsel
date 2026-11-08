@@ -310,7 +310,10 @@ impl State {
 /// The violation of a `@preserves_unique` body whose re-proof fails (MODE-2).
 pub(super) const UNIQUE_PROOF_FAILED: &str = "preserved unique hand-back";
 
-struct Model {
+/// The immutable flow plan of one body, built once and shared by its quiet,
+/// reporting and `@preserves_unique` solves. A solve's mutable state is its
+/// [`Model`]; `cleanup_sets` is a hash-consing interner whose ids are stable.
+pub(super) struct Plan {
     creation: bool,
     crossing_depth: usize,
     header_names: BTreeSet<OriginRoot>,
@@ -348,6 +351,16 @@ struct Model {
     /// The origin paths each place type admits (`admits_path`). A partition
     /// keeps no path its value has no field for, since no typed place reads it.
     typed_origin_paths: HashMap<TypeId, Vec<Vec<hirsel_types::FieldId>>>,
+    /// Flow successors of each block, by block index.
+    graph: Vec<Vec<usize>>,
+    /// Reverse-postorder rank of each block from the entry.
+    rank: Vec<usize>,
+    /// Origins a loop back edge expires, by (source, target) block.
+    loop_expirations: BTreeMap<(u32, u32), BTreeSet<Origin>>,
+}
+/// One solve over a body's [`Plan`].
+struct Model {
+    plan: std::rc::Rc<Plan>,
     /// The parameter root a `@preserves_unique` re-proof hands back (MODE-2).
     unique_proof: Option<usize>,
     /// The failure edge being checked is a release's that runs no user code
@@ -355,6 +368,12 @@ struct Model {
     releasing: std::cell::Cell<bool>,
     /// While a return's cleanup runs, the roots whose shares it returns.
     returning_shares: std::cell::RefCell<BTreeSet<usize>>,
+}
+impl std::ops::Deref for Model {
+    type Target = Plan;
+    fn deref(&self) -> &Plan {
+        &self.plan
+    }
 }
 /// Whether a value of `ty` may have a part at `path`. Only a known layout
 /// can exclude one: a nominal type is read through its representation, and
@@ -401,6 +420,35 @@ impl Model {
     fn origin_paths_of(&self, ty: TypeId) -> &[Vec<hirsel_types::FieldId>] {
         &self.typed_origin_paths[&ty]
     }
+    /// A solve over a freshly built plan of the checker's body.
+    #[cfg(test)]
+    fn new(checker: &mut Checker<'_, '_>) -> Self {
+        Self::over(std::rc::Rc::new(Plan::new(checker)))
+    }
+    /// A solve over the checker's body plan, built once per body. A build
+    /// that reports a tooling limit is not kept, so every solve reports it.
+    fn for_body(checker: &mut Checker<'_, '_>) -> Self {
+        let slot = &checker.scratch.plans[checker.site.body.0 as usize];
+        if let Some(plan) = slot.get() {
+            return Self::over(plan.clone());
+        }
+        let limits = checker.proof_errors.borrow().len();
+        let plan = std::rc::Rc::new(Plan::new(checker));
+        if checker.proof_errors.borrow().len() == limits {
+            let _ = checker.scratch.plans[checker.site.body.0 as usize].set(plan.clone());
+        }
+        Self::over(plan)
+    }
+    fn over(plan: std::rc::Rc<Plan>) -> Self {
+        Self {
+            plan,
+            unique_proof: None,
+            releasing: std::cell::Cell::new(false),
+            returning_shares: std::cell::RefCell::new(BTreeSet::new()),
+        }
+    }
+}
+impl Plan {
     fn new(checker: &mut Checker<'_, '_>) -> Self {
         let body = checker.body;
         let mut places: Vec<_> = body
@@ -972,6 +1020,28 @@ impl Model {
                 },
             );
         }
+        let graph: Vec<Vec<usize>> = body
+            .blocks
+            .iter()
+            .map(|block| {
+                checker
+                    .flow_successors(&block.terminator)
+                    .into_iter()
+                    .map(|id| id.0 as usize)
+                    .collect()
+            })
+            .collect();
+        let mut rank = vec![0; graph.len()];
+        for (index, block) in hirsel_graph::postorder(
+            &graph,
+            std::iter::once(body.entry.0 as usize).chain(0..graph.len()),
+        )
+        .into_iter()
+        .rev()
+        .enumerate()
+        {
+            rank[block] = index;
+        }
         Self {
             header_names,
             protocol_holders,
@@ -1015,11 +1085,13 @@ impl Model {
             release,
             temporary,
             depth,
-            unique_proof: None,
-            releasing: std::cell::Cell::new(false),
-            returning_shares: std::cell::RefCell::new(BTreeSet::new()),
+            graph,
+            rank,
+            loop_expirations: super::flow_origins::loop_expirations(body),
         }
     }
+}
+impl Model {
     fn refresh_cleanup(&self, state: &mut State, root: usize) {
         if !self.release[root] {
             return;
@@ -1617,11 +1689,10 @@ impl Checker<'_, '_> {
         proof: Option<hirsel_types::ParamId>,
     ) {
         let started = super::profile_start();
-        let mut model = Model::new(self);
+        let mut model = Model::for_body(self);
         model.unique_proof = proof
             .and_then(|p| self.body.parameters.get(p.0 as usize))
             .map(|l| l.0 as usize);
-        let loop_expirations = super::flow_origins::loop_expirations(self.body);
         // Dead-edge audits never contaminate executable predecessor joins.
         let mut incoming = vec![[None, None]; self.body.blocks.len()];
         let lifetime_global = |ty: TypeId| {
@@ -1673,28 +1744,7 @@ impl Checker<'_, '_> {
         self.initial_authority(&model, &mut initial);
         self.initial_creation(&model, &mut initial);
         incoming[self.body.entry.0 as usize][0] = Some(initial);
-        let graph: Vec<Vec<usize>> = self
-            .body
-            .blocks
-            .iter()
-            .map(|block| {
-                self.flow_successors(&block.terminator)
-                    .into_iter()
-                    .map(|id| id.0 as usize)
-                    .collect()
-            })
-            .collect();
-        let mut rank = vec![0; graph.len()];
-        for (index, block) in hirsel_graph::postorder(
-            &graph,
-            std::iter::once(self.body.entry.0 as usize).chain(0..graph.len()),
-        )
-        .into_iter()
-        .rev()
-        .enumerate()
-        {
-            rank[block] = index;
-        }
+        let (graph, rank) = (&model.plan.graph, &model.plan.rank);
         // All acyclic predecessors run before their join. Cycles still revisit
         // nodes until the same monotone fixed point, independently per audit class.
         let mut pending =
@@ -1739,7 +1789,7 @@ impl Checker<'_, '_> {
                 if tagged && !self.tag_edge(edge.to_mut(), block, target) {
                     continue;
                 }
-                if let Some(roots) = loop_expirations.get(&(block.0, target.0)) {
+                if let Some(roots) = model.loop_expirations.get(&(block.0, target.0)) {
                     let edge = edge.to_mut();
                     edge.widen_cursors(&model, self.body);
                     for origin in roots {

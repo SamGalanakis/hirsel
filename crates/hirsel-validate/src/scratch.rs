@@ -75,6 +75,8 @@ pub(super) struct Scratch {
     /// Per body, per place: every proper projected prefix is declared unique,
     /// so an owned call receipt's root evidence reaches the place (MODE-2).
     pub(super) receipt_paths: Vec<std::cell::OnceCell<Vec<bool>>>,
+    /// Per body: its flow plan, shared by every solve of that body.
+    pub(super) plans: Vec<std::cell::OnceCell<std::rc::Rc<super::flow::Plan>>>,
 }
 impl Scratch {
     pub(super) fn new(bodies: usize) -> Self {
@@ -99,6 +101,7 @@ impl Scratch {
             layouts: (0..bodies).map(|_| RefCell::default()).collect(),
             relations: (0..bodies).map(|_| RefCell::default()).collect(),
             receipt_paths: (0..bodies).map(|_| std::cell::OnceCell::new()).collect(),
+            plans: (0..bodies).map(|_| std::cell::OnceCell::new()).collect(),
             canonical: RefCell::default(),
         }
     }

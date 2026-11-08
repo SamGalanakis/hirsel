@@ -137,7 +137,7 @@ pub fn serve(
             "only 1 callee run at a time is supported",
         ));
     }
-    let mut session = crate::session::Session::open(program, policy);
+    let mut session = crate::session::Session::open_resident(program, policy);
     let initial = session.request(crate::requests::CompileOperation::Tir { definition: None })?;
     let crate::requests::CompileResult::Tir(input) = &initial.result else {
         return Err(host_error(

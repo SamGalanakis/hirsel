@@ -70,7 +70,12 @@ impl Policy {
 
 impl Session {
     /// Capture host policy now; observe source inputs lazily on first request.
+    /// A one-shot request releases each body at publication (batch retention).
     pub fn open(entry: &Path, policy: Policy) -> Self {
+        Self::open_with_compiler(entry, policy.compiler())
+    }
+    /// A session that answers repeated requests keeps its bodies (serve, watch).
+    pub fn open_resident(entry: &Path, policy: Policy) -> Self {
         Self::open_with_compiler(
             entry,
             policy
@@ -106,6 +111,8 @@ struct Registry {
     sessions: Vec<(Key, Session)>,
     limit: usize,
     opened: u64,
+    /// Set by `keep_sessions`: this thread answers repeated requests.
+    resident: bool,
 }
 thread_local! {
     static RESIDENT: RefCell<Registry> = const {
@@ -113,16 +120,19 @@ thread_local! {
             sessions: Vec::new(),
             limit: 1,
             opened: 0,
+            resident: false,
         })
     };
 }
 
-/// Keep up to `limit` sessions on this thread from now on. Every thread
-/// keeps one, so repeated requests for one program reuse its session;
-/// `hirsel serve` keeps more for its several clients.
+/// Keep up to `limit` resident sessions on this thread from now on. Every
+/// thread keeps one, so repeated requests for one program reuse its session;
+/// only a thread that called this (`hirsel serve`, `--watch`) opens them
+/// resident.
 pub fn keep_sessions(limit: usize) {
     RESIDENT.with(|r| {
         let mut registry = r.borrow_mut();
+        registry.resident = true;
         registry.limit = limit.max(1);
         let over = registry.sessions.len().saturating_sub(registry.limit);
         registry.sessions.drain(..over);
@@ -192,18 +202,25 @@ struct Key {
 /// `key`'s session out of the registry, or a new one. A session is taken
 /// while in use so a nested lease of the same program loads its own.
 fn take(key: &Key) -> Session {
-    let kept = RESIDENT.with(|r| {
+    let (kept, resident) = RESIDENT.with(|r| {
         let mut registry = r.borrow_mut();
         let index = registry.sessions.iter().position(|(k, _)| k == key);
-        match index {
+        let kept = match index {
             Some(i) => Some(registry.sessions.remove(i).1),
             None => {
                 registry.opened += 1;
                 None
             }
-        }
+        };
+        (kept, registry.resident)
     });
-    kept.unwrap_or_else(|| Session::open(&key.entry, key.policy))
+    kept.unwrap_or_else(|| {
+        if resident {
+            Session::open_resident(&key.entry, key.policy)
+        } else {
+            Session::open(&key.entry, key.policy)
+        }
+    })
 }
 /// Keep `session` under `key`, replacing a nested lease's session of the same key.
 fn put(key: Key, session: Session) {

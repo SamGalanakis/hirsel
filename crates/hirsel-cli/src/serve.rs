@@ -734,6 +734,7 @@ fn unreachable_cwd<R>(cwd: &Path) -> R {
 /// the kernel delivers an input event. Register before comparing bytes so an
 /// edit racing the previous check or watch installation cannot be missed.
 pub fn watch(args: Vec<OsString>) -> u8 {
+    hirsel_driver::session::keep_sessions(1);
     hirsel_engine::free_sessions(true);
     loop {
         let started = Instant::now();

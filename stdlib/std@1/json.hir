@@ -678,12 +678,17 @@ pub fn array_next(mut cursor: Reader, mut first: bool) -> Result[bool, JsonError
   Ok(true)
 }
 
-/// Next object key without allocating a key set. Generated records check their
-/// declared field slots and keep a set only for unknown fields.
-pub fn object_key(mut cursor: Reader, mut first: bool) -> Result[
-  Option[ObjectKey],
-  JsonError
-] uses {} {
+// serde_json de.rs:1919-2045 MapAccess and serde_derive identifier.rs:199-219
+// select one field before its value. Carry only the ordinal on the known-field
+// path; an unknown key is copied into the caller's pending slot instead.
+// Duplicate detection precedes the colon, preserving the failure cursor.
+pub fn object_field[n: size](
+  mut cursor: Reader,
+  mut first: bool,
+  fields: Inline[Bytes, n],
+  mut seen: Inline[bool, n],
+  mut unknown: Option[ObjectKey]
+) -> Result[u64, JsonError] uses {} {
   let mut c = peek(mut cursor)
   if c == 125 {
     if cursor.depth == 0 {
@@ -691,7 +696,7 @@ pub fn object_key(mut cursor: Reader, mut first: bool) -> Result[
     }
     cursor.pos += 1
     cursor.depth -= 1
-    return Ok(None)
+    return Ok(n + 1)
   }
   if !first {
     if c != 44 {
@@ -704,30 +709,82 @@ pub fn object_key(mut cursor: Reader, mut first: bool) -> Result[
   if c != 34 {
     return Error(Syntax(cursor.pos))
   }
-  // serde_json read.rs:521-566 borrows an unescaped key and serde_derive
-  // de/identifier.rs:199-219 selects its field. Fuse the one-byte ASCII case:
-  // the quotes prove its complete extent, so no scan or owned subview is needed.
   let at = cursor.pos
-  if core@1/bytes.len(cursor.data) - at >= 3 && cursor.data[at + 2] == 34 {
-    let byte = cursor.data[at + 1]
-    if byte >= 32 && byte < 128 && byte != 34 && byte != 92 {
-      cursor.pos = at + 3
-      return Ok(Some(ByteKey(byte)))
+  let remaining = core@1/bytes.len(cursor.data) - at
+  let byte = if remaining >= 3 {
+    cursor.data[at + 1]
+  } else {
+    0u8
+  }
+  let field = if remaining >= 3 && cursor.data[at + 2] == 34 && byte >= 32 && byte < 128 && byte != 34 && byte != 92 {
+    cursor.pos = at + 3
+    let mut index: u64 = 0
+    while index < n {
+      if core@1/bytes.len(fields[index]) == 1 && fields[index][0] == byte {
+        break
+      }
+      index += 1
     }
+    if index == n {
+      unknown = Some(ByteKey(byte))
+    }
+    index
+  } else {
+    let end = core@1/bytes.find_any(cursor.data, JSON_STRING_STOP, at + 1)
+    let key = if end < core@1/bytes.len(cursor.data) && cursor.data[end] == 34 {
+      cursor.pos = end + 1
+      KeySpan(at + 1, end)
+    } else {
+      DecodedKey(json_quoted(cursor.data, mut cursor.pos)?)
+    }
+    let index = key_field(cursor.data, key, fields)
+    if index == n {
+      unknown = Some(copy key)
+    }
+    index
   }
-  let end = core@1/bytes.find_any(cursor.data, JSON_STRING_STOP, at + 1)
-  if end < core@1/bytes.len(cursor.data) && cursor.data[end] == 34 {
-    cursor.pos = end + 1
-    return Ok(Some(KeySpan(at + 1, end)))
+  if field == n {
+    return Ok(n)
   }
-  Ok(Some(DecodedKey(json_quoted(cursor.data, mut cursor.pos)?)))
+  if seen[field] {
+    return Error(DuplicateKey(at))
+  }
+  if json_whitespace(cursor.data, mut cursor.pos) != 58 {
+    return Error(Syntax(cursor.pos))
+  }
+  cursor.pos += 1
+  seen[field] = true
+  Ok(field)
+}
+
+fn key_field[n: size](data: Bytes, key: ObjectKey, fields: Inline[Bytes, n]) -> u64 uses {} {
+  let mut index: u64 = 0
+  while index < n {
+    let expected = fields[index]
+    let equal = match key {
+      ByteKey(byte) => core@1/bytes.len(expected) == 1 && expected[0] == byte,
+      KeySpan(start, end) => end - start == core@1/bytes.len(expected) && core@1/bytes.slice(
+        data,
+        start,
+        end
+      ) == expected,
+      DecodedKey(decoded) => core@1/string.as_bytes(decoded) == expected,
+    }
+    if equal {
+      return index
+    }
+    index += 1
+  }
+  n
 }
 
 // Compare retained key spans against this reader's immutable input. Like
 // serde_json's borrowed keys, plain keys never require a scratch allocation.
 pub fn key_is(data: Bytes, key: ObjectKey, expected: String) -> bool uses {} {
   match key {
-    ByteKey(byte) => core@1/string.byte_len(expected) == 1 && core@1/string.as_bytes(expected)[0] == byte,
+    ByteKey(byte) => core@1/string.byte_len(expected) == 1 && core@1/string.as_bytes(
+      expected
+    )[0] == byte,
     KeySpan(start, end) => {
       if end - start != core@1/string.byte_len(expected) {
         return false

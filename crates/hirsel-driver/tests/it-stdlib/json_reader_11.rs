@@ -33,6 +33,9 @@ fn point_from_json_bytes(data: Bytes) -> Result[unique Point, String] uses {} = 
 type Label { label: String }
 fn label_from_json_reader(mut cursor: json.Reader) -> Result[unique Label, String] uses {} = comptime derive.from_json_reader(shape(Label))
 fn label_from_json_bytes(data: Bytes) -> Result[unique Label, String] uses {} = comptime derive.from_json_bytes(shape(Label))
+type Maybe { x: Option[f64] }
+fn maybe_from_json_reader(mut cursor: json.Reader) -> Result[unique Maybe, String] uses {} = comptime derive.from_json_reader(shape(Maybe))
+fn maybe_from_json_bytes(data: Bytes) -> Result[unique Maybe, String] uses {} = comptime derive.from_json_bytes(shape(Maybe))
 // A nominal reader may replace the public cursor's input. Retained unknown
 // names belong to the input at their read, even when later fields change it.
 type Child { ok: bool }
@@ -125,6 +128,20 @@ pub fn main(t: Test) -> Result[(), ()] {
   test.equal(t, p.x, 0.125)
   test.equal(t, p.y, 0.5)
   test.equal(t, p.z, 0.25)
+  let Ok(reordered) = point_from_json_bytes(b" { \"z\" : 0.25 , \"x\":0.125,\"y\":0.5 } ") else { return Error(()) }
+  test.equal(t, reordered.x, 0.125)
+  test.equal(t, reordered.y, 0.5)
+  test.equal(t, reordered.z, 0.25)
+  let mut duplicate_cursor = json.reader(b"{\"x\":1,\"x\":2}")
+  test.equal(t, x_from_json_reader(mut duplicate_cursor), Error("not JSON"))
+  test.equal(t, duplicate_cursor.pos, 10)
+  let Ok(absent) = maybe_from_json_bytes(b"{}") else { return Error(()) }
+  test.equal(t, absent.x, None)
+  let Ok(null) = maybe_from_json_bytes(b"{\"x\":null}") else { return Error(()) }
+  test.equal(t, null.x, None)
+  let Ok(present) = maybe_from_json_bytes(b"{\"x\":0.5}") else { return Error(()) }
+  test.equal(t, present.x, Some(0.5))
+  test.equal(t, maybe_from_json_bytes(b"{\"x\":null,\"x\":0.5}"), Error("not JSON"))
   let Ok(x) = x_from_json_bytes(b"{\"\\u0078\":0.5,\"opts\":{},\"nested\":{\"x\":1}}") else { return Error(()) }
   test.equal(t, x.x, 0.5)
   let Ok(label) = label_from_json_bytes(b"{\"label\":\"\\u00e9\\uD834\\uDD1E\"}") else { return Error(()) }

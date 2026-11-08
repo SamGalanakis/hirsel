@@ -34,6 +34,7 @@ fn dfa_test_case(pattern: String, src: String) -> bool uses {} {
 pub type DfaTestFailure { pattern: String, src: String, stage: u64 }
 
 pub fn dfa_test_main() -> Result[(), DfaTestFailure] uses {} {
+  if !dfa_cached_views() { return Error(DfaTestFailure(pattern: "cached-views", src: "abb!", stage: 8)) }
   let patterns: List[String] = ["", "a", "a*", "a*?", "a+", "a+?", "a|ab", "ab|a", "a*b|a", "(a|b)*", "(a*)*", "[ab]+", "[^a]*", ".*", ".*?", "^a|b$", "\\ba\\b", "\\Ba\\B", "(?m)^a*$", "(?s:.)*", "(?i)[a-z]+", "(?U)a+", "a{0,2}", "a{0,2}?", "ab|a|bc|b|cd|c|d"]
   for pattern in patterns {
     let mut bits = 1u64
@@ -339,4 +340,20 @@ fn dfa_count_laws() -> bool uses {} {
     }
   }
   true
+}
+
+// A hand-derived table checks borrowed byte coordinates, repeated match tags,
+// EOF and an unknown cell through the real primitive in all three engines.
+fn dfa_cached_views() -> bool uses {} {
+  let mut table: unique List[u64] = []
+  for i in 0u64..140 { core@1/list.push(mut table, 0u64) }
+  for i in 0u64..128 { table[i] = if i == 97 { 0u64 } else if i == 98 { 1u64 } else { 2u64 } }
+  table[128] = 136 * 8
+  table[136] = 136 * 8
+  table[137] = 136 * 8 + 1
+  table[138] = 136 * 8 + 2
+  let source = core@1/bytes.slice(b"prefixabb!tail", 6, 10)
+  core@1/bytes.dfa_run(source, table, 0, 128, 0) == (136u64, 3u64, 2u64) &&
+    core@1/bytes.dfa_run(source, table, 0, 128, 1) == (128u64, 1u64, 18446744073709551615u64) &&
+    core@1/bytes.dfa_run(source, table, 0, 128, 4) == (128u64, 4u64, 18446744073709551615u64)
 }

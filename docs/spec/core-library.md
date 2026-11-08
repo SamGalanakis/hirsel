@@ -331,6 +331,7 @@ N fn bytes.sha512_256(data: Bytes) -> Inline[u8, 32] uses {}
 N fn bytes.len(src: Bytes) -> u64
 N fn bytes.find_any(src: Bytes, needles: Bytes, start: u64) -> u64
 N fn bytes.find_pair(src: Bytes, firsts: Bytes, seconds: Bytes, start: u64) -> u64
+N fn bytes.dfa_run(src: Bytes, table: List[u64], classes: u64, state: u64, start: u64) -> (u64, u64, u64)
 N fn bytes.json_number_end(src: Bytes, start: u64) -> (u64, u64)
 N fn bytes.integer(src: Bytes, radix: u8, signed: bool, positive_hi: u64, positive_lo: u64, negative_hi: u64, negative_lo: u64) -> (u64, u64, u64)
 N fn bytes.decimal_word(value: u64, mut buffer: Inline[u8, 20]) -> u64
@@ -1854,6 +1855,18 @@ is a member. It returns the first relative matching pair offset at or after
 tail and starts outside the extent have no match. All extents are borrowed,
 no allocation occurs, and every byte value is supported. Regex prepares these
 Teddy-style nibble tables once per compiled prefix plan.
+
+`bytes.dfa_run(src, table, classes, state, start)` follows cached ASCII
+transitions without allocating or retaining either argument. The 128 class
+columns are `table[classes..classes+128]`. For the current byte, the transition
+word is `table[state + column]`. Zero is unknown; bits 1 and 2 are stop tags.
+Such bytes, and non-ASCII bytes, remain unread. Otherwise bit 0 records a
+match at the current cursor, the next state is `word >> 3`, and the cursor
+advances. The result is `(state, cursor, latest_match)`; `latest_match` is
+`u64.MAX` when none was seen. EOF ends the cached run. An out-of-range start,
+class range, accessed transition, or overflow fails SEM-3. Regex alone builds
+and interprets these rows; this leaf never determinizes or returns a regex
+answer, and finite regex work limits keep using the ordered source VM.
 
 The numeric byte leaves back std's existing lossless JSON and scalar APIs.
 `bytes.json_number_end` returns the cursor immediately after a strict JSON number

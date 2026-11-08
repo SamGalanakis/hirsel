@@ -131,7 +131,7 @@ pub fn classify(mut row: OperationRow) -> Result<OperationRow, String> {
     }
     row.failure = matches!(
         name.as_str(),
-        "string.slice" | "bytes.slice" | "bytes.append_from_history"
+        "string.slice" | "bytes.slice" | "bytes.append_from_history" | "bytes.dfa_run"
     )
     .then(|| hirsel_core_contract::RuleCode("SEM-3".into()));
     if matches!(
@@ -159,6 +159,7 @@ pub fn classify(mut row: OperationRow) -> Result<OperationRow, String> {
         | "bytes.decimal_word"
         | "bytes.find_any"
         | "bytes.find_pair"
+        | "bytes.dfa_run"
         | "bytes.base64_encode"
         | "bytes.base64_decode"
         | "bytes.sha1"
@@ -1575,6 +1576,21 @@ pub const HIRSEL_ABI_EXPORTS: &[AbiExport] = &[
     },
     AbiExport {
         caller_site: false,
+        symbol: "hirsel_rt_v2_bytes_dfa_run",
+        destination: false,
+        result: Some((24, 8)),
+        parameters: &[
+            Physical::Pointer,
+            Physical::I64,
+            Physical::I64,
+            Physical::Pointer,
+            Physical::I64,
+            Physical::I64,
+            Physical::I64,
+        ],
+    },
+    AbiExport {
+        caller_site: false,
         symbol: "hirsel_rt_v2_bytes_find_pair",
         destination: false,
         result: Some((8, 8)),
@@ -2678,6 +2694,7 @@ pub const NATIVE_PATHS: &[&str] = &[
     "bytes.decimal_word",
     "bytes.find_any",
     "bytes.find_pair",
+    "bytes.dfa_run",
     "bytes.base64_encode",
     "bytes.base64_decode",
     "bytes.sha1",

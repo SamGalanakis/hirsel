@@ -45,3 +45,10 @@ AVX2 and SSSE3 use exact nibble membership and overlapping thirty-two- or sixtee
 portable path loads whole eight-byte words. Both guard the second load and
 retain every boundary and tail candidate. An independent scalar window oracle
 covers offsets, all byte pairs, overlapping candidates and lengths through 65.
+
+`byte_scan::scan_dfa` follows already cached ASCII rows, records delayed match
+endpoints, and leaves unknown, start, stop and Unicode bytes unread. The std
+regex source owns determinization, ordering and scalar continuation. Native
+and interpreter adapters borrow their tables; arithmetic and lookup failures
+remain explicit failures. Existing scalar vectors and the three-engine regex
+fixture compare endpoints and full spans against the independent Pike iterator.

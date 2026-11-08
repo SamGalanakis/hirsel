@@ -2426,6 +2426,24 @@ primary_operations! { library, call, context, name, a, value;
     Primitive: "bytes.find_any" => u64_value(hirsel_kernels::byte_scan::find_any(
         bytes(arg(a, 0)?)?, bytes(arg(a, 1)?)?, index(arg(a, 2)?)? as u64,
     )),
+    Primitive: "bytes.dfa_run" => {
+        let Value::Sequence { elements, .. } = arg(a, 1)? else { return Err(invalid("DFA table")); };
+        let classes = int(arg(a, 2)?)?.bits() as u64;
+        let state = int(arg(a, 3)?)?.bits() as u64;
+        let start = int(arg(a, 4)?)?.bits() as u64;
+        let get = |at: u64| {
+            let Value::Integer(word) = elements.get(usize::try_from(at).ok()?)?.as_ref()? else { return None; };
+            Some(word.bits() as u64)
+        };
+        let alphabet_valid = classes.checked_add(128).is_some_and(|end| end <= elements.len() as u64);
+        let result = if alphabet_valid {
+            hirsel_kernels::byte_scan::scan_dfa(bytes(arg(a, 0)?)?, |byte| get(classes.checked_add(u64::from(byte))?), get, start, state)
+        } else { None };
+        let Some(result) = result else {
+            return Ok(Some(OperationResult::Failed(fail(&call, context, "SEM-3", "invalid cached DFA table or range"))));
+        };
+        Value::Tuple(result.into_iter().map(|word| Some(u64_value(word))).collect())
+    },
     Primitive: "bytes.find_pair" => u64_value(hirsel_kernels::byte_scan::find_pair(
         bytes(arg(a, 0)?)?, bytes(arg(a, 1)?)?, bytes(arg(a, 2)?)?, index(arg(a, 3)?)? as u64,
     )),

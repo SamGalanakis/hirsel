@@ -321,8 +321,13 @@ unsafe fn pair_avx2(source: &[u8], firsts: &[u8; 32], seconds: &[u8; 32]) -> Opt
         }
         at += 32;
     }
-    // SAFETY: AVX2 detection also admits SSSE3; this helper checks its own tail.
-    unsafe { pair_ssse3(&source[at..], firsts, seconds) }.map(|offset| at + offset)
+    let tail = if std::is_x86_feature_detected!("ssse3") {
+        // SAFETY: SSSE3 is detected independently; the helper bounds its tail.
+        unsafe { pair_ssse3(&source[at..], firsts, seconds) }
+    } else {
+        pair_word(&source[at..], firsts, seconds)
+    };
+    tail.map(|offset| at + offset)
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -349,6 +354,57 @@ unsafe fn pair_members_avx2(
         _mm256_cmpeq_epi8(_mm256_and_si256(members, bit), zero),
         _mm256_set1_epi8(-1),
     )
+}
+
+/// Run known ASCII DFA transitions, leaving tagged/unknown/Unicode bytes unread.
+/// Adapted from regex-automata 0.4.11 hybrid/search.rs:189-239 and
+/// hybrid/dfa.rs:1415-1425. Row offsets are already prepared by the source
+/// determinizer. Bit zero records a delayed match; bits one/two stop this
+/// cached run. Zero means unknown. Return state, cursor and the latest match
+/// offset, or u64::MAX when no match was observed. Invalid arithmetic/table
+/// accesses return None so adapters report a resource-independent failure.
+/// The lookup closures keep interpreter values borrowed without copying a slab.
+pub fn scan_dfa(
+    source: &[u8],
+    class: impl Fn(u8) -> Option<u64>,
+    transition: impl Fn(u64) -> Option<u64>,
+    start: u64,
+    mut state: u64,
+) -> Option<[u64; 3]> {
+    let mut cursor = usize::try_from(start).ok()?;
+    if cursor > source.len() {
+        return None;
+    }
+    let mut matched = u64::MAX;
+    // hybrid/search.rs:189-239: one bounds decision admits four dependent
+    // transitions. Each stop still returns the exact unconsumed byte.
+    macro_rules! advance {
+        () => {{
+            let byte = source[cursor];
+            if byte >= 128 {
+                return Some([state, cursor as u64, matched]);
+            }
+            let hit = transition(state.checked_add(class(byte)?)?)?;
+            if hit == 0 || hit & 6 != 0 {
+                return Some([state, cursor as u64, matched]);
+            }
+            if hit & 1 != 0 {
+                matched = cursor as u64;
+            }
+            state = hit >> 3;
+            cursor += 1;
+        }};
+    }
+    while source.len() - cursor >= 4 {
+        advance!();
+        advance!();
+        advance!();
+        advance!();
+    }
+    while cursor < source.len() {
+        advance!();
+    }
+    Some([state, cursor as u64, matched])
 }
 
 #[cfg(test)]
@@ -511,6 +567,60 @@ mod tests {
                     Some(expected)
                 );
             }
+        }
+        // Hand-derived cached-state vectors. a enters row 136; b records a
+        // delayed match there; other ASCII bytes stop before consumption.
+        // Native and interpreter adapters use this same primitive contract.
+        let mut rows = [0u64; 140];
+        rows[128] = 136 * 8;
+        rows[136] = 136 * 8;
+        rows[137] = 136 * 8 + 1;
+        rows[138] = 136 * 8 + 2;
+        let class = |byte| {
+            Some(match byte {
+                b'a' => 0,
+                b'b' => 1,
+                _ => 2,
+            })
+        };
+        let transition = |at| {
+            usize::try_from(at)
+                .ok()
+                .and_then(|at| rows.get(at).copied())
+        };
+        for (source, start, state, expected) in [
+            (b"abbb!".as_slice(), 0, 128, Some([136, 4, 3])),
+            (b"abbbbbbb", 0, 128, Some([136, 8, 7])),
+            (b"abbbbbbbbb!", 0, 128, Some([136, 10, 9])),
+            (b"aa!abbbb", 0, 128, Some([136, 2, u64::MAX])),
+            (b"bb", 0, 128, Some([128, 0, u64::MAX])),
+            (b"ab\xc3\xa9", 0, 128, Some([136, 2, 1])),
+            (b"_ab", 1, 128, Some([136, 3, 2])),
+            (b"ab", 2, 128, Some([128, 2, u64::MAX])),
+            (b"ab", 3, 128, None),
+            (b"b", 0, u64::MAX, None),
+            (b"b", 0, 139, None),
+        ] {
+            assert_eq!(
+                super::scan_dfa(source, class, transition, start, state),
+                expected
+            );
+        }
+        for flags in 2..8 {
+            rows[138] = 136 * 8 + flags;
+            let transition = |at| {
+                usize::try_from(at)
+                    .ok()
+                    .and_then(|at| rows.get(at).copied())
+            };
+            assert_eq!(
+                super::scan_dfa(b"ab!", class, transition, 0, 128),
+                Some([136, 2, 1])
+            );
+            assert_eq!(
+                super::scan_dfa(b"aaaa!", class, transition, 0, 128),
+                Some([136, 4, u64::MAX])
+            );
         }
     }
 }

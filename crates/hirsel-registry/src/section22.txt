@@ -293,6 +293,7 @@ N fn bytes.sha512_256(data: Bytes) -> Inline[u8, 32] uses {}
 N fn bytes.len(src: Bytes) -> u64
 N fn bytes.find_any(src: Bytes, needles: Bytes, start: u64) -> u64
 N fn bytes.find_pair(src: Bytes, firsts: Bytes, seconds: Bytes, start: u64) -> u64
+N fn bytes.dfa_run(src: Bytes, table: List[u64], classes: u64, state: u64, start: u64) -> (u64, u64, u64)
 N fn bytes.json_number_end(src: Bytes, start: u64) -> (u64, u64)
 N fn bytes.integer(src: Bytes, radix: u8, signed: bool, positive_hi: u64, positive_lo: u64, negative_hi: u64, negative_lo: u64) -> (u64, u64, u64)
 N fn bytes.decimal_word(value: u64, mut buffer: Inline[u8, 20]) -> u64

@@ -2002,6 +2002,69 @@ fn text(module: Option<&str>, name: &str, args: &[OpValue]) -> Option<OpOutcome>
         }
         (
             Some("bytes"),
+            "dfa_run",
+            [
+                OpValue::Bytes(source),
+                OpValue::Elements {
+                    scalar: ScalarKind::U64,
+                    bits: table,
+                },
+                OpValue::Bits {
+                    scalar: ScalarKind::U64,
+                    bits: classes,
+                },
+                OpValue::Bits {
+                    scalar: ScalarKind::U64,
+                    bits: initial,
+                },
+                OpValue::Bits {
+                    scalar: ScalarKind::U64,
+                    bits: start,
+                },
+            ],
+        ) => {
+            // Independent numeric table walk. The production cached-run kernel
+            // is deliberately not used by this checked-heap oracle.
+            let fail = || Some(OpOutcome::Fail("SEM-3".into()));
+            if *start > source.len() as u128
+                || classes
+                    .checked_add(128)
+                    .is_none_or(|end| end > table.len() as u128)
+            {
+                return fail();
+            }
+            let mut cursor = *start as usize;
+            let mut state = *initial;
+            let mut matched = u64::MAX;
+            while cursor < source.len() && source[cursor] < 128 {
+                let column = table[*classes as usize + usize::from(source[cursor])];
+                let Some(at) = state
+                    .checked_add(column)
+                    .and_then(|at| usize::try_from(at).ok())
+                else {
+                    return fail();
+                };
+                let Some(&word) = table.get(at) else {
+                    return fail();
+                };
+                if word == 0 || word & 6 != 0 {
+                    break;
+                }
+                if word & 1 != 0 {
+                    matched = cursor as u64;
+                }
+                state = word >> 3;
+                cursor += 1;
+            }
+            OpValue::Plain(
+                [state as u64, cursor as u64, matched]
+                    .iter()
+                    .flat_map(|word| word.to_le_bytes())
+                    .collect(),
+            )
+        }
+        (
+            Some("bytes"),
             "find_pair",
             [
                 OpValue::Bytes(source),

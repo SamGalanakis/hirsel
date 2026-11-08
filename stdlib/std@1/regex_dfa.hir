@@ -489,48 +489,16 @@ fn dfa_search_end(re: Regex, program: VmProgram, subject: Subject, start: u64, h
         }
       }
     }
-    // hybrid/search.rs:197-239: cached transitions stay in one byte loop.
-    // This single-pattern endpoint engine can record match-only tags here,
-    // including every byte of a greedy repetition. Unknown, stop and start
-    // tags still return to slow handling before consuming their byte.
+    // The native leaf follows cached rows only. Determinization, priority,
+    // pending matches and Unicode continuation remain in this ordered engine.
+    // Unknown/start/stop bytes are left unread for the existing slow path.
     if !scalar {
-      let begin = cursor
-      // regex-automata hybrid/search.rs:189-227: four ordered cached
-      // transitions per loop. Leave each tagged/unknown/Unicode byte unconsumed.
-      while cursor < size {
-        let byte: u64 = core@1/int.widen(bytes[cursor])
-        if byte >= 128 { break }
-        let hit = cache.data[state + cache.data[cache.classes + byte]]
-        if hit == 0 || hit % 8 >= 2 { break }
-        if hit % 2 == 1 { end = Some(cursor) }
-        state = hit / 8
-        cursor += 1
-        if !(cursor < size) { break }
-        let byte1: u64 = core@1/int.widen(bytes[cursor])
-        if byte1 >= 128 { break }
-        let hit1 = cache.data[state + cache.data[cache.classes + byte1]]
-        if hit1 == 0 || hit1 % 8 >= 2 { break }
-        if hit1 % 2 == 1 { end = Some(cursor) }
-        state = hit1 / 8
-        cursor += 1
-        if !(cursor < size) { break }
-        let byte2: u64 = core@1/int.widen(bytes[cursor])
-        if byte2 >= 128 { break }
-        let hit2 = cache.data[state + cache.data[cache.classes + byte2]]
-        if hit2 == 0 || hit2 % 8 >= 2 { break }
-        if hit2 % 2 == 1 { end = Some(cursor) }
-        state = hit2 / 8
-        cursor += 1
-        if !(cursor < size) { break }
-        let byte3: u64 = core@1/int.widen(bytes[cursor])
-        if byte3 >= 128 { break }
-        let hit3 = cache.data[state + cache.data[cache.classes + byte3]]
-        if hit3 == 0 || hit3 % 8 >= 2 { break }
-        if hit3 % 2 == 1 { end = Some(cursor) }
-        state = hit3 / 8
-        cursor += 1
-      }
-      cache.searched += cursor - begin
+      let (next_state, next_cursor, matched_at) = core@1/bytes.dfa_run(
+        bytes, cache.data, cache.classes, state, cursor)
+      cache.searched += next_cursor - cursor
+      state = next_state
+      cursor = next_cursor
+      if matched_at != 18446744073709551615 { end = Some(matched_at) }
     }
     // hybrid/search.rs:63-70,95-110: load the byte and follow a known
     // transition in the same loop. A non-ASCII byte transfers the current

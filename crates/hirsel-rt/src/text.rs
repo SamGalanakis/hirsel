@@ -671,6 +671,72 @@ pub unsafe extern "C" fn hirsel_rt_v2_bytes_find_pair(
     STATUS_OK
 }
 
+/// Run cached regex transitions over borrowed bytes and a borrowed u64 slab.
+/// A malformed range or table returns failure without writing output.
+/// # Safety
+/// The source extent and List[u64] are live and initialized; output holds three
+/// writable u64 words. Neither borrowed owner is retained or mutated.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_rt_v2_bytes_dfa_run(
+    _ctx: *mut TaskCtx,
+    out: *mut [u64; 3],
+    owner: *mut Header,
+    start: u64,
+    length: u64,
+    table: *mut Header,
+    classes: u64,
+    state: u64,
+    offset: u64,
+) -> u8 {
+    let source = unsafe {
+        bytes(Slice {
+            owner,
+            start,
+            length,
+        })
+    };
+    let data = unsafe { payload(table) };
+    // SAFETY: a live List[u64] has an initialized count followed by its
+    // aligned, initialized elements. Validate address-size arithmetic first.
+    let count = unsafe { data.cast::<u64>().read() };
+    let Some(size) = count.checked_mul(8).and_then(|n| n.checked_add(16)) else {
+        return STATUS_FAILURE;
+    };
+    if size > isize::MAX as u64 {
+        return STATUS_FAILURE;
+    }
+    let words = unsafe {
+        std::slice::from_raw_parts(
+            data.add(sequence_elements_offset(8) as usize).cast::<u64>(),
+            count as usize,
+        )
+    };
+    let Ok(base) = usize::try_from(classes) else {
+        return STATUS_FAILURE;
+    };
+    let Some(end) = base.checked_add(128) else {
+        return STATUS_FAILURE;
+    };
+    let Some(alphabet) = words.get(base..end) else {
+        return STATUS_FAILURE;
+    };
+    let Some(result) = hirsel_kernels::byte_scan::scan_dfa(
+        source,
+        |byte| Some(alphabet[usize::from(byte)]),
+        |at| {
+            usize::try_from(at)
+                .ok()
+                .and_then(|at| words.get(at).copied())
+        },
+        offset,
+        state,
+    ) else {
+        return STATUS_FAILURE;
+    };
+    unsafe { out.write(result) };
+    STATUS_OK
+}
+
 /// Strict JSON grammar over a borrowed extent; no lexeme allocation/conversion.
 /// # Safety
 /// The extent is live and initialized; `out` holds two writable u64 words.

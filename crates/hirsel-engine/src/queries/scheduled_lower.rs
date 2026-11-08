@@ -1742,7 +1742,7 @@ impl FrontLowerQueries {
             .and_then(|_| source.evidence.borrow().finish(&observed));
         if result.is_ok() {
             let selections = std::mem::take(&mut *source.selections.borrow_mut());
-            let action = self.output_action(id, &key, &observed);
+            let action = self.output_action(id, &key);
             let execution_subject = action.0;
             if let Some((definition, evidence)) = &verification
                 && let Ok(Value::Lower(lower)) = &mut result
@@ -1865,10 +1865,10 @@ impl FrontLowerQueries {
             .put_content(domain, &bytes)
             .ok_or(self.errors.resource)?;
         let action = if outcome.result.is_ok() {
-            self.output_action(id, key, &outcome.reads)
+            self.output_action(id, key)
         } else {
             hirsel_artifact_store::Action(ContentHash::of_parts(
-                "hirsel.front.scheduled-action.v1",
+                "hirsel.front.scheduled-action.v2",
                 [
                     key.0.0.as_slice(),
                     key.1.0.as_slice(),
@@ -1876,9 +1876,6 @@ impl FrontLowerQueries {
                         .ok_or(self.errors.resource)?
                         .output
                         .0
-                        .0
-                        .as_slice(),
-                    hirsel_engine_store::payload_reads_hash(&outcome.reads)
                         .0
                         .as_slice(),
                     domain.kind.to_le_bytes().as_slice(),
@@ -2410,19 +2407,13 @@ struct LowerCharge {
     _reservation: hirsel_engine_admission::MemoryReservation,
 }
 impl FrontLowerQueries {
-    fn output_action(
-        &self,
-        id: QueryId,
-        key: &EntryKey,
-        reads: &Reads,
-    ) -> hirsel_artifact_store::Action {
+    fn output_action(&self, id: QueryId, key: &EntryKey) -> hirsel_artifact_store::Action {
         hirsel_artifact_store::Action(ContentHash::of_parts(
-            "hirsel.front.live-action.v1",
+            "hirsel.front.live-action.v2",
             [
                 key.0.0.as_slice(),
                 key.1.0.as_slice(),
                 self.namespace.manifest.0.as_slice(),
-                hirsel_engine_store::payload_reads_hash(reads).0.as_slice(),
                 id.kind.to_le_bytes().as_slice(),
             ],
         ))
@@ -2438,7 +2429,7 @@ impl FrontLowerQueries {
     ) -> Result<ProductRef, Reference> {
         let _ = self.persist_live(id, key, &outcome, &raw, verification);
         self.remember_live_carry(id, key, &outcome, &raw);
-        let action = self.output_action(id, key, &outcome.reads);
+        let action = self.output_action(id, key);
         outcome.action = action;
         let metadata = (
             outcome.reads.clone(),

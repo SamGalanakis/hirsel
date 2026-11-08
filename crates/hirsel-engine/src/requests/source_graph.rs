@@ -258,8 +258,6 @@ pub struct SourceShape {
     pub export: bool,
     pub storage: bool,
     pub batch: bool,
-    /// Native consumers keep only compact retained front reads.
-    pub compact_reads: bool,
 }
 
 /// The source selection a Check covers.
@@ -885,9 +883,8 @@ pub fn install(
         &run_inputs,
         &catalogue,
     )?;
-    let prepared_front = prepared_front.filter(|front| {
-        !shape.compact_reads && front.covers_scope(&definitions, &namespace, plan.body)
-    });
+    let prepared_front =
+        prepared_front.filter(|front| front.covers_scope(&definitions, &namespace, plan.body));
     let reuse_front = prepared_front.is_some();
     let sources = engine.sources.clone();
     let inference = match engine.release_private_inference_admission() {
@@ -924,9 +921,6 @@ pub fn install(
             .front_body_queries_in(&definitions, namespace, plan.body, &request, errors)
             .map_err(query_error)?,
     };
-    if shape.compact_reads {
-        front.compact_retained_reads();
-    }
     // Before any task: this fresh graph adopts the selector's earlier accepted
     // front facts only where their text and reads still validate.
     if let Some(carry) = front_carry.filter(|_| !reuse_front) {

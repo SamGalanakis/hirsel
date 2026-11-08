@@ -1897,7 +1897,6 @@ fn archived_front_releases_observation_arrays_when_their_readers_finish() {
                 .engine
                 .front_body_queries(&[program.entry.clone()], weight, &budget, errors())
                 .unwrap();
-            front.compact_retained_reads();
             let mut runtime = AdmittedRuntime::new(
                 hirsel_intern::jobs::Jobs::ONE,
                 budget.reserve(512 << 20).unwrap(),

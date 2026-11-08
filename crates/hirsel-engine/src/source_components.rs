@@ -225,7 +225,7 @@ pub(crate) enum SourceGrowthQueryRecord {
 pub(crate) struct SourceGrowthData {
     pub facets: Arc<SourceGrowthFacets>,
     pub diagnostics: Arc<Vec<hirsel_diag::Diagnostic>>,
-    pub reads: Arc<crate::queries::ArchivedReader>,
+    pub reads: Arc<Reads>,
 }
 
 /// Accepted typed call/growth facts retained by the admitted source task.
@@ -276,37 +276,8 @@ pub struct SourceGrowthProducer<'a> {
 
 impl SourceGrowthProducer<'_> {
     /// Called only with a completed checked-stage output, never with a
-    /// provisional recursive summary. All observations remain with the root.
-    pub fn fact(
-        &self,
-        definition: Address,
-        summary: Arc<CheckedSummary>,
-        reads: &Reads,
-        selected: Reference,
-    ) -> Option<SourceGrowthFact> {
-        let read_bytes = reads.iter().try_fold(8u64, |bytes, (key, _)| {
-            bytes
-                .checked_add(key.encoded_bytes()? as u64)?
-                .checked_add(32)
-        })?;
-        let indices = reads
-            .len()
-            .checked_mul(std::mem::size_of::<std::ops::Range<usize>>())?
-            as u64;
-        if read_bytes.checked_mul(2)?.checked_add(indices)? > self.scratch {
-            return None;
-        }
-        self.fact_observed(
-            definition,
-            summary,
-            SourceGrowthSelection::Archived(selected),
-            hirsel_engine_store::payload_reads_hash(reads),
-        )
-    }
-
-    /// P actions already bind the complete recorded reads through query_action;
-    /// failed P records embed those reads. Their accepted witnesses avoid
-    /// re-encoding a shared read universe for every source declaration.
+    /// provisional recursive summary. P actions bind their package input
+    /// identity; failed P records are content-addressed.
     pub(crate) fn fact_observed(
         &self,
         definition: Address,

@@ -71,10 +71,6 @@ impl FrontCheckQueries {
         weight.tree::<DefPath, ()>(data.failed_lowered.len());
         for (path, observed) in &data.front {
             weight.path(path);
-            weight.add(
-                usize::try_from(observed.reads.decoding_bytes().ok_or_else(missing)?)
-                    .map_err(|_| missing())?,
-            );
             weight.add(hirsel_engine_admission::retained_arc_bytes(&Reads::empty()) as usize);
             weight.add(
                 observed
@@ -87,10 +83,6 @@ impl FrontCheckQueries {
         for (path, _) in &data.failed_front {
             weight.path(path);
             let reader = data.observations.front_reader(path).ok_or_else(missing)?;
-            weight.add(
-                usize::try_from(reader.decoding_bytes().ok_or_else(missing)?)
-                    .map_err(|_| missing())?,
-            );
             weight.add(hirsel_engine_admission::retained_arc_bytes(&Reads::empty()) as usize);
             weight.add(
                 reader
@@ -113,10 +105,6 @@ impl FrontCheckQueries {
             let query = self.plan.lower.query(path).ok_or_else(missing)?;
             let reader = data.observations.lower_reader(query).ok_or_else(missing)?;
             let rows = reader.len();
-            weight.add(
-                usize::try_from(reader.decoding_bytes().ok_or_else(missing)?)
-                    .map_err(|_| missing())?,
-            );
             weight.add(2 * hirsel_engine_admission::retained_arc_bytes(&Reads::empty()) as usize);
             // The Lower read clone, linear union and a possible boxed-slice
             // shrink overlap temporarily. Front rows have two union buffers
@@ -127,9 +115,6 @@ impl FrontCheckQueries {
             );
         }
         Ok(weight.bytes())
-    }
-    fn completed_front_reads(&self, data: &Data, path: &DefPath) -> Option<Arc<Reads>> {
-        data.observations.front_reader(path)?.load(&*self.store)
     }
     /// Scope is minted only for this root's exact completed descriptor. The
     /// caller reserves its inspection buffers separately from producer memory.
@@ -160,11 +145,14 @@ impl FrontCheckQueries {
             _allowance: allowance,
         };
         for (path, observed) in &data.front {
-            let reads = observed.reads.load(&*self.store).ok_or_else(missing)?;
-            scope.reads.insert(path.clone(), reads);
+            scope.reads.insert(path.clone(), observed.reads.clone());
         }
         for (path, _) in &data.failed_front {
-            let reads = self.completed_front_reads(data, path).ok_or_else(missing)?;
+            let reads = data
+                .observations
+                .front_reader(path)
+                .cloned()
+                .ok_or_else(missing)?;
             scope.reads.insert(path.clone(), reads);
         }
         for (path, failed) in data
@@ -177,7 +165,7 @@ impl FrontCheckQueries {
             let reads = data
                 .observations
                 .lower_reader(query)
-                .and_then(|reader| reader.load(&*self.store))
+                .cloned()
                 .ok_or_else(missing)?;
             let complete = match scope.reads.get(path) {
                 Some(front) => Arc::new(front.union(&reads).map_err(|_| missing())?),

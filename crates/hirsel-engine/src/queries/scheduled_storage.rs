@@ -32,7 +32,7 @@ struct Data {
 pub struct FrontStorageGraphOutput {
     pub profiles: RetainedView<Vec<CallableStorageProfile>>,
     pub diagnostics: RetainedView<Vec<Diagnostic>>,
-    pub reads: RetainedView<Reads>,
+    pub reads: Arc<Reads>,
 }
 pub struct FrontStorageGraphQueries {
     query: QueryId,
@@ -96,7 +96,7 @@ impl FrontStorageGraphQueries {
         (*selected == product).then(|| FrontStorageGraphOutput {
             profiles: RetainedView::new(data.profiles.clone(), data.clone()),
             diagnostics: RetainedView::new(data.diagnostics.clone(), data.clone()),
-            reads: RetainedView::new(data.reads.clone(), data.clone()),
+            reads: data.reads.clone(),
         })
     }
     pub fn failure(&self, reference: Reference) -> Option<QueryError> {
@@ -584,11 +584,8 @@ impl Task {
                 .ok_or_else(|| invalid("storage graph output exceeds admission"))?,
         );
         let action = hirsel_artifact_store::Action(ContentHash::of_parts(
-            "hirsel.front.storage-graph.action.v2",
-            [
-                self.digest.0.as_slice(),
-                hirsel_engine_store::payload_reads_hash(&reads).0.as_slice(),
-            ],
+            "hirsel.front.storage-graph.action.v3",
+            [self.digest.0.as_slice()],
         ));
         let product = ProductRef::live(
             owner.query.address,

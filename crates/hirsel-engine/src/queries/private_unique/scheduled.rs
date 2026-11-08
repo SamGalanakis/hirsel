@@ -271,11 +271,8 @@ impl QueryEngine {
         owner.0.name = "$private-unique".into();
         EntryKey::new(
             ContentHash::of_parts(
-                "hirsel.private-inference.v5",
-                [
-                    self.environment_value().0.as_slice(),
-                    self.store_identity.0.as_slice(),
-                ],
+                "hirsel.private-inference.v6",
+                [self.products_environment(&path.0.package).0.as_slice()],
             ),
             &owner,
             ContentHash::default(),
@@ -354,7 +351,7 @@ impl QueryEngine {
         let key = self.inference_key(path);
         let store = self.result_store.clone()?;
         let entry = StoredEntry::load(&*store, &key);
-        let variant = entry.resolve_current(&*store, &key, |key| self.observe(path, key))?;
+        let variant = entry.resolve(&*store, &key)?;
         let facts: Facts = self.decode_record(&variant.payload)?;
         (facts.reads == variant.reads
             && facts

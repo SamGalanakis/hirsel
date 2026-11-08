@@ -479,11 +479,7 @@ impl FrontRegistrationQueries {
             return None;
         }
         let key = Self::storage_key(input);
-        let variant = Entry::load(&*self.lower.store, &key).resolve_current(
-            &*self.lower.store,
-            &key,
-            |read| self.observe(input, read),
-        )?;
+        let variant = Entry::load(&*self.lower.store, &key).resolve(&*self.lower.store, &key)?;
         let stored: Stored = bincode::deserialize(&variant.payload).ok()?;
         if !self
             .lower

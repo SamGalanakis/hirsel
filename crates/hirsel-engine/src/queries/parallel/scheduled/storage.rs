@@ -346,11 +346,8 @@ impl StorageTask {
             }
             Ok(output) => {
                 let action = hirsel_artifact_store::Action(ContentHash::of_parts(
-                    "hirsel.front.storage.action.v2",
-                    [
-                        product.action.0.0.as_slice(),
-                        hirsel_engine_store::payload_reads_hash(&reads).0.as_slice(),
-                    ],
+                    "hirsel.front.storage.action.v3",
+                    [product.action.0.0.as_slice()],
                 ));
                 let product = ProductRef::live(
                     self.id.address,

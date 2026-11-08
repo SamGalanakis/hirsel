@@ -430,7 +430,6 @@ fn check_settled_front_eviction(
                 .unwrap();
             runtime.register(FRONT_CHECK_KIND, check.factory()).unwrap();
             let warmed = archive_readers.then(|| {
-                front.compact_retained_reads();
                 let header = front
                     .signatures()
                     .signature(hirsel_syntax::DefId::intern(&program.entry))

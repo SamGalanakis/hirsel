@@ -3,9 +3,8 @@
 use hirsel_intern::Symbol;
 use hirsel_syntax::{ContentHash, DefId, DefPath, FileContext, PackageId};
 use std::num::NonZeroU64;
-pub mod pool;
-pub use pool::ReadPool;
-use pool::Rows;
+mod rows;
+use rows::Rows;
 
 /// One revision of a session's inputs. Revision 1 is the first.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -503,7 +502,7 @@ impl Reads {
     /// Standard Arc slice ownership and sorted integer indices keep the flat
     /// binary-search/order/codec contract; no lookup can see an excluded row.
     pub fn share_rows(&self, complete: &Self) -> Option<Self> {
-        if complete.indices.is_some() || complete.rows.shared() || self.len() > complete.len() {
+        if complete.indices.is_some() || self.len() > complete.len() {
             return None;
         }
         let mut indices = Vec::with_capacity(self.len());
@@ -522,10 +521,6 @@ impl Reads {
             indices: (indices.len() != complete.len()).then(|| indices.into()),
             observation: self.observation.clone(),
         })
-    }
-    /// Whether these reads retain a producer's pooled row leases.
-    pub fn pooled(&self) -> bool {
-        self.rows.shared()
     }
     /// Detach a selected phase from the complete body's backing rows. Exact
     /// observations, order and encoding stay unchanged.

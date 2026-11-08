@@ -1196,12 +1196,6 @@ pub(super) fn install(
         export: artifacts,
         storage: !matches!(request.operation, CompileOperation::Expand),
         batch: matches!(request.operation, CompileOperation::TirBatch { .. }),
-        compact_reads: matches!(
-            request.operation,
-            CompileOperation::NativeOwnership(_)
-                | CompileOperation::NativeBuild(_)
-                | CompileOperation::NativeRun(_)
-        ),
     };
     let root_package = program.entry.0.package.clone();
     let selection = SourceSelection {

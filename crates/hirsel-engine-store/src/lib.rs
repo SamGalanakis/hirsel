@@ -13,7 +13,7 @@ pub use hirsel_artifact_store::{
 };
 #[cfg(test)]
 use hirsel_engine_admission::test_alloc;
-use hirsel_query_products::reads::{ReadKey, Reads};
+use hirsel_query_products::reads::Reads;
 use hirsel_query_products::{LoweringPolicy, QueryKind};
 use hirsel_syntax::{ContentHash, DefPath};
 use std::collections::HashMap;
@@ -683,11 +683,12 @@ pub enum VerifyStore {
     Recompute,
 }
 
-/// At most this many variants (distinct read sets) per entry.
+/// At most this many variants (distinct inputs) per entry.
 pub const VARIANTS: usize = 4;
 
 /// One entry: up to `VARIANTS` variants, most recently written first. Each
-/// variant's reads complete its action; an immutable reference names its output.
+/// variant's inputs complete its action; an immutable reference names its
+/// output. Its reads are the producer's recorded dependencies, not identity.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct Entry {
     pub variants: Vec<VariantRef>,
@@ -699,15 +700,12 @@ pub struct Variant {
     pub payload: Bytes,
 }
 
-pub fn payload_reads_hash(reads: &Reads) -> ContentHash {
-    let _scope = hirsel_intern::timings::instructions::scope(
-        hirsel_intern::timings::instructions::Owner::Store,
-    );
-    // Reads' in-memory ordering is by interned identity. Persisted witnesses
-    // sort the canonical key bytes, so another process/salt verifies the same
-    // complete set without depending on its DefId assignment order.
-    // One contiguous arena retains row boundaries for the original length-
-    // framed digest. Sorting offsets avoids one growable allocation per read.
+/// The complete ordinary-query action. The key's address binds the package
+/// input identity (its sources and every dependency's), so the action needs no
+/// record of what the producer observed.
+fn reads_witness(reads: &Reads) -> ContentHash {
+    // Reads' in-memory ordering is by interned identity. Sorting the canonical
+    // row bytes makes the witness independent of DefId assignment order.
     let mut bytes = Vec::new();
     let mut rows = Vec::with_capacity(reads.len());
     for (key, value) in reads.iter() {
@@ -723,17 +721,10 @@ pub fn payload_reads_hash(reads: &Reads) -> ContentHash {
     )
 }
 
-/// The complete ordinary-query action, shared by S0 variants and already
-/// settled immutable query owners. Reclaiming an evicted runtime node need
-/// not depend on an optional durable index or reconstruct its body.
-pub fn query_action(key: &EntryKey, inputs: ContentHash, reads: &Reads) -> Action {
+pub fn query_action(key: &EntryKey, inputs: ContentHash) -> Action {
     Action(ContentHash::of_parts(
-        "hirsel.result.action.v1",
-        [
-            key.0.0.as_slice(),
-            inputs.0.as_slice(),
-            payload_reads_hash(reads).0.as_slice(),
-        ],
+        "hirsel.result.action.v2",
+        [key.0.0.as_slice(), inputs.0.as_slice()],
     ))
 }
 
@@ -773,13 +764,16 @@ impl VariantRef {
         variant
     }
     pub fn action(&self, key: &EntryKey) -> Action {
-        query_action(key, self.inputs, &self.reads)
+        query_action(key, self.inputs)
     }
+    // The witness binds the recorded dependencies that restore replays, so a
+    // well-formed frame cannot substitute them. They are not product identity.
     fn binding(&self, key: &EntryKey) -> ContentHash {
         ContentHash::of_parts(
-            "hirsel.result.binding.v1",
+            "hirsel.result.binding.v2",
             [
                 self.action(key).0.0.as_slice(),
+                reads_witness(&self.reads).0.as_slice(),
                 self.output.output.0.0.as_slice(),
                 self.output.domain.kind.to_le_bytes().as_slice(),
                 self.output.domain.schema.to_le_bytes().as_slice(),
@@ -812,39 +806,23 @@ impl VariantRef {
 const ENTRY_MAGIC: &[u8; 4] = b"HRE5";
 
 impl Entry {
-    /// The first variant whose every read still observes its recorded value.
-    pub fn hit(
-        &self,
-        mut current: impl FnMut(&ReadKey) -> Option<ContentHash>,
-    ) -> Option<&VariantRef> {
+    /// The variant bound to exactly this key's inputs. The key's address
+    /// carries the package input identity, so no recorded read is compared.
+    pub fn current(&self, key: &EntryKey) -> Option<&VariantRef> {
         self.variants
             .iter()
-            .find(|v| v.reads.first_changed(&mut current).is_none())
+            .find(|v| v.inputs == key.1 && v.valid(key))
     }
-    /// Check each candidate's binding once before observing any of its reads.
-    /// Fetch content only for the first bound candidate whose reads are current.
-    pub fn resolve_current(
-        &self,
-        store: &dyn ResultStore,
-        key: &EntryKey,
-        mut current: impl FnMut(&ReadKey) -> Option<ContentHash>,
-    ) -> Option<Variant> {
-        for variant in &self.variants {
-            if variant.inputs == key.1
-                && variant.valid(key)
-                && variant.reads.first_changed(&mut current).is_none()
-            {
-                return variant.resolve_bound(store);
-            }
-        }
-        None
+    /// Fetch content for the first bound candidate only; missing content is a
+    /// miss, never permission to select an older variant.
+    pub fn resolve(&self, store: &dyn ResultStore, key: &EntryKey) -> Option<Variant> {
+        self.current(key)?.resolve_bound(store)
     }
 
-    /// Adds a variant first, replacing one with the same inputs/reads and dropping
+    /// Adds a variant first, replacing one with the same inputs and dropping
     /// the least recently written past `VARIANTS`.
     pub fn insert(&mut self, variant: VariantRef) {
-        self.variants
-            .retain(|v| v.inputs != variant.inputs || v.reads != variant.reads);
+        self.variants.retain(|v| v.inputs != variant.inputs);
         self.variants.insert(0, variant);
         self.variants.truncate(VARIANTS);
     }

@@ -87,110 +87,28 @@ fn bounded_memory_cache_preserves_outstanding_reads_across_eviction_and_drain() 
 }
 
 #[test]
-fn read_binding_digest_keeps_canonical_rows_with_bounded_scratch_allocations() {
-    fn original(reads: &Reads) -> ContentHash {
-        let mut rows: Vec<Vec<u8>> = reads
-            .iter()
-            .map(|(key, value)| {
-                let mut bytes = Vec::new();
-                key.encode(&mut bytes);
-                bytes.extend(value.0);
-                bytes
-            })
-            .collect();
-        rows.sort();
-        ContentHash::of_parts("hirsel.result.reads.v1", rows.iter().map(Vec::as_slice))
-    }
-    for count in [0, 1, 16, 64] {
-        let reads = Reads::from_vec(
-            (0..count)
-                .rev()
-                .map(|at| {
-                    (
-                        ReadKey::Signature(DefId::intern(&path(&format!(
-                            "varied_{at:03}_longer_name"
-                        )))),
-                        h(&at.to_string()),
-                    )
-                })
-                .collect(),
-        )
-        .unwrap();
-        let expected = original(&reads);
-        let (actual, allocations) = crate::test_alloc::measured(|| payload_reads_hash(&reads));
-        assert_eq!(actual, expected, "count={count}");
-        assert!(
-            allocations.allocations <= 20,
-            "count={count}: {} scratch allocations",
-            allocations.allocations
-        );
-    }
-    let signature = ReadKey::Signature(DefId::intern(&path("identity_signature")));
-    let environment = ReadKey::Environment;
-    let observed_first = Reads::from_vec(vec![
-        (environment, h("environment")),
-        (signature, h("signature")),
-    ])
-    .unwrap();
-    let canonical_first = Reads::from_vec(vec![
-        (signature, h("signature")),
-        (environment, h("environment")),
-    ])
-    .unwrap();
-    assert_eq!(observed_first, canonical_first);
-    assert_eq!(observed_first.digest(), canonical_first.digest());
-    assert_eq!(
-        payload_reads_hash(&observed_first),
-        payload_reads_hash(&canonical_first)
-    );
-    let action_key = key("reads_order_identity");
-    assert_eq!(
-        query_action(&action_key, h("inputs"), &observed_first),
-        query_action(&action_key, h("inputs"), &canonical_first)
-    );
-}
-
-#[test]
-fn current_variants_validate_bindings_before_observation_and_keep_first_hit() {
+fn current_variants_bind_inputs_and_witness_and_never_fall_back_past_missing_content() {
     let store = MemStore::default();
     let key = key("bound");
-    let observed = ReadKey::Signature(DefId::intern(&path("observed")));
-    let forbidden = ReadKey::Signature(DefId::intern(&path("forbidden")));
-    let reads = Reads::from_vec(vec![(observed, h("current"))]).unwrap();
-    let good = VariantRef::publish(&store, &key, reads, b"first bound payload").unwrap();
-    let mut corrupt = good.clone();
-    corrupt.reads = Reads::from_vec(vec![(forbidden, h("current"))]).unwrap();
+    let good = VariantRef::publish(&store, &key, Reads::empty(), b"first bound payload").unwrap();
+    let mut forged = good.clone();
+    forged.output = product_domain(QueryKind::Check)
+        .reference(b"forged")
+        .unwrap();
     let mut stale = good.clone();
     stale.inputs = h("other inputs");
     stale.witness = stale.binding(&key);
     let mut entry = Entry {
-        variants: vec![corrupt, stale, good.clone()],
+        variants: vec![forged, stale, good.clone()],
     };
-    let mut visits = vec![];
-    let hit = entry
-        .resolve_current(&store, &key, |read| {
-            visits.push(*read);
-            assert_eq!(
-                *read, observed,
-                "unbound or wrong-input reads are never observed"
-            );
-            Some(h("current"))
-        })
-        .unwrap();
-    assert_eq!(visits, [observed]);
+    // An unbound witness and another input's variant are both skipped.
+    let hit = entry.resolve(&store, &key).unwrap();
     assert_eq!(&*hit.payload, b"first bound payload");
-    assert!(
-        entry
-            .resolve_current(&store, &key, |_| Some(h("changed")))
-            .is_none()
-    );
     entry.variants = vec![good.clone(), good];
     entry.variants[0].output.len += 1;
     entry.variants[0].witness = entry.variants[0].binding(&key);
     assert!(
-        entry
-            .resolve_current(&store, &key, |_| Some(h("current")))
-            .is_none(),
+        entry.resolve(&store, &key).is_none(),
         "missing content for the first current candidate does not select a later variant"
     );
 }
@@ -240,28 +158,33 @@ fn entry_keys_separate_every_component() {
 }
 
 #[test]
-fn entries_hold_four_variants_and_hit_on_matching_reads() {
+fn entries_hold_four_variants_and_select_by_inputs() {
+    let variant = |inputs: &str, payload: &str| {
+        let mut variant = variant("s", payload);
+        variant.inputs = h(inputs);
+        variant.witness = variant.binding(&key("a"));
+        variant
+    };
     let mut entry = Entry::default();
     for i in 0..6 {
-        entry.insert(variant(&format!("s{i}"), &format!("p{i}")));
+        entry.insert(variant(&format!("i{i}"), &format!("p{i}")));
     }
     assert_eq!(entry.variants.len(), VARIANTS);
-    entry.insert(variant("s3", "p3 again"));
-    assert_eq!(entry.variants.len(), VARIANTS, "same reads replace");
+    entry.insert(variant("i3", "p3 again"));
+    assert_eq!(entry.variants.len(), VARIANTS, "same inputs replace");
     assert_eq!(
         entry.variants[0].output,
         product_domain(QueryKind::Check)
             .reference(b"p3 again")
             .unwrap()
     );
-    let dep = ReadKey::Signature(DefId::intern(&path("dep")));
-    let current = |sig: &'static str| move |k: &ReadKey| (*k == dep).then(|| h(sig));
+    let at = |inputs: &str| EntryKey(key("a").0, h(inputs), QueryKind::Check);
     assert_eq!(
-        entry.hit(current("s4")).unwrap().output,
+        entry.current(&at("i4")).unwrap().output,
         product_domain(QueryKind::Check).reference(b"p4").unwrap()
     );
-    assert!(entry.hit(current("s0")).is_none(), "evicted");
-    assert!(entry.hit(current("other")).is_none());
+    assert!(entry.current(&at("i0")).is_none(), "evicted");
+    assert!(entry.current(&at("other")).is_none());
     let decoded = Entry::decode(&entry.encode()).unwrap();
     assert_eq!(decoded, entry);
     let mut bytes = entry.encode();
@@ -507,18 +430,6 @@ fn logical_addresses_survive_edits_and_actions_bind_complete_inputs() {
         old.output, new.output,
         "equal outputs ignore source actions"
     );
-    let other_reads = VariantRef::publish(
-        &store,
-        &first,
-        variant("signature2", "unused").reads,
-        b"same result",
-    )
-    .unwrap();
-    assert_ne!(old.action(&first), other_reads.action(&first));
-    assert_eq!(
-        old.output, other_reads.output,
-        "equal outputs ignore dependency witnesses"
-    );
     let mut entry = Entry::default();
     entry.insert(old.clone());
     entry.insert(new);
@@ -630,9 +541,10 @@ fn action_index_admission_does_not_fetch_content_and_missing_outputs_miss() {
     let index = entry.encode_for(&key);
     store.put(&key, &index);
     let loaded = Entry::load(&store, &key);
-    assert!(loaded.hit(|_| Some(h("after"))).is_none());
+    let other = EntryKey(key.0, h("other inputs"), key.2);
+    assert!(loaded.current(&other).is_none());
     assert_eq!(store.content_reads.load(Ordering::Relaxed), 0);
-    let hit = loaded.hit(|_| Some(h("before"))).unwrap();
+    let hit = loaded.current(&key).unwrap();
     assert_eq!(
         &*hit.resolve(&store, &key).unwrap().payload,
         b"one immutable output"
@@ -649,7 +561,7 @@ fn action_index_admission_does_not_fetch_content_and_missing_outputs_miss() {
     let loaded = Entry::load(&store, &key);
     assert!(
         loaded
-            .hit(|_| Some(h("before")))
+            .current(&key)
             .unwrap()
             .resolve(&store, &key)
             .is_none()

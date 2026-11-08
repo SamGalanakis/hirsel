@@ -302,8 +302,7 @@ impl FrontLowerQueries {
                 return Some(self.forward_capture(id, actual, owner, query_reads).await);
             }
         }
-        let variant =
-            entry.resolve_current(&*self.store, &storage, |read| self.observe(path, read))?;
+        let variant = entry.resolve(&*self.store, &storage)?;
         // This outer record contains only fixed-size references.
         let record: Record = bincode::deserialize(&variant.payload).ok()?;
         let domain = if id.kind == FRONT_LOWER_KIND {

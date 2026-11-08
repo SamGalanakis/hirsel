@@ -73,10 +73,6 @@ struct FrontFacts {
     reads: Arc<Reads>,
     diagnostic_phases: Vec<(Diagnostic, String)>,
     checked: CheckedProduct,
-    checked_reader: OnceLock<(
-        Arc<dyn ResultStore>,
-        crate::queries::reader_receipts::ReaderReceipt,
-    )>,
     /// The package dead-arm lint's facts of a checked body.
     dead_arms: Option<LintFacts>,
     table_keys: Option<Arc<crate::table_keys::TableKeyUse>>,
@@ -144,7 +140,6 @@ impl FrontFacts {
             reads,
             diagnostic_phases,
             checked,
-            checked_reader: OnceLock::new(),
             dead_arms: dead_arms.map(LintFacts::capture),
             table_keys,
             memos: memos.into_boxed_slice(),
@@ -265,9 +260,7 @@ pub struct FrontBodyQueries {
     terminal_cache: Option<Box<dyn Send + Sync>>,
     work: Mutex<BTreeMap<(DefId, QueryKind), u64>>,
     store_adoptions: AtomicU64,
-    /// Full-rescan refusals of stored body entries: by the first changed read
-    /// of the newest variant, in `ReadKind::ALL` order, then by own text.
-    refusals: [AtomicU64; hirsel_query_products::reads::ReadKind::ALL.len()],
+    /// Refusals of stored body entries bound to other inputs.
     text_refusals: AtomicU64,
     /// Stored entry validations plus memo rows written.
     memo_operations: AtomicU64,
@@ -284,7 +277,6 @@ pub struct FrontBodyQueries {
     refusal: Mutex<Option<FrontMemoryRefusal>>,
     // Own immutable snapshot and output metadata admission until every task and
     // external output reader releases this view.
-    read_pool: std::sync::OnceLock<Mutex<hirsel_query_products::reads::ReadPool>>,
     _allowance: Arc<FrontSourceBacking>,
     _header_allowance: Option<Arc<dyn header_products::HeaderAllowance>>,
 }
@@ -709,53 +701,6 @@ impl FrontBodyQueries {
                     + ProductSource::metadata_bytes(),
             )
     }
-    /// Compact diagnostic retention within this source's original allowance.
-    /// Ordinary requests retain their flat read representation.
-    pub fn compact_retained_reads(&self) {
-        self.read_pool.get_or_init(Mutex::default);
-    }
-    pub(crate) fn retained_reads(
-        &self,
-        cx: &mut dyn QueryContext,
-        reads: &Arc<Reads>,
-    ) -> Option<Arc<Reads>> {
-        let Some(pool) = self.read_pool.get() else {
-            return Some(reads.clone());
-        };
-        self.retained_reads_in(cx, reads, pool)
-    }
-    /// Admit a consumer's shared observations without selecting compact read
-    /// retention for ordinary Front body producers.
-    pub(crate) fn retained_reads_in(
-        &self,
-        cx: &mut dyn QueryContext,
-        reads: &Arc<Reads>,
-        pool: &Mutex<hirsel_query_products::reads::ReadPool>,
-    ) -> Option<Arc<Reads>> {
-        let pool = self.read_pool.get().unwrap_or(pool);
-        if Reads::tracked_by(reads, pool) {
-            return Some(reads.clone());
-        }
-        hirsel_query_products::reads::ReadPool::admit_tracked(
-            pool,
-            reads,
-            &self._allowance.request,
-            |charge| self.make_room(cx, charge).is_some(),
-        )
-        .map_err(|refused| {
-            if let Some(charge) = refused {
-                self.record_refusal("read observations", charge, self._allowance.request.free());
-            }
-        })
-        .ok()
-    }
-    fn reclaim_reads(&self) -> bool {
-        let Some(pool) = self.read_pool.get() else {
-            return false;
-        };
-        pool.lock().unwrap_or_else(|e| e.into_inner()).reclaim() != 0
-    }
-
     fn pool_completion_reads(
         &self,
         cx: &mut dyn QueryContext,
@@ -797,34 +742,6 @@ impl FrontBodyQueries {
             {
                 *observed = checked_reads.clone();
             }
-        }
-        if self.read_pool.get().is_none() {
-            return Some(());
-        }
-        // Arrays carry refundable leases; the source-local dictionary owns
-        // each distinct observed row once across settled and archived facts.
-        let mut shared = BTreeMap::<usize, Arc<Reads>>::new();
-        let mut intern = |reads: &mut Arc<Reads>| -> Option<()> {
-            let identity = Arc::as_ptr(reads) as usize;
-            let retained = if let Some(retained) = shared.get(&identity) {
-                retained.clone()
-            } else {
-                let retained = self.retained_reads(cx, reads)?;
-                shared.insert(identity, retained.clone());
-                retained
-            };
-            *reads = retained;
-            Some(())
-        };
-        intern(reads)?;
-        if let Some(summary) = summary {
-            intern(&mut Arc::make_mut(summary).reads)?;
-        }
-        if let Some((_, reads, _)) = checked {
-            intern(reads)?;
-        }
-        for (_, reads) in memos {
-            intern(reads)?;
         }
         Some(())
     }
@@ -1029,9 +946,6 @@ impl FrontBodyQueries {
     fn make_room(&self, cx: &mut dyn QueryContext, charge: u64) -> Option<()> {
         // Reclaim idle consumers until the request footprint has room.
         while self._allowance.request.free() < charge {
-            if self.reclaim_reads() {
-                continue;
-            }
             if !cx.evict_body()
                 && !self
                     .namespace
@@ -1190,10 +1104,6 @@ impl FrontBodyQueries {
     /// Captured rows and actual settled metadata owned by this producer view.
     /// Provider content bytes and active decode scratch have separate owners.
     pub fn retained_bytes(&self) -> u64 {
-        // Runtime eviction drops its final Summary alias after the factory
-        // returns. Collect dictionary rows that became unused on that drop
-        // before reporting the retained live set.
-        self.reclaim_reads();
         self._allowance.request.reserved()
     }
 
@@ -1245,9 +1155,6 @@ impl FrontBodyQueries {
     /// operations. Each refused entry is one memo identity.
     pub fn refusal_stats(&self) -> (crate::memo::MemoStats, u64) {
         let mut stats = crate::memo::MemoStats::default();
-        for (total, count) in stats.invalidated.iter_mut().zip(&self.refusals) {
-            *total = count.load(Relaxed);
-        }
         stats.invalidated_text = self.text_refusals.load(Relaxed);
         (stats, self.memo_operations.load(Relaxed))
     }
@@ -1636,52 +1543,6 @@ impl FrontBodyQueries {
     pub fn factory(self: &Arc<Self>) -> Arc<dyn QueryFactory> {
         Arc::new(Factory(self.clone()))
     }
-    /// Encode an exact checked observation once while its producer is live.
-    /// The receipt owns no read arrays, and its inline cell is charged in the
-    /// existing FrontFacts allocation. Other stores and views encode normally.
-    pub(in crate::queries) fn reader_receipt(
-        &self,
-        query: QueryId,
-        reads: &Reads,
-        store: &Arc<dyn ResultStore>,
-        scratch: u64,
-    ) -> Option<crate::queries::reader_receipts::ReaderReceipt> {
-        use crate::queries::reader_receipts::ReaderReceipt;
-        let key = &query.address.0;
-        let facts = if query.kind == FRONT_BODY_KIND
-            && Arc::ptr_eq(&self.store, store)
-            && !self
-                .forwarded
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .contains_key(key)
-        {
-            let slots = self.slots.lock().unwrap_or_else(|e| e.into_inner());
-            match slots.get(key) {
-                Some(outcome) => Some(outcome.facts.clone()),
-                _ => None,
-            }
-        } else {
-            None
-        };
-        let cache = facts.as_ref().and_then(|facts| {
-            let expected = &facts.checked.as_ref()?.1;
-            (std::ptr::eq(reads, &**expected)
-                || reads == &**expected && reads.observed().eq(expected.observed()))
-            .then_some(&facts.checked_reader)
-        });
-        if let Some(cache) = cache {
-            if let Some((owner, receipt)) = cache.get()
-                && Arc::ptr_eq(owner, store)
-            {
-                return Some(receipt.clone());
-            }
-            let receipt = ReaderReceipt::capture(&**store, reads, scratch)?;
-            let _ = cache.set((store.clone(), receipt.clone()));
-            return Some(receipt);
-        }
-        ReaderReceipt::capture(&**store, reads, scratch)
-    }
     /// Inspect compact reads without decoding the checked body.
     pub(crate) fn selected_reads(
         &self,
@@ -1983,7 +1844,6 @@ impl QueryFactory for Factory {
             || self.0.namespace.snapshot.evict_cached()
             || self.0.inputs.clear_addresses()
             || self.0.trim_slot_admission()
-            || self.0.reclaim_reads()
     }
     fn create(&self, query: QueryId) -> Result<Box<dyn QueryTask>, Reference> {
         if !self.0.owns_query(query)
@@ -2262,7 +2122,7 @@ impl BodyTask {
             .store
             .put_content(FAILURE, &bytes)
             .ok_or_else(|| queries.resource_refusal())?;
-        let action = hirsel_engine_store::query_action(&input.key, input.key.1, &reads);
+        let action = hirsel_engine_store::query_action(&input.key, input.key.1);
         let mut cached = queries
             .publish_facts(
                 cx,
@@ -2348,7 +2208,7 @@ impl BodyTask {
                     .ok_or_else(|| queries.resource_refusal())?,
             );
         }
-        let action = hirsel_engine_store::query_action(&input.key, input.key.1, &reads);
+        let action = hirsel_engine_store::query_action(&input.key, input.key.1);
         let product = queries
             .admit_body(self.query.address, action, outcome, summary)
             .ok_or_else(|| queries.resource_refusal())?;
@@ -2438,18 +2298,8 @@ impl BodyTask {
             return None;
         }
         queries.memo_operations.fetch_add(1, Relaxed);
-        entry
-            .variants
-            .retain(|variant| variant.inputs == input.key.1 && variant.valid(&input.key));
-        let Some(newest) = entry.variants.first() else {
+        let Some(variant) = entry.current(&input.key) else {
             queries.text_refusals.fetch_add(1, Relaxed);
-            return None;
-        };
-        let observe = |read: &ReadKey| queries.observe(input.definition.path(), read);
-        let Some(variant) = entry.hit(observe) else {
-            if let Some(read) = newest.reads.first_changed(observe) {
-                queries.refusals[read.kind() as usize].fetch_add(1, Relaxed);
-            }
             return None;
         };
         if variant.output.len > self.weight.scratch {
@@ -2594,19 +2444,15 @@ impl BodyTask {
         let input = &queries.inputs[&self.input];
         let expected = if queries.verify_store == hirsel_engine_store::VerifyStore::Recompute {
             let mut entry = hirsel_engine_store::Entry::load(&*queries.store, &input.key);
-            entry.variants.retain(|variant| {
-                variant.inputs == input.key.1
-                    && variant.valid(&input.key)
-                    && variant.output.len <= self.weight.scratch
-            });
             entry
-                .hit(|read| queries.observe(input.definition.path(), read))
-                .and_then(|variant| {
-                    queries
-                        .store
-                        .get_content(variant.output)
-                        .map(|bytes| (variant.reads.clone(), bytes))
-                })
+                .variants
+                .retain(|variant| variant.output.len <= self.weight.scratch);
+            entry.current(&input.key).and_then(|variant| {
+                queries
+                    .store
+                    .get_content(variant.output)
+                    .map(|bytes| (variant.reads.clone(), bytes))
+            })
         } else {
             None
         };
@@ -2871,7 +2717,7 @@ impl BodyTask {
         } else {
             (
                 None,
-                hirsel_engine_store::query_action(&input.key, input.key.1, &outcome.reads),
+                hirsel_engine_store::query_action(&input.key, input.key.1),
             )
         };
         drop(bytes);
@@ -3352,13 +3198,11 @@ impl QueryEngine {
             clean_memos: Mutex::new(BTreeSet::new()),
             work: Mutex::new(BTreeMap::new()),
             store_adoptions: AtomicU64::new(0),
-            refusals: Default::default(),
             text_refusals: AtomicU64::new(0),
             memo_operations: AtomicU64::new(0),
             verify_store: self.verify_store,
             errors,
             refusal: Mutex::new(None),
-            read_pool: std::sync::OnceLock::new(),
             _allowance: backing,
             _header_allowance: header_allowance,
         }))

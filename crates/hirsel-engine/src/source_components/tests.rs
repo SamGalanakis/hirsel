@@ -123,33 +123,33 @@ fn equal_settled_component_stops_changed_member_and_preserves_unrelated_outputs(
         }
         vec![
             producer
-                .fact(
+                .fact_observed(
                     Address(ids[0].path().fingerprint()),
                     summary(ids[0], edges),
-                    &reads,
-                    selected,
+                    SourceGrowthSelection::Archived(selected),
+                    selected.output.0,
                 )
                 .unwrap(),
             producer
-                .fact(
+                .fact_observed(
                     Address(ids[1].path().fingerprint()),
                     summary(
                         ids[1],
                         vec![(parameter(ids[1]), parameter(ids[0]), false, sites[1])],
                     ),
-                    &reads,
-                    selected,
+                    SourceGrowthSelection::Archived(selected),
+                    selected.output.0,
                 )
                 .unwrap(),
             producer
-                .fact(
+                .fact_observed(
                     Address(ids[2].path().fingerprint()),
                     summary(
                         ids[2],
                         vec![(parameter(ids[2]), parameter(ids[2]), false, sites[2])],
                     ),
-                    &reads,
-                    selected,
+                    SourceGrowthSelection::Archived(selected),
+                    selected.output.0,
                 )
                 .unwrap(),
         ]
@@ -221,58 +221,6 @@ fn equal_settled_component_stops_changed_member_and_preserves_unrelated_outputs(
 }
 
 #[test]
-fn changed_observations_bind_live_actions_before_equal_fact_cutoff() {
-    let (_engine, source, ids, _) = context();
-    let pool = output_pool();
-    let producer = SourceGrowthProducer {
-        source: &source,
-        output_pool: &pool,
-        namespace: Address(ContentHash::of_bytes(b"observations")),
-        scratch: 8 << 20,
-    };
-    let selected = SELECTED.reference(b"accepted checked output").unwrap();
-    for key in [
-        hirsel_query_products::reads::ReadKey::PrivateSummary(ids[0]),
-        hirsel_query_products::reads::ReadKey::Lookup(hirsel_query_products::reads::LookupKey::of(
-            hirsel_query_products::reads::LookupSource::Provider,
-            &crate::default_context(),
-            None,
-            &["missing".into()],
-        )),
-        hirsel_query_products::reads::ReadKey::Lookup(hirsel_query_products::reads::LookupKey::of(
-            hirsel_query_products::reads::LookupSource::Manifest,
-            &crate::default_context(),
-            None,
-            &["module".into()],
-        )),
-    ] {
-        let make = |value| {
-            let mut reads = ReadsBuilder::new();
-            reads.record(key, ContentHash::of_bytes(value));
-            producer
-                .fact(
-                    Address(ids[0].path().fingerprint()),
-                    summary(ids[0], vec![]),
-                    &reads.finish().unwrap(),
-                    selected,
-                )
-                .unwrap()
-        };
-        let a = make(b"before");
-        let b = make(b"after");
-        assert_ne!(a.observed, b.observed);
-        assert_eq!(a.calls, b.calls);
-        assert_eq!(a.growth, b.growth);
-        let a = settle(&producer, vec![a]).unwrap();
-        let b = settle(&producer, vec![b]).unwrap();
-        let a = &a.components[0].product;
-        let b = &b.components[0].product;
-        assert_ne!(a.action, b.action);
-        assert_eq!(output(a), output(b));
-    }
-}
-
-#[test]
 fn independently_selected_roots_sharing_a_lexical_owner_all_contribute() {
     let (_engine, source, ids, sites) = context();
     let pool = output_pool();
@@ -289,7 +237,7 @@ fn independently_selected_roots_sharing_a_lexical_owner_all_contribute() {
             .into_iter()
             .map(|grows| {
                 producer
-                    .fact(
+                    .fact_observed(
                         Address(ids[usize::from(grows != reversed)].path().fingerprint()),
                         summary(
                             ids[0],
@@ -299,8 +247,8 @@ fn independently_selected_roots_sharing_a_lexical_owner_all_contribute() {
                                 vec![]
                             },
                         ),
-                        &reads,
-                        selected,
+                        SourceGrowthSelection::Archived(selected),
+                        selected.output.0,
                     )
                     .unwrap()
             })
@@ -311,14 +259,14 @@ fn independently_selected_roots_sharing_a_lexical_owner_all_contribute() {
     // The former store-poisoning vector now has no archive lookup path. Keep
     // its single-root source verdict in the live producer law.
     let single = producer
-        .fact(
+        .fact_observed(
             Address(ids[0].path().fingerprint()),
             summary(
                 ids[0],
                 vec![(parameter(ids[0]), parameter(ids[0]), true, sites[0])],
             ),
-            &reads,
-            selected,
+            SourceGrowthSelection::Archived(selected),
+            selected.output.0,
         )
         .unwrap();
     let single = settle(&producer, vec![single]).unwrap();
@@ -354,19 +302,18 @@ fn reordered_sources_preserve_canonical_settled_component_values() {
             namespace: Address(ContentHash::of_bytes(b"canonical source order")),
             scratch: 8 << 20,
         };
-        let reads = ReadsBuilder::new().finish().unwrap();
         let selected = SELECTED.reference(b"accepted checked output").unwrap();
         let facts: Vec<_> = (0..2)
             .map(|i| {
                 producer
-                    .fact(
+                    .fact_observed(
                         Address(ids[i].path().fingerprint()),
                         summary(
                             ids[i],
                             vec![(parameter(ids[i]), parameter(ids[1 - i]), true, sites[i])],
                         ),
-                        &reads,
-                        selected,
+                        SourceGrowthSelection::Archived(selected),
+                        selected.output.0,
                     )
                     .unwrap()
             })
@@ -399,11 +346,11 @@ fn membership_record_reopens_through_the_same_native_codec_as_components() {
     };
     let selected = SELECTED.reference(b"checked").unwrap();
     let fact = producer
-        .fact(
+        .fact_observed(
             Address(ids[0].path().fingerprint()),
             summary(ids[0], vec![]),
-            &Reads::empty(),
-            selected,
+            SourceGrowthSelection::Archived(selected),
+            selected.output.0,
         )
         .unwrap();
     let (product, components) = producer.membership_parts(&[fact]).unwrap();
@@ -474,11 +421,11 @@ fn compact_source_fact_releases_checked_input_and_admits_growth_backing() {
     let checked = summary(ids[0], vec![edge]);
     let old_owner = Arc::downgrade(&checked);
     let fact = producer
-        .fact(
+        .fact_observed(
             Address(ids[0].path().fingerprint()),
             checked.clone(),
-            &Reads::empty(),
-            SELECTED.reference(b"checked compact growth").unwrap(),
+            SourceGrowthSelection::Archived(SELECTED.reference(b"checked compact growth").unwrap()),
+            ContentHash::of_bytes(b"checked compact growth"),
         )
         .unwrap();
     drop(checked);

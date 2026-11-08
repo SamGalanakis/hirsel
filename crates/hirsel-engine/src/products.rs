@@ -494,7 +494,8 @@ pub(crate) struct GrowthPublicationSource {
     _reservation: hirsel_engine_admission::MemoryReservation,
 }
 pub(crate) struct SourceGrowthPublication {
-    pub(crate) reads: Arc<crate::queries::ArchivedReader>,
+    pub(crate) reads: Arc<Reads>,
+    source: Arc<GrowthPublicationSource>,
 }
 #[derive(Clone)]
 enum SourceGrowthValue {
@@ -543,18 +544,16 @@ impl LiveSourceGrowthProduct {
                 if (value.product.address, value.product.action) != identity {
                     return None;
                 }
-                Arc::get_mut(&mut value)?.publication = Some(SourceGrowthPublication {
-                    reads: crate::queries::ArchivedReader::capture(source, &reads)?,
-                });
+                Arc::get_mut(&mut value)?.publication =
+                    Some(SourceGrowthPublication { reads, source });
                 (SourceGrowthValue::Membership(value), None)
             }
             SourceGrowthQueryData::Component { mut value, reads } => {
                 if (value.product.address, value.product.action) != identity {
                     return None;
                 }
-                Arc::get_mut(&mut value)?.publication = Some(SourceGrowthPublication {
-                    reads: crate::queries::ArchivedReader::capture(source, &reads)?,
-                });
+                Arc::get_mut(&mut value)?.publication =
+                    Some(SourceGrowthPublication { reads, source });
                 let facet = SummaryFacet::component(value.clone());
                 (SourceGrowthValue::Component(value), Some(facet))
             }
@@ -572,7 +571,7 @@ impl LiveSourceGrowthProduct {
             SourceGrowthValue::Component(v) => v.publication.as_ref().unwrap(),
         }
     }
-    pub(crate) fn reader(&self) -> Arc<crate::queries::ArchivedReader> {
+    pub(crate) fn reader(&self) -> Arc<Reads> {
         self.publication().reads.clone()
     }
     pub(crate) fn membership(&self) -> Option<Arc<crate::source_components::SourceMembership>> {
@@ -588,7 +587,7 @@ impl LiveSourceGrowthProduct {
         }
     }
     pub(crate) fn value(&self) -> Option<SourceGrowthQueryData> {
-        let reads = self.publication().reads.load()?;
+        let reads = self.publication().reads.clone();
         Some(match &self.0 {
             SourceGrowthValue::Membership(value) => SourceGrowthQueryData::Membership {
                 value: value.clone(),
@@ -655,7 +654,7 @@ impl LiveSourceGrowthProduct {
         &self,
         admission: ArchiveAdmission<'_>,
     ) -> io::Result<ProductArchive> {
-        let source = &self.publication().reads.source().source;
+        let source = &self.publication().source.source;
         ProductArchive::materialize(self.domain(), admission, |grant| {
             self.publication()
                 .reads
@@ -1097,21 +1096,6 @@ mod tests {
         );
         ProductSource::prepare(context, records, backing).unwrap()
     }
-    fn archived_growth_fixture_reader(
-        context: &NativeRecordContext,
-    ) -> Arc<crate::queries::ArchivedReader> {
-        let store = Arc::new(hirsel_engine_store::MemStore::default());
-        let records = NativeRecords::new(context.record_types().clone(), store.clone());
-        let source = ProductSource::prepare(context.clone(), records, Arc::new(())).unwrap();
-        let pool = hirsel_engine_admission::ProcessBudget::new(1 << 20);
-        let mut allowance = pool
-            .reserve(LiveSourceGrowthProduct::source_bytes())
-            .ok()
-            .unwrap();
-        let source =
-            LiveSourceGrowthProduct::admit_source(source, store, 64 << 10, &mut allowance).unwrap();
-        crate::queries::ArchivedReader::capture_owned(source, &Reads::empty(), &pool).unwrap()
-    }
     fn growth_fixture() -> (
         Arc<crate::source_components::SourceGrowthData>,
         NativeRecordContext,
@@ -1137,7 +1121,7 @@ mod tests {
             Arc::new(crate::source_components::SourceGrowthData {
                 facets: Arc::new(facets),
                 diagnostics: Arc::new(Vec::new()),
-                reads: archived_growth_fixture_reader(&source),
+                reads: Arc::new(Reads::empty()),
             }),
             source,
         )

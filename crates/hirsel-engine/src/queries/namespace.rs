@@ -884,13 +884,6 @@ impl QueryEngine {
             std::iter::once(self.environment_value().0.as_slice())
                 .chain(base.iter().map(|hash| hash.0.as_slice())),
         );
-        let environment = ContentHash::of_parts(
-            "hirsel.persisted-products.v1",
-            [
-                self.environment_value().0.as_slice(),
-                self.store_identity.0.as_slice(),
-            ],
-        );
         for path in definitions {
             let facts = self
                 .source_facts(path)
@@ -928,7 +921,7 @@ impl QueryEngine {
                                 self.front_declaration_store_key(path, kind)
                             } else {
                                 Ok(EntryKey::new(
-                                    environment,
+                                    self.products_environment(&path.0.package),
                                     path,
                                     implementation,
                                     kind,

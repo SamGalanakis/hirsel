@@ -955,7 +955,7 @@ impl BodyTask {
             &mut facts.checked,
             &mut memo_rows,
         )?;
-        let action = hirsel_engine_store::query_action(&input.key, input.key.1, &reads);
+        let action = hirsel_engine_store::query_action(&input.key, input.key.1);
         let outcome = queries
             .publish_compact_facts(self.input, reference, action, reads, facts, memo_rows)?;
         let publication = match &outcome.state {

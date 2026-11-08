@@ -1,7 +1,7 @@
 //! Source GEN-5 over every required checked root. Native reachability never
 //! selects this root set. Pending reads retain the frontier and compact facts;
 //! factories and output inspection execute no compiler phase.
-use super::reader_receipts::{ArchivedReader, ReadUnion};
+use super::read_union::ReadUnion;
 use super::*;
 use crate::products::ProductSource;
 use crate::products::{
@@ -112,7 +112,7 @@ impl FrontGrowthQueries {
         Some(FrontGrowthOutput {
             facets: data.facets.clone(),
             diagnostics: data.diagnostics.clone(),
-            reads: data.reads.load()?,
+            reads: data.reads.clone(),
             _product: product.clone(),
         })
     }
@@ -207,8 +207,8 @@ impl QueryFactory for Factory {
             .map_or(queries.roots.len(), |(m, i)| m.components[*i].inputs.len());
         let bytes = (count as u64)
             .checked_mul(
-                (std::mem::size_of::<SourceGrowthFact>()
-                    + std::mem::size_of::<Arc<ArchivedReader>>()) as u64,
+                (std::mem::size_of::<SourceGrowthFact>() + std::mem::size_of::<Arc<Reads>>())
+                    as u64,
             )
             .ok_or(queries.errors.resource)?;
         let admission = queries
@@ -269,7 +269,7 @@ struct FactTask {
     waiting: Option<QueryId>,
     cursor: usize,
     facts: Vec<SourceGrowthFact>,
-    reads: Vec<Arc<ArchivedReader>>,
+    reads: Vec<Arc<Reads>>,
     terminal: Option<Result<ProductRef, Reference>>,
     admission: hirsel_engine_admission::MemoryReservation,
 }
@@ -296,18 +296,7 @@ impl FactTask {
                 Poll::Ready(selected) => selected,
             };
             if let Some(checked) = self.front.checked(selected.clone()) {
-                let source = self.queries.publication_source()?;
-                let reader = self
-                    .front
-                    .reader_receipt(
-                        input,
-                        &checked.reads,
-                        &source.store,
-                        self.queries.weight.scratch,
-                    )
-                    .ok_or(self.queries.errors.resource)?;
-                self.reads
-                    .push(ArchivedReader::from_receipt(source, reader));
+                self.reads.push(checked.reads.clone());
                 let observed = selected
                     .as_ref()
                     .map(|p| p.action.0)
@@ -331,10 +320,7 @@ impl FactTask {
             } else if let Some(facts) = self.front.check_facts(selected.clone())
                 && matches!(facts.result, Err(QueryError::Diagnostics(_)))
             {
-                self.reads.push(
-                    ArchivedReader::capture(self.queries.publication_source()?, &facts.reads)
-                        .ok_or(self.queries.errors.resource)?,
-                );
+                self.reads.push(facts.reads.clone());
             } else {
                 return Poll::Ready(Err(selected.err().unwrap_or(self.queries.errors.protocol)));
             }
@@ -362,11 +348,8 @@ impl FactTask {
         let queries = self.queries.clone();
         self.facts
             .sort_by_key(|fact| (fact.owner, fact.definition.0.0));
-        // Reduce one encoded root receipt at a time in this active scratch
-        // frame. Suspensions and completed roots retain references only.
         let reads = Arc::new(
-            ReadUnion::reduce(&self.reads, queries.weight.scratch)
-                .ok_or(queries.errors.resource)?
+            ReadUnion::of(self.reads.iter().map(|reads| &**reads))
                 .finish()
                 .map_err(|_| queries.errors.protocol)?,
         );
@@ -419,11 +402,8 @@ impl FactTask {
             // Rejected roots without a checked summary still contribute every
             // failed lookup and signature observation to this computation.
             let action = hirsel_artifact_store::Action(ContentHash::of_parts(
-                "hirsel.source-growth.membership.query-action.v1",
-                [
-                    inputs.0.0.as_slice(),
-                    hirsel_engine_store::payload_reads_hash(&reads).0.as_slice(),
-                ],
+                "hirsel.source-growth.membership.query-action.v2",
+                [inputs.0.0.as_slice()],
             ));
             let cached = queries
                 .store
@@ -584,7 +564,7 @@ struct Task {
     cursor: usize,
     table_keys: BTreeMap<DefPath, Arc<crate::table_keys::TableKeyUse>>,
     required: BTreeMap<DefPath, BTreeSet<usize>>,
-    reads: Vec<Arc<ArchivedReader>>,
+    reads: Vec<Arc<Reads>>,
     waiting: Option<QueryId>,
     terminal: Option<Result<ProductRef, Reference>>,
 }
@@ -701,20 +681,11 @@ impl Task {
                     checked.summary.summary.owner.path().clone(),
                     checked.table_keys,
                 );
-                let source = queries.publication_source()?;
-                let reader = self
-                    .front
-                    .reader_receipt(id, &checked.reads, &source.store, queries.weight.scratch)
-                    .ok_or(queries.errors.resource)?;
-                self.reads
-                    .push(ArchivedReader::from_receipt(source, reader));
+                self.reads.push(checked.reads.clone());
             } else if let Some(facts) = self.front.check_facts(selected.clone())
                 && matches!(facts.result, Err(QueryError::Diagnostics(_)))
             {
-                self.reads.push(
-                    ArchivedReader::capture(queries.publication_source()?, &facts.reads)
-                        .ok_or(queries.errors.resource)?,
-                );
+                self.reads.push(facts.reads.clone());
             } else {
                 return Poll::Ready(Err(selected.err().unwrap_or(queries.errors.protocol)));
             }
@@ -738,14 +709,8 @@ impl Task {
             std::mem::take(&mut self.required),
             &mut |definition| provider.signature(definition).map(Some),
         );
-        let mut union = ReadUnion::reduce(&self.reads, queries.weight.scratch)
-            .ok_or(queries.errors.resource)?;
-        union
-            .merge(
-                &table_reads.finish().map_err(|_| queries.errors.protocol)?,
-                queries.weight.scratch,
-            )
-            .ok_or(queries.errors.resource)?;
+        let mut union = ReadUnion::of(self.reads.iter().map(|reads| &**reads));
+        union.merge(&table_reads.finish().map_err(|_| queries.errors.protocol)?);
         let reads = union.finish().map_err(|_| queries.errors.protocol)?;
         self.reads.clear();
         self.reads.shrink_to_fit();
@@ -804,13 +769,8 @@ impl Task {
             .collect();
         let observed = crate::source_components::hash_source_value(
             &queries.items,
-            "hirsel.front.source-growth.value.v1",
-            &(
-                facets.membership.output,
-                &outputs,
-                &diagnostics,
-                hirsel_engine_store::payload_reads_hash(&reads),
-            ),
+            "hirsel.front.source-growth.value.v2",
+            &(facets.membership.output, &outputs, &diagnostics),
         )
         .ok_or(queries.errors.resource)?;
         let action = hirsel_artifact_store::Action(ContentHash::of_parts(
@@ -822,17 +782,11 @@ impl Task {
             .as_ref()
             .ok_or(queries.errors.protocol)?
             .reads;
-        let membership_reads = membership_reader.load().ok_or(queries.errors.resource)?;
         let reads =
-            if reads == *membership_reads && reads.observed().eq(membership_reads.observed()) {
+            if reads == **membership_reader && reads.observed().eq(membership_reader.observed()) {
                 membership_reader.clone()
             } else {
-                ArchivedReader::capture_owned(
-                    queries.publication_source()?,
-                    &reads,
-                    &queries.output_pool,
-                )
-                .ok_or(queries.errors.resource)?
+                Arc::new(reads)
             };
         let data = Arc::new(crate::source_components::SourceGrowthData {
             facets: Arc::new(facets),

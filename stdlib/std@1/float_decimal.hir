@@ -3353,17 +3353,43 @@ pub fn parse_bytes(bytes: Bytes, fraction: u64, bias: i32) -> Result[
   u64,
   scalar.ParseError
 ] uses {} {
+  let mut pos: u64 = 0
+  parse_decimal(bytes, mut pos, fraction, bias, false)
+}
+
+// serde_json 1.0.154 src/de.rs:462-623 accumulates the significand while
+// consuming grammar. Keep Hirsel's exact rounding and long-mantissa fallback;
+// the JSON caller needs neither a second lexical scan nor a token subview.
+@noalloc
+pub fn parse_json(bytes: Bytes, mut pos: u64, fraction: u64, bias: i32) -> Result[
+  u64,
+  scalar.ParseError
+] uses {} {
+  parse_decimal(bytes, mut pos, fraction, bias, true)
+}
+
+@noalloc
+fn parse_decimal(
+  bytes: Bytes,
+  mut pos: u64,
+  fraction: u64,
+  bias: i32,
+  json: bool
+) -> Result[u64, scalar.ParseError] uses {} {
   let length = core@1/bytes.len(bytes)
-  if length == 0 {
+  if pos >= length {
     return Error(Invalid)
   }
-  let negative = bytes[0] == 45
-  let mut at: u64 = if negative {
-    1
-  } else {
-    0
+  let negative = bytes[pos] == 45
+  let mut at = pos
+  if negative {
+    at += 1
   }
   let start = at
+  if json && at < length && bytes[at] == 48 && length - at > 1 && bytes[at + 1] >= 48 && bytes[at + 1] <= 57 {
+    pos = at + 1
+    return Error(Invalid)
+  }
   // Rust core f6c1107f dec2flt/parse.rs:55-76 (MIT): accumulate exactly
   // through the nineteenth significant digit, then only validate/count digits.
   // Separate integer/fraction phases retain Hirsel's required integer and
@@ -3401,6 +3427,7 @@ pub fn parse_bytes(bytes: Bytes, fraction: u64, bias: i32) -> Result[
   let integer_digits = at - start
   let mut significant = at - integer_significant_start
   if integer_digits == 0 {
+    pos = at
     return Error(Invalid)
   }
   let mut fractional_digits: u64 = 0
@@ -3436,6 +3463,7 @@ pub fn parse_bytes(bytes: Bytes, fraction: u64, bias: i32) -> Result[
     fractional_digits = at - fractional_start
     significant += at - fractional_significant_start
     if fractional_digits == 0 {
+      pos = at
       return Error(Invalid)
     }
   }
@@ -3457,15 +3485,17 @@ pub fn parse_bytes(bytes: Bytes, fraction: u64, bias: i32) -> Result[
       at += 1
     }
     if at == exponent_start {
+      pos = at
       return Error(Invalid)
     }
     if exponent_negative {
       decimal_exponent = -decimal_exponent
     }
   }
-  if at != length {
+  if !json && at != length {
     return Error(Invalid)
   }
+  pos = at
   let sign: u64 = if negative {
     1u64 << fraction + if bias == 127 {
       8

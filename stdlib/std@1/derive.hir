@@ -1531,8 +1531,8 @@ pub fn write_json_f64(value: f64, mut out: List[u8]) -> () uses {} {
   }
 }
 
-// serde_json src/de.rs:462-576 converts the token without an owned String.
-// Reuse Hirsel's exact decimal parser and keep its public String wrapper.
+// serde_json src/de.rs:462-623 consumes grammar and significand together.
+// Keep Hirsel's exact rounding, error strings and nonfinite string policy.
 pub fn read_json_f64(mut cursor: json.Reader) -> Result[f64, String] uses {} {
   let next = json.peek(mut cursor)
   if next == 34 {
@@ -1545,11 +1545,11 @@ pub fn read_json_f64(mut cursor: json.Reader) -> Result[f64, String] uses {} {
   if next != 45 && !ascii.is_digit(next) {
     return Error("expected a JSON number")
   }
-  let raw = match json.read_number(mut cursor) {
-    Ok(raw) => raw,
-    Error(_) => return Error("not JSON"),
+  let bits = match internal.float_decimal.parse_json(cursor.data, mut cursor.pos, 52, 1023) {
+    Ok(bits) => bits,
+    Error(Invalid) => return Error("not JSON"),
+    Error(_) => return Error("expected a JSON number fitting f64"),
   }
-  let bits = parsed(internal.float_decimal.parse_bytes(raw, 52, 1023), "f64")?
   let word: u64 = core@1/int.narrow(bits)
   Ok(core@1/f64.from_bits(word))
 }
@@ -1563,8 +1563,8 @@ pub fn write_json_f32(value: f32, mut out: List[u8]) -> () uses {} {
   }
 }
 
-// serde_json src/de.rs:462-576 converts the token without an owned String.
-// Reuse Hirsel's exact decimal parser and keep its public String wrapper.
+// serde_json src/de.rs:462-623 consumes grammar and significand together.
+// Keep Hirsel's exact rounding, error strings and nonfinite string policy.
 pub fn read_json_f32(mut cursor: json.Reader) -> Result[f32, String] uses {} {
   let next = json.peek(mut cursor)
   if next == 34 {
@@ -1577,11 +1577,11 @@ pub fn read_json_f32(mut cursor: json.Reader) -> Result[f32, String] uses {} {
   if next != 45 && !ascii.is_digit(next) {
     return Error("expected a JSON number")
   }
-  let raw = match json.read_number(mut cursor) {
-    Ok(raw) => raw,
-    Error(_) => return Error("not JSON"),
+  let bits = match internal.float_decimal.parse_json(cursor.data, mut cursor.pos, 23, 127) {
+    Ok(bits) => bits,
+    Error(Invalid) => return Error("not JSON"),
+    Error(_) => return Error("expected a JSON number fitting f32"),
   }
-  let bits = parsed(internal.float_decimal.parse_bytes(raw, 23, 127), "f32")?
   let word: u32 = core@1/int.narrow(bits)
   Ok(core@1/f32.from_bits(word))
 }

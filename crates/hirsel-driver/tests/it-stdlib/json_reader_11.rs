@@ -75,6 +75,41 @@ pub fn main(t: Test) -> Result[(), ()] {
     test.equal(t, owned_value, expected)
     test.equal(t, json.finish_reader(mut owned), Ok(()))
   }
+  // Hand-derived IEEE encodings guard token boundaries, negative zero and
+  // nearest-even rounding when numeric grammar and conversion share a scan.
+  let numbers: List[(Bytes, u64, u32)] = [
+    (b"0]", 0u64, 0u32),
+    (b"-0,", 0x8000000000000000u64, 0x80000000u32),
+    (b"0.125}", 0x3fc0000000000000u64, 0x3e000000u32),
+    (b" 1.5e+2,", 0x4062c00000000000u64, 0x43160000u32),
+    (b"-2.5e-1]", 0xbfd0000000000000u64, 0xbe800000u32),
+    (b"0.1,", 0x3fb999999999999au64, 0x3dcccccdu32),
+    (b"9007199254740993]", 0x4340000000000000u64, 0x5a000000u32),
+    (b"2.4703282292062327e-324]", 0u64, 0u32),
+    (b"1x", 0x3ff0000000000000u64, 0x3f800000u32)
+  ]
+  for (data, wide, narrow) in numbers {
+    let mut cursor = json.reader(data)
+    let Ok(value) = derive.read_json_f64(mut cursor) else { return Error(()) }
+    test.equal(t, core@1/f64.bits(value), wide)
+    test.equal(t, cursor.pos, bytes.len(data) - 1)
+    let mut other = json.reader(data)
+    let Ok(small) = derive.read_json_f32(mut other) else { return Error(()) }
+    test.equal(t, core@1/f32.bits(small), narrow)
+    test.equal(t, other.pos, bytes.len(data) - 1)
+  }
+  let malformed_numbers: List[(Bytes, u64)] = [
+    (b"01,", 1), (b"-01]", 2), (b"00.1]", 1),
+    (b"1.,", 2), (b"1e+]", 3), (b"1e-]", 3), (b"-]", 1)
+  ]
+  for (data, at) in malformed_numbers {
+    let mut cursor = json.reader(data)
+    test.equal(t, derive.read_json_f64(mut cursor), Error("not JSON"))
+    test.equal(t, cursor.pos, at)
+    let mut other = json.reader(data)
+    test.equal(t, derive.read_json_f32(mut other), Error("not JSON"))
+    test.equal(t, other.pos, at)
+  }
   let Ok(p) = point_from_json_bytes(string.as_bytes("{\"x\":0.125,\"y\":0.5,\"z\":0.25,\"name\":\"é\",\"opts\":{\"1\":[1,true]}}")) else { return Error(()) }
   test.equal(t, p.x, 0.125)
   test.equal(t, p.y, 0.5)

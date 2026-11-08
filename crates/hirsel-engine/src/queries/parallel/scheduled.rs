@@ -175,6 +175,10 @@ struct FrontSourceBacking {
     products: SharedProductSource,
     admitted: u64,
     allowance: Arc<hirsel_engine_admission::MemoryReservationPool>,
+    /// The request's footprint: every live outcome and sibling view is charged
+    /// here when admitted and released at its last use, bounded only by the
+    /// process cap.
+    request: Arc<hirsel_engine_admission::ProcessBudget>,
     _inputs: hirsel_engine_admission::MemoryReservation,
     _sources: SourceMap,
 }
@@ -188,13 +192,11 @@ impl header_products::HeaderAllowance for FrontSourceBacking {
 }
 struct LiveSourceBacking {
     _source: Arc<FrontSourceBacking>,
-    retention: Arc<Mutex<u64>>,
     debit: Mutex<FrontDebit>,
 }
 struct FrontDebit {
     charge: u64,
     allowance: hirsel_engine_admission::MemoryReservation,
-    observation: Option<Arc<LiveSourceBacking>>,
 }
 impl LiveSourceBacking {
     fn add(&self, allowance: hirsel_engine_admission::MemoryReservation) -> Option<()> {
@@ -231,38 +233,8 @@ impl LiveSourceBacking {
             return false;
         };
         debit.charge = required;
-        *self.retention.lock().unwrap_or_else(|e| e.into_inner()) += bytes;
         drop(allowance);
         true
-    }
-    fn split(&self, bytes: u64) -> Option<Arc<Self>> {
-        let mut debit = self.debit.lock().unwrap_or_else(|e| e.into_inner());
-        let next = debit.charge.checked_sub(bytes)?;
-        let allowance = debit.allowance.split(bytes)?;
-        debit.charge = next;
-        let observation = Arc::new(Self {
-            _source: self._source.clone(),
-            retention: self.retention.clone(),
-            debit: Mutex::new(FrontDebit {
-                charge: bytes,
-                allowance,
-                observation: debit.observation.take(),
-            }),
-        });
-        // The original value also keeps the transferred read charge until its
-        // last alias drops. The child owns no reference back to this lease.
-        debit.observation = Some(observation.clone());
-        Some(observation)
-    }
-}
-impl Drop for LiveSourceBacking {
-    fn drop(&mut self) {
-        let mut retention = self.retention.lock().unwrap_or_else(|e| e.into_inner());
-        *retention += self
-            .debit
-            .get_mut()
-            .unwrap_or_else(|e| e.into_inner())
-            .charge;
     }
 }
 #[derive(Clone)]
@@ -889,7 +861,7 @@ impl FrontBodyQueries {
         );
         weight.bytes()
     }
-    fn admit_input_slot(&self, cx: &mut dyn QueryContext, definition: DefId) -> Option<()> {
+    fn admit_input_slot(&self, definition: DefId) -> Option<()> {
         let key = self.inputs.key_for(definition)?;
         loop {
             let mut ledger = self.input_slots.lock().unwrap_or_else(|e| e.into_inner());
@@ -909,7 +881,7 @@ impl FrontBodyQueries {
             drop(slots);
             drop(ledger);
             let admitted = if bytes != 0 {
-                Some(self.owner_grant(cx, bytes, "Front demand slots")?)
+                Some(self.owner_grant(bytes, "Front demand slots")?)
             } else {
                 None
             };
@@ -1011,7 +983,6 @@ impl FrontBodyQueries {
     }
     fn retain(
         &self,
-        cx: &mut dyn QueryContext,
         outcome: &ModeResult,
         checked: &CheckedProduct,
         table_keys: Option<&Arc<crate::table_keys::TableKeyUse>>,
@@ -1035,7 +1006,7 @@ impl FrontBodyQueries {
                 0
             })?
             .checked_add(dead_arms.map_or(0, LintFacts::capture_bytes))?;
-        let (allowance, backing) = self.owner_grant(cx, charge, "compact facts")?;
+        let (allowance, backing) = self.owner_grant(charge, "compact facts")?;
         // The complete payload and its lease are one owner. No later failure
         // can consume a debit without retaining the corresponding reservation.
         backing.add(allowance)?;
@@ -1106,7 +1077,6 @@ impl FrontBodyQueries {
     }
     fn owner_grant(
         &self,
-        cx: &mut dyn QueryContext,
         value_bytes: u64,
         owner: &'static str,
     ) -> Option<(
@@ -1117,34 +1087,32 @@ impl FrontBodyQueries {
             LiveSourceBacking,
         >::uninit());
         let charge = value_bytes.checked_add(backing_bytes)?;
-        if self.make_room(cx, charge).is_none() {
-            let available = (*self.retention.lock().unwrap_or_else(|e| e.into_inner()))
-                .min(self._allowance.allowance.available_bytes());
-            self.record_refusal(owner, charge, available);
-            return None;
-        }
-        let mut remaining = self.retention.lock().unwrap_or_else(|e| e.into_inner());
-        let next = remaining.checked_sub(charge)?;
-        let mut allowance = self._allowance.allowance.take(charge)?;
+        let request = &self._allowance.request;
+        let mut allowance = match request.reserve(charge) {
+            Ok(allowance) => allowance,
+            Err(_) => {
+                self.record_refusal(
+                    owner,
+                    charge,
+                    request.limit().saturating_sub(request.reserved()),
+                );
+                return None;
+            }
+        };
         let backing_allowance = allowance.split(backing_bytes)?;
-        *remaining = next;
-        drop(remaining);
         Some((
             allowance,
             Arc::new(LiveSourceBacking {
                 _source: self._allowance.clone(),
-                retention: self.retention.clone(),
                 debit: Mutex::new(FrontDebit {
                     charge,
                     allowance: backing_allowance,
-                    observation: None,
                 }),
             }),
         ))
     }
     fn admit_summary(
         &self,
-        cx: &mut dyn QueryContext,
         address: hirsel_artifact_store::Address,
         action: hirsel_artifact_store::Action,
         summary: Arc<PublishedSummary>,
@@ -1155,7 +1123,6 @@ impl FrontBodyQueries {
             Arc<LiveSourceBacking>,
         )>::uninit());
         let (mut allowance, backing) = self.owner_grant(
-            cx,
             LiveSummaryProduct::shared_owner_bytes().checked_add(tuple_bytes)?,
             "Summary publication",
         )?;
@@ -1184,7 +1151,6 @@ impl FrontBodyQueries {
     ) -> Option<FrontOutcome> {
         self.pool_completion_reads(cx, &mut outcome, &mut checked, &mut memos)?;
         let backing = self.retain(
-            cx,
             &outcome,
             &checked,
             table_keys.as_ref(),
@@ -1206,7 +1172,6 @@ impl FrontBodyQueries {
             Err(error) => Some(FrontOutcome::failed(reference?, error, facts)),
             Ok(output) => {
                 let publication = self.admit_summary(
-                    cx,
                     hirsel_artifact_store::Address(key),
                     action,
                     outcome.summary?,
@@ -1224,14 +1189,12 @@ impl FrontBodyQueries {
     }
     fn admit_body(
         &self,
-        cx: &mut dyn QueryContext,
         address: hirsel_artifact_store::Address,
         action: hirsel_artifact_store::Action,
         outcome: ModeResult,
         summary: LiveSummaryProduct,
     ) -> Option<ProductRef> {
         let (mut allowance, backing) = self.owner_grant(
-            cx,
             LiveAnalyzedProduct::shared_required_bytes(&outcome)?,
             "analyzed body",
         )?;
@@ -2124,7 +2087,7 @@ impl QueryTask for BodyTask {
         }
         let definition = self.queries.inputs[&self.input].definition;
         if !self.slot_admitted {
-            if self.queries.admit_input_slot(cx, definition).is_none() {
+            if self.queries.admit_input_slot(definition).is_none() {
                 return finish(Err(self.queries.resource_refusal()));
             }
             self.slot_admitted = true;
@@ -2342,7 +2305,6 @@ impl BodyTask {
     }
     fn publish_body(
         &self,
-        cx: &mut dyn QueryContext,
         mut outcome: ModeResult,
         bytes: Option<&[u8]>,
     ) -> Result<ProductRef, Reference> {
@@ -2409,7 +2371,7 @@ impl BodyTask {
         }
         let action = hirsel_engine_store::query_action(&input.key, input.key.1, &reads);
         let product = queries
-            .admit_body(cx, self.query.address, action, outcome, summary)
+            .admit_body(self.query.address, action, outcome, summary)
             .ok_or_else(|| queries.resource_refusal())?;
         let body = product
             .live_value::<crate::products::LiveAnalyzedProduct>()
@@ -2428,7 +2390,7 @@ impl BodyTask {
                 let changed = *archive != reference;
                 *archive = reference;
                 *owner = Some(body.downgrade());
-                if !queries.store.persistence().retains() {
+                if !queries.store.persistence().publishes() {
                     current.live_body = Some(body.clone());
                 }
                 if changed {
@@ -2486,7 +2448,7 @@ impl BodyTask {
             reads,
             signature.as_deref(),
         )?;
-        Some(self.publish_body(cx, restored.outcome, None))
+        Some(self.publish_body(restored.outcome, None))
     }
 
     fn load(&self, cx: &mut dyn QueryContext) -> Option<Result<ProductRef, Reference>> {
@@ -2772,7 +2734,7 @@ impl BodyTask {
                 .copied(),
             environment: queries.environment,
         };
-        // Only a retaining store persists the encoded body record.
+        // Only a publishing store persists the encoded body record.
         let mut completed = CompactCompleted::capture(
             done,
             &worker,
@@ -2781,7 +2743,7 @@ impl BodyTask {
             queries
                 .store
                 .persistence()
-                .retains()
+                .publishes()
                 .then_some(&*queries.records),
         );
         // A generated private header is provisional until its accepted body
@@ -2841,7 +2803,7 @@ impl BodyTask {
         }
         if self.materialize {
             return self
-                .publish_body(cx, outcome, bytes.as_deref())
+                .publish_body(outcome, bytes.as_deref())
                 .map_err(Into::into);
         }
         if let Some((reads, expected)) = expected {
@@ -2935,7 +2897,7 @@ impl BodyTask {
         };
         drop(bytes);
         let live_body =
-            (!failed && !queries.store.persistence().retains()).then(|| outcome.clone());
+            (!failed && !queries.store.persistence().publishes()).then(|| outcome.clone());
         let mut cached = queries
             .publish_facts(
                 cx, self.input, record, action, outcome, checked, dead_arms, table_keys, memo_rows,
@@ -2947,16 +2909,7 @@ impl BodyTask {
                 publication, body, ..
             } = &mut cached.state
             && let Some(summary) = publication.live_value::<crate::products::LiveSummaryProduct>()
-        {
-            let charge = LiveAnalyzedProduct::shared_required_bytes(&outcome).and_then(|bytes| {
-                bytes.checked_add(hirsel_engine_admission::retained_arc_bytes(
-                    &std::mem::MaybeUninit::<LiveSourceBacking>::uninit(),
-                ))
-            });
-            if charge.is_some_and(|bytes| {
-                bytes <= *queries.retention.lock().unwrap_or_else(|e| e.into_inner())
-            }) && let Some(product) = queries.admit_body(
-                cx,
+            && let Some(product) = queries.admit_body(
                 queries
                     .body_query(input.definition.path())
                     .ok_or_else(|| queries.protocol_refusal())?
@@ -2964,12 +2917,11 @@ impl BodyTask {
                 action,
                 outcome,
                 summary.clone(),
-            ) && let Some(analyzed) =
-                product.live_value::<crate::products::LiveAnalyzedProduct>()
-            {
-                *body = Some(analyzed.downgrade());
-                cached.live_body = Some(analyzed.clone());
-            }
+            )
+            && let Some(analyzed) = product.live_value::<crate::products::LiveAnalyzedProduct>()
+        {
+            *body = Some(analyzed.downgrade());
+            cached.live_body = Some(analyzed.clone());
         }
         let terminal = match &cached.state {
             FrontState::Failed { record, .. } => Err(*record),
@@ -3378,9 +3330,13 @@ impl QueryEngine {
             &mut inputs_allowance,
         )
         .ok_or_else(|| refusal("shared product admission"))?;
+        let request = allowance
+            .budget()
+            .ok_or_else(|| refusal("request footprint"))?;
         let backing = Arc::new(FrontSourceBacking {
             products,
             admitted,
+            request,
             allowance,
             _inputs: inputs_allowance,
             _sources: self.sources.clone(),
@@ -3388,7 +3344,6 @@ impl QueryEngine {
         let sibling_sources = Arc::new(SiblingSources {
             files: siblings,
             backing: backing.clone(),
-            retention: retention.clone(),
             namespace: namespace.clone(),
         });
         let header_allowance = snapshot

@@ -130,6 +130,15 @@ impl MemoryReservationPool {
             .as_ref()
             .map_or(0, MemoryReservation::bytes)
     }
+    /// The process budget this partition was charged to.
+    pub fn budget(&self) -> Option<Arc<ProcessBudget>> {
+        self.inner
+            .available
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .map(|reservation| reservation.budget.clone())
+    }
     pub fn take(&self, bytes: u64) -> Option<MemoryReservation> {
         let mut parent = self
             .inner

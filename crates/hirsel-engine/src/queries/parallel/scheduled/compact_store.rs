@@ -180,7 +180,7 @@ impl FrontBodyQueries {
     /// Persist a completed record at the store boundary. A request-local
     /// store keeps the live outcome itself; nothing reads an encoded copy.
     pub(super) fn store_compact(&self, key: Key, outcome: &mut FrontOutcome, scratch: u64) {
-        if !self.store.persistence().retains() {
+        if !self.store.persistence().publishes() {
             return;
         }
         self.store

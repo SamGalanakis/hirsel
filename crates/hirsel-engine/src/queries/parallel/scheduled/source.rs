@@ -11,7 +11,6 @@ pub(super) struct SiblingSources {
     pub files: BTreeMap<FileId, SiblingFile>,
     pub namespace: Arc<NamespaceCapture>,
     pub backing: Arc<FrontSourceBacking>,
-    pub retention: Arc<Mutex<u64>>,
 }
 impl crate::snapshot::DeclarationSiblings for SiblingSources {
     fn siblings(&self, syntax: &ItemSyntax) -> Result<SiblingView, QueryError> {
@@ -104,24 +103,16 @@ impl SiblingSources {
                 ))
             })
             .ok_or("sibling memory size overflow")?;
-        let mut remaining = self.retention.lock().unwrap_or_else(|e| e.into_inner());
-        let next = remaining
-            .checked_sub(bytes)
-            .ok_or("sibling memory allowance exhausted")?;
         let allowance = self
             .backing
-            .allowance
-            .take(bytes)
-            .ok_or("sibling memory allowance exhausted")?;
-        *remaining = next;
-        drop(remaining);
+            .request
+            .reserve(bytes)
+            .map_err(|_| "sibling memory allowance exhausted")?;
         let backing = Arc::new(LiveSourceBacking {
             _source: self.backing.clone(),
-            retention: self.retention.clone(),
             debit: Mutex::new(FrontDebit {
                 charge: bytes,
                 allowance,
-                observation: None,
             }),
         });
         Ok(SiblingView::retained(
@@ -288,15 +279,17 @@ mod tests {
         let namespace = engine
             .capture_namespace(&definitions, &[], 8 << 20)
             .unwrap();
-        let budget = hirsel_engine_admission::ProcessBudget::new(8 << 20);
+        // The partition holds the inputs; sibling views are charged to the
+        // rest of the request's process budget.
+        let budget = hirsel_engine_admission::ProcessBudget::new(16 << 20);
         let mut allowance = budget.reserve(8 << 20).unwrap();
         let products =
             ProductSource::admit_shared((*owners).clone(), records.clone(), &mut allowance)
                 .unwrap();
-        let retention = Arc::new(Mutex::new(allowance.bytes()));
         let backing = Arc::new(FrontSourceBacking {
             products,
             admitted: allowance.bytes(),
+            request: budget.clone(),
             _inputs: allowance.split(0).unwrap(),
             allowance: Arc::new(
                 hirsel_engine_admission::MemoryReservationPool::new(allowance)
@@ -310,7 +303,6 @@ mod tests {
                 files: BTreeMap::from([(file, SiblingFile::default())]),
                 namespace,
                 backing,
-                retention,
             },
             written,
         )
@@ -320,8 +312,6 @@ mod tests {
         for jobs in [1, 8] {
             let (sources, written) = fixture();
             let barrier = std::sync::Barrier::new(jobs);
-            let retention = sources.retention.clone();
-            let before = *retention.lock().unwrap();
             let held = std::thread::scope(|scope| {
                 let handles: Vec<_> = (0..jobs)
                     .map(|_| {
@@ -348,15 +338,8 @@ mod tests {
                 assert!(results.iter().all(|items| items.same_items(&results[0])));
                 results
             });
-            let charged = before - *retention.lock().unwrap();
             drop(sources);
-            assert_eq!(
-                *retention.lock().unwrap(),
-                before - charged,
-                "detached sibling readers retain their admission"
-            );
             drop(held);
-            assert_eq!(*retention.lock().unwrap(), before);
         }
     }
     #[test]
@@ -418,65 +401,5 @@ mod tests {
             sources.siblings(&changed),
             Err(QueryError::Operational(failure)) if failure.message.contains("captured sibling binding changed")
         ));
-    }
-    #[test]
-    fn live_siblings_retry_operational_admission_refusals() {
-        let (sources, written) = fixture();
-        let available = *sources.retention.lock().unwrap();
-        *sources.retention.lock().unwrap() = 0;
-        assert!(matches!(
-            sources.siblings(&written[0]),
-            Err(QueryError::Operational(_))
-        ));
-        *sources.retention.lock().unwrap() = available;
-        let items = sources
-            .siblings(&written[0])
-            .expect("admission refusal is retryable");
-        assert_eq!(items.len(), written.len());
-    }
-    #[test]
-    fn live_siblings_charge_the_partition_and_release_it_with_the_request() {
-        let (sources, written) = fixture();
-        let retention = sources.retention.clone();
-        let backing = sources.backing.clone();
-        let before = *retention.lock().unwrap();
-        let available = backing.allowance.available_bytes();
-        let items = sources.siblings(&written[0]).unwrap();
-        let charged = before - *retention.lock().unwrap();
-        let payload: u64 = written
-            .iter()
-            .map(|syntax| hirsel_query_products::retained::retained_syntax_bytes(syntax))
-            .sum();
-        let array = hirsel_engine_admission::retained_arc_bytes(items.as_ref());
-        let owner = hirsel_engine_admission::retained_arc_bytes(&std::mem::MaybeUninit::<
-            LiveSourceBacking,
-        >::uninit());
-        assert!(
-            charged >= payload + array + owner,
-            "every retained allocation is charged: {charged} < {}",
-            payload + array + owner
-        );
-        assert_eq!(backing.allowance.available_bytes(), available - charged);
-        drop(items);
-        assert_eq!(*retention.lock().unwrap(), before - charged);
-        drop(sources);
-        assert_eq!(*retention.lock().unwrap(), before);
-        assert_eq!(backing.allowance.available_bytes(), available);
-
-        let (sources, written) = fixture();
-        let available = *sources.retention.lock().unwrap();
-        *sources.retention.lock().unwrap() = 0;
-        for _ in 0..2 {
-            let error = sources.siblings(&written[0]).unwrap_err();
-            assert!(
-                matches!(error, QueryError::Operational(error) if error.message.contains("sibling memory allowance exhausted"))
-            );
-        }
-        assert_eq!(*sources.retention.lock().unwrap(), 0);
-        *sources.retention.lock().unwrap() = available;
-        let retried = sources
-            .siblings(&written[0])
-            .expect("admission refusal is retryable");
-        assert_eq!(retried.len(), written.len());
     }
 }

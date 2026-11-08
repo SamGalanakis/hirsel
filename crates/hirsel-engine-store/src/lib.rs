@@ -502,7 +502,8 @@ impl ProviderCapability {
     pub fn persistence(self) -> Persistence {
         match self {
             Self::Absent => Persistence::Disabled,
-            Self::ReadOnly | Self::Writable => Persistence::Cache,
+            Self::ReadOnly => Persistence::Installed,
+            Self::Writable => Persistence::Cache,
             Self::RequestLocal(policy) => policy,
         }
     }
@@ -517,6 +518,9 @@ pub enum Persistence {
     /// association is encoded or restored. A request transport still carries
     /// the request's live bytes.
     Disabled,
+    /// Installed immutable content is restored; nothing this request
+    /// publishes outlives it, so its producers keep their live values.
+    Installed,
     /// Ordinary products and query variants publish best-effort; eviction or
     /// a failed write is a later miss.
     Cache,
@@ -528,9 +532,14 @@ pub enum Persistence {
     Complete,
 }
 impl Persistence {
-    /// Whether anything this request publishes can outlive it.
+    /// Whether stored content is restored and this request's records reach
+    /// its store operation.
     pub fn retains(self) -> bool {
         self != Self::Disabled
+    }
+    /// Whether new content this request encodes can outlive it.
+    pub fn publishes(self) -> bool {
+        matches!(self, Self::Cache | Self::Complete)
     }
 }
 
@@ -548,14 +557,14 @@ impl OperationPersistence {
         }
     }
     fn persistence(&self) -> Persistence {
-        if self.base.retains() && self.complete.load(Ordering::Acquire) {
+        if self.base.publishes() && self.complete.load(Ordering::Acquire) {
             Persistence::Complete
         } else {
             self.base
         }
     }
     fn completing(&self) {
-        if self.base.retains() {
+        if self.base.publishes() {
             self.complete.store(true, Ordering::Release);
         }
     }

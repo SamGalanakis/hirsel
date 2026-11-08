@@ -1350,10 +1350,9 @@ mod frozen_task_tests {
             assert_eq!(runtime.stats().polls, 1);
             runtime.shutdown();
             drop(queries);
-            assert_eq!(
-                budget.reserved(),
-                2 << 20,
-                "held body metadata owns its snapshot reservation"
+            assert!(
+                budget.reserved() >= 2 << 20,
+                "held body metadata owns its snapshot reservation and its own charge"
             );
             drop(held);
             assert_eq!(budget.reserved(), 0);

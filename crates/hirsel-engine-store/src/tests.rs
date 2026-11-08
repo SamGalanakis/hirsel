@@ -846,7 +846,7 @@ fn disabled_writable_cache_keeps_installed_products_and_never_publishes() {
     if std::env::var_os(CHILD).is_some() {
         let store = store_by_name("none@1", None).unwrap();
         assert_eq!(store.name(), "none@1");
-        assert_eq!(store.persistence(), Persistence::Cache);
+        assert_eq!(store.persistence(), Persistence::Installed);
         assert!(store.local_product_store().is_none());
         assert_eq!(&*store.get(&query).unwrap(), b"installed index");
         assert_eq!(&*store.get_content(reference).unwrap(), b"installed bytes");

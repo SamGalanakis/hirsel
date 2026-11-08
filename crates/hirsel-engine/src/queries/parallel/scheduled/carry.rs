@@ -499,7 +499,6 @@ impl FactsRef<'_> {
 impl FrontBodyQueries {
     fn publish_compact_facts(
         &self,
-        cx: &mut dyn QueryContext,
         key: Key,
         reference: Option<Reference>,
         action: hirsel_artifact_store::Action,
@@ -526,7 +525,7 @@ impl FrontBodyQueries {
             .checked_add(
                 (memos.len() * std::mem::size_of::<(crate::memo::MemoKey, Arc<Reads>)>()) as u64,
             )?;
-        let (allowance, backing) = self.owner_grant(cx, charge, "cached compact facts")?;
+        let (allowance, backing) = self.owner_grant(charge, "cached compact facts")?;
         backing.add(allowance)?;
         let lowering = facts.lowering?;
         let diagnostics = facts.diagnostics;
@@ -542,7 +541,6 @@ impl FrontBodyQueries {
             backing,
         );
         let publication = self.admit_summary(
-            cx,
             hirsel_artifact_store::Address(key),
             action,
             summary,
@@ -958,7 +956,7 @@ impl BodyTask {
         )?;
         let action = hirsel_engine_store::query_action(&input.key, input.key.1, &reads);
         let outcome = queries
-            .publish_compact_facts(cx, self.input, reference, action, reads, facts, memo_rows)?;
+            .publish_compact_facts(self.input, reference, action, reads, facts, memo_rows)?;
         let publication = match &outcome.state {
             FrontState::Failed { record, .. } => return Some(Err(*record)),
             FrontState::Settled { publication, .. } => publication.clone(),

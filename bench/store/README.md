@@ -23,8 +23,8 @@ directory's absolute path:
 Run the same executable and key count for every compared revision:
 
 ```sh
-HIRSEL_JOBS=1 HIRSEL_MEMORY_LIMIT=2G tools/capped --timeout 60 \
-  prlimit --cpu=60:60 -- perf stat -e instructions:u -- \
+HIRSEL_JOBS=1 HIRSEL_MEMORY_LIMIT=2G tools/capped \
+  -- perf stat -e instructions:u -- \
   taskset -c "$BENCH_CPU" /tmp/store-measure \
   --hirsel-grants /tmp/store-grants.json compact 100
 ```

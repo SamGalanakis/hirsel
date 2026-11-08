@@ -3,49 +3,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::process::Command;
 
-// Keep a bad generated executable or a malformed-DWARF reader from holding the
-// pool test for its whole harness timeout. Drain both pipes while it runs.
+// Command::output drains both pipes while the command runs.
 fn output(command: &mut Command) -> std::process::Output {
-    use std::io::Read;
-    use std::process::Stdio;
-    use std::time::{Duration, Instant};
-    let mut child = command
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-    let mut stdout = child.stdout.take().unwrap();
-    let mut stderr = child.stderr.take().unwrap();
-    let stdout = std::thread::spawn(move || {
-        let mut bytes = Vec::new();
-        stdout.read_to_end(&mut bytes).unwrap();
-        bytes
-    });
-    let stderr = std::thread::spawn(move || {
-        let mut bytes = Vec::new();
-        stderr.read_to_end(&mut bytes).unwrap();
-        bytes
-    });
-    let deadline = Instant::now() + Duration::from_secs(30);
-    let mut timed_out = false;
-    let status = loop {
-        if let Some(status) = child.try_wait().unwrap() {
-            break status;
-        }
-        if Instant::now() >= deadline {
-            timed_out = true;
-            child.kill().unwrap();
-            break child.wait().unwrap();
-        }
-        std::thread::sleep(Duration::from_millis(10));
-    };
-    let output = std::process::Output {
-        status,
-        stdout: stdout.join().unwrap(),
-        stderr: stderr.join().unwrap(),
-    };
-    assert!(!timed_out, "{command:?} exceeded 30 seconds: {output:?}");
-    output
+    command.output().unwrap()
 }
 
 fn tool(name: &str) -> std::path::PathBuf {

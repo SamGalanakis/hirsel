@@ -64,7 +64,7 @@ def main():
                                           archive / f'{round_number}-{workload}-{name}', round_number)
                     result.update(name=name, counts=result['perf'])
                 else:
-                    result = sample(micros[workload][name], 31, 300)
+                    result = sample(micros[workload][name], 31)
                     result.update(name=name, round=round_number)
                 rows[workload].append(result)
                 args.output.write_text(json.dumps(document, indent=2) + '\n')

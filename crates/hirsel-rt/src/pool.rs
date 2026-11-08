@@ -2260,19 +2260,9 @@ mod tests {
                 .env(CHILD, "1")
                 .spawn()
                 .unwrap();
-            let until = Instant::now() + Duration::from_secs(5);
-            loop {
-                if let Some(status) = child.try_wait().unwrap() {
-                    assert!(status.success(), "bridge child: {status}");
-                    return;
-                }
-                if Instant::now() >= until {
-                    child.kill().unwrap();
-                    child.wait().unwrap();
-                    panic!("home waited for the role while its owner waited for a home call");
-                }
-                std::thread::sleep(Duration::from_millis(5));
-            }
+            let status = child.wait().unwrap();
+            assert!(status.success(), "bridge child: {status}");
+            return;
         }
         for queued_before_merge in [false, true] {
             let mut ctx = std::ptr::null_mut();

@@ -20,7 +20,7 @@ def main(args):
     for backend in ['llvm','cranelift']:
         binary=output/backend
         build=[str(args.hirsel),'build',str(root/'hirsel.json'),'--backend',backend,'-o',str(binary)]
-        done=subprocess.run(build,env=env,capture_output=True,timeout=300)
+        done=subprocess.run(build,env=env,capture_output=True)
         (output/(backend+'-build.stdout')).write_bytes(done.stdout)
         (output/(backend+'-build.stderr')).write_bytes(done.stderr)
         assert done.returncode==0,(backend,done)
@@ -44,7 +44,7 @@ def main(args):
             argv=[str(binary),'--hirsel-record',str(tape),'--hirsel-grants',str(grant),'manifest.json']
             receipt=dict(id=identity,engine=backend,argv=argv,state='started',input_sha256=hashlib.sha256(source.read_bytes()).hexdigest(),expected=expected)
             rows.append(receipt);(output/'receipts.json').write_text(json.dumps(rows,indent=2))
-            done=subprocess.run(argv,stdin=subprocess.DEVNULL,capture_output=True,env=env,timeout=30)
+            done=subprocess.run(argv,stdin=subprocess.DEVNULL,capture_output=True,env=env)
             (d/'stdout').write_bytes(done.stdout);(d/'stderr').write_bytes(done.stderr)
             actual=dict(exit=done.returncode,rows=[json.loads(line) for line in done.stdout.splitlines()],stderr=done.stderr.decode())
             receipt.update(state='completed',actual=actual,passed=actual==expected)

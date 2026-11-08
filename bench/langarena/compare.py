@@ -124,8 +124,7 @@ class Session:
         log = self.directory / (re.sub(r'[^a-zA-Z0-9_.-]', '-', label) + '.log')
         timing = log.with_suffix('.elapsed')
         command = [str(x) for x in command]
-        wrapped = ['nice', '-n', '10', str(ROOT / 'tools/capped'), '--timeout', str(self.args.timeout),
-                   '/usr/bin/time', '-f', '%e', '-o', str(timing), *command]
+        wrapped = ['nice', '-n', '10', str(ROOT / 'tools/capped'), '/usr/bin/time', '-f', '%e', '-o', str(timing), *command]
         started = time.monotonic()
         with log.open('w') as out:
             result = subprocess.run(wrapped, cwd=cwd, env=self.env, stdout=out, stderr=subprocess.STDOUT)
@@ -412,12 +411,11 @@ def main():
     parser.add_argument('--rounds', type=int, default=10)
     parser.add_argument('--cpu', type=int, default=31)
     parser.add_argument('--seed', type=int, default=20261021)
-    parser.add_argument('--timeout', type=int, default=900)
     parser.add_argument('--session', default=datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S'))
     parser.add_argument('--output', type=Path, help='report path; default /workspace/code/hirsel-briefs/langarena/<session>/RESULTS.md')
     args = parser.parse_args()
-    if args.rounds < 1 or not 1 <= args.timeout <= 900:
-        parser.error('rounds must be positive; timeout must be between 1 and 900')
+    if args.rounds < 1:
+        parser.error('rounds must be positive')
     if not re.fullmatch(r'[a-zA-Z0-9_.-]+', args.session):
         parser.error('session must be a simple directory name')
     if args.output is None:

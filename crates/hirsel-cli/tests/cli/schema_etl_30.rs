@@ -309,9 +309,8 @@ fn schema_etl_30_native_host_and_four_engine_replay() {
                 eprintln!("SCHEMA_ETL_30_STARTED {id} {backend} host-files");
                 let output = Command::new("python3")
                     .arg(&capped)
-                    .args(["--timeout", "60"])
                     .arg("prlimit")
-                    .args(["--cpu=60:61", "--as=2147483648"])
+                    .args(["--as=2147483648"])
                     .arg(&executable)
                     .arg("--hirsel-record")
                     .arg(&tape)

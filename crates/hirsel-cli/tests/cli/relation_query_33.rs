@@ -343,10 +343,6 @@ fn relation_query_33_full_entry_native_replay() {
             "PATH=/usr/bin:/bin".into(),
             "/usr/bin/python3".into(),
             root.join("capped").to_str().unwrap().into(),
-            "--timeout".into(),
-            "60".into(),
-            "prlimit".into(),
-            "--cpu=60:61".into(),
         ];
         tools.launch_timeout = std::time::Duration::from_secs(75);
         fs::write(root.join("toolchain.txt"), format!("{tools:#?}")).unwrap();

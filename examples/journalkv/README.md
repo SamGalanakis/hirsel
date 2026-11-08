@@ -117,8 +117,8 @@ implement its lower-bound predicate.
 Keep recordings outside every granted mutable directory:
 
 ```sh
-HIRSEL_MEMORY_LIMIT=2G HIRSEL_JOBS=4 tools/capped --timeout 60 \
-  prlimit --cpu=60:61 /tmp/journalkv \
+HIRSEL_MEMORY_LIMIT=2G HIRSEL_JOBS=4 tools/capped \
+  /tmp/journalkv \
   --hirsel-record /tmp/journalkv-apply.tape \
   --hirsel-grants /tmp/journalkv-demo/grants.json apply changes.json
 /tmp/journalkv --hirsel-replay /tmp/journalkv-apply.tape

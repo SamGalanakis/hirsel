@@ -731,7 +731,7 @@ fn campaign_selected(phase: &str, only: Option<&str>) {
         fs::write(cell.join("row.json"), row.to_string()).unwrap();
         let output = Command::new("python3")
             .arg(root.join("capped"))
-            .args(["--timeout", "120", "prlimit", "--cpu=60:61"])
+            .args(["prlimit"])
             .arg(std::env::current_exe().unwrap())
             .args([
                 "--exact",
@@ -887,7 +887,7 @@ for f in sorted(r.rglob('*')):
         Some(
             Command::new("python3")
                 .arg(root.join("capped"))
-                .args(["--timeout", "60", "prlimit", "--cpu=60:61", "python3"])
+                .args(["python3"])
                 .arg(root.join("ordered.py"))
                 .arg("--hirsel")
                 .arg(env!("CARGO_BIN_EXE_hirsel"))
@@ -978,7 +978,7 @@ for key,p in roots.items():
         eprintln!("DT35_MINIMUM_STARTED {engine}");
         let output = Command::new("python3")
             .arg(root.join("capped"))
-            .args(["--timeout", "120", "prlimit", "--cpu=60:61"])
+            .args(["prlimit"])
             .arg(std::env::current_exe().unwrap())
             .args([
                 "--exact",

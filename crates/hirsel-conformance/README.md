@@ -229,7 +229,7 @@ The `corpus-fmt` binary migrates files through the **release CLI**:
 release='--target-platforms //tools/buck2:release --show-full-simple-output'
 hirsel="$(.buck2/bin/buck2 build $release //:hirsel-cli-bin-hirsel)"
 fmt="$(.buck2/bin/buck2 build $release //:hirsel-conformance-bin-corpus-fmt)"
-tools/capped --timeout 3600 "$fmt" --hirsel "$hirsel" --evidence /tmp/corpus-format-evidence
+tools/capped "$fmt" --hirsel "$hirsel" --evidence /tmp/corpus-format-evidence
 ```
 
 It first runs the entire suite and saves `before.json`, formats copies with

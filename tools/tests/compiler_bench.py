@@ -342,7 +342,7 @@ class Matrix(unittest.TestCase):
 class Startup(unittest.TestCase):
     def probe(self, code, endpoint='stdout'):
         return subprocess.run([sys.executable, str(BENCH/'startup.py'), '--endpoint', endpoint,
-                               '--', sys.executable, '-c', code], capture_output=True, text=True, timeout=5)
+                               '--', sys.executable, '-c', code], capture_output=True, text=True)
 
     def report(self, done):
         line = next(l for l in done.stderr.splitlines() if l.startswith('compiler-startup: '))

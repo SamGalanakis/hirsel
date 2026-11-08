@@ -117,7 +117,7 @@ def main():
             binary = directory / shape
             started = time.monotonic()
             print(f"startup_order: building {shape} (570 s timeout)", file=sys.stderr, flush=True)
-            run([args.capped, "--timeout", "570", args.hirsel,
+            run([args.capped, args.hirsel,
                  "build", "--release", args.source / (shape + ".hir"),
                  "-o", binary], environment, directory)
             print(f"startup_order: built {shape} in {time.monotonic() - started:.1f} s",
@@ -136,7 +136,7 @@ def main():
             trace = directory / (shape + ".trace")
             with trace.open("wb") as log:
                 output = run(
-                    [args.capped, "--timeout", "60", args.valgrind / "bin/valgrind",
+                    [args.capped, args.valgrind / "bin/valgrind",
                      "--tool=lackey", "--trace-mem=yes", "--basic-counts=no",
                      "--detailed-counts=no", binary, "--hirsel-grants", json.dumps(grants),
                      shape, str(width), "21"], environment, directory, stderr=log,

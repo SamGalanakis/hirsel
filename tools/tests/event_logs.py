@@ -109,7 +109,7 @@ class BoundedTests(unittest.TestCase):
     def test_large_population_retains_every_target_option_log_and_failure(self):
         targets = [f'root//:cli-shard-{i}' for i in range(566)]
         prefix = ['test', '-c', 'hirsel.test_seed=123', '--target-platforms', '//tools/buck2:release']
-        suffix = ['--', '--timeout', '1800']
+        suffix = ['--', '--test-arg=--nocapture']
         calls = []
         def execute(command, **kwargs):
             calls.append(command)
@@ -126,7 +126,7 @@ class BoundedTests(unittest.TestCase):
         self.assertEqual(len({call[3] for call in calls}), 18)
         for call in calls:
             self.assertEqual([call[1], *call[4:8]], prefix)
-            self.assertEqual(call[-3:], suffix)
+            self.assertEqual(call[-len(suffix):], suffix)
         self.assertEqual(result.returncode, 1)
         self.assertEqual(result.stdout, ''.join(f'{i}\n' for i in range(1, 19)))
 

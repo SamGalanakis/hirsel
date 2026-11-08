@@ -100,7 +100,7 @@ The runner measures fresh std with products absent, as `tools/perf-counts
 installed std. All use `none@1` result storage, a fresh process, one job,
 `perf stat` instructions:u and inclusive instructions, the compiler's JSON work
 counts and peak compiler RSS. Three seeded interleaved rounds produce medians.
-Each process uses `tools/capped`, 2 GiB and 60 CPU seconds. The lowest available
+Each process uses `tools/capped` and a 2 GiB memory cap. The lowest available
 allowed CPU is the default; `--cpu` can select another, except 12-15 or 28-31.
 Only one process is measured at a time. Refusals stop that workload's remaining
 rounds and write refused rows instead of partial medians.
@@ -268,6 +268,12 @@ focus. Leave it off for whole crates and gate stages, which use the threads
 their request buys; the request is in the test's action key, so a focus run
 neither reuses nor replaces their cached verdicts.
 
+Local commands run through `tools/capped` with memory and CPU-share limits,
+without CPU-second or wall-time limits. The progress reporter has no inner
+deadline. The pinned Buck2 client still requires a test-execution timeout;
+its API accepts a duration rather than an optional timeout, so the existing
+runner overrides remain until the client supports unbounded test execution.
+
 Arguments after `--` go to Buck2's test runner: `--test-arg=<a>` passes one
 libtest argument, and `--timeout <seconds>` raises the ten-minute limit per
 test. A sharded binary given a case filter runs it all in shard 1. Check the output
@@ -291,18 +297,13 @@ names the target, including empty binaries and ignored-only runs. Intentional
 empty shard partitions use `--exact ""` and keep their success; discovery keeps
 its status.
 
-Pool test actions reserve 5% of the unchanged 600-second RE limit for reporting.
-At the 570-second inner deadline, `test_report.py` prints
-`HIRSEL_TEST_INNER_DEADLINE`, every completed body's result, and each
-`HIRSEL_TEST_RUNNING` name with its elapsed time, then terminates its own test
-descendants and exits 124. Descendants keep the executor's process group for
-memory sampling and enforcement. This returns an ordinary failed action with its
-output before RE's `DeadlineExceeded` discards that output. Rust bodies are
-tracked through libtest's JSON start/result events; ordinary result lines,
-summaries and per-case timings remain available to count and cost tools.
-Python unittest scripts retain their verbose output, including the active
-method. A deadline during setup, discovery or teardown is labeled separately.
-The action's CPU and memory grants and outer RE timeout remain unchanged.
+`test_report.py` streams libtest JSON start/result events without an inner
+deadline. Ordinary result lines, summaries and per-case timings remain available
+to count and cost tools. Python unittest scripts retain their verbose output.
+On an external signal, the reporter prints `HIRSEL_TEST_INTERRUPTED`, completed
+results, active body names and phase spans, then reaps only its owned descendants.
+Descendants keep the executor's process group for memory enforcement. The
+pinned client's outer test timeout remains as described above.
 
 Heavy Buck2 commands run from this host and execute on the pool when one is
 configured. Native changes use a filtered campaign:

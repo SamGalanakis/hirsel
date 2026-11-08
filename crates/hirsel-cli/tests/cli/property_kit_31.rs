@@ -582,7 +582,7 @@ fn property_kit_31_production_ordered_widths_and_replay() {
             for backend in ["llvm", "cranelift"] {
                 let refused = std::process::Command::new("python3")
                     .arg(root.join("capped"))
-                    .args(["--timeout", "60", "prlimit", "--cpu=60:61"])
+                    .args(["prlimit"])
                     .arg(root.join(backend))
                     .arg("--hirsel-replay")
                     .arg(&bad)
@@ -645,9 +645,5 @@ fn capped_tools(tools: &mut Toolchain, root: &Path) {
         "HIRSEL_JOBS=4".into(),
         "python3".into(),
         capped.to_string_lossy().into_owned(),
-        "--timeout".into(),
-        "60".into(),
-        "prlimit".into(),
-        "--cpu=60:61".into(),
     ];
 }

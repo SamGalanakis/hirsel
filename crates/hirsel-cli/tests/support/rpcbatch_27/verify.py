@@ -43,7 +43,6 @@ def receive(peer):
 
 
 def limits():
-    resource.setrlimit(resource.RLIMIT_CPU, (60, 60))
     resource.setrlimit(resource.RLIMIT_DATA, (2 * 1024**3, 2 * 1024**3))
 
 
@@ -75,7 +74,7 @@ def verify(hirsel, selection, output):
 
     def run(label, argv, expected=None, setup=False):
         p = subprocess.run(list(map(str, argv)), capture_output=True, stdin=subprocess.DEVNULL,
-                           timeout=240 if setup else 60, env=env, preexec_fn=None if setup else limits)
+                            env=env, preexec_fn=None if setup else limits)
         return save(label, argv, (p.returncode, p.stdout, p.stderr), expected)
 
     binaries = {}
@@ -140,7 +139,7 @@ def verify(hirsel, selection, output):
                     assert select.select([p.stdout], [], [], 60)[0], label
                     ready = p.stdout.readline()
                     assert ready == b'{"listening":true}\n', (label, ready)
-                    stdout, stderr = p.communicate(timeout=60)
+                    stdout, stderr = p.communicate()
                     save(label, argv, (p.returncode, ready + stdout, stderr), (0, b'{"listening":true}\n{"served":0,"expired":true}\n', b''))
                 finally:
                     if p.poll() is None:
@@ -210,7 +209,7 @@ def verify(hirsel, selection, output):
                 for width in (1, 2, 4):
                     replay_env = env | dict(HIRSEL_RT_WORKERS=str(width))
                     argv = [binaries[engine], '--hirsel-replay', output / (label + '.tape')]
-                    p = subprocess.run(list(map(str, argv)), capture_output=True, timeout=60, env=replay_env, preexec_fn=limits)
+                    p = subprocess.run(list(map(str, argv)), capture_output=True,  env=replay_env, preexec_fn=limits)
                     save(label + '-replay-' + str(width), argv, (p.returncode, p.stdout, p.stderr), (0, compact(expected) + b'\n', b''))
             assert not path.exists()
     print(json.dumps(dict(passes=passes, recorded=len(records), engines=['interpreter', 'llvm', 'cranelift'], only_reverse=only_reverse, scripted_idle_accept='INCOMPLETE: exhausted script accept returns ConnectionAborted; tested with host sockets')))

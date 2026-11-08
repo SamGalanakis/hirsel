@@ -172,10 +172,10 @@ sudo -n systemd-run --wait --pipe --collect --slice=timing.slice \
   --root "$PWD" --out /path/to/session --inventory /path/to/inventory.json
 ```
 
-Each child uses `tools/capped --inside --timeout 60` and RLIMIT_CPU=60,
+Each child uses `tools/capped --inside`,
 retaining that outer service's affinity and memory cap. Do not nest an ordinary
 user scope: the fence excludes user.slice from timing CPUs. The wall ratio is
-whole-process `perf duration_time`, with perf/time/prlimit startup outside the
+whole-process `perf duration_time`, with perf/time startup outside the
 measured executable; counters inherit its full process tree. The observer-on
 runs are a separate overhead study, never subtracted from acceptance throughput.
 

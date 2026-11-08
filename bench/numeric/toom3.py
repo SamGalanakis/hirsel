@@ -48,8 +48,7 @@ def main():
             'dependencies': [{'manifest': str(std / 'std@1/hirsel.json'),
                               'package': {'name': 'std', 'version': '1'}, 'expose': []}]}))
         binary = directory / 'multiply'
-        subprocess.run([str(ROOT / 'tools/capped'), '--timeout', '900',
-                        str(Path(toolchain) / 'hirsel'), 'build', '--release', str(source), '-o', str(binary)],
+        subprocess.run([str(ROOT / 'tools/capped'), str(Path(toolchain) / 'hirsel'), 'build', '--release', str(source), '-o', str(binary)],
                        env=env, check=True)
         binaries.append((name, binary))
     for size in map(int, args.sizes.split(',')):

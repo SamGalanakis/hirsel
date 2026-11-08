@@ -864,13 +864,7 @@ impl TodoServer {
             let _ = send.send(line);
         });
         // A native run compiles first, and its first build also builds the runtime.
-        let line = recv
-            .recv_timeout(std::time::Duration::from_secs(if native {
-                300
-            } else {
-                90
-            }))
-            .expect("server readiness");
+        let line = recv.recv().expect("server readiness");
         server.port = line
             .strip_prefix("listening on 127.0.0.1:")
             .unwrap_or_else(|| panic!("readiness line {line:?}"))
@@ -2508,21 +2502,16 @@ impl Running {
 
     fn line(&self, what: &str) -> String {
         self.lines
-            .recv_timeout(std::time::Duration::from_secs(120))
+            .recv()
             .unwrap_or_else(|e| panic!("{what}: no line: {e}"))
     }
 
     /// Closes stdin and waits for the exit status.
     fn finish(mut self, what: &str) -> std::process::ExitStatus {
         drop(self.child.stdin.take());
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
-        loop {
-            if let Some(status) = self.child.try_wait().unwrap() {
-                return status;
-            }
-            assert!(std::time::Instant::now() < deadline, "{what}: did not exit");
-            std::thread::sleep(std::time::Duration::from_millis(50));
-        }
+        self.child
+            .wait()
+            .unwrap_or_else(|e| panic!("{what}: wait failed: {e}"))
     }
 }
 

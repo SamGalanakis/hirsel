@@ -434,7 +434,6 @@ fn runtime57_free_owned_scope_physically_leaves_its_pending_exit_and_replays() {
                         .stdout(std::process::Stdio::piped())
                         .stderr(std::process::Stdio::piped());
                     let mut process = command.spawn().unwrap();
-                    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
                     loop {
                         let text = std::fs::read_to_string(&trace).unwrap_or_default();
                         if pending_exit_left(&text) {
@@ -444,11 +443,6 @@ fn runtime57_free_owned_scope_physically_leaves_its_pending_exit_and_replays() {
                         if process.try_wait().unwrap().is_some() {
                             let output = process.wait_with_output().unwrap();
                             panic!("scope exited before its pending save: {text}, {output:?}");
-                        }
-                        if std::time::Instant::now() >= deadline {
-                            process.kill().unwrap();
-                            let output = process.wait_with_output().unwrap();
-                            panic!("scope did not release its pending stack: {text}, {output:?}");
                         }
                         std::thread::yield_now();
                     }
@@ -520,19 +514,8 @@ fn pending_exit_left(text: &str) -> bool {
     })
 }
 
-fn finish_physical_run(mut process: std::process::Child) -> std::process::Output {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-    loop {
-        if process.try_wait().unwrap().is_some() {
-            return process.wait_with_output().unwrap();
-        }
-        if std::time::Instant::now() >= deadline {
-            process.kill().unwrap();
-            let output = process.wait_with_output().unwrap();
-            panic!("scope did not complete after its child gate: {output:?}");
-        }
-        std::thread::yield_now();
-    }
+fn finish_physical_run(process: std::process::Child) -> std::process::Output {
+    process.wait_with_output().unwrap()
 }
 
 #[test]

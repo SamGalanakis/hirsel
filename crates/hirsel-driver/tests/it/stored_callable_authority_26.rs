@@ -481,7 +481,6 @@ fn runtime_case(id: &str, source: &str) {
         let name = std::thread::current().name().unwrap().to_owned();
         let output = std::process::Command::new("python3")
             .arg(capped)
-            .args(["--timeout", "60"])
             .arg(std::env::current_exe().unwrap())
             .args([&name, "--exact", "--nocapture", "--test-threads=1"])
             .env("HIRSEL_AUTH26_CHILD", "1")

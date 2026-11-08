@@ -37,7 +37,7 @@ p["io"]["dirs"][0]["host"] = str(Path("examples/mdsite/data").resolve())
 Path("/tmp/mdsite-grants.json").write_text(json.dumps(p))
 PY_GRANTS
 hirsel build examples/mdsite/hirsel.json --backend llvm -o /tmp/mdsite-llvm
-HIRSEL_MEMORY_LIMIT=2G HIRSEL_JOBS=4 tools/capped --timeout 60 prlimit --cpu=60:61 /tmp/mdsite-llvm --hirsel-record /tmp/mdsite.tape --hirsel-grants /tmp/mdsite-grants.json build site.toml
+HIRSEL_MEMORY_LIMIT=2G HIRSEL_JOBS=4 tools/capped /tmp/mdsite-llvm --hirsel-record /tmp/mdsite.tape --hirsel-grants /tmp/mdsite-grants.json build site.toml
 /tmp/mdsite-llvm --hirsel-replay /tmp/mdsite.tape
 hirsel run examples/mdsite/hirsel.json --replay /tmp/mdsite.tape
 ```

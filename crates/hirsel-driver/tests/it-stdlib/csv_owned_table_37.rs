@@ -415,7 +415,6 @@ fn measured(source: &str, label: &str) -> String {
     std::fs::write(&cap, include_str!("../../../../tools/capped")).unwrap();
     let output = Command::new("python3")
         .arg(&cap)
-        .args(["--timeout", "60"])
         .arg(exe)
         .env_clear()
         .env("PATH", "/usr/bin:/bin")

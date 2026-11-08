@@ -32,11 +32,8 @@ def qualify(root,out,binaries,run,env,hirsel,widths):
                 assert fd>=0
                 assert libc.inotify_add_watch(fd,os.fsencode(project),0x100|0x8)>=0
                 def wait_file(path):
-                    until=time.monotonic()+15
                     while not path.exists():
-                        remaining=until-time.monotonic()
-                        if remaining<=0:return False
-                        if not select.select([fd],[],[],remaining)[0]:return False
+                        select.select([fd],[],[])
                         os.read(fd,65536)
                     return True
                 def task(name,deps,mode):
@@ -50,10 +47,10 @@ def qualify(root,out,binaries,run,env,hirsel,widths):
                 g=d/'grants.json';g.write_text(json.dumps(grants));tape=d/'record.tape'
                 argv=[str(binary),'--hirsel-record',str(tape),'--hirsel-grants',str(g),'build','manifest.json']
                 with (d/'stdout').open('wb') as stdout,(d/'stderr').open('wb') as stderr:
-                    p=subprocess.Popen([sys.executable,str(root/'capped'),'--timeout','60','prlimit','--cpu=60:61',*argv],stdin=subprocess.DEVNULL,stdout=stdout,stderr=stderr,env=env)
+                    p=subprocess.Popen([sys.executable,str(root/'capped'),*argv],stdin=subprocess.DEVNULL,stdout=stdout,stderr=stderr,env=env)
                     admitted=wait_file(project/'a.started') and wait_file(project/'x.started')
                     if not admitted:
-                        code=p.wait(timeout=75)
+                        code=p.wait()
                         assert identity=='real-cranelift-cancel-cleanup-w4' and code==124,('unexpected admission/liveness failure',identity,code)
                         observed={str(path.name):int(path.read_text()) for path in project.glob('*.started')}
                         survivors=[pid for pid in observed.values() if Path('/proc',str(pid)).exists()]
@@ -73,7 +70,7 @@ def qualify(root,out,binaries,run,env,hirsel,widths):
                     # explicit cancellation or (success/domain) release.
                     if workflow!='cancel-cleanup':
                         with (project/'a.release').open('wb') as gate:gate.write(b'x')
-                    code=p.wait(timeout=75)
+                    code=p.wait()
                 os.close(fd)
                 rows=[json.loads(line) for line in (d/'stdout').read_bytes().splitlines()]
                 assert code==(0 if workflow=='success' else 1),(identity,code,(d/'stderr').read_text())

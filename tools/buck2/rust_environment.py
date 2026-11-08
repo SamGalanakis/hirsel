@@ -33,7 +33,7 @@ def environment(root, validate=False):
         for executable in (cargo, rustc):
             try:
                 probe = subprocess.run([executable, '--version'], cwd=root, env=env,
-                                       capture_output=True, timeout=30)
+                                       capture_output=True)
             except (OSError, subprocess.TimeoutExpired) as error:
                 raise ValueError(f'Rust toolchain unavailable: {executable} --version failed') from error
             if probe.returncode:

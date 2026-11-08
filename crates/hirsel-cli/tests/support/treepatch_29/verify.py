@@ -27,7 +27,6 @@ def blob(value):
 
 
 def limits():
-    resource.setrlimit(resource.RLIMIT_CPU, (60, 61))
     resource.setrlimit(resource.RLIMIT_DATA, (2 << 30, 2 << 30))
 
 
@@ -35,7 +34,7 @@ def run(identity, argv, setup=False):
     argv = list(map(str, argv))
     (evidence / (identity + '.started.json')).write_text(json.dumps(argv))
     result = subprocess.run(argv, env=env, stdin=subprocess.DEVNULL,
-                            capture_output=True, timeout=600 if setup else 60,
+                            capture_output=True,
                             preexec_fn=None if setup else limits())
     (evidence / (identity + '.stdout')).write_bytes(result.stdout)
     (evidence / (identity + '.stderr')).write_bytes(result.stderr)

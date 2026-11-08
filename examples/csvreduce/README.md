@@ -21,7 +21,7 @@ containing the input file. The tool reads relative to that read-only `data` moun
 It prints exactly one JSON object to stdout and creates no output file.
 
 ```sh
-HIRSEL_JOBS=1 tools/capped --timeout 60 "$HIRSEL" run --native --backend llvm \
+HIRSEL_JOBS=1 tools/capped "$HIRSEL" run --native --backend llvm \
   examples/csvreduce/hirsel.json --grants /absolute/grants.json --cores 2 \
   --record /absolute/csvreduce.tape -- input.csv 1 --grain 3
 ```
@@ -44,7 +44,7 @@ Replay needs the original source revision and immutable tape, and reads no input
 file or live capability provider:
 
 ```sh
-HIRSEL_JOBS=1 tools/capped --timeout 60 "$HIRSEL" run \
+HIRSEL_JOBS=1 tools/capped "$HIRSEL" run \
   examples/csvreduce/hirsel.json --replay /absolute/csvreduce.tape
 ```
 

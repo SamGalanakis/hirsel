@@ -669,7 +669,7 @@ fn campaign(phase: &str) {
         fs::write(cell.join("row.json"), row.to_string()).unwrap();
         let output = Command::new("python3")
             .arg(root.join("capped"))
-            .args(["--timeout", "120", "prlimit", "--cpu=60:60"])
+            .args(["prlimit"])
             .arg(std::env::current_exe().unwrap())
             .args([
                 "--exact",

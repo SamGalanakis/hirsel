@@ -55,7 +55,7 @@ def ready_cancel(root, fixture):
         observed = time.monotonic_ns()
         child.kill()
         canceled = time.monotonic_ns()
-        code = child.wait(timeout=10)
+        code = child.wait()
         assert code == -signal.SIGKILL and not Path('/proc', str(child.pid)).exists()
         return dict(state='ready then cancelled', pid=child.pid, observed_ns=observed,
                     canceled_ns=canceled, wait_returncode=code, reaped=True)

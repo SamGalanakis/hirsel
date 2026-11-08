@@ -408,10 +408,6 @@ fn state_model_checker_34_native_full_entry_replay() {
             "HIRSEL_MEMORY_LIMIT=2G".into(),
             "/usr/bin/python3".into(),
             root.join("capped").to_string_lossy().into_owned(),
-            "--timeout".into(),
-            "60".into(),
-            "/usr/bin/prlimit".into(),
-            "--cpu=60:61".into(),
         ];
         let ready = build(&input, &options).unwrap();
         let sites = Sites::new(input.snapshot());
@@ -798,7 +794,7 @@ fn state_model_checker_34_arithmetic_and_encoder_boundaries() {
     for backend in ["llvm", "cranelift"] {
         let output = std::process::Command::new("python3")
             .arg(root.join("capped"))
-            .args(["--timeout", "60", "prlimit", "--cpu=60:61"])
+            .args(["prlimit"])
             .arg(env!("CARGO_BIN_EXE_hirsel"))
             .args(["test", "--native", "--backend", backend])
             .arg(&path)

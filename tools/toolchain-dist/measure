@@ -53,7 +53,7 @@ def main():
         values['HIRSEL_JOBS'] = '1'
     runners = {}
     for name, directory in bundles.items():
-        options = argparse.Namespace(toolchain=directory, work=str(work / name), timeout=300,
+        options = argparse.Namespace(toolchain=directory, work=str(work / name),
                                      cpu=args.cpu, repeat=1, repeat_large=False)
         runners[name] = bench.Runner(options, env)
     samples = {(p.name, mode, name): [] for p in programs for mode in modes for name in bundles}

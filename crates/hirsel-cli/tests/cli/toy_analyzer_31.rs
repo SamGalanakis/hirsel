@@ -858,7 +858,7 @@ fn toy_analyzer_31_host_tapes_checked_replay_and_controls() {
                     let backend = "cranelift";
                     let launched = Command::new("python3")
                         .arg(directory.join("capped"))
-                        .args(["--timeout", "60", "prlimit", "--cpu=60:61"])
+                        .args(["prlimit"])
                         .arg(directory.join(backend))
                         .arg("--hirsel-replay")
                         .arg(&tape)

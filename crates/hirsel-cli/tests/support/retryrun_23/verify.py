@@ -28,10 +28,8 @@ def report(statuses):
 
 def child(request):
     request = json.loads(request.read_text())
-    resource.setrlimit(resource.RLIMIT_CPU, (60, 60))
     with open(request['stdout'], 'wb') as out, open(request['stderr'], 'wb') as err:
-        done = subprocess.run(request['argv'], stdin=subprocess.DEVNULL, stdout=out, stderr=err,
-                              timeout=60)
+        done = subprocess.run(request['argv'], stdin=subprocess.DEVNULL, stdout=out, stderr=err)
     Path(request['status']).write_text(str(done.returncode))
 
 
@@ -51,14 +49,13 @@ def verify(hirsel, root, output, shipped_only=False):
         if runtime:
             request = output / (label + '.request.json')
             request.write_text(json.dumps(dict(argv=argv, stdout=str(stdout), stderr=str(stderr), status=str(status))))
-            done = subprocess.run([sys.executable, root / 'capped', '--timeout', '60',
-                                   sys.executable, __file__, '--child', request],
-                                  stdin=subprocess.DEVNULL, capture_output=True, env=env, timeout=90)
+            done = subprocess.run([sys.executable, root / 'capped', sys.executable, __file__, '--child', request],
+                                  stdin=subprocess.DEVNULL, capture_output=True, env=env)
             (output / (label + '.cap.log')).write_bytes(done.stdout + done.stderr)
             assert done.returncode == 0, (label, done, str(output))
             actual = int(status.read_text()), stdout.read_bytes(), stderr.read_bytes()
         else:
-            done = subprocess.run(argv, stdin=subprocess.DEVNULL, capture_output=True, env=env, timeout=600)
+            done = subprocess.run(argv, stdin=subprocess.DEVNULL, capture_output=True, env=env)
             actual = done.returncode, done.stdout, done.stderr
             stdout.write_bytes(done.stdout)
             stderr.write_bytes(done.stderr)

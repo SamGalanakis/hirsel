@@ -310,7 +310,7 @@ fn capped(root: &Path, name: &str, argv: &[String]) -> (i32, Vec<u8>, Vec<u8>) {
     seal(root, &dir.join("seal.json"), argv);
     let output = Command::new("python3")
         .arg(root.join("capped"))
-        .args(["--timeout", "60", "prlimit", "--cpu=60:61", "python3"])
+        .args(["python3"])
         .arg(root.join("child.py"))
         .arg(&dir)
         .args(argv)

@@ -208,7 +208,7 @@ fn campaign_mode(
         tools.wrapper = vec![
             "/bin/sh".into(),
             "-c".into(),
-            "ulimit -t 60; ulimit -d 2097152; exec \"$@\"".into(),
+            "ulimit -d 2097152; exec \"$@\"".into(),
             "timed-process-caps".into(),
         ];
         if let Some(floor) = &tools.glibc_floor {

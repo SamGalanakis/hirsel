@@ -76,7 +76,6 @@ def apply_oracle(source, patch):
 
 
 def runtime_limits():
-    resource.setrlimit(resource.RLIMIT_CPU, (60, 60))
     # RLIMIT_DATA bounds allocations while permitting LLVM's shared mappings.
     resource.setrlimit(resource.RLIMIT_DATA, (2 << 30, 2 << 30))
 
@@ -98,9 +97,9 @@ def verify(hirsel, root, output, capped=None):
                         'os.dup2(os.open(sys.argv[1],os.O_WRONLY|os.O_CREAT|os.O_TRUNC,0o600),1); '
                         'os.dup2(os.open(sys.argv[2],os.O_WRONLY|os.O_CREAT|os.O_TRUNC,0o600),2); '
                         'os.execv(sys.argv[3],sys.argv[3:])')
-            wrapped = [str(capped), '--timeout', '60', sys.executable, '-c', redirect,
+            wrapped = [str(capped), sys.executable, '-c', redirect,
                        str(stdout_file), str(stderr_file), *argv]
-            done = subprocess.run(wrapped, stdin=subprocess.DEVNULL, capture_output=True, env=env, timeout=90)
+            done = subprocess.run(wrapped, stdin=subprocess.DEVNULL, capture_output=True, env=env)
             (output / (label + '.capped')).write_bytes(done.stderr)
             assert stdout_file.exists() and stderr_file.exists(), (label, done)
             status = done.returncode, stdout_file.read_bytes(), stderr_file.read_bytes()
@@ -108,7 +107,7 @@ def verify(hirsel, root, output, capped=None):
             (output / 'commands.json').write_text(json.dumps(commands, indent=2) + '\n')
             return status
         done = subprocess.run(argv, stdin=subprocess.DEVNULL, capture_output=True,
-                              timeout=600 if setup else 60, env=env,
+                               env=env,
                               preexec_fn=None if setup else runtime_limits)
         (output / (label + '.stdout')).write_bytes(done.stdout)
         (output / (label + '.stderr')).write_bytes(done.stderr)

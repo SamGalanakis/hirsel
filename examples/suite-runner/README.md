@@ -70,9 +70,9 @@ exists). Use distinct grant/tape paths per backend/width, with placement cores
 1, 2, or 4 and `tasks.cooperative@1`, commit `shared`, reorder `auto`:
 
 ```sh
-tools/capped --timeout 300 "$HIRSEL" build examples/suite-runner/hirsel.json --backend llvm -o "$EVIDENCE/app-llvm"
-HIRSEL_MEMORY_LIMIT=2G HIRSEL_JOBS=4 tools/capped --timeout 60 prlimit --cpu=60:61 "$EVIDENCE/app-llvm" --hirsel-record "$EVIDENCE/llvm-1.tape" --hirsel-grants "$PRIVATE_GRANTS" run manifest.json report.json fast 0 1
-HIRSEL_MEMORY_LIMIT=2G HIRSEL_JOBS=4 tools/capped --timeout 60 prlimit --cpu=60:61 "$EVIDENCE/app-llvm" --hirsel-replay "$EVIDENCE/llvm-1.tape"
+tools/capped "$HIRSEL" build examples/suite-runner/hirsel.json --backend llvm -o "$EVIDENCE/app-llvm"
+HIRSEL_MEMORY_LIMIT=2G HIRSEL_JOBS=4 tools/capped "$EVIDENCE/app-llvm" --hirsel-record "$EVIDENCE/llvm-1.tape" --hirsel-grants "$PRIVATE_GRANTS" run manifest.json report.json fast 0 1
+HIRSEL_MEMORY_LIMIT=2G HIRSEL_JOBS=4 tools/capped "$EVIDENCE/app-llvm" --hirsel-replay "$EVIDENCE/llvm-1.tape"
 ```
 
 Keep tapes outside granted mutable directories. Requested placement alone does

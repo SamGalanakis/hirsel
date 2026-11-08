@@ -37,7 +37,7 @@ def main():
                 'entry':{'module':[],'name':'main'},'sources':[{'path':source.name,'module':[]}],
                 'dependencies':[{'manifest':str(ROOT/'stdlib/std@1/hirsel.json'),'package':{'name':'std','version':'1'},'expose':[]}]}))
             binary = out/case
-            subprocess.run([str(ROOT/'tools/capped'),'--timeout','900',str(cli),'build','--release',str(source),'-o',str(binary)], env=env, check=True)
+            subprocess.run([str(ROOT/'tools/capped'),str(cli),'build','--release',str(source),'-o',str(binary)], env=env, check=True)
             commands[case] = [str(binary),'--hirsel-grants','{grants}','{iterations}']
         participants.append({'name':'cooperative','provider':'tasks.cooperative@1','widths':[1],
             'modes':['off','record','durable'],'commands':commands})

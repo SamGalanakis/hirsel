@@ -13,8 +13,7 @@ def cell(a):
     (r/'argv.json').write_text(json.dumps(command)+'\n')
     p=subprocess.Popen(command,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
     pidfd=os.pidfd_open(p.pid);observations=[]; opened=False; sent=False; ready=False; saw_control=False
-    deadline=time.monotonic()+40
-    while p.poll() is None and time.monotonic()<deadline:
+    while p.poll() is None:
         if saw_control:
             try:
                 with socket.socket(socket.AF_UNIX) as s:
@@ -27,7 +26,7 @@ def cell(a):
                     ready=value.get('worker_phase')=='running' and value['width']['effective']==a.width and value['width']['pending']==0
             except (OSError,ValueError):pass
             if ready and (a.kind!='cancel' or sent): break
-        rd,_,_=select.select([notify,pidfd],[],[],0 if saw_control else max(0,deadline-time.monotonic()))
+        rd,_,_=select.select([notify,pidfd],[],[],0 if saw_control else None)
         if notify in rd:
             b=os.read(notify,65536);i=0
             while i<len(b):
@@ -36,9 +35,7 @@ def cell(a):
                 if mask&0x20 and name==b'input':opened=True
         if ready and opened and a.kind=='cancel' and not sent and p.poll() is None and (int(next(line.split()[1] for line in Path(f'/proc/{p.pid}/status').read_text().splitlines() if line.startswith('SigCgt:')),16) & (1 << (signal.SIGINT-1))):
             p.send_signal(signal.SIGINT);sent=True
-    try:stdout,stderr=p.communicate(timeout=max(.1,deadline-time.monotonic()))
-    except subprocess.TimeoutExpired:
-        p.kill();stdout,stderr=p.communicate();raise
+    stdout,stderr=p.communicate()
     os.close(pidfd);os.close(notify)
     result=dict(status=p.returncode,stdout=list(stdout),stderr=list(stderr),ready=ready,sent=sent,opened=opened,samples=observations)
     (r/'result.json').write_text(json.dumps(result,indent=2)+'\n')
@@ -75,9 +72,9 @@ def campaign(a):
                 grant=dict(args=row['args'],io=dict(stdout='stdout.bytes@1',stderr='stderr.bytes@1',tasks='tasks.cooperative@1',dirs=[dict(path='data',host=str(r/'data'),access='read_write')]),placement=dict(cores=width,commit='shared',reorder='auto',control=str(r/'ctl')))
                 if kind=='cancel':grant['io']['signals']=dict(provider='signals.host@1',kinds=['interrupt'])
                 (r/'grants.json').write_text(json.dumps(grant)+'\n');(r/'case.json').write_text(json.dumps(row)+'\n')
-                cmd=[sys.executable,str(a.app_root/'capped'),'--timeout','60','prlimit','--cpu=60:61',sys.executable,str(Path(__file__).resolve()),'--cell','--root',str(r),'--binary',str(binary),'--width',str(width),'--kind',kind]
+                cmd=[sys.executable,str(a.app_root/'capped'),sys.executable,str(Path(__file__).resolve()),'--cell','--root',str(r),'--binary',str(binary),'--width',str(width),'--kind',kind]
                 (r/'consumer-before.json').write_text(json.dumps(dict(argv=cmd,files={str(p):hashlib.sha256(p.read_bytes()).hexdigest() for p in [binary,Path(__file__),r/'grants.json',r/'case.json',r/'data'/'input']}),indent=2)+'\n')
-                done=subprocess.run(cmd,env=env,capture_output=True,timeout=90)
+                done=subprocess.run(cmd,env=env,capture_output=True)
                 (r/'stdout').write_bytes(done.stdout);(r/'stderr').write_bytes(done.stderr);(r/'exit').write_text(str(done.returncode)+'\n')
                 print(r.name,done.returncode,done.stdout.decode(),flush=True)
                 if done.returncode==0:

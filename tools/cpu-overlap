@@ -137,20 +137,14 @@ def run(directory, cpus, slice_name, uid, selection):
         if case:
             command += [case, '--exact', '--include-ignored', '--nocapture', '--test-threads=1']
         print(f'BEGIN {name} cpus={assigned} unit={unit}', flush=True)
-        try:
-            remaining = 900 - (time.monotonic() - started)
-            if remaining <= 0:
-                raise subprocess.TimeoutExpired(command, 900)
-            result = subprocess.run(command, cwd=data['root'], env=environment,
-                                    timeout=min(600, remaining), capture_output=True, text=True)
-            print(result.stdout, end='', flush=True)
-            print(result.stderr, end='', flush=True)
-            status = result.returncode
-            if case and status == 0 and not re.search(r'test result: ok\. 1 passed; 0 failed;', result.stdout):
-                print(f'{name}: expected one executed passing body', flush=True)
-                status = 1
-        except subprocess.TimeoutExpired:
-            status = 124
+        result = subprocess.run(command, cwd=data['root'], env=environment,
+                                 capture_output=True, text=True)
+        print(result.stdout, end='', flush=True)
+        print(result.stderr, end='', flush=True)
+        status = result.returncode
+        if case and status == 0 and not re.search(r'test result: ok\. 1 passed; 0 failed;', result.stdout):
+            print(f'{name}: expected one executed passing body', flush=True)
+            status = 1
         if status:
             subprocess.run(control + ['stop', unit + '.scope'], env=manager_env,
                            check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)

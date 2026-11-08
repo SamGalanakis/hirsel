@@ -1068,7 +1068,7 @@ for i in 0u64..COUNTu64
         let mut server = Server::spawn(&mut command).unwrap_or_else(|e| {
             panic!("server startup native={native} cranelift={cranelift}: {e}")
         });
-        let port = server.ready(Duration::from_secs(90)).unwrap_or_else(|e| {
+        let port = server.ready().unwrap_or_else(|e| {
             panic!("server startup native={native} cranelift={cranelift}: {e}")
         });
         if deadline {
@@ -2568,7 +2568,7 @@ pub fn main(rt: Io, args: Args) -> Result[(), GrantError] {
         let (reader, mut writer) = std::io::pipe().unwrap();
         let observer = reader.try_clone().unwrap();
         let (mut child, lines) = spawn(reader.into(), native);
-        match lines.recv_timeout(std::time::Duration::from_secs(60)) {
+        match lines.recv() {
             Ok(line) => assert_eq!(line, "sibling"),
             Err(e) => {
                 let _ = child.kill();
@@ -2653,7 +2653,7 @@ pub fn main(rt: Io, args: Args) -> Result[(), GrantError] {
             }
         });
         for expected in ["sibling", "canceled"] {
-            match lines.recv_timeout(std::time::Duration::from_secs(60)) {
+            match lines.recv() {
                 Ok(line) => assert_eq!(line, expected),
                 Err(e) => {
                     let _ = child.kill();

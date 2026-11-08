@@ -50,7 +50,7 @@ grant['io']['dirs'][0]['host'] = '/tmp/spectral-data'
 Path('/tmp/spectral-run/grants.json').write_text(json.dumps(grant) + '\n')
 PYTHON
 hirsel build examples/spectralaudit/hirsel.json --backend llvm -o /tmp/spectral-run/spectralaudit
-HIRSEL_MEMORY_LIMIT=2G HIRSEL_JOBS=4 tools/capped --timeout 60 prlimit --cpu=60:61 /tmp/spectral-run/spectralaudit --hirsel-record /tmp/spectral-run/audit.tape --hirsel-grants /tmp/spectral-run/grants.json data samples.json audit.json 4
+HIRSEL_MEMORY_LIMIT=2G HIRSEL_JOBS=4 tools/capped /tmp/spectral-run/spectralaudit --hirsel-record /tmp/spectral-run/audit.tape --hirsel-grants /tmp/spectral-run/grants.json data samples.json audit.json 4
 /tmp/spectral-run/spectralaudit --hirsel-replay /tmp/spectral-run/audit.tape
 ```
 

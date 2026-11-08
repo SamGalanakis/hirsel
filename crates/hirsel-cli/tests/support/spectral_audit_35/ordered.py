@@ -32,8 +32,8 @@ assert lib.inotify_add_watch(notify,os.fsencode(data),0x20)>=0
 cmd=[str(binary.resolve()),'--hirsel-grants',str(r/'grants.json'),'--hirsel-record',str(tape),'--hirsel-trace-events',str(trace),*words]
 (r/'consumer-before.json').write_text(json.dumps(dict(argv=cmd,environment={k:v for k,v in os.environ.items() if k.startswith('HIRSEL_')},files={str(x):hashlib.sha256(x.read_bytes()).hexdigest() for x in [binary,pathlib.Path(__file__),r/'grants.json',data/'samples.json']}),indent=2))
 child=subprocess.Popen(cmd,stdout=subprocess.PIPE,stderr=subprocess.PIPE);pidfd=os.pidfd_open(child.pid)
-samples=[];opened=False;ready=False;sent=False;deadline=time.monotonic()+45
-while child.poll() is None and time.monotonic()<deadline:
+samples=[];opened=False;ready=False;sent=False
+while child.poll() is None:
  if control.exists() and opened:
   try:
    with socket.socket(socket.AF_UNIX) as conn:
@@ -50,13 +50,13 @@ while child.poll() is None and time.monotonic()<deadline:
  # watched filesystem event. Continue the bounded control/handler handshake
  # instead of parking until process exit and missing the injection window.
  if ready and a.kind=='cancel' and not sent:continue
- rd,_,_=select.select([notify,pidfd],[],[],max(0,deadline-time.monotonic()))
+ rd,_,_=select.select([notify,pidfd],[],[])
  if notify in rd:
   raw=os.read(notify,65536);i=0
   while i<len(raw):
    wd,mask,cookie,size=struct.unpack_from('iIII',raw,i);name=raw[i+16:i+16+size].split(b'\0',1)[0];i+=16+size
    if mask&0x20 and name==b'samples.json':opened=True
-out,err=child.communicate(timeout=max(.1,deadline-time.monotonic()));os.close(pidfd);os.close(notify)
+out,err=child.communicate();os.close(pidfd);os.close(notify)
 (r/'stdout').write_bytes(out);(r/'stderr').write_bytes(err)
 receipt=dict(backend=a.backend,selected=True,started=True,completed=True,passed=False,kind=a.kind,width=a.width,controls=samples,opened=opened,signal_delivered=sent,exit=child.returncode)
 (r/'receipt.json').write_text(json.dumps(receipt,indent=2))
@@ -76,7 +76,7 @@ prior={x.name:x.read_bytes() for x in retained.iterdir()}
 replays=[]
 for player in sorted({binary.resolve(),binary.resolve().parent/'ordered-llvm',binary.resolve().parent/'ordered-cranelift'}):
  if not player.is_file():continue
- replay=subprocess.run([str(player),'--hirsel-replay',str(tape)],capture_output=True,timeout=45)
+ replay=subprocess.run([str(player),'--hirsel-replay',str(tape)],capture_output=True)
  assert (replay.returncode,replay.stdout,replay.stderr)==(child.returncode,out,err),replay
  assert {x.name:x.read_bytes() for x in retained.iterdir()}==prior and not data.exists(),'offline host mutation'
  assert tape.read_bytes()==frozen

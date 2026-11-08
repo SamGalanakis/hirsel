@@ -77,10 +77,9 @@ def sample(root, out, inventory, case, provider, record, observed, n, rnd):
     metrics = scratch/'resources.json'; counter = scratch/'perf.csv'
     # capped's --inside retains the outer timing.slice fence instead of moving
     # the measured child into a user.slice scope excluded from timing CPUs.
-    # The outer transient service enforces MemoryMax=2G; RLIMIT_CPU is per child.
-    args = [str(root/'tools/capped'), '--inside', '--timeout','60',
-            '/usr/bin/time','-f','{"rss_kib":%M,"user_s":%U,"system_s":%S}', '-o',str(metrics),
-            'prlimit','--cpu=60','--',inventory['perf_elf'],'stat','--no-big-num','-x',';',
+    # The outer transient service enforces MemoryMax=2G.
+    args = [str(root/'tools/capped'), '--inside', '/usr/bin/time','-f','{"rss_kib":%M,"user_s":%U,"system_s":%S}', '-o',str(metrics),
+            inventory['perf_elf'],'stat','--no-big-num','-x',';',
             '-e','instructions:u,instructions,cycles,duration_time','-o',str(counter),'--',
             *command]
     (scratch/'command.json').write_text(json.dumps({'argv':args,'env':{k:v for k,v in env.items() if k.startswith('HIRSEL_') or k in ('PATH','LC_ALL','LD_LIBRARY_PATH')}}, indent=2)+'\n')

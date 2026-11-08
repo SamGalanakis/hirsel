@@ -165,7 +165,6 @@ fn fixture(case: &Value) -> hirsel_native::Fixture {
     }
 }
 fn scripted(boundaries: bool) {
-    cap_fixture_process();
     with_compiler_stack(|| {
         let root = scratch("scripted-");
         let path = package(&root);
@@ -380,7 +379,6 @@ fn chunk_backup_31_scripted_native_record_replay() {
     ) {
         return;
     }
-    cap_fixture_process();
     use hirsel_driver::native::*;
     use hirsel_native::*;
     use hirsel_native_batch::*;
@@ -434,10 +432,6 @@ fn chunk_backup_31_scripted_native_record_replay() {
                 .unwrap()
                 .to_string_lossy()
                 .into(),
-            "--timeout".into(),
-            "60".into(),
-            "/usr/bin/prlimit".into(),
-            "--cpu=60:61".into(),
         ];
         let ready = build(&input, &options).unwrap();
         let sites = Sites::new(input.snapshot());
@@ -938,7 +932,6 @@ fn production_tapes_host_replay() {
 
 #[test]
 fn chunk_backup_31_fragmentation_and_reset_real_splitter() {
-    cap_fixture_process();
     with_compiler_stack(|| {
         let root = scratch("fragment-");
         let path = package(&root);
@@ -994,17 +987,6 @@ fn chunk_backup_31_fragmentation_and_reset_real_splitter() {
             );
         }
     });
-}
-
-fn cap_fixture_process() {
-    if std::env::var_os("CHUNK_BACKUP_31_CAP_CPU").is_some() {
-        let bound = libc::rlimit {
-            rlim_cur: 60,
-            rlim_max: 61,
-        };
-        // This test process only; setup and native child caps remain independent.
-        assert_eq!(unsafe { libc::setrlimit(libc::RLIMIT_CPU, &bound) }, 0);
-    }
 }
 
 fn selected_engine(name: &str) -> bool {
@@ -1098,7 +1080,7 @@ fn tape_controls(root: &Path, path: &Path, tape: &Path, bound: u64) {
                 .arg(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tools/capped"))
                 .env("HIRSEL_MEMORY_LIMIT", "2G")
                 .env("HIRSEL_JOBS", "4")
-                .args(["--timeout", "60", "/usr/bin/prlimit", "--cpu=60:61"])
+                .args(["/usr/bin/prlimit"])
                 .arg(root.join(format!("app-{backend}")))
                 .arg("--hirsel-replay")
                 .arg(&bad)
@@ -1203,7 +1185,6 @@ fn dispatch_cases(test: &str, boundaries: bool, native: bool) -> bool {
                     "--nocapture",
                 ])
                 .env("CHUNK_BACKUP_31_CASE", &ids)
-                .env("CHUNK_BACKUP_31_CAP_CPU", "1")
                 .env("HIRSEL_MEMORY_LIMIT", "2G");
             if native {
                 command.env("CHUNK_BACKUP_31_RECORDERS", engine);

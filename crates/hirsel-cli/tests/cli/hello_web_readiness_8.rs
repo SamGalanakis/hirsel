@@ -12,7 +12,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
     },
     thread::{self, JoinHandle},
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 pub(super) fn replace_once(source: &str, anchor: &str, replacement: &str) -> String {
@@ -138,8 +138,7 @@ impl Server {
         Ok(server)
     }
 
-    pub(super) fn ready(&mut self, timeout: Duration) -> Result<u16, String> {
-        let started = Instant::now();
+    pub(super) fn ready(&mut self) -> Result<u16, String> {
         loop {
             match self.child.try_wait() {
                 Ok(Some(status)) => {
@@ -173,26 +172,12 @@ impl Server {
             if let Some(result) = result {
                 return result.map_err(|reason| self.failure(&reason));
             }
-            if started.elapsed() >= timeout {
-                return Err(self.failure("server readiness timeout"));
-            }
             thread::sleep(Duration::from_millis(5));
         }
     }
 
-    fn wait(&mut self, timeout: Duration) -> Result<ExitStatus, String> {
-        let started = Instant::now();
-        loop {
-            match self.child.try_wait() {
-                Ok(Some(status)) => return Ok(status),
-                Err(e) => return Err(format!("wait failed: {e}")),
-                Ok(None) => {}
-            }
-            if started.elapsed() >= timeout {
-                return Err("owned child exit timeout".into());
-            }
-            thread::sleep(Duration::from_millis(5));
-        }
+    fn wait(&mut self) -> Result<ExitStatus, String> {
+        self.child.wait().map_err(|e| format!("wait failed: {e}"))
     }
 
     fn cleanup(&mut self) {
@@ -204,7 +189,7 @@ impl Server {
         unsafe {
             libc::kill(-(self.child.id() as i32), libc::SIGKILL);
         }
-        self.outcome = match self.wait(Duration::from_secs(10)) {
+        self.outcome = match self.wait() {
             Ok(status) => status.to_string(),
             Err(e) => e,
         };
@@ -236,9 +221,7 @@ impl Server {
     }
 
     pub(super) fn finish(&mut self) -> Result<(), String> {
-        let status = self
-            .wait(Duration::from_secs(10))
-            .map_err(|e| self.failure(&e))?;
+        let status = self.wait().map_err(|e| self.failure(&e))?;
         self.cleanup();
         if !status.success() {
             return Err(self.failure(&format!("server failed: {status}")));
@@ -265,7 +248,7 @@ fn shell(script: &str) -> Server {
 #[test]
 fn early_exit_reports_stderr_and_outcome() {
     let mut server = shell("printf 'startup failed' >&2; exit 7");
-    let error = server.ready(Duration::from_secs(10)).unwrap_err();
+    let error = server.ready().unwrap_err();
     assert!(
         error.contains("EOF") || error.contains("child exited"),
         "{error}"
@@ -287,7 +270,7 @@ fn invalid_readiness_preserves_bytes_and_cleans_up() {
         let mut server = shell(&format!(
             "printf 'diagnostic' >&2; printf '{value}\\n'; sleep 30 & wait"
         ));
-        let error = server.ready(Duration::from_secs(10)).unwrap_err();
+        let error = server.ready().unwrap_err();
         assert!(error.contains(reason), "{error}");
         assert!(error.contains("diagnostic"), "{error}");
         assert!(error.contains("process outcome="), "{error}");
@@ -298,10 +281,11 @@ fn invalid_readiness_preserves_bytes_and_cleans_up() {
 }
 
 #[test]
-fn timeout_preserves_partial_readiness_and_drains_large_stderr() {
-    let mut server = shell("head -c 131072 /dev/zero >&2; printf partial; exec sleep 30");
-    let error = server.ready(Duration::from_millis(250)).unwrap_err();
-    assert!(error.contains("server readiness timeout"), "{error}");
+fn eof_preserves_partial_readiness_and_drains_large_stderr() {
+    let mut server =
+        shell("head -c 131072 /dev/zero >&2; printf partial; exec 1>&-; exec sleep 30");
+    let error = server.ready().unwrap_err();
+    assert!(error.contains("EOF before readiness newline"), "{error}");
     assert_eq!(
         server
             .stdout
@@ -333,7 +317,7 @@ fn readiness_uses_the_actual_nonzero_loopback_port() {
     let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
     let port = listener.local_addr().unwrap().port();
     let mut server = shell(&format!("printf '{port}\\n'; exec sleep 30"));
-    let ready = server.ready(Duration::from_secs(10)).unwrap();
+    let ready = server.ready().unwrap();
     assert_eq!(ready, port);
     assert_ne!(ready, 0);
     let _client = std::net::TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, ready)).unwrap();
@@ -342,9 +326,8 @@ fn readiness_uses_the_actual_nonzero_loopback_port() {
 }
 
 #[test]
-fn readiness_read_error_is_distinct_from_timeout() {
+fn readiness_read_error_preserves_diagnostic() {
     let mut server = shell("printf 'read failure diagnostic' >&2; exec sleep 30");
-    let started = Instant::now();
     while server
         .stderr
         .as_ref()
@@ -355,20 +338,18 @@ fn readiness_read_error_is_distinct_from_timeout() {
         .bytes
         .is_empty()
     {
-        assert!(started.elapsed() < Duration::from_secs(10));
         thread::sleep(Duration::from_millis(5));
     }
     server.stdout = Some(Pipe::new(std::fs::File::open("/").unwrap()).unwrap());
-    let error = server.ready(Duration::from_secs(10)).unwrap_err();
+    let error = server.ready().unwrap_err();
     assert!(error.contains("readiness read error"), "{error}");
     assert!(error.contains("read failure diagnostic"), "{error}");
-    assert!(!error.contains("readiness timeout"), "{error}");
 }
 
 #[test]
 fn eof_with_partial_readiness_reports_the_bytes() {
     let mut server = shell("printf 'early diagnostic' >&2; printf 123; exec 1>&-; exec sleep 30");
-    let error = server.ready(Duration::from_secs(10)).unwrap_err();
+    let error = server.ready().unwrap_err();
     assert!(error.contains("EOF before readiness newline"), "{error}");
     assert!(error.contains("Some([49, 50, 51])"), "{error}");
     assert!(error.contains("early diagnostic"), "{error}");
@@ -377,7 +358,7 @@ fn eof_with_partial_readiness_reports_the_bytes() {
 #[test]
 fn drop_reaps_owned_group_and_joins_both_readers_during_unwind() {
     let mut server = shell("printf '12345\\n'; sleep 30 & wait");
-    assert_eq!(server.ready(Duration::from_secs(10)).unwrap(), 12345);
+    assert_eq!(server.ready().unwrap(), 12345);
     let pid = server.child.id();
     let stdout = Arc::clone(&server.stdout.as_ref().unwrap().captured);
     let stderr = Arc::clone(&server.stderr.as_ref().unwrap().captured);

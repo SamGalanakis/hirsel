@@ -1,22 +1,20 @@
 #!/usr/bin/env python3
-"""Run one local command under a hard memory cap, a CPU quota and a timeout.
+"""Run one local command under a hard memory cap and a CPU quota.
 
-    tools/capped [--long] [--timeout SECONDS] <command> [arguments...]
+    tools/capped [--long] <command> [arguments...]
 
 The sanctioned way to run anything outside Buck2 on a shared host (a built
 `hirsel`, `hirsel-conformance`, a probe): the command runs in a systemd user
 scope with `MemoryMax=$HIRSEL_MEMORY_LIMIT` (default 4G), `MemorySwapMax=0`
-and `CPUQuota` of `$HIRSEL_JOBS` CPUs (default 2), under a timeout (default
-300 s). Where no user manager is reachable (a sandbox without its bus), it
-falls back to process limits: RLIMIT_DATA at the cap, RLIMIT_NPROC near the
+and `CPUQuota` of `$HIRSEL_JOBS` CPUs (default 2). Where no user manager is
+reachable (a sandbox without its bus), it falls back to process limits: RLIMIT_DATA at the cap, RLIMIT_NPROC near the
 user's current process count, and CPU affinity to $HIRSEL_JOBS CPUs; the
-report names the mechanism that applied. The command sees the same HIRSEL_MEMORY_LIMIT and HIRSEL_JOBS, so a
-hirsel binary's own guard (crates/hirsel-guard) caps itself identically.
+report names the mechanism that applied. The command sees the same
+HIRSEL_MEMORY_LIMIT and HIRSEL_JOBS, so a hirsel binary's own guard (crates/hirsel-guard) caps itself identically.
 Runs share numbered slots: MemAvailable / MemoryMax at startup, clamped to
-2..8, or HIRSEL_CAPPED_SLOTS. --long uses a separate single slot and is required
-for timeouts over 900 s. Queued runs report holders and their wait. At exit it prints the
-scope's peak memory, wall time and exit status to stderr. A run that reaches
-the cap or the timeout is a finding: report the program and its peak, never
+2..8, or HIRSEL_CAPPED_SLOTS. --long uses a separate single slot. Queued runs
+report holders and their wait. At exit it prints the scope's peak memory, wall time and exit status to stderr. A run that reaches
+the memory cap is a finding: report the program and its peak, never
 raise the cap to make it pass. Many-program runs go through Buck2 test targets.
 """
 
@@ -36,10 +34,6 @@ import time
 
 DEFAULT_LIMIT = '4G'
 DEFAULT_JOBS = '2'
-DEFAULT_TIMEOUT = 300
-SHORT_TIMEOUT = 900
-# The scope's processes get this long to exit after the timeout's SIGTERM.
-GRACE = 10
 LIMIT = re.compile(r'[1-9][0-9]*[KMGT]?')
 UNITS = {'K': 1 << 10, 'M': 1 << 20, 'G': 1 << 30, 'T': 1 << 40}
 # Processes the fallback lets the command add to the user's current count.
@@ -150,8 +144,8 @@ def oom_kills(cgroup: Path | None) -> int:
         return 0
 
 
-def inside(timeout: int, limit: str, command: list[str], limits=None) -> int:
-    """Run the command in its own process group under the timeout, then report
+def inside(limit: str, command: list[str], limits=None) -> int:
+    """Run the command in its own process group, then report
     the peak memory and whether it hit the cap: the scope's when inside one,
     otherwise the largest child's under `limits` (process limits applied in
     the child before it runs the command). Only an OOM kill during this run
@@ -160,18 +154,8 @@ def inside(timeout: int, limit: str, command: list[str], limits=None) -> int:
     kills_before = oom_kills(cgroup)
     start = time.monotonic()
     child = subprocess.Popen(command, start_new_session=True, preexec_fn=limits)
-    timed_out = False
     try:
-        status = child.wait(timeout)
-    except subprocess.TimeoutExpired:
-        timed_out = True
-        os.killpg(child.pid, signal.SIGTERM)
-        try:
-            child.wait(GRACE)
-        except subprocess.TimeoutExpired:
-            os.killpg(child.pid, signal.SIGKILL)
-        child.wait()
-        status = 124
+        status = child.wait()
     except KeyboardInterrupt:
         os.killpg(child.pid, signal.SIGKILL)
         child.wait()
@@ -192,8 +176,6 @@ def inside(timeout: int, limit: str, command: list[str], limits=None) -> int:
     notes = []
     if oom:
         notes.append(f'memory limit {limit} reached (HIRSEL_MEMORY_LIMIT): the kernel killed the command')
-    if timed_out:
-        notes.append(f'timed out after {timeout} s')
     note = ''.join(f'; {n}' for n in notes)
     mechanism = 'process limits' if limits else 'systemd scope'
     print(f'capped: peak {peak} of {limit} ({mechanism}), {wall:.1f} s, exit {status}{note}', file=sys.stderr)
@@ -244,20 +226,15 @@ def granted_cpus(jobs: int) -> float:
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description='Run one command under the HIRSEL_MEMORY_LIMIT cap, a HIRSEL_JOBS CPU quota and a timeout.')
-    parser.add_argument('--timeout', type=int, default=DEFAULT_TIMEOUT, help='seconds (default 300)')
+        description='Run one command under the HIRSEL_MEMORY_LIMIT cap, a HIRSEL_JOBS CPU quota.')
     parser.add_argument('--long', action='store_true',
-                        help='use the separate single long-job slot; required for timeouts over 900 s')
+                        help='use the separate single long-job slot')
     parser.add_argument('--inside', action='store_true', help=argparse.SUPPRESS)
     parser.add_argument('command', nargs=argparse.REMAINDER)
     args = parser.parse_args()
     command = args.command[1:] if args.command[:1] == ['--'] else args.command
     if not command:
         parser.error('a command to run is required')
-    if args.timeout <= 0:
-        parser.error('--timeout must be positive')
-    if args.timeout > SHORT_TIMEOUT and not args.long:
-        parser.error('--timeout above 900 s requires --long (the separate long-job slot)')
     limit = os.environ.get('HIRSEL_MEMORY_LIMIT') or DEFAULT_LIMIT
     if not LIMIT.fullmatch(limit):
         parser.error(f'HIRSEL_MEMORY_LIMIT={limit!r}: expected bytes or a K, M, G or T count, for example 4G')
@@ -275,7 +252,7 @@ def main() -> int:
     if not os.environ.get('HIRSEL_JOBS'):
         jobs = str(min(int(jobs), int(grant)))
     if args.inside:
-        return inside(args.timeout, limit, command)
+        return inside(limit, command)
     try:
         slots = slot_count(limit_bytes(limit), os.environ)
     except ValueError as error:
@@ -288,11 +265,11 @@ def main() -> int:
         if not scope_available(env):
             print('capped: no systemd user manager is reachable; using process limits', file=sys.stderr)
             os.environ.update(HIRSEL_MEMORY_LIMIT=limit, HIRSEL_JOBS=jobs)
-            return inside(args.timeout, limit, command, process_limits(limit_bytes(limit), int(jobs)))
+            return inside(limit, command, process_limits(limit_bytes(limit), int(jobs)))
         scope = ['systemd-run', '--user', '--scope', '--quiet', '--collect',
                  '-p', f'MemoryMax={limit}', '-p', 'MemorySwapMax=0', '-p', 'OOMPolicy=continue',
                  '-p', f'CPUQuota={int(jobs) * 100}%',
-                 '--', sys.executable or 'python3', os.path.abspath(__file__), '--inside', '--timeout', str(args.timeout),
+                 '--', sys.executable or 'python3', os.path.abspath(__file__), '--inside',
                  *(['--long'] if args.long else []), '--', *command]
         try:
             return subprocess.run(scope, env=env).returncode
@@ -304,7 +281,7 @@ def scope_available(env) -> bool:
     """Whether systemd-run can start a user scope here."""
     try:
         return subprocess.run(['systemd-run', '--user', '--scope', '--quiet', '--collect', '--', 'true'],
-                              env=env, capture_output=True, timeout=30).returncode == 0
+                              env=env, capture_output=True).returncode == 0
     except (OSError, subprocess.TimeoutExpired):
         return False
 

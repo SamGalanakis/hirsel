@@ -35,7 +35,6 @@ fn cli(root: &Path, args: &[&str]) -> Output {
         .unwrap();
     Command::new("python3")
         .arg(capped)
-        .args(["--timeout", "60"])
         .arg(binary)
         .args(args)
         .current_dir(root)

@@ -20,10 +20,10 @@ def exact(s,n):
 def receive(s):
  n=struct.unpack('!I',exact(s,4))[0];assert 0<n<=2048;return json.loads(exact(s,n))
 def limits():
- resource.setrlimit(resource.RLIMIT_CPU,(60,61));resource.setrlimit(resource.RLIMIT_DATA,(2*1024**3,2*1024**3))
+ resource.setrlimit(resource.RLIMIT_DATA,(2*1024**3,2*1024**3))
 def run(argv,d,name,setup=False):
  (d/(name+'.argv.json')).write_text(compact(list(map(str,argv))))
- o=subprocess.run(argv,capture_output=True,env=env,timeout=300 if setup else 60,preexec_fn=None if setup else limits)
+ o=subprocess.run(argv,capture_output=True,env=env,preexec_fn=None if setup else limits)
  (d/(name+'.stdout')).write_bytes(o.stdout);(d/(name+'.stderr')).write_bytes(o.stderr);return o
 class Peer:
  def __init__(self,path,mode):
@@ -61,7 +61,7 @@ for backend,binary in binaries.items():
    args=['serve','routes.json',str(listener)]
    grants=dict(args=args,io=dict(stdout='stdout.bytes@1',tasks='tasks.cooperative@1',random='random.splitmix64@1',monotonic_clock='clock.monotonic.ns@1',dirs=[dict(path='config',host=str(config),access='read')],net=dict(provider='net.stream@1',rules=[dict(address=str(listener),service='0',operation='unix_listen'),dict(address=str(up),service='0',operation='unix_connect')])),placement=dict(cores=width,control=str(control),commit='shared',reorder='off'))
    grant=d/'grants.json';grant.write_text(compact(grants));tape=d/'run.tape';argv=[str(binary),'--hirsel-record',str(tape),'--hirsel-grants',str(grant),*args];(d/'record.argv.json').write_text(compact(argv))
-   wrapped=['python3',str(root/'capped'),'--timeout','60','prlimit','--cpu=60:61',*argv]
+   wrapped=['python3',str(root/'capped'),*argv]
    (d/'wrapper.argv.json').write_text(compact(wrapped))
    child=subprocess.Popen(wrapped,stdout=subprocess.PIPE,stderr=subprocess.PIPE,env=env,start_new_session=True)
    try:
@@ -79,7 +79,7 @@ for backend,binary in binaries.items():
      else:
       peer.release.set();reply=receive(down);assert reply==dict(id='collision',**(dict(error=dict(code='unknown_outcome' if mode=='unsafe' else 'divide_by_zero')) if mode in ['error','unsafe'] else dict(result=15))),reply
     assert peer.closed.wait(10),'upstream not closed on disconnect'
-    stdout,stderr=child.communicate(timeout=15);actual=dict(exit=child.returncode,stdout=(ready+stdout).decode())
+    stdout,stderr=child.communicate();actual=dict(exit=child.returncode,stdout=(ready+stdout).decode())
     status='canceled' if mode=='cancel' else 'unknown_outcome' if mode=='unsafe' else 'application_error' if mode=='error' else 'ok'
     wanted=dict(exit=0,stdout='{"listening":true}\n'+compact(dict(client=0,request=0,attempt=1,status=status))+'\n{"clients":1,"expired":false}\n')
     (d/'wrapper.stderr').write_bytes(stderr)

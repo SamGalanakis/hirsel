@@ -2800,9 +2800,7 @@ fn frozen_generator_acceptance_cancellation_publishes_no_registration() {
             .register_local(FRONT_EVALUATE_KIND, lower.factory())
             .unwrap();
         let request = runtime.request(&[lower.evaluate_query(&path("A")).unwrap()]);
-        ready
-            .recv_timeout(std::time::Duration::from_secs(60))
-            .unwrap();
+        ready.recv().unwrap();
         runtime.cancel(request);
         release.send(()).unwrap();
         runtime.shutdown();

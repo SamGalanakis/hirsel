@@ -901,14 +901,7 @@ fn spectral_audit_35_ordered_capacity() {
     let kind = std::env::var("SPECTRAL_AUDIT_35_KIND").expect("success/domain/cancel");
     let o = Command::new("python3")
         .arg(root.join("capped"))
-        .args([
-            "--timeout",
-            "60",
-            "prlimit",
-            "--cpu=60:61",
-            "--data=2147483648:2147483648",
-            "python3",
-        ])
+        .args(["--data=2147483648:2147483648", "python3"])
         .env("HIRSEL_MEMORY_LIMIT", "2G")
         .arg(root.join("ordered.py"))
         .arg("--hirsel")

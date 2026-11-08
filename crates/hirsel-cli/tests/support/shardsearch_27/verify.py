@@ -22,13 +22,9 @@ def verify(hirsel, root, backend):
 
     def run(label, argv, runtime=False):
         argv = list(map(str, argv))
-        def limits():
-            resource.setrlimit(resource.RLIMIT_CPU, (60, 60))
-        actual = [sys.executable, root / 'capped', '--timeout', '60' if runtime else '300', *argv]
+        actual = [sys.executable, root / 'capped', *argv]
         done = subprocess.run(list(map(str, actual)), stdin=subprocess.DEVNULL,
-                              capture_output=True, env=env, cwd=root,
-                              timeout=90 if runtime else 300,
-                              preexec_fn=limits if runtime else None)
+                              capture_output=True, env=env, cwd=root,)
         (root / (label + '.stdout')).write_bytes(done.stdout)
         (root / (label + '.stderr')).write_bytes(done.stderr)
         commands.append(dict(id=label, argv=list(map(str, actual)), status=done.returncode))

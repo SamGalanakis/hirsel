@@ -40,7 +40,7 @@ def run(command, **kwargs):
 
 
 def build(binary):
-    run([CAPPED, '--timeout', 300, 'cargo', 'build', '--release', '--locked',
+    run([CAPPED,  'cargo', 'build', '--release', '--locked',
          '--manifest-path', APP / 'rust/Cargo.toml', '--target-dir', APP / 'rust/target'])
     output = subprocess.check_output([str(ROOT / '.buck2/bin/buck2'), 'build',
         '--target-platforms', '//tools/buck2:release', '//:hirsel-toolchain', '//:hirsel-rt-archives',
@@ -48,7 +48,7 @@ def build(binary):
     paths = {line.split()[0].rsplit(':', 1)[1]: line.split()[1] for line in output.splitlines() if line.startswith('root//')}
     environment = dict(os.environ, LLVM_SYS_231_PREFIX=str(ROOT / 'tools/buck2/toolchains/llvm-files'),
         HIRSEL_RUNTIME_ARCHIVES=paths['hirsel-rt-archives'], HIRSEL_LINK_KIT=paths['kit'], HIRSEL_GLIBC_FLOOR=paths['glibc_floor'])
-    run([CAPPED, '--timeout', 300, Path(paths['hirsel-toolchain']) / 'hirsel', 'build', ROOT / 'examples/tasks/hirsel.json',
+    run([CAPPED,  Path(paths['hirsel-toolchain']) / 'hirsel', 'build', ROOT / 'examples/tasks/hirsel.json',
          '--release', '-o', binary], env=environment)
 
 
@@ -112,7 +112,7 @@ class AttachedPerf:
 
     def stop(self):
         self.process.send_signal(signal.SIGINT)
-        _, error = self.process.communicate(timeout=30)
+        _, error = self.process.communicate()
         os.close(self.control_fd)
         os.close(self.ack_fd)
         self.control.unlink()
@@ -131,7 +131,7 @@ def sample(kind, operation, rate, args, directory, round_number, profile=False):
     before = sibling()
     lifetime = directory / 'lifetime.csv' if operation in ('cold', 'restart') else None
     binary = binary_for(kind, args)
-    server = Server(kind, data, port, binary, directory / 'server.log', timeout=900, perf=lifetime,
+    server = Server(kind, data, port, binary, directory / 'server.log', perf=lifetime,
                     record=directory / 'profile.data' if profile and lifetime else None)
     client = None
     perf = None
@@ -148,11 +148,11 @@ def sample(kind, operation, rate, args, directory, round_number, profile=False):
                   'first_ms': first_ms, 'idle_rss': idle_rss, 'binary_bytes': binary.stat().st_size,
                   'sibling_before': before}
         if operation not in ('cold', 'restart'):
-            client = subprocess.Popen([str(CAPPED), '--timeout', '600', 'taskset', '-c', '7',
+            client = subprocess.Popen([str(CAPPED), 'taskset', '-c', '7',
                 str(APP / 'rust/target/release/load'), str(port), operation, str(rate), str(args.seconds)],
                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=open(directory / 'client.log', 'wb'), bufsize=0,
                 env=dict(os.environ, HIRSEL_JOBS='1'))
-            assert line(client, 120) == 'ready'
+            assert line(client) == 'ready'
             if profile:
                 recording = AttachedPerf(pid, directory, record=True)
                 # A short fan-out can finish before perf has attached. The ack makes
@@ -164,7 +164,7 @@ def sample(kind, operation, rate, args, directory, round_number, profile=False):
             perf.send('enable')
             client.stdin.write(b'go\n')
             client.stdin.flush()
-            output, _ = client.communicate(timeout=600)
+            output, _ = client.communicate()
             perf.send('disable')
             measured_after = sibling()
             result.update(json.loads(output))
@@ -225,7 +225,7 @@ def startup_profile(kind, operation, args, directory):
         request(server.port)
     finally:
         server.stop()
-    output = subprocess.check_output([str(CAPPED), '--timeout', '60', 'perf', 'report', '-i', str(directory / 'profile.data'),
+    output = subprocess.check_output([str(CAPPED), 'perf', 'report', '-i', str(directory / 'profile.data'),
                                       '--stdio', '--no-children', '--sort', 'symbol', '--percent-limit', '0', '-F', 'overhead,symbol'], text=True)
     shutil.rmtree(data)
     return output
@@ -245,7 +245,7 @@ def memory_profile(kind, args, directory):
         assert reply.status == 200
         reply.read()
         connection.close()
-        client = run([CAPPED, '--timeout', 300, 'taskset', '-c', 7, APP / 'rust/target/release/load',
+        client = run([CAPPED,  'taskset', '-c', 7, APP / 'rust/target/release/load',
                       server.port, 'sse', 100, 1], input=b'go\n', stdout=subprocess.PIPE)
         pid = json.loads(server.marker.read_text())['pid']
         maps = Path(f'/proc/{pid}/smaps').read_text()
@@ -254,8 +254,8 @@ def memory_profile(kind, args, directory):
         server.stop()
     interpreted = directory / 'heap.interpreted'
     with raw.open('rb') as source, interpreted.open('wb') as output:
-        run([CAPPED, '--timeout', 300, '/usr/lib/heaptrack/libexec/heaptrack_interpret'], stdin=source, stdout=output)
-    output = subprocess.check_output([str(CAPPED), '--timeout', '300', 'heaptrack_print', '-f', str(interpreted),
+        run([CAPPED,  '/usr/lib/heaptrack/libexec/heaptrack_interpret'], stdin=source, stdout=output)
+    output = subprocess.check_output([str(CAPPED), 'heaptrack_print', '-f', str(interpreted),
                                       '-p', '1', '-a', '0', '-T', '0', '-n', '5', '-s', '2'], text=True)
     shutil.rmtree(data)
     regions = []

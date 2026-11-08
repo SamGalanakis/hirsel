@@ -83,8 +83,8 @@ def environment(toolchain, scratch, fresh):
 
 def measure(toolchain, path, cpu, scratch, fresh):
     counters, status, stderr = (scratch / name for name in ('perf', 'status', 'stderr'))
-    command = [str(ROOT / 'tools/capped'), '--timeout', '120', 'taskset', '-c', str(cpu),
-               'prlimit', '--cpu=60:60', '--', 'perf', 'stat', '-x', ';', '-o', str(counters),
+    command = [str(ROOT / 'tools/capped'), 'taskset', '-c', str(cpu),
+               'perf', 'stat', '-x', ';', '-o', str(counters),
                '-e', 'instructions:u,instructions', '--', sys.executable, '-c', CHILD, str(status),
                str(toolchain / 'hirsel'), 'check', '--timings=json', str(path)]
     try:

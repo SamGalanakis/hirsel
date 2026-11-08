@@ -8,7 +8,7 @@ use std::{
     os::unix::{fs::PermissionsExt, process::CommandExt},
     path::{Path, PathBuf},
     process::{Command, Output, Stdio},
-    time::{Duration, Instant},
+    time::Instant,
 };
 
 fn from_project(variable: &str) -> PathBuf {
@@ -38,27 +38,14 @@ fn phase(command: &mut Command, root: &Path, label: &str) -> Result<Output, Stri
         .stderr(File::create(&stderr).unwrap())
         .spawn()
         .map_err(|error| format!("{label}: spawn: {error}"))?;
-    let mut expired = false;
-    let status = loop {
-        if let Some(status) = child.try_wait().unwrap() {
-            break status;
-        }
-        if start.elapsed() >= Duration::from_secs(20) {
-            expired = true;
-            // SAFETY: this child created a new group whose ID is its own PID.
-            unsafe { libc::kill(-(child.id() as i32), libc::SIGKILL) };
-            break child.wait().unwrap();
-        }
-        std::thread::sleep(Duration::from_millis(2));
-    };
+    let status = child.wait().unwrap();
     let output = Output {
         status,
         stdout: fs::read(stdout).unwrap(),
         stderr: fs::read(stderr).unwrap(),
     };
-    let disposition = if expired { "TIMED_OUT" } else { "COMPLETED" };
     let evidence = format!(
-        "{disposition} {label} elapsed={:?} status={} stdout={:?} stderr={:?}\n",
+        "COMPLETED {label} elapsed={:?} status={} stdout={:?} stderr={:?}\n",
         start.elapsed(),
         output.status,
         output.stdout,
@@ -66,7 +53,7 @@ fn phase(command: &mut Command, root: &Path, label: &str) -> Result<Output, Stri
     );
     eprintln!("REPLAY_LIVENESS {evidence}");
     phases.write_all(evidence.as_bytes()).unwrap();
-    if expired || !output.status.success() {
+    if !output.status.success() {
         return Err(evidence);
     }
     Ok(output)

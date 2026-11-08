@@ -224,27 +224,7 @@ fn await_any_replay_case(force_save_window: bool) {
         } else {
             "tasks::free::sets::tests::native_await_any_replay_uses_recorded_members_after_reversed_late_completion"
         }, "--nocapture"]).env(CHILD, "1");
-        let output = if force_save_window {
-            // Keep a failed diagnostic handshake bounded and reap only our
-            // own child before reporting the captured stage evidence.
-            let mut child = command
-                .stdout(std::process::Stdio::piped())
-                .stderr(std::process::Stdio::piped())
-                .spawn()
-                .unwrap();
-            let until = std::time::Instant::now() + std::time::Duration::from_secs(20);
-            while child.try_wait().unwrap().is_none() {
-                if std::time::Instant::now() >= until {
-                    child.kill().unwrap();
-                    let output = child.wait_with_output().unwrap();
-                    panic!("bounded save-window probe timed out: {output:?}");
-                }
-                std::thread::sleep(std::time::Duration::from_millis(10));
-            }
-            child.wait_with_output().unwrap()
-        } else {
-            command.output().unwrap()
-        };
+        let output = command.output().unwrap();
         assert!(output.status.success(), "{output:?}");
         eprint!("{}", String::from_utf8_lossy(&output.stderr));
         return;

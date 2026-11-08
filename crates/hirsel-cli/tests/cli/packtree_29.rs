@@ -363,9 +363,7 @@ fn refusal_controls(root: &std::path::Path) {
         let bytes = fs::read(&path).unwrap();
         for engine in ["reference", "llvm", "cranelift"] {
             let mut command = Command::new("python3");
-            command
-                .arg(root.join("capped"))
-                .args(["--timeout", "60", "prlimit", "--cpu=60:61"]);
+            command.arg(root.join("capped")).args(["prlimit"]);
             command
                 .env("HIRSEL_MEMORY_LIMIT", "2G")
                 .env("HIRSEL_JOBS", "4")

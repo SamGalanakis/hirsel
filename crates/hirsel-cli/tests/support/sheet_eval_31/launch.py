@@ -10,7 +10,7 @@ if len(sys.argv)>1 and sys.argv[1]=='--payload':
         run=subprocess.run(sys.argv[4:],stdin=subprocess.DEVNULL,stdout=out,stderr=err)
     sys.exit(run.returncode)
 dir=Path(tempfile.mkdtemp(prefix='launch-',dir=root))
-argv=[(sys.executable or "/usr/bin/python3"),str(root/'capped'),'--timeout','60','prlimit','--cpu=60:61',(sys.executable or "/usr/bin/python3"),__file__,'--payload',str(dir/'stdout'),str(dir/'stderr'),*sys.argv[1:]]
+argv=[(sys.executable or "/usr/bin/python3"),str(root/'capped'),(sys.executable or "/usr/bin/python3"),__file__,'--payload',str(dir/'stdout'),str(dir/'stderr'),*sys.argv[1:]]
 with (dir/'scope').open('wb') as report:
     run=subprocess.run(argv,stdin=subprocess.DEVNULL,stdout=report,stderr=report,env=os.environ|{'HIRSEL_MEMORY_LIMIT':'2G','HIRSEL_JOBS':'4'})
 for name,stream in [('stdout',sys.stdout.buffer),('stderr',sys.stderr.buffer)]:

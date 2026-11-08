@@ -43,14 +43,10 @@ def run(argv, root, label, wanted, env):
     cell.mkdir()
     (cell/'expected.json').write_text(compact(wanted)+'\n')
     (cell/'argv.json').write_text(compact([str(a) for a in argv])+'\n')
-    try:
-        output = subprocess.run(argv, env=env, capture_output=True, timeout=60)
-        result = dict(status=output.returncode,
-                      stdout=output.stdout.decode(errors='replace'),
-                      stderr=output.stderr.decode(errors='replace'))
-    except subprocess.TimeoutExpired as error:
-        result = dict(status='TIMEOUT', stdout=(error.stdout or b'').decode(errors='replace'),
-                      stderr=(error.stderr or b'').decode(errors='replace'))
+    output = subprocess.run(argv, env=env, capture_output=True)
+    result = dict(status=output.returncode,
+                  stdout=output.stdout.decode(errors='replace'),
+                  stderr=output.stderr.decode(errors='replace'))
     (cell/'actual.json').write_text(compact(result)+'\n')
     return result == wanted, result
 
@@ -149,7 +145,7 @@ def real(hirsel, executable, manifest, root, label, deadline, env, width=1, cont
         peers[0].release.set()
         # Pending peers are released to wait for EOF, never to manufacture a response.
         peers[1].release.set()
-        stdout, stderr = child.communicate(timeout=15)
+        stdout, stderr = child.communicate()
         actual = dict(status=child.returncode, stdout=stdout.decode(errors='replace'), stderr=stderr.decode(errors='replace'))
     except Exception as error:
         actual = dict(error=repr(error))

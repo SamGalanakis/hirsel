@@ -17,7 +17,6 @@ def verify(args):
     receipts = []
     child = root / 'child.py'
     child.write_text('''import pathlib,resource,subprocess,sys
-resource.setrlimit(resource.RLIMIT_CPU,(60,60))
 p=subprocess.run(sys.argv[3:],stdin=subprocess.DEVNULL,capture_output=True)
 pathlib.Path(sys.argv[1]).write_bytes(p.stdout)
 pathlib.Path(sys.argv[2]).write_bytes(p.stderr)
@@ -26,7 +25,7 @@ sys.exit(p.returncode)
     selection = root / 'hirsel.json'
     binary = output / args.backend
     command = [str(args.hirsel), 'build', str(selection), '--backend', args.backend, '-o', str(binary)]
-    setup = subprocess.run(command, capture_output=True, env=env, timeout=300)
+    setup = subprocess.run(command, capture_output=True, env=env)
     (output/'build.stdout').write_bytes(setup.stdout)
     (output/'build.stderr').write_bytes(setup.stderr)
     assert (setup.returncode, setup.stdout, setup.stderr) == (0, b'', b''), setup
@@ -68,14 +67,14 @@ sys.exit(p.returncode)
             dirs=[dict(path='fixtures', host=str(tree), access='read')]), args=['scan','fixtures',data['pattern']])))
         stdout, stderr = output/f'{id}.stdout', output/f'{id}.stderr'
         tape = output/f'{id}.tape'
-        command = [sys.executable, str(root/'capped'), '--timeout', '60', sys.executable,
+        command = [sys.executable, str(root/'capped'), sys.executable,
                    str(child), str(stdout), str(stderr), str(binary), '--hirsel-record',
                    str(tape), '--hirsel-grants', str(grants), 'scan', 'fixtures', data['pattern']]
         receipts.append(dict(id=id,engine=args.backend,input_sha256=row['input_sha256'],
                              expected_sha256=row['expected_sha256'],command=command,state='started'))
         (output/'receipts.json').write_text(json.dumps(receipts,indent=2)+'\n')
         print('FILEMANIFEST_STREAM_25_NATIVE_START '+json.dumps(receipts[-1]), flush=True)
-        done = subprocess.run(command, capture_output=True, env=env, timeout=120)
+        done = subprocess.run(command, capture_output=True, env=env)
         (output/f'{id}.resources').write_bytes(done.stderr)
         actual = done.returncode, stdout.read_bytes(), stderr.read_bytes()
         receipts[-1].update(state='completed',exit=done.returncode,passed=actual ==

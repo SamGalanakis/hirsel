@@ -16,7 +16,7 @@ if launch and launch[0]=='--inherit-exact-cpus':
  jobs=str(len(affinity))
  (target/'allocation.json').write_text(__import__('json').dumps(dict(inherited_affinity=affinity,jobs=jobs,cpu_seconds=60,memory_bytes=2147483648)))
 env=os.environ|{'HIRSEL_JOBS':jobs,'HIRSEL_MEMORY_LIMIT':'2G','PATH':os.defpath}
-cmd=['python3',str(base/'capped'),'--timeout','60','prlimit','--cpu=60:61','--data=2147483648:2147483648','python3',__file__,'child',str(target),*launch]
+cmd=['python3',str(base/'capped'),'prlimit', '--data=2147483648:2147483648','python3',__file__,'child',str(target),*launch]
 (target/'command.json').write_text(__import__('json').dumps(cmd))
 p=subprocess.run(cmd,env=env,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
 (target/'cap-stdout').write_bytes(p.stdout);(target/'cap-stderr').write_bytes(p.stderr)

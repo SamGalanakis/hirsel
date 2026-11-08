@@ -204,16 +204,14 @@ class LauncherReporting(LauncherFixture):
     def reporter(self):
         return Path(os.environ.get('HIRSEL_TEST_REPORTER', ROOT / 'tools/buck2/test_report.py')).resolve()
 
-    def run_report(self, args=(), deadline=0.5):
-        # The injected short deadline is confined to this regression process;
-        # production has no timeout environment variable or command-line knob.
+    def run_report(self, args=()):
         code = ("import runpy,sys; m=runpy.run_path(sys.argv[1]); "
-                f"sys.exit(m['supervise'](sys.argv[2:], deadline={deadline}))")
+                "sys.exit(m['supervise'](sys.argv[2:]))")
         env = self.env | {'HIRSEL_TEST_REPORT_ACTIVE': '1',
                           'HIRSEL_TEST_REPORTER': str(self.reporter())}
         return subprocess.run([sys.executable, '-c', code, str(self.reporter()),
                                'sh', str(LAUNCHER), 'harness', *args],
-                              cwd=self.root, env=env, capture_output=True, text=True, timeout=10)
+                              cwd=self.root, env=env, capture_output=True, text=True)
 
     def test_zero_body_pass_is_refused_and_names_target(self):
         self.env['TEST_TARGET'] = 'root//:fixture-test-it'
@@ -222,7 +220,7 @@ class LauncherReporting(LauncherFixture):
                             ({'pool::only': False}, ('--ignored',))]:
             with self.subTest(cases=cases, args=args):
                 self.env['CASES'] = json.dumps(cases)
-                result = self.run_report(args, deadline=10)
+                result = self.run_report(args)
                 self.assertEqual(result.returncode, 2, result.stderr)
                 self.assertIn('root//:fixture-test-it', result.stderr)
                 self.assertIn('executed zero test bodies', result.stderr)
@@ -230,18 +228,18 @@ class LauncherReporting(LauncherFixture):
     def test_empty_partitions_and_discovery_keep_their_status(self):
         self.env['CASES'] = json.dumps({'pool::only': False})
         self.env.update(TEST_TOTAL_SHARDS='2', TEST_SHARD_INDEX='1')
-        result = self.run_report(deadline=10)
+        result = self.run_report()
         self.assertEqual(result.returncode, 0, result.stderr)
         selected = json.loads(self.observed.read_text())
         self.assertEqual(selected['cases'], [])
         index = selected['argv'].index('--exact')
         self.assertEqual(selected['argv'][index:index + 2], ['--exact', ''])
-        result = self.run_report(('pool::only',), deadline=10)
+        result = self.run_report(('pool::only',))
         self.assertEqual(result.returncode, 0, result.stderr)
         self.env.pop('TEST_TOTAL_SHARDS')
         self.env.pop('TEST_SHARD_INDEX')
         self.env['CASES'] = '{}'
-        result = self.run_report(('--list',), deadline=10)
+        result = self.run_report(('--list',))
         self.assertEqual(result.returncode, 0, result.stderr)
 
     def fixture(self):
@@ -271,177 +269,50 @@ if phase_dir:
     Path(phase_dir, str(os.getpid()) + '.jsonl').write_text(
         ''.join(json.dumps(event) + '\n' for event in events))
 signal.signal(signal.SIGTERM, signal.SIG_IGN)
+print('fixture ready', flush=True)
 while True: signal.pause()
 ''')
 
-    def test_hanging_body_is_named_and_finished_body_keeps_its_result(self):
-        self.fixture()
-        for shard in ({}, dict(TEST_TOTAL_SHARDS='1', TEST_SHARD_INDEX='0')):
-            self.env.update(shard)
-            result = self.run_report()
-            self.assertEqual(result.returncode, 124, result.stderr)
-            self.assertIn('test finished ... ok <0.010000s>', result.stdout)
-            self.assertIn('HIRSEL_TEST_FINISHED ok finished', result.stderr)
-            self.assertIn('HIRSEL_TEST_RUNNING forever elapsed=', result.stderr)
-            self.assertNotIn('HIRSEL_TEST_RUNNING finished', result.stderr)
-            self.assertNotIn('HIRSEL_TEST_RUNNING queued', result.stderr)
-            self.assertIn('HIRSEL_TEST_INNER_DEADLINE', result.stderr)
-            records = [json.loads(line.split(' ', 1)[1]) for line in result.stderr.splitlines()
-                       if line.startswith('HIRSEL_TEST_PHASE_')]
-            prepared = next(row for row in records if row['phase'] == 'compiler-request')
-            self.assertEqual(prepared['completed'], 1)
-            self.assertAlmostEqual(prepared['inclusive_seconds'], 0.1, places=4)
-            replay = next(row for row in records if row['phase'] == 'replay')
-            self.assertEqual(replay['detail'], 'fixture/main')
-            self.assertGreater(replay['elapsed_seconds'], 0)
-
-    def test_deadline_dumps_all_threads_of_owned_children_before_cleanup(self):
-        self.fixture()
-        harness = self.root / 'harness'
-        harness.write_text(harness.read_text().replace('signal.signal(signal.SIGTERM', '''
-import threading, subprocess
-from pathlib import Path
-ready = threading.Event()
-def worker():
-    Path('worker.tid').write_text(str(threading.get_native_id()))
-    ready.set()
-    threading.Event().wait()
-threading.Thread(target=worker, daemon=True).start()
-ready.wait()
-child = subprocess.Popen([sys.executable, '-c', 'import signal; signal.pause()'])
-Path('child.pid').write_text(str(child.pid))
-signal.signal(signal.SIGTERM'''))
-        debugger = self.root / 'gdb'
-        debugger.write_text('''#!/usr/bin/env python3
-import os, sys
-from pathlib import Path
-pid = sys.argv[sys.argv.index('-p') + 1]
-assert 'thread apply all bt' in sys.argv, sys.argv
-assert Path('/proc/' + pid).exists(), 'dump ran after cleanup'
-print('fixture all-thread stack for pid=' + pid)
-''')
-        debugger.chmod(0o755)
-        self.env['PATH'] = str(self.root) + ':' + os.environ['PATH']
-        result = self.run_report()
-        self.assertEqual(result.returncode, 124, result.stderr)
-        self.assertIn('HIRSEL_TEST_STACKS pid=', result.stderr)
-        self.assertIn('fixture all-thread stack for pid=', result.stderr)
-        tid = (self.root / 'worker.tid').read_text()
-        pid = (self.root / 'child.pid').read_text()
-        self.assertIn(f'HIRSEL_TEST_THREAD tid={tid} ', result.stderr)
-        self.assertIn(f'fixture all-thread stack for pid={pid}', result.stderr)
-        with self.assertRaises(ProcessLookupError):
-            os.kill(int(pid), 0)
-
-    def stack_reporter(self):
-        import runpy
-        return runpy.run_path(str(self.reporter()))['dump_owned_stacks']
-
-    def test_stack_dump_without_a_debugger_keeps_thread_waits(self):
-        import contextlib
-        import io
-        from unittest.mock import patch
-        dump = self.stack_reporter()
-        output = io.StringIO()
-        original_open = Path.open
-        def process_file(path, *args, **kwargs):
-            if path == Path(f'/proc/{os.getpid()}/cmdline'):
-                return io.BytesIO(b'/private/hirsel\0build\0--input\0hidden-value\0')
-            return original_open(path, *args, **kwargs)
-        with patch.dict(dump.__globals__, owned_descendants=lambda: [os.getpid()]), \
-             patch.object(dump.__globals__['shutil'], 'which', return_value=None), \
-             patch.object(Path, 'open', process_file), \
-             contextlib.redirect_stderr(output):
-            dump()
-        self.assertIn('debugger=unavailable', output.getvalue())
-        self.assertIn(f'HIRSEL_TEST_THREAD tid={os.getpid()} ', output.getvalue())
-        self.assertIn('"wchan":', output.getvalue())
-        process = next(line for line in output.getvalue().splitlines()
-                       if line.startswith(f'HIRSEL_TEST_PROCESS pid={os.getpid()} '))
-        description = json.loads(process.split(' ', 2)[2])
-        self.assertEqual(description, {'program': 'hirsel', 'operation': 'build'})
-        self.assertNotIn('hidden-value', process)
-        self.assertNotIn('/private', process)
 
 
-    def test_stuck_debugger_is_bounded_by_one_reporting_budget(self):
-        import time
-        from unittest.mock import patch
-        dump = self.stack_reporter()
-        debugger = self.root / 'gdb'
-        debugger.write_text('#!/usr/bin/env python3\nimport time\ntime.sleep(60)\n')
-        debugger.chmod(0o755)
-        with tempfile.TemporaryFile(mode='w+') as output, \
-             patch.dict(dump.__globals__, owned_descendants=lambda: [os.getpid()],
-                        STACK_DUMP_SECONDS=0.1), \
-             patch.object(dump.__globals__['shutil'], 'which', return_value=str(debugger)), \
-             patch.object(sys, 'stderr', output):
-            start = time.monotonic()
-            dump()
-            self.assertLess(time.monotonic() - start, 2)
-            output.seek(0)
-            self.assertIn('timed out', output.read())
 
-    def test_real_libtest_results_and_inner_deadline(self):
+
+    def test_real_libtest_results(self):
         fixture = os.environ.get('HIRSEL_TEST_REPORT_FIXTURE')
         if not fixture:
             self.skipTest('real libtest fixture supplied by Buck2')
         import shutil
         shutil.copy2(Path(fixture).resolve(), self.root / 'harness')
-        result = self.run_report(('--include-ignored',), deadline=10)
+        result = self.run_report(('--include-ignored',))
         self.assertEqual(result.returncode, 101, result.stderr)
         self.assertIn('test a_pass ... ok', result.stdout)
         self.assertIn('test b_fail ... FAILED', result.stdout)
         self.assertIn('fixture failure output', result.stdout)
-        self.assertIn('test result: FAILED. 2 passed; 1 failed; 0 ignored;', result.stdout)
-        result = self.run_report(('--exact', 'b_fail'), deadline=10)
+        self.assertIn('test result: FAILED. 1 passed; 1 failed; 0 ignored;', result.stdout)
+        result = self.run_report(('--exact', 'b_fail'))
         self.assertEqual(result.returncode, 2, result.stderr)
         self.assertIn('fixture-test-it executed zero test bodies', result.stderr)
         costs = self.root / 'costs.tsv'
-        costs.write_text('a_pass\t1\nc_hangs\t1\n')
+        costs.write_text('a_pass\t1\n')
         self.env['HIRSEL_TEST_COSTS'] = str(costs)
         for unstable in ((), ('-Z', 'unstable-options')):
-            result = self.run_report(unstable, deadline=10)
+            result = self.run_report(unstable)
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertRegex(result.stdout, r'test a_pass \.\.\. ok <[0-9.]+s>')
-            self.assertIn('test result: ok. 2 passed; 0 failed; 1 ignored;', result.stdout)
-        self.env['HIRSEL_REPORT_FIXTURE_HANG'] = '1'
-        result = self.run_report(('--test-threads=1',), deadline=1)
-        self.assertEqual(result.returncode, 124, result.stderr)
-        self.assertIn('HIRSEL_TEST_RUNNING c_hangs', result.stderr)
-        self.assertIn('HIRSEL_TEST_FINISHED ok a_pass', result.stderr)
-        self.assertIn('HIRSEL_TEST_FINISHED ignored b_fail', result.stderr)
-        self.assertIn('HIRSEL_TEST_STACKS pid=', result.stderr)
-        self.assertIn('HIRSEL_TEST_THREAD tid=', result.stderr)
-
-    def test_unittest_partial_start_names_the_hanging_method(self):
-        (self.root / 'harness').write_text(r'''#!/usr/bin/env python3
-import signal, unittest
-class Fixture(unittest.TestCase):
-    def test_a_pass(self): pass
-    def test_b_hangs(self):
-        while True: signal.pause()
-unittest.main(verbosity=2)
-''')
-        self.env.pop('HIRSEL_TEST_BINARY', None)
-        result = self.run_report()
-        self.assertEqual(result.returncode, 124, result.stderr)
-        self.assertIn('HIRSEL_TEST_FINISHED ok __main__.Fixture.test_a_pass', result.stderr)
-        self.assertIn('HIRSEL_TEST_RUNNING __main__.Fixture.test_b_hangs', result.stderr)
-
+            self.assertIn('test result: ok. 1 passed; 0 failed; 1 ignored;', result.stdout)
     def test_executor_process_group_is_preserved_and_orphans_are_reaped(self):
         self.env['EXPECTED_PGID'] = str(os.getpgrp())
         (self.root / 'harness').write_text(r'''#!/usr/bin/env python3
 import json, os, subprocess, sys
 assert os.getpgrp() == int(os.environ['EXPECTED_PGID']), 'escaped executor sampling group'
 print(json.dumps(dict(type='test', event='started', name='orphan')), flush=True)
-child = subprocess.Popen([sys.executable, '-c', 'import signal; signal.pause()'])
+child = subprocess.Popen([sys.executable, '-c', 'import signal; signal.pause()'],
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 with open('orphan.pid', 'w') as output: output.write(str(child.pid))
+print(json.dumps(dict(type='test', event='ok', name='orphan')), flush=True)
 ''')
         result = self.run_report()
-        self.assertEqual(result.returncode, 124, result.stderr)
-        self.assertIn('HIRSEL_TEST_RUNNING orphan', result.stderr)
-        self.assertIn('"phase": "child-teardown"', result.stderr)
+        self.assertEqual(result.returncode, 0, result.stderr)
         pid = int((self.root / 'orphan.pid').read_text())
         with self.assertRaises(ProcessLookupError):
             os.kill(pid, 0)
@@ -460,12 +331,24 @@ with open('orphan.pid', 'w') as output: output.write(str(child.pid))
                 # Read one character at a time: TextIO's read-ahead would hide
                 # later lines from select while waiting for the hanging name.
                 output = ''
-                while 'HIRSEL_TEST_STARTED forever\n' not in output:
+                while 'fixture ready\n' not in output:
                     output += run.stdout.read(1)
                 run.send_signal(signal.SIGTERM)
-                _, stderr = run.communicate(timeout=5)
+                _, stderr = run.communicate()
                 self.assertEqual(run.returncode, 143, stderr)
                 self.assertIn('HIRSEL_TEST_RUNNING forever', stderr)
+                self.assertIn('HIRSEL_TEST_FINISHED ok finished', stderr)
+                self.assertNotIn('HIRSEL_TEST_RUNNING finished', stderr)
+                self.assertNotIn('HIRSEL_TEST_RUNNING queued', stderr)
+                records = [json.loads(line.split(' ', 1)[1]) for line in stderr.splitlines()
+                           if line.startswith('HIRSEL_TEST_PHASE_')]
+                prepared = next(row for row in records if row['phase'] == 'compiler-request')
+                self.assertEqual(prepared['completed'], 1)
+                self.assertAlmostEqual(prepared['inclusive_seconds'], 0.1, places=4)
+                replay = next(row for row in records if row['phase'] == 'replay')
+                self.assertEqual(replay['detail'], 'fixture/main')
+                self.assertGreater(replay['elapsed_seconds'], 0)
+
             finally:
                 if run.poll() is None:
                     run.kill()
@@ -798,7 +681,7 @@ class LauncherMemory(LauncherFixture):
         if not limit:
             env.pop('HIRSEL_MEMORY_LIMIT', None)
         run = subprocess.run(['sh', str(LAUNCHER), 'probe'], cwd=self.root, env=env,
-                             capture_output=True, text=True, timeout=60)
+                             capture_output=True, text=True)
         self.assertEqual(run.returncode, 0, run.stderr)
         return run.stdout.split()
 

@@ -5,7 +5,7 @@ env=dict(os.environ,HIRSEL_JOBS='4',HIRSEL_MEMORY_LIMIT='2G',HIRSEL_DAEMON='off'
 def sha(p):return hashlib.sha256(p.read_bytes()).hexdigest()
 def invoke(argv,name,execution=False):
  (root/(name+'.argv.json')).write_text(json.dumps([str(a) for a in argv]))
- if execution:argv=[capped,'--timeout','60','prlimit','--cpu=60:61',*argv]
+ if execution:argv=[capped,*argv]
  out=subprocess.run([str(a) for a in argv],env=env,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
  (root/(name+'.stdout')).write_bytes(out.stdout);(root/(name+'.stderr')).write_bytes(out.stderr)
  (root/(name+'.exit')).write_text(str(out.returncode))
@@ -36,7 +36,7 @@ for backend in ['llvm','cranelift']:
  exe=root/('app-'+backend)
  if os.environ.get('CHUNK_BACKUP_REUSE'):
   assert exe.is_file();continue
- built=invoke([capped,'--timeout','300',hirsel,'build',root/'hirsel.json','--backend',backend,'-o',exe],'build-'+backend)
+ built=invoke([capped,hirsel,'build',root/'hirsel.json','--backend',backend,'-o',exe],'build-'+backend)
  if built.returncode:raise RuntimeError(('build',backend,built.stderr.decode()))
  (root/(backend+'-binary.sha256')).write_text(sha(exe))
 if os.environ.get('CHUNK_BACKUP_BUILD_ONLY'):sys.exit(0)
@@ -59,12 +59,12 @@ for backend in ['llvm','cranelift']:
    control_parent=pathlib.Path(tempfile.mkdtemp(prefix='cb31-'));control=control_parent/'ctl'
    grants=dict(args=['backup','input.json','daily','4'],io=dict(stdout='stdout.bytes@1',stderr='stderr.bytes@1',tasks='tasks.cooperative@1',signals=dict(provider='signals.host@1',kinds=['interrupt']),dirs=[dict(path=m,host=str(d/m),access='read' if m=='source' else 'read_write') for m in ['source','chunks','snapshots','target']]),placement=dict(cores=width,commit='shared',reorder='off',control=str(control)))
    g=d/'grants.json';g.write_text(json.dumps(grants));tape=root/(name+'.tape');trace=root/(name+'.trace')
-   argv=[str(capped),'--timeout','60','prlimit','--cpu=60:61',str(exe),'--hirsel-trace-events',str(trace),'--hirsel-record',str(tape),'--hirsel-grants',str(g),*grants['args']]
+   argv=[str(capped),str(exe),'--hirsel-trace-events',str(trace),'--hirsel-record',str(tape),'--hirsel-grants',str(g),*grants['args']]
    (root/(name+'.argv.json')).write_text(json.dumps(argv));(root/(name+'.inputs.sha256')).write_text(json.dumps({str(p):sha(p) for p in d.rglob('*') if p.is_file()}))
    with open(root/(name+'.stdout'),'wb') as stdout,open(root/(name+'.stderr'),'wb') as stderr:
     child=subprocess.Popen(argv,env=env,stdout=stdout,stderr=stderr)
-    settled=None;samples=[];deadline=time.monotonic()+60;sent=False
-    while child.poll() is None and time.monotonic()<deadline:
+    settled=None;samples=[];sent=False
+    while child.poll() is None:
      try:
       with socket.socket(socket.AF_UNIX,socket.SOCK_STREAM) as client:
        client.settimeout(1);client.connect(str(control));client.sendall(b'{"metrics":true}\n');reply=b''
@@ -81,7 +81,7 @@ for backend in ['llvm','cranelift']:
           pid=peer_pid
           if pid:os.kill(pid,signal.SIGINT);sent=True
      except (OSError,ValueError,KeyError):pass
-    status=child.wait(timeout=10)
+    status=child.wait()
    (root/(name+'.control.json')).write_text(json.dumps(samples,indent=2));(root/(name+'.exit')).write_text(str(status))
    result=dict(id=name,status=status,settled=settled is not None,cancel_sent=sent,tape=str(tape))
    if mode!='cancel':

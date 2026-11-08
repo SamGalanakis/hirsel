@@ -41,11 +41,7 @@ def observe(command, endpoint, grace=1.0):
 
     def interrupted(signum, _frame):
         stop(signum)
-        try:
-            child.wait(timeout=1)
-        except subprocess.TimeoutExpired:
-            stop(signal.SIGKILL)
-            child.wait()
+        child.wait()
         raise SystemExit(128 + signum)
 
     def stop_program():
@@ -114,11 +110,7 @@ def observe(command, endpoint, grace=1.0):
                 if time.monotonic() - start - ready > grace:
                     stop_program()
                     break
-        try:
-            code = child.wait(timeout=1)
-        except subprocess.TimeoutExpired:
-            stop(signal.SIGKILL)
-            code = child.wait()
+        code = child.wait()
         # A short-lived process may exit before the selector reads its first byte.
         try:
             os.killpg(child.pid, signal.SIGKILL)

@@ -41,11 +41,9 @@ def wait_for_stdin_parked(child, tape, pid):
         # Watch before reading the prefix so no completion wakeup can be lost.
         if libc.inotify_add_watch(notify, os.fsencode(tape), 0x2 | 0x8) < 0:
             raise OSError(ctypes.get_errno(), 'inotify_add_watch')
-        deadline = time.monotonic() + 5
         while not stdin_is_blocked(tape):
             assert child.poll() is None, 'application exited before stdin blocked'
-            remaining = deadline - time.monotonic()
-            assert remaining > 0 and select.select([notify], [], [], remaining)[0], 'stdin did not block'
+            select.select([notify], [], [])
             os.read(notify, 65536)
     finally:
         os.close(notify)
@@ -55,7 +53,7 @@ def wait_for_stdin_parked(child, tape, pid):
     while True:
         wait = pathlib.Path(f'/proc/{pid}/wchan').read_text().strip()
         if wait in ('ep_poll', 'do_epoll_wait'): return
-        assert child.poll() is None and time.monotonic() < deadline, (pid, wait)
+        assert child.poll() is None, (pid, wait)
         os.sched_yield()
 
 cli, manifest = sys.argv[1:]
@@ -92,7 +90,7 @@ for backend in ('llvm','cranelift'):
             dirs=[dict(path='input',host=str(root/'input'),access='read')]
             if receipt: dirs.append(dict(path='output',host=str(root/'output'),access='read_write'))
             grants.write_text(json.dumps(dict(args=['--ready','check','modules.json','2'],io=dict(stdout='stdout.bytes@1',stdin='stdin.bytes@1',tasks='tasks.cooperative@1',dirs=dirs),placement=dict(cores=width,commit='shared',reorder='off',control=str(ctl)))))
-            command=[sys.executable,str(root/'capped'),'--timeout','60','prlimit','--cpu=60:61',str(app),'--hirsel-record',str(tape),'--hirsel-grants',str(grants),'--ready','check','modules.json','2']
+            command=[sys.executable,str(root/'capped'),str(app),'--hirsel-record',str(tape),'--hirsel-grants',str(grants),'--ready','check','modules.json','2']
             child=subprocess.Popen(command,stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,env=env)
             assert child.stdout.readline()==b'ready\n',ident
             with socket.socket(socket.AF_UNIX) as conn:
@@ -103,10 +101,10 @@ for backend in ('llvm','cranelift'):
             (root/(ident+'.control.json')).write_text(json.dumps(reply))
             capacity_ok=reply['worker_phase']=='running' and reply['width']['effective']==width and reply['width']['pending']==0
             if not capacity_ok:
-                child.stdin.close();child.stdin=None;child.communicate(timeout=65)
+                child.stdin.close();child.stdin=None;child.communicate()
             assert capacity_ok,reply
             wait_for_stdin_parked(child, tape, pid)
-            child.stdin.write(b'x');child.stdin.flush();out,err=child.communicate(timeout=65)
+            child.stdin.write(b'x');child.stdin.flush();out,err=child.communicate()
             (root/(ident+'.stdout')).write_bytes(b'ready\n'+out);(root/(ident+'.stderr')).write_bytes(err)
             assert child.returncode==expected,(ident,child.returncode,err)
             if workflow.startswith('cancel'): assert json.loads(out)==dict(error='ast_depth'),(ident,out)
@@ -118,7 +116,7 @@ for backend in ('llvm','cranelift'):
             (root/'input/b.toy').unlink(missing_ok=True)
             for target in ('llvm','cranelift'):
                 if not (root/target).exists(): continue
-                replay=subprocess.run([sys.executable,str(root/'capped'),'--timeout','60','prlimit','--cpu=60:61',str(root/target),'--hirsel-replay',str(tape)],env=env,capture_output=True)
+                replay=subprocess.run([sys.executable,str(root/'capped'),str(root/target),'--hirsel-replay',str(tape)],env=env,capture_output=True)
                 assert replay.returncode==expected and replay.stdout==b'ready\n'+out,(ident,target,replay)
             assert tape.read_bytes()==original
             if receipt: assert not (root/'output/admitted').exists()

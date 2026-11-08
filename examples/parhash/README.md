@@ -26,7 +26,7 @@ g = json.loads((p / 'grants.json').read_text())
 g['io']['dirs'][0]['host'] = str((p / 'fixtures').resolve())
 Path('/tmp/parhash-grants.json').write_text(json.dumps(g))
 PY
-HIRSEL_JOBS=4 tools/capped --timeout 60 "$HIRSEL" run --native --backend llvm \
+HIRSEL_JOBS=4 tools/capped "$HIRSEL" run --native --backend llvm \
   examples/parhash/hirsel.json --grants /tmp/parhash-grants.json --cores 2 \
   --record /tmp/parhash.tape
 ```

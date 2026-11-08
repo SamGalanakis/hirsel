@@ -25,7 +25,7 @@ class AtomicScratch(unittest.TestCase):
         replace = Path.replace
 
         def publish(path, destination):
-            barrier.wait(timeout=10)
+            barrier.wait()
             return replace(path, destination)
 
         with patch.object(Path, 'replace', publish), ThreadPoolExecutor(2) as workers:

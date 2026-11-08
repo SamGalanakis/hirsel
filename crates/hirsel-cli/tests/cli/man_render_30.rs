@@ -434,7 +434,7 @@ fn man_render_30_host_refusal_controls() {
             for binary in &binaries {
                 let result = Command::new("python3")
                     .arg(&capped)
-                    .args(["--timeout", "60", "prlimit", "--cpu=60:61"])
+                    .args(["prlimit"])
                     .arg(binary)
                     .arg("--hirsel-replay")
                     .arg(&bad)
@@ -488,7 +488,7 @@ fn man_render_30_host_refusal_controls() {
                 assert!(build.status.success(), "{build:?}");
                 let result = Command::new("python3")
                     .arg(&capped)
-                    .args(["--timeout", "60", "prlimit", "--cpu=60:61"])
+                    .args(["prlimit"])
                     .arg(&binary)
                     .arg("--hirsel-replay")
                     .arg(&tape)

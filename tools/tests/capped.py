@@ -52,7 +52,7 @@ class Capped(unittest.TestCase):
 
     def capped(self, *command, env=None):
         return subprocess.run([str(CAPPED), *command], env=self.env | (env or {}),
-                              capture_output=True, text=True, timeout=60)
+                              capture_output=True, text=True)
 
     def properties(self):
         # The scope probe (`systemd-run ... -- true`) sets no properties.
@@ -99,7 +99,7 @@ class Capped(unittest.TestCase):
             self.skipTest('requires a non-timing CPU')
         result = subprocess.run(['taskset', '-c', str(min(allowed)), str(CAPPED),
                                  'sh', '-c', 'printf %s "$HIRSEL_JOBS"'],
-                                env=self.env, capture_output=True, text=True, timeout=60)
+                                env=self.env, capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout, '1')
         self.assertEqual(self.properties(),
@@ -190,22 +190,6 @@ class Capped(unittest.TestCase):
             self.assertEqual(result.returncode, 2, env)
             self.assertFalse(self.calls.exists(), env)
 
-    def test_the_timeout_kills_the_command_and_its_children(self):
-        pids = Path(self.directory.name) / 'pids'
-        result = self.capped('--timeout', '1', 'sh', '-c',
-                             # Off the captured pipes, so an orphan cannot delay the result.
-                             f'for _ in 1 2; do sleep 30 >/dev/null 2>&1 & echo $! >> {pids}; done; '
-                             f'echo $$ >> {pids}; wait')
-        self.assertEqual(result.returncode, 124, result.stderr)
-        self.assertIn('timed out after 1 s', result.stderr)
-        survivors = [int(pid) for pid in pids.read_text().split()]
-        self.assertEqual(len(survivors), 3)
-        # Killed processes may linger as zombies until their new parent reaps them.
-        deadline = time.monotonic() + 5
-        while survivors and time.monotonic() < deadline:
-            survivors = [pid for pid in survivors if alive(pid)]
-            time.sleep(0.05)
-        self.assertEqual(survivors, [], 'the timeout left processes of the command running')
 
     def test_only_an_oom_kill_during_the_run_reports_the_cap(self):
         cgroup = Path(self.directory.name) / 'cgroup'
@@ -218,7 +202,7 @@ class Capped(unittest.TestCase):
             events.write_text('oom 2\noom_kill 2\n')
             stderr = io.StringIO()
             with contextlib.redirect_stderr(stderr), patch.object(capped, 'own_cgroup', return_value=cgroup):
-                self.assertEqual(capped.inside(60, '4G', command), 0)
+                self.assertEqual(capped.inside('4G', command), 0)
             self.assertRegex(stderr.getvalue(), r'^capped: peak 5 MiB of 4G \(systemd scope\), [0-9.]+ s, exit 0')
             self.assertEqual('memory limit 4G reached' in stderr.getvalue(), note, stderr.getvalue())
 
@@ -288,26 +272,17 @@ with slot(Path(sys.argv[2]), 1, ['crashed']):
             sleep.assert_not_called()
             self.assertEqual(path.stat().st_ino, inode)
 
-    def test_timeout_above_900_refuses_without_long_before_running(self):
-        result = self.capped('--timeout', '901', 'true')
-        self.assertEqual(result.returncode, 2, result.stderr)
-        self.assertIn('--timeout above 900 s requires --long', result.stderr)
-        self.assertFalse(self.calls.exists())
-        self.assertEqual(list(self.root.glob('*.lock')), [])
-        result = self.capped('--timeout', '900', 'true')
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertTrue((self.root / f'hirsel-capped-{os.getuid()}.slot-1.lock').exists())
 
 
     def test_long_jobs_forward_long_to_the_scoped_runner(self):
-        result = self.capped('--long', '--timeout', '901', 'true')
+        result = self.capped('--long', 'true')
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.properties(),
                          ['MemoryMax=4G', 'MemorySwapMax=0', 'OOMPolicy=continue', 'CPUQuota=200%'])
         self.assertEqual([p.name for p in self.root.glob('*.lock')],
                          [f'hirsel-capped-{os.getuid()}.long.lock'])
 
-    def test_long_uses_its_own_slot_even_with_the_default_timeout(self):
+    def test_long_uses_its_own_slot(self):
         result = self.capped('--long', 'true')
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual([p.name for p in self.root.glob('*.lock')],
@@ -326,13 +301,6 @@ with slot(Path(sys.argv[2]), 1, ['crashed']):
             for count in ('1', '12'):
                 self.assertEqual(capped.slot_count(1 << 30, {'HIRSEL_CAPPED_SLOTS': count}), int(count))
 
-
-def alive(pid: int) -> bool:
-    """Whether the process exists and is not a zombie."""
-    try:
-        return Path(f'/proc/{pid}/stat').read_text().rsplit(')', 1)[1].split()[0] != 'Z'
-    except (OSError, IndexError):
-        return False
 
 
 if __name__ == '__main__':

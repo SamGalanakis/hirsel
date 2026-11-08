@@ -57,7 +57,7 @@ class Recipe:
         with stem.with_suffix('.stdout').open('wb') as stdout, stem.with_suffix('.stderr').open('wb') as stderr:
             try:
                 result = subprocess.run(argv, cwd=self.scratch, env=self.env,
-                                        stdout=stdout, stderr=stderr, timeout=180)
+                                        stdout=stdout, stderr=stderr)
             except subprocess.TimeoutExpired:
                 stem.with_suffix('.exit').write_text('TIMEOUT\n')
                 raise

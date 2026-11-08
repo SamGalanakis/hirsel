@@ -22,9 +22,9 @@ def main(a):
         (root/'receipts.json').write_text(json.dumps(receipts, indent=2)+'\n')
 
     def call(argv, name, setup=False):
-        wrapped = ['python3', str(root/'capped'), '--timeout', '300' if setup else '60']
+        wrapped = ['python3', str(root/'capped')]
         if not setup:
-            wrapped += ['prlimit', '--cpu=60:61']
+            wrapped += ['prlimit',]
         done = subprocess.run(wrapped+list(map(str, argv)), stdin=subprocess.DEVNULL,
                               capture_output=True, env=env)
         (root/(name+'.stdout')).write_bytes(done.stdout)

@@ -119,15 +119,8 @@ fn resident_stop_exits_only_the_selected_workspace_and_is_idempotent() {
         .unwrap();
     assert!(stop.status.success(), "{stop:?}");
     assert!(!socket.exists(), "stop returned before socket removal");
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-    loop {
-        if let Some(status) = first.0.try_wait().unwrap() {
-            assert!(status.success(), "{status}");
-            break;
-        }
-        assert!(std::time::Instant::now() < deadline, "server did not exit");
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
+    let status = first.0.wait().unwrap();
+    assert!(status.success(), "{status}");
     let again = command(directory.path())
         .args(["serve", "--workspace"])
         .arg(&workspace)

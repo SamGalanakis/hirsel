@@ -21,7 +21,7 @@ class Comparison(unittest.TestCase):
     def session(self, directory):
         session = compare.Session.__new__(compare.Session)
         session.directory = Path(directory)
-        session.args = SimpleNamespace(timeout=3, cpu=31)
+        session.args = SimpleNamespace(cpu=31)
         session.env = {}
         session.commands = []
         session.perf = False
@@ -46,7 +46,7 @@ class Comparison(unittest.TestCase):
 
                         def run(wrapped, **kwargs):
                             self.assertEqual(wrapped, ['nice', '-n', '10', str(ROOT / 'tools/capped'),
-                                '--timeout', '3', '/usr/bin/time', '-f', '%e', '-o', str(timing),
+                                '/usr/bin/time', '-f', '%e', '-o', str(timing),
                                 'program', 'input.json'])
                             self.assertEqual(kwargs['cwd'], Path(directory))
                             self.assertEqual(kwargs['env'], session.env)

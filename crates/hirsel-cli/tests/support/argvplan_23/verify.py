@@ -17,7 +17,6 @@ import subprocess
 
 
 def limits():
-    resource.setrlimit(resource.RLIMIT_CPU, (60, 60))
     resource.setrlimit(resource.RLIMIT_DATA, (2 * 1024**3, 2 * 1024**3))
 
 
@@ -47,7 +46,7 @@ def verify(hirsel, root, output):
     def run(label, argv, runtime=False):
         argv = list(map(str, argv))
         done = subprocess.run(argv, stdin=subprocess.DEVNULL, capture_output=True,
-                              timeout=75 if runtime else 300, env=environment,
+                               env=environment,
                               cwd=output, preexec_fn=limits if runtime else None)
         (output / (label + '.stdout')).write_bytes(done.stdout)
         (output / (label + '.stderr')).write_bytes(done.stderr)

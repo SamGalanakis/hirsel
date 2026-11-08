@@ -51,7 +51,7 @@ def main(a):
   children=[dict(program=j['program'],args=j['argv'],steps=[dict(print=[79,79]),dict(print_err=[69,69]),dict(exit=dict(exited=7 if j['argv'] and j['argv'][0]=='fail' else 0))]) for j in config['jobs']]
   grants=dict(args=args,io=dict(stdout='stdout.bytes@1',stderr='stderr.bytes@1',tasks='tasks.cooperative@1',monotonic_clock='clock.monotonic.ns@1',wall_clock='clock.wall.unix_ns@1',dirs=[dict(path='config',host=str(cfg),access='read'),dict(path='state',host=str(state),access='read' if case.get('deny')=='state' else 'read_write')],process=dict(provider='process.script@1',rules=[] if case.get('deny')=='spawn' else [dict(program='/fixture/child')],runs=[],children=[] if case.get('missing_child') else children)),placement=dict(cores=1,commit='shared',reorder='auto'))
   grant=d/'grants.json';write(grant,grants);tape=d/'record.tape'
-  cmd=[str(a.capped),'--timeout','15','prlimit','--cpu=60:61','--as=2147483648',str(a.binary),'--hirsel-record',str(tape),'--hirsel-grants',str(grant),*args]
+  cmd=[str(a.capped),'prlimit', '--as=2147483648',str(a.binary),'--hirsel-record',str(tape),'--hirsel-grants',str(grant),*args]
   r.update(state='started',argv=cmd,expected=dict(rows=expected,error=error,exit=case['exit']));write(a.root/'receipts.json',receipts)
   done=subprocess.run(cmd,env=env,capture_output=True)
   (d/'stdout').write_bytes(done.stdout);(d/'capped.stderr').write_bytes(done.stderr)

@@ -49,13 +49,12 @@ def main():
     parser.add_argument('--rounds', type=int, default=10)
     parser.add_argument('--seed', type=int, default=0)
     parser.add_argument('--cpu', type=int, default=31)
-    parser.add_argument('--timeout', type=int, default=300)
     parser.add_argument('--compare', type=Path, help='saved session: compare instructions only; times are refused')
     args = parser.parse_args()
     result = None
     try:
-        if args.rounds < 2 or args.timeout < 1 or args.timeout > 900:
-            raise ValueError('need at least two rounds and a timeout in 1..900 seconds')
+        if args.rounds < 2:
+            raise ValueError('need at least two rounds')
         if args.cpu not in os.sched_getaffinity(0):
             raise ValueError(f'CPU {args.cpu} is not available')
         entries = participants(args.participants)
@@ -74,7 +73,7 @@ def main():
         with timing_lock(args.cpu):
             for round_number, name in schedule(by_name, args.rounds, args.seed):
                 print(f'round {round_number + 1}/{args.rounds}: {name}', file=sys.stderr, flush=True)
-                measured = sample(by_name[name], args.cpu, args.timeout)
+                measured = sample(by_name[name], args.cpu)
                 measured.update(round=round_number, name=name)
                 result['samples'].append(measured)
         # A checksum disagreement is a correctness failure, never a fast result.

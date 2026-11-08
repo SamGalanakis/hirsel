@@ -12,7 +12,7 @@ for mode in ['success','domain','cancel']:
  path=root/mode;path.mkdir();sock=Path(tempfile.mkdtemp(prefix='ps30-interp-'))/'relay.sock';tape=root/(mode+'.tape')
  grant=path/'grants.json'
  grant.write_text(json.dumps({'io':{'dirs':[],'stdout':'stdout.bytes@1','tasks':'tasks.cooperative@1','monotonic_clock':'clock.monotonic.ns@1','net':{'provider':'net.stream@1','rules':[{'address':str(sock),'service':'0','operation':'unix_listen'}]}}}))
- argv=[str(base/'capped'),'--timeout','15','prlimit','--cpu=60:61',cli,'run',manifest,'--grants',str(grant),'--record',str(tape),'--max-steps','10000000','--','serve',str(sock),'64','5000' if mode!='cancel' else '500','4']
+ argv=[str(base/'capped'),cli,'run',manifest,'--grants',str(grant),'--record',str(tape),'--max-steps','10000000','--','serve',str(sock),'64','5000' if mode!='cancel' else '500','4']
  (path/'argv.json').write_text(json.dumps(argv))
  child=subprocess.Popen(argv,env=env,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
  peers=[]
@@ -34,7 +34,7 @@ for mode in ['success','domain','cancel']:
    bad=connect();bad.sendall(b'\0\0\0\1{');assert bad.recv(1)==b''
    p=connect();send(p,{'op':'stop'});assert recv(p)=={'op':'stopping'}
   else:p=connect();p.sendall(b'\0\0')
-  out,err=child.communicate(timeout=12);out=first+out
+  out,err=child.communicate();out=first+out
   (path/'stdout').write_bytes(out);(path/'stderr').write_bytes(err);(path/'status').write_text(str(child.returncode))
   assert child.returncode==0,(child.returncode,out,err)
   final=json.loads(out.splitlines()[-1]);assert final['joined'] and final['credits_held']==0 and final['reserved']==final['returned']

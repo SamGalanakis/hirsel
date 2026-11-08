@@ -23,11 +23,7 @@ tools/compiler-bench/report quick.json --scoreboard > scoreboard.md
 ```
 
 `--quick` selects hello and csvjson, all four modes and their Rust pairs, one
-cold/warm round, at one job. Each command has a 45-second timeout and the runner
-stops issuing measurements after a 540-second work budget. This keeps the
-reduced matrix below ten minutes of active work, including dependency setup;
-waiting for another lane's capped slot and initial Buck2 tool preparation are
-outside the budget. A timeout is a result, never an invitation to raise the cap.
+cold/warm round, at one job. Commands retain their memory caps and run to completion.
 Quick is for iteration and counter comparisons, not stable wall-time ratios.
 
 The archived historical campaign used ten rounds, with seeded language/mode order within each input
@@ -53,7 +49,7 @@ multiplex percentages remain in the raw JSON.
 
 The older explicit modes `clif`, `llvm-o2` and the `edit-*` selectors
 remain accepted. `--groups`, `--select`, `--modes`, `--jobs`, `--repeat` and
-`--timeout` narrow a run; a native-only selection still includes Rust release.
+narrow a run; a native-only selection still includes Rust release.
 The edit group must be explicitly selected with its `edit-*` modes. It uses the
 existing body/private/public signature probes on syn10k. They do not measure a
 resident engine; unchanged warm is not an edit benchmark.

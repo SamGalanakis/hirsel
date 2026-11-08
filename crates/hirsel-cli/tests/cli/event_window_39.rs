@@ -424,10 +424,6 @@ fn native(partition: &str) {
             "HIRSEL_JOBS=1".into(),
             "python3".into(),
             root.join("capped").to_string_lossy().into_owned(),
-            "--timeout".into(),
-            "60".into(),
-            "prlimit".into(),
-            "--cpu=60:61".into(),
         ];
         tools.launch_timeout = std::time::Duration::from_secs(75);
         let execution =
@@ -741,10 +737,6 @@ fn event_window_39_arithmetic_and_output_boundary() {
             "HIRSEL_JOBS=1".into(),
             "python3".into(),
             root.join("capped").to_string_lossy().into_owned(),
-            "--timeout".into(),
-            "60".into(),
-            "prlimit".into(),
-            "--cpu=60:61".into(),
         ];
         for (engine, outcome) in differential_ready(
             &mut crate::native_ready::supplier(&path, &loaded.entry, &tools),

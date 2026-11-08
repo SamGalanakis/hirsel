@@ -51,13 +51,13 @@ def main():
             for mode in args.modes.split(','):
                 expected = None
                 for name, bundle in bundles.items():
-                    options = argparse.Namespace(toolchain=str(bundle), work=str(work), timeout=300)
+                    options = argparse.Namespace(toolchain=str(bundle), work=str(work))
                     runner = bench.Runner(options, environment)
                     runner.timings = []
                     output = runner.scratch / ('canonical.tir' if mode == 'export' else 'program')
                     command = ([str(bundle / 'hirsel'), 'export', '--tir', str(program.path), '-o', str(output)]
                                if mode == 'export' else runner.hirsel_command(program.path, mode))
-                    done = subprocess.run([str(bench.CAPPED), '--timeout', '300', 'taskset', '-c', str(args.cpu), *command],
+                    done = subprocess.run([str(bench.CAPPED), 'taskset', '-c', str(args.cpu), *command],
                                           cwd=ROOT, env=runner.env(native=mode in bench.NATIVE), capture_output=True, check=True)
                     stderr = b'\n'.join(line for line in done.stderr.splitlines() if not line.startswith(b'capped:'))
                     actual = (done.stdout, stderr, digest(output) if mode != 'check' else None)

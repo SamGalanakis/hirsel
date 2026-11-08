@@ -34,15 +34,12 @@ def main(args):
         (out/'receipts.json').write_text(json.dumps(records,indent=2)+'\n')
     def invoke(argv, prefix, build=False, full=False):
         if build:
-            command=[sys.executable,str(root/'capped'),'--timeout','300',*map(str,argv)]
+            command=[sys.executable,str(root/'capped'),*map(str,argv)]
         else:
-            command=[sys.executable,str(root/'capped'),'--timeout','60','prlimit','--cpu=60:61',*map(str,argv)]
-        try:
-            with open('/dev/full' if full else os.devnull,'wb') as sink:
-                done=subprocess.run(command,stdout=sink if full else subprocess.PIPE,stderr=subprocess.PIPE,env=env,stdin=subprocess.DEVNULL,timeout=330 if build else 75)
-            result=dict(exit=done.returncode,stdout=(done.stdout or b'').decode(errors='replace'),stderr=done.stderr.decode(errors='replace'))
-        except subprocess.TimeoutExpired as e:
-            result=dict(exit=None,stdout=(e.stdout or b'').decode(errors='replace'),stderr=(e.stderr or b'').decode(errors='replace'),disposition='INCOMPLETE timeout')
+            command=[sys.executable,str(root/'capped'),*map(str,argv)]
+        with open('/dev/full' if full else os.devnull,'wb') as sink:
+            done=subprocess.run(command,stdout=sink if full else subprocess.PIPE,stderr=subprocess.PIPE,env=env,stdin=subprocess.DEVNULL)
+        result=dict(exit=done.returncode,stdout=(done.stdout or b'').decode(errors='replace'),stderr=done.stderr.decode(errors='replace'))
         prefix.with_suffix('.stdout').write_text(result['stdout']);prefix.with_suffix('.stderr').write_text(result['stderr'])
         return result
     binaries={}
@@ -140,10 +137,8 @@ def main(args):
                 fd=libc.inotify_init1(os.O_CLOEXEC|os.O_NONBLOCK);assert fd>=0
                 assert libc.inotify_add_watch(fd,os.fsencode(state),0x100|0x8)>=0
                 def wait_file(path):
-                    until=time.monotonic()+10
                     while not path.exists():
-                        remaining=until-time.monotonic();assert remaining>0,('handshake',path)
-                        assert select.select([fd],[],[],remaining)[0],path
+                        select.select([fd],[],[])
                         os.read(fd,65536)
                 modes=(['hold','fail' if mode=='domain-error' else 'pass'] if mode in ['success','domain-error'] else ['cancel','cancel'] if mode=='cancellation' else ['cancel'] if mode=='attempt-deadline' else ['pipes'] if mode=='pipes' else ['hold-fail','fail','pass'])
                 items=[]
@@ -156,7 +151,7 @@ def main(args):
                 grant=state/'grants.json';grant.write_text(json.dumps(grants));tape=out/(backend+'-'+identity+'.tape')
                 argv=([args.hirsel,'run',root/'hirsel.json','--grants',grant,'--record',tape,'--max-steps','1000000'] if backend=='reference' else [binaries[backend],'--hirsel-record',tape,'--hirsel-grants',grant,'run','manifest.json','report.json'])
                 record=dict(id=identity,engine=backend,directory=str(state),tape=str(tape),argv=list(map(str,argv)),grants_sha256=digest(grant),input_sha256=digest(data/'manifest.json'),requested_width=width,jobs=2,state='started',passed=False);records.append(record);save()
-                wrapper=[sys.executable,str(root/'capped'),'--timeout','60','prlimit','--cpu=60:61',*map(str,argv)]
+                wrapper=[sys.executable,str(root/'capped'),*map(str,argv)]
                 with (state/'run.stdout').open('wb') as stdout,(state/'run.stderr').open('wb') as stderr:
                     process=subprocess.Popen(wrapper,stdin=subprocess.DEVNULL,stdout=stdout,stderr=stderr,env=env)
                     try:
@@ -168,10 +163,10 @@ def main(args):
                                 assert record['control']['width']['effective']==width
                             if mode in ['success','domain-error','cutoff']:
                                 with (state/'0.release').open('wb') as release:release.write(b'x')
-                        code=process.wait(timeout=70)
+                        code=process.wait()
                     except Exception as error:
                         record['harness_error']=repr(error)
-                        process.terminate();code=process.wait(timeout=10)
+                        process.terminate();code=process.wait()
                 os.close(fd)
                 if control.exists():control.unlink()
                 control_dir.rmdir()

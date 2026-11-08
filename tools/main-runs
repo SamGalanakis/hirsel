@@ -653,7 +653,7 @@ def api_index(tree):
     built = subprocess.run([str(TREE / '.buck2/bin/buck2'), 'build', *config, '--show-json-output', cli], cwd=TREE,
                            capture_output=True, text=True, check=True)
     page = subprocess.run([str(TREE / json.loads(built.stdout)[cli]), 'doc', 'stdlib/std@1/hirsel.json'],
-                          cwd=TREE, capture_output=True, check=True, timeout=600).stdout
+                          cwd=TREE, capture_output=True, check=True).stdout
     (tree / 'docs/api.md').write_bytes(page)
 
 

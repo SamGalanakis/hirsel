@@ -80,19 +80,17 @@ class Server:
         self.process = subprocess.Popen(command, cwd=directory, env=self.env,
                                         stdin=subprocess.DEVNULL, stdout=log, stderr=log)
         self.log = log
-        # Wait on output we own, with a deadline; no benchmark interval starts here.
-        deadline = time.monotonic() + 10
-        while time.monotonic() < deadline:
+        # No benchmark interval starts before this owned server is ready.
+        while True:
             if b'serving ' in (directory / 'server.log').read_bytes():
                 return
             if self.process.poll() is not None:
                 raise RuntimeError((directory / 'server.log').read_text())
             time.sleep(.01)
-        raise RuntimeError('resident server did not become ready')
 
     def close(self):
         self.process.terminate()
-        self.process.wait(timeout=10)
+        self.process.wait()
         self.log.close()
         shutil.rmtree(self.runtime)
 
@@ -113,7 +111,7 @@ class Server:
         start = time.monotonic()
         result = subprocess.run(argv, cwd=self.directory,
                                 env=child_env,
-                                stdin=subprocess.DEVNULL, capture_output=True, timeout=300)
+                                stdin=subprocess.DEVNULL, capture_output=True)
         wall = time.monotonic() - start
         if daemon == 'auto' and results == 'dir@1':
             after = self.log_path.read_bytes().count(b'exited ')
@@ -213,7 +211,7 @@ def server_counts(pid, output):
         os.read(ack_read, 128)
     finally:
         proc.send_signal(signal.SIGINT)
-        proc.wait(timeout=10)
+        proc.wait()
         os.close(ctl_write)
         os.close(ack_read)
 
@@ -331,8 +329,7 @@ def campaign(args):
             directory = args.work / 'sessions' / f'{number:03}-{name.replace("/", "-")}'
             directory.mkdir(parents=True, exist_ok=True)
             output = directory / 'result.json'
-            command = [str(corpus.ROOT / 'tools/capped'), '--timeout', '900',
-                       str(Path(__file__).resolve()), args.mode, '--single',
+            command = [str(corpus.ROOT / 'tools/capped'), str(Path(__file__).resolve()), args.mode, '--single',
                        '--select', '^' + re.escape(name) + '$',
                        '--scale', ','.join(map(str, args.scale)), '--rounds', str(args.rounds),
                        *(['--server-cpu', str(args.server_cpu), '--client-cpu', str(args.client_cpu)]

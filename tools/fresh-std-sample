@@ -6,7 +6,7 @@
 
 Build every compared compiler with the same release profile and toolchain.
 Use the same frozen source and CPU for every sample. This runs only fresh std,
-once, with absent products, none@1, caches off, jobs1, wall120, CPU60 and 2 GiB.
+once, with absent products, none@1, caches off, jobs1 and 2 GiB.
 Samples using this command share a per-user lock; the wall timer starts after admission.
 """
 import argparse

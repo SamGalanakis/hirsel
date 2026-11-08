@@ -1008,7 +1008,7 @@ fn route_planner_33_ordered_capacity() {
     assert!(built.status.success(), "{built:?}");
     let run = Command::new("python3")
         .arg(root.join("capped"))
-        .args(["--timeout", "60", "python3"])
+        .args(["python3"])
         .arg(root.join("ordered.py"))
         .arg("--binary")
         .arg(binary)

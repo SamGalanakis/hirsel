@@ -95,7 +95,7 @@ def main():
         if not profiles or any(p.stat().st_size == 0 for p in profiles):
             raise SystemExit('training left an empty or missing raw profile')
         merged = work / 'merged.profdata'
-        subprocess.run([str(ROOT / 'tools/capped'), '--timeout', '300', args.profdata, 'merge',
+        subprocess.run([str(ROOT / 'tools/capped'), args.profdata, 'merge',
                         '-o', str(merged), *map(str, profiles)],
                        env=dict(os.environ, HIRSEL_JOBS='1'), check=True)
         subprocess.run([args.profdata, 'show', str(merged)], check=True)

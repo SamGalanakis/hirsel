@@ -54,8 +54,7 @@ def main():
     parser.add_argument('--stop-file', type=Path, help='end promptly when the owner creates this file')
     args = parser.parse_args()
     rows = []
-    deadline = time.monotonic() + 850
-    while len(rows) < args.sessions and time.monotonic() < deadline:
+    while len(rows) < args.sessions:
         if args.stop_file is not None and args.stop_file.exists():
             return
         for port in (18475, 18476):

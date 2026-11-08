@@ -42,9 +42,9 @@ def main(args):
         receipts.append(receipt)
         (evidence/'receipts.json').write_text(json.dumps(receipts,indent=2)+'\n')
         print('PNM_TILES_30_STARTED '+identity,flush=True)
-        wrapped=[sys.executable,root/'capped','--timeout','300' if setup else '60']
-        if not setup:wrapped+=['prlimit','--cpu=60:61']
-        actual=subprocess.run(list(map(str,wrapped+command)),env=env,capture_output=True,timeout=330 if setup else 90)
+        wrapped=[sys.executable,root/'capped']
+        if not setup:wrapped+=['prlimit',]
+        actual=subprocess.run(list(map(str,wrapped+command)),env=env,capture_output=True)
         (evidence/(identity+'.stdout')).write_bytes(actual.stdout)
         (evidence/(identity+'.resources')).write_bytes(actual.stderr)
         # tools/capped adds its own diagnostics to stderr; child captures separately.

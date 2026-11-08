@@ -114,7 +114,7 @@ def main(args):
             shutil.copy2(original, binary)
             assert hashlib.sha256(binary.read_bytes()).digest() == hashlib.sha256(original.read_bytes()).digest()
         else:
-            build = subprocess.run([str(args.hirsel), 'build', str(root/'hirsel.json'), '--backend', backend, '-o', str(binary)], env=env, capture_output=True, timeout=300)
+            build = subprocess.run([str(args.hirsel), 'build', str(root/'hirsel.json'), '--backend', backend, '-o', str(binary)], env=env, capture_output=True)
             (root/(backend+'-build.stdout')).write_bytes(build.stdout)
             (root/(backend+'-build.stderr')).write_bytes(build.stderr)
             assert build.returncode == 0, (backend, build)
@@ -129,7 +129,7 @@ def main(args):
     def run(command, label):
         row = dict(id=label, argv=list(map(str,command)), state='started')
         receipts.append(row); (root/'receipts.json').write_text(json.dumps(receipts,indent=2))
-        done = subprocess.run(['python3',str(root/'capped'),'--timeout','60','prlimit','--cpu=60:61',*map(str,command)], env=runenv, capture_output=True, timeout=90)
+        done = subprocess.run(['python3',str(root/'capped'),*map(str,command)], env=runenv, capture_output=True)
         # capped diagnostics belong to the host wrapper, not app stderr.
         (root/(label+'.stdout')).write_bytes(done.stdout)
         (root/(label+'.stderr')).write_bytes(done.stderr)

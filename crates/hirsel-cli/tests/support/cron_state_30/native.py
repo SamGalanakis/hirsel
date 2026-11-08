@@ -12,7 +12,7 @@ def main(a):
  env.update(HIRSEL_DAEMON='off',HIRSEL_RESULTS='none@1',HIRSEL_JOBS='4',HIRSEL_MEMORY_LIMIT='2G')
  app=root/a.backend
  build=[str(a.hirsel),'build',str(a.manifest),'--backend',a.backend,'-o',str(app)]
- done=subprocess.run(build,env=env,capture_output=True,timeout=300)
+ done=subprocess.run(build,env=env,capture_output=True)
  (root/'build.stdout').write_bytes(done.stdout);(root/'build.stderr').write_bytes(done.stderr)
  assert done.returncode==0,(build,done.stderr.decode())
  child=root/'child.py';child.write_text('''import socket,sys\ns=socket.socket(socket.AF_UNIX);s.connect(sys.argv[1]);s.sendall(b'ready\\n');s.recv(1)\nsys.stdout.write('O'*100000);sys.stderr.write('E'*100000)\nsys.exit(7 if sys.argv[2]=='error' else 0)\n''')
@@ -34,7 +34,7 @@ def main(a):
     argv=['run','schedule.json',until,'1']
     grants=dict(args=argv,io=dict(stdout='stdout.bytes@1',stderr='stderr.bytes@1',tasks='tasks.cooperative@1',wall_clock='clock.wall.unix_ns@1',monotonic_clock='clock.monotonic.ns@1',dirs=[dict(path='config',host=str(data),access='read'),dict(path='state',host=str(state),access='read_write')],process=dict(provider='process.spawn@1',rules=[dict(program='/usr/bin/python3')])),placement=dict(cores=width,control=str(control),commit='shared',reorder='auto'))
     grant=d/'grants.json';write(grant,grants);tape=d/'record.tape'
-    cmd=[str(a.capped),'--timeout','15','prlimit','--cpu=60:61','--as=2147483648',str(app),'--hirsel-record',str(tape),'--hirsel-grants',str(grant),*argv]
+    cmd=[str(a.capped),'prlimit', '--as=2147483648',str(app),'--hirsel-record',str(tape),'--hirsel-grants',str(grant),*argv]
     r=dict(id=id,argv=cmd,state='started');receipts.append(r);write(root/'receipts.json',receipts)
     proc=subprocess.Popen(cmd,env=env,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
     try:
@@ -48,7 +48,7 @@ def main(a):
      metrics=json.loads(reply);r['width']=metrics
      r['ready']=metrics['width']['effective']==width and metrics['width']['pending']==0 and metrics.get('worker_phase')=='running'
      if mode!='cancel':connection.sendall(b'x')
-     out,err=proc.communicate(timeout=15)
+     out,err=proc.communicate()
      connection.close();listener.close()
     except Exception as e:
      proc.kill();out,err=proc.communicate();r['setup_error']=repr(e)
@@ -70,7 +70,7 @@ def main(a):
    if engine!='reference' and not binary.exists():continue
    cmd=([str(a.hirsel),'run',str(a.manifest),'--replay',str(d/'record.tape'),'--max-steps','10000000'] if engine=='reference' else [str(binary),'--hirsel-replay',str(d/'record.tape')])
    replay_env=dict(env,HIRSEL_JOBS='1') if engine=='reference' else env
-   done=subprocess.run([str(a.capped),'--timeout','15','prlimit','--cpu=60:61','--as=2147483648',*cmd],env=replay_env,capture_output=True)
+   done=subprocess.run([str(a.capped),'prlimit', '--as=2147483648',*cmd],env=replay_env,capture_output=True)
    (d/(engine+'-replay.stdout')).write_bytes(done.stdout);(d/(engine+'-replay.stderr')).write_bytes(done.stderr)
    assert done.returncode==r['exit'] and done.stdout==r['stdout'].encode() and b''.join(line for line in done.stderr.splitlines(keepends=True) if not line.startswith(b'capped:'))==r['stderr'].encode(),(r['id'],engine,done)
    assert hashlib.sha256((d/'record.tape').read_bytes()).hexdigest()==r['tape_sha256']

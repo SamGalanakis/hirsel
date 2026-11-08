@@ -145,7 +145,6 @@ fn output_capability_guidance_24_repairs_check_export_and_launch_exact_streams()
     .unwrap();
     let output = Command::new("python3")
         .arg(root.join("capped"))
-        .args(["--timeout", "60"])
         .arg(env!("CARGO_BIN_EXE_hirsel"))
         .arg("run")
         .arg(manifest)

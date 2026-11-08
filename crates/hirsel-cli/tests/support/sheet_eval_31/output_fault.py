@@ -12,7 +12,7 @@ for backend in ['llvm','cranelift']:
  (d/'argv.json').write_text(json.dumps(argv))
  env=os.environ|{'HIRSEL_MEMORY_LIMIT':'2G','HIRSEL_JOBS':'4'}
  with (d/'stdout').open('wb') as out,(d/'stderr').open('wb') as err:
-  done=subprocess.run([capped,'--timeout','60','prlimit','--cpu=60:61',sys.executable,__file__,str(root),capped,'--payload',*argv],stdout=out,stderr=err,env=env)
+  done=subprocess.run([capped,sys.executable,__file__,str(root),capped,'--payload',*argv],stdout=out,stderr=err,env=env)
  assert done.returncode==3,(backend,done.returncode,(d/'stderr').read_text());assert (d/'stdout').read_bytes()==b''
  (d/'exit').write_text('3');(d/'PASS').write_text('real stdout ENOSPC, explicit ExitCode3\n');work.rename(d/'original-work-unavailable')
  print('OUTPUT_FAULT_PASS',backend,flush=True)

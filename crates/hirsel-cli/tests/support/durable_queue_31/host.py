@@ -25,7 +25,7 @@ with tempfile.TemporaryDirectory(prefix='wq31-') as transport:
     for f in data.iterdir():f.unlink()
     grants={'io':{'stdout':'stdout.bytes@1','tasks':'tasks.cooperative@1','monotonic_clock':'clock.monotonic.ns@1','dirs':[{'path':'data','host':str(data),'access':'read_write'}],'net':{'provider':'net.stream@1','rules':[{'address':str(socketpath),'service':'0','operation':'unix_listen'}]}},'placement':{'cores':width,'control':str(control),'commit':'shared','reorder':'auto'}}
     grant=receipt/'grants.json';grant.write_text(json.dumps(grants));tape=receipt/'original.tape'
-    argv=['python3',a.capped,'--timeout','60','prlimit','--cpu=60:61',str(binary),'--hirsel-record',str(tape),'--hirsel-grants',str(grant),'serve',str(socketpath),'1000','100']
+    argv=['python3',a.capped,str(binary),'--hirsel-record',str(tape),'--hirsel-grants',str(grant),'serve',str(socketpath),'1000','100']
     (receipt/'argv.json').write_text(json.dumps(argv))
     child=subprocess.Popen(argv,stdout=subprocess.PIPE,stderr=subprocess.PIPE,env=env)
     try:
@@ -47,7 +47,7 @@ with tempfile.TemporaryDirectory(prefix='wq31-') as transport:
         assert call(client,{'op':'ack','group':0,'id':1,'token':1})=={'acked':1}
         assert call(client,{'op':'checkpoint'})=={'checkpointed':True}
        assert call(client,{'op':'stop'})=={'stopped':True}
-      suffix,err=child.communicate(timeout=10)
+      suffix,err=child.communicate()
     finally:
      if child.poll() is None:child.kill();child.wait()
     output=prefix+suffix;(receipt/'stdout').write_bytes(output);(receipt/'stderr').write_bytes(err)
@@ -58,7 +58,7 @@ with tempfile.TemporaryDirectory(prefix='wq31-') as transport:
     data.rmdir();grant.unlink()
     for target in ['llvm','cranelift','reference']:
      command=[str(a.root/target),'--hirsel-replay',str(tape)] if target!='reference' else [a.hirsel,'run',str(a.root/'hirsel.json'),'--replay',str(tape),'--max-steps','10000000']
-     replay=subprocess.run(['python3',a.capped,'--timeout','60','prlimit','--cpu=60:61',*command],capture_output=True,env=env)
+     replay=subprocess.run(['python3',a.capped,*command],capture_output=True,env=env)
      (receipt/f'replay-{target}.stdout').write_bytes(replay.stdout);(receipt/f'replay-{target}.stderr').write_bytes(replay.stderr)
      assert replay.returncode==0 and replay.stdout==output,(cell,target,replay.returncode,replay.stderr)
     assert not data.exists() and tape.read_bytes()==original

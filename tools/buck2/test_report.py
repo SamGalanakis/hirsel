@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
-"""Return test progress before the RE action's 600-second deadline.
+"""Stream test progress and clean up owned descendants on interruption.
 
 Libtest events follow rust-lang/rust library/test/src/formatters/json.rs:36,
 121-177 (a7c37f9f). Keep the usual result lines for counts and cost extraction.
-The 5% reporting reserve is inside the action cap; it never extends a test.
 """
 import json
 import ctypes
@@ -11,17 +10,11 @@ import os
 from pathlib import Path
 import re
 import selectors
-import shutil
 import signal
 import subprocess
 import sys
 import tempfile
 import time
-
-ACTION_TIMEOUT_SECONDS = 600
-INNER_DEADLINE_SECONDS = ACTION_TIMEOUT_SECONDS * 0.95
-STACK_DUMP_SECONDS = 20
-
 
 def report_phases(directory):
     """Read coarse spans outside captured application stdout/stderr."""
@@ -51,81 +44,6 @@ def report_phases(directory):
                 process_alive=Path(f'/proc/{path.stem}').exists(),
                 elapsed_seconds=round(max(0, now - started), 6))),
                 file=sys.stderr, flush=True)
-
-
-def owned_descendants():
-    # Include adopted orphans and children created by any worker thread.
-    pending = [os.getpid()]
-    owned = set()
-    while pending:
-        parent = pending.pop()
-        for task in Path(f'/proc/{parent}/task').glob('*'):
-            try:
-                children = (task / 'children').read_text().split()
-            except OSError:
-                continue
-            for child in map(int, children):
-                if child not in owned:
-                    owned.add(child)
-                    pending.append(child)
-    return sorted(owned)
-
-
-def dump_owned_stacks():
-    # Spend only the existing reporting reserve, even if a debugger hangs.
-    end = time.monotonic() + STACK_DUMP_SECONDS
-    debugger = shutil.which('gdb') or shutil.which('eu-stack')
-    for pid in owned_descendants():
-        if time.monotonic() >= end:
-            print('HIRSEL_TEST_STACKS reporting budget exhausted', file=sys.stderr, flush=True)
-            break
-        print(f'HIRSEL_TEST_STACKS pid={pid} debugger={debugger or "unavailable"}',
-              file=sys.stderr, flush=True)
-        try:
-            with Path(f'/proc/{pid}/cmdline').open('rb') as command:
-                # Identify the command/operation without dumping host inputs,
-                # grants or arbitrary application arguments into the log.
-                argv = command.read(4096).split(b'\0')
-            program = Path(os.fsdecode(argv[0])).name
-            operation = os.fsdecode(argv[1]) if len(argv) > 1 else ''
-            if operation.endswith('.py'):
-                operation = Path(operation).name
-            elif operation not in {'check', 'build', 'run', 'export', 'test',
-                                   'bench', 'fmt', 'serve', '-c'}:
-                operation = ''
-            print(f'HIRSEL_TEST_PROCESS pid={pid} ' + json.dumps({
-                'program': program, 'operation': operation,
-            }), file=sys.stderr, flush=True)
-        except OSError:
-            pass  # The owned process may have exited since discovery.
-        # Keep useful thread/wait information when the action has no debugger
-        # or its sandbox denies ptrace. Never inspect unrelated processes.
-        for task in sorted(Path(f'/proc/{pid}/task').glob('*')):
-            if time.monotonic() >= end:
-                break
-            fields = {}
-            for name in ('comm', 'wchan', 'stack'):
-                try:
-                    fields[name] = (task / name).read_text().strip()
-                except OSError as error:
-                    fields[name] = str(error)
-            print(f'HIRSEL_TEST_THREAD tid={task.name} {json.dumps(fields)}',
-                  file=sys.stderr, flush=True)
-        if debugger:
-            command = ([debugger, '-q', '-nx', '-batch', '-p', str(pid),
-                        '-ex', 'set pagination off', '-ex', 'thread apply all bt']
-                       if Path(debugger).name == 'gdb' else [debugger, '-p', str(pid)])
-            remaining = end - time.monotonic()
-            if remaining <= 0:
-                break
-            try:
-                result = subprocess.run(command, stdin=subprocess.DEVNULL,
-                                        stdout=sys.stderr, stderr=sys.stderr,
-                                        timeout=min(5, remaining))
-                print(f'HIRSEL_TEST_STACKS pid={pid} exit={result.returncode}',
-                      file=sys.stderr, flush=True)
-            except (OSError, subprocess.TimeoutExpired) as error:
-                print(f'HIRSEL_TEST_STACKS pid={pid} {error}', file=sys.stderr, flush=True)
 
 
 def reap_owned_children(child):
@@ -217,8 +135,8 @@ class Progress:
                   f"finished in {event.get('exec_time', 0):.2f}s", flush=True)
 
     def interrupted(self, reason):
-        print(f'HIRSEL_TEST_INNER_DEADLINE {reason}; completed={len(self.finished)} '
-              f'running={len(self.running)}; action cap={ACTION_TIMEOUT_SECONDS}s',
+        print(f'HIRSEL_TEST_INTERRUPTED {reason}; completed={len(self.finished)} '
+              f'running={len(self.running)}',
               file=sys.stderr, flush=True)
         for name, status in sorted(self.finished.items()):
             print(f'HIRSEL_TEST_FINISHED {status} {name}', file=sys.stderr, flush=True)
@@ -230,7 +148,7 @@ class Progress:
                   file=sys.stderr, flush=True)
 
 
-def supervise(command, *, deadline=INNER_DEADLINE_SECONDS, raw_json=False):
+def supervise(command, *, raw_json=False):
     progress = Progress(raw_json)
     stopped = None
 
@@ -239,7 +157,6 @@ def supervise(command, *, deadline=INNER_DEADLINE_SECONDS, raw_json=False):
         stopped = signum
 
     previous = {sig: signal.signal(sig, stop) for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP)}
-    end = time.monotonic() + deadline
     child = None
     # Adopt orphaned descendants so cleanup needs only our direct children,
     # without a new session/group escaping the executor's resource enforcement.
@@ -256,9 +173,8 @@ def supervise(command, *, deadline=INNER_DEADLINE_SECONDS, raw_json=False):
             selector.register(child.stderr, selectors.EVENT_READ)
             pending = {child.stdout: b'', child.stderr: b''}
             while selector.get_map() or child.poll() is None:
-                remaining = end - time.monotonic()
-                if stopped or remaining <= 0:
-                    progress.interrupted(f'signal={stopped}' if stopped else f'after {deadline:g}s')
+                if stopped:
+                    progress.interrupted(f'signal={stopped}')
                     if child.poll() is not None or progress.suite_finished:
                         print('HIRSEL_TEST_PHASE_RUNNING ' + json.dumps(dict(
                             phase='child-teardown', status=child.returncode)),
@@ -269,10 +185,8 @@ def supervise(command, *, deadline=INNER_DEADLINE_SECONDS, raw_json=False):
                             phase='launcher-setup-or-discovery')),
                             file=sys.stderr, flush=True)
                     report_phases(phases.name)
-                    if not stopped:
-                        dump_owned_stacks()
-                    return 128 + stopped if stopped else 124
-                for key, _ in selector.select(min(remaining, 0.1)):
+                    return 128 + stopped
+                for key, _ in selector.select(0.1):
                     stream = key.fileobj
                     chunk = os.read(stream.fileno(), 65536)
                     if not chunk:
@@ -305,11 +219,6 @@ def supervise(command, *, deadline=INNER_DEADLINE_SECONDS, raw_json=False):
             return status if status >= 0 else 128 - status
     finally:
         if child is not None:
-            child.terminate()
-            try:
-                child.wait(timeout=0.5)
-            except subprocess.TimeoutExpired:
-                pass
             reap_owned_children(child)
             child.stdout.close()
             child.stderr.close()

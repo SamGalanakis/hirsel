@@ -28,7 +28,6 @@ sheet = args.family == 'sheet_eval_31'
 manifest = root / ('qualified-app/hirsel.json' if sheet else 'hirsel.json')
 for backend in ['llvm', 'cranelift']:
     binary = root / (f'app-{backend}' if sheet else backend)
-    subprocess.run([sys.executable, str(root / 'capped'), '--timeout', '300',
-                    str(args.hirsel.resolve()), 'build', str(manifest),
+    subprocess.run([sys.executable, str(root / 'capped'), str(args.hirsel.resolve()), 'build', str(manifest),
                     '--backend', backend, '-o', str(binary)], check=True)
 print(root)

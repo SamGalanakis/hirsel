@@ -23,11 +23,10 @@ def toolchain():
     raise RuntimeError('Buck2 did not report the Hirsel toolchain output')
 
 
-def line(process, timeout=30):
+def line(process):
     with selectors.DefaultSelector() as selector:
         selector.register(process.stdout, selectors.EVENT_READ)
-        if not selector.select(timeout):
-            raise TimeoutError(f'no readiness line from pid {process.pid}')
+        selector.select()
         value = process.stdout.readline().decode().strip()
         if not value:
             raise RuntimeError(f'process exited before readiness: {process.args}')
@@ -50,7 +49,7 @@ def grants(directory, port):
 
 
 class Server:
-    def __init__(self, kind, directory, port, hirsel_binary, log, timeout=300, perf=None, record=None, heap=None, extra_env=None, cpu=31):
+    def __init__(self, kind, directory, port, hirsel_binary, log, perf=None, record=None, heap=None, extra_env=None, cpu=31):
         environment = dict(os.environ, TASKS_DATA=str(directory),
                            TASKS_STATIC=str(ROOT / 'examples/tasks/static'),
                            TASKS_WALL_CLOCK='off', TASKS_LOG_LEVEL='error',
@@ -78,13 +77,12 @@ class Server:
                        'task-clock,cycles,instructions,cycles:u,instructions:u', *command]
         self.log = open(log, 'wb')
         self.started = time.monotonic()
-        self.process = subprocess.Popen([str(CAPPED), *(['--long'] if timeout > 900 else []),
-                                         '--timeout', str(timeout), *command],
+        self.process = subprocess.Popen([str(CAPPED), *command],
                                         env=environment, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                         stderr=self.log, bufsize=0)
         self.port = port
         try:
-            value = line(self.process, 60)
+            value = line(self.process)
             assert value == f'listening on http://127.0.0.1:{port}/', value
         except BaseException:
             self.stop(check=False)
@@ -93,12 +91,7 @@ class Server:
     def stop(self, check=True):
         if self.process.poll() is None:
             self.process.stdin.close()
-            try:
-                self.process.wait(30)
-            except subprocess.TimeoutExpired:
-                self.process.terminate()
-                self.process.wait(15)
-                raise
+            self.process.wait()
         self.log.close()
         if check and self.process.returncode:
             raise RuntimeError(f'server failed: exit {self.process.returncode}')

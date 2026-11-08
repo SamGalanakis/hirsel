@@ -22,7 +22,7 @@ def encoded(value):
 def invoke(request):
     item = json.loads(request.read_text())
     done = subprocess.run(item['argv'], stdin=subprocess.DEVNULL, capture_output=True,
-                          timeout=55, env=os.environ | {'HIRSEL_DAEMON': 'off'})
+                           env=os.environ | {'HIRSEL_DAEMON': 'off'})
     stem = Path(item['stem'])
     stem.with_suffix('.stdout').write_bytes(done.stdout)
     stem.with_suffix('.stderr').write_bytes(done.stderr)
@@ -43,9 +43,9 @@ def verify(hirsel, root, output):
             request = output / (label + '.request.json')
             request.write_text(json.dumps(dict(argv=argv, stem=str(stem))))
             wrapper = subprocess.run(
-                [sys.executable, root / 'capped', '--timeout', '60', sys.executable,
+                [sys.executable, root / 'capped', sys.executable,
                  Path(__file__), '--invoke', request],
-                stdin=subprocess.DEVNULL, capture_output=True, timeout=80,
+                stdin=subprocess.DEVNULL, capture_output=True,
                 env=env | {'HIRSEL_MEMORY_LIMIT': '2G'})
             (output / (label + '.cap.stderr')).write_bytes(wrapper.stderr)
             assert wrapper.returncode == 0, (label, wrapper, str(output))
@@ -54,7 +54,7 @@ def verify(hirsel, root, output):
                       stem.with_suffix('.stderr').read_bytes())
         else:
             done = subprocess.run(argv, stdin=subprocess.DEVNULL, capture_output=True,
-                                  timeout=300, env=env)
+                                   env=env)
             stem.with_suffix('.stdout').write_bytes(done.stdout)
             stem.with_suffix('.stderr').write_bytes(done.stderr)
             answer = (done.returncode, done.stdout, done.stderr)

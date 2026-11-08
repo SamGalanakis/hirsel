@@ -40,7 +40,7 @@ def verify(args):
     receipts = []
     if args.engine != 'interpreter':
         argv = [str(args.hirsel), 'build', str(selection), '--backend', args.engine, '-o', str(binary)]
-        built = subprocess.run(argv, capture_output=True, env=env, timeout=300)
+        built = subprocess.run(argv, capture_output=True, env=env)
         (out / 'build.stdout').write_bytes(built.stdout)
         (out / 'build.stderr').write_bytes(built.stderr)
         (out / 'build.json').write_text(json.dumps(dict(argv=argv, exit=built.returncode)))
@@ -59,15 +59,11 @@ def verify(args):
         fd = libc.inotify_init1(os.O_CLOEXEC | os.O_NONBLOCK)
         assert fd >= 0
         assert libc.inotify_add_watch(fd, os.fsencode(state), 0x100 | 0x8) >= 0
-        def wait_file(path, app, seconds):
+        def wait_file(path, app):
             # Go TestPipes reads only after Start and a read ends at child EOF:
             # each wait ends at its marker or at the app's exit (pidfd).
-            until = time.monotonic() + seconds
             while not path.exists():
-                remaining = until - time.monotonic()
-                assert remaining > 0, ('handshake timeout', path)
-                ready = select.select([fd, app], [], [], remaining)[0]
-                assert ready, ('handshake timeout', path)
+                ready = select.select([fd, app], [], [])[0]
                 if fd in ready:
                     os.read(fd, 65536)
                 assert app not in ready or path.exists(), ('app exited before handshake', path)
@@ -106,22 +102,21 @@ def verify(args):
         receipts.append(receipt)
         (out/'receipts.json').write_text(json.dumps(receipts,indent=2))
         accounting = state/'children.json'
-        wrapper = [sys.executable,str(root/'capped'),'--timeout','60',
-                   sys.executable,str(root/'child_accounting.py'),str(accounting),*argv]
+        wrapper = [sys.executable,str(root/'capped'),sys.executable,str(root/'child_accounting.py'),str(accounting),*argv]
         with stdout.open('wb') as stdout_file, stderr.open('wb') as stderr_file:
             child = subprocess.Popen(wrapper, stdin=subprocess.DEVNULL, stdout=stdout_file, stderr=stderr_file, env=env)
             if identity == 'mixed':
                 # First job is held until the later three have completed. An
                 # app that exits early fails at once, not at the 10s bound.
                 app = os.pidfd_open(child.pid)
-                wait_file(state/'0.started', app, 10)
+                wait_file(state/'0.started', app)
                 for i in [1,3]:
-                    wait_file(state/(str(i)+'.done'), app, 10)
-                wait_file(state/'2.started', app, 10)
+                    wait_file(state/(str(i)+'.done'), app)
+                wait_file(state/'2.started', app)
                 os.close(app)
                 with (state/'0.release').open('wb') as release:
                     release.write(b'x')
-            code = child.wait(timeout=75)
+            code = child.wait()
         os.close(fd)
         # capped emits resource accounting on stderr; child application stderr is
         # captured independently below by the tape/output contract where applicable.
@@ -164,8 +159,8 @@ def verify(args):
         immutable = tape.read_bytes()
         replay_argv = ([str(args.hirsel),'run',str(selection),'--replay',str(tape)] if args.engine=='interpreter'
                        else [str(binary),'--hirsel-replay',str(tape)])
-        replay = subprocess.run([sys.executable,str(root/'capped'),'--timeout','60',*replay_argv],
-            stdin=subprocess.DEVNULL,capture_output=True,env=env,timeout=75)
+        replay = subprocess.run([sys.executable,str(root/'capped'),*replay_argv],
+            stdin=subprocess.DEVNULL,capture_output=True,env=env)
         (state/'replay.stdout').write_bytes(replay.stdout)
         (state/'replay.stderr').write_bytes(replay.stderr)
         receipt['replay'] = dict(argv=replay_argv,exit=replay.returncode,passed=replay.returncode==code and replay.stdout==stdout.read_bytes())

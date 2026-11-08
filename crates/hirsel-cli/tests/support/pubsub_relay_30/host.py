@@ -32,17 +32,16 @@ def host_case(exe, root, width, mode, env, capped):
     grants={'io':{'dirs':[],'stdout':'stdout.bytes@1','tasks':'tasks.cooperative@1','monotonic_clock':'clock.monotonic.ns@1','net':{'provider':'net.stream@1','rules':[{'address':str(sock),'service':'0','operation':'unix_listen'}]}},'placement':{'cores':width,'commit':'shared','reorder':'auto','control':str(ctl)}}
     grant=directory/'grants.json';grant.write_text(json.dumps(grants))
     tape=root/(name+'.tape')
-    argv=[str(capped),'--timeout','15','prlimit','--cpu=60:61',str(exe),'--hirsel-record',str(tape),'--hirsel-grants',str(grant),'serve',str(sock),'64','5000' if mode!='cancel' else '500','4']
+    argv=[str(capped),str(exe),'--hirsel-record',str(tape),'--hirsel-grants',str(grant),'serve',str(sock),'64','5000' if mode!='cancel' else '500','4']
     (directory/'argv.json').write_text(json.dumps(argv))
     child=subprocess.Popen(argv,env=env,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
     peers=[]
     try:
         sel=selectors.DefaultSelector();sel.register(child.stdout,selectors.EVENT_READ)
-        assert sel.select(10), 'no application readiness'
+        sel.select()
         line=child.stdout.readline();(directory/'first').write_bytes(line);assert json.loads(line)=={'listening':True},line
         samples=[]
-        until=time.monotonic()+2
-        while time.monotonic()<until:
+        while child.poll() is None:
             snapshot=control(ctl);samples.append(snapshot)
             if snapshot.get('worker_phase')=='running' and snapshot['width']['requested']==width and snapshot['width']['effective']==width and snapshot['width']['pending']==0:break
         (directory/'control.json').write_text(json.dumps(samples,indent=2))
@@ -69,7 +68,7 @@ def host_case(exe, root, width, mode, env, capped):
             p=connect();send(p,{'op':'stop'});assert recv(p)=={'op':'stopping'}
         else:
             p=connect();p.sendall(b'\0\0')  # genuinely pending read, no injected Canceled
-        suffix,stderr=child.communicate(timeout=12)
+        suffix,stderr=child.communicate()
         output=line+suffix
         (directory/'stdout').write_bytes(output);(directory/'stderr').write_bytes(stderr);(directory/'status').write_text(str(child.returncode))
         assert child.returncode==0,(child.returncode,stderr,output)

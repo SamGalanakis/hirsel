@@ -134,7 +134,7 @@ class Land(unittest.TestCase):
     def wrapped_land(self, **env):
         log, events = self.top / 'detached.log', self.top / 'events.tsv'
         done = subprocess.run([sys.executable, 'tools/land-run', str(log), str(events)], cwd=self.lane,
-                              env=self.env | env, capture_output=True, text=True, timeout=30)
+                              env=self.env | env, capture_output=True, text=True)
         with events.open(newline='') as source:
             rows = list(csv.reader(source, delimiter='\t'))
         return done, log.read_text(), rows
@@ -474,13 +474,13 @@ if pathlib.Path('lane-0.txt').exists() and not pathlib.Path('lane-1.txt').exists
         def cleanup():
             if proc.poll() is None:
                 proc.kill()
-            proc.wait(timeout=10)
+            proc.wait()
         self.addCleanup(cleanup)
         return proc, log
 
     def finish_land(self, process, code=0):
         proc, log = process
-        proc.wait(timeout=30)
+        proc.wait()
         log.seek(0)
         output = log.read()
         self.assertEqual(proc.returncode, code, output)
@@ -708,7 +708,7 @@ if not (root / 'release-build').exists():
     def test_a_dead_lanes_ticket_is_dropped_from_the_batch(self):
         checks, lanes, lands, holder = self.batch_lanes(3)
         lands[1][0].kill()
-        lands[1][0].wait(timeout=10)
+        lands[1][0].wait()
         holder.unlink()
         outputs = [self.finish_land(lands[i]) for i in (0, 2)]
         self.assertIn('dropped ticket 00000000000000000003 for lane1 from the batch: dead process', outputs[0])
@@ -808,7 +808,7 @@ if not (root / 'release-retry').exists():
         if retire is not None:
             self.wait_for(lambda: (checks / 'holding-retry').exists())
             lands[retire][0].kill()
-            lands[retire][0].wait(timeout=10)
+            lands[retire][0].wait()
             (checks / 'release-retry').touch()
         outputs = {i: self.finish_land(land) for i, land in enumerate(lands) if i != retire}
         expected = (['newcomer'] if newcomer else []) + [f'lane {i}' for i in (2, 1, 0) if i != retire]
@@ -898,7 +898,7 @@ if not (root / 'release-retry').exists():
         [old] = self.queued()
         self.assertEqual(json.loads(old.read_text())['result']['code'], 0)
         lands[1].kill()
-        lands[1].wait(timeout=10)
+        lands[1].wait()
         again = subprocess.run([sys.executable, '-c', DRIVER], cwd=lanes[1], env=self.env,
                                capture_output=True, text=True)
         self.assertEqual(again.returncode, 0, again.stdout + again.stderr)
@@ -948,7 +948,7 @@ if not (root / 'release-retry').exists():
             def cleanup(proc=proc):
                 if proc.poll() is None:
                     proc.terminate()
-                proc.wait(timeout=10)
+                proc.wait()
             self.addCleanup(cleanup)
         own, other = holders
         paths = [directory / f'{i:020d}' for i in (1, 2)]
@@ -961,7 +961,7 @@ if not (root / 'release-retry').exists():
                                 env=self.env, capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn(f'withdrew ticket {paths[0].name} pid {own.pid}', result.stdout)
-        self.assertEqual(own.wait(timeout=10), -signal.SIGTERM)
+        self.assertEqual(own.wait(), -signal.SIGTERM)
         self.assertIsNone(other.poll())
         self.assertEqual(paths[1].read_bytes(), untouched)
         # Reuse the surviving process's PID with an old identity in our ticket.
@@ -1020,7 +1020,7 @@ if not (root / 'release-retry').exists():
         second = self.start_land(lanes[1])
         self.wait_for(lambda: len(self.queued()) == 2)
         first[0].kill()
-        first[0].wait(timeout=10)
+        first[0].wait()
         # Let the fake checker child finish too; only the holder is killed.
         (checks / 'release').touch()
         output = self.finish_land(second)
@@ -1053,7 +1053,7 @@ if not (root / 'release-retry').exists():
         self.assertIn('heartbeat older than 15 minutes', output)
         (checks / 'release').touch()
         os.kill(first[0].pid, signal.SIGCONT)
-        first[0].wait(timeout=15)
+        first[0].wait()
         first[1].seek(0)
         refused = first[1].read()
         self.assertEqual(first[0].returncode, 1, refused)

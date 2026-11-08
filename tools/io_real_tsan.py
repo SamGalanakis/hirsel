@@ -13,7 +13,7 @@ def shadow_space():
     resource.setrlimit(resource.RLIMIT_DATA, (hard, hard))
 
 binary = os.environ['HIRSEL_IO_REAL_TSAN']
-result = subprocess.run([binary, '8', '16', '--require-tsan'], preexec_fn=shadow_space, timeout=60,
+result = subprocess.run([binary, '8', '16', '--require-tsan'], preexec_fn=shadow_space,
                         env=os.environ | {'TSAN_OPTIONS': 'halt_on_error=1'})
 raise SystemExit(result.returncode)
 

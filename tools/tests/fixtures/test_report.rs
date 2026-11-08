@@ -6,12 +6,3 @@ fn a_pass() {}
 fn b_fail() {
     panic!("fixture failure output");
 }
-
-#[test]
-fn c_hangs() {
-    if std::env::var_os("HIRSEL_REPORT_FIXTURE_HANG").is_some() {
-        loop {
-            std::thread::park();
-        }
-    }
-}

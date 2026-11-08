@@ -78,19 +78,19 @@ def main():
                     server=None;client=None;perf=None
                     with (out/'server.log').open('wb') as log:
                         try:
-                            server=subprocess.Popen([str(ROOT/'tools/capped'),'--timeout','300','taskset','-c',','.join(map(str,cpus[:width])),
+                            server=subprocess.Popen([str(ROOT/'tools/capped'),'taskset','-c',','.join(map(str,cpus[:width])),
                                 str(launch),str(marker),*command],env=env,stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=log)
-                            if line(server,60)!=f'listening on http://127.0.0.1:{port}/': raise ValueError('server readiness mismatch')
+                            if line(server)!=f'listening on http://127.0.0.1:{port}/': raise ValueError('server readiness mismatch')
                             pid=json.loads(marker.read_text())['pid'];reference.request(port)
                             rss=reference.rss(pid)
-                            client=subprocess.Popen([str(ROOT/'tools/capped'),'--timeout','120','taskset','-c',str(a.client_cpu),str(load),str(port),op,str(rate),str(a.seconds)],
+                            client=subprocess.Popen([str(ROOT/'tools/capped'),'taskset','-c',str(a.client_cpu),str(load),str(port),op,str(rate),str(a.seconds)],
                                 env=dict(os.environ,HIRSEL_JOBS='1'),stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
-                            if line(client,60)!='ready': raise ValueError('client readiness mismatch')
+                            if line(client)!='ready': raise ValueError('client readiness mismatch')
                             perf=reference.AttachedPerf(pid,out)
                             sibling_before=reference.sibling();perf.send('enable')
                             client.stdin.write(b'go\n');client.stdin.flush()
                             # communicate cannot follow a closed stdin object.
-                            raw,error=client.communicate(timeout=120)
+                            raw,error=client.communicate()
                             if client.returncode: raise ValueError(error.decode())
                             perf.send('disable');counts=perf.stop();perf=None
                             measured=json.loads(raw);measured.update(kind=kind,width=width,operation=op,rate=rate,round=r,
@@ -99,7 +99,7 @@ def main():
                             data['samples'].append(measured)
                         finally:
                             if perf: perf.stop()
-                            if client and client.poll() is None: client.terminate();client.communicate(timeout=15)
+                            if client and client.poll() is None: client.terminate();client.communicate()
                             if server:
                                 server.stdin.close();server.wait(timeout=30)
                                 if server.returncode: raise ValueError((out/'server.log').read_text())

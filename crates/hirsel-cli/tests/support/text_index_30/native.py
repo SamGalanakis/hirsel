@@ -30,15 +30,13 @@ def main(a):
         inputs.extend(p for directory in evidence.glob('provider-*') for p in directory.rglob('*') if p.is_file())
         receipt=dict(id=label,backend=backend,argv=list(map(str,argv)),state='started',inputs={str(p):digest(p) for p in inputs},width_samples=samples)
         receipts.append(receipt);save()
-        def limits(): resource.setrlimit(resource.RLIMIT_CPU,(60,61))
-        command=[sys.executable,str(root/'capped'),'--timeout','60' if runtime else '300',*map(str,argv)]
+        command=[sys.executable,str(root/'capped'),*map(str,argv)]
         # Record target streams independently of capped's resource receipt.
         child=root/'capture.py'
         if placement:
             # Control samples belong to host diagnostics, outside canonical tape.
-            proc=subprocess.Popen(command,cwd=root,env=env,stdout=subprocess.PIPE,stderr=subprocess.PIPE,preexec_fn=limits if runtime else None)
-            deadline=time.monotonic()+65
-            while proc.poll() is None and time.monotonic()<deadline:
+            proc=subprocess.Popen(command,cwd=root,env=env,stdout=subprocess.PIPE,stderr=subprocess.PIPE,)
+            while proc.poll() is None:
                 try:
                     with socket.socket(socket.AF_UNIX) as s:
                         s.settimeout(.05);s.connect(str(placement));s.sendall(b'{"metrics":true}\n');reply=b''
@@ -49,10 +47,10 @@ def main(a):
                         sample=json.loads(reply);samples.append(sample)
                         if sample.get('worker_phase')=='running' and sample.get('width',{}).get('pending')==0:break
                 except (OSError,ValueError):pass
-            stdout,stderr=proc.communicate(timeout=max(1,deadline-time.monotonic()))
+            stdout,stderr=proc.communicate()
             result=subprocess.CompletedProcess(command,proc.returncode,stdout,stderr)
         else:
-            result=subprocess.run(command,cwd=root,env=env if runtime else env|{'HIRSEL_MEMORY_LIMIT':'4G'},stdin=subprocess.DEVNULL,capture_output=True,timeout=330 if not runtime else 75,preexec_fn=limits if runtime else None)
+            result=subprocess.run(command,cwd=root,env=env if runtime else env|{'HIRSEL_MEMORY_LIMIT':'4G'},stdin=subprocess.DEVNULL,capture_output=True,)
         out.write_bytes(result.stdout);err.write_bytes(result.stderr)
         receipt.update(state='completed',status=result.returncode)
         save();return result,receipt

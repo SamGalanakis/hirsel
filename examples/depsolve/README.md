@@ -56,7 +56,7 @@ resolve beside that grants file. Placement is independent of logical jobs.
 
 ```sh
 hirsel build examples/depsolve/hirsel.json --backend llvm -o /tmp/depsolve-llvm
-HIRSEL_MEMORY_LIMIT=2G HIRSEL_JOBS=4 tools/capped --timeout 60 prlimit --cpu=60:61 /tmp/depsolve-llvm --hirsel-record /tmp/depsolve-llvm.tape --hirsel-grants /absolute/private/grants.json resolve root.json 4 catalog.json
+HIRSEL_MEMORY_LIMIT=2G HIRSEL_JOBS=4 tools/capped /tmp/depsolve-llvm --hirsel-record /tmp/depsolve-llvm.tape --hirsel-grants /absolute/private/grants.json resolve root.json 4 catalog.json
 hirsel run examples/depsolve/hirsel.json --replay /tmp/depsolve-llvm.tape
 /tmp/depsolve-llvm --hirsel-replay /tmp/depsolve-llvm.tape
 ```

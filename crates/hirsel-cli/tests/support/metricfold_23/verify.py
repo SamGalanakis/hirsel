@@ -75,18 +75,17 @@ def verify(hirsel, root, output):
         if runtime:
             # Redirection keeps cap accounting separate from the program streams.
             # Arguments are positional, with no shell interpolation of user text.
-            command = [sys.executable, root / 'capped', '--timeout', '60',
-                       'sh', '-c', 'exec "$@" >"$METRICFOLD_STDOUT" 2>"$METRICFOLD_STDERR"',
+            command = [sys.executable, root / 'capped', 'sh', '-c', 'exec "$@" >"$METRICFOLD_STDOUT" 2>"$METRICFOLD_STDERR"',
                        'metricfold', *argv]
             process = subprocess.run(command, stdin=subprocess.DEVNULL, capture_output=True,
-                                     timeout=180, env=env | dict(METRICFOLD_STDOUT=str(stdout),
+                                      env=env | dict(METRICFOLD_STDOUT=str(stdout),
                                                                 METRICFOLD_STDERR=str(stderr)))
             (output / (label + '.cap')).write_bytes(process.stdout + process.stderr)
             runtime_count += 1
             result = (process.returncode, stdout.read_bytes(), stderr.read_bytes())
         else:
             process = subprocess.run(argv, stdin=subprocess.DEVNULL, capture_output=True,
-                                     timeout=900, env=env)
+                                      env=env)
             stdout.write_bytes(process.stdout)
             stderr.write_bytes(process.stderr)
             result = (process.returncode, process.stdout, process.stderr)

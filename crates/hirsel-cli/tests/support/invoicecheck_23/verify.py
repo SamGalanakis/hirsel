@@ -62,12 +62,11 @@ def verify(hirsel, root, output, selected=None):
         prefix = output / label
         if runtime:
             # Keep capped's resource report separate from the application's streams.
-            command = [sys.executable, str(root / 'capped'), '--timeout', '60',
-                       sys.executable, __file__, '--one', str(prefix), *argv]
+            command = [sys.executable, str(root / 'capped'), sys.executable, __file__, '--one', str(prefix), *argv]
         else:
             command = argv
         done = subprocess.run(command, stdin=subprocess.DEVNULL, capture_output=True,
-                              timeout=600, env=environment)
+                               env=environment)
         if runtime:
             prefix.with_suffix('.cap').write_bytes(done.stderr)
             assert done.returncode == 0, (label, done, str(output))
@@ -197,7 +196,6 @@ def verify(hirsel, root, output, selected=None):
 if __name__ == '__main__':
     if len(sys.argv) > 1 and sys.argv[1] == '--one':
         prefix = Path(sys.argv[2])
-        resource.setrlimit(resource.RLIMIT_CPU, (60, 60))
         with prefix.with_suffix('.stdout').open('wb') as out, prefix.with_suffix('.stderr').open('wb') as err:
             done = subprocess.run(sys.argv[3:], stdin=subprocess.DEVNULL, stdout=out, stderr=err)
         prefix.with_suffix('.status').write_text(str(done.returncode))

@@ -164,7 +164,6 @@ class FreshStdCounts(unittest.TestCase):
             baseline.write_text(original)
             for count, expected in ((9900, 0), (10300, 0), (10301, 1)):
                 def measure(command, **kwargs):
-                    self.assertEqual(command[command.index('--cpu=60:60') + 1], '--')
                     self.assertIn('instructions:u,instructions', command)
                     self.assertEqual(command[-2:], ['check', str(ROOT / 'stdlib/std@1/hirsel.json')])
                     env = kwargs['env']

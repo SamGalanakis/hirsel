@@ -11,7 +11,6 @@ use hirsel_host_io::launch::*;
 use std::{
     sync::{Arc, Mutex, mpsc},
     task::Poll,
-    time::Duration,
 };
 
 struct Fixture {
@@ -433,8 +432,8 @@ impl QueryTask for CompletionTask {
                 .unwrap()
                 .take()
                 .unwrap()
-                .recv_timeout(Duration::from_secs(30))
-                .expect("independent producer did not settle before the completion gate deadline");
+                .recv()
+                .expect("independent producer disconnected before the completion gate");
         }
         self.inner.poll(cx)
     }

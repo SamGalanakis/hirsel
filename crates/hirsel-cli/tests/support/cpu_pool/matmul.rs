@@ -82,17 +82,12 @@ pub fn main(rt: Io) -> Result[(), String] {{
         use std::os::unix::process::CommandExt;
         unsafe {
             run.pre_exec(|| {
-                for (resource, limit) in [(libc::RLIMIT_CPU, 60), (libc::RLIMIT_AS, 2 << 30)] {
-                    if libc::setrlimit(
-                        resource,
-                        &libc::rlimit {
-                            rlim_cur: limit,
-                            rlim_max: limit,
-                        },
-                    ) != 0
-                    {
-                        return Err(std::io::Error::last_os_error());
-                    }
+                let limit = libc::rlimit {
+                    rlim_cur: 2 << 30,
+                    rlim_max: 2 << 30,
+                };
+                if libc::setrlimit(libc::RLIMIT_AS, &limit) != 0 {
+                    return Err(std::io::Error::last_os_error());
                 }
                 Ok(())
             });

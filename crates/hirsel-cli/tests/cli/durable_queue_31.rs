@@ -295,10 +295,6 @@ fn fixture_campaign(replay_network: bool) {
                 .join("../../tools/capped")
                 .to_string_lossy()
                 .into(),
-            "--timeout".into(),
-            "60".into(),
-            "prlimit".into(),
-            "--cpu=60:61".into(),
         ];
         let mut objects = vec![];
         for backend in [Backend::Llvm, Backend::Cranelift] {

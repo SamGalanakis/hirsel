@@ -42,7 +42,7 @@ def main():
                                       'package': {'name': 'std', 'version': '1'}, 'expose': []}]}
         source.with_suffix('.hir.json').write_text(json.dumps(manifest, indent=2) + '\n')
         executable = directory / 'gzip_read'
-        subprocess.run([str(ROOT / 'tools/capped'), '--timeout', '900', str(bundle / 'hirsel'),
+        subprocess.run([str(ROOT / 'tools/capped'), str(bundle / 'hirsel'),
                         'build', '--release', str(source), '-o', str(executable)], env=env, check=True)
         participants.append({'name': name, 'command': [str(executable), '--hirsel-grants',
                              str(ROOT / 'bench/micro/grants.json')], 'cwd': str(ROOT)})
@@ -51,7 +51,7 @@ def main():
         manifest = output / f'participants-{chunk}.json'
         manifest.write_text(json.dumps(entries, indent=2) + '\n')
         subprocess.run([str(ROOT / 'bench/micro/run'), str(manifest), '--rounds', '10',
-                        '--seed', '20261021', '--timeout', '900', '--output',
+                        '--seed', '20261021', '--output',
                         str(output / f'result-{chunk}.json')], check=True)
     (output / 'baseline.sha').write_text(revision + '\n')
 

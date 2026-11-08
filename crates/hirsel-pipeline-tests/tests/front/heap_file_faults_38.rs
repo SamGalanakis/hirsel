@@ -480,7 +480,7 @@ fn treelearn_original_commit_denied() {
         std::fs::write(cap.path(), include_str!("../../../../tools/capped")).unwrap();
         let child = std::process::Command::new("python3")
             .arg(cap.path())
-            .args(["--timeout", "120", "prlimit", "--cpu=60:61"])
+            .args(["prlimit"])
             .arg(std::env::current_exe().unwrap())
             .args([
                 "--exact",

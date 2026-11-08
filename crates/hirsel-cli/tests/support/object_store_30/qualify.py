@@ -61,7 +61,7 @@ try:
   # A control reply in starting state can advance to running without another
   # FS notification. Continue control transactions immediately at that point.
   if ctl.exists() and not settled:continue
- out,err=proc.communicate(timeout=30)
+ out,err=proc.communicate()
 finally:
  os.close(fd);os.close(pidfd);sel.close()
 (root/'stdout').write_bytes(out);(root/'stderr').write_bytes(err);(root/'metrics.json').write_text(json.dumps(snapshots,indent=2)+'\n')

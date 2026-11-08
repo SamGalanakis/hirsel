@@ -12,7 +12,6 @@ fn launch(manifest: &Path, grants: &Path, cwd: &Path, directory: &str) -> Output
         .unwrap();
     let mut output = Command::new("python3")
         .arg(manifest.parent().unwrap().parent().unwrap().join("capped"))
-        .args(["--timeout", "60"])
         .arg(executable)
         .env("HIRSEL_DAEMON", "off")
         .env("HIRSEL_RESULTS", "none@1")

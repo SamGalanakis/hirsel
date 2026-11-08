@@ -8,14 +8,11 @@ REQUEST = b'GET / HTTP/1.1\r\nHost: localhost\r\n\r\n'
 
 def one(port, scheduled):
     time.sleep(max(0, scheduled - time.monotonic()))
-    deadline = time.monotonic() + 20
     while True:
         try:
             connection = socket.create_connection(('127.0.0.1', port), timeout=10)
             break
         except ConnectionRefusedError:
-            if time.monotonic() > deadline:
-                raise
             time.sleep(.001)
     with connection:
         connection.sendall(REQUEST)

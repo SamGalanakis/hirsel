@@ -39,7 +39,7 @@ def main():
                          '//:hirsel-toolchain')['hirsel-toolchain']
     env = native_environment()
     capped = str(ROOT / 'tools/capped')
-    subprocess.run([capped, '--timeout', '900', str(Path(bundle) / 'hirsel'),
+    subprocess.run([capped, str(Path(bundle) / 'hirsel'),
                     'build', '--release', str(source), '-o', str(output / args.case)], env=env, check=True)
     if args.case in ('json', 'json_typed', 'json_typed_dom'):
         target = 'json-reference' if args.case == 'json' else 'json-typed-reference'

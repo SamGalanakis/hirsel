@@ -35,7 +35,7 @@ def cpu_snapshot(text, cpus):
     return result
 
 
-def sample(participant, case, spec, width, mode, cpus, timeout, placement=False, budget=None):
+def sample(participant, case, spec, width, mode, cpus, placement=False, budget=None):
     """One process per capped call. perf/time exclude the capped queue wait."""
     with tempfile.TemporaryDirectory(prefix='mc-bench-') as directory:
         scratch = Path(directory)
@@ -68,7 +68,7 @@ def sample(participant, case, spec, width, mode, cpus, timeout, placement=False,
             '--pre',shlex.join([str(HERE/'snapshot'),str(before)]),
             '--post',shlex.join([str(HERE/'snapshot'),str(after)]),'--',
             '/usr/bin/time','-f','{"rss_kib":%M,"user_s":%U,"system_s":%S}','-o',str(resource), *command]
-        proc = subprocess.run([str(ROOT/'tools/capped'),'--timeout',str(timeout),*perf],
+        proc = subprocess.run([str(ROOT/'tools/capped'),*perf],
             env=env,cwd=participant.get('cwd',str(ROOT)),capture_output=True,text=True)
         if proc.returncode:
             raise ValueError(f'{participant["name"]}/{case}/{width}/{mode}: exit {proc.returncode}: {proc.stderr[-3000:]}')

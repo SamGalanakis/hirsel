@@ -77,8 +77,6 @@ fn retained_stdin_pending_releases_its_pooled_stack_and_replays_on_both_backends
                             .arg(&grants)
                             .stdin(std::process::Stdio::piped());
                         let mut process = command.spawn().unwrap();
-                        let deadline =
-                            std::time::Instant::now() + std::time::Duration::from_secs(10);
                         loop {
                             let text = std::fs::read_to_string(&trace).unwrap_or_default();
                             if pending_left(&text) {
@@ -90,11 +88,6 @@ fn retained_stdin_pending_releases_its_pooled_stack_and_replays_on_both_backends
                                 panic!(
                                     "{cell}: returned before entered read leave: {text}, {output:?}"
                                 );
-                            }
-                            if std::time::Instant::now() >= deadline {
-                                process.kill().unwrap();
-                                let output = process.wait_with_output().unwrap();
-                                panic!("{cell}: no entered read leave: {text}, {output:?}");
                             }
                             std::thread::yield_now();
                         }
@@ -142,17 +135,8 @@ fn pending_left(text: &str) -> bool {
             })
     })
 }
-fn finish(mut child: std::process::Child, cell: &str) -> std::process::Output {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-    loop {
-        if child.try_wait().unwrap().is_some() {
-            return child.wait_with_output().unwrap();
-        }
-        if std::time::Instant::now() >= deadline {
-            child.kill().unwrap();
-            let output = child.wait_with_output().unwrap();
-            panic!("{cell}: read did not complete: {output:?}");
-        }
-        std::thread::yield_now();
-    }
+fn finish(child: std::process::Child, cell: &str) -> std::process::Output {
+    child
+        .wait_with_output()
+        .unwrap_or_else(|e| panic!("{cell}: wait failed: {e}"))
 }

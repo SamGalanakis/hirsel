@@ -79,14 +79,13 @@ def verify(hirsel, root, output):
                        'o=open(sys.argv[1],"wb"); e=open(sys.argv[2],"wb"); '
                        'p=subprocess.run(sys.argv[3:],stdin=subprocess.DEVNULL,stdout=o,stderr=e); '
                        'sys.exit(p.returncode)')
-            done = subprocess.run([sys.executable, str(root / 'capped'), '--timeout', '60',
-                                   sys.executable, '-c', wrapper, str(stdout), str(stderr), *argv],
-                                  capture_output=True, timeout=90, env=env)
+            done = subprocess.run([sys.executable, str(root / 'capped'), sys.executable, '-c', wrapper, str(stdout), str(stderr), *argv],
+                                  capture_output=True,  env=env)
             (output / (label + '.scope')).write_bytes(done.stdout + done.stderr)
             actual = done.returncode, stdout.read_bytes(), stderr.read_bytes()
         else:
             done = subprocess.run(argv, stdin=subprocess.DEVNULL, capture_output=True,
-                                  timeout=300, env=env)
+                                   env=env)
             stdout.write_bytes(done.stdout)
             stderr.write_bytes(done.stderr)
             actual = done.returncode, done.stdout, done.stderr

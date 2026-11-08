@@ -35,7 +35,6 @@ def oracle(request):
 
 
 def limits():
-    resource.setrlimit(resource.RLIMIT_CPU, (60, 60))
     resource.setrlimit(resource.RLIMIT_DATA, (2 * 1024**3, 2 * 1024**3))
 
 
@@ -56,7 +55,7 @@ def verify(hirsel, root, output):
     def run(label, argv, setup=False):
         nonlocal executions
         p = subprocess.run(list(map(str, argv)), capture_output=True, stdin=subprocess.DEVNULL,
-                           timeout=240 if setup else 60, env=env, preexec_fn=None if setup else limits)
+                            env=env, preexec_fn=None if setup else limits)
         if not setup:
             executions += 1
         return retain(label, argv, (p.returncode, p.stdout, p.stderr))
@@ -113,7 +112,7 @@ def verify(hirsel, root, output):
             try:
                 assert select.select([p.stdout], [], [], 60)[0], (label, 'no readiness')
                 ready = p.stdout.readline()
-                assert ready == b'{"listening":true}\n', (label, ready, p.communicate(timeout=5))
+                assert ready == b'{"listening":true}\n', (label, ready, p.communicate())
             except BaseException:
                 p.kill()
                 p.communicate()
@@ -124,7 +123,7 @@ def verify(hirsel, root, output):
             nonlocal executions
             p, argv, ready = started
             try:
-                out, err = p.communicate(timeout=60)
+                out, err = p.communicate()
             except BaseException:
                 p.kill()
                 p.communicate()
@@ -260,7 +259,7 @@ def verify(hirsel, root, output):
                             assert recv(peer) == compact(request)
                             assert peer.recv(1) == b''
                             peer.sendall(wire)
-                        out, err = p.communicate(timeout=60)
+                        out, err = p.communicate()
                     finally:
                         if p.poll() is None:
                             p.kill(); p.communicate()

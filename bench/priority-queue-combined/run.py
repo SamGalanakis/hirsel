@@ -29,7 +29,7 @@ def sha(path):
 
 
 def run(command, **kwargs):
-    return subprocess.run([str(ROOT / 'tools/capped'), '--timeout', '900', *map(str, command)],
+    return subprocess.run([str(ROOT / 'tools/capped'), *map(str, command)],
                           cwd=ROOT, check=True, **kwargs)
 
 
@@ -113,14 +113,13 @@ def timing_lock(cpu):
         yield exclusive
 
 
-def sample(participant, cpu, timeout, directory):
+def sample(participant, cpu, directory):
     # Adapt bench/micro/measure.py:79-113; retain all raw evidence per cell.
     directory.mkdir(parents=True, exist_ok=False)
     counters = directory / 'perf.csv'
     before_path, after_path = directory / 'before.stat', directory / 'after.stat'
     env = os.environ | participant.get('env', {}) | {'LC_ALL': 'C'}
-    command = [str(ROOT / 'tools/capped'), '--timeout', str(timeout),
-        *perf_command(participant['command'], cpu, counters, before_path, after_path)]
+    command = [str(ROOT / 'tools/capped'), *perf_command(participant['command'], cpu, counters, before_path, after_path)]
     with (directory / 'stdout').open('wb') as stdout, (directory / 'stderr').open('wb') as stderr:
         result = subprocess.run(command, cwd=ROOT, env=env, stdin=subprocess.DEVNULL, stdout=stdout, stderr=stderr)
     status = {'command': command, 'exit': result.returncode, 'accepted': False}
@@ -247,7 +246,7 @@ def main():
                 with timing_lock(31) as exclusive:
                     for _, name in schedule(list(commands), 1, 20261022 + round_number):
                         command = commands[name] + list(map(str, [k, 8192, seed]))
-                        result = sample({'name': name, 'command': command, 'env': env}, 31, 300, output / 'raw' / f'{operation}-{k}-{round_number}-{name}')
+                        result = sample({'name': name, 'command': command, 'env': env}, 31, output / 'raw' / f'{operation}-{k}-{round_number}-{name}')
                         assert result['stdout_sha256'] == expected_hash, (name, k, seed, result)
                         status_file = Path(result['raw']) / 'status.json'
                         status = json.loads(status_file.read_text())

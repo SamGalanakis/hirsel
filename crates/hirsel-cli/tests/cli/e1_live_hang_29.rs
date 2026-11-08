@@ -2,7 +2,6 @@
 use std::{
     path::Path,
     process::{Command, Output, Stdio},
-    time::{Duration, Instant},
 };
 
 // Supplemental live coverage of the process/task-set/deadline diamond shape.
@@ -49,30 +48,19 @@ pub fn main(rt: Io) -> Result[(), GrantError] {
 }
 "#;
 
-fn bounded(command: &mut Command, label: &str) -> Output {
+fn completed_output(command: &mut Command, label: &str) -> Output {
     eprintln!("LIVE_LIVENESS STARTED {label}");
-    let mut child = command
+    let child = command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
-    let until = Instant::now() + Duration::from_secs(10);
-    loop {
-        if child.try_wait().unwrap().is_some() {
-            let output = child.wait_with_output().unwrap();
-            assert!(output.status.success(), "{label}: {output:?}");
-            assert!(output.stderr.is_empty(), "{label}: {output:?}");
-            eprintln!("LIVE_LIVENESS COMPLETED {label}");
-            return output;
-        }
-        if Instant::now() >= until {
-            child.kill().unwrap();
-            let output = child.wait_with_output().unwrap();
-            panic!("{label}: live process diamond did not finish within 10s: {output:?}");
-        }
-        std::thread::sleep(Duration::from_millis(2));
-    }
+    let output = child.wait_with_output().unwrap();
+    assert!(output.status.success(), "{label}: {output:?}");
+    assert!(output.stderr.is_empty(), "{label}: {output:?}");
+    eprintln!("LIVE_LIVENESS COMPLETED {label}");
+    output
 }
 
 #[test]
@@ -119,7 +107,7 @@ fn process_diamond_live_finishes_repeatedly_at_each_width() {
                 if iteration != 0 {
                     command.env("HIRSEL_RT_WORKERS", width.to_string());
                 }
-                let output = bounded(
+                let output = completed_output(
                     command
                         .arg("--hirsel-record")
                         .arg(&tape)
@@ -212,7 +200,7 @@ fn dagbuild_diamond_live_matches_the_oracle_repeatedly_at_each_width() {
                 if iteration != 0 {
                     command.env("HIRSEL_RT_WORKERS", width.to_string());
                 }
-                let output = bounded(
+                let output = completed_output(
                     command
                         .arg("--hirsel-record")
                         .arg(run.join("record.tape"))

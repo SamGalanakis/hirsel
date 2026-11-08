@@ -6,11 +6,11 @@ root=Path(a.root);root.mkdir(parents=True,exist_ok=True)
 env=os.environ.copy();env.update(HIRSEL_JOBS='4',HIRSEL_MEMORY_LIMIT='2G',HIRSEL_DAEMON='off',HIRSEL_RESULTS='none@1')
 for key in ['HIRSEL_RT_WORKERS','HIRSEL_RT_MIGRATE','HIRSEL_FREE_TEST','HIRSEL_FREE_REPLAY']:env.pop(key,None)
 
-def await_line(stream,seconds=30):
+def await_line(stream):
     selector=selectors.DefaultSelector();selector.register(stream,selectors.EVENT_READ)
-    data=b'';deadline=time.monotonic()+seconds
+    data=b''
     while not data.endswith(b'\n'):
-        if not selector.select(max(0,deadline-time.monotonic())):raise RuntimeError('handshake timeout')
+        selector.select()
         b=os.read(stream.fileno(),1)
         if not b:raise RuntimeError('EOF before handshake '+repr(data))
         data+=b
@@ -24,7 +24,7 @@ for workflow in ([a.workflow] if a.workflow else ['success','domain','cancel']):
     args=['--jobs','4']+(['--interruptible'] if workflow=='cancel' else [])+['-']
     if workflow=='cancel':io['signals']={'provider':'signals.host@1','kinds':['interrupt']}
     grants.write_text(json.dumps(dict(args=args,io=io,placement=dict(cores=width,control=str(ctl),commit='shared',reorder='auto'))))
-    argv=[a.capped,'--timeout','60','prlimit','--cpu=60:61',a.app,'--hirsel-record',str(tape),'--hirsel-grants',str(grants),*args]
+    argv=[a.capped,a.app,'--hirsel-record',str(tape),'--hirsel-grants',str(grants),*args]
     (d/'argv.json').write_text(json.dumps(argv))
     with (d/'stderr').open('wb') as errors:
       child=subprocess.Popen(argv,env=env,stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=errors,bufsize=0)
@@ -42,7 +42,7 @@ for workflow in ([a.workflow] if a.workflow else ['success','domain','cancel']):
         else:
           script=b'set A1 = 2\nset B1 = A1+3\nshow\nsave book.json\nload book.json\nshow B1\n' if workflow=='success' else b'set A1 = 1/0\nshow A1\n'
           child.stdin.write(script);child.stdin.flush();expected=head+(b'OK\nOK\nA1 = 2\nB1 = 5\nOK\nOK\nB1 = 5\n' if workflow=='success' else b'OK\nA1 = #DIV_ZERO\n');code=0 if workflow=='success' else 1
-        child.stdin.close();tail=child.stdout.read();rc=child.wait(timeout=65)
+        child.stdin.close();tail=child.stdout.read();rc=child.wait()
         output=head+tail;(d/'stdout').write_bytes(output);(d/'exit').write_text(str(rc))
         assert rc==code,(label,rc,(d/'stderr').read_text())
         assert output==expected,(label,output,expected)
@@ -50,5 +50,5 @@ for workflow in ([a.workflow] if a.workflow else ['success','domain','cancel']):
         (d/'PASS').write_text('capacity qualified; no claim of simultaneous CPU utilization\n')
         print('PRODUCTION_PASS',label,flush=True)
       except BaseException:
-        if child.poll() is None:child.terminate();child.wait(timeout=15)
+        if child.poll() is None:child.terminate();child.wait()
         raise

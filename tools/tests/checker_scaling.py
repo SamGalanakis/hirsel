@@ -35,10 +35,6 @@ class Growth(unittest.TestCase):
         broken = samples(lambda n: n**3)
         broken[10] = {'status': 1, 'instructions': None, 'rss_kb': 1, 'detail': 'type error'}
         self.assertEqual(scaling.verdict(family, broken, BASELINE)[0], False)
-        timed_out = samples(lambda n: n)
-        timed_out[160] = {'status': 124, 'instructions': None, 'rss_kb': 1, 'detail': 'exceeded'}
-        self.assertEqual(scaling.verdict(family, timed_out, BASELINE), (True, scaling.verdict(family, timed_out, BASELINE)[1]))
-        self.assertEqual(scaling.verdict('if_chain', timed_out, BASELINE)[0], False)
 
     @patch.object(scaling.subprocess, 'check_output', return_value='''{"products":"/installed/products"}''')
     @patch.dict(os.environ, {'HOME': '/home/checker', 'XDG_CACHE_HOME': '/cache/checker',

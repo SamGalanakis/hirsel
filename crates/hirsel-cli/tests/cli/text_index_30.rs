@@ -448,7 +448,7 @@ fn native(boundary: bool) {
             for binary in &binaries {
                 let out = Command::new("python3")
                     .arg(root.join("capped"))
-                    .args(["--timeout", "60", "prlimit", "--cpu=60:61"])
+                    .args(["prlimit"])
                     .arg("python3")
                     .arg(root.join("capture.py"))
                     .arg(root.join("replay.stdout"))
@@ -537,7 +537,7 @@ fn replay_refusals(selection: &Path, root: &Path, tape: &Path, binaries: &[PathB
         for (i, binary) in binaries.iter().enumerate() {
             let out = Command::new("python3")
                 .arg(root.join("capped"))
-                .args(["--timeout", "60", "prlimit", "--cpu=60:61"])
+                .args(["prlimit"])
                 .arg(binary)
                 .env("HIRSEL_JOBS", "4")
                 .env("HIRSEL_MEMORY_LIMIT", "2G")
@@ -600,7 +600,7 @@ fn replay_refusals(selection: &Path, root: &Path, tape: &Path, binaries: &[PathB
         );
         let out = Command::new("python3")
             .arg(root.join("capped"))
-            .args(["--timeout", "60", "prlimit", "--cpu=60:61"])
+            .args(["prlimit"])
             .arg(&binary)
             .env("HIRSEL_JOBS", "4")
             .env("HIRSEL_MEMORY_LIMIT", "2G")
@@ -623,7 +623,7 @@ fn replay_refusals(selection: &Path, root: &Path, tape: &Path, binaries: &[PathB
     for binary in binaries {
         let out = Command::new("python3")
             .arg(root.join("capped"))
-            .args(["--timeout", "60", "prlimit", "--cpu=60:61"])
+            .args(["prlimit"])
             .arg(binary)
             .env("HIRSEL_JOBS", "4")
             .env("HIRSEL_MEMORY_LIMIT", "2G")

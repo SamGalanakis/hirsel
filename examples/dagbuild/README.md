@@ -46,7 +46,7 @@ x['io']['dirs'][1]['host']='/tmp/dagbuild-demo/state'
 Path('/tmp/dagbuild-demo/grants.json').write_text(json.dumps(x))
 PY
 "$HIRSEL" build examples/dagbuild/hirsel.json --backend llvm -o /tmp/dagbuild-demo/dagbuild
-HIRSEL_MEMORY_LIMIT=2G HIRSEL_JOBS=4 tools/capped --timeout 60 prlimit --cpu=60:61 \
+HIRSEL_MEMORY_LIMIT=2G HIRSEL_JOBS=4 tools/capped \
   /tmp/dagbuild-demo/dagbuild --hirsel-record /tmp/dagbuild-demo/build.tape \
   --hirsel-grants /tmp/dagbuild-demo/grants.json build manifest.json
 /tmp/dagbuild-demo/dagbuild --hirsel-grants /tmp/dagbuild-demo/grants.json plan manifest.json

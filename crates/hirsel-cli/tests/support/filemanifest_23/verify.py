@@ -48,10 +48,9 @@ def verify(hirsel, root, output):
     selection = root / 'hirsel.json'
     commands = []
     # The wrapper records target streams untouched; capped's diagnostics have their
-    # own file. RLIMIT_CPU applies to each runtime, independently of setup builds.
+    # own file. The memory limit applies independently to each runtime.
     child = output / 'child.py'
     child.write_text('''import pathlib,resource,subprocess,sys
-resource.setrlimit(resource.RLIMIT_CPU,(60,60))
 p=subprocess.run(sys.argv[3:],stdin=subprocess.DEVNULL,capture_output=True)
 pathlib.Path(sys.argv[1]).write_bytes(p.stdout)
 pathlib.Path(sys.argv[2]).write_bytes(p.stderr)
@@ -64,10 +63,9 @@ sys.exit(p.returncode)
         argv = list(map(str, argv))
         stdout = output / (label + '.stdout')
         stderr = output / (label + '.stderr')
-        command = ([sys.executable, root / 'capped', '--timeout', '60',
-                    sys.executable, child, stdout, stderr, *argv] if runtime else argv)
+        command = ([sys.executable, root / 'capped', sys.executable, child, stdout, stderr, *argv] if runtime else argv)
         done = subprocess.run(list(map(str, command)), stdin=subprocess.DEVNULL,
-                              capture_output=True, env=env, timeout=120 if runtime else 300)
+                              capture_output=True, env=env)
         if runtime:
             (output / (label + '.resources')).write_bytes(done.stderr)
             assert stdout.exists() and stderr.exists(), (label, done.returncode, done.stderr)

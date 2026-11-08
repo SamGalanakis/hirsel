@@ -77,7 +77,7 @@ def verify(hirsel, root, output):
 
     def run(label, argv):
         argv = list(map(str, argv))
-        done = subprocess.run(argv, stdin=subprocess.DEVNULL, capture_output=True, timeout=240,
+        done = subprocess.run(argv, stdin=subprocess.DEVNULL, capture_output=True,
                               env=os.environ | {'HIRSEL_DAEMON': 'off'})
         (output / (label + '.stdout')).write_bytes(done.stdout)
         (output / (label + '.stderr')).write_bytes(done.stderr)

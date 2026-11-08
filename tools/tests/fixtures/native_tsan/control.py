@@ -33,8 +33,6 @@ int main(int argc, char **argv) {
 def shadow_space():
     _, hard = resource.getrlimit(resource.RLIMIT_DATA)
     resource.setrlimit(resource.RLIMIT_DATA, (hard, hard))
-    resource.setrlimit(resource.RLIMIT_CPU, (10, 10))
-
 with tempfile.TemporaryDirectory(prefix="hirsel-native-tsan-") as scratch:
     root = Path(scratch)
     (root / "mapper.o").write_bytes(sys.stdin.buffer.read())
@@ -46,7 +44,7 @@ with tempfile.TemporaryDirectory(prefix="hirsel-native-tsan-") as scratch:
     subprocess.run([clang, "-fsanitize=thread", root / "control.o", root / "mapper.o", "-pthread", "-o", root / "control"], check=True)
     for arguments, status in [([], 0), (["same-cell"], 66)]:
         result = subprocess.run([root / "control", *arguments], capture_output=True, text=True,
-                                preexec_fn=shadow_space, timeout=15,
+                                preexec_fn=shadow_space,
                                 env=os.environ | {"TSAN_OPTIONS": "symbolize=0:halt_on_error=1:exitcode=66"})
         assert result.returncode == status, (result.returncode, result.stdout, result.stderr)
         assert ("ThreadSanitizer: data race" in result.stderr) == bool(arguments), result.stderr

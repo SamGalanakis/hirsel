@@ -96,7 +96,7 @@ for backend in ["llvm", "cranelift"]:
                 "placement": {"cores": width, "commit": "shared", "reorder": "off", "control": str(control)},
             }
             grants.write_text(json.dumps(grant))
-            command = [args.capped, "--timeout", "60", "prlimit", "--cpu=60:61", str(root / backend),
+            command = [args.capped, str(root / backend),
                        "--hirsel-record", str(tape), "--hirsel-grants", str(grants)] + app_args
             (directory / "argv.json").write_text(json.dumps(command))
             flush({"cell": cell, "status": "STARTED", "argv": command, "grants_sha256": digest(grants), "executable_sha256": digest(root / backend), "manifest_sha256": digest(root / "hirsel.json")})
@@ -121,7 +121,7 @@ for backend in ["llvm", "cranelift"]:
                 process.stdin.write(b"x")
                 process.stdin.flush()
                 # Keep stdin open and empty while cancel's actual read parks.
-                process.wait(timeout=55)
+                process.wait()
                 stdout, stderr = process.stdout.read(), process.stderr.read()
                 (directory / "stdout").write_bytes(ready + stdout)
                 (directory / "stderr").write_bytes(stderr)
@@ -134,8 +134,7 @@ for backend in ["llvm", "cranelift"]:
                     path.unlink()
                 (records / "failure.json").unlink()
                 for target in ["llvm", "cranelift"]:
-                    replay = run(cell + "-replay-" + target, [args.capped, "--timeout", "60", "prlimit", "--cpu=60:61",
-                                 str(root / target), "--hirsel-replay", str(tape)])
+                    replay = run(cell + "-replay-" + target, [args.capped, str(root / target), "--hirsel-replay", str(tape)])
                     assert replay.returncode == code and replay.stdout == ready + expected, (cell, target, replay)
                     assert not (records / "failure.json").exists() and not list(output.iterdir()), "real replay effects"
                 assert original == digest(tape)

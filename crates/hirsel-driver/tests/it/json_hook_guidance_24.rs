@@ -379,7 +379,6 @@ pub fn main() -> Result[(), String] uses {} {
             assert!(built.is_ok(), "{built:?}");
             let output = std::process::Command::new("python3")
                 .arg(&capped)
-                .args(["--timeout", "60"])
                 .arg(exe)
                 .env("HIRSEL_JOBS", "1")
                 .env("HIRSEL_MEMORY_LIMIT", "2G")

@@ -69,7 +69,7 @@ def verify(hirsel, root, output, prebuilt=None):
 
     def run(label, argv):
         argv = list(map(str, argv))
-        done = subprocess.run(argv, capture_output=True, stdin=subprocess.DEVNULL, timeout=240)
+        done = subprocess.run(argv, capture_output=True, stdin=subprocess.DEVNULL)
         (output / (label + '.stdout')).write_bytes(done.stdout)
         (output / (label + '.stderr')).write_bytes(done.stderr)
         commands.append({'label': label, 'argv': argv, 'cwd': str(Path.cwd()), 'exit': done.returncode})

@@ -85,7 +85,7 @@ def perf_command(command, cpu, counters, before, after):
             '--post', '/bin/cat /proc/stat > ' + shlex.quote(str(after)), '--', *command]
 
 
-def sample(participant, cpu, timeout):
+def sample(participant, cpu):
     """One process under capped; perf counts only the pinned participant tree."""
     sibling_cpus = siblings(cpu)
     env = {**os.environ, **participant.get('env', {}), 'LC_ALL': 'C'}
@@ -95,8 +95,7 @@ def sample(participant, cpu, timeout):
         with open(Path(scratch) / 'stdout', 'w+b') as output:
             with open(participant.get('stdin', '/dev/null'), 'rb') as source:
                 process = subprocess.run([
-                    str(ROOT / 'tools/capped'), '--timeout', str(timeout),
-                    *perf_command(participant['command'], cpu, counters, before_path, after_path),
+                    str(ROOT / 'tools/capped'), *perf_command(participant['command'], cpu, counters, before_path, after_path),
                 ], cwd=participant.get('cwd', ROOT), env=env, stdin=source,
                     stdout=output, stderr=subprocess.PIPE, text=True)
             if process.returncode:

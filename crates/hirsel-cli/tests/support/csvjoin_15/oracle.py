@@ -42,14 +42,7 @@ def execute(command, label):
                 for path in inputs if path.exists()}
     before = hashes()
     stem.with_suffix('.inputs-before.json').write_text(json.dumps(before, indent=2))
-    try:
-        result = subprocess.run(command, capture_output=True, timeout=300)
-    except subprocess.TimeoutExpired as error:
-        stem.with_suffix('.stdout').write_bytes(error.stdout or b'')
-        stem.with_suffix('.stderr').write_bytes(error.stderr or b'')
-        stem.with_suffix('.exit').write_text('timeout')
-        stem.with_suffix('.inputs-after.json').write_text(json.dumps(hashes(), indent=2))
-        raise
+    result = subprocess.run(command, capture_output=True)
     after = hashes()
     stem.with_suffix('.inputs-after.json').write_text(json.dumps(after, indent=2))
     stem.with_suffix('.stdout').write_bytes(result.stdout)

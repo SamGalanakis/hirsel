@@ -204,7 +204,6 @@ fn simulated(caps: bool) {
         .unwrap();
         let result = Command::new("python3")
             .arg(root.join("capped"))
-            .args(["--timeout", "60"])
             .arg(std::env::current_exe().unwrap())
             .args(["--exact", name, "--nocapture", "--test-threads=1"])
             .env("FILEMANIFEST_STREAM_25_CHILD", name)

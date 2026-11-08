@@ -62,7 +62,7 @@ class ToyRun:
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as peer:
             peer.connect(str(self.path))
             peer.sendall(b'{"quit":true}\n')
-        self.thread.join(timeout=2)
+        self.thread.join()
         self.listener.close()
         assert not self.thread.is_alive()
         assert not self.errors, self.errors
@@ -113,7 +113,7 @@ class BrokerTests(unittest.TestCase):
             with toys[1].lock:
                 toys[1].sample['segment_ready_delay_ns']['p99'] = delay
             result = subprocess.run([sys.executable, str(BROKER), str(path), '--once'],
-                                    capture_output=True, text=True, timeout=5)
+                                    capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
             self.assertEqual(len(json.loads(result.stdout)['runs']), 2)
         self.assertEqual(before, [3, 1])

@@ -493,7 +493,7 @@ fn recording_controls(root: &Path) {
                 .env("HIRSEL_MEMORY_LIMIT", "2G")
                 .env("HIRSEL_JOBS", "4")
                 .arg(root.join("capped"))
-                .args(["--timeout", "60", "prlimit", "--cpu=60:61"]);
+                .args(["prlimit"]);
             if engine == "reference" {
                 command
                     .arg(env!("CARGO_BIN_EXE_hirsel"))

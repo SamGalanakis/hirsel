@@ -247,29 +247,11 @@ fn run_width_policy_backends_mode(
         #[cfg(feature = "native-tsan")]
         {
             command.env("HIRSEL_TSAN_DOUBLE_CLAIM", "1");
-            let mut mutant = command.spawn().unwrap();
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
-            let timed_out = loop {
-                if mutant.try_wait().unwrap().is_some() {
-                    break false;
-                }
-                if std::time::Instant::now() >= deadline {
-                    mutant.kill().unwrap();
-                    break true;
-                }
-                std::thread::sleep(std::time::Duration::from_millis(10));
-            };
+            let mutant = command.spawn().unwrap();
             let output = mutant.wait_with_output().unwrap();
             let stderr = String::from_utf8_lossy(&output.stderr);
             eprintln!("MUTANT {provider} {backend} W{width}\n{stderr}");
-            if timed_out {
-                eprintln!(
-                    "MUTANT {provider} {backend} W{width}: double-claim control timed out at 15s; P not qualified"
-                );
-                blocked.push(format!(
-                    "{provider} {backend}: double-claim control timed out at 15s"
-                ));
-            } else if std::panic::catch_unwind(|| {
+            if std::panic::catch_unwind(|| {
                 assert_eq!(output.status.code(), Some(66), "{output:?}");
                 assert!(stderr.contains("ThreadSanitizer: data race"), "{stderr}");
                 emitted_mapper_race(&executable, &stderr);

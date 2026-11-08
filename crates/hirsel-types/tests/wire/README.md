@@ -20,7 +20,7 @@ Reproduce the actual target round trips with the installed tools:
 .buck2/bin/buck2 test //:hirsel-lir-test-it -- --test-arg=canonical_wire::
 CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc \
 CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUNNER='qemu-aarch64-static -L /usr/aarch64-linux-gnu' \
-tools/capped --timeout 3600 cargo test -j 2 -p hirsel-types --target aarch64-unknown-linux-gnu --test wire
+tools/capped cargo test -j 2 -p hirsel-types --target aarch64-unknown-linux-gnu --test wire
 ```
 
 The ignored `write_wire_goldens` test is only a manual regeneration tool. Payload

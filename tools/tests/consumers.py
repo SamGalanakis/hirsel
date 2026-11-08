@@ -155,8 +155,7 @@ fn regression() { fixture(); }
                 patch.object(consumers.subprocess, 'run', return_value=listing) as run:
             self.assertEqual(consumers.listings(ROOT, graph), {binary: {'https::verifies_replay'}})
         self.assertEqual(build.call_args.args[1:], ('build', 'root//:' + binary + '-harness', '--show-json-output'))
-        self.assertEqual(run.call_args.args[0], [str(ROOT / 'tools/capped'), '--timeout', '60',
-                                              str(ROOT / 'built/cli'), '--list', '--format', 'terse'])
+        self.assertEqual(run.call_args.args[0], [str(ROOT / 'tools/capped'), str(ROOT / 'built/cli'), '--list', '--format', 'terse'])
         self.assertEqual(run.call_args.kwargs['env']['HIRSEL_JOBS'], '1')
         with patch.object(consumers, 'buck', return_value=outputs), \
                 patch.object(consumers.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, '', '')):

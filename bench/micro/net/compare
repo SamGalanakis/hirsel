@@ -49,7 +49,7 @@ with timing_lock(31), (args.output / 'client.log').open('w') as log:
     stop = args.output / 'stop-client'
     stop.unlink(missing_ok=True)
     runner.timing_lock = lambda cpu: contextlib.nullcontext()
-    client = subprocess.Popen([str(ROOT / 'tools/capped'), '--timeout', '900', 'taskset', '-c', '7',
+    client = subprocess.Popen([str(ROOT / 'tools/capped'), 'taskset', '-c', '7',
         'python3', str(ROOT / 'bench/micro/http/load.py'), '--sessions', str(10 * len(participants)),
         '--output', str(args.output / 'latencies.json'), '--stop-file', str(stop)], env=env, stdout=log, stderr=log)
     try:
@@ -58,7 +58,7 @@ with timing_lock(31), (args.output / 'client.log').open('w') as log:
         status = runner.main()
         if status:
             raise RuntimeError('measurement failed')
-        client.wait(timeout=30)
+        client.wait()
         if client.returncode:
             raise RuntimeError('client failed: ' + (args.output / 'client.log').read_text())
     finally:

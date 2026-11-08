@@ -133,7 +133,7 @@ fn journal_kv_29_open_append_native_replay() {
         let tape = root.path().join(format!("{backend}.tape"));
         let run = Command::new("python3")
             .arg(root.path().join("capped"))
-            .args(["--timeout", "60", "prlimit", "--cpu=60:61"])
+            .args(["prlimit"])
             .arg(app)
             .env("HIRSEL_MEMORY_LIMIT", "2G")
             .env("HIRSEL_JOBS", "4")
@@ -152,7 +152,7 @@ fn journal_kv_29_open_append_native_replay() {
         let immutable = fs::read(&tape).unwrap();
         let interpreted = Command::new("python3")
             .arg(root.path().join("capped"))
-            .args(["--timeout", "60", "prlimit", "--cpu=60:61"])
+            .args(["prlimit"])
             .arg(cli)
             .env("HIRSEL_MEMORY_LIMIT", "2G")
             .env("HIRSEL_JOBS", "4")
@@ -167,7 +167,7 @@ fn journal_kv_29_open_append_native_replay() {
         for replay_app in &apps {
             let replay = Command::new("python3")
                 .arg(root.path().join("capped"))
-                .args(["--timeout", "60", "prlimit", "--cpu=60:61"])
+                .args(["prlimit"])
                 .arg(replay_app)
                 .env("HIRSEL_MEMORY_LIMIT", "2G")
                 .env("HIRSEL_JOBS", "4")
@@ -656,7 +656,7 @@ fn journal_kv_29_native_crash_helpers() {
     for backend in ["llvm", "cranelift"] {
         let done = Command::new("python3")
             .arg(root.path().join("capped"))
-            .args(["--timeout", "60", "prlimit", "--cpu=60:61"])
+            .args(["prlimit"])
             .arg(env!("CARGO_BIN_EXE_hirsel"))
             .args(["test", "--native", "--backend", backend])
             .arg(&selection)

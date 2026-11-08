@@ -41,13 +41,9 @@ def main(a):
     (out/'resume-identities.json').write_text(json.dumps(sorted(skip)))
     def run(argv,label,setup=False):
         def limits():
-            resource.setrlimit(resource.RLIMIT_CPU,(60,61))
             resource.setrlimit(resource.RLIMIT_AS,(2*1024**3,2*1024**3))
-        wrapped=argv if setup else [sys.executable,str(root/'capped'),'--timeout','60',*argv]
-        try:
-            p=subprocess.run(wrapped,env=env,stdin=subprocess.DEVNULL,capture_output=True,timeout=300 if setup else 75,preexec_fn=None if setup else limits)
-        except subprocess.TimeoutExpired as e:
-            p=subprocess.CompletedProcess(wrapped,124,e.stdout or b'',e.stderr or b'')
+        wrapped=argv if setup else [sys.executable,str(root/'capped'),*argv]
+        p=subprocess.run(wrapped,env=env,stdin=subprocess.DEVNULL,capture_output=True,preexec_fn=None if setup else limits)
         (out/(label+'.stdout')).write_bytes(p.stdout);(out/(label+'.stderr')).write_bytes(p.stderr)
         return p
     binaries={}

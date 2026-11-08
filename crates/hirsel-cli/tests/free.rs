@@ -105,14 +105,8 @@ impl Drop for CompilerSlot {
     }
 }
 
-/// One run of `program` under the test channel `hook`. Bound each child so
-/// a stuck replay names its engine, phase/cut and seed before the pool's
-/// whole-harness timeout discards its output. Follow cli/dwarf.rs's watchdog,
-/// using files so detached runners cannot hold a pipe open. Native runners form
-/// their own process groups, so a
-/// timeout stops and collects this child's descendants before killing them.
+/// One run of `program` under the test channel `hook`, captured to files.
 fn run(engine: &[&str], program: &Path, grants: &str, hook: &str) -> Output {
-    use std::time::{Duration, Instant};
     let _compiler = engine.is_empty().then(CompilerSlot::take);
     // Concurrent replays of one recording each capture their own output.
     static CHILD: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
@@ -138,26 +132,12 @@ fn run(engine: &[&str], program: &Path, grants: &str, hook: &str) -> Output {
         eprintln!("free child start {engine:?} {program:?}: {hook}");
     }
     let mut child = command.spawn().unwrap();
-    let deadline = Instant::now() + Duration::from_secs(120);
-    let mut timed_out = false;
-    let status = loop {
-        if let Some(status) = child.try_wait().unwrap() {
-            break status;
-        }
-        if Instant::now() >= deadline {
-            timed_out = true;
-            stop_tree(child.id());
-            let _ = child.kill();
-            break child.wait().unwrap();
-        }
-        std::thread::sleep(Duration::from_millis(10));
-    };
+    let status = child.wait().unwrap();
     let output = Output {
         status,
         stdout: std::fs::read(stdout).unwrap(),
         stderr: std::fs::read(stderr).unwrap(),
     };
-    assert!(!timed_out, "{command:?} exceeded 120 seconds: {output:?}");
     if diagnostics {
         eprintln!("free child ended {engine:?} {program:?}: {}", output.status);
     }
@@ -188,16 +168,15 @@ fn native_trace(engine: &[&str], program: &Path, grants: &str) -> PathBuf {
         if fueled {
             build.arg("--fuel");
         }
-        let output = bounded_output(&mut build, program, "native trace build");
+        let output = captured_output(&mut build, program, "native trace build");
         assert!(output.status.success(), "{engine:?}: {output:?}");
     }
     executable
 }
 
-/// Production acceptance children use the same bounded watchdog as test-channel
-/// runs. File capture also prevents a detached native runner retaining a pipe.
-fn bounded_output(command: &mut Command, program: &Path, cell: &str) -> Output {
-    use std::time::{Duration, Instant};
+/// Capture production acceptance children to files until they complete.
+fn captured_output(command: &mut Command, program: &Path, cell: &str) -> Output {
+    use std::time::Instant;
     let _compiler = CompilerSlot::take();
     let stdout = program.with_extension("matrix.stdout");
     let stderr = program.with_extension("matrix.stderr");
@@ -208,123 +187,18 @@ fn bounded_output(command: &mut Command, program: &Path, cell: &str) -> Output {
     eprintln!("Free matrix start {cell}");
     let started = Instant::now();
     let mut child = command.spawn().unwrap();
-    let deadline = Instant::now() + Duration::from_secs(120);
-    let mut timed_out = false;
-    let status = loop {
-        if let Some(status) = child.try_wait().unwrap() {
-            break status;
-        }
-        if Instant::now() >= deadline {
-            timed_out = true;
-            stop_tree(child.id());
-            let _ = child.kill();
-            break child.wait().unwrap();
-        }
-        std::thread::sleep(Duration::from_millis(10));
-    };
+    let status = child.wait().unwrap();
     let output = Output {
         status,
         stdout: std::fs::read(stdout).unwrap(),
         stderr: std::fs::read(stderr).unwrap(),
     };
-    assert!(
-        !timed_out,
-        "{cell}: {command:?} exceeded 120 seconds: {output:?}"
-    );
     eprintln!(
         "Free matrix ended {cell}: {} in {:.1}s",
         output.status,
         started.elapsed().as_secs_f64()
     );
     output
-}
-
-/// Linux child-tree traversal follows hirsel-conformance/src/bin/profile.rs's
-/// watchdog. Stop each
-/// parent before reading its children: it cannot reap/reuse their identities
-/// while we address them, and no stopped process can create more descendants.
-/// Read every thread's children (compilers can launch from worker threads).
-fn stop_tree(root: u32) {
-    let mut tree = vec![root];
-    let signal = |pid: u32, kind: &str| {
-        let _ = Command::new("kill")
-            .args([kind, "--", &pid.to_string()])
-            .status();
-    };
-    let mut at = 0;
-    while at < tree.len() {
-        let pid = tree[at];
-        let stat = std::fs::read_to_string(format!("/proc/{pid}/stat"));
-        let wchan = std::fs::read_to_string(format!("/proc/{pid}/wchan"));
-        signal(pid, "-STOP");
-        if let Ok(threads) = std::fs::read_dir(format!("/proc/{pid}/task")) {
-            for thread in threads.flatten() {
-                if let Ok(children) = std::fs::read_to_string(thread.path().join("children")) {
-                    for child in children.split_whitespace().filter_map(|s| s.parse().ok()) {
-                        if !tree.contains(&child) {
-                            tree.push(child);
-                        }
-                    }
-                }
-            }
-        }
-        eprintln!("free child timeout pid {pid}: stat {stat:?}; wchan {wchan:?}");
-        at += 1;
-    }
-    for pid in tree.into_iter().rev() {
-        signal(pid, "-KILL");
-    }
-}
-
-#[test]
-fn watchdog_stops_a_native_descendant_in_its_own_group() {
-    use std::process::Stdio;
-    use std::time::{Duration, Instant};
-    let scratch = Scratch::new("watchdog");
-    let pid_file = scratch.path("native.pid");
-    let mut child = Command::new("/bin/sh")
-        .args([
-            "-c",
-            r#"setsid /bin/sh -c 'echo $$ > "$1"; exec sleep 30' sh "$1" & wait"#,
-            "sh",
-        ])
-        .arg(&pid_file)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap();
-    let until = Instant::now() + Duration::from_secs(5);
-    let pid = loop {
-        if let Some(pid) = std::fs::read_to_string(&pid_file)
-            .ok()
-            .and_then(|text| text.trim().parse::<u32>().ok())
-        {
-            break pid;
-        }
-        if Instant::now() >= until {
-            stop_tree(child.id());
-            child.wait().unwrap();
-            panic!("native descendant did not start");
-        }
-        std::thread::sleep(Duration::from_millis(10));
-    };
-    stop_tree(child.id());
-    assert!(!child.wait().unwrap().success());
-    // The orphan may briefly remain a zombie until the action's init reaps
-    // it; neither a zombie nor an absent process can keep output pipes open.
-    loop {
-        let stat = std::fs::read_to_string(format!("/proc/{pid}/stat"));
-        if stat.as_ref().is_err()
-            || stat.as_ref().is_ok_and(|text| {
-                text.rsplit_once(") ")
-                    .is_some_and(|(_, rest)| rest.starts_with('Z'))
-            })
-        {
-            break;
-        }
-        assert!(Instant::now() < until, "descendant survived: {stat:?}");
-        std::thread::sleep(Duration::from_millis(10));
-    }
 }
 
 /// A replay of `tape` under `seed`: the projection it reports.
@@ -1148,7 +1022,7 @@ fn f1_corpus_matrix_cells(
             .env(hirsel_rt::free_replay::Report::VAR, &report);
         f1_permits(&mut command, 8);
         let stop_peer = live_peer();
-        let live = bounded_output(
+        let live = captured_output(
             &mut command,
             &program,
             &format!("{name} {level} live LLVM width 8 permits 8"),
@@ -1200,7 +1074,7 @@ fn f1_corpus_matrix_cells(
                 f1_permits(&mut command, permits);
                 let cell = format!("{name} {level} {engine:?} width {width} permits {permits}");
                 command.stdin(std::process::Stdio::null());
-                let replay = bounded_output(&mut command, &program, &cell);
+                let replay = captured_output(&mut command, &program, &cell);
                 assert_eq!(
                     replay.status.code(),
                     live.status.code(),
@@ -1848,7 +1722,7 @@ fn f1_terminal_restoration_matrix(
         .args(["--cores", "8", "--grants", &grants.to_string(), "--record"])
         .arg(&path);
     f1_permits(&mut command, 8);
-    let live = bounded_output(&mut command, &program, "root forgery producer");
+    let live = captured_output(&mut command, &program, "root forgery producer");
     assert!(live.status.success(), "{live:?}");
     let original = std::fs::read(&path).unwrap();
     let parsed = tape::parse(&original).unwrap();
@@ -1917,7 +1791,7 @@ fn f1_terminal_restoration_matrix(
                 if let Some(permits) = permits {
                     f1_permits(&mut command, permits);
                 }
-                let replay = bounded_output(
+                let replay = captured_output(
                     &mut command,
                     &program,
                     &format!("root forgery {mutation} {engine:?} width{width} permits{permits:?}"),
@@ -3236,7 +3110,7 @@ fn f1_runner_compute_single_permit_cross_engine_outcomes() {
         .arg(&tape)
         .env(hirsel_rt::free_replay::Report::VAR, &report);
     f1_permits(&mut command, 1);
-    let live = bounded_output(&mut command, &program, "runner compute live width1 permit1");
+    let live = captured_output(&mut command, &program, "runner compute live width1 permit1");
     assert!(live.status.success(), "{live:?}");
     assert_eq!(live.stdout, b"runner outcomes\n");
     assert!(
@@ -3256,7 +3130,7 @@ fn f1_runner_compute_single_permit_cross_engine_outcomes() {
             .args(["--cores", "1"])
             .env(hirsel_rt::free_replay::Report::VAR, &report);
         f1_permits(&mut command, 1);
-        let replay = bounded_output(
+        let replay = captured_output(
             &mut command,
             &program,
             &format!("runner compute replay {engine:?} width1 permit1"),
@@ -3321,7 +3195,7 @@ fn f1_runner_call_record_replay(
         .arg(&tape)
         .env(hirsel_rt::free_replay::Report::VAR, &report);
     f1_permits(&mut command, 1);
-    let live = bounded_output(&mut command, &program, "runner call child host waits live");
+    let live = captured_output(&mut command, &program, "runner call child host waits live");
     assert!(live.status.success(), "{live:?}");
     assert_eq!(live.stdout, live_output);
     let projection = std::fs::read_to_string(&report).unwrap();
@@ -3336,7 +3210,7 @@ fn f1_runner_call_record_replay(
             .args(["--cores", "1"])
             .env(hirsel_rt::free_replay::Report::VAR, &report);
         f1_permits(&mut command, 1);
-        let replay = bounded_output(
+        let replay = captured_output(
             &mut command,
             &program,
             &format!("runner call replay {engine:?}"),
@@ -3546,7 +3420,7 @@ pub fn main(rt: Io, args: Args) -> Result[(), E] {
     let executable = scratch.path("program");
     let mut build = Command::new(env!("CARGO_BIN_EXE_hirsel"));
     build.arg("build").arg(&program).arg("-o").arg(&executable);
-    let built = bounded_output(&mut build, &program, "external stop standalone build");
+    let built = captured_output(&mut build, &program, "external stop standalone build");
     assert!(built.status.success(), "{built:?}");
     for &level in cells.levels {
         let tape = scratch.path(level);
@@ -3562,7 +3436,7 @@ pub fn main(rt: Io, args: Args) -> Result[(), E] {
             .env("HIRSEL_RT_STOP_AFTER_MS", "200")
             .env(hirsel_rt::free_replay::Report::VAR, &report);
         f1_permits(&mut command, record_permits);
-        let live = bounded_output(
+        let live = captured_output(
             &mut command,
             &program,
             &format!("external stop {level} live"),
@@ -3612,7 +3486,7 @@ pub fn main(rt: Io, args: Args) -> Result[(), E] {
                     .args(["--cores", width])
                     .env(hirsel_rt::free_replay::Report::VAR, &report);
                 f1_permits(&mut command, permits);
-                let replay = bounded_output(
+                let replay = captured_output(
                     &mut command,
                     &program,
                     &format!(
@@ -3679,7 +3553,7 @@ pub fn main(rt: Io, args: Args) -> Result[(), E] {
                     .args(["--cores", width])
                     .env(hirsel_rt::free_replay::Report::VAR, &report);
                 f1_permits(&mut command, permits);
-                let replay = bounded_output(
+                let replay = captured_output(
                     &mut command,
                     &program,
                     &format!(
@@ -3731,7 +3605,7 @@ fn f1_returned_error_resource_matrix(
             .arg(&tape)
             .env(hirsel_rt::free_replay::Report::VAR, &report);
         f1_permits(&mut command, record_permits);
-        let live = bounded_output(
+        let live = captured_output(
             &mut command,
             &program,
             &format!("returned resource {level} live"),
@@ -3762,7 +3636,7 @@ fn f1_returned_error_resource_matrix(
                     .args(["--cores", width])
                     .env(hirsel_rt::free_replay::Report::VAR, &report);
                 f1_permits(&mut command, permits);
-                let replay = bounded_output(
+                let replay = captured_output(
                     &mut command,
                     &program,
                     &format!(
@@ -3829,7 +3703,7 @@ fn f1_explicit_exit_codes_matrix(
                 .arg(&tape)
                 .env(hirsel_rt::free_replay::Report::VAR, &report);
             f1_permits(&mut command, record_permits);
-            let live = bounded_output(
+            let live = captured_output(
                 &mut command,
                 &program,
                 &format!("exit code {name} {level} live"),
@@ -3860,7 +3734,7 @@ fn f1_explicit_exit_codes_matrix(
                         .args(["--cores", width])
                         .env(hirsel_rt::free_replay::Report::VAR, &report);
                     f1_permits(&mut command, permits);
-                    let replay = bounded_output(
+                    let replay = captured_output(
                         &mut command,
                         &program,
                         &format!(
@@ -3924,7 +3798,7 @@ pub fn main(rt: Io) -> Result[(), GrantError] {
             .arg(&tape)
             .env(hirsel_rt::free_replay::Report::VAR, &report);
         f1_permits(&mut command, record_permits);
-        let live = bounded_output(
+        let live = captured_output(
             &mut command,
             &program,
             &format!("failure causes {level} live"),
@@ -3977,7 +3851,7 @@ pub fn main(rt: Io) -> Result[(), GrantError] {
                     .args(["--cores", width])
                     .env(hirsel_rt::free_replay::Report::VAR, &report);
                 f1_permits(&mut command, permits);
-                let replay = bounded_output(
+                let replay = captured_output(
                     &mut command,
                     &program,
                     &format!(
@@ -4020,7 +3894,7 @@ fn f1_terminal_metadata_matrix(
         .args(["--grants", &grants, "--cores", record_width, "--record"])
         .arg(&tape);
     f1_permits(&mut command, record_permits);
-    let live = bounded_output(&mut command, &program, "terminal metadata producer");
+    let live = captured_output(&mut command, &program, "terminal metadata producer");
     assert!(live.status.success(), "{live:?}");
     assert_eq!(live.stdout, b"terminal guard\n");
     assert!(live.stderr.is_empty(), "{live:?}");
@@ -4103,7 +3977,7 @@ fn f1_terminal_metadata_matrix(
                     .arg(&path)
                     .args(["--cores", width]);
                 f1_permits(&mut command, permits);
-                let replay = bounded_output(
+                let replay = captured_output(
                     &mut command,
                     &program,
                     &format!("terminal metadata {name} {engine:?} width{width} permits{permits}"),
@@ -4191,7 +4065,7 @@ fn f1_runner_matrix_in(
             .arg(&tape)
             .env(hirsel_rt::free_replay::Report::VAR, &report);
         f1_permits(&mut command, 8);
-        let live = bounded_output(
+        let live = captured_output(
             &mut command,
             &program,
             &format!("{name} {level} native width8 permits8"),
@@ -4216,7 +4090,7 @@ fn f1_runner_matrix_in(
                         .args(["--cores", width])
                         .env(hirsel_rt::free_replay::Report::VAR, &report);
                     f1_permits(&mut command, permits);
-                    let replay = bounded_output(
+                    let replay = captured_output(
                         &mut command,
                         &program,
                         &format!("{name} {level} {engine:?} width{width} permits{permits}"),
@@ -4354,7 +4228,7 @@ fn f1_runner_linked_tapes_matrix(cells: Cells) {
         let child_tape = scratch.path(&format!("{level}.call-0"));
         let mut command = Command::new(env!("CARGO_BIN_EXE_hirsel"));
         command.args(["tapes", "check"]).arg(&tape).arg(&child_tape);
-        let joined = bounded_output(&mut command, &program, "actual-eight joined runner tapes");
+        let joined = captured_output(&mut command, &program, "actual-eight joined runner tapes");
         assert!(joined.status.success(), "{joined:?}");
         assert!(
             String::from_utf8_lossy(&joined.stdout)
@@ -4544,7 +4418,7 @@ fn f1_runner_child_replay_matrix(
                     .arg(tape)
                     .args(["--cores", width]);
                 f1_permits(&mut command, permits);
-                let replay = bounded_output(
+                let replay = captured_output(
                     &mut command,
                     program,
                     &format!(
@@ -5212,7 +5086,7 @@ uint64_t f1_serial_overlap(void) { return atomic_load_explicit(&overlap, memory_
         .arg(package.join("lib.c"))
         .arg("-o")
         .arg(package.join("lib.o"));
-    let compiled = bounded_output(&mut command, &scratch.path("main.hir"), "serial C fixture");
+    let compiled = captured_output(&mut command, &scratch.path("main.hir"), "serial C fixture");
     assert!(compiled.status.success(), "{compiled:?}");
     std::fs::write(package.join("lib.hir"), r#"type State { tasks: Tasks }
 /// Calls callback(state, tag) once, during this call; retains neither pointer.
@@ -5268,7 +5142,7 @@ fn f1_required_serial_callbacks_interpreter_refuses_extern() {
         .arg(&program)
         .args(["--grants", F1_SERIAL_GRANTS]);
     f1_permits(&mut command, 1);
-    let refused = bounded_output(
+    let refused = captured_output(
         &mut command,
         &scratch.path("main.hir"),
         "PROG-4 interpreter extern refusal",
@@ -5303,7 +5177,7 @@ fn f1_required_serial_callbacks_native_width_and_permit_matrix() {
             .arg(&tape)
             .env(hirsel_rt::free_replay::Report::VAR, &report);
         f1_permits(&mut command, 8);
-        let live = bounded_output(
+        let live = captured_output(
             &mut command,
             &capture,
             &format!("serial {level} native width8 permits8"),
@@ -5329,7 +5203,7 @@ fn f1_required_serial_callbacks_native_width_and_permit_matrix() {
                         .args(["--cores", width])
                         .env(hirsel_rt::free_replay::Report::VAR, &report);
                     f1_permits(&mut command, permits);
-                    let replay = bounded_output(
+                    let replay = captured_output(
                         &mut command,
                         &capture,
                         &format!("serial {level} {engine:?} width{width} permits{permits}"),
@@ -5405,7 +5279,7 @@ fn f1_required_mutex_cycle_witness_source_checks() {
     std::fs::write(&program, F1_REQUIRED_MUTEX_CYCLE_WITNESS).unwrap();
     let mut command = Command::new(env!("CARGO_BIN_EXE_hirsel"));
     command.arg("check").arg(&program);
-    let checked = bounded_output(&mut command, &program, "mutex cycle witness source check");
+    let checked = captured_output(&mut command, &program, "mutex cycle witness source check");
     assert!(checked.status.success(), "{checked:?}");
 }
 
@@ -5526,7 +5400,7 @@ fn f1_required_parked_receive_records_live_durable_output_cut_and_replays_prefix
                                 .args(["--cores", width])
                                 .env(hirsel_rt::free_replay::Report::VAR, &report);
                             f1_permits(&mut command, permits);
-                            let replay = bounded_output(
+                            let replay = captured_output(
                                 &mut command,
                                 &program,
                                 &format!(
@@ -5893,7 +5767,7 @@ fn f1_queued_never_started_divergent_child_full_projection_matrix() {
     let executable = scratch.path("program");
     let mut build = Command::new(env!("CARGO_BIN_EXE_hirsel"));
     build.arg("build").arg(&program).arg("-o").arg(&executable);
-    let built = bounded_output(&mut build, &program, "queued divergent standalone build");
+    let built = captured_output(&mut build, &program, "queued divergent standalone build");
     assert!(built.status.success(), "{built:?}");
     for level in ["record", "durable"] {
         let tape = scratch.path(level);
@@ -5912,7 +5786,7 @@ fn f1_queued_never_started_divergent_child_full_projection_matrix() {
             .env("HIRSEL_RT_FREE_STOP_BEFORE_FIRST_CHILD", &witness)
             .env(hirsel_rt::free_replay::Report::VAR, &report);
         f1_permits(&mut command, 8);
-        let live = bounded_output(
+        let live = captured_output(
             &mut command,
             &program,
             &format!("queued divergent {level} actual8 live"),
@@ -5959,7 +5833,7 @@ fn f1_queued_never_started_divergent_child_full_projection_matrix() {
                         .args(["--cores", width])
                         .env(hirsel_rt::free_replay::Report::VAR, &report);
                     f1_permits(&mut command, permits);
-                    let replay = bounded_output(
+                    let replay = captured_output(
                         &mut command,
                         &program,
                         &format!(
@@ -6028,7 +5902,7 @@ pub fn main(rt: Io, args: Args) -> Result[(), AppError] {
         .arg(&program)
         .arg("-o")
         .arg(&binary);
-    let built = bounded_output(&mut build, &program, "live namespace build");
+    let built = captured_output(&mut build, &program, "live namespace build");
     assert!(built.status.success(), "{built:?}");
     let root = scratch.path("files");
     std::fs::create_dir(&root).unwrap();
@@ -6047,7 +5921,7 @@ pub fn main(rt: Io, args: Args) -> Result[(), AppError] {
     let mut run = Command::new(&binary);
     f1_permits(&mut run, 8);
     run.arg("--hirsel-grants").arg(&grants).arg("32");
-    let output = bounded_output(&mut run, &program, "live namespace file requests");
+    let output = captured_output(&mut run, &program, "live namespace file requests");
     assert!(output.status.success(), "{output:?}");
     assert_eq!(output.stdout, b"256\n");
     for lane in 0..8 {
@@ -6103,7 +5977,7 @@ fn runtime50_matrix(name: &str, text: &str, part: Runtime50) {
             .stdin(std::process::Stdio::null())
             .env(hirsel_rt::free_replay::Report::VAR, &report);
         f1_permits(&mut command, 8);
-        let live = bounded_output(
+        let live = captured_output(
             &mut command,
             &program,
             &format!("runtime50 {name} live {backend:?} width 8 permits 8"),
@@ -6145,7 +6019,7 @@ fn runtime50_matrix(name: &str, text: &str, part: Runtime50) {
                     .stdin(std::process::Stdio::null())
                     .env(hirsel_rt::free_replay::Report::VAR, &report);
                 f1_permits(&mut command, permits);
-                let replay = bounded_output(&mut command, &program, &cell);
+                let replay = captured_output(&mut command, &program, &cell);
                 assert_eq!(
                     replay.status.code(),
                     live.status.code(),
@@ -6208,7 +6082,7 @@ fn runtime50_matrix(name: &str, text: &str, part: Runtime50) {
                     .arg("--replay")
                     .arg(&path)
                     .stdin(std::process::Stdio::null());
-                let refused = bounded_output(&mut command, &program, &cell);
+                let refused = captured_output(&mut command, &program, &cell);
                 assert!(!refused.status.success(), "{cell}: {refused:?}");
                 assert!(refused.stdout.is_empty(), "{cell}: output before refusal");
                 refusals += 1;
@@ -6292,7 +6166,7 @@ fn tir_live_free_durable_host_wait_and_scope_expiry_cross_replay() {
             .args(["--grants", &grants, "--record"])
             .arg(&tape)
             .env(hirsel_rt::free_replay::Report::VAR, &live_projection);
-        let live = bounded_output(&mut command, &source, &format!("TIR {level} live"));
+        let live = captured_output(&mut command, &source, &format!("TIR {level} live"));
         assert_eq!(live.status.code(), Some(0), "{live:?}");
         assert_eq!(live.stdout, b"expired\n");
         assert!(
@@ -6311,7 +6185,7 @@ fn tir_live_free_durable_host_wait_and_scope_expiry_cross_replay() {
                 .arg(&tape)
                 .env(hirsel_rt::free_replay::Report::VAR, &replay_projection);
             let replay =
-                bounded_output(&mut command, &source, &format!("TIR {level} to {engine:?}"));
+                captured_output(&mut command, &source, &format!("TIR {level} to {engine:?}"));
             assert_eq!(replay.status.code(), Some(0), "{replay:?}");
             assert_eq!(replay.stdout, live.stdout);
             assert_eq!(

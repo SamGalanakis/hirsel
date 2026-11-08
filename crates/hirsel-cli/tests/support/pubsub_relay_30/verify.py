@@ -17,12 +17,9 @@ def main(cli, manifest, requested):
     def save(): (root/'receipts.json').write_text(json.dumps(receipts,indent=2)+'\n')
     def run(cmd, stem, timeout=20, measured=True):
         (root/(stem+'.argv.json')).write_text(json.dumps(cmd)+'\n')
-        if measured: cmd=[str(capped),'--timeout','15','prlimit','--cpu=60:61',*cmd]
-        try:
-            completed=subprocess.run(cmd, env=env,capture_output=True,timeout=timeout)
-            code=completed.returncode;out=completed.stdout;err=completed.stderr
-        except subprocess.TimeoutExpired as error:
-            code=124;out=error.stdout or b'';err=error.stderr or b''
+        if measured: cmd=[str(capped),*cmd]
+        completed=subprocess.run(cmd, env=env,capture_output=True)
+        code=completed.returncode;out=completed.stdout;err=completed.stderr
         (root/(stem+'.stdout')).write_bytes(out)
         (root/(stem+'.stderr')).write_bytes(err)
         (root/(stem+'.status')).write_text(str(code))

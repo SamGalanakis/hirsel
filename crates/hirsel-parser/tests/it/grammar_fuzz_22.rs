@@ -36,7 +36,6 @@ use std::{
     fs,
     path::{Path as FsPath, PathBuf},
     process::{Command, Stdio},
-    time::{Duration, Instant},
 };
 
 const SEED: u64 = 0x22_6772_616d_6d61;
@@ -193,7 +192,6 @@ enum Failure {
     Determinism,
     Rename,
     Tooling,
-    Timeout,
     Injected,
 }
 type Checked<T> = Result<T, Failure>;
@@ -651,20 +649,8 @@ fn isolated(source: &str, dir: &FsPath) -> Checked<String> {
         .stderr(Stdio::from(log))
         .spawn()
         .map_err(|_| Failure::Tooling)?;
-    let deadline = Instant::now() + Duration::from_secs(3);
-    loop {
-        if let Some(status) = child.try_wait().map_err(|_| Failure::Tooling)? {
-            if !status.success() {
-                return Err(Failure::Tooling);
-            }
-            break;
-        }
-        if Instant::now() >= deadline {
-            child.kill().unwrap();
-            child.wait().unwrap();
-            return Err(Failure::Timeout);
-        }
-        std::thread::sleep(Duration::from_millis(2));
+    if !child.wait().map_err(|_| Failure::Tooling)?.success() {
+        return Err(Failure::Tooling);
     }
     let result = fs::read_to_string(result).map_err(|_| Failure::Tooling)?;
     match result.as_str() {

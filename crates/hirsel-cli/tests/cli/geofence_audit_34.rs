@@ -943,7 +943,7 @@ fn geofence_audit_34_ordered_capacity() {
     let kind = std::env::var("GEOFENCE_AUDIT_34_KIND").expect("select success/domain/cancel");
     let output = Command::new("python3")
         .arg(root.join("capped"))
-        .args(["--timeout", "60", "python3"])
+        .args(["python3"])
         .arg(root.join("ordered.py"))
         .arg("--hirsel")
         .arg(env!("CARGO_BIN_EXE_hirsel"))

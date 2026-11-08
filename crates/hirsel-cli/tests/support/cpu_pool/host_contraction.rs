@@ -176,7 +176,6 @@ pub fn main(rt: Io) -> Result[(), GrantError] {
                 "--property=Delegate=yes",
                 "--property=CPUQuota=400%",
                 "--property=MemoryMax=2G",
-                "--property=RuntimeMaxSec=15s",
             ])
             .arg(format!("--unit={}", unit.0))
             .arg(format!("--setenv=HIRSEL_RT_CPU_PROBE={}", probe.display()))

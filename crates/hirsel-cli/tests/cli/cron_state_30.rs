@@ -573,13 +573,7 @@ fn capped_native(command: &std::process::Command) -> std::process::Output {
         .canonicalize()
         .unwrap();
     let mut output = std::process::Command::new(cap)
-        .args([
-            "--timeout",
-            "15",
-            "prlimit",
-            "--cpu=60:61",
-            "--as=2147483648",
-        ])
+        .args(["--as=2147483648"])
         .arg(command.get_program())
         .args(command.get_args())
         .env("HIRSEL_JOBS", "4")

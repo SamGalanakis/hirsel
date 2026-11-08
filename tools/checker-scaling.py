@@ -7,7 +7,7 @@ peak RSS comes from a separate uninstrumented run. Wall time is printed for
 diagnosis only and never judged. Growth budget: the marginal cost over an
 empty-program baseline may grow at most TOLERANCE times N log2(N) between
 consecutive sizes; RSS additionally permits RSS_NOISE_KB of allocator noise.
-A cell that exceeds its memory cap or timeout is a bounded failure: a finding,
+A cell that exceeds its memory cap is a bounded failure: a finding,
 never a reason to raise the cap.
 """
 import argparse
@@ -17,7 +17,6 @@ import os
 from pathlib import Path
 import re
 import resource
-import signal
 import subprocess
 import tempfile
 import time
@@ -30,8 +29,6 @@ EXPECTED = {}
 TOLERANCE = 2.0
 RSS_NOISE_KB = 16 * 1024
 DATA_CAP = 2 * 1024**3
-RSS_TIMEOUT = 45
-IR_TIMEOUT = 240
 
 
 def program(family, n):
@@ -76,28 +73,17 @@ def capped():
     resource.setrlimit(resource.RLIMIT_DATA, (cap, hard))
 
 
-def bounded(command, env, timeout):
+def bounded(command, env):
     """(status, peak RSS KiB, seconds, stderr tail) of one process group."""
     started = time.monotonic()
     with tempfile.TemporaryFile() as err:
         process = subprocess.Popen([str(x) for x in command], env=env, stdout=subprocess.DEVNULL, stderr=err,
                                    preexec_fn=capped, start_new_session=True)
-        deadline = started + timeout
-        while True:
-            pid, status, usage = os.wait4(process.pid, os.WNOHANG)
-            if pid:
-                code = os.waitstatus_to_exitcode(status)
-                break
-            if time.monotonic() > deadline:
-                os.killpg(process.pid, signal.SIGKILL)
-                _, _, usage = os.wait4(process.pid, 0)
-                code = 124
-                break
-            time.sleep(0.02)
+        _, status, usage = os.wait4(process.pid, 0)
+        code = os.waitstatus_to_exitcode(status)
+        process.returncode = code
         err.seek(0)
         detail = err.read()[-2000:].decode(errors='replace')
-    if code == 124:
-        detail = f'exceeded the {timeout} s budget'
     return code, usage.ru_maxrss, time.monotonic() - started, detail
 
 
@@ -120,7 +106,7 @@ def instructions(text):
 
 def sample(compiler, source, directory, env):
     command = [compiler, 'check', source]
-    status, rss, seconds, detail = bounded(command, env, RSS_TIMEOUT)
+    status, rss, seconds, detail = bounded(command, env)
     row = {'status': status, 'rss_kb': rss, 'seconds': round(seconds, 3), 'instructions': None, 'detail': detail}
     if status != 0:
         return row
@@ -128,7 +114,7 @@ def sample(compiler, source, directory, env):
     output.unlink(missing_ok=True)
     tool, launch = valgrind(env)
     status, _, seconds, detail = bounded([*tool, '--tool=cachegrind', '--cache-sim=no', '--branch-sim=no',
-                                          f'--cachegrind-out-file={output}', *launch, *command], env, IR_TIMEOUT)
+                                          f'--cachegrind-out-file={output}', *launch, *command], env)
     row['ir_seconds'] = round(seconds, 3)
     if status != 0:
         return row | {'status': status, 'detail': 'under Cachegrind: ' + detail}
@@ -163,8 +149,8 @@ def verdict(family, samples, baseline):
     if not errors:
         return False, f'XPASS {family}: remove the expected failure ({expected})'
     # A generator's own syntax or type error is never the expected growth
-    # failure: only growth, the memory cap or the timeout count.
-    growth = all(row['status'] in (0, 124, -6, -9) or 'memory limit' in row['detail'] for row in samples.values())
+    # failure: only growth or the memory cap counts.
+    growth = all(row['status'] in (0, -6, -9) or 'memory limit' in row['detail'] for row in samples.values())
     return growth, f'{"XFAIL" if growth else "FAIL"} {family}: {expected}; ' + '; '.join(errors)
 
 

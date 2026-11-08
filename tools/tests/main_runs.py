@@ -556,7 +556,7 @@ class RunningReport(unittest.TestCase):
         sha = '0123456789abcdef0123456789abcdef01234567'
 
         def stages(stage, tier):
-            stage('workspace tests', ['fixture-buck', 'test', *targets, '--', '--timeout', '1800'])
+            stage('workspace tests', ['fixture-buck', 'test', *targets, '--'])
 
         def execute(command, **kwargs):
             def buck(arguments, **_):
@@ -799,7 +799,7 @@ class RollingBatches(unittest.TestCase):
                 active -= len(selected)
             return subprocess.CompletedProcess(arguments, int(targets[6] in selected), ''.join(selected), '')
         with tempfile.TemporaryDirectory() as temporary, patch.dict(os.environ, HIRSEL_BUCK2_LOG_DIR=temporary):
-            result = events.run(['test', *targets, '--', '--timeout', '1800'], runner=execute,
+            result = events.run(['test', *targets, '--'], runner=execute,
                                 batch_size=4, batch_concurrency=2)
         self.assertEqual(overlapped, [True])
         self.assertCountEqual(ran, targets)

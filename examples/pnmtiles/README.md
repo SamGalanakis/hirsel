@@ -33,7 +33,7 @@ Path('/tmp/pnmtiles-evidence/grants.json').write_text(json.dumps(p) + '\n')
 PY
 hirsel run examples/pnmtiles/hirsel.json --grants /tmp/pnmtiles-evidence/grants.json -- info data sample-2x3-c3-blur.pnm
 hirsel build examples/pnmtiles/hirsel.json --backend llvm -o /tmp/pnmtiles-evidence/pnmtiles
-HIRSEL_MEMORY_LIMIT=2G HIRSEL_JOBS=4 tools/capped --timeout 60 prlimit --cpu=60:61 /tmp/pnmtiles-evidence/pnmtiles --hirsel-record /tmp/pnmtiles-evidence/blur.tape --hirsel-grants /tmp/pnmtiles-evidence/grants.json filter data sample-2x3-c3-blur.pnm output.ppm blur 4
+HIRSEL_MEMORY_LIMIT=2G HIRSEL_JOBS=4 tools/capped /tmp/pnmtiles-evidence/pnmtiles --hirsel-record /tmp/pnmtiles-evidence/blur.tape --hirsel-grants /tmp/pnmtiles-evidence/grants.json filter data sample-2x3-c3-blur.pnm output.ppm blur 4
 /tmp/pnmtiles-evidence/pnmtiles --hirsel-replay /tmp/pnmtiles-evidence/blur.tape
 ```
 

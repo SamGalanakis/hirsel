@@ -43,17 +43,17 @@ def verify(hirsel, root, output):
         prefix = output / label
         if setup:
             done = subprocess.run(argv, stdin=subprocess.DEVNULL, capture_output=True,
-                                  timeout=900, env=env)
+                                   env=env)
             code, stdout, stderr = done.returncode, done.stdout, done.stderr
             prefix.with_suffix('.stdout').write_bytes(stdout)
             prefix.with_suffix('.stderr').write_bytes(stderr)
         else:
             # The cap's telemetry has its own file; application stderr is compared
             # byte for byte, including when it is empty. Builds are setup.
-            wrapped = [sys.executable, root / 'capped', '--timeout', '60', sys.executable,
+            wrapped = [sys.executable, root / 'capped', sys.executable,
                        Path(__file__).resolve(), '--cell', json.dumps(argv), str(prefix)]
             done = subprocess.run(list(map(str, wrapped)), stdin=subprocess.DEVNULL,
-                                  capture_output=True, timeout=90, env=env)
+                                  capture_output=True,  env=env)
             prefix.with_suffix('.cap').write_bytes(done.stdout + done.stderr)
             assert done.returncode == 0, (label, done, str(output))
             code = json.loads(prefix.with_suffix('.status').read_text())
@@ -209,7 +209,7 @@ if __name__ == '__main__':
     if sys.argv[1:2] == ['--cell']:
         argv, prefix = json.loads(sys.argv[2]), Path(sys.argv[3])
         with prefix.with_suffix('.stdout').open('wb') as stdout, prefix.with_suffix('.stderr').open('wb') as stderr:
-            done = subprocess.run(argv, stdin=subprocess.DEVNULL, stdout=stdout, stderr=stderr, timeout=55)
+            done = subprocess.run(argv, stdin=subprocess.DEVNULL, stdout=stdout, stderr=stderr)
         prefix.with_suffix('.status').write_text(json.dumps(done.returncode))
     else:
         parser = argparse.ArgumentParser(description=__doc__)

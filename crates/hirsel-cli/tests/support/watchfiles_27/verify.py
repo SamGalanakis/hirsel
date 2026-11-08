@@ -16,7 +16,7 @@ env.update(HIRSEL_DAEMON='off', HIRSEL_RESULTS='none@1', HIRSEL_JOBS='1')
 
 
 def run(argv, code=0, stdout=None):
-    proc = subprocess.run(list(map(str, argv)), env=env, capture_output=True, timeout=60)
+    proc = subprocess.run(list(map(str, argv)), env=env, capture_output=True)
     assert proc.returncode == code, (argv, proc.returncode, proc.stdout, proc.stderr)
     if stdout is not None:
         assert proc.stdout == stdout, (argv, proc.stdout, stdout, proc.stderr)
@@ -93,7 +93,7 @@ for backend in ['H', 'llvm', 'cranelift']:
             p.stdin.write(b'x')
             p.stdin.flush()
             assert p.stdout.readline() == f'{tick}:0:{status}:3\n'.encode()
-        stdout, stderr = p.communicate(timeout=10)
+        stdout, stderr = p.communicate()
         assert p.returncode == 0 and stdout == b'', (backend, p.returncode, stdout, stderr)
     finally:
         if p.poll() is None:

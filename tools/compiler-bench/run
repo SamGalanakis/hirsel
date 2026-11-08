@@ -6,8 +6,7 @@
 Every measurement takes its own tools/capped slot. Default: ten seeded,
 interleaved rounds of check, debug, release and native startup, including the
 3k/10k/30k scale series. --quick selects hello and csvjson, one round, with a
-540-second active-work budget. Toolchain preparation and capped queue time
-are outside that budget. Legacy clif/llvm-o2 and edit modes remain
+fixed selection. Legacy clif/llvm-o2 and edit modes remain
 selectable. Cold removes only this runner's program/native caches; std's
 published products and Rust dependency artifacts are retained on both sides.
 """
@@ -74,9 +73,9 @@ def git_commit():
         return None
 
 
-def measured(command, env, timeout, cpu=31):
+def measured(command, env, cpu=31):
     """One `tools/capped` run of `command`: exit status, wall and CPU seconds
-    and peak RSS (MiB) from /usr/bin/time, `cap` or `timeout` from capped's
+    and peak RSS (MiB) from /usr/bin/time, `cap` from capped's
     report, and the command's own stderr (capped's lines removed)."""
     sibling_cpus = siblings(cpu)
     with tempfile.TemporaryDirectory(prefix='compiler-sample-') as scratch:
@@ -85,7 +84,7 @@ def measured(command, env, timeout, cpu=31):
         timed = ['/usr/bin/time', '-f', '%e %U %S %M', '-o', str(times),
                  *perf_command(command, cpu, counters, before_path, after_path)]
         started = time.monotonic()
-        process = subprocess.run([str(CAPPED), '--timeout', str(timeout), *timed], env=dict(env, LC_ALL='C'),
+        process = subprocess.run([str(CAPPED), *timed], env=dict(env, LC_ALL='C'),
                                  stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
         snapshots_present = before_path.exists() and after_path.exists()
         before = cpu_snapshot(sibling_cpus, before_path) if before_path.exists() else {}
@@ -96,8 +95,7 @@ def measured(command, env, timeout, cpu=31):
     lines = process.stderr.splitlines()
     report = next((line for line in reversed(lines) if line.startswith('capped: peak')), '')
     stderr = ''.join(line + '\n' for line in lines if not line.startswith('capped:'))
-    status = ('cap' if 'memory limit' in report else 'timeout' if 'timed out' in report
-              else 'ok' if process.returncode == 0 else 'failed')
+    status = ('cap' if 'memory limit' in report else 'ok' if process.returncode == 0 else 'failed')
     run = {'exit': process.returncode, 'wall_s': elapsed, 'status': status,
            'sibling_before': before, 'sibling_after': after, 'sibling_busy_share': busy_share(before, after) if before and after else {}}
     if status == 'ok':
@@ -195,7 +193,7 @@ class Runner:
 
     def untimed(self, command, env):
         started = time.monotonic()
-        done = subprocess.run([str(CAPPED), '--timeout', str(self.args.timeout), *command], env=env,
+        done = subprocess.run([str(CAPPED), *command], env=env,
                               stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
         self.active_s += time.monotonic() - started
         if done.returncode:
@@ -242,7 +240,7 @@ class Runner:
         return runs
 
     def timed_hirsel(self, path, mode):
-        run, stderr = measured(self.hirsel_command(path, mode), self.env(native=mode in NATIVE), self.args.timeout, self.args.cpu)
+        run, stderr = measured(self.hirsel_command(path, mode), self.env(native=mode in NATIVE), self.args.cpu)
         run.update(timings(stderr) or {})
         return run
 
@@ -256,7 +254,7 @@ class Runner:
 
         def once():
             self.clean_rust(program.path, env)
-            return measured(self.cargo(program.path, verb, jobs), env, self.args.timeout, self.args.cpu)[0]
+            return measured(self.cargo(program.path, verb, jobs), env, self.args.cpu)[0]
         self.cell(program, mode, jobs, RUST_COLD, self.repeated(program, once))
 
     def edit_cell(self, program, edit, jobs):
@@ -276,13 +274,11 @@ class Runner:
             edited.write_text(variants[edit])
             if program.language == 'hirsel':
                 return self.timed_hirsel(copy / 'hirsel.json', edit)
-            return measured(self.cargo(copy, 'check', jobs), env, self.args.timeout, self.args.cpu)[0]
+            return measured(self.cargo(copy, 'check', jobs), env, self.args.cpu)[0]
         cache = HIRSEL_CACHE if program.language == 'hirsel' else RUST_WARM
         self.cell(program, edit, jobs, cache, self.repeated(program, once))
 
     def sample(self, program, mode, jobs, temperature, cache):
-        if self.args.quick and self.active_s >= 540:
-            return {'status': 'budget', 'exit': None}
         env = self.env(native=mode in NATIVE and program.language == 'hirsel', jobs=jobs if program.language == 'rust' else None)
         env.update(HIRSEL_NATIVE_CACHE=str(cache / 'native'), XDG_CACHE_HOME=str(cache / 'xdg'))
         if temperature == 'cold':
@@ -297,8 +293,7 @@ class Runner:
             grants, endpoint = startup_config(program, self.scratch)
             command += ['--grants', str(grants)]
             command = [sys.executable, str(HERE / 'startup.py'), '--endpoint', endpoint, '--', *command]
-        timeout = min(self.args.timeout, max(1, int(540 - self.active_s))) if self.args.quick else self.args.timeout
-        result, stderr = measured(command, env, timeout, self.args.cpu)
+        result, stderr = measured(command, env, self.args.cpu)
         logs = self.work / 'logs'
         logs.mkdir(exist_ok=True)
         with tempfile.NamedTemporaryFile(mode='w', dir=logs, prefix=program.name.replace('/', '-') + '-' + program.language + '-' + mode + '-' + temperature + '-', suffix='.stderr', delete=False) as log:
@@ -360,10 +355,6 @@ class Runner:
                         if (round_number and any(r['status'] != 'ok' for t in ('cold', 'warm') for r in results.get((key, t), []))):
                             continue
                         if 'scale' in p.groups and (p.language, mode, j) in blocked:
-                            continue
-                        if args.quick and self.active_s >= 540:
-                            for temperature in ('cold', 'warm'):
-                                results.setdefault((key, temperature), []).append({'status': 'budget', 'exit': None})
                             continue
                         if p.language == 'rust' and (name, key) not in prepared:
                             try:
@@ -503,15 +494,14 @@ def main():
     parser.add_argument('--resume', help='resume a matching .partial checkpoint in the same work directory')
     parser.add_argument('--lock-scope', choices=('round', 'session'), default='round',
                         help='yield CPU timing lock between rounds by default; session enables wall ratios')
-    parser.add_argument('--quick', action='store_true', help='hello + csvjson, all four modes, one cold/warm round, 45s cells')
+    parser.add_argument('--quick', action='store_true', help='hello + csvjson, all four modes, one cold/warm round')
     parser.add_argument('--repeat-large', action='store_true', help='repeat programs of 30k lines or more too')
     parser.add_argument('--jobs', default='1', help='cargo job counts (default 1); Hirsel is single-threaded')
-    parser.add_argument('--timeout', type=int, default=300, help='seconds per run (default 300)')
     args = parser.parse_args()
     if args.quick:
         args.groups = 'examples'
         args.select = '^(hello|csvjson)$'
-        args.repeat, args.jobs, args.timeout = 1, '1', min(args.timeout, 45)
+        args.repeat, args.jobs = 1, '1'
     if not (Path(args.toolchain) / 'hirsel').exists():
         parser.error(f'{args.toolchain}/hirsel does not exist')
     if args.repeat < 1 or args.cpu not in os.sched_getaffinity(0):

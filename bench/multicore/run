@@ -28,7 +28,6 @@ def main():
     p.add_argument('--seed', type=int, default=20261019)
     p.add_argument('--cpus', help='eight distinct physical worker CPUs, comma-separated')
     p.add_argument('--client-cpu', type=int, help='separate load-client CPU for server cells')
-    p.add_argument('--timeout', type=int, default=300)
     p.add_argument('--participants', type=Path, help='additional sealed participant inventory (free executor adapters)')
     args = p.parse_args()
     if args.report_only:
@@ -87,7 +86,7 @@ def main():
                 rng.shuffle(cells)
                 for participant,case,width,mode in cells:
                     try:
-                        measured = sample(participant,case,manifest['workloads'][case],width,mode,cpus,args.timeout,
+                        measured = sample(participant,case,manifest['workloads'][case],width,mode,cpus,
                             placement=participant.get('placement',False),budget=participant.get('budget'))
                         measured['round'] = round_number
                         data['samples'].append(measured)

@@ -27,10 +27,10 @@ with tempfile.TemporaryDirectory(prefix='tasks-signal-replay-') as scratch:
         json.dumps(config), '--record', str(tape), '--', '--port', str(port)],
         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0)
     try:
-        ready = line(recorded, 180)
+        ready = line(recorded)
         assert ready == f'listening on http://127.0.0.1:{port}/', ready
         recorded.send_signal(signal.SIGTERM)
-        output, errors = recorded.communicate(timeout=60)
+        output, errors = recorded.communicate()
         assert recorded.returncode == 0, (recorded.returncode, output, errors)
         expected = ready.encode() + b'\n' + output
         assert b'"msg":"stopped"' in errors, errors
@@ -40,7 +40,7 @@ with tempfile.TemporaryDirectory(prefix='tasks-signal-replay-') as scratch:
             recorded.wait()
     shutil.rmtree(data)
     replayed = subprocess.run([str(hirsel), 'run', str(manifest), '--replay', str(tape)],
-        capture_output=True, timeout=180)
+        capture_output=True)
     assert replayed.returncode == 0, (replayed.stdout, replayed.stderr)
     assert replayed.stdout == expected, (replayed.stdout, expected)
     assert replayed.stderr == errors, (replayed.stderr, errors)

@@ -62,7 +62,7 @@ def main():
         if runner.wait():
             raise RuntimeError('measurement failed; inspect the session JSON')
         for child in children:
-            if child.wait(timeout=30):
+            if child.wait():
                 raise RuntimeError('client failed')
     finally:
         for child in children:

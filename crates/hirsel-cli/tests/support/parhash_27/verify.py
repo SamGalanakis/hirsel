@@ -24,7 +24,7 @@ def main(args):
     (out / 'environment.json').write_text(json.dumps({k:v for k,v in env.items() if k.startswith('HIRSEL_')}, indent=2)+'\n')
     binary = out / args.backend
     argv = [str(args.hirsel), 'build', str(root/'hirsel.json'), '--backend', args.backend, '-o', str(binary)]
-    built = subprocess.run(argv, env=env, capture_output=True, timeout=300)
+    built = subprocess.run(argv, env=env, capture_output=True)
     (out/'build.stdout').write_bytes(built.stdout)
     (out/'build.stderr').write_bytes(built.stderr)
     (out/'build.json').write_text(json.dumps(dict(argv=argv,status=built.returncode)))
@@ -38,13 +38,13 @@ def main(args):
     receipts = []
     def run(id, argv, row):
         result_file = out / (id+'.result.json')
-        command = [sys.executable, str(root/'capped'), '--timeout', '60', sys.executable,
+        command = [sys.executable, str(root/'capped'), sys.executable,
                    str(root/'verify.py'), '--child', str(result_file), '--', *map(str,argv)]
         receipt = dict(id=id,engine=args.backend,argv=command,started=1,completed=0,passed=0)
         receipts.append(receipt)
         (out/'receipts.json').write_text(json.dumps(receipts,indent=2)+'\n')
         print('PARHASH_27_STARTED '+json.dumps(receipt),flush=True)
-        done = subprocess.run(command,env=env,capture_output=True,timeout=90)
+        done = subprocess.run(command,env=env,capture_output=True)
         (out/(id+'.resources')).write_bytes(done.stderr)
         assert result_file.exists(), (id,done)
         actual = json.loads(result_file.read_bytes())

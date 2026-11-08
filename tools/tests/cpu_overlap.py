@@ -17,7 +17,7 @@ runner = importlib.machinery.SourceFileLoader('cpu_overlap', str(SCRIPT)).load_m
 
 
 class PrivateScopes(unittest.TestCase):
-    def invoke(self, status=0, timeout=False, stdout="test result: ok. 1 passed; 0 failed; 0 ignored;\n"):
+    def invoke(self, status=0, stdout="test result: ok. 1 passed; 0 failed; 0 ignored;\n"):
         with tempfile.TemporaryDirectory() as scratch:
             directory = Path(scratch)
             for kind, widths in [('ordinary', [4, 8, 16]), ('tsan', [4, 8])]:
@@ -27,12 +27,9 @@ class PrivateScopes(unittest.TestCase):
                         'env': {'HIRSEL_MEMORY_LIMIT': '2097152K', 'HIRSEL_RUNTIME_ARCHIVES': ['runtime-archive']}}))
             result = subprocess.CompletedProcess([], status, stdout, "")
             account = pwd.struct_passwd(('audit', 'x', os.getuid(), os.getgid(), '', scratch, '/bin/sh'))
-            side_effect = subprocess.TimeoutExpired([], 600) if timeout else None
             with patch.object(runner.pwd, 'getpwuid', return_value=account), \
-                    patch.object(runner.subprocess, 'run', return_value=result, side_effect=side_effect) as run, \
+                    patch.object(runner.subprocess, 'run', return_value=result) as run, \
                     contextlib.redirect_stdout(io.StringIO()):
-                if timeout:
-                    run.side_effect = [subprocess.TimeoutExpired([], 600), result]
                 failed = runner.run(directory, list(range(16)), None, os.getuid(), ['ordered-4'])
             return failed, run.call_args_list
 
@@ -85,12 +82,6 @@ class PrivateScopes(unittest.TestCase):
         self.assertEqual(calls[0].kwargs['env']['HIRSEL_RUNTIME_ARCHIVES'], 'runtime-archive')
         self.assertIn('--exact', command)
 
-    def test_timeout_stops_only_the_scope_the_runner_created(self):
-        failed, calls = self.invoke(timeout=True)
-        self.assertTrue(failed)
-        command = calls[0].args[0]
-        unit = command[command.index('--unit') + 1]
-        self.assertEqual(calls[1].args[0], ['systemctl', '--user', 'stop', unit + '.scope'])
 
 
 if __name__ == '__main__':

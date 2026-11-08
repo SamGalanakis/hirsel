@@ -104,7 +104,7 @@ def listings(root, graph):
     env.setdefault('HIRSEL_MEMORY_LIMIT', '2G')
     for binary in sorted(binaries):
         harness = root / outputs['root//:' + binary + '-harness']
-        listed = subprocess.run([str(root / 'tools/capped'), '--timeout', '60', str(harness),
+        listed = subprocess.run([str(root / 'tools/capped'), str(harness),
                                  *binaries[binary], '--list', '--format', 'terse'], cwd=root, env=env,
                                 capture_output=True, text=True)
         if listed.returncode:

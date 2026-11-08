@@ -11,7 +11,7 @@ def run(args):
  serial+=1
  out=root/f'command-{serial}.stdout';err=root/f'command-{serial}.stderr'
  wrapper="import subprocess,sys; r=subprocess.run(sys.argv[3:],stdout=open(sys.argv[1],'wb'),stderr=open(sys.argv[2],'wb'));sys.exit(r.returncode)"
- r=subprocess.run(['python3',str(capped),'--timeout','60','prlimit','--cpu=60:61','python3','-c',wrapper,str(out),str(err),*map(str,args)],env={**os.environ,'HIRSEL_JOBS':'4','HIRSEL_MEMORY_LIMIT':'2G'},capture_output=True)
+ r=subprocess.run(['python3',str(capped),'python3','-c',wrapper,str(out),str(err),*map(str,args)],env={**os.environ,'HIRSEL_JOBS':'4','HIRSEL_MEMORY_LIMIT':'2G'},capture_output=True)
  (root/f'command-{serial}.cap').write_bytes(r.stderr)
  return subprocess.CompletedProcess(args,r.returncode,out.read_bytes() if out.exists() else b'',err.read_bytes() if err.exists() else r.stderr)
 build=subprocess.run([a.hirsel,'build',str(root/'hirsel.json'),'--backend',a.backend,'-o',str(app)],capture_output=True)

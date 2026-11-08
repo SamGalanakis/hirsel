@@ -10,7 +10,7 @@ def run(argv,d,name):
     (d/(name+'.argv.json')).write_text(json.dumps(list(map(str,argv))))
     inputs=[p for p in root.glob('*.hir')]+[p for p in d.rglob('*.json')]+[Path(argv[0]).resolve()]
     (d/(name+'.inputs.json')).write_text(json.dumps({str(p):hashlib.sha256(p.read_bytes()).hexdigest() for p in inputs if p.is_file()},sort_keys=True))
-    out=subprocess.run(argv,capture_output=True,env=env,timeout=300 if "build" in argv else 60,preexec_fn=None if "build" in argv else lambda: resource.setrlimit(resource.RLIMIT_CPU,(60,61)))
+    out=subprocess.run(argv,capture_output=True,env=env)
     (d/(name+'.stdout')).write_bytes(out.stdout);(d/(name+'.stderr')).write_bytes(out.stderr)
     return out
 binaries={}

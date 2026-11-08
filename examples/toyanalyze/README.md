@@ -90,7 +90,7 @@ input and optional output roots first):
 
 ```
 hirsel build examples/toyanalyze/hirsel.json --backend llvm -o /tmp/toyanalyze-llvm
-HIRSEL_MEMORY_LIMIT=2G HIRSEL_JOBS=4 tools/capped --timeout 60 prlimit --cpu=60:61 /tmp/toyanalyze-llvm --hirsel-record /tmp/toyanalyze.tape --hirsel-grants /tmp/toyanalyze-grants.json check modules.json 2
+HIRSEL_MEMORY_LIMIT=2G HIRSEL_JOBS=4 tools/capped /tmp/toyanalyze-llvm --hirsel-record /tmp/toyanalyze.tape --hirsel-grants /tmp/toyanalyze-grants.json check modules.json 2
 /tmp/toyanalyze-llvm --hirsel-replay /tmp/toyanalyze.tape
 ```
 

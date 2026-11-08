@@ -120,7 +120,7 @@ def verify(hirsel, root, output, prebuilt=None):
     def run(label, argv):
         start = time.monotonic()
         command = list(map(str, argv))
-        done = subprocess.run(command, capture_output=True, stdin=subprocess.DEVNULL, timeout=150)
+        done = subprocess.run(command, capture_output=True, stdin=subprocess.DEVNULL)
         (output / (label + '.stdout')).write_bytes(done.stdout)
         (output / (label + '.stderr')).write_bytes(done.stderr)
         records.append({'label': label, 'argv': command, 'cwd': str(Path.cwd()),

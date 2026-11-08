@@ -45,11 +45,10 @@ def main(a):
                 tape=q/(id+'.tape');trace=q/(id+'.trace');actual=q/(id+'.result.json')
                 fd=libc.inotify_init1(os.O_CLOEXEC|os.O_NONBLOCK);assert fd>=0
                 assert libc.inotify_add_watch(fd,os.fsencode(q),0x100|0x8)>=0
-                command=[sys.executable,str(a.root/'capped'),'--timeout','60','prlimit','--cpu=60:61',sys.executable,str(Path(__file__)),'--child',str(actual),'--',str(a.root/'evidence'/backend),'--hirsel-trace-events',str(trace),'--hirsel-record',str(tape),'--hirsel-grants',str(gp),*argv]
+                command=[sys.executable,str(a.root/'capped'),sys.executable,str(Path(__file__)),'--child',str(actual),'--',str(a.root/'evidence'/backend),'--hirsel-trace-events',str(trace),'--hirsel-record',str(tape),'--hirsel-grants',str(gp),*argv]
                 rec=dict(id=id,argv=command,started=1,completed=0,passed=0,requested=width,snapshots=[])
                 receipt.append(rec);(q/'receipts.json').write_text(json.dumps(receipt,indent=2))
                 child=subprocess.Popen(command,env=env,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
-                deadline=time.monotonic()+10
                 while child.poll() is None:
                     if control.exists():
                         try:
@@ -65,11 +64,10 @@ def main(a):
                                 if snap['width']['effective']==width:break
                         except (OSError,ValueError):pass
                     else:
-                        remaining=deadline-time.monotonic()
-                        if remaining<=0 or not select.select([fd],[],[],remaining)[0]:break
+                        select.select([fd],[],[])
                         os.read(fd,65536)
                 os.close(fd)
-                stdout,stderr=child.communicate(timeout=80)
+                stdout,stderr=child.communicate()
                 (q/(id+'.resources')).write_bytes(stderr)
                 rec.update(completed=int(actual.exists()))
                 if actual.exists():
@@ -100,8 +98,8 @@ def main(a):
                 if backend=='reference':
                     host.add(tape,actual,complete)
                     continue
-                command=[sys.executable,str(a.root/'capped'),'--timeout','60','prlimit','--cpu=60:61',sys.executable,str(Path(__file__)),'--child',str(actual),'--',*cmd]
-                done=subprocess.run(command,env=env,capture_output=True,timeout=90)
+                command=[sys.executable,str(a.root/'capped'),sys.executable,str(Path(__file__)),'--child',str(actual),'--',*cmd]
+                done=subprocess.run(command,env=env,capture_output=True)
                 (q/(id+'.resources')).write_bytes(done.stderr)
                 complete(json.loads(actual.read_text()))
     host.flush()

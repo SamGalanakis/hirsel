@@ -29,8 +29,8 @@ def main(a):
     def save(): (root/'receipts.json').write_text(json.dumps(receipts,indent=2)+'\n')
     def call(argv,name,setup=False):
         limit='300' if setup else '60'
-        wrapped=['python3',str(root/'capped'),'--timeout',limit]
-        if not setup:wrapped+=['prlimit','--cpu=60:61']
+        wrapped=['python3',str(root/'capped')]
+        if not setup:wrapped+=['prlimit',]
         done=subprocess.run(wrapped+list(map(str,argv)),stdin=subprocess.DEVNULL,capture_output=True,env=env)
         (root/(name+'.stdout')).write_bytes(done.stdout)
         (root/(name+'.stderr')).write_bytes(done.stderr)

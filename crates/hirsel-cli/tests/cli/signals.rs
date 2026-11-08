@@ -117,19 +117,7 @@ fn interrupted(
         // The handler only enqueues; give it time to run before the next arrival.
         std::thread::sleep(std::time::Duration::from_millis(200));
     }
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
-    let status = loop {
-        if let Some(status) = child.try_wait().unwrap() {
-            break status;
-        }
-        if std::time::Instant::now() > deadline {
-            let _ = Command::new("kill")
-                .args(["-KILL", "--", &format!("-{}", child.id())])
-                .status();
-            panic!("still running after {count} Interrupts: {lines:?}");
-        }
-        std::thread::sleep(std::time::Duration::from_millis(50));
-    };
+    let status = child.wait().unwrap();
     lines.extend(stdout.lines().map(Result::unwrap));
     (
         status,

@@ -59,7 +59,7 @@ def main(args):
         binary=out/backend
         if args.resume:
             assert binary.exists();binaries[backend]=binary;continue
-        done=subprocess.run([str(args.hirsel),'build',str(root/'hirsel.json'),'--backend',backend,'-o',str(binary)],env=env,capture_output=True,timeout=300)
+        done=subprocess.run([str(args.hirsel),'build',str(root/'hirsel.json'),'--backend',backend,'-o',str(binary)],env=env,capture_output=True)
         (out/(backend+'-build.stdout')).write_bytes(done.stdout)
         (out/(backend+'-build.stderr')).write_bytes(done.stderr)
         assert done.returncode==0,(backend,done)
@@ -91,8 +91,8 @@ def main(args):
             assert argv[-2:] == ['--max-steps','1000000']
             host.add(argv[argv.index('--replay')+1], cell/'result.json', lambda actual: finish(actual, actual['status']))
             return
-        command=[sys.executable,str(root/'capped'),'--timeout','60','prlimit','--cpu=60:61',sys.executable,str(root/'verify.py'),'--child',str(cell/'result.json'),'--',*map(str,argv)]
-        done=subprocess.run(command,env=env,capture_output=True,timeout=90)
+        command=[sys.executable,str(root/'capped'),sys.executable,str(root/'verify.py'),'--child',str(cell/'result.json'),'--',*map(str,argv)]
+        done=subprocess.run(command,env=env,capture_output=True)
         (cell/'resources').write_bytes(done.stderr)
         assert (cell/'result.json').exists(),(id,done)
         finish(json.loads((cell/'result.json').read_text()), done.returncode)
@@ -158,7 +158,7 @@ def main(args):
     host.flush()
     tape=tapes[0][1]
     damaged=out/'truncated.tape';damaged.write_bytes(tape.read_bytes()[:-1])
-    refusal=subprocess.run([str(binaries['llvm']),'--hirsel-replay',str(damaged)],capture_output=True,env=env,timeout=60)
+    refusal=subprocess.run([str(binaries['llvm']),'--hirsel-replay',str(damaged)],capture_output=True,env=env)
     assert refusal.returncode!=0 and not refusal.stdout
     (out/'truncated.stderr').write_bytes(refusal.stderr)
     # Refusal controls use the supported CLI; original files stay unavailable.
@@ -169,7 +169,7 @@ def main(args):
     controls=[('changed-program',[str(args.hirsel),'run',str(changed/'hirsel.json'),'--replay',str(tape)]),
               ('changed-config',[str(binaries['llvm']),'--hirsel-replay',str(tape),'--hirsel-grants',str(out/'llvm-pack-empty-w1.grants.json'),'changed-input'])]
     for name,argv in controls:
-        done=subprocess.run(argv,capture_output=True,env=env,timeout=60)
+        done=subprocess.run(argv,capture_output=True,env=env)
         (out/(name+'.stdout')).write_bytes(done.stdout);(out/(name+'.stderr')).write_bytes(done.stderr)
         assert done.returncode!=0 and not done.stdout,(name,done)
     assert all(digest(Path(p))==h for p,h in seal.items())

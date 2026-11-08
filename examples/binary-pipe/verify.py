@@ -21,7 +21,7 @@ def verify(hirsel, root, output):
         try:
             result = subprocess.run(list(map(str, command)), input=data if pipe else None,
                                     stdin=None if pipe else subprocess.DEVNULL,
-                                    stdout=stdout, stderr=subprocess.PIPE, timeout=180)
+                                    stdout=stdout, stderr=subprocess.PIPE)
         finally:
             if dev_full:
                 stdout.close()

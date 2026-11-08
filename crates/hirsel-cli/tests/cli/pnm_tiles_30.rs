@@ -405,7 +405,7 @@ fn refused(manifest: &Path, root: &Path, tape: &Path, kind: &str) {
     for backend in ["llvm", "cranelift"] {
         let output = Command::new("python3")
             .arg(root.join("capped"))
-            .args(["--timeout", "60", "prlimit", "--cpu=60:61"])
+            .args(["prlimit"])
             .arg(root.join("native").join(backend))
             .arg("--hirsel-replay")
             .arg(tape)

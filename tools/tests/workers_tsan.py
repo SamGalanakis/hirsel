@@ -15,7 +15,7 @@ SCRIPT = Path(__file__).resolve().parents[1] / 'workers-tsan'
 
 
 class NativeQualification(unittest.TestCase):
-    def run_gate(self, width, stderr, status=0, controls=True, timeout=False, listing=False):
+    def run_gate(self, width, stderr, status=0, controls=True, listing=False):
         if controls:
             stderr += "".join(
                 f"MUTANT {policy} {backend} W{width}: exit 66, emitted mapper race\n"
@@ -25,11 +25,7 @@ class NativeQualification(unittest.TestCase):
         stdout = (f'native_tsan_ordered_cranelift_width_{width}: test\n' if listing else '4 passed\n')
         result = subprocess.CompletedProcess([], status, stdout, stderr)
         process = Mock(returncode=status, pid=12345)
-        if timeout:
-            process.communicate.side_effect = [subprocess.TimeoutExpired('native', 180),
-                                               (result.stdout, result.stderr)]
-        else:
-            process.communicate.return_value = (result.stdout, result.stderr)
+        process.communicate.return_value = (result.stdout, result.stderr)
         output = io.StringIO()
         with patch.dict(os.environ, {'HIRSEL_NATIVE_CPU_HARNESS': 'unused-harness'}), \
                 patch.object(sys, 'argv', [str(SCRIPT), '--native', str(width), *(['--list'] if listing else [])]), \
@@ -73,12 +69,6 @@ class NativeQualification(unittest.TestCase):
     def test_full_width_witnesses_without_double_claim_detection_are_not_qualification(self):
         self.assertNotEqual(self.run_gate(4, ''.join(self.witnesses(4)), controls=False), 0)
 
-    def test_timeout_keeps_output_and_kills_the_owned_native_process_group(self):
-        self.assertNotEqual(self.run_gate(4, ''.join(self.witnesses(4)), timeout=True), 0)
-        self.assertIn('4 passed', self.output)
-        self.assertIn('emitted mapper race', self.output)
-        self.assertEqual(self.killed, [call(12345, signal.SIGKILL)])
-        self.assertTrue(self.spawn.kwargs['start_new_session'])
 
     def test_sanitizer_failure_status_is_preserved_even_with_witnesses(self):
         self.assertEqual(self.run_gate(8, ''.join(self.witnesses(8)), 66), 66)

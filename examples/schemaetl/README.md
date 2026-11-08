@@ -24,7 +24,7 @@ Only explicitly granted directories are accessible. Tapes must stay outside both
 ```sh
 "$HIRSEL" run examples/schemaetl/hirsel.json --grants /absolute/grants.json -- check manifest.json pipeline.json
 "$HIRSEL" run examples/schemaetl/hirsel.json --grants /absolute/grants.json -- explain manifest.json pipeline.json
-HIRSEL_MEMORY_LIMIT=2G HIRSEL_JOBS=4 tools/capped --timeout 60 prlimit --cpu=60:61 \
+HIRSEL_MEMORY_LIMIT=2G HIRSEL_JOBS=4 tools/capped \
   "$HIRSEL" run examples/schemaetl/hirsel.json --grants /absolute/grants.json \
   --record /absolute/etl.tape -- run manifest.json pipeline.json
 "$HIRSEL" build examples/schemaetl/hirsel.json --backend llvm -o /absolute/etl-llvm
@@ -33,7 +33,7 @@ HIRSEL_MEMORY_LIMIT=2G HIRSEL_JOBS=4 tools/capped --timeout 60 prlimit --cpu=60:
 For standalone native launch, observer options precede grants; app arguments follow:
 
 ```sh
-HIRSEL_MEMORY_LIMIT=2G HIRSEL_JOBS=4 tools/capped --timeout 60 prlimit --cpu=60:61 \
+HIRSEL_MEMORY_LIMIT=2G HIRSEL_JOBS=4 tools/capped \
   /absolute/etl-llvm --hirsel-record /absolute/native.tape \
   --hirsel-grants /absolute/grants.json run manifest.json pipeline.json
 /absolute/etl-llvm --hirsel-replay /absolute/native.tape

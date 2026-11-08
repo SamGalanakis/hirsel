@@ -389,7 +389,7 @@ fn refusals(root: &Path, binaries: &Path) {
             argv.push(tape.to_string_lossy().into_owned());
             let output = Command::new("python3")
                 .arg(root.join("capped"))
-                .args(["--timeout", "60", "prlimit", "--cpu=60:61"])
+                .args(["prlimit"])
                 .args(&argv)
                 .env("HIRSEL_MEMORY_LIMIT", "2G")
                 .env("HIRSEL_JOBS", "4")

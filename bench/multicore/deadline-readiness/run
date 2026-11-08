@@ -58,9 +58,9 @@ def main():
                        '--collect', '--quiet', '--slice=timing.slice',
                        '--uid=1000', '--gid=1000',
                        '-p', f'AllowedCPUs={args.cpus}',
-                       '-p', 'MemoryMax=2G', '-p', 'RuntimeMaxSec=60', '--']
+                       '-p', 'MemoryMax=2G', '--']
         else:
-            wrapper = [str(root / 'tools/capped'), '--timeout', '60']
+            wrapper = [str(root / 'tools/capped')]
         command = wrapper + measured
         result = subprocess.run(command, env=env, capture_output=True)
         (cell / 'stdout').write_bytes(result.stdout)

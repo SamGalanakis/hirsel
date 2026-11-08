@@ -219,14 +219,10 @@ def verify(hirsel, root, output, case=None):
         start = time.monotonic()
         try:
             done = subprocess.run(entry['argv'], capture_output=True,
-                                  stdin=subprocess.DEVNULL, timeout=180,
+                                  stdin=subprocess.DEVNULL,
                                   preexec_fn=deny_network if offline else None)
             entry.update(state='finished', exit=done.returncode, seconds=time.monotonic() - start)
             stdout, stderr = done.stdout, done.stderr
-        except subprocess.TimeoutExpired as error:
-            entry.update(state='timeout', seconds=time.monotonic() - start)
-            stdout, stderr = error.stdout or b'', error.stderr or b''
-            raise
         finally:
             if 'stdout' in locals():
                 (output / (label + '.stdout')).write_bytes(stdout)

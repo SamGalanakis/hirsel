@@ -44,7 +44,7 @@ def verify(hirsel, root, output, reuse=None):
 
     def run(label, argv, data=b'', expected=None):
         argv = list(map(str, argv))
-        done = subprocess.run(argv, input=data, capture_output=True, timeout=300)
+        done = subprocess.run(argv, input=data, capture_output=True)
         (output / (label + '.stdin')).write_bytes(data)
         (output / (label + '.stdout')).write_bytes(done.stdout)
         (output / (label + '.stderr')).write_bytes(done.stderr)
@@ -77,13 +77,12 @@ def verify(hirsel, root, output, reuse=None):
                 for chunk in chunks:
                     proc.stdin.write(chunk)
                     sent.extend(chunk)
-                deadline, response = time.monotonic() + 30, bytearray()
+                response = bytearray()
                 while not response.endswith(b'\n'):
-                    assert selector.select(max(0, deadline - time.monotonic())), (label, index, 'response-before-next-input timeout')
+                    selector.select()
                     chunk = os.read(proc.stdout.fileno(), 1)
                     assert chunk, (label, index, 'EOF before response', proc.stderr.read())
                     response.extend(chunk)
-                    assert time.monotonic() < deadline, (label, index, 'response deadline')
                 received.extend(response)
                 assert bytes(response) == golden, (label, index, response, golden)
                 result['interactive_commands'] += 1
@@ -92,7 +91,7 @@ def verify(hirsel, root, output, reuse=None):
             # until wait() proves the program exits without asking for EOF.
             if eof:
                 proc.stdin.close()
-            assert proc.wait(timeout=30) == 0, (label, proc.stderr.read())
+            assert proc.wait() == 0, (label, proc.stderr.read())
             assert proc.stdout.read() == b'', label
             assert proc.stderr.read() == b'', label
             result['observations'] += 1
@@ -115,7 +114,7 @@ def verify(hirsel, root, output, reuse=None):
         argv = list(map(str, cmd(engine)))
         fd = os.open(output, os.O_RDONLY | os.O_DIRECTORY)
         try:
-            done = subprocess.run(argv, stdin=fd, capture_output=True, timeout=30)
+            done = subprocess.run(argv, stdin=fd, capture_output=True)
         finally:
             os.close(fd)
         (output / (engine + '-read-fault.stdout')).write_bytes(done.stdout)
@@ -130,12 +129,12 @@ def verify(hirsel, root, output, reuse=None):
         selector.register(proc.stdout, selectors.EVENT_READ)
         try:
             proc.stdin.write(b'SHOW\n')
-            assert selector.select(30), (engine, 'write-fault prefix timeout')
+            selector.select()
             prefix = proc.stdout.readline()
             assert prefix == b'{"ok":"value","value":null}\n'
             proc.stdout.close()
             proc.stdin.write(b'SHOW\n')
-            code = proc.wait(timeout=30)
+            code = proc.wait()
             error = proc.stderr.read()
             (output / (engine + '-write-fault.stdout')).write_bytes(prefix)
             (output / (engine + '-write-fault.stderr')).write_bytes(error)

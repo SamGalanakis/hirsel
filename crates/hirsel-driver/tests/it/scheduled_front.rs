@@ -65,9 +65,9 @@ impl QueryTask for EvictCompact {
     fn weight(&self) -> MemoryWeight {
         self.1
     }
-    fn poll(&mut self, cx: &mut dyn QueryContext) -> QueryPoll {
+    fn run(&mut self, cx: &mut dyn QueryContext) -> QueryOutcome {
         assert!(cx.evict_body());
-        QueryPoll::Complete(synthetic_fixture(
+        Ok(synthetic_fixture(
             self.0.address,
             hirsel_engine_store::Action(self.0.address.0),
             Domain {
@@ -1311,19 +1311,16 @@ fn admitted_front_pressure_evicts_only_unpinned_settled_bodies_and_recomputes_eq
                     fn weight(&self) -> MemoryWeight {
                         MemoryWeight::default()
                     }
-                    fn poll(&mut self, cx: &mut dyn QueryContext) -> QueryPoll {
+                    fn run(&mut self, cx: &mut dyn QueryContext) -> QueryOutcome {
                         for dependency in self.0.iter().copied() {
                             match cx.read(dependency) {
-                                std::task::Poll::Pending => {
-                                    return QueryPoll::Waiting(vec![dependency]);
+                                Err(error) => {
+                                    return Err(error);
                                 }
-                                std::task::Poll::Ready(Err(error)) => {
-                                    return QueryPoll::Failed(error);
-                                }
-                                std::task::Poll::Ready(Ok(_)) => {}
+                                Ok(_) => {}
                             }
                         }
-                        QueryPoll::Complete(synthetic_fixture(
+                        Ok(synthetic_fixture(
                             self.1.address,
                             hirsel_engine_store::Action(hirsel_syntax::ContentHash::of_bytes(
                                 b"settled-consumer",

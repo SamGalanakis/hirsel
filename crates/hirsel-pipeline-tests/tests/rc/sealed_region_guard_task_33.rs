@@ -9,24 +9,20 @@ use hirsel_native_queries::seal_demand::Plan;
 use hirsel_rc::seal_demand::equations::LocalDemandEquations;
 use hirsel_syntax::ContentHash;
 use hirsel_types::TypeKind;
-use std::{collections::BTreeMap, sync::Arc, task::Poll};
+use std::{collections::BTreeMap, sync::Arc};
 
 struct Context {
     inputs: BTreeMap<ContentHash, (u32, ProductRef)>,
-    pending: bool,
     changed: bool,
 }
 impl QueryContext for Context {
-    fn read(&mut self, id: QueryId) -> Poll<Result<ProductRef, hirsel_engine_store::Reference>> {
+    fn read(&mut self, id: QueryId) -> Result<ProductRef, hirsel_engine_store::Reference> {
         let (expected_kind, mut output) = (self.inputs[&id.address.0]).clone();
         assert_eq!(id.kind, expected_kind);
-        if self.pending {
-            return Poll::Pending;
-        }
         if self.changed {
             output.action = Action(ContentHash([255; 32]));
         }
-        Poll::Ready(Ok(output))
+        Ok(output)
     }
 }
 
@@ -75,7 +71,6 @@ fn original_guard_task_waits_for_dependencies_and_keeps_its_existing_grant_with_
                 let allowance = Arc::new(budget.reserve(bytes).unwrap());
                 let mut context = Context {
                     inputs: BTreeMap::new(),
-                    pending: true,
                     changed: false,
                 };
                 let inputs = locals
@@ -160,17 +155,14 @@ fn original_guard_task_waits_for_dependencies_and_keeps_its_existing_grant_with_
                 let factory = owner.factory();
                 let mut task = factory.create(owner.query_id()).unwrap();
                 assert!(owner.selection().is_none());
-                assert!(matches!(task.poll(&mut context), QueryPoll::Waiting(_)));
-                assert!(owner.selection().is_none());
-                context.pending = false;
-                let QueryPoll::Complete(product) = task.poll(&mut context) else {
+                let Ok(product) = task.run(&mut context) else {
                     panic!("settled metadata query did not complete");
                 };
                 assert!(owner.accepts(product));
                 selection = owner.selection();
                 let mut rejected = factory.create(owner.query_id()).unwrap();
                 context.changed = true;
-                assert!(matches!(rejected.poll(&mut context), QueryPoll::Failed(_)));
+                assert!(matches!(rejected.run(&mut context), Err(_)));
                 retained = Some((budget, bytes));
                 tasks = Some(owner);
             }

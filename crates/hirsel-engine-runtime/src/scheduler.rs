@@ -98,10 +98,10 @@ enum Running {
     Local(Box<dyn LocalQueryTask>),
 }
 impl Running {
-    fn poll(&mut self, cx: &mut dyn QueryContext) -> QueryPoll {
+    fn run(&mut self, cx: &mut dyn QueryContext) -> Outcome {
         match self {
-            Self::Send(task) => task.poll(cx),
-            Self::Local(task) => task.poll(cx),
+            Self::Send(task) => task.run(cx),
+            Self::Local(task) => task.run(cx),
         }
     }
 }
@@ -138,19 +138,6 @@ struct State {
 pub struct AdmittedRuntime {
     shared: Arc<Mutex<State>>,
     reservation: Option<hirsel_engine_admission::MemoryReservation>,
-}
-
-/// A host completion wait independent of the runtime's outer ownership lock.
-/// Clone while holding that lock, then release it before waiting. It drives
-/// the request's roots on a compiler stack; it does not consume a result.
-#[derive(Clone)]
-pub struct RuntimeCompletion {
-    shared: Arc<Mutex<State>>,
-}
-impl RuntimeCompletion {
-    pub fn wait(&self, request: RequestId) {
-        drive(&self.shared, request.0);
-    }
 }
 
 fn lock(shared: &Mutex<State>) -> MutexGuard<'_, State> {
@@ -270,18 +257,6 @@ impl AdmittedRuntime {
     pub fn stats(&self) -> RuntimeStats {
         lock(&self.shared).stats
     }
-    pub fn completion(&self) -> RuntimeCompletion {
-        RuntimeCompletion {
-            shared: self.shared.clone(),
-        }
-    }
-    pub fn wait(&mut self, request: RequestId) -> OutcomeList {
-        loop {
-            if let Poll::Ready(result) = self.poll(request) {
-                return result;
-            }
-        }
-    }
     pub fn shutdown(&mut self) {
         drop(self.shutdown_with_reservation());
     }
@@ -337,19 +312,19 @@ impl QueryRuntime for AdmittedRuntime {
         );
         request
     }
-    fn poll(&mut self, request: RequestId) -> Poll<OutcomeList> {
+    fn wait(&mut self, request: RequestId) -> OutcomeList {
         drive(&self.shared, request.0);
         let mut state = lock(&self.shared);
         let Some(entry) = state.requests.remove(&request.0) else {
-            return Poll::Ready(Err(state.errors.cancelled));
+            return Err(state.errors.cancelled);
         };
         let Some(results) = entry.results.into_iter().collect::<Option<Vec<_>>>() else {
             // Stopped before every root settled.
-            return Poll::Ready(Err(state.errors.cancelled));
+            return Err(state.errors.cancelled);
         };
         state.event(RuntimeEvent::Completed(request));
         // A failed early root does not suppress legally required diagnostic roots.
-        Poll::Ready(results.into_iter().collect())
+        results.into_iter().collect()
     }
     fn cancel(&mut self, request: RequestId) {
         let mut state = lock(&self.shared);
@@ -405,7 +380,7 @@ impl State {
         let created = catch_unwind(AssertUnwindSafe(|| match factory {
             Some(Factory::Send(factory)) => {
                 let task = factory.create(id(query))?;
-                if task.id() != id(query) || task.continuation_bytes() > task.weight().retained {
+                if task.id() != id(query) {
                     return Err(errors.protocol);
                 }
                 let weight = task.weight();
@@ -414,10 +389,7 @@ impl State {
             Some(Factory::Local(factory)) => {
                 let weight = factory.weight(id(query))?;
                 let task = factory.create(id(query))?;
-                if task.id() != id(query)
-                    || task.weight() != weight
-                    || task.continuation_bytes() > weight.retained
-                {
+                if task.id() != id(query) || task.weight() != weight {
                     return Err(errors.protocol);
                 }
                 Ok((Running::Local(task), weight))
@@ -462,7 +434,6 @@ impl State {
         self.stats.active = self.stack.len();
         self.stats.charged_bytes = self.charged;
         self.stats.peak_bytes = self.stats.peak_bytes.max(self.charged);
-        // Every read settles inline, so one poll completes or fails the task.
         let outcome = {
             self.stats.polls += 1;
             let elapsed_ns = self.elapsed();
@@ -479,7 +450,7 @@ impl State {
                 query,
                 scratch: weight.scratch,
             };
-            let polled = catch_unwind(AssertUnwindSafe(|| task.poll(&mut cx)));
+            let ran = catch_unwind(AssertUnwindSafe(|| task.run(&mut cx)));
             let cpu_ns = thread_cpu_ns().saturating_sub(start);
             let elapsed_ns = self.elapsed();
             let charged = self.charged;
@@ -490,13 +461,10 @@ impl State {
                 cpu_ns,
                 charged,
             });
-            match polled {
-                Ok(QueryPoll::Complete(product)) if product.address == Address(query.1) => {
-                    Ok(product)
-                }
-                Ok(QueryPoll::Failed(error)) => Err(error),
-                // Every read settles inline, so no continuation can wait.
-                Ok(_) => Err(self.errors.protocol),
+            match ran {
+                Ok(Ok(product)) if product.address == Address(query.1) => Ok(product),
+                Ok(Ok(_)) => Err(self.errors.protocol),
+                Ok(Err(error)) => Err(error),
                 Err(_) => Err(self.errors.panicked),
             }
         };
@@ -587,13 +555,13 @@ impl QueryContext for Context<'_> {
         }
         Some(path.iter().map(|(query, _)| id(*query)).collect())
     }
-    fn read(&mut self, dependency: QueryId) -> Poll<Outcome> {
+    fn read(&mut self, dependency: QueryId) -> Outcome {
         self.state.stats.edges += 1;
         self.state.event(RuntimeEvent::Read {
             query: id(self.query),
             dependency,
         });
-        Poll::Ready(self.state.demand(key(dependency)))
+        self.state.demand(key(dependency))
     }
 }
 

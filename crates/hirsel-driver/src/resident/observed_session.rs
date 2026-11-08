@@ -497,8 +497,8 @@ mod tests {
                 ..Default::default()
             }
         }
-        fn poll(&mut self, _: &mut dyn QueryContext) -> QueryPoll {
-            QueryPoll::Complete(self.0.clone())
+        fn run(&mut self, _: &mut dyn QueryContext) -> QueryOutcome {
+            Ok(self.0.clone())
         }
     }
     struct Factory(ProductRef);

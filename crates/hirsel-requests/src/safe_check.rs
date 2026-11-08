@@ -9,10 +9,7 @@ use hirsel_engine_store::ResultStore;
 use hirsel_engine_store::{Action, Address, Domain, Reference};
 
 use hirsel_syntax::{ContentHash, DefPath};
-use std::{
-    sync::{Arc, Mutex},
-    task::Poll,
-};
+use std::sync::{Arc, Mutex};
 
 pub(super) const KIND: u32 = 0x5200_0010;
 pub(super) const BYTES: u64 = 4096;
@@ -174,7 +171,7 @@ impl QueryTask for Task {
             stack: 0,
         }
     }
-    fn poll(&mut self, cx: &mut dyn QueryContext) -> QueryPoll {
+    fn run(&mut self, cx: &mut dyn QueryContext) -> QueryOutcome {
         let owner = &self.owner;
         if let Some(settled) = owner
             .completed
@@ -182,28 +179,26 @@ impl QueryTask for Task {
             .unwrap_or_else(|e| e.into_inner())
             .as_ref()
         {
-            return QueryPoll::Complete(settled.product.clone());
+            return Ok(settled.product.clone());
         }
         let check = match self.check.clone() {
             Some(product) => product,
             None => match cx.read(owner.check.query()) {
-                Poll::Pending => return QueryPoll::Waiting(vec![owner.check.query()]),
-                Poll::Ready(Err(error)) => return QueryPoll::Failed(error),
-                Poll::Ready(Ok(product)) => {
+                Err(error) => return Err(error),
+                Ok(product) => {
                     self.check = Some(product.clone());
                     product
                 }
             },
         };
         let Some(accepted) = owner.check.accepted(check.clone()) else {
-            return QueryPoll::Failed(owner.errors.protocol);
+            return Err(owner.errors.protocol);
         };
         let launch = owner.launch.filter(|_| accepted);
         let run = match launch {
             Some(query) => match cx.read(query) {
-                Poll::Pending => return QueryPoll::Waiting(vec![query]),
-                Poll::Ready(Err(error)) => return QueryPoll::Failed(error),
-                Poll::Ready(Ok(product)) => Some(product),
+                Err(error) => return Err(error),
+                Ok(product) => Some(product),
             },
             None => None,
         };
@@ -211,12 +206,12 @@ impl QueryTask for Task {
         bytes.push(u8::from(run.is_some()));
         if let Some(run) = &run {
             let Ok(archive) = run.archive(ArchiveAdmission::Retained) else {
-                return QueryPoll::Failed(owner.errors.resource);
+                return Err(owner.errors.resource);
             };
             bytes.extend_from_slice(&archive.reference().output.0.0);
         }
         let Some(record) = owner.store.put_content(OUTPUT, &bytes) else {
-            return QueryPoll::Failed(owner.errors.resource);
+            return Err(owner.errors.resource);
         };
         let action = Action(ContentHash::of_parts(
             "hirsel.safe-check.action.v1",
@@ -228,7 +223,7 @@ impl QueryTask for Task {
             ],
         ));
         let Some(archive) = owner.store.open_product_archive(record) else {
-            return QueryPoll::Failed(owner.errors.resource);
+            return Err(owner.errors.resource);
         };
         let product = ProductRef::import_archive(owner.id.address, action, archive);
         *owner.completed.lock().unwrap_or_else(|e| e.into_inner()) = Some(Settled {
@@ -236,6 +231,6 @@ impl QueryTask for Task {
             check,
             run,
         });
-        QueryPoll::Complete(product)
+        Ok(product)
     }
 }

@@ -20,7 +20,6 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
     sync::atomic::{AtomicU64, Ordering},
-    task::Poll,
 };
 
 const FAILURE: hirsel_engine_store::Domain = hirsel_engine_store::Domain {
@@ -507,61 +506,51 @@ impl QueryTask for NativeTask {
             ..self.tasks.weight
         }
     }
-    fn continuation_bytes(&self) -> u64 {
-        std::mem::size_of::<Self>() as u64
-    }
-    fn poll(&mut self, cx: &mut dyn QueryContext) -> QueryPoll {
+    fn run(&mut self, cx: &mut dyn QueryContext) -> QueryOutcome {
         if let Some(result) = self.terminal.clone() {
-            return match result {
-                Ok(p) => QueryPoll::Complete(p),
-                Err(e) => QueryPoll::Failed(e),
-            };
+            return result;
         }
         let request = match self.tasks.open_request(self.key) {
             Ok(request) => request,
-            Err(message) => return QueryPoll::Failed(self.tasks.failure(&message)),
+            Err(message) => return Err(self.tasks.failure(&message)),
         };
         let bytes = request.retained_bytes();
         if bytes.saturating_add(size_of::<Self>() as u64) > self.tasks.weight.scratch {
-            return QueryPoll::Failed(
-                self.tasks
-                    .failure("native task recipe exceeds scratch allowance"),
-            );
+            return Err(self
+                .tasks
+                .failure("native task recipe exceeds scratch allowance"));
         }
         let _lease = match self.tasks.snapshot.dispatch_read("native-plan", bytes) {
             Ok(lease) => lease,
-            Err(message) => return QueryPoll::Failed(self.tasks.failure(&message)),
+            Err(message) => return Err(self.tasks.failure(&message)),
         };
-        let mut waiting = Vec::new();
         for (key, record) in &request.reads {
             match cx.read(*key) {
-                Poll::Pending => waiting.push(*key),
-                Poll::Ready(Err(error)) => {
+                Err(error) => {
                     self.terminal = Some(Err(error));
-                    return QueryPoll::Failed(error);
+                    return Err(error);
                 }
-                Poll::Ready(Ok(product))
+                Ok(product)
                     if product.address == key.address
                         && product
                             .archive(ArchiveAdmission::Retained)
                             .is_ok_and(|archive| archive.reference() == *record) => {}
-                Poll::Ready(Ok(_)) => {
+                Ok(_) => {
                     let error = self
                         .tasks
                         .failure("native dependency output changed within the immutable snapshot");
                     self.terminal = Some(Err(error));
-                    return QueryPoll::Failed(error);
+                    return Err(error);
                 }
             }
         }
         if let Some(key) = request.guard {
             match cx.read(key) {
-                Poll::Pending => waiting.push(key),
-                Poll::Ready(Err(error)) => {
+                Err(error) => {
                     self.terminal = Some(Err(error));
-                    return QueryPoll::Failed(error);
+                    return Err(error);
                 }
-                Poll::Ready(Ok(product))
+                Ok(product)
                     if self
                         .tasks
                         .snapshot
@@ -571,17 +560,14 @@ impl QueryTask for NativeTask {
                 {
                     ()
                 }
-                Poll::Ready(Ok(_)) => {
+                Ok(_) => {
                     let error = self
                         .tasks
                         .failure("Ready seal-demand output differs from its settled dependency");
                     self.terminal = Some(Err(error));
-                    return QueryPoll::Failed(error);
+                    return Err(error);
                 }
             }
-        }
-        if !waiting.is_empty() {
-            return QueryPoll::Waiting(waiting);
         }
         let mut products = DemandProducts::new(self.tasks.snapshot.clone());
         let result = match &request.work {
@@ -595,10 +581,7 @@ impl QueryTask for NativeTask {
             Ordering::Relaxed,
         );
         self.terminal = Some(result.clone());
-        match result {
-            Ok(p) => QueryPoll::Complete(p),
-            Err(e) => QueryPoll::Failed(e),
-        }
+        result
     }
 }
 

@@ -1,4 +1,5 @@
 use super::*;
+use crate::QueryRuntime;
 use hirsel_artifact_store::Domain;
 
 fn query(n: u64) -> QueryId {
@@ -77,24 +78,23 @@ impl QueryTask for Task {
             stack: 0,
         }
     }
-    fn poll(&mut self, cx: &mut dyn QueryContext) -> QueryPoll {
+    fn run(&mut self, cx: &mut dyn QueryContext) -> Outcome {
         assert!(!self.spec.panic, "producer panic");
         for dependency in self.spec.dependencies.iter().copied().map(query) {
             match cx.read(dependency) {
-                Poll::Pending => return QueryPoll::Waiting(vec![dependency]),
-                Poll::Ready(Err(error)) => {
+                Err(error) => {
                     if error == errors().cycle
                         && let Some(path) = cx.cycle_members(dependency, 16)
                     {
                         self.cycles.lock().unwrap().push(path);
                     }
-                    return QueryPoll::Failed(error);
+                    return Err(error);
                 }
-                Poll::Ready(Ok(_)) if self.spec.consume => cx.consume(dependency),
-                Poll::Ready(Ok(_)) => (),
+                Ok(_) if self.spec.consume => cx.consume(dependency),
+                Ok(_) => (),
             }
         }
-        QueryPoll::Complete(product(self.id))
+        Ok(product(self.id))
     }
 }
 type Claims = Arc<Mutex<BTreeMap<Key, usize>>>;

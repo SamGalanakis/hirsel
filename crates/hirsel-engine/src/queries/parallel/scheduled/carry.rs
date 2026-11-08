@@ -635,9 +635,7 @@ impl BodyTask {
         let Some(slot) = slots.get(&self.input) else {
             return;
         };
-        let outcome = match slot {
-            outcome => outcome,
-        };
+        let outcome = slot;
         let (reference, summary, diagnostics, lowering) = match &outcome.state {
             FrontState::Failed { .. } => return,
             FrontState::Settled {

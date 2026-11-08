@@ -358,12 +358,12 @@ impl FrontLowerQueries {
             },
         );
     }
-    pub(super) async fn load_carry(
+    pub(super) fn load_carry<'r>(
         self: &Arc<Self>,
         id: QueryId,
         path: &DefPath,
         key: &EntryKey,
-        query_reads: &QueryReads,
+        query_reads: &'r QueryReads<'r>,
     ) -> Option<Result<ProductRef, Reference>> {
         let carry = self.carry()?;
         let mut row = {
@@ -421,7 +421,6 @@ impl FrontLowerQueries {
                         site,
                         query_reads.clone(),
                     )
-                    .await
                     .ok()?;
                 product.result.ok()?;
                 if let Some(next) = product.successor {
@@ -434,7 +433,7 @@ impl FrontLowerQueries {
             {
                 let owner = successor.owner().clone();
                 let actual = owner.id(path, id.kind)?;
-                return Some(self.forward_capture(id, actual, owner, query_reads).await);
+                return Some(self.forward_capture(id, actual, owner, query_reads));
             }
         } else if !row.demands.is_empty() {
             return None;
@@ -496,16 +495,10 @@ impl FrontLowerQueries {
             lower.materialized = Arc::new(std::sync::OnceLock::new());
             lower.archived_metadata = None;
         }
-        if let Err(error) = self
-            .restore_selections(&outcome.selections, query_reads)
-            .await
-        {
+        if let Err(error) = self.restore_selections(&outcome.selections, query_reads) {
             return Some(Err(error));
         }
-        Some(
-            self.publish_live(id, key, outcome, raw, None, query_reads)
-                .await,
-        )
+        Some(self.publish_live(id, key, outcome, raw, None, query_reads))
     }
 }
 fn visit(

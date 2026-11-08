@@ -403,41 +403,27 @@ impl hirsel_engine_runtime::QueryTask for GuardTask {
             ..self.owner.weight
         }
     }
-    fn continuation_bytes(&self) -> u64 {
-        std::mem::size_of::<Self>() as u64
-    }
-    fn poll(
+    fn run(
         &mut self,
         cx: &mut dyn hirsel_engine_runtime::QueryContext,
-    ) -> hirsel_engine_runtime::QueryPoll {
-        use hirsel_engine_runtime::QueryPoll;
-        use std::task::Poll;
-        let finish = |result| match result {
-            Ok(p) => QueryPoll::Complete(p),
-            Err(e) => QueryPoll::Failed(e),
-        };
+    ) -> hirsel_engine_runtime::QueryOutcome {
         if let Some(result) = self.terminal.clone() {
-            return finish(result);
+            return result;
         }
-        let mut waiting = vec![];
         for input in &self.owner.plan.inputs {
             let expected = input.product.clone();
             let key = input.query;
             match cx.read(key) {
-                Poll::Pending => waiting.push(key),
-                Poll::Ready(Err(error)) => {
+                Err(error) => {
                     self.terminal = Some(Err(error));
-                    return finish(Err(error));
+                    return Err(error);
                 }
-                Poll::Ready(Ok(product)) if product == expected => (),
-                Poll::Ready(Ok(_)) => {
+                Ok(product) if product == expected => (),
+                Ok(_) => {
                     self.terminal = Some(Err(self.owner.failure));
-                    return finish(Err(self.owner.failure));
+                    return Err(self.owner.failure);
                 }
             }
-        }
-        if !waiting.is_empty() {
-            return QueryPoll::Waiting(waiting);
         }
         let result = self
             .owner
@@ -465,6 +451,6 @@ impl hirsel_engine_runtime::QueryTask for GuardTask {
                     .unwrap_or(self.owner.failure)
             });
         self.terminal = Some(result.clone());
-        finish(result)
+        result
     }
 }

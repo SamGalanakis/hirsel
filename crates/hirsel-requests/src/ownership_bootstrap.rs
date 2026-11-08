@@ -20,10 +20,7 @@ use hirsel_native_queries::instance_tasks::InstanceTasks;
 use hirsel_native_queries::ownership_compilation::OwnershipCompilation;
 use hirsel_native_queries::products::EmissionOptions;
 use hirsel_syntax::{ContentHash, DefPath};
-use std::{
-    sync::{Arc, Mutex, OnceLock},
-    task::Poll,
-};
+use std::sync::{Arc, Mutex, OnceLock};
 
 pub(super) const KIND: u32 = 0x5200_0013;
 const OUTPUT: Domain = Domain {
@@ -450,20 +447,18 @@ impl QueryTask for Task {
     fn weight(&self) -> MemoryWeight {
         self.owner.weight
     }
-    fn poll(&mut self, cx: &mut dyn QueryContext) -> QueryPoll {
+    fn run(&mut self, cx: &mut dyn QueryContext) -> QueryOutcome {
         if self.terminal.is_none() {
             let source = self.owner.source.source.query();
             match cx.read(source) {
-                Poll::Pending => return QueryPoll::Waiting(vec![source]),
-                Poll::Ready(Err(error)) => self.terminal = Some(Err(error)),
-                Poll::Ready(Ok(product)) => match self.owner.prepare(product) {
+                Err(error) => self.terminal = Some(Err(error)),
+                Ok(product) => match self.owner.prepare(product) {
                     Err(error) => self.terminal = Some(Err(self.owner.fail(error))),
                     Ok(prepared) => {
                         let query = prepared.compilation.query_id();
                         match cx.read(query) {
-                            Poll::Pending => return QueryPoll::Waiting(vec![query]),
-                            Poll::Ready(Err(error)) => self.terminal = Some(Err(error)),
-                            Poll::Ready(Ok(product)) => {
+                            Err(error) => self.terminal = Some(Err(error)),
+                            Ok(product) => {
                                 self.terminal = Some(
                                     self.owner.publish(product).map_err(|e| self.owner.fail(e)),
                                 )
@@ -473,10 +468,7 @@ impl QueryTask for Task {
                 },
             }
         }
-        match self.terminal.clone().unwrap() {
-            Ok(product) => QueryPoll::Complete(product),
-            Err(error) => QueryPoll::Failed(error),
-        }
+        self.terminal.clone().unwrap()
     }
 }
 

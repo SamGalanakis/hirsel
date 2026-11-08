@@ -6,12 +6,9 @@ use super::*;
 use hirsel_engine_runtime::*;
 use hirsel_engine_store::{Domain, Reference, ResultStore};
 use hirsel_types::storage::{CallableStorageProfile, graph::*};
-use std::{
-    sync::{
-        Mutex,
-        atomic::{AtomicU64, Ordering::Relaxed},
-    },
-    task::Poll,
+use std::sync::{
+    Mutex,
+    atomic::{AtomicU64, Ordering::Relaxed},
 };
 pub const FRONT_STORAGE_GRAPH_KIND: u32 = 0x4600_0014;
 const OUTPUT: Domain = Domain {
@@ -155,9 +152,7 @@ impl QueryFactory for Factory {
             seen: BTreeSet::new(),
             bodies: BTreeMap::new(),
             current: None,
-            recipe: None,
             reads: ReadsBuilder::new(),
-            waiting: None,
             digest: ContentHash::of_bytes(b"source storage"),
             terminal,
         }))
@@ -175,9 +170,7 @@ struct Task {
     seen: BTreeSet<DefPath>,
     bodies: BTreeMap<hirsel_types::storage::StorageCallable, StorageBody>,
     current: Option<Current>,
-    recipe: Option<Box<dyn QueryTask>>,
     reads: ReadsBuilder,
-    waiting: Option<QueryId>,
     terminal: Option<Result<ProductRef, Reference>>,
     digest: ContentHash,
 }
@@ -188,59 +181,39 @@ impl QueryTask for Task {
     fn weight(&self) -> MemoryWeight {
         self.owner.weight
     }
-    fn poll(&mut self, cx: &mut dyn QueryContext) -> QueryPoll {
+    fn run(&mut self, cx: &mut dyn QueryContext) -> QueryOutcome {
         let result = if let Some(result) = self.terminal.clone() {
             result
         } else {
-            match self.advance(cx) {
-                Poll::Pending => return QueryPoll::Waiting(self.waiting.into_iter().collect()),
-                Poll::Ready(result) => {
-                    self.terminal = Some(result.clone());
-                    result
-                }
-            }
+            let result = self.advance(cx);
+            self.terminal = Some(result.clone());
+            result
         };
-        match result {
-            Ok(product) => QueryPoll::Complete(product),
-            Err(reference) => QueryPoll::Failed(reference),
-        }
+        result
     }
 }
 impl Task {
-    fn read(
-        &mut self,
-        cx: &mut dyn QueryContext,
-        query: QueryId,
-    ) -> Poll<Result<ProductRef, Reference>> {
-        match cx.read(query) {
-            Poll::Pending => {
-                self.waiting = Some(query);
-                Poll::Pending
-            }
-            Poll::Ready(result) => {
-                self.waiting = None;
-                if let Ok(product) = &result {
-                    self.fold(product);
-                }
-                Poll::Ready(result)
-            }
+    fn read(&mut self, cx: &mut dyn QueryContext, query: QueryId) -> Result<ProductRef, Reference> {
+        let result = cx.read(query);
+        if let Ok(product) = &result {
+            self.fold(product);
         }
+        result
     }
-    fn advance(&mut self, cx: &mut dyn QueryContext) -> Poll<Result<ProductRef, Reference>> {
+    fn advance(&mut self, cx: &mut dyn QueryContext) -> Result<ProductRef, Reference> {
         let owner = self.owner.clone();
         if !self.initialized {
             match self.read(cx, owner.growth.query()) {
-                Poll::Pending => return Poll::Pending,
-                Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
-                Poll::Ready(Ok(_)) => (),
+                Err(error) => return Err(error),
+                Ok(_) => (),
             };
             let mut checked = Vec::new();
             for definition in &owner.definitions {
                 let path = definition.path();
                 let Some(output) = owner.front.checked_definition(path) else {
-                    return Poll::Ready(Err(owner.fail(invalid(format!(
+                    return Err(owner.fail(invalid(format!(
                         "missing checked source storage root {path}"
-                    )))));
+                    ))));
                 };
                 self.reads.merge(&output.reads);
                 self.digest = ContentHash::of_parts(
@@ -285,7 +258,7 @@ impl Task {
         loop {
             if self.current.is_none() {
                 let Some(path) = self.pending.pop_first() else {
-                    return Poll::Ready(self.complete().map_err(|error| owner.fail(error)));
+                    return self.complete().map_err(|error| owner.fail(error));
                 };
                 if !self.seen.insert(path.clone()) {
                     continue;
@@ -297,41 +270,20 @@ impl Task {
                     continue;
                 }
                 let Some(query) = owner.recipes.query(&path) else {
-                    return Poll::Ready(Err(owner.fail(invalid(format!(
+                    return Err(owner.fail(invalid(format!(
                         "missing actual storage producer for {path}"
-                    )))));
+                    ))));
                 };
-                if self.recipe.is_none() {
-                    self.recipe = match owner.recipes.factory().create(query) {
-                        Ok(recipe) => Some(recipe),
-                        Err(error) => return Poll::Ready(Err(error)),
-                    };
-                }
-                let recipe = self.recipe.as_mut().unwrap();
+                let mut recipe = owner.recipes.factory().create(query)?;
                 if recipe.id() != query {
-                    return Poll::Ready(Err(owner.errors.protocol));
+                    return Err(owner.errors.protocol);
                 }
-                // The root owns one recipe continuation. Its reads are still
-                // actual runtime reads; Pending releases this root's execution
-                // grant instead of allocating a scheduler node per definition.
-                let product = match recipe.poll(cx) {
-                    QueryPoll::Waiting(dependencies) | QueryPoll::WaitingAny(dependencies) => {
-                        let [dependency] = dependencies.as_slice() else {
-                            return Poll::Ready(Err(owner.errors.protocol));
-                        };
-                        self.waiting = Some(*dependency);
-                        self.pending.insert(path.clone());
-                        self.seen.remove(&path);
-                        return Poll::Pending;
-                    }
-                    QueryPoll::Failed(error) => return Poll::Ready(Err(error)),
-                    QueryPoll::Complete(product) => product,
-                };
-                self.recipe = None;
-                self.waiting = None;
+                // The root runs each recipe under its own frame; the recipe's
+                // reads are still actual runtime reads.
+                let product = recipe.run(cx)?;
                 self.fold(&product);
                 let Some(output) = owner.recipes.outcome(product) else {
-                    return Poll::Ready(Err(owner.errors.protocol));
+                    return Err(owner.errors.protocol);
                 };
                 self.reads.merge(&output.reads);
                 self.current = Some(Current {
@@ -358,23 +310,19 @@ impl Task {
                                 }
                                 let Some(query) = owner.lower.evaluate_query(definition.path())
                                 else {
-                                    return Poll::Ready(Err(owner.fail(invalid(format!(
+                                    return Err(owner.fail(invalid(format!(
                                         "missing source constant producer for {}",
                                         definition.path()
-                                    )))));
+                                    ))));
                                 };
                                 match self.read(cx, query) {
-                                    Poll::Pending => {
-                                        self.current = Some(current);
-                                        return Poll::Pending;
-                                    }
-                                    Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
-                                    Poll::Ready(Ok(_)) => (),
+                                    Err(error) => return Err(error),
+                                    Ok(_) => (),
                                 }
                                 let materialized =
                                     match owner.lower.settled_constant(definition.path(), &[]) {
                                         Ok(value) => value,
-                                        Err(error) => return Poll::Ready(Err(owner.fail(error))),
+                                        Err(error) => return Err(owner.fail(error)),
                                     };
                                 if let Some(reads) = owner
                                     .lower
@@ -399,7 +347,7 @@ impl Task {
                                     },
                                 ) {
                                     Ok(value) => value,
-                                    Err(error) => return Poll::Ready(Err(owner.fail(error))),
+                                    Err(error) => return Err(owner.fail(error)),
                                 };
                             }
                         }
@@ -414,7 +362,7 @@ impl Task {
                             ..
                         } => {
                             if let Err(error) = self.reference(*definition, arguments) {
-                                return Poll::Ready(Err(owner.fail(error)));
+                                return Err(owner.fail(error));
                             }
                         }
                         StorageOp::Call {
@@ -431,7 +379,7 @@ impl Task {
                                         arguments,
                                     } => {
                                         if let Err(error) = self.reference(*definition, arguments) {
-                                            return Poll::Ready(Err(owner.fail(error)));
+                                            return Err(owner.fail(error));
                                         }
                                     }
                                     StorageValue::Constant { code, .. } => {
@@ -440,7 +388,7 @@ impl Task {
                                                 reference.definition,
                                                 &reference.arguments,
                                             ) {
-                                                return Poll::Ready(Err(owner.fail(error)));
+                                                return Err(owner.fail(error));
                                             }
                                         }
                                     }
@@ -456,9 +404,7 @@ impl Task {
                     current.node += 1;
                 }
                 if self.bodies.insert(body.callable, body.clone()).is_some() {
-                    return Poll::Ready(Err(
-                        owner.fail(invalid("duplicate actual callable association"))
-                    ));
+                    return Err(owner.fail(invalid("duplicate actual callable association")));
                 }
                 current.body += 1;
                 current.node = 0;
@@ -469,7 +415,7 @@ impl Task {
                 bytes.checked_add(weight.bytes)
             });
             if bytes.is_none_or(|bytes| bytes > owner.weight.retained) {
-                return Poll::Ready(Err(owner.errors.resource));
+                return Err(owner.errors.resource);
             }
         }
     }

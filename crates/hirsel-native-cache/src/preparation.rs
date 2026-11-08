@@ -14,7 +14,6 @@ use hirsel_syntax::{ContentHash, DefPath};
 use std::{
     collections::BTreeMap,
     sync::{Arc, Mutex, OnceLock},
-    task::Poll,
 };
 
 pub const PREPARATION_KIND: u32 = 0x4e00_0050;
@@ -337,24 +336,20 @@ impl QueryTask for Task {
     fn weight(&self) -> MemoryWeight {
         self.owner.weight
     }
-    fn continuation_bytes(&self) -> u64 {
-        size_of::<Self>() as u64
-    }
-    fn poll(&mut self, cx: &mut dyn QueryContext) -> QueryPoll {
+    fn run(&mut self, cx: &mut dyn QueryContext) -> QueryOutcome {
         let result = if let Some(result) = self.terminal.clone() {
             result
         } else {
             let entry = &self.owner.entries[&self.query.address.0];
             match cx.read(entry.source) {
-                Poll::Pending => return QueryPoll::Waiting(vec![entry.source]),
-                Poll::Ready(Err(error)) => Err(error),
-                Poll::Ready(Ok(source)) => self.owner.prepare(entry, source),
+                Err(error) => Err(error),
+                Ok(source) => self.owner.prepare(entry, source),
             }
         };
         self.terminal = Some(result.clone());
         match result {
-            Ok(product) => QueryPoll::Complete(product),
-            Err(error) => QueryPoll::Failed(error),
+            Ok(product) => Ok(product),
+            Err(error) => Err(error),
         }
     }
 }

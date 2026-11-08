@@ -33,52 +33,6 @@ pub(crate) trait DependencySource {
     ) -> DependencyProduct<Option<DefPath>>;
 }
 
-/// Saved dependency futures retain the same source request and read evidence
-/// across suspension. Their output confers no additional verifier authority.
-pub(crate) trait AsyncDependencySource {
-    fn definition(
-        &mut self,
-        path: &DefPath,
-    ) -> impl std::future::Future<Output = DependencyProduct<DefinitionRef>>;
-    fn constant(
-        &mut self,
-        path: &DefPath,
-    ) -> impl std::future::Future<Output = DependencyProduct<MaterializedRef>>;
-    fn constant_instance(
-        &mut self,
-        path: &DefPath,
-        arguments: &[u64],
-    ) -> impl std::future::Future<Output = DependencyProduct<MaterializedRef>>;
-    fn instance_body(
-        &mut self,
-        path: &DefPath,
-        arguments: &[GenericArgument],
-    ) -> impl std::future::Future<Output = DependencyProduct<Option<DefPath>>>;
-}
-struct ReadyDependencies<'a, S>(&'a mut S);
-impl<S: DependencySource> AsyncDependencySource for ReadyDependencies<'_, S> {
-    async fn definition(&mut self, path: &DefPath) -> DependencyProduct<DefinitionRef> {
-        self.0.definition(path)
-    }
-    async fn constant(&mut self, path: &DefPath) -> DependencyProduct<MaterializedRef> {
-        self.0.constant(path)
-    }
-    async fn constant_instance(
-        &mut self,
-        path: &DefPath,
-        arguments: &[u64],
-    ) -> DependencyProduct<MaterializedRef> {
-        self.0.constant_instance(path, arguments)
-    }
-    async fn instance_body(
-        &mut self,
-        path: &DefPath,
-        arguments: &[GenericArgument],
-    ) -> DependencyProduct<Option<DefPath>> {
-        self.0.instance_body(path, arguments)
-    }
-}
-
 /// An immutable private artifact after V admission. It can execute with any
 /// task-local dependency source and a worker's runtime; it owns no session.
 /// Lowering stays in EvaluationInput::lower, so a failed lower never forces
@@ -183,33 +137,14 @@ impl ValidatedEvaluation {
     }
     /// The caller clones RuntimeTypes once per worker. Nested evaluations
     /// reuse that runtime so Serialization's recorder stack remains nested.
+    /// The caller clones RuntimeTypes once per worker. Nested evaluations
+    /// reuse that runtime so Serialization's recorder stack remains nested.
     pub(crate) fn run(
         self,
         sources: &SourceMap,
         limits: crate::ComptimeLimits,
         runtime: &hirsel_interp::aggregate::RuntimeTypes,
         source: &mut impl DependencySource,
-    ) -> EvaluationOutcome {
-        use std::{
-            future::Future,
-            task::{Context, Poll, Waker},
-        };
-        let mut source = ReadyDependencies(source);
-        let mut execution = std::pin::pin!(self.run_async(sources, limits, runtime, &mut source));
-        match execution
-            .as_mut()
-            .poll(&mut Context::from_waker(Waker::noop()))
-        {
-            Poll::Ready(product) => product,
-            Poll::Pending => unreachable!("synchronous S1 dependency source suspended"),
-        }
-    }
-    pub(crate) async fn run_async(
-        self,
-        sources: &SourceMap,
-        limits: crate::ComptimeLimits,
-        runtime: &hirsel_interp::aggregate::RuntimeTypes,
-        source: &mut impl AsyncDependencySource,
     ) -> EvaluationOutcome {
         let configuration = RunConfiguration {
             entry: self.definition.path.path().clone(),
@@ -232,8 +167,7 @@ impl ValidatedEvaluation {
             site: self.site,
             ty: self.ty,
         }
-        .run_async(&mut provider)
-        .await;
+        .run(&mut provider);
         let mut reads = ReadsBuilder::new();
         let successor = provider.successor.clone();
         let acceptance = provider
@@ -358,39 +292,6 @@ impl<S: DependencySource> TirProvider for EvaluationProvider<'_, S> {
         self.merge(product)
     }
     fn constant_definitions(&mut self) -> Result<Vec<DefPath>, QueryError> {
-        Ok(vec![])
-    }
-}
-
-impl<S: AsyncDependencySource> hirsel_interp::AsyncTirProvider for EvaluationProvider<'_, S> {
-    async fn definition(&mut self, path: &DefPath) -> Result<DefinitionRef, QueryError> {
-        if path == self.root.path.path() {
-            return Ok(self.root.clone());
-        }
-        let product = self.source.definition(path).await;
-        self.merge(product)
-    }
-    async fn constant(&mut self, path: &DefPath) -> Result<MaterializedRef, QueryError> {
-        let product = self.source.constant(path).await;
-        self.merge(product)
-    }
-    async fn constant_instance(
-        &mut self,
-        path: &DefPath,
-        arguments: &[u64],
-    ) -> Result<MaterializedRef, QueryError> {
-        let product = self.source.constant_instance(path, arguments).await;
-        self.merge(product)
-    }
-    async fn instance_body(
-        &mut self,
-        path: &DefPath,
-        arguments: &[GenericArgument],
-    ) -> Result<Option<DefPath>, QueryError> {
-        let product = self.source.instance_body(path, arguments).await;
-        self.merge(product)
-    }
-    async fn constant_definitions(&mut self) -> Result<Vec<DefPath>, QueryError> {
         Ok(vec![])
     }
 }
@@ -537,27 +438,26 @@ mod tests {
         }
     }
 
-    struct DeferredSource {
-        dependencies: hirsel_engine_runtime::QueryReads,
+    struct DeferredSource<'r, 'c> {
+        dependencies: &'r hirsel_engine_runtime::QueryReads<'c>,
         query: hirsel_engine_runtime::QueryId,
         types: Arc<hirsel_types::TypeInterner>,
         reads: Reads,
         calls: Arc<std::sync::atomic::AtomicUsize>,
     }
-    impl AsyncDependencySource for DeferredSource {
-        async fn definition(&mut self, _: &DefPath) -> DependencyProduct<DefinitionRef> {
+    impl DependencySource for DeferredSource<'_, '_> {
+        fn definition(&mut self, _: &DefPath) -> DependencyProduct<DefinitionRef> {
             DependencyProduct {
                 successor: None,
                 result: Err(QueryError::NotImplemented),
                 reads: Reads::empty(),
             }
         }
-        async fn constant(&mut self, _: &DefPath) -> DependencyProduct<MaterializedRef> {
+        fn constant(&mut self, _: &DefPath) -> DependencyProduct<MaterializedRef> {
             self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             let result = self
                 .dependencies
                 .read(self.query)
-                .await
                 .map(|_| {
                     Arc::new(hirsel_tir::Materialized {
                         root: hirsel_tir::ValueNode {
@@ -573,14 +473,14 @@ mod tests {
                 reads: self.reads.clone(),
             }
         }
-        async fn constant_instance(
+        fn constant_instance(
             &mut self,
             path: &DefPath,
             _: &[u64],
         ) -> DependencyProduct<MaterializedRef> {
-            self.constant(path).await
+            self.constant(path)
         }
-        async fn instance_body(
+        fn instance_body(
             &mut self,
             _: &DefPath,
             _: &[GenericArgument],
@@ -647,14 +547,14 @@ mod tests {
         fn weight(&self) -> hirsel_engine_runtime::MemoryWeight {
             Default::default()
         }
-        fn poll(
+        fn run(
             &mut self,
             _: &mut dyn hirsel_engine_runtime::QueryContext,
-        ) -> hirsel_engine_runtime::QueryPoll {
+        ) -> hirsel_engine_runtime::QueryOutcome {
             if self.fail {
-                hirsel_engine_runtime::QueryPoll::Failed(errors().protocol)
+                Err(errors().protocol)
             } else {
-                hirsel_engine_runtime::QueryPoll::Complete(product(self.query))
+                Ok(product(self.query))
             }
         }
     }
@@ -684,12 +584,11 @@ mod tests {
             let snapshot = self.snapshot.clone();
             let calls = self.calls.clone();
             let fail = self.fail;
-            let task = hirsel_engine_runtime::LocalFutureTask::new(
+            let task = hirsel_engine_runtime::LocalFnTask::new(
                 query,
                 self.weight(query)?,
-                1,
                 errors(),
-                |dependencies| async move {
+                move |dependencies| {
                     let root = DefPath::core("saved-private-root");
                     let dependency = DefPath::core("saved-private-dependency");
                     let prepared = reading_artifact(&types, &root, &dependency);
@@ -721,14 +620,12 @@ mod tests {
                         reads: expected.clone(),
                         calls,
                     };
-                    let outcome = validated
-                        .run_async(
-                            &SourceMap::default(),
-                            Default::default(),
-                            &runtime,
-                            &mut source,
-                        )
-                        .await;
+                    let outcome = validated.run(
+                        &SourceMap::default(),
+                        Default::default(),
+                        &runtime,
+                        &mut source,
+                    );
                     assert_eq!(outcome.value.reads, expected);
                     assert!(outcome.limit.is_none());
                     if fail {
@@ -744,7 +641,7 @@ mod tests {
                     }
                     Ok(product(query))
                 },
-            )?;
+            );
             Ok(Box::new(task))
         }
     }

@@ -13,7 +13,6 @@ use hirsel_syntax::ContentHash;
 use std::{
     collections::BTreeMap,
     sync::{Arc, Mutex},
-    task::Poll,
 };
 
 pub(super) const BYTES: u64 = 4096;
@@ -123,7 +122,7 @@ impl QueryTask for Task {
     fn weight(&self) -> MemoryWeight {
         self.0.weight
     }
-    fn poll(&mut self, cx: &mut dyn QueryContext) -> QueryPoll {
+    fn run(&mut self, cx: &mut dyn QueryContext) -> QueryOutcome {
         let owner = &self.0;
         if let Some(completed) = owner
             .completed
@@ -131,15 +130,11 @@ impl QueryTask for Task {
             .unwrap_or_else(|e| e.into_inner())
             .as_ref()
         {
-            return QueryPoll::Complete(completed.product.clone());
+            return Ok(completed.product.clone());
         }
-        let exported = match cx.read(owner.export.query()) {
-            Poll::Pending => return QueryPoll::Waiting(vec![owner.export.query()]),
-            Poll::Ready(Err(error)) => return QueryPoll::Failed(error),
-            Poll::Ready(Ok(product)) => product,
-        };
+        let exported = cx.read(owner.export.query())?;
         let Ok((check, tir)) = owner.export.outcome(exported) else {
-            return QueryPoll::Failed(owner.errors.protocol);
+            return Err(owner.errors.protocol);
         };
         let accepted = check.completion == CheckCompletion::Complete
             && !check
@@ -150,34 +145,26 @@ impl QueryTask for Task {
         if accepted {
             let query = owner.assembly.query();
             let built = match cx.read(query) {
-                Poll::Pending => return QueryPoll::Waiting(vec![query]),
-                Poll::Ready(Err(error)) => Err(owner
+                Err(error) => Err(owner
                     .assembly
                     .failure(error)
                     .map(|e| e.to_string())
                     .unwrap_or_else(|| format!("native compiler refusal: {error:?}"))),
-                Poll::Ready(Ok(product)) => owner.assembly.bootstrap().outcome(product),
+                Ok(product) => owner.assembly.bootstrap().outcome(product),
             };
             match built {
-                Err(error) => return QueryPoll::Failed(owner.fail(error)),
+                Err(error) => return Err(owner.fail(error)),
                 Ok((compilation, product, _source)) => {
                     let Ok(tasks) = compilation.native(product.clone()) else {
-                        return QueryPoll::Failed(owner.errors.protocol);
+                        return Err(owner.errors.protocol);
                     };
                     let mut reads = Vec::new();
-                    let mut waiting = Vec::new();
                     for query in tasks.receipt_queries() {
                         match cx.read(query) {
-                            Poll::Pending => waiting.push(query),
-                            Poll::Ready(Err(error)) => return QueryPoll::Failed(error),
-                            Poll::Ready(Ok(product)) if product.address == query.address => {
-                                reads.push(product)
-                            }
-                            _ => return QueryPoll::Failed(owner.errors.protocol),
+                            Err(error) => return Err(error),
+                            Ok(product) if product.address == query.address => reads.push(product),
+                            _ => return Err(owner.errors.protocol),
                         }
-                    }
-                    if !waiting.is_empty() {
-                        return QueryPoll::Waiting(waiting);
                     }
                     let result = (|| {
                         let receipts = tasks.receipts(&reads)?;
@@ -211,23 +198,23 @@ impl QueryTask for Task {
                     })();
                     match result {
                         Ok(outputs) => native = Some(outputs),
-                        Err(error) => return QueryPoll::Failed(owner.fail(error)),
+                        Err(error) => return Err(owner.fail(error)),
                     }
                 }
             }
         }
         let artifacts = match host_selector::completed_artifacts(&check, tir, native) {
             Ok(artifacts) => artifacts,
-            Err(error) => return QueryPoll::Failed(owner.fail(error)),
+            Err(error) => return Err(owner.fail(error)),
         };
         let bytes = artifacts.iter().try_fold(0u64, |n, (key, value)| {
             n.checked_add((key.capacity() + value.capacity() + 128) as u64)
         });
         let Some(bytes) = bytes.and_then(|n| n.checked_mul(2)) else {
-            return QueryPoll::Failed(owner.errors.resource);
+            return Err(owner.errors.resource);
         };
         let Ok(allowance) = owner.budget.reserve(bytes) else {
-            return QueryPoll::Failed(owner.errors.resource);
+            return Err(owner.errors.resource);
         };
         let mut descriptor = Vec::new();
         for (name, bytes) in &artifacts {
@@ -236,7 +223,7 @@ impl QueryTask for Task {
             descriptor.extend_from_slice(&ContentHash::of_bytes(bytes).0);
         }
         let Some(record) = owner.store.put_content(OUTPUT, &descriptor) else {
-            return QueryPoll::Failed(owner.errors.resource);
+            return Err(owner.errors.resource);
         };
         let action = Action(ContentHash::of_parts(
             "hirsel.native-artifacts.action.v1",
@@ -246,7 +233,7 @@ impl QueryTask for Task {
             ],
         ));
         let Some(archive) = owner.store.open_product_archive(record) else {
-            return QueryPoll::Failed(owner.errors.resource);
+            return Err(owner.errors.resource);
         };
         let product = ProductRef::import_archive(owner.query.address, action, archive);
         *owner.completed.lock().unwrap_or_else(|e| e.into_inner()) = Some(Completed {
@@ -256,6 +243,6 @@ impl QueryTask for Task {
         });
         // Native artifacts are this request's root (see proof_export).
         owner.store.publish_root(product.address, action, record);
-        QueryPoll::Complete(product)
+        Ok(product)
     }
 }

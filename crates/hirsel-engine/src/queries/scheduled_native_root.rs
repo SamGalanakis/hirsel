@@ -7,7 +7,7 @@ use hirsel_engine_runtime::*;
 use hirsel_engine_store::{Domain, Reference, ResultStore};
 use hirsel_registry::{OperationKey, OperationParameter, OperationRecord};
 use hirsel_types::SignatureKind;
-use std::{sync::Mutex, task::Poll};
+use std::sync::Mutex;
 mod acceptance;
 
 pub const FRONT_NATIVE_ROOT_KIND: u32 = 0x4600_001a;
@@ -254,31 +254,24 @@ impl QueryFactory for Factory {
         if id != self.0.preparation_query() {
             return Err(self.0.errors.protocol);
         }
-        let state = self
+        let terminal = self
             .0
             .completed
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .as_ref()
-            .map(|(p, _)| RootState::Finished(Ok(p.clone())))
-            .unwrap_or(RootState::Seeding { next: 0 });
+            .map(|(p, _)| Ok(p.clone()));
         Ok(Box::new(Task {
             owner: self.0.clone(),
             id,
-            state,
+            terminal,
         }))
     }
 }
 struct Task {
     owner: Arc<FrontNativeQueries>,
     id: QueryId,
-    state: RootState,
-}
-enum RootState {
-    Seeding { next: usize },
-    Preparing,
-    Definitions(DefinitionsState),
-    Finished(Result<ProductRef, Reference>),
+    terminal: Option<Result<ProductRef, Reference>>,
 }
 struct DefinitionsState {
     selected: Vec<DefPath>,
@@ -288,10 +281,6 @@ struct DefinitionsState {
     evaluated: Vec<QueryId>,
     charge: MemoryReservation,
 }
-enum Advance {
-    Waiting(QueryId),
-    Finished(Result<ProductRef, Reference>),
-}
 impl QueryTask for Task {
     fn id(&self) -> QueryId {
         self.id
@@ -299,119 +288,68 @@ impl QueryTask for Task {
     fn weight(&self) -> MemoryWeight {
         self.owner.weight
     }
-    fn poll(&mut self, cx: &mut dyn QueryContext) -> QueryPoll {
-        let state = std::mem::replace(&mut self.state, RootState::Preparing);
-        let (state, advance) = state.advance(&self.owner, self.id, cx);
-        self.state = state;
-        let result = match advance {
-            Advance::Waiting(id) => return QueryPoll::Waiting(vec![id]),
-            Advance::Finished(result) => result,
+    fn run(&mut self, cx: &mut dyn QueryContext) -> QueryOutcome {
+        if let Some(result) = &self.terminal {
+            return result.clone();
+        }
+        let result = prepare(&self.owner, self.id, cx);
+        self.terminal = Some(result.clone());
+        result
+    }
+}
+fn prepare(
+    owner: &Arc<FrontNativeQueries>,
+    id: QueryId,
+    cx: &mut dyn QueryContext,
+) -> QueryOutcome {
+    for path in &owner.template.definitions {
+        let definition = owner.definitions.query(path).ok_or(owner.errors.protocol)?;
+        cx.read(definition)?;
+    }
+    let run_id = owner
+        .run
+        .preparation_query(&owner.entry)
+        .ok_or(owner.errors.protocol)?;
+    let product = cx.read(run_id)?;
+    let output = owner
+        .run
+        .outcome(product.clone())
+        .ok_or(owner.errors.protocol)?;
+    let charge = owner
+        .request()
+        .reserve(0)
+        .map_err(|_| owner.errors.resource)?;
+    let mut state = DefinitionsState::prepared(product, &output, charge);
+    while state.next < state.selected.len() {
+        let path = &state.selected[state.next];
+        let Some(definition) = owner.definitions.query(path) else {
+            return Err(owner.fail(invalid(format!(
+                "missing native source product input {path}"
+            ))));
         };
-        match result {
-            Ok(product) => QueryPoll::Complete(product),
-            Err(reference) => QueryPoll::Failed(reference),
-        }
+        let product = cx.read(definition)?;
+        let output = owner
+            .definitions
+            .outcome(product)
+            .ok_or(owner.errors.protocol)?;
+        state.definition_done(output, owner)?;
     }
-}
-fn read(cx: &mut dyn QueryContext, id: QueryId) -> Result<Result<ProductRef, Reference>, QueryId> {
-    match cx.read(id) {
-        Poll::Pending => Err(id),
-        Poll::Ready(result) => Ok(result),
+    while let Some(query) = owner
+        .definitions
+        .staged_static_query(&state.selected, &state.evaluated)
+    {
+        cx.read(query)?;
+        // Vec's first allocation holds four query slots; this
+        // bound also covers every later geometric growth step.
+        state
+            .charge
+            .grow(4 * std::mem::size_of::<QueryId>() as u64)
+            .map_err(|_| owner.errors.resource)?;
+        state.evaluated.push(query);
     }
-}
-impl RootState {
-    fn finish(result: Result<ProductRef, Reference>) -> (Self, Advance) {
-        (Self::Finished(result.clone()), Advance::Finished(result))
-    }
-    fn advance(
-        self,
-        owner: &Arc<FrontNativeQueries>,
-        id: QueryId,
-        cx: &mut dyn QueryContext,
-    ) -> (Self, Advance) {
-        match self {
-            Self::Seeding { mut next } => {
-                while next < owner.template.definitions.len() {
-                    let path = &owner.template.definitions[next];
-                    let Some(id) = owner.definitions.query(path) else {
-                        return Self::finish(Err(owner.errors.protocol));
-                    };
-                    match read(cx, id) {
-                        Err(id) => return (Self::Seeding { next }, Advance::Waiting(id)),
-                        Ok(Err(error)) => return Self::finish(Err(error)),
-                        Ok(Ok(_)) => cx.release_body(id),
-                    }
-                    next += 1;
-                }
-                Self::Preparing.advance(owner, id, cx)
-            }
-            Self::Preparing => {
-                let Some(run_id) = owner.run.preparation_query(&owner.entry) else {
-                    return Self::finish(Err(owner.errors.protocol));
-                };
-                let product = match read(cx, run_id) {
-                    Err(id) => return (Self::Preparing, Advance::Waiting(id)),
-                    Ok(Err(error)) => return Self::finish(Err(error)),
-                    Ok(Ok(product)) => product,
-                };
-                let Some(output) = owner.run.outcome(product.clone()) else {
-                    return Self::finish(Err(owner.errors.protocol));
-                };
-                let Ok(charge) = owner.request().reserve(0) else {
-                    return Self::finish(Err(owner.errors.resource));
-                };
-                Self::Definitions(DefinitionsState::prepared(product, &output, charge))
-                    .advance(owner, id, cx)
-            }
-            Self::Definitions(mut state) => {
-                while state.next < state.selected.len() {
-                    let path = &state.selected[state.next];
-                    let Some(id) = owner.definitions.query(path) else {
-                        return Self::finish(Err(owner.fail(invalid(format!(
-                            "missing native source product input {path}"
-                        )))));
-                    };
-                    let product = match read(cx, id) {
-                        Err(id) => return (Self::Definitions(state), Advance::Waiting(id)),
-                        Ok(Err(error)) => return Self::finish(Err(error)),
-                        Ok(Ok(product)) => product,
-                    };
-                    let Some(output) = owner.definitions.outcome(product) else {
-                        return Self::finish(Err(owner.errors.protocol));
-                    };
-                    if let Err(error) = state.definition_done(output, owner) {
-                        return Self::finish(Err(error));
-                    }
-                }
-                while let Some(query) = owner
-                    .definitions
-                    .staged_static_query(&state.selected, &state.evaluated)
-                {
-                    match read(cx, query) {
-                        Err(query) => return (Self::Definitions(state), Advance::Waiting(query)),
-                        Ok(Err(error)) => return Self::finish(Err(error)),
-                        Ok(Ok(_)) => {}
-                    }
-                    // Vec's first allocation holds four query slots; this
-                    // bound also covers every later geometric growth step.
-                    if state
-                        .charge
-                        .grow(4 * std::mem::size_of::<QueryId>() as u64)
-                        .is_err()
-                    {
-                        return Self::finish(Err(owner.errors.resource));
-                    }
-                    state.evaluated.push(query);
-                }
-                Self::finish(
-                    state
-                        .complete(owner, id, cx.scratch_bytes())
-                        .map_err(|error| owner.fail(error)),
-                )
-            }
-            Self::Finished(result) => Self::finish(result),
-        }
-    }
+    state
+        .complete(owner, id, cx.scratch_bytes())
+        .map_err(|error| owner.fail(error))
 }
 impl DefinitionsState {
     fn prepared(

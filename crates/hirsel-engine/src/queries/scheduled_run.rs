@@ -43,7 +43,7 @@ use hirsel_engine_runtime::*;
 use hirsel_engine_store::{Domain, Reference, ResultStore};
 use hirsel_proof_export::DefinitionContent;
 use hirsel_types::{SignatureKind, SignatureRef};
-use std::{sync::Mutex, task::Poll};
+use std::sync::Mutex;
 
 pub const FRONT_RUN_KIND: u32 = 0x4600_0010;
 pub const FRONT_RUN_BATCH_KIND: u32 = 0x4600_001e;
@@ -477,7 +477,6 @@ impl QueryFactory for Factory {
             pending: Vec::new(),
             entries: BTreeMap::new(),
             input: None,
-            waiting: None,
             terminal: completed.map(Ok),
         }))
     }
@@ -496,7 +495,6 @@ struct Task {
     pending: Vec<DefId>,
     entries: BTreeMap<DefId, Arc<GraphEntry>>,
     input: Option<Arc<Input>>,
-    waiting: Option<QueryId>,
     terminal: Option<Result<ProductRef, Reference>>,
 }
 impl QueryTask for Task {
@@ -506,42 +504,19 @@ impl QueryTask for Task {
     fn weight(&self) -> MemoryWeight {
         self.queries.weight
     }
-    fn poll(&mut self, cx: &mut dyn QueryContext) -> QueryPoll {
+    fn run(&mut self, cx: &mut dyn QueryContext) -> QueryOutcome {
         let result = if let Some(result) = self.terminal.clone() {
             result
         } else {
-            match self.advance(cx) {
-                Poll::Pending => return QueryPoll::Waiting(self.waiting.into_iter().collect()),
-                Poll::Ready(result) => {
-                    self.terminal = Some(result.clone());
-                    result
-                }
-            }
+            let result = self.advance(cx);
+            self.terminal = Some(result.clone());
+            result
         };
-        match result {
-            Ok(product) => QueryPoll::Complete(product),
-            Err(error) => QueryPoll::Failed(error),
-        }
+        result
     }
 }
 impl Task {
-    fn read(
-        &mut self,
-        cx: &mut dyn QueryContext,
-        query: QueryId,
-    ) -> Poll<Result<ProductRef, Reference>> {
-        match cx.read(query) {
-            Poll::Pending => {
-                self.waiting = Some(query);
-                Poll::Pending
-            }
-            Poll::Ready(result) => {
-                self.waiting = None;
-                Poll::Ready(result)
-            }
-        }
-    }
-    fn advance(&mut self, cx: &mut dyn QueryContext) -> Poll<Result<ProductRef, Reference>> {
+    fn advance(&mut self, cx: &mut dyn QueryContext) -> Result<ProductRef, Reference> {
         if !self.started {
             self.started = true;
             self.pending.push(DefId::intern(&self.root));
@@ -566,7 +541,7 @@ impl Task {
                 }
                 let input = match self.queries.input(path) {
                     Ok(input) => input,
-                    Err(error) => return Poll::Ready(Err(self.queries.failure_record(error))),
+                    Err(error) => return Err(self.queries.failure_record(error)),
                 };
                 if hirsel_engine_admission::entry_roots(
                     self.queries.lower.signatures().types(),
@@ -587,21 +562,17 @@ impl Task {
                     continue;
                 }
                 let Some(query) = self.queries.semantic_query(path) else {
-                    return Poll::Ready(Err(self.queries.protocol_failure(
+                    return Err(self.queries.protocol_failure(
                         self.query,
                         &format!("Run semantic input for {path} is outside the captured namespace"),
-                    )));
+                    ));
                 };
-                let product = match self.read(cx, query) {
-                    Poll::Pending => return Poll::Pending,
-                    Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
-                    Poll::Ready(Ok(product)) => product,
-                };
+                let product = cx.read(query)?;
                 let Some(entry) = self.queries.semantic_entry(product) else {
-                    return Poll::Ready(Err(self.queries.protocol_failure(
+                    return Err(self.queries.protocol_failure(
                         self.query,
                         "Run producer or observation is unavailable",
-                    )));
+                    ));
                 };
                 self.pending.pop();
                 self.pending.extend(
@@ -618,7 +589,7 @@ impl Task {
                     .graph_bytes()
                     .is_none_or(|bytes| bytes > self.queries.weight.retained)
                 {
-                    return Poll::Ready(Err(self.queries.errors.resource));
+                    return Err(self.queries.errors.resource);
                 }
             }
             match self.queries.lower.selected_instances(
@@ -631,7 +602,7 @@ impl Task {
                         .filter(|p| !self.entries.contains_key(&DefId::intern(p)))
                         .map(|path| DefId::intern(&path)),
                 ),
-                Err(error) => return Poll::Ready(Err(self.queries.failure_record(error))),
+                Err(error) => return Err(self.queries.failure_record(error)),
             }
             if self.pending.is_empty() {
                 break;
@@ -641,60 +612,50 @@ impl Task {
             // Source acceptance gates Run publication after dependency-ready
             // semantic/Lower work, rather than gating its admission.
             let Some(check) = self.queries.check.clone() else {
-                return Poll::Ready(Err(self.queries.protocol_failure(
-                    self.query,
-                    "Run producer or observation is unavailable",
-                )));
+                return Err(self
+                    .queries
+                    .protocol_failure(self.query, "Run producer or observation is unavailable"));
             };
-            let product = match self.read(cx, check.query()) {
-                Poll::Pending => return Poll::Pending,
-                Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
-                Poll::Ready(Ok(product)) => product,
-            };
+            let product = cx.read(check.query())?;
             let Some(output) = check.outcome(product.clone()) else {
-                return Poll::Ready(Err(self.queries.protocol_failure(
-                    self.query,
-                    "Run producer or observation is unavailable",
-                )));
+                return Err(self
+                    .queries
+                    .protocol_failure(self.query, "Run producer or observation is unavailable"));
             };
             if output.checked.completion != CheckCompletion::Complete {
-                return Poll::Ready(Err(self.queries.failure_record(operational(format!(
+                return Err(self.queries.failure_record(operational(format!(
                     "Run source check is incomplete: {:?}",
                     output.checked.completion
-                )))));
+                ))));
             }
             if has_errors(&output.checked.diagnostics) {
-                return Poll::Ready(Err(self
+                return Err(self
                     .queries
-                    .failure_record(QueryError::Diagnostics(output.checked.diagnostics))));
+                    .failure_record(QueryError::Diagnostics(output.checked.diagnostics)));
             }
         }
-        Poll::Ready(
-            self.complete()
-                .map_err(|error| self.queries.failure_record(error)),
-        )
+        self.complete()
+            .map_err(|error| self.queries.failure_record(error))
     }
     fn node(
         &mut self,
         cx: &mut dyn QueryContext,
         path: &DefPath,
-    ) -> Poll<
-        Result<
-            (
-                content::Node,
-                DefinitionContent,
-                BTreeSet<DefPath>,
-                Option<source_products::Body>,
-            ),
-            Reference,
-        >,
+    ) -> Result<
+        (
+            content::Node,
+            DefinitionContent,
+            BTreeSet<DefPath>,
+            Option<source_products::Body>,
+        ),
+        Reference,
     > {
         let queries = self.queries.clone();
         let mut observations = Vec::new();
         if self.input.is_none() {
             self.input = match queries.input(path) {
                 Ok(input) => Some(input),
-                Err(error) => return Poll::Ready(Err(queries.failure_record(error))),
+                Err(error) => return Err(queries.failure_record(error)),
             };
         }
         let input = self
@@ -710,14 +671,13 @@ impl Task {
             && (input.executable || !matches!(input.signature.kind, SignatureKind::Type(_)))
         {
             let Some(id) = queries.front.query(path) else {
-                return Poll::Ready(Err(
+                return Err(
                     queries.failure_record(operational(format!("missing P input for {path}")))
-                ));
+                );
             };
-            let product = match self.read(cx, id) {
-                Poll::Pending => return Poll::Pending,
-                Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
-                Poll::Ready(Ok(product)) => {
+            let product = match cx.read(id) {
+                Err(error) => return Err(error),
+                Ok(product) => {
                     observations.push((id.kind, id.address.0, product.action.0));
                     product
                 }
@@ -726,42 +686,39 @@ impl Task {
                 Some(output) => output,
                 None => {
                     let Some(id) = queries.front.body_query(path) else {
-                        return Poll::Ready(Err(
+                        return Err(
                             queries.protocol_failure(self.query, "Run body input is unavailable")
-                        ));
+                        );
                     };
-                    let product = match self.read(cx, id) {
-                        Poll::Pending => return Poll::Pending,
-                        Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
-                        Poll::Ready(Ok(product)) => {
+                    let product = match cx.read(id) {
+                        Err(error) => return Err(error),
+                        Ok(product) => {
                             observations.push((id.kind, id.address.0, product.action.0));
                             product
                         }
                     };
                     let Some(output) = queries.front.outcome(Ok(product.clone())) else {
-                        return Poll::Ready(Err(queries.failure_record(operational(format!(
+                        return Err(queries.failure_record(operational(format!(
                             "source body product for {path} is unavailable after materialization"
-                        )))));
+                        ))));
                     };
                     output
                 }
             };
             let analyzed = match &output.outcome.result {
                 Ok(body) => body,
-                Err(error) => return Poll::Ready(Err(queries.failure_record(error.clone()))),
+                Err(error) => return Err(queries.failure_record(error.clone())),
             };
             if has_errors(&analyzed.diagnostics) {
-                return Poll::Ready(Err(
+                return Err(
                     queries.failure_record(QueryError::Diagnostics(analyzed.diagnostics.clone()))
-                ));
+                );
             }
             if input.generated {
                 generated_tokens = match hirsel_fmt::semantic_item(&analyzed.value.typed.syntax) {
                     Some(tokens) => Some(tokens),
                     None => {
-                        return Poll::Ready(
-                            Err(queries.failure_record(QueryError::NotImplemented)),
-                        );
+                        return Err(queries.failure_record(QueryError::NotImplemented));
                     }
                 };
             }
@@ -776,33 +733,32 @@ impl Task {
             });
             if input.executable {
                 let Some(id) = queries.lower.query(path) else {
-                    return Poll::Ready(Err(queries
-                        .failure_record(operational(format!("missing Lower input for {path}")))));
+                    return Err(queries
+                        .failure_record(operational(format!("missing Lower input for {path}"))));
                 };
-                let product = match self.read(cx, id) {
-                    Poll::Pending => return Poll::Pending,
-                    Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
-                    Poll::Ready(Ok(product)) => {
+                let product = match cx.read(id) {
+                    Err(error) => return Err(error),
+                    Ok(product) => {
                         observations.push((id.kind, id.address.0, product.action.0));
                         product
                     }
                 };
                 let Some(output) = queries.lower.outcome(product) else {
-                    return Poll::Ready(Err(queries.failure_record(operational(format!(
+                    return Err(queries.failure_record(operational(format!(
                         "missing settled Lower product for {path}"
-                    )))));
+                    ))));
                 };
                 if has_errors(&output.output.diagnostics) {
-                    return Poll::Ready(Err(
+                    return Err(
                         queries.failure_record(QueryError::Diagnostics(output.output.diagnostics))
-                    ));
+                    );
                 }
                 // Run keeps the settled Lower holder after its runtime cache
                 // is released. Populate that holder's required spill first.
                 if output.spill(queries.weight.scratch).is_none() {
-                    return Poll::Ready(Err(queries.failure_record(operational(format!(
+                    return Err(queries.failure_record(operational(format!(
                         "cannot retain Lower body for {path} within spill admission"
-                    )))));
+                    ))));
                 }
                 dependencies.extend(
                     output
@@ -833,14 +789,13 @@ impl Task {
                 if matches!(&input.signature.kind, SignatureKind::Const {generics, ..} if generics.is_empty())
                 {
                     let Some(id) = queries.lower.evaluate_query(path) else {
-                        return Poll::Ready(Err(queries.failure_record(operational(format!(
+                        return Err(queries.failure_record(operational(format!(
                             "missing Evaluate input for {path}"
-                        )))));
+                        ))));
                     };
-                    match self.read(cx, id) {
-                        Poll::Pending => return Poll::Pending,
-                        Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
-                        Poll::Ready(Ok(product)) => {
+                    match cx.read(id) {
+                        Err(error) => return Err(error),
+                        Ok(product) => {
                             observations.push((id.kind, id.address.0, product.action.0));
                         }
                     }
@@ -851,7 +806,7 @@ impl Task {
                     }
                     let value = match queries.lower.settled_constant(path, &[]) {
                         Ok(value) => value,
-                        Err(error) => return Poll::Ready(Err(queries.failure_record(error))),
+                        Err(error) => return Err(queries.failure_record(error)),
                     };
                     if let Some(products) = &mut source_products {
                         products.constant = Some(value.clone());
@@ -897,7 +852,7 @@ impl Task {
             })();
         let (mut source_content, _content_charge) = match source_content {
             Ok(content) => content,
-            Err(error) => return Poll::Ready(Err(queries.failure_record(error))),
+            Err(error) => return Err(queries.failure_record(error)),
         };
         if let Some(tokens) = generated_tokens {
             // Scalar semantic_body_node hashes the analyzed source: a generic
@@ -939,9 +894,9 @@ impl Task {
         all_dependencies.extend(references);
         let node = match content::Node::new(&queries, source_content, &dependencies, observations) {
             Ok(node) => node,
-            Err(error) => return Poll::Ready(Err(queries.failure_record(error))),
+            Err(error) => return Err(queries.failure_record(error)),
         };
-        Poll::Ready(Ok((node, content, all_dependencies, source_products)))
+        Ok((node, content, all_dependencies, source_products))
     }
     fn graph_bytes(&self) -> Option<u64> {
         let mut metadata = hirsel_query_products::retained::MetadataWeight::default();

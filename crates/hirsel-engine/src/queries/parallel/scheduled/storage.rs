@@ -3,7 +3,6 @@
 //! storage derivation or a synchronous compiler/controller fallback.
 use super::*;
 use hirsel_types::storage::graph::StorageDefinition;
-use std::task::Poll;
 pub const FRONT_STORAGE_KIND: u32 = 0x4600_000d;
 const OUTPUT: Domain = Domain {
     kind: 0x4600_000e,
@@ -155,7 +154,6 @@ impl QueryFactory for StorageFactory {
             owner: self.0.clone(),
             id,
             definition,
-            body: None,
             terminal,
         }))
     }
@@ -164,7 +162,6 @@ struct StorageTask {
     owner: Arc<FrontStorageQueries>,
     id: QueryId,
     definition: DefId,
-    body: Option<Box<dyn QueryTask>>,
     terminal: Option<Result<ProductRef, Reference>>,
 }
 const _: () = assert!(
@@ -180,66 +177,48 @@ impl QueryTask for StorageTask {
     fn weight(&self) -> MemoryWeight {
         self.owner.weight
     }
-    fn poll(&mut self, cx: &mut dyn QueryContext) -> QueryPoll {
+    fn run(&mut self, cx: &mut dyn QueryContext) -> QueryOutcome {
         if let Some(terminal) = self.terminal.clone() {
-            return finish(terminal);
+            return terminal;
         }
-        let path = self.definition.path();
-        let Some(front) = self.owner.front.query(path) else {
-            return finish(Err(self.owner.errors.protocol));
-        };
-        let selected = match cx.read(front) {
-            Poll::Pending => return QueryPoll::Waiting(vec![front]),
-            Poll::Ready(Err(reference)) => Err(reference),
-            Poll::Ready(Ok(product)) => {
-                if self.owner.front.outcome(Ok(product.clone())).is_some() {
-                    self.run(product)
-                } else {
-                    let Some(body) = self.owner.front.body_query(path) else {
-                        return finish(Err(self.owner.errors.protocol));
-                    };
-                    if self.body.is_none() {
-                        let task = match self.owner.front.factory().create(body) {
-                            Ok(task) => task,
-                            Err(error) => return finish(Err(error)),
-                        };
-                        let weight = task.weight();
-                        if weight.scratch > self.owner.weight.scratch
-                            || weight.stack > self.owner.weight.stack
-                        {
-                            drop(task);
-                            return match cx.read(body) {
-                                Poll::Pending => QueryPoll::Waiting(vec![body]),
-                                Poll::Ready(Err(error)) => finish(Err(error)),
-                                Poll::Ready(Ok(product)) => {
-                                    let selected = self.run(product);
-                                    self.terminal = Some(selected.clone());
-                                    finish(selected)
-                                }
-                            };
-                        }
-                        self.body = Some(task);
-                    }
-                    // Storage owns this one continuation under its existing
-                    // frame and working grant, just as the storage graph owns
-                    // one recipe. Its actual P read remains the dependency.
-                    match self.body.as_mut().unwrap().poll(cx) {
-                        waiting @ (QueryPoll::Waiting(_) | QueryPoll::WaitingAny(_)) => {
-                            return waiting;
-                        }
-                        QueryPoll::Failed(error) => Err(error),
-                        QueryPoll::Complete(product) => self.run(product),
-                    }
-                }
-            }
-        };
-        self.body = None;
+        let selected = self.select(cx);
         self.terminal = Some(selected.clone());
-        finish(selected)
+        selected
     }
 }
 impl StorageTask {
-    fn run(&self, product: ProductRef) -> Result<ProductRef, Reference> {
+    fn select(&self, cx: &mut dyn QueryContext) -> QueryOutcome {
+        let path = self.definition.path();
+        let front = self
+            .owner
+            .front
+            .query(path)
+            .ok_or(self.owner.errors.protocol)?;
+        let product = cx.read(front)?;
+        if self.owner.front.outcome(Ok(product.clone())).is_some() {
+            return self.store(product);
+        }
+        let body = self
+            .owner
+            .front
+            .body_query(path)
+            .ok_or(self.owner.errors.protocol)?;
+        let mut task = self.owner.front.factory().create(body)?;
+        let weight = task.weight();
+        let product = if weight.scratch > self.owner.weight.scratch
+            || weight.stack > self.owner.weight.stack
+        {
+            drop(task);
+            cx.read(body)?
+        } else {
+            // Storage runs its body producer under its own frame, just as the
+            // storage graph owns one recipe. Its actual P read remains the
+            // dependency.
+            task.run(cx)?
+        };
+        self.store(product)
+    }
+    fn store(&self, product: ProductRef) -> Result<ProductRef, Reference> {
         let owner = &self.owner;
         let path = self.definition.path();
         let body = owner

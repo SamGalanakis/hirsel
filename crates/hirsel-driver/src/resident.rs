@@ -4,7 +4,6 @@
 use hirsel_engine::requests::{OutputReadiness, RequestEngine, SelectedRequest};
 use hirsel_engine_runtime::{QueryRuntime, RequestId};
 use std::sync::{Arc, Mutex, Weak};
-use std::task::Poll;
 
 mod compilation_session;
 pub use compilation_session::CompilationSession;
@@ -50,7 +49,6 @@ impl<E: RequestEngine> Host<E> {
         Ok(RequestLease {
             subscription,
             output,
-            completed: false,
         })
     }
 }
@@ -99,43 +97,32 @@ pub enum RequestError<E> {
 pub struct RequestLease<R: QueryRuntime, O> {
     subscription: Arc<Subscription<R>>,
     output: O,
-    completed: bool,
 }
 
 impl<R: QueryRuntime, O: OutputReadiness> RequestLease<R, O> {
-    /// The transport drives this when work can advance. After Ready the lease
-    /// is terminal, like a completed Future; polling it again is a caller error.
-    pub fn poll(&mut self) -> Poll<Result<O::Output, RequestError<O::Error>>> {
-        assert!(!self.completed, "request already completed");
+    /// Run the request to completion on this thread and check its output.
+    pub fn wait(mut self) -> Result<O::Output, RequestError<O::Error>> {
         let mut active = self
             .subscription
             .active
             .lock()
             .expect("request subscription poisoned");
-        let Some(id) = *active else {
-            self.completed = true;
-            return Poll::Ready(Err(RequestError::Cancelled));
+        let Some(id) = active.take() else {
+            return Err(RequestError::Cancelled);
         };
+        drop(active);
         let result = self
             .subscription
             .runtime
             .lock()
             .expect("query runtime poisoned")
-            .poll(id);
+            .wait(id);
         match result {
-            Poll::Pending => Poll::Pending,
-            Poll::Ready(result) => {
-                active.take();
-                drop(active);
-                self.completed = true;
-                Poll::Ready(match result {
-                    Ok(products) => self.output.ready(&products).map_err(RequestError::Output),
-                    Err(diagnostics) => Err(match self.output.failed(diagnostics) {
-                        Some(error) => RequestError::Output(error),
-                        None => RequestError::Query(diagnostics),
-                    }),
-                })
-            }
+            Ok(products) => self.output.ready(&products).map_err(RequestError::Output),
+            Err(diagnostics) => Err(match self.output.failed(diagnostics) {
+                Some(error) => RequestError::Output(error),
+                None => RequestError::Query(diagnostics),
+            }),
         }
     }
 
@@ -156,32 +143,6 @@ impl<R: QueryRuntime, O> Drop for RequestLease<R, O> {
     }
 }
 
-impl<O: OutputReadiness> RequestLease<hirsel_engine_runtime::AdmittedRuntime, O> {
-    /// Complete a synchronous host operation while leaving request admission,
-    /// cancellation and shutdown available to other users of this runtime.
-    /// The engine's completion latch never consumes the terminal product;
-    /// ordinary polling still owns diagnostics and output readiness.
-    pub fn wait(mut self) -> Result<O::Output, RequestError<O::Error>> {
-        let id = *self
-            .subscription
-            .active
-            .lock()
-            .expect("request subscription poisoned");
-        if let Some(id) = id {
-            let completion = self
-                .subscription
-                .runtime
-                .lock()
-                .expect("query runtime poisoned")
-                .completion();
-            completion.wait(id);
-        }
-        match self.poll() {
-            Poll::Ready(result) => result,
-            Poll::Pending => unreachable!("query completion woke before its request settled"),
-        }
-    }
-}
 /// Restore the engine-selected linked output through its configured provider.
 /// The descriptor is resolved and output readiness checked on every request;
 /// this adapter owns neither an executable cache nor a linker.

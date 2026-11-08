@@ -17,7 +17,6 @@ use std::{
         Mutex, OnceLock,
         atomic::{AtomicU64, Ordering},
     },
-    task::Poll,
 };
 
 pub const INSTANCE_INPUT_KIND: u32 = 0x4e00_0020;
@@ -851,12 +850,6 @@ struct InstanceTask {
     id: QueryId,
     terminal: Option<Result<ProductRef, Reference>>,
 }
-fn finish(result: Result<ProductRef, Reference>) -> QueryPoll {
-    match result {
-        Ok(product) => QueryPoll::Complete(product),
-        Err(error) => QueryPoll::Failed(error),
-    }
-}
 impl QueryTask for InstanceTask {
     fn id(&self) -> QueryId {
         self.id
@@ -869,23 +862,20 @@ impl QueryTask for InstanceTask {
             ..self.tasks.weight
         }
     }
-    fn continuation_bytes(&self) -> u64 {
-        std::mem::size_of::<Self>() as u64
-    }
-    fn poll(&mut self, cx: &mut dyn QueryContext) -> QueryPoll {
+    fn run(&mut self, cx: &mut dyn QueryContext) -> QueryOutcome {
         if let Some(result) = self.terminal.clone() {
-            return finish(result);
+            return result;
         }
         let key = match self.entry.key(self.tasks.store.as_ref()) {
             Ok(key) => key,
-            Err(error) => return finish(Err(self.tasks.failure(&error))),
+            Err(error) => return Err(self.tasks.failure(&error)),
         };
         let mut key_weight = hirsel_query_products::retained::MetadataWeight::default();
         key_weight.path(key.instance.definition());
         key_weight.add(key.instance.retained_encoding_bytes());
         let _key_read = match self.tasks.window.read_for("owner-key", key_weight.bytes()) {
             Ok(lease) => lease,
-            Err(error) => return finish(Err(self.tasks.failure(&error))),
+            Err(error) => return Err(self.tasks.failure(&error)),
         };
         let mut receipt_products = Vec::new();
         let source_owner = self.entry.request.source.then(|| key.instance.definition());
@@ -904,31 +894,26 @@ impl QueryTask for InstanceTask {
             } else {
                 source_owner.into_iter().collect()
             };
-            let mut waiting = Vec::new();
             for path in paths {
                 let Some(query) = front.bindings.get(path).copied() else {
                     let error = self
                         .tasks
                         .failure("native source has no front Lower dependency");
                     self.terminal = Some(Err(error));
-                    return finish(Err(error));
+                    return Err(error);
                 };
                 let selected = match cx.read(query) {
-                    Poll::Pending => {
-                        waiting.push(query);
-                        continue;
-                    }
-                    Poll::Ready(Err(error)) => {
+                    Err(error) => {
                         self.terminal = Some(Err(error));
-                        return finish(Err(error));
+                        return Err(error);
                     }
-                    Poll::Ready(Ok(product)) if product.address == query.address => product,
+                    Ok(product) if product.address == query.address => product,
                     _ => {
                         let error = self
                             .tasks
                             .failure("front Lower returned another query output");
                         self.terminal = Some(Err(error));
-                        return finish(Err(error));
+                        return Err(error);
                     }
                 };
                 let result = front
@@ -950,21 +935,17 @@ impl QueryTask for InstanceTask {
                 if let Err(message) = result {
                     let error = self.tasks.failure(&message);
                     self.terminal = Some(Err(error));
-                    return finish(Err(error));
+                    return Err(error);
                 }
-            }
-            if !waiting.is_empty() {
-                return QueryPoll::Waiting(waiting);
             }
         }
         if self.id.kind == INSTANCE_KIND {
             match cx.read(input_id(&key)) {
-                Poll::Pending => return QueryPoll::Waiting(vec![input_id(&key)]),
-                Poll::Ready(Err(error)) => {
+                Err(error) => {
                     self.terminal = Some(Err(error));
-                    return finish(Err(error));
+                    return Err(error);
                 }
-                Poll::Ready(Ok(product))
+                Ok(product)
                     if product_identity(&product)
                         .is_ok_and(|identity| self.entry.input.get() == Some(&identity)) => {}
                 _ => {
@@ -972,7 +953,7 @@ impl QueryTask for InstanceTask {
                         .tasks
                         .failure("native instance input differs from selected snapshot");
                     self.terminal = Some(Err(error));
-                    return finish(Err(error));
+                    return Err(error);
                 }
             }
         }
@@ -1038,7 +1019,7 @@ impl QueryTask for InstanceTask {
         })()
         .map_err(|error: String| self.tasks.failure(&error));
         self.terminal = Some(result.clone());
-        finish(result)
+        result
     }
 }
 struct DiscoveryTask {
@@ -1054,37 +1035,13 @@ impl QueryTask for DiscoveryTask {
     fn weight(&self) -> MemoryWeight {
         self.tasks.weight
     }
-    fn continuation_bytes(&self) -> u64 {
-        // Completed products remain owned by the registry/snapshot and its
-        // explicit reservation. This charge covers only the task frame.
-        self.tasks.weight.retained
-    }
-    fn poll(&mut self, cx: &mut dyn QueryContext) -> QueryPoll {
+    fn run(&mut self, cx: &mut dyn QueryContext) -> QueryOutcome {
         if let Some(result) = self.terminal.clone() {
-            return finish(result);
+            return result;
         }
         let result = self.advance(cx);
-        match result {
-            Ok(Some(product)) => {
-                self.terminal = Some(Ok(product.clone()));
-                finish(Ok(product))
-            }
-            Ok(None) => QueryPoll::Waiting(if self.frontier.is_empty() {
-                vec![self.tasks.callable_id()]
-            } else {
-                self.frontier
-                    .iter()
-                    .map(|entry| QueryId {
-                        kind: INSTANCE_KIND,
-                        address: Address(entry.address),
-                    })
-                    .collect()
-            }),
-            Err(error) => {
-                self.terminal = Some(Err(error));
-                finish(Err(error))
-            }
-        }
+        self.terminal = Some(result.clone());
+        result
     }
 }
 // Ordinals are stable, dense slots in this immutable operation's registry.
@@ -1104,7 +1061,7 @@ fn mark(bits: &mut Vec<u64>, ordinal: usize) -> bool {
     previous
 }
 impl DiscoveryTask {
-    fn advance(&mut self, cx: &mut dyn QueryContext) -> Result<Option<ProductRef>, Reference> {
+    fn advance(&mut self, cx: &mut dyn QueryContext) -> Result<ProductRef, Reference> {
         let mut frontier = std::mem::take(&mut self.frontier);
         let mut read = Vec::new();
         while let Some(entry) = frontier.pop() {
@@ -1115,9 +1072,8 @@ impl DiscoveryTask {
                 kind: INSTANCE_KIND,
                 address: Address(entry.address),
             }) {
-                Poll::Pending => self.frontier.push(entry),
-                Poll::Ready(Err(error)) => return Err(error),
-                Poll::Ready(Ok(product)) => {
+                Err(error) => return Err(error),
+                Ok(product) => {
                     let selected = entry
                         .output
                         .read(self.tasks.store.as_ref())
@@ -1146,7 +1102,6 @@ impl DiscoveryTask {
             let mut weight = hirsel_query_products::retained::MetadataWeight::default();
             weight.add(size_of::<Self>());
             weight.flat_vec(&frontier);
-            weight.flat_vec(&self.frontier);
             weight.flat_vec(&self.seen);
             weight.flat_vec(&read);
             if weight.bytes() > self.tasks.weight.retained {
@@ -1155,20 +1110,14 @@ impl DiscoveryTask {
                     .failure("native discovery frame exceeds retained allowance"));
             }
         }
-        self.frontier.sort_unstable_by_key(|entry| entry.address);
-        self.frontier.dedup_by_key(|entry| entry.address);
-        if !self.frontier.is_empty() {
-            return Ok(None);
-        }
         let (discovery, needs_callable) = self
             .tasks
             .original_discovery()
             .map_err(|e| self.tasks.failure(&e))?;
         if needs_callable {
             match cx.read(self.tasks.callable_id()) {
-                Poll::Pending => return Ok(None),
-                Poll::Ready(Err(error)) => return Err(error),
-                Poll::Ready(Ok(product))
+                Err(error) => return Err(error),
+                Ok(product)
                     if self
                         .tasks
                         .callables
@@ -1190,7 +1139,7 @@ impl DiscoveryTask {
             {
                 return Err("native discovery completion changed".into());
             }
-            Ok(Some(discovery))
+            Ok(discovery)
         })();
         result.map_err(|e: String| self.tasks.failure(&e))
     }
@@ -1339,14 +1288,10 @@ impl QueryTask for CallableTask {
             ..self.tasks.weight
         }
     }
-    fn continuation_bytes(&self) -> u64 {
-        std::mem::size_of::<Self>() as u64
-    }
-    fn poll(&mut self, cx: &mut dyn QueryContext) -> QueryPoll {
+    fn run(&mut self, cx: &mut dyn QueryContext) -> QueryOutcome {
         if let Some(result) = self.terminal.clone() {
-            return finish(result);
+            return result;
         }
-        let mut waiting = Vec::new();
         if self.id == self.tasks.callable_id() {
             for entry in self.tasks.entries() {
                 let query = QueryId {
@@ -1354,37 +1299,32 @@ impl QueryTask for CallableTask {
                     address: Address(entry.address),
                 };
                 match cx.read(query) {
-                    Poll::Pending => waiting.push(query),
-                    Poll::Ready(Err(error)) => {
+                    Err(error) => {
                         self.terminal = Some(Err(error));
-                        return finish(Err(error));
+                        return Err(error);
                     }
-                    Poll::Ready(Ok(product)) if entry.output.holds(&product) => (),
+                    Ok(product) if entry.output.holds(&product) => (),
                     _ => {
                         let error = self.tasks.failure("callable original output differs");
                         self.terminal = Some(Err(error));
-                        return finish(Err(error));
+                        return Err(error);
                     }
                 }
-            }
-            if !waiting.is_empty() {
-                return QueryPoll::Waiting(waiting);
             }
             let result = self
                 .tasks
                 .callable_scope()
                 .map_err(|e| self.tasks.failure(&e));
             self.terminal = Some(result.clone());
-            finish(result)
+            result
         } else {
             let query = self.tasks.callable_id();
             match cx.read(query) {
-                Poll::Pending => return QueryPoll::Waiting(vec![query]),
-                Poll::Ready(Err(error)) => {
+                Err(error) => {
                     self.terminal = Some(Err(error));
-                    return finish(Err(error));
+                    return Err(error);
                 }
-                Poll::Ready(Ok(product))
+                Ok(product)
                     if self
                         .tasks
                         .callables
@@ -1396,7 +1336,7 @@ impl QueryTask for CallableTask {
                 _ => {
                     let error = self.tasks.failure("callable alias has another graph");
                     self.terminal = Some(Err(error));
-                    return finish(Err(error));
+                    return Err(error);
                 }
             }
             let result = (|| {
@@ -1411,7 +1351,7 @@ impl QueryTask for CallableTask {
                     .ok_or_else(|| self.tasks.failure("unregistered callable Value alias"))
             })();
             self.terminal = Some(result.clone());
-            finish(result)
+            result
         }
     }
 }
@@ -1420,102 +1360,6 @@ impl QueryTask for CallableTask {
 mod retained_tests {
     use super::*;
     use hirsel_engine::DefinitionQueries;
-
-    #[test]
-    fn discovery_frontier_keeps_addresses_within_a_small_frame() {
-        hirsel_intern::jobs::with_compiler_stack(|| {
-            for count in [48, 256] {
-                let transport = hirsel_engine_admission::ProcessBudget::new(64 << 20);
-                let store: Arc<dyn ResultStore> = Arc::new(hirsel_engine_store::RequestStore::new(
-                    Arc::new(hirsel_engine_store::MemStore::default()),
-                    transport.reserve(64 << 20).unwrap(),
-                ));
-                let mut engine = hirsel_engine::QueryEngine::new(
-                    hirsel_engine::default_environment(),
-                    hirsel_front_phases::compiler_adapters(),
-                )
-                .with_result_store(store.clone());
-                let text = (0..count)
-                    .map(|n| format!("pub fn function_{n}()->u64{{1u64}}\n"))
-                    .collect();
-                let file = engine.sources.add("frontier-bounds.hir", text).unwrap();
-                engine
-                    .parse_file(file, &hirsel_engine::default_context())
-                    .unwrap();
-                let mut discovery =
-                    hirsel_engine::NativeDiscoveryCache::new(engine.types().clone(), store.clone());
-                let declarations = hirsel_native_cache::declarations::NativeDeclarations::collect(
-                    &mut engine,
-                    &mut discovery,
-                    &[],
-                )
-                .unwrap();
-                let paths = declarations
-                    .context
-                    .sources
-                    .keys()
-                    .cloned()
-                    .collect::<Vec<_>>();
-                let context = engine.native_original_context(&paths).unwrap();
-                let source =
-                    NativeInstanceInputs::from_products(declarations, context.reader([]).unwrap())
-                        .unwrap();
-                let budget = hirsel_engine_admission::ProcessBudget::new(16 << 20);
-                let tasks = InstanceTasks::new(
-                    source,
-                    store,
-                    hirsel_native::Options::new(hirsel_lir::TargetSpec::x86_64_unknown_linux_gnu()),
-                    ContentHash::of_bytes(b"frontier bounds"),
-                    MemoryWeight {
-                        scratch: 16 << 20,
-                        retained: 16 << 10,
-                        stack: 0,
-                    },
-                    budget.reserve(16 << 20).unwrap(),
-                )
-                .unwrap();
-                assert_eq!(
-                    tasks
-                        .roots
-                        .iter()
-                        .filter(|key| key.instance.definition().0.name.starts_with("function_"))
-                        .count(),
-                    count
-                );
-                struct Pending(Vec<QueryId>);
-                impl QueryContext for Pending {
-                    fn read(&mut self, query: QueryId) -> Poll<Result<ProductRef, Reference>> {
-                        self.0.push(query);
-                        Poll::Pending
-                    }
-                }
-                let mut task = InstanceTaskFactory::new(tasks.clone())
-                    .create(tasks.discovery)
-                    .unwrap();
-                let mut pending = Pending(vec![]);
-                let QueryPoll::Waiting(waiting) = task.poll(&mut pending) else {
-                    panic!("discovery must subscribe to all roots");
-                };
-                assert_eq!(waiting.len(), tasks.roots.len());
-                pending.0.sort_by_key(|query| query.address.0);
-                let mut waiting = waiting;
-                waiting.sort_by_key(|query| query.address.0);
-                assert_eq!(waiting, pending.0);
-                let alias_id = QueryId {
-                    kind: hirsel_native::query_model::CALLABLE_VALUE_KIND,
-                    address: tasks.roots[0]
-                        .address(hirsel_native::query_model::CALLABLE_VALUE_KIND),
-                };
-                for id in [tasks.callable_id(), alias_id] {
-                    let task = InstanceTaskFactory::new(tasks.clone()).create(id).unwrap();
-                    assert_eq!(task.weight().retained, size_of::<CallableTask>() as u64);
-                    assert_eq!(task.continuation_bytes(), size_of::<CallableTask>() as u64);
-                    assert_eq!(task.weight().scratch, tasks.weight.scratch);
-                    assert_eq!(task.weight().stack, tasks.weight.stack);
-                }
-            }
-        });
-    }
 
     #[test]
     fn registry_metadata_refuses_one_less_and_releases_its_exact_partition() {

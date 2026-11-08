@@ -2,12 +2,9 @@
 use super::{roots::RootProducts, tasks::NativeTasks, *};
 use hirsel_engine_runtime::*;
 use hirsel_native::root_source::NativeLinkSource;
-use std::{
-    sync::{
-        OnceLock,
-        atomic::{AtomicU64, Ordering},
-    },
-    task::Poll,
+use std::sync::{
+    OnceLock,
+    atomic::{AtomicU64, Ordering},
 };
 
 /// One immutable root request and its compact completed output. The OnceLock
@@ -149,37 +146,29 @@ impl QueryTask for RootTask {
     fn weight(&self) -> MemoryWeight {
         self.inputs.weight
     }
-    fn poll(&mut self, cx: &mut dyn QueryContext) -> QueryPoll {
+    fn run(&mut self, cx: &mut dyn QueryContext) -> QueryOutcome {
         if let Some(result) = self.terminal.clone() {
-            return match result {
-                Ok(p) => QueryPoll::Complete(p),
-                Err(e) => QueryPoll::Failed(e),
-            };
+            return result;
         }
-        let mut waiting = Vec::new();
         for (key, expected) in &self.inputs.reads {
             match cx.read(*key) {
-                Poll::Pending => waiting.push(*key),
-                Poll::Ready(Ok(product))
+                Ok(product)
                     if product.address == key.address
                         && product
                             .archive(ArchiveAdmission::Retained)
                             .is_ok_and(|archive| archive.reference() == *expected) => {}
                 result => {
                     let error = match result {
-                        Poll::Ready(Err(error)) => error,
+                        Err(error) => error,
                         _ => self
                             .inputs
                             .native
                             .failure("native root input changed within immutable snapshot"),
                     };
                     self.terminal = Some(Err(error));
-                    return QueryPoll::Failed(error);
+                    return Err(error);
                 }
             }
-        }
-        if !waiting.is_empty() {
-            return QueryPoll::Waiting(waiting);
         }
         let result = (|| {
             let mut products = RootProducts::new(
@@ -198,9 +187,6 @@ impl QueryTask for RootTask {
         })()
         .map_err(|e: String| self.inputs.native.failure(&e));
         self.terminal = Some(result.clone());
-        match result {
-            Ok(p) => QueryPoll::Complete(p),
-            Err(e) => QueryPoll::Failed(e),
-        }
+        result
     }
 }

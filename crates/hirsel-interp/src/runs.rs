@@ -6,10 +6,10 @@
 //! none of their providers can make external progress. Runs whose providers share one
 //! readiness (host runs) are asked whether a wait is ready before any of them sleeps, so a
 //! wakeup reaches the run it belongs to.
-use crate::AsyncTirProvider;
 use crate::eval::{Scheduler, Step, enter_checked, execute_frames};
 use crate::frame::Frame;
 use crate::*;
+use hirsel_tir::TirProvider;
 use std::collections::VecDeque;
 
 /// One run of the execution.
@@ -20,8 +20,8 @@ pub(crate) struct Run {
     pub(crate) entry_consumed: bool,
 }
 impl Run {
-    pub(crate) async fn new(
-        provider: &mut (impl AsyncTirProvider + ?Sized),
+    pub(crate) fn new(
+        provider: &mut (impl TirProvider + ?Sized),
         configuration: RunConfiguration,
         arguments: Vec<Value>,
         limits: Limits,
@@ -29,10 +29,9 @@ impl Run {
         budgets: RunBudgets,
         checker: Option<&checked::Shared>,
     ) -> Result<Self, ExecutionError> {
-        let constants = constants::Constants::initialize(provider, runtime).await?;
+        let constants = constants::Constants::initialize(provider, runtime)?;
         let definition = provider
             .definition(&configuration.entry)
-            .await
             .map_err(Error::Query)?;
         let mut frame = Frame::new(runtime.types.clone(), definition, arguments)?;
         if let Some(state) = checker {
@@ -64,9 +63,9 @@ impl Run {
             entry_consumed: false,
         })
     }
-    async fn step<O: crate::ownership_trace::Observer>(
+    fn step<O: crate::ownership_trace::Observer>(
         &mut self,
-        provider: &mut (impl AsyncTirProvider + ?Sized),
+        provider: &mut (impl TirProvider + ?Sized),
         sources: &SourceMap,
         limits: Limits,
         operations: &mut (impl Operations + ?Sized),
@@ -85,7 +84,6 @@ impl Run {
             &mut self.entry_consumed,
             observer,
         )
-        .await
     }
     /// An operation context of this run outside any operation.
     fn context<'a>(
@@ -127,8 +125,8 @@ struct Callee {
 /// and its result. A callee's tooling limit, undefined behavior, trap or environmental
 /// stop ends the whole execution with that outcome, as a process crash ends caller and
 /// callees together.
-pub(crate) async fn execute<O: crate::ownership_trace::Observer>(
-    provider: &mut (impl AsyncTirProvider + ?Sized),
+pub(crate) fn execute<O: crate::ownership_trace::Observer>(
+    provider: &mut (impl TirProvider + ?Sized),
     sources: &SourceMap,
     limits: Limits,
     root_operations: &mut dyn Operations,
@@ -212,21 +210,17 @@ pub(crate) async fn execute<O: crate::ownership_trace::Observer>(
                 runtime,
                 observer,
             )
-            .await
         } else {
             let callee = callees[index - 1].as_mut().expect("a ready callee is live");
             callee.started = true;
-            let step = callee
-                .run
-                .step(
-                    provider,
-                    sources,
-                    limits,
-                    callee.operations.as_mut(),
-                    runtime,
-                    observer,
-                )
-                .await;
+            let step = callee.run.step(
+                provider,
+                sources,
+                limits,
+                callee.operations.as_mut(),
+                runtime,
+                observer,
+            );
             // A place in this process writes to the process's own output.
             root.execution
                 .stdout
@@ -251,9 +245,7 @@ pub(crate) async fn execute<O: crate::ownership_trace::Observer>(
                         runtime,
                         call.budgets,
                         checker.as_ref(),
-                    )
-                    .await
-                    {
+                    ) {
                         Ok(run) => run,
                         Err(error) => break 'run Err(error.error),
                     };

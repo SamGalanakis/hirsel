@@ -6,10 +6,7 @@ use hirsel_intern::jobs::with_compiler_stack;
 use hirsel_front_phases::COMPILER;
 use hirsel_intern::jobs::Jobs;
 use hirsel_native_cache::preparation::*;
-use std::{
-    sync::{Arc, Mutex},
-    task::Poll,
-};
+use std::sync::{Arc, Mutex};
 
 #[derive(Default)]
 struct FaultStore {
@@ -252,13 +249,12 @@ fn preparation_demands_one_source_and_keeps_closure_and_layout_views_after_regis
 struct Selected {
     query: QueryId,
     product: Option<ProductRef>,
+    missing: Reference,
 }
 impl QueryContext for Selected {
-    fn read(&mut self, query: QueryId) -> Poll<Result<ProductRef, Reference>> {
+    fn read(&mut self, query: QueryId) -> Result<ProductRef, Reference> {
         assert_eq!(query, self.query);
-        self.product
-            .clone()
-            .map_or(Poll::Pending, |product| Poll::Ready(Ok(product)))
+        self.product.clone().ok_or(self.missing)
     }
 }
 #[test]
@@ -272,10 +268,9 @@ fn preparation_enforces_exact_view_admission_and_refuses_crossed_or_damaged_prod
         let mut selected = Selected {
             query: f.source.query(&main).unwrap(),
             product: None,
+            missing: f.errors.cycle,
         };
-        assert!(
-            matches!(task.poll(&mut selected), QueryPoll::Waiting(ids) if ids == vec![selected.query])
-        );
+        assert_eq!(task.run(&mut selected), Err(f.errors.cycle));
         drop(task);
         let output = f.complete(&preparation, "main");
         let facts = preparation.outcome(output.clone()).unwrap();
@@ -287,16 +282,15 @@ fn preparation_enforces_exact_view_admission_and_refuses_crossed_or_damaged_prod
                 .factory()
                 .create(candidate.query(&main).unwrap())
                 .unwrap();
-            match task.poll(&mut selected) {
-                QueryPoll::Complete(product) => {
+            match task.run(&mut selected) {
+                Ok(product) => {
                     assert!(succeeds);
                     assert!(candidate.outcome(product).is_some());
                 }
-                QueryPoll::Failed(error) => {
+                Err(error) => {
                     assert!(!succeeds);
                     assert_eq!(error, f.errors.resource);
                 }
-                _ => panic!("settled source must finish preparation"),
             }
         }
         assert!(
@@ -331,9 +325,7 @@ fn preparation_enforces_exact_view_admission_and_refuses_crossed_or_damaged_prod
             .factory()
             .create(candidate.query(&main).unwrap())
             .unwrap();
-        assert!(
-            matches!(task.poll(&mut selected), QueryPoll::Failed(error) if error == f.errors.protocol)
-        );
+        assert!(matches!(task.run(&mut selected), Err(error) if error == f.errors.protocol));
     });
 }
 #[test]

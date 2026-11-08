@@ -198,10 +198,9 @@ mod tests {
                 .register_local(FRONT_EVALUATE_KIND, lower.factory())
                 .unwrap();
             let request = runtime.request(&[query]);
-            runtime.completion().wait(request);
-            let completed = match runtime.poll(request) {
-                std::task::Poll::Ready(Ok(completed)) => completed,
-                std::task::Poll::Ready(Err(reference)) => panic!(
+            let completed = match runtime.wait(request) {
+                Ok(completed) => completed,
+                Err(reference) => panic!(
                     "front Lower failed: lower={:?}, front={:?}, record={:?}, stats={:?}",
                     lower.failure(reference),
                     front
@@ -212,9 +211,6 @@ mod tests {
                         .map(|bytes| String::from_utf8_lossy(&bytes).into_owned()),
                     runtime.stats(),
                 ),
-                std::task::Poll::Pending => {
-                    panic!("front Lower completion returned before settlement")
-                }
             };
             let selected = completed[0].clone();
             let polls = runtime.stats().polls;

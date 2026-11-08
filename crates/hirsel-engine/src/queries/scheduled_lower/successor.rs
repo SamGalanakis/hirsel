@@ -84,17 +84,17 @@ pub(super) fn refused(message: &str) -> QueryError {
 }
 
 impl FrontLowerQueries {
-    pub(super) async fn forward_capture(
+    pub(super) fn forward_capture<'r>(
         &self,
         id: QueryId,
         actual: QueryId,
         owner: Arc<FrontLowerQueries>,
-        reads: &QueryReads,
+        reads: &'r QueryReads<'r>,
     ) -> Result<ProductRef, Reference> {
         if actual == id {
             return Err(self.errors.protocol);
         }
-        let selected = reads.read_consuming(actual).await;
+        let selected = reads.read_consuming(actual);
         let alias = selected.clone().map(|mut product| {
             product.address = id.address;
             product

@@ -172,16 +172,16 @@ pub(super) fn selection_bytes(rows: &Selections) -> u64 {
     weight.bytes()
 }
 impl FrontLowerQueries {
-    pub(super) async fn restore_selections(
+    pub(super) fn restore_selections<'r>(
         &self,
         selections: &Selections,
-        reads: &QueryReads,
+        reads: &'r QueryReads<'r>,
     ) -> Result<(), Reference> {
         for (declaration, arguments) in selections {
             let id = self
                 .staged_query(declaration.path(), arguments)
                 .map_err(|_| self.errors.resource)?;
-            let selected = reads.read_consuming(id).await;
+            let selected = reads.read_consuming(id);
             let outcome = self.selected(id, selected.clone()).ok_or_else(|| {
                 selected
                     .as_ref()

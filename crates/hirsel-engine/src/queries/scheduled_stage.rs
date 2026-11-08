@@ -5,7 +5,7 @@ use super::*;
 use crate::comptime::{StagedDeclarationInput, StagedRegistration};
 use hirsel_engine_runtime::*;
 use hirsel_engine_store::{Domain, Reference, ResultStore};
-use std::{sync::Mutex, task::Poll};
+use std::sync::Mutex;
 
 pub const FRONT_STAGE_KIND: u32 = 0x4601_0001;
 const OUTPUT: Domain = Domain {
@@ -298,38 +298,33 @@ impl QueryTask for Task {
             ..self.queries.weight
         }
     }
-    fn continuation_bytes(&self) -> u64 {
-        self.weight().retained
-    }
-    fn poll(&mut self, cx: &mut dyn QueryContext) -> QueryPoll {
+    fn run(&mut self, cx: &mut dyn QueryContext) -> QueryOutcome {
         if let Some(result) = self.terminal.clone() {
-            return finish(result);
+            return result;
         }
         let input = &self.queries.inputs[&self.id.address.0];
         let selected = match cx.read(input.front) {
-            Poll::Pending => return QueryPoll::Waiting(vec![input.front]),
-            Poll::Ready(Err(error)) => {
+            Err(error) => {
                 self.terminal = Some(Err(error));
-                return QueryPoll::Failed(error);
+                return Err(error);
             }
-            Poll::Ready(Ok(product)) => product,
+            Ok(product) => product,
         };
         let front = match self.queries.front.outcome(Ok(selected.clone())) {
             Some(front) => front,
             None => {
                 let Some(body) = self.queries.front.body_query(&input.owner) else {
-                    return QueryPoll::Failed(self.queries.errors.protocol);
+                    return Err(self.queries.errors.protocol);
                 };
                 let selected = match cx.read(body) {
-                    Poll::Pending => return QueryPoll::Waiting(vec![body]),
-                    Poll::Ready(Err(error)) => {
+                    Err(error) => {
                         self.terminal = Some(Err(error));
-                        return QueryPoll::Failed(error);
+                        return Err(error);
                     }
-                    Poll::Ready(Ok(product)) => product,
+                    Ok(product) => product,
                 };
                 let Some(front) = self.queries.front.outcome(Ok(selected.clone())) else {
-                    return QueryPoll::Failed(self.queries.errors.protocol);
+                    return Err(self.queries.errors.protocol);
                 };
                 front
             }
@@ -357,12 +352,12 @@ impl QueryTask for Task {
             ReadKey::Signature(DefId::intern(&input.owner)),
         ] {
             let Some(hash) = self.queries.front.observe(&input.owner, &key) else {
-                return QueryPoll::Failed(self.queries.errors.protocol);
+                return Err(self.queries.errors.protocol);
             };
             reads.record(key, hash);
         }
         let Ok(reads) = reads.finish() else {
-            return QueryPoll::Failed(self.queries.errors.protocol);
+            return Err(self.queries.errors.protocol);
         };
         let result = self.queries.complete(
             self.id,
@@ -374,13 +369,7 @@ impl QueryTask for Task {
             },
         );
         self.terminal = Some(result.clone());
-        finish(result)
-    }
-}
-fn finish(result: Result<ProductRef, Reference>) -> QueryPoll {
-    match result {
-        Ok(product) => QueryPoll::Complete(product),
-        Err(error) => QueryPoll::Failed(error),
+        result
     }
 }
 impl FrontStageQueries {

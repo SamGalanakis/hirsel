@@ -83,10 +83,7 @@ mod tests {
     use hirsel_engine_store::{Action, Address, Domain};
     use hirsel_intern::jobs::Jobs;
     use hirsel_syntax::ContentHash;
-    use std::{
-        sync::atomic::{AtomicUsize, Ordering},
-        task::Poll,
-    };
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn query(kind: u32) -> QueryId {
         QueryId {
@@ -121,8 +118,8 @@ mod tests {
                 stack: 0,
             }
         }
-        fn poll(&mut self, _: &mut dyn QueryContext) -> QueryPoll {
-            QueryPoll::Complete(product(self.0))
+        fn run(&mut self, _: &mut dyn QueryContext) -> QueryOutcome {
+            Ok(product(self.0))
         }
     }
     struct Bootstrap {
@@ -154,20 +151,18 @@ mod tests {
                 stack: 0,
             }
         }
-        fn poll(&mut self, cx: &mut dyn QueryContext) -> QueryPoll {
+        fn run(&mut self, cx: &mut dyn QueryContext) -> QueryOutcome {
             match cx.read(query(2)) {
-                Poll::Pending => return QueryPoll::Waiting(vec![query(2)]),
-                Poll::Ready(Err(error)) => return QueryPoll::Failed(error),
-                Poll::Ready(Ok(_)) => {}
+                Err(error) => return Err(error),
+                Ok(_) => {}
             }
             if !self.bound {
                 self.routing.bind(vec![(3, self.leaf.clone())]).unwrap();
                 self.bound = true;
             }
             match cx.read(query(3)) {
-                Poll::Pending => QueryPoll::Waiting(vec![query(3)]),
-                Poll::Ready(Err(error)) => QueryPoll::Failed(error),
-                Poll::Ready(Ok(_)) => QueryPoll::Complete(product(query(1))),
+                Err(error) => Err(error),
+                Ok(_) => Ok(product(query(1))),
             }
         }
     }
@@ -217,15 +212,8 @@ mod tests {
             runtime.register(4, leaf.clone()).is_err(),
             "query registry freezes at the first request"
         );
-        runtime.completion().wait(first);
-        assert_eq!(
-            runtime.poll(first),
-            Poll::Ready(Ok(vec![product(query(1))]))
-        );
-        assert_eq!(
-            runtime.poll(second),
-            Poll::Ready(Ok(vec![product(query(1))]))
-        );
+        assert_eq!(runtime.wait(first), Ok(vec![product(query(1))]));
+        assert_eq!(runtime.wait(second), Ok(vec![product(query(1))]));
         assert_eq!(leaf.0.load(Ordering::SeqCst), 1);
         assert!(
             routing.bind(vec![(3, leaf)]).is_err(),

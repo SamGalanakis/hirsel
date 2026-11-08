@@ -1,66 +1,61 @@
 //! Compiled constant data is decoded once into program-lifetime storage.
-use crate::AsyncTirProvider;
 use crate::{Error, Value, aggregate, invalid, scalar};
 use hirsel_syntax::DefPath;
+use hirsel_tir::TirProvider;
 use hirsel_tir::{Materialized, ValueKind, ValueNode};
 use std::collections::BTreeMap;
 
 #[derive(Default)]
 pub(crate) struct Constants(BTreeMap<DefPath, Value>);
 impl Constants {
-    pub(crate) async fn initialize(
-        provider: &mut (impl AsyncTirProvider + ?Sized),
+    pub(crate) fn initialize(
+        provider: &mut (impl TirProvider + ?Sized),
         runtime: &aggregate::RuntimeTypes,
     ) -> Result<Self, Error> {
         let mut values = Self::default();
-        for path in provider
-            .constant_definitions()
-            .await
-            .map_err(Error::Query)?
-        {
-            values.ensure(provider, &path, runtime).await?;
+        for path in provider.constant_definitions().map_err(Error::Query)? {
+            values.ensure(provider, &path, runtime)?;
         }
         Ok(values)
     }
-    pub(crate) async fn read(
+    pub(crate) fn read(
         &mut self,
-        provider: &mut (impl AsyncTirProvider + ?Sized),
+        provider: &mut (impl TirProvider + ?Sized),
         path: &DefPath,
         runtime: &aggregate::RuntimeTypes,
     ) -> Result<Value, Error> {
-        self.ensure(provider, path, runtime).await?;
+        self.ensure(provider, path, runtime)?;
         // The reference evaluator models read-only shares with semantic copies;
         // physical holder/allocation accounting belongs to the native oracle.
         Ok(self.0[path].clone())
     }
-    pub(crate) async fn read_instance(
+    pub(crate) fn read_instance(
         &mut self,
-        provider: &mut (impl AsyncTirProvider + ?Sized),
+        provider: &mut (impl TirProvider + ?Sized),
         path: &DefPath,
         arguments: &[u64],
         runtime: &aggregate::RuntimeTypes,
     ) -> Result<Value, Error> {
         if arguments.is_empty() {
-            return self.read(provider, path, runtime).await;
+            return self.read(provider, path, runtime);
         }
         let key = hirsel_tir::constant_instance_path(path, arguments);
         if !self.0.contains_key(&key) {
             let data = provider
                 .constant_instance(path, arguments)
-                .await
                 .map_err(Error::Query)?;
             self.0.insert(key.clone(), decode(&data, runtime)?);
         }
         Ok(self.0[&key].clone())
     }
-    async fn ensure(
+    fn ensure(
         &mut self,
-        provider: &mut (impl AsyncTirProvider + ?Sized),
+        provider: &mut (impl TirProvider + ?Sized),
         path: &DefPath,
         runtime: &aggregate::RuntimeTypes,
     ) -> Result<(), Error> {
         if !self.0.contains_key(path) {
-            let data = provider.constant(path).await.map_err(Error::Query)?;
+            let data = provider.constant(path).map_err(Error::Query)?;
             self.0.insert(path.clone(), decode(&data, runtime)?);
         }
         Ok(())

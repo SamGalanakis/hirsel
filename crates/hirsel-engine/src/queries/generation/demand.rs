@@ -339,22 +339,16 @@ impl DemandProducer {
         }
         error
     }
-    pub(crate) async fn charge_manifest(
+    pub(crate) fn charge_manifest<'r>(
         &self,
         capture: &NamespaceCapture,
         manifest: hirsel_engine_store::Reference,
         site: Span,
-        reads: &QueryReads,
+        reads: &'r QueryReads<'r>,
     ) -> Result<(), QueryError> {
         let demands = capture
             .manifest_demands(manifest, self.weight.scratch)
             .ok_or_else(|| refused("missing selected generation manifest"))?;
-        if !demands.is_empty() {
-            reads
-                .publication()
-                .await
-                .map_err(|_| refused("cached instance selection cancelled before admission"))?;
-        }
         for demand in demands {
             self.charge_instance(capture, &demand.declaration, &demand.arguments, site)?;
         }
@@ -646,21 +640,18 @@ impl DemandProducer {
         {
             let previous = scope.previous.upgrade().ok_or(self.errors.protocol)?;
             let producer = self.clone();
-            return Ok(Box::new(hirsel_engine_runtime::LocalFutureTask::new(
+            return Ok(Box::new(hirsel_engine_runtime::LocalFnTask::new(
                 id,
                 self.weight,
-                self.max_reads,
                 self.errors,
-                move |reads| async move {
-                    let result = producer
-                        .complete_scope(
-                            &previous,
-                            &scope.roots,
-                            scope.policy,
-                            scope.stop_on_error,
-                            reads,
-                        )
-                        .await;
+                move |reads| {
+                    let result = producer.complete_scope(
+                        &previous,
+                        &scope.roots,
+                        scope.policy,
+                        scope.stop_on_error,
+                        reads,
+                    );
                     *scope.result.lock().unwrap_or_else(|e| e.into_inner()) =
                         Some(result.clone().map(|successor| successor.downgrade()));
                     let successor = result.map_err(|error| {
@@ -673,7 +664,7 @@ impl DemandProducer {
                     })?;
                     producer.scope_product(id, &previous, &successor)
                 },
-            )?));
+            )));
         }
         let request = self
             .requests
@@ -684,15 +675,13 @@ impl DemandProducer {
             .ok_or(self.errors.protocol)?;
         let previous = request.previous.upgrade().ok_or(self.errors.protocol)?;
         let producer = self.clone();
-        Ok(Box::new(hirsel_engine_runtime::LocalFutureTask::new(
+        Ok(Box::new(hirsel_engine_runtime::LocalFnTask::new(
             id,
             self.weight,
-            self.max_reads,
             self.errors,
-            move |reads| async move {
-                let product = producer
-                    .demand(&previous, &request.declaration, &[], request.site, reads)
-                    .await;
+            move |reads| {
+                let product =
+                    producer.demand(&previous, &request.declaration, &[], request.site, reads);
                 let result = match product {
                     Ok(product) => match product.result {
                         Ok(_) => product
@@ -737,7 +726,7 @@ impl DemandProducer {
                 })?;
                 producer.scope_product(id, &previous, &successor)
             },
-        )?))
+        )))
     }
     fn scope_product(
         &self,
@@ -772,11 +761,11 @@ impl DemandProducer {
         ))
     }
 
-    pub(crate) async fn stage_declaration(
+    pub(crate) fn stage_declaration<'r>(
         self: &Arc<Self>,
         previous: &Arc<NamespaceCapture>,
         declaration: &DefPath,
-        reads: QueryReads,
+        reads: &'r QueryReads<'r>,
     ) -> Result<Option<scheduled_lower::SuccessorCapture>, QueryError> {
         let Some((owner, ordinal)) = declaration.0.name.rsplit_once(':') else {
             return Ok(None);
@@ -792,7 +781,7 @@ impl DemandProducer {
         if !previous.bodies.contains_key(&DefId::intern(&owner)) {
             return Ok(None);
         }
-        let successor = self.stage_body(previous, &owner, reads).await?;
+        let successor = self.stage_body(previous, &owner, reads)?;
         let capture = successor.as_ref().map_or(previous, |next| next.namespace());
         if !capture
             .snapshot
@@ -805,11 +794,11 @@ impl DemandProducer {
         }
         Ok(successor)
     }
-    pub(crate) async fn stage_body(
+    pub(crate) fn stage_body<'r>(
         self: &Arc<Self>,
         previous: &Arc<NamespaceCapture>,
         path: &DefPath,
-        reads: hirsel_engine_runtime::QueryReads,
+        reads: &'r QueryReads<'r>,
     ) -> Result<Option<scheduled_lower::SuccessorCapture>, QueryError> {
         let id = DefId::intern(path);
         let Some(body) = previous.bodies.get(&id) else {
@@ -840,10 +829,6 @@ impl DemandProducer {
         if !scheduled_stage::has_staged_body(previous.syntax(path)?.as_ref()) {
             return Ok(None);
         }
-        reads
-            .publication()
-            .await
-            .map_err(|_| refused("staged demand cancelled before admission"))?;
         let owner = self.current()?;
         let stage = crate::FrontStageQueries::new(
             std::slice::from_ref(path),
@@ -862,7 +847,7 @@ impl DemandProducer {
             .factory()
             .create(query)
             .map_err(|_| refused("staged producer admission"))?;
-        let selected = reads.compose(task).await.map_err(|reference| {
+        let selected = reads.compose(task).map_err(|reference| {
             stage
                 .failure(reference)
                 .unwrap_or_else(|| refused("staged producer refused its product"))
@@ -870,10 +855,6 @@ impl DemandProducer {
         let output = stage
             .outcome(selected)
             .ok_or_else(|| refused("staged output is unavailable"))?;
-        reads
-            .publication()
-            .await
-            .map_err(|_| refused("staged demand cancelled at acceptance"))?;
         let metadata = {
             let staged = self.staged.lock().unwrap_or_else(|e| e.into_inner());
             let mut next = hirsel_query_products::retained::MetadataWeight::default();
@@ -936,11 +917,11 @@ impl DemandProducer {
             .upgrade()
             .ok_or_else(|| refused("demand owner has ended"))
     }
-    pub(crate) async fn reopen_manifest(
+    pub(crate) fn reopen_manifest<'r>(
         self: &Arc<Self>,
         previous: &Arc<NamespaceCapture>,
         manifest: hirsel_engine_store::Reference,
-        reads: QueryReads,
+        reads: &'r QueryReads<'r>,
     ) -> Option<scheduled_lower::SuccessorCapture> {
         let demands = previous.manifest_demands(manifest, self.weight.scratch)?;
         {
@@ -980,7 +961,6 @@ impl DemandProducer {
                     site,
                     reads.clone(),
                 )
-                .await
                 .ok()?;
             output.result.ok()?;
             if let Some(successor) = output.successor {
@@ -993,13 +973,13 @@ impl DemandProducer {
         }
         last
     }
-    async fn complete_scope(
+    fn complete_scope<'r>(
         self: &Arc<Self>,
         previous: &Arc<NamespaceCapture>,
         roots: &[DefPath],
         _policy: LoweringPolicy,
         stop_on_error: bool,
-        reads: QueryReads,
+        reads: &'r QueryReads<'r>,
     ) -> Result<scheduled_lower::SuccessorCapture, QueryError> {
         let initial = self.current()?;
         // Nongeneric declarations already listed as roots are demanded in this
@@ -1046,16 +1026,13 @@ impl DemandProducer {
                                 .contains_key(&DefId::intern(path))
                         {
                             let syntax = owner.capture().syntax(path)?;
-                            match self
-                                .demand(
-                                    owner.capture(),
-                                    path,
-                                    &[],
-                                    syntax.item.name_span,
-                                    reads.clone(),
-                                )
-                                .await
-                            {
+                            match self.demand(
+                                owner.capture(),
+                                path,
+                                &[],
+                                syntax.item.name_span,
+                                reads.clone(),
+                            ) {
                                 Ok(product) => {
                                     product.result?;
                                 }
@@ -1067,7 +1044,7 @@ impl DemandProducer {
                         let query = front
                             .query(path)
                             .ok_or_else(|| refused("scope body has no Front producer"))?;
-                        let selected = reads.read_consuming(query).await;
+                        let selected = reads.read_consuming(query);
                         if let Some(facts) = front.check_facts(selected.clone()) {
                             if let Err(error) = facts.result {
                                 // A generated dependency can supply the private
@@ -1117,16 +1094,13 @@ impl DemandProducer {
                             .contains_key(&DefId::intern(&instance))
                         {
                             let current = self.current()?;
-                            match self
-                                .demand(
-                                    current.capture(),
-                                    &request.declaration,
-                                    &request.actuals.arguments,
-                                    request.site,
-                                    reads.clone(),
-                                )
-                                .await
-                            {
+                            match self.demand(
+                                current.capture(),
+                                &request.declaration,
+                                &request.actuals.arguments,
+                                request.site,
+                                reads.clone(),
+                            ) {
                                 Ok(product) => {
                                     product.result?;
                                     changed = true;
@@ -1166,9 +1140,7 @@ impl DemandProducer {
                     let Some(query) = owner.body_front().query(path) else {
                         continue;
                     };
-                    let Some(facts) = owner
-                        .body_front()
-                        .check_facts(reads.read_consuming(query).await)
+                    let Some(facts) = owner.body_front().check_facts(reads.read_consuming(query))
                     else {
                         continue;
                     };
@@ -1205,7 +1177,7 @@ impl DemandProducer {
                         let query = owner
                             .query(path)
                             .ok_or_else(|| refused("scope body has no Lower producer"))?;
-                        let selected = reads.read_consuming(query).await;
+                        let selected = reads.read_consuming(query);
                         if let Err(reference) = selected {
                             let error = owner.failure(reference).ok_or_else(|| {
                                 let reason = if reference == self.errors.resource {
@@ -1353,21 +1325,15 @@ impl DemandProducer {
     }
     /// `previous` is the caller's consumption capture. The only successor
     /// returned here is an admitted descendant of that explicit capture.
-    pub(crate) fn demand<'a>(
+    pub(crate) fn demand<'a, 'r>(
         self: &'a Arc<Self>,
         previous: &'a Arc<NamespaceCapture>,
         declaration: &'a DefPath,
         arguments: &'a [hirsel_types::GenericArgument],
         site: Span,
-        reads: QueryReads,
-    ) -> std::pin::Pin<
-        Box<
-            dyn std::future::Future<
-                    Output = Result<s1::DependencyProduct<Option<DefPath>>, QueryError>,
-                > + 'a,
-        >,
-    > {
-        Box::pin(async move {
+        reads: &'r QueryReads<'r>,
+    ) -> Result<s1::DependencyProduct<Option<DefPath>>, QueryError> {
+        {
             let declaration_id = DefId::intern(declaration);
             if !previous.instances.declarations.contains(&declaration_id)
                 && !previous
@@ -1382,12 +1348,8 @@ impl DemandProducer {
                 });
             }
 
-            reads
-                .publication()
-                .await
-                .map_err(|_| refused("demand cancelled before admission"))?;
             let mut transaction = DemandTransaction::new(self);
-            let result = async {
+            let result = (|| {
                 let current = self
                     .state
                     .lock()
@@ -1524,7 +1486,7 @@ impl DemandProducer {
                     .query(&selected)
                     .ok_or_else(|| refused("missing generator execution input"))?;
                 drop(engine);
-                let product = text.clone().run_tentative(query, reads.clone()).await;
+                let product = text.clone().run_tentative(query, reads.clone());
                 let completed = product.as_ref().ok().cloned();
                 let output = match product {
                     Ok(product) => text.outcome(product),
@@ -1565,14 +1527,7 @@ impl DemandProducer {
                         self.weight.scratch,
                     )
                     .ok_or_else(|| refused("generator demand manifest"))?;
-                self.charge_manifest(output.namespace(), manifest, site, &reads)
-                    .await?;
-                // Cancellation is checked again after execution and before allocating
-                // any accepted source. A cancelled future drops every tentative owner.
-                reads
-                    .publication()
-                    .await
-                    .map_err(|_| refused("demand cancelled at acceptance"))?;
+                self.charge_manifest(output.namespace(), manifest, site, &reads)?;
                 let metadata = Self::take(
                     &self.request,
                     (3 * (size_of::<(DefId, Vec<hirsel_types::GenericArgument>)>()
@@ -1602,10 +1557,6 @@ impl DemandProducer {
                         });
                     }
                 };
-                reads
-                    .publication()
-                    .await
-                    .map_err(|_| refused("demand cancelled during acceptance"))?;
                 let observed = accepted.reads().clone();
                 let mut registrations = output_capture
                     .registrations
@@ -1641,11 +1592,10 @@ impl DemandProducer {
                     reads: observed,
                     successor: Some(result),
                 })
-            }
-            .await;
+            })();
             transaction.completed = true;
             result
-        })
+        }
     }
 }
 

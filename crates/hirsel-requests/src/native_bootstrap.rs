@@ -21,10 +21,7 @@ use hirsel_native_queries::compilation_tasks::CompilationTasks;
 use hirsel_native_queries::instance_tasks::InstanceTasks;
 use hirsel_native_queries::products::EmissionOptions;
 use hirsel_syntax::{ContentHash, DefPath};
-use std::{
-    sync::{Arc, Mutex, OnceLock},
-    task::Poll,
-};
+use std::sync::{Arc, Mutex, OnceLock};
 
 pub(super) const KIND: u32 = 0x5200_0030;
 const OUTPUT: Domain = Domain {
@@ -583,28 +580,22 @@ impl QueryTask for Task {
     fn weight(&self) -> MemoryWeight {
         self.owner.weight
     }
-    fn poll(&mut self, cx: &mut dyn QueryContext) -> QueryPoll {
+    fn run(&mut self, cx: &mut dyn QueryContext) -> QueryOutcome {
         let result = if let Some(result) = self.terminal.clone() {
             result
         } else {
             let source = match cx.read(self.owner.source.preparation_query()) {
-                Poll::Pending => {
-                    return QueryPoll::Waiting(vec![self.owner.source.preparation_query()]);
-                }
-                Poll::Ready(Err(error)) => {
+                Err(error) => {
                     self.terminal = Some(Err(error));
-                    return QueryPoll::Failed(error);
+                    return Err(error);
                 }
-                Poll::Ready(Ok(product)) => product,
+                Ok(product) => product,
             };
             match self.owner.prepare(source) {
                 Err(error) => Err(self.owner.fail(error)),
                 Ok(prepared) => match cx.read(prepared.compilation.query_id()) {
-                    Poll::Pending => {
-                        return QueryPoll::Waiting(vec![prepared.compilation.query_id()]);
-                    }
-                    Poll::Ready(Err(error)) => Err(error),
-                    Poll::Ready(Ok(compilation))
+                    Err(error) => Err(error),
+                    Ok(compilation)
                         if compilation.address == prepared.compilation.query_id().address =>
                     {
                         let action = Action(ContentHash::of_parts(
@@ -629,10 +620,7 @@ impl QueryTask for Task {
             }
         };
         self.terminal = Some(result.clone());
-        match result {
-            Ok(product) => QueryPoll::Complete(product),
-            Err(error) => QueryPoll::Failed(error),
-        }
+        result
     }
 }
 

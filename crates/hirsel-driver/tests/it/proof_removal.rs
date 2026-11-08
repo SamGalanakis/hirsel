@@ -996,9 +996,9 @@ fn native_discovery_reports_actual_removals_on_cold_and_body_free_fresh_hits() {
                 fn weight(&self) -> MemoryWeight {
                     self.0.weight()
                 }
-                fn poll(&mut self, cx: &mut dyn QueryContext) -> QueryPoll {
+                fn run(&mut self, cx: &mut dyn QueryContext) -> QueryOutcome {
                     let _observe = self.1.enter();
-                    self.0.poll(cx)
+                    self.0.run(cx)
                 }
             }
             let factory = Arc::new(Traced(

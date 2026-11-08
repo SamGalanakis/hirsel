@@ -7,7 +7,6 @@ use hirsel_syntax::ContentHash;
 use std::collections::VecDeque;
 use std::io;
 use std::sync::{Arc, Mutex};
-use std::task::Poll;
 
 fn product() -> ProductRef {
     crate::fixture_product_bytes(
@@ -27,7 +26,7 @@ fn product() -> ProductRef {
 struct ProbeRuntime {
     next: u64,
     events: Vec<String>,
-    replies: VecDeque<Poll<Result<Vec<ProductRef>, Reference>>>,
+    replies: VecDeque<Result<Vec<ProductRef>, Reference>>,
 }
 impl QueryRuntime for ProbeRuntime {
     fn request(&mut self, roots: &[QueryId]) -> RequestId {
@@ -42,9 +41,9 @@ impl QueryRuntime for ProbeRuntime {
         self.events.push(format!("request {}", self.next));
         RequestId(self.next)
     }
-    fn poll(&mut self, request: RequestId) -> Poll<Result<Vec<ProductRef>, Reference>> {
-        self.events.push(format!("poll {}", request.0));
-        self.replies.pop_front().unwrap_or(Poll::Pending)
+    fn wait(&mut self, request: RequestId) -> Result<Vec<ProductRef>, Reference> {
+        self.events.push(format!("wait {}", request.0));
+        self.replies.pop_front().expect("probe reply")
     }
     fn cancel(&mut self, request: RequestId) {
         self.events.push(format!("cancel {}", request.0));
@@ -108,7 +107,7 @@ fn host() -> (Host<Selector>, Arc<Mutex<ProbeRuntime>>) {
         runtime,
     )
 }
-fn reply(runtime: &Arc<Mutex<ProbeRuntime>>, result: Poll<Result<Vec<ProductRef>, Reference>>) {
+fn reply(runtime: &Arc<Mutex<ProbeRuntime>>, result: Result<Vec<ProductRef>, Reference>) {
     runtime.lock().unwrap().replies.push_back(result);
 }
 fn events(runtime: &Arc<Mutex<ProbeRuntime>>) -> Vec<String> {
@@ -119,7 +118,6 @@ fn events(runtime: &Arc<Mutex<ProbeRuntime>>) -> Vec<String> {
 fn pending_request_cancels_once_and_forwards_explicit_eviction() {
     let (mut host, runtime) = host();
     let mut request = host.request(&false).unwrap();
-    assert_eq!(request.poll(), Poll::Pending);
     request.evict_to(0);
     request.evict_to(17);
     drop(request);
@@ -128,7 +126,6 @@ fn pending_request_cancels_once_and_forwards_explicit_eviction() {
         [
             "observe/seal/select",
             "request 1",
-            "poll 1",
             "evict 0",
             "evict 17",
             "cancel 1"
@@ -140,11 +137,10 @@ fn pending_request_cancels_once_and_forwards_explicit_eviction() {
 fn shared_runtime_cancellation_does_not_cancel_another_subscription() {
     let (mut host, runtime) = host();
     let abandoned = host.request(&false).unwrap();
-    let mut live = host.request(&false).unwrap();
+    let live = host.request(&false).unwrap();
     drop(abandoned);
-    reply(&runtime, Poll::Ready(Ok(vec![product()])));
-    assert_eq!(live.poll(), Poll::Ready(Ok(vec![product()])));
-    drop(live);
+    reply(&runtime, Ok(vec![product()]));
+    assert_eq!(live.wait(), Ok(vec![product()]));
     assert_eq!(
         events(&runtime),
         [
@@ -153,7 +149,7 @@ fn shared_runtime_cancellation_does_not_cancel_another_subscription() {
             "observe/seal/select",
             "request 2",
             "cancel 1",
-            "poll 2",
+            "wait 2",
             "ready"
         ]
     );
@@ -162,11 +158,10 @@ fn shared_runtime_cancellation_does_not_cancel_another_subscription() {
 #[test]
 fn host_shutdown_cancels_live_subscriptions_without_readiness() {
     let (mut host, runtime) = host();
-    let mut request = host.request(&false).unwrap();
+    let request = host.request(&false).unwrap();
     drop(host);
-    reply(&runtime, Poll::Ready(Ok(vec![product()])));
-    assert_eq!(request.poll(), Poll::Ready(Err(RequestError::Cancelled)));
-    drop(request);
+    reply(&runtime, Ok(vec![product()]));
+    assert_eq!(request.wait(), Err(RequestError::Cancelled));
     assert_eq!(
         events(&runtime),
         ["observe/seal/select", "request 1", "cancel 1"]
@@ -176,36 +171,31 @@ fn host_shutdown_cancels_live_subscriptions_without_readiness() {
 #[test]
 fn query_failure_never_materializes_output() {
     let (mut host, runtime) = host();
-    let mut request = host.request(&false).unwrap();
+    let request = host.request(&false).unwrap();
     let reference = product()
         .archive(hirsel_engine_runtime::ArchiveAdmission::Retained)
         .unwrap()
         .reference();
-    reply(&runtime, Poll::Ready(Err(reference)));
-    assert_eq!(
-        request.poll(),
-        Poll::Ready(Err(RequestError::Query(reference)))
-    );
-    drop(request);
+    reply(&runtime, Err(reference));
+    assert_eq!(request.wait(), Err(RequestError::Query(reference)));
     assert_eq!(
         events(&runtime),
-        ["observe/seal/select", "request 1", "poll 1"]
+        ["observe/seal/select", "request 1", "wait 1"]
     );
 }
 
 #[test]
 fn output_readiness_failure_is_not_request_success() {
     let (mut host, runtime) = host();
-    let mut request = host.request(&true).unwrap();
-    reply(&runtime, Poll::Ready(Ok(vec![product()])));
+    let request = host.request(&true).unwrap();
+    reply(&runtime, Ok(vec![product()]));
     assert_eq!(
-        request.poll(),
-        Poll::Ready(Err(RequestError::Output("missing executable")))
+        request.wait(),
+        Err(RequestError::Output("missing executable"))
     );
-    drop(request);
     assert_eq!(
         events(&runtime),
-        ["observe/seal/select", "request 1", "poll 1", "ready"]
+        ["observe/seal/select", "request 1", "wait 1", "ready"]
     );
 }
 
@@ -397,10 +387,9 @@ fn terminal_diagnostics_are_owned_before_transient_provider_and_lease_drop() {
         runtime: runtime.clone(),
         store,
     });
-    let mut lease = host.request(&()).unwrap();
-    reply(&runtime, Poll::Ready(Err(diagnostic)));
-    let result = lease.poll();
-    drop(lease);
+    let lease = host.request(&()).unwrap();
+    reply(&runtime, Err(diagnostic));
+    let result = lease.wait();
     drop(host);
     assert!(
         weak.upgrade().is_none(),
@@ -408,9 +397,7 @@ fn terminal_diagnostics_are_owned_before_transient_provider_and_lease_drop() {
     );
     assert_eq!(
         result,
-        Poll::Ready(Err(RequestError::Output(
-            "exact terminal diagnostic".into()
-        )))
+        Err(RequestError::Output("exact terminal diagnostic".into()))
     );
-    assert_eq!(events(&runtime), ["request 1", "poll 1", "diagnostics"]);
+    assert_eq!(events(&runtime), ["request 1", "wait 1", "diagnostics"]);
 }

@@ -206,7 +206,6 @@ pub fn inspect(root: List[u64]) -> u64 { forward(root)+forward_again(root) }
             use hirsel_engine_runtime::MemoryWeight;
             use hirsel_engine_runtime::QueryFactory;
             use hirsel_engine_runtime::QueryId;
-            use hirsel_engine_runtime::QueryPoll;
             use hirsel_native_cache::source_inputs::NativeFrontLower;
             use hirsel_native_queries::instance_tasks::INSTANCE_INPUT_KIND;
             use hirsel_native_queries::instance_tasks::InstanceTaskFactory;
@@ -227,12 +226,7 @@ pub fn inspect(root: List[u64]) -> u64 { forward(root)+forward_again(root) }
                 .iter()
                 .map(|(path, query)| (*query, products[path].0.clone()))
                 .collect();
-            let mut delayed = read.clone();
-            delayed.0.name = "read".into();
-            let mut cx = LowerReads {
-                rows,
-                waiting: Some(bindings[&delayed]),
-            };
+            let mut cx = LowerReads { rows };
             let budget = hirsel_engine_admission::ProcessBudget::new(64 << 20);
             let tasks = InstanceTasks::new(
                 inputs.clone(),
@@ -265,11 +259,7 @@ pub fn inspect(root: List[u64]) -> u64 { forward(root)+forward_again(root) }
                     address: owner.address(INSTANCE_INPUT_KIND),
                 })
                 .unwrap();
-            assert!(
-                matches!(task.poll(&mut cx), QueryPoll::Waiting(ref waits) if waits == &[cx.waiting.unwrap()])
-            );
-            cx.waiting = None;
-            assert!(matches!(task.poll(&mut cx), QueryPoll::Complete(_)));
+            assert!(task.run(&mut cx).is_ok());
             assert_eq!(tasks.imports.load(std::sync::atomic::Ordering::Relaxed), 0);
         }
         let mut source = inputs.provider();
@@ -445,23 +435,19 @@ struct LowerReads {
         hirsel_engine_runtime::QueryId,
         hirsel_engine_runtime::ProductRef,
     )>,
-    waiting: Option<hirsel_engine_runtime::QueryId>,
 }
 impl hirsel_engine_runtime::QueryContext for LowerReads {
     fn read(
         &mut self,
         query: hirsel_engine_runtime::QueryId,
-    ) -> std::task::Poll<Result<hirsel_engine_runtime::ProductRef, store::Reference>> {
-        if self.waiting == Some(query) {
-            return std::task::Poll::Pending;
-        }
-        std::task::Poll::Ready(Ok(self
+    ) -> Result<hirsel_engine_runtime::ProductRef, store::Reference> {
+        Ok(self
             .rows
             .iter()
             .find(|(id, _)| *id == query)
             .unwrap()
             .1
-            .clone()))
+            .clone())
     }
 }
 

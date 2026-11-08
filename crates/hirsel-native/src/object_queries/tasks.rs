@@ -2,9 +2,8 @@
 //! only; actual dependency reads suspend before any backend/linker is entered.
 use super::*;
 use hirsel_engine_runtime::{
-    MemoryWeight, QueryContext, QueryFactory, QueryId, QueryPoll, QueryTask,
+    MemoryWeight, QueryContext, QueryFactory, QueryId, QueryOutcome, QueryTask,
 };
-use std::task::Poll;
 
 pub const CODEGEN_KIND: u32 = 0x4f000001;
 pub const LINK_KIND: u32 = 0x4f000002;
@@ -165,27 +164,9 @@ struct ObjectTask<S> {
     terminal: Option<Result<ProductRef, Reference>>,
 }
 
-// Read every dependency in the prescribed order even when another is pending.
-// The runtime records real edges/coalesces wakeups; no worker blocks here.
-fn read(cx: &mut dyn QueryContext, ids: &[QueryId]) -> Result<Vec<ProductRef>, QueryPoll> {
-    let mut waiting = Vec::new();
-    let mut products = Vec::with_capacity(ids.len());
-    for id in ids {
-        match cx.read(*id) {
-            Poll::Pending => {
-                if !waiting.contains(id) {
-                    waiting.push(*id);
-                }
-            }
-            Poll::Ready(Ok(product)) => products.push(product),
-            Poll::Ready(Err(error)) => return Err(QueryPoll::Failed(error)),
-        }
-    }
-    if waiting.is_empty() {
-        Ok(products)
-    } else {
-        Err(QueryPoll::Waiting(waiting))
-    }
+// Read every dependency in the prescribed order; the first failure wins.
+fn read(cx: &mut dyn QueryContext, ids: &[QueryId]) -> Result<Vec<ProductRef>, Reference> {
+    ids.iter().map(|id| cx.read(*id)).collect()
 }
 
 impl<S: ObjectTaskSnapshot> ObjectTask<S> {
@@ -193,33 +174,15 @@ impl<S: ObjectTaskSnapshot> ObjectTask<S> {
         &self,
         cx: &mut dyn QueryContext,
         ids: &[QueryId],
-    ) -> Result<Vec<ProductRef>, QueryPoll> {
-        let Some(execution) = self.snapshot.execution_query() else {
-            return read(cx, ids);
-        };
-        let execution = match cx.read(execution) {
-            Poll::Ready(Err(error)) => return Err(QueryPoll::Failed(error)),
-            Poll::Ready(Ok(product)) => {
-                self.snapshot
-                    .admit_execution(&product)
-                    .map_err(QueryPoll::Failed)?;
-                return read(cx, ids);
-            }
-            Poll::Pending => execution,
-        };
-        // Ready producers can run while the complete execution root waits.
-        // Every pending read belongs to this continuation. Execution still
-        // selects the first failure and gates all backend work/publication.
-        let mut waiting = vec![execution];
-        for id in ids {
-            if cx.read(*id).is_pending() && !waiting.contains(id) {
-                waiting.push(*id);
-            }
+    ) -> Result<Vec<ProductRef>, Reference> {
+        // Execution selects the first failure and gates all backend work.
+        if let Some(execution) = self.snapshot.execution_query() {
+            let product = cx.read(execution)?;
+            self.snapshot.admit_execution(&product)?;
         }
-        Err(QueryPoll::Waiting(waiting))
+        read(cx, ids)
     }
-    fn compute(&self, cx: &mut dyn QueryContext) -> Result<ProductRef, QueryPoll> {
-        let failed = QueryPoll::Failed;
+    fn compute(&self, cx: &mut dyn QueryContext) -> Result<ProductRef, Reference> {
         let product = match &self.request {
             ObjectTaskRequest::WholeCodegen { key, .. } => {
                 let ids = key
@@ -229,37 +192,27 @@ impl<S: ObjectTaskSnapshot> ObjectTask<S> {
                     .collect::<Vec<_>>();
                 let settled = self.read_codegen(cx, &ids)?;
                 for product in &settled {
-                    let ready = self
-                        .snapshot
-                        .ready_descriptor(product.clone())
-                        .map_err(failed)?;
+                    let ready = self.snapshot.ready_descriptor(product.clone())?;
                     if ready.product != *product || !ready.optimizer_reads.is_empty() {
-                        return Err(failed(
-                            self.snapshot
-                                .failure("whole-module Ready dependency differs"),
-                        ));
+                        return Err(self
+                            .snapshot
+                            .failure("whole-module Ready dependency differs"));
                     }
                 }
-                let mut products = self.snapshot.products(&settled).map_err(failed)?;
+                let mut products = self.snapshot.products(&settled)?;
                 products
                     .codegen_whole(key)
-                    .map_err(|e| failed(self.snapshot.failure(&e)))?
+                    .map_err(|e| self.snapshot.failure(&e))?
                     .product
                     .clone()
             }
             ObjectTaskRequest::Codegen { key, ready, .. } => {
                 let own = self.read_codegen(cx, &[*ready])?[0].clone();
-                let descriptor = self
-                    .snapshot
-                    .ready_descriptor(own.clone())
-                    .map_err(failed)?;
+                let descriptor = self.snapshot.ready_descriptor(own.clone())?;
                 if descriptor.product != own {
-                    return Err(failed(self.snapshot.failure("Ready descriptor mismatch")));
+                    return Err(self.snapshot.failure("Ready descriptor mismatch"));
                 }
-                let dependencies = self
-                    .snapshot
-                    .optimizer_queries(key, &descriptor)
-                    .map_err(failed)?;
+                let dependencies = self.snapshot.optimizer_queries(key, &descriptor)?;
                 let ids = dependencies.iter().map(|(id, _)| *id).collect::<Vec<_>>();
                 if ids.iter().any(|id| *id == *ready)
                     || ids
@@ -267,45 +220,38 @@ impl<S: ObjectTaskSnapshot> ObjectTask<S> {
                         .enumerate()
                         .any(|(index, id)| ids[..index].contains(id))
                 {
-                    return Err(failed(
-                        self.snapshot.failure("duplicate or self optimizer read"),
-                    ));
+                    return Err(self.snapshot.failure("duplicate or self optimizer read"));
                 }
                 let copies = read(cx, &ids)?;
                 for (current, (id, expected)) in copies.iter().zip(&dependencies) {
                     let mismatch = if let Some(old) = expected {
                         let current_archive = current
                             .archive(hirsel_engine_runtime::ArchiveAdmission::Retained)
-                            .map_err(|e| failed(self.snapshot.failure(&e.to_string())))?;
+                            .map_err(|e| self.snapshot.failure(&e.to_string()))?;
                         let old_archive = old
                             .archive(hirsel_engine_runtime::ArchiveAdmission::Retained)
-                            .map_err(|e| failed(self.snapshot.failure(&e.to_string())))?;
+                            .map_err(|e| self.snapshot.failure(&e.to_string()))?;
                         current.address != old.address
                             || current_archive.reference() != old_archive.reference()
                     } else {
                         false
                     };
                     if current.address != id.address || mismatch {
-                        return Err(failed(
-                            self.snapshot.failure("stale optimizer body dependency"),
-                        ));
+                        return Err(self.snapshot.failure("stale optimizer body dependency"));
                     }
                 }
                 let mut settled = vec![own];
                 settled.extend(copies);
-                let mut products = self.snapshot.products(&settled).map_err(failed)?;
+                let mut products = self.snapshot.products(&settled)?;
                 products
                     .codegen(key)
-                    .map_err(|e| failed(self.snapshot.failure(&e)))?
+                    .map_err(|e| self.snapshot.failure(&e))?
                     .product
                     .clone()
             }
             ObjectTaskRequest::Link { key, manifest, .. } => {
                 let manifest = read(cx, &[*manifest])?[0].clone();
-                let deps = self
-                    .snapshot
-                    .link_dependencies(manifest.clone())
-                    .map_err(failed)?;
+                let deps = self.snapshot.link_dependencies(manifest.clone())?;
                 let mut ids = deps.fragments.clone();
                 ids.push(deps.static_manifest);
                 ids.extend(&deps.runtime_archives);
@@ -321,9 +267,8 @@ impl<S: ObjectTaskSnapshot> ObjectTask<S> {
                         fragment_product(self.snapshot.store(), p.clone())
                             .map_err(|e| self.snapshot.failure(&e))
                     })
-                    .collect::<Result<Vec<_>, _>>()
-                    .map_err(failed)?;
-                let resolve = |p| self.snapshot.link_input(p).map_err(failed);
+                    .collect::<Result<Vec<_>, _>>()?;
+                let resolve = |p| self.snapshot.link_input(p);
                 let static_manifest = resolve(outputs[n].clone())?;
                 let r = n + 1;
                 let f = r + deps.runtime_archives.len();
@@ -342,7 +287,7 @@ impl<S: ObjectTaskSnapshot> ObjectTask<S> {
                         .map(|p| {
                             p.archive(hirsel_engine_runtime::ArchiveAdmission::Retained)
                                 .map(|archive| archive.reference())
-                                .map_err(|e| failed(self.snapshot.failure(&e.to_string())))
+                                .map_err(|e| self.snapshot.failure(&e.to_string()))
                         })
                         .collect::<Result<Vec<_>, _>>()?,
                     fragments,
@@ -353,19 +298,18 @@ impl<S: ObjectTaskSnapshot> ObjectTask<S> {
                 };
                 let mut settled = vec![manifest];
                 settled.extend(outputs);
-                let mut products = self.snapshot.products(&settled).map_err(failed)?;
+                let mut products = self.snapshot.products(&settled)?;
                 products
                     .link(key, &inputs)
-                    .map_err(|e| failed(self.snapshot.failure(&e)))?
+                    .map_err(|e| self.snapshot.failure(&e))?
                     .product
                     .clone()
             }
         };
         if product.address != self.request.id().address {
-            return Err(failed(
-                self.snapshot
-                    .failure("object task returned another product"),
-            ));
+            return Err(self
+                .snapshot
+                .failure("object task returned another product"));
         }
         Ok(product)
     }
@@ -380,30 +324,12 @@ impl<S: ObjectTaskSnapshot> QueryTask for ObjectTask<S> {
             ..self.request.weight()
         }
     }
-    fn continuation_bytes(&self) -> u64 {
-        if matches!(&self.request, ObjectTaskRequest::Link { .. }) {
-            0
-        } else {
-            self.retained
-        }
-    }
-    fn poll(&mut self, cx: &mut dyn QueryContext) -> QueryPoll {
+    fn run(&mut self, cx: &mut dyn QueryContext) -> QueryOutcome {
         if let Some(result) = self.terminal.clone() {
-            return match result {
-                Ok(p) => QueryPoll::Complete(p),
-                Err(e) => QueryPoll::Failed(e),
-            };
+            return result;
         }
-        match self.compute(cx) {
-            Ok(product) => {
-                self.terminal = Some(Ok(product.clone()));
-                QueryPoll::Complete(product)
-            }
-            Err(QueryPoll::Failed(error)) => {
-                self.terminal = Some(Err(error));
-                QueryPoll::Failed(error)
-            }
-            Err(other) => other,
-        }
+        let result = self.compute(cx);
+        self.terminal = Some(result.clone());
+        result
     }
 }

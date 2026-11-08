@@ -39,12 +39,9 @@ impl QueryTask for TracedTask {
     fn weight(&self) -> MemoryWeight {
         self.0.weight()
     }
-    fn continuation_bytes(&self) -> u64 {
-        self.0.continuation_bytes()
-    }
-    fn poll(&mut self, cx: &mut dyn QueryContext) -> QueryPoll {
+    fn run(&mut self, cx: &mut dyn QueryContext) -> QueryOutcome {
         let _observe = self.1.enter();
-        self.0.poll(cx)
+        self.0.run(cx)
     }
 }
 #[derive(Debug, Eq, PartialEq)]

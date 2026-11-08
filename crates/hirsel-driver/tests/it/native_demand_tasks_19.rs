@@ -14,10 +14,7 @@ use hirsel_native_queries::instance_tasks::DISCOVERY_KIND;
 use hirsel_native_queries::instance_tasks::INSTANCE_INPUT_KIND;
 use hirsel_native_queries::instance_tasks::InstanceTaskFactory;
 use hirsel_native_queries::instance_tasks::InstanceTasks;
-use std::{
-    sync::{Arc, atomic::Ordering},
-    task::Poll,
-};
+use std::sync::{Arc, atomic::Ordering};
 
 struct Traced(Arc<dyn QueryFactory>, hirsel_lir::construction::ValueTrace);
 struct TracedTask(Box<dyn QueryTask>, hirsel_lir::construction::ValueTrace);
@@ -33,15 +30,15 @@ impl QueryTask for TracedTask {
     fn weight(&self) -> MemoryWeight {
         self.0.weight()
     }
-    fn poll(&mut self, cx: &mut dyn QueryContext) -> QueryPoll {
+    fn run(&mut self, cx: &mut dyn QueryContext) -> QueryOutcome {
         let _observe = self.1.enter();
-        self.0.poll(cx)
+        self.0.run(cx)
     }
 }
-struct Pending;
-impl QueryContext for Pending {
-    fn read(&mut self, _: QueryId) -> Poll<Result<ProductRef, store::Reference>> {
-        Poll::Pending
+struct Refused(store::Reference);
+impl QueryContext for Refused {
+    fn read(&mut self, _: QueryId) -> Result<ProductRef, store::Reference> {
+        Err(self.0)
     }
 }
 #[test]
@@ -122,10 +119,10 @@ fn native_demand_tasks_import_and_reuse_actual_settled_source_without_a_controll
                 address: main.address(INSTANCE_KIND),
             };
             let mut task = factory.create(id).unwrap();
-            assert!(matches!(task.poll(&mut Pending), QueryPoll::Waiting(_)));
+            let denied = tasks.failure("native task control refusal");
+            assert_eq!(task.run(&mut Refused(denied)), Err(denied));
             assert_eq!(trace.totals(), Default::default());
             assert_eq!(tasks.imports.load(Ordering::Relaxed), 0);
-            let denied = tasks.failure("native task control refusal");
             let errors = RuntimeErrors {
                 resource: denied,
                 cycle: denied,

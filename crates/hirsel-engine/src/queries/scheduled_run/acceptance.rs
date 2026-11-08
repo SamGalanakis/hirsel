@@ -23,7 +23,7 @@ impl Task {
             terminal,
         }
     }
-    fn advance(&self, cx: &mut dyn QueryContext) -> Result<Option<Vec<QueryId>>, Reference> {
+    fn advance(&self, cx: &mut dyn QueryContext) -> Result<(), Reference> {
         let queries = &self.queries;
         let check = queries.check.as_ref().ok_or(queries.errors.protocol)?;
         let preparation = queries
@@ -31,28 +31,12 @@ impl Task {
             .ok_or(queries.errors.protocol)?;
         let prepared = cx.read(preparation);
         let checked = cx.read(check.query());
-        let mut waiting = Vec::new();
-        if prepared.is_pending() {
-            waiting.push(preparation);
-        }
-        if checked.is_pending() {
-            waiting.push(check.query());
-        }
-        if !waiting.is_empty() {
-            return Ok(Some(waiting));
-        }
-        let Poll::Ready(checked) = checked else {
-            unreachable!()
-        };
         let checked = checked?;
         if check.accepted(checked.clone()) != Some(true) {
             return Err(check
                 .rejection_reference(&checked)
                 .ok_or(queries.errors.protocol)?);
         }
-        let Poll::Ready(prepared) = prepared else {
-            unreachable!()
-        };
         let prepared = prepared?;
         if prepared.address != preparation.address {
             return Err(queries.errors.protocol);
@@ -83,7 +67,7 @@ impl Task {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .insert(self.query.address.0, (product, output));
-        Ok(None)
+        Ok(())
     }
 }
 impl QueryTask for Task {
@@ -96,16 +80,12 @@ impl QueryTask for Task {
             ..self.queries.weight
         }
     }
-    fn continuation_bytes(&self) -> u64 {
-        self.weight().retained
-    }
-    fn poll(&mut self, cx: &mut dyn QueryContext) -> QueryPoll {
+    fn run(&mut self, cx: &mut dyn QueryContext) -> QueryOutcome {
         if let Some(result) = &self.terminal {
-            return finish(result.clone());
+            return result.clone();
         }
         let result = match self.advance(cx) {
-            Ok(Some(waiting)) => return QueryPoll::Waiting(waiting),
-            Ok(None) => self
+            Ok(()) => self
                 .queries
                 .completed
                 .lock()
@@ -116,12 +96,6 @@ impl QueryTask for Task {
             Err(error) => Err(error),
         };
         self.terminal = Some(result.clone());
-        finish(result)
-    }
-}
-fn finish(result: Result<ProductRef, Reference>) -> QueryPoll {
-    match result {
-        Ok(product) => QueryPoll::Complete(product),
-        Err(error) => QueryPoll::Failed(error),
+        result
     }
 }

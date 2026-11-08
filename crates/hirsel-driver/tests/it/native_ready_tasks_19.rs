@@ -26,10 +26,7 @@ use hirsel_native_queries::products::EmissionOptions;
 use hirsel_native_queries::products::NativeSnapshot;
 use hirsel_native_queries::tasks::NativeTaskFactory;
 use hirsel_native_queries::tasks::NativeTasks;
-use std::{
-    sync::{Arc, atomic::Ordering},
-    task::Poll,
-};
+use std::sync::{Arc, atomic::Ordering};
 
 struct Traced(Arc<dyn QueryFactory>, hirsel_lir::construction::ValueTrace);
 struct TracedTask(Box<dyn QueryTask>, hirsel_lir::construction::ValueTrace);
@@ -45,12 +42,9 @@ impl QueryTask for TracedTask {
     fn weight(&self) -> MemoryWeight {
         self.0.weight()
     }
-    fn continuation_bytes(&self) -> u64 {
-        self.0.continuation_bytes()
-    }
-    fn poll(&mut self, cx: &mut dyn QueryContext) -> QueryPoll {
+    fn run(&mut self, cx: &mut dyn QueryContext) -> QueryOutcome {
         let _observe = self.1.enter();
-        self.0.poll(cx)
+        self.0.run(cx)
     }
 }
 struct OriginalBodies(Vec<std::sync::Weak<hirsel_tir::Definition>>);
@@ -62,10 +56,10 @@ impl Drop for OriginalBodies {
         }
     }
 }
-struct Pending;
-impl QueryContext for Pending {
-    fn read(&mut self, _: QueryId) -> Poll<Result<ProductRef, store::Reference>> {
-        Poll::Pending
+struct Refused(store::Reference);
+impl QueryContext for Refused {
+    fn read(&mut self, _: QueryId) -> Result<ProductRef, store::Reference> {
+        Err(self.0)
     }
 }
 #[test]
@@ -324,10 +318,10 @@ fn ready_case_inner_mutation(
                 address: main.address(INSTANCE_KIND),
             };
             let mut task = factory.create(id).unwrap();
-            assert!(matches!(task.poll(&mut Pending), QueryPoll::Waiting(_)));
+            let denied = tasks.failure("native task control refusal");
+            assert_eq!(task.run(&mut Refused(denied)), Err(denied));
             assert_eq!(trace.totals(), Default::default());
             assert_eq!(tasks.imports.load(Ordering::Relaxed), 0);
-            let denied = tasks.failure("native task control refusal");
             let errors = RuntimeErrors {
                 resource: tasks.failure("runtime resource admission refused"),
                 cycle: tasks.failure("runtime dependency cycle refused"),
@@ -656,7 +650,8 @@ fn ready_case_inner_mutation(
                 .unwrap();
                 let factory = roots.factory();
                 let mut pending = factory.create(roots.query_id()).unwrap();
-                assert!(matches!(pending.poll(&mut Pending), QueryPoll::Waiting(_)));
+                let denied = tasks.failure("native ownership control refusal");
+                assert_eq!(pending.run(&mut Refused(denied)), Err(denied));
                 assert_eq!(roots.transformations.load(Ordering::Relaxed), 0);
                 let mut invalid = roots.query_id();
                 invalid.kind = READY_KIND;

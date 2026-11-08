@@ -15,7 +15,6 @@ use std::{
         OnceLock,
         atomic::{AtomicU64, Ordering},
     },
-    task::Poll,
 };
 
 pub const OWNERSHIP_READY_KIND: u32 = 0x4e00_002b;
@@ -785,25 +784,15 @@ impl QueryTask for Task {
     fn weight(&self) -> MemoryWeight {
         self.owner.weight
     }
-    fn poll(&mut self, cx: &mut dyn QueryContext) -> QueryPoll {
+    fn run(&mut self, cx: &mut dyn QueryContext) -> QueryOutcome {
         if self.terminal.is_none() {
-            match self.advance(cx) {
-                Ok(Err(waiting)) => return QueryPoll::Waiting(waiting),
-                Ok(Ok(product)) => self.terminal = Some(Ok(product)),
-                Err(error) => self.terminal = Some(Err(error)),
-            }
+            self.terminal = Some(self.advance(cx));
         }
-        match self.terminal.clone().unwrap() {
-            Ok(product) => QueryPoll::Complete(product),
-            Err(error) => QueryPoll::Failed(error),
-        }
+        self.terminal.clone().unwrap()
     }
 }
 impl Task {
-    fn advance(
-        &self,
-        cx: &mut dyn QueryContext,
-    ) -> Result<Result<ProductRef, Vec<QueryId>>, Reference> {
+    fn advance(&self, cx: &mut dyn QueryContext) -> Result<ProductRef, Reference> {
         let owner = &self.owner;
         let fail = |error: String| owner.native.failure(&error);
         let root = self.query == owner.root;
@@ -823,13 +812,11 @@ impl Task {
                 .map(|(query, record)| (*query, Some(*record)))
                 .collect()
         };
-        let mut waiting = Vec::new();
         let mut outputs = Vec::new();
         for (query, expected) in reads {
             match cx.read(query) {
-                Poll::Pending => waiting.push(query),
-                Poll::Ready(Err(error)) => return Err(error),
-                Poll::Ready(Ok(product)) => {
+                Err(error) => return Err(error),
+                Ok(product) => {
                     let selected = product
                         .archive(hirsel_engine_runtime::ArchiveAdmission::Retained)
                         .map_err(|e| fail(e.to_string()))?
@@ -844,9 +831,6 @@ impl Task {
                     outputs.push(product)
                 }
             }
-        }
-        if !waiting.is_empty() {
-            return Ok(Err(waiting));
         }
         if root {
             let bytes = serde_json::to_vec(
@@ -867,14 +851,12 @@ impl Task {
             .map_err(|e| fail(e.to_string()))?;
             owner
                 .publish(self.query, ROOT, bytes, &owner.completed)
-                .map(Ok)
                 .map_err(fail)
         } else {
             if let Some(guard) = owner.native.snapshot.guard.get() {
                 match cx.read(guard.query_id()) {
-                    Poll::Pending => return Ok(Err(vec![guard.query_id()])),
-                    Poll::Ready(Err(error)) => return Err(error),
-                    Poll::Ready(Ok(product)) if guard.accepts(product.clone()) => (),
+                    Err(error) => return Err(error),
+                    Ok(product) if guard.accepts(product.clone()) => (),
                     _ => return Err(fail("ownership seal-demand dependency changed".into())),
                 }
             }
@@ -897,7 +879,6 @@ impl Task {
             let bytes = hirsel_codec::to_text(&(payload, observed.source_action.0));
             owner
                 .publish(self.query, UNIT, bytes.into_bytes(), &request.completed)
-                .map(Ok)
                 .map_err(fail)
         }
     }

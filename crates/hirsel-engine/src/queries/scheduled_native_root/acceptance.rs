@@ -16,33 +16,17 @@ impl Task {
             .map(|product| Ok(product.clone()));
         Self { owner, terminal }
     }
-    fn advance(&self, cx: &mut dyn QueryContext) -> Result<Option<Vec<QueryId>>, Reference> {
+    fn advance(&self, cx: &mut dyn QueryContext) -> Result<(), Reference> {
         let owner = &self.owner;
         let check = owner.run.source_check().ok_or(owner.errors.protocol)?;
         let prepared = cx.read(owner.preparation_query());
         let accepted = cx.read(check.query());
-        let mut waiting = Vec::new();
-        if prepared.is_pending() {
-            waiting.push(owner.preparation_query());
-        }
-        if accepted.is_pending() {
-            waiting.push(check.query());
-        }
-        if !waiting.is_empty() {
-            return Ok(Some(waiting));
-        }
-        let Poll::Ready(accepted) = accepted else {
-            unreachable!()
-        };
         let checked = accepted?;
         if check.accepted(checked.clone()) != Some(true) {
             return Err(check
                 .rejection_reference(&checked)
                 .ok_or(owner.errors.protocol)?);
         }
-        let Poll::Ready(prepared) = prepared else {
-            unreachable!()
-        };
         let prepared = prepared?;
         if prepared.address != owner.preparation_query().address
             || owner.outcome(prepared.clone()).is_none()
@@ -72,7 +56,7 @@ impl Task {
             .store
             .associate_product(product.address, product.action, record);
         *owner.accepted.lock().unwrap_or_else(|e| e.into_inner()) = Some(product);
-        Ok(None)
+        Ok(())
     }
 }
 impl QueryTask for Task {
@@ -85,16 +69,12 @@ impl QueryTask for Task {
             ..self.owner.weight
         }
     }
-    fn continuation_bytes(&self) -> u64 {
-        self.weight().retained
-    }
-    fn poll(&mut self, cx: &mut dyn QueryContext) -> QueryPoll {
+    fn run(&mut self, cx: &mut dyn QueryContext) -> QueryOutcome {
         if let Some(result) = &self.terminal {
-            return finish(result.clone());
+            return result.clone();
         }
         let result = match self.advance(cx) {
-            Ok(Some(waiting)) => return QueryPoll::Waiting(waiting),
-            Ok(None) => self
+            Ok(()) => self
                 .owner
                 .accepted
                 .lock()
@@ -104,12 +84,6 @@ impl QueryTask for Task {
             Err(error) => Err(error),
         };
         self.terminal = Some(result.clone());
-        finish(result)
-    }
-}
-fn finish(result: Result<ProductRef, Reference>) -> QueryPoll {
-    match result {
-        Ok(product) => QueryPoll::Complete(product),
-        Err(error) => QueryPoll::Failed(error),
+        result
     }
 }

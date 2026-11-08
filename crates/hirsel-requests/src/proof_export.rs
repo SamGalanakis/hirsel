@@ -11,7 +11,6 @@ use hirsel_syntax::ContentHash;
 use std::{
     rc::Rc,
     sync::{Arc, Mutex},
-    task::Poll,
 };
 
 pub(super) const KIND: u32 = 0x5200_0020;
@@ -162,7 +161,7 @@ impl QueryTask for Task {
             stack: 0,
         }
     }
-    fn poll(&mut self, cx: &mut dyn QueryContext) -> QueryPoll {
+    fn run(&mut self, cx: &mut dyn QueryContext) -> QueryOutcome {
         let owner = &self.0;
         if let Some(settled) = owner
             .completed
@@ -170,16 +169,12 @@ impl QueryTask for Task {
             .unwrap_or_else(|e| e.into_inner())
             .as_ref()
         {
-            return QueryPoll::Complete(settled.product.clone());
+            return Ok(settled.product.clone());
         }
-        let product = match cx.read(owner.safe.query()) {
-            Poll::Pending => return QueryPoll::Waiting(vec![owner.safe.query()]),
-            Poll::Ready(Err(error)) => return QueryPoll::Failed(error),
-            Poll::Ready(Ok(product)) => product,
-        };
+        let product = cx.read(owner.safe.query())?;
         let (check, run) = match owner.safe.settled(product.clone()) {
             Ok(output) => output,
-            Err(_) => return QueryPoll::Failed(owner.errors.protocol),
+            Err(_) => return Err(owner.errors.protocol),
         };
         let built = run
             .ok_or_else(|| "check was not accepted".to_owned())
@@ -189,12 +184,12 @@ impl QueryTask for Task {
             Err(error) => error.as_bytes().to_vec(),
         };
         let Ok(input_archive) = product.archive(ArchiveAdmission::Retained) else {
-            return QueryPoll::Failed(owner.errors.resource);
+            return Err(owner.errors.resource);
         };
         let mut bytes = input_archive.reference().output.0.0.to_vec();
         bytes.extend_from_slice(&descriptor);
         let Some(record) = owner.store.put_content(OUTPUT, &bytes) else {
-            return QueryPoll::Failed(owner.errors.resource);
+            return Err(owner.errors.resource);
         };
         let action = Action(ContentHash::of_parts(
             "hirsel.proof-export.action.v1",
@@ -204,7 +199,7 @@ impl QueryTask for Task {
             ],
         ));
         let Some(archive) = owner.store.open_product_archive(record) else {
-            return QueryPoll::Failed(owner.errors.resource);
+            return Err(owner.errors.resource);
         };
         let product = ProductRef::import_archive(owner.query.address, action, archive);
         let (text, copy) = match built {
@@ -221,6 +216,6 @@ impl QueryTask for Task {
         // its deferred components first. The returned text never depends on
         // whether the closure became durable.
         owner.store.publish_root(product.address, action, record);
-        QueryPoll::Complete(product)
+        Ok(product)
     }
 }

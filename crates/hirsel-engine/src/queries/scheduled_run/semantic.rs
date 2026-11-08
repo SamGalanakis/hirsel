@@ -134,7 +134,6 @@ pub(super) fn create(queries: &Arc<FrontRunQueries>, query: QueryId) -> Option<B
             pending: Vec::new(),
             entries: BTreeMap::new(),
             input: None,
-            waiting: None,
             terminal,
         },
     }))
@@ -153,22 +152,14 @@ impl QueryTask for SemanticTask {
             ..weight
         }
     }
-    fn continuation_bytes(&self) -> u64 {
-        // Completed nodes live in semantic_completed under the independent
-        // source-output reservation, just like settled Lower products.
-        self.weight().retained
-    }
-    fn poll(&mut self, cx: &mut dyn QueryContext) -> QueryPoll {
+    fn run(&mut self, cx: &mut dyn QueryContext) -> QueryOutcome {
         let result = if let Some(result) = self.node.terminal.clone() {
             result
         } else {
             let path = self.node.root.clone();
             match self.node.node(cx, &path) {
-                Poll::Pending => {
-                    return QueryPoll::Waiting(self.node.waiting.into_iter().collect());
-                }
-                Poll::Ready(Err(error)) => Err(error),
-                Poll::Ready(Ok((node, content, dependencies, source))) => self
+                Err(error) => Err(error),
+                Ok((node, content, dependencies, source)) => self
                     .complete(node, content, dependencies, source)
                     .map_err(|error| self.node.queries.failure_record(error)),
             }
@@ -191,10 +182,7 @@ impl QueryTask for SemanticTask {
             }
         }
         self.node.terminal = Some(result.clone());
-        match result {
-            Ok(product) => QueryPoll::Complete(product),
-            Err(error) => QueryPoll::Failed(error),
-        }
+        result
     }
 }
 impl SemanticTask {

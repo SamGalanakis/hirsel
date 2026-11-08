@@ -190,10 +190,7 @@ impl QueryTask for UniverseTask {
             ..self.queries.weight
         }
     }
-    fn continuation_bytes(&self) -> u64 {
-        self.weight().retained
-    }
-    fn poll(&mut self, _cx: &mut dyn QueryContext) -> QueryPoll {
+    fn run(&mut self, _cx: &mut dyn QueryContext) -> QueryOutcome {
         let result = match self.terminal.clone() {
             Some(result) => result,
             None => self
@@ -201,10 +198,7 @@ impl QueryTask for UniverseTask {
                 .map_err(|error| self.queries.failure_record(error)),
         };
         self.terminal = Some(result.clone());
-        match result {
-            Ok(product) => QueryPoll::Complete(product),
-            Err(error) => QueryPoll::Failed(error),
-        }
+        result
     }
 }
 impl UniverseTask {
@@ -266,7 +260,6 @@ pub(super) fn create(queries: &Arc<FrontRunQueries>, query: QueryId) -> Option<B
         query,
         index: 0,
         digest: ContentHash::default(),
-        waiting: None,
         terminal: None,
     }))
 }
@@ -275,7 +268,6 @@ struct Task {
     query: QueryId,
     index: usize,
     digest: ContentHash,
-    waiting: Option<QueryId>,
     terminal: Option<Result<ProductRef, Reference>>,
 }
 impl QueryTask for Task {
@@ -288,53 +280,24 @@ impl QueryTask for Task {
             ..self.queries.weight
         }
     }
-    fn continuation_bytes(&self) -> u64 {
-        self.weight().retained
-    }
-    fn poll(&mut self, cx: &mut dyn QueryContext) -> QueryPoll {
+    fn run(&mut self, cx: &mut dyn QueryContext) -> QueryOutcome {
         let result = if let Some(result) = self.terminal.clone() {
             result
         } else {
-            match self.advance(cx) {
-                Poll::Pending => return QueryPoll::Waiting(self.waiting.into_iter().collect()),
-                Poll::Ready(result) => result,
-            }
+            self.advance(cx)
         };
         self.terminal = Some(result.clone());
-        match result {
-            Ok(product) => QueryPoll::Complete(product),
-            Err(error) => QueryPoll::Failed(error),
-        }
+        result
     }
 }
 impl Task {
-    fn read(
-        &mut self,
-        cx: &mut dyn QueryContext,
-        query: QueryId,
-    ) -> Poll<Result<ProductRef, Reference>> {
-        match cx.read(query) {
-            Poll::Pending => {
-                self.waiting = Some(query);
-                Poll::Pending
-            }
-            Poll::Ready(result) => {
-                self.waiting = None;
-                Poll::Ready(result)
-            }
-        }
-    }
-    fn advance(&mut self, cx: &mut dyn QueryContext) -> Poll<Result<ProductRef, Reference>> {
+    fn advance(&mut self, cx: &mut dyn QueryContext) -> Result<ProductRef, Reference> {
         let queries = self.queries.clone();
         let Some(selection) = &queries.precompute else {
-            return Poll::Ready(Err(queries.errors.protocol));
+            return Err(queries.errors.protocol);
         };
         while let Some((query, source)) = selection.roots.get(self.index).copied() {
-            let product = match self.read(cx, query) {
-                Poll::Pending => return Poll::Pending,
-                Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
-                Poll::Ready(Ok(product)) => product,
-            };
+            let product = cx.read(query)?;
             if source {
                 self.digest = ContentHash::of_parts(
                     "hirsel.front.precompute.fold.v2",
@@ -352,14 +315,10 @@ impl Task {
             .nth(self.index - selection.roots.len())
             .cloned()
         {
-            let product = match self.read(cx, query) {
-                Poll::Pending => return Poll::Pending,
-                Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
-                Poll::Ready(Ok(product)) => product,
-            };
+            let product = cx.read(query)?;
             let archive = match product.archive(ArchiveAdmission::Retained) {
                 Ok(archive) => archive,
-                Err(_) => return Poll::Ready(Err(queries.errors.resource)),
+                Err(_) => return Err(queries.errors.resource),
             };
             self.digest = ContentHash::of_parts(
                 "hirsel.front.precompute.universe-fold.v1",
@@ -372,7 +331,7 @@ impl Task {
             cx.consume(query);
             self.index += 1;
         }
-        Poll::Ready((|| {
+        (|| {
             let output = FrontPrecomputeOutput {
                 definitions: selection.definitions,
                 digest: self.digest,
@@ -401,6 +360,6 @@ impl Task {
                 .store
                 .associate_product(product.address, product.action, record);
             Ok(product)
-        })())
+        })()
     }
 }

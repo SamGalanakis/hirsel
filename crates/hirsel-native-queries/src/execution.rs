@@ -8,7 +8,7 @@ use hirsel_native::ReadyProgram;
 use hirsel_native::execution_plan::ExecutionPlan;
 use hirsel_native::execution_plan::{ExecutionProduct, identity};
 use hirsel_native::object_queries::CodegenKey;
-use std::{collections::BTreeMap, sync::OnceLock, task::Poll};
+use std::{collections::BTreeMap, sync::OnceLock};
 
 pub const EXECUTION_KIND: u32 = 0x4e00_0031;
 pub const EXECUTION_OBJECTS_KIND: u32 = 0x4e00_0032;
@@ -396,7 +396,7 @@ impl QueryTask for Task {
     fn weight(&self) -> MemoryWeight {
         self.tasks.weight
     }
-    fn poll(&mut self, cx: &mut dyn QueryContext) -> QueryPoll {
+    fn run(&mut self, cx: &mut dyn QueryContext) -> QueryOutcome {
         if self.terminal.is_none() {
             let ids = if self.query.kind == EXECUTION_KIND {
                 let mut owners = self
@@ -415,21 +415,16 @@ impl QueryTask for Task {
                 vec![self.tasks.query]
             };
             let mut reads = Vec::new();
-            let mut waiting = Vec::new();
             for id in ids {
                 match cx.read(id) {
-                    Poll::Pending => waiting.push(id),
-                    Poll::Ready(Ok(p)) => reads.push(p),
-                    Poll::Ready(Err(e)) => {
+                    Ok(p) => reads.push(p),
+                    Err(e) => {
                         self.terminal = Some(Err(e));
                         break;
                     }
                 }
             }
             if self.terminal.is_none() {
-                if !waiting.is_empty() {
-                    return QueryPoll::Waiting(waiting);
-                }
                 let result = if self.query.kind == EXECUTION_KIND {
                     self.tasks.plan(reads[0].clone(), &reads[1..])
                 } else {
@@ -438,9 +433,6 @@ impl QueryTask for Task {
                 self.terminal = Some(result.map_err(|e| self.tasks.roots.native.failure(&e)));
             }
         }
-        match self.terminal.clone().unwrap() {
-            Ok(p) => QueryPoll::Complete(p),
-            Err(e) => QueryPoll::Failed(e),
-        }
+        self.terminal.clone().unwrap()
     }
 }

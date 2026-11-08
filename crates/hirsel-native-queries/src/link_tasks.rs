@@ -12,7 +12,7 @@ use hirsel_native::object_queries::ObjectProducts;
 use hirsel_native::object_queries::ObjectQueries;
 use hirsel_native::object_queries::ObjectTaskRequest;
 use hirsel_native::object_queries::ObjectTaskSnapshot;
-use std::{collections::BTreeMap, sync::OnceLock, task::Poll};
+use std::{collections::BTreeMap, sync::OnceLock};
 
 pub const LINK_INPUT_KIND: u32 = 0x4e00_0006;
 pub const LINK_MANIFEST_KIND: u32 = 0x4e00_0007;
@@ -441,18 +441,17 @@ struct LeafTask {
     terminal: Option<Result<ProductRef, Reference>>,
 }
 impl LeafTask {
-    fn compute(&self, cx: &mut dyn QueryContext) -> Result<ProductRef, QueryPoll> {
+    fn compute(&self, cx: &mut dyn QueryContext) -> Result<ProductRef, Reference> {
         let root = match &self.request.work {
             Work::Input(Leaf::Fixed(_)) => None,
             _ => match cx.read(self.tasks.root.query_id()) {
-                Poll::Pending => return Err(QueryPoll::Waiting(vec![self.tasks.root.query_id()])),
-                Poll::Ready(Err(error)) => return Err(QueryPoll::Failed(error)),
-                Poll::Ready(Ok(product)) => Some((
+                Err(error) => return Err(error),
+                Ok(product) => Some((
                     product.clone(),
                     self.tasks
                         .root
                         .output(product)
-                        .map_err(|e| QueryPoll::Failed(self.tasks.failure(&e)))?,
+                        .map_err(|e| self.tasks.failure(&e))?,
                 )),
             },
         };
@@ -464,10 +463,10 @@ impl LeafTask {
                     root.address.0,
                     root.action.0,
                     root.archive(hirsel_engine_runtime::ArchiveAdmission::Retained)
-                        .map_err(|e| QueryPoll::Failed(self.tasks.failure(&e.to_string())))?
+                        .map_err(|e| self.tasks.failure(&e.to_string()))?
                         .reference(),
                 ))
-                .map_err(|e| QueryPoll::Failed(self.tasks.failure(&e.to_string())))?;
+                .map_err(|e| self.tasks.failure(&e.to_string()))?;
                 self.tasks.publish(self.request.query, MANIFEST, bytes)
             }
             Work::Input(leaf) => {
@@ -479,17 +478,13 @@ impl LeafTask {
                 self.tasks
                     .store()
                     .read_product_content(reference)
-                    .map_err(|error| {
-                        QueryPoll::Failed(
-                            self.tasks.failure(&format!("settled Link input: {error}")),
-                        )
-                    })?;
+                    .map_err(|error| self.tasks.failure(&format!("settled Link input: {error}")))?;
                 let bytes = serde_json::to_vec(&reference)
-                    .map_err(|e| QueryPoll::Failed(self.tasks.failure(&e.to_string())))?;
+                    .map_err(|e| self.tasks.failure(&e.to_string()))?;
                 self.tasks.publish(self.request.query, INPUT, bytes)
             }
         };
-        result.map_err(|e| QueryPoll::Failed(self.tasks.failure(&e)))
+        result.map_err(|e| self.tasks.failure(&e))
     }
 }
 impl QueryTask for LeafTask {
@@ -499,24 +494,13 @@ impl QueryTask for LeafTask {
     fn weight(&self) -> MemoryWeight {
         self.tasks.leaf_weight
     }
-    fn poll(&mut self, cx: &mut dyn QueryContext) -> QueryPoll {
+    fn run(&mut self, cx: &mut dyn QueryContext) -> QueryOutcome {
         if let Some(result) = self.terminal.clone() {
-            return match result {
-                Ok(p) => QueryPoll::Complete(p),
-                Err(e) => QueryPoll::Failed(e),
-            };
+            return result;
         }
-        match self.compute(cx) {
-            Ok(product) => {
-                self.terminal = Some(Ok(product.clone()));
-                QueryPoll::Complete(product)
-            }
-            Err(QueryPoll::Failed(error)) => {
-                self.terminal = Some(Err(error));
-                QueryPoll::Failed(error)
-            }
-            Err(waiting) => waiting,
-        }
+        let result = self.compute(cx);
+        self.terminal = Some(result.clone());
+        result
     }
 }
 impl ObjectTaskSnapshot for LinkTasks {

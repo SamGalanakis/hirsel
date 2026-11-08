@@ -16,7 +16,6 @@ use hirsel_engine_store::{Action, Address, Domain};
 use std::{
     collections::BTreeMap,
     sync::{Mutex, OnceLock},
-    task::Poll,
 };
 
 pub const OWNERSHIP_COMPILATION_KIND: u32 = 0x4e00_002d;
@@ -347,21 +346,17 @@ impl QueryTask for Task {
     fn weight(&self) -> MemoryWeight {
         self.owner.weight
     }
-    fn poll(&mut self, cx: &mut dyn QueryContext) -> QueryPoll {
+    fn run(&mut self, cx: &mut dyn QueryContext) -> QueryOutcome {
         if self.terminal.is_none() {
             let fail = |error: String| self.owner.instances.failure(&error);
             let mut selected = Vec::new();
-            let mut waiting = Vec::new();
             for query in [
                 self.owner.instances.discovery_id(),
                 self.owner.arena.query_id(),
             ] {
                 match cx.read(query) {
-                    Poll::Pending => waiting.push(query),
-                    Poll::Ready(Ok(product)) if product.address == query.address => {
-                        selected.push(product)
-                    }
-                    Poll::Ready(Err(error)) => {
+                    Ok(product) if product.address == query.address => selected.push(product),
+                    Err(error) => {
                         self.terminal = Some(Err(error));
                         break;
                     }
@@ -374,27 +369,18 @@ impl QueryTask for Task {
                 }
             }
             if self.terminal.is_none() {
-                if !waiting.is_empty() {
-                    return QueryPoll::Waiting(waiting);
-                }
                 self.terminal = match self
                     .owner
                     .initialize(selected[0].clone(), selected[1].clone())
                 {
                     Err(error) => Some(Err(fail(error))),
                     Ok(dispatch) => match cx.read(dispatch.ownership.query_id()) {
-                        Poll::Pending => {
-                            return QueryPoll::Waiting(vec![dispatch.ownership.query_id()]);
-                        }
-                        Poll::Ready(Err(error)) => Some(Err(error)),
-                        Poll::Ready(Ok(root)) => Some(self.owner.publish(root).map_err(fail)),
+                        Err(error) => Some(Err(error)),
+                        Ok(root) => Some(self.owner.publish(root).map_err(fail)),
                     },
                 };
             }
         }
-        match self.terminal.clone().unwrap() {
-            Ok(product) => QueryPoll::Complete(product),
-            Err(error) => QueryPoll::Failed(error),
-        }
+        self.terminal.clone().unwrap()
     }
 }

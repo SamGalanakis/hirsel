@@ -547,9 +547,8 @@ fn object_hit_never_reads_ready_body_payload() {
 use crate::object_queries::tasks::{
     LinkDependencies, ObjectTaskFactory, ObjectTaskRequest, ObjectTaskSnapshot,
 };
-use hirsel_engine_runtime::{MemoryWeight, QueryContext, QueryFactory, QueryId, QueryPoll};
+use hirsel_engine_runtime::{MemoryWeight, QueryContext, QueryFactory, QueryId};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::task::Poll;
 
 struct TaskSnapshot {
     request: ObjectTaskRequest,
@@ -639,12 +638,13 @@ struct TaskContext {
     reads: Vec<QueryId>,
 }
 impl QueryContext for TaskContext {
-    fn read(&mut self, id: QueryId) -> Poll<Result<ProductRef, Reference>> {
+    fn read(&mut self, id: QueryId) -> Result<ProductRef, Reference> {
         self.reads.push(id);
         self.settled
             .iter()
             .find(|(q, _)| *q == id)
-            .map_or(Poll::Pending, |(_, p)| Poll::Ready(p.clone()))
+            .map(|(_, p)| p.clone())
+            .expect("read of an unsettled dependency")
     }
 }
 fn query(product: ProductRef) -> QueryId {
@@ -679,7 +679,7 @@ fn task_snapshot(
 }
 
 #[test]
-fn codegen_stages_local_ready_while_execution_waits_and_preserves_failure_order() {
+fn codegen_reads_execution_before_ready_and_preserves_failure_order() {
     for whole in [false, true] {
         for (execution_ok, ready_ok) in [(true, true), (false, false), (true, false)] {
             let store = Arc::new(hirsel_engine_store::MemStore::default());
@@ -717,10 +717,6 @@ fn codegen_stages_local_ready_while_execution_waits_and_preserves_failure_order(
             Arc::get_mut(&mut snapshot).unwrap().execution = Some(execution);
             let mut task = ObjectTaskFactory::new(snapshot.clone()).create(id).unwrap();
             let mut cx = TaskContext::default();
-            assert!(
-                matches!(task.poll(&mut cx), QueryPoll::Waiting(p) if p == vec![execution, owner])
-            );
-            assert_eq!(cx.reads, vec![execution, owner]);
             let ready_error = input(store.as_ref(), "Ready refused");
             cx.settled.push((
                 owner,
@@ -730,8 +726,6 @@ fn codegen_stages_local_ready_while_execution_waits_and_preserves_failure_order(
                     Err(ready_error)
                 },
             ));
-            assert!(matches!(task.poll(&mut cx), QueryPoll::Waiting(p) if p == vec![execution]));
-            assert_eq!(snapshot.makes.load(Ordering::SeqCst), 0);
             let execution_error = input(store.as_ref(), "execution refused");
             cx.settled.push((
                 execution,
@@ -741,12 +735,12 @@ fn codegen_stages_local_ready_while_execution_waits_and_preserves_failure_order(
                     Err(execution_error)
                 },
             ));
-            match task.poll(&mut cx) {
-                QueryPoll::Complete(p) => {
+            match task.run(&mut cx) {
+                Ok(p) => {
                     assert!(execution_ok && ready_ok);
                     assert_eq!(p, result);
                 }
-                QueryPoll::Failed(error) => assert_eq!(
+                Err(error) => assert_eq!(
                     error,
                     if execution_ok {
                         ready_error
@@ -754,10 +748,8 @@ fn codegen_stages_local_ready_while_execution_waits_and_preserves_failure_order(
                         execution_error
                     }
                 ),
-                QueryPoll::Waiting(_) | QueryPoll::WaitingAny(_) => {
-                    panic!("all required inputs settled")
-                }
             }
+            assert_eq!(cx.reads[0], execution, "execution admission is read first");
             assert_eq!(
                 snapshot.makes.load(Ordering::SeqCst),
                 usize::from(execution_ok && ready_ok)
@@ -767,7 +759,7 @@ fn codegen_stages_local_ready_while_execution_waits_and_preserves_failure_order(
 }
 
 #[test]
-fn codegen_task_create_is_lazy_and_waits_for_complete_optimizer_inventory() {
+fn codegen_task_create_is_lazy_and_reads_the_complete_optimizer_inventory() {
     let store = Arc::new(admitted(Arc::new(hirsel_engine_store::MemStore::default())));
     let mut ready = ready(store.as_ref());
     ready.optimizer_reads = vec![
@@ -812,16 +804,16 @@ fn codegen_task_create_is_lazy_and_waits_for_complete_optimizer_inventory() {
     let mut task = ObjectTaskFactory::new(snapshot.clone()).create(id).unwrap();
     let mut cx = TaskContext::default();
     assert_eq!(snapshot.makes.load(Ordering::SeqCst), 0);
-    assert!(matches!(task.poll(&mut cx),QueryPoll::Waiting(ref p) if p==&vec![owner]));
     cx.settled.push((owner, Ok(ready.product)));
     let copies: Vec<_> = ready.optimizer_reads.iter().cloned().map(query).collect();
-    assert!(matches!(task.poll(&mut cx),QueryPoll::Waiting(ref p) if p==&copies));
-    assert_eq!(snapshot.makes.load(Ordering::SeqCst), 0);
     for (q, p) in copies.iter().zip(&ready.optimizer_reads) {
         cx.settled.push((*q, Ok((*p).clone())));
     }
-    assert!(matches!(task.poll(&mut cx),QueryPoll::Complete(p) if p==result));
-    assert!(matches!(task.poll(&mut cx),QueryPoll::Complete(p) if p==result));
+    assert_eq!(task.run(&mut cx), Ok(result.clone()));
+    let mut expected = vec![owner];
+    expected.extend(copies);
+    assert_eq!(cx.reads, expected);
+    assert_eq!(task.run(&mut cx), Ok(result));
     assert_eq!(snapshot.makes.load(Ordering::SeqCst), 1);
 }
 
@@ -866,13 +858,13 @@ fn codegen_task_rejects_stale_optimizer_and_dependency_failure_before_emission()
             Err(input(store.as_ref(), "failed validation"))
         };
         cx.settled.push((query(copy), next));
-        assert!(matches!(task.poll(&mut cx), QueryPoll::Failed(_)));
+        assert!(task.run(&mut cx).is_err());
         assert_eq!(snapshot.makes.load(Ordering::SeqCst), 0);
     }
 }
 
 #[test]
-fn link_task_waits_for_manifest_then_all_fragments_and_runtime_inputs() {
+fn link_task_reads_manifest_then_all_fragments_and_runtime_inputs() {
     let store = Arc::new(admitted(Arc::new(hirsel_engine_store::MemStore::default())));
     let ready = ready(store.as_ref());
     let fragment = codegen(store.as_ref(), &key("main"), &ready, || Ok(object())).unwrap();
@@ -910,23 +902,21 @@ fn link_task_waits_for_manifest_then_all_fragments_and_runtime_inputs() {
     };
     let mut task = ObjectTaskFactory::new(snapshot.clone()).create(id).unwrap();
     let mut cx = TaskContext::default();
-    assert!(matches!(task.poll(&mut cx),QueryPoll::Waiting(ref p) if p==&vec![manifest_id]));
     cx.settled.push((manifest_id, Ok(manifest)));
-    assert!(matches!(task.poll(&mut cx),QueryPoll::Waiting(ref p) if p.len()==5));
-    assert_eq!(snapshot.makes.load(Ordering::SeqCst), 0);
     let deps = &snapshot.link;
     cx.settled.extend([
         (deps.fragments[0], Ok(fragment.product)),
         (deps.static_manifest, Ok(static_p)),
         (deps.runtime_archives[0], Ok(runtime)),
         (deps.launch_manifest, Ok(launch)),
+        (deps.native_reads[0], Ok(native)),
     ]);
-    assert!(
-        matches!(task.poll(&mut cx),QueryPoll::Waiting(ref p) if p==&vec![deps.native_reads[0]])
+    assert_eq!(task.run(&mut cx), Ok(result));
+    assert_eq!(
+        cx.reads[0], manifest_id,
+        "the manifest names the other inputs"
     );
-    assert_eq!(snapshot.makes.load(Ordering::SeqCst), 0);
-    cx.settled.push((deps.native_reads[0], Ok(native)));
-    assert!(matches!(task.poll(&mut cx),QueryPoll::Complete(p) if p==result));
+    assert_eq!(cx.reads.len(), 6);
     assert_eq!(snapshot.makes.load(Ordering::SeqCst), 1);
 }
 

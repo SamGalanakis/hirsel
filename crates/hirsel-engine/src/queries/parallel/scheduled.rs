@@ -1882,14 +1882,14 @@ impl QueryTask for BodyTask {
             stack: self.weight.stack,
         }
     }
-    fn poll(&mut self, cx: &mut dyn QueryContext) -> QueryPoll {
+    fn run(&mut self, cx: &mut dyn QueryContext) -> QueryOutcome {
         if let Some(result) = self.terminal.clone() {
-            return finish(result);
+            return result;
         }
         let definition = self.queries.inputs[&self.input].definition;
         if !self.slot_admitted {
             if self.queries.admit_input_slot(definition).is_none() {
-                return finish(Err(self.queries.resource_refusal()));
+                return Err(self.queries.resource_refusal());
             }
             self.slot_admitted = true;
         }
@@ -1920,12 +1920,12 @@ impl QueryTask for BodyTask {
                         None,
                     );
                     self.terminal = Some(result.clone());
-                    return finish(result);
+                    return result;
                 }
-                return finish(Err(self.queries.protocol_failure(self.query, &format!(
+                return Err(self.queries.protocol_failure(self.query, &format!(
                     "generated declaration {} has no accepted registration and no live demand producer",
                     definition.path(),
-                ))));
+                )));
             };
             let demand = match producer.query(
                 self.queries.namespace.clone(),
@@ -1936,27 +1936,23 @@ impl QueryTask for BodyTask {
                     .map_or(Span::default(), |syntax| syntax.item.name_span),
             ) {
                 Ok(query) => query,
-                Err(_) => return finish(Err(self.queries.resource_refusal())),
+                Err(_) => return Err(self.queries.resource_refusal()),
             };
-            let selected = match cx.read(demand) {
-                std::task::Poll::Pending => return QueryPoll::Waiting(vec![demand]),
-                std::task::Poll::Ready(selected) => selected,
-            };
+            let selected = cx.read(demand);
             if let Some(failure) = producer.failed(demand) {
-                cx.release_body(demand);
                 let result = self.publish_demand_failure(cx, failure);
                 self.terminal = Some(result.clone());
-                return finish(result);
+                return result;
             }
             let successor = match producer.completed(demand) {
                 Some(Ok(successor)) => successor,
                 _ => {
-                    return finish(Err(selected.err().unwrap_or_else(|| {
+                    return Err(selected.err().unwrap_or_else(|| {
                         self.queries.protocol_failure(
                             self.query,
                             "generation demand settled without a successor or failure",
                         )
-                    })));
+                    }));
                 }
             };
             let owner = successor.owner().body_front().clone();
@@ -1965,18 +1961,15 @@ impl QueryTask for BodyTask {
             } else {
                 owner.query(definition.path())
             }) else {
-                return finish(Err(self.queries.protocol_failure(
+                return Err(self.queries.protocol_failure(
                     self.query,
                     &format!(
                         "accepted successor has no Front producer for {}",
                         definition.path(),
                     ),
-                )));
+                ));
             };
-            let selected = match cx.read(query) {
-                std::task::Poll::Pending => return QueryPoll::Waiting(vec![query]),
-                std::task::Poll::Ready(selected) => selected,
-            };
+            let selected = cx.read(query);
             let alias = selected.clone().map(|mut product| {
                 product.address = self.query.address;
                 product
@@ -1995,9 +1988,8 @@ impl QueryTask for BodyTask {
                         successor,
                     },
                 );
-            cx.release_body(demand);
             self.terminal = Some(alias.clone());
-            return finish(alias);
+            return alias;
         }
         if self.materialize {
             let parent = QueryId {
@@ -2005,30 +1997,23 @@ impl QueryTask for BodyTask {
                 address: hirsel_artifact_store::Address(self.input),
             };
             match cx.read(parent) {
-                std::task::Poll::Pending => return QueryPoll::Waiting(vec![parent]),
-                std::task::Poll::Ready(Err(error)) => {
+                Err(error) => {
                     self.terminal = Some(Err(error));
-                    return finish(Err(error));
+                    return Err(error);
                 }
-                std::task::Poll::Ready(Ok(_)) => {}
+                Ok(_) => {}
             }
         }
-        let result = match self.run(cx) {
+        let result = match self.execute(cx) {
             Ok(product) => Ok(product),
             Err(BodyRunError::Refused(reference)) => Err(reference),
             Err(BodyRunError::Demand(dependency)) => {
                 self.demand = Some(dependency);
-                return self.poll(cx);
+                return self.run(cx);
             }
         };
         self.terminal = Some(result.clone());
-        finish(result)
-    }
-}
-fn finish(result: Result<ProductRef, Reference>) -> QueryPoll {
-    match result {
-        Ok(product) => QueryPoll::Complete(product),
-        Err(error) => QueryPoll::Failed(error),
+        result
     }
 }
 impl BodyTask {
@@ -2327,7 +2312,7 @@ impl BodyTask {
             }
         }
     }
-    fn run(&mut self, cx: &mut dyn QueryContext) -> Result<ProductRef, BodyRunError> {
+    fn execute(&mut self, cx: &mut dyn QueryContext) -> Result<ProductRef, BodyRunError> {
         let _read_scope = self.queries.store.read_scope();
         let _publication = self.queries.store.publication_scope();
         if !self.materialize

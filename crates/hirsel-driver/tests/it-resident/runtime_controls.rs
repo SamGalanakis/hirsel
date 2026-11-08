@@ -10,7 +10,7 @@ use hirsel_engine_runtime::ProductRef;
 use hirsel_engine_runtime::QueryContext;
 use hirsel_engine_runtime::QueryFactory;
 use hirsel_engine_runtime::QueryId;
-use hirsel_engine_runtime::QueryPoll;
+use hirsel_engine_runtime::QueryOutcome;
 use hirsel_engine_runtime::QueryTask;
 use hirsel_engine_runtime::RuntimeErrors;
 use hirsel_engine_store::{MemStore, ResultStore};
@@ -22,7 +22,6 @@ use std::sync::{
     Arc, Mutex,
     atomic::{AtomicUsize, Ordering},
 };
-use std::task::Poll;
 
 const ALLOWANCE: u64 = (128 << 20) + (1 << 20);
 fn root() -> QueryId {
@@ -60,9 +59,9 @@ impl QueryTask for Task {
             ..Default::default()
         }
     }
-    fn poll(&mut self, _: &mut dyn QueryContext) -> QueryPoll {
+    fn run(&mut self, _: &mut dyn QueryContext) -> QueryOutcome {
         self.polls.fetch_add(1, Ordering::SeqCst);
-        QueryPoll::Complete(self.product.clone())
+        Ok(self.product.clone())
     }
 }
 struct Factory {
@@ -183,21 +182,6 @@ fn engine(
         current: None,
     }
 }
-fn complete<
-    R: hirsel_engine_runtime::QueryRuntime,
-    O: OutputReadiness<Output = Vec<u8>, Error = String>,
->(
-    request: &mut hirsel_driver::resident::RequestLease<R, O>,
-) -> Result<Vec<u8>, RequestError<String>> {
-    loop {
-        match request.poll() {
-            Poll::Ready(result) => return result,
-            Poll::Pending => {
-                std::thread::yield_now();
-            }
-        }
-    }
-}
 #[test]
 fn actual_runtime_coalesces_sixteen_identical_requests_and_cancel_preserves_live_consumers() {
     let tree = tempfile::tempdir().unwrap();
@@ -211,11 +195,10 @@ fn actual_runtime_coalesces_sixteen_identical_requests_and_cancel_preserves_live
         .map(|_| host.request(&(source.clone(), 0)).unwrap())
         .collect::<Vec<_>>();
     drop(requests.remove(0));
-    for request in &mut requests {
-        assert_eq!(complete(request).unwrap(), b"snapshot");
+    for request in requests {
+        assert_eq!(request.wait().unwrap(), b"snapshot");
     }
     assert_eq!(polls.load(Ordering::SeqCst), 1);
-    drop(requests);
     drop(host);
     assert_eq!(budget.reserved(), 0);
 }
@@ -228,16 +211,14 @@ fn actual_runtime_keeps_old_revision_and_refuses_cap_multiplication() {
     let store = Arc::new(MemStore::default());
     let polls = Arc::new(AtomicUsize::new(0));
     let mut host = Host::new(engine(budget.clone(), store, polls));
-    let mut before = host.request(&(source.clone(), 0)).unwrap();
+    let before = host.request(&(source.clone(), 0)).unwrap();
     std::fs::write(&source, b"after!").unwrap();
-    let mut after = host.request(&(source.clone(), 0)).unwrap();
+    let after = host.request(&(source.clone(), 0)).unwrap();
     assert_eq!(budget.reserved(), 2 * ALLOWANCE);
     std::fs::write(&source, b"third!").unwrap();
     assert!(host.request(&(source.clone(), 0)).is_err());
-    assert_eq!(complete(&mut before).unwrap(), b"before");
-    assert_eq!(complete(&mut after).unwrap(), b"after!");
-    drop(before);
-    drop(after);
+    assert_eq!(before.wait().unwrap(), b"before");
+    assert_eq!(after.wait().unwrap(), b"after!");
     drop(host);
     assert_eq!(budget.reserved(), 0);
 }
@@ -250,20 +231,17 @@ fn actual_runtime_policy_change_restart_and_zero_retention_use_ordinary_products
     let store = Arc::new(MemStore::default());
     let polls = Arc::new(AtomicUsize::new(0));
     let mut host = Host::new(engine(budget.clone(), store.clone(), polls.clone()));
-    let mut request = host.request(&(source.clone(), 0)).unwrap();
-    assert_eq!(complete(&mut request).unwrap(), b"payload");
-    request.evict_to(0);
-    drop(request);
+    let request = host.request(&(source.clone(), 0)).unwrap();
+    assert_eq!(request.wait().unwrap(), b"payload");
     let mut request = host.request(&(source.clone(), 1)).unwrap();
-    assert_eq!(complete(&mut request).unwrap(), b"payload");
-    drop(request);
+    request.evict_to(0);
+    assert_eq!(request.wait().unwrap(), b"payload");
     drop(host);
     assert_eq!(budget.reserved(), 0);
     let mut fresh = Host::new(engine(budget.clone(), store, polls.clone()));
-    let mut request = fresh.request(&(source, 1)).unwrap();
-    assert_eq!(complete(&mut request).unwrap(), b"payload");
+    let request = fresh.request(&(source, 1)).unwrap();
+    assert_eq!(request.wait().unwrap(), b"payload");
     assert_eq!(polls.load(Ordering::SeqCst), 3);
-    drop(request);
     drop(fresh);
     assert_eq!(budget.reserved(), 0);
 }

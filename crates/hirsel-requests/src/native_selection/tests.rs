@@ -11,7 +11,6 @@ use hirsel_engine_store::MemStore;
 use hirsel_engine_store::ResultStore;
 
 use hirsel_intern::jobs::Jobs;
-use std::task::Poll;
 
 #[test]
 #[ignore = "requires native-selector-proof selected platform inputs"]
@@ -107,10 +106,8 @@ fn actual_native_selector_coalesces_build_and_bound_run_without_a_retained_contr
                 let cancelled = first.runtime.lock().unwrap().request(&first.roots);
                 let active = second.runtime.lock().unwrap().request(&second.roots);
                 first.runtime.lock().unwrap().cancel(cancelled);
-                let completion = second.runtime.lock().unwrap().completion();
-                completion.wait(active);
-                let completed = second.runtime.lock().unwrap().poll(active);
-                let Poll::Ready(Ok(products)) = completed else {
+                let completed = second.runtime.lock().unwrap().wait(active);
+                let Ok(products) = completed else {
                     panic!(
                         "selected native producer failed: {completed:?}; stats={:?}",
                         second.runtime.lock().unwrap().stats()

@@ -37,9 +37,9 @@ impl QueryTask for Task {
     fn weight(&self) -> MemoryWeight {
         self.weight
     }
-    fn poll(&mut self, _: &mut dyn QueryContext) -> QueryPoll {
+    fn run(&mut self, _: &mut dyn QueryContext) -> QueryOutcome {
         self.polls.fetch_add(1, Ordering::SeqCst);
-        QueryPoll::Complete(self.product.clone())
+        Ok(self.product.clone())
     }
 }
 #[test]

@@ -21,7 +21,7 @@ use hirsel_native::object_queries::LINK_KIND;
 use hirsel_native::object_queries::LinkKey;
 use hirsel_native::object_queries::ObjectTaskFactory;
 use hirsel_native::root_source::NativeLinkSource;
-use std::{collections::BTreeMap, sync::OnceLock, task::Poll};
+use std::{collections::BTreeMap, sync::OnceLock};
 
 pub const COMPILATION_KIND: u32 = 0x4e00_0023;
 /// Settled identities and the Ready program assembled over exactly them.
@@ -661,12 +661,6 @@ struct CompilationTask {
     tasks: Arc<CompilationTasks>,
     terminal: Option<Result<ProductRef, Reference>>,
 }
-fn finish(result: Result<ProductRef, Reference>) -> QueryPoll {
-    match result {
-        Ok(product) => QueryPoll::Complete(product),
-        Err(error) => QueryPoll::Failed(error),
-    }
-}
 impl QueryTask for CompilationTask {
     fn id(&self) -> QueryId {
         self.tasks.query
@@ -674,40 +668,24 @@ impl QueryTask for CompilationTask {
     fn weight(&self) -> MemoryWeight {
         self.tasks.weight
     }
-    fn poll(&mut self, cx: &mut dyn QueryContext) -> QueryPoll {
+    fn run(&mut self, cx: &mut dyn QueryContext) -> QueryOutcome {
         if let Some(result) = self.terminal.clone() {
-            return finish(result);
+            return result;
         }
-        match self.advance(cx) {
-            Ok(Ok(product)) => {
-                self.terminal = Some(Ok(product.clone()));
-                finish(Ok(product))
-            }
-            Ok(Err(waiting)) => QueryPoll::Waiting(waiting),
-            Err(error) => {
-                self.terminal = Some(Err(error));
-                finish(Err(error))
-            }
-        }
+        let result = self.advance(cx);
+        self.terminal = Some(result.clone());
+        result
     }
 }
 impl CompilationTask {
-    fn advance(
-        &self,
-        cx: &mut dyn QueryContext,
-    ) -> Result<Result<ProductRef, Vec<QueryId>>, Reference> {
+    fn advance(&self, cx: &mut dyn QueryContext) -> Result<ProductRef, Reference> {
         let tasks = &self.tasks;
-        let mut waiting = Vec::new();
         let mut selected = Vec::new();
         for key in [tasks.instances.discovery_id(), tasks.arena.query_id()] {
             match cx.read(key) {
-                Poll::Pending => waiting.push(key),
-                Poll::Ready(Err(error)) => return Err(error),
-                Poll::Ready(Ok(product)) => selected.push(product),
+                Err(error) => return Err(error),
+                Ok(product) => selected.push(product),
             }
-        }
-        if !waiting.is_empty() {
-            return Ok(Err(waiting));
         }
         let initializing = tasks.dispatch.get().is_none();
         let dispatch = tasks
@@ -723,9 +701,8 @@ impl CompilationTask {
         let mut outputs = Vec::new();
         for key in &dispatch.links {
             match cx.read(*key) {
-                Poll::Pending => waiting.push(*key),
-                Poll::Ready(Err(error)) => return Err(error),
-                Poll::Ready(Ok(product)) if product.address == key.address => outputs.push(product),
+                Err(error) => return Err(error),
+                Ok(product) if product.address == key.address => outputs.push(product),
                 _ => {
                     return Err(tasks
                         .instances
@@ -733,12 +710,8 @@ impl CompilationTask {
                 }
             }
         }
-        if !waiting.is_empty() {
-            return Ok(Err(waiting));
-        }
         tasks
             .publish(outputs)
-            .map(Ok)
             .map_err(|e| tasks.instances.failure(&e))
     }
 }

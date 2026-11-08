@@ -68,25 +68,20 @@ impl FrontLowerQueries {
         self: &Arc<Self>,
         cx: &mut dyn QueryContext,
         id: QueryId,
-    ) -> Poll<Result<CheckFacts, Reference>> {
+    ) -> Result<CheckFacts, Reference> {
         // Successful live products already survive runtime consumption. Their
         // selected identity still checks publication, which may itself refuse.
         // A failed descriptor returns its exact reference after admission has
         // consumed the node; asking the runtime again would repeat the work.
         let selected = match self.check_failure(id) {
             Some(reference) => Err(reference),
-            None => match cx.read(id) {
-                Poll::Pending => return Poll::Pending,
-                Poll::Ready(selected) => selected,
-            },
+            None => cx.read(id),
         };
         let Some(facts) = self.check_facts(id, selected.clone()) else {
-            return Poll::Ready(Err(selected
-                .err()
-                .unwrap_or_else(|| self.protocol_refusal())));
+            return Err(selected.err().unwrap_or_else(|| self.protocol_refusal()));
         };
         cx.consume(id);
-        Poll::Ready(Ok(facts))
+        Ok(facts)
     }
 }
 

@@ -192,12 +192,12 @@ impl FrontLowerQueries {
         debug_assert!(matches!(id.kind, FRONT_LOWER_KIND | FRONT_EVALUATE_KIND));
     }
 
-    pub(super) async fn load_stored(
+    pub(super) fn load_stored<'r>(
         self: &Arc<Self>,
         id: QueryId,
         path: &DefPath,
         key: &EntryKey,
-        query_reads: &QueryReads,
+        query_reads: &'r QueryReads<'r>,
     ) -> Option<Result<ProductRef, Reference>> {
         if !self.store.persistence().retains() {
             return None;
@@ -232,13 +232,12 @@ impl FrontLowerQueries {
             let Some(producer) = self.demand_producer() else {
                 continue;
             };
-            if let Some(successor) = producer
-                .reopen_manifest(&self.namespace, record.manifest, query_reads.clone())
-                .await
+            if let Some(successor) =
+                producer.reopen_manifest(&self.namespace, record.manifest, query_reads.clone())
             {
                 let owner = successor.owner().clone();
                 let actual = owner.id(path, id.kind)?;
-                return Some(self.forward_capture(id, actual, owner, query_reads).await);
+                return Some(self.forward_capture(id, actual, owner, query_reads));
             }
         }
         // A candidate may name staged headers that are absent from the written
@@ -289,7 +288,6 @@ impl FrontLowerQueries {
             for declaration in staged {
                 if let Some(next) = producer
                     .stage_declaration(&capture, declaration.path(), query_reads.clone())
-                    .await
                     .ok()?
                 {
                     capture = next.namespace().clone();
@@ -299,7 +297,7 @@ impl FrontLowerQueries {
             if let Some(successor) = successor {
                 let owner = successor.owner().clone();
                 let actual = owner.id(path, id.kind)?;
-                return Some(self.forward_capture(id, actual, owner, query_reads).await);
+                return Some(self.forward_capture(id, actual, owner, query_reads));
             }
         }
         let variant = entry.resolve(&*self.store, &storage)?;
@@ -324,7 +322,6 @@ impl FrontLowerQueries {
                         .map_or(Span::default(), |input| input.site),
                     query_reads,
                 )
-                .await
                 .ok()?;
         }
         let (value, reads, depth, executed, selections, reads_decode_bytes) = if id.kind
@@ -549,19 +546,16 @@ impl FrontLowerQueries {
                         action: hirsel_artifact_store::Action(execution_subject),
                         observations: None,
                     };
-                    return Some(
-                        self.publish(
-                            id,
-                            key,
-                            outcome,
-                            Publication {
-                                domain: FAILURE,
-                                bytes: bytes.into(),
-                            },
-                            query_reads,
-                        )
-                        .await,
-                    );
+                    return Some(self.publish(
+                        id,
+                        key,
+                        outcome,
+                        Publication {
+                            domain: FAILURE,
+                            bytes: bytes.into(),
+                        },
+                        query_reads,
+                    ));
                 }
             }
         } else {
@@ -585,10 +579,7 @@ impl FrontLowerQueries {
             action: hirsel_artifact_store::Action(execution_subject),
             observations: None,
         };
-        if let Err(error) = self
-            .restore_selections(&outcome.selections, query_reads)
-            .await
-        {
+        if let Err(error) = self.restore_selections(&outcome.selections, query_reads) {
             return Some(Err(error));
         }
         self.remember_imported_carry(id, key, &outcome);
@@ -596,18 +587,15 @@ impl FrontLowerQueries {
         // length was bounded by this task's scratch partition above; detach
         // that payload before its archive takes a settled retention lease.
         let descriptor = descriptor.to_vec().into();
-        Some(
-            self.publish(
-                id,
-                key,
-                outcome,
-                Publication {
-                    domain,
-                    bytes: descriptor,
-                },
-                query_reads,
-            )
-            .await,
-        )
+        Some(self.publish(
+            id,
+            key,
+            outcome,
+            Publication {
+                domain,
+                bytes: descriptor,
+            },
+            query_reads,
+        ))
     }
 }

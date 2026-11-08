@@ -22,7 +22,6 @@ pub mod observation;
 pub mod ownership_trace;
 mod parked;
 mod profile;
-mod provider;
 mod resources;
 mod runs;
 pub mod scalar;
@@ -32,7 +31,7 @@ pub mod type_arguments;
 pub mod value;
 
 pub use budget::RunBudgets;
-pub use eval::{run, run_with_operations, run_with_runtime, run_with_runtime_async};
+pub use eval::{run, run_with_operations, run_with_runtime};
 use hirsel_diag::RuleId;
 pub use hirsel_run_schema::BudgetKind;
 use hirsel_span::{SourceMap, Span};
@@ -40,7 +39,6 @@ use hirsel_syntax::DefPath;
 use hirsel_tir::{BlockId, CleanupAction, RunConfiguration};
 use hirsel_types::{GenericArgument, QueryError, TypeId, TypeInterner};
 pub use profile::with_step_profile;
-pub use provider::{AsyncTirProvider, ImmediateTirProvider};
 pub use value::{Integer, Value};
 
 /// Default tooling step bound for the reference evaluator and corpus fixtures.

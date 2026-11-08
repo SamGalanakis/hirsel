@@ -293,10 +293,9 @@ fn bootstrap_link_refusal(test_table: bool, emit_only: bool) {
             let first = runtime.request(&[bootstrap.query()]);
             let second = runtime.request(&[bootstrap.query()]);
             runtime.cancel(first);
-            runtime.completion().wait(second);
-            let result = runtime.poll(second);
+            let result = runtime.wait(second);
             if emit_only {
-                let Poll::Ready(Ok(complete)) = result else {
+                let Ok(complete) = result else {
                     panic!("expected actual Codegen completion, got {result:?}");
                 };
                 let (compilation, product, _) = bootstrap.outcome(complete[0].clone()).unwrap();
@@ -322,7 +321,7 @@ fn bootstrap_link_refusal(test_table: bool, emit_only: bool) {
                 }
                 continue;
             }
-            let Poll::Ready(Err(error)) = result else {
+            let Err(error) = result else {
                 panic!("expected exact Link refusal, got {result:?}");
             };
             let bytes = store.get_content(error).unwrap();
@@ -683,9 +682,8 @@ fn actual_native_bootstrap_links_both_backends_and_restores_after_runtime_drop()
             let first = runtime.request(&[bootstrap.query()]);
             let second = runtime.request(&[bootstrap.query()]);
             runtime.cancel(first);
-            runtime.completion().wait(second);
-            let result = runtime.poll(second);
-            let Poll::Ready(Ok(completed)) = result else {
+            let result = runtime.wait(second);
+            let Ok(completed) = result else {
                 panic!("native bootstrap failed before executable readiness: {result:?}");
             };
             let [selected] = completed.as_slice() else {
@@ -1087,9 +1085,8 @@ fn native_bootstrap_policy_case(bind_run: bool) {
             let first = runtime.request(&[bootstrap.query()]);
             let second = runtime.request(&[bootstrap.query()]);
             runtime.cancel(first);
-            runtime.completion().wait(second);
-            let result = runtime.poll(second);
-            let Poll::Ready(Ok(completed)) = result else {
+            let result = runtime.wait(second);
+            let Ok(completed) = result else {
                 panic!("native bootstrap failed before executable readiness: {result:?}");
             };
             let [selected] = completed.as_slice() else {
@@ -1545,9 +1542,8 @@ fn native_bootstrap_assesses_evidence_against_its_settled_source_root_before_ins
                 graph.runtime.register(kind, factory).unwrap();
             }
             let request = graph.runtime.request(&[bootstrap.query()]);
-            graph.runtime.completion().wait(request);
-            let result = graph.runtime.poll(request);
-            let Poll::Ready(Err(error)) = result else {
+            let result = graph.runtime.wait(request);
+            let Err(error) = result else {
                 panic!("expected exact Link refusal, got {result:?}");
             };
             // Link is reached only after the complete discovery accepted the

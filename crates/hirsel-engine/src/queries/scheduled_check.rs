@@ -1,12 +1,11 @@
 //! Dependency admission and ordered publication of one complete source Check.
 //! One bounded stream admits and publishes source roots independently of SCC
-//! acceptance. Operational stops fence effectful successors; ordinary bodies
-//! and independent pure evaluations retain their worker window.
+//! acceptance. Operational stops fence effectful successors.
 use super::read_union::{ReaderSequence, ReaderSource};
 use super::*;
 use hirsel_engine_runtime::*;
 use hirsel_engine_store::{Domain, Reference, ResultStore};
-use std::{sync::Mutex, task::Poll};
+use std::sync::Mutex;
 mod admission;
 mod products;
 pub use products::FrontCheckedInput;
@@ -73,7 +72,6 @@ struct RootInput {
     path: DefPath,
     executable: bool,
     ordered_front: bool,
-    ordered_lower: bool,
 }
 #[derive(Clone)]
 struct FileInput {
@@ -430,7 +428,6 @@ enum Publication {
     Roots {
         file: usize,
         root: usize,
-        window: std::collections::VecDeque<admission::RootRead>,
     },
     SelectInstances {
         file: usize,
@@ -458,11 +455,7 @@ enum Publication {
 }
 impl Publication {
     fn roots(file: usize) -> Self {
-        Self::Roots {
-            file,
-            root: 0,
-            window: std::collections::VecDeque::new(),
-        }
+        Self::Roots { file, root: 0 }
     }
 }
 struct Task {
@@ -482,32 +475,20 @@ impl QueryTask for Task {
     fn weight(&self) -> MemoryWeight {
         self.queries.weight
     }
-    fn poll(&mut self, cx: &mut dyn QueryContext) -> QueryPoll {
+    fn run(&mut self, cx: &mut dyn QueryContext) -> QueryOutcome {
         if let Publication::Finished(result) = &self.publication {
-            return finish(result.clone());
+            return result.clone();
         }
-        match self.advance(cx) {
-            Ok(Some(waiting)) if waiting.len() == 1 => QueryPoll::Waiting(waiting),
-            Ok(Some(waiting)) => QueryPoll::WaitingAny(waiting),
-            result => {
-                let result = result.and_then(|_| self.complete());
-                self.publication = Publication::Finished(result.clone());
-                finish(result)
-            }
-        }
-    }
-}
-fn finish(result: Result<ProductRef, Reference>) -> QueryPoll {
-    match result {
-        Ok(product) => QueryPoll::Complete(product),
-        Err(error) => QueryPoll::Failed(error),
+        let result = self.advance(cx).and_then(|()| self.complete());
+        self.publication = Publication::Finished(result.clone());
+        result
     }
 }
 impl Task {
-    fn advance(&mut self, cx: &mut dyn QueryContext) -> Result<Option<Vec<QueryId>>, Reference> {
+    fn advance(&mut self, cx: &mut dyn QueryContext) -> Result<(), Reference> {
         loop {
             match &mut self.publication {
-                Publication::Roots { file, root, window } => {
+                Publication::Roots { file, root } => {
                     let file_index = *file;
                     let Some(file) = self.files.get_mut(file_index) else {
                         self.publication = Publication::Extra { next: 0 };
@@ -521,51 +502,16 @@ impl Task {
                         self.publication = Publication::SelectInstances { file: file_index };
                         continue;
                     }
-                    let width = admission::width(cx, self.queries.weight, size_of::<Self>());
-                    if width == 0 {
-                        return Err(self.queries.errors.resource);
-                    }
-                    if window.capacity() < width {
-                        window.reserve_exact(width - window.len());
-                    }
-                    while window.len() < width && *root + window.len() < file.input.paths.len() {
-                        window.push_back(admission::RootRead::Front);
-                    }
-                    let mut pending = Vec::with_capacity(width);
-                    for (offset, read) in window.iter_mut().enumerate() {
-                        let waiting = read.poll(
-                            &self.queries,
-                            cx,
-                            &file.input,
-                            *root + offset,
-                            offset == 0,
-                            file.error.is_some(),
-                        )?;
-                        if let Some(id) = waiting {
-                            pending.push(id);
-                        }
-                        // Declare each root's Front and Lower reads in source
-                        // order, then overlap the pending Lower producers.
-                        if matches!(read, admission::RootRead::Front)
-                            || (!read.settled() && waiting.is_none())
-                        {
-                            break;
-                        }
-                    }
-                    if window.front().is_some_and(admission::RootRead::settled) {
-                        let read = window.pop_front().ok_or(self.queries.errors.protocol)?;
-                        let path = file.input.paths[*root].path.clone();
-                        *root += 1;
-                        self.publish_root(cx, file_index, path, read)?;
-                        if !pending.is_empty() {
-                            return Ok(Some(pending));
-                        }
-                        continue;
-                    }
-                    if pending.is_empty() {
-                        return Err(self.queries.protocol_refusal());
-                    }
-                    return Ok(Some(pending));
+                    let read = admission::read_root(
+                        &self.queries,
+                        cx,
+                        &file.input,
+                        *root,
+                        file.error.is_some(),
+                    )?;
+                    let path = file.input.paths[*root].path.clone();
+                    *root += 1;
+                    self.publish_root(cx, file_index, path, read)?;
                 }
                 Publication::SelectInstances { file } => {
                     let index = *file;
@@ -610,10 +556,7 @@ impl Task {
                         .lower
                         .query(&path)
                         .ok_or(self.queries.errors.protocol)?;
-                    let facts = match self.queries.plan.lower.poll_check(cx, id) {
-                        Poll::Pending => return Ok(Some(vec![id])),
-                        Poll::Ready(facts) => facts?,
-                    };
+                    let facts = self.queries.plan.lower.poll_check(cx, id)?;
                     *next += 1;
                     self.publish_lower(index, path, facts)?;
                 }
@@ -657,10 +600,7 @@ impl Task {
                         continue;
                     }
                     let (id, site) = selections[*next];
-                    let facts = match self.queries.plan.lower.poll_check(cx, id) {
-                        Poll::Pending => return Ok(Some(vec![id])),
-                        Poll::Ready(facts) => facts?,
-                    };
+                    let facts = self.queries.plan.lower.poll_check(cx, id)?;
                     self.reads.record(
                         facts.reads.clone(),
                         Some(ReaderSource::StagedLower(facts.query)),
@@ -688,10 +628,8 @@ impl Task {
                         .front
                         .query(path)
                         .ok_or(self.queries.errors.protocol)?;
-                    match cx.read(id) {
-                        Poll::Pending => return Ok(Some(vec![id])),
-                        Poll::Ready(_) => cx.consume(id),
-                    }
+                    let _ = cx.read(id);
+                    cx.consume(id);
                     *next += 1;
                 }
                 Publication::Growth => {
@@ -701,10 +639,7 @@ impl Task {
                         && self.files.iter().all(|file| file.error.is_none())
                     {
                         let id = self.queries.plan.growth.query();
-                        let selected = match cx.read(id) {
-                            Poll::Pending => return Ok(Some(vec![id])),
-                            Poll::Ready(selected) => selected,
-                        };
+                        let selected = cx.read(id);
                         match selected {
                             Ok(product) => {
                                 let output = self
@@ -754,10 +689,7 @@ impl Task {
                     {
                         if let Some(storage) = &self.queries.storage {
                             let id = storage.query();
-                            let result = match cx.read(id) {
-                                Poll::Pending => return Ok(Some(vec![id])),
-                                Poll::Ready(result) => result,
-                            };
+                            let result = cx.read(id);
                             match result {
                                 Ok(product) => {
                                     let output = storage
@@ -793,7 +725,7 @@ impl Task {
                     }
                     self.publication = Publication::Done;
                 }
-                Publication::Done | Publication::Finished(_) => return Ok(None),
+                Publication::Done | Publication::Finished(_) => return Ok(()),
             }
         }
     }
@@ -804,9 +736,7 @@ impl Task {
         path: DefPath,
         read: admission::RootRead,
     ) -> Result<(), Reference> {
-        let admission::RootRead::Settled { front, lower } = read else {
-            return Err(self.queries.errors.protocol);
-        };
+        let admission::RootRead { front, lower } = read;
         if let Some(selected) = front {
             let path = &path;
             let id = self
@@ -1251,17 +1181,12 @@ impl QueryEngine {
                                         .get(id.path())
                                         .is_some_and(|metadata| !metadata.public)
                             }),
-                        ordered_lower: item.facts.generator
-                            || item.facts.staged
-                            || item.facts.instance_bodied
-                            || item.facts.specializes,
                     });
                     if item.facts.fact {
                         input.paths.push(RootInput {
                             path: hirsel_check_protocol::fact::fact_path(&item.definition),
                             executable: true,
                             ordered_front: false,
-                            ordered_lower: false,
                         });
                     }
                 }

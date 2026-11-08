@@ -1,6 +1,7 @@
 //! Independent checked-TIR certificate for owned CPU mapper data and operations.
 //! This walk never consumes a native layout, mapper graph or execution plan.
-use crate::{AsyncTirProvider, Error, Value, aggregate::RuntimeTypes};
+use crate::{Error, Value, aggregate::RuntimeTypes};
+use hirsel_tir::TirProvider;
 use hirsel_tir::{Callee, Constant, Constructor, InstructionKind, Rvalue, Storage, Terminator};
 use hirsel_type_analysis::logical::{Logical, LogicalNominal, Resolved, Scope, type_arguments};
 use hirsel_types::{BuiltinType, Destination, Primitive, TypeId, TypeKind};
@@ -193,8 +194,8 @@ fn pure(path: &hirsel_syntax::DefPath) -> bool {
     .any(|name| path.is_core(name))
 }
 
-pub(crate) async fn certified(
-    provider: &mut (impl AsyncTirProvider + ?Sized),
+pub(crate) fn certified(
+    provider: &mut (impl TirProvider + ?Sized),
     runtime: &RuntimeTypes,
     mapper: &Value,
 ) -> Result<bool, Error> {
@@ -222,7 +223,7 @@ pub(crate) async fn certified(
     let mut checked = BTreeSet::new();
     let mut instructions = 0;
     while let Some((path, selected, leave)) = todo.pop() {
-        let definition = match provider.definition(&path).await {
+        let definition = match provider.definition(&path) {
             Ok(definition) => definition,
             Err(hirsel_types::QueryError::NotImplemented) => return Ok(false),
             Err(error) => return Err(Error::Query(error)),
@@ -321,11 +322,7 @@ mod tests {
     use hirsel_span::Span;
     use hirsel_tir::*;
     use hirsel_types::{GenericArgument, QueryError, Type, TypeInterner};
-    use std::{
-        future::Future,
-        sync::Arc,
-        task::{Context, Poll, Waker},
-    };
+    use std::sync::Arc;
 
     struct Program(DefinitionRef);
     impl TirProvider for Program {
@@ -405,15 +402,7 @@ mod tests {
             types: runtime.types.clone(),
             ty,
         }));
-        let mut provider = crate::ImmediateTirProvider::new(&mut program);
-        let mut future = std::pin::pin!(certified(&mut provider, runtime, &mapper));
-        match future
-            .as_mut()
-            .poll(&mut Context::from_waker(Waker::noop()))
-        {
-            Poll::Ready(result) => result.unwrap(),
-            Poll::Pending => panic!("immediate checked program suspended"),
-        }
+        certified(&mut program, runtime, &mapper).unwrap()
     }
     #[test]
     fn allocating_sequence_certificate_refuses_deep_copy_and_scoped_storage() {

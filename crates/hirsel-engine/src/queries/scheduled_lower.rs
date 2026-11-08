@@ -19,7 +19,7 @@ pub(super) mod staged_runtime;
 mod successor;
 pub(crate) use successor::{SuccessorCapture, WeakSuccessorCapture};
 mod stored;
-use crate::comptime::{EvaluationInput, PreparingSource, ValuePreparation};
+use crate::comptime::EvaluationInput;
 pub use carry::LowerCarry;
 use constants::Constants;
 use dependencies::{Dependencies, PackedDependencies};
@@ -37,11 +37,8 @@ pub use registration::{
 };
 use std::{
     cell::{Cell, RefCell},
-    future::{Future, poll_fn},
-    pin::Pin,
     rc::Rc,
     sync::Mutex,
-    task::{Context, Poll, Waker},
 };
 
 pub const FRONT_LOWER_KIND: u32 = 0x4600_0003;
@@ -683,16 +680,16 @@ impl FrontLowerQueries {
     }
     /// Reserve from the request footprint, letting settled bodies release
     /// first; refuse only when nothing in flight can free memory.
-    async fn reserve(
+    fn reserve<'r>(
         &self,
         bytes: u64,
-        query_reads: &QueryReads,
+        query_reads: &'r QueryReads<'r>,
     ) -> Result<hirsel_engine_admission::MemoryReservation, Reference> {
         loop {
             if let Ok(reservation) = self.request().reserve(bytes) {
                 return Ok(reservation);
             }
-            if !query_reads.evict_body().await {
+            if !query_reads.evict_body() {
                 return Err(self.errors.resource);
             }
         }
@@ -1499,11 +1496,11 @@ impl FrontLowerQueries {
             })
             .and_then(|(_, outcome, _)| project(self, outcome))
     }
-    async fn run(
+    fn run<'a>(
         self: Arc<Self>,
         id: QueryId,
         path: DefPath,
-        reads: QueryReads,
+        reads: &'a QueryReads<'a>,
     ) -> Result<ProductRef, Reference> {
         let _read_scope = self.store.read_scope();
         let _publication = self.store.publication_scope();
@@ -1530,7 +1527,7 @@ impl FrontLowerQueries {
                         .id(&path, id.kind)
                         .ok_or_else(|| self.protocol_refusal())?,
                 };
-                return self.forward_capture(id, actual, owner, &reads).await;
+                return self.forward_capture(id, actual, owner, &reads);
             }
         }
         let key = if let Some(selection) = &selection {
@@ -1556,12 +1553,12 @@ impl FrontLowerQueries {
             let evaluate = self
                 .evaluate_query(&path)
                 .ok_or_else(|| self.protocol_refusal())?;
-            reads.read_consuming(evaluate).await.is_ok()
+            reads.read_consuming(evaluate).is_ok()
         } else {
             true
         };
         if can_restore && self.verify_store == hirsel_engine_store::VerifyStore::Off {
-            if let Some(product) = self.load_carry(id, &path, key, &reads).await {
+            if let Some(product) = self.load_carry(id, &path, key, &reads) {
                 match product {
                     // The compact descriptor can outlive V's independently
                     // evictable content. A current V miss needs the ordinary
@@ -1572,7 +1569,7 @@ impl FrontLowerQueries {
                     product => return product,
                 }
             }
-            if let Some(product) = self.load_stored(id, &path, key, &reads).await {
+            if let Some(product) = self.load_stored(id, &path, key, &reads) {
                 return product;
             }
         }
@@ -1608,15 +1605,12 @@ impl FrontLowerQueries {
         );
         let computed = if source.framed && source.depth.borrow().limit() == 0 {
             if self.verify == Verify::On {
-                let observed = self
-                    .validation_reads(&path.0.package, &source.reads)
-                    .await?;
+                let observed = self.validation_reads(&path.0.package, &source.reads)?;
                 source.merge(&observed.finish().map_err(|_| self.protocol_refusal())?);
             }
             Err(source.overflow(self.inputs[&path].site))
         } else {
             self.compute(id.kind, &path, selection.as_ref(), &mut source)
-                .await
         };
         let restart = source.restart.borrow_mut().take();
         if let Some(successor) = restart {
@@ -1638,7 +1632,7 @@ impl FrontLowerQueries {
             let reads = source.reads.clone();
             drop(computed);
             drop(source);
-            let selected = reads.read_consuming(actual).await;
+            let selected = reads.read_consuming(actual);
             let alias = selected.clone().map(|mut product| {
                 product.address = id.address;
                 product
@@ -1676,8 +1670,7 @@ impl FrontLowerQueries {
             };
             let selected = owner
                 .clone()
-                .finish_computation(actual, path, key, source, computed)
-                .await;
+                .finish_computation(actual, path, key, source, computed);
             let alias = selected.clone().map(|mut product| {
                 product.address = id.address;
                 product
@@ -1698,14 +1691,13 @@ impl FrontLowerQueries {
         }
         self.clone()
             .finish_computation(id, path, key.clone(), source, computed)
-            .await
     }
-    async fn finish_computation(
+    fn finish_computation(
         self: Arc<Self>,
         id: QueryId,
         path: DefPath,
         key: EntryKey,
-        source: Source,
+        source: Source<'_>,
         computed: Result<Computed, QueryError>,
     ) -> Result<ProductRef, Reference> {
         let (mut result, verification, raw) = match computed {
@@ -1769,16 +1761,14 @@ impl FrontLowerQueries {
                 action,
                 observations: None,
             };
-            return self
-                .publish_live(
-                    id,
-                    &key,
-                    outcome,
-                    raw,
-                    verification.as_ref().map(|(_, evidence)| evidence),
-                    &source.reads,
-                )
-                .await;
+            return self.publish_live(
+                id,
+                &key,
+                outcome,
+                raw,
+                verification.as_ref().map(|(_, evidence)| evidence),
+                &source.reads,
+            );
         }
         let selections = std::mem::take(&mut *source.selections.borrow_mut());
         let reads_decode_bytes = 0;
@@ -1837,17 +1827,16 @@ impl FrontLowerQueries {
             },
             &source.reads,
         )
-        .await
     }
     /// Settle one descriptor: store it, admit its outcome under this producer's
     /// retention and associate a successful product.
-    async fn publish(
+    fn publish<'r>(
         &self,
         id: QueryId,
         key: &EntryKey,
         mut outcome: Outcome,
         publication: Publication,
-        query_reads: &QueryReads,
+        query_reads: &'r QueryReads<'r>,
     ) -> Result<ProductRef, Reference> {
         let Publication { domain, bytes } = publication;
         let record = self
@@ -1965,7 +1954,7 @@ impl FrontLowerQueries {
                 match ProductArchive::from_retained_bytes(record, bytes.clone(), self.request()) {
                     Ok(archive) => Some(archive),
                     Err(_) => {
-                        if !query_reads.evict_body().await {
+                        if !query_reads.evict_body() {
                             return Err(self.errors.resource);
                         }
                         continue;
@@ -1989,7 +1978,7 @@ impl FrontLowerQueries {
                     LiveAdmission::Admitted(live) => Some(live),
                     LiveAdmission::Blocked(output) => {
                         original = Some(*output);
-                        if !query_reads.evict_body().await {
+                        if !query_reads.evict_body() {
                             return Err(self.errors.resource);
                         }
                         continue;
@@ -2009,7 +1998,7 @@ impl FrontLowerQueries {
                 .retained_bytes()
                 .and_then(|bytes| bytes.checked_add(outcome_table_bytes(1)))
                 .ok_or(self.errors.resource)?;
-            let charge = self.reserve(charge, query_reads).await?;
+            let charge = self.reserve(charge, query_reads)?;
             let admitted = outcome.take().expect("unadmitted outcome");
             let replaced = self
                 .outcomes
@@ -2038,10 +2027,10 @@ impl FrontLowerQueries {
             archive.ok_or_else(|| self.protocol_refusal())?,
         ))
     }
-    async fn validation_reads(
+    fn validation_reads<'r>(
         &self,
         package: &PackageId,
-        query_reads: &QueryReads,
+        query_reads: &'r QueryReads<'r>,
     ) -> Result<ReadsBuilder, Reference> {
         // V shares Front's partition. Release optional body retention before
         // retrying the exact universe read, as for ordinary Lower admission.
@@ -2055,20 +2044,20 @@ impl FrontLowerQueries {
                     return Ok(observed);
                 }
             }
-            if !query_reads.evict_body().await {
+            if !query_reads.evict_body() {
                 return Err(self.errors.resource);
             }
         }
     }
-    async fn compute(
+    fn compute(
         &self,
         kind: u32,
         path: &DefPath,
         selection: Option<&staged::Selection>,
-        source: &mut Source,
+        source: &mut Source<'_>,
     ) -> Result<Computed, QueryError> {
         let front = self.front.query(path).ok_or(QueryError::NotImplemented)?;
-        let selected = source.reads.read_consuming(front).await;
+        let selected = source.reads.read_consuming(front);
         if let Err(reference) = selected
             && let Some(sources) = self.front.diagnostic_sources(reference)
         {
@@ -2077,7 +2066,7 @@ impl FrontLowerQueries {
         if let Some(successor) = self.front.successor_for(path) {
             source.join(Some(successor))?;
             let owner = source.active_owner();
-            return Box::pin(owner.compute(kind, path, selection, source)).await;
+            return owner.compute(kind, path, selection, source);
         }
         let body = match self.front.outcome(selected.clone()) {
             Some(body) => body,
@@ -2089,7 +2078,6 @@ impl FrontLowerQueries {
                 let product = source
                     .reads
                     .compose(materialize)
-                    .await
                     .map_err(|error| source.refused(error))?;
                 self.front.outcome(Ok(product.clone())).ok_or_else(|| {
                     source.refused(self.protocol_failure(
@@ -2105,13 +2093,12 @@ impl FrontLowerQueries {
             }
         };
         if let Some(producer) = self.demand_producer()
-            && let Some(successor) = producer
-                .stage_body(&source.capture(), path, source.reads.clone())
-                .await?
+            && let Some(successor) =
+                producer.stage_body(&source.capture(), path, source.reads.clone())?
         {
             source.join(Some(successor))?;
             let owner = source.active_owner();
-            return Box::pin(owner.compute(kind, path, selection, source)).await;
+            return owner.compute(kind, path, selection, source);
         }
         if self.namespace.consumers_admitted()
             && body.outcome.result.as_ref().is_ok_and(|analyzed| {
@@ -2127,7 +2114,6 @@ impl FrontLowerQueries {
         if self.verify == Verify::On {
             let observed = self
                 .validation_reads(&path.0.package, &source.reads)
-                .await
                 .map_err(|error| source.refused(error))?;
             source.merge(
                 &observed
@@ -2172,29 +2158,21 @@ impl FrontLowerQueries {
         source.merge(&observed.finish().map_err(|_| QueryError::NotImplemented)?);
         let staged = staged
             .map_err(|error| lower_input_error(path, "preparing staged type inputs", error))?;
-        let mut values = Values {
-            source: source.clone(),
-            pending: None,
-        };
-        let mut preparation = ValuePreparation::new(&analyzed.value);
         let mut constants = if kind == FRONT_LOWER_KIND
             && matches!(signature.kind, hirsel_types::SignatureKind::Const { .. })
         {
-            let (_, constants) = source.constant_value(path).await?;
+            let (_, constants) = source.constant_value(path)?;
             constants
         } else {
-            poll_fn(|_| {
-                preparation
-                    .poll(
-                        self.namespace.snapshot.types(),
-                        &analyzed.value,
-                        &staged,
-                        &signature,
-                        &mut values,
-                    )
-                    .map(|r| r.map(|v| v.to_vec()))
-            })
-            .await
+            crate::comptime::prepare_values(
+                self.namespace.snapshot.types(),
+                &analyzed.value,
+                &staged,
+                &signature,
+                &mut Values {
+                    source: source.clone(),
+                },
+            )
             .map_err(|error| lower_input_error(path, "preparing compile-time values", error))?
         };
         if let Some(selection) = selection {
@@ -2234,8 +2212,7 @@ impl FrontLowerQueries {
                 ty,
                 constants.clone(),
                 sizes,
-            )
-            .await?
+            )?
             .result?;
             return Ok(Computed {
                 value: Value::Constant(Box::new(Constants::new(value, constants))),
@@ -2250,15 +2227,14 @@ impl FrontLowerQueries {
             else {
                 return Err(QueryError::NotImplemented);
             };
-            let dictionary = crate::dictionaries::declaration_async(
+            let dictionary = crate::dictionaries::declaration(
                 self.namespace.snapshot.types(),
                 &self.memo,
                 &analyzed.value,
                 &signature,
                 &constants,
-                source,
-            )
-            .await?;
+                &mut Declaring(source),
+            )?;
             let is_dictionary = dictionary.is_some();
             let value = if let Some(dictionary) = dictionary {
                 dictionary
@@ -2284,8 +2260,7 @@ impl FrontLowerQueries {
                     ty,
                     constants.clone(),
                     vec![],
-                )
-                .await?
+                )?
                 .result?
             };
             if is_dictionary && !constants.iter().any(|(id, _)| *id == expression) {
@@ -2322,7 +2297,6 @@ impl FrontLowerQueries {
         if self.verify == Verify::On {
             let observed = completed
                 .validation_reads(&path.0.package, &source.reads)
-                .await
                 .map_err(|error| source.refused(error))?;
             source.merge(&observed.finish().map_err(|_| QueryError::NotImplemented)?);
             let (report, ran, accepted, evidence) = completed
@@ -2408,14 +2382,14 @@ impl FrontLowerQueries {
             ],
         ))
     }
-    async fn publish_live(
+    fn publish_live<'r>(
         &self,
         id: QueryId,
         key: &EntryKey,
         mut outcome: Outcome,
         raw: Option<RawLowerOutput>,
         verification: Option<&hirsel_validate::VerifiedDefinition>,
-        query_reads: &QueryReads,
+        query_reads: &'r QueryReads<'r>,
     ) -> Result<ProductRef, Reference> {
         let _ = self.persist_live(id, key, &outcome, &raw, verification);
         self.remember_live_carry(id, key, &outcome, &raw);
@@ -2441,7 +2415,7 @@ impl FrontLowerQueries {
         );
         let metadata_bytes = weight.bytes();
         let charge = Arc::new(LowerCharge {
-            _reservation: self.reserve(metadata_bytes, query_reads).await?,
+            _reservation: self.reserve(metadata_bytes, query_reads)?,
         });
         let serialization_working = metadata
             .0
@@ -2507,7 +2481,7 @@ impl FrontLowerQueries {
                         LiveAdmission::Admitted(live) => break live,
                         LiveAdmission::Blocked(value) => {
                             output = Some(*value);
-                            if !query_reads.evict_body().await {
+                            if !query_reads.evict_body() {
                                 return Err(self.errors.resource);
                             }
                         }
@@ -2535,7 +2509,7 @@ impl FrontLowerQueries {
                     .and_then(|bytes| bytes.checked_add(size_of::<LowerCharge>() as u64 + 128))
                     .ok_or(self.errors.resource)?;
                 let charge = Arc::new(LowerCharge {
-                    _reservation: self.reserve(bytes, query_reads).await?,
+                    _reservation: self.reserve(bytes, query_reads)?,
                 });
                 ProductRef::live(
                     id.address,
@@ -2567,7 +2541,7 @@ impl FrontLowerQueries {
             .retained_bytes()
             .and_then(|bytes| bytes.checked_add(outcome_table_bytes(1)))
             .ok_or(self.errors.resource)?;
-        let charge = self.reserve(charge, query_reads).await?;
+        let charge = self.reserve(charge, query_reads)?;
         let replaced = self
             .outcomes
             .lock()
@@ -2609,24 +2583,6 @@ impl FrontLowerOutput {
 struct Factory {
     owner: Arc<FrontLowerQueries>,
     _demand: Option<Arc<generation::demand::DemandProducer>>,
-}
-// This producer's settled Outcome allocations and provider archives have
-// independent owners. Only the saved future/mailbox/working state belongs to
-// the runtime continuation, and S5 retires it after destruction at home.
-struct LowerTask(LocalFutureTask);
-impl LocalQueryTask for LowerTask {
-    fn id(&self) -> QueryId {
-        self.0.id()
-    }
-    fn weight(&self) -> MemoryWeight {
-        self.0.weight()
-    }
-    fn continuation_bytes(&self) -> u64 {
-        self.0.weight().retained
-    }
-    fn poll(&mut self, cx: &mut dyn QueryContext) -> QueryPoll {
-        self.0.poll(cx)
-    }
 }
 impl LocalQueryFactory for Factory {
     fn weight(&self, id: QueryId) -> Result<MemoryWeight, Reference> {
@@ -2679,21 +2635,20 @@ impl LocalQueryFactory for Factory {
             )
         })?;
         let owner = self.owner.clone();
-        Ok(Box::new(LowerTask(LocalFutureTask::new(
+        Ok(Box::new(hirsel_engine_runtime::LocalFnTask::new(
             id,
             weight,
-            self.owner.max_reads,
             self.owner.errors,
             move |reads| owner.run(id, path, reads),
-        )?)))
+        )))
     }
 }
 #[derive(Clone)]
-struct Source {
+struct Source<'a> {
     id: QueryId,
     root: DefId,
     owner: Arc<FrontLowerQueries>,
-    reads: QueryReads,
+    reads: &'a QueryReads<'a>,
     observed: Rc<RefCell<ReadsBuilder>>,
     selections: Rc<RefCell<staged::Selections>>,
     refusal: Rc<Cell<Option<Reference>>>,
@@ -2745,7 +2700,7 @@ impl FrontLowerQueries {
     }
 }
 
-impl Source {
+impl Source<'_> {
     fn active_owner(&self) -> Arc<FrontLowerQueries> {
         self.successor
             .borrow()
@@ -2900,7 +2855,7 @@ impl Source {
         self.merge(&observed.finish().map_err(|_| QueryError::NotImplemented)?);
         result
     }
-    async fn value(&self, path: &DefPath, kind: u32, site: Span) -> Result<Value, QueryError> {
+    fn value(&self, path: &DefPath, kind: u32, site: Span) -> Result<Value, QueryError> {
         let owner = self.active_owner();
         if kind == FRONT_LOWER_KIND
             && let Some((generator, site)) = owner.generator
@@ -2925,9 +2880,9 @@ impl Source {
                 ),
             })
         })?;
-        self.selected_value_in(owner, id, path, kind, site).await
+        self.selected_value_in(owner, id, path, kind, site)
     }
-    async fn selected_value(
+    fn selected_value(
         &self,
         id: QueryId,
         path: &DefPath,
@@ -2935,9 +2890,8 @@ impl Source {
         site: Span,
     ) -> Result<Value, QueryError> {
         self.selected_value_in(self.active_owner(), id, path, kind, site)
-            .await
     }
-    async fn selected_value_in(
+    fn selected_value_in(
         &self,
         owner: Arc<FrontLowerQueries>,
         id: QueryId,
@@ -2952,7 +2906,7 @@ impl Source {
             owner: &owner,
             id: self.id,
         };
-        let selected = self.reads.read_consuming(id).await;
+        let selected = self.reads.read_consuming(id);
 
         drop(pending);
         if selected == Err(owner.errors.cycle) {
@@ -3037,7 +2991,7 @@ impl Source {
             self.phase.set(outcome.phase);
         })
     }
-    async fn constant_value(
+    fn constant_value(
         &self,
         path: &DefPath,
     ) -> Result<(Materialized, Vec<(hirsel_syntax::ExprId, Materialized)>), QueryError> {
@@ -3048,9 +3002,8 @@ impl Source {
                 .get(path)
                 .map_or(Span::default(), |input| input.site),
         )
-        .await
     }
-    async fn constant_at(
+    fn constant_at(
         &self,
         path: &DefPath,
         site: Span,
@@ -3066,7 +3019,7 @@ impl Source {
                 return Ok((value, vec![]));
             }
         }
-        match self.value(path, FRONT_EVALUATE_KIND, site).await? {
+        match self.value(path, FRONT_EVALUATE_KIND, site)? {
             Value::Constant(value) => value
                 .decoded(
                     &self.active_owner().records,
@@ -3079,10 +3032,10 @@ impl Source {
         }
     }
 }
-impl s1::AsyncDependencySource for Source {
-    async fn definition(&mut self, path: &DefPath) -> s1::DependencyProduct<DefinitionRef> {
+impl s1::DependencySource for Source<'_> {
+    fn definition(&mut self, path: &DefPath) -> s1::DependencyProduct<DefinitionRef> {
         let previous = self.capture();
-        let result = match self.value(path, FRONT_LOWER_KIND, Span::default()).await {
+        let result = match self.value(path, FRONT_LOWER_KIND, Span::default()) {
             Ok(Value::Lower(lower)) => match lower.decode(&self.active_owner()) {
                 Some(output) => {
                     self.execution_signatures(output.dependencies.iter());
@@ -3100,9 +3053,9 @@ impl s1::AsyncDependencySource for Source {
             reads: Reads::empty(),
         }
     }
-    async fn constant(&mut self, path: &DefPath) -> s1::DependencyProduct<MaterializedRef> {
+    fn constant(&mut self, path: &DefPath) -> s1::DependencyProduct<MaterializedRef> {
         let previous = self.capture();
-        let result = self.constant_value(path).await.map(|(v, _)| Arc::new(v));
+        let result = self.constant_value(path).map(|(v, _)| Arc::new(v));
         let successor = self.successor_since(&previous);
         s1::DependencyProduct {
             successor: successor.as_ref().ok().and_then(Clone::clone),
@@ -3110,16 +3063,16 @@ impl s1::AsyncDependencySource for Source {
             reads: Reads::empty(),
         }
     }
-    async fn constant_instance(
+    fn constant_instance(
         &mut self,
         path: &DefPath,
         arguments: &[u64],
     ) -> s1::DependencyProduct<MaterializedRef> {
         if arguments.is_empty() {
-            return s1::AsyncDependencySource::constant(self, path).await;
+            return s1::DependencySource::constant(self, path);
         }
         let previous = self.capture();
-        let result = async {
+        let result = (|| {
             let active = self.active_owner();
             let id = active.staged_query(path, arguments)?;
             self.select(&[(DefId::intern(path), arguments.to_vec())])?;
@@ -3130,9 +3083,8 @@ impl s1::AsyncDependencySource for Source {
                 .ok_or(QueryError::NotImplemented)?;
             let owner = declaration.owner.clone();
             let site = active.inputs[&owner].site;
-            let Value::Constant(value) = self
-                .selected_value_in(active, id, &owner, FRONT_EVALUATE_KIND, site)
-                .await?
+            let Value::Constant(value) =
+                self.selected_value_in(active, id, &owner, FRONT_EVALUATE_KIND, site)?
             else {
                 return Err(QueryError::NotImplemented);
             };
@@ -3145,8 +3097,7 @@ impl s1::AsyncDependencySource for Source {
                 )
                 .map(|(value, _)| Arc::new(value))
                 .ok_or(QueryError::NotImplemented)
-        }
-        .await;
+        })();
         let successor = self.successor_since(&previous);
         s1::DependencyProduct {
             successor: successor.as_ref().ok().and_then(Clone::clone),
@@ -3154,7 +3105,7 @@ impl s1::AsyncDependencySource for Source {
             reads: Reads::empty(),
         }
     }
-    async fn instance_body(
+    fn instance_body(
         &mut self,
         path: &DefPath,
         arguments: &[hirsel_types::GenericArgument],
@@ -3162,18 +3113,15 @@ impl s1::AsyncDependencySource for Source {
         let previous = self.capture();
         let active = self.active_owner();
         let result = if let Some(producer) = active.demand_producer() {
-            match producer
-                .demand(
-                    &previous,
-                    path,
-                    arguments,
-                    previous
-                        .syntax(path)
-                        .map_or(Span::default(), |syntax| syntax.item.name_span),
-                    self.reads.clone(),
-                )
-                .await
-            {
+            match producer.demand(
+                &previous,
+                path,
+                arguments,
+                previous
+                    .syntax(path)
+                    .map_or(Span::default(), |syntax| syntax.item.name_span),
+                self.reads.clone(),
+            ) {
                 Ok(product) => {
                     if let Err(error) = &product.result {
                         if let Ok(failure) = producer.demand_failure(
@@ -3220,102 +3168,62 @@ impl s1::AsyncDependencySource for Source {
         }
     }
 }
-impl crate::dictionaries::DeclarationSource for Source {
+/// The dictionary declaration's field evaluations, which take only the
+/// evaluated value.
+struct Declaring<'s, 'a>(&'s mut Source<'a>);
+impl crate::comptime::ComptimeValueSource for Declaring<'_, '_> {
     fn signature(&mut self, path: &DefPath) -> Result<hirsel_types::SignatureRef, QueryError> {
-        Source::signature(self, path)
+        self.0.signature(path)
     }
-    async fn evaluate(&mut self, input: EvaluationInput<'_>) -> Result<Materialized, QueryError> {
-        evaluate(
-            self.clone(),
-            Arc::new(QueryOutput {
-                value: input.analyzed.clone(),
-                diagnostics: vec![],
-                dependencies: vec![],
-            }),
-            input.staged.to_vec(),
-            Arc::new(input.signature.clone()),
-            input.expression,
-            input.child,
-            input.ty,
-            input.constants.to_vec(),
-            input.sizes.to_vec(),
-        )
-        .await?
-        .result
+    fn constant(&mut self, path: &DefPath, site: Span) -> Result<Materialized, QueryError> {
+        self.0.constant_at(path, site).map(|(v, _)| v)
+    }
+    fn evaluate(&mut self, input: EvaluationInput<'_>) -> Result<Materialized, QueryError> {
+        evaluate_input(self.0.clone(), input)?.result
     }
 }
-type Evaluation =
-    Pin<Box<dyn Future<Output = Result<s1::DependencyProduct<Materialized>, QueryError>>>>;
-struct Values {
-    source: Source,
-    pending: Option<Evaluation>,
+/// Compile-time value preparation, joining each evaluation's successor and
+/// reads into the producing source.
+struct Values<'a> {
+    source: Source<'a>,
 }
-impl PreparingSource for Values {
-    fn signature(
-        &mut self,
-        path: &DefPath,
-    ) -> Poll<Result<hirsel_types::SignatureRef, QueryError>> {
-        Poll::Ready(self.source.signature(path))
+impl crate::comptime::ComptimeValueSource for Values<'_> {
+    fn signature(&mut self, path: &DefPath) -> Result<hirsel_types::SignatureRef, QueryError> {
+        self.source.signature(path)
     }
-    fn constant(&mut self, path: &DefPath, site: Span) -> Poll<Result<Materialized, QueryError>> {
-        if self.pending.is_none() {
-            let source = self.source.clone();
-            let path = path.clone();
-            self.pending = Some(Box::pin(async move {
-                Ok(s1::DependencyProduct {
-                    successor: None,
-                    result: source.constant_at(&path, site).await.map(|(v, _)| v),
-                    reads: Reads::empty(),
-                })
-            }));
-        }
-        self.advance()
+    fn constant(&mut self, path: &DefPath, site: Span) -> Result<Materialized, QueryError> {
+        self.source.constant_at(path, site).map(|(v, _)| v)
     }
-    fn evaluate(&mut self, input: EvaluationInput<'_>) -> Poll<Result<Materialized, QueryError>> {
-        if self.pending.is_none() {
-            self.pending = Some(Box::pin(evaluate(
-                self.source.clone(),
-                Arc::new(QueryOutput {
-                    value: input.analyzed.clone(),
-                    diagnostics: vec![],
-                    dependencies: vec![],
-                }),
-                input.staged.to_vec(),
-                Arc::new(input.signature.clone()),
-                input.expression,
-                input.child,
-                input.ty,
-                input.constants.to_vec(),
-                input.sizes.to_vec(),
-            )));
-        }
-        self.advance()
+    fn evaluate(&mut self, input: EvaluationInput<'_>) -> Result<Materialized, QueryError> {
+        let product = evaluate_input(self.source.clone(), input)?;
+        self.source.join(product.successor)?;
+        self.source.merge(&product.reads);
+        product.result
     }
 }
-impl Values {
-    fn advance(&mut self) -> Poll<Result<Materialized, QueryError>> {
-        match self
-            .pending
-            .as_mut()
-            .unwrap()
-            .as_mut()
-            .poll(&mut Context::from_waker(Waker::noop()))
-        {
-            Poll::Pending => Poll::Pending,
-            Poll::Ready(result) => {
-                self.pending = None;
-                Poll::Ready(result.and_then(|p| {
-                    self.source.join(p.successor)?;
-                    self.source.merge(&p.reads);
-                    p.result
-                }))
-            }
-        }
-    }
+fn evaluate_input(
+    source: Source<'_>,
+    input: EvaluationInput<'_>,
+) -> Result<s1::DependencyProduct<Materialized>, QueryError> {
+    evaluate(
+        source,
+        Arc::new(QueryOutput {
+            value: input.analyzed.clone(),
+            diagnostics: vec![],
+            dependencies: vec![],
+        }),
+        input.staged.to_vec(),
+        Arc::new(input.signature.clone()),
+        input.expression,
+        input.child,
+        input.ty,
+        input.constants.to_vec(),
+        input.sizes.to_vec(),
+    )
 }
 #[allow(clippy::too_many_arguments)]
-async fn evaluate(
-    mut source: Source,
+fn evaluate(
+    mut source: Source<'_>,
     analyzed: Arc<QueryOutput<AnalyzedBody>>,
     staged: Vec<(hirsel_syntax::ExprId, hirsel_types::TypeId)>,
     signature: hirsel_types::SignatureRef,
@@ -3356,14 +3264,12 @@ async fn evaluate(
         .evidence
         .borrow_mut()
         .accepted(admission.acceptance().cloned());
-    let product = admission
-        .run_async(
-            &owner.namespace.sources,
-            owner.namespace.limits,
-            &runtime,
-            &mut source,
-        )
-        .await;
+    let product = admission.run(
+        &owner.namespace.sources,
+        owner.namespace.limits,
+        &runtime,
+        &mut source,
+    );
     source.join(product.value.successor)?;
     source.merge(&product.value.reads);
     source.evidence.borrow_mut().accepted(product.acceptance);
@@ -3395,11 +3301,11 @@ async fn evaluate(
     })
 }
 
-struct Materializer<'a> {
+struct Materializer<'a, 's> {
     provider: FrozenProvider<'a>,
-    source: &'a Source,
+    source: &'a Source<'s>,
 }
-impl crate::materialized::MaterializationSource for Materializer<'_> {
+impl crate::materialized::MaterializationSource for Materializer<'_, '_> {
     fn signature(&mut self, id: DefId) -> Result<hirsel_types::SignatureRef, QueryError> {
         SignatureProvider::signature(&mut self.provider, id)
     }

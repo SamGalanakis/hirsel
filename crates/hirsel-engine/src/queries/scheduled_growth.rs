@@ -11,12 +11,9 @@ use crate::products::{
 use crate::source_components::{SourceGrowthComponents, SourceGrowthQueryRecord, SourceMembership};
 use hirsel_engine_runtime::*;
 use hirsel_engine_store::{Domain, Reference, ResultStore};
-use std::{
-    sync::{
-        Mutex,
-        atomic::{AtomicU64, Ordering::Relaxed},
-    },
-    task::Poll,
+use std::sync::{
+    Mutex,
+    atomic::{AtomicU64, Ordering::Relaxed},
 };
 pub const FRONT_GROWTH_KIND: u32 = 0x4600_0008;
 const FAILURE: Domain = Domain {
@@ -195,7 +192,6 @@ impl QueryFactory for Factory {
                 table_keys: BTreeMap::new(),
                 required: BTreeMap::new(),
                 reads: Vec::new(),
-                waiting: None,
                 terminal: None,
             }));
         }
@@ -222,7 +218,6 @@ impl QueryFactory for Factory {
             id,
             component,
             count,
-            waiting: None,
             cursor: 0,
             facts: Vec::with_capacity(count),
             reads: Vec::with_capacity(count),
@@ -247,17 +242,8 @@ impl QueryTask for Reopened {
             ..MemoryWeight::default()
         }
     }
-    fn continuation_bytes(&self) -> u64 {
-        self.weight().retained
-    }
-    fn poll(&mut self, _: &mut dyn QueryContext) -> QueryPoll {
-        QueryPoll::Complete(self.product.clone())
-    }
-}
-fn finish(result: Result<ProductRef, Reference>) -> QueryPoll {
-    match result {
-        Ok(product) => QueryPoll::Complete(product),
-        Err(error) => QueryPoll::Failed(error),
+    fn run(&mut self, _: &mut dyn QueryContext) -> QueryOutcome {
+        Ok(self.product.clone())
     }
 }
 struct FactTask {
@@ -266,7 +252,6 @@ struct FactTask {
     id: QueryId,
     component: Option<(Arc<SourceMembership>, usize)>,
     count: usize,
-    waiting: Option<QueryId>,
     cursor: usize,
     facts: Vec<SourceGrowthFact>,
     reads: Vec<Arc<Reads>>,
@@ -285,16 +270,12 @@ impl FactTask {
             })
             .unwrap()
     }
-    fn advance(&mut self, cx: &mut dyn QueryContext) -> Poll<Result<ProductRef, Reference>> {
+    fn advance(&mut self, cx: &mut dyn QueryContext) -> Result<ProductRef, Reference> {
         while self.cursor < self.count {
             let input = self
                 .queries
                 .selected_input(&self.front, self.input(self.cursor))?;
-            self.waiting = Some(input);
-            let selected = match cx.read(input) {
-                Poll::Pending => return Poll::Pending,
-                Poll::Ready(selected) => selected,
-            };
+            let selected = cx.read(input);
             if let Some(checked) = self.front.checked(selected.clone()) {
                 self.reads.push(checked.reads.clone());
                 let observed = selected
@@ -307,14 +288,14 @@ impl FactTask {
                     selected.into(),
                     observed,
                 ) else {
-                    return Poll::Ready(Err(self.queries.errors.resource));
+                    return Err(self.queries.errors.resource);
                 };
                 let bytes = fact.input_bytes() - std::mem::size_of::<SourceGrowthFact>() as u64;
                 let Some(charge) = self.queries.output_pool.reserve(bytes).ok() else {
-                    return Poll::Ready(Err(self.queries.errors.resource));
+                    return Err(self.queries.errors.resource);
                 };
                 if self.admission.join(charge).is_err() {
-                    return Poll::Ready(Err(self.queries.errors.protocol));
+                    return Err(self.queries.errors.protocol);
                 }
                 self.facts.push(fact);
             } else if let Some(facts) = self.front.check_facts(selected.clone())
@@ -322,13 +303,12 @@ impl FactTask {
             {
                 self.reads.push(facts.reads.clone());
             } else {
-                return Poll::Ready(Err(selected.err().unwrap_or(self.queries.errors.protocol)));
+                return Err(selected.err().unwrap_or(self.queries.errors.protocol));
             }
             cx.consume(input);
             self.cursor += 1;
         }
-        self.waiting = None;
-        Poll::Ready(self.complete(cx))
+        self.complete(cx)
     }
     fn release_inputs(&mut self) -> Result<(), Reference> {
         drop(std::mem::take(&mut self.facts));
@@ -470,20 +450,13 @@ impl QueryTask for FactTask {
             ..self.queries.weight
         }
     }
-    fn continuation_bytes(&self) -> u64 {
-        self.weight().retained
-    }
-    fn poll(&mut self, cx: &mut dyn QueryContext) -> QueryPoll {
+    fn run(&mut self, cx: &mut dyn QueryContext) -> QueryOutcome {
         if let Some(result) = &self.terminal {
-            return finish(result.clone());
+            return result.clone();
         }
-        match self.advance(cx) {
-            Poll::Pending => QueryPoll::Waiting(self.waiting.into_iter().collect()),
-            Poll::Ready(result) => {
-                self.terminal = Some(result.clone());
-                finish(result)
-            }
-        }
+        let result = self.advance(cx);
+        self.terminal = Some(result.clone());
+        result
     }
 }
 impl FrontGrowthQueries {
@@ -565,7 +538,6 @@ struct Task {
     table_keys: BTreeMap<DefPath, Arc<crate::table_keys::TableKeyUse>>,
     required: BTreeMap<DefPath, BTreeSet<usize>>,
     reads: Vec<Arc<Reads>>,
-    waiting: Option<QueryId>,
     terminal: Option<Result<ProductRef, Reference>>,
 }
 impl QueryTask for Task {
@@ -575,40 +547,28 @@ impl QueryTask for Task {
     fn weight(&self) -> MemoryWeight {
         self.queries.weight
     }
-    fn continuation_bytes(&self) -> u64 {
-        self.weight().retained
-    }
-    fn poll(&mut self, cx: &mut dyn QueryContext) -> QueryPoll {
+    fn run(&mut self, cx: &mut dyn QueryContext) -> QueryOutcome {
         if let Some(result) = &self.terminal {
-            return finish(result.clone());
+            return result.clone();
         }
-        match self.advance(cx) {
-            Poll::Pending => QueryPoll::Waiting(self.waiting.into_iter().collect()),
-            Poll::Ready(result) => {
-                self.terminal = Some(result.clone());
-                finish(result)
-            }
-        }
+        let result = self.advance(cx);
+        self.terminal = Some(result.clone());
+        result
     }
 }
 impl Task {
-    fn advance(&mut self, cx: &mut dyn QueryContext) -> Poll<Result<ProductRef, Reference>> {
+    fn advance(&mut self, cx: &mut dyn QueryContext) -> Result<ProductRef, Reference> {
         let queries = self.queries.clone();
         if self.membership.is_none() {
             let id = queries.membership_query();
-            self.waiting = Some(id);
-            let product = match cx.read(id) {
-                Poll::Pending => return Poll::Pending,
-                Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
-                Poll::Ready(Ok(p)) => p,
-            };
+            let product = cx.read(id)?;
             let Some(publication) =
                 product.live_value::<crate::products::LiveSourceGrowthProduct>()
             else {
-                return Poll::Ready(Err(queries.errors.protocol));
+                return Err(queries.errors.protocol);
             };
             let Some(value) = publication.membership() else {
-                return Poll::Ready(Err(queries.errors.protocol));
+                return Err(queries.errors.protocol);
             };
             self.reads.push(publication.reader());
             self.membership = Some(value.clone());
@@ -622,19 +582,14 @@ impl Task {
                     membership.components[self.component_cursor].address,
                 ),
             };
-            self.waiting = Some(id);
-            let product = match cx.read(id) {
-                Poll::Pending => return Poll::Pending,
-                Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
-                Poll::Ready(Ok(p)) => p,
-            };
+            let product = cx.read(id)?;
             let Some(publication) =
                 product.live_value::<crate::products::LiveSourceGrowthProduct>()
             else {
-                return Poll::Ready(Err(queries.errors.protocol));
+                return Err(queries.errors.protocol);
             };
             let Some(value) = publication.component() else {
-                return Poll::Ready(Err(queries.errors.protocol));
+                return Err(queries.errors.protocol);
             };
             self.reads.push(publication.reader());
             let mut components = queries.components.lock().unwrap_or_else(|e| e.into_inner());
@@ -647,10 +602,10 @@ impl Task {
                     )
                     .is_none()
                 {
-                    return Poll::Ready(Err(queries.errors.resource));
+                    return Err(queries.errors.resource);
                 }
             } else if components[self.component_cursor].product != value.product {
-                return Poll::Ready(Err(queries.errors.protocol));
+                return Err(queries.errors.protocol);
             }
             // A restarted reduction reads the retained prefix through the
             // scheduler again, so this generation records every dependency.
@@ -662,11 +617,7 @@ impl Task {
         // neither builds membership nor solves a source component.
         while self.cursor < queries.roots.len() {
             let id = queries.selected_input(&self.front, queries.roots[self.cursor])?;
-            self.waiting = Some(id);
-            let selected = match cx.read(id) {
-                Poll::Pending => return Poll::Pending,
-                Poll::Ready(p) => p,
-            };
+            let selected = cx.read(id);
             if let Some(checked) = self.front.checked(selected.clone()) {
                 for call in &checked.summary.summary.calls {
                     let slots = hirsel_types::core_roles::table_key_parameters(call.callee.path());
@@ -687,13 +638,12 @@ impl Task {
             {
                 self.reads.push(facts.reads.clone());
             } else {
-                return Poll::Ready(Err(selected.err().unwrap_or(queries.errors.protocol)));
+                return Err(selected.err().unwrap_or(queries.errors.protocol));
             }
             cx.consume(id);
             self.cursor += 1;
         }
-        self.waiting = None;
-        Poll::Ready(self.complete(cx))
+        self.complete(cx)
     }
     fn complete(&mut self, _cx: &mut dyn QueryContext) -> Result<ProductRef, Reference> {
         let queries = &self.queries;

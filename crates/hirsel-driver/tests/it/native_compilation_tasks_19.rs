@@ -38,7 +38,6 @@ use std::{
         Arc,
         atomic::{AtomicU64, Ordering},
     },
-    task::Poll,
 };
 
 // Preserve the real directory provider and its validator capabilities while
@@ -228,16 +227,10 @@ impl NativeLinkExecutor for Platform {
         )
     }
 }
-struct Pending;
-impl QueryContext for Pending {
-    fn read(&mut self, _: QueryId) -> Poll<Result<ProductRef, store::Reference>> {
-        Poll::Pending
-    }
-}
 struct Failed(store::Reference);
 impl QueryContext for Failed {
-    fn read(&mut self, _: QueryId) -> Poll<Result<ProductRef, store::Reference>> {
-        Poll::Ready(Err(self.0))
+    fn read(&mut self, _: QueryId) -> Result<ProductRef, store::Reference> {
+        Err(self.0)
     }
 }
 struct TraceFactory(Arc<dyn QueryFactory>, hirsel_lir::construction::ValueTrace);
@@ -254,12 +247,9 @@ impl QueryTask for TraceTask {
     fn weight(&self) -> MemoryWeight {
         self.0.weight()
     }
-    fn continuation_bytes(&self) -> u64 {
-        self.0.continuation_bytes()
-    }
-    fn poll(&mut self, cx: &mut dyn QueryContext) -> QueryPoll {
+    fn run(&mut self, cx: &mut dyn QueryContext) -> QueryOutcome {
         let _guard = self.1.enter();
-        self.0.poll(cx)
+        self.0.run(cx)
     }
 }
 
@@ -638,17 +628,11 @@ fn run_program_case_with_frame(
         .unwrap();
         let factory = CompilationFactory::new(compilation.clone());
         let mut task = factory.create(compilation.query_id()).unwrap();
-        assert!(
-            matches!(task.poll(&mut Pending), QueryPoll::Waiting(ref keys)
-            if keys == &vec![instances.discovery_id(), arena.query_id()])
-        );
+        let denied = instances.failure("compilation fixture dependency refused");
+        assert!(matches!(task.run(&mut Failed(denied)), Err(error) if error == denied));
         assert_eq!(trace.totals(), Default::default());
         assert_eq!(instances.imports.load(Ordering::Relaxed), 0);
         assert_eq!(calls.load(Ordering::Relaxed), 0);
-        let denied = instances.failure("compilation fixture dependency refused");
-        assert!(
-            matches!(task.poll(&mut Failed(denied)), QueryPoll::Failed(error) if error == denied)
-        );
         drop(task);
         let mut runtime = AdmittedRuntime::new(
             hirsel_intern::jobs::Jobs::new(jobs),

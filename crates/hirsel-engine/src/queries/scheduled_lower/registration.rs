@@ -175,22 +175,21 @@ impl FrontRegistrationQueries {
             namespace: namespace.clone(),
         })
     }
-    pub(in crate::queries) async fn run(
+    pub(in crate::queries) fn run<'a>(
         self: Arc<Self>,
         id: QueryId,
-        reads: QueryReads,
+        reads: &'a QueryReads<'a>,
     ) -> Result<ProductRef, Reference> {
-        let result = self.clone().run_tentative(id, reads.clone()).await;
+        let result = self.clone().run_tentative(id, reads.clone());
         if let Ok(product) = &result {
-            reads.publication().await?;
             self.commit(product);
         }
         result
     }
-    pub(in crate::queries) async fn run_tentative(
+    pub(in crate::queries) fn run_tentative<'a>(
         self: Arc<Self>,
         id: QueryId,
-        reads: QueryReads,
+        reads: &'a QueryReads<'a>,
     ) -> Result<ProductRef, Reference> {
         let input = &self.inputs[&id.address.0];
         let (mut data, namespace) = if let Some(data) = self.restore(input) {
@@ -231,7 +230,6 @@ impl FrontRegistrationQueries {
                 Err(source.overflow(input.site))
             } else {
                 self.compute(input, &mut source, &mut dependencies)
-                    .await
                     .map_err(|error| {
                         lower_input_error(input.definition.path(), "executing a generator", error)
                     })
@@ -261,7 +259,7 @@ impl FrontRegistrationQueries {
                 drop(engine);
                 drop(text);
                 drop(source);
-                let selected = Box::pin(replay.clone().run_tentative(query, reads)).await;
+                let selected = replay.clone().run_tentative(query, reads);
                 let (mut product, data, namespace) = replay
                     .outcomes
                     .lock()
@@ -585,7 +583,7 @@ impl FrontRegistrationQueries {
         }
         self.lower.store.cache_query(&key, reads, &payload);
     }
-    async fn compute(
+    fn compute(
         &self,
         input: &Input,
         source: &mut Source,
@@ -631,23 +629,15 @@ impl FrontRegistrationQueries {
         );
         source.merge(&observed.finish().map_err(|_| QueryError::NotImplemented)?);
         let staged = staged?;
-        let mut values = Values {
-            source: source.clone(),
-            pending: None,
-        };
-        let mut preparation = ValuePreparation::new(&checked.analyzed);
-        let constants = poll_fn(|_| {
-            preparation
-                .poll(
-                    self.lower.namespace.snapshot.types(),
-                    &checked.analyzed,
-                    &staged,
-                    &checked.signature,
-                    &mut values,
-                )
-                .map(|r| r.map(|v| v.to_vec()))
-        })
-        .await?;
+        let constants = crate::comptime::prepare_values(
+            self.lower.namespace.snapshot.types(),
+            &checked.analyzed,
+            &staged,
+            &checked.signature,
+            &mut Values {
+                source: source.clone(),
+            },
+        )?;
         let value = generator.value;
         let site = checked.analyzed.typed.syntax.tree.expressions[value.0 as usize]
             .origin
@@ -684,14 +674,12 @@ impl FrontRegistrationQueries {
             .evidence
             .borrow_mut()
             .accepted(admission.acceptance().cloned());
-        let result = admission
-            .run_async(
-                &source.capture().sources,
-                source.capture().limits,
-                &runtime,
-                source,
-            )
-            .await;
+        let result = admission.run(
+            &source.capture().sources,
+            source.capture().limits,
+            &runtime,
+            source,
+        );
         source.join(result.value.successor)?;
         source.merge(&result.value.reads);
         source.evidence.borrow_mut().accepted(result.acceptance);
@@ -708,13 +696,12 @@ impl LocalQueryFactory for Factory {
     }
     fn create(&self, id: QueryId) -> Result<Box<dyn LocalQueryTask>, Reference> {
         let owner = self.0.clone();
-        Ok(Box::new(LowerTask(LocalFutureTask::new(
+        Ok(Box::new(hirsel_engine_runtime::LocalFnTask::new(
             id,
             self.weight(id)?,
-            self.0.lower.max_reads,
             self.0.errors,
             move |reads| owner.run(id, reads),
-        )?)))
+        )))
     }
 }
 impl QueryEngine {

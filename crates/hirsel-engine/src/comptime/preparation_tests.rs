@@ -1,6 +1,6 @@
 use super::*;
 use hirsel_types::{CheckedBody, Elaboration, OwnershipFacts, Resolution, Type, UseKind};
-use std::{collections::BTreeMap, task::Poll};
+use std::collections::BTreeMap;
 
 fn fixture() -> (Arc<hirsel_types::TypeInterner>, AnalyzedBody, Signature) {
     let mut engine = QueryEngine::new(default_environment(), crate::phases::engine_only_adapters());
@@ -87,38 +87,27 @@ struct Source {
     substitutions: Vec<Vec<ExprId>>,
     fail: bool,
 }
-impl PreparingSource for Source {
-    fn signature(&mut self, _: &DefPath) -> Poll<Result<Arc<Signature>, QueryError>> {
+impl ComptimeValueSource for Source {
+    fn signature(&mut self, _: &DefPath) -> Result<Arc<Signature>, QueryError> {
         self.signatures += 1;
-        if self.signatures == 1 {
-            Poll::Pending
-        } else {
-            Poll::Ready(Ok(self.signature.clone()))
-        }
+        Ok(self.signature.clone())
     }
-    fn constant(&mut self, _: &DefPath, _: Span) -> Poll<Result<Materialized, QueryError>> {
+    fn constant(&mut self, _: &DefPath, _: Span) -> Result<Materialized, QueryError> {
         self.constants += 1;
-        if self.constants == 1 {
-            return Poll::Pending;
-        }
-        Poll::Ready(if self.fail {
+        if self.fail {
             Err(QueryError::NotImplemented)
         } else {
             Ok(value(match self.signature.kind {
                 SignatureKind::Const { ty, .. } => ty,
                 _ => unreachable!(),
             }))
-        })
-    }
-    fn evaluate(&mut self, input: EvaluationInput<'_>) -> Poll<Result<Materialized, QueryError>> {
-        let calls = self.evaluations.entry(input.expression).or_default();
-        *calls += 1;
-        if *calls == 1 {
-            return Poll::Pending;
         }
+    }
+    fn evaluate(&mut self, input: EvaluationInput<'_>) -> Result<Materialized, QueryError> {
+        *self.evaluations.entry(input.expression).or_default() += 1;
         self.substitutions
             .push(input.constants.iter().map(|(id, _)| *id).collect());
-        Poll::Ready(Ok(value(input.ty)))
+        Ok(value(input.ty))
     }
 }
 fn value(ty: TypeId) -> Materialized {
@@ -140,51 +129,24 @@ fn source(signature: &Signature) -> Source {
     }
 }
 #[test]
-fn suspension_retains_constant_and_inner_expression_substitutions_without_replay() {
+fn constants_precede_inner_expressions_and_each_sees_earlier_substitutions() {
     hirsel_intern::jobs::with_compiler_stack(|| {
         let (types, body, signature) = fixture();
         let mut source = source(&signature);
-        let mut preparation = ValuePreparation::new(&body);
-        let values = loop {
-            if let Poll::Ready(result) =
-                preparation.poll(&types, &body, &[], &signature, &mut source)
-            {
-                break result.unwrap().to_vec();
-            }
-        };
+        let values = prepare_values(&types, &body, &[], &signature, &mut source).unwrap();
         assert_eq!(
             values.len(),
             3,
             "one constant, then two nested comptime expressions"
         );
-        assert_eq!(
-            source.signatures, 2,
-            "pending constant must retain its selected signature"
-        );
-        assert_eq!(source.constants, 2);
+        assert_eq!(source.signatures, 1);
+        assert_eq!(source.constants, 1);
         assert_eq!(source.evaluations.len(), 2);
-        assert!(source.evaluations.values().all(|calls| *calls == 2));
+        assert!(source.evaluations.values().all(|calls| *calls == 1));
         assert_eq!(
             source.substitutions,
             [vec![values[0].0], vec![values[0].0, values[1].0]]
         );
-        let repeated = preparation.poll(&types, &body, &[], &signature, &mut source);
-        let Poll::Ready(Ok(repeated)) = repeated else {
-            panic!("completed preparation must be ready");
-        };
-        assert_eq!(
-            repeated
-                .iter()
-                .map(|(id, value)| (*id, &value.root))
-                .collect::<Vec<_>>(),
-            values
-                .iter()
-                .map(|(id, value)| (*id, &value.root))
-                .collect::<Vec<_>>()
-        );
-        assert_eq!(source.constants, 2);
-        assert_eq!(source.signatures, 2);
-        assert_eq!(source.substitutions.len(), 2);
     });
 }
 #[test]
@@ -193,22 +155,12 @@ fn failed_dependency_stops_preparation_before_later_expression_selection() {
         let (types, body, signature) = fixture();
         let mut source = source(&signature);
         source.fail = true;
-        let mut preparation = ValuePreparation::new(&body);
-        for _ in 0..2 {
-            assert!(
-                preparation
-                    .poll(&types, &body, &[], &signature, &mut source)
-                    .is_pending()
-            );
-        }
-        for _ in 0..2 {
-            assert!(matches!(
-                preparation.poll(&types, &body, &[], &signature, &mut source),
-                Poll::Ready(Err(QueryError::NotImplemented))
-            ));
-        }
-        assert_eq!(source.signatures, 2);
-        assert_eq!(source.constants, 2);
+        assert!(matches!(
+            prepare_values(&types, &body, &[], &signature, &mut source),
+            Err(QueryError::NotImplemented)
+        ));
+        assert_eq!(source.signatures, 1);
+        assert_eq!(source.constants, 1);
         assert!(source.evaluations.is_empty());
     });
 }

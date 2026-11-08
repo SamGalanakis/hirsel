@@ -77,64 +77,6 @@ pub(crate) fn run_observed<O: crate::ownership_trace::Observer>(
     runtime: &crate::aggregate::RuntimeTypes,
     observer: &mut O,
 ) -> Result<Execution, ExecutionError> {
-    use std::{
-        future::Future,
-        task::{Context, Poll, Waker},
-    };
-    let mut immediate = crate::provider::ImmediateTirProvider::new(provider);
-    let mut execution = std::pin::pin!(run_observed_async(
-        &mut immediate,
-        sources,
-        configuration,
-        arguments,
-        limits,
-        operations,
-        runtime,
-        observer
-    ));
-    match execution
-        .as_mut()
-        .poll(&mut Context::from_waker(Waker::noop()))
-    {
-        Poll::Ready(result) => result,
-        Poll::Pending => unreachable!("an immediate TIR provider suspended"),
-    }
-}
-
-/// Execute with saved compiler dependency continuations. Poll and drop this
-/// future on one worker: it retains the interpreter's Rc/RefCell ownership.
-pub async fn run_with_runtime_async(
-    provider: &mut (impl AsyncTirProvider + ?Sized),
-    sources: &SourceMap,
-    configuration: &RunConfiguration,
-    arguments: Vec<Value>,
-    limits: Limits,
-    operations: &mut impl Operations,
-    runtime: &crate::aggregate::RuntimeTypes,
-) -> Result<Execution, ExecutionError> {
-    run_observed_async(
-        provider,
-        sources,
-        configuration,
-        arguments,
-        limits,
-        operations,
-        runtime,
-        &mut crate::ownership_trace::NoTrace,
-    )
-    .await
-}
-
-async fn run_observed_async<O: crate::ownership_trace::Observer>(
-    provider: &mut (impl AsyncTirProvider + ?Sized),
-    sources: &SourceMap,
-    configuration: &RunConfiguration,
-    arguments: Vec<Value>,
-    limits: Limits,
-    operations: &mut impl Operations,
-    runtime: &crate::aggregate::RuntimeTypes,
-    observer: &mut O,
-) -> Result<Execution, ExecutionError> {
     let checker = runtime.checked.clone().map(crate::checked::state);
     let root = crate::runs::Run::new(
         provider,
@@ -144,12 +86,10 @@ async fn run_observed_async<O: crate::ownership_trace::Observer>(
         runtime,
         runtime.budgets,
         checker.as_ref(),
-    )
-    .await?;
+    )?;
     let (mut root, result) = crate::runs::execute(
         provider, sources, limits, operations, runtime, root, observer,
-    )
-    .await;
+    );
     let execution = &mut root.execution;
     let result = match (result, &checker) {
         (Err(Error::Blocked(waits)), _) => {
@@ -245,7 +185,7 @@ struct Resolved<'p, P: ?Sized> {
     /// Declarations with their own body: CT-5 instances never replace them.
     own_bodies: std::collections::BTreeSet<hirsel_syntax::DefPath>,
 }
-impl<'p, P: AsyncTirProvider + ?Sized> Resolved<'p, P> {
+impl<'p, P: TirProvider + ?Sized> Resolved<'p, P> {
     fn new(provider: &'p mut P) -> Self {
         Self {
             provider,
@@ -254,8 +194,8 @@ impl<'p, P: AsyncTirProvider + ?Sized> Resolved<'p, P> {
         }
     }
 }
-impl<P: AsyncTirProvider + ?Sized> AsyncTirProvider for Resolved<'_, P> {
-    async fn definition(
+impl<P: TirProvider + ?Sized> TirProvider for Resolved<'_, P> {
+    fn definition(
         &mut self,
         path: &hirsel_syntax::DefPath,
     ) -> Result<DefinitionRef, hirsel_types::QueryError> {
@@ -266,30 +206,30 @@ impl<P: AsyncTirProvider + ?Sized> AsyncTirProvider for Resolved<'_, P> {
         {
             return Ok(definition);
         }
-        let definition = self.provider.definition(path).await?;
+        let definition = self.provider.definition(path)?;
         self.definitions
             .insert(path.clone(), std::sync::Arc::downgrade(&definition));
         Ok(definition)
     }
-    async fn constant(
+    fn constant(
         &mut self,
         path: &hirsel_syntax::DefPath,
     ) -> Result<MaterializedRef, hirsel_types::QueryError> {
-        self.provider.constant(path).await
+        self.provider.constant(path)
     }
-    async fn constant_instance(
+    fn constant_instance(
         &mut self,
         path: &hirsel_syntax::DefPath,
         arguments: &[u64],
     ) -> Result<MaterializedRef, hirsel_types::QueryError> {
-        self.provider.constant_instance(path, arguments).await
+        self.provider.constant_instance(path, arguments)
     }
-    async fn constant_definitions(
+    fn constant_definitions(
         &mut self,
     ) -> Result<Vec<hirsel_syntax::DefPath>, hirsel_types::QueryError> {
-        self.provider.constant_definitions().await
+        self.provider.constant_definitions()
     }
-    async fn instance_body(
+    fn instance_body(
         &mut self,
         path: &hirsel_syntax::DefPath,
         arguments: &[hirsel_types::GenericArgument],
@@ -297,7 +237,7 @@ impl<P: AsyncTirProvider + ?Sized> AsyncTirProvider for Resolved<'_, P> {
         if self.own_bodies.contains(path) {
             return Ok(None);
         }
-        let instance = self.provider.instance_body(path, arguments).await?;
+        let instance = self.provider.instance_body(path, arguments)?;
         if instance.is_none() {
             self.own_bodies.insert(path.clone());
         }
@@ -411,8 +351,8 @@ pub(crate) enum Step {
 }
 /// The holding table's size before its first pruning.
 const HOLDING_MARK: usize = 32;
-pub(crate) async fn execute_frames<O: crate::ownership_trace::Observer>(
-    provider: &mut (impl AsyncTirProvider + ?Sized),
+pub(crate) fn execute_frames<O: crate::ownership_trace::Observer>(
+    provider: &mut (impl TirProvider + ?Sized),
     sources: &SourceMap,
     configuration: &RunConfiguration,
     limits: Limits,
@@ -474,7 +414,6 @@ pub(crate) async fn execute_frames<O: crate::ownership_trace::Observer>(
                     (
                         provider
                             .definition(definition.path())
-                            .await
                             .map_err(Error::Query)?,
                         *body,
                         captures.clone(),
@@ -484,7 +423,6 @@ pub(crate) async fn execute_frames<O: crate::ownership_trace::Observer>(
                 Value::FunctionReference(reference) => {
                     let definition = provider
                         .definition(&reference.definition)
-                        .await
                         .map_err(Error::Query)?;
                     let body = definition.entry;
                     crate::type_arguments::bind(
@@ -1131,7 +1069,6 @@ pub(crate) async fn execute_frames<O: crate::ownership_trace::Observer>(
                             (
                                 provider
                                     .definition(definition.path())
-                                    .await
                                     .map_err(Error::Query)?,
                                 body,
                                 captures,
@@ -1230,8 +1167,7 @@ pub(crate) async fn execute_frames<O: crate::ownership_trace::Observer>(
                                     arguments
                                         .get(3)
                                         .ok_or_else(|| invalid("CPU mapper argument"))?,
-                                )
-                                .await?;
+                                )?;
                                 operations.cpu_mapper_certified(certified);
                             }
                             let operation = operations.resolve(&reference.definition);
@@ -1307,7 +1243,6 @@ pub(crate) async fn execute_frames<O: crate::ownership_trace::Observer>(
                             }
                             let definition = provider
                                 .definition(&reference.definition)
-                                .await
                                 .map_err(Error::Query)?;
                             let body = definition.entry;
                             let mut sizes = Default::default();
@@ -1918,8 +1853,7 @@ pub(crate) async fn execute_frames<O: crate::ownership_trace::Observer>(
                                     definition: definition.path().clone(),
                                 },
                             );
-                            let definition =
-                                provider.definition(&path).await.map_err(Error::Query)?;
+                            let definition = provider.definition(&path).map_err(Error::Query)?;
                             let mut bindings = Default::default();
                             Frame::bind_sizes(
                                 &mut bindings,
@@ -2615,7 +2549,6 @@ pub(crate) async fn execute_frames<O: crate::ownership_trace::Observer>(
                     &mut constants,
                     &mut budgets,
                 )
-                .await
                 .map(|_| Action::Continue),
             }
         } else {
@@ -2862,7 +2795,6 @@ pub(crate) async fn execute_frames<O: crate::ownership_trace::Observer>(
                         closure_check = check;
                         let definition = provider
                             .definition(definition.path())
-                            .await
                             .map_err(Error::Query)?;
                         if !actuals.arguments.is_empty() {
                             crate::type_arguments::bind(
@@ -2887,25 +2819,25 @@ pub(crate) async fn execute_frames<O: crate::ownership_trace::Observer>(
                                 match call.target.get() {
                                     Some(target) => target.clone(),
                                     None => {
-                                        let target = std::rc::Rc::new(
-                                            target(
-                                                frame,
-                                                provider,
-                                                runtime,
-                                                call.callee.clone(),
-                                                generics,
-                                            )
-                                            .await?,
-                                        );
+                                        let target = std::rc::Rc::new(target(
+                                            frame,
+                                            provider,
+                                            runtime,
+                                            call.callee.clone(),
+                                            generics,
+                                        )?);
                                         let _ = call.target.set(target.clone());
                                         target
                                     }
                                 }
                             }
-                            path => std::rc::Rc::new(
-                                target(frame, provider, runtime, path.into_path(), generics)
-                                    .await?,
-                            ),
+                            path => std::rc::Rc::new(target(
+                                frame,
+                                provider,
+                                runtime,
+                                path.into_path(),
+                                generics,
+                            )?),
                         };
                         if forward_caller && let Some(tail) = &target.tail {
                             let released = frame.loop_owned.len();
@@ -3075,8 +3007,7 @@ pub(crate) async fn execute_frames<O: crate::ownership_trace::Observer>(
                                     arguments
                                         .get(3)
                                         .ok_or_else(|| invalid("CPU mapper argument"))?,
-                                )
-                                .await?;
+                                )?;
                                 operations.cpu_mapper_certified(certified);
                             }
                             operations.call_resolved(
@@ -3205,7 +3136,7 @@ pub(crate) async fn execute_frames<O: crate::ownership_trace::Observer>(
                             .and_then(|entry| entry.definition.borrow().upgrade())
                         {
                             Some(definition) => definition,
-                            None => provider.definition(path).await.map_err(Error::Query)?,
+                            None => provider.definition(path).map_err(Error::Query)?,
                         };
                         let entry =
                             target.entry.get_or_init(|| {
@@ -3803,13 +3734,13 @@ enum Action {
         on_failure: CleanupId,
     },
 }
-async fn rvalue(
+fn rvalue(
     frame: &mut Frame,
     id: RvalueId,
     destination: PlaceId,
     site: Span,
     runtime: &crate::aggregate::RuntimeTypes,
-    provider: &mut (impl AsyncTirProvider + ?Sized),
+    provider: &mut (impl TirProvider + ?Sized),
     constants: &mut crate::constants::Constants,
     budgets: &mut crate::bounded::Budgets,
 ) -> Result<(Value, Shadow), EvalError> {
@@ -3888,9 +3819,7 @@ async fn rvalue(
                     hirsel_types::Size::Parameter(parameter) => frame.size(*parameter),
                 })
                 .collect::<Result<Vec<_>, Error>>()?;
-            let value = constants
-                .read_instance(provider, definition, &arguments, runtime)
-                .await?;
+            let value = constants.read_instance(provider, definition, &arguments, runtime)?;
             if frame.check.is_some() {
                 shadow = shadow.ownership(&value, false);
             }
@@ -4680,13 +4609,13 @@ fn checked_allocation(frame: &Frame, placement: &Destination) -> Result<Option<u
         )),
     }
 }
-async fn execute_instruction(
+fn execute_instruction(
     frame: &mut Frame,
     kind: &InstructionKind,
     runtime: &crate::aggregate::RuntimeTypes,
     site: Span,
     trace: &mut Vec<TraceEvent>,
-    provider: &mut (impl AsyncTirProvider + ?Sized),
+    provider: &mut (impl TirProvider + ?Sized),
     constants: &mut crate::constants::Constants,
     budgets: &mut crate::bounded::Budgets,
 ) -> Result<(), EvalError> {
@@ -4826,8 +4755,7 @@ async fn execute_instruction(
                 provider,
                 constants,
                 budgets,
-            )
-            .await?;
+            )?;
             if let Value::Resource { definition, .. } | Value::ResourceVariant { definition, .. } =
                 &value
             {
@@ -5250,9 +5178,9 @@ impl CalleePath {
 }
 /// Resolve a direct callee for a call from `frame`: close its generic arguments,
 /// select its CT-5 instance and classify the call.
-async fn target(
+fn target(
     frame: &Frame,
-    provider: &mut (impl AsyncTirProvider + ?Sized),
+    provider: &mut (impl TirProvider + ?Sized),
     runtime: &crate::aggregate::RuntimeTypes,
     mut path: hirsel_syntax::DefPath,
     generics: Vec<hirsel_types::GenericArgument>,
@@ -5268,7 +5196,6 @@ async fn target(
     // selected instance.
     if let Some(instance) = provider
         .instance_body(&path, &actuals.arguments)
-        .await
         .map_err(Error::Query)?
     {
         path = instance;

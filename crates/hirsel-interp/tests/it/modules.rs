@@ -17,7 +17,7 @@ mod operation_mutation;
 mod patterns;
 mod scalars;
 mod structural;
-mod query_suspension;
+mod definition_backing;
 mod ownership_trace;
 mod arena_inventory_breadth_33;
 mod sealed_regions_33;

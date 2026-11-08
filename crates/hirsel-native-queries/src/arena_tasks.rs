@@ -17,7 +17,6 @@ use std::{
         OnceLock,
         atomic::{AtomicU64, Ordering},
     },
-    task::Poll,
 };
 
 pub const ARENA_GRAPH_KIND: u32 = 0x4e00_0022;
@@ -275,12 +274,6 @@ struct ArenaTask {
     index: Option<usize>,
     terminal: Option<Result<ProductRef, Reference>>,
 }
-fn finish(result: Result<ProductRef, Reference>) -> QueryPoll {
-    match result {
-        Ok(product) => QueryPoll::Complete(product),
-        Err(error) => QueryPoll::Failed(error),
-    }
-}
 impl QueryTask for ArenaTask {
     fn id(&self) -> QueryId {
         self.key
@@ -293,41 +286,22 @@ impl QueryTask for ArenaTask {
             ..self.tasks.weight
         }
     }
-    fn continuation_bytes(&self) -> u64 {
-        std::mem::size_of::<Self>() as u64
-    }
-    fn poll(&mut self, cx: &mut dyn QueryContext) -> QueryPoll {
+    fn run(&mut self, cx: &mut dyn QueryContext) -> QueryOutcome {
         if let Some(result) = self.terminal.clone() {
-            return finish(result);
+            return result;
         }
         let result = self.advance(cx);
-        match result {
-            Ok(Ok(product)) => {
-                self.terminal = Some(Ok(product.clone()));
-                finish(Ok(product))
-            }
-            Ok(Err(waiting)) => QueryPoll::Waiting(waiting),
-            Err(error) => {
-                self.terminal = Some(Err(error));
-                finish(Err(error))
-            }
-        }
+        self.terminal = Some(result.clone());
+        result
     }
 }
 impl ArenaTask {
-    fn advance(
-        &self,
-        cx: &mut dyn QueryContext,
-    ) -> Result<Result<ProductRef, Vec<QueryId>>, Reference> {
+    fn advance(&self, cx: &mut dyn QueryContext) -> Result<ProductRef, Reference> {
         let tasks = &self.tasks;
         let fail = |e: String| tasks.instances.failure(&e);
         let plan = if self.index.is_none() {
             let discovery = tasks.instances.discovery_id();
-            let product = match cx.read(discovery) {
-                Poll::Pending => return Ok(Err(vec![discovery])),
-                Poll::Ready(Err(error)) => return Err(error),
-                Poll::Ready(Ok(product)) => product,
-            };
+            let product = cx.read(discovery)?;
             tasks.plan(product).map_err(fail)?
         } else {
             tasks
@@ -341,15 +315,13 @@ impl ArenaTask {
             (0..plan.ids.len()).collect()
         };
         let mut selected = BTreeMap::new();
-        let mut waiting = Vec::new();
         if let Some(index) = self.index {
             for member in &plan.queries.component_keys[index].members {
                 let expected = plan.instances[&member.address(INSTANCE_KIND).0].clone();
                 let query = instance_query(member, expected.clone());
                 match cx.read(query) {
-                    Poll::Pending => waiting.push(query),
-                    Poll::Ready(Err(error)) => return Err(error),
-                    Poll::Ready(Ok(product)) if expected == product => {}
+                    Err(error) => return Err(error),
+                    Ok(product) if expected == product => {}
                     _ => return Err(fail("arena member differs from discovered instance".into())),
                 }
             }
@@ -357,9 +329,8 @@ impl ArenaTask {
         for index in reads {
             let query = plan.ids[index];
             match cx.read(query) {
-                Poll::Pending => waiting.push(query),
-                Poll::Ready(Err(error)) => return Err(error),
-                Poll::Ready(Ok(product)) => {
+                Err(error) => return Err(error),
+                Ok(product) => {
                     let summary = plan.outputs[index].get().ok_or_else(|| {
                         fail("arena dependency has no completed descriptor".into())
                     })?;
@@ -369,9 +340,6 @@ impl ArenaTask {
                     selected.insert(index, summary.clone());
                 }
             }
-        }
-        if !waiting.is_empty() {
-            return Ok(Err(waiting));
         }
         let result = if let Some(index) = self.index {
             let mut counts = ArenaQueryCounts::default();
@@ -396,6 +364,6 @@ impl ArenaTask {
         } else {
             tasks.publish_graph(plan, &selected).map_err(fail)?
         };
-        Ok(Ok(result))
+        Ok(result)
     }
 }

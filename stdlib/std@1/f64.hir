@@ -112,7 +112,7 @@ pub fn parse_bytes(data: Bytes) -> Result[f64, scalar.ParseError] uses {} {
   if data == b"-inf" {
     return Ok(core@1/f64.from_bits(18442240474082181120u64))
   }
-  match internal.float_decimal.parse_bytes(data, 52, 1023) {
+  match internal.float_decimal.parse_bytes(data, internal.float_decimal.F64_TEXT) {
     Error(error) => Error(error),
     Ok(bits) => {
       let word: u64 = core@1/int.narrow(bits)

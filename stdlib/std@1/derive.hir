@@ -1545,7 +1545,11 @@ pub fn read_json_f64(mut cursor: json.Reader) -> Result[f64, String] uses {} {
   if next != 45 && !ascii.is_digit(next) {
     return Error("expected a JSON number")
   }
-  let bits = match internal.float_decimal.parse_json(cursor.data, mut cursor.pos, 52, 1023) {
+  let bits = match internal.float_decimal.parse_json(
+    cursor.data,
+    mut cursor.pos,
+    internal.float_decimal.F64_JSON
+  ) {
     Ok(bits) => bits,
     Error(Invalid) => return Error("not JSON"),
     Error(_) => return Error("expected a JSON number fitting f64"),
@@ -1577,7 +1581,11 @@ pub fn read_json_f32(mut cursor: json.Reader) -> Result[f32, String] uses {} {
   if next != 45 && !ascii.is_digit(next) {
     return Error("expected a JSON number")
   }
-  let bits = match internal.float_decimal.parse_json(cursor.data, mut cursor.pos, 23, 127) {
+  let bits = match internal.float_decimal.parse_json(
+    cursor.data,
+    mut cursor.pos,
+    internal.float_decimal.F32_JSON
+  ) {
     Ok(bits) => bits,
     Error(Invalid) => return Error("not JSON"),
     Error(_) => return Error("expected a JSON number fitting f32"),
@@ -1846,7 +1854,10 @@ fn reader_members(
   for name in names {
     let raw = core@1/string.as_bytes(name)
     if core@1/bytes.len(raw) == 1 {
-      put(mut w, f" if end - start == 1 && cursor.data[start] == {raw[0]}u8 {{ {i}u64 }} else ")
+      put(
+        mut w,
+        f" if end - start == 1 && cursor.data[start] == {raw[0]}u8 {{ {i}u64 }} else "
+      )
     } else {
       let digits: Bytes = b"0123456789abcdef"
       let mut byte_spelling: List[u8] = [98, 34]
@@ -1857,7 +1868,10 @@ fn reader_members(
       }
       core@1/list.push(mut byte_spelling, 34)
       let spelling = text.finish_valid(take byte_spelling)
-      put(mut w, f" if core@1/bytes.slice(cursor.data, start, end) == {spelling} {{ {i}u64 }} else ")
+      put(
+        mut w,
+        f" if core@1/bytes.slice(cursor.data, start, end) == {spelling} {{ {i}u64 }} else "
+      )
     }
     i += 1
   }

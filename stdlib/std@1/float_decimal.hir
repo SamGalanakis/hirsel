@@ -3303,9 +3303,24 @@ pub fn special[n: size](text: String, mut buffer: Inline[u8, n]) -> Result[
 // Validates the whole text, then decides with Eisel-Lemire and, when that is
 // undecidable, with Rust's exact DecimalSeq path over the first 768 significant
 // digits and a truncated flag for the rest. Long input is still validated.
+// The format witness carries static precision and grammar through ordinary
+// type inference; its single case has no payload or allocation.
+pub type DecimalFormat[fraction: size, bias: size, json_mode: size] = DecimalFormat()
+
+pub const F64_TEXT: DecimalFormat[52, 1023, 0] = DecimalFormat()
+
+pub const F32_TEXT: DecimalFormat[23, 127, 0] = DecimalFormat()
+
+pub const F64_JSON: DecimalFormat[52, 1023, 1] = DecimalFormat()
+
+pub const F32_JSON: DecimalFormat[23, 127, 1] = DecimalFormat()
+
 @noalloc
-pub fn parse(text: String, fraction: u64, bias: i32) -> Result[u64, scalar.ParseError] uses {} {
-  parse_bytes(core@1/string.as_bytes(text), fraction, bias)
+pub fn parse[fraction: size, bias: size](
+  text: String,
+  format: DecimalFormat[fraction, bias, 0]
+) -> Result[u64, scalar.ParseError] uses {} {
+  parse_bytes(core@1/string.as_bytes(text), format)
 }
 
 // Rust core f6c1107f dec2flt/decimal.rs:39-85 and mod.rs:108-179 (MIT):
@@ -3313,8 +3328,45 @@ pub fn parse(text: String, fraction: u64, bias: i32) -> Result[u64, scalar.Parse
 // followed by ONE correctly rounded operation at the destination precision.
 // Hirsel's scalar operations already require binary32/binary64 rounding; no
 // x87 precision mutation or disguised-fast-path extension is needed here.
-const CLINGER64: Inline[f64, 23] = [1e0f64, 1e1f64, 1e2f64, 1e3f64, 1e4f64, 1e5f64, 1e6f64, 1e7f64, 1e8f64, 1e9f64, 1e10f64, 1e11f64, 1e12f64, 1e13f64, 1e14f64, 1e15f64, 1e16f64, 1e17f64, 1e18f64, 1e19f64, 1e20f64, 1e21f64, 1e22f64]
-const CLINGER32: Inline[f32, 11] = [1e0f32, 1e1f32, 1e2f32, 1e3f32, 1e4f32, 1e5f32, 1e6f32, 1e7f32, 1e8f32, 1e9f32, 1e10f32]
+const CLINGER64: Inline[f64, 23] = [
+  1e0f64,
+  1e1f64,
+  1e2f64,
+  1e3f64,
+  1e4f64,
+  1e5f64,
+  1e6f64,
+  1e7f64,
+  1e8f64,
+  1e9f64,
+  1e10f64,
+  1e11f64,
+  1e12f64,
+  1e13f64,
+  1e14f64,
+  1e15f64,
+  1e16f64,
+  1e17f64,
+  1e18f64,
+  1e19f64,
+  1e20f64,
+  1e21f64,
+  1e22f64
+]
+
+const CLINGER32: Inline[f32, 11] = [
+  1e0f32,
+  1e1f32,
+  1e2f32,
+  1e3f32,
+  1e4f32,
+  1e5f32,
+  1e6f32,
+  1e7f32,
+  1e8f32,
+  1e9f32,
+  1e10f32
+]
 
 // Rust core ea137335 dec2flt/parse.rs:15-30 and common.rs:60-66 (MIT).
 // Checked byte loads assemble the little-endian word; validation precedes the
@@ -3341,7 +3393,10 @@ fn eight_digits(bytes: Bytes, at: u64) -> Option[u64] uses {} {
   }
   let pairs = digits * 10 + (digits >> 8)
   let first = core@1/int.wrapping_mul(pairs & 0x000000ff000000ff, 0x000f424000000064)
-  let second = core@1/int.wrapping_mul((pairs >> 16) & 0x000000ff000000ff, 0x0000271000000001)
+  let second = core@1/int.wrapping_mul(
+    pairs >> 16 & 0x000000ff000000ff,
+    0x0000271000000001
+  )
   let combined = core@1/int.wrapping_add(first, second)
   let value: u32 = core@1/int.truncate(combined >> 32)
   Some(core@1/int.widen(value))
@@ -3349,33 +3404,37 @@ fn eight_digits(bytes: Bytes, at: u64) -> Option[u64] uses {} {
 
 // The same parser over a borrowed interval, for typed JSON numeric tokens.
 @noalloc
-pub fn parse_bytes(bytes: Bytes, fraction: u64, bias: i32) -> Result[
-  u64,
-  scalar.ParseError
-] uses {} {
+pub fn parse_bytes[fraction: size, bias: size](
+  bytes: Bytes,
+  format: DecimalFormat[fraction, bias, 0]
+) -> Result[u64, scalar.ParseError] uses {} {
   let mut pos: u64 = 0
-  parse_decimal(bytes, mut pos, fraction, bias, false)
+  parse_decimal(bytes, mut pos, format)
 }
 
 // serde_json 1.0.154 src/de.rs:462-623 accumulates the significand while
 // consuming grammar. Keep Hirsel's exact rounding and long-mantissa fallback;
 // the JSON caller needs neither a second lexical scan nor a token subview.
 @noalloc
-pub fn parse_json(bytes: Bytes, mut pos: u64, fraction: u64, bias: i32) -> Result[
-  u64,
-  scalar.ParseError
-] uses {} {
-  parse_decimal(bytes, mut pos, fraction, bias, true)
+pub fn parse_json[fraction: size, bias: size](
+  bytes: Bytes,
+  mut pos: u64,
+  format: DecimalFormat[fraction, bias, 1]
+) -> Result[u64, scalar.ParseError] uses {} {
+  parse_decimal(bytes, mut pos, format)
 }
 
 @noalloc
-fn parse_decimal(
+// Rust core dec2flt's RawFloat specializes the width and its constants. Size
+// arguments give source numeric readers the same fixed-width specialization;
+// the grammar mode is also fixed by the whole-input and JSON entry points.
+fn parse_decimal[fraction: size, exponent_bias: size, json_mode: size](
   bytes: Bytes,
   mut pos: u64,
-  fraction: u64,
-  bias: i32,
-  json: bool
+  format: DecimalFormat[fraction, exponent_bias, json_mode]
 ) -> Result[u64, scalar.ParseError] uses {} {
+  let bias: i32 = core@1/int.narrow(exponent_bias)
+  let json = json_mode == 1
   let length = core@1/bytes.len(bytes)
   if pos >= length {
     return Error(Invalid)
@@ -3440,7 +3499,9 @@ fn parse_decimal(
       }
     }
     let fractional_significant_start = at
-    while length - at >= 8 && leading < 100000000000 {
+    // In a JSON source extent, more document bytes follow the number. Reject
+    // a separator at either edge before calling the full eight-digit decoder.
+    while length - at >= 8 && leading < 100000000000 && bytes[at] >= 48 && bytes[at] <= 57 && bytes[at + 7] >= 48 && bytes[at + 7] <= 57 {
       let Some(digits) = eight_digits(bytes, at) else {
         break
       }

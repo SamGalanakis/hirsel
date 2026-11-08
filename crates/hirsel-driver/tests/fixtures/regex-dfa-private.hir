@@ -345,6 +345,19 @@ fn dfa_count_laws() -> bool uses {} {
 // A hand-derived table checks borrowed byte coordinates, repeated match tags,
 // EOF and an unknown cell through the real primitive in all three engines.
 fn dfa_cached_views() -> bool uses {} {
+  // With no prefilter, warmed empty frontiers must stay in the cached scan.
+  // z+ cannot match any byte of this ASCII subject. Previously its start
+  // tags returned cursor zero even after every transition was cached.
+  let Ok(re) = compile("z+", 100) else { return false }
+  if re.prefilter.enabled { return false }
+  let mut work = 1000000u64
+  let Ok(subject) = make_subject("xxxxxxxx", mut work) else { return false }
+  let mut cache = dfa_cache(re, true, 65024)
+  if dfa_search(re, subject, 0, b"xxxxxxxx", mut cache) != DfaMiss() { return false }
+  let state = dfa_start(vm_program(re), false, 0, mut cache)
+  let (_, cursor, matched) = core@1/bytes.dfa_run(
+    b"xxxxxxxx", cache.data, cache.classes, state, 0)
+  if cursor != 8 || matched != 18446744073709551615 { return false }
   let mut table: unique List[u64] = []
   for i in 0u64..140 { core@1/list.push(mut table, 0u64) }
   for i in 0u64..128 { table[i] = if i == 97 { 0u64 } else if i == 98 { 1u64 } else { 2u64 } }

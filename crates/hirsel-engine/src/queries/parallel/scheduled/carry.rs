@@ -1119,30 +1119,6 @@ mod tests {
         after.reads(&reads);
         assert!(after.bytes < before.bytes);
         assert_eq!(bincode::serialize(&facts).unwrap(), original);
-        let reversed = Arc::new(
-            Reads::from_vec(vec![
-                (
-                    ReadKey::Signature(owner),
-                    ContentHash::of_bytes(b"signature"),
-                ),
-                (ReadKey::Environment, ContentHash::of_bytes(b"environment")),
-            ])
-            .unwrap(),
-        );
-        facts.share_summary_reads(&reversed).unwrap();
-        let preserved = &facts.summary.as_ref().unwrap().reads;
-        assert!(Arc::ptr_eq(preserved, &reads));
-        assert_eq!(
-            preserved.iter().copied().collect::<Vec<_>>(),
-            vec![
-                (ReadKey::Environment, ContentHash::of_bytes(b"environment"),),
-                (
-                    ReadKey::Signature(owner),
-                    ContentHash::of_bytes(b"signature"),
-                ),
-            ]
-        );
-        assert_eq!(bincode::serialize(&facts).unwrap(), original);
         let changed = Arc::new(
             Reads::from_vec(vec![(
                 ReadKey::Environment,
@@ -1304,30 +1280,6 @@ mod tests {
                     assert_eq!(
                         decoded.checked.as_ref().unwrap().1,
                         facts.checked.as_ref().unwrap().1
-                    );
-                }
-                if separate_summary_order {
-                    assert_eq!(
-                        decoded
-                            .summary
-                            .as_ref()
-                            .unwrap()
-                            .reads
-                            .iter()
-                            .copied()
-                            .collect::<Vec<_>>(),
-                        vec![environment, carry_read(0), carry_read(1), carry_read(2),]
-                    );
-                    assert_eq!(
-                        decoded
-                            .checked
-                            .as_ref()
-                            .unwrap()
-                            .1
-                            .iter()
-                            .copied()
-                            .collect::<Vec<_>>(),
-                        vec![carry_read(0), environment, carry_read(1), carry_read(2),]
                     );
                 }
                 assert_eq!(

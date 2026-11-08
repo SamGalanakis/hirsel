@@ -1700,11 +1700,26 @@ impl Checker<'_, '_> {
         let mut pending =
             BTreeSet::from([(rank[self.body.entry.0 as usize], self.body.entry.0, 0)]);
         self.returned.clear();
+        // A reporting solve reports from every transfer and keeps, per entry,
+        // only its last one. Any later change to an entry's input schedules it
+        // again, so that last transfer read the converged input: the reports
+        // equal a separate pass over the converged entries in arena order.
+        let mut reports: Vec<[Option<Vec<Violation>>; 2]> = if report {
+            vec![[None, None]; self.body.blocks.len()]
+        } else {
+            Vec::new()
+        };
         while let Some((_, block, class)) = pending.pop_first() {
             let block = BlockId(block);
             work::count(Counter::ValidateFlowSteps);
             let mut state = incoming[block.0 as usize][class].clone().unwrap();
-            self.transfer(&model, &mut state, block, false);
+            if report {
+                self.flow_reports = Some(Vec::new());
+            }
+            self.transfer(&model, &mut state, block, report);
+            if report {
+                reports[block.0 as usize][class] = self.flow_reports.take();
+            }
             let targets = &graph[block.0 as usize];
             let tagged = matches!(
                 self.body.blocks[block.0 as usize].terminator,
@@ -1748,11 +1763,9 @@ impl Checker<'_, '_> {
         // the converged value. Captures accumulate the same joins during solve.
         // Quiet queries need no duplicate replay. Reporting still visits each
         // converged entry in arena order, like rustc's ResultsVisitor.
-        if report {
-            for (b, classes) in incoming.into_iter().enumerate() {
-                for mut state in classes.into_iter().flatten() {
-                    self.transfer(&model, &mut state, BlockId(b as u32), true);
-                }
+        for violation in reports.into_iter().flatten().flatten().flatten() {
+            if !self.errors.contains(&violation) {
+                self.errors.push(violation);
             }
         }
         if let Some(started) = started {
@@ -2824,8 +2837,20 @@ impl Checker<'_, '_> {
         }
     }
     fn flow_error(&mut self, report: bool, kind: ViolationKind) {
-        if report {
-            self.error(kind);
+        if !report {
+            return;
+        }
+        let Some(reports) = &mut self.flow_reports else {
+            return self.error(kind);
+        };
+        let v = Violation {
+            body: Some(self.site.body),
+            block: self.site.block,
+            instruction: self.site.instruction,
+            kind,
+        };
+        if !reports.contains(&v) {
+            reports.push(v);
         }
     }
     /// The explicit access chain grants only the loan and its ancestors.
@@ -7177,6 +7202,7 @@ mod nominal_limit_tests {
                 static_data: None,
                 proof_errors: std::cell::RefCell::new(Vec::new()),
                 unique_parts_cache: Default::default(),
+                flow_reports: None,
             };
             let model = Model::new(&mut checker);
             let lifetime_global = |ty: TypeId| {
@@ -7295,6 +7321,7 @@ mod header_name_tests {
                 static_data: None,
                 proof_errors: std::cell::RefCell::new(Vec::new()),
                 unique_parts_cache: Default::default(),
+                flow_reports: None,
             };
             let model = Model::new(&mut checker);
             let state = model.initial(
@@ -7394,6 +7421,7 @@ mod header_name_tests {
                 static_data: None,
                 proof_errors: std::cell::RefCell::new(Vec::new()),
                 unique_parts_cache: Default::default(),
+                flow_reports: None,
             };
             let model = Model::new(&mut checker);
             let state = model.initial(

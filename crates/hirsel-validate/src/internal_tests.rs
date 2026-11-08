@@ -47,6 +47,7 @@ fn weakening_a_captured_generic_uses_its_outer_sendability_bound() {
         static_data: None,
         proof_errors: std::cell::RefCell::new(Vec::new()),
         unique_parts_cache: Default::default(),
+        flow_reports: None,
     };
     let types = interner();
     let weakened = checker.weakened_type(types, body.places[1].ty, &checker.generic_declarations());
@@ -106,6 +107,7 @@ fn substituted_call_rows_normalize_with_the_actual_declaring_binder() {
         static_data: None,
         proof_errors: std::cell::RefCell::new(Vec::new()),
         unique_parts_cache: Default::default(),
+        flow_reports: None,
     };
     let types = interner();
     let declaration = interner();
@@ -204,6 +206,7 @@ fn sorted_map_equality_and_key_validation_accounts_for_the_order_dictionary() {
             static_data: None,
             proof_errors: std::cell::RefCell::new(Vec::new()),
             unique_parts_cache: Default::default(),
+            flow_reports: None,
         };
         assert_eq!(
             checker.bound(
@@ -354,6 +357,7 @@ fn capability_authority_is_nominal_even_with_an_incomplete_snapshot() {
             static_data: None,
             proof_errors: std::cell::RefCell::new(Vec::new()),
             unique_parts_cache: Default::default(),
+            flow_reports: None,
         };
         let expected =
             AuthoritySummary::Known(vec![AuthorityTerm::Capability(path("Gate"))].into());
@@ -447,6 +451,7 @@ fn nonregular_nominal_bound_reports_the_declared_tooling_limit() {
         static_data: None,
         proof_errors: std::cell::RefCell::new(Vec::new()),
         unique_parts_cache: Default::default(),
+        flow_reports: None,
     };
     assert!(!checker.bound(interner(), root, Bound::Copyable, &declarations[0]));
     let report = Validation {
@@ -541,6 +546,7 @@ fn finite_layout_cleanup_and_packed_carriers_have_no_nominal_depth_cutoff() {
                 static_data: None,
                 proof_errors: std::cell::RefCell::new(Vec::new()),
                 unique_parts_cache: Default::default(),
+                flow_reports: None,
             };
             let store = interner();
             assert!(checker.bound(store, root, Bound::NoallocDrop, &declarations[0]));
@@ -600,6 +606,7 @@ fn repeated_flat_copies_keep_canonical_rows_without_reinterning() {
         static_data: None,
         proof_errors: std::cell::RefCell::new(Vec::new()),
         unique_parts_cache: Default::default(),
+        flow_reports: None,
     };
     let operand = copy(0);
     let original = checker.body.places[0].ty;
@@ -666,6 +673,7 @@ fn row_transformations_respect_a_foreign_generic_environment() {
         static_data: None,
         proof_errors: std::cell::RefCell::new(Vec::new()),
         unique_parts_cache: Default::default(),
+        flow_reports: None,
     };
     let parameter = types.intern(ty(TypeKind::Parameter(TypeParameterRef::body(
         checker.body.parameter_scope,

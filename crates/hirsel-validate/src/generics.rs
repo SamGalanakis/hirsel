@@ -312,6 +312,7 @@ impl Checker<'_, '_> {
                 static_data: None,
                 proof_errors: std::cell::RefCell::new(Vec::new()),
                 unique_parts_cache: Default::default(),
+                flow_reports: None,
             };
             checker.flow(&[], false);
             self.proof_errors

@@ -38,6 +38,7 @@ fn with_model(f: &Fixture, run: impl FnOnce(&mut Checker<'_, '_>, &Model, State)
         static_data: None,
         proof_errors: std::cell::RefCell::new(Vec::new()),
         unique_parts_cache: Default::default(),
+        flow_reports: None,
     };
     checker.types();
     assert!(checker.errors.is_empty(), "{:?}", checker.errors);

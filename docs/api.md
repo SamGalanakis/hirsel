@@ -4,7 +4,7 @@ Generated from manifest-selected public declarations. Do not edit by hand.
 Signatures retain modes, brands, attributes, relations and `uses` clauses.
 Opaque representations stay hidden; bodies are not checked or evaluated.
 
-2294 exported definitions; 1011 variants.
+2296 exported definitions; 1011 variants.
 
 ## Types and roots
 
@@ -3501,6 +3501,10 @@ References: [`core@1/Bytes`](#def-core_401_2fBytes), [`core@1/u64`](#def-core_40
 
 - `@noalloc fn bytes.find_any(src: Bytes, needles: Bytes, start: u64) -> u64`
 
+<a id="def-core_401_2fbytes_2ffind_5fpair"></a>
+
+- `@noalloc fn bytes.find_pair(src: Bytes, firsts: Bytes, seconds: Bytes, start: u64) -> u64`
+
 <a id="def-std_401_2fbytes_2ffrom_5finline"></a>
 
 - `pub fn bytes.from_inline[n: size](xs: Inline[u8, n]) -> unique Bytes uses {}`
@@ -3510,6 +3514,8 @@ References: [`core@1/Bytes`](#def-core_401_2fBytes), [`core@1/Inline`](#def-core
 <a id="def-core_401_2fbytes_2ffrom_5flist"></a>
 
 - `@preserves_unique(src) fn bytes.from_list(take src: List[u8]) -> Bytes`
+
+Recipes: [Owned valid UTF-8](std-api-recipes.md#recipe-utf8-valid)
 
 <a id="def-core_401_2fbytes_2finteger"></a>
 
@@ -9608,6 +9614,8 @@ Variant of json.Value.
 
 References: [`core@1/String`](#def-core_401_2fString)
 
+Recipes: [JSON text escaping](std-api-recipes.md#recipe-json-text)
+
 <a id="def-std_401_2fjson_2farray_5fnext"></a>
 
 - `pub fn json.array_next(mut cursor: Reader, mut first: bool) -> Result[bool, JsonError] uses {}`
@@ -9752,6 +9760,8 @@ References: [`core@1/Result`](#def-core_401_2fResult), [`std@1/json/JsonError`](
 
 References: [`core@1/Result`](#def-core_401_2fResult), [`core@1/String`](#def-core_401_2fString), [`std@1/json/JsonError`](#def-std_401_2fjson_2fJsonError), [`std@1/json/Value`](#def-std_401_2fjson_2fValue)
 
+Recipes: [JSON text escaping](std-api-recipes.md#recipe-json-text)
+
 <a id="def-std_401_2fjson_2fstringify_5finto"></a>
 
 - `@preserves_unique(out) pub fn json.stringify_into(value: Value, mut out: List[u8]) -> Result[(), JsonError] uses {}`
@@ -9784,6 +9794,8 @@ References: [`core@1/Bytes`](#def-core_401_2fBytes), [`core@1/bool`](#def-core_4
 
 References: [`core@1/List`](#def-core_401_2fList), [`core@1/String`](#def-core_401_2fString), [`core@1/u8`](#def-core_401_2fu8)
 
+Recipes: [JSON text escaping](std-api-recipes.md#recipe-json-text)
+
 
 ## json_access
 
@@ -9792,6 +9804,8 @@ References: [`core@1/List`](#def-core_401_2fList), [`core@1/String`](#def-core_4
 - `pub fn json_access.as_array(value: json.Value) -> Option[List[json.Value]] in value uses {}`
 
 References: [`core@1/List`](#def-core_401_2fList), [`core@1/Option`](#def-core_401_2fOption), [`std@1/json/Value`](#def-std_401_2fjson_2fValue)
+
+Recipes: [Array element and length](std-api-recipes.md#recipe-array)
 
 <a id="def-std_401_2fjson_5faccess_2fas_5fbool"></a>
 
@@ -9823,6 +9837,8 @@ Select a zero-based array element; wrong variants and out-of-range return None()
 
 References: [`core@1/Option`](#def-core_401_2fOption), [`core@1/u64`](#def-core_401_2fu64), [`std@1/json/Value`](#def-std_401_2fjson_2fValue)
 
+Recipes: [Array element and length](std-api-recipes.md#recipe-array)
+
 <a id="def-std_401_2fjson_5faccess_2fis_5fnull"></a>
 
 - `pub fn json_access.is_null(value: json.Value) -> bool uses {}`
@@ -9836,6 +9852,8 @@ References: [`core@1/bool`](#def-core_401_2fbool), [`std@1/json/Value`](#def-std
 Select an object member; present null is Some(Null()), absence is None().
 
 References: [`core@1/Option`](#def-core_401_2fOption), [`core@1/String`](#def-core_401_2fString), [`std@1/json/Value`](#def-std_401_2fjson_2fValue)
+
+Recipes: [Object member lookup](std-api-recipes.md#recipe-object)
 
 <a id="def-std_401_2fjson_5faccess_2fnumber_5ftext"></a>
 
@@ -10721,6 +10739,8 @@ References: [`core@1/List`](#def-core_401_2fList)
 - `@noalloc fn list.len[T](xs: List[T]) -> u64`
 
 Number of elements in `xs: List[T]`.
+
+Recipes: [Array element and length](std-api-recipes.md#recipe-array)
 
 <a id="def-std_401_2flist_2fmap"></a>
 
@@ -13234,6 +13254,12 @@ References: [`core@1/Result`](#def-core_401_2fResult), [`core@1/String`](#def-co
 - `pub fn regex.compile_flags(pattern: String, flags: Flags, max_instructions: u64) -> Result[ Regex, CompileError ] uses {}`
 
 References: [`core@1/Result`](#def-core_401_2fResult), [`core@1/String`](#def-core_401_2fString), [`core@1/u64`](#def-core_401_2fu64), [`std@1/regex/CompileError`](#def-std_401_2fregex_2fCompileError), [`std@1/regex/Flags`](#def-std_401_2fregex_2fFlags), [`std@1/regex/Regex`](#def-std_401_2fregex_2fRegex)
+
+<a id="def-std_401_2fregex_2fcount"></a>
+
+- `pub fn regex.count(re: Regex, text: String, work_limit: u64) -> Result[u64, MatchError] uses {}`
+
+References: [`core@1/Result`](#def-core_401_2fResult), [`core@1/String`](#def-core_401_2fString), [`core@1/u64`](#def-core_401_2fu64), [`std@1/regex/MatchError`](#def-std_401_2fregex_2fMatchError), [`std@1/regex/Regex`](#def-std_401_2fregex_2fRegex)
 
 <a id="def-std_401_2fregex_2fdefault_5fflags"></a>
 
@@ -16407,6 +16433,8 @@ References: [`core@1/Option`](#def-core_401_2fOption), [`core@1/StrPos`](#def-co
 
 - `@preserves_unique(bytes) fn string.from_bytes(take bytes: Bytes) -> Result[String, Bytes]`
 
+Recipes: [Owned valid UTF-8](std-api-recipes.md#recipe-utf8-valid), [Owned invalid UTF-8 preserves bytes](std-api-recipes.md#recipe-utf8-invalid)
+
 <a id="def-std_401_2fstring_2fis_5fascii"></a>
 
 - `@noalloc pub fn string.is_ascii(s: String) -> bool uses {}`
@@ -17853,6 +17881,8 @@ References: [`core@1/Result`](#def-core_401_2fResult), [`core@1/String`](#def-co
 
 References: [`core@1/Option`](#def-core_401_2fOption), [`core@1/i32`](#def-core_401_2fi32), [`std@1/time/DateTime`](#def-std_401_2ftime_2fDateTime)
 
+Recipes: [Format an explicitly supplied civil value](std-api-recipes.md#recipe-time)
+
 <a id="def-std_401_2ftime_2fCalendarError"></a>
 
 - `@serializable pub type time.CalendarError = OutOfRange | NoSuchDay`
@@ -18130,6 +18160,8 @@ References: [`core@1/ClockError`](#def-core_401_2fClockError), [`core@1/Instant`
 - `pub fn time.format(value: BrokenDownTime, pattern: String) -> Result[ unique String, FormatError ] uses {}`
 
 References: [`core@1/Result`](#def-core_401_2fResult), [`core@1/String`](#def-core_401_2fString), [`std@1/time/BrokenDownTime`](#def-std_401_2ftime_2fBrokenDownTime), [`std@1/time/FormatError`](#def-std_401_2ftime_2fFormatError)
+
+Recipes: [Format an explicitly supplied civil value](std-api-recipes.md#recipe-time)
 
 <a id="def-std_401_2ftime_2fparse"></a>
 

@@ -3315,14 +3315,6 @@ pub const F64_JSON: DecimalFormat[52, 1023, 1] = DecimalFormat()
 
 pub const F32_JSON: DecimalFormat[23, 127, 1] = DecimalFormat()
 
-@noalloc
-pub fn parse[fraction: size, bias: size](
-  text: String,
-  format: DecimalFormat[fraction, bias, 0]
-) -> Result[u64, scalar.ParseError] uses {} {
-  parse_bytes(core@1/string.as_bytes(text), format)
-}
-
 // Rust core f6c1107f dec2flt/decimal.rs:39-85 and mod.rs:108-179 (MIT):
 // Clinger's path uses an exactly representable mantissa and power of ten,
 // followed by ONE correctly rounded operation at the destination precision.
@@ -3402,33 +3394,11 @@ fn eight_digits(bytes: Bytes, at: u64) -> Option[u64] uses {} {
   Some(core@1/int.widen(value))
 }
 
-// The same parser over a borrowed interval, for typed JSON numeric tokens.
-@noalloc
-pub fn parse_bytes[fraction: size, bias: size](
-  bytes: Bytes,
-  format: DecimalFormat[fraction, bias, 0]
-) -> Result[u64, scalar.ParseError] uses {} {
-  let mut pos: u64 = 0
-  parse_decimal(bytes, mut pos, format)
-}
-
-// serde_json 1.0.154 src/de.rs:462-623 accumulates the significand while
-// consuming grammar. Keep Hirsel's exact rounding and long-mantissa fallback;
-// the JSON caller needs neither a second lexical scan nor a token subview.
-@noalloc
-pub fn parse_json[fraction: size, bias: size](
-  bytes: Bytes,
-  mut pos: u64,
-  format: DecimalFormat[fraction, bias, 1]
-) -> Result[u64, scalar.ParseError] uses {} {
-  parse_decimal(bytes, mut pos, format)
-}
-
 @noalloc
 // Rust core dec2flt's RawFloat specializes the width and its constants. Size
 // arguments give source numeric readers the same fixed-width specialization;
 // the grammar mode is also fixed by the whole-input and JSON entry points.
-fn parse_decimal[fraction: size, exponent_bias: size, json_mode: size](
+pub fn parse_decimal[fraction: size, exponent_bias: size, json_mode: size](
   bytes: Bytes,
   mut pos: u64,
   format: DecimalFormat[fraction, exponent_bias, json_mode]

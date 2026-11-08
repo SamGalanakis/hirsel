@@ -1534,7 +1534,12 @@ pub fn write_json_f64(value: f64, mut out: List[u8]) -> () uses {} {
 // serde_json src/de.rs:462-623 consumes grammar and significand together.
 // Keep Hirsel's exact rounding, error strings and nonfinite string policy.
 pub fn read_json_f64(mut cursor: json.Reader) -> Result[f64, String] uses {} {
-  let next = json.peek(mut cursor)
+  // serde_json de.rs:255 caches the current non-whitespace byte.
+  let next = if cursor.pos < core@1/bytes.len(cursor.data) && cursor.data[cursor.pos] > 32 {
+    cursor.data[cursor.pos]
+  } else {
+    json.peek(mut cursor)
+  }
   if next == 34 {
     let spelling = read_json(json.read_owned_text(mut cursor))?
     if !non_finite(spelling) {
@@ -1542,10 +1547,10 @@ pub fn read_json_f64(mut cursor: json.Reader) -> Result[f64, String] uses {} {
     }
     return parsed(f64.parse(spelling), "f64")
   }
-  if next != 45 && !ascii.is_digit(next) {
+  if next != 45 && (next < 48 || next > 57) {
     return Error("expected a JSON number")
   }
-  let bits = match internal.float_decimal.parse_json(
+  let bits = match internal.float_decimal.parse_decimal(
     cursor.data,
     mut cursor.pos,
     internal.float_decimal.F64_JSON
@@ -1570,7 +1575,12 @@ pub fn write_json_f32(value: f32, mut out: List[u8]) -> () uses {} {
 // serde_json src/de.rs:462-623 consumes grammar and significand together.
 // Keep Hirsel's exact rounding, error strings and nonfinite string policy.
 pub fn read_json_f32(mut cursor: json.Reader) -> Result[f32, String] uses {} {
-  let next = json.peek(mut cursor)
+  // serde_json de.rs:255 caches the current non-whitespace byte.
+  let next = if cursor.pos < core@1/bytes.len(cursor.data) && cursor.data[cursor.pos] > 32 {
+    cursor.data[cursor.pos]
+  } else {
+    json.peek(mut cursor)
+  }
   if next == 34 {
     let spelling = read_json(json.read_owned_text(mut cursor))?
     if !non_finite(spelling) {
@@ -1578,10 +1588,10 @@ pub fn read_json_f32(mut cursor: json.Reader) -> Result[f32, String] uses {} {
     }
     return parsed(f32.parse(spelling), "f32")
   }
-  if next != 45 && !ascii.is_digit(next) {
+  if next != 45 && (next < 48 || next > 57) {
     return Error("expected a JSON number")
   }
-  let bits = match internal.float_decimal.parse_json(
+  let bits = match internal.float_decimal.parse_decimal(
     cursor.data,
     mut cursor.pos,
     internal.float_decimal.F32_JSON

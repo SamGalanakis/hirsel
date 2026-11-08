@@ -70,17 +70,11 @@ pub struct PreparedNativeDefinition {
     anchors: crate::NativeRecordContext,
     archive: Mutex<Option<Reference>>,
     store: Arc<dyn ResultStore>,
-    remaining: Arc<Mutex<u64>>,
     decoded_bytes: u64,
     archive_bytes: u64,
-    charge: u64,
+    charge: hirsel_engine_admission::MemoryReservation,
     _ownership: Arc<SourceOwnership>,
     _capture: Arc<FrontLowerQueries>,
-}
-impl Drop for PreparedNativeDefinition {
-    fn drop(&mut self) {
-        *self.remaining.lock().unwrap_or_else(|e| e.into_inner()) += self.charge;
-    }
 }
 impl PreparedNativeDefinition {
     /// The prepared decoded backing, excluding independently leased archives
@@ -184,13 +178,12 @@ impl LiveProductValue for PreparedNativeDefinition {
             return ProductArchive::open_retained(
                 &*self.store,
                 reference,
-                self._ownership._allowance.clone(),
-                self.remaining.clone(),
+                self._ownership._allowance.budget(),
             );
         }
         drop(cached);
         ProductArchive::materialize(OUTPUT, admission, |grant| {
-            if grant.bytes() < self.charge {
+            if grant.bytes() < self.charge.bytes() {
                 return Err(std::io::ErrorKind::OutOfMemory.into());
             }
             let bytes = self
@@ -223,7 +216,6 @@ pub struct FrontNativeDefinitionQueries {
     store: Arc<dyn ResultStore>,
     completed: Mutex<BTreeMap<ContentHash, (ProductRef, Arc<Data>)>>,
     failures: Mutex<BTreeMap<ContentHash, (Reference, QueryError)>>,
-    remaining: Arc<Mutex<u64>>,
     weight: MemoryWeight,
     errors: RuntimeErrors,
     _ownership: Arc<SourceOwnership>,
@@ -237,11 +229,6 @@ impl FrontNativeDefinitionQueries {
             Some(query),
             detail,
         )
-    }
-    /// Fixed inputs and currently held output or archive-reader charges.
-    pub fn retained_bytes(&self) -> u64 {
-        self._ownership._allowance.bytes()
-            - *self.remaining.lock().unwrap_or_else(|e| e.into_inner())
     }
     fn input(&self, path: &DefPath) -> Result<DemandedInput<'_>, QueryError> {
         self.input_in(path, self.front.namespace())
@@ -389,12 +376,11 @@ impl FrontNativeDefinitionQueries {
             return ProductArchive::open_retained(
                 &*self.store,
                 reference,
-                self._ownership._allowance.clone(),
-                self.remaining.clone(),
+                self._ownership._allowance.budget(),
             )
             .map_err(|_| native_selection_error("native export exceeds retained admission"));
         }
-        if live.charge > scratch {
+        if live.charge.bytes() > scratch {
             return Err(native_selection_error(
                 "native export exceeds scratch admission",
             ));
@@ -417,8 +403,7 @@ impl FrontNativeDefinitionQueries {
         let archive = ProductArchive::from_retained_bytes(
             record,
             bytes.into(),
-            self._ownership._allowance.clone(),
-            self.remaining.clone(),
+            self._ownership._allowance.budget(),
         )
         .map_err(|_| native_selection_error("native export exceeds retained admission"))?;
         if self.store.persistence().retains() {
@@ -624,7 +609,6 @@ impl Task {
             if let Some(original) = ordinary.as_mut() {
                 let admission = crate::native_lower::OriginalAdmission {
                     _allowance: owner._ownership._allowance.clone(),
-                    remaining: owner.remaining.clone(),
                 };
                 let Some(body) = original.body.clone().admit(&admission) else {
                     return Poll::Ready(Err(owner.errors.resource));
@@ -788,10 +772,14 @@ impl Task {
                 anchors: (*current.namespace().anchors).clone(),
                 archive: Mutex::new(None),
                 store: owner.store.clone(),
-                remaining: owner.remaining.clone(),
                 decoded_bytes: 0,
                 archive_bytes: 0,
-                charge: 0,
+                charge: owner
+                    ._ownership
+                    ._allowance
+                    .budget()
+                    .reserve(0)
+                    .map_err(|_| owner.errors.resource)?,
                 _ownership: owner._ownership.clone(),
                 _capture: current.clone(),
             };
@@ -814,14 +802,13 @@ impl Task {
                 *prepared.archive.lock().unwrap_or_else(|e| e.into_inner()) = Some(record);
             }
             let required = prepared.publication_bytes().ok_or(owner.errors.resource)?;
-            {
-                let mut remaining = owner.remaining.lock().unwrap_or_else(|e| e.into_inner());
-                if *remaining < required {
-                    return Err(owner.errors.resource);
-                }
-                *remaining -= prepared.decoded_bytes;
-                prepared.charge = prepared.decoded_bytes;
+            let request = owner._ownership._allowance.budget();
+            if request.free() < required {
+                return Err(owner.errors.resource);
             }
+            prepared.charge = request
+                .reserve(prepared.decoded_bytes)
+                .map_err(|_| owner.errors.resource)?;
             let live = Arc::new(prepared);
             if let Some(record) = *live.archive.lock().unwrap_or_else(|e| e.into_inner()) {
                 owner
@@ -1183,21 +1170,18 @@ impl QueryEngine {
             records,
             anchors,
             store,
-            required,
+            required: _,
         } = inputs;
-        let output_budget = allowance.bytes() - required;
         let ownership = Arc::new(SourceOwnership {
             _operation: operation,
             _front: front.clone(),
             _lower: lower.clone(),
             _allowance: Arc::new(allowance),
         });
-        let remaining = Arc::new(Mutex::new(output_budget));
         let original_context = Arc::new(original_context.retain_owner(
             ownership.clone(),
             crate::native_lower::OriginalAdmission {
                 _allowance: ownership._allowance.clone(),
-                remaining: remaining.clone(),
             },
         ));
         Ok(Arc::new(FrontNativeDefinitionQueries {
@@ -1212,7 +1196,6 @@ impl QueryEngine {
             store,
             completed: Mutex::new(BTreeMap::new()),
             failures: Mutex::new(BTreeMap::new()),
-            remaining,
             weight,
             errors,
             _ownership: ownership,

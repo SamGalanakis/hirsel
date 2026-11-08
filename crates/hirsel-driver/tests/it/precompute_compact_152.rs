@@ -213,7 +213,7 @@ fn cached_front_retains_no_more_metadata_than_the_same_cold_front() {
                         scratch: 8 << 20,
                         stack: 0,
                     },
-                    budget.reserve(8 << 20).unwrap(),
+                    &budget,
                     errors,
                 )
                 .unwrap();

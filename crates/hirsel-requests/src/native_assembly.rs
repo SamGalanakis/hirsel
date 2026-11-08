@@ -47,7 +47,6 @@ pub(super) struct NativeSourceInputs {
 pub(super) struct NativeProofPlan {
     pub evidence: Arc<hirsel_native::Evidence>,
     pub headers: hirsel_engine_admission::MemoryReservation,
-    pub export: hirsel_engine_admission::MemoryReservation,
 }
 /// These partitions transfer the caller's existing snapshot reservation.
 /// This module cannot reserve another process cap or enlarge a task frame.
@@ -149,15 +148,13 @@ impl NativeAssembly {
         let proofs = plan
             .proofs
             .map(|proofs| {
+                let request = proofs.headers.budget().clone();
                 let headers = program
                     .engine
                     .front_checked_signatures(inputs.front, proofs.headers)?;
-                let export = program.engine.front_proof_export_from_native(
-                    &entry,
-                    &source,
-                    headers,
-                    proofs.export,
-                )?;
+                let export = program
+                    .engine
+                    .front_proof_export_from_native(&entry, &source, headers, &request)?;
                 Ok(NativeProofs {
                     evidence: proofs.evidence,
                     export,

@@ -121,14 +121,13 @@ pub struct FrontRegistrationQueries {
     outcomes: Mutex<BTreeMap<ContentHash, Completed>>,
     weight: MemoryWeight,
     errors: RuntimeErrors,
-    output_pool: Arc<hirsel_engine_admission::MemoryReservationPool>,
+    output_pool: Arc<hirsel_engine_admission::ProcessBudget>,
     _inputs: hirsel_engine_admission::MemoryReservation,
 }
 impl FrontRegistrationQueries {
     pub fn input_bytes(definitions: &[DefPath]) -> u64 {
         let mut weight = hirsel_query_products::retained::MetadataWeight::default();
         weight.add(size_of::<Self>() + 2 * size_of::<usize>());
-        weight.add(hirsel_engine_admission::MemoryReservationPool::metadata_bytes() as usize);
         weight.tree::<ContentHash, Input>(definitions.len());
         weight.tree::<ContentHash, Completed>(definitions.len());
         weight.bytes()
@@ -247,11 +246,11 @@ impl FrontRegistrationQueries {
                     .assembly(restart.namespace())
                     .map_err(|_| self.errors.resource)?;
                 let replay = engine
-                    .front_registration_queries_in_pool(
+                    .front_registration_queries(
                         std::slice::from_ref(input.definition.path()),
                         restart.owner().clone(),
                         self.weight,
-                        self.output_pool.clone(),
+                        &self.output_pool,
                         self.errors,
                     )
                     .map_err(|_| self.errors.resource)?;
@@ -342,7 +341,8 @@ impl FrontRegistrationQueries {
         }
         let allowance = self
             .output_pool
-            .take(weight.bytes())
+            .reserve(weight.bytes())
+            .ok()
             .ok_or(self.errors.resource)?;
         Arc::get_mut(&mut data)
             .expect("unpublished generator output")
@@ -729,22 +729,11 @@ impl QueryEngine {
         definitions: &[DefPath],
         lower: Arc<FrontLowerQueries>,
         weight: MemoryWeight,
-        allowance: hirsel_engine_admission::MemoryReservation,
+        request: &Arc<hirsel_engine_admission::ProcessBudget>,
         errors: RuntimeErrors,
     ) -> Result<Arc<FrontRegistrationQueries>, QueryError> {
-        let pool = hirsel_engine_admission::MemoryReservationPool::new(allowance)
-            .map_err(|_| QueryError::NotImplemented)?;
-        self.front_registration_queries_in_pool(definitions, lower, weight, Arc::new(pool), errors)
-    }
-    pub(crate) fn front_registration_queries_in_pool(
-        &mut self,
-        definitions: &[DefPath],
-        lower: Arc<FrontLowerQueries>,
-        weight: MemoryWeight,
-        output_pool: Arc<hirsel_engine_admission::MemoryReservationPool>,
-        errors: RuntimeErrors,
-    ) -> Result<Arc<FrontRegistrationQueries>, QueryError> {
-        let available = output_pool.available_bytes();
+        let output_pool = request.clone();
+        let available = output_pool.free();
         let refused = || {
             QueryError::Operational(hirsel_types::OperationalFailure {
             operation: "generator registration admission".into(), message: "generator input inventory exceeds admission or differs from its source snapshot".into(),
@@ -812,7 +801,7 @@ impl QueryEngine {
                 },
             );
         }
-        let inputs_allowance = output_pool.take(required).ok_or_else(refused)?;
+        let inputs_allowance = output_pool.reserve(required).ok().ok_or_else(refused)?;
         Ok(Arc::new(FrontRegistrationQueries {
             inputs,
             lower,

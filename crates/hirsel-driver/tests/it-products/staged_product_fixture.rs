@@ -29,12 +29,7 @@ impl StagedProducts {
         let definitions = engine.front_source_roots();
         let roots = engine.front_staged_roots(&definitions)?;
         if !roots.is_empty() {
-            let front = engine.front_body_queries(
-                &definitions,
-                weight,
-                budget.reserve(16 << 20).unwrap(),
-                errors,
-            )?;
+            let front = engine.front_body_queries(&definitions, weight, &budget, errors)?;
             let stage = FrontStageQueries::new(
                 &roots,
                 front.clone(),
@@ -63,18 +58,13 @@ impl StagedProducts {
             }
             runtime.shutdown();
         }
-        let front = engine.front_body_queries(
-            &definitions,
-            weight,
-            budget.reserve(16 << 20).unwrap(),
-            errors,
-        )?;
+        let front = engine.front_body_queries(&definitions, weight, &budget, errors)?;
         let lower = engine.front_lower_queries(
             &definitions,
             front.clone(),
             weight,
             4096,
-            budget.reserve(32 << 20).unwrap(),
+            &budget,
             errors,
         )?;
         let mut runtime = AdmittedRuntime::new(

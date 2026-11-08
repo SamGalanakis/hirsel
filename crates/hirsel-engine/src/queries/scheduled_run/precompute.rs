@@ -55,14 +55,8 @@ impl FrontRunQueries {
             .capacity()
             .checked_mul(std::mem::size_of::<(QueryId, bool)>())
             .ok_or(QueryError::NotImplemented)? as u64;
-        let mut remaining = this
-            .retention
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        *remaining = remaining
-            .checked_sub(bytes)
-            .ok_or_else(|| operational("precompute inventory exceeds admission"))?;
-        drop(remaining);
+        this.retain(bytes)
+            .map_err(|_| operational("precompute inventory exceeds admission"))?;
         let query = QueryId {
             kind: FRONT_RUN_KIND,
             address: hirsel_artifact_store::Address(ContentHash::of_parts(

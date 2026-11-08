@@ -100,7 +100,7 @@ impl SourceGrowthComponents {
     pub(crate) fn push(
         &mut self,
         value: Arc<SourceGrowthComponent>,
-        pool: &hirsel_engine_admission::MemoryReservationPool,
+        pool: &Arc<hirsel_engine_admission::ProcessBudget>,
         remaining: usize,
     ) -> Option<()> {
         if self
@@ -110,12 +110,12 @@ impl SourceGrowthComponents {
         {
             let count = remaining.clamp(1, Self::PAGE);
             let bytes = count.checked_mul(size_of::<Arc<SourceGrowthComponent>>())?;
-            let reservation = pool.take(bytes as u64)?;
+            let reservation = pool.reserve(bytes as u64).ok()?;
             if self.pages.len() == self.pages.capacity() {
                 let capacity = self.pages.capacity().saturating_mul(2).max(4);
                 let bytes =
                     (capacity - self.pages.capacity()).checked_mul(size_of::<SourceGrowthPage>())?;
-                let directory = pool.take(bytes as u64)?;
+                let directory = pool.reserve(bytes as u64).ok()?;
                 if let Some(held) = &mut self._directory {
                     held.join(directory).ok()?;
                 } else {
@@ -269,7 +269,7 @@ impl SourceGrowthFact {
 /// a settled checked summary before the final acceptance reduction.
 pub struct SourceGrowthProducer<'a> {
     pub source: &'a NativeRecordContext,
-    pub output_pool: &'a hirsel_engine_admission::MemoryReservationPool,
+    pub output_pool: &'a Arc<hirsel_engine_admission::ProcessBudget>,
     pub namespace: Address,
     pub scratch: u64,
 }
@@ -435,7 +435,7 @@ impl SourceGrowthProducer<'_> {
         }
         let count = u32::try_from(components.len()).ok()?;
         weight.add(components.len().checked_mul(size_of::<u32>())?);
-        let reservation = self.output_pool.take(weight.bytes())?;
+        let reservation = self.output_pool.reserve(weight.bytes()).ok()?;
         let mut address_order: Vec<_> = (0..count).collect();
         address_order.sort_unstable_by_key(|&i| components[i as usize].address);
         Some(SourceMembership {
@@ -566,7 +566,7 @@ impl SourceGrowthProducer<'_> {
             growing,
             settled_growing,
             publication: None,
-            _reservation: self.output_pool.take(bytes as u64)?,
+            _reservation: self.output_pool.reserve(bytes as u64).ok()?,
         }))
     }
     /// The root reduces already settled component products. It never solves.
@@ -579,7 +579,7 @@ impl SourceGrowthProducer<'_> {
         Some(SourceGrowthFacets {
             membership,
             components,
-            _reservation: self.output_pool.take(bytes as u64)?,
+            _reservation: self.output_pool.reserve(bytes as u64).ok()?,
         })
     }
 }

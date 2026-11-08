@@ -1006,17 +1006,20 @@ impl QueryEngine {
                 message: "standalone bootstrap exceeds its existing partition".into(),
             })
         };
-        let available = reservation.bytes();
-        let partitions: u64 = (384 + 2 * 32 + 2 * 16 + 2 * 8) << 20;
-        if available < partitions {
-            return Err(QueryError::Operational(hirsel_types::OperationalFailure {
+        // The scope's runtime is part of this charge; its producers reserve
+        // what they hold from the request footprint, released by the rest.
+        let runtime = reservation.split(384 << 20).ok_or_else(|| {
+            QueryError::Operational(hirsel_types::OperationalFailure {
                 operation: "private generated inference".into(),
                 message: format!(
-                    "standalone bootstrap partitions require {partitions} bytes; available {available} bytes of the process query allowance"
+                    "standalone bootstrap runtime requires {} bytes; available {} bytes",
+                    384u64 << 20,
+                    reservation.bytes()
                 ),
-            }));
-        }
-        let mut split = |bytes| reservation.split(bytes).ok_or_else(refused);
+            })
+        })?;
+        let request = reservation.budget().clone();
+        drop(reservation);
         let admission = FrontDemandAdmission {
             carry: None,
             jobs: hirsel_intern::jobs::Jobs::new(1),
@@ -1026,13 +1029,8 @@ impl QueryEngine {
                 stack: 0,
             },
             max_reads: definitions.len().saturating_mul(3).min(4096),
-            runtime: split(384 << 20)?,
-            front: split(32 << 20)?,
-            lower: split(32 << 20)?,
-            text: split(16 << 20)?,
-            syntax: split(16 << 20)?,
-            discovery: split(8 << 20)?,
-            metadata: split(8 << 20)?,
+            runtime,
+            request,
         };
         let kinds = ["resource", "cycle", "cancelled", "protocol", "panicked"];
         let [resource, cycle, cancelled, protocol, panicked] = kinds.map(|kind| {

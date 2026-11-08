@@ -44,7 +44,7 @@ fn prepared_source_inputs_enforce_exact_caps_and_snapshot_identity_49() {
         };
         let front = program
             .engine
-            .front_body_queries(&paths, weight, budget.reserve(16 << 20).unwrap(), errors)
+            .front_body_queries(&paths, weight, &budget, errors)
             .unwrap();
         let lower = program
             .engine
@@ -53,19 +53,13 @@ fn prepared_source_inputs_enforce_exact_caps_and_snapshot_identity_49() {
                 front.clone(),
                 weight,
                 3 * paths.len(),
-                budget.reserve(16 << 20).unwrap(),
+                &budget,
                 errors,
             )
             .unwrap();
         let growth = program
             .engine
-            .front_growth_queries(
-                &program.entry,
-                front.clone(),
-                weight,
-                budget.reserve(8 << 20).unwrap(),
-                errors,
-            )
+            .front_growth_queries(&program.entry, front.clone(), weight, &budget, errors)
             .unwrap();
         let check = program
             .engine
@@ -83,7 +77,7 @@ fn prepared_source_inputs_enforce_exact_caps_and_snapshot_identity_49() {
                     lint_package: None,
                 },
                 weight,
-                budget.reserve(16 << 20).unwrap(),
+                &budget,
                 errors,
             )
             .unwrap();
@@ -244,7 +238,7 @@ fn semantic_source_products_do_not_require_a_launch_or_program_check() {
         };
         let front = program
             .engine
-            .front_body_queries(&paths, weight, budget.reserve(16 << 20).unwrap(), errors)
+            .front_body_queries(&paths, weight, &budget, errors)
             .unwrap();
         let lower = program
             .engine
@@ -253,7 +247,7 @@ fn semantic_source_products_do_not_require_a_launch_or_program_check() {
                 front.clone(),
                 weight,
                 3 * paths.len(),
-                budget.reserve(16 << 20).unwrap(),
+                &budget,
                 errors,
             )
             .unwrap();

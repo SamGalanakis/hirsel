@@ -51,12 +51,7 @@ fn admitted_staged_declarations_match_scalar_without_executing_or_publishing() {
                 .unwrap();
                 let front = program
                     .engine
-                    .front_body_queries(
-                        &definitions,
-                        weight,
-                        budget.reserve(8 << 20).unwrap(),
-                        errors,
-                    )
+                    .front_body_queries(&definitions, weight, &budget, errors)
                     .unwrap();
                 let input_bytes = FrontStageQueries::input_bytes(&definitions);
                 let stage = FrontStageQueries::new(
@@ -157,12 +152,7 @@ fn staged_acceptance_checks_all_reads_and_admits_the_installed_copy() {
         };
         let front = program
             .engine
-            .front_body_queries(
-                &definitions,
-                weight,
-                budget.reserve(8 << 20).unwrap(),
-                errors,
-            )
+            .front_body_queries(&definitions, weight, &budget, errors)
             .unwrap();
         let stage = FrontStageQueries::new(
             &definitions,

@@ -42,33 +42,15 @@ fn scope_case(source: &str, failed_front: bool, failed_lower: bool) {
             .unwrap();
             let front = program
                 .engine
-                .front_body_queries(
-                    &definitions,
-                    weight,
-                    budget.reserve(8 << 20).unwrap(),
-                    errors,
-                )
+                .front_body_queries(&definitions, weight, &budget, errors)
                 .unwrap();
             let lower = program
                 .engine
-                .front_lower_queries(
-                    &definitions,
-                    front.clone(),
-                    weight,
-                    32,
-                    budget.reserve(8 << 20).unwrap(),
-                    errors,
-                )
+                .front_lower_queries(&definitions, front.clone(), weight, 32, &budget, errors)
                 .unwrap();
             let growth = program
                 .engine
-                .front_growth_queries(
-                    &program.entry,
-                    front.clone(),
-                    weight,
-                    budget.reserve(8 << 20).unwrap(),
-                    errors,
-                )
+                .front_growth_queries(&program.entry, front.clone(), weight, &budget, errors)
                 .unwrap();
             let check = program
                 .engine
@@ -88,7 +70,7 @@ fn scope_case(source: &str, failed_front: bool, failed_lower: bool) {
                         lint_package: None,
                     },
                     weight,
-                    budget.reserve(8 << 20).unwrap(),
+                    &budget,
                     errors,
                 )
                 .unwrap();
@@ -195,12 +177,7 @@ fn scope_case(source: &str, failed_front: bool, failed_lower: bool) {
             .unwrap();
             let oracle_front = program
                 .engine
-                .front_body_queries(
-                    &definitions,
-                    weight,
-                    budget.reserve(8 << 20).unwrap(),
-                    oracle_errors,
-                )
+                .front_body_queries(&definitions, weight, &budget, oracle_errors)
                 .unwrap();
             let oracle_lower = program
                 .engine
@@ -209,7 +186,7 @@ fn scope_case(source: &str, failed_front: bool, failed_lower: bool) {
                     oracle_front.clone(),
                     weight,
                     32,
-                    budget.reserve(8 << 20).unwrap(),
+                    &budget,
                     oracle_errors,
                 )
                 .unwrap();
@@ -219,7 +196,7 @@ fn scope_case(source: &str, failed_front: bool, failed_lower: bool) {
                     &program.entry,
                     oracle_front.clone(),
                     weight,
-                    budget.reserve(8 << 20).unwrap(),
+                    &budget,
                     oracle_errors,
                 )
                 .unwrap();
@@ -241,7 +218,7 @@ fn scope_case(source: &str, failed_front: bool, failed_lower: bool) {
                         lint_package: None,
                     },
                     weight,
-                    budget.reserve(8 << 20).unwrap(),
+                    &budget,
                     oracle_errors,
                 )
                 .unwrap();
@@ -358,7 +335,7 @@ fn registered_capture(
     let front = program.engine.front_body_queries(
         &roots,
         weight,
-        budget.reserve(8 << 20).unwrap(),
+        &budget,
         crate::scheduled_front::errors(),
     );
     (roots, front)

@@ -10,12 +10,8 @@ pub struct FrontDemandAdmission {
     pub weight: MemoryWeight,
     pub max_reads: usize,
     pub runtime: hirsel_engine_admission::MemoryReservation,
-    pub front: hirsel_engine_admission::MemoryReservation,
-    pub lower: hirsel_engine_admission::MemoryReservation,
-    pub text: hirsel_engine_admission::MemoryReservation,
-    pub syntax: hirsel_engine_admission::MemoryReservation,
-    pub discovery: hirsel_engine_admission::MemoryReservation,
-    pub metadata: hirsel_engine_admission::MemoryReservation,
+    /// The request footprint every scope owner reserves what it holds from.
+    pub request: Arc<hirsel_engine_admission::ProcessBudget>,
 }
 
 pub enum FrontDemandError {
@@ -161,12 +157,8 @@ impl QueryEngine {
         });
         let required = FrontDemandScope::input_bytes(definitions, generators)
             .ok_or_else(|| admission_error("metadata size overflow"))?;
-        if required > admission.metadata.bytes()
-            || roots.iter().any(|root| !definitions.contains(root))
-        {
-            return Err(admission_error(
-                "scope cursors exceed metadata or source inventory",
-            ));
+        if roots.iter().any(|root| !definitions.contains(root)) {
+            return Err(admission_error("scope cursors exceed the source inventory"));
         }
         let FrontDemandAdmission {
             carry,
@@ -174,31 +166,22 @@ impl QueryEngine {
             weight,
             max_reads,
             runtime,
-            mut front,
-            mut lower,
-            text,
-            syntax,
-            discovery,
-            mut metadata,
+            request,
         } = admission;
-        drop(discovery);
-        let front_grant = front
-            .split(front.bytes() / 2)
-            .ok_or_else(|| admission_error("Front partition"))?;
-        let lower_grant = lower
-            .split(lower.bytes() / 2)
-            .ok_or_else(|| admission_error("Lower partition"))?;
+        let metadata = request
+            .reserve(required)
+            .map_err(|_| admission_error("scope cursors exceed the request footprint"))?;
         let previous = self.private_bootstrap_active;
         self.private_bootstrap_active = true;
         let prepared = (|| {
-            let capture = self.capture_namespace(definitions, &[], front_grant.bytes())?;
+            let capture = self.capture_namespace(definitions, &[], request.free())?;
             let front =
-                self.front_body_queries_in(definitions, capture, weight, front_grant, errors)?;
+                self.front_body_queries_in(definitions, capture, weight, &request, errors)?;
             if let Some(carry) = &carry {
                 // An optional carry miss leaves ordinary production active.
                 let _ = front.install_carry(carry.clone());
             }
-            self.front_lower_queries(definitions, front, weight, max_reads, lower_grant, errors)
+            self.front_lower_queries(definitions, front, weight, max_reads, &request, errors)
         })();
         self.private_bootstrap_active = previous;
         let initial = prepared.map_err(|error| {
@@ -209,10 +192,7 @@ impl QueryEngine {
             initial.clone(),
             demand::DemandAdmission {
                 carry: carry.clone(),
-                front,
-                lower,
-                text,
-                syntax,
+                request,
             },
             weight,
             max_reads,
@@ -287,9 +267,6 @@ impl QueryEngine {
                     FrontDemandError::Generator(FrontRegistrationBootstrapError::Admission(error))
                 })?;
         }
-        let metadata = metadata
-            .split(required)
-            .ok_or_else(|| admission_error("completed scope metadata"))?;
         let front = carry
             .as_ref()
             .map(|_| successor.owner().body_front().clone());

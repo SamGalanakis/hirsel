@@ -20,10 +20,7 @@ mod scope;
 pub use scope::{FrontDemandAdmission, FrontDemandError, FrontDemandScope};
 mod instances;
 mod syntax;
-pub use bootstrap::{
-    FrontRegistrationBootstrap, FrontRegistrationBootstrapAdmission,
-    FrontRegistrationBootstrapError,
-};
+pub use bootstrap::FrontRegistrationBootstrapError;
 
 pub(crate) mod task;
 pub use accepted::{AcceptedFrontRegistration, FrontRegistrationFailure};

@@ -160,11 +160,7 @@ impl Waiting {
             } else {
                 Vec::new()
             },
-            charge: LowerInputCharge {
-                remaining: partition.remaining.clone(),
-                bytes: 0,
-                _allowance: partition.allowance.clone(),
-            },
+            charge: LowerInputCharge::empty(partition.request()),
         }
     }
     pub(super) fn get(&self, key: (DefId, u32)) -> Option<Span> {
@@ -190,13 +186,7 @@ impl Waiting {
                     } else {
                         0
                     })? as u64;
-                let mut remaining = self
-                    .charge
-                    .remaining
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner());
-                *remaining = remaining.checked_sub(extra)?;
-                self.charge.bytes += extra;
+                self.charge.grow(extra)?;
                 self.rows.reserve_exact(growth);
             }
             self.rows.push((key, site));
@@ -222,11 +212,7 @@ impl Paths {
             rows: Mutex::new(PathRows {
                 lower: Vec::new(),
                 evaluate: Vec::new(),
-                charge: LowerInputCharge {
-                    remaining: partition.remaining.clone(),
-                    bytes: 0,
-                    _allowance: partition.allowance.clone(),
-                },
+                charge: LowerInputCharge::empty(partition.request()),
             }),
         }
     }
@@ -234,12 +220,7 @@ impl Paths {
         let mut index = self.rows.lock().unwrap_or_else(|e| e.into_inner());
         drop(std::mem::take(&mut index.lower));
         drop(std::mem::take(&mut index.evaluate));
-        let bytes = std::mem::take(&mut index.charge.bytes);
-        *index
-            .charge
-            .remaining
-            .lock()
-            .unwrap_or_else(|e| e.into_inner()) += bytes;
+        index.charge.release();
     }
     fn prefix(address: ContentHash) -> u32 {
         u32::from_le_bytes([address.0[0], address.0[1], address.0[2], address.0[3]])
@@ -268,12 +249,9 @@ impl Paths {
             else {
                 return;
             };
-            let mut remaining = charge.remaining.lock().unwrap_or_else(|e| e.into_inner());
-            let Some(available) = remaining.checked_sub(bytes) else {
+            if charge.grow(bytes).is_none() {
                 return;
-            };
-            *remaining = available;
-            charge.bytes += bytes;
+            }
             rows.reserve_exact(capacity);
         }
         rows.insert(at, row);

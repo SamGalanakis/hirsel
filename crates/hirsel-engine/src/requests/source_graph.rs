@@ -57,75 +57,19 @@ pub fn host_limits(cap: u64, jobs: usize) -> RequestLimits {
     }
 }
 
-/// Bounds supplied by the actual source/producer footprint planner. These are
-/// parts of the existing snapshot cap, not extra per-producer process caps.
+/// The fixed owners a source graph holds past installation. Every other
+/// producer reserves exactly what it holds from the request footprint.
 #[derive(Clone, Copy)]
 pub struct SnapshotPlan {
     pub source: u64,
-    pub front: u64,
-    pub lower: u64,
-    pub check: u64,
-    pub growth: u64,
     pub run: u64,
 }
 pub struct GraphAdmission {
     pub runtime: hirsel_engine_admission::MemoryReservation,
     pub source: hirsel_engine_admission::MemoryReservation,
-    pub front: hirsel_engine_admission::MemoryReservation,
-    pub lower: hirsel_engine_admission::MemoryReservation,
-    pub check: hirsel_engine_admission::MemoryReservation,
-    pub growth: hirsel_engine_admission::MemoryReservation,
     pub run: hirsel_engine_admission::MemoryReservation,
     pub transport: hirsel_engine_admission::MemoryReservation,
     pub native_transport: hirsel_engine_admission::MemoryReservation,
-}
-impl GraphAdmission {
-    pub fn reserve(
-        budget: &Arc<hirsel_engine_admission::ProcessBudget>,
-        limits: RequestLimits,
-        plan: SnapshotPlan,
-    ) -> Result<Self, ToolError> {
-        Self::reserve_with(limits, plan, |bytes| budget.reserve(bytes))
-    }
-    /// Let the host reclaim idle owners after every partial grant has dropped.
-    pub fn reserve_once(
-        budget: &Arc<hirsel_engine_admission::ProcessBudget>,
-        limits: RequestLimits,
-        plan: SnapshotPlan,
-    ) -> Result<Self, ToolError> {
-        Self::reserve_with(limits, plan, |bytes| budget.reserve_once(bytes))
-    }
-    fn reserve_with(
-        limits: RequestLimits,
-        plan: SnapshotPlan,
-        reserve: impl Fn(u64) -> std::io::Result<hirsel_engine_admission::MemoryReservation>,
-    ) -> Result<Self, ToolError> {
-        let snapshot = plan
-            .source
-            .checked_add(plan.front)
-            .and_then(|bytes| bytes.checked_add(plan.lower))
-            .and_then(|bytes| bytes.checked_add(plan.check))
-            .and_then(|bytes| bytes.checked_add(plan.growth))
-            .and_then(|bytes| bytes.checked_add(plan.run));
-        if snapshot.is_none_or(|bytes| bytes > limits.snapshot_bytes) {
-            return Err(ToolError::Io(std::io::Error::other(
-                "compiler snapshot footprint exceeds admission",
-            )));
-        }
-        // A failed later reservation drops every earlier temporary. Nothing
-        // becomes visible to request clients before this whole value exists.
-        Ok(Self {
-            runtime: reserve(limits.runtime_bytes).map_err(ToolError::Io)?,
-            source: reserve(plan.source).map_err(ToolError::Io)?,
-            front: reserve(plan.front).map_err(ToolError::Io)?,
-            lower: reserve(plan.lower).map_err(ToolError::Io)?,
-            check: reserve(plan.check).map_err(ToolError::Io)?,
-            growth: reserve(plan.growth).map_err(ToolError::Io)?,
-            run: reserve(plan.run).map_err(ToolError::Io)?,
-            transport: reserve(limits.transport_bytes).map_err(ToolError::Io)?,
-            native_transport: reserve(0).map_err(ToolError::Io)?,
-        })
-    }
 }
 
 /// Charge the whole selected snapshot partition before S0 allocates a loader
@@ -201,37 +145,15 @@ impl LoadingAdmission {
         let _ = self.runtime.join(runtime);
         let _ = self.snapshot.join(snapshot);
     }
+    /// Keep the source and Run owners and release the rest of the loading
+    /// charge, which producers then reserve from as they hold it.
     pub fn finish(mut self, plan: SnapshotPlan) -> Result<GraphAdmission, ToolError> {
-        let bytes = [
-            plan.source,
-            plan.front,
-            plan.lower,
-            plan.growth,
-            plan.check,
-            plan.run,
-        ]
-        .into_iter()
-        .try_fold(0u64, u64::checked_add);
-        if bytes.is_none_or(|bytes| bytes > self.snapshot.bytes()) {
-            return Err(ToolError::Runtime(
-                "compiler snapshot footprint exceeds admission".into(),
-            ));
-        }
-        // The checked total proves each split fits. No reservation is released
-        // while ownership transfers, even when another host is admitting work.
-        let source = self.snapshot.split(plan.source).unwrap();
-        let front = self.snapshot.split(plan.front).unwrap();
-        let lower = self.snapshot.split(plan.lower).unwrap();
-        let growth = self.snapshot.split(plan.growth).unwrap();
-        let check = self.snapshot.split(plan.check).unwrap();
-        let run = self.snapshot.split(plan.run).unwrap();
+        let refusal = || ToolError::Runtime("compiler snapshot footprint exceeds admission".into());
+        let source = self.snapshot.split(plan.source).ok_or_else(refusal)?;
+        let run = self.snapshot.split(plan.run).ok_or_else(refusal)?;
         Ok(GraphAdmission {
             runtime: self.runtime,
             source,
-            front,
-            lower,
-            growth,
-            check,
             run,
             transport: self.transport,
             native_transport: self.native_transport,
@@ -408,7 +330,6 @@ impl Plan {
             .checked_mul(if shape.check_variants { 2 } else { 1 })
             .ok_or_else(|| uninstalled())?;
         let needs_run = shape.run;
-        let needs_receipt = shape.receipt;
         let needs_ownership = shape.ownership;
         let needs_native = shape.native;
         let extended = needs_native || needs_ownership;
@@ -451,11 +372,10 @@ impl Plan {
         .into_iter()
         .try_fold(0u64, u64::checked_add)
         .ok_or_else(|| uninstalled())?;
-        let slack = limits.snapshot_bytes.checked_sub(fixed).ok_or_else(|| {
-            ToolError::Runtime(
-                format!("compiler immutable input inventory exceeds snapshot admission: fixed {fixed}/{} B; source {source}, Front {}, Lower {lower_inventory}, Growth {growth_inventory}, storage {storage_inventory}, Check {check_inventory}, Run {run_inventory}, extension {extension_inventory}", limits.snapshot_bytes, footprint.front_inputs),
-            )
-        })?;
+        // Producers reserve their inventories from the request footprint as
+        // they hold them; only the optional source index and extension
+        // footprints are sized from what the snapshot loan leaves.
+        let slack = limits.snapshot_bytes.saturating_sub(fixed);
         // Headers and private proofs can grow after this metadata-only plan.
         // Retain their source index within the existing optional-cache cap,
         // rather than freezing the smaller pre-demand size as its allowance.
@@ -476,64 +396,13 @@ impl Plan {
         } else {
             0
         };
-        let slack = slack - extension_slack;
         let (extension_bytes, extension_source) = if extended {
             host.extension_bytes(definitions, extension_slack, catalogue_bytes)
                 .ok_or_else(|| uninstalled())?
         } else {
             (0, 0)
         };
-        // Every partition lives as long as the graph. A full-std receipt's
-        // staged peak (~580MB) is 29 times the front's retained outcomes
-        // and input rows (20MB), so a receipt leaves the front a sixteenth.
-        let front_slack = if needs_ownership {
-            slack * 83 / 96
-        } else if needs_receipt {
-            slack / 16
-        } else {
-            slack / 4
-        };
-        // A checked receipt is a root output after Check, like Run, and takes
-        // the remainder with no Run inventory or rows. Its staged input and
-        // construction hold every lowered original, while Lower itself keeps
-        // only settled metadata (13MB with its rows for full std; a body's
-        // grant is the smaller continuation bound), so Lower keeps a sixteenth.
-        let lower_slack = if needs_ownership {
-            slack / 12
-        } else if needs_receipt {
-            slack / 16
-        } else if needs_run {
-            slack / 3
-        } else {
-            slack / 2
-        };
-        // A receipt's root continuation is already bounded by Check's
-        // thirty-second, and Growth's own output is its merged edges and reads
-        // (2MB for full std), so Growth keeps that thirty-second too.
-        let growth_slack = if needs_ownership {
-            slack / 48
-        } else if needs_receipt {
-            slack / 32
-        } else {
-            slack / 8
-        };
-        // Check admits its fixed rows, retained data and archive separately.
-        // A receipt also captures its headers within this partition.
-        let check_slack = if needs_ownership {
-            slack / 48
-        } else if needs_receipt {
-            slack / 32
-        } else if needs_run {
-            slack / 8
-        } else {
-            slack - front_slack - lower_slack - growth_slack
-        };
-        let run_slack = slack - front_slack - lower_slack - growth_slack - check_slack;
-        let front = footprint.front_inputs + front_slack;
-        let lower = lower_inventory + lower_slack;
-        let growth = growth_inventory + storage_inventory + growth_slack;
-        let check = check_inventory + check_slack;
-        let run = extension_bytes + run_inventory + run_slack;
+        let run = extension_bytes + run_inventory;
         // Each definition can name P, Lower, Evaluate and, when selected,
         // Run and a semantic node; native selection adds its definition rows. Growth/
         // Check, the selected SafeCheck root and the native bootstrap and
@@ -618,51 +487,18 @@ impl Plan {
             + u64::from(shape.storage);
         let root_bound = suspended / (2 * root_shares);
         let body_bound = suspended / (2 * (BODY_CONTINUATIONS + native_frames));
-        // Only demanded Lower outputs consume producer retention. Potential
-        // addresses carry compact input slots, not maximum future/body grants.
-        let output_metadata = FrontLowerQueries::output_bytes(MemoryWeight::default())
-            .ok_or_else(|| uninstalled())?;
-        let retained = lower_slack
-            .checked_sub(output_metadata)
-            .map(|bytes| (bytes / 2).min(body_bound))
-            .filter(|bytes| *bytes != 0)
-            .ok_or_else(|| {
-                ToolError::Runtime("compiler Lower continuation exceeds admission".into())
-            })?;
-        // Check retains data and its archive under separate bounds. A receipt
-        // also captures headers from this same partition before installing it.
-        let check_continuation = if shape.check_variants {
-            check_slack / 4
-        } else if needs_receipt {
-            check_slack / 3
-        } else {
-            check_slack / 2
-        };
-        let root_retained = growth_slack.min(check_continuation).min(root_bound);
-        if root_retained == 0 {
-            return Err(ToolError::Runtime(
-                "compiler root continuation exceeds admission".into(),
-            ));
-        }
         Ok(Self {
             source_index_bytes,
-            snapshots: SnapshotPlan {
-                source,
-                front,
-                lower,
-                growth,
-                check,
-                run,
-            },
+            snapshots: SnapshotPlan { source, run },
             query_inventory,
             query_capacity,
             body: MemoryWeight {
-                retained,
+                retained: body_bound,
                 scratch,
                 stack: 0,
             },
             root: MemoryWeight {
-                retained: root_retained,
+                retained: root_bound,
                 scratch,
                 stack: 0,
             },
@@ -675,7 +511,7 @@ impl Plan {
             run: MemoryWeight {
                 // Run accumulates the selected semantic closure, so it uses
                 // its two root shares rather than one Lower body.
-                retained: (run_slack / 4).min(2 * root_bound),
+                retained: 2 * root_bound,
                 scratch,
                 stack: 0,
             },
@@ -692,8 +528,8 @@ pub struct InstalledSource {
     pub lower: Arc<FrontLowerQueries>,
     pub growth: Arc<FrontGrowthQueries>,
     pub storage: Option<(Arc<FrontStorageQueries>, Arc<FrontStorageGraphQueries>)>,
-    /// The Check partition, consumed by [`InstalledSource::check`].
-    pub check: hirsel_engine_admission::MemoryReservation,
+    /// The request footprint the Check root reserves its inputs from.
+    pub request: Arc<hirsel_engine_admission::ProcessBudget>,
     pub run: hirsel_engine_admission::MemoryReservation,
     pub native_transport: hirsel_engine_admission::MemoryReservation,
     pub run_inputs: Option<FrontRunInputs>,
@@ -925,29 +761,12 @@ pub fn prepare_source_scope(
         .release_private_inference_admission()
         .map_err(|error| engine_error(engine, error))?;
     loading.return_runtime(inference);
-    let metadata =
-        FrontDemandScope::input_bytes(&definitions, &generators).ok_or_else(|| uninstalled())?;
+    // The scope's producers reserve what they hold from the request
+    // footprint, so the snapshot loan is released while they run.
     let (runtime, snapshot) = loading.lend();
     let lent = (runtime.bytes(), snapshot.bytes());
-    let snapshot =
-        hirsel_engine_admission::MemoryReservationPool::new(snapshot).map_err(|_| uninstalled())?;
-    let split = |bytes| snapshot.take(bytes).ok_or_else(|| uninstalled());
-    let front = split(plan.snapshots.front)?;
-    let lower = split(plan.snapshots.lower)?;
-    let rest = lent
-        .1
-        .checked_sub(plan.snapshots.front)
-        .and_then(|bytes| bytes.checked_sub(plan.snapshots.lower))
-        .and_then(|bytes| {
-            bytes.checked_sub(hirsel_engine_admission::MemoryReservationPool::metadata_bytes())
-        })
-        .ok_or_else(|| uninstalled())?;
-    let metadata = metadata.max(rest / 8);
-    let reserved = split(metadata)?;
-    let rest = rest.checked_sub(metadata).ok_or_else(|| uninstalled())?;
-    let discovery = split(rest / 7)?;
-    let text = split((rest - rest / 7) / 2)?;
-    let syntax = split(rest - rest / 7 - (rest - rest / 7) / 2)?;
+    let request = snapshot.budget().clone();
+    drop(snapshot);
     let errors = runtime_errors(store)?;
     let scope = engine
         .demand_front_scope_with_policy(
@@ -962,18 +781,12 @@ pub fn prepare_source_scope(
                 weight: plan.body,
                 max_reads: lower_reads(&definitions)?,
                 runtime,
-                front,
-                lower,
-                text,
-                syntax,
-                discovery,
-                metadata: reserved,
+                request: request.clone(),
             },
             errors,
         )
         .map_err(|error| instance_bootstrap_error(engine, error, errors))?;
-    let snapshot_bytes = snapshot.available_bytes();
-    drop(snapshot);
+    let snapshot_bytes = lent.1.min(request.free());
     host.readmit(loading, lent.0, snapshot_bytes)?;
     Ok((
         Some(scope),
@@ -1139,11 +952,6 @@ pub fn install(
         !shape.compact_reads && front.covers_scope(&definitions, &namespace, plan.body)
     });
     let reuse_front = prepared_front.is_some();
-    if prepared_front.is_some() {
-        // The completed owner retains its original admitted Front partition.
-        // Installation needs no second reservation for the same products.
-        plan.snapshots.front = 0;
-    }
     let sources = engine.sources.clone();
     let inference = match engine.release_private_inference_admission() {
         Ok(allowance) => allowance,
@@ -1153,14 +961,11 @@ pub fn install(
     let GraphAdmission {
         runtime,
         mut source,
-        front,
-        lower,
-        mut growth,
-        check,
         transport,
         native_transport,
         run,
     } = loading.finish(plan.snapshots)?;
+    let request = source.budget().clone();
     engine.admit_private_inference(runtime);
     let source_index = source
         .split(plan.source_index_bytes)
@@ -1177,12 +982,9 @@ pub fn install(
     drop(transport);
     let errors = runtime_errors(store)?;
     let front = match prepared_front {
-        Some(prepared) => {
-            drop(front);
-            prepared
-        }
+        Some(prepared) => prepared,
         None => engine
-            .front_body_queries_in(&definitions, namespace, plan.body, front, errors)
+            .front_body_queries_in(&definitions, namespace, plan.body, &request, errors)
             .map_err(query_error)?,
     };
     if shape.compact_reads {
@@ -1199,7 +1001,7 @@ pub fn install(
             front.clone(),
             plan.body,
             lower_reads(&definitions)?,
-            lower,
+            &request,
             errors,
         )
         .map_err(query_error)?;
@@ -1208,38 +1010,12 @@ pub fn install(
             .install_carry(carry.lower.clone())
             .map_err(|_| uninstalled())?;
     }
-    let (growth_admission, storage_allowance) = if shape.storage {
-        let recipe_inputs =
-            FrontStorageQueries::input_bytes(&front).ok_or_else(|| uninstalled())?;
-        let graph_inputs =
-            FrontStorageGraphQueries::input_bytes(&definitions).ok_or_else(|| uninstalled())?;
-        let growth_inputs = FrontGrowthQueries::input_bytes(&definitions, plan.root)
-            .ok_or_else(|| uninstalled())?;
-        let recipe = growth.split(recipe_inputs).ok_or_else(|| uninstalled())?;
-        let graph = growth.split(graph_inputs).ok_or_else(|| uninstalled())?;
-        let roots = growth.split(growth_inputs).ok_or_else(|| uninstalled())?;
-        let outputs = OutputPartition::new(growth).ok_or_else(|| uninstalled())?;
-        (
-            ProducerAdmission::shared(roots, outputs.clone()),
-            Some((
-                ProducerAdmission::shared(recipe, outputs.clone()),
-                ProducerAdmission::shared(graph, outputs),
-            )),
-        )
-    } else {
-        (growth.into(), None)
-    };
     let growth = engine
-        .front_growth_queries(
-            &selection.entry,
-            front.clone(),
-            plan.root,
-            growth_admission,
-            errors,
-        )
+        .front_growth_queries(&selection.entry, front.clone(), plan.root, &request, errors)
         .map_err(query_error)?;
-    let storage = storage_allowance
-        .map(|(recipe_allowance, graph_allowance)| {
+    let storage = shape
+        .storage
+        .then(|| {
             let recipes = engine
                 .front_storage_queries(
                     front.clone(),
@@ -1247,7 +1023,7 @@ pub fn install(
                         retained: plan.body.retained.min(64 << 10),
                         ..plan.body
                     },
-                    recipe_allowance,
+                    &request,
                     errors,
                 )
                 .map_err(query_error)?;
@@ -1259,7 +1035,7 @@ pub fn install(
                     recipes.clone(),
                     lower.clone(),
                     plan.root,
-                    graph_allowance,
+                    &request,
                     errors,
                 )
                 .map_err(query_error)?;
@@ -1274,7 +1050,7 @@ pub fn install(
         lower,
         growth,
         storage,
-        check,
+        request,
         run,
         native_transport,
         run_inputs,
@@ -1303,10 +1079,6 @@ impl InstalledSource {
         engine: &mut QueryEngine,
         selection: &SourceSelection,
     ) -> Result<Arc<FrontCheckQueries>, ToolError> {
-        let allowance = self
-            .check
-            .split(self.check.bytes())
-            .ok_or_else(|| uninstalled())?;
         let check = engine
             .front_check_queries(
                 FrontCheckPlan {
@@ -1318,7 +1090,7 @@ impl InstalledSource {
                     lint_package: selection.lint_package.clone(),
                 },
                 self.plan.root,
-                allowance,
+                &self.request,
                 self.errors,
             )
             .map_err(|error| self.query_error(error))?;

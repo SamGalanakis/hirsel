@@ -9,20 +9,15 @@ use std::sync::{Mutex, Weak};
 
 pub(crate) struct DemandAdmission {
     pub carry: Option<Arc<FrontCarry>>,
-    pub front: hirsel_engine_admission::MemoryReservation,
-    pub lower: hirsel_engine_admission::MemoryReservation,
-    pub text: hirsel_engine_admission::MemoryReservation,
-    pub syntax: hirsel_engine_admission::MemoryReservation,
+    pub request: Arc<hirsel_engine_admission::ProcessBudget>,
 }
 
 pub(crate) struct DemandProducer {
     carry: Option<Arc<FrontCarry>>,
     adapters: SourcePhases,
     state: Mutex<State>,
-    front: Arc<hirsel_engine_admission::MemoryReservationPool>,
     lower: scheduled_lower::LowerPartition,
-    text: Arc<hirsel_engine_admission::MemoryReservationPool>,
-    syntax: hirsel_engine_admission::MemoryReservationPool,
+    request: Arc<hirsel_engine_admission::ProcessBudget>,
     weight: MemoryWeight,
     max_reads: usize,
     errors: RuntimeErrors,
@@ -198,14 +193,10 @@ impl DemandProducer {
         max_reads: usize,
         errors: RuntimeErrors,
     ) -> Result<Arc<Self>, QueryError> {
-        let pool = |grant| {
-            hirsel_engine_admission::MemoryReservationPool::new(grant)
-                .map_err(|_| refused("pool metadata exceeds admission"))
-        };
-        let mut syntax = admission.syntax;
-        let metadata = syntax
-            .split((size_of::<Self>() + 2 * size_of::<usize>()) as u64)
-            .ok_or_else(|| refused("producer owner metadata exceeds admission"))?;
+        let metadata = admission
+            .request
+            .reserve((size_of::<Self>() + 2 * size_of::<usize>()) as u64)
+            .map_err(|_| refused("producer owner metadata exceeds the request footprint"))?;
         let producer = Arc::new(Self {
             carry: admission.carry,
             adapters: engine.adapters.source_phases(),
@@ -218,10 +209,8 @@ impl DemandProducer {
                 producing: BTreeMap::new(),
                 staged_log: vec![],
             }),
-            front: Arc::new(pool(admission.front)?),
-            lower: scheduled_lower::LowerPartition::new(admission.lower),
-            text: Arc::new(pool(admission.text)?),
-            syntax: pool(syntax)?,
+            lower: scheduled_lower::LowerPartition::new(&admission.request),
+            request: admission.request,
             weight,
             max_reads,
             errors,
@@ -301,7 +290,7 @@ impl DemandProducer {
             ));
         }
         let charge = Self::take(
-            &self.syntax,
+            &self.request,
             (3 * (size_of::<InstanceSelection>()
                 + size_of::<hirsel_engine_admission::MemoryReservation>())) as u64,
         )?;
@@ -459,7 +448,7 @@ impl DemandProducer {
             .is_none_or(|request| request.previous.strong_count() == 0)
         {
             let allowance = Self::take(
-                &self.syntax,
+                &self.request,
                 (size_of::<DemandRequest>()
                     + 12 * size_of::<usize>()
                     + declaration.0.name.len()
@@ -521,7 +510,7 @@ impl DemandProducer {
             for root in roots {
                 weight.path(root);
             }
-            let allowance = Self::take(&self.syntax, weight.bytes())?;
+            let allowance = Self::take(&self.request, weight.bytes())?;
             scopes.insert(
                 key,
                 Arc::new(ScopeRequest {
@@ -609,7 +598,7 @@ impl DemandProducer {
             _ => (previous.sources.clone(), previous.clone()),
         };
         let allowance = Arc::new(Self::take(
-            &self.syntax,
+            &self.request,
             (size_of::<namespace::DiagnosticSources>() + 8 * size_of::<usize>()) as u64
                 + sources.retained_snapshot_metadata_bytes(),
         )?);
@@ -762,7 +751,10 @@ impl DemandProducer {
             + size_of::<namespace::OperationLease>()
             + size_of::<scheduled_lower::SuccessorCapture>()
             + 4 * size_of::<usize>();
-        let allowance = self.text.take(bytes as u64).ok_or(self.errors.resource)?;
+        let allowance = self
+            .request
+            .reserve(bytes as u64)
+            .map_err(|_| self.errors.resource)?;
         Ok(hirsel_engine_runtime::ProductRef::live(
             id.address,
             hirsel_artifact_store::Action(namespace.identity()),
@@ -857,7 +849,10 @@ impl DemandProducer {
             std::slice::from_ref(path),
             owner.body_front().clone(),
             self.weight,
-            Self::take(&self.text, self.text.available_bytes())?,
+            Self::take(
+                &self.request,
+                crate::FrontStageQueries::input_bytes(std::slice::from_ref(path)),
+            )?,
             self.errors,
         )?;
         let query = stage
@@ -888,7 +883,7 @@ impl DemandProducer {
                 previous.tree::<(DefId, ContentHash), ()>(staged.len());
             }
             Self::take(
-                &self.syntax,
+                &self.request,
                 next.bytes().saturating_sub(previous.bytes())
                     + (3 * (size_of::<hirsel_engine_admission::MemoryReservation>()
                         + size_of::<(DefId, ContentHash)>())) as u64,
@@ -896,7 +891,7 @@ impl DemandProducer {
         };
         let mut engine = owner.capture().assembly(&self.adapters)?;
         let installed = output.installation_bytes()?;
-        engine.accept_front_staged(&output, Self::take(&self.syntax, installed)?)?;
+        engine.accept_front_staged(&output, Self::take(&self.request, installed)?)?;
         let definitions = owner
             .capture()
             .bodies
@@ -1101,11 +1096,8 @@ impl DemandProducer {
                     let owner = self.current()?;
                     let mut engine = owner.capture().discovery_assembly(&self.adapters)?;
                     let fronts = [owner.body_front().clone()];
-                    let discovery = engine.discover_front_instances(
-                        &demanded,
-                        &fronts,
-                        Self::take(&self.syntax, self.syntax.available_bytes())?,
-                    )?;
+                    let discovery =
+                        engine.discover_front_instances(&demanded, &fronts, &self.request)?;
                     let requests = discovery.requests().to_vec();
                     let missing = discovery.pending_bodies().to_vec();
                     drop(discovery);
@@ -1251,12 +1243,12 @@ impl DemandProducer {
         self.weight
     }
     fn take(
-        pool: &hirsel_engine_admission::MemoryReservationPool,
+        pool: &Arc<hirsel_engine_admission::ProcessBudget>,
         bytes: u64,
     ) -> Result<hirsel_engine_admission::MemoryReservation, QueryError> {
-        pool.take(bytes).ok_or_else(|| refused(&format!(
+        pool.reserve(bytes).ok().ok_or_else(|| refused(&format!(
             "producer inputs require {bytes} bytes; available {} bytes in their existing partition",
-            pool.available_bytes()
+            pool.free()
         )))
     }
     fn view(
@@ -1268,7 +1260,7 @@ impl DemandProducer {
         engine.prepare_namespace_scope(registrations);
         let refreshed = registrations
             .iter()
-            .map(|registration| registration.in_engine(engine, &self.syntax))
+            .map(|registration| registration.in_engine(engine, &self.request))
             .collect::<Result<Vec<_>, _>>()?;
         if std::env::var_os("HIRSEL_OPERATION_OWNER_TRACE").is_some() {
             let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
@@ -1276,7 +1268,7 @@ impl DemandProducer {
                 "OWNER VIEWS count={} registrations={} pool_available={}",
                 state.views.len(),
                 registrations.len(),
-                self.front.available_bytes()
+                self.request.free()
             ));
             for (generation, view) in state.views.iter().enumerate() {
                 if let Some(owner) = view.owner.upgrade() {
@@ -1292,8 +1284,7 @@ impl DemandProducer {
                 }
             }
         }
-        let namespace =
-            engine.capture_namespace(definitions, &refreshed, self.front.available_bytes())?;
+        let namespace = engine.capture_namespace(definitions, &refreshed, self.request.free())?;
         {
             let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
             let existing = state
@@ -1322,11 +1313,11 @@ impl DemandProducer {
             .unwrap_or_else(|e| e.into_inner())
             .current
             .upgrade();
-        let front = engine.front_body_queries_in_pool(
+        let front = engine.front_body_queries_in_request(
             &ready,
             namespace,
             self.weight,
-            self.front.clone(),
+            self.request.clone(),
             self.errors,
             previous.as_ref().map(|previous| &**previous.body_front()),
         )?;
@@ -1351,7 +1342,7 @@ impl DemandProducer {
             previous.as_deref(),
         )?;
         lower.bind_demand(self)?;
-        let charge = Self::take(&self.syntax, (3 * size_of::<DemandView>()) as u64)?;
+        let charge = Self::take(&self.request, (3 * size_of::<DemandView>()) as u64)?;
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         state.views.push(DemandView {
             owner: Arc::downgrade(&lower),
@@ -1452,10 +1443,7 @@ impl DemandProducer {
                         site,
                     };
                     let syntax = engine
-                        .register_front_instance(
-                            &request,
-                            Self::take(&self.syntax, self.syntax.available_bytes())?,
-                        )
+                        .register_front_instance(&request, &self.request)
                         .map_err(|failure| failure.error)?;
                     syntax.definition().clone()
                 } else {
@@ -1505,11 +1493,11 @@ impl DemandProducer {
                     .unwrap_or_else(|e| e.into_inner())
                     .commit(&lower);
 
-                let text = engine.front_registration_queries_in_pool(
+                let text = engine.front_registration_queries(
                     std::slice::from_ref(&selected),
                     lower,
                     self.weight,
-                    self.text.clone(),
+                    &self.request,
                     self.errors,
                 )?;
                 let definition = DefId::intern(&selected);
@@ -1525,7 +1513,7 @@ impl DemandProducer {
                             .tree::<DefId, (usize, hirsel_engine_admission::MemoryReservation)>(1);
                         state
                             .producing
-                            .insert(definition, (1, Self::take(&self.syntax, weight.bytes())?));
+                            .insert(definition, (1, Self::take(&self.request, weight.bytes())?));
                     }
                 }
                 let _production = Production {
@@ -1586,7 +1574,7 @@ impl DemandProducer {
                     .await
                     .map_err(|_| refused("demand cancelled at acceptance"))?;
                 let metadata = Self::take(
-                    &self.syntax,
+                    &self.request,
                     (3 * (size_of::<(DefId, Vec<hirsel_types::GenericArgument>)>()
                         + size_of::<hirsel_engine_admission::MemoryReservation>())
                         + size_of_val(arguments)) as u64,
@@ -1594,10 +1582,7 @@ impl DemandProducer {
                 let observed = output.reads().clone();
                 let output_capture = output.namespace().clone();
                 let mut engine = output_capture.assembly(&self.adapters)?;
-                let accepted = match engine.accept_front_registration(
-                    output,
-                    Self::take(&self.syntax, self.syntax.available_bytes())?,
-                ) {
+                let accepted = match engine.accept_front_registration(output, &self.request) {
                     Ok(accepted) => accepted,
                     Err(mut failure) => {
                         failure.error =
@@ -1710,32 +1695,17 @@ mod tests {
                 stack: 1 << 20,
             };
             let front = engine
-                .front_body_queries(
-                    &definitions,
-                    weight,
-                    budget.reserve(8 << 20).unwrap(),
-                    errors,
-                )
+                .front_body_queries(&definitions, weight, &budget, errors)
                 .unwrap();
             let initial = engine
-                .front_lower_queries(
-                    &definitions,
-                    front,
-                    weight,
-                    256,
-                    budget.reserve(8 << 20).unwrap(),
-                    errors,
-                )
+                .front_lower_queries(&definitions, front, weight, 256, &budget, errors)
                 .unwrap();
             let producer = DemandProducer::new(
                 &engine,
                 initial,
                 DemandAdmission {
                     carry: None,
-                    front: budget.reserve(8 << 20).unwrap(),
-                    lower: budget.reserve(8 << 20).unwrap(),
-                    text: budget.reserve(8 << 20).unwrap(),
-                    syntax: budget.reserve(8 << 20).unwrap(),
+                    request: budget.clone(),
                 },
                 weight,
                 256,
@@ -1797,12 +1767,12 @@ mod tests {
                 weak.upgrade().is_none(),
                 "the publication cache must release the predecessor producer"
             );
-            let retained = producer.front.available_bytes();
+            let retained = producer.request.free();
             let expected = lease.capture().retained_bytes();
             let read = lease.clone();
             drop(lease);
             assert_eq!(
-                producer.front.available_bytes(),
+                producer.request.free(),
                 retained,
                 "the held reader still pins its inputs"
             );
@@ -1812,7 +1782,7 @@ mod tests {
             );
             drop(read);
             assert_eq!(
-                producer.front.available_bytes() - retained,
+                producer.request.free() - retained,
                 expected,
                 "the final reader returns the predecessor capture charge exactly once"
             );

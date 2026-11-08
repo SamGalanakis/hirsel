@@ -1215,7 +1215,7 @@ impl QueryEngine {
         &mut self,
         plan: FrontCheckPlan,
         weight: MemoryWeight,
-        allowance: hirsel_engine_admission::MemoryReservation,
+        request: &Arc<hirsel_engine_admission::ProcessBudget>,
         errors: RuntimeErrors,
     ) -> Result<Arc<FrontCheckQueries>, QueryError> {
         let capture = plan.front.namespace().clone();
@@ -1342,15 +1342,15 @@ impl QueryEngine {
         let required = FrontCheckQueries::input_bytes(&definitions, files.len(), weight)
             .and_then(|required| required.checked_add(lint.as_ref().map_or(0, DeadArmLint::bytes)))
             .ok_or_else(refusal)?;
-        if required > allowance.bytes() {
-            return Err(QueryError::Operational(hirsel_types::OperationalFailure {
+        let allowance = request.reserve(required).map_err(|_| {
+            QueryError::Operational(hirsel_types::OperationalFailure {
                 operation: "ordered check admission".into(),
                 message: format!(
-                    "source Check requires {required} bytes, admitted {}",
-                    allowance.bytes()
+                    "source Check requires {required} bytes, request footprint has {}",
+                    request.free()
                 ),
-            }));
-        }
+            })
+        })?;
         let mut file_identity = Vec::new();
         if let Some(package) = &plan.lint_package {
             file_identity.extend(

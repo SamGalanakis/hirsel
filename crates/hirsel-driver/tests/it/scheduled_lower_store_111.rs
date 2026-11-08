@@ -159,12 +159,7 @@ fn check_lower_reuse(carry_across_stores: bool) {
                     };
                     let front = program
                         .engine
-                        .front_body_queries(
-                            &definitions,
-                            weight,
-                            budget.reserve(16 << 20).unwrap(),
-                            errors,
-                        )
+                        .front_body_queries(&definitions, weight, &budget, errors)
                         .unwrap();
                     let lower = program
                         .engine
@@ -173,7 +168,7 @@ fn check_lower_reuse(carry_across_stores: bool) {
                             front.clone(),
                             weight,
                             64,
-                            budget.reserve(32 << 20).unwrap(),
+                            &budget,
                             errors,
                         )
                         .unwrap();
@@ -452,23 +447,11 @@ fn check_live_lower_observations(live_only: bool) {
                 std::mem::take(&mut program.engine.sources).replace_owner(source_admission);
             let front = program
                 .engine
-                .front_body_queries(
-                    &definitions,
-                    weight,
-                    budget.reserve(16 << 20).unwrap(),
-                    errors,
-                )
+                .front_body_queries(&definitions, weight, &budget, errors)
                 .unwrap();
             let lower = program
                 .engine
-                .front_lower_queries(
-                    &definitions,
-                    front.clone(),
-                    weight,
-                    64,
-                    budget.reserve(32 << 20).unwrap(),
-                    errors,
-                )
+                .front_lower_queries(&definitions, front.clone(), weight, 64, &budget, errors)
                 .unwrap();
             runtime.register(FRONT_BODY_KIND, front.factory()).unwrap();
             runtime

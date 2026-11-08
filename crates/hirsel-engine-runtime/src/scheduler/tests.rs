@@ -126,7 +126,7 @@ struct AdmissionGate {
     release: Mutex<mpsc::Receiver<()>>,
 }
 struct LowerAdmission {
-    pool: Arc<hirsel_engine_admission::MemoryReservationPool>,
+    pool: Arc<hirsel_engine_admission::ProcessBudget>,
     gate: Option<Arc<AdmissionGate>>,
 }
 impl LocalQueryFactory for LowerAdmission {
@@ -147,7 +147,7 @@ impl LocalQueryFactory for LowerAdmission {
             errors(),
             move |reads| async move {
                 let held = if id == query(0) {
-                    Some(pool.take(6).ok_or(errors().resource)?)
+                    Some(pool.reserve(6).map_err(|_| errors().resource)?)
                 } else {
                     None
                 };
@@ -160,7 +160,7 @@ impl LocalQueryFactory for LowerAdmission {
                         .unwrap();
                 } else {
                     let admitted = loop {
-                        if let Some(admitted) = pool.take(6) {
+                        if let Ok(admitted) = pool.reserve(6) {
                             break admitted;
                         }
                         if !reads.evict_body().await {
@@ -186,13 +186,7 @@ fn lower_admission_waits_for_another_body_to_release_its_partition() {
             }
         }
     }
-    let total = hirsel_engine_admission::MemoryReservationPool::metadata_bytes() + 10;
-    let budget = hirsel_engine_admission::ProcessBudget::new(total);
-    let pool = Arc::new(
-        hirsel_engine_admission::MemoryReservationPool::new(budget.reserve(total).unwrap())
-            .ok()
-            .unwrap(),
-    );
+    let pool = hirsel_engine_admission::ProcessBudget::new(10);
     let (started, starting) = mpsc::channel();
     let (release, released) = mpsc::channel();
     let mut rt = runtime(2, 8 << 20);
@@ -219,13 +213,7 @@ fn lower_admission_waits_for_another_body_to_release_its_partition() {
 }
 #[test]
 fn lower_admission_refuses_when_its_own_body_is_the_only_holder() {
-    let total = hirsel_engine_admission::MemoryReservationPool::metadata_bytes() + 10;
-    let budget = hirsel_engine_admission::ProcessBudget::new(total);
-    let pool = Arc::new(
-        hirsel_engine_admission::MemoryReservationPool::new(budget.reserve(total).unwrap())
-            .ok()
-            .unwrap(),
-    );
+    let pool = hirsel_engine_admission::ProcessBudget::new(10);
     let mut rt = runtime(1, 4 << 20);
     rt.register_local(1, Arc::new(LowerAdmission { pool, gate: None }))
         .unwrap();

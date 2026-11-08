@@ -96,33 +96,15 @@ fn export_case_with_ownership(
             .unwrap();
             let front = program
                 .engine
-                .front_body_queries(
-                    &definitions,
-                    weight,
-                    budget.reserve(8 << 20).unwrap(),
-                    errors,
-                )
+                .front_body_queries(&definitions, weight, &budget, errors)
                 .unwrap();
             let lower = program
                 .engine
-                .front_lower_queries(
-                    &definitions,
-                    front.clone(),
-                    weight,
-                    32,
-                    budget.reserve(8 << 20).unwrap(),
-                    errors,
-                )
+                .front_lower_queries(&definitions, front.clone(), weight, 32, &budget, errors)
                 .unwrap();
             let growth = program
                 .engine
-                .front_growth_queries(
-                    &program.entry,
-                    front.clone(),
-                    weight,
-                    budget.reserve(8 << 20).unwrap(),
-                    errors,
-                )
+                .front_growth_queries(&program.entry, front.clone(), weight, &budget, errors)
                 .unwrap();
             let check = program
                 .engine
@@ -142,7 +124,7 @@ fn export_case_with_ownership(
                         lint_package: None,
                     },
                     weight,
-                    budget.reserve(8 << 20).unwrap(),
+                    &budget,
                     errors,
                 )
                 .unwrap();
@@ -213,7 +195,7 @@ fn export_case_with_ownership(
                         &program.entry,
                         native,
                         headers.unwrap(),
-                        budget.reserve(4 << 20).unwrap(),
+                        &budget,
                     )
                     .unwrap()
             } else {
@@ -223,12 +205,7 @@ fn export_case_with_ownership(
                 let header_ready = snapshot.header_ready(entry);
                 let export = program
                     .engine
-                    .front_deferred_proof_export(
-                        &program.entry,
-                        run,
-                        budget.reserve(4 << 20).unwrap(),
-                        budget.reserve(4 << 20).unwrap(),
-                    )
+                    .front_deferred_proof_export(&program.entry, run, &budget)
                     .unwrap();
                 assert_eq!(
                     snapshot.header_ready(entry),

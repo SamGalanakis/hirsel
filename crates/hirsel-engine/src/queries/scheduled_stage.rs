@@ -85,10 +85,9 @@ pub struct FrontStageQueries {
     anchors: Arc<crate::NativeRecordContext>,
     store: Arc<dyn ResultStore>,
     outcomes: Mutex<BTreeMap<ContentHash, Completed>>,
-    output_pool: hirsel_engine_admission::MemoryReservationPool,
+    output_pool: Arc<hirsel_engine_admission::ProcessBudget>,
     weight: MemoryWeight,
     errors: RuntimeErrors,
-    total: u64,
     _allowance: hirsel_engine_admission::MemoryReservation,
 }
 impl FrontStageQueries {
@@ -96,7 +95,6 @@ impl FrontStageQueries {
     pub fn input_bytes(definitions: &[DefPath]) -> u64 {
         let mut weight = hirsel_query_products::retained::MetadataWeight::default();
         weight.add(size_of::<Self>() + 2 * size_of::<usize>());
-        weight.add(hirsel_engine_admission::MemoryReservationPool::metadata_bytes() as usize);
         weight.tree::<ContentHash, Input>(definitions.len());
         weight.tree::<DefPath, QueryId>(definitions.len());
         for path in definitions {
@@ -112,7 +110,13 @@ impl FrontStageQueries {
         Arc::new(Factory(self.clone()))
     }
     pub fn retained_bytes(&self) -> u64 {
-        self.total - self.output_pool.available_bytes()
+        let outputs = self.outcomes.lock().unwrap_or_else(|e| e.into_inner());
+        self._allowance.bytes()
+            + outputs
+                .values()
+                .filter_map(|(_, data)| data._allowance.as_ref())
+                .map(hirsel_engine_admission::MemoryReservation::bytes)
+                .sum::<u64>()
     }
     pub fn outcome(self: &Arc<Self>, product: ProductRef) -> Option<FrontStageOutput> {
         let outcomes = self.outcomes.lock().unwrap_or_else(|e| e.into_inner());
@@ -216,7 +220,11 @@ impl FrontStageQueries {
                     .ok_or(self.errors.resource)?,
             )
             .ok_or(self.errors.resource)?;
-        data._allowance = Some(self.output_pool.take(charge).ok_or(self.errors.resource)?);
+        data._allowance = Some(
+            self.output_pool
+                .reserve(charge)
+                .map_err(|_| self.errors.resource)?,
+        );
         let failed = data.result.is_err();
         let data = Arc::new(data);
         let action = hirsel_artifact_store::Action(ContentHash::of_parts(
@@ -392,17 +400,14 @@ impl FrontStageQueries {
             })
         };
         let required = Self::input_bytes(definitions);
-        let total = allowance.bytes();
-        let remaining = total.checked_sub(required).ok_or_else(refused)?;
-        let output = allowance
-            .split(
-                remaining
-                    .checked_add(hirsel_engine_admission::MemoryReservationPool::metadata_bytes())
-                    .ok_or_else(refused)?,
-            )
+        let remaining = allowance
+            .bytes()
+            .checked_sub(required)
             .ok_or_else(refused)?;
-        let output_pool =
-            hirsel_engine_admission::MemoryReservationPool::new(output).map_err(|_| refused())?;
+        // Outputs are charged to the request when admitted; keep only the
+        // fixed inputs of this grant.
+        drop(allowance.split(remaining).ok_or_else(refused)?);
+        let output_pool = allowance.budget().clone();
         let mut inputs = BTreeMap::new();
         let mut ids = BTreeMap::new();
         for owner in definitions {
@@ -443,7 +448,6 @@ impl FrontStageQueries {
             output_pool,
             weight,
             errors,
-            total,
             _allowance: allowance,
         }))
     }

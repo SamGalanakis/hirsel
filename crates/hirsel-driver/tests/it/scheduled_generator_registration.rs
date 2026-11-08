@@ -61,18 +61,11 @@ fn admitted_generator_text_waits_on_lower_with_one_worker_and_keeps_detached_evi
             .unwrap();
             let front = program
                 .engine
-                .front_body_queries(&ordinary, weight, budget.reserve(16 << 20).unwrap(), errors)
+                .front_body_queries(&ordinary, weight, &budget, errors)
                 .unwrap();
             let lower = program
                 .engine
-                .front_lower_queries(
-                    &ordinary,
-                    front.clone(),
-                    weight,
-                    32,
-                    budget.reserve(16 << 20).unwrap(),
-                    errors,
-                )
+                .front_lower_queries(&ordinary, front.clone(), weight, 32, &budget, errors)
                 .unwrap();
             let required = FrontRegistrationQueries::input_bytes(&generators);
             assert!(
@@ -82,20 +75,14 @@ fn admitted_generator_text_waits_on_lower_with_one_worker_and_keeps_detached_evi
                         &generators,
                         lower.clone(),
                         weight,
-                        budget.reserve(required - 1).unwrap(),
+                        &hirsel_engine_admission::ProcessBudget::new(required - 1),
                         errors
                     )
                     .is_err()
             );
             let registration = program
                 .engine
-                .front_registration_queries(
-                    &generators,
-                    lower.clone(),
-                    weight,
-                    budget.reserve(16 << 20).unwrap(),
-                    errors,
-                )
+                .front_registration_queries(&generators, lower.clone(), weight, &budget, errors)
                 .unwrap();
             runtime.register(FRONT_BODY_KIND, front.factory()).unwrap();
             runtime
@@ -204,18 +191,11 @@ fn generator_refusal_control(zero_depth: bool) {
             .unwrap();
             let front = program
                 .engine
-                .front_body_queries(&ordinary, weight, budget.reserve(16 << 20).unwrap(), errors)
+                .front_body_queries(&ordinary, weight, &budget, errors)
                 .unwrap();
             let lower = program
                 .engine
-                .front_lower_queries(
-                    &ordinary,
-                    front.clone(),
-                    weight,
-                    32,
-                    budget.reserve(16 << 20).unwrap(),
-                    errors,
-                )
+                .front_lower_queries(&ordinary, front.clone(), weight, 32, &budget, errors)
                 .unwrap();
             let registration = program
                 .engine
@@ -223,7 +203,7 @@ fn generator_refusal_control(zero_depth: bool) {
                     &[program.entry.clone()],
                     lower.clone(),
                     weight,
-                    budget.reserve(16 << 20).unwrap(),
+                    &budget,
                     errors,
                 )
                 .unwrap();
@@ -334,18 +314,11 @@ fn accepted_generator_view_checks_and_lowers_the_literal_without_changing_raw_so
             .unwrap();
             let front = program
                 .engine
-                .front_body_queries(&ordinary, weight, budget.reserve(16 << 20).unwrap(), errors)
+                .front_body_queries(&ordinary, weight, &budget, errors)
                 .unwrap();
             let lower = program
                 .engine
-                .front_lower_queries(
-                    &ordinary,
-                    front.clone(),
-                    weight,
-                    32,
-                    budget.reserve(16 << 20).unwrap(),
-                    errors,
-                )
+                .front_lower_queries(&ordinary, front.clone(), weight, 32, &budget, errors)
                 .unwrap();
             let required = FrontRegistrationQueries::input_bytes(&generators);
             assert!(
@@ -355,20 +328,14 @@ fn accepted_generator_view_checks_and_lowers_the_literal_without_changing_raw_so
                         &generators,
                         lower.clone(),
                         weight,
-                        budget.reserve(required - 1).unwrap(),
+                        &hirsel_engine_admission::ProcessBudget::new(required - 1),
                         errors
                     )
                     .is_err()
             );
             let registration = program
                 .engine
-                .front_registration_queries(
-                    &generators,
-                    lower.clone(),
-                    weight,
-                    budget.reserve(16 << 20).unwrap(),
-                    errors,
-                )
+                .front_registration_queries(&generators, lower.clone(), weight, &budget, errors)
                 .unwrap();
             runtime.register(FRONT_BODY_KIND, front.factory()).unwrap();
             runtime
@@ -397,7 +364,7 @@ fn accepted_generator_view_checks_and_lowers_the_literal_without_changing_raw_so
             let raw = program.engine.definition_items(&program.entry).unwrap()[0].clone();
             let accepted = program
                 .engine
-                .accept_front_registration(output.clone(), budget.reserve(16 << 20).unwrap())
+                .accept_front_registration(output.clone(), &budget)
                 .unwrap();
             assert_eq!(
                 program.engine.definition_items(&program.entry).unwrap()[0].text_hash,
@@ -407,29 +374,16 @@ fn accepted_generator_view_checks_and_lowers_the_literal_without_changing_raw_so
             assert!(
                 program
                     .engine
-                    .front_body_queries(&all, weight, budget.reserve(16 << 20).unwrap(), errors)
+                    .front_body_queries(&all, weight, &budget, errors)
                     .is_err()
             );
             let accepted_front = program
                 .engine
-                .front_body_queries_with_registrations(
-                    &all,
-                    &[accepted],
-                    weight,
-                    budget.reserve(16 << 20).unwrap(),
-                    errors,
-                )
+                .front_body_queries_with_registrations(&all, &[accepted], weight, &budget, errors)
                 .unwrap();
             let accepted_lower = program
                 .engine
-                .front_lower_queries(
-                    &all,
-                    accepted_front.clone(),
-                    weight,
-                    64,
-                    budget.reserve(16 << 20).unwrap(),
-                    errors,
-                )
+                .front_lower_queries(&all, accepted_front.clone(), weight, 64, &budget, errors)
                 .unwrap();
             let mut checked_runtime = AdmittedRuntime::new(
                 hirsel_intern::jobs::Jobs::new(jobs),
@@ -544,18 +498,11 @@ pub(super) fn accepted_output_control_with(
     .unwrap();
     let front = program
         .engine
-        .front_body_queries(&ordinary, weight, budget.reserve(16 << 20).unwrap(), errors)
+        .front_body_queries(&ordinary, weight, &budget, errors)
         .unwrap();
     let lower = program
         .engine
-        .front_lower_queries(
-            &ordinary,
-            front.clone(),
-            weight,
-            32,
-            budget.reserve(16 << 20).unwrap(),
-            errors,
-        )
+        .front_lower_queries(&ordinary, front.clone(), weight, 32, &budget, errors)
         .unwrap();
     let registration = program
         .engine
@@ -563,7 +510,7 @@ pub(super) fn accepted_output_control_with(
             &[program.entry.clone()],
             lower.clone(),
             weight,
-            budget.reserve(16 << 20).unwrap(),
+            &budget,
             errors,
         )
         .unwrap();
@@ -607,7 +554,10 @@ fn accepted_generator_view_refuses_short_grants_without_publishing_sources_and_k
                 assert!(
                     program
                         .engine
-                        .accept_front_registration(output.clone(), budget.reserve(0).unwrap())
+                        .accept_front_registration(
+                            output.clone(),
+                            &hirsel_engine_admission::ProcessBudget::new(0)
+                        )
                         .is_err()
                 );
                 assert_eq!(budget.reserved(), reserved);
@@ -615,7 +565,7 @@ fn accepted_generator_view_refuses_short_grants_without_publishing_sources_and_k
                 assert!(program.engine.generated_source(&program.entry).is_none());
                 let accepted = program
                     .engine
-                    .accept_front_registration(output.clone(), budget.reserve(16 << 20).unwrap())
+                    .accept_front_registration(output.clone(), &budget)
                     .unwrap();
                 assert!(accepted.retained_bytes() > 0);
                 assert!(accepted.retained_bytes() <= 16 << 20);
@@ -654,7 +604,7 @@ fn accepted_edit_control(own: bool) {
             accepted_output_control(jobs, |program, budget, output| {
                 let accepted = program
                     .engine
-                    .accept_front_registration(output.clone(), budget.reserve(16 << 20).unwrap())
+                    .accept_front_registration(output.clone(), &budget)
                     .unwrap();
                 let primary = program
                     .engine
@@ -682,7 +632,7 @@ fn accepted_edit_control(own: bool) {
                         &paths,
                         &[accepted],
                         weight,
-                        budget.reserve(16 << 20).unwrap(),
+                        &budget,
                         crate::scheduled_front::errors(),
                     )
                     .err()
@@ -703,7 +653,7 @@ fn accepted_edit_control(own: bool) {
                 assert!(
                     program
                         .engine
-                        .accept_front_registration(output, budget.reserve(16 << 20).unwrap())
+                        .accept_front_registration(output, &budget)
                         .is_err()
                 );
             });
@@ -719,7 +669,7 @@ fn accepted_generator_view_accepts_the_exact_grant_and_refuses_n_minus_one() {
             accepted_output_control(jobs, |program, budget, output| {
                 let accepted = program
                     .engine
-                    .accept_front_registration(output, budget.reserve(16 << 20).unwrap())
+                    .accept_front_registration(output, &budget)
                     .unwrap();
                 required = accepted.retained_bytes();
             });
@@ -728,7 +678,10 @@ fn accepted_generator_view_accepts_the_exact_grant_and_refuses_n_minus_one() {
                 assert!(
                     program
                         .engine
-                        .accept_front_registration(output, budget.reserve(required - 1).unwrap())
+                        .accept_front_registration(
+                            output,
+                            &hirsel_engine_admission::ProcessBudget::new(required - 1)
+                        )
                         .is_err()
                 );
                 assert_eq!(program.engine.sources.retained_payload_bytes(), before);
@@ -737,7 +690,10 @@ fn accepted_generator_view_accepts_the_exact_grant_and_refuses_n_minus_one() {
             accepted_output_control(jobs, |program, budget, output| {
                 let accepted = program
                     .engine
-                    .accept_front_registration(output, budget.reserve(required).unwrap())
+                    .accept_front_registration(
+                        output,
+                        &hirsel_engine_admission::ProcessBudget::new(required),
+                    )
                     .unwrap();
                 assert_eq!(accepted.retained_bytes(), required);
             });
@@ -760,7 +716,7 @@ fn accepted_generator_view_rejects_verify_off_text_when_validation_is_required()
                     assert!(
                         program
                             .engine
-                            .accept_front_registration(output, budget.reserve(16 << 20).unwrap())
+                            .accept_front_registration(output, &budget)
                             .is_err()
                     );
                     assert_eq!(program.engine.sources.retained_payload_bytes(), before);
@@ -785,7 +741,7 @@ fn accepted_generator_view_rejects_a_literal_header_that_differs_from_its_declar
                     let before = program.engine.sources.retained_payload_bytes();
                     let error = program
                         .engine
-                        .accept_front_registration(output, budget.reserve(16 << 20).unwrap())
+                        .accept_front_registration(output, &budget)
                         .err()
                         .expect("literal type differs");
                     let hirsel_engine::QueryError::Diagnostics(diagnostics) = error.error else {
@@ -821,10 +777,7 @@ fn rejected_generator_header_retains_diagnostic_sources_without_namespace_public
                     let producer_bytes = budget.reserved();
                     let failure = program
                         .engine
-                        .accept_front_registration(
-                            output.clone(),
-                            budget.reserve(16 << 20).unwrap(),
-                        )
+                        .accept_front_registration(output.clone(), &budget)
                         .err()
                         .expect("header rejection");
                     let hirsel_engine::QueryError::Diagnostics(diagnostics) = &failure.error else {
@@ -872,7 +825,7 @@ fn accepted_generator_view_releases_unused_syntax_grant_and_keeps_clone_owned_by
                 let before = budget.reserved();
                 let accepted = program
                     .engine
-                    .accept_front_registration(output, budget.reserve(16 << 20).unwrap())
+                    .accept_front_registration(output, &budget)
                     .unwrap();
                 let retained = accepted.retained_bytes();
                 assert!(retained > 0 && retained < 16 << 20);
@@ -909,337 +862,6 @@ fn accepted_generator_view_releases_unused_syntax_grant_and_keeps_clone_owned_by
 }
 
 #[test]
-fn generator_bootstrap_finishes_before_final_admitted_check_and_preserves_its_scalar_result() {
-    use hirsel_engine::*;
-    use hirsel_engine_runtime::*;
-    use hirsel_engine_store::MemStore;
-
-    use hirsel_query_products::reads::ReadKey;
-    use hirsel_query_products::{LoweringPolicy, QueryKind};
-
-    use std::sync::Arc;
-    with_compiler_stack(|| {
-        let directory = tempfile::tempdir().unwrap();
-        let manifest = directory.path().join("hirsel.json");
-        std::fs::write(directory.path().join("main.hir"), ACCEPTED_SOURCE).unwrap();
-        std::fs::write(&manifest, r#"{"schema":1,"package":{"name":"bootstrap_front","version":"1"},"sources":[{"path":"main.hir","module":[]}],"dependencies":[],"entry":{"module":[],"name":"main"}}"#).unwrap();
-        for jobs in [1, 2] {
-            let compiler = COMPILER
-                .with_config(CompileConfig {
-                    store: Arc::new(MemStore::default()),
-                    jobs: hirsel_intern::jobs::Jobs::new(jobs),
-                    hold_bytes: 0,
-                    ..Default::default()
-                })
-                .with_owned_engines();
-            let expected = compiler
-                .load_program(&manifest)
-                .unwrap()
-                .check(LoweringPolicy::Comptime)
-                .unwrap();
-            let mut program = compiler.load_program(&manifest).unwrap();
-            let definitions = program.engine.front_source_roots();
-            let generators = program.engine.front_generator_roots(&definitions).unwrap();
-            assert_eq!(generators, vec![program.entry.clone()]);
-            let budget = hirsel_engine_admission::ProcessBudget::new(1 << 30);
-            let errors = crate::scheduled_front::errors();
-            let weight = MemoryWeight {
-                retained: 2 << 20,
-                scratch: 8 << 20,
-                stack: 0,
-            };
-            let required =
-                FrontRegistrationBootstrap::input_bytes(&definitions, generators.len()).unwrap();
-            let admission = |metadata| FrontRegistrationBootstrapAdmission {
-                jobs: hirsel_intern::jobs::Jobs::new(jobs),
-                weight,
-                max_reads: 64,
-                runtime: budget.reserve(512 << 20).unwrap(),
-                front: budget.reserve(16 << 20).unwrap(),
-                lower: budget.reserve(16 << 20).unwrap(),
-                text: budget.reserve(16 << 20).unwrap(),
-                syntax: vec![budget.reserve(16 << 20).unwrap()],
-                metadata: budget.reserve(metadata).unwrap(),
-            };
-            let before = program.engine.work_stats();
-            assert!(
-                program
-                    .engine
-                    .bootstrap_front_registrations(
-                        &definitions,
-                        &generators,
-                        admission(required - 1),
-                        errors
-                    )
-                    .is_err()
-            );
-            assert_eq!(program.engine.work_stats(), before);
-            assert_eq!(budget.reserved(), 0);
-            let bootstrap = program
-                .engine
-                .bootstrap_front_registrations(
-                    &definitions,
-                    &generators,
-                    admission(required),
-                    errors,
-                )
-                .unwrap();
-            assert_eq!(bootstrap.stats().active, 0);
-            assert_eq!(bootstrap.registrations().len(), 1);
-            assert_eq!(
-                bootstrap.query_capacity(),
-                FrontRegistrationBootstrap::required_queries(
-                    definitions.len() - generators.len(),
-                    generators.len()
-                )
-                .unwrap()
-            );
-            assert!(
-                budget.reserved() < 512 << 20,
-                "bootstrap runtime grant releases before final construction"
-            );
-            let front = program
-                .engine
-                .front_body_queries_with_registrations(
-                    &definitions,
-                    bootstrap.registrations(),
-                    weight,
-                    budget.reserve(16 << 20).unwrap(),
-                    errors,
-                )
-                .unwrap();
-            let lower = program
-                .engine
-                .front_lower_queries(
-                    &definitions,
-                    front.clone(),
-                    weight,
-                    64,
-                    budget.reserve(16 << 20).unwrap(),
-                    errors,
-                )
-                .unwrap();
-            let growth = program
-                .engine
-                .front_growth_queries(
-                    &program.entry,
-                    front.clone(),
-                    weight,
-                    budget.reserve(16 << 20).unwrap(),
-                    errors,
-                )
-                .unwrap();
-            let check = program
-                .engine
-                .front_check_queries(
-                    FrontCheckPlan {
-                        files: program
-                            .files
-                            .iter()
-                            .map(|(file, context)| {
-                                (*file, context.clone(), LoweringPolicy::Comptime)
-                            })
-                            .collect(),
-                        front: front.clone(),
-                        lower: lower.clone(),
-                        growth: growth.clone(),
-                        unsafe_ffi: program.unsafe_ffi.clone(),
-                        lint_package: None,
-                    },
-                    weight,
-                    budget.reserve(16 << 20).unwrap(),
-                    errors,
-                )
-                .unwrap();
-            let capacity = definitions.len() * 4 + 8;
-            let mut runtime = AdmittedRuntime::with_query_capacity(
-                hirsel_intern::jobs::Jobs::new(jobs),
-                budget.reserve(512 << 20).unwrap(),
-                errors,
-                capacity,
-            )
-            .unwrap();
-            runtime.register(FRONT_BODY_KIND, front.factory()).unwrap();
-            runtime
-                .register_local(FRONT_LOWER_KIND, lower.factory())
-                .unwrap();
-            runtime
-                .register_local(FRONT_EVALUATE_KIND, lower.factory())
-                .unwrap();
-            runtime
-                .register(FRONT_GROWTH_KIND, growth.factory())
-                .unwrap();
-            runtime.register(FRONT_CHECK_KIND, check.factory()).unwrap();
-            let request = runtime.request(&[check.query()]);
-            let complete = runtime
-                .wait(request)
-                .unwrap_or_else(|reference| panic!("final check {:?}", check.failure(reference)));
-            let output = check.outcome((complete[0]).clone()).unwrap();
-            drop(complete);
-            assert_eq!(output.checked.completion, expected.completion);
-            assert_eq!(output.checked.diagnostics, expected.diagnostics);
-            runtime.shutdown();
-            drop(runtime);
-            drop(output);
-            drop(check);
-            drop(growth);
-            drop(lower);
-            drop(front);
-            drop(bootstrap);
-            drop(program);
-            assert_eq!(budget.reserved(), 0);
-        }
-    });
-}
-
-#[test]
-fn generator_bootstrap_preserves_typed_failure_and_only_the_accepted_source_prefix() {
-    bootstrap_refusal_control(false, false);
-}
-
-#[test]
-fn generator_bootstrap_zero_depth_refuses_before_any_source_publication() {
-    bootstrap_refusal_control(true, false);
-}
-
-#[test]
-fn generator_bootstrap_counts_spare_syntax_grants_before_engine_work() {
-    bootstrap_refusal_control(false, true);
-}
-
-fn bootstrap_refusal_control(zero_depth: bool, spare_grants: bool) {
-    use hirsel_engine::*;
-    use hirsel_engine_runtime::*;
-    use hirsel_engine_store::MemStore;
-
-    use hirsel_query_products::reads::ReadKey;
-    use hirsel_query_products::{LoweringPolicy, QueryKind};
-
-    use std::sync::Arc;
-    with_compiler_stack(|| {
-        let directory = tempfile::tempdir().unwrap();
-        let manifest = directory.path().join("hirsel.json");
-        std::fs::write(directory.path().join("main.hir"),
-            "fn good()->Result[Body[fn()->u8 uses {}],String]{Ok(codegen.body(\"fn()->u8 uses {} {7u8}\"))}\nfn fail()->Result[Body[fn()->u8 uses {}],String]{Error(\"bootstrap stop\")}\nfn later()->Result[Body[fn()->u8 uses {}],String]{Error(\"must stay idle\")}\npub fn a_ok()->u8 uses {} = comptime good()\npub fn b_fail()->u8 uses {} = comptime fail()\npub fn c_later()->u8 uses {} = comptime later()\n").unwrap();
-        std::fs::write(&manifest, r#"{"schema":1,"package":{"name":"bootstrap_refusal","version":"1"},"sources":[{"path":"main.hir","module":[]}],"dependencies":[],"entry":{"module":[],"name":"a_ok"}}"#).unwrap();
-        for jobs in [1, 2] {
-            let compiler = COMPILER
-                .with_config(CompileConfig {
-                    store: Arc::new(MemStore::default()),
-                    jobs: hirsel_intern::jobs::Jobs::new(jobs),
-                    hold_bytes: 0,
-                    ..Default::default()
-                })
-                .with_comptime_limits(ComptimeLimits {
-                    call_depth: if zero_depth { 0 } else { usize::MAX },
-                    ..Default::default()
-                })
-                .with_owned_engines();
-            let mut program = compiler.load_program(&manifest).unwrap();
-            let definitions = program.engine.front_source_roots();
-            let mut generators = program.engine.front_generator_roots(&definitions).unwrap();
-            generators.sort_by(|a, b| a.0.name.cmp(&b.0.name));
-            assert_eq!(
-                generators
-                    .iter()
-                    .map(|p| p.0.name.as_str())
-                    .collect::<Vec<_>>(),
-                ["a_ok", "b_fail", "c_later"]
-            );
-            let budget = hirsel_engine_admission::ProcessBudget::new(1 << 30);
-            let metadata =
-                FrontRegistrationBootstrap::input_bytes(&definitions, generators.len()).unwrap();
-            let mut syntax = Vec::with_capacity(if spare_grants { 32 } else { generators.len() });
-            syntax.extend(generators.iter().map(|_| budget.reserve(16 << 20).unwrap()));
-            let before = program.engine.work_stats();
-            let failure = program
-                .engine
-                .bootstrap_front_registrations(
-                    &definitions,
-                    &generators,
-                    FrontRegistrationBootstrapAdmission {
-                        jobs: hirsel_intern::jobs::Jobs::new(jobs),
-                        weight: MemoryWeight {
-                            retained: 2 << 20,
-                            scratch: 8 << 20,
-                            stack: 0,
-                        },
-                        max_reads: 64,
-                        runtime: budget.reserve(512 << 20).unwrap(),
-                        front: budget.reserve(16 << 20).unwrap(),
-                        lower: budget.reserve(16 << 20).unwrap(),
-                        text: budget.reserve(16 << 20).unwrap(),
-                        syntax,
-                        metadata: budget.reserve(metadata).unwrap(),
-                    },
-                    crate::scheduled_front::errors(),
-                )
-                .err()
-                .expect("bootstrap refusal");
-            if spare_grants {
-                assert!(
-                    matches!(&failure, FrontRegistrationBootstrapError::Admission(QueryError::Operational(error)) if error.operation == "generator bootstrap admission")
-                );
-                assert_eq!(program.engine.work_stats(), before);
-                assert_eq!(budget.reserved(), 0);
-            } else {
-                let FrontRegistrationBootstrapError::Runtime {
-                    reference,
-                    error: Some(error),
-                    owner,
-                    sources,
-                } = &failure
-                else {
-                    panic!("{failure:?}")
-                };
-                let output = owner
-                    .failed(*reference)
-                    .expect("typed failure product survives runtime shutdown");
-                assert_eq!(
-                    output.definition(),
-                    &generators[if zero_depth { 0 } else { 1 }]
-                );
-                assert!(!output.has_execution_acceptance());
-                match error {
-                    QueryError::Operational(error) if zero_depth => {
-                        assert_eq!(error.operation, "compile-time tooling limit");
-                        assert!(error.message.contains("CallDepth"));
-                    }
-                    QueryError::Diagnostics(diagnostics) if !zero_depth => {
-                        assert_eq!(diagnostics.len(), 1);
-                        assert_eq!(diagnostics[0].rule.as_str(), "CT-1");
-                        assert!(
-                            diagnostics[0]
-                                .notes
-                                .iter()
-                                .any(|note| note == "bootstrap stop")
-                        );
-                        assert!(sources.slice(diagnostics[0].primary).is_some());
-                    }
-                    error => panic!("unexpected bootstrap failure: {error:?}"),
-                }
-                assert!(
-                    budget.reserved() < 512 << 20,
-                    "failed bootstrap releases its runtime partition too"
-                );
-            }
-            assert_eq!(
-                program.engine.generated_source(&generators[0]).is_some(),
-                !zero_depth && !spare_grants
-            );
-            assert!(program.engine.generated_source(&generators[1]).is_none());
-            assert!(program.engine.generated_source(&generators[2]).is_none());
-            drop(program);
-            if !spare_grants {
-                assert!(budget.reserved() > 0, "detached failure owns evidence");
-            }
-            drop(failure);
-            assert_eq!(budget.reserved(), 0);
-        }
-    });
-}
-
-#[test]
 fn accepted_generated_native_catalogue_preserves_raw_source_and_actual_lower_authority() {
     use hirsel_engine::*;
     use hirsel_engine_runtime::*;
@@ -1257,7 +879,7 @@ fn accepted_generated_native_catalogue_preserves_raw_source_and_actual_lower_aut
                     .value;
                 let accepted = program
                     .engine
-                    .accept_front_registration(output, budget.reserve(16 << 20).unwrap())
+                    .accept_front_registration(output, &budget)
                     .unwrap();
                 let definitions = program.engine.front_source_roots();
                 let weight = MemoryWeight {
@@ -1272,20 +894,13 @@ fn accepted_generated_native_catalogue_preserves_raw_source_and_actual_lower_aut
                         &definitions,
                         &[accepted],
                         weight,
-                        budget.reserve(16 << 20).unwrap(),
+                        &budget,
                         errors,
                     )
                     .unwrap();
                 let lower = program
                     .engine
-                    .front_lower_queries(
-                        &definitions,
-                        front.clone(),
-                        weight,
-                        64,
-                        budget.reserve(16 << 20).unwrap(),
-                        errors,
-                    )
+                    .front_lower_queries(&definitions, front.clone(), weight, 64, &budget, errors)
                     .unwrap();
                 let native = program
                     .engine
@@ -1363,7 +978,7 @@ fn accepted_generated_native_inputs_bind_current_views_and_exact_metadata_grants
             accepted_output_control(jobs, |program, budget, output| {
                 let accepted = program
                     .engine
-                    .accept_front_registration(output.clone(), budget.reserve(16 << 20).unwrap())
+                    .accept_front_registration(output.clone(), &budget)
                     .unwrap();
                 let definitions = program.engine.front_source_roots();
                 let weight = MemoryWeight {
@@ -1378,20 +993,13 @@ fn accepted_generated_native_inputs_bind_current_views_and_exact_metadata_grants
                         &definitions,
                         &[accepted.clone()],
                         weight,
-                        budget.reserve(16 << 20).unwrap(),
+                        &budget,
                         errors,
                     )
                     .unwrap();
                 let lower = program
                     .engine
-                    .front_lower_queries(
-                        &definitions,
-                        front.clone(),
-                        weight,
-                        64,
-                        budget.reserve(16 << 20).unwrap(),
-                        errors,
-                    )
+                    .front_lower_queries(&definitions, front.clone(), weight, 64, &budget, errors)
                     .unwrap();
                 let before = program.engine.work_stats();
                 assert!(
@@ -1462,7 +1070,7 @@ fn accepted_generated_native_inputs_bind_current_views_and_exact_metadata_grants
                 );
                 let other = program
                     .engine
-                    .accept_front_registration(output, budget.reserve(16 << 20).unwrap())
+                    .accept_front_registration(output, &budget)
                     .unwrap();
                 let before = program.engine.work_stats();
                 let other_namespace = program
@@ -1571,7 +1179,7 @@ fn namespace_capture_keeps_its_admitted_memory_after_front_release() {
         accepted_output_control(1, |program, budget, output| {
             let accepted = program
                 .engine
-                .accept_front_registration(output, budget.reserve(16 << 20).unwrap())
+                .accept_front_registration(output, &budget)
                 .unwrap();
             let definitions = program.engine.front_source_roots();
             let front = program
@@ -1584,7 +1192,7 @@ fn namespace_capture_keeps_its_admitted_memory_after_front_release() {
                         scratch: 8 << 20,
                         stack: 0,
                     },
-                    budget.reserve(16 << 20).unwrap(),
+                    &budget,
                     crate::scheduled_front::errors(),
                 )
                 .unwrap();
@@ -1618,7 +1226,7 @@ fn captured_check_refuses_an_edited_written_file_before_publication() {
         accepted_output_control(1, |program, budget, output| {
             let accepted = program
                 .engine
-                .accept_front_registration(output, budget.reserve(16 << 20).unwrap())
+                .accept_front_registration(output, &budget)
                 .unwrap();
             let definitions = program.engine.front_source_roots();
             let weight = MemoryWeight {
@@ -1633,30 +1241,17 @@ fn captured_check_refuses_an_edited_written_file_before_publication() {
                     &definitions,
                     &[accepted],
                     weight,
-                    budget.reserve(16 << 20).unwrap(),
+                    &budget,
                     errors,
                 )
                 .unwrap();
             let lower = program
                 .engine
-                .front_lower_queries(
-                    &definitions,
-                    front.clone(),
-                    weight,
-                    64,
-                    budget.reserve(16 << 20).unwrap(),
-                    errors,
-                )
+                .front_lower_queries(&definitions, front.clone(), weight, 64, &budget, errors)
                 .unwrap();
             let growth = program
                 .engine
-                .front_growth_queries(
-                    &program.entry,
-                    front.clone(),
-                    weight,
-                    budget.reserve(16 << 20).unwrap(),
-                    errors,
-                )
+                .front_growth_queries(&program.entry, front.clone(), weight, &budget, errors)
                 .unwrap();
             let primary = program
                 .engine
@@ -1689,7 +1284,7 @@ fn captured_check_refuses_an_edited_written_file_before_publication() {
                         lint_package: None,
                     },
                     weight,
-                    budget.reserve(16 << 20).unwrap(),
+                    &budget,
                     errors,
                 )
                 .err()

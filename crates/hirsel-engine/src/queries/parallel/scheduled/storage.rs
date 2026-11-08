@@ -31,7 +31,12 @@ impl Outcomes {
     fn values(&self) -> impl Iterator<Item = &Arc<Outcome>> {
         self.values.values()
     }
-    fn insert(&mut self, key: Key, outcome: Arc<Outcome>, outputs: &OutputPartition) -> Option<()> {
+    fn insert(
+        &mut self,
+        key: Key,
+        outcome: Arc<Outcome>,
+        outputs: &Arc<hirsel_engine_admission::ProcessBudget>,
+    ) -> Option<()> {
         let len = self
             .values
             .len()
@@ -39,7 +44,7 @@ impl Outcomes {
         let mut weight = hirsel_query_products::retained::MetadataWeight::default();
         weight.tree::<Key, Arc<Outcome>>(len);
         let current = self.directory.as_ref().map_or(0, |grant| grant.bytes());
-        let extra = outputs.pool.take(weight.bytes().checked_sub(current)?)?;
+        let extra = outputs.reserve(weight.bytes().checked_sub(current)?).ok()?;
         if let Some(directory) = &mut self.directory {
             directory.join(extra).ok()?;
         } else {
@@ -56,7 +61,7 @@ pub struct FrontStorageQueries {
     records: crate::NativeRecords,
     weight: MemoryWeight,
     errors: RuntimeErrors,
-    outputs: Arc<OutputPartition>,
+    outputs: Arc<hirsel_engine_admission::ProcessBudget>,
     executions: std::sync::atomic::AtomicU64,
     _allowance: hirsel_engine_admission::MemoryReservation,
 }
@@ -322,8 +327,8 @@ impl StorageTask {
         let reservation = Arc::new(
             owner
                 .outputs
-                .pool
-                .take(weight.bytes)
+                .reserve(weight.bytes)
+                .ok()
                 .ok_or(owner.errors.resource)?,
         );
         let result = match result {
@@ -395,15 +400,15 @@ impl QueryEngine {
         &mut self,
         front: Arc<FrontBodyQueries>,
         weight: MemoryWeight,
-        allowance: impl Into<ProducerAdmission>,
+        request: &Arc<hirsel_engine_admission::ProcessBudget>,
         errors: RuntimeErrors,
     ) -> Result<Arc<FrontStorageQueries>, QueryError> {
         let inventory =
             FrontStorageQueries::input_bytes(&front).ok_or(QueryError::NotImplemented)?;
-        let (allowance, outputs) = allowance
-            .into()
-            .partition(inventory)
-            .ok_or(QueryError::NotImplemented)?;
+        let allowance = request
+            .reserve(inventory)
+            .map_err(|_| QueryError::NotImplemented)?;
+        let outputs = request.clone();
         let source = front.stage_source();
         Ok(Arc::new(FrontStorageQueries {
             front,

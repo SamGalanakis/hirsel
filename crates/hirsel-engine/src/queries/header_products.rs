@@ -48,18 +48,9 @@ enum HeaderCharge {
     /// Lent by a live Front partition; evictable while unpinned.
     Front(FrontCharge),
 }
-/// A charge a Front partition lent. Dropping it returns the bytes to the
-/// partition's grant and the reservation to its allowance, exactly once.
+/// A charge on a Front source's request footprint, released on drop.
 struct FrontCharge {
-    credit: Arc<std::sync::Mutex<u64>>,
-    bytes: u64,
-    #[expect(dead_code, reason = "held for its drop")]
     allowance: hirsel_engine_admission::MemoryReservation,
-}
-impl Drop for FrontCharge {
-    fn drop(&mut self) {
-        *self.credit.lock().unwrap_or_else(|e| e.into_inner()) += self.bytes;
-    }
 }
 /// One admitted payload, shared by its row, entry and raw signature readers.
 #[derive(Clone)]
@@ -76,7 +67,7 @@ impl Charge {
             return 0;
         };
         match &*charge.lock().unwrap_or_else(|e| e.into_inner()) {
-            HeaderCharge::Front(charge) => charge.bytes,
+            HeaderCharge::Front(charge) => charge.allowance.bytes(),
             _ => 0,
         }
     }
@@ -149,7 +140,6 @@ type ValidationCaches = Arc<std::sync::Mutex<Vec<Weak<crate::snapshot::Signature
 #[derive(Clone)]
 struct HeaderAdmission {
     validation_caches: ValidationCaches,
-    remaining: Arc<std::sync::Mutex<u64>>,
     partition: Weak<dyn HeaderAllowance>,
     tables: Arc<std::sync::Mutex<Vec<Weak<HeaderProducts>>>>,
 }
@@ -749,11 +739,7 @@ impl HeaderProducts {
         let Some(partition) = admission.partition.upgrade() else {
             return 0;
         };
-        let remaining = *admission
-            .remaining
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        remaining.min(partition.available_header_bytes())
+        partition.available_header_bytes()
     }
     fn admitted(&self) -> bool {
         self.scope()
@@ -1165,19 +1151,10 @@ impl HeaderProducts {
             &std::mem::MaybeUninit::<std::sync::Mutex<HeaderCharge>>::uninit(),
         ));
         let allowance = loop {
-            let mut grant = admission
-                .remaining
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
-            if *grant >= bytes
-                && let Some(allowance) = partition.take_header(bytes)
-            {
-                *grant -= bytes;
+            if let Some(allowance) = partition.take_header(bytes) {
                 break allowance;
             }
-            // Syntax and other source owners share the backing pool without
-            // debiting this row grant. Reclaim optional facts on either limit.
-            drop(grant);
+            // Reclaim optional facts until the request footprint has room.
             if !reclaim || !self.evict() {
                 if std::env::var_os("HIRSEL_OPERATION_OWNER_TRACE").is_some() {
                     let payloads = self
@@ -1239,7 +1216,7 @@ impl HeaderProducts {
                                 if let HeaderCharge::Front(charge) = &*charge {
                                     rows += 1;
                                     if seen.insert(Arc::as_ptr(cell) as usize) {
-                                        charged += charge.bytes;
+                                        charged += charge.allowance.bytes();
                                     }
                                     aliases += product
                                         .result
@@ -1261,12 +1238,8 @@ impl HeaderProducts {
                         ));
                     }
                     crate::queries::operation_owner_trace(format_args!(
-                        "OWNER HEADER REFUSAL required={} credit={} source_available={}",
+                        "OWNER HEADER REFUSAL required={} request_free={}",
                         bytes,
-                        *admission
-                            .remaining
-                            .lock()
-                            .unwrap_or_else(|e| e.into_inner()),
                         partition.available_header_bytes()
                     ));
                     crate::queries::operation_owner_trace(format_args!(
@@ -1280,11 +1253,7 @@ impl HeaderProducts {
                 }));
             }
         };
-        Ok(admission.lend(FrontCharge {
-            credit: admission.remaining.clone(),
-            bytes,
-            allowance,
-        }))
+        Ok(admission.lend(FrontCharge { allowance }))
     }
     fn admit_signature(
         &self,
@@ -1404,7 +1373,6 @@ impl HeaderProducts {
     pub(crate) fn configure_source_backing(
         self: &Arc<Self>,
         backing: Arc<dyn HeaderAllowance>,
-        remaining: Arc<std::sync::Mutex<u64>>,
     ) -> Arc<dyn HeaderAllowance> {
         let scope = self.scope();
         let mut admission = scope.admission.lock().unwrap_or_else(|e| e.into_inner());
@@ -1416,7 +1384,6 @@ impl HeaderProducts {
         }
         *admission = Some(HeaderAdmission {
             validation_caches: self.validation_caches.clone(),
-            remaining,
             partition: Arc::downgrade(&backing),
             tables: Arc::default(),
         });
@@ -2005,15 +1972,15 @@ pub(super) fn decode_installed_syntax(
 #[cfg(test)]
 mod retention_tests {
     use super::*;
-    use hirsel_engine_admission::{MemoryReservation, MemoryReservationPool, ProcessBudget};
+    use hirsel_engine_admission::{MemoryReservation, ProcessBudget};
 
-    struct Allowance(MemoryReservationPool);
+    struct Allowance(Arc<ProcessBudget>);
     impl HeaderAllowance for Allowance {
         fn take_header(&self, bytes: u64) -> Option<MemoryReservation> {
-            self.0.take(bytes)
+            self.0.reserve(bytes).ok()
         }
         fn available_header_bytes(&self) -> u64 {
-            self.0.available_bytes()
+            self.0.free()
         }
     }
 
@@ -2022,21 +1989,16 @@ mod retention_tests {
         let mut engine = QueryEngine::new(default_environment(), PhaseAdapters::default());
         let capture = engine.capture_namespace(&[], &[], 1 << 20).unwrap();
         let headers = capture.snapshot.header_products().unwrap();
-        let budget = ProcessBudget::new(1 << 20);
-        let backing: Arc<dyn HeaderAllowance> = Arc::new(Allowance(
-            MemoryReservationPool::new(budget.reserve(1 << 20).unwrap())
-                .ok()
-                .unwrap(),
-        ));
-        let remaining = Arc::new(std::sync::Mutex::new(1 << 19));
-        let _partition = headers.configure_source_backing(backing, remaining.clone());
-        let before = *remaining.lock().unwrap();
+        let budget = ProcessBudget::new(1 << 19);
+        let backing: Arc<dyn HeaderAllowance> = Arc::new(Allowance(budget.clone()));
+        let _partition = headers.configure_source_backing(backing);
+        let before = budget.free();
         let demand = Box::new(capture.demand_validation().unwrap());
-        assert!(*remaining.lock().unwrap() < before);
+        assert!(budget.free() < before);
         drop(demand);
         while headers.evict() {}
         assert_eq!(
-            *remaining.lock().unwrap(),
+            budget.free(),
             before,
             "an immutable capture alias must not retain a finished demand's reservation"
         );
@@ -2064,7 +2026,7 @@ mod retention_tests {
                     scratch: 1 << 19,
                     stack: 0,
                 },
-                budget.reserve(1 << 20).unwrap(),
+                &budget,
                 RuntimeErrors {
                     resource: reference(b"resource"),
                     cycle: reference(b"cycle"),
@@ -2188,16 +2150,11 @@ mod retention_tests {
             mutable.paths = Arc::from([donor]);
             mutable.rows.insert(donor, HeaderSlot::default());
             let budget = ProcessBudget::new(16 << 20);
-            let backing = Arc::new(Allowance(
-                MemoryReservationPool::new(budget.reserve(16 << 20).unwrap())
-                    .ok()
-                    .unwrap(),
-            ));
-            let remaining = Arc::new(std::sync::Mutex::new(16 << 20));
-            let _partition = headers.configure_source_backing(backing.clone(), remaining.clone());
+            let backing = Arc::new(Allowance(budget.clone()));
+            let _partition = headers.configure_source_backing(backing.clone());
             let memory: Arc<dyn ValidationMemory> = Arc::new(Memory(headers.clone()));
             let reads = Arc::new(AtomicU64::new(0));
-            let before = *remaining.lock().unwrap();
+            let before = budget.free();
             let (table, allocation) = crate::test_alloc::measured(|| {
                 let installed = Arc::new(
                     InstalledViews::new(
@@ -2221,7 +2178,7 @@ mod retention_tests {
                 table.retain_control(&memory).unwrap();
                 table
             });
-            let charged = before - *remaining.lock().unwrap();
+            let charged = before - budget.free();
             // Membership needs one ID and one lazy pointer per definition. All
             // other unopened table/control storage fits an independent 64 KiB.
             let bound = 64 * 1024 + 16 * count as u64;
@@ -2267,7 +2224,7 @@ mod retention_tests {
             ));
             headers.seed(donor, entry);
             assert!(headers.ready(donor).is_some());
-            let pressure = backing.0.take(backing.0.available_bytes() - 128).unwrap();
+            let pressure = backing.0.reserve(backing.0.free() - 128).unwrap();
             let demanded = table.get(ids[1]).unwrap().unwrap();
             assert_eq!(
                 demanded.digest(),
@@ -2312,21 +2269,16 @@ mod retention_tests {
         }
         let engine = QueryEngine::new(default_environment(), PhaseAdapters::default());
         let headers = HeaderProducts::capture(&engine);
-        let budget = ProcessBudget::new(1 << 20);
-        let backing: Arc<dyn HeaderAllowance> = Arc::new(Allowance(
-            MemoryReservationPool::new(budget.reserve(1 << 20).unwrap())
-                .ok()
-                .unwrap(),
-        ));
-        let remaining = Arc::new(std::sync::Mutex::new(1 << 19));
-        headers.configure_source_backing(backing.clone(), remaining.clone());
+        let budget = ProcessBudget::new(1 << 19);
+        let backing: Arc<dyn HeaderAllowance> = Arc::new(Allowance(budget.clone()));
+        headers.configure_source_backing(backing.clone());
         let memory = Memory(headers);
         let registry = hirsel_registry::BuiltinRegistry::shared();
         let shared = registry.signatures().next().unwrap().clone();
-        let initial = *remaining.lock().unwrap();
+        let initial = budget.free();
         let shared_lease = memory.0.validation_signature_lease(&shared).unwrap();
         assert_eq!(
-            *remaining.lock().unwrap(),
+            budget.free(),
             initial,
             "aliasing a process-owned core payload allocates no request storage"
         );
@@ -2345,17 +2297,17 @@ mod retention_tests {
         });
         let first = hirsel_validate::View::new(&engine.types, signature.clone(), None);
         let second = hirsel_validate::View::new(&engine.types, signature, None);
-        let initial = *remaining.lock().unwrap();
+        let initial = budget.free();
         first.identified().retain_control(&memory).unwrap();
-        let after_first = *remaining.lock().unwrap();
+        let after_first = budget.free();
         second.identified().retain_control(&memory).unwrap();
-        let after_second = *remaining.lock().unwrap();
+        let after_second = budget.free();
         assert!(
             after_first - after_second <= initial - after_first - 8192,
             "a second identity must not debit the shared 8192-byte signature field twice"
         );
         drop(first);
-        assert!(*remaining.lock().unwrap() < initial);
+        assert!(budget.free() < initial);
         assert_eq!(
             second
                 .signature()
@@ -2371,7 +2323,7 @@ mod retention_tests {
         );
         drop(second);
         while memory.0.evict() {}
-        assert_eq!(*remaining.lock().unwrap(), initial);
+        assert_eq!(budget.free(), initial);
     }
 
     #[test]
@@ -2387,12 +2339,8 @@ mod retention_tests {
         let ids: Vec<_> = headers.rows.keys().copied().collect();
         Arc::get_mut(&mut headers).unwrap().paths = ids.clone().into();
         let budget = ProcessBudget::new(1 << 20);
-        let backing: Arc<dyn HeaderAllowance> = Arc::new(Allowance(
-            MemoryReservationPool::new(budget.reserve(1 << 20).unwrap())
-                .ok()
-                .unwrap(),
-        ));
-        headers.configure_source_backing(backing.clone(), Arc::new(std::sync::Mutex::new(1 << 19)));
+        let backing: Arc<dyn HeaderAllowance> = Arc::new(Allowance(budget.clone()));
+        headers.configure_source_backing(backing.clone());
         for id in ids {
             let signature = Arc::new(hirsel_types::Signature {
                 metadata: Default::default(),
@@ -2480,14 +2428,9 @@ mod retention_tests {
                 .unwrap()
                 .rows
                 .insert(id, HeaderSlot::default());
-            let budget = ProcessBudget::new(1 << 20);
-            let backing: Arc<dyn HeaderAllowance> = Arc::new(Allowance(
-                MemoryReservationPool::new(budget.reserve(1 << 20).unwrap())
-                    .ok()
-                    .unwrap(),
-            ));
-            let remaining = Arc::new(std::sync::Mutex::new(1 << 19));
-            headers.configure_source_backing(backing.clone(), remaining.clone());
+            let budget = ProcessBudget::new(1 << 19);
+            let backing: Arc<dyn HeaderAllowance> = Arc::new(Allowance(budget.clone()));
+            headers.configure_source_backing(backing.clone());
             let bytes = crate::memo::retained::retained_signature_entry_bytes(&entry).unwrap()
                 + hirsel_engine_admission::retained_arc_bytes(&std::mem::MaybeUninit::<
                     HeaderProduct,
@@ -2515,29 +2458,29 @@ mod retention_tests {
                 drop(engine);
                 assert!(headers.evict_row());
                 assert_eq!(
-                    *remaining.lock().unwrap(),
+                    budget.free(),
                     (1 << 19) - payload,
                     "evicting the last row owner must return its metadata charge"
                 );
                 drop(signature);
-                assert_eq!(*remaining.lock().unwrap(), 1 << 19);
+                assert_eq!(budget.free(), 1 << 19);
                 continue;
             }
             let raw = entry.result().unwrap();
-            let before = *remaining.lock().unwrap();
+            let before = budget.free();
             assert!(headers.evict_row());
             assert!(headers.ready(id).is_none());
-            assert_eq!(*remaining.lock().unwrap() - before, wrapper);
+            assert_eq!(budget.free() - before, wrapper);
             assert_eq!(raw.value.fingerprint, signature.fingerprint);
             assert!(payload > 0);
-            assert!(*remaining.lock().unwrap() < 1 << 19);
+            assert!(budget.free() < 1 << 19);
             drop(raw);
             drop(entry);
             drop(engine);
             assert!(headers.reclaim_header_rows());
-            assert_eq!(*remaining.lock().unwrap(), (1 << 19) - payload);
+            assert_eq!(budget.free(), (1 << 19) - payload);
             drop(signature);
-            assert_eq!(*remaining.lock().unwrap(), 1 << 19);
+            assert_eq!(budget.free(), 1 << 19);
         }
     }
 }

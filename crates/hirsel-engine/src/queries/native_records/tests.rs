@@ -779,12 +779,8 @@ fn lazy_archive_row_over_reservation_refuses_without_allocation_or_io_and_reader
 fn lazy_archive_reader_drop_releases_rows_and_returns_exact_borrowed_partition() {
     use std::sync::atomic::Ordering;
     let f = lazy_rows_fixture();
-    let bytes = (16 << 20) + hirsel_engine_admission::MemoryReservationPool::metadata_bytes();
-    let budget = hirsel_engine_admission::ProcessBudget::new(bytes);
-    let pool = hirsel_engine_admission::MemoryReservationPool::new(budget.reserve(bytes).unwrap())
-        .ok()
-        .unwrap();
-    let grant = pool.take(16 << 20).unwrap();
+    let pool = hirsel_engine_admission::ProcessBudget::new(16 << 20);
+    let grant = pool.reserve(16 << 20).ok().unwrap();
     let mut reader = f
         .records
         .prepare_encoding(&f.context, &0u32, &grant, 0)
@@ -805,13 +801,13 @@ fn lazy_archive_reader_drop_releases_rows_and_returns_exact_borrowed_partition()
             .all(|&id| f.records.types.get_if_loaded(id).is_none())
     );
     assert_eq!(
-        pool.available_bytes(),
+        pool.free(),
         0,
         "the borrowed partition remains held until its owner drops"
     );
     drop(grant);
-    assert_eq!(pool.available_bytes(), 16 << 20);
-    let grant = pool.take(16 << 20).unwrap();
+    assert_eq!(pool.free(), 16 << 20);
+    let grant = pool.reserve(16 << 20).ok().unwrap();
     let mut reader = f
         .records
         .prepare_encoding(&f.context, &0u32, &grant, 0)
@@ -824,6 +820,5 @@ fn lazy_archive_reader_drop_releases_rows_and_returns_exact_borrowed_partition()
     );
     drop(reader);
     drop(grant);
-    drop(pool);
-    assert_eq!(budget.reserved(), 0);
+    assert_eq!(pool.reserved(), 0);
 }

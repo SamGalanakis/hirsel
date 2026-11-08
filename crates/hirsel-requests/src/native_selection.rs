@@ -186,7 +186,6 @@ impl NativeSelection {
             Some(evidence) => Some(NativeProofPlan {
                 evidence: evidence.clone(),
                 headers: split(footprint.proofs / 2)?,
-                export: split(footprint.proofs - footprint.proofs / 2)?,
             }),
         };
         let assembly = NativeAssembly::new(

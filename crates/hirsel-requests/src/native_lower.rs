@@ -157,7 +157,7 @@ mod tests {
                 stack: 0,
             };
             let front = engine
-                .front_body_queries(&paths, weight, budget.reserve(8 << 20).unwrap(), errors)
+                .front_body_queries(&paths, weight, &budget, errors)
                 .unwrap();
             let lower = engine
                 .front_lower_queries(
@@ -165,7 +165,7 @@ mod tests {
                     front.clone(),
                     weight,
                     paths.len().checked_mul(3).unwrap().min(4096),
-                    budget.reserve(16 << 20).unwrap(),
+                    &budget,
                     errors,
                 )
                 .unwrap();

@@ -109,33 +109,15 @@ fn check_case(
     .unwrap();
     let front = program
         .engine
-        .front_body_queries(
-            &definitions,
-            weight,
-            budget.reserve(16 << 20).unwrap(),
-            errors,
-        )
+        .front_body_queries(&definitions, weight, &budget, errors)
         .unwrap();
     let lower = program
         .engine
-        .front_lower_queries(
-            &definitions,
-            front.clone(),
-            weight,
-            32,
-            budget.reserve(32 << 20).unwrap(),
-            errors,
-        )
+        .front_lower_queries(&definitions, front.clone(), weight, 32, &budget, errors)
         .unwrap();
     let growth = program
         .engine
-        .front_growth_queries(
-            &program.entry,
-            front.clone(),
-            weight,
-            budget.reserve(8 << 20).unwrap(),
-            errors,
-        )
+        .front_growth_queries(&program.entry, front.clone(), weight, &budget, errors)
         .unwrap();
     // Match package checking: the requested policy applies to the root
     // package; dependencies lower only their compile-time obligations.
@@ -169,7 +151,7 @@ fn check_case(
             .front_check_queries(
                 plan(),
                 weight,
-                budget.reserve(input_bytes - 1).unwrap(),
+                &hirsel_engine_admission::ProcessBudget::new(input_bytes - 1),
                 errors
             )
             .is_err(),
@@ -177,7 +159,12 @@ fn check_case(
     );
     let check = program
         .engine
-        .front_check_queries(plan(), weight, budget.reserve(input_bytes).unwrap(), errors)
+        .front_check_queries(
+            plan(),
+            weight,
+            &hirsel_engine_admission::ProcessBudget::new(input_bytes),
+            errors,
+        )
         .unwrap();
     runtime.register(FRONT_BODY_KIND, front.factory()).unwrap();
     runtime
@@ -403,36 +390,18 @@ fn check_settled_front_eviction(
             .unwrap();
             let front = program
                 .engine
-                .front_body_queries(
-                    &definitions,
-                    weight,
-                    budget.reserve(16 << 20).unwrap(),
-                    errors,
-                )
+                .front_body_queries(&definitions, weight, &budget, errors)
                 .unwrap();
             if let Some(carry) = &carry {
                 front.install_carry(carry.clone()).ok().unwrap();
             }
             let lower = program
                 .engine
-                .front_lower_queries(
-                    &definitions,
-                    front.clone(),
-                    weight,
-                    32,
-                    budget.reserve(32 << 20).unwrap(),
-                    errors,
-                )
+                .front_lower_queries(&definitions, front.clone(), weight, 32, &budget, errors)
                 .unwrap();
             let growth = program
                 .engine
-                .front_growth_queries(
-                    &program.entry,
-                    front.clone(),
-                    weight,
-                    budget.reserve(8 << 20).unwrap(),
-                    errors,
-                )
+                .front_growth_queries(&program.entry, front.clone(), weight, &budget, errors)
                 .unwrap();
             let plan = FrontCheckPlan {
                 files: program
@@ -448,7 +417,7 @@ fn check_settled_front_eviction(
             };
             let check = program
                 .engine
-                .front_check_queries(plan, weight, budget.reserve(16 << 20).unwrap(), errors)
+                .front_check_queries(plan, weight, &budget, errors)
                 .unwrap();
             runtime.register(FRONT_BODY_KIND, front.factory()).unwrap();
             runtime

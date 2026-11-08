@@ -36,7 +36,7 @@ impl AcceptedFrontRegistration {
     pub(crate) fn in_engine(
         self: &Arc<Self>,
         engine: &mut QueryEngine,
-        pool: &hirsel_engine_admission::MemoryReservationPool,
+        pool: &Arc<hirsel_engine_admission::ProcessBudget>,
     ) -> Result<Arc<Self>, QueryError> {
         let (reads, execution) = self.validate_engine_inputs(engine)?;
         if reads == *self.reads {
@@ -64,7 +64,7 @@ impl AcceptedFrontRegistration {
                     .ok_or_else(refusal)?,
             );
         }
-        let refresh = Arc::new(pool.take(weight.bytes()).ok_or_else(refusal)?);
+        let refresh = Arc::new(pool.reserve(weight.bytes()).ok().ok_or_else(refusal)?);
         Ok(Arc::new(Self {
             syntax: self.syntax.clone(),
             reads: Arc::new(reads),
@@ -402,7 +402,7 @@ impl AcceptanceInputs {
     fn accept(
         self,
         output: FrontRegistrationOutput,
-        mut allowance: hirsel_engine_admission::MemoryReservation,
+        request: &Arc<hirsel_engine_admission::ProcessBudget>,
     ) -> Result<(Arc<AcceptedFrontRegistration>, SourceMap), FrontRegistrationFailure> {
         let definition = output.definition().clone();
         let source_before = self.sources.retained_payload_bytes();
@@ -568,9 +568,9 @@ impl AcceptanceInputs {
                 );
             }
             let retained = weight.bytes();
-            let retained_allowance = Arc::new(allowance.split(retained).ok_or_else(|| QueryError::Operational(hirsel_types::OperationalFailure {
+            let retained_allowance = Arc::new(request.reserve(retained).map_err(|_| QueryError::Operational(hirsel_types::OperationalFailure {
                 operation: "generated syntax acceptance".into(),
-                message: format!("{definition}: generated syntax requires {retained} retained bytes, {} available", allowance.bytes()),
+                message: format!("{definition}: generated syntax requires {retained} retained bytes, {} free in the request footprint", request.free()),
             }))?);
             sources = sources.clone().retain_owner(retained_allowance.clone());
             Ok(Arc::new(AcceptedFrontRegistration {
@@ -598,10 +598,10 @@ impl AcceptanceInputs {
                         .unwrap_or(usize::MAX),
                 );
                 let retained = matches!(error, QueryError::Diagnostics(_))
-                    .then(|| allowance.split(weight.bytes()))
+                    .then(|| request.reserve(weight.bytes()).ok())
                     .flatten();
                 let keep_sources = retained.is_some();
-                let allowance = Arc::new(retained.unwrap_or(allowance));
+                let allowance = Arc::new(retained.unwrap_or_else(|| request.empty()));
                 let sources = if keep_sources {
                     sources.retain_owner(allowance.clone())
                 } else {
@@ -627,7 +627,7 @@ impl QueryEngine {
     pub fn accept_front_registration(
         &mut self,
         output: FrontRegistrationOutput,
-        allowance: hirsel_engine_admission::MemoryReservation,
+        request: &Arc<hirsel_engine_admission::ProcessBudget>,
     ) -> Result<Arc<AcceptedFrontRegistration>, FrontRegistrationFailure> {
         let definition = output.definition().clone();
         let captured = (|| {
@@ -687,7 +687,7 @@ impl QueryEngine {
                         definition: DefId::intern(&definition),
                         error,
                         sources: self.sources.clone(),
-                        _allowance: Arc::new(allowance),
+                        _allowance: Arc::new(request.empty()),
                     });
                 }
             };
@@ -717,7 +717,7 @@ impl QueryEngine {
             parser: self.adapters.parser.clone(),
             signer: self.adapters.signature.clone(),
         };
-        let (accepted, sources) = inputs.accept(output, allowance)?;
+        let (accepted, sources) = inputs.accept(output, request)?;
         self.sources = sources;
         self.generated.insert(definition, accepted.source());
         Ok(accepted)

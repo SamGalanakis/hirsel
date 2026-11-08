@@ -52,7 +52,7 @@ fn admitted_native_roots_preserve_selection_constants_and_detached_metadata_owne
                 .unwrap();
                 let front = program
                     .engine
-                    .front_body_queries(&paths, weight, budget.reserve(16 << 20).unwrap(), errors)
+                    .front_body_queries(&paths, weight, &budget, errors)
                     .unwrap();
                 let lower = program
                     .engine
@@ -61,19 +61,13 @@ fn admitted_native_roots_preserve_selection_constants_and_detached_metadata_owne
                         front.clone(),
                         weight,
                         3 * paths.len(),
-                        budget.reserve(16 << 20).unwrap(),
+                        &budget,
                         errors,
                     )
                     .unwrap();
                 let growth = program
                     .engine
-                    .front_growth_queries(
-                        &entry,
-                        front.clone(),
-                        weight,
-                        budget.reserve(8 << 20).unwrap(),
-                        errors,
-                    )
+                    .front_growth_queries(&entry, front.clone(), weight, &budget, errors)
                     .unwrap();
                 let check = program
                     .engine
@@ -93,7 +87,7 @@ fn admitted_native_roots_preserve_selection_constants_and_detached_metadata_owne
                             lint_package: None,
                         },
                         weight,
-                        budget.reserve(16 << 20).unwrap(),
+                        &budget,
                         errors,
                     )
                     .unwrap();

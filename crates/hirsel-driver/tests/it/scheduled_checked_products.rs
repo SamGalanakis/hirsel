@@ -133,12 +133,7 @@ fn products_case_with_decode_layout(
             .unwrap();
             let front = program
                 .engine
-                .front_body_queries(
-                    &definitions,
-                    weight,
-                    budget.reserve(8 << 20).unwrap(),
-                    errors,
-                )
+                .front_body_queries(&definitions, weight, &budget, errors)
                 .unwrap();
             let headers = program
                 .engine
@@ -146,12 +141,7 @@ fn products_case_with_decode_layout(
                 .unwrap();
             let other_front = program
                 .engine
-                .front_body_queries(
-                    &definitions,
-                    weight,
-                    budget.reserve(8 << 20).unwrap(),
-                    errors,
-                )
+                .front_body_queries(&definitions, weight, &budget, errors)
                 .unwrap();
             let wrong_headers = program
                 .engine
@@ -159,24 +149,11 @@ fn products_case_with_decode_layout(
                 .unwrap();
             let lower = program
                 .engine
-                .front_lower_queries(
-                    &definitions,
-                    front.clone(),
-                    weight,
-                    32,
-                    budget.reserve(8 << 20).unwrap(),
-                    errors,
-                )
+                .front_lower_queries(&definitions, front.clone(), weight, 32, &budget, errors)
                 .unwrap();
             let growth = program
                 .engine
-                .front_growth_queries(
-                    &program.entry,
-                    front.clone(),
-                    weight,
-                    budget.reserve(8 << 20).unwrap(),
-                    errors,
-                )
+                .front_growth_queries(&program.entry, front.clone(), weight, &budget, errors)
                 .unwrap();
             let check = program
                 .engine
@@ -196,7 +173,7 @@ fn products_case_with_decode_layout(
                         lint_package: None,
                     },
                     weight,
-                    budget.reserve(8 << 20).unwrap(),
+                    &budget,
                     errors,
                 )
                 .unwrap();
@@ -331,7 +308,9 @@ fn products_case_with_decode_layout(
                     "layout inspection is metadata only"
                 );
             }
-            let input_reserved_before = budget.reserved();
+            // The input grant has its own footprint: Front's lazy header charges
+            // land on the request and are not this grant's storage.
+            let grants = hirsel_engine_admission::ProcessBudget::new(1 << 30);
             let mut owned = if admitted {
                 let before_reads = counted.reads.load(Ordering::Relaxed);
                 let required = scope
@@ -349,7 +328,7 @@ fn products_case_with_decode_layout(
                         .checked_product_input_with_allowance(
                             headers.clone(),
                             &program.entry,
-                            budget.reserve(required - 1).unwrap()
+                            grants.reserve(required - 1).unwrap()
                         )
                         .is_err()
                 );
@@ -363,7 +342,7 @@ fn products_case_with_decode_layout(
                         .checked_product_input_with_allowance(
                             headers.clone(),
                             &program.entry,
-                            budget.reserve(required).unwrap(),
+                            grants.reserve(required).unwrap(),
                         )
                         .unwrap(),
                 ))
@@ -386,7 +365,7 @@ fn products_case_with_decode_layout(
                     .checked_product_input_bytes(&headers, &program.entry)
                     .unwrap();
                 assert_eq!(
-                    budget.reserved() - input_reserved_before,
+                    grants.reserved(),
                     total - scratch,
                     "decoded originals retain their storage; one decode workspace is released"
                 );
@@ -543,12 +522,7 @@ fn products_case_with_decode_layout(
             .unwrap();
             let oracle_front = program
                 .engine
-                .front_body_queries(
-                    &definitions,
-                    weight,
-                    budget.reserve(8 << 20).unwrap(),
-                    oracle_errors,
-                )
+                .front_body_queries(&definitions, weight, &budget, oracle_errors)
                 .unwrap();
             let oracle_headers = program
                 .engine
@@ -561,7 +535,7 @@ fn products_case_with_decode_layout(
                     oracle_front.clone(),
                     weight,
                     32,
-                    budget.reserve(8 << 20).unwrap(),
+                    &budget,
                     oracle_errors,
                 )
                 .unwrap();
@@ -571,7 +545,7 @@ fn products_case_with_decode_layout(
                     &program.entry,
                     oracle_front.clone(),
                     weight,
-                    budget.reserve(8 << 20).unwrap(),
+                    &budget,
                     oracle_errors,
                 )
                 .unwrap();
@@ -593,7 +567,7 @@ fn products_case_with_decode_layout(
                         lint_package: None,
                     },
                     weight,
-                    budget.reserve(8 << 20).unwrap(),
+                    &budget,
                     oracle_errors,
                 )
                 .unwrap();

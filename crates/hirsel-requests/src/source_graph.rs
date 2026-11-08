@@ -36,7 +36,7 @@ use std::sync::{Arc, Mutex};
 /// headers, and the one grant its staged construction is admitted from.
 struct CheckedReceipt {
     headers: Arc<hirsel_engine::FrontCheckedSignatures>,
-    allowance: Mutex<Option<hirsel_engine_admission::MemoryReservation>>,
+    request: Arc<hirsel_engine_admission::ProcessBudget>,
     products: std::sync::OnceLock<Arc<hirsel_engine::CheckedProducts>>,
     /// The digest-only view, charged once to what the stages left.
     digest_view: std::sync::OnceLock<Arc<hirsel_engine::CheckedProducts>>,
@@ -54,15 +54,11 @@ impl CheckedReceipt {
         let refused = |stage: &str, error: hirsel_engine::QueryError| {
             ToolError::Runtime(format!("checked products {stage}: {error:?}"))
         };
-        let mut pool = self
-            .allowance
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .take()
-            .ok_or_else(|| uninstalled())?;
-        let mut stage = |bytes: u64, what: &str| {
-            pool.split(bytes).ok_or_else(|| {
-                ToolError::Runtime(format!("checked product {what} exceeds its admission"))
+        let stage = |bytes: u64, what: &str| {
+            self.request.reserve(bytes).map_err(|error| {
+                ToolError::Runtime(format!(
+                    "checked product {what} exceeds the request footprint: {error}"
+                ))
             })
         };
         // Each stage is sized before it allocates. Scope, input, type capture
@@ -118,10 +114,6 @@ impl CheckedReceipt {
             .checked_products_with_allowances(output, receipt)
             .map_err(|error| refused("receipt publication", error))?;
         drop(built);
-        *self
-            .allowance
-            .lock()
-            .unwrap_or_else(|error| error.into_inner()) = Some(pool);
         Ok(self.products.get_or_init(|| products).clone())
     }
     fn digest_view(
@@ -134,15 +126,9 @@ impl CheckedReceipt {
             return Ok(view.clone());
         }
         let products = self.products(check, product, entry)?;
-        let view = self
-            .allowance
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .as_mut()
-            .and_then(|pool| products.digest_view(pool))
-            .ok_or_else(|| {
-                ToolError::Runtime("checked product digest view exceeds its admission".into())
-            })?;
+        let view = products.digest_view(&self.request).ok_or_else(|| {
+            ToolError::Runtime("checked product digest view exceeds the request footprint".into())
+        })?;
         Ok(self.digest_view.get_or_init(|| view).clone())
     }
 }
@@ -945,11 +931,9 @@ impl SourceProducts {
             }
             let message = if reference == errors.resource {
                 return ToolError::Runtime(format!(
-                    "compiler query allowance exhausted; Front retained {}/{}B, Lower retained {}/{}B; Front refusal {:?}",
+                    "compiler request footprint exhausted; Front retained {}B, Lower retained {}B; Front refusal {:?}",
                     front.retained_bytes(),
-                    front.admitted_bytes(),
                     lower.retained_bytes(),
-                    lower.admitted_bytes(),
                     front.memory_refusal(),
                 ));
             } else if reference == errors.cycle {
@@ -1429,19 +1413,14 @@ pub(super) fn install(
             .engine
             .front_checked_signatures_bytes(&front)
             .map_err(&query_error)?;
-        let headers = installed
-            .check
-            .split(headers)
-            .ok_or_else(|| uninstalled())?;
+        let headers = installed.request.reserve(headers).map_err(ToolError::Io)?;
         let headers = program
             .engine
             .front_checked_signatures(front.clone(), headers)
             .map_err(&query_error)?;
-        // The receipt has no Run, so its stages draw from Run's partition.
-        let allowance = run.split(run.bytes()).ok_or_else(|| uninstalled())?;
         Some(Arc::new(CheckedReceipt {
             headers,
-            allowance: Mutex::new(Some(allowance)),
+            request: installed.request.clone(),
             products: std::sync::OnceLock::new(),
             digest_view: std::sync::OnceLock::new(),
         }))
@@ -1468,9 +1447,9 @@ pub(super) fn install(
             })
             .ok_or_else(|| uninstalled())?;
         let allowance = installed
-            .check
-            .split(bytes as u64)
-            .ok_or_else(|| uninstalled())?;
+            .request
+            .reserve(bytes as u64)
+            .map_err(ToolError::Io)?;
         let mut text = String::with_capacity(bytes);
         for (path, generated) in generated {
             if !text.is_empty() {
@@ -1487,10 +1466,6 @@ pub(super) fn install(
         None
     };
     let comptime_check = if shared_source {
-        let allowance = installed
-            .check
-            .split(installed.check.bytes() / 2)
-            .ok_or_else(|| uninstalled())?;
         let files = selection
             .files
             .iter()
@@ -1508,7 +1483,7 @@ pub(super) fn install(
                     lint_package: selection.lint_package.clone(),
                 },
                 installed.plan.root,
-                allowance,
+                &installed.request,
                 errors,
             )
             .map_err(&query_error)?;
@@ -1531,7 +1506,7 @@ pub(super) fn install(
         let minimum = headers
             .checked_add(super::safe_check::BYTES)
             .and_then(|bytes| bytes.checked_add(super::proof_export::BYTES));
-        if shared_source && minimum.is_none_or(|bytes| bytes > run.bytes()) {
+        if shared_source && minimum.is_none_or(|bytes| bytes > installed.request.free()) {
             available_export = false;
             export_error = Some(QueryError::Operational(hirsel_types::OperationalFailure {
                 operation: "proof export inputs".into(),
@@ -1556,8 +1531,10 @@ pub(super) fn install(
     };
     let safe_allowance = if available_run && needs_safe {
         Some(
-            run.split(super::safe_check::BYTES)
-                .ok_or_else(|| uninstalled())?,
+            installed
+                .request
+                .reserve(super::safe_check::BYTES)
+                .map_err(ToolError::Io)?,
         )
     } else {
         None
@@ -1573,20 +1550,19 @@ pub(super) fn install(
         })
         .transpose()?;
     let export_allowance = if available_export {
+        // A deferred factory charges its table to the request when export
+        // demands it; an ordinary export admits its measured headers now.
         let headers = export_headers.ok_or_else(|| uninstalled())?;
-        // The deferred factory and its eventual complete table share this
-        // existing Run partition. Insufficient space refuses only export.
         let headers = if shared_source {
-            headers.max(run.bytes() / 3)
+            None
         } else {
-            headers
+            Some(installed.request.reserve(headers).map_err(ToolError::Io)?)
         };
-        let headers = run.split(headers).ok_or_else(|| uninstalled())?;
-        let output = run
-            .split(super::proof_export::BYTES)
-            .ok_or_else(|| uninstalled())?;
-        let export = run.split(run.bytes() / 4).ok_or_else(|| uninstalled())?;
-        Some((headers, export, output))
+        let output = installed
+            .request
+            .reserve(super::proof_export::BYTES)
+            .map_err(ToolError::Io)?;
+        Some((headers, output))
     } else {
         None
     };
@@ -1704,16 +1680,10 @@ pub(super) fn install(
     // The export selects its own unshared Run view of the entry package; that
     // view replaces the ordinary Run for this graph.
     let mut export_products = None;
-    if let Some((headers, allowance, output)) = export_allowance {
+    if let Some((headers, output)) = export_allowance {
         let entry = program.entry.clone();
-        let export = if shared_source {
-            program.engine.front_deferred_proof_export(
-                &entry,
-                run.take().ok_or_else(|| uninstalled())?,
-                headers,
-                allowance,
-            )
-        } else {
+        let request = &installed.request;
+        let export = if let Some(headers) = headers {
             let headers = program
                 .engine
                 .front_checked_signatures(front.clone(), headers)
@@ -1723,16 +1693,22 @@ pub(super) fn install(
                     &entry,
                     native.source(),
                     headers,
-                    allowance,
+                    request,
                 )
             } else {
                 program.engine.front_proof_export(
                     &entry,
                     run.take().ok_or_else(|| uninstalled())?,
                     headers,
-                    allowance,
+                    request,
                 )
             }
+        } else {
+            program.engine.front_deferred_proof_export(
+                &entry,
+                run.take().ok_or_else(|| uninstalled())?,
+                request,
+            )
         }
         .map_err(&query_error)?;
         run = Some(export.run().clone());

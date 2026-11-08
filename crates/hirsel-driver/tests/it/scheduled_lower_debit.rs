@@ -9,7 +9,7 @@ use hirsel_host_io::launch::*;
 use std::sync::Arc;
 
 #[test]
-fn admitted_lower_retains_actual_metadata_and_refuses_an_insufficient_output_grant() {
+fn admitted_lower_retains_actual_metadata_and_refuses_a_request_without_room_for_it() {
     with_compiler_stack(|| {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("main.hir");
@@ -46,14 +46,11 @@ fn admitted_lower_retains_actual_metadata_and_refuses_an_insufficient_output_gra
                 .unwrap();
                 let front = program
                     .engine
-                    .front_body_queries(
-                        &definitions,
-                        weight,
-                        budget.reserve(8 << 20).unwrap(),
-                        errors,
-                    )
+                    .front_body_queries(&definitions, weight, &budget, errors)
                     .unwrap();
                 let input_bytes = FrontLowerQueries::input_bytes(&definitions).unwrap();
+                let footprint =
+                    hirsel_engine_admission::ProcessBudget::new(input_bytes + output_bytes);
                 let lower = program
                     .engine
                     .front_lower_queries(
@@ -61,11 +58,11 @@ fn admitted_lower_retains_actual_metadata_and_refuses_an_insufficient_output_gra
                         front.clone(),
                         weight,
                         3 * definitions.len(),
-                        budget.reserve(input_bytes + output_bytes).unwrap(),
+                        &footprint,
                         errors,
                     )
                     .unwrap();
-                assert_eq!(lower.retained_bytes(), input_bytes);
+                assert_eq!(footprint.reserved(), input_bytes);
                 runtime.register(FRONT_BODY_KIND, front.factory()).unwrap();
                 runtime
                     .register_local(FRONT_LOWER_KIND, lower.factory())
@@ -90,8 +87,8 @@ fn admitted_lower_retains_actual_metadata_and_refuses_an_insufficient_output_gra
                         .unwrap_or_else(|r| panic!("Lower refusal {r:?}: {:?}", lower.failure(r)));
                     let output = lower.outcome((products[0]).clone()).unwrap();
                     assert!(output.verified.is_some());
-                    assert!(lower.retained_bytes() > input_bytes);
-                    assert!(lower.retained_bytes() <= input_bytes + output_bytes);
+                    assert!(footprint.reserved() > input_bytes);
+                    assert!(lower.retained_bytes() <= output_bytes);
                     assert!(
                         lower.retained_bytes() < FrontLowerQueries::output_bytes(weight).unwrap(),
                         "settled metadata does not retain the unused maximum future/body weight"
@@ -153,25 +150,11 @@ fn admitted_lower_consumes_many_constant_dependencies_with_original_mailbox_boun
             .unwrap();
             let front = program
                 .engine
-                .front_body_queries(
-                    &definitions,
-                    weight,
-                    budget
-                        .reserve((weight.retained + 8192) * definitions.len() as u64)
-                        .unwrap(),
-                    errors,
-                )
+                .front_body_queries(&definitions, weight, &budget, errors)
                 .unwrap();
             let lower = program
                 .engine
-                .front_lower_queries(
-                    &definitions,
-                    front.clone(),
-                    weight,
-                    32,
-                    budget.reserve(32 << 20).unwrap(),
-                    errors,
-                )
+                .front_lower_queries(&definitions, front.clone(), weight, 32, &budget, errors)
                 .unwrap();
             runtime.register(FRONT_BODY_KIND, front.factory()).unwrap();
             runtime
@@ -306,23 +289,11 @@ fn original_body_decode_admission_precedes_provider_reads_and_preserves_scalar_t
             .unwrap();
             let front = program
                 .engine
-                .front_body_queries(
-                    &definitions,
-                    weight,
-                    budget.reserve(8 << 20).unwrap(),
-                    errors,
-                )
+                .front_body_queries(&definitions, weight, &budget, errors)
                 .unwrap();
             let lower = program
                 .engine
-                .front_lower_queries(
-                    &definitions,
-                    front.clone(),
-                    weight,
-                    32,
-                    budget.reserve(8 << 20).unwrap(),
-                    errors,
-                )
+                .front_lower_queries(&definitions, front.clone(), weight, 32, &budget, errors)
                 .unwrap();
             assert!(
                 lower

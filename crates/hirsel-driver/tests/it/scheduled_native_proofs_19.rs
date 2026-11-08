@@ -58,33 +58,15 @@ pub fn main()->Result[(),()] {let n=bump([1u32,2u32],1u64,3u32);Ok(())}
         .unwrap();
         let front = program
             .engine
-            .front_body_queries(
-                &definitions,
-                weight,
-                budget.reserve(8 << 20).unwrap(),
-                errors,
-            )
+            .front_body_queries(&definitions, weight, &budget, errors)
             .unwrap();
         let lower = program
             .engine
-            .front_lower_queries(
-                &definitions,
-                front.clone(),
-                weight,
-                32,
-                budget.reserve(8 << 20).unwrap(),
-                errors,
-            )
+            .front_lower_queries(&definitions, front.clone(), weight, 32, &budget, errors)
             .unwrap();
         let growth = program
             .engine
-            .front_growth_queries(
-                &program.entry,
-                front.clone(),
-                weight,
-                budget.reserve(8 << 20).unwrap(),
-                errors,
-            )
+            .front_growth_queries(&program.entry, front.clone(), weight, &budget, errors)
             .unwrap();
         let check = program
             .engine
@@ -102,7 +84,7 @@ pub fn main()->Result[(),()] {let n=bump([1u32,2u32],1u64,3u32);Ok(())}
                     lint_package: None,
                 },
                 weight,
-                budget.reserve(8 << 20).unwrap(),
+                &budget,
                 errors,
             )
             .unwrap();
@@ -160,12 +142,7 @@ pub fn main()->Result[(),()] {let n=bump([1u32,2u32],1u64,3u32);Ok(())}
             .unwrap();
         let export = program
             .engine
-            .front_proof_export_from_native(
-                &program.entry,
-                &source,
-                headers,
-                budget.reserve(4 << 20).unwrap(),
-            )
+            .front_proof_export_from_native(&program.entry, &source, headers, &budget)
             .unwrap();
         runtime
             .register(FRONT_RUN_KIND, source.run_factory())

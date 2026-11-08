@@ -173,21 +173,19 @@ struct Input {
 /// publish declarations, fuel or a later source root's diagnostics.
 struct FrontSourceBacking {
     products: SharedProductSource,
-    admitted: u64,
-    allowance: Arc<hirsel_engine_admission::MemoryReservationPool>,
-    /// The request's footprint: every live outcome and sibling view is charged
-    /// here when admitted and released at its last use, bounded only by the
-    /// process cap.
+    /// The request's footprint: every live outcome, sibling view, header and
+    /// pooled read is charged here when admitted and released at its last
+    /// use, bounded only by the process cap.
     request: Arc<hirsel_engine_admission::ProcessBudget>,
     _inputs: hirsel_engine_admission::MemoryReservation,
     _sources: SourceMap,
 }
 impl header_products::HeaderAllowance for FrontSourceBacking {
     fn take_header(&self, bytes: u64) -> Option<hirsel_engine_admission::MemoryReservation> {
-        self.allowance.take(bytes)
+        self.request.reserve(bytes).ok()
     }
     fn available_header_bytes(&self) -> u64 {
-        self.allowance.available_bytes()
+        self.request.free()
     }
 }
 struct LiveSourceBacking {
@@ -284,7 +282,6 @@ pub struct FrontBodyQueries {
     clean_memos: Mutex<BTreeSet<crate::memo::MemoKey>>,
     errors: RuntimeErrors,
     refusal: Mutex<Option<FrontMemoryRefusal>>,
-    retention: Arc<Mutex<u64>>,
     // Own immutable snapshot and output metadata admission until every task and
     // external output reader releases this view.
     read_pool: std::sync::OnceLock<Mutex<hirsel_query_products::reads::ReadPool>>,
@@ -708,9 +705,7 @@ impl FrontBodyQueries {
             .checked_add(
                 (1328 // Frozen pre-owner Front planning budget.
                     + 104 // Frozen source backing planning budget.
-                    + std::mem::size_of::<Mutex<u64>>()
                     + 4 * std::mem::size_of::<usize>()) as u64
-                    + hirsel_engine_admission::MemoryReservationPool::metadata_bytes()
                     + ProductSource::metadata_bytes(),
             )
     }
@@ -724,9 +719,6 @@ impl FrontBodyQueries {
         cx: &mut dyn QueryContext,
         reads: &Arc<Reads>,
     ) -> Option<Arc<Reads>> {
-        if Reads::tracked_by(reads, &self.retention) {
-            return Some(reads.clone());
-        }
         let Some(pool) = self.read_pool.get() else {
             return Some(reads.clone());
         };
@@ -741,21 +733,18 @@ impl FrontBodyQueries {
         pool: &Mutex<hirsel_query_products::reads::ReadPool>,
     ) -> Option<Arc<Reads>> {
         let pool = self.read_pool.get().unwrap_or(pool);
-        if Reads::tracked_by(reads, &self.retention) {
+        if Reads::tracked_by(reads, pool) {
             return Some(reads.clone());
         }
         hirsel_query_products::reads::ReadPool::admit_tracked(
             pool,
             reads,
-            &self._allowance.allowance,
-            &self.retention,
+            &self._allowance.request,
             |charge| self.make_room(cx, charge).is_some(),
         )
         .map_err(|refused| {
             if let Some(charge) = refused {
-                let available = (*self.retention.lock().unwrap_or_else(|e| e.into_inner()))
-                    .min(self._allowance.allowance.available_bytes());
-                self.record_refusal("read observations", charge, available);
+                self.record_refusal("read observations", charge, self._allowance.request.free());
             }
         })
         .ok()
@@ -764,9 +753,7 @@ impl FrontBodyQueries {
         let Some(pool) = self.read_pool.get() else {
             return false;
         };
-        let reclaimed = pool.lock().unwrap_or_else(|e| e.into_inner()).reclaim();
-        *self.retention.lock().unwrap_or_else(|e| e.into_inner()) += reclaimed;
-        reclaimed != 0
+        pool.lock().unwrap_or_else(|e| e.into_inner()).reclaim() != 0
     }
 
     fn pool_completion_reads(
@@ -1040,11 +1027,8 @@ impl FrontBodyQueries {
         })
     }
     fn make_room(&self, cx: &mut dyn QueryContext, charge: u64) -> Option<()> {
-        // Headers and source syntax borrow from the same pool without reducing
-        // this metadata counter. Reclaim idle consumers on either limit.
-        while *self.retention.lock().unwrap_or_else(|e| e.into_inner()) < charge
-            || self._allowance.allowance.available_bytes() < charge
-        {
+        // Reclaim idle consumers until the request footprint has room.
+        while self._allowance.request.free() < charge {
             if self.reclaim_reads() {
                 continue;
             }
@@ -1091,11 +1075,7 @@ impl FrontBodyQueries {
         let mut allowance = match request.reserve(charge) {
             Ok(allowance) => allowance,
             Err(_) => {
-                self.record_refusal(
-                    owner,
-                    charge,
-                    request.limit().saturating_sub(request.reserved()),
-                );
+                self.record_refusal(owner, charge, request.free());
                 return None;
             }
         };
@@ -1214,8 +1194,7 @@ impl FrontBodyQueries {
         // returns. Collect dictionary rows that became unused on that drop
         // before reporting the retained live set.
         self.reclaim_reads();
-        let remaining = self.retention.lock().unwrap_or_else(|e| e.into_inner());
-        self._allowance.admitted - *remaining
+        self._allowance.request.reserved()
     }
 
     /// The settled proof of the private module declaring `definition`,
@@ -1254,9 +1233,9 @@ impl FrontBodyQueries {
             .is_some_and(|headers| headers.ready(DefId::intern(definition)).is_some())
     }
 
-    /// Immutable producer grant, including input rows and retained outcomes.
+    /// The request footprint every Front charge is bounded by.
     pub fn admitted_bytes(&self) -> u64 {
-        self._allowance.admitted
+        self._allowance.request.limit()
     }
 
     pub fn store_adoptions(&self) -> u64 {
@@ -3058,10 +3037,10 @@ impl QueryEngine {
         &mut self,
         definitions: &[DefPath],
         weight: MemoryWeight,
-        allowance: hirsel_engine_admission::MemoryReservation,
+        request: &Arc<hirsel_engine_admission::ProcessBudget>,
         errors: RuntimeErrors,
     ) -> Result<Arc<FrontBodyQueries>, QueryError> {
-        self.front_body_queries_with_registrations(definitions, &[], weight, allowance, errors)
+        self.front_body_queries_with_registrations(definitions, &[], weight, request, errors)
     }
     /// Freeze original bodies together with explicitly accepted generated views.
     pub fn front_body_queries_with_registrations(
@@ -3069,10 +3048,10 @@ impl QueryEngine {
         definitions: &[DefPath],
         registrations: &[Arc<AcceptedFrontRegistration>],
         weight: MemoryWeight,
-        allowance: hirsel_engine_admission::MemoryReservation,
+        request: &Arc<hirsel_engine_admission::ProcessBudget>,
         errors: RuntimeErrors,
     ) -> Result<Arc<FrontBodyQueries>, QueryError> {
-        let capture = self.capture_namespace(definitions, registrations, allowance.bytes())?;
+        let capture = self.capture_namespace(definitions, registrations, request.free())?;
         for definition in definitions {
             if capture
                 .bodies
@@ -3088,33 +3067,31 @@ impl QueryEngine {
                 }));
             }
         }
-        self.front_body_queries_in(definitions, capture, weight, allowance, errors)
+        self.front_body_queries_in(definitions, capture, weight, request, errors)
     }
     pub fn front_body_queries_in(
         &mut self,
         definitions: &[DefPath],
         namespace: Arc<NamespaceCapture>,
         weight: MemoryWeight,
-        allowance: hirsel_engine_admission::MemoryReservation,
+        request: &Arc<hirsel_engine_admission::ProcessBudget>,
         errors: RuntimeErrors,
     ) -> Result<Arc<FrontBodyQueries>, QueryError> {
-        let pool = hirsel_engine_admission::MemoryReservationPool::new(allowance)
-            .map_err(|_| QueryError::NotImplemented)?;
-        self.front_body_queries_in_pool(
+        self.front_body_queries_in_request(
             definitions,
             namespace,
             weight,
-            Arc::new(pool),
+            request.clone(),
             errors,
             None,
         )
     }
-    pub(crate) fn front_body_queries_in_pool(
+    pub(crate) fn front_body_queries_in_request(
         &mut self,
         definitions: &[DefPath],
         namespace: Arc<NamespaceCapture>,
         weight: MemoryWeight,
-        allowance: Arc<hirsel_engine_admission::MemoryReservationPool>,
+        request: Arc<hirsel_engine_admission::ProcessBudget>,
         errors: RuntimeErrors,
         _previous: Option<&FrontBodyQueries>,
     ) -> Result<Arc<FrontBodyQueries>, QueryError> {
@@ -3128,7 +3105,7 @@ impl QueryEngine {
         {
             previous.inputs.clear_addresses();
         }
-        let available = allowance.available_bytes();
+        let available = request.free();
         namespace.require_environment(self)?;
         let registrations = namespace
             .registrations
@@ -3310,18 +3287,12 @@ impl QueryEngine {
         if required > available {
             return Err(refused_inputs(required));
         }
-        let retention = Arc::new(Mutex::new(available - required));
         let items = Arc::new(BTreeMap::new());
-        // Include the pool owner as well as the bytes it lends. Reserving
-        // this reported live set again must cover construction of its pool.
-        let admitted = available
-            .checked_add(hirsel_engine_admission::MemoryReservationPool::metadata_bytes())
-            .ok_or_else(|| refusal("pool size overflow"))?;
-        let mut inputs_allowance = allowance
-            .take(required)
-            .ok_or_else(|| refusal("shared Front input partition"))?;
+        let mut inputs_allowance = request
+            .reserve(required)
+            .map_err(|_| refusal("shared Front input partition"))?;
         namespace.admit(&mut inputs_allowance, self.sources.clone())?;
-        indexes.admit(&mut inputs_allowance, allowance.clone(), retention.clone())?;
+        indexes.admit(&mut inputs_allowance, request.clone())?;
         *operation_front = Some(Arc::downgrade(&indexes));
         drop(operation_front);
         let products = ProductSource::admit_shared(
@@ -3330,14 +3301,9 @@ impl QueryEngine {
             &mut inputs_allowance,
         )
         .ok_or_else(|| refusal("shared product admission"))?;
-        let request = allowance
-            .budget()
-            .ok_or_else(|| refusal("request footprint"))?;
         let backing = Arc::new(FrontSourceBacking {
             products,
-            admitted,
             request,
-            allowance,
             _inputs: inputs_allowance,
             _sources: self.sources.clone(),
         });
@@ -3348,7 +3314,7 @@ impl QueryEngine {
         });
         let header_allowance = snapshot
             .header_products()
-            .map(|headers| headers.configure_source_backing(backing.clone(), retention.clone()));
+            .map(|headers| headers.configure_source_backing(backing.clone()));
         let namespace_sources = namespace.sources.clone();
         Ok(Arc::new(FrontBodyQueries {
             demand: Default::default(),
@@ -3392,7 +3358,6 @@ impl QueryEngine {
             verify_store: self.verify_store,
             errors,
             refusal: Mutex::new(None),
-            retention,
             read_pool: std::sync::OnceLock::new(),
             _allowance: backing,
             _header_allowance: header_allowance,

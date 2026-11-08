@@ -114,7 +114,7 @@ fn bootstrap_link_refusal(test_table: bool, emit_only: bool) {
                     .unwrap();
             let front = program
                 .engine
-                .front_body_queries(&paths, weight, budget.reserve(24 << 20).unwrap(), errors)
+                .front_body_queries(&paths, weight, &budget, errors)
                 .unwrap();
             let lower = program
                 .engine
@@ -123,19 +123,13 @@ fn bootstrap_link_refusal(test_table: bool, emit_only: bool) {
                     front.clone(),
                     weight,
                     paths.len() * 3,
-                    budget.reserve(24 << 20).unwrap(),
+                    &budget,
                     errors,
                 )
                 .unwrap();
             let growth = program
                 .engine
-                .front_growth_queries(
-                    &entry,
-                    front.clone(),
-                    weight,
-                    budget.reserve(12 << 20).unwrap(),
-                    errors,
-                )
+                .front_growth_queries(&entry, front.clone(), weight, &budget, errors)
                 .unwrap();
             let check = program
                 .engine
@@ -153,7 +147,7 @@ fn bootstrap_link_refusal(test_table: bool, emit_only: bool) {
                         lint_package: None,
                     },
                     weight,
-                    budget.reserve(24 << 20).unwrap(),
+                    &budget,
                     errors,
                 )
                 .unwrap();
@@ -442,7 +436,7 @@ fn actual_native_bootstrap_links_both_backends_and_restores_after_runtime_drop()
                     .unwrap();
             let front = program
                 .engine
-                .front_body_queries(&paths, weight, budget.reserve(24 << 20).unwrap(), errors)
+                .front_body_queries(&paths, weight, &budget, errors)
                 .unwrap();
             let lower = program
                 .engine
@@ -451,19 +445,13 @@ fn actual_native_bootstrap_links_both_backends_and_restores_after_runtime_drop()
                     front.clone(),
                     weight,
                     paths.len() * 3,
-                    budget.reserve(24 << 20).unwrap(),
+                    &budget,
                     errors,
                 )
                 .unwrap();
             let growth = program
                 .engine
-                .front_growth_queries(
-                    &entry,
-                    front.clone(),
-                    weight,
-                    budget.reserve(12 << 20).unwrap(),
-                    errors,
-                )
+                .front_growth_queries(&entry, front.clone(), weight, &budget, errors)
                 .unwrap();
             let check = program
                 .engine
@@ -481,7 +469,7 @@ fn actual_native_bootstrap_links_both_backends_and_restores_after_runtime_drop()
                         lint_package: None,
                     },
                     weight,
-                    budget.reserve(24 << 20).unwrap(),
+                    &budget,
                     errors,
                 )
                 .unwrap();
@@ -882,7 +870,7 @@ fn native_bootstrap_policy_case(bind_run: bool) {
                     .unwrap();
             let front = program
                 .engine
-                .front_body_queries(&paths, weight, budget.reserve(24 << 20).unwrap(), errors)
+                .front_body_queries(&paths, weight, &budget, errors)
                 .unwrap();
             let lower = program
                 .engine
@@ -891,19 +879,13 @@ fn native_bootstrap_policy_case(bind_run: bool) {
                     front.clone(),
                     weight,
                     paths.len() * 3,
-                    budget.reserve(24 << 20).unwrap(),
+                    &budget,
                     errors,
                 )
                 .unwrap();
             let growth = program
                 .engine
-                .front_growth_queries(
-                    &entry,
-                    front.clone(),
-                    weight,
-                    budget.reserve(12 << 20).unwrap(),
-                    errors,
-                )
+                .front_growth_queries(&entry, front.clone(), weight, &budget, errors)
                 .unwrap();
             let check = program
                 .engine
@@ -921,7 +903,7 @@ fn native_bootstrap_policy_case(bind_run: bool) {
                         lint_package: None,
                     },
                     weight,
-                    budget.reserve(24 << 20).unwrap(),
+                    &budget,
                     errors,
                 )
                 .unwrap();
@@ -1308,7 +1290,7 @@ fn proof_graph(
         AdmittedRuntime::new(Jobs::ONE, budget.reserve(512 << 20).unwrap(), errors).unwrap();
     let front = program
         .engine
-        .front_body_queries(&paths, weight, budget.reserve(24 << 20).unwrap(), errors)
+        .front_body_queries(&paths, weight, &budget, errors)
         .unwrap();
     let lower = program
         .engine
@@ -1317,19 +1299,13 @@ fn proof_graph(
             front.clone(),
             weight,
             paths.len() * 3,
-            budget.reserve(24 << 20).unwrap(),
+            &budget,
             errors,
         )
         .unwrap();
     let growth = program
         .engine
-        .front_growth_queries(
-            &entry,
-            front.clone(),
-            weight,
-            budget.reserve(12 << 20).unwrap(),
-            errors,
-        )
+        .front_growth_queries(&entry, front.clone(), weight, &budget, errors)
         .unwrap();
     let check = program
         .engine
@@ -1347,7 +1323,7 @@ fn proof_graph(
                 lint_package: None,
             },
             weight,
-            budget.reserve(24 << 20).unwrap(),
+            &budget,
             errors,
         )
         .unwrap();
@@ -1393,7 +1369,7 @@ fn proof_graph(
         .unwrap();
     let export = program
         .engine
-        .front_proof_export_from_native(&entry, &source, headers, budget.reserve(4 << 20).unwrap())
+        .front_proof_export_from_native(&entry, &source, headers, &budget)
         .unwrap();
     runtime
         .register(hirsel_engine::FRONT_BODY_KIND, front.factory())
@@ -1709,7 +1685,7 @@ fn original_plan_inputs_bind_source_edits_membership_options_and_foreign_bytes()
             let paths = engine.front_source_roots();
             assert_eq!(paths.len(), if text.contains("fn other") { 3 } else { 2 });
             let front = engine
-                .front_body_queries(&paths, weight, budget.reserve(24 << 20).unwrap(), errors)
+                .front_body_queries(&paths, weight, &budget, errors)
                 .unwrap();
             let lower = engine
                 .front_lower_queries(
@@ -1717,7 +1693,7 @@ fn original_plan_inputs_bind_source_edits_membership_options_and_foreign_bytes()
                     front.clone(),
                     weight,
                     paths.len() * 3,
-                    budget.reserve(24 << 20).unwrap(),
+                    &budget,
                     errors,
                 )
                 .unwrap();

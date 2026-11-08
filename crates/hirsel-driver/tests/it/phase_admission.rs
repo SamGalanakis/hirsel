@@ -68,28 +68,15 @@ impl Fixture {
         .unwrap();
         let front = program
             .engine
-            .front_body_queries(&paths, weight, budget.reserve(16 << 20).unwrap(), errors)
+            .front_body_queries(&paths, weight, &budget, errors)
             .unwrap();
         let lower = program
             .engine
-            .front_lower_queries(
-                &paths,
-                front.clone(),
-                weight,
-                32,
-                budget.reserve(32 << 20).unwrap(),
-                errors,
-            )
+            .front_lower_queries(&paths, front.clone(), weight, 32, &budget, errors)
             .unwrap();
         let growth = program
             .engine
-            .front_growth_queries(
-                &program.entry,
-                front.clone(),
-                weight,
-                budget.reserve(8 << 20).unwrap(),
-                errors,
-            )
+            .front_growth_queries(&program.entry, front.clone(), weight, &budget, errors)
             .unwrap();
         let check = program
             .engine
@@ -107,7 +94,7 @@ impl Fixture {
                     lint_package: None,
                 },
                 weight,
-                budget.reserve(16 << 20).unwrap(),
+                &budget,
                 errors,
             )
             .unwrap();

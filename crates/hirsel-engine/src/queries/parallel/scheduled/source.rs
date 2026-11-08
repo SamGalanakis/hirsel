@@ -288,14 +288,8 @@ mod tests {
                 .unwrap();
         let backing = Arc::new(FrontSourceBacking {
             products,
-            admitted: allowance.bytes(),
             request: budget.clone(),
-            _inputs: allowance.split(0).unwrap(),
-            allowance: Arc::new(
-                hirsel_engine_admission::MemoryReservationPool::new(allowance)
-                    .ok()
-                    .unwrap(),
-            ),
+            _inputs: allowance,
             _sources: engine.sources.clone(),
         });
         (

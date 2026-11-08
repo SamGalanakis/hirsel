@@ -67,23 +67,11 @@ fn refusal_case(refused_kind: u32) {
                 };
                 let front = program
                     .engine
-                    .front_body_queries(
-                        &definitions,
-                        weight,
-                        budget.reserve(8 << 20).unwrap(),
-                        errors,
-                    )
+                    .front_body_queries(&definitions, weight, &budget, errors)
                     .unwrap();
                 let lower = program
                     .engine
-                    .front_lower_queries(
-                        &definitions,
-                        front.clone(),
-                        weight,
-                        32,
-                        budget.reserve(16 << 20).unwrap(),
-                        errors,
-                    )
+                    .front_lower_queries(&definitions, front.clone(), weight, 32, &budget, errors)
                     .unwrap();
                 let mut runtime = AdmittedRuntime::new(
                     hirsel_intern::jobs::Jobs::new(jobs),

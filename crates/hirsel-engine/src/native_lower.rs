@@ -6,7 +6,7 @@ use crate::{
 use hirsel_syntax::{ContentHash, DefId, DefPath};
 use std::{
     collections::{BTreeMap, BTreeSet},
-    sync::{Arc, Mutex},
+    sync::Arc,
 };
 
 /// A settled front Lower result. The ordinary payload is always available;
@@ -71,29 +71,11 @@ struct BoundOriginal {
 #[derive(Clone)]
 pub(crate) struct OriginalAdmission {
     pub _allowance: Arc<hirsel_engine_admission::MemoryReservation>,
-    pub remaining: Arc<Mutex<u64>>,
 }
-struct OriginalLease {
-    admission: OriginalAdmission,
-    bytes: u64,
-}
-impl Drop for OriginalLease {
-    fn drop(&mut self) {
-        *self
-            .admission
-            .remaining
-            .lock()
-            .unwrap_or_else(|e| e.into_inner()) += self.bytes;
-    }
-}
+type OriginalLease = hirsel_engine_admission::MemoryReservation;
 impl OriginalAdmission {
     fn reserve(&self, bytes: u64) -> Option<Arc<OriginalLease>> {
-        let mut remaining = self.remaining.lock().unwrap_or_else(|e| e.into_inner());
-        *remaining = remaining.checked_sub(bytes)?;
-        Some(Arc::new(OriginalLease {
-            admission: self.clone(),
-            bytes,
-        }))
+        self._allowance.budget().reserve(bytes).ok().map(Arc::new)
     }
 }
 impl From<hirsel_product_codec::CheckedTir> for NativeOriginalHandle {

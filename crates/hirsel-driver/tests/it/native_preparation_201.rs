@@ -97,7 +97,7 @@ fn fixture(text: &str, verify: Verify, jobs: usize) -> Fixture {
         AdmittedRuntime::new(Jobs::new(jobs), budget.reserve(256 << 20).unwrap(), errors).unwrap();
     let front = program
         .engine
-        .front_body_queries(&paths, weight, budget.reserve(24 << 20).unwrap(), errors)
+        .front_body_queries(&paths, weight, &budget, errors)
         .unwrap();
     let lower = program
         .engine
@@ -106,7 +106,7 @@ fn fixture(text: &str, verify: Verify, jobs: usize) -> Fixture {
             front.clone(),
             weight,
             paths.len() * 3,
-            budget.reserve(24 << 20).unwrap(),
+            &budget,
             errors,
         )
         .unwrap();

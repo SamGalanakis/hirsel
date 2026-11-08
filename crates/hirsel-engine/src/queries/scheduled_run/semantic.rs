@@ -10,17 +10,7 @@ const OUTPUT: Domain = Domain {
 
 pub(super) struct SemanticOwnership {
     context: crate::NativeRecordContext,
-    remaining: Arc<Mutex<u64>>,
-    _allowance: Arc<hirsel_engine_admission::MemoryReservation>,
-    bytes: u64,
-}
-impl Drop for SemanticOwnership {
-    fn drop(&mut self) {
-        *self
-            .remaining
-            .lock()
-            .unwrap_or_else(|error| error.into_inner()) += self.bytes;
-    }
+    _reservation: hirsel_engine_admission::MemoryReservation,
 }
 pub(super) struct LiveSemantic {
     entry: Arc<GraphEntry>,
@@ -250,10 +240,7 @@ impl SemanticTask {
             weight.bytes()
         };
         let mut charge = charge_entry(&entry);
-        let remaining = *queries
-            .retention
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
+        let remaining = queries.ownership._allowance.budget().free();
         if charge > queries.weight.retained / 2
             || charge > remaining.saturating_sub(queries.weight.scratch)
         {
@@ -304,19 +291,14 @@ impl SemanticTask {
                 identity.0.as_slice(),
             ],
         ));
-        let mut remaining = queries
-            .retention
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        *remaining = remaining
-            .checked_sub(charge)
-            .ok_or_else(|| operational("semantic products exceed admission"))?;
-        drop(remaining);
         let ownership = Arc::new(SemanticOwnership {
             context: queries.anchors.clone(),
-            remaining: queries.retention.clone(),
-            _allowance: queries.ownership._allowance.clone(),
-            bytes: charge,
+            _reservation: queries
+                .ownership
+                ._allowance
+                .budget()
+                .reserve(charge)
+                .map_err(|_| operational("semantic products exceed the request footprint"))?,
         });
         let product = ProductRef::live(
             self.node.query.address,

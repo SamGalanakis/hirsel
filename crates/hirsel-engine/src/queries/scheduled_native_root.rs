@@ -2,6 +2,7 @@
 //! products. Source selection keeps the existing whole-package default and
 //! semantic closure; host readiness only inspects this completed handoff.
 use super::*;
+use hirsel_engine_admission::{MemoryReservation, ProcessBudget};
 use hirsel_engine_runtime::*;
 use hirsel_engine_store::{Domain, Reference, ResultStore};
 use hirsel_registry::{OperationKey, OperationParameter, OperationRecord};
@@ -37,6 +38,7 @@ pub struct FrontNativeProducts {
     pub signatures: Arc<SignatureSnapshot>,
     pub run: Arc<FrontRunOutput>,
     pub semantic: Arc<crate::NativeSemanticProgram>,
+    _charge: MemoryReservation,
     _owner: Arc<Ownership>,
 }
 pub struct FrontNativeOutput {
@@ -60,7 +62,6 @@ pub struct FrontNativeQueries {
     failure: Mutex<Option<(Reference, QueryError)>>,
     weight: MemoryWeight,
     errors: RuntimeErrors,
-    output_budget: u64,
     ownership: Arc<Ownership>,
 }
 struct Ownership {
@@ -105,6 +106,9 @@ fn metadata_bytes<'a>(
 }
 
 impl FrontNativeQueries {
+    fn request(&self) -> &Arc<ProcessBudget> {
+        self.ownership._allowance.budget()
+    }
     pub fn input_bytes(definitions: &[DefPath]) -> Option<u64> {
         // Core operation/builtin inputs are mandatory even for a source with
         // no calls. Cache their immutable inventory cost, then bound source
@@ -231,7 +235,7 @@ impl FrontNativeQueries {
         let Some(bytes) = self.records.encode(&self.anchors, &error) else {
             return self.errors.resource;
         };
-        if bytes.len() as u64 > self.output_budget {
+        if bytes.len() as u64 > self.request().free() {
             return self.errors.resource;
         }
         let Some(reference) = self.store.put_content(FAILURE, &bytes) else {
@@ -282,7 +286,7 @@ struct DefinitionsState {
     next: usize,
     definitions: Vec<FrontNativeDefinitionOutput>,
     evaluated: Vec<QueryId>,
-    used: u64,
+    charge: MemoryReservation,
 }
 enum Advance {
     Waiting(QueryId),
@@ -353,7 +357,10 @@ impl RootState {
                 let Some(output) = owner.run.outcome(product.clone()) else {
                     return Self::finish(Err(owner.errors.protocol));
                 };
-                Self::Definitions(DefinitionsState::prepared(product, &output))
+                let Ok(charge) = owner.request().reserve(0) else {
+                    return Self::finish(Err(owner.errors.resource));
+                };
+                Self::Definitions(DefinitionsState::prepared(product, &output, charge))
                     .advance(owner, id, cx)
             }
             Self::Definitions(mut state) => {
@@ -387,16 +394,13 @@ impl RootState {
                     }
                     // Vec's first allocation holds four query slots; this
                     // bound also covers every later geometric growth step.
-                    let Some(used) = state
-                        .used
-                        .checked_add(4 * std::mem::size_of::<QueryId>() as u64)
-                    else {
-                        return Self::finish(Err(owner.errors.resource));
-                    };
-                    if used > owner.output_budget || used > owner.weight.retained {
+                    if state
+                        .charge
+                        .grow(4 * std::mem::size_of::<QueryId>() as u64)
+                        .is_err()
+                    {
                         return Self::finish(Err(owner.errors.resource));
                     }
-                    state.used = used;
                     state.evaluated.push(query);
                 }
                 Self::finish(
@@ -410,7 +414,11 @@ impl RootState {
     }
 }
 impl DefinitionsState {
-    fn prepared(run_product: ProductRef, output: &FrontRunOutput) -> Self {
+    fn prepared(
+        run_product: ProductRef,
+        output: &FrontRunOutput,
+        charge: MemoryReservation,
+    ) -> Self {
         // Bootstrap binds every checked semantic declaration, including
         // compile-time-only functions. Runtime registration is a separate
         // subset; omitting these headers breaks the exact source union.
@@ -424,7 +432,7 @@ impl DefinitionsState {
             next: 0,
             definitions: Vec::new(),
             evaluated: Vec::new(),
-            used: 0,
+            charge,
         }
     }
     fn definition_done(
@@ -433,16 +441,11 @@ impl DefinitionsState {
         owner: &FrontNativeQueries,
     ) -> Result<(), Reference> {
         // Each handoff row is a handle to a product its definition owner
-        // has already charged to that owner's output budget, so the root
-        // holds only the row and its vector slot.
-        let used = self
-            .used
-            .checked_add(2 * std::mem::size_of::<FrontNativeDefinitionOutput>() as u64)
-            .ok_or(owner.errors.resource)?;
-        if used > owner.output_budget || used > owner.weight.retained {
-            return Err(owner.errors.resource);
-        }
-        self.used = used;
+        // has already charged to the request, so the root holds only the row
+        // and its vector slot.
+        self.charge
+            .grow(2 * std::mem::size_of::<FrontNativeDefinitionOutput>() as u64)
+            .map_err(|_| owner.errors.resource)?;
         self.definitions.push(output);
         self.next += 1;
         Ok(())
@@ -454,6 +457,7 @@ impl DefinitionsState {
         scratch: u64,
     ) -> Result<ProductRef, QueryError> {
         let run_product = self.run_product;
+        let mut charge = self.charge;
         let run = owner
             .run
             .outcome(run_product.clone())
@@ -476,13 +480,9 @@ impl DefinitionsState {
         // text, lines and anchors keep their original producer reservations.
         // Refuse before allocating the copy, within the existing output grant.
         let source_metadata = owner.template.sources.retained_snapshot_metadata_bytes();
-        let used = self
-            .used
-            .checked_add(source_metadata)
-            .ok_or_else(|| invalid("native source metadata overflow"))?;
-        if used > owner.output_budget {
-            return Err(invalid("native source metadata exceeds admission"));
-        }
+        charge
+            .grow(source_metadata)
+            .map_err(|_| invalid("native source metadata exceeds admission"))?;
         let mut roots = owner.template.clone();
         roots.definitions = native_selected;
         roots.foreign_unreplayable = run.semantic.foreign_unreplayable();
@@ -541,16 +541,12 @@ impl DefinitionsState {
                 })
                 .collect())
         })?;
-        let (staged, staged_bytes) = owner.definitions.staged_static_inputs(
-            &selected_set,
-            owner
-                .output_budget
-                .checked_sub(used)
-                .ok_or_else(|| invalid("native staged output admission"))?,
-        )?;
-        let used = used
-            .checked_add(staged_bytes)
-            .ok_or_else(|| invalid("native staged output overflow"))?;
+        let (staged, staged_bytes) = owner
+            .definitions
+            .staged_static_inputs(&selected_set, owner.request().free())?;
+        charge
+            .grow(staged_bytes)
+            .map_err(|_| invalid("native staged output admission"))?;
         constants.extend(staged.constants);
         let extra = crate::generic_graph::native_materialized(
             signatures.types(),
@@ -629,10 +625,7 @@ impl DefinitionsState {
                 ),
             )
             .ok_or_else(|| invalid("native root archive encoding"))?;
-        if (bytes.len() as u64)
-            .checked_add(used)
-            .is_none_or(|used| used > owner.output_budget)
-        {
+        if bytes.len() as u64 > owner.request().free() {
             return Err(invalid("native root outputs exceed admission"));
         }
         let record = owner
@@ -649,8 +642,7 @@ impl DefinitionsState {
             ProductArchive::from_retained_bytes(
                 record,
                 bytes.into(),
-                owner.ownership._allowance.clone(),
-                Arc::new(Mutex::new(owner.output_budget - used)),
+                owner.ownership._allowance.budget(),
             )
             .map_err(|_| QueryError::NotImplemented)?,
         );
@@ -667,6 +659,7 @@ impl DefinitionsState {
             signatures,
             semantic: run.semantic.clone(),
             run,
+            _charge: charge,
             _owner: owner.ownership.clone(),
         };
         *owner.completed.lock().unwrap_or_else(|e| e.into_inner()) =
@@ -872,7 +865,6 @@ impl QueryEngine {
             failure: Mutex::new(None),
             weight,
             errors,
-            output_budget: allowance.bytes() - required,
             ownership: Arc::new(Ownership {
                 _run: run.clone(),
                 _definitions: definitions.clone(),

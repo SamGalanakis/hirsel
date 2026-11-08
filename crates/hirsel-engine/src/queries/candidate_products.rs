@@ -33,13 +33,13 @@ impl CheckedProducts {
         self
     }
     /// The same receipt without canonical text. Its copied read maps are
-    /// split from `grant` before the copy and stay charged while any clone
-    /// of the view is held; None leaves `grant` unchanged.
+    /// charged to `request` before the copy and stay charged while any clone
+    /// of the view is held; None charges nothing.
     pub fn digest_view(
         &self,
-        grant: &mut hirsel_engine_admission::MemoryReservation,
+        request: &Arc<hirsel_engine_admission::ProcessBudget>,
     ) -> Option<Arc<Self>> {
-        let charge = grant.split(self.digest_view_bytes()?)?;
+        let charge = request.reserve(self.digest_view_bytes()?).ok()?;
         let view = Self {
             digest: self.digest,
             canonical: None,
@@ -274,14 +274,10 @@ mod registration_tests {
             owner: Arc::new(()),
         };
         let needed = products.digest_view_bytes().unwrap();
-        let mut short = budget.reserve(needed - 1).unwrap();
-        assert!(products.digest_view(&mut short).is_none());
-        assert_eq!(short.bytes(), needed - 1);
-        drop(short);
-        let mut grant = budget.reserve(needed + 7).unwrap();
-        let view = products.digest_view(&mut grant).unwrap();
-        assert_eq!(grant.bytes(), 7);
-        drop(grant);
+        let short = hirsel_engine_admission::ProcessBudget::new(needed - 1);
+        assert!(products.digest_view(&short).is_none());
+        assert_eq!(short.reserved(), 0);
+        let view = products.digest_view(&budget).unwrap();
         assert_eq!(view.canonical, None);
         assert_eq!(view.digest, products.digest);
         assert_eq!(view.reads, products.reads);

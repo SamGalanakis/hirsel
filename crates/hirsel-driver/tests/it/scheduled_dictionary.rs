@@ -44,7 +44,7 @@ fn admitted_dictionary_matches_scalar_named_callables_and_resumes_data_dependenc
             .unwrap();
             let front = program
                 .engine
-                .front_body_queries(&paths, weight, budget.reserve(8 << 20).unwrap(), errors)
+                .front_body_queries(&paths, weight, &budget, errors)
                 .unwrap();
             let lower = program
                 .engine
@@ -53,7 +53,7 @@ fn admitted_dictionary_matches_scalar_named_callables_and_resumes_data_dependenc
                     front.clone(),
                     weight,
                     3 * paths.len(),
-                    budget.reserve(8 << 20).unwrap(),
+                    &budget,
                     errors,
                 )
                 .unwrap();
@@ -124,6 +124,7 @@ fn admitted_dictionary_matches_scalar_named_callables_and_resumes_data_dependenc
             drop(ordinary);
             drop(lower);
             drop(front);
+            drop(program);
             assert_eq!(budget.reserved(), 0);
         }
     });

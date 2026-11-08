@@ -403,40 +403,41 @@ pub struct FrontLowerOutput {
     constants_archive: Arc<std::sync::OnceLock<Reference>>,
     owner: Arc<LowerSource>,
 }
+/// The request footprint every retained Lower value is charged to.
+/// Successor generations share one metadata charge.
 pub(crate) struct LowerPartition {
-    allowance: Arc<hirsel_engine_admission::MemoryReservation>,
-    remaining: Arc<Mutex<u64>>,
+    request: Arc<hirsel_engine_admission::ProcessBudget>,
+    retained: Arc<Mutex<LowerInputCharge>>,
 }
 impl LowerPartition {
-    pub(crate) fn new(allowance: hirsel_engine_admission::MemoryReservation) -> Self {
+    pub(crate) fn new(request: &Arc<hirsel_engine_admission::ProcessBudget>) -> Self {
         Self {
-            remaining: Arc::new(Mutex::new(allowance.bytes())),
-            allowance: Arc::new(allowance),
+            request: request.clone(),
+            retained: Arc::new(Mutex::new(LowerInputCharge::empty(request))),
         }
     }
-}
-struct LowerInputCharge {
-    remaining: Arc<Mutex<u64>>,
-    bytes: u64,
-    _allowance: Arc<hirsel_engine_admission::MemoryReservation>,
-}
-impl LowerInputCharge {
-    fn take(partition: &LowerPartition, bytes: u64) -> Option<Self> {
-        let mut remaining = partition
-            .remaining
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        *remaining = remaining.checked_sub(bytes)?;
-        Some(Self {
-            remaining: partition.remaining.clone(),
-            bytes,
-            _allowance: partition.allowance.clone(),
-        })
+    fn request(&self) -> &Arc<hirsel_engine_admission::ProcessBudget> {
+        &self.request
     }
 }
-impl Drop for LowerInputCharge {
-    fn drop(&mut self) {
-        *self.remaining.lock().unwrap_or_else(|e| e.into_inner()) += self.bytes;
+/// A growable charge on the request footprint, released when it drops.
+struct LowerInputCharge(hirsel_engine_admission::MemoryReservation);
+impl LowerInputCharge {
+    fn take(partition: &LowerPartition, bytes: u64) -> Option<Self> {
+        partition.request().reserve(bytes).ok().map(Self)
+    }
+    fn empty(request: &Arc<hirsel_engine_admission::ProcessBudget>) -> Self {
+        Self(request.empty())
+    }
+    fn grow(&mut self, bytes: u64) -> Option<()> {
+        self.0.grow(bytes).ok()
+    }
+    fn release(&mut self) {
+        let bytes = self.0.bytes();
+        drop(self.0.split(bytes));
+    }
+    fn bytes(&self) -> u64 {
+        self.0.bytes()
     }
 }
 struct LowerSource {
@@ -445,7 +446,6 @@ struct LowerSource {
     records: crate::NativeRecords,
     store: Arc<dyn ResultStore>,
     _sources: SourceMap,
-    _allowance: Arc<hirsel_engine_admission::MemoryReservation>,
 }
 impl FrontLowerOutput {
     /// Move the typed ordinary result into an admitted live owner. Verifier
@@ -502,7 +502,16 @@ pub struct FrontLowerQueries {
     verify_store: hirsel_engine_store::VerifyStore,
     records: crate::NativeRecords,
     store: Arc<dyn ResultStore>,
-    outcomes: Mutex<BTreeMap<(u32, ContentHash), (Option<Reference>, Box<Outcome>, u64)>>,
+    outcomes: Mutex<
+        BTreeMap<
+            (u32, ContentHash),
+            (
+                Option<Reference>,
+                Box<Outcome>,
+                hirsel_engine_admission::MemoryReservation,
+            ),
+        >,
+    >,
     carry: Mutex<Option<Arc<LowerCarry>>>,
     carry_changes: Mutex<Option<Arc<carry::CarryChanges>>>,
     clean_memos: Mutex<BTreeSet<crate::memo::MemoKey>>,
@@ -511,8 +520,10 @@ pub struct FrontLowerQueries {
     weight: MemoryWeight,
     max_reads: usize,
     errors: RuntimeErrors,
-    retention: Arc<Mutex<u64>>,
-    _allowance: Arc<hirsel_engine_admission::MemoryReservation>,
+    /// Settled metadata that lives as long as the request (staged selections,
+    /// carried subscriptions), shared with successor generations.
+    retained: Arc<Mutex<LowerInputCharge>>,
+    request: Arc<hirsel_engine_admission::ProcessBudget>,
     source: Arc<LowerSource>,
 }
 impl FrontLowerQueries {
@@ -617,7 +628,7 @@ impl FrontLowerQueries {
             let mut outcome_bytes = 0;
             let mut read_bytes = 0;
             for (_, outcome, bytes) in outcomes.values() {
-                outcome_bytes += bytes;
+                outcome_bytes += bytes.bytes();
                 read_bytes += outcome
                     .reads
                     .allocations()
@@ -645,12 +656,47 @@ impl FrontLowerQueries {
                 read_bytes,
                 live_bytes,
                 forwarded.len(),
-                self.source._inputs.bytes,
+                self.source._inputs.bytes(),
                 outcome_table_bytes(outcomes.len()),
-                self._allowance.bytes() - *self.retention.lock().unwrap_or_else(|e| e.into_inner())
+                self.retained_charge()
             ));
         }
-        self._allowance.bytes() - *self.retention.lock().unwrap_or_else(|e| e.into_inner())
+        self.retained_charge()
+    }
+    /// Lower's charges on the request footprint: inputs, settled metadata
+    /// and every admitted outcome.
+    fn retained_charge(&self) -> u64 {
+        let outcomes: u64 = self
+            .outcomes
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .values()
+            .map(|(_, _, charge)| charge.bytes())
+            .sum();
+        self.retained
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .bytes()
+            + outcomes
+    }
+    fn request(&self) -> &Arc<hirsel_engine_admission::ProcessBudget> {
+        &self.request
+    }
+    /// Reserve from the request footprint, letting settled bodies release
+    /// first; refuse only when nothing in flight can free memory.
+    async fn reserve(
+        &self,
+        bytes: u64,
+        query_reads: &QueryReads,
+    ) -> Result<hirsel_engine_admission::MemoryReservation, Reference> {
+        loop {
+            if let Ok(reservation) = self.request().reserve(bytes) {
+                return Ok(reservation);
+            }
+            if !query_reads.evict_body().await {
+                return Err(self.errors.resource);
+            }
+        }
     }
 
     /// Outcomes adopted through an unchanged subscription generation, without
@@ -660,10 +706,6 @@ impl FrontLowerQueries {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clone()
-    }
-    /// Immutable producer grant, including input rows and retained outcomes.
-    pub fn admitted_bytes(&self) -> u64 {
-        self._allowance.bytes()
     }
 
     /// Settled memo identities for work accounting. No read archive or body
@@ -1919,45 +1961,22 @@ impl FrontLowerQueries {
             None
         };
         outcome.archive_reads(record);
-        let archive_bytes = if failed {
-            0
-        } else {
+        // A malformed archive or live layout refuses here; only a full
+        // request footprint waits below.
+        if !failed {
             ProductArchive::retained_required_bytes(record, &bytes)
-                .map_err(|_| self.errors.resource)?
-        };
-        let live_bytes = if let Some(original) = &original {
-            LiveLowerProduct::retained_required_bytes(original).ok_or(self.errors.resource)?
-        } else {
-            0
-        };
-        let required = outcome
-            .retained_bytes()
-            .and_then(|bytes| bytes.checked_add(archive_bytes))
-            .and_then(|bytes| bytes.checked_add(live_bytes))
-            .and_then(|bytes| bytes.checked_add(outcome_table_bytes(1)))
-            .ok_or(self.errors.resource)?;
-        // Each draw below debits the shared retained counter. A body whose
-        // reservation does not fit waits for in-flight work to release bytes
-        // (or for a settled body to evict) instead of refusing; it refuses
-        // only when the runtime reports nothing in flight can free memory.
+                .map_err(|_| self.errors.resource)?;
+        }
+        if let Some(original) = &original {
+            LiveLowerProduct::retained_required_bytes(original).ok_or(self.errors.resource)?;
+        }
         let mut outcome = Some(outcome);
         let (archive, live) = loop {
-            while *self.retention.lock().unwrap_or_else(|e| e.into_inner()) < required {
-                if !query_reads.evict_body().await {
-                    return Err(self.errors.resource);
-                }
-            }
             let archive = if failed {
                 None
             } else {
-                match ProductArchive::from_retained_bytes(
-                    record,
-                    bytes.clone(),
-                    self._allowance.clone(),
-                    self.retention.clone(),
-                ) {
+                match ProductArchive::from_retained_bytes(record, bytes.clone(), self.request()) {
                     Ok(archive) => Some(archive),
-                    // A peer's draw landed between the estimate and this take.
                     Err(_) => {
                         if !query_reads.evict_body().await {
                             return Err(self.errors.resource);
@@ -1978,8 +1997,7 @@ impl FrontLowerQueries {
                     (*self.namespace.anchors).clone(),
                     self.records.clone(),
                     self.source.clone(),
-                    self._allowance.clone(),
-                    self.retention.clone(),
+                    self.request(),
                 ) {
                     LiveAdmission::Admitted(live) => Some(live),
                     LiveAdmission::Blocked(output) => {
@@ -2000,38 +2018,21 @@ impl FrontLowerQueries {
             if let Ok(Value::Lower(lower)) = &mut outcome_ref.result {
                 lower.live = live.as_ref().map(LiveLowerProduct::downgrade);
             }
-            let charge = outcome_ref.retained_bytes().ok_or(self.errors.resource)?;
-            let admitted = {
-                let mut retention = self.retention.lock().unwrap_or_else(|e| e.into_inner());
-                let mut outcomes = self.outcomes.lock().unwrap_or_else(|e| e.into_inner());
-                let selected = (id.kind, id.address.0);
-                let old = outcomes.get(&selected).map(|(_, _, charge)| *charge);
-                let next_len = outcomes
-                    .len()
-                    .checked_add(usize::from(old.is_none()))
-                    .ok_or(self.errors.resource)?;
-                let table_growth = outcome_table_bytes(next_len)
-                    .checked_sub(outcome_table_bytes(outcomes.len()))
-                    .ok_or(self.errors.resource)?;
-                retention
-                    .checked_add(old.unwrap_or(0))
-                    .and_then(|n| n.checked_sub(charge))
-                    .and_then(|n| n.checked_sub(table_growth))
-                    .map(|remaining| {
-                        let admitted = outcome.take().expect("unadmitted outcome");
-                        let replaced =
-                            outcomes.insert(selected, (Some(record), Box::new(admitted), charge));
-                        *retention = remaining;
-                        replaced
-                    })
-            };
-            if admitted.is_none() {
-                if !query_reads.evict_body().await {
-                    return Err(self.errors.resource);
-                }
-                continue;
-            }
-            drop(admitted);
+            let charge = outcome_ref
+                .retained_bytes()
+                .and_then(|bytes| bytes.checked_add(outcome_table_bytes(1)))
+                .ok_or(self.errors.resource)?;
+            let charge = self.reserve(charge, query_reads).await?;
+            let admitted = outcome.take().expect("unadmitted outcome");
+            let replaced = self
+                .outcomes
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(
+                    (id.kind, id.address.0),
+                    (Some(record), Box::new(admitted), charge),
+                );
+            drop(replaced);
             break (archive, live);
         };
         if failed {
@@ -2406,14 +2407,7 @@ impl FrontLowerQueries {
     }
 }
 struct LowerCharge {
-    _allowance: Arc<hirsel_engine_admission::MemoryReservation>,
-    remaining: Arc<Mutex<u64>>,
-    bytes: u64,
-}
-impl Drop for LowerCharge {
-    fn drop(&mut self) {
-        *self.remaining.lock().unwrap_or_else(|e| e.into_inner()) += self.bytes;
-    }
+    _reservation: hirsel_engine_admission::MemoryReservation,
 }
 impl FrontLowerQueries {
     fn output_action(
@@ -2465,31 +2459,9 @@ impl FrontLowerQueries {
                 .map_err(|_| self.errors.resource)?,
         );
         let metadata_bytes = weight.bytes();
-        let required = outcome
-            .retained_bytes()
-            .and_then(|bytes| bytes.checked_add(metadata_bytes))
-            .and_then(|bytes| bytes.checked_add(outcome_table_bytes(1)))
-            .ok_or(self.errors.resource)?;
-        while *self.retention.lock().unwrap_or_else(|e| e.into_inner()) < required {
-            if !query_reads.evict_body().await {
-                return Err(self.errors.resource);
-            }
-        }
-        let charge = loop {
-            let mut remaining = self.retention.lock().unwrap_or_else(|e| e.into_inner());
-            if let Some(next) = remaining.checked_sub(metadata_bytes) {
-                *remaining = next;
-                break Arc::new(LowerCharge {
-                    _allowance: self._allowance.clone(),
-                    remaining: self.retention.clone(),
-                    bytes: metadata_bytes,
-                });
-            }
-            drop(remaining);
-            if !query_reads.evict_body().await {
-                return Err(self.errors.resource);
-            }
-        };
+        let charge = Arc::new(LowerCharge {
+            _reservation: self.reserve(metadata_bytes, query_reads).await?,
+        });
         let serialization_working = metadata
             .0
             .encoding_working_bytes()
@@ -2549,8 +2521,7 @@ impl FrontLowerQueries {
                         (*self.namespace.anchors).clone(),
                         self.records.clone(),
                         self.source.clone(),
-                        self._allowance.clone(),
-                        self.retention.clone(),
+                        self.request(),
                     ) {
                         LiveAdmission::Admitted(live) => break live,
                         LiveAdmission::Blocked(value) => {
@@ -2582,21 +2553,9 @@ impl FrontLowerQueries {
                     .checked_add(size_of_val(&root) as u64)
                     .and_then(|bytes| bytes.checked_add(size_of::<LowerCharge>() as u64 + 128))
                     .ok_or(self.errors.resource)?;
-                let charge = loop {
-                    let mut remaining = self.retention.lock().unwrap_or_else(|e| e.into_inner());
-                    if let Some(next) = remaining.checked_sub(bytes) {
-                        *remaining = next;
-                        break Arc::new(LowerCharge {
-                            _allowance: self._allowance.clone(),
-                            remaining: self.retention.clone(),
-                            bytes,
-                        });
-                    }
-                    drop(remaining);
-                    if !query_reads.evict_body().await {
-                        return Err(self.errors.resource);
-                    }
-                };
+                let charge = Arc::new(LowerCharge {
+                    _reservation: self.reserve(bytes, query_reads).await?,
+                });
                 ProductRef::live(
                     id.address,
                     action,
@@ -2623,37 +2582,17 @@ impl FrontLowerQueries {
             }
             _ => return Err(self.protocol_refusal()),
         };
-        loop {
-            let charge = outcome.retained_bytes().ok_or(self.errors.resource)?;
-            let inserted = {
-                let mut remaining = self.retention.lock().unwrap_or_else(|e| e.into_inner());
-                let mut outcomes = self.outcomes.lock().unwrap_or_else(|e| e.into_inner());
-                let selected = (id.kind, id.address.0);
-                let old = outcomes.get(&selected).map_or(0, |(_, _, bytes)| *bytes);
-                let growth = outcome_table_bytes(
-                    outcomes.len() + usize::from(!outcomes.contains_key(&selected)),
-                )
-                .checked_sub(outcome_table_bytes(outcomes.len()))
-                .ok_or(self.errors.resource)?;
-                if let Some(next) = remaining
-                    .checked_add(old)
-                    .and_then(|n| n.checked_sub(charge))
-                    .and_then(|n| n.checked_sub(growth))
-                {
-                    *remaining = next;
-                    Some(outcomes.insert(selected, (None, Box::new(outcome.clone()), charge)))
-                } else {
-                    None
-                }
-            };
-            if let Some(replaced) = inserted {
-                drop(replaced);
-                break;
-            }
-            if !query_reads.evict_body().await {
-                return Err(self.errors.resource);
-            }
-        }
+        let charge = outcome
+            .retained_bytes()
+            .and_then(|bytes| bytes.checked_add(outcome_table_bytes(1)))
+            .ok_or(self.errors.resource)?;
+        let charge = self.reserve(charge, query_reads).await?;
+        let replaced = self
+            .outcomes
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert((id.kind, id.address.0), (None, Box::new(outcome), charge));
+        drop(replaced);
         Ok(product)
     }
 }
@@ -3506,7 +3445,7 @@ impl QueryEngine {
         front: Arc<FrontBodyQueries>,
         weight: MemoryWeight,
         max_reads: usize,
-        allowance: hirsel_engine_admission::MemoryReservation,
+        request: &Arc<hirsel_engine_admission::ProcessBudget>,
         errors: RuntimeErrors,
     ) -> Result<Arc<FrontLowerQueries>, QueryError> {
         self.front_lower_queries_in_generator(
@@ -3514,7 +3453,7 @@ impl QueryEngine {
             front,
             weight,
             max_reads,
-            allowance,
+            request,
             errors,
             None,
         )
@@ -3526,18 +3465,11 @@ impl QueryEngine {
         front: Arc<FrontBodyQueries>,
         weight: MemoryWeight,
         max_reads: usize,
-        mut allowance: hirsel_engine_admission::MemoryReservation,
+        request: &Arc<hirsel_engine_admission::ProcessBudget>,
         errors: RuntimeErrors,
         generator: Option<(DefId, Span)>,
     ) -> Result<Arc<FrontLowerQueries>, QueryError> {
         front.namespace().require_environment(self)?;
-        let refusal = || {
-            QueryError::Operational(hirsel_types::OperationalFailure {
-                operation: "front Lower admission".into(),
-                message: "immutable Lower inputs exceed admission or lack phase/source bindings"
-                    .into(),
-            })
-        };
         let pending = generator.is_none()
             && !front.namespace().consumers_admitted()
             && !self.private_bootstrap_active
@@ -3555,19 +3487,14 @@ impl QueryEngine {
                             .contains_key(&DefId::intern(path))
                 }));
         let demand_admission = if pending {
-            let part = allowance.bytes() / 6;
-            let mut take = || allowance.split(part).ok_or_else(refusal);
             Some(generation::demand::DemandAdmission {
                 carry: None,
-                front: take()?,
-                lower: take()?,
-                text: take()?,
-                syntax: take()?,
+                request: request.clone(),
             })
         } else {
             None
         };
-        let partition = LowerPartition::new(allowance);
+        let partition = LowerPartition::new(request);
         let lower = self.front_lower_queries_in_partition(
             definitions,
             front,
@@ -3630,11 +3557,12 @@ impl QueryEngine {
                 })
             })
             .ok_or_else(refusal)?;
-        let retention = partition.remaining.clone();
+        let request = partition.request().clone();
+        let free = || request.limit().saturating_sub(request.reserved());
         let input_charge = LowerInputCharge::take(partition, input_bytes).ok_or_else(|| {
             refuse(format!(
-                "capture metadata requested={input_bytes} remaining={} definitions={}",
-                *retention.lock().unwrap_or_else(|e| e.into_inner()),
+                "capture metadata requested={input_bytes} free={} definitions={}",
+                free(),
                 definitions.len()
             ))
         })?;
@@ -3668,7 +3596,7 @@ impl QueryEngine {
         .ok_or_else(|| {
             refuse(format!(
                 "cumulative definition inventory exceeds remaining {} bytes",
-                *retention.lock().unwrap_or_else(|e| e.into_inner())
+                free()
             ))
         })?;
         let namespace = front.namespace().clone();
@@ -3700,7 +3628,7 @@ impl QueryEngine {
             None => inputs::Shared::new(layouts, layout_bytes, partition).ok_or_else(|| {
                 refuse(format!(
                     "layout inventory requested={layout_bytes} remaining={}",
-                    *retention.lock().unwrap_or_else(|e| e.into_inner())
+                    free()
                 ))
             })?,
         };
@@ -3715,11 +3643,10 @@ impl QueryEngine {
         .ok_or_else(|| {
             refuse(format!(
                 "staged inventory exceeds remaining {} bytes",
-                *retention.lock().unwrap_or_else(|e| e.into_inner())
+                free()
             ))
         })?;
         let paths = inputs::Paths::new(partition);
-        let allowance = partition.allowance.clone();
         let anchors = (*namespace.anchors).clone();
         let records = namespace.records.clone();
         let source = Arc::new(LowerSource {
@@ -3728,7 +3655,6 @@ impl QueryEngine {
             records: records.clone(),
             store: store.clone(),
             _sources: namespace.sources.clone(),
-            _allowance: allowance.clone(),
         });
         let lower = Arc::new(FrontLowerQueries {
             demand: Default::default(),
@@ -3761,8 +3687,8 @@ impl QueryEngine {
             weight,
             max_reads,
             errors,
-            retention,
-            _allowance: allowance,
+            retained: partition.retained.clone(),
+            request: partition.request.clone(),
         });
         Ok(lower)
     }

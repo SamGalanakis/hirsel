@@ -109,6 +109,8 @@ pub struct ReadPool {
     rows: BTreeSet<RowRef>,
     charged_bytes: u64,
     released: Option<Arc<Released>>,
+    /// The dictionary B-tree's own nodes, charged to the request footprint.
+    tree: Option<hirsel_engine_admission::MemoryReservation>,
 }
 /// An exclusive pool borrow keeps the computed admission current until insertion.
 pub struct TrackedAdmission<'a> {
@@ -122,21 +124,19 @@ impl TrackedAdmission<'_> {
     }
     pub fn intern(
         self,
-        allowance: &mut hirsel_engine_admission::MemoryReservation,
-        remaining: &mut u64,
-        credit: Arc<std::sync::Mutex<u64>>,
+        request: &Arc<hirsel_engine_admission::ProcessBudget>,
+        tracker: usize,
     ) -> Option<Reads> {
         self.pool
-            .intern_admitted(self.reads, self.bytes, allowance, remaining, Some(credit))
+            .intern_admitted(self.reads, self.bytes, request, Some(tracker))
     }
 }
 #[cfg(test)]
 thread_local! { static RECLAIM_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
 
 impl ReadPool {
-    /// The caller owns this dictionary's retention partition. Arrays retain
-    /// their refundable leases independently; unused rows can now return the
-    /// dictionary's original row and B-tree debits as well.
+    /// Arrays retain their charges independently; unused rows return their
+    /// row and B-tree charges to the request here.
     pub fn reclaim(&mut self) -> u64 {
         let tree_bytes = |len| {
             let mut weight = crate::retained::MetadataWeight::default();
@@ -174,7 +174,11 @@ impl ReadPool {
                 reclaimed += self.released.take().unwrap()._allowance.bytes();
             }
         }
-        reclaimed + before - tree_bytes(self.rows.len())
+        let shrunk = before - tree_bytes(self.rows.len());
+        if let Some(tree) = &mut self.tree {
+            drop(tree.split(shrunk.min(tree.bytes())));
+        }
+        reclaimed + shrunk
     }
     pub fn charged_bytes(&self) -> u64 {
         self.charged_bytes
@@ -256,17 +260,17 @@ impl ReadPool {
             bytes,
         })
     }
-    /// Admit one tracked receipt against a shared allowance and its retention
-    /// credit. `make_room` may reclaim this pool, so each attempt recomputes
-    /// the exact charge under the pool lock and checks both limits before
-    /// interning. `Err(Some(bytes))` names the charge `make_room` refused.
+    /// Admit one receipt tracked by `pool`, charged to the request footprint.
+    /// `make_room` may reclaim this pool, so each attempt recomputes the exact
+    /// charge under the pool lock before interning. `Err(Some(bytes))` names
+    /// the charge `make_room` refused.
     pub fn admit_tracked(
         pool: &Mutex<Self>,
         reads: &Reads,
-        allowance: &hirsel_engine_admission::MemoryReservationPool,
-        remaining: &Arc<Mutex<u64>>,
+        request: &Arc<hirsel_engine_admission::ProcessBudget>,
         mut make_room: impl FnMut(u64) -> bool,
     ) -> Result<Arc<Reads>, Option<u64>> {
+        let tracker = std::ptr::from_ref(pool) as usize;
         let mut charge = pool
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -279,17 +283,13 @@ impl ReadPool {
             let mut pool = pool.lock().unwrap_or_else(|e| e.into_inner());
             let admission = pool.prepare_tracked(reads).ok_or(None)?;
             charge = admission.required_bytes();
-            let mut credit = remaining.lock().unwrap_or_else(|e| e.into_inner());
-            let available = allowance.available_bytes();
-            if *credit < charge || available < charge {
+            if request.free() < charge {
                 continue;
             }
-            let mut lease = allowance.take(available).ok_or(None)?;
-            let retained = Arc::new(
-                admission
-                    .intern(&mut lease, &mut credit, remaining.clone())
-                    .ok_or(None)?,
-            );
+            let Some(retained) = admission.intern(request, tracker) else {
+                continue;
+            };
+            let retained = Arc::new(retained);
             Reads::bind_tracked_owner(&retained);
             return Ok(retained);
         }
@@ -297,28 +297,30 @@ impl ReadPool {
     pub fn intern(
         &mut self,
         reads: &Reads,
-        allowance: &mut hirsel_engine_admission::MemoryReservation,
-        remaining: &mut u64,
+        request: &Arc<hirsel_engine_admission::ProcessBudget>,
     ) -> Option<Reads> {
         if reads.is_empty() {
             return Some(Reads::empty());
         }
         let bytes = self.admission(reads)?;
-        self.intern_admitted(reads, bytes, allowance, remaining, None)
+        self.intern_admitted(reads, bytes, request, None)
     }
     fn intern_admitted(
         &mut self,
         reads: &Reads,
         bytes: (u64, u64, u64, u64, u64),
-        allowance: &mut hirsel_engine_admission::MemoryReservation,
-        remaining: &mut u64,
-        credit: Option<Arc<std::sync::Mutex<u64>>>,
+        request: &Arc<hirsel_engine_admission::ProcessBudget>,
+        tracker: Option<usize>,
     ) -> Option<Reads> {
         let (loaned, charge, row_bytes, shared_bytes, queue_bytes) = bytes;
-        let after = remaining.checked_sub(charge)?;
-        if allowance.bytes() < loaned {
+        // Refuse before allocating (a failed reserve formats its error); the
+        // lease covers rows, array, queue and the B-tree growth, which stays
+        // with the dictionary.
+        if request.free() < charge {
             return None;
         }
+        let mut allowance = request.reserve(charge).ok()?;
+        let allowance = &mut allowance;
         let released = self
             .released
             .get_or_insert_with(|| {
@@ -348,9 +350,8 @@ impl ReadPool {
         let shared = Arc::new(SharedRows {
             values: rows.into_boxed_slice(),
             released,
-            _credit: credit.map(|remaining| ReadCredit {
-                remaining,
-                bytes: shared_bytes,
+            tracker: tracker.map(|pool| Tracker {
+                pool,
                 owner: std::sync::OnceLock::new(),
             }),
             _allowance: allowance
@@ -358,7 +359,11 @@ impl ReadPool {
                 .expect("pre-admitted read array"),
         });
         self.charged_bytes += loaned;
-        *remaining = after;
+        let tree = allowance.split(charge - loaned)?;
+        match &mut self.tree {
+            Some(held) => held.join(tree).ok()?,
+            None => self.tree = Some(tree),
+        }
         Some(Reads {
             rows: Rows::Shared(shared),
             indices: None,
@@ -367,21 +372,16 @@ impl ReadPool {
     }
 }
 
-struct ReadCredit {
-    remaining: Arc<std::sync::Mutex<u64>>,
-    bytes: u64,
+/// The pool that admitted a receipt and the one wrapper it admitted it as.
+struct Tracker {
+    pool: usize,
     owner: std::sync::OnceLock<std::sync::Weak<Reads>>,
-}
-impl Drop for ReadCredit {
-    fn drop(&mut self) {
-        *self.remaining.lock().unwrap_or_else(|e| e.into_inner()) += self.bytes;
-    }
 }
 pub struct SharedRows {
     values: Box<[Arc<ChargedRow>]>,
     released: Arc<Released>,
     _allowance: hirsel_engine_admission::MemoryReservation,
-    _credit: Option<ReadCredit>,
+    tracker: Option<Tracker>,
 }
 
 impl Drop for SharedRows {
@@ -412,15 +412,15 @@ impl Drop for SharedRows {
 impl Reads {
     pub fn bind_tracked_owner(this: &Arc<Self>) {
         if let Rows::Shared(rows) = &this.rows
-            && let Some(credit) = &rows._credit
+            && let Some(tracker) = &rows.tracker
         {
-            let _ = credit.owner.set(Arc::downgrade(this));
+            let _ = tracker.owner.set(Arc::downgrade(this));
         }
     }
-    pub fn tracked_by(this: &Arc<Self>, remaining: &Arc<std::sync::Mutex<u64>>) -> bool {
+    pub fn tracked_by(this: &Arc<Self>, pool: &Mutex<ReadPool>) -> bool {
         this.indices.is_none()
-            && matches!(&this.rows, Rows::Shared(rows) if rows._credit.as_ref().is_some_and(|credit| {
-                Arc::ptr_eq(&credit.remaining, remaining) && credit.owner.get().is_some_and(|owner| std::ptr::eq(owner.as_ptr(), Arc::as_ptr(this)))
+            && matches!(&this.rows, Rows::Shared(rows) if rows.tracker.as_ref().is_some_and(|tracker| {
+                tracker.pool == std::ptr::from_ref(pool) as usize && tracker.owner.get().is_some_and(|owner| std::ptr::eq(owner.as_ptr(), Arc::as_ptr(this)))
             }))
     }
 }
@@ -521,17 +521,15 @@ mod tests {
             })
             .collect::<Vec<_>>();
         let budget = hirsel_engine_admission::ProcessBudget::new(1 << 20);
-        let mut allowance = budget.reserve(1 << 20).unwrap();
-        let mut remaining = allowance.bytes();
         let ((mut pool, pooled), measured) = crate::test_alloc::measured(|| {
             let mut pool = ReadPool::default();
             let pooled = originals
                 .iter()
-                .map(|reads| pool.intern(reads, &mut allowance, &mut remaining).unwrap())
+                .map(|reads| pool.intern(reads, &budget).unwrap())
                 .collect::<Vec<_>>();
             (pool, pooled)
         });
-        let retained = (1 << 20) - remaining
+        let retained = budget.reserved()
             + pooled
                 .iter()
                 .flat_map(Reads::allocations)
@@ -586,7 +584,6 @@ mod tests {
         let held = pooled[0].clone();
         drop(pool);
         drop(pooled);
-        drop(allowance);
         assert!(
             budget.reserved() > 0,
             "escaped rows must retain their original admission"
@@ -614,14 +611,11 @@ mod tests {
         let budget = hirsel_engine_admission::ProcessBudget::new(1 << 20);
         let mut held = Vec::with_capacity(32);
         let (_, actual) = crate::test_alloc::measured(|| {
-            let mut allowance = budget.reserve(1 << 20).unwrap();
-            let mut remaining = allowance.bytes();
             let mut pool = ReadPool::default();
             for _ in 0..32 {
-                held.push(pool.intern(&reads, &mut allowance, &mut remaining).unwrap());
+                held.push(pool.intern(&reads, &budget).unwrap());
             }
             drop(pool);
-            drop(allowance);
         });
         assert!(actual.live > 0);
         assert!(
@@ -640,25 +634,21 @@ mod tests {
     #[test]
     fn pooled_refusal_does_not_allocate_or_replace_a_previous_fingerprint() {
         let budget = hirsel_engine_admission::ProcessBudget::new(4096);
-        let mut allowance = budget.reserve(4096).unwrap();
         let key = ReadKey::Environment;
         let first = Reads::from_vec(vec![(key, ContentHash::of_bytes(b"first"))]).unwrap();
         let second = Reads::from_vec(vec![(key, ContentHash::of_bytes(b"second"))]).unwrap();
         let mut pool = ReadPool::default();
-        let mut remaining = 4096;
-        let accepted = pool.intern(&first, &mut allowance, &mut remaining).unwrap();
-        let reserved = allowance.bytes();
-        let mut exhausted = 0;
-        let (refused, allocations) =
-            crate::test_alloc::measured(|| pool.intern(&second, &mut allowance, &mut exhausted));
+        let accepted = pool.intern(&first, &budget).unwrap();
+        let exhausted = budget.reserve(budget.free()).unwrap();
+        let reserved = budget.reserved();
+        let (refused, allocations) = crate::test_alloc::measured(|| pool.intern(&second, &budget));
         assert!(refused.is_none());
         assert_eq!(allocations.allocations, 0);
-        assert_eq!(allowance.bytes(), reserved);
+        assert_eq!(budget.reserved(), reserved);
         assert_eq!(pool.rows.len(), 1);
         assert_eq!(accepted, first);
-        let changed = pool
-            .intern(&second, &mut allowance, &mut remaining)
-            .unwrap();
+        drop(exhausted);
+        let changed = pool.intern(&second, &budget).unwrap();
         assert_eq!(pool.rows.len(), 2);
         assert_eq!(changed, second);
         assert_ne!(accepted.get(&key), changed.get(&key));
@@ -683,36 +673,24 @@ mod tests {
         )
         .unwrap();
         let budget = hirsel_engine_admission::ProcessBudget::new(1 << 20);
-        let allowance =
-            hirsel_engine_admission::MemoryReservationPool::new(budget.reserve(1 << 20).unwrap())
-                .ok()
-                .unwrap();
-        let credit = Arc::new(Mutex::new(1 << 20));
         let pool = Mutex::new(ReadPool::default());
         let first_time = pool.lock().unwrap().required_tracked_bytes(&reads).unwrap();
-        drop(ReadPool::admit_tracked(&pool, &reads, &allowance, &credit, |_| true).unwrap());
+        drop(ReadPool::admit_tracked(&pool, &reads, &budget, |_| true).unwrap());
         let repeat = pool.lock().unwrap().required_tracked_bytes(&reads).unwrap();
         assert!(
             repeat < first_time,
             "released rows still discount a re-read"
         );
         // Leave one byte less than the discounted estimate; an evictable owner
-        // holds the rest of the allowance.
-        let mut evictable = Some(
-            allowance
-                .take(allowance.available_bytes() - (repeat - 1))
-                .unwrap(),
-        );
+        // holds the rest of the request.
+        let mut evictable = Some(budget.reserve(budget.free() - (repeat - 1)).unwrap());
         assert!(evictable.as_ref().unwrap().bytes() >= first_time);
-        let admitted = ReadPool::admit_tracked(&pool, &reads, &allowance, &credit, |charge| {
+        let admitted = ReadPool::admit_tracked(&pool, &reads, &budget, |charge| {
             loop {
-                if allowance.available_bytes() >= charge && *credit.lock().unwrap() >= charge {
+                if budget.free() >= charge {
                     return true;
                 }
-                let reclaimed = pool.lock().unwrap().reclaim();
-                if reclaimed != 0 {
-                    *credit.lock().unwrap() += reclaimed;
-                } else if evictable.take().is_none() {
+                if pool.lock().unwrap().reclaim() == 0 && evictable.take().is_none() {
                     return false;
                 }
             }
@@ -720,10 +698,9 @@ mod tests {
         .expect("an evictable owner covers the charge");
         assert_eq!(admitted.as_ref(), &reads);
         assert!(admitted.observed().eq(reads.observed()));
-        assert!(Reads::tracked_by(&admitted, &credit));
+        assert!(Reads::tracked_by(&admitted, &pool));
         drop(admitted);
         drop(pool);
-        drop(allowance);
         assert_eq!(budget.reserved(), 0);
     }
     #[test]
@@ -739,8 +716,9 @@ mod tests {
         let reads = Reads::from_vec(vec![environment, signature]).unwrap();
         let canonical = Reads::from_vec(vec![signature, environment]).unwrap();
         let budget = hirsel_engine_admission::ProcessBudget::new(1 << 20);
-        let mut allowance = budget.reserve(1 << 20).unwrap();
-        let mut pool = ReadPool::default();
+        let tracked = Mutex::new(ReadPool::default());
+        let tracker = std::ptr::from_ref(&tracked) as usize;
+        let mut pool = tracked.lock().unwrap();
         let ordered_required = pool.required_bytes(&reads).unwrap();
         let canonical_required = pool.required_bytes(&canonical).unwrap();
         let order_bytes = std::alloc::Layout::new::<[usize; 2]>()
@@ -758,73 +736,58 @@ mod tests {
             vec![environment, signature]
         );
         let required = pool.required_tracked_bytes(&reads).unwrap();
-        let remaining = Arc::new(std::sync::Mutex::new(required - 1));
-        let before = allowance.bytes();
+        let exhausted = budget.reserve(budget.free() - (required - 1)).unwrap();
+        let before = budget.reserved();
         assert!(
             pool.prepare_tracked(&reads)
                 .unwrap()
-                .intern(
-                    &mut allowance,
-                    &mut remaining.lock().unwrap(),
-                    remaining.clone()
-                )
+                .intern(&budget, tracker)
                 .is_none()
         );
-        assert_eq!(*remaining.lock().unwrap(), required - 1);
-        assert_eq!(allowance.bytes(), before);
+        assert_eq!(budget.reserved(), before);
         assert!(pool.rows.is_empty());
-        *remaining.lock().unwrap() = before;
+        drop(exhausted);
+        let before = budget.reserved();
         let receipt = Arc::new(
             pool.prepare_tracked(&reads)
                 .unwrap()
-                .intern(
-                    &mut allowance,
-                    &mut remaining.lock().unwrap(),
-                    remaining.clone(),
-                )
+                .intern(&budget, tracker)
                 .unwrap(),
         );
         Reads::bind_tracked_owner(&receipt);
-        assert!(Reads::tracked_by(&receipt, &remaining));
-        assert!(Reads::tracked_by(&receipt.clone(), &remaining));
+        assert!(Reads::tracked_by(&receipt, &tracked));
+        assert!(Reads::tracked_by(&receipt.clone(), &tracked));
         assert!(!Reads::tracked_by(
             &receipt,
-            &Arc::new(std::sync::Mutex::new(0))
+            &Mutex::new(ReadPool::default())
         ));
         let copied_wrapper = Arc::new((*receipt).clone());
-        assert!(!Reads::tracked_by(&copied_wrapper, &remaining));
+        assert!(!Reads::tracked_by(&copied_wrapper, &tracked));
         assert_eq!(*copied_wrapper, reads);
         drop(copied_wrapper);
-        let after = *remaining.lock().unwrap();
-        assert_eq!(before - after, required);
+        let after = budget.reserved();
+        assert_eq!(after - before, required);
         let array_bytes = pool.required_tracked_bytes(&reads).unwrap();
         let held = receipt.as_ref().clone();
         drop(receipt);
-        assert_eq!(*remaining.lock().unwrap(), after);
+        assert_eq!(budget.reserved(), after);
         assert_eq!(held, reads);
         assert_eq!(pool.reclaim(), 0, "a held receipt still owns every row");
         drop(held);
-        assert_eq!(*remaining.lock().unwrap(), after + array_bytes);
-        let reclaimed = pool.reclaim();
-        *remaining.lock().unwrap() += reclaimed;
+        assert_eq!(budget.reserved(), after - array_bytes);
+        pool.reclaim();
         assert_eq!(
-            *remaining.lock().unwrap(),
+            budget.reserved(),
             before,
-            "the last reader and dictionary eviction return the entire original debit"
+            "the last reader and dictionary eviction return the entire original charge"
         );
         assert_eq!(pool.reclaim(), 0, "reclamation refunds each row only once");
         // Independently owned arrays release the same rows concurrently. A
         // later round must requeue a row that a held receipt kept alive.
         for _ in 0..4 {
-            let mut local_remaining = allowance.bytes();
-            let held = pool
-                .intern(&reads, &mut allowance, &mut local_remaining)
-                .unwrap();
+            let held = pool.intern(&reads, &budget).unwrap();
             let arrays: Vec<_> = (0..16)
-                .map(|_| {
-                    pool.intern(&reads, &mut allowance, &mut local_remaining)
-                        .unwrap()
-                })
+                .map(|_| pool.intern(&reads, &budget).unwrap())
                 .collect();
             std::thread::scope(|scope| {
                 for array in arrays {
@@ -840,7 +803,7 @@ mod tests {
             assert_eq!(pool.reclaim(), 0);
         }
         drop(pool);
-        drop(allowance);
+        drop(tracked);
         assert_eq!(budget.reserved(), 0);
     }
 }

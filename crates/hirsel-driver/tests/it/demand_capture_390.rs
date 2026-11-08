@@ -94,12 +94,7 @@ fn lower_captures_only_its_demand_and_full_check_still_rejects_unused_body() {
         let errors = crate::scheduled_front::errors();
         let front = program
             .engine
-            .front_body_queries(
-                &definitions,
-                weight,
-                budget.reserve(8 << 20).unwrap(),
-                errors,
-            )
+            .front_body_queries(&definitions, weight, &budget, errors)
             .unwrap();
         assert!(
             !front
@@ -108,14 +103,7 @@ fn lower_captures_only_its_demand_and_full_check_still_rejects_unused_body() {
         );
         let lower = program
             .engine
-            .front_lower_queries(
-                &definitions,
-                front.clone(),
-                weight,
-                32,
-                budget.reserve(8 << 20).unwrap(),
-                errors,
-            )
+            .front_lower_queries(&definitions, front.clone(), weight, 32, &budget, errors)
             .unwrap();
         let mut runtime = AdmittedRuntime::new(
             hirsel_intern::jobs::Jobs::new(1),
@@ -237,23 +225,11 @@ fn native_catalogue_is_lazy_and_store_off_archives_require_export() {
         let errors = crate::scheduled_front::errors();
         let front = program
             .engine
-            .front_body_queries(
-                &definitions,
-                weight,
-                budget.reserve(8 << 20).unwrap(),
-                errors,
-            )
+            .front_body_queries(&definitions, weight, &budget, errors)
             .unwrap();
         let lower = program
             .engine
-            .front_lower_queries(
-                &definitions,
-                front.clone(),
-                weight,
-                32,
-                budget.reserve(8 << 20).unwrap(),
-                errors,
-            )
+            .front_lower_queries(&definitions, front.clone(), weight, 32, &budget, errors)
             .unwrap();
         let native = program
             .engine

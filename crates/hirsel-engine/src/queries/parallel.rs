@@ -1313,7 +1313,7 @@ mod frozen_task_tests {
                         scratch: 1 << 20,
                         stack: 0,
                     },
-                    budget.reserve(2 << 20).unwrap(),
+                    &budget,
                     runtime_errors(),
                 )
                 .unwrap();
@@ -1351,8 +1351,8 @@ mod frozen_task_tests {
             runtime.shutdown();
             drop(queries);
             assert!(
-                budget.reserved() >= 2 << 20,
-                "held body metadata owns its snapshot reservation and its own charge"
+                budget.reserved() > 0,
+                "held body metadata keeps its charge after the producer drops"
             );
             drop(held);
             assert_eq!(budget.reserved(), 0);

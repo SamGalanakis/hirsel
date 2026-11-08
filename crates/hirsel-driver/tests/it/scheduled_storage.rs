@@ -75,42 +75,19 @@ fn admitted_source_storage_root_matches_scalar_and_rejects_root_escape() {
                 runtime.observe(recipe_claims.clone()).unwrap();
                 let front = program
                     .engine
-                    .front_body_queries(
-                        &definitions,
-                        weight,
-                        budget.reserve(16 << 20).unwrap(),
-                        errors,
-                    )
+                    .front_body_queries(&definitions, weight, &budget, errors)
                     .unwrap();
                 let lower = program
                     .engine
-                    .front_lower_queries(
-                        &definitions,
-                        front.clone(),
-                        weight,
-                        4096,
-                        budget.reserve(16 << 20).unwrap(),
-                        errors,
-                    )
+                    .front_lower_queries(&definitions, front.clone(), weight, 4096, &budget, errors)
                     .unwrap();
                 let growth = program
                     .engine
-                    .front_growth_queries(
-                        &program.entry,
-                        front.clone(),
-                        weight,
-                        budget.reserve(8 << 20).unwrap(),
-                        errors,
-                    )
+                    .front_growth_queries(&program.entry, front.clone(), weight, &budget, errors)
                     .unwrap();
                 let recipes = program
                     .engine
-                    .front_storage_queries(
-                        front.clone(),
-                        weight,
-                        budget.reserve(16 << 20).unwrap(),
-                        errors,
-                    )
+                    .front_storage_queries(front.clone(), weight, &budget, errors)
                     .unwrap();
                 assert!(
                     program
@@ -125,7 +102,7 @@ fn admitted_source_storage_root_matches_scalar_and_rejects_root_escape() {
                                 scratch: weight.scratch - 1,
                                 ..weight
                             },
-                            budget.reserve(8 << 20).unwrap(),
+                            &budget,
                             errors,
                         )
                         .is_err(),
@@ -140,7 +117,7 @@ fn admitted_source_storage_root_matches_scalar_and_rejects_root_escape() {
                         recipes.clone(),
                         lower.clone(),
                         weight,
-                        budget.reserve(8 << 20).unwrap(),
+                        &budget,
                         errors,
                     )
                     .unwrap();
@@ -162,7 +139,7 @@ fn admitted_source_storage_root_matches_scalar_and_rejects_root_escape() {
                             lint_package: None,
                         },
                         weight,
-                        budget.reserve(16 << 20).unwrap(),
+                        &budget,
                         errors,
                     )
                     .unwrap()

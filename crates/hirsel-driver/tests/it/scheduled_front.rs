@@ -122,7 +122,7 @@ fn admitted_real_front_tasks_match_scalar_modes_and_complete_reads() {
                         scratch: 8 << 20,
                         stack: 0,
                     },
-                    budget.reserve(8 << 20).unwrap(),
+                    &budget,
                     errors(),
                 )
                 .unwrap();
@@ -251,23 +251,11 @@ fn admitted_lower_saved_work_and_native_metadata_survive_dependency_suspension()
             };
             let front = program
                 .engine
-                .front_body_queries(
-                    &definitions,
-                    weight,
-                    budget.reserve(16 << 20).unwrap(),
-                    errors(),
-                )
+                .front_body_queries(&definitions, weight, &budget, errors())
                 .unwrap();
             let lower = program
                 .engine
-                .front_lower_queries(
-                    &definitions,
-                    front.clone(),
-                    weight,
-                    32,
-                    budget.reserve(32 << 20).unwrap(),
-                    errors(),
-                )
+                .front_lower_queries(&definitions, front.clone(), weight, 32, &budget, errors())
                 .unwrap();
             runtime.register(FRONT_BODY_KIND, front.factory()).unwrap();
             runtime
@@ -512,12 +500,7 @@ fn admitted_lower_depth_matches_scalar_after_warm_constant_dependencies() {
                     };
                     let front = program
                         .engine
-                        .front_body_queries(
-                            &definitions,
-                            weight,
-                            budget.reserve(16 << 20).unwrap(),
-                            errors(),
-                        )
+                        .front_body_queries(&definitions, weight, &budget, errors())
                         .unwrap();
                     let lower = program
                         .engine
@@ -526,7 +509,7 @@ fn admitted_lower_depth_matches_scalar_after_warm_constant_dependencies() {
                             front.clone(),
                             weight,
                             32,
-                            budget.reserve(32 << 20).unwrap(),
+                            &budget,
                             errors(),
                         )
                         .unwrap();
@@ -594,12 +577,7 @@ fn admitted_lower_reserves_outputs_only_for_demanded_definitions() {
         .unwrap();
         let front = program
             .engine
-            .front_body_queries(
-                &definitions,
-                weight,
-                budget.reserve(1 << 20).unwrap(),
-                errors,
-            )
+            .front_body_queries(&definitions, weight, &budget, errors)
             .unwrap();
         let inventory = FrontLowerQueries::input_bytes(&definitions).unwrap();
         let extra = extra.unwrap_or_else(|| FrontLowerQueries::output_bytes(weight).unwrap());
@@ -610,7 +588,7 @@ fn admitted_lower_reserves_outputs_only_for_demanded_definitions() {
                 front.clone(),
                 weight,
                 32,
-                budget.reserve(inventory + extra).unwrap(),
+                &hirsel_engine_admission::ProcessBudget::new(inventory + extra),
                 errors,
             )
             .unwrap();
@@ -729,12 +707,7 @@ fn admitted_front_store_hits_validate_signature_reads_before_materializing_bodie
             };
             let front = program
                 .engine
-                .front_body_queries(
-                    &definitions,
-                    weight,
-                    budget.reserve(8 << 20).unwrap(),
-                    errors(),
-                )
+                .front_body_queries(&definitions, weight, &budget, errors())
                 .unwrap();
             runtime.register(FRONT_BODY_KIND, front.factory()).unwrap();
             let request = runtime.request(
@@ -858,12 +831,7 @@ fn admitted_front_zero_hold_retains_only_archives_after_settlement() {
         };
         let front = program
             .engine
-            .front_body_queries(
-                &[program.entry.clone()],
-                weight,
-                budget.reserve(8 << 20).unwrap(),
-                errors(),
-            )
+            .front_body_queries(&[program.entry.clone()], weight, &budget, errors())
             .unwrap();
         runtime.register(FRONT_BODY_KIND, front.factory()).unwrap();
         let query = front.query(&program.entry).unwrap();
@@ -1025,7 +993,7 @@ fn admitted_front_pressure_refused_citation_caches_nothing_and_recomputes_the_ci
                 .front_body_queries(
                     &definitions,
                     weight,
-                    budget.reserve(limit).unwrap(),
+                    &hirsel_engine_admission::ProcessBudget::new(limit),
                     errors(),
                 )
                 .unwrap();
@@ -1197,7 +1165,7 @@ fn admitted_front_pressure_evicts_only_unpinned_settled_bodies_and_recomputes_eq
                     .front_body_queries(
                         &definitions,
                         weight,
-                        budget.reserve(limit).unwrap(),
+                        &hirsel_engine_admission::ProcessBudget::new(limit),
                         errors(),
                     )
                     .unwrap();
@@ -1502,13 +1470,11 @@ fn admitted_front_pressure_evicts_only_unpinned_settled_bodies_and_recomputes_eq
                 .front_body_queries(
                     &definitions,
                     weight,
-                    budget
-                        .reserve(if mode == 4 {
-                            single_compact_limit - 1
-                        } else {
-                            compact_limit
-                        })
-                        .unwrap(),
+                    &hirsel_engine_admission::ProcessBudget::new(if mode == 4 {
+                        single_compact_limit - 1
+                    } else {
+                        compact_limit
+                    }),
                     errors(),
                 )
                 .unwrap();
@@ -1691,7 +1657,7 @@ fn admitted_front_pressure_evicts_only_unpinned_settled_bodies_and_recomputes_eq
                 .front_body_queries(
                     &[a.clone(), b.clone()],
                     weight,
-                    budget.reserve(reservation).unwrap(),
+                    &hirsel_engine_admission::ProcessBudget::new(reservation),
                     errors(),
                 )
                 .unwrap();
@@ -1768,21 +1734,11 @@ fn admitted_storage_recipe_waits_for_checked_body_and_matches_scalar_adapter() {
             };
             let front = program
                 .engine
-                .front_body_queries(
-                    &[program.entry.clone()],
-                    weight,
-                    budget.reserve(8 << 20).unwrap(),
-                    errors(),
-                )
+                .front_body_queries(&[program.entry.clone()], weight, &budget, errors())
                 .unwrap();
             let storage = program
                 .engine
-                .front_storage_queries(
-                    front.clone(),
-                    weight,
-                    budget.reserve(8 << 20).unwrap(),
-                    errors(),
-                )
+                .front_storage_queries(front.clone(), weight, &budget, errors())
                 .unwrap();
             runtime.register(FRONT_BODY_KIND, front.factory()).unwrap();
             runtime
@@ -1885,7 +1841,7 @@ fn admitted_front_actual_output_debit_refuses_insufficient_producer_allowance() 
                 .front_body_queries(
                     &definitions,
                     weight,
-                    budget.reserve(footprint.front_inputs + extra).unwrap(),
+                    &hirsel_engine_admission::ProcessBudget::new(footprint.front_inputs + extra),
                     errors(),
                 )
                 .unwrap();
@@ -1942,12 +1898,7 @@ fn archived_front_releases_observation_arrays_when_their_readers_finish() {
             };
             let front = program
                 .engine
-                .front_body_queries(
-                    &[program.entry.clone()],
-                    weight,
-                    budget.reserve(8 << 20).unwrap(),
-                    errors(),
-                )
+                .front_body_queries(&[program.entry.clone()], weight, &budget, errors())
                 .unwrap();
             front.compact_retained_reads();
             let mut runtime = AdmittedRuntime::with_query_capacity(

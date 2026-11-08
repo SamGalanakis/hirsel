@@ -1583,13 +1583,8 @@ mod tests {
     fn successor_views_charge_fixed_operation_inputs_once_until_the_last_lease() {
         hirsel_intern::jobs::with_compiler_stack(|| {
             let (mut engine, definitions) = indexed(Arc::new(MemStore::default()));
-            let budget = hirsel_engine_admission::ProcessBudget::new(8 << 20);
-            let pool = hirsel_engine_admission::MemoryReservationPool::new(
-                budget.reserve(8 << 20).unwrap(),
-            )
-            .ok()
-            .unwrap();
-            let before = pool.available_bytes();
+            let pool = hirsel_engine_admission::ProcessBudget::new(8 << 20);
+            let before = pool.free();
             let mut views = Vec::new();
             let mut view_bytes = 0;
             let mut fixed = None;
@@ -1606,10 +1601,7 @@ mod tests {
                         required,
                         capture.retained + capture._delta.unadmitted_bytes()
                     );
-                    assert_eq!(
-                        before - pool.available_bytes(),
-                        inputs + bodies + anchors + view_bytes
-                    );
+                    assert_eq!(before - pool.free(), inputs + bodies + anchors + view_bytes);
                 } else {
                     fixed = Some((
                         capture.inputs.unadmitted_bytes(),
@@ -1617,7 +1609,7 @@ mod tests {
                         capture.anchors.unadmitted_bytes().unwrap(),
                     ));
                 }
-                let mut allowance = pool.take(required).unwrap();
+                let mut allowance = pool.reserve(required).ok().unwrap();
                 capture
                     .admit(&mut allowance, engine.sources.clone())
                     .unwrap();
@@ -1644,7 +1636,7 @@ mod tests {
             drop(views);
             drop(engine);
             assert!(
-                pool.available_bytes() < before,
+                pool.free() < before,
                 "the last reader keeps fixed inputs admitted"
             );
             assert_eq!(last.inputs.unadmitted_bytes(), 0);
@@ -1652,13 +1644,13 @@ mod tests {
             let retained_slot = last.lease();
             drop(last);
             assert!(
-                pool.available_bytes() < before,
+                pool.free() < before,
                 "a retained holder keeps the payload admitted after all readers finish"
             );
             assert_eq!(retained_slot.capture().inputs.unadmitted_bytes(), 0);
             drop(retained_slot);
             assert_eq!(
-                pool.available_bytes(),
+                pool.free(),
                 before,
                 "the last lease returns all input bytes"
             );
@@ -1667,16 +1659,16 @@ mod tests {
     #[test]
     fn demanded_syntax_keeps_its_charge_after_the_front_partition_ends() {
         use hirsel_validate::SignatureLookup;
-        struct Allowance(Arc<hirsel_engine_admission::MemoryReservationPool>);
+        struct Allowance(Arc<hirsel_engine_admission::ProcessBudget>);
         impl header_products::HeaderAllowance for Allowance {
             fn take_header(
                 &self,
                 bytes: u64,
             ) -> Option<hirsel_engine_admission::MemoryReservation> {
-                self.0.take(bytes)
+                self.0.reserve(bytes).ok()
             }
             fn available_header_bytes(&self) -> u64 {
-                self.0.available_bytes()
+                self.0.free()
             }
         }
         hirsel_intern::jobs::with_compiler_stack(|| {
@@ -1693,28 +1685,11 @@ mod tests {
             let headers = capture.snapshot.header_products().unwrap().clone();
             let definition = DefId::intern(&definitions[0]);
             let package = definitions[0].0.package.clone();
-            let budget = hirsel_engine_admission::ProcessBudget::new(8 << 20);
-            let pool = Arc::new(
-                hirsel_engine_admission::MemoryReservationPool::new(
-                    budget.reserve(8 << 20).unwrap(),
-                )
-                .ok()
-                .unwrap(),
-            );
-            let before = pool.available_bytes();
-            let denied_bytes = hirsel_engine_admission::MemoryReservationPool::metadata_bytes() + 1;
-            let denied_budget = hirsel_engine_admission::ProcessBudget::new(denied_bytes);
-            let denied_pool = Arc::new(
-                hirsel_engine_admission::MemoryReservationPool::new(
-                    denied_budget.reserve(denied_bytes).unwrap(),
-                )
-                .ok()
-                .unwrap(),
-            );
-            let denied = headers.configure_source_backing(
-                Arc::new(Allowance(denied_pool)),
-                Arc::new(std::sync::Mutex::new(1)),
-            );
+            let pool = hirsel_engine_admission::ProcessBudget::new(8 << 20);
+            let before = pool.free();
+            let denied = headers.configure_source_backing(Arc::new(Allowance(
+                hirsel_engine_admission::ProcessBudget::new(1),
+            )));
             assert!(
                 capture.demand_validation().is_err(),
                 "an unadmitted demand must refuse"
@@ -1724,10 +1699,7 @@ mod tests {
                 "refused admission must not publish a reusable demand"
             );
             drop(denied);
-            let partition = headers.configure_source_backing(
-                Arc::new(Allowance(pool.clone())),
-                Arc::new(std::sync::Mutex::new(before)),
-            );
+            let partition = headers.configure_source_backing(Arc::new(Allowance(pool.clone())));
             let mut adapters = crate::phases::engine_only_adapters();
             adapters.signature = Some(Arc::new(Header));
             let mut consumer = capture.assembly(&adapters.source_phases()).unwrap();
@@ -1745,28 +1717,26 @@ mod tests {
             for definition in &definitions {
                 drop(capture.syntax(definition).unwrap());
             }
-            let retained = pool.available_bytes();
+            let retained = pool.free();
             assert!(retained < before, "the live source owns its syntax charge");
             let signature = capture.snapshot.signature(definition).unwrap().unwrap();
             let expected = hirsel_validate::View::new(&types, signature.clone(), None).digest();
             let builds =
                 hirsel_intern::work::read(hirsel_intern::work::Counter::ValidationBaseBuilds);
-            let available = pool.available_bytes();
+            let available = pool.free();
             let ((validation, expected_universe), allocated) = crate::test_alloc::measured(|| {
                 let validation = capture.demand_validation().unwrap();
                 let universe = capture.snapshot.package_universe(&package).unwrap();
                 (validation, universe)
             });
             assert!(
-                allocated.live.max(0) as u64 <= available - pool.available_bytes(),
+                allocated.live.max(0) as u64 <= available - pool.free(),
                 "live validation allocation {} exceeds admitted bytes {}",
                 allocated.live,
-                available - pool.available_bytes()
+                available - pool.free()
             );
             for _ in 0..4 {
-                let pressure = headers
-                    .validation_lease(pool.available_bytes() / 2)
-                    .unwrap();
+                let pressure = headers.validation_lease(pool.free() / 2).unwrap();
                 while headers.evict() {}
                 let views = capture.snapshot.validation(&package).unwrap();
                 assert_eq!(views.view(definition).unwrap().unwrap().digest(), expected);
@@ -1793,7 +1763,7 @@ mod tests {
                     .iter()
                     .map(|definition| headers.product(DefId::intern(definition)).unwrap().unwrap())
                     .collect::<Vec<_>>();
-                let held = pool.take(pool.available_bytes()).unwrap();
+                let held = pool.reserve(pool.free()).ok().unwrap();
                 let before = hirsel_intern::work::read(
                     hirsel_intern::work::Counter::ValidationRetentionRefusals,
                 );
@@ -1812,7 +1782,7 @@ mod tests {
                     2
                 );
                 assert_eq!(
-                    pool.available_bytes(),
+                    pool.free(),
                     0,
                     "transient validation publishes no retained charge"
                 );
@@ -1820,7 +1790,7 @@ mod tests {
             }
             drop(partition);
             assert!(
-                pool.available_bytes() < retained,
+                pool.free() < retained,
                 "live syntax and signature leases keep their reservations"
             );
             drop(validation);
@@ -1828,23 +1798,23 @@ mod tests {
             drop(headers);
             assert_eq!(alias.view(definition).unwrap().unwrap().digest(), expected);
             assert!(
-                pool.available_bytes() < before,
+                pool.free() < before,
                 "the escaped validation alias keeps its charge"
             );
             drop(alias);
             assert!(
-                pool.available_bytes() < before,
+                pool.free() < before,
                 "the raw signature retains its payload lease"
             );
             drop(signature);
             assert_eq!(identity.digest(), expected);
             assert!(
-                pool.available_bytes() < before,
+                pool.free() < before,
                 "an escaped identity retains its own control charge"
             );
             drop(identity);
             assert_eq!(
-                pool.available_bytes(),
+                pool.free(),
                 before,
                 "the final payload lease releases its reservation"
             );

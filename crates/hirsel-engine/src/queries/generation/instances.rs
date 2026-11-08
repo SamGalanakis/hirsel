@@ -59,9 +59,8 @@ impl QueryEngine {
     pub fn register_front_instance(
         &mut self,
         request: &FrontInstanceRequest,
-        allowance: hirsel_engine_admission::MemoryReservation,
+        request_budget: &Arc<hirsel_engine_admission::ProcessBudget>,
     ) -> Result<Arc<FrontInstanceSyntax>, FrontRegistrationFailure> {
-        let mut allowance = allowance;
         let previous_sources = self.sources.clone();
         let source_before = self.sources.retained_payload_bytes();
         let mut installed = None;
@@ -147,9 +146,9 @@ impl QueryEngine {
             }
             let retained = weight.bytes();
             let retained_allowance = Arc::new(
-                allowance
-                    .split(retained)
-                    .ok_or_else(|| refusal("instance syntax exceeds its reservation"))?,
+                request_budget
+                    .reserve(retained)
+                    .map_err(|_| refusal("instance syntax exceeds the request footprint"))?,
             );
             if fresh {
                 self.sources = self
@@ -166,7 +165,6 @@ impl QueryEngine {
         match result {
             Ok(value) => Ok(value),
             Err(mut error) => {
-                let allowance = Arc::new(allowance);
                 let mut weight = hirsel_query_products::retained::MetadataWeight::default();
                 weight.add(
                     size_of::<hirsel_engine_admission::MemoryReservation>()
@@ -178,13 +176,18 @@ impl QueryEngine {
                         .try_into()
                         .unwrap_or(usize::MAX),
                 );
+                let allowance = Arc::new(
+                    request_budget
+                        .reserve(weight.bytes())
+                        .unwrap_or_else(|_| request_budget.empty()),
+                );
                 let sources = if matches!(error, QueryError::Diagnostics(_))
                     && weight.bytes() <= allowance.bytes()
                 {
                     self.sources.clone().retain_owner(allowance.clone())
                 } else {
                     if matches!(error, QueryError::Diagnostics(_)) {
-                        error = refusal("instance diagnostics exceed their reservation");
+                        error = refusal("instance diagnostics exceed the request footprint");
                     }
                     previous_sources.clone()
                 };
@@ -277,7 +280,7 @@ impl QueryEngine {
         &mut self,
         roots: &[DefPath],
         fronts: &[Arc<FrontBodyQueries>],
-        allowance: hirsel_engine_admission::MemoryReservation,
+        request_budget: &Arc<hirsel_engine_admission::ProcessBudget>,
     ) -> Result<FrontInstanceDiscovery, QueryError> {
         let mut pending: Vec<_> = roots
             .iter()
@@ -458,9 +461,9 @@ impl QueryEngine {
         });
         weight.vec(&pending_bodies, |w, path| w.path(path));
         let retained = weight.bytes();
-        if retained > allowance.bytes() {
-            return Err(refusal("instance discovery exceeds its reservation"));
-        }
+        let allowance = request_budget
+            .reserve(retained)
+            .map_err(|_| refusal("instance discovery exceeds the request footprint"))?;
         Ok(FrontInstanceDiscovery {
             requests,
             pending_bodies,

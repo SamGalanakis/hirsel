@@ -521,7 +521,7 @@ fn admitted_front(engine: &mut QueryEngine, definitions: &[DefPath], jobs: usize
                 scratch: 8 << 20,
                 stack: 0,
             },
-            budget.reserve(8 << 20).unwrap(),
+            &budget,
             errors,
         )
         .unwrap();
@@ -1776,18 +1776,7 @@ fn scheduled_scc_run_with_capacity(
     };
     let errors = runtime_errors();
     let front = engine
-        .front_body_queries(
-            &definitions,
-            weight,
-            budget
-                .reserve(if capacity.is_some() {
-                    64 << 20
-                } else {
-                    8 << 20
-                })
-                .unwrap(),
-            errors,
-        )
+        .front_body_queries(&definitions, weight, &budget, errors)
         .unwrap();
     let inventory = FrontGrowthQueries::input_bytes(&definitions, weight).unwrap();
     let growth = engine
@@ -1795,7 +1784,7 @@ fn scheduled_scc_run_with_capacity(
             &path("main"),
             front.clone(),
             weight,
-            budget.reserve(inventory + output_bytes).unwrap(),
+            &hirsel_engine_admission::ProcessBudget::new(inventory + output_bytes),
             errors,
         )
         .unwrap();
@@ -2023,13 +2012,8 @@ fn scheduled_scc_products_fit_the_existing_complete_growth_output_grant() {
         text.push_str(&format!("fn f{i} {{}}\n"));
     }
     text.push_str("fn main {}\n");
-    let (output, solves, memberships) = scheduled_scc_run(
-        &text,
-        &[],
-        Arc::new(MemStore::default()),
-        1,
-        106_172 - hirsel_engine_admission::MemoryReservationPool::metadata_bytes(),
-    );
+    let (output, solves, memberships) =
+        scheduled_scc_run(&text, &[], Arc::new(MemStore::default()), 1, 106_172);
     assert_eq!(output.facets.components.len(), 257);
     assert_eq!((solves, memberships), (257, 1));
 }
@@ -2183,21 +2167,10 @@ fn scheduled_scc_cancelled_prefix_reopens_and_records_its_consumed_reads() {
     };
     let errors = runtime_errors();
     let front = engine
-        .front_body_queries(
-            &definitions,
-            weight,
-            budget.reserve(8 << 20).unwrap(),
-            errors,
-        )
+        .front_body_queries(&definitions, weight, &budget, errors)
         .unwrap();
     let growth = engine
-        .front_growth_queries(
-            &path("main"),
-            front.clone(),
-            weight,
-            budget.reserve(8 << 20).unwrap(),
-            errors,
-        )
+        .front_growth_queries(&path("main"), front.clone(), weight, &budget, errors)
         .unwrap();
     let (started, receive) = mpsc::channel();
     let (release, released) = mpsc::channel();

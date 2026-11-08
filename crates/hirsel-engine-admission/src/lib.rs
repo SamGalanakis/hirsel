@@ -3,21 +3,13 @@
 hirsel_guard::install!();
 
 mod budget;
-pub use budget::{MemoryReservation, MemoryReservationPool, ProcessBudget};
+pub use budget::{MemoryReservation, ProcessBudget};
 mod run;
 pub use run::{admit_run, bind_run, callee_roots, entry_launch_kind, entry_roots, read_run_record};
 
-pub struct RetainedArchiveLease {
-    pub _allowance: std::sync::Arc<MemoryReservation>,
-    pub remaining: std::sync::Arc<std::sync::Mutex<u64>>,
-    pub bytes: u64,
-}
-impl Drop for RetainedArchiveLease {
-    fn drop(&mut self) {
-        let mut remaining = self.remaining.lock().unwrap_or_else(|e| e.into_inner());
-        *remaining += self.bytes;
-    }
-}
+/// One retained value's charge on the request footprint, released when the
+/// value's last owner drops it.
+pub struct RetainedArchiveLease(pub MemoryReservation);
 
 pub fn arc_bytes<T: ?Sized>(value: &T) -> usize {
     std::alloc::Layout::new::<[usize; 2]>()

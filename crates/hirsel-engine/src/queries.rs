@@ -57,8 +57,8 @@ pub use scheduled_stage::{FRONT_STAGE_KIND, FrontStageOutput, FrontStageQueries}
 mod scheduled_growth;
 pub use generation::{
     AcceptedFrontRegistration, FrontDemandAdmission, FrontDemandError, FrontDemandScope,
-    FrontInstanceDiscovery, FrontInstanceRequest, FrontInstanceSyntax, FrontRegistrationBootstrap,
-    FrontRegistrationBootstrapAdmission, FrontRegistrationBootstrapError, FrontRegistrationFailure,
+    FrontInstanceDiscovery, FrontInstanceRequest, FrontInstanceSyntax,
+    FrontRegistrationBootstrapError, FrontRegistrationFailure,
 };
 pub use parallel::{
     FRONT_BODY_KIND, FRONT_STORAGE_KIND, FrontBodyOutput, FrontBodyQueries, FrontCarry,

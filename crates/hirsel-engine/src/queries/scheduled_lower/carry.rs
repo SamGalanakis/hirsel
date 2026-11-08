@@ -127,10 +127,12 @@ impl FrontLowerQueries {
         let mut weight = hirsel_query_products::retained::MetadataWeight::default();
         weight.add(size_of::<CarryChanges>() + 2 * size_of::<usize>());
         weight.tree::<(u32, ContentHash), u64>(rows.entries.len());
-        let mut retention = self.retention.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(remaining) = retention.checked_sub(weight.bytes()) {
-            *retention = remaining;
-            drop(retention);
+        let admitted = self
+            .retained
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .grow(weight.bytes());
+        if admitted.is_some() {
             let mut clean: BTreeMap<_, _> = rows
                 .entries
                 .iter()

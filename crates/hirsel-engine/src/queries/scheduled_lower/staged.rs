@@ -142,12 +142,10 @@ impl FrontLowerQueries {
                 .checked_sub(previous.bytes())
                 .and_then(|bytes| bytes.checked_add(size_of_val(arguments) as u64))
                 .ok_or(QueryError::NotImplemented)?;
-            let mut remaining = self
-                .retention
+            self.retained
                 .lock()
-                .unwrap_or_else(|error| error.into_inner());
-            *remaining = remaining
-                .checked_sub(required)
+                .unwrap_or_else(|error| error.into_inner())
+                .grow(required)
                 .ok_or(QueryError::NotImplemented)?;
             selections.insert(
                 live,

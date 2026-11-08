@@ -249,14 +249,14 @@ impl ArchivedReader {
     pub(crate) fn capture_owned(
         source: Arc<crate::products::GrowthPublicationSource>,
         reads: &Reads,
-        pool: &hirsel_engine_admission::MemoryReservationPool,
+        pool: &Arc<hirsel_engine_admission::ProcessBudget>,
     ) -> Option<Arc<Self>> {
         let bytes =
             hirsel_engine_admission::retained_arc_bytes(&std::mem::MaybeUninit::<Self>::uninit())
                 .checked_add(hirsel_engine_admission::retained_arc_bytes(
                 &std::mem::MaybeUninit::<hirsel_engine_admission::MemoryReservation>::uninit(),
             ))?;
-        let allowance = Arc::new(pool.take(bytes)?);
+        let allowance = Arc::new(pool.reserve(bytes).ok()?);
         let mut reader = Self::capture(source, reads)?;
         Arc::get_mut(&mut reader)?._owned = Some(allowance);
         Some(reader)
@@ -497,7 +497,6 @@ impl ReadUnion {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
 
     #[test]
     fn completed_reader_receipt_releases_pooled_rows_and_preserves_observation_order() {
@@ -507,19 +506,17 @@ mod tests {
         ])
         .unwrap();
         let budget = hirsel_engine_admission::ProcessBudget::new(1 << 20);
-        let mut allowance = budget.reserve(1 << 20).unwrap();
-        let credit = Arc::new(Mutex::new(1 << 20));
         let mut pool = hirsel_query_products::reads::ReadPool::default();
         let pooled = pool
             .prepare_tracked(&reads)
             .unwrap()
-            .intern(&mut allowance, &mut credit.lock().unwrap(), credit.clone())
+            .intern(&budget, 1)
             .unwrap();
         let store = hirsel_engine_store::MemStore::default();
         let receipt = ReaderReceipt::capture(&store, &pooled, 1 << 20).unwrap();
         drop(pooled);
-        *credit.lock().unwrap() += pool.reclaim();
-        assert_eq!(*credit.lock().unwrap(), 1 << 20);
+        pool.reclaim();
+        assert_eq!(budget.reserved(), 0);
         let restored = receipt.load(&store).unwrap();
         assert_eq!(restored.as_ref(), &reads);
         assert!(restored.observed().eq(reads.observed()));

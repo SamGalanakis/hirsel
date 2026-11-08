@@ -69,24 +69,11 @@ fn admitted_source_growth_demands_unexecuted_required_roots() {
                 .unwrap();
                 let front = program
                     .engine
-                    .front_body_queries(
-                        &definitions,
-                        weight,
-                        budget
-                            .reserve((weight.retained + 8192) * definitions.len() as u64)
-                            .unwrap(),
-                        errors,
-                    )
+                    .front_body_queries(&definitions, weight, &budget, errors)
                     .unwrap_or_else(|error| panic!("{} roots: {error:?}", definitions.len()));
                 let growth = program
                     .engine
-                    .front_growth_queries(
-                        &program.entry,
-                        front.clone(),
-                        weight,
-                        budget.reserve(8 << 20).unwrap(),
-                        errors,
-                    )
+                    .front_growth_queries(&program.entry, front.clone(), weight, &budget, errors)
                     .unwrap();
                 runtime.register(FRONT_BODY_KIND, front.factory()).unwrap();
                 runtime
@@ -143,13 +130,9 @@ fn growth_output_admission_does_not_spend_its_grant_on_the_runtime_frame() {
                 (small, 1, "relay"),
                 (small, 16 << 10, "relay"),
                 // The selected-footprint control's original complete growth
-                // output grant, including the pool's own metadata. Front has
+                // output grant. Front has
                 // its independent admission here, so this law reaches growth.
-                (
-                    many.as_str(),
-                    106_172 - hirsel_engine_admission::MemoryReservationPool::metadata_bytes(),
-                    "f255",
-                ),
+                (many.as_str(), 106_172, "f255"),
             ] {
                 std::fs::write(&source, text).unwrap();
                 let mut program = COMPILER
@@ -176,12 +159,7 @@ fn growth_output_admission_does_not_spend_its_grant_on_the_runtime_frame() {
                 .unwrap();
                 let front = program
                     .engine
-                    .front_body_queries(
-                        &definitions,
-                        weight,
-                        budget.reserve(8 << 20).unwrap(),
-                        errors,
-                    )
+                    .front_body_queries(&definitions, weight, &budget, errors)
                     .unwrap();
                 let inputs =
                     FrontGrowthQueries::input_bytes(&definitions, MemoryWeight::default()).unwrap();
@@ -191,7 +169,7 @@ fn growth_output_admission_does_not_spend_its_grant_on_the_runtime_frame() {
                         &program.entry,
                         front.clone(),
                         weight,
-                        budget.reserve(inputs + output_bytes).unwrap(),
+                        &hirsel_engine_admission::ProcessBudget::new(inputs + output_bytes),
                         errors,
                     )
                     .unwrap();
@@ -273,22 +251,11 @@ fn changed_source_member_stops_at_equal_settled_component() {
             .unwrap();
             let front = program
                 .engine
-                .front_body_queries(
-                    &definitions,
-                    weight,
-                    budget.reserve(8 << 20).unwrap(),
-                    errors,
-                )
+                .front_body_queries(&definitions, weight, &budget, errors)
                 .unwrap();
             let growth = program
                 .engine
-                .front_growth_queries(
-                    &program.entry,
-                    front.clone(),
-                    weight,
-                    budget.reserve(8 << 20).unwrap(),
-                    errors,
-                )
+                .front_growth_queries(&program.entry, front.clone(), weight, &budget, errors)
                 .unwrap();
             runtime.register(FRONT_BODY_KIND, front.factory()).unwrap();
             runtime

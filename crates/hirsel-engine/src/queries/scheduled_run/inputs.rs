@@ -13,18 +13,13 @@ impl FrontRunQueries {
             weight.path(dependency);
         }
         let bytes = weight.bytes();
-        let mut remaining = self
-            .retention
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        *remaining = remaining
-            .checked_sub(bytes)
-            .ok_or_else(|| operational("demanded Run input exceeds admission"))?;
-        drop(remaining);
         input._charge = Some(InputCharge {
-            remaining: self.retention.clone(),
-            _allowance: self.ownership._allowance.clone(),
-            bytes,
+            _reservation: self
+                .ownership
+                ._allowance
+                .budget()
+                .reserve(bytes)
+                .map_err(|_| operational("demanded Run input exceeds admission"))?,
         });
         Ok(Arc::new(input))
     }
@@ -33,8 +28,7 @@ impl FrontRunQueries {
     }
     pub(super) fn execution_admission(&self) -> ExecutionAdmission {
         ExecutionAdmission {
-            remaining: self.retention.clone(),
-            allowance: self.ownership._allowance.clone(),
+            request: self.ownership._allowance.budget().clone(),
             scratch: self.weight.scratch,
         }
     }
@@ -161,8 +155,7 @@ impl FrontRunQueries {
 /// Independent of the query owner, so a published handle cannot form a cycle.
 #[derive(Clone)]
 pub(super) struct ExecutionAdmission {
-    remaining: Arc<Mutex<u64>>,
-    allowance: Arc<hirsel_engine_admission::MemoryReservation>,
+    request: Arc<hirsel_engine_admission::ProcessBudget>,
     pub(super) scratch: u64,
 }
 impl ExecutionAdmission {
@@ -178,16 +171,13 @@ impl ExecutionAdmission {
                 self.scratch
             )));
         }
-        let mut remaining = self.remaining.lock().unwrap_or_else(|e| e.into_inner());
-        *remaining = remaining.checked_sub(bytes).ok_or_else(|| {
+        let reservation = self.request.reserve(bytes).map_err(|error| {
             operational(format!(
-                "installed decode exceeds retention admission: {bytes} requested, {remaining} available"
+                "installed decode exceeds the request footprint: {error}"
             ))
         })?;
         Ok(Arc::new(InputCharge {
-            remaining: self.remaining.clone(),
-            _allowance: self.allowance.clone(),
-            bytes,
+            _reservation: reservation,
         }))
     }
 }
@@ -195,15 +185,5 @@ impl ExecutionAdmission {
 /// The last consumer releases decoded headers and dependencies before
 /// refunding their debit. The catalogue itself keeps no decoded allocation.
 pub(super) struct InputCharge {
-    remaining: Arc<Mutex<u64>>,
-    _allowance: Arc<hirsel_engine_admission::MemoryReservation>,
-    bytes: u64,
-}
-impl Drop for InputCharge {
-    fn drop(&mut self) {
-        *self
-            .remaining
-            .lock()
-            .unwrap_or_else(|error| error.into_inner()) += self.bytes;
-    }
+    _reservation: hirsel_engine_admission::MemoryReservation,
 }

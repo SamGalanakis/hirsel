@@ -13,8 +13,10 @@ use std::{
     sync::{Arc, Mutex, OnceLock, Weak},
 };
 
+#[cfg(test)]
+use hirsel_engine::requests::source_graph::SnapshotPlan;
 pub(super) use hirsel_engine::requests::source_graph::{
-    GraphAdmission, LoadingAdmission, SnapshotPlan, retain_error, retain_sources,
+    LoadingAdmission, retain_error, retain_sources,
 };
 
 /// Implemented only by installed compiler producer views. Public requests
@@ -177,29 +179,6 @@ impl GraphBudget {
             }
             self.budget
                 .wait_for_release(std::time::Duration::from_secs(1));
-        }
-    }
-    pub fn admit(
-        &self,
-        limits: RequestLimits,
-        plan: SnapshotPlan,
-    ) -> Result<GraphAdmission, ToolError> {
-        let snapshot = plan
-            .source
-            .checked_add(plan.front)
-            .and_then(|bytes| bytes.checked_add(plan.lower))
-            .and_then(|bytes| bytes.checked_add(plan.check))
-            .and_then(|bytes| bytes.checked_add(plan.growth))
-            .and_then(|bytes| bytes.checked_add(plan.run));
-        if snapshot.is_none_or(|bytes| bytes > limits.snapshot_bytes) {
-            return GraphAdmission::reserve_once(&self.budget, limits, plan);
-        }
-        match GraphAdmission::reserve_once(&self.budget, limits, plan) {
-            Ok(admission) => Ok(admission),
-            Err(_) => {
-                self.release_idle();
-                GraphAdmission::reserve_once(&self.budget, limits, plan)
-            }
         }
     }
     fn keep(&self, graph: Arc<InstalledGraph>) {
@@ -651,18 +630,9 @@ mod tests {
         let record = store
             .put_content(Domain { kind: 1, schema: 1 }, b"source input")
             .unwrap();
-        let admission = loading
-            .finish(SnapshotPlan {
-                source: 16,
-                front: 16,
-                lower: 16,
-                check: 16,
-                growth: 0,
-                run: 0,
-            })
-            .unwrap();
+        let admission = loading.finish(SnapshotPlan { source: 16, run: 0 }).unwrap();
         assert_eq!(admission.transport.bytes(), 0);
-        assert_eq!(budget.reserved(), 8320);
+        assert_eq!(budget.reserved(), 64 + 16 + 8192);
         let held = store.get_content(record).unwrap();
         drop(admission);
         drop(store);
@@ -686,36 +656,17 @@ mod tests {
         let loading = LoadingAdmission::reserve(&budget, limits, 0).unwrap();
         assert_eq!(budget.reserved(), 100);
         assert!(budget.reserve(1).is_err());
-        let graph = loading
-            .finish(SnapshotPlan {
-                source: 5,
-                front: 5,
-                lower: 5,
-                growth: 5,
-                check: 5,
-                run: 0,
-            })
-            .unwrap();
-        assert_eq!(budget.reserved(), 85);
+        let graph = loading.finish(SnapshotPlan { source: 5, run: 0 }).unwrap();
+        assert_eq!(budget.reserved(), 40 + 5 + 20);
         drop(graph);
         assert_eq!(budget.reserved(), 0);
         for plan in [
             SnapshotPlan {
                 source: u64::MAX,
-                front: 1,
-                lower: 0,
-                growth: 0,
-                check: 0,
-                run: 0,
+                run: 1,
             },
-            SnapshotPlan {
-                source: 41,
-                front: 0,
-                lower: 0,
-                growth: 0,
-                check: 0,
-                run: 0,
-            },
+            SnapshotPlan { source: 41, run: 0 },
+            SnapshotPlan { source: 40, run: 1 },
         ] {
             assert!(
                 LoadingAdmission::reserve(&budget, limits, 0)
@@ -744,42 +695,6 @@ mod tests {
         assert_eq!(held.text(), "bad source");
         drop(held);
         assert_eq!(budget.reserved(), 0);
-    }
-    #[test]
-    fn partial_graph_admission_rolls_back_and_never_multiplies_snapshot_cap() {
-        let limits = RequestLimits {
-            runtime_bytes: 40,
-            snapshot_bytes: 40,
-            transport_bytes: 20,
-        };
-        let plan = SnapshotPlan {
-            source: 10,
-            front: 10,
-            lower: 10,
-            check: 10,
-            growth: 0,
-            run: 0,
-        };
-        let budget = hirsel_engine_admission::ProcessBudget::new(99);
-        assert!(GraphAdmission::reserve(&budget, limits, plan).is_err());
-        assert_eq!(budget.reserved(), 0);
-        let budget = hirsel_engine_admission::ProcessBudget::new(100);
-        let admitted = GraphAdmission::reserve(&budget, limits, plan).unwrap();
-        assert_eq!(budget.reserved(), 100);
-        assert!(GraphAdmission::reserve(&budget, limits, plan).is_err());
-        assert_eq!(budget.reserved(), 100);
-        drop(admitted);
-        assert_eq!(budget.reserved(), 0);
-        for plan in [
-            SnapshotPlan { check: 11, ..plan },
-            SnapshotPlan {
-                source: u64::MAX,
-                ..plan
-            },
-        ] {
-            assert!(GraphAdmission::reserve(&budget, limits, plan).is_err());
-            assert_eq!(budget.reserved(), 0);
-        }
     }
     #[test]
     fn host_admission_rolls_back_partial_grants_before_releasing_idle_metadata() {
@@ -867,7 +782,6 @@ mod tests {
     fn shared_graph_budget_evicts_idle_views_but_refuses_to_overcommit_live_leases() {
         struct Empty {
             source: Arc<hirsel_engine_admission::MemoryReservation>,
-            _producer: hirsel_engine_admission::MemoryReservation,
         }
         impl GraphProducts for Empty {
             fn check_source_owner(&self) -> Option<Arc<dyn Send + Sync>> {
@@ -925,21 +839,14 @@ mod tests {
         let mut second = GraphSelections::new(&budget, true);
         assert!(Arc::ptr_eq(&first.retention, &second.retention));
         let create = |owner: &GraphBudget, request: &CompileRequest| {
-            let admission = owner.admit(
-                RequestLimits {
-                    runtime_bytes: bytes,
-                    snapshot_bytes: 2,
-                    transport_bytes: 0,
-                },
-                SnapshotPlan {
-                    source: 1,
-                    front: 1,
-                    lower: 0,
-                    check: 0,
-                    growth: 0,
-                    run: 0,
-                },
-            )?;
+            let limits = RequestLimits {
+                runtime_bytes: bytes,
+                snapshot_bytes: 2,
+                transport_bytes: 0,
+            };
+            let admission = owner
+                .begin(limits, false, 0)?
+                .finish(SnapshotPlan { source: 2, run: 0 })?;
             let error = hirsel_engine_store::Domain {
                 kind: 0x4600_00fe,
                 schema: 1,
@@ -964,7 +871,6 @@ mod tests {
                 runtime: Arc::new(Mutex::new(runtime)),
                 products: Arc::new(Empty {
                     source: Arc::new(admission.source),
-                    _producer: admission.front,
                 }),
             }))
         };
@@ -1131,19 +1037,10 @@ fn native_transport_is_admitted_before_source_work_and_transfers_without_a_secon
         budget.reserve(20).is_err(),
         "a late native reservation would exceed the cap"
     );
-    let mut graph = loading
-        .finish(SnapshotPlan {
-            source: 10,
-            front: 10,
-            lower: 10,
-            check: 10,
-            growth: 5,
-            run: 5,
-        })
-        .unwrap();
+    let mut graph = loading.finish(SnapshotPlan { source: 10, run: 5 }).unwrap();
     let native_transport = graph.native_transport.split(20).unwrap();
     assert_eq!(native_transport.bytes(), 20);
-    assert_eq!(budget.reserved(), 90);
+    assert_eq!(budget.reserved(), 10 + 10 + 5 + 10 + 20);
     drop(graph);
     assert_eq!(budget.reserved(), 30);
     drop(source_transport);

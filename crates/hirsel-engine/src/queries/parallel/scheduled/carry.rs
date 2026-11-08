@@ -29,6 +29,7 @@ struct Rows {
 /// graph may replace a shared row, but cannot make this view trust that row.
 pub(super) struct CarryChanges {
     clean: BTreeMap<Key, u64>,
+    _charge: hirsel_engine_admission::MemoryReservation,
 }
 /// Optional host-owned carry, independently bounded from ordinary body storage.
 /// Its rows are data only: current text and every read must validate before
@@ -571,10 +572,7 @@ impl FrontBodyQueries {
         let mut weight = hirsel_query_products::retained::MetadataWeight::default();
         weight.add(size_of::<CarryChanges>() + 2 * size_of::<usize>());
         weight.tree::<Key, u64>(rows.entries.len());
-        let mut retention = self.retention.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(remaining) = retention.checked_sub(weight.bytes()) {
-            *retention = remaining;
-            drop(retention);
+        if let Ok(charge) = self._allowance.request.reserve(weight.bytes()) {
             let mut clean: BTreeMap<_, _> = rows
                 .entries
                 .iter()
@@ -612,7 +610,10 @@ impl FrontBodyQueries {
                 }
             }
             *self.carry_changes.lock().unwrap_or_else(|e| e.into_inner()) =
-                Some(Arc::new(CarryChanges { clean }));
+                Some(Arc::new(CarryChanges {
+                    clean,
+                    _charge: charge,
+                }));
         }
         drop(rows);
         *slot = Some(carry);

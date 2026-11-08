@@ -169,7 +169,7 @@ impl PrivateProducts {
                 let charge = cell.lock().unwrap_or_else(|e| e.into_inner());
                 if let HeaderCharge::Front(charge) = &*charge {
                     totals.0 += 1;
-                    totals.1 += charge.bytes;
+                    totals.1 += charge.allowance.bytes();
                     totals.2 += usize::from(Arc::strong_count(&product) > 2);
                 }
             }

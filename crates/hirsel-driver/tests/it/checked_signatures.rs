@@ -37,18 +37,18 @@ fn checked_signature_inputs_keep_exact_coverage_private_views_and_source_owner()
             .front_body_queries(
                 &definitions,
                 weight,
-                budget.reserve(8 << 20).unwrap(),
+                &budget,
                 crate::scheduled_front::errors(),
             )
             .unwrap();
-        let before = budget.reserved();
+        let short = hirsel_engine_admission::ProcessBudget::new(1 << 20);
         assert!(
             program
                 .engine
-                .front_checked_signatures(front.clone(), budget.reserve(0).unwrap())
+                .front_checked_signatures(front.clone(), short.reserve(0).unwrap())
                 .is_err()
         );
-        assert_eq!(budget.reserved(), before);
+        assert_eq!(short.reserved(), 0);
         let required = program
             .engine
             .front_checked_signatures_bytes(&front)
@@ -56,9 +56,10 @@ fn checked_signature_inputs_keep_exact_coverage_private_views_and_source_owner()
         assert!(
             program
                 .engine
-                .front_checked_signatures(front.clone(), budget.reserve(required - 1).unwrap())
+                .front_checked_signatures(front.clone(), short.reserve(required - 1).unwrap())
                 .is_err()
         );
+        assert_eq!(short.reserved(), 0);
         let inputs = program
             .engine
             .front_checked_signatures(front.clone(), budget.reserve(required).unwrap())
@@ -98,7 +99,7 @@ fn checked_signature_inputs_keep_exact_coverage_private_views_and_source_owner()
             .front_body_queries(
                 &definitions,
                 weight,
-                budget.reserve(8 << 20).unwrap(),
+                &budget,
                 crate::scheduled_front::errors(),
             )
             .unwrap();
@@ -117,7 +118,10 @@ fn checked_signature_inputs_keep_exact_coverage_private_views_and_source_owner()
         drop(expected);
         drop(program);
         drop(front);
-        assert_eq!(budget.reserved(), before + required);
+        assert!(
+            budget.reserved() >= required,
+            "the inputs keep their own charge"
+        );
         assert!(
             inputs.section(&hidden).is_some(),
             "header inspection keeps its source owner alive"

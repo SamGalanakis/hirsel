@@ -789,9 +789,9 @@ impl LiveLowerProduct {
             _reservation: ValueAdmission::Owned(reservation),
         })))
     }
-    /// Transfer a settled producer's existing partition into its live value.
+    /// Charge a settled producer's live value to the request footprint.
     /// Clones share this one lease; the last owner returns the exact charge.
-    /// A short partition hands the output back so admission can wait and retry;
+    /// A full request hands the output back so admission can wait and retry;
     /// coverage or layout refusal keeps the producer's existing error.
     pub(crate) fn from_retained(
         identity: (Address, Action),
@@ -799,8 +799,7 @@ impl LiveLowerProduct {
         context: NativeRecordContext,
         records: NativeRecords,
         backing: Arc<dyn Send + Sync>,
-        allowance: Arc<hirsel_engine_admission::MemoryReservation>,
-        remaining: Arc<Mutex<u64>>,
+        request: &Arc<hirsel_engine_admission::ProcessBudget>,
     ) -> LiveAdmission {
         if !records.uses_types(context.record_types()) {
             return LiveAdmission::Refused;
@@ -808,17 +807,10 @@ impl LiveLowerProduct {
         let Some(bytes) = Self::retained_required_bytes(&output) else {
             return LiveAdmission::Refused;
         };
-        let mut available = remaining.lock().unwrap_or_else(|e| e.into_inner());
-        let Some(next) = available.checked_sub(bytes) else {
+        let Ok(reservation) = request.reserve(bytes) else {
             return LiveAdmission::Blocked(Box::new(output));
         };
-        *available = next;
-        drop(available);
-        let owner = Arc::new(RetainedArchiveLease {
-            _allowance: allowance.clone(),
-            remaining,
-            bytes,
-        });
+        let owner = Arc::new(RetainedArchiveLease(reservation));
         let source = ProductSource {
             shared: SharedProductSource(Arc::new(ProductContext {
                 context,
@@ -1111,12 +1103,11 @@ mod tests {
         let store = Arc::new(hirsel_engine_store::MemStore::default());
         let records = NativeRecords::new(context.record_types().clone(), store.clone());
         let source = ProductSource::prepare(context.clone(), records, Arc::new(())).unwrap();
-        let budget = hirsel_engine_admission::ProcessBudget::new(1 << 20);
-        let pool =
-            hirsel_engine_admission::MemoryReservationPool::new(budget.reserve(1 << 20).unwrap())
-                .ok()
-                .unwrap();
-        let mut allowance = pool.take(LiveSourceGrowthProduct::source_bytes()).unwrap();
+        let pool = hirsel_engine_admission::ProcessBudget::new(1 << 20);
+        let mut allowance = pool
+            .reserve(LiveSourceGrowthProduct::source_bytes())
+            .ok()
+            .unwrap();
         let source =
             LiveSourceGrowthProduct::admit_source(source, store, 64 << 10, &mut allowance).unwrap();
         crate::queries::ArchivedReader::capture_owned(source, &Reads::empty(), &pool).unwrap()
@@ -1126,12 +1117,7 @@ mod tests {
         NativeRecordContext,
     ) {
         let (_, source) = fixture();
-        let budget = hirsel_engine_admission::ProcessBudget::new(1 << 20);
-        let pool = hirsel_engine_admission::MemoryReservationPool::new(
-            budget.reserve(budget.limit()).unwrap(),
-        )
-        .ok()
-        .unwrap();
+        let pool = hirsel_engine_admission::ProcessBudget::new(1 << 20);
         let facets = crate::SourceGrowthProducer {
             source: &source,
             output_pool: &pool,
@@ -1675,10 +1661,7 @@ mod source_component_tests {
         let engine = QueryEngine::new(crate::default_environment(), PhaseAdapters::default());
         let context = engine.source_records();
         let budget = hirsel_engine_admission::ProcessBudget::new(1 << 20);
-        let pool =
-            hirsel_engine_admission::MemoryReservationPool::new(budget.reserve(512 << 10).unwrap())
-                .ok()
-                .unwrap();
+        let pool = hirsel_engine_admission::ProcessBudget::new(512 << 10);
         let producer = SourceGrowthProducer {
             source: &context,
             output_pool: &pool,

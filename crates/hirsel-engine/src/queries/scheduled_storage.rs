@@ -56,7 +56,7 @@ pub struct FrontStorageGraphQueries {
     executions: AtomicU64,
     weight: MemoryWeight,
     errors: RuntimeErrors,
-    outputs: Arc<OutputPartition>,
+    outputs: Arc<hirsel_engine_admission::ProcessBudget>,
     _allowance: hirsel_engine_admission::MemoryReservation,
 }
 impl FrontStorageGraphQueries {
@@ -124,7 +124,7 @@ impl FrontStorageGraphQueries {
         };
         let mut weight = hirsel_query_products::retained::Weight::default();
         weight.error(&error);
-        let Some(reservation) = self.outputs.pool.take(weight.bytes) else {
+        let Some(reservation) = self.outputs.reserve(weight.bytes).ok() else {
             return self.errors.resource;
         };
         let Some(reference) = self.store.put_content(FAILURE, &bytes) else {
@@ -579,8 +579,8 @@ impl Task {
         let reservation = Arc::new(
             owner
                 .outputs
-                .pool
-                .take(weight.bytes)
+                .reserve(weight.bytes)
+                .ok()
                 .ok_or_else(|| invalid("storage graph output exceeds admission"))?,
         );
         let action = hirsel_artifact_store::Action(ContentHash::of_parts(
@@ -633,7 +633,7 @@ impl QueryEngine {
         recipes: Arc<FrontStorageQueries>,
         lower: Arc<FrontLowerQueries>,
         weight: MemoryWeight,
-        allowance: impl Into<ProducerAdmission>,
+        request: &Arc<hirsel_engine_admission::ProcessBudget>,
         errors: RuntimeErrors,
     ) -> Result<Arc<FrontStorageGraphQueries>, QueryError> {
         if !recipes.fits_poll(weight) {
@@ -650,10 +650,10 @@ impl QueryEngine {
             .collect::<Vec<_>>();
         let inventory = FrontStorageGraphQueries::input_bytes(&definitions)
             .ok_or(QueryError::NotImplemented)?;
-        let (allowance, outputs) = allowance
-            .into()
-            .partition(inventory)
-            .ok_or_else(|| invalid("source storage inventory exceeds admission"))?;
+        let allowance = request
+            .reserve(inventory)
+            .map_err(|_| invalid("source storage inventory exceeds the request footprint"))?;
+        let outputs = request.clone();
         let instances = definitions
             .iter()
             .filter(|p| {

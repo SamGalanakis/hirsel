@@ -154,35 +154,15 @@ fn check_case(
         .unwrap();
         let front = program
             .engine
-            .front_body_queries(
-                &definitions,
-                weight,
-                budget
-                    .reserve((weight.retained + 8192) * definitions.len() as u64)
-                    .unwrap(),
-                errors,
-            )
+            .front_body_queries(&definitions, weight, &budget, errors)
             .unwrap();
         let lower = program
             .engine
-            .front_lower_queries(
-                &definitions,
-                front.clone(),
-                weight,
-                32,
-                budget.reserve(32 << 20).unwrap(),
-                errors,
-            )
+            .front_lower_queries(&definitions, front.clone(), weight, 32, &budget, errors)
             .unwrap();
         let growth = program
             .engine
-            .front_growth_queries(
-                &program.entry,
-                front.clone(),
-                weight,
-                budget.reserve(8 << 20).unwrap(),
-                errors,
-            )
+            .front_growth_queries(&program.entry, front.clone(), weight, &budget, errors)
             .unwrap();
         // As the package check and the request graph do, only the root
         // package lowers under `policy`; dependencies lower what it reaches.
@@ -208,7 +188,7 @@ fn check_case(
         };
         let check = program
             .engine
-            .front_check_queries(plan, weight, budget.reserve(16 << 20).unwrap(), errors)
+            .front_check_queries(plan, weight, &budget, errors)
             .unwrap();
         runtime.register(FRONT_BODY_KIND, front.factory()).unwrap();
         runtime

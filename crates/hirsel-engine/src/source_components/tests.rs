@@ -14,11 +14,8 @@ fn output(product: &SourceGrowthIdentity) -> ContentHash {
     product.output
 }
 
-fn output_pool() -> hirsel_engine_admission::MemoryReservationPool {
-    let budget = hirsel_engine_admission::ProcessBudget::new(64 << 20);
-    hirsel_engine_admission::MemoryReservationPool::new(budget.reserve(64 << 20).unwrap())
-        .ok()
-        .unwrap()
+fn output_pool() -> Arc<hirsel_engine_admission::ProcessBudget> {
+    hirsel_engine_admission::ProcessBudget::new(64 << 20)
 }
 
 fn parameter(id: DefId) -> (DefId, GenericParameterRef) {

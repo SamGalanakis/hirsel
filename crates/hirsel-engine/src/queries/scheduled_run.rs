@@ -131,7 +131,9 @@ pub struct FrontRunQueries {
     anchors: crate::NativeRecordContext,
     completed: Mutex<BTreeMap<ContentHash, (ProductRef, Arc<FrontRunOutput>)>>,
     failures: Mutex<BTreeMap<ContentHash, (Reference, QueryError)>>,
-    retention: Arc<Mutex<u64>>,
+    /// Run's request-lifetime inventory (roots, batches, admitted root
+    /// graphs) on the request footprint.
+    retained: Mutex<hirsel_engine_admission::MemoryReservation>,
     weight: MemoryWeight,
     errors: RuntimeErrors,
     ownership: Arc<Ownership>,
@@ -185,8 +187,7 @@ impl FrontRunQueries {
         ProductArchive::from_retained_bytes(
             reference,
             bytes.into(),
-            self.ownership._allowance.clone(),
-            self.retention.clone(),
+            self.ownership._allowance.budget(),
         )
     }
     /// One source closure and canonical hash pass for a bounded set of launches.
@@ -206,14 +207,8 @@ impl FrontRunQueries {
         let charge = (bytes.len() as u64)
             .checked_add((roots.len() * std::mem::size_of::<DefPath>()) as u64)
             .ok_or_else(|| operational("Run batch inventory overflow"))?;
-        let mut remaining = this
-            .retention
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        *remaining = remaining
-            .checked_sub(charge)
-            .ok_or_else(|| operational("Run batch roots exceed admission"))?;
-        drop(remaining);
+        this.retain(charge)
+            .map_err(|_| operational("Run batch roots exceed admission"))?;
         let query = QueryId {
             kind: FRONT_RUN_BATCH_KIND,
             address: hirsel_artifact_store::Address(ContentHash::of_parts(
@@ -223,6 +218,13 @@ impl FrontRunQueries {
         };
         this.batch = Some((query, roots));
         Ok(self)
+    }
+    /// Charge request-lifetime Run inventory to the request footprint.
+    fn retain(&self, bytes: u64) -> std::io::Result<()> {
+        self.retained
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .grow(bytes)
     }
     pub fn batch_query(&self) -> Option<QueryId> {
         self.batch.as_ref().map(|(query, _)| *query)
@@ -276,11 +278,8 @@ impl FrontRunQueries {
         let charge = (bytes.len() as u64)
             .checked_add((roots.len() * std::mem::size_of::<DefPath>()) as u64)
             .ok_or_else(|| operational("native root inventory overflow"))?;
-        let mut remaining = this.retention.lock().unwrap_or_else(|e| e.into_inner());
-        *remaining = remaining
-            .checked_sub(charge)
-            .ok_or_else(|| operational("native source roots exceed Run admission"))?;
-        drop(remaining);
+        this.retain(charge)
+            .map_err(|_| operational("native source roots exceed Run admission"))?;
         let roots_identity =
             ContentHash::of_parts("hirsel.front.run.source-roots.v1", [bytes.as_slice()]);
         for id in this.ids.values_mut() {
@@ -470,12 +469,10 @@ impl QueryFactory for Factory {
             (root, completed)
         };
         // A root's potentially retained graph is admitted before any work.
-        let mut retention = self.0.retention.lock().unwrap_or_else(|e| e.into_inner());
         let bytes = FrontRunQueries::output_bytes(self.0.weight).ok_or(self.0.errors.resource)?;
         if completed.is_none() {
-            *retention = retention.checked_sub(bytes).ok_or(self.0.errors.resource)?;
+            self.0.retain(bytes).map_err(|_| self.0.errors.resource)?;
         }
-        drop(retention);
         Ok(Box::new(Task {
             queries: self.0.clone(),
             query,
@@ -1629,7 +1626,7 @@ impl QueryEngine {
             inputs,
             specializations,
             store,
-            required,
+            required: _,
         } = inputs;
         let namespace = operation.namespace().clone();
         let signatures = namespace.snapshot.clone();
@@ -1713,7 +1710,12 @@ impl QueryEngine {
             store,
             completed: Mutex::new(BTreeMap::new()),
             failures: Mutex::new(BTreeMap::new()),
-            retention: Arc::new(Mutex::new(allowance.bytes() - required)),
+            retained: Mutex::new(
+                allowance
+                    .budget()
+                    .reserve(0)
+                    .map_err(|_| operational("Run admission"))?,
+            ),
             weight,
             errors,
             ownership: Arc::new(Ownership {

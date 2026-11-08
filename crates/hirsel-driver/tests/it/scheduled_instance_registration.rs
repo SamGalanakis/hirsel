@@ -73,7 +73,7 @@ fn front(
             &paths,
             accepted,
             weight(),
-            budget.reserve(32 << 20).unwrap(),
+            &budget,
             crate::scheduled_front::errors(),
         )
         .unwrap();
@@ -112,24 +112,11 @@ fn execute(
     let errors = crate::scheduled_front::errors();
     let lower = program
         .engine
-        .front_lower_queries(
-            &lower_paths,
-            front.clone(),
-            weight(),
-            32,
-            budget.reserve(32 << 20).unwrap(),
-            errors,
-        )
+        .front_lower_queries(&lower_paths, front.clone(), weight(), 32, &budget, errors)
         .unwrap();
     let registration = program
         .engine
-        .front_registration_queries(
-            paths,
-            lower.clone(),
-            weight(),
-            budget.reserve(32 << 20).unwrap(),
-            errors,
-        )
+        .front_registration_queries(paths, lower.clone(), weight(), &budget, errors)
         .unwrap();
     let mut runtime = AdmittedRuntime::new(
         hirsel_intern::jobs::Jobs::new(jobs),
@@ -179,7 +166,7 @@ fn discovery(
     let roots = [program.entry.clone()];
     program
         .engine
-        .discover_front_instances(&roots, fronts, budget.reserve(16 << 20).unwrap())
+        .discover_front_instances(&roots, fronts, &budget)
         .unwrap()
 }
 fn register(
@@ -191,10 +178,7 @@ fn register(
         .requests()
         .iter()
         .map(|r| {
-            let input = program
-                .engine
-                .register_front_instance(r, budget.reserve(16 << 20).unwrap())
-                .unwrap();
+            let input = program.engine.register_front_instance(r, &budget).unwrap();
             assert!(
                 program
                     .engine
@@ -239,10 +223,7 @@ fn closed_instances_accept_two_types_deduplicate_and_select_nested_instances_bef
                             accepted.push(
                                 program
                                     .engine
-                                    .accept_front_registration(
-                                        output,
-                                        budget.reserve(16 << 20).unwrap(),
-                                    )
+                                    .accept_front_registration(output, &budget)
                                     .unwrap(),
                             );
                         }
@@ -258,7 +239,7 @@ fn closed_instances_accept_two_types_deduplicate_and_select_nested_instances_bef
                     .map(|r| {
                         program
                             .engine
-                            .register_front_instance(r, budget.reserve(16 << 20).unwrap())
+                            .register_front_instance(r, &budget)
                             .unwrap()
                             .definition()
                             .clone()
@@ -288,10 +269,7 @@ fn closed_instances_accept_two_types_deduplicate_and_select_nested_instances_bef
                             accepted.push(
                                 program
                                     .engine
-                                    .accept_front_registration(
-                                        output,
-                                        budget.reserve(16 << 20).unwrap(),
-                                    )
+                                    .accept_front_registration(output, &budget)
                                     .unwrap(),
                             );
                         }
@@ -338,7 +316,9 @@ fn closed_instance_registration_and_acceptance_enforce_exact_grants() {
                                 .engine
                                 .register_front_instance(
                                     request,
-                                    budget.reserve(required_syntax - 1).unwrap()
+                                    &hirsel_engine_admission::ProcessBudget::new(
+                                        required_syntax - 1
+                                    )
                                 )
                                 .is_err()
                         );
@@ -348,20 +328,18 @@ fn closed_instance_registration_and_acceptance_enforce_exact_grants() {
                         .engine
                         .register_front_instance(
                             request,
-                            budget
-                                .reserve(if phase == 0 {
-                                    16 << 20
-                                } else {
-                                    required_syntax
-                                })
-                                .unwrap(),
+                            &hirsel_engine_admission::ProcessBudget::new(if phase == 0 {
+                                16 << 20
+                            } else {
+                                required_syntax
+                            }),
                         )
                         .unwrap();
                     required_syntax = input.retained_bytes();
                     let path = input.definition().clone();
                     let repeated = program
                         .engine
-                        .register_front_instance(request, budget.reserve(16 << 20).unwrap())
+                        .register_front_instance(request, &budget)
                         .unwrap();
                     assert_eq!(input.definition(), repeated.definition());
                     let next = front(program, budget, jobs, &[]);
@@ -380,7 +358,9 @@ fn closed_instance_registration_and_acceptance_enforce_exact_grants() {
                                         .engine
                                         .accept_front_registration(
                                             output.clone(),
-                                            budget.reserve(required_accepted - 1).unwrap()
+                                            &hirsel_engine_admission::ProcessBudget::new(
+                                                required_accepted - 1
+                                            )
                                         )
                                         .is_err()
                                 );
@@ -390,13 +370,11 @@ fn closed_instance_registration_and_acceptance_enforce_exact_grants() {
                                 .engine
                                 .accept_front_registration(
                                     output,
-                                    budget
-                                        .reserve(if phase == 0 {
-                                            16 << 20
-                                        } else {
-                                            required_accepted
-                                        })
-                                        .unwrap(),
+                                    &hirsel_engine_admission::ProcessBudget::new(if phase == 0 {
+                                        16 << 20
+                                    } else {
+                                        required_accepted
+                                    }),
                                 )
                                 .unwrap();
                             required_accepted = accepted.retained_bytes();
@@ -424,10 +402,7 @@ fn closed_instance_views_reject_stale_generator_helper_and_declaring_header_read
                             .map(|output| {
                                 program
                                     .engine
-                                    .accept_front_registration(
-                                        output.clone(),
-                                        budget.reserve(16 << 20).unwrap(),
-                                    )
+                                    .accept_front_registration(output.clone(), &budget)
                                     .unwrap()
                             })
                             .collect();
@@ -492,10 +467,7 @@ fn closed_instance_views_reject_stale_generator_helper_and_declaring_header_read
                             assert!(
                                 program
                                     .engine
-                                    .accept_front_registration(
-                                        output,
-                                        budget.reserve(16 << 20).unwrap()
-                                    )
+                                    .accept_front_registration(output, &budget)
                                     .is_err()
                             );
                         }
@@ -520,7 +492,7 @@ fn closed_instance_discovery_refuses_stale_summaries_and_exact_output_budget() {
                         .discover_front_instances(
                             &roots,
                             &[first.clone()],
-                            budget.reserve(bytes - 1).unwrap()
+                            &hirsel_engine_admission::ProcessBudget::new(bytes - 1)
                         )
                         .is_err()
                 );
@@ -529,7 +501,7 @@ fn closed_instance_discovery_refuses_stale_summaries_and_exact_output_budget() {
                     .discover_front_instances(
                         &roots,
                         &[first.clone()],
-                        budget.reserve(bytes).unwrap(),
+                        &hirsel_engine_admission::ProcessBudget::new(bytes),
                     )
                     .unwrap();
                 assert_eq!(exact.retained_bytes(), bytes);
@@ -552,11 +524,7 @@ fn closed_instance_discovery_refuses_stale_summaries_and_exact_output_budget() {
                 assert!(
                     program
                         .engine
-                        .discover_front_instances(
-                            &roots,
-                            &[first],
-                            budget.reserve(16 << 20).unwrap()
-                        )
+                        .discover_front_instances(&roots, &[first], &budget)
                         .is_err()
                 );
             });
@@ -598,7 +566,7 @@ fn closed_instance_registration_refuses_open_wrong_kind_and_257th_selection_with
             assert!(
                 program
                     .engine
-                    .register_front_instance(&wrong, budget.reserve(16 << 20).unwrap())
+                    .register_front_instance(&wrong, &budget)
                     .is_err()
             );
             let open = FrontInstanceRequest {
@@ -613,7 +581,7 @@ fn closed_instance_registration_refuses_open_wrong_kind_and_257th_selection_with
             assert!(
                 program
                     .engine
-                    .register_front_instance(&open, budget.reserve(16 << 20).unwrap())
+                    .register_front_instance(&open, &budget)
                     .is_err()
             );
             for n in 0..256 {
@@ -626,7 +594,10 @@ fn closed_instance_registration_refuses_open_wrong_kind_and_257th_selection_with
                 };
                 program
                     .engine
-                    .register_front_instance(&request, budget.reserve(512 << 10).unwrap())
+                    .register_front_instance(
+                        &request,
+                        &hirsel_engine_admission::ProcessBudget::new(512 << 10),
+                    )
                     .unwrap();
             }
             let request = FrontInstanceRequest {
@@ -638,7 +609,7 @@ fn closed_instance_registration_refuses_open_wrong_kind_and_257th_selection_with
             };
             let failure = program
                 .engine
-                .register_front_instance(&request, budget.reserve(16 << 20).unwrap())
+                .register_front_instance(&request, &budget)
                 .err()
                 .expect("257 refused");
             let QueryError::Diagnostics(ds) = &failure.error else {
@@ -680,15 +651,8 @@ fn bounded_instance_bootstrap_reuses_one_grant_and_refreshes_nested_final_univer
                     weight: weight(),
                     max_reads: 64,
                     runtime: budget.reserve(256 << 20).unwrap(),
-                    front: budget.reserve(32 << 20).unwrap(),
-                    lower: budget.reserve(32 << 20).unwrap(),
-                    text: budget.reserve(32 << 20).unwrap(),
-                    syntax: budget.reserve(32 << 20).unwrap(),
-                    discovery: budget.reserve(16 << 20).unwrap(),
-                    metadata: budget.reserve(4 << 20).unwrap(),
+                    request: budget.clone(),
                 };
-                let reserved = budget.reserved();
-                assert_eq!(reserved, 404 << 20);
                 let bootstrap = program
                     .engine
                     .demand_front_scope(
@@ -736,7 +700,7 @@ fn bounded_instance_bootstrap_reuses_one_grant_and_refreshes_nested_final_univer
                         bootstrap.definitions(),
                         bootstrap.registrations(),
                         weight(),
-                        budget.reserve(32 << 20).unwrap(),
+                        &budget,
                         crate::scheduled_front::errors(),
                     )
                     .unwrap();
@@ -761,7 +725,7 @@ fn bounded_instance_bootstrap_reuses_one_grant_and_refreshes_nested_final_univer
                     .discover_front_instances(
                         &[program.entry.clone()],
                         &[final_front.clone()],
-                        budget.reserve(16 << 20).unwrap(),
+                        &budget,
                     )
                     .unwrap();
                 assert!(complete.pending_bodies().is_empty());
@@ -799,12 +763,7 @@ fn bounded_instance_bootstrap_refuses_short_metadata_before_body_work_or_registr
                             weight: weight(),
                             max_reads: 64,
                             runtime: budget.reserve(256 << 20).unwrap(),
-                            front: budget.reserve(32 << 20).unwrap(),
-                            lower: budget.reserve(32 << 20).unwrap(),
-                            text: budget.reserve(32 << 20).unwrap(),
-                            syntax: budget.reserve(32 << 20).unwrap(),
-                            discovery: budget.reserve(16 << 20).unwrap(),
-                            metadata: budget.reserve(required - 1).unwrap(),
+                            request: hirsel_engine_admission::ProcessBudget::new(required - 1),
                         },
                         crate::scheduled_front::errors(),
                     )
@@ -870,12 +829,7 @@ fn instance_bootstrap_failure(zero_depth: bool) {
                         weight: weight(),
                         max_reads: 64,
                         runtime: budget.reserve(256 << 20).unwrap(),
-                        front: budget.reserve(32 << 20).unwrap(),
-                        lower: budget.reserve(32 << 20).unwrap(),
-                        text: budget.reserve(32 << 20).unwrap(),
-                        syntax: budget.reserve(32 << 20).unwrap(),
-                        discovery: budget.reserve(16 << 20).unwrap(),
-                        metadata: budget.reserve(4 << 20).unwrap(),
+                        request: budget.clone(),
                     },
                     crate::scheduled_front::errors(),
                 )
@@ -961,12 +915,7 @@ fn instance_bootstrap_keeps_ordinary_failure_local_until_selected_front_demand()
                             weight: weight(),
                             max_reads: 64,
                             runtime: budget.reserve(256 << 20).unwrap(),
-                            front: budget.reserve(32 << 20).unwrap(),
-                            lower: budget.reserve(32 << 20).unwrap(),
-                            text: budget.reserve(32 << 20).unwrap(),
-                            syntax: budget.reserve(32 << 20).unwrap(),
-                            discovery: budget.reserve(16 << 20).unwrap(),
-                            metadata: budget.reserve(4 << 20).unwrap(),
+                            request: budget.clone(),
                         },
                         crate::scheduled_front::errors(),
                     )
@@ -979,7 +928,7 @@ fn instance_bootstrap_keeps_ordinary_failure_local_until_selected_front_demand()
                         bootstrap.definitions(),
                         bootstrap.registrations(),
                         weight(),
-                        budget.reserve(32 << 20).unwrap(),
+                        &budget,
                         crate::scheduled_front::errors(),
                     )
                     .unwrap();

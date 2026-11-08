@@ -589,12 +589,6 @@ fn request_instance(
         .item
         .name_span;
     let (budget, _) = hirsel_engine::requests::source_graph::host_budget();
-    let allowance = budget.reserve(16 << 20).map_err(|error| {
-        QueryError::Operational(hirsel_types::OperationalFailure {
-            operation: "test instance registration".into(),
-            message: error.to_string(),
-        })
-    })?;
     let instance = engine
         .register_front_instance(
             &FrontInstanceRequest {
@@ -604,7 +598,7 @@ fn request_instance(
                 },
                 site,
             },
-            allowance,
+            &budget,
         )
         .map_err(|failure| {
             QueryError::Operational(hirsel_types::OperationalFailure {

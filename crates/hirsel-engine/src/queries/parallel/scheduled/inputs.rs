@@ -116,8 +116,7 @@ impl Inputs {
     pub(super) fn admit(
         &self,
         allowance: &mut hirsel_engine_admission::MemoryReservation,
-        pool: Arc<hirsel_engine_admission::MemoryReservationPool>,
-        retention: Arc<Mutex<u64>>,
+        request: Arc<hirsel_engine_admission::ProcessBudget>,
     ) -> Result<(), QueryError> {
         self.rows.admit(allowance)?;
         if self.addresses.admission.get().is_none() {
@@ -128,8 +127,7 @@ impl Inputs {
                 })?;
             let _ = self.addresses.admission.set(AddressAdmission {
                 _metadata: metadata,
-                pool,
-                retention,
+                request,
             });
         }
         Ok(())
@@ -152,8 +150,7 @@ struct AddressRows {
 }
 struct AddressAdmission {
     _metadata: hirsel_engine_admission::MemoryReservation,
-    pool: Arc<hirsel_engine_admission::MemoryReservationPool>,
-    retention: Arc<Mutex<u64>>,
+    request: Arc<hirsel_engine_admission::ProcessBudget>,
 }
 impl Addresses {
     fn prefix(key: Key) -> u32 {
@@ -196,24 +193,17 @@ impl Addresses {
             else {
                 return;
             };
-            let mut remaining = admission
-                .retention
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
-            let Some(next) = remaining.checked_sub(bytes) else {
-                return;
-            };
-            let Some(extra) = admission.pool.take(bytes) else {
-                return;
-            };
-            if let Some(charge) = charge {
-                if charge.join(extra).is_err() {
-                    return;
+            match charge {
+                Some(charge) => {
+                    if charge.grow(bytes).is_err() {
+                        return;
+                    }
                 }
-            } else {
-                *charge = Some(extra);
+                None => match admission.request.reserve(bytes) {
+                    Ok(extra) => *charge = Some(extra),
+                    Err(_) => return,
+                },
             }
-            *remaining = next;
             rows.reserve_exact(growth);
         }
         rows.insert(at, row);
@@ -222,33 +212,7 @@ impl Addresses {
         let mut rows = self.rows.lock().unwrap_or_else(|e| e.into_inner());
         rows.front = Vec::new();
         rows.body = Vec::new();
-        if let Some(charge) = rows.charge.take() {
-            if let Some(admission) = self.admission.get() {
-                *admission
-                    .retention
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner()) += charge.bytes();
-            }
-            return true;
-        }
-        false
-    }
-}
-impl Drop for Addresses {
-    fn drop(&mut self) {
-        if let Some(admission) = self.admission.get()
-            && let Some(charge) = self
-                .rows
-                .get_mut()
-                .unwrap_or_else(|e| e.into_inner())
-                .charge
-                .take()
-        {
-            *admission
-                .retention
-                .lock()
-                .unwrap_or_else(|e| e.into_inner()) += charge.bytes();
-        }
+        rows.charge.take().is_some()
     }
 }
 impl std::ops::Index<&Key> for Inputs {
@@ -282,10 +246,9 @@ impl OperationFrontInputs {
     pub(super) fn admit(
         &self,
         allowance: &mut hirsel_engine_admission::MemoryReservation,
-        pool: Arc<hirsel_engine_admission::MemoryReservationPool>,
-        retention: Arc<Mutex<u64>>,
+        request: Arc<hirsel_engine_admission::ProcessBudget>,
     ) -> Result<(), QueryError> {
-        self.inputs.admit(allowance, pool, retention)?;
+        self.inputs.admit(allowance, request)?;
         self.cited.admit(allowance)?;
         self.candidates.admit(allowance)?;
         self.arm_fixes.admit(allowance)

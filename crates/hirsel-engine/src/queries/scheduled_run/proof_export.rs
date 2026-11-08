@@ -17,7 +17,9 @@ pub struct FrontProofExport {
     sources: SourceMap,
     metadata: std::sync::OnceLock<Result<ProofSourceMetadata, QueryError>>,
     signature_edges: std::sync::OnceLock<Result<SignatureEdges, QueryError>>,
-    _allowance: hirsel_engine_admission::MemoryReservation,
+    /// Source metadata and signature edges charge their measured bytes here
+    /// when export first derives them.
+    request: Arc<hirsel_engine_admission::ProcessBudget>,
 }
 struct ProofSourceMetadata {
     executable: BTreeSet<DefPath>,
@@ -26,10 +28,12 @@ struct ProofSourceMetadata {
     files: BTreeMap<DefPath, Vec<FileId>>,
     input_metadata_bytes: u64,
     metadata_bytes: u64,
+    _charge: hirsel_engine_admission::MemoryReservation,
 }
 struct SignatureEdges {
     edges: BTreeMap<DefId, Vec<DefId>>,
     input_metadata_bytes: u64,
+    _charge: hirsel_engine_admission::MemoryReservation,
 }
 /// A complete input and its decode/clone working admission. Keep this owner
 /// alive while its input is borrowed by an export builder. Final export tables
@@ -503,9 +507,10 @@ impl FrontProofExport {
                 w.vec(&a.payload, |w, token| w.add(token.capacity()));
             });
         });
-        if weight.bytes() > self._allowance.bytes() {
-            return Err(operational("PS9 source metadata exceeds admission"));
-        }
+        let charge = self
+            .request
+            .reserve(weight.bytes())
+            .map_err(|_| operational("PS9 source metadata exceeds the request footprint"))?;
         Ok(ProofSourceMetadata {
             executable,
             annotations,
@@ -513,6 +518,7 @@ impl FrontProofExport {
             files,
             input_metadata_bytes,
             metadata_bytes: weight.bytes(),
+            _charge: charge,
         })
     }
     fn signature_edges(&self, closure: &BTreeSet<DefPath>) -> Result<&SignatureEdges, QueryError> {
@@ -538,13 +544,10 @@ impl FrontProofExport {
                 }
                 let mut weight = hirsel_query_products::retained::MetadataWeight::default();
                 weight.map(&edges, |weight, _, edges| weight.flat_vec(edges));
-                if metadata
-                    .metadata_bytes
-                    .checked_add(weight.bytes())
-                    .is_none_or(|bytes| bytes > self._allowance.bytes())
-                {
-                    return Err(operational("PS9 source metadata exceeds admission"));
-                }
+                let charge = self
+                    .request
+                    .reserve(weight.bytes())
+                    .map_err(|_| operational("PS9 signature edges exceed the request footprint"))?;
                 let edge_count: usize = edges.values().map(Vec::len).sum();
                 let bytes = edge_count
                     .saturating_mul(2)
@@ -561,6 +564,7 @@ impl FrontProofExport {
                 Ok(SignatureEdges {
                     edges,
                     input_metadata_bytes,
+                    _charge: charge,
                 })
             })
             .as_ref()
@@ -856,7 +860,7 @@ impl QueryEngine {
         entry: &DefPath,
         run: Arc<FrontRunQueries>,
         headers: Arc<FrontCheckedSignatures>,
-        allowance: hirsel_engine_admission::MemoryReservation,
+        request: &Arc<hirsel_engine_admission::ProcessBudget>,
     ) -> Result<Arc<FrontProofExport>, QueryError> {
         let roots: BTreeSet<_> = self
             .item_paths()
@@ -874,7 +878,7 @@ impl QueryEngine {
             run,
             super::super::checked_signatures::ProofHeaders::Ready(headers),
             roots,
-            allowance,
+            request,
         )
     }
     /// Capture the same export producer without demanding its header inventory.
@@ -882,15 +886,14 @@ impl QueryEngine {
         &mut self,
         entry: &DefPath,
         run: Arc<FrontRunQueries>,
-        headers: hirsel_engine_admission::MemoryReservation,
-        allowance: hirsel_engine_admission::MemoryReservation,
+        request: &Arc<hirsel_engine_admission::ProcessBudget>,
     ) -> Result<Arc<FrontProofExport>, QueryError> {
         let roots: BTreeSet<_> = self
             .item_paths()
             .into_iter()
             .filter(|p| p.0.package == entry.0.package)
             .collect();
-        let headers = self.deferred_proof_signatures(run.front.clone(), headers)?;
+        let headers = self.deferred_proof_signatures(run.front.clone(), request)?;
         let mut run = run.with_source_roots(roots.iter().cloned().collect())?;
         let selected = Arc::get_mut(&mut run).ok_or(QueryError::NotImplemented)?;
         selected.records = selected
@@ -902,7 +905,7 @@ impl QueryEngine {
             run,
             headers,
             roots,
-            allowance,
+            request,
         )
     }
     /// Attach to native's already selected Run. Its selected roots must cover
@@ -912,7 +915,7 @@ impl QueryEngine {
         entry: &DefPath,
         native: &Arc<FrontNativeQueries>,
         headers: Arc<FrontCheckedSignatures>,
-        allowance: hirsel_engine_admission::MemoryReservation,
+        request: &Arc<hirsel_engine_admission::ProcessBudget>,
     ) -> Result<Arc<FrontProofExport>, QueryError> {
         let run = native.export_run(entry).ok_or(QueryError::NotImplemented)?;
         let roots: BTreeSet<_> = self
@@ -929,7 +932,7 @@ impl QueryEngine {
             run,
             super::super::checked_signatures::ProofHeaders::Ready(headers),
             roots,
-            allowance,
+            request,
         )
     }
     fn capture_proof_export(
@@ -939,7 +942,7 @@ impl QueryEngine {
         run: Arc<FrontRunQueries>,
         headers: super::super::checked_signatures::ProofHeaders,
         roots: BTreeSet<DefPath>,
-        allowance: hirsel_engine_admission::MemoryReservation,
+        request: &Arc<hirsel_engine_admission::ProcessBudget>,
     ) -> Result<Arc<FrontProofExport>, QueryError> {
         if !headers.matches(&run.front)
             || !Arc::ptr_eq(&run.lower.signatures(), &self.signature_inputs())
@@ -956,7 +959,7 @@ impl QueryEngine {
             sources: self.sources.clone(),
             metadata: std::sync::OnceLock::new(),
             signature_edges: std::sync::OnceLock::new(),
-            _allowance: allowance,
+            request: request.clone(),
         }))
     }
 }

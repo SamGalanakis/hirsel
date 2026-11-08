@@ -2599,17 +2599,10 @@ fn frozen_frontier_generator_demand_skips_a_dead_compile_time_branch() {
                     stack: 0,
                 };
                 let front = engine
-                    .front_body_queries(&paths, weight, budget.reserve(64 << 20).unwrap(), errors)
+                    .front_body_queries(&paths, weight, &budget, errors)
                     .unwrap();
                 let lower = engine
-                    .front_lower_queries(
-                        &paths,
-                        front.clone(),
-                        weight,
-                        64,
-                        budget.reserve(128 << 20).unwrap(),
-                        errors,
-                    )
+                    .front_lower_queries(&paths, front.clone(), weight, 64, &budget, errors)
                     .unwrap();
                 let mut runtime = AdmittedRuntime::new(
                     hirsel_intern::jobs::Jobs::new(jobs),
@@ -2685,7 +2678,7 @@ fn frozen_generator_instance_allowance_counts_current_selections_including_hits(
                     },
                     site: hirsel_span::Span::default(),
                 },
-                budget.reserve(budget.limit() - budget.reserved()).unwrap(),
+                &budget,
             )
         };
         for n in 0..256 {
@@ -2787,17 +2780,10 @@ fn frozen_generator_acceptance_cancellation_publishes_no_registration() {
             stack: 0,
         };
         let front = engine
-            .front_body_queries(&paths, weight, budget.reserve(64 << 20).unwrap(), errors)
+            .front_body_queries(&paths, weight, &budget, errors)
             .unwrap();
         let lower = engine
-            .front_lower_queries(
-                &paths,
-                front.clone(),
-                weight,
-                64,
-                budget.reserve(128 << 20).unwrap(),
-                errors,
-            )
+            .front_lower_queries(&paths, front.clone(), weight, 64, &budget, errors)
             .unwrap();
         let mut runtime = AdmittedRuntime::new(
             hirsel_intern::jobs::Jobs::new(1),

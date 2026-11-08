@@ -1110,16 +1110,16 @@ pub fn import_execution_product(
     if association.reference.domain != LOCATOR {
         return Err(failure("locator domain"));
     }
-    let pool = hirsel_engine_admission::MemoryReservationPool::new(allowance)
-        .map_err(|_| failure("import admission"))?;
+    let pool = allowance.budget().clone();
+    drop(allowance);
     let requirement = hirsel_product_codec::DecodeRequirement::<Locator>::plain(get(
         &store,
         association.reference,
     )?)
     .ok_or_else(|| failure("invalid locator"))?;
     let _locator_owner = pool
-        .take(requirement.required_bytes())
-        .ok_or_else(|| failure("locator exceeds admission"))?;
+        .reserve(requirement.required_bytes())
+        .map_err(|_| failure("locator exceeds admission"))?;
     let product = requirement
         .decode_reserved(|_| Some(()), |_, _| None)
         .ok_or_else(|| failure("locator exceeds admission"))?;
@@ -1151,9 +1151,10 @@ pub fn import_execution_product(
     }
     let root = product.root;
     drop(product);
-    let limit = pool.available_bytes();
+    let limit = pool.free();
     let execution = load(&store, root, &current, limit, move |bytes| {
-        pool.take(bytes)
+        pool.reserve(bytes)
+            .ok()
             .map(|reservation| Arc::new(reservation) as Arc<dyn Send + Sync>)
             .ok_or_else(|| failure("import exceeds admission"))
     })?;

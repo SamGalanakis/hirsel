@@ -1,10 +1,7 @@
 //! Checked archives retain their full backing and refundable admission.
 use hirsel_artifact_store::{Bytes, Domain, Reference};
 use hirsel_engine_admission::{RetainedArchiveLease, retained_arc_bytes};
-use std::{
-    io,
-    sync::{Arc, Mutex},
-};
+use std::{io, sync::Arc};
 pub enum ArchiveAdmission<'a> {
     Retained,
     Materialize {
@@ -105,19 +102,17 @@ impl ProductArchive {
     ) -> io::Result<Self> {
         materialize_archive(domain, admission, encode)
     }
-    /// Retain a checked archive in an already admitted producer partition.
-    /// `remaining` is the same quota used for that partition's other retained
-    /// allocations. Only the independent grant survives the producer.
+    /// Retain a checked archive on the request footprint until its last
+    /// reader drops it.
     pub fn open_retained(
         store: &(impl super::backing::ProductBacking + ?Sized),
         reference: Reference,
-        allowance: Arc<hirsel_engine_admission::MemoryReservation>,
-        remaining: Arc<Mutex<u64>>,
+        request: &Arc<hirsel_engine_admission::ProcessBudget>,
     ) -> io::Result<Self> {
         let bytes = store
             .get_content(reference)
             .ok_or_else(|| io::Error::other("product archive is unavailable"))?;
-        Self::from_retained_bytes(reference, bytes, allowance, remaining)
+        Self::from_retained_bytes(reference, bytes, request)
     }
     pub fn retained_required_bytes(reference: Reference, bytes: &Bytes) -> io::Result<u64> {
         Self::checked_import_charge(reference, bytes)?
@@ -126,31 +121,15 @@ impl ProductArchive {
             >::uninit()))
             .ok_or_else(|| io::Error::other("product archive backing layout overflow"))
     }
-    /// Transfer freshly encoded bytes into the producer's existing partition.
-    /// This retains the complete concrete backing without a transport reread.
+    /// Retain freshly encoded bytes on the request footprint, keeping the
+    /// complete concrete backing without a transport reread.
     pub fn from_retained_bytes(
         reference: Reference,
         bytes: Bytes,
-        allowance: Arc<hirsel_engine_admission::MemoryReservation>,
-        remaining: Arc<Mutex<u64>>,
+        request: &Arc<hirsel_engine_admission::ProcessBudget>,
     ) -> io::Result<Self> {
         let charge = Self::retained_required_bytes(reference, &bytes)?;
-        let mut available = remaining.lock().unwrap_or_else(|e| e.into_inner());
-        if *available > allowance.bytes() {
-            return Err(io::Error::other(
-                "product archive quota exceeds its partition",
-            ));
-        }
-        let next = available
-            .checked_sub(charge)
-            .ok_or_else(|| io::Error::other("product archive backing admission exhausted"))?;
-        *available = next;
-        drop(available);
-        let owner = Arc::new(RetainedArchiveLease {
-            _allowance: allowance,
-            remaining,
-            bytes: charge,
-        });
+        let owner = Arc::new(RetainedArchiveLease(request.reserve(charge)?));
         Self::from_admitted_content(reference, bytes, charge, owner)
     }
     /// Import from an existing reusable producer partition. Detached archives
@@ -158,15 +137,15 @@ impl ProductArchive {
     pub fn open_in(
         store: &(impl super::backing::ProductBacking + ?Sized),
         reference: Reference,
-        allowance: &hirsel_engine_admission::MemoryReservationPool,
+        request: &Arc<hirsel_engine_admission::ProcessBudget>,
     ) -> io::Result<Self> {
         let bytes = store
             .get_content(reference)
             .ok_or_else(|| io::Error::other("product archive is unavailable"))?;
         let charge = Self::checked_import_charge(reference, &bytes)?;
-        let reservation = allowance
-            .take(charge)
-            .ok_or_else(|| io::Error::other("product archive backing admission exhausted"))?;
+        let reservation = request
+            .reserve(charge)
+            .map_err(|_| io::Error::other("product archive backing admission exhausted"))?;
         Ok(Self(ArchiveBacking::Imported(Arc::new(ImportedArchive {
             reference,
             bytes,
@@ -176,7 +155,7 @@ impl ProductArchive {
     pub fn from_encoded_in(
         reference: Reference,
         bytes: Vec<u8>,
-        allowance: &hirsel_engine_admission::MemoryReservationPool,
+        request: &Arc<hirsel_engine_admission::ProcessBudget>,
     ) -> io::Result<Self> {
         if reference.domain.reference(&bytes) != Some(reference) {
             return Err(io::Error::other(
@@ -186,9 +165,9 @@ impl ProductArchive {
         let bytes = bytes.into_boxed_slice();
         let charge = archive_bytes(bytes.len())
             .ok_or_else(|| io::Error::other("product archive backing layout overflow"))?;
-        let reservation = allowance
-            .take(charge)
-            .ok_or_else(|| io::Error::other("product archive backing admission exhausted"))?;
+        let reservation = request
+            .reserve(charge)
+            .map_err(|_| io::Error::other("product archive backing admission exhausted"))?;
         Ok(Self(ArchiveBacking::Materialized(Arc::new(ArchiveOwner {
             reference,
             bytes,
@@ -293,76 +272,42 @@ mod tests {
         .unwrap();
         let required = ProductArchive::checked_import_charge(reference, &bytes).unwrap()
             + retained_arc_bytes(&std::mem::MaybeUninit::<RetainedArchiveLease>::uninit());
+        let short = hirsel_engine_admission::ProcessBudget::new(required - 1);
+        assert!(ProductArchive::from_retained_bytes(reference, bytes.clone(), &short).is_err());
+        assert_eq!(short.reserved(), 0);
         let budget = hirsel_engine_admission::ProcessBudget::new(required);
-        let allowance = Arc::new(budget.reserve(required).unwrap());
-        let source = Arc::downgrade(&allowance);
-        let remaining = Arc::new(Mutex::new(required - 1));
-        assert!(
-            ProductArchive::from_retained_bytes(
-                reference,
-                bytes.clone(),
-                allowance.clone(),
-                remaining.clone()
-            )
-            .is_err()
-        );
-        assert_eq!(*remaining.lock().unwrap(), required - 1);
-        *remaining.lock().unwrap() = required;
         let mut foreign = reference;
         foreign.output.0.0[0] ^= 1;
-        assert!(
-            ProductArchive::from_retained_bytes(
-                foreign,
-                bytes.clone(),
-                allowance.clone(),
-                remaining.clone()
-            )
-            .is_err()
-        );
-        assert_eq!(*remaining.lock().unwrap(), required);
-        let archive = ProductArchive::from_retained_bytes(
-            reference,
-            bytes,
-            allowance.clone(),
-            remaining.clone(),
-        )
-        .unwrap();
-        assert_eq!(*remaining.lock().unwrap(), 0);
+        assert!(ProductArchive::from_retained_bytes(foreign, bytes.clone(), &budget).is_err());
+        assert_eq!(budget.reserved(), 0);
+        let archive = ProductArchive::from_retained_bytes(reference, bytes, &budget).unwrap();
+        assert_eq!(budget.reserved(), required);
         assert_eq!(archive.bytes().as_ptr(), pointer);
         assert_eq!(archive.retained_bytes(), required);
         let detached = archive.clone();
         drop(archive);
-        drop(allowance);
-        assert!(source.upgrade().is_some());
-        assert_eq!(*remaining.lock().unwrap(), 0);
+        assert_eq!(budget.reserved(), required);
         assert_eq!(detached.bytes(), b"complete encoded payload");
         drop(detached);
-        assert!(source.upgrade().is_none());
-        assert_eq!(*remaining.lock().unwrap(), required);
         assert_eq!(budget.reserved(), 0);
     }
 
     #[test]
-    fn encoded_archive_pool_covers_spare_capacity_and_detached_views() {
+    fn encoded_archive_charge_covers_spare_capacity_and_detached_views() {
         let budget = hirsel_engine_admission::ProcessBudget::new(1 << 20);
-        let pool =
-            hirsel_engine_admission::MemoryReservationPool::new(budget.reserve(1 << 20).unwrap())
-                .ok()
-                .unwrap();
-        let before = pool.available_bytes();
+        let before = budget.free();
         let (archive, allocation) = crate::test_alloc::measured(|| {
             let mut bytes = Vec::with_capacity(4096);
             bytes.extend_from_slice(b"complete buffer");
             let reference = TEST_DOMAIN.reference(&bytes).unwrap();
-            ProductArchive::from_encoded_in(reference, bytes, &pool).unwrap()
+            ProductArchive::from_encoded_in(reference, bytes, &budget).unwrap()
         });
-        let charged = before - pool.available_bytes();
+        let charged = before - budget.free();
         assert!(allocation.live > 0);
         assert!(charged >= allocation.live as u64);
         assert_eq!(archive.retained_bytes(), charged);
         let detached = archive.clone();
         drop(archive);
-        drop(pool);
         assert!(budget.reserved() >= charged);
         assert_eq!(detached.bytes(), b"complete buffer");
         assert_eq!(
@@ -426,30 +371,18 @@ mod tests {
         let charge =
             charge + retained_arc_bytes(&std::mem::MaybeUninit::<RetainedArchiveLease>::uninit());
         let budget = hirsel_engine_admission::ProcessBudget::new(charge);
-        let allowance = Arc::new(budget.reserve(charge).unwrap());
-        let remaining = Arc::new(Mutex::new(charge));
         let store = Store(bytes);
-        let first =
-            ProductArchive::open_retained(&store, reference, allowance.clone(), remaining.clone())
-                .unwrap();
+        let first = ProductArchive::open_retained(&store, reference, &budget).unwrap();
         let reader = first.clone();
-        assert_eq!(*remaining.lock().unwrap(), 0);
-        assert!(
-            ProductArchive::open_retained(&store, reference, allowance.clone(), remaining.clone(),)
-                .is_err()
-        );
+        assert_eq!(budget.reserved(), charge);
+        assert!(ProductArchive::open_retained(&store, reference, &budget).is_err());
         drop(first);
-        assert_eq!(*remaining.lock().unwrap(), 0);
+        assert_eq!(budget.reserved(), charge);
         drop(reader);
-        assert_eq!(*remaining.lock().unwrap(), charge);
-        let replacement =
-            ProductArchive::open_retained(&store, reference, allowance.clone(), remaining.clone())
-                .unwrap();
-        assert_eq!(*remaining.lock().unwrap(), 0);
-        drop(allowance);
+        assert_eq!(budget.reserved(), 0);
+        let replacement = ProductArchive::open_retained(&store, reference, &budget).unwrap();
         assert_eq!(budget.reserved(), charge);
         drop(replacement);
-        assert_eq!(*remaining.lock().unwrap(), charge);
         assert_eq!(budget.reserved(), 0);
     }
 }

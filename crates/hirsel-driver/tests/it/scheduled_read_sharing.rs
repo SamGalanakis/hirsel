@@ -37,7 +37,7 @@ fn front_complete_reads_share_equal_phase_allocations_without_merging_phase_keys
                     scratch: 8 << 20,
                     stack: 0,
                 },
-                budget.reserve(8 << 20).unwrap(),
+                &budget,
                 errors,
             )
             .unwrap();

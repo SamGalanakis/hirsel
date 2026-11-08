@@ -57,12 +57,7 @@ fn admitted_native_definition_products_match_independent_scalar_products() {
             .unwrap();
             let front = program
                 .engine
-                .front_body_queries(
-                    &definitions,
-                    weight,
-                    budget.reserve(16 << 20).unwrap(),
-                    errors,
-                )
+                .front_body_queries(&definitions, weight, &budget, errors)
                 .unwrap();
             let lower = program
                 .engine
@@ -71,7 +66,7 @@ fn admitted_native_definition_products_match_independent_scalar_products() {
                     front.clone(),
                     weight,
                     3 * definitions.len(),
-                    budget.reserve(16 << 20).unwrap(),
+                    &budget,
                     errors,
                 )
                 .unwrap();
@@ -110,24 +105,20 @@ fn admitted_native_definition_products_match_independent_scalar_products() {
                 .collect::<Vec<_>>();
             for output in &outputs {
                 let product = (output.product.product).clone().unwrap();
-                let before = native.retained_bytes();
+                let before = budget.reserved();
                 let archive = product.archive(ArchiveAdmission::Retained).unwrap();
-                let held = native.retained_bytes();
+                let held = budget.reserved();
                 assert!(
                     held > before,
                     "the archive reader holds its backing admission"
                 );
                 let alias = archive.clone();
                 drop(archive);
-                assert_eq!(
-                    native.retained_bytes(),
-                    held,
-                    "an active alias retains admission"
-                );
+                assert_eq!(budget.reserved(), held, "an active alias retains admission");
                 let bytes = store.get_content(alias.reference()).unwrap();
                 drop(alias);
                 assert_eq!(
-                    native.retained_bytes(),
+                    budget.reserved(),
                     before,
                     "the final reader returns admission while the product remains cached"
                 );
@@ -484,12 +475,7 @@ fn native_catalogue_allows_lower_pressure_eviction_and_scoped_cold_reads() {
             .unwrap();
             let front = program
                 .engine
-                .front_body_queries(
-                    &definitions,
-                    weight,
-                    budget.reserve(8 << 20).unwrap(),
-                    errors,
-                )
+                .front_body_queries(&definitions, weight, &budget, errors)
                 .unwrap();
             let lower = program
                 .engine
@@ -498,7 +484,7 @@ fn native_catalogue_allows_lower_pressure_eviction_and_scoped_cold_reads() {
                     front.clone(),
                     weight,
                     64,
-                    budget.reserve(limit).unwrap(),
+                    &hirsel_engine_admission::ProcessBudget::new(limit),
                     errors,
                 )
                 .unwrap();

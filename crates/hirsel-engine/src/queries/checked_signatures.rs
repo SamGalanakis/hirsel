@@ -260,15 +260,15 @@ impl QueryEngine {
     pub(super) fn deferred_proof_signatures(
         &mut self,
         front: Arc<FrontBodyQueries>,
-        mut allowance: hirsel_engine_admission::MemoryReservation,
+        request: &Arc<hirsel_engine_admission::ProcessBudget>,
     ) -> Result<ProofHeaders, QueryError> {
         let inputs = self.capture_checked_signature_inputs(front)?;
-        let factory = allowance
-            .split(inputs.retained_bytes())
-            .ok_or_else(header_refusal)?;
+        let factory = request
+            .reserve(inputs.retained_bytes())
+            .map_err(|_| header_refusal())?;
         Ok(ProofHeaders::Deferred {
             inputs,
-            allowance: std::sync::Mutex::new(Some(allowance)),
+            request: request.clone(),
             result: std::sync::OnceLock::new(),
             _factory: factory,
         })
@@ -331,6 +331,31 @@ impl CapturedCheckedSignatures {
             operation: "checked signature inputs".into(),
             message: format!("missing captured signature coverage: {path}"),
         }))
+    }
+    /// The table `materialize` retains, sized before it allocates.
+    fn materialized_bytes(&self) -> Result<u64, QueryError> {
+        let snapshot = self.front.signatures();
+        let mut weight = hirsel_query_products::retained::MetadataWeight::default();
+        weight.add(size_of::<FrontCheckedSignatures>() + 2 * size_of::<usize>());
+        weight.tree::<DefPath, Input>(self.paths.len());
+        weight.add(self.environment.compiler_version.capacity());
+        weight.vec(&self.registrations, |w, row| w.add(row.capacity()));
+        let mut owned_signatures = hirsel_query_products::retained::Weight::default();
+        for path in &self.paths {
+            let id = DefId::intern(path);
+            if !matches!(snapshot.signature(id), Some(Ok(_))) {
+                match self.builtins.get(path) {
+                    Some(signature) => owned_signatures.signature(signature),
+                    None => continue,
+                }
+            }
+            weight.path(path);
+            weight.flat_vec(&self.coverage(&snapshot, path)?);
+        }
+        weight
+            .bytes()
+            .checked_add(owned_signatures.bytes)
+            .ok_or_else(header_refusal)
     }
     fn materialize(
         &self,
@@ -395,7 +420,7 @@ pub(super) enum ProofHeaders {
     Ready(Arc<FrontCheckedSignatures>),
     Deferred {
         inputs: CapturedCheckedSignatures,
-        allowance: std::sync::Mutex<Option<hirsel_engine_admission::MemoryReservation>>,
+        request: Arc<hirsel_engine_admission::ProcessBudget>,
         result: std::sync::OnceLock<Result<Arc<FrontCheckedSignatures>, QueryError>>,
         _factory: hirsel_engine_admission::MemoryReservation,
     },
@@ -412,16 +437,14 @@ impl ProofHeaders {
             Self::Ready(headers) => Ok(headers),
             Self::Deferred {
                 inputs,
-                allowance,
+                request,
                 result,
                 ..
             } => result
                 .get_or_init(|| {
-                    let allowance = allowance
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .take()
-                        .ok_or_else(header_refusal)?;
+                    let allowance = request
+                        .reserve(inputs.materialized_bytes()?)
+                        .map_err(|_| header_refusal())?;
                     inputs.materialize(allowance)
                 })
                 .as_ref()

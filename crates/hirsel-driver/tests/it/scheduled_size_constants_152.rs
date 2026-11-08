@@ -67,12 +67,7 @@ fn check_size_instances(nested: bool) {
                 .unwrap();
                 let front = program
                     .engine
-                    .front_body_queries(
-                        &definitions,
-                        weight,
-                        budget.reserve(16 << 20).unwrap(),
-                        errors,
-                    )
+                    .front_body_queries(&definitions, weight, &budget, errors)
                     .unwrap();
                 let stage = FrontStageQueries::new(
                     &definitions,
@@ -104,23 +99,11 @@ fn check_size_instances(nested: bool) {
                 drop(front);
                 let front = program
                     .engine
-                    .front_body_queries(
-                        &definitions,
-                        weight,
-                        budget.reserve(16 << 20).unwrap(),
-                        errors,
-                    )
+                    .front_body_queries(&definitions, weight, &budget, errors)
                     .unwrap();
                 let lower = program
                     .engine
-                    .front_lower_queries(
-                        &definitions,
-                        front.clone(),
-                        weight,
-                        4096,
-                        budget.reserve(32 << 20).unwrap(),
-                        errors,
-                    )
+                    .front_lower_queries(&definitions, front.clone(), weight, 4096, &budget, errors)
                     .unwrap();
                 let mut runtime = AdmittedRuntime::new(
                     hirsel_intern::jobs::Jobs::new(jobs),

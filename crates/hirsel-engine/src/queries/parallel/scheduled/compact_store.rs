@@ -26,7 +26,7 @@ fn encode_record(
     encoded: u64,
 ) -> Option<Vec<u8>> {
     // bincode 1.3.3 src/ser/mod.rs:155-185 leaves tuples/structs unframed.
-    // Preserve Record's field order and write its admitted HRD3 only once.
+    // Preserve Record's field order and write its admitted HRD4 only once.
     let mut bytes = Vec::with_capacity(usize::try_from(encoded).ok()?);
     bincode::serialize_into(&mut bytes, &head).ok()?;
     bincode::serialize_into(&mut bytes, &reads_bytes).ok()?;

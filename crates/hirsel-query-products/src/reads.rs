@@ -22,19 +22,6 @@ impl Revision {
     }
 }
 
-/// How often an input changes. Low is user package files, Medium is dependency
-/// packages, High is std, the core registry and the environment. A memo's
-/// durability is the minimum over everything it read.
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub enum Durability {
-    Low,
-    Medium,
-    High,
-}
-impl Durability {
-    pub const ALL: [Durability; 3] = [Durability::Low, Durability::Medium, Durability::High];
-}
-
 /// A package, by its `name@version` spelling.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct PackageKey(pub Symbol);
@@ -92,10 +79,26 @@ impl LookupKey {
         qualifier: Option<&PackageId>,
         segments: &[String],
     ) -> Self {
+        Self::in_context(source, Self::context_keys(context), qualifier, segments)
+    }
+    /// The package and module keys of a lookup context.
+    pub fn context_keys(context: &FileContext) -> (PackageKey, ModuleKey) {
+        (
+            PackageKey::of(&context.package),
+            ModuleKey::of(&context.modules),
+        )
+    }
+    /// `of` with the context's keys already formed.
+    pub fn in_context(
+        source: LookupSource,
+        (package, module): (PackageKey, ModuleKey),
+        qualifier: Option<&PackageId>,
+        segments: &[String],
+    ) -> Self {
         Self {
             source,
-            package: PackageKey::of(&context.package),
-            module: ModuleKey::of(&context.modules),
+            package,
+            module,
             qualifier: qualifier.map(PackageKey::of),
             path: Symbol::intern(&segments.join(".")),
         }
@@ -361,7 +364,6 @@ pub struct Reads {
     // A sorted view into the same canonical rows. Normal receipts stay flat;
     // completed predecessor phases can share the final phase's allocation.
     indices: Option<std::sync::Arc<[u32]>>,
-    observation: Option<std::sync::Arc<[u32]>>,
 }
 impl PartialEq for Reads {
     fn eq(&self, other: &Self) -> bool {
@@ -389,98 +391,62 @@ impl Reads {
     pub fn empty() -> Self {
         Self::default()
     }
-    /// Sorts and de-duplicates; conflicting observations of one key are an error.
+    /// Sorts and de-duplicates; conflicting observations of one key are an
+    /// error naming the least such key.
     pub fn from_vec(reads: Vec<(ReadKey, ContentHash)>) -> Result<Self, Inconsistent> {
-        // Rust ea137335 std/collections/hash/map.rs:1002-1014: Entry
-        // deduplicates by identity. Canonical spelling order is needed only
-        // for the final unique set, not every inherited observation.
-        let mut unique: Vec<(ReadKey, ContentHash, usize)>;
+        let mut unique: Vec<(ReadKey, ContentHash)>;
+        let mut conflict: Option<ReadKey> = None;
         if reads.len() >= 32 {
             use std::collections::{HashMap, hash_map::Entry};
-            let mut by_key = HashMap::with_hasher(hirsel_intern::IdHasher::default());
-            let mut conflict: Option<ReadKey> = None;
-            for (ordinal, (key, value)) in reads.into_iter().enumerate() {
+            let mut by_key =
+                HashMap::with_capacity_and_hasher(reads.len(), hirsel_intern::IdHasher::default());
+            for (key, value) in reads {
                 match by_key.entry(key) {
                     Entry::Vacant(entry) => {
-                        entry.insert((value, ordinal));
+                        entry.insert(value);
                     }
                     Entry::Occupied(entry) => {
-                        if entry.get().0 != value && conflict.is_none_or(|old| key < old) {
+                        if *entry.get() != value && conflict.is_none_or(|old| key < old) {
                             conflict = Some(key);
                         }
                     }
                 }
             }
-            // Match the first conflicting key of the original canonical sort,
-            // regardless of observation order or session identity assignment.
-            if let Some(key) = conflict {
-                return Err(Inconsistent(key));
-            }
-            unique = by_key
-                .into_iter()
-                .map(|(key, (value, ordinal))| (key, value, ordinal))
-                .collect();
+            unique = by_key.into_iter().collect();
         } else {
-            let mut conflict: Option<ReadKey> = None;
             unique = Vec::with_capacity(reads.len());
-            for (ordinal, (key, value)) in reads.into_iter().enumerate() {
-                if let Some((_, previous, _)) =
-                    unique.iter().find(|(candidate, _, _)| *candidate == key)
+            for (key, value) in reads {
+                if let Some((_, previous)) = unique.iter().find(|(candidate, _)| *candidate == key)
                 {
                     if *previous != value && conflict.is_none_or(|old| key < old) {
                         conflict = Some(key);
                     }
                 } else {
-                    unique.push((key, value, ordinal));
+                    unique.push((key, value));
                 }
             }
-            if let Some(key) = conflict {
-                return Err(Inconsistent(key));
-            }
+        }
+        if let Some(key) = conflict {
+            return Err(Inconsistent(key));
         }
         unique.sort_unstable_by(|a, b| {
             #[cfg(test)]
             SORT_COMPARISONS.with(|n| n.set(n.get() + 1));
             a.0.cmp(&b.0)
         });
-        Ok(Self::from_canonical_observations(unique))
+        Ok(Self::from_canonical(unique))
     }
-    /// Freeze already canonical unique rows with their first-read ordinals.
-    /// Both callers construct uniqueness before reaching this boundary.
-    pub fn from_canonical_observations(unique: Vec<(ReadKey, ContentHash, usize)>) -> Self {
-        debug_assert!(unique.windows(2).all(|pair| pair[0].0 < pair[1].0));
-        let observation = if unique.windows(2).all(|pair| pair[0].2 < pair[1].2) {
-            None
-        } else {
-            let mut order = (0..unique.len()).map(|at| at as u32).collect::<Vec<_>>();
-            order.sort_unstable_by_key(|&at| unique[at as usize].2);
-            Some(order.into())
-        };
-        let rows = unique
-            .into_iter()
-            .map(|(key, value, _)| (key, value))
-            .collect::<Vec<_>>();
+    /// Freeze rows already sorted by key with one row per key.
+    pub fn from_canonical(rows: Vec<(ReadKey, ContentHash)>) -> Self {
+        debug_assert!(rows.windows(2).all(|pair| pair[0].0 < pair[1].0));
         Self {
             rows: rows.into(),
             indices: None,
-            observation,
         }
     }
     pub fn iter(&self) -> impl ExactSizeIterator<Item = &(ReadKey, ContentHash)> {
         (0..self.len())
             .map(|at| &self.rows[self.indices.as_ref().map_or(at, |rows| rows[at] as usize)])
-    }
-    pub fn observed(&self) -> impl ExactSizeIterator<Item = &(ReadKey, ContentHash)> {
-        (0..self.len()).map(|at| {
-            let logical = self
-                .observation
-                .as_ref()
-                .map_or(at, |order| order[at] as usize);
-            &self.rows[self
-                .indices
-                .as_ref()
-                .map_or(logical, |rows| rows[logical] as usize)]
-        })
     }
     pub fn len(&self) -> usize {
         self.indices
@@ -519,11 +485,10 @@ impl Reads {
         Some(Self {
             rows: complete.rows.clone(),
             indices: (indices.len() != complete.len()).then(|| indices.into()),
-            observation: self.observation.clone(),
         })
     }
     /// Detach a selected phase from the complete body's backing rows. Exact
-    /// observations, order and encoding stay unchanged.
+    /// observations and encoding stay unchanged.
     pub fn flat_copy(&self) -> Self {
         if self.indices.is_none() {
             return self.clone();
@@ -531,17 +496,12 @@ impl Reads {
         Self {
             rows: self.iter().copied().collect::<Vec<_>>().into(),
             indices: None,
-            observation: self.observation.clone(),
         }
     }
     pub fn flat_backing_bytes(&self) -> Option<usize> {
-        self.indices.as_ref().map(|_| {
-            let rows = 2 * size_of::<usize>() + self.len() * size_of::<(ReadKey, ContentHash)>();
-            let observation = self.observation.as_ref().map_or(0, |order| {
-                hirsel_engine_admission::retained_arc_bytes(&**order) as usize
-            });
-            rows + observation
-        })
+        self.indices
+            .as_ref()
+            .map(|_| 2 * size_of::<usize>() + self.len() * size_of::<(ReadKey, ContentHash)>())
     }
     /// Actual distinct Arc backing allocations; the containing Reads value is
     /// accounted separately by its owner. This exposes no semantic identity.
@@ -553,89 +513,35 @@ impl Reads {
                 hirsel_engine_admission::arc_bytes(&**indices),
             )
         });
-        let observation = self.observation.as_ref().map(|order| {
-            (
-                order.as_ptr() as usize,
-                hirsel_engine_admission::arc_bytes(&**order),
-            )
-        });
-        [rows, indices, observation].into_iter().flatten()
+        [rows, indices].into_iter().flatten()
     }
     /// The union of two read sets (execution closure, design §1b).
     pub fn union(&self, other: &Reads) -> Result<Reads, Inconsistent> {
-        let (mut a, mut b) = (self.iter().peekable(), other.iter().peekable());
-        let mut out = Vec::with_capacity(self.len() + other.len());
-        loop {
-            match (a.peek(), b.peek()) {
-                (Some(x), Some(y)) => match x.0.cmp(&y.0) {
-                    std::cmp::Ordering::Less => out.push(*a.next().unwrap()),
-                    std::cmp::Ordering::Greater => out.push(*b.next().unwrap()),
-                    std::cmp::Ordering::Equal => {
-                        if x.1 != y.1 {
-                            return Err(Inconsistent(x.0));
-                        }
-                        out.push(*a.next().unwrap());
-                        b.next();
-                    }
-                },
-                (Some(_), None) => out.extend(a.by_ref().copied()),
-                (None, Some(_)) => out.extend(b.by_ref().copied()),
-                (None, None) => break,
-            }
+        let mut conflict = None;
+        let rows = merge_canonical(self.iter().copied(), other.iter().copied(), &mut conflict);
+        match conflict {
+            Some(key) => Err(Inconsistent(key)),
+            None => Ok(Self::from_canonical(rows)),
         }
-        let mut seen = vec![false; out.len()];
-        let mut order = Vec::with_capacity(out.len());
-        for (key, _) in self.observed().chain(other.observed()) {
-            let logical = out
-                .binary_search_by(|(candidate, _)| candidate.cmp(key))
-                .expect("union row exists in canonical output");
-            if !std::mem::replace(&mut seen[logical], true) {
-                order.push(logical as u32);
-            }
-        }
-        let observation = order
-            .iter()
-            .enumerate()
-            .any(|(at, &logical)| at as u32 != logical)
-            .then(|| order.into());
-        Ok(Self {
-            rows: out.into(),
-            indices: None,
-            observation,
-        })
     }
-    /// The minimum durability over every read, given each read's durability.
-    pub fn durability(&self, of: impl Fn(&ReadKey) -> Durability) -> Durability {
-        self.iter()
-            .map(|(k, _)| of(k))
-            .min()
-            .unwrap_or(Durability::High)
-    }
-    /// The first read whose current value differs, by `current`.
+    /// The first read, in key order, whose current value differs by `current`.
     pub fn first_changed(
         &self,
         mut current: impl FnMut(&ReadKey) -> Option<ContentHash>,
     ) -> Option<ReadKey> {
-        self.observed()
+        self.iter()
             .find(|(k, v)| current(k) != Some(*v))
             .map(|(k, _)| *k)
     }
     /// The canonical persisted encoding.
     pub fn encode(&self, out: &mut Vec<u8>) {
-        // Version 2 separates lookup identity from diagnostic spelling repairs.
-        // Reject pre-separation receipts even when they contain no new tags.
-        out.extend(b"HRD3");
+        // HRD4 is canonical rows only; earlier framings carried an
+        // observation permutation and are rejected.
+        out.extend(b"HRD4");
         out.extend((self.len() as u32).to_le_bytes());
         for (key, value) in self.iter() {
             key.encode(out);
             out.extend(value.0);
-        }
-        for at in 0..self.len() {
-            let logical = self
-                .observation
-                .as_ref()
-                .map_or(at as u32, |order| order[at]);
-            out.extend(logical.to_le_bytes());
         }
     }
     pub fn encoded_bytes(&self) -> Option<u64> {
@@ -644,7 +550,7 @@ impl Reads {
                 .checked_add(u64::try_from(key.encoded_bytes()?).ok()?)?
                 .checked_add(value.0.len() as u64)
         })?;
-        bytes.checked_add((self.len() as u64).checked_mul(4)?)
+        Some(bytes)
     }
     pub fn encoding_working_bytes(&self) -> Option<u64> {
         self.encoded_bytes()?
@@ -652,17 +558,17 @@ impl Reads {
             .checked_mul(4)?
             .checked_add(size_of::<Vec<u8>>() as u64)
     }
-    /// Visit HRD3's canonical rows, then its exact observation indices.
-    /// This uses the same framing, row-order and permutation checks as decode.
+    /// Visit HRD4's canonical rows with the same framing and row-order
+    /// checks as decode.
     pub fn visit_encoded(
         mut input: &[u8],
-        mut visit: impl FnMut(usize, Option<(ReadKey, ContentHash)>) -> Option<()>,
+        mut visit: impl FnMut(usize, (ReadKey, ContentHash)) -> Option<()>,
     ) -> Option<usize> {
-        if take(&mut input, 4)? != b"HRD3" {
+        if take(&mut input, 4)? != b"HRD4" {
             return None;
         }
         let count = take_u32(&mut input)? as usize;
-        if count > input.len() / (1 + size_of::<ContentHash>() + size_of::<u32>()) {
+        if count > input.len() / (1 + size_of::<ContentHash>()) {
             return None;
         }
         let mut previous = None;
@@ -673,24 +579,16 @@ impl Reads {
             }
             previous = Some(key);
             let value = ContentHash(take(&mut input, 32)?.try_into().ok()?);
-            visit(index, Some((key, value)))?;
-        }
-        let mut seen = vec![false; count];
-        for _ in 0..count {
-            let index = take_u32(&mut input)? as usize;
-            if index >= count || std::mem::replace(&mut seen[index], true) {
-                return None;
-            }
-            visit(index, None)?;
+            visit(index, (key, value))?;
         }
         input.is_empty().then_some(count)
     }
     pub fn decode(input: &mut &[u8]) -> Option<Reads> {
-        if take(input, 4)? != b"HRD3" {
+        if take(input, 4)? != b"HRD4" {
             return None;
         }
         let count = take_u32(input)? as usize;
-        if count > input.len() / (1 + size_of::<ContentHash>() + size_of::<u32>()) {
+        if count > input.len() / (1 + size_of::<ContentHash>()) {
             return None;
         }
         let mut reads = Vec::with_capacity(count.min(1 << 16));
@@ -702,25 +600,7 @@ impl Reads {
             let value = ContentHash(take(input, 32)?.try_into().ok()?);
             reads.push((key, value));
         }
-        let mut seen = vec![false; count];
-        let mut order = Vec::with_capacity(count.min(1 << 16));
-        for _ in 0..count {
-            let logical = take_u32(input)? as usize;
-            if logical >= count || std::mem::replace(&mut seen[logical], true) {
-                return None;
-            }
-            order.push(logical as u32);
-        }
-        let observation = order
-            .iter()
-            .enumerate()
-            .any(|(at, &logical)| at as u32 != logical)
-            .then(|| order.into());
-        Some(Reads {
-            rows: reads.into(),
-            indices: None,
-            observation,
-        })
+        Some(Self::from_canonical(reads))
     }
     /// The content hash of the canonical encoding.
     pub fn digest(&self) -> ContentHash {
@@ -736,30 +616,102 @@ impl Reads {
 }
 
 /// Records reads during one evaluation (a task-local accumulator), then
-/// freezes them into `Reads`.
+/// freezes them into `Reads`. Merged complete read sets stay canonical and
+/// join by linear merges; only the evaluation's own rows are sorted.
 #[derive(Clone, Debug, Default)]
-pub struct ReadsBuilder(Vec<(ReadKey, ContentHash)>);
+pub struct ReadsBuilder {
+    rows: Vec<(ReadKey, ContentHash)>,
+    sets: Vec<Reads>,
+}
 impl ReadsBuilder {
     pub fn new() -> Self {
         Self::default()
     }
     pub fn record(&mut self, key: ReadKey, value: ContentHash) {
-        self.0.push((key, value));
+        self.rows.push((key, value));
     }
     /// Merges another memo's complete reads (execution closure by union).
     pub fn merge(&mut self, reads: &Reads) {
-        self.0.extend(reads.observed().copied());
+        if !reads.is_empty() {
+            self.sets.push(reads.clone());
+        }
     }
     /// Merges another evaluation's recorded reads.
     pub fn extend(&mut self, other: ReadsBuilder) {
-        self.0.extend(other.0);
+        self.rows.extend(other.rows);
+        self.sets.extend(other.sets);
     }
     pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
+        self.rows.is_empty() && self.sets.is_empty()
     }
+    /// The union of every recorded row and merged set. Conflicting
+    /// observations of one key are an error naming the least such key.
     pub fn finish(self) -> Result<Reads, Inconsistent> {
-        Reads::from_vec(self.0)
+        let mut conflict = None;
+        let own = match Reads::from_vec(self.rows) {
+            Ok(own) => own,
+            Err(Inconsistent(key)) => {
+                conflict = Some(key);
+                Reads::empty()
+            }
+        };
+        let mut level: Vec<Reads> = std::iter::once(own)
+            .chain(self.sets)
+            .filter(|reads| !reads.is_empty())
+            .collect();
+        if level.len() == 1 && conflict.is_none() {
+            return Ok(level.pop().expect("one set"));
+        }
+        while level.len() > 1 {
+            let mut next = Vec::with_capacity(level.len().div_ceil(2));
+            let mut sets = level.into_iter();
+            while let Some(a) = sets.next() {
+                next.push(match sets.next() {
+                    Some(b) => Reads::from_canonical(merge_canonical(
+                        a.iter().copied(),
+                        b.iter().copied(),
+                        &mut conflict,
+                    )),
+                    None => a,
+                });
+            }
+            level = next;
+        }
+        match conflict {
+            Some(key) => Err(Inconsistent(key)),
+            None => Ok(level.pop().unwrap_or_default()),
+        }
     }
+}
+
+/// Merge two canonical row sequences, keeping the first value of a shared
+/// key and lowering `conflict` to the least key whose values disagree.
+fn merge_canonical(
+    a: impl Iterator<Item = (ReadKey, ContentHash)>,
+    b: impl Iterator<Item = (ReadKey, ContentHash)>,
+    conflict: &mut Option<ReadKey>,
+) -> Vec<(ReadKey, ContentHash)> {
+    let (mut a, mut b) = (a.peekable(), b.peekable());
+    let mut out = Vec::with_capacity(a.size_hint().0 + b.size_hint().0);
+    loop {
+        match (a.peek(), b.peek()) {
+            (Some(x), Some(y)) => match x.0.cmp(&y.0) {
+                std::cmp::Ordering::Less => out.push(a.next().expect("peeked")),
+                std::cmp::Ordering::Greater => out.push(b.next().expect("peeked")),
+                std::cmp::Ordering::Equal => {
+                    let (x, y) = (a.next().expect("peeked"), b.next().expect("peeked"));
+                    if x.1 != y.1 && conflict.is_none_or(|old| x.0 < old) {
+                        *conflict = Some(x.0);
+                    }
+                    out.push(x);
+                }
+            },
+            (Some(_), None) => out.extend(a.by_ref()),
+            (None, Some(_)) => out.extend(b.by_ref()),
+            (None, None) => break,
+        }
+    }
+    out
 }
 
 impl serde::Serialize for Reads {
@@ -919,13 +871,6 @@ mod tests {
         .unwrap();
         assert_eq!(one.len(), 2);
         assert_eq!(one.iter().next().unwrap().0, ReadKey::Signature(a));
-        assert_eq!(
-            one.observed().copied().collect::<Vec<_>>(),
-            vec![
-                (ReadKey::Signature(b), h("b")),
-                (ReadKey::Signature(a), h("a"))
-            ]
-        );
         let same_set = Reads::from_vec(vec![
             (ReadKey::Signature(a), h("a")),
             (ReadKey::Signature(b), h("b")),
@@ -949,13 +894,6 @@ mod tests {
             one.digest(),
             ContentHash::of_parts("hirsel.reads.v2", [canonical_encoding.as_slice()])
         );
-        assert_eq!(
-            same_set.observed().copied().collect::<Vec<_>>(),
-            vec![
-                (ReadKey::Signature(a), h("a")),
-                (ReadKey::Signature(b), h("b"))
-            ]
-        );
         let mut visited = Vec::new();
         assert_eq!(
             one.first_changed(|key| {
@@ -968,7 +906,7 @@ mod tests {
             }),
             Some(ReadKey::Signature(b))
         );
-        assert_eq!(visited, vec![ReadKey::Signature(b)]);
+        assert_eq!(visited, vec![ReadKey::Signature(a), ReadKey::Signature(b)]);
         let two = Reads::from_vec(vec![
             (ReadKey::Signature(a), h("a")),
             (ReadKey::ExecutedBody(a), h("body")),
@@ -976,38 +914,7 @@ mod tests {
         .unwrap();
         let both = one.union(&two).unwrap();
         assert_eq!(both.len(), 3);
-        assert_eq!(
-            both.observed().copied().collect::<Vec<_>>(),
-            vec![
-                (ReadKey::Signature(b), h("b")),
-                (ReadKey::Signature(a), h("a")),
-                (ReadKey::ExecutedBody(a), h("body"))
-            ]
-        );
         assert_eq!(both, two.union(&one).unwrap());
-        assert_eq!(
-            two.union(&one)
-                .unwrap()
-                .observed()
-                .copied()
-                .collect::<Vec<_>>(),
-            vec![
-                (ReadKey::Signature(a), h("a")),
-                (ReadKey::ExecutedBody(a), h("body")),
-                (ReadKey::Signature(b), h("b"))
-            ]
-        );
-        let mut builder = ReadsBuilder::new();
-        builder.merge(&one);
-        assert_eq!(
-            builder
-                .finish()
-                .unwrap()
-                .observed()
-                .copied()
-                .collect::<Vec<_>>(),
-            one.observed().copied().collect::<Vec<_>>()
-        );
         let conflict = Reads::from_vec(vec![(ReadKey::Signature(a), h("other"))]).unwrap();
         assert_eq!(
             one.union(&conflict),
@@ -1040,25 +947,10 @@ mod tests {
             if let Some(key) = conflict {
                 return Err(Inconsistent(key));
             }
-            let observed = unique.iter().map(|(key, _)| *key).collect::<Vec<_>>();
             unique.sort_unstable_by_key(|(key, _)| *key);
-            let order = observed
-                .iter()
-                .map(|key| {
-                    unique
-                        .binary_search_by_key(key, |(candidate, _)| *candidate)
-                        .unwrap() as u32
-                })
-                .collect::<Vec<_>>();
-            let observation = order
-                .iter()
-                .enumerate()
-                .any(|(at, &logical)| at as u32 != logical)
-                .then(|| order.into());
             Ok(Reads {
                 rows: unique.into(),
                 indices: None,
-                observation,
             })
         }
         let (a, b) = (def("read_z"), def("read_a"));
@@ -1125,12 +1017,35 @@ mod tests {
             let expected = original(rows.clone());
             let got = Reads::from_vec(rows.clone());
             assert_eq!(got, expected, "seed {seed}");
+            // A builder over canonical sets, split anywhere, is the flat
+            // union of what it was fed: the same rows and the same least
+            // conflicting key.
+            for parts in [2usize, 3, 7] {
+                let mut builder = ReadsBuilder::new();
+                let mut fed = Vec::new();
+                let chunk = rows.len().div_ceil(parts);
+                for (at, part) in rows.chunks(chunk).enumerate() {
+                    if at == 0 {
+                        for &(key, value) in part {
+                            builder.record(key, value);
+                        }
+                        fed.extend_from_slice(part);
+                    } else {
+                        // Keep each set internally consistent, so every
+                        // conflict meets only across merged sets.
+                        let mut first = Vec::<(ReadKey, ContentHash)>::new();
+                        for &(key, value) in part {
+                            if !first.iter().any(|(seen, _)| *seen == key) {
+                                first.push((key, value));
+                            }
+                        }
+                        fed.extend_from_slice(&first);
+                        builder.merge(&Reads::from_vec(first).unwrap());
+                    }
+                }
+                assert_eq!(builder.finish(), original(fed), "seed {seed} parts {parts}");
+            }
             if let (Ok(got), Ok(expected)) = (got, expected) {
-                assert_eq!(
-                    got.observed().copied().collect::<Vec<_>>(),
-                    expected.observed().copied().collect::<Vec<_>>(),
-                    "seed {seed}"
-                );
                 let mut bytes = vec![];
                 got.encode(&mut bytes);
                 let mut reference = vec![];
@@ -1213,10 +1128,6 @@ mod tests {
             shared.encode(&mut bytes);
             let decoded = Reads::decode(&mut bytes.as_slice()).unwrap();
             assert_eq!(decoded, original);
-            assert_eq!(
-                decoded.observed().copied().collect::<Vec<_>>(),
-                original.observed().copied().collect::<Vec<_>>()
-            );
             for key in [a, b, c] {
                 assert_eq!(shared.get(&key), original.get(&key));
             }
@@ -1225,29 +1136,20 @@ mod tests {
         }
         let reversed = Reads::from_vec(vec![(b, h("b")), (a, h("a"))]).unwrap();
         let shared = reversed.share_rows(&complete).unwrap();
-        let expected = vec![(b, h("b")), (a, h("a"))];
-        assert_eq!(shared.observed().copied().collect::<Vec<_>>(), expected);
+        let expected = vec![(a, h("a")), (b, h("b"))];
+        assert_eq!(shared.iter().copied().collect::<Vec<_>>(), expected);
         let row_bytes = std::alloc::Layout::new::<[usize; 2]>()
             .extend(std::alloc::Layout::array::<(ReadKey, ContentHash)>(2).unwrap())
             .unwrap()
             .0
             .pad_to_align()
             .size();
-        let observation_bytes = std::alloc::Layout::new::<[usize; 2]>()
-            .extend(std::alloc::Layout::array::<u32>(2).unwrap())
-            .unwrap()
-            .0
-            .pad_to_align()
-            .size();
-        assert_eq!(
-            shared.flat_backing_bytes(),
-            Some(row_bytes + observation_bytes)
-        );
+        assert_eq!(shared.flat_backing_bytes(), Some(row_bytes));
         let flat = shared.flat_copy();
-        assert_eq!(flat.observed().copied().collect::<Vec<_>>(), expected);
+        assert_eq!(flat.iter().copied().collect::<Vec<_>>(), expected);
         assert_eq!(
             flat.allocations().map(|(_, bytes)| bytes).sum::<usize>(),
-            row_bytes + observation_bytes
+            row_bytes
         );
         let inconsistent = Reads::from_vec(vec![(a, h("other"))]).unwrap();
         assert!(inconsistent.share_rows(&complete).is_none());
@@ -1287,16 +1189,11 @@ mod tests {
             ),
         ];
         let reads = Reads::from_vec(observations.clone()).unwrap();
-        assert_eq!(reads.observed().copied().collect::<Vec<_>>(), observations);
         let mut bytes = vec![];
         reads.encode(&mut bytes);
         let mut input = bytes.as_slice();
         let decoded = Reads::decode(&mut input).unwrap();
         assert_eq!(decoded, reads);
-        assert_eq!(
-            decoded.observed().copied().collect::<Vec<_>>(),
-            observations
-        );
         assert!(input.is_empty());
         let ReadKey::Lookup(lookup) = reads
             .iter()
@@ -1335,24 +1232,17 @@ mod tests {
         assert_eq!(reads.len(), 2);
         let mut bytes = vec![];
         reads.encode(&mut bytes);
-        assert_eq!(&bytes[..4], b"HRD3");
+        assert_eq!(&bytes[..4], b"HRD4");
         assert_eq!(Reads::decode(&mut bytes.as_slice()), Some(reads.clone()));
-        let mut old = bytes.clone();
-        old[..4].copy_from_slice(b"HRD2");
-        assert!(Reads::decode(&mut old.as_slice()).is_none());
-        let order_start = bytes.len() - reads.len() * size_of::<u32>();
-        let mut missing_order = bytes.clone();
-        missing_order.truncate(order_start);
-        assert!(Reads::decode(&mut missing_order.as_slice()).is_none());
-        let mut duplicate_order = bytes.clone();
-        let first = duplicate_order[order_start..order_start + 4].to_vec();
-        duplicate_order[order_start + 4..order_start + 8].copy_from_slice(&first);
-        assert!(Reads::decode(&mut duplicate_order.as_slice()).is_none());
-        let mut out_of_range = bytes.clone();
-        out_of_range[order_start..order_start + 4]
-            .copy_from_slice(&(reads.len() as u32).to_le_bytes());
-        assert!(Reads::decode(&mut out_of_range.as_slice()).is_none());
-        let mut noncanonical = b"HRD3".to_vec();
+        for old_magic in [b"HRD2", b"HRD3"] {
+            let mut old = bytes.clone();
+            old[..4].copy_from_slice(old_magic);
+            assert!(Reads::decode(&mut old.as_slice()).is_none());
+        }
+        let mut truncated = bytes.clone();
+        truncated.pop();
+        assert!(Reads::decode(&mut truncated.as_slice()).is_none());
+        let mut noncanonical = b"HRD4".to_vec();
         noncanonical.extend(2u32.to_le_bytes());
         for (key, value) in [
             (ReadKey::Environment, h("environment")),
@@ -1361,8 +1251,6 @@ mod tests {
             key.encode(&mut noncanonical);
             noncanonical.extend(value.0);
         }
-        noncanonical.extend(0u32.to_le_bytes());
-        noncanonical.extend(1u32.to_le_bytes());
         assert!(Reads::decode(&mut noncanonical.as_slice()).is_none());
         // The old encoding began directly with the row count.
         assert!(Reads::decode(&mut &bytes[4..]).is_none());
@@ -1377,18 +1265,12 @@ mod tests {
     }
 
     #[test]
-    fn durability_is_the_minimum_and_changes_are_found() {
+    fn changed_reads_are_found() {
         let reads = Reads::from_vec(vec![
             (ReadKey::Signature(def("a")), h("a")),
             (ReadKey::Environment, h("e")),
         ])
         .unwrap();
-        let of = |k: &ReadKey| match k {
-            ReadKey::Environment => Durability::High,
-            _ => Durability::Low,
-        };
-        assert_eq!(reads.durability(of), Durability::Low);
-        assert_eq!(Reads::empty().durability(of), Durability::High);
         assert_eq!(
             reads.first_changed(|k| reads.get(k)),
             None,
@@ -1487,20 +1369,18 @@ impl hirsel_product_codec::decode_schema::Walk for Reads {
             scan.add(size_of::<DefPath>())
         }
         let n = scan.length()?;
-        // Raw payload plus row/order Vec growth, Arc conversion and path scopes.
+        // Raw payload plus row Vec growth, Arc conversion and path scopes.
         scan.add(n.checked_mul(2)?)?;
         let bytes = scan.take(n)?;
         let mut rows = Scan::raw_reads(bytes);
-        if rows.take(4)? != b"HRD3" {
+        if rows.take(4)? != b"HRD4" {
             return None;
         }
         let count = rows.word()? as usize;
-        if count > bytes.len() / 37 {
+        if count > bytes.len() / (1 + size_of::<ContentHash>()) {
             return None;
         }
-        scan.add(
-            count.checked_mul(4 * (size_of::<(ReadKey, ContentHash)>() + size_of::<u32>()) + 1)?,
-        )?;
+        scan.add(count.checked_mul(4 * size_of::<(ReadKey, ContentHash)>() + 1)?)?;
         for _ in 0..count {
             let kind = *ReadKind::ALL.get(rows.read_u8()? as usize)?;
             match kind {
@@ -1537,7 +1417,6 @@ impl hirsel_product_codec::decode_schema::Walk for Reads {
             }
             rows.take(32)?;
         }
-        rows.take(count.checked_mul(4)?)?;
         scan.add(usize::try_from(rows.finish()?).ok()?)
     }
 }

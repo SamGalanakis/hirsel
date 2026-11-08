@@ -714,24 +714,20 @@ impl FrontBodyQueries {
         if let Some(summary) = summary.as_mut() {
             let summary = Arc::make_mut(summary);
             summary.share_checked_storage();
-            if summary.reads.as_ref() == reads.as_ref()
-                && summary.reads.observed().eq(reads.observed())
-            {
+            if summary.reads.as_ref() == reads.as_ref() {
                 summary.reads = reads.clone();
             }
         }
         if let Some((_, checked_reads, _)) = checked
             && checked_reads.as_ref() == reads.as_ref()
-            && checked_reads.observed().eq(reads.observed())
         {
             *checked_reads = reads.clone();
         }
         for (_, observed) in memos.iter_mut() {
-            if observed.as_ref() == reads.as_ref() && observed.observed().eq(reads.observed()) {
+            if observed.as_ref() == reads.as_ref() {
                 *observed = reads.clone();
             } else if let Some((_, checked_reads, _)) = checked
                 && observed.as_ref() == checked_reads.as_ref()
-                && observed.observed().eq(checked_reads.observed())
             {
                 *observed = checked_reads.clone();
             }

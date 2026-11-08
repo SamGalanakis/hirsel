@@ -45,7 +45,7 @@ pub(in crate::queries) fn current_reads(
         return Some(reads);
     }
     let mut values = reads
-        .observed()
+        .iter()
         .map(|(key, digest)| Some((*key, current(key, *digest)?)))
         .collect::<Option<Vec<_>>>()?;
     for (package, digest) in receipt.contexts() {

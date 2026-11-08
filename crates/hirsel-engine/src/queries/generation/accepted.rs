@@ -633,7 +633,7 @@ impl QueryEngine {
         let captured = (|| {
             let original = self.snapshot(&definition)?;
             let mut current = Vec::new();
-            for (key, _) in output.reads().observed() {
+            for (key, _) in output.reads().iter() {
                 let observed = self.observe(&definition, key);
                 current.push((*key, observed));
             }

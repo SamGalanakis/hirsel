@@ -288,7 +288,7 @@ impl Facts {
             if summary.reads.as_ref() != reads.as_ref() {
                 return None;
             }
-            if summary.reads.observed().eq(reads.observed()) {
+            if summary.reads.iter().eq(reads.iter()) {
                 Arc::make_mut(summary).reads = reads.clone();
             }
         }
@@ -343,10 +343,11 @@ impl serde::Serialize for FactsRef<'_> {
                     PackedSummaryRef::Checked {
                         definition: summary.definition,
                         text: summary.text,
-                        reads: if self.checked.as_ref().is_some_and(|(_, reads, _)| {
-                            reads.as_ref() == summary.reads.as_ref()
-                                && reads.observed().eq(summary.reads.observed())
-                        }) {
+                        reads: if self
+                            .checked
+                            .as_ref()
+                            .is_some_and(|(_, reads, _)| reads.as_ref() == summary.reads.as_ref())
+                        {
                             None
                         } else {
                             Some(&summary.reads)
@@ -908,9 +909,7 @@ impl BodyTask {
         // equal checked facts before selecting the compact retained shape;
         // the complete decoded peak was admitted before this normalization.
         if let Some((checked, checked_reads, _)) = &mut facts.checked {
-            if checked_reads.as_ref() == reads.as_ref()
-                && checked_reads.observed().eq(reads.observed())
-            {
+            if checked_reads.as_ref() == reads.as_ref() {
                 *checked_reads = reads.clone();
             }
             if let Some(summary) = &mut facts.summary
@@ -1134,7 +1133,7 @@ mod tests {
         let preserved = &facts.summary.as_ref().unwrap().reads;
         assert!(Arc::ptr_eq(preserved, &reads));
         assert_eq!(
-            preserved.observed().copied().collect::<Vec<_>>(),
+            preserved.iter().copied().collect::<Vec<_>>(),
             vec![
                 (ReadKey::Environment, ContentHash::of_bytes(b"environment"),),
                 (
@@ -1314,7 +1313,7 @@ mod tests {
                             .as_ref()
                             .unwrap()
                             .reads
-                            .observed()
+                            .iter()
                             .copied()
                             .collect::<Vec<_>>(),
                         vec![environment, carry_read(0), carry_read(1), carry_read(2),]
@@ -1325,7 +1324,7 @@ mod tests {
                             .as_ref()
                             .unwrap()
                             .1
-                            .observed()
+                            .iter()
                             .copied()
                             .collect::<Vec<_>>(),
                         vec![carry_read(0), environment, carry_read(1), carry_read(2),]

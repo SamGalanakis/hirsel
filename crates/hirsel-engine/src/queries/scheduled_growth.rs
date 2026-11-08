@@ -1,7 +1,6 @@
 //! Source GEN-5 over every required checked root. Native reachability never
 //! selects this root set. Pending reads retain the frontier and compact facts;
 //! factories and output inspection execute no compiler phase.
-use super::read_union::ReadUnion;
 use super::*;
 use crate::products::ProductSource;
 use crate::products::{
@@ -329,7 +328,7 @@ impl FactTask {
         self.facts
             .sort_by_key(|fact| (fact.owner, fact.definition.0.0));
         let reads = Arc::new(
-            ReadUnion::of(self.reads.iter().map(|reads| &**reads))
+            union_of(self.reads.iter().map(|reads| &**reads))
                 .finish()
                 .map_err(|_| queries.errors.protocol)?,
         );
@@ -659,7 +658,7 @@ impl Task {
             std::mem::take(&mut self.required),
             &mut |definition| provider.signature(definition).map(Some),
         );
-        let mut union = ReadUnion::of(self.reads.iter().map(|reads| &**reads));
+        let mut union = union_of(self.reads.iter().map(|reads| &**reads));
         union.merge(&table_reads.finish().map_err(|_| queries.errors.protocol)?);
         let reads = union.finish().map_err(|_| queries.errors.protocol)?;
         self.reads.clear();
@@ -732,12 +731,11 @@ impl Task {
             .as_ref()
             .ok_or(queries.errors.protocol)?
             .reads;
-        let reads =
-            if reads == **membership_reader && reads.observed().eq(membership_reader.observed()) {
-                membership_reader.clone()
-            } else {
-                Arc::new(reads)
-            };
+        let reads = if reads == **membership_reader {
+            membership_reader.clone()
+        } else {
+            Arc::new(reads)
+        };
         let data = Arc::new(crate::source_components::SourceGrowthData {
             facets: Arc::new(facets),
             diagnostics: Arc::new(diagnostics),
@@ -870,4 +868,12 @@ impl QueryEngine {
             _allowance: allowance,
         }))
     }
+}
+
+fn union_of<'a>(readers: impl IntoIterator<Item = &'a Reads>) -> ReadsBuilder {
+    let mut union = ReadsBuilder::new();
+    for reads in readers {
+        union.merge(reads);
+    }
+    union
 }

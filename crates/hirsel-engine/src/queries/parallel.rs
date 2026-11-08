@@ -381,7 +381,7 @@ impl Worker<'_> {
                             .merged
                             .record(ReadKey::DeclaredSignature(owner), value);
                     }
-                    for &(key, value) in task.registration.iter().flat_map(|r| r.reads.observed()) {
+                    for &(key, value) in task.registration.iter().flat_map(|r| r.reads.iter()) {
                         if private_unique::inherited_registration_read(&key) {
                             observed.merged.record(key, value);
                         }

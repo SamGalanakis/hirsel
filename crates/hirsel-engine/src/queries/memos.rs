@@ -235,17 +235,45 @@ pub(crate) fn complete_reads(
     for (path, key) in &detail.failed_signature_keys {
         reads.record(ReadKey::FailedSignature(def(path)), optional(*key));
     }
+    // Resolver reads are interned, so a repeated lookup is the same
+    // allocation and records the same row; each row depends only on its read.
+    let mut seen = std::collections::HashSet::<usize, hirsel_intern::IdHasher>::default();
+    let mut contexts = Vec::<(usize, (PackageKey, ModuleKey))>::new();
+    let mut keys = |context: &FileContext| {
+        let at = std::ptr::from_ref(context) as usize;
+        match contexts.iter().find(|(seen, _)| *seen == at) {
+            Some((_, keys)) => *keys,
+            None => {
+                let keys = LookupKey::context_keys(context);
+                contexts.push((at, keys));
+                keys
+            }
+        }
+    };
+    // Only the resolver product that emits a missing-name diagnostic
+    // observes spelling repairs. Later phases inherit its typed reads;
+    // replaying resolver detail must not add new candidate dependencies to
+    // successful reservation probes.
+    let diagnostics = observed
+        .products
+        .resolution
+        .as_ref()
+        .is_some_and(|resolution| !resolution.output.diagnostics.is_empty());
     for read in detail.manifest_lookups.iter().chain(detail.resolver.iter()) {
-        match read.as_ref() {
+        let read: &hirsel_types::DependencyRead = read.as_ref();
+        if !seen.insert(std::ptr::from_ref(read) as usize) {
+            continue;
+        }
+        match read {
             hirsel_types::DependencyRead::ProviderLookup {
                 context,
                 package,
                 segments,
                 output,
             } => reads.record(
-                ReadKey::Lookup(LookupKey::of(
+                ReadKey::Lookup(LookupKey::in_context(
                     LookupSource::Provider,
-                    context,
+                    keys(context),
                     package.as_ref(),
                     segments,
                 )),
@@ -259,20 +287,12 @@ pub(crate) fn complete_reads(
                 ..
             } => {
                 let namespace = source.namespace(context, result);
-                // Only the resolver product that emits a missing-name
-                // diagnostic observes spelling repairs. Later phases inherit
-                // its typed reads; replaying resolver detail must not add new
-                // candidate dependencies to successful reservation probes.
-                let diagnostics = observed
-                    .products
-                    .resolution
-                    .as_ref()
-                    .is_some_and(|resolution| !resolution.output.diagnostics.is_empty());
+                let context_keys = keys(context);
                 if diagnostics && missing_lookup(result) {
                     reads.record(
-                        ReadKey::Lookup(LookupKey::of(
+                        ReadKey::Lookup(LookupKey::in_context(
                             LookupSource::Candidates,
-                            context,
+                            context_keys,
                             package.as_ref(),
                             segments,
                         )),
@@ -280,9 +300,9 @@ pub(crate) fn complete_reads(
                     );
                 }
                 reads.record(
-                    ReadKey::Lookup(LookupKey::of(
+                    ReadKey::Lookup(LookupKey::in_context(
                         LookupSource::Manifest,
-                        context,
+                        context_keys,
                         package.as_ref(),
                         segments,
                     )),
@@ -295,9 +315,9 @@ pub(crate) fn complete_reads(
                 exposed,
                 ..
             } => reads.record(
-                ReadKey::Lookup(LookupKey::of(
+                ReadKey::Lookup(LookupKey::in_context(
                     LookupSource::Head,
-                    context,
+                    keys(context),
                     None,
                     std::slice::from_ref(head),
                 )),

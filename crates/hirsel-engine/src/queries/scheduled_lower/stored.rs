@@ -47,7 +47,7 @@ impl FrontLowerQueries {
             Reads::from_vec(
                 outcome
                     .reads
-                    .observed()
+                    .iter()
                     .map(|(key, hash)| {
                         (
                             *key,

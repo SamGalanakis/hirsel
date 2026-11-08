@@ -511,7 +511,7 @@ fn check_settled_front_eviction(
                     .find(|(key, _)| key.kind == QueryKind::Modes)
                     .unwrap();
                 assert_eq!(expected.as_ref(), modes.1.as_ref());
-                assert!(expected.observed().eq(modes.1.observed()));
+                assert!(expected.iter().eq(modes.1.iter()));
                 assert_eq!(front.recompute_count(&program.entry, QueryKind::Modes), 1);
             }
             if demand_lower && (!carry_across_graphs || revision == 1) {

@@ -23,7 +23,6 @@ pub(super) fn summary_shared(
             && summary.summary == value.summary
             && summary.growth == value.growth
             && summary.reads.as_ref() == reads
-            && summary.reads.observed().eq(reads.observed())
     })
 }
 #[cfg(test)]

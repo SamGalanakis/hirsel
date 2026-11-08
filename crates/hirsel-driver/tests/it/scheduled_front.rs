@@ -1930,7 +1930,7 @@ fn archived_front_releases_observation_arrays_when_their_readers_finish() {
             let readers = front.memo_snapshot().unwrap();
             let expected = readers
                 .iter()
-                .map(|(key, reads)| (*key, reads.observed().copied().collect::<Vec<_>>()))
+                .map(|(key, reads)| (*key, reads.iter().copied().collect::<Vec<_>>()))
                 .collect::<Vec<_>>();
             assert!(!expected.is_empty());
             let readers = held.then_some(readers);
@@ -1955,7 +1955,7 @@ fn archived_front_releases_observation_arrays_when_their_readers_finish() {
             assert_eq!(
                 reopened
                     .iter()
-                    .map(|(key, reads)| { (*key, reads.observed().copied().collect::<Vec<_>>()) })
+                    .map(|(key, reads)| { (*key, reads.iter().copied().collect::<Vec<_>>()) })
                     .collect::<Vec<_>>(),
                 expected
             );

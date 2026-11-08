@@ -613,7 +613,7 @@ pub(super) fn persisted_execution_reads(
     acceptance: Option<&hirsel_validate::ExecutionReceipt>,
 ) -> Option<Reads> {
     let mut reads = Vec::new();
-    for (read, digest) in executed.observed() {
+    for (read, digest) in executed.iter() {
         if let ReadKey::ValidationUniverse(package) = read {
             if !acceptance?
                 .contexts()

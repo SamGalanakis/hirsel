@@ -323,38 +323,86 @@ unsafe fn pair_members(
 // arch/generic/packedpair.rs:222-276: use two overlapping full-width loads,
 // report the first set lane, and keep the narrower scanner for the tail.
 // Exact nibble membership retains the SSSE3 contract for arbitrary byte sets.
+// A single folded ASCII byte plus every non-ASCII byte can use vector
+// equality instead of nibble shuffles. Validate the complete membership table.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn folded_ascii_mask(mask: &[u8; 32]) -> Option<u8> {
+    use std::arch::x86_64::*;
+    // SAFETY: both loads read sixteen initialized bytes of the table.
+    let low = unsafe { _mm_loadu_si128(mask.as_ptr().cast()) };
+    let present = (!_mm_movemask_epi8(_mm_cmpeq_epi8(low, _mm_setzero_si128())) as u32) & 65535;
+    if !present.is_power_of_two() {
+        return None;
+    }
+    let nibble = present.trailing_zeros() as usize;
+    let members = mask[nibble];
+    if !matches!(members, 5 | 10 | 80 | 160) {
+        return None;
+    }
+    // SAFETY: the high half is the other sixteen initialized table bytes.
+    let high = unsafe { _mm_loadu_si128(mask.as_ptr().add(16).cast()) };
+    if _mm_movemask_epi8(_mm_cmpeq_epi8(high, _mm_set1_epi8(-1))) != 65535 {
+        return None;
+    }
+    Some(nibble as u8 | 32 | ((members.trailing_zeros() as u8) << 4))
+}
+
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 unsafe fn pair_avx2(source: &[u8], firsts: &[u8; 32], seconds: &[u8; 32]) -> Option<usize> {
     use std::arch::x86_64::*;
-    let bit_values: [u8; 16] = [1, 2, 4, 8, 16, 32, 64, 128, 1, 2, 4, 8, 16, 32, 64, 128];
-    // SAFETY: each table load reads sixteen initialized bytes. Broadcasting
-    // repeats the table in both independent AVX2 shuffle lanes.
-    let (fl, fh, sl, sh, bits) = unsafe {
-        (
-            _mm256_broadcastsi128_si256(_mm_loadu_si128(firsts.as_ptr().cast())),
-            _mm256_broadcastsi128_si256(_mm_loadu_si128(firsts.as_ptr().add(16).cast())),
-            _mm256_broadcastsi128_si256(_mm_loadu_si128(seconds.as_ptr().cast())),
-            _mm256_broadcastsi128_si256(_mm_loadu_si128(seconds.as_ptr().add(16).cast())),
-            _mm256_broadcastsi128_si256(_mm_loadu_si128(bit_values.as_ptr().cast())),
-        )
-    };
     let mut at = 0;
-    while source.len() - at >= 33 {
-        // SAFETY: thirty-three remaining bytes bound both thirty-two-byte loads.
-        let (first, second) = unsafe {
+    // SAFETY: AVX2 is enabled and both complete tables are live.
+    let folded = unsafe {
+        folded_ascii_mask(firsts)
+            .and_then(|first| folded_ascii_mask(seconds).map(|second| (first, second)))
+    };
+    if let Some((first, second)) = folded {
+        let first = _mm256_set1_epi8(first as i8);
+        let second = _mm256_set1_epi8(second as i8);
+        let fold = _mm256_set1_epi8(32);
+        while source.len() - at >= 33 {
+            // SAFETY: thirty-three bytes bound both overlapping vector loads.
+            let a = unsafe { _mm256_loadu_si256(source.as_ptr().add(at).cast()) };
+            let b = unsafe { _mm256_loadu_si256(source.as_ptr().add(at + 1).cast()) };
+            let ma = _mm256_or_si256(a, _mm256_cmpeq_epi8(_mm256_or_si256(a, fold), first));
+            let mb = _mm256_or_si256(b, _mm256_cmpeq_epi8(_mm256_or_si256(b, fold), second));
+            let mask = _mm256_movemask_epi8(_mm256_and_si256(ma, mb)) as u32;
+            if mask != 0 {
+                return Some(at + mask.trailing_zeros() as usize);
+            }
+            at += 32;
+        }
+    } else {
+        let bit_values: [u8; 16] = [1, 2, 4, 8, 16, 32, 64, 128, 1, 2, 4, 8, 16, 32, 64, 128];
+        // SAFETY: each table load reads sixteen initialized bytes. Broadcasting
+        // repeats the table in both independent AVX2 shuffle lanes.
+        let (fl, fh, sl, sh, bits) = unsafe {
             (
-                _mm256_loadu_si256(source.as_ptr().add(at).cast()),
-                _mm256_loadu_si256(source.as_ptr().add(at + 1).cast()),
+                _mm256_broadcastsi128_si256(_mm_loadu_si128(firsts.as_ptr().cast())),
+                _mm256_broadcastsi128_si256(_mm_loadu_si128(firsts.as_ptr().add(16).cast())),
+                _mm256_broadcastsi128_si256(_mm_loadu_si128(seconds.as_ptr().cast())),
+                _mm256_broadcastsi128_si256(_mm_loadu_si128(seconds.as_ptr().add(16).cast())),
+                _mm256_broadcastsi128_si256(_mm_loadu_si128(bit_values.as_ptr().cast())),
             )
         };
-        let a = unsafe { pair_members_avx2(first, fl, fh, bits) };
-        let b = unsafe { pair_members_avx2(second, sl, sh, bits) };
-        let mask = _mm256_movemask_epi8(_mm256_and_si256(a, b)) as u32;
-        if mask != 0 {
-            return Some(at + mask.trailing_zeros() as usize);
+        while source.len() - at >= 33 {
+            // SAFETY: thirty-three remaining bytes bound both thirty-two-byte loads.
+            let (first, second) = unsafe {
+                (
+                    _mm256_loadu_si256(source.as_ptr().add(at).cast()),
+                    _mm256_loadu_si256(source.as_ptr().add(at + 1).cast()),
+                )
+            };
+            let a = unsafe { pair_members_avx2(first, fl, fh, bits) };
+            let b = unsafe { pair_members_avx2(second, sl, sh, bits) };
+            let mask = _mm256_movemask_epi8(_mm256_and_si256(a, b)) as u32;
+            if mask != 0 {
+                return Some(at + mask.trailing_zeros() as usize);
+            }
+            at += 32;
         }
-        at += 32;
     }
     let tail = if std::is_x86_feature_detected!("ssse3") {
         // SAFETY: SSSE3 is detected independently; the helper bounds its tail.
@@ -511,11 +559,29 @@ mod tests {
     }
     #[test]
     fn pair_boundaries_and_byte_sets() {
+        let mut folded_first = vec![b'P', b'p'];
+        let mut folded_second = vec![b'A', b'a'];
+        folded_first.extend(128..=255);
+        folded_second.extend(128..=255);
+        let mut folded_control_first = vec![15, 47];
+        let mut folded_control_second = vec![26, 58];
+        folded_control_first.extend(128..=255);
+        folded_control_second.extend(128..=255);
+        let mut exact_first = vec![b'A'];
+        let mut exact_second = vec![b'b'];
+        exact_first.extend(128..=255);
+        exact_second.extend(128..=255);
         for (firsts, seconds) in [
             (b"a".as_slice(), b"b".as_slice()),
             (b"abc", b"bcd"),
             (b"\x00\x80\xff", b"\xff\x81\x00"),
             (b"", b"a"),
+            (folded_first.as_slice(), folded_second.as_slice()),
+            (exact_first.as_slice(), exact_second.as_slice()),
+            (
+                folded_control_first.as_slice(),
+                folded_control_second.as_slice(),
+            ),
         ] {
             let (first_mask, second_mask) = (mask(firsts), mask(seconds));
             for length in 0..=65 {
@@ -595,6 +661,18 @@ mod tests {
                 let mut block = [b'x'; 34];
                 block[16] = first;
                 block[17] = second;
+                for (a, b) in [
+                    (&folded_first, &folded_second),
+                    (&folded_control_first, &folded_control_second),
+                    (&exact_first, &exact_second),
+                ] {
+                    let wanted = if a.contains(&first) && b.contains(&second) {
+                        16
+                    } else {
+                        block.len()
+                    };
+                    assert_eq!(find_pair(&block, &mask(a), &mask(b), 0), wanted as u64);
+                }
                 let expected = block.windows(2).position(|p| p == [first, second]).unwrap();
                 assert_eq!(
                     find_pair(&block, &mask(&[first]), &mask(&[second]), 0),

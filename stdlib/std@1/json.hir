@@ -844,10 +844,11 @@ pub fn object_next(mut cursor: Reader, mut first: bool, mut keys: Set[String]) -
 // Like the derived reader, keep both inline keys after spilling. Only later
 // keys enter the existing hashed Set, so wide objects stay bounded per lookup.
 fn remember_skipped_key(
-  mut first: Option[String],
-  mut second: Option[String],
+  data: Bytes,
+  mut first: Option[ObjectKey],
+  mut second: Option[ObjectKey],
   mut spill: Option[Set[String]],
-  take key: String
+  take key: ObjectKey
 ) -> bool uses {} {
   match first {
     None => {
@@ -855,7 +856,7 @@ fn remember_skipped_key(
       return true
     },
     Some(previous) => {
-      if previous == key {
+      if keys_equal(data, previous, key) {
         return false
       }
     },
@@ -866,7 +867,7 @@ fn remember_skipped_key(
       return true
     },
     Some(previous) => {
-      if previous == key {
+      if keys_equal(data, previous, key) {
         return false
       }
     },
@@ -875,9 +876,10 @@ fn remember_skipped_key(
     Some(previous) => take previous,
     None => core@1/set.empty(),
   }
-  let duplicate = core@1/set.contains(seen, key)
+  let owned = key_owned(data, key)
+  let duplicate = core@1/set.contains(seen, owned)
   if !duplicate {
-    core@1/set.insert(mut seen, take key)
+    core@1/set.insert(mut seen, take owned)
   }
   spill = Some(take seen)
   !duplicate
@@ -905,12 +907,29 @@ pub fn skip(mut cursor: Reader) -> Result[(), JsonError] uses {} {
     cursor.pos += 1
     cursor.depth += 1
     let mut first = true
-    let mut first_key: Option[String] = None
-    let mut second_key: Option[String] = None
+    let mut first_key: Option[ObjectKey] = None
+    let mut second_key: Option[ObjectKey] = None
     let mut spill: Option[Set[String]] = None
     while let Some(start) = owned_member_start(mut cursor, mut first)? {
-      let key = read_owned_text(mut cursor)?
-      if !remember_skipped_key(mut first_key, mut second_key, mut spill, take key) {
+      let next = if cursor.pos < core@1/bytes.len(cursor.data) && cursor.data[cursor.pos] > 32 {
+        cursor.data[cursor.pos]
+      } else {
+        peek(mut cursor)
+      }
+      if next != 34 { return Error(Syntax(cursor.pos)) }
+      let at = cursor.pos
+      let byte = if core@1/bytes.len(cursor.data) - at >= 3 && cursor.data[at + 2] == 34 {
+        cursor.data[at + 1]
+      } else { 0u8 }
+      // serde_json SliceRead borrows plain keys (read.rs:521-566). A single
+      // ASCII byte needs no owned spelling, even while recursively skipping.
+      let key: ObjectKey = if byte >= 32 && byte < 128 && byte != 34 && byte != 92 {
+        cursor.pos = at + 3
+        ByteKey(byte)
+      } else {
+        DecodedKey(read_owned_text(mut cursor)?)
+      }
+      if !remember_skipped_key(cursor.data, mut first_key, mut second_key, mut spill, take key) {
         return Error(DuplicateKey(start))
       }
       colon(mut cursor)?

@@ -21,6 +21,7 @@ would redo every compile, test and toolchain unpack here.
 """
 from pathlib import Path
 import os
+import re
 import subprocess
 import sys
 
@@ -52,6 +53,16 @@ def main():
     local = ROOT / '.buckconfig.local'
     before = local.read_bytes() if local.is_file() else None
     status = configure()
+    if status == 0:
+        # The daemon launches executors outside the project root. The shared
+        # timeout stays in .buckconfig; only this checkout's path is local.
+        text = re.sub(r'(?m)^v2_test_executor\s*=.*\n?', '', local.read_text())
+        setting = f'v2_test_executor = {HERE / "test_executor.py"}\n'
+        if re.search(r'(?m)^\[test\][ \t]*(?:\n|$)', text):
+            text = re.sub(r'(?m)^\[test\][ \t]*(?:\n|$)', lambda m: '[test]\n' + setting, text, count=1)
+        else:
+            text += '\n[test]\n' + setting
+        local.write_text(text)
     if (local.read_bytes() if local.is_file() else None) != before:
         subprocess.run([str(ROOT / '.buck2/bin/buck2'), 'kill'], cwd=ROOT, capture_output=True)
     return status

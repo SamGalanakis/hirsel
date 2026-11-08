@@ -271,12 +271,13 @@ neither reuses nor replaces their cached verdicts.
 Local commands run through `tools/capped` with memory and CPU-share limits,
 without CPU-second or wall-time limits. The progress reporter has no inner
 deadline. The pinned Buck2 client still requires a test-execution timeout;
-its API accepts a duration rather than an optional timeout, so the existing
-runner overrides remain until the client supports unbounded test execution.
+all tests share the single 86400-second outer bound in `.buckconfig`. The
+repository executor passes it to the stock runner because this pin ignores
+`test.timeout_default_s` for external test providers. `prepare.py` records the
+executor's absolute checkout path; no Buck patch or per-target override is used.
 
 Arguments after `--` go to Buck2's test runner: `--test-arg=<a>` passes one
-libtest argument, and `--timeout <seconds>` raises the ten-minute limit per
-test. A sharded binary given a case filter runs it all in shard 1. Check the output
+libtest argument. Test commands use the shared outer bound without overrides. A sharded binary given a case filter runs it all in shard 1. Check the output
 for a nonzero case count. Every test runs on the pool by default, including
 native and full-gate cases. `-c hirsel.tests=host` explicitly opts into host
 execution; it still uses the pinned tool inputs. There are no implicit host
@@ -309,7 +310,7 @@ Heavy Buck2 commands run from this host and execute on the pool when one is
 configured. Native changes use a filtered campaign:
 
 ```sh
-.buck2/bin/buck2 test -c hirsel.full=true //:gate-native-full -- --test-arg=--filter --test-arg=SEM-4-view-return-source-run --timeout 14400
+.buck2/bin/buck2 test -c hirsel.full=true //:gate-native-full -- --test-arg=--filter --test-arg=SEM-4-view-return-source-run
 ```
 
 Native tests receive LLVM 23.1.5, the link kit and glibc 2.28 floor runtime
@@ -599,7 +600,7 @@ shard of the binary with libtest's timing report and regenerate:
 
 ```sh
 .buck2/bin/buck2 test //:hirsel-driver-test-it-stdlib-shard-1 ... -- --env RUSTC_BOOTSTRAP=1 \
-  --test-arg=-Zunstable-options --test-arg=--report-time --timeout 3600 > /tmp/costs.log 2>&1
+  --test-arg=-Zunstable-options --test-arg=--report-time > /tmp/costs.log 2>&1
 python3 tools/buck2/test_costs.py /tmp/costs.log   # writes the tables, prints walls and slowest cases
 python3 tools/buck2/sync.py
 ```
@@ -848,9 +849,8 @@ shards, `agree.py` checks unique shard identities, matching catalogue
 metadata, sample coverage and classification/edit totals, and fails on any
 cluster or absent shard.
 `tools/main-runs` runs `agree.py --full`: a rotating sample of at most 96 variants per program over
-`AGREE_FULL_SHARDS` (96) shards by the same stable rank, each under its own
-`AGREE_FULL_TIMEOUT` (1800 s), so a slow or non-terminating variant fails one
-named shard. The campaign has grown past what one 4-CPU action can finish
+`AGREE_FULL_SHARDS` shards by the same stable rank, each under the shared
+repository test bound. The campaign has grown past what one 4-CPU action can finish
 (286950 variants on 2026-10-16, about 33000 shard-seconds on the pool); each
 shard prints its stage times, slowest variants and costliest programs to stderr,
 and names any variant still running after 30 s.
@@ -893,8 +893,7 @@ without a measurement, or above that budget, run alone. Both backends run
 every slice in separate pool actions. The helper uses exact `--case` IDs; the
 CLI's `--filter` continues to match substrings. Each selected smoke or parity case runs
 in a fresh process within its action, releasing compiler and interpreter
-state before that worker takes another case. The existing memory cap and
-1800-second action timeout still apply.
+state before that worker takes another case. The existing memory cap and shared outer test bound still apply.
 
 Workers print `native case program seconds peak_RSS_KiB`.
 Import a Buck2 log with `python3 tools/buck2/test_costs.py <log>`, or refresh

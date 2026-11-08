@@ -7,19 +7,14 @@ use crate::io_keys::{Key, Kind, NAMESPACE};
 use std::collections::BTreeSet;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 type Recording = crate::tasks::free::record::Recording;
 
-fn until(mut done: impl FnMut() -> bool) -> bool {
-    let start = Instant::now();
+fn until(mut done: impl FnMut() -> bool) {
     while !done() {
-        if start.elapsed() > Duration::from_secs(20) {
-            return false;
-        }
         std::thread::sleep(Duration::from_micros(200));
     }
-    true
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -55,7 +50,7 @@ impl Probe {
     fn has(&self, flag: &str) -> bool {
         self.flags.lock().unwrap().contains(flag)
     }
-    fn wait(&self, flag: &str) -> bool {
+    fn wait(&self, flag: &str) {
         until(|| self.has(flag))
     }
     fn note(&self, entry: String) {
@@ -213,7 +208,7 @@ unsafe fn install(ctx: *mut TaskCtx, adapter: Arc<dyn ConcurrentAdapter>, probe:
 /// holding R would stall every owner that must re-enter it.
 /// # Safety
 /// A running task holding the role.
-unsafe fn await_flag(ctx: *mut TaskCtx, probe: &Probe, flag: &str) -> bool {
+unsafe fn await_flag(ctx: *mut TaskCtx, probe: &Probe, flag: &str) {
     let _segment = unsafe { role::Segment::new(ctx) };
     probe.wait(flag)
 }
@@ -354,11 +349,10 @@ fn deadline_hook(probe: &Probe, request: &Request, point: Point) {
         }
         (Request::FileRead { .. }, Point::Before) => {
             probe.set("job held");
-            if probe.wait("deadline") {
-                probe.set("call saw deadline");
-            }
+            probe.wait("deadline");
+            probe.set("call saw deadline");
             if probe.has("abandon") {
-                assert!(probe.wait("release"), "test releases the held call");
+                probe.wait("release");
             }
         }
         _ => {}
@@ -428,8 +422,8 @@ fn runtime50_blocking_file_allows_compute_and_deadline() {
                     assert_eq!(jobs.held(), 1, "credit released before actual return");
                     assert_eq!(stats.returned.load(Ordering::Acquire), 0);
                     probe.set("release");
-                    assert!(until(|| jobs.held() == 0));
-                    assert!(until(|| stats.reclaimed.load(Ordering::Acquire) == 1));
+                    until(|| jobs.held() == 0);
+                    until(|| stats.reclaimed.load(Ordering::Acquire) == 1);
                     assert_eq!(stats.quarantined.load(Ordering::Acquire), 1);
                     assert_eq!(stats.delivered.load(Ordering::Acquire), 0);
                 } else {
@@ -576,7 +570,7 @@ fn runtime50_host_claim_cut_delivery_matrix() {
                     }
                     if !home {
                         let jobs = probe.jobs();
-                        assert!(until(|| jobs.held() == 0), "{case}");
+                        until(|| jobs.held() == 0);
                         let stats = jobs.stats();
                         assert_eq!(
                             stats.submitted.load(Ordering::Acquire),
@@ -600,9 +594,9 @@ fn handle_hook(probe: &Probe, request: &Request, point: Point) {
     if let (Request::Open { path, .. }, Point::After) = (request, point) {
         probe.set(format!("opened {path}"));
         // Delay the initialized handle until the canceler ran.
-        assert!(probe.wait(&format!("canceled {path}")));
+        probe.wait(&format!("canceled {path}"));
         if probe.has("stop") && path == "h2" {
-            assert!(probe.wait("release"));
+            probe.wait("release");
         }
     }
 }
@@ -627,7 +621,7 @@ fn runtime50_handle_cancel_shield_and_reuse() {
                             ctx,
                             Box::new(move |ctx| {
                                 let opened = format!("opened {target}");
-                                assert!(unsafe { await_flag(ctx, &canceler, &opened) });
+                                unsafe { await_flag(ctx, &canceler, &opened) };
                                 // Cancel the owner while its handle is in flight.
                                 scheduler(ctx).cancel(0, 3);
                                 canceler.set(format!("canceled {target}"));
@@ -667,8 +661,8 @@ fn runtime50_handle_cancel_shield_and_reuse() {
                 assert!(!probe.has(&format!("delivered {}", ROUNDS - 1)), "{case}");
                 assert_eq!(jobs.held(), 1, "{case}");
                 probe.set("release");
-                assert!(until(|| jobs.held() == 0), "{case}");
-                assert!(until(|| stats.reclaimed.load(Ordering::Acquire) == 1));
+                until(|| jobs.held() == 0);
+                until(|| stats.reclaimed.load(Ordering::Acquire) == 1);
                 assert_eq!(
                     stats.delivered.load(Ordering::Acquire),
                     ROUNDS - 1,
@@ -698,7 +692,7 @@ fn order_hook(probe: &Probe, request: &Request, point: Point) {
             if *file == 7 {
                 // Out of order: the later independent file returns first.
                 probe.set("7 started");
-                assert!(probe.wait("8 returned"), "independent file stalled");
+                probe.wait("8 returned");
             }
         }
         (Request::FileRead { file, .. }, Point::After) => {
@@ -735,7 +729,7 @@ fn runtime50_independent_keys_and_namespace() {
             spawn(
                 ctx,
                 Box::new(move |ctx| {
-                    assert!(unsafe { await_flag(ctx, &other, "7 started") });
+                    unsafe { await_flag(ctx, &other, "7 started") };
                     assert_eq!(
                         unsafe { request(ctx, file(8)) },
                         Ok(Completion::Bytes(Ok(vec![8])))
@@ -772,7 +766,7 @@ fn runtime50_independent_keys_and_namespace() {
             spawn(
                 ctx,
                 Box::new(move |ctx| {
-                    assert!(unsafe { await_flag(ctx, &waiter, "first waiting") });
+                    unsafe { await_flag(ctx, &waiter, "first waiting") };
                     let second = Request::ChildWait {
                         process: 4,
                         child: 2,

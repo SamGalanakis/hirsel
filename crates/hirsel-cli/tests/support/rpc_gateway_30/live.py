@@ -3,7 +3,7 @@
 No engine adapter. Peers block on explicit observer handshakes; production
 Ordered placement is observed after the gateway's listening record.
 """
-import argparse,json,os,resource,select,socket,struct,subprocess,tempfile,threading,shutil,signal,hashlib
+import argparse,json,os,resource,select,socket,struct,subprocess,tempfile,threading,shutil,signal,hashlib,time
 from pathlib import Path
 p=argparse.ArgumentParser();p.add_argument('--hirsel',required=True);p.add_argument('--manifest',type=Path,required=True);a=p.parse_args();root=a.manifest.parent
 # Keep Unix paths within the application's declared 100-byte cap.
@@ -27,22 +27,26 @@ def run(argv,d,name,setup=False):
  (d/(name+'.stdout')).write_bytes(o.stdout);(d/(name+'.stderr')).write_bytes(o.stderr);return o
 class Peer:
  def __init__(self,path,mode):
-  self.path=path;self.mode=mode;self.seen=[];self.errors=[];self.ready=threading.Event();self.release=threading.Event();self.closed=threading.Event()
-  self.listener=socket.socket(socket.AF_UNIX);self.listener.settimeout(12);self.listener.bind(str(path));self.listener.listen(4)
+  self.path=path;self.mode=mode;self.seen=[];self.errors=[];self.ready=threading.Event();self.release=threading.Event();self.closed=threading.Event();self.stopped=threading.Event()
+  self.listener=socket.socket(socket.AF_UNIX);self.listener.bind(str(path));self.listener.listen(4);self.listener.setblocking(False)
   self.thread=threading.Thread(target=self.serve,daemon=True);self.thread.start()
  def serve(self):
   try:
-   with self.listener.accept()[0] as stream:
-    stream.settimeout(12);item=receive(stream);self.seen.append(item);self.ready.set()
+   while not self.stopped.is_set():
+    try:stream,_=self.listener.accept();break
+    except BlockingIOError:time.sleep(.001)
+   else:return
+   with stream:
+    item=receive(stream);self.seen.append(item);self.ready.set()
     if self.mode=='cancel':assert stream.recv(1)==b'';self.closed.set();return
-    assert self.release.wait(10)
+    assert self.release.wait()
     if self.mode=='unsafe':self.closed.set();return
     reply=dict(id=item['id'],**(dict(error=dict(code='divide_by_zero')) if self.mode=='error' else dict(result=15)))
     stream.sendall(frame(reply));assert stream.recv(1)==b'';self.closed.set()
   except BaseException as e:self.errors.append(repr(e));self.ready.set()
   finally:self.listener.close()
  def finish(self):
-  self.release.set();self.thread.join(12);assert not self.thread.is_alive();assert not self.errors,self.errors;self.path.unlink(missing_ok=True)
+  self.stopped.set();self.release.set();self.thread.join();assert not self.errors,self.errors;self.path.unlink(missing_ok=True)
 binaries={}
 for backend in ['llvm','cranelift']:
  binary=root/backend
@@ -65,20 +69,20 @@ for backend,binary in binaries.items():
    (d/'wrapper.argv.json').write_text(compact(wrapped))
    child=subprocess.Popen(wrapped,stdout=subprocess.PIPE,stderr=subprocess.PIPE,env=env,start_new_session=True)
    try:
-    assert select.select([child.stdout],[],[],12)[0],'no ready';ready=child.stdout.readline();assert ready==b'{"listening":true}\n',ready
+    assert select.select([child.stdout],[],[])[0],'no ready';ready=child.stdout.readline();assert ready==b'{"listening":true}\n',ready
     # Handshake keeps the app alive before any request is allowed to complete.
     with socket.socket(socket.AF_UNIX) as ctl:
-     ctl.settimeout(5);ctl.connect(str(control));ctl.sendall(b'{"metrics":true}\n');receipt=b''
+     ctl.connect(str(control));ctl.sendall(b'{"metrics":true}\n');receipt=b''
      while b'\n' not in receipt:receipt+=ctl.recv(65536)
     snapshot=json.loads(receipt);(d/'control.json').write_bytes(receipt)
     assert snapshot['worker_phase']=='running' and snapshot['width']['effective']==width and snapshot['width']['pending']==0,snapshot
     with socket.socket(socket.AF_UNIX) as down:
-     down.settimeout(12);down.connect(str(listener));down.sendall(frame(dict(id='collision',method='Arith.Add',args=dict(a=7,b=8))))
-     assert peer.ready.wait(10);assert len(peer.seen)==1 and peer.seen[0]['id']=='c0r0a1',peer.seen
+     down.connect(str(listener));down.sendall(frame(dict(id='collision',method='Arith.Add',args=dict(a=7,b=8))))
+     assert peer.ready.wait();assert len(peer.seen)==1 and peer.seen[0]['id']=='c0r0a1',peer.seen
      if mode=='cancel':down.close()
      else:
       peer.release.set();reply=receive(down);assert reply==dict(id='collision',**(dict(error=dict(code='unknown_outcome' if mode=='unsafe' else 'divide_by_zero')) if mode in ['error','unsafe'] else dict(result=15))),reply
-    assert peer.closed.wait(10),'upstream not closed on disconnect'
+    assert peer.closed.wait(),'upstream not closed on disconnect'
     stdout,stderr=child.communicate();actual=dict(exit=child.returncode,stdout=(ready+stdout).decode())
     status='canceled' if mode=='cancel' else 'unknown_outcome' if mode=='unsafe' else 'application_error' if mode=='error' else 'ok'
     wanted=dict(exit=0,stdout='{"listening":true}\n'+compact(dict(client=0,request=0,attempt=1,status=status))+'\n{"clients":1,"expired":false}\n')

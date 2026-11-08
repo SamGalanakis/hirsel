@@ -1,7 +1,6 @@
 //! Audit witness: home callback parent versus role-owning child's home bridge.
 use crate::pool::*;
 use crate::tasks::{self, role};
-use std::sync::mpsc;
 
 struct Probe {
     home: std::thread::ThreadId,
@@ -65,23 +64,12 @@ unsafe extern "C" fn bridge_child(
 fn home_callback_parent_and_child_bridge_make_progress() {
     const CHILD: &str = "HIRSEL_POOL_HOST_PROGRESS_AUDIT_45";
     if std::env::var_os(CHILD).is_none() {
-        let child = std::process::Command::new(std::env::current_exe().unwrap())
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
             .args(["--exact", "pool::audit_modules::progress_audit_45::home_callback_parent_and_child_bridge_make_progress", "--nocapture"])
             .env(CHILD, "1").spawn().unwrap();
-        let pid = child.id();
-        let (done, ended) = mpsc::channel();
-        let watchdog = std::thread::spawn(move || {
-            let mut child = child;
-            done.send(child.wait().unwrap()).unwrap();
-        });
-        let status = ended.recv_timeout(Duration::from_secs(5));
-        if status.is_err() {
-            eprintln!("AUDIT45 five-second watchdog killing only owned child");
-            unsafe { libc::kill(pid as i32, libc::SIGKILL) };
-        }
-        watchdog.join().unwrap();
+        let status = child.wait().unwrap();
         assert!(
-            status.is_ok_and(|status| status.success()),
+            status.success(),
             "home callback and child bridge failed normal progress"
         );
         return;

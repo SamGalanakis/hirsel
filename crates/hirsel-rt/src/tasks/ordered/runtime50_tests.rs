@@ -881,8 +881,8 @@ mod native {
         if ahead::private(ctx) {
             probe.private.fetch_add(1, Ordering::AcqRel);
             // Let a later sibling's private start overlap this one.
-            let until = std::time::Instant::now() + std::time::Duration::from_millis(50);
-            while std::time::Instant::now() < until && ahead::private(ctx) {
+
+            while ahead::private(ctx) {
                 std::thread::yield_now();
             }
         }

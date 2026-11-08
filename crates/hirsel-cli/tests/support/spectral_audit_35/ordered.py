@@ -37,7 +37,7 @@ while child.poll() is None:
  if control.exists() and opened:
   try:
    with socket.socket(socket.AF_UNIX) as conn:
-    conn.settimeout(1);conn.connect(str(control));conn.sendall(b'{"metrics":true}\n');value=json.loads(conn.makefile('rb').readline());samples.append(value)
+    conn.connect(str(control));conn.sendall(b'{"metrics":true}\n');value=json.loads(conn.makefile('rb').readline());samples.append(value)
     ready=value.get('worker_phase')=='running' and value['width']['requested']==a.width and value['width']['effective']==a.width and value['width']['pending']==0
   except (OSError,ValueError):pass
  if ready and a.kind=='cancel' and not sent:

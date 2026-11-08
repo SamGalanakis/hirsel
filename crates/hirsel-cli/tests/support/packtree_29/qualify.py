@@ -53,7 +53,7 @@ def main(a):
                     if control.exists():
                         try:
                             with socket.socket(socket.AF_UNIX) as connection:
-                                connection.settimeout(0.5);connection.connect(str(control));connection.sendall(b'{"metrics":true}\n')
+                                connection.connect(str(control));connection.sendall(b'{"metrics":true}\n')
                                 data=b''
                                 while not data.endswith(b'\n'):
                                     part=connection.recv(65536)

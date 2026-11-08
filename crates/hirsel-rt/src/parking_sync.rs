@@ -19,29 +19,7 @@ impl Wait {
             );
         }
     }
-    #[cfg(test)]
-    pub(crate) fn wait_timeout(
-        &self,
-        word: &AtomicU32,
-        expected: u32,
-        timeout: std::time::Duration,
-    ) {
-        let timeout = libc::timespec {
-            tv_sec: timeout.as_secs().try_into().unwrap_or(libc::time_t::MAX),
-            tv_nsec: timeout.subsec_nanos().into(),
-        };
-        // SAFETY: the word remains live and aligned; timeout is a valid
-        // relative timespec. The caller rechecks its token and deadline.
-        unsafe {
-            libc::syscall(
-                libc::SYS_futex,
-                word.as_ptr(),
-                libc::FUTEX_WAIT | libc::FUTEX_PRIVATE_FLAG,
-                expected,
-                &timeout,
-            );
-        }
-    }
+
     pub(crate) fn wake(&self, word: &AtomicU32) {
         // SAFETY: the owner retains the word until every notifier has exited.
         unsafe {

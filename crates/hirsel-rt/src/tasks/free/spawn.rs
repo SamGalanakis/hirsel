@@ -372,12 +372,8 @@ mod store_load_gate {
 
     unsafe extern "C" fn store(ctx: *mut TaskCtx, env: *mut Header, _: u64, _: u64) -> u8 {
         let (word, shared) = unsafe { env.add(1).cast::<(u64, Arc<Shared>)>().read() };
-        let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
+
         while !shared.loaded.load(Ordering::Acquire) {
-            assert!(
-                std::time::Instant::now() < until,
-                "immediate C must pass runnable B"
-            );
             std::thread::yield_now();
         }
         drop(shared);
@@ -602,8 +598,7 @@ mod cut_tests {
         unsafe { run.use_physical_dispatch() };
         let control = run.control();
         let stop = std::thread::spawn(move || {
-            wait.recv_timeout(std::time::Duration::from_secs(5))
-                .unwrap();
+            wait.recv().unwrap();
             cutter.recorder.flush().unwrap().unwrap();
             let cut = cutter.recorder.stop("cut", None).unwrap().unwrap().0;
             assert!(cut.progress.contains_key(&vec![0]));

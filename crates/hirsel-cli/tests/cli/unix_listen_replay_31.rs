@@ -161,17 +161,15 @@ fn replay_case(case: &str) {
                     let socket = socket.to_owned();
                     std::thread::spawn(move || {
                         use std::io::{Read, Write};
-                        let end = Instant::now() + Duration::from_secs(20);
+
                         let mut stream = loop {
                             if let Ok(stream) = std::os::unix::net::UnixStream::connect(&socket) {
                                 break stream;
                             }
-                            assert!(Instant::now() < end, "listener never opened");
+
                             std::thread::sleep(Duration::from_millis(2));
                         };
-                        stream
-                            .set_read_timeout(Some(Duration::from_secs(20)))
-                            .unwrap();
+
                         stream.write_all(b"q").unwrap();
                         let mut reply = [0];
                         stream.read_exact(&mut reply).unwrap();

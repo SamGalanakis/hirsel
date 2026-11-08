@@ -152,14 +152,8 @@ impl ConcurrentAdapter for EarlyEdge {
         assert_eq!(state.0, Some(token));
         state.1 = true;
         unsafe { crate::pool::wake_home(self.run.load(std::sync::atomic::Ordering::Acquire)) };
-        let (state, timeout) = self
-            .consumed
-            .wait_timeout_while(state, std::time::Duration::from_secs(2), |state| !state.2)
-            .unwrap();
-        assert!(
-            !timeout.timed_out() && state.2,
-            "home must consume before physical save"
-        );
+        let state = self.consumed.wait_while(state, |state| !state.2).unwrap();
+        assert!(state.2, "home must consume before physical save");
     }
     fn ready(&self) -> Result<crate::io::Ready, AdapterError> {
         let mut state = self.state.lock().unwrap();

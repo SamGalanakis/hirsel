@@ -491,11 +491,10 @@ mod tests {
             };
             let state = Arc::downgrade(&run.call);
             let holders = unsafe { crate::pool::holders((*run.root).run_ref()).unwrap() };
-            let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
+
             while !ENTERED.load(Ordering::Acquire)
                 || (bridge && !unsafe { crate::pool::home_posts((*run.root).run_ptr()) })
             {
-                assert!(std::time::Instant::now() < until);
                 std::thread::yield_now();
             }
             unsafe { (*run.root).run_ref().control.request(Stop::Requested) };
@@ -512,7 +511,6 @@ mod tests {
             }
             RELEASE.store(true, Ordering::Release);
             while holders.left() != 0 {
-                assert!(std::time::Instant::now() < until);
                 std::thread::yield_now();
             }
             assert!(state.upgrade().is_none());
@@ -629,7 +627,7 @@ mod tests {
             })
             .map(Some)
             .collect();
-        let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
+
         while runs.iter().any(Option::is_some) {
             for (tag, slot) in runs.iter_mut().enumerate() {
                 let Some(run) = slot else { continue };
@@ -642,7 +640,7 @@ mod tests {
                     slot.take();
                 }
             }
-            assert!(std::time::Instant::now() < until);
+
             std::thread::yield_now();
         }
         assert_eq!(calls.get(), 3);

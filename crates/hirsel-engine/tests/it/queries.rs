@@ -2129,12 +2129,7 @@ fn scheduled_scc_cancelled_prefix_reopens_and_records_its_consumed_reads() {
                 && !self.gate.once.swap(true, Ordering::SeqCst)
             {
                 self.gate.started.send(()).unwrap();
-                self.gate
-                    .release
-                    .lock()
-                    .unwrap()
-                    .recv_timeout(Duration::from_secs(10))
-                    .unwrap();
+                self.gate.release.lock().unwrap().recv().unwrap();
             }
             polled
         }
@@ -2193,7 +2188,7 @@ fn scheduled_scc_cancelled_prefix_reopens_and_records_its_consumed_reads() {
         )
         .unwrap();
     let cancelled = runtime.request(&[growth.query()]);
-    receive.recv_timeout(Duration::from_secs(10)).unwrap();
+    receive.recv().unwrap();
     runtime.cancel(cancelled);
     let resumed = runtime.request(&[growth.query()]);
     release.send(()).unwrap();

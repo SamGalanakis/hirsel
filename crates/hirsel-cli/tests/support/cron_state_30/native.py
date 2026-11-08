@@ -27,7 +27,7 @@ def main(a):
    import tempfile
    with tempfile.TemporaryDirectory(prefix='cronctl-') as short:
     control=Path(short)/'ctl';peer=Path(short)/'peer'
-    listener=socket.socket(socket.AF_UNIX);listener.bind(str(peer));listener.listen(1);listener.settimeout(10)
+    listener=socket.socket(socket.AF_UNIX);listener.bind(str(peer));listener.listen(1);
     config=dict(version=1,parallel=4,jobs=[dict(id='a',cron='* * * * *',program='/usr/bin/python3',argv=[str(child),str(peer),mode],deadline_ms=3000)])
     write(data/'schedule.json',config)
     until=utc(time.time_ns()+(1500000000 if mode=='cancel' else 10000000000))
@@ -41,7 +41,7 @@ def main(a):
      connection,_=listener.accept();assert connection.recv(100)==b'ready\n'
      # The child is running, with the parent held in child.wait. This is an
      # application handshake, not a socket-existence/startup-width inference.
-     ctl=socket.socket(socket.AF_UNIX);ctl.settimeout(5);ctl.connect(str(control));ctl.sendall(b'{"metrics":true}\n')
+     ctl=socket.socket(socket.AF_UNIX);ctl.connect(str(control));ctl.sendall(b'{"metrics":true}\n')
      reply=b''
      while not reply.endswith(b'\n'):reply+=ctl.recv(65536)
      write(d/'control.json',json.loads(reply));ctl.close()

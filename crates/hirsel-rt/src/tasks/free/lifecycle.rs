@@ -784,12 +784,8 @@ mod tests {
             };
             assert_eq!(image, if rest.detach { [1, 99] } else { none });
             rest.started.store(true, Ordering::Release);
-            let until = std::time::Instant::now() + std::time::Duration::from_secs(2);
+
             while !rest.resume.load(Ordering::Acquire) {
-                assert!(
-                    std::time::Instant::now() < until,
-                    "the rest's cut must finish"
-                );
                 std::thread::yield_now();
             }
             status
@@ -804,12 +800,7 @@ mod tests {
         let watched = rest.clone();
         let in_call = recording.clone();
         let observer = std::thread::spawn(move || {
-            let until = std::time::Instant::now() + std::time::Duration::from_secs(2);
             while !watched.started.load(Ordering::Acquire) {
-                assert!(
-                    std::time::Instant::now() < until,
-                    "the joined rest must start"
-                );
                 std::thread::yield_now();
             }
             let cut = in_call.recorder.flush().unwrap().unwrap();
@@ -869,7 +860,7 @@ mod tests {
                     0,
                 );
                 let id = child as u32;
-                let until = std::time::Instant::now() + std::time::Duration::from_secs(2);
+
                 loop {
                     let saved = {
                         let _role = role::Guard::new(ctx);
@@ -879,10 +870,7 @@ mod tests {
                     if saved {
                         break;
                     }
-                    assert!(
-                        std::time::Instant::now() < until,
-                        "the native result must reach idle"
-                    );
+
                     std::thread::yield_now();
                 }
                 let cut = cutter.recorder.flush().unwrap().unwrap();

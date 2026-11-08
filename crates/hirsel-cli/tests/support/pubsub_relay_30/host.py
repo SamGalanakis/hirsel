@@ -18,7 +18,7 @@ def recv(peer):
 
 def control(path):
     with socket.socket(socket.AF_UNIX) as peer:
-        peer.settimeout(2);peer.connect(str(path));peer.sendall(b'{"metrics":true}\n')
+        peer.connect(str(path));peer.sendall(b'{"metrics":true}\n')
         data=b''
         while b'\n' not in data:
             part=peer.recv(8192);assert part;data+=part
@@ -49,7 +49,7 @@ def host_case(exe, root, width, mode, env, capped):
         # Rust validates physical capacity from the immutable admission record.
         # These samples remain evidence of live observation only.
         def connect():
-            peer=socket.socket(socket.AF_UNIX);peer.settimeout(2);peer.connect(str(sock));peers.append(peer);return peer
+            peer=socket.socket(socket.AF_UNIX);peer.connect(str(sock));peers.append(peer);return peer
         if mode=='success':
             a,b,p=connect(),connect(),connect()
             for peer in [a,b]:send(peer,{'op':'subscribe','topic':'a'});assert recv(peer)=={'op':'subscribed','topic':'a'}

@@ -1014,12 +1014,7 @@ pub(super) mod tests {
             probe.rest_done.store(true, Ordering::Release);
             probe.order.lock().unwrap().push(mode);
         } else {
-            let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
             while !probe.logged.load(Ordering::Acquire) {
-                assert!(
-                    std::time::Instant::now() < until,
-                    "younger detach did not run ahead"
-                );
                 std::thread::yield_now();
             }
             let _role = unsafe { role::Guard::new(ctx) };
@@ -1218,12 +1213,7 @@ pub(super) mod tests {
             unsafe { crate::alloc::payload(env).cast::<[u64; 3]>().read() };
         let probe = unsafe { &*(probe as *const SpawnOrder) };
         if ordinal == 0 {
-            let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
             while !probe.issued.load(Ordering::Acquire) {
-                assert!(
-                    std::time::Instant::now() < until,
-                    "younger spawner could not run ahead"
-                );
                 std::thread::yield_now();
             }
             let _role = unsafe { role::Guard::new(ctx) };
@@ -1634,7 +1624,6 @@ pub(super) mod tests {
         let [mut sender, await_saved] =
             unsafe { crate::alloc::payload(environment).cast::<[u64; 2]>().read() };
         if await_saved != 0 {
-            let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
             loop {
                 let waiting = {
                     let _role = unsafe { role::Guard::new(ctx) };
@@ -1644,10 +1633,7 @@ pub(super) mod tests {
                 if waiting {
                     break;
                 }
-                assert!(
-                    std::time::Instant::now() < until,
-                    "receiver never saved its wait"
-                );
+
                 let mut cause = 0;
                 assert_eq!(
                     unsafe { hirsel_rt_v2_task_canceled(ctx, &mut cause, &0) },

@@ -1117,14 +1117,11 @@ fn strict_batch_finish_waits_for_publication_lock() {
         // A strict writer waits for the short publication critical section;
         // contention cannot become an error or a successful skipped write.
         assert!(matches!(
-            result.recv_timeout(std::time::Duration::from_millis(100)),
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+            result.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Empty)
         ));
         drop(publication);
-        result
-            .recv_timeout(std::time::Duration::from_secs(5))
-            .unwrap()
-            .unwrap();
+        result.recv().unwrap().unwrap();
     });
     let publication = pack::Lock::try_root(&root, true).unwrap();
     std::thread::scope(|scope| {
@@ -1136,16 +1133,11 @@ fn strict_batch_finish_waits_for_publication_lock() {
             done.send((association, content)).unwrap();
         });
         assert!(
-            matches!(
-                result.recv_timeout(std::time::Duration::from_millis(100)),
-                Err(std::sync::mpsc::RecvTimeoutError::Timeout)
-            ),
+            matches!(result.try_recv(), Err(std::sync::mpsc::TryRecvError::Empty)),
             "a strict reader must wait rather than cache a contended index as absent"
         );
         drop(publication);
-        let (association, content) = result
-            .recv_timeout(std::time::Duration::from_secs(5))
-            .unwrap();
+        let (association, content) = result.recv().unwrap();
         assert_eq!(association.unwrap().reference, reference);
         assert_eq!(&*content.unwrap(), b"committed after contention");
     });

@@ -979,7 +979,6 @@ fn full_gate_hello_web_concurrent_request_read_deadline_cranelift() {
 fn hello_web(native: bool, concurrent: bool, cranelift: bool, deadline: bool) {
     use hello_web_readiness_8::{Server, replace_once};
     use std::io::{Read, Write};
-    use std::time::Duration;
     {
         let original = if concurrent {
             include_str!("../../../../examples/hello-web-concurrent/main.hir")
@@ -1074,9 +1073,7 @@ for i in 0u64..COUNTu64
         if deadline {
             let mut stalled =
                 std::net::TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, port)).unwrap();
-            stalled
-                .set_read_timeout(Some(Duration::from_secs(10)))
-                .unwrap();
+
             // Send nothing: even the initial bytes must not race the server's deadline.
             let mut response = vec![];
             stalled.read_to_end(&mut response).unwrap();
@@ -1089,9 +1086,7 @@ for i in 0u64..COUNTu64
             let mut held = concurrent.then(|| {
                 let mut stream =
                     std::net::TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, port)).unwrap();
-                stream
-                    .set_read_timeout(Some(Duration::from_secs(10)))
-                    .unwrap();
+
                 stream.write_all(b"GET / HTTP/1.1\r\nHost:").unwrap();
                 stream
             });
@@ -1101,9 +1096,7 @@ for i in 0u64..COUNTu64
                 // Go TestCloseNotifierPipelined: both requests arrive before the first response.
                 let mut pipeline =
                     std::net::TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, port)).unwrap();
-                pipeline
-                    .set_read_timeout(Some(Duration::from_secs(10)))
-                    .unwrap();
+
                 pipeline.write_all(b"POST /one HTTP/1.1\r\nHost: localhost\r\nContent-Length: 3\r\n\r\nabcGET /two HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n").unwrap();
                 let mut responses = vec![];
                 pipeline.read_to_end(&mut responses).unwrap();
@@ -1111,9 +1104,7 @@ for i in 0u64..COUNTu64
                 // Go testTCPConnectionStaysOpen: drain each body, then reuse the socket.
                 let mut sequential =
                     std::net::TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, port)).unwrap();
-                sequential
-                    .set_read_timeout(Some(Duration::from_secs(10)))
-                    .unwrap();
+
                 sequential
                     .write_all(b"GET /one HTTP/1.1\r\nHost: localhost\r\n\r\n")
                     .unwrap();
@@ -1133,7 +1124,7 @@ for i in 0u64..COUNTu64
             (b"BAD\0 / HTTP/1.1\r\n\r\n",b"HTTP/1.1 400 \r\nContent-Length: 11\r\nConnection: close\r\n\r\nBad Request"),
         ] {
             let mut stream=std::net::TcpStream::connect((std::net::Ipv4Addr::LOCALHOST,port)).unwrap();
-            stream.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+
             stream.write_all(request).unwrap();
             stream.shutdown(std::net::Shutdown::Write).unwrap();
             let mut response=vec![];stream.read_to_end(&mut response).unwrap();assert_eq!(response,expected,"native={native}");

@@ -1066,12 +1066,9 @@ fn flow_audit_36_ordered_capacity() {
                             world,
                         )
                     });
-                    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-                    while !child.is_finished() && std::time::Instant::now() < deadline {
+
+                    while !child.is_finished() {
                         if let Ok(mut connection) = UnixStream::connect(&control) {
-                            connection
-                                .set_read_timeout(Some(std::time::Duration::from_millis(100)))
-                                .unwrap();
                             if connection.write_all(b"{\"metrics\":true}\n").is_ok() {
                                 let mut line = String::new();
                                 if BufReader::new(connection).read_line(&mut line).is_ok()

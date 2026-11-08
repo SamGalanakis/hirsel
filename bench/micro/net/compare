@@ -64,4 +64,4 @@ with timing_lock(31), (args.output / 'client.log').open('w') as log:
     finally:
         stop.touch()
         if client.poll() is None:
-            client.wait(30)
+            client.wait()

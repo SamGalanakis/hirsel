@@ -1067,15 +1067,13 @@ fn candidate_v2_protocol_strict_latched_handles_and_observe_disk() {
             .starts_with("InvalidRequest")
     );
     let id = c.handle(&req)["ok"]["lease"].as_u64().unwrap();
-    let mut result = Value::Null;
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-    while std::time::Instant::now() < deadline {
-        result = c.handle(&json!({"version":2,"op":"result","lease":id}));
+    let result = loop {
+        let result = c.handle(&json!({"version":2,"op":"result","lease":id}));
         if result["ok"]["pending"] != true {
-            break;
+            break result;
         }
         std::thread::yield_now();
-    }
+    };
     assert_eq!(result["ok"]["verdict"], "Pass", "{result}");
     assert_eq!(result["ok"]["scope_complete"], true);
     let obs = json!({"version":2,"op":"observe_disk","target":"base","handle":base});

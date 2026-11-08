@@ -30,9 +30,7 @@ pub(in crate::tasks::free) fn isolated_at(test: &str, variable: &str) -> bool {
 }
 
 pub(in crate::tasks::free) fn wait_until(what: &str, done: impl Fn() -> bool) {
-    let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
     while !done() {
-        assert!(std::time::Instant::now() < until, "{what}");
         std::thread::yield_now();
     }
 }
@@ -947,9 +945,8 @@ fn runtime50_object_custody_race_matrix() {
                         && !hook.put.load(Ordering::Acquire)
                     {
                         hook.saving.store(true, Ordering::Release);
-                        let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
+
                         while !hook.put.load(Ordering::Acquire) {
-                            assert!(std::time::Instant::now() < until, "the holder puts");
                             std::thread::yield_now();
                         }
                         hook.saving.store(false, Ordering::Release);

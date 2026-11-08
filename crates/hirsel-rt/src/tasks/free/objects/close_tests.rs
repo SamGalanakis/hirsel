@@ -722,7 +722,7 @@ fn free51_role_free_close_replays_only_the_admitted_cleanup_prefix() {
                 // the run. Observe the actual image teardown before checking
                 // the completed replay; return timing is not reclamation.
                 reclaimed
-                    .recv_timeout(std::time::Duration::from_secs(5))
+                    .recv()
                     .expect("cut teardown frees task-owned detached images");
                 assert_eq!(replay.finish().unwrap(), expected);
             }

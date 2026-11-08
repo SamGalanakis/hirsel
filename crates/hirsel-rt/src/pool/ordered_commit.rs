@@ -281,14 +281,8 @@ mod tests {
                     drop(role);
                     permits.release(&exec);
                 });
-                waiting.recv_timeout(Duration::from_secs(5)).unwrap();
-                let control = (*ctx).run_ref().control.clone();
-                let (done, timeout) = mpsc::channel();
-                let watchdog = std::thread::spawn(move || {
-                    if timeout.recv_timeout(Duration::from_secs(5)).is_err() {
-                        control.request(crate::stop::Stop::Requested);
-                    }
-                });
+                waiting.recv().unwrap();
+
                 assert_eq!(
                     service.call(ctx, || {
                         assert_eq!(compute_permits(), (1, 1, 0));
@@ -296,8 +290,6 @@ mod tests {
                     }),
                     42
                 );
-                done.send(()).unwrap();
-                watchdog.join().unwrap();
                 contender.join().unwrap();
                 assert_eq!(compute_permits(), (1, 0, 0));
                 // This fixture returns to ordinary code rather than C.

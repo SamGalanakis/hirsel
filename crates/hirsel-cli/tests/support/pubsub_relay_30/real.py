@@ -17,10 +17,10 @@ for mode in ['success','domain','cancel']:
  child=subprocess.Popen(argv,env=env,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
  peers=[]
  try:
-  sel=selectors.DefaultSelector();sel.register(child.stdout,selectors.EVENT_READ);assert sel.select(10)
+  sel=selectors.DefaultSelector();sel.register(child.stdout,selectors.EVENT_READ);assert sel.select()
   first=child.stdout.readline();(path/'first').write_bytes(first);assert json.loads(first)=={'listening':True},first
   def connect():
-   s=socket.socket(socket.AF_UNIX);s.settimeout(3);s.connect(str(sock));peers.append(s);return s
+   s=socket.socket(socket.AF_UNIX);s.connect(str(sock));peers.append(s);return s
   if mode=='success':
    a,b,p=connect(),connect(),connect()
    for s in [a,b]:send(s,{'op':'subscribe','topic':'a'});assert recv(s)=={'op':'subscribed','topic':'a'}

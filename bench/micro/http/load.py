@@ -9,7 +9,7 @@ import time
 
 
 def run(port, rate, stop=None):
-    with socket.create_connection(('127.0.0.1', port), timeout=.1) as connection:
+    with socket.create_connection(('127.0.0.1', port)) as connection:
         connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         connection.setblocking(False)
         request = b'GET / HTTP/1.1\r\nHost: localhost\r\n\r\n'

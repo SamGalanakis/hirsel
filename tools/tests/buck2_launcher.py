@@ -56,6 +56,29 @@ else:
 '''
 
 
+class TestExecutor(unittest.TestCase):
+    def test_shared_bound_preserves_stock_runner_arguments(self):
+        path = Path(os.environ.get('HIRSEL_TEST_EXECUTOR', ROOT / 'tools/buck2/test_executor.py'))
+        namespace = {'__file__': str(path), '__name__': 'test_executor'}
+        exec(compile(path.read_text(), str(path), 'exec'), namespace)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / '.buckconfig').write_text('[test]\ntimeout_default_s = 86400\n')
+            actual = namespace['command']([
+                '--executor-fd', '7', '--orchestrator-fd', '8',
+                '--buck-trace-id', 'trace', '--config-entry', 'host=linux',
+                '--config-entry', 'config=hirsel.full=true',
+                '--', 'ignored', '--buck-test-info', 'ignored',
+                '--env', 'FIXTURE=value', '--test-arg=--exact', '--test-arg=case',
+            ], root)
+        self.assertEqual(actual, [
+            str(root / '.buck2/bin/buck2'), 'internal-test-runner',
+            '--executor-fd', '7', '--orchestrator-fd', '8', '--', 'ignored',
+            '--timeout', '86400', '--buck-test-info', 'ignored',
+            '--env', 'FIXTURE=value', '--test-arg=--exact', '--test-arg=case',
+        ])
+
+
 class CpuRequests(unittest.TestCase):
     def platforms(self, mode):
         source_dir = ROOT / 'tools/buck2'
@@ -327,7 +350,7 @@ print(json.dumps(dict(type='test', event='ok', name='orphan')), flush=True)
             try:
                 with selectors.DefaultSelector() as ready:
                     ready.register(run.stdout, selectors.EVENT_READ)
-                    self.assertTrue(ready.select(5), 'no started event')
+                    self.assertTrue(ready.select(), 'no started event')
                 # Read one character at a time: TextIO's read-ahead would hide
                 # later lines from select while waiting for the hanging name.
                 output = ''

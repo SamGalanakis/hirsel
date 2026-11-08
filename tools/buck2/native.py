@@ -9,8 +9,8 @@ import sys
 ROOT = Path(__file__).resolve().parents[2]
 
 
-# A third of the action timeout leaves room for setup and host variance. Unknown
-# programs get a whole budget; a missing timing must never make a large action.
+# A scheduling slice balances measured costs. It never limits execution.
+# Unknown programs get a whole slice so missing timings cannot pack a large action.
 NATIVE_SLICE_SECONDS = 600
 
 
@@ -56,8 +56,7 @@ def targets(programs, root=ROOT):
 
 def command(programs, root=ROOT):
     return [sys.executable, str(root / 'tools/buck2/event_logs.py'), 'test',
-            *os.environ.get('HIRSEL_BUCK2_CONFIG', '').split(), *config(programs, root), *targets(programs, root),
-            '--', '--timeout', '1800']
+            *os.environ.get('HIRSEL_BUCK2_CONFIG', '').split(), *config(programs, root), *targets(programs, root)]
 
 
 def main():

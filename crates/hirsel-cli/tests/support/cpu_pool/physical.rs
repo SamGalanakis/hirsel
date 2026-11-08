@@ -292,8 +292,8 @@ fn run_width_policy_backends_mode(
         let mut threads = PhysicalThreads::default();
         let mut pinned = BTreeSet::new();
         let mut slot_threads = BTreeMap::new();
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-        while pinned.len() < width && std::time::Instant::now() < deadline {
+
+        while pinned.len() < width {
             threads.capture(child.id());
             // The runtime applies each slot's admitted CPU and records the
             // native TID after sched_setaffinity succeeds. Include caller slot

@@ -48,51 +48,49 @@ config=(-c hirsel.full=true ${HIRSEL_PRIORITY:+-c "hirsel.priority=$HIRSEL_PRIOR
 export HIRSEL_BUCK2_CONFIG="${config[*]}"
 buck2() { local command=$1; shift; python3 tools/buck2/event_logs.py "$command" "${config[@]}" "$@"; }
 release=(--target-platforms //tools/buck2:release)
-timeout=(--timeout 1800)
-long=(--timeout 14400)
 libtest() { local argument; for argument in "$@"; do printf -- '--test-arg=%s\n' "$argument"; done; }
 mapfile -t runtime < <(buck2 uquery 'kind("_rust_test", attrregexfilter(name, "^hirsel-rt-", //...))')
-run_stage "runtime tests" buck2 test "${runtime[@]}" -- "${timeout[@]}"
-run_stage "runtime C harness" buck2 test //:gate-native-runtime-c -- "${timeout[@]}"
-run_stage "library C probes" buck2 test //:gate-native-library-c -- "${timeout[@]}"
-run_stage "layout C probes" buck2 test //:hirsel-lir-test-it -- "${timeout[@]}" $(libtest layout:: --ignored)
-run_stage "LLVM toolchain pin" buck2 test //:gate-native-toolchain-pin -- "${timeout[@]}"
+run_stage "runtime tests" buck2 test "${runtime[@]}" --
+run_stage "runtime C harness" buck2 test //:gate-native-runtime-c --
+run_stage "library C probes" buck2 test //:gate-native-library-c --
+run_stage "layout C probes" buck2 test //:hirsel-lir-test-it -- $(libtest layout:: --ignored)
+run_stage "LLVM toolchain pin" buck2 test //:gate-native-toolchain-pin --
 # They link AArch64 programs with the cross gcc and run them under qemu-user.
-run_stage "LLVM backend tests" buck2 test //:hirsel-llvm-unittest //:hirsel-llvm-test-it -- "${timeout[@]}" $(libtest --include-ignored)
+run_stage "LLVM backend tests" buck2 test //:hirsel-llvm-unittest //:hirsel-llvm-test-it -- $(libtest --include-ignored)
 run_stage "LLVM scalar library matrix against the interpreter's kernels" \
-  buck2 test //:hirsel-pipeline-tests-test-front-shard-1 -- "${timeout[@]}" $(libtest llvm_scalar_library:: --include-ignored)
+  buck2 test //:hirsel-pipeline-tests-test-front-shard-1 -- $(libtest llvm_scalar_library:: --include-ignored)
 run_stage "Lean RC model audit" proofs/rc/audit.sh
 run_stage "Lean RC model vectors" proofs/rc/check-vectors.sh
 run_stage "TLA+ ordered-mode model" proofs/ordered/check.sh
 mapfile -t driver < <(buck2 uquery 'attrregexfilter(name, "^hirsel-driver-test-it(-shard-[0-9]+)?$", //...)')
 run_stage "native stages end to end: full matrix on both targets and 22 link partitions" \
-  buck2 test "${release[@]}" "${driver[@]}" -- "${long[@]}" \
+  buck2 test "${release[@]}" "${driver[@]}" -- \
   $(libtest native:: --include-ignored --test-threads=4)
-run_stage "native smoke with real Io record and replay" buck2 test //:gate-native-smoke -- "${timeout[@]}"
+run_stage "native smoke with real Io record and replay" buck2 test //:gate-native-smoke --
 # Host execution proves production Ordered widths 1/2/4/8; the pool executor
 # otherwise clamps wider cells to its two CPUs.
 run_stage "Ordered qualification: native trace, immutable-input replay and topology" \
-  buck2 test -c hirsel.tests=host //:hirsel-cli-test-cli-shard-1 -- "${long[@]}" $(libtest ordered_qualification:: runtime50_ordered:: --ignored --test-threads=1)
-run_stage "native executables under Valgrind memcheck" buck2 test //:gate-native-sanitize -- "${long[@]}"
+  buck2 test -c hirsel.tests=host //:hirsel-cli-test-cli-shard-1 -- $(libtest ordered_qualification:: runtime50_ordered:: --ignored --test-threads=1)
+run_stage "native executables under Valgrind memcheck" buck2 test //:gate-native-sanitize --
 run_stage "native library bodies on both targets" \
-  buck2 test //:hirsel-pipeline-tests-test-rc-shard-1 -- "${long[@]}" $(libtest rc_library_ --include-ignored --test-threads=4)
+  buck2 test //:hirsel-pipeline-tests-test-rc-shard-1 -- $(libtest rc_library_ --include-ignored --test-threads=4)
 run_stage "native Map and Set laws: hash seeds, structural order and failure sites" \
-  buck2 test //:hirsel-pipeline-tests-test-rc-shard-1 -- "${long[@]}" $(libtest rc_maps_native:: --include-ignored --test-threads=1)
+  buck2 test //:hirsel-pipeline-tests-test-rc-shard-1 -- $(libtest rc_maps_native:: --include-ignored --test-threads=1)
 run_stage "joined SSA loop views: heap and both native backends" \
-  buck2 test //:hirsel-pipeline-tests-test-rc-shard-1 -- "${long[@]}" $(libtest rc_import::loop_version_matches_reference_heap_llvm_and_cranelift --ignored --test-threads=1)
+  buck2 test //:hirsel-pipeline-tests-test-rc-shard-1 -- $(libtest rc_import::loop_version_matches_reference_heap_llvm_and_cranelift --ignored --test-threads=1)
 run_stage "flat region copies: native parity" \
-  buck2 test //:hirsel-pipeline-tests-test-rc-shard-1 -- "${long[@]}" $(libtest flat_storage_audit_16::native_flat_region_copy_parity --ignored --test-threads=1)
+  buck2 test //:hirsel-pipeline-tests-test-rc-shard-1 -- $(libtest flat_storage_audit_16::native_flat_region_copy_parity --ignored --test-threads=1)
 run_stage "string cursor descriptor parity" \
-  buck2 test //:hirsel-pipeline-tests-test-rc-shard-1 -- "${long[@]}" $(libtest native_desc_cell_16:: --ignored --test-threads=1)
+  buck2 test //:hirsel-pipeline-tests-test-rc-shard-1 -- $(libtest native_desc_cell_16:: --ignored --test-threads=1)
 run_stage "SIMD structural equality parity" \
-  buck2 test //:hirsel-pipeline-tests-test-rc-shard-1 -- "${long[@]}" $(libtest native_simd_eq_17:: --ignored --test-threads=1)
+  buck2 test //:hirsel-pipeline-tests-test-rc-shard-1 -- $(libtest native_simd_eq_17:: --ignored --test-threads=1)
 run_stage "isolate owned result parity" \
-  buck2 test //:hirsel-pipeline-tests-test-rc-shard-1 -- "${long[@]}" $(libtest isolate_bytes_leak_17::isolate_returns_unique_bytes --ignored --test-threads=1)
+  buck2 test //:hirsel-pipeline-tests-test-rc-shard-1 -- $(libtest isolate_bytes_leak_17::isolate_returns_unique_bytes --ignored --test-threads=1)
 run_stage "nested unique copies: native snapshots and borrowed extractions" \
-  buck2 test //:hirsel-pipeline-tests-test-rc-shard-1 -- "${long[@]}" $(libtest unique_copy_nested_20:: --ignored --test-threads=1)
+  buck2 test //:hirsel-pipeline-tests-test-rc-shard-1 -- $(libtest unique_copy_nested_20:: --ignored --test-threads=1)
 # Cursor parity and RC assertions are explicit full/native controls, not fast-tier tests.
 run_stage "borrow cursor projection, parity, deep walks and RC evidence" \
-  buck2 test //:hirsel-pipeline-tests-test-rc-shard-1 -- "${long[@]}" $(libtest rc_borrow_cursor_ --ignored --test-threads=1)
+  buck2 test //:hirsel-pipeline-tests-test-rc-shard-1 -- $(libtest rc_borrow_cursor_ --ignored --test-threads=1)
 if (( ${#failed_stages[@]} > 0 )); then
   printf 'check-native.sh: %d failing stages: %s\n' "${#failed_stages[@]}" "$(IFS=';'; echo "${failed_stages[*]}")" >&2
   echo "check-native.sh: failed ($((SECONDS - gate_start)) s)" >&2

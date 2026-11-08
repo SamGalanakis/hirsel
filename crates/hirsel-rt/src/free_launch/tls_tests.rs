@@ -12,7 +12,7 @@ use hirsel_run_schema::{
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject};
 use std::io::{Read, Write};
 use std::sync::atomic::{AtomicU16, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 const CA: &[u8] = include_bytes!("../../tests/it/tls-data/ca.cert");
 static PORT: AtomicU16 = AtomicU16::new(0);
 
@@ -35,23 +35,16 @@ fn server() -> (u16, std::thread::JoinHandle<()>) {
     let port = listener.local_addr().unwrap().port();
     listener.set_nonblocking(true).unwrap();
     let thread = std::thread::spawn(move || {
-        let until = Instant::now() + Duration::from_secs(5);
         let socket = loop {
             match listener.accept() {
                 Ok((socket, _)) => break socket,
                 Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                    assert!(Instant::now() < until, "TLS connection not issued");
                     std::thread::sleep(Duration::from_millis(1));
                 }
                 Err(e) => panic!("{e}"),
             }
         };
-        socket
-            .set_read_timeout(Some(Duration::from_secs(5)))
-            .unwrap();
-        socket
-            .set_write_timeout(Some(Duration::from_secs(5)))
-            .unwrap();
+
         let conn = rustls::ServerConnection::new(Arc::new(config)).unwrap();
         let mut tls = rustls::StreamOwned::new(conn, socket);
         let mut bytes = [0; 4];

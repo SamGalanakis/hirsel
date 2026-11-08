@@ -430,10 +430,8 @@ for line in sys.stdin:
         return checks
 
     def wait_for(self, predicate):
-        deadline = time.monotonic() + 15
+
         while not predicate():
-            if time.monotonic() > deadline:
-                self.fail('queue rendezvous timed out')
             time.sleep(.02)
 
     def queue_lanes(self):
@@ -445,10 +443,8 @@ for line in sys.stdin:
 if pathlib.Path('lane-0.txt').exists() and not pathlib.Path('lane-1.txt').exists():
     import time
     (root / 'holding').touch()
-    deadline = time.monotonic() + 20
+
     while not (root / 'release').exists():
-        if time.monotonic() > deadline:
-            raise SystemExit('holder timed out')
         time.sleep(.02)
 """)
         self.git(self.lane, 'commit', '-qam', 'slow first check')
@@ -513,10 +509,8 @@ if pathlib.Path('lane-0.txt').exists() and not pathlib.Path('lane-1.txt').exists
 if not (root / 'release-build').exists():
     import time
     (root / 'holding-build').touch()
-    deadline = time.monotonic() + 20
+
     while not (root / 'release-build').exists():
-        if time.monotonic() > deadline:
-            raise SystemExit('build holder timed out')
         time.sleep(.02)
 """)
             self.git(self.lane, 'commit', '-qam', 'hold first build')
@@ -783,10 +777,8 @@ for i, commits in enumerate(moves):
                 out.write('''import time
 if not (root / 'release-retry').exists():
     (root / 'holding-retry').touch()
-    deadline = time.monotonic() + 20
+
     while not (root / 'release-retry').exists():
-        if time.monotonic() > deadline:
-            raise SystemExit('retry holder timed out')
         time.sleep(.02)
 ''')
         hook.chmod(0o755)

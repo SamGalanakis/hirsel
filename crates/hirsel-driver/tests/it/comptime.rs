@@ -1022,11 +1022,9 @@ fn frozen_frontier_evaluation_tasks_overlap() {
                 workers.push(thread);
             }
             self.ready.notify_all();
-            let (workers, _) = self
+            let workers = self
                 .ready
-                .wait_timeout_while(workers, std::time::Duration::from_secs(10), |workers| {
-                    workers.len() < 2
-                })
+                .wait_while(workers, |workers| workers.len() < 2)
                 .unwrap();
             assert!(workers.len() >= 2, "evaluation work did not overlap");
             drop(workers);

@@ -94,7 +94,7 @@ for backend in ('llvm','cranelift'):
             child=subprocess.Popen(command,stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,env=env)
             assert child.stdout.readline()==b'ready\n',ident
             with socket.socket(socket.AF_UNIX) as conn:
-                conn.settimeout(5);conn.connect(str(ctl))
+                conn.connect(str(ctl))
                 pid,uid,_=struct.unpack('3i',conn.getsockopt(socket.SOL_SOCKET,socket.SO_PEERCRED,12))
                 assert uid==os.getuid()
                 conn.sendall(b'{"metrics":true}\n');reply=json.loads(conn.makefile('rb').readline())

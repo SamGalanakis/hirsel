@@ -30,12 +30,7 @@ pub fn server(truncated: bool, tls12: bool) -> (u16, std::thread::JoinHandle<()>
     let port = listener.local_addr().unwrap().port();
     let thread = std::thread::spawn(move || {
         let (socket, _) = listener.accept().unwrap();
-        socket
-            .set_read_timeout(Some(std::time::Duration::from_secs(5)))
-            .unwrap();
-        socket
-            .set_write_timeout(Some(std::time::Duration::from_secs(5)))
-            .unwrap();
+
         let conn = rustls::ServerConnection::new(Arc::new(config)).unwrap();
         let mut tls = rustls::StreamOwned::new(conn, socket);
         let mut ping = [0; 4];

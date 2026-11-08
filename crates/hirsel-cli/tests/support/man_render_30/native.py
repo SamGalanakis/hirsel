@@ -35,7 +35,7 @@ for row in selected:
    while not stop.is_set():
     try:
      with socket.socket(socket.AF_UNIX) as s:
-      s.settimeout(.2);s.connect(str(ctl));s.sendall(b'{"metrics":true}\n');reply=b''
+      s.connect(str(ctl));s.sendall(b'{"metrics":true}\n');reply=b''
       while not reply.endswith(b'\n'):
        part=s.recv(65536)
        if not part:break

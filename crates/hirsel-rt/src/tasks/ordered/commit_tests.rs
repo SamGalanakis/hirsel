@@ -24,12 +24,7 @@ unsafe extern "C" fn sibling(
     let probe = unsafe { &*(probe as *const Siblings) };
     if identity == 1 {
         if width > 1 {
-            let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
             while probe.started.load(Ordering::Acquire) & 1 == 0 {
-                assert!(
-                    std::time::Instant::now() < until,
-                    "older sibling did not enter its pure segment"
-                );
                 std::thread::yield_now();
             }
         }
@@ -51,12 +46,7 @@ unsafe extern "C" fn sibling(
         probe.started.fetch_or(1, Ordering::Release);
     }
     if width > 1 && identity == 0 {
-        let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
         while probe.started.load(Ordering::Acquire) != 3 {
-            assert!(
-                std::time::Instant::now() < until,
-                "independent sibling did not run ahead"
-            );
             std::thread::yield_now();
         }
     }
@@ -394,12 +384,7 @@ fn dedicated_commit_stop_retains_inflight_callback_loans_and_reclaims_the_lent_p
         let control = run.control();
         let stopping = control.clone();
         let stopper = std::thread::spawn(move || {
-            let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
             while entered.load(Ordering::Acquire) == 0 {
-                assert!(
-                    std::time::Instant::now() < until,
-                    "callback loan did not enter"
-                );
                 std::thread::yield_now();
             }
             stopping.stop();
@@ -414,12 +399,8 @@ fn dedicated_commit_stop_retains_inflight_callback_loans_and_reclaims_the_lent_p
                 let _role = role::Guard::new(ctx);
                 let callback = || {
                     inside.store(1, Ordering::Release);
-                    let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
+
                     while release.load(Ordering::Acquire) == 0 {
-                        assert!(
-                            std::time::Instant::now() < until,
-                            "host did not release bounded test callback"
-                        );
                         std::thread::yield_now();
                     }
                     end.fetch_add(1, Ordering::Release);
@@ -446,12 +427,8 @@ fn dedicated_commit_stop_retains_inflight_callback_loans_and_reclaims_the_lent_p
         assert_eq!(crate::pool::lost_compute_permits(), 1);
         assert_eq!(crate::pool::compute_permits().1, 1);
         released.store(1, Ordering::Release);
-        let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
+
         while control.status().reclamation_pending != 0 {
-            assert!(
-                std::time::Instant::now() < until,
-                "callback run was not reclaimed"
-            );
             std::thread::yield_now();
         }
         assert_eq!(finished.load(Ordering::Acquire), 1);

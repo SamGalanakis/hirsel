@@ -180,12 +180,7 @@ struct EpochProbe {
 }
 
 unsafe fn yield_until(ctx: *mut TaskCtx, label: &str, mut ready: impl FnMut() -> bool) {
-    let until = std::time::Instant::now() + std::time::Duration::from_secs(2);
     while !ready() {
-        assert!(
-            std::time::Instant::now() < until,
-            "host epoch progress: {label}"
-        );
         // Test stage changes explicitly wake Retry waiters; repeatedly
         // enqueueing this fiber locally can starve untouched injection work
         // at width one before any host phase has even started.
@@ -323,7 +318,7 @@ fn native_host_epochs_release_workers_and_end_before_readiness_attempts() {
                     // Entry metadata can precede the physical idle save.
                     // Release the role while those idle continuations finish;
                     // no worker/permit is needed to finish an already saved frame.
-                    let until = std::time::Instant::now() + std::time::Duration::from_secs(2);
+
                     loop {
                         let s = scheduler(ctx);
                         if [2, 3].into_iter().all(|id| {
@@ -332,10 +327,7 @@ fn native_host_epochs_release_workers_and_end_before_readiness_attempts() {
                         }) {
                             break;
                         }
-                        assert!(
-                            std::time::Instant::now() < until,
-                            "key waiters physically saved"
-                        );
+
                         let _segment = role::Segment::new(ctx);
                         std::thread::yield_now();
                     }

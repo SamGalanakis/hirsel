@@ -94,12 +94,7 @@ fn serve() -> (u16, std::thread::JoinHandle<()>) {
     let thread = std::thread::spawn(move || {
         for rejected in [true, true, false] {
             let (socket, _) = listener.accept().unwrap();
-            socket
-                .set_read_timeout(Some(std::time::Duration::from_secs(10)))
-                .unwrap();
-            socket
-                .set_write_timeout(Some(std::time::Duration::from_secs(10)))
-                .unwrap();
+
             let conn = rustls::ServerConnection::new(config.clone()).unwrap();
             let mut tls = rustls::StreamOwned::new(conn, socket);
             let mut request = [0; 4];

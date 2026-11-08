@@ -136,7 +136,7 @@ def verify(hirsel, selection, output):
                 argv = command(engine, label, g, True)
                 p = subprocess.Popen(list(map(str, argv)), stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env, preexec_fn=limits)
                 try:
-                    assert select.select([p.stdout], [], [], 60)[0], label
+                    assert select.select([p.stdout], [], [])[0], label
                     ready = p.stdout.readline()
                     assert ready == b'{"listening":true}\n', (label, ready)
                     stdout, stderr = p.communicate()
@@ -162,7 +162,7 @@ def verify(hirsel, selection, output):
             listener = socket.socket(socket.AF_UNIX)
             listener.bind(str(path))
             listener.listen(4)
-            listener.settimeout(30)
+
             seen = []
             active = []
             closed = []
@@ -172,7 +172,7 @@ def verify(hirsel, selection, output):
                 try:
                     for _ in range(4):
                         connection, _ = listener.accept()
-                        connection.settimeout(30)
+
                         connections.append(connection)
                     # Read all literal frames first. This is the active-call barrier.
                     indexed = {}
@@ -188,7 +188,7 @@ def verify(hirsel, selection, output):
                         indexed[i].shutdown(socket.SHUT_WR)
                         waiter = select.poll()
                         waiter.register(indexed[i], 0)
-                        events = waiter.poll(30000)
+                        events = waiter.poll()
                         assert events and events[0][1] & select.POLLHUP
                         closed.append(True)
                 finally:
@@ -201,7 +201,7 @@ def verify(hirsel, selection, output):
                 g = grants(['batch', str(path), '4', '2000', *[compact(r).decode() for r in requests]], 'unix_connect')
                 argv = command(engine, label, g, True)
                 run(label, argv, (0, compact(expected) + b'\n', b''))
-                future.result(timeout=35)
+                future.result()
             assert sorted(seen) == list(range(4)) and active == [4] and len(closed) == 4
             path.unlink()  # Host fixture owns this listener; Hirsel never unlinks it.
             if engine in binaries:

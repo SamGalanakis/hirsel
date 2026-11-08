@@ -80,7 +80,7 @@ def observe(command, endpoint, grace=1.0):
                         ready, reason = time.monotonic() - start, endpoint
             if ready is None and tcp:
                 with socket.socket() as probe:
-                    probe.settimeout(0.01)
+
                     if probe.connect_ex((tcp[0], int(tcp[1]))) == 0:
                         ready, reason = time.monotonic() - start, endpoint
                         if endpoint.startswith('http:'):
@@ -88,8 +88,8 @@ def observe(command, endpoint, grace=1.0):
                             # existing bench/micro/http/load.py:14,29-38. Record
                             # listening at connect; avoid an artificial EOF before
                             # the request that the application actually accepts.
-                            probe.settimeout(1)
-                            connection = http.client.HTTPConnection(tcp[0], int(tcp[1]), timeout=1)
+
+                            connection = http.client.HTTPConnection(tcp[0], int(tcp[1]))
                             connection.sock = probe
                             try:
                                 connection.request('GET', '/', headers={'Connection': 'close'})

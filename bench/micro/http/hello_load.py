@@ -10,7 +10,7 @@ def one(port, scheduled):
     time.sleep(max(0, scheduled - time.monotonic()))
     while True:
         try:
-            connection = socket.create_connection(('127.0.0.1', port), timeout=10)
+            connection = socket.create_connection(('127.0.0.1', port))
             break
         except ConnectionRefusedError:
             time.sleep(.001)

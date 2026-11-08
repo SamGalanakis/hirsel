@@ -7,7 +7,6 @@ use std::io::{BufRead, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
-use std::time::Duration;
 
 const CHAIN: &[u8] = include_bytes!("../../../hirsel-rt/tests/it/tls-data/server.cert");
 const KEY: &[u8] = include_bytes!("../../../hirsel-rt/tests/it/tls-data/server.key");
@@ -112,9 +111,7 @@ fn fetch(port: u16) -> (Vec<u8>, Vec<u8>) {
     .with_no_client_auth();
     config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
     let socket = std::net::TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, port)).unwrap();
-    socket
-        .set_read_timeout(Some(Duration::from_secs(30)))
-        .unwrap();
+
     let name = rustls::pki_types::ServerName::try_from("localhost").unwrap();
     let conn = rustls::ClientConnection::new(Arc::new(config), name).unwrap();
     let mut tls = rustls::StreamOwned::new(conn, socket);

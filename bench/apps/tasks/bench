@@ -64,7 +64,7 @@ def rss(pid):
 
 
 def request(port):
-    connection = http.client.HTTPConnection('127.0.0.1', port, timeout=60)
+    connection = http.client.HTTPConnection('127.0.0.1', port)
     connection.request('GET', '/?q=Task+9999')
     response = connection.getresponse()
     assert response.status == 200, response.status
@@ -205,7 +205,7 @@ def sample(kind, operation, rate, args, directory, round_number, profile=False):
     finally:
         if client and client.poll() is None:
             client.terminate()
-            client.wait(30)
+            client.wait()
         if recording:
             recording.stop()
         if perf:
@@ -239,7 +239,7 @@ def memory_profile(kind, args, directory):
     server = Server(kind, data, free_port(), binary_for(kind, args), directory / 'server.log', heap=raw)
     try:
         request(server.port)
-        connection = http.client.HTTPConnection('127.0.0.1', server.port, timeout=60)
+        connection = http.client.HTTPConnection('127.0.0.1', server.port)
         connection.request('GET', '/')
         reply = connection.getresponse()
         assert reply.status == 200

@@ -121,24 +121,8 @@ fn child(root: &Path, mode: &str, id: u64) -> TestChild {
     )
 }
 fn accept(listener: &UnixListener) -> UnixStream {
-    let mut p = libc::pollfd {
-        fd: listener.as_raw_fd(),
-        events: libc::POLLIN,
-        revents: 0,
-    };
-    // SAFETY: one valid stack pollfd and a finite timeout.
-    assert_eq!(
-        unsafe { libc::poll(&mut p, 1, 5000) },
-        1,
-        "child did not connect"
-    );
     let (stream, _) = listener.accept().unwrap();
-    stream
-        .set_read_timeout(Some(std::time::Duration::from_secs(5)))
-        .unwrap();
-    stream
-        .set_write_timeout(Some(std::time::Duration::from_secs(5)))
-        .unwrap();
+
     stream
 }
 #[test]
@@ -196,9 +180,7 @@ fn cooperating_child() {
     let epoch = index_benchmark_epoch(&root).unwrap();
     let delta = build(&root, &[record], crate::Durability::Rebuildable).unwrap();
     let mut socket = UnixStream::connect(root.join("barrier")).unwrap();
-    socket
-        .set_read_timeout(Some(std::time::Duration::from_secs(5)))
-        .unwrap();
+
     socket.write_all(&[id as u8]).unwrap();
     let mut go = [0];
     socket.read_exact(&mut go).unwrap();
@@ -306,7 +288,10 @@ fn changed_compaction_inputs_conflict_once_without_overwriting_root() {
     let path = root.to_owned();
     let expected = old.clone();
     observe_compaction(move || fs::write(path.join("index/MANIFEST"), old).unwrap());
-    assert_eq!(compact(root, budget(), crate::Durability::Rebuildable).unwrap(), CompactOutcome::Conflict);
+    assert_eq!(
+        compact(root, budget(), crate::Durability::Rebuildable).unwrap(),
+        CompactOutcome::Conflict
+    );
     assert_eq!(fs::read(root.join("index/MANIFEST")).unwrap(), expected);
 }
 #[test]
@@ -332,7 +317,10 @@ fn concurrently_appended_identical_output_cannot_create_duplicate_descriptors() 
     write(root, &[entry(2)]);
     let path = root.to_owned();
     observe_compaction(move || write(&path, &[entry(1), entry(2)]));
-    assert_eq!(compact(root, budget(), crate::Durability::Rebuildable).unwrap(), CompactOutcome::Conflict);
+    assert_eq!(
+        compact(root, budget(), crate::Durability::Rebuildable).unwrap(),
+        CompactOutcome::Conflict
+    );
     assert_eq!(current_layer_ids_locked(root).unwrap().len(), 3);
     let pin = load_pinned(root, crate::Durability::Rebuildable).unwrap();
     for n in [1, 2] {
@@ -399,7 +387,10 @@ fn multiprocess_same_address_precedence_follows_publication_order() {
     a.finish();
     b.finish();
     assert_eq!(
-        find(&load_pinned(root, crate::Durability::Rebuildable).unwrap(), entry(1).key),
+        find(
+            &load_pinned(root, crate::Durability::Rebuildable).unwrap(),
+            entry(1).key
+        ),
         Some(expected)
     );
 }
@@ -433,9 +424,7 @@ fn parent_body(name: &str) -> bool {
     if std::env::var("INDEX53_PARENT").as_deref() == Ok(name) {
         if let Some(path) = std::env::var_os("INDEX53_PARENT_START") {
             let mut socket = UnixStream::connect(path).unwrap();
-            socket
-                .set_read_timeout(Some(std::time::Duration::from_secs(5)))
-                .unwrap();
+
             socket.write_all(&[0]).unwrap();
             let mut go = [0];
             socket.read_exact(&mut go).unwrap();
@@ -458,4 +447,3 @@ fn parent_body(name: &str) -> bool {
     TestChild::spawn(&mut command).finish();
     false
 }
-

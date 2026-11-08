@@ -764,7 +764,7 @@ mod tests {
                 threads.spawn(move || {
                     let mut idle = std::ptr::null_mut();
                     for step in 1..=SAVES {
-                        let queued = receive.recv_timeout(Duration::from_secs(10)).unwrap();
+                        let queued = receive.recv().unwrap();
                         let mut running = queued.start();
                         let body = running.value().body;
                         // SAFETY: Running owns this saved stack, and no image

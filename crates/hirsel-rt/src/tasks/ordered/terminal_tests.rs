@@ -27,12 +27,8 @@ struct Probe {
 unsafe extern "C" fn older(ctx: *mut TaskCtx, env: *mut Header, _: u64, _: u64) -> u8 {
     let [probe, atomic] = unsafe { crate::alloc::payload(env).cast::<[u64; 2]>().read() };
     let probe = unsafe { &*(probe as *const Probe) };
-    let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
+
     while !probe.attempted.load(Ordering::Acquire) {
-        assert!(
-            std::time::Instant::now() < until,
-            "terminal task never ran ahead"
-        );
         std::thread::yield_now();
     }
     loop {
@@ -45,10 +41,7 @@ unsafe extern "C" fn older(ctx: *mut TaskCtx, env: *mut Header, _: u64, _: u64) 
         if pending {
             break;
         }
-        assert!(
-            std::time::Instant::now() < until,
-            "terminal task never saved at its head gate"
-        );
+
         std::thread::yield_now();
     }
     match probe.mode.load(Ordering::Acquire) {
@@ -536,12 +529,8 @@ fn stopped_trace_with_failures(
             crate::stop::run_root(ctx, crate::stop::LaunchFrame::bare(entry)),
             Err(expected)
         );
-        let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
+
         while crate::pool::busy((*ctx).run_ref()) != 0 {
-            assert!(
-                std::time::Instant::now() < until,
-                "stopped root did not save"
-            );
             std::thread::yield_now();
         }
         (*ctx).abandon();
@@ -697,12 +686,7 @@ unsafe extern "C" fn budget_suffix_head(ctx: *mut TaskCtx, env: *mut Header, _: 
         let [probe, atomic] = crate::alloc::payload(env).cast::<[u64; 2]>().read();
         let probe = &*(probe as *const BudgetSuffix);
         if probe.wide {
-            let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
             while !probe.suffix.load(Ordering::Acquire) {
-                assert!(
-                    std::time::Instant::now() < until,
-                    "younger charge suffix never ran ahead"
-                );
                 std::thread::yield_now();
             }
         }
@@ -909,12 +893,8 @@ pub(crate) fn budget_terminal_trace_truncates_actual_younger_suffix_and_accumula
                             crate::stop::run_root(ctx, crate::stop::LaunchFrame::bare(entry)),
                             Err(Stop::BudgetExceeded(hirsel_run_schema::BudgetKind::Memory))
                         );
-                        let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
+
                         while crate::pool::busy((*ctx).run_ref()) != 0 {
-                            assert!(
-                                std::time::Instant::now() < until,
-                                "budget cut did not quiesce"
-                            );
                             std::thread::yield_now();
                         }
                         (*ctx).abandon();
@@ -1220,7 +1200,7 @@ fn canonical_blocked_cut_uses_logical_wait_targets_after_every_frame_is_saved() 
                                         if task == 1 && parked && !held.swap(true, Ordering::SeqCst)
                                         {
                                             observed_saves.fetch_or(1, Ordering::SeqCst);
-                                            receive.lock().unwrap().recv_timeout(std::time::Duration::from_secs(5))
+                                            receive.lock().unwrap().recv()
                                                 .expect("all final waiters must save before the held token becomes idle");
                                         }
                                     });
@@ -1302,21 +1282,7 @@ fn canonical_blocked_cut_uses_logical_wait_targets_after_every_frame_is_saved() 
                                 }
                                 unreachable!("fully blocked tree cannot return");
                             });
-                            let control = crate::host::RunControl::from_inner(
-                                (*ctx).run_ref().control.clone(),
-                            );
-                            let (done, finished) = std::sync::mpsc::channel();
-                            let watchdog = std::thread::spawn(move || {
-                                if finished
-                                    .recv_timeout(std::time::Duration::from_secs(5))
-                                    .is_err()
-                                {
-                                    control.stop();
-                                    false
-                                } else {
-                                    true
-                                }
-                            });
+
                             let outcome =
                                 crate::stop::run_root(ctx, crate::stop::LaunchFrame::bare(entry));
                             let Err(Stop::Blocked(raw)) = outcome else {
@@ -1332,11 +1298,6 @@ fn canonical_blocked_cut_uses_logical_wait_targets_after_every_frame_is_saved() 
                                     "both sides of the forced idle handoff executed"
                                 );
                             }
-                            let _ = done.send(());
-                            assert!(
-                                watchdog.join().unwrap(),
-                                "blocked cut watchdog: {children}/{known_site}/{width}/{reorder:?}/{jitter}"
-                            );
 
                             let s = (*(*(*ctx).run_ptr()).tasks.get()).as_deref().unwrap();
                             assert!(

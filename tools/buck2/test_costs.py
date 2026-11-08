@@ -5,8 +5,7 @@ Run every shard (or the one target) of the binaries to measure with libtest's ti
 including a binary's per-case width shards (`<binary>-cpus-<N>-shard-<i>`):
 
     .buck2/bin/buck2 test //:<binary>-shard-1 ... //:<binary>-shard-<n> -- \\
-      --env RUSTC_BOOTSTRAP=1 --test-arg=-Zunstable-options --test-arg=--report-time \\
-      --timeout 3600 > /tmp/costs.log 2>&1
+      --env RUSTC_BOOTSTRAP=1 --test-arg=-Zunstable-options --test-arg=--report-time > /tmp/costs.log 2>&1
     python3 tools/buck2/test_costs.py /tmp/costs.log
     python3 tools/buck2/sync.py
 

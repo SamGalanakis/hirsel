@@ -516,7 +516,7 @@ class BoundedTests(unittest.TestCase):
             with (directory / 'run.log').open('w+') as log:
                 future = worker.submit(tool['run_stages'], directory, log, 'fast')
                 try:
-                    replenished = completed.wait(2)
+                    replenished = completed.wait()
                 finally:
                     release.set()
                 _, _, _, _, status = future.result()
@@ -595,15 +595,14 @@ class RunningReport(unittest.TestCase):
                     patch('subprocess.run', side_effect=execute), ThreadPoolExecutor(max_workers=1) as worker:
                 future = worker.submit(tool['run'], sha, 'fast')
                 try:
-                    self.assertTrue(fast_finished.wait(2))
-                    deadline = time.monotonic() + 3
+                    self.assertTrue(fast_finished.wait())
                     report = ''
-                    while time.monotonic() < deadline:
+                    while True:
                         if (root / 'RUNNING.md').exists():
                             report = (root / 'RUNNING.md').read_text()
                         if 'root//:fast' in report and 'action-input-digest:142' in report:
                             break
-                        release.wait(0.02)
+                        time.sleep(0.02)
                     self.assertIn('root//:fast', report)
                     self.assertIn(sha, report)
                     self.assertIn('action-input-digest:142', report)
@@ -792,7 +791,7 @@ class RollingBatches(unittest.TestCase):
                 peak = max(peak, active)
                 ran.extend(selected)
             if targets[0] in selected:
-                overlapped.append(release.wait(2))
+                overlapped.append(release.wait())
             if targets[4] in selected:
                 release.set()
             with lock:

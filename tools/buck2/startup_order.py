@@ -116,7 +116,7 @@ def main():
         for shape, width in [("serial", 1), ("pool", pool_width)]:
             binary = directory / shape
             started = time.monotonic()
-            print(f"startup_order: building {shape} (570 s timeout)", file=sys.stderr, flush=True)
+            print(f"startup_order: building {shape}", file=sys.stderr, flush=True)
             run([args.capped, args.hirsel,
                  "build", "--release", args.source / (shape + ".hir"),
                  "-o", binary], environment, directory)

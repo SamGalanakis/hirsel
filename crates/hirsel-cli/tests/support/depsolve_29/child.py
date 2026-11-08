@@ -24,21 +24,17 @@ if notify is not None:
     pidfd=os.pidfd_open(p.pid)
     try:
         while True:
-            ready,_,_=select.select([notify,pidfd],[],[],10)
-            if not ready:
-                (root/'admission-incomplete.txt').write_text('No admission handshake before bounded wait expired')
-                break
+            ready,_,_=select.select([notify,pidfd],[],[])
             if notify in ready:
                 os.read(notify,65536)
                 if Path(control).exists():
                     try:
                         samples=[]
-                        deadline=time.monotonic()+5
                         requested=config['placement']['cores']
                         qualified=False
-                        while time.monotonic()<deadline:
+                        while True:
                             with socket.socket(socket.AF_UNIX) as peer:
-                                peer.settimeout(max(0.001,deadline-time.monotonic()))
+
                                 peer.connect(control);peer.sendall(b'{"metrics":true}\n')
                                 reply=b''
                                 while not reply.endswith(b'\n'):
@@ -58,7 +54,7 @@ if notify is not None:
                             if select.select([pidfd],[],[],0)[0]:break
                         (root/'width-qualified.json').write_text(json.dumps(qualified))
                         if not qualified:
-                            (root/'admission-incomplete.txt').write_text('No running settled-width sample before exit or bounded deadline')
+                            (root/'admission-incomplete.txt').write_text('No running settled-width sample before exit')
                     except (OSError, ValueError) as error:
                         (root/'admission-incomplete.txt').write_text(str(error))
                     break

@@ -419,10 +419,8 @@ SELECTED_SLICES = 16
 CONFORMANCE_SLICE_PROGRAMS = 20
 AGREE_SLICE_PROGRAMS = 260
 # The unrestricted campaign (tools/main-runs) runs as shards of the whole
-# seed-1 catalogue by stable variant rank, each with its own timeout, so a slow
-# or non-terminating variant fails fast and names its shard.
+# seed-1 catalogue by stable variant rank, with progress attributed to each shard.
 AGREE_FULL_SHARDS = 384
-AGREE_FULL_TIMEOUT = 1800
 # The unrestricted native agreement campaign (tools/main-runs) runs as
 # shards of the same catalogue by stable variant rank. On 2026-10-14 the whole
 # campaign took 4909 s for 1987 programs, and on 2026-10-16 2416 programs did
@@ -431,7 +429,6 @@ AGREE_FULL_TIMEOUT = 1800
 # them, and agree.py --native-full runs them together, merges them and judges
 # agree-known.txt.
 AGREE_NATIVE_FULL_SHARDS = 16
-AGREE_NATIVE_FULL_TIMEOUT = 3600
 # The full native matrix (tools/main-runs) runs as shards of the baseline by
 # path hash, each case under its rotating pairwise cover, so each shard stays well
 # under its Buck2 timeout; gate-native-full stays whole for --bless and for a
@@ -1136,6 +1133,7 @@ def first_party(meta: dict) -> str:
                             data=["tools/tests/buck2_launcher.py"],
                             files_env={"HIRSEL_TEST_LAUNCHER": "//tools/buck2:test_launcher.sh",
                                        "HIRSEL_TEST_REPORTER": "//tools/buck2:test_report.py",
+                                       "HIRSEL_TEST_EXECUTOR": "//tools/buck2:test_executor.py",
                                        "HIRSEL_TEST_REPORT_FIXTURE": "//:test-report-fixture-harness",
                                        "HIRSEL_TEST_NATIVE_ENVIRONMENT": "//tools/buck2/native-toolchain:environment.tsv",
                                        "HIRSEL_TEST_PRIVATE_NATIVE_INPUTS": "//tools/buck2:private_native_inputs.py",

@@ -9,7 +9,7 @@ from peer import exact
 payload = sys.argv[2].encode()
 assert 0 < len(payload) <= 2048
 with socket.socket(socket.AF_UNIX) as stream:
-    stream.settimeout(4)
+
     stream.connect(sys.argv[1])
     stream.sendall(struct.pack('!I', len(payload)) + payload)
     size, = struct.unpack('!I', exact(stream, 4))

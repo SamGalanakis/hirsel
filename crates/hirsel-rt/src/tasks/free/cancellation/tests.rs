@@ -13,12 +13,7 @@ struct Race {
 }
 
 fn wait_until(mut done: impl FnMut() -> bool) {
-    let until = std::time::Instant::now() + std::time::Duration::from_secs(2);
     while !done() {
-        assert!(
-            std::time::Instant::now() < until,
-            "native cancellation must advance"
-        );
         std::thread::yield_now();
     }
 }

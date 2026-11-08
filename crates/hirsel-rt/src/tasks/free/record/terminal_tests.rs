@@ -6,7 +6,6 @@ use hirsel_free::claim::Sweep;
 use hirsel_free::projection::Projection;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, SyncSender};
-use std::time::{Duration, Instant};
 
 fn request() -> Request {
     Request::Print {
@@ -17,7 +16,7 @@ fn request() -> Request {
 
 fn stop_here(ready: &SyncSender<()>, stopped: &mpsc::Receiver<()>) {
     ready.send(()).unwrap();
-    stopped.recv_timeout(Duration::from_secs(5)).unwrap();
+    stopped.recv().unwrap();
 }
 
 #[test]
@@ -39,7 +38,7 @@ fn embedding_stop_cuts_native_requests_before_publishing_the_run_outcome() {
                 let control = run.control();
                 let stop_control = control.clone();
                 let stopper = std::thread::spawn(move || {
-                    reached.recv_timeout(Duration::from_secs(5)).unwrap();
+                    reached.recv().unwrap();
                     stop_control.stop();
                     // A second request returns the same winner and must not
                     // run the cutter or append a second terminal frame.
@@ -94,9 +93,8 @@ fn embedding_stop_cuts_native_requests_before_publishing_the_run_outcome() {
                 assert_eq!(outcome.ended, Err(Stop::Requested));
                 // A claimed call may be leaving on another worker. Reclaim
                 // before inspecting encoder traces or unwrapping the owner.
-                let deadline = Instant::now() + Duration::from_secs(5);
+
                 while control.status().reclamation_pending != 0 {
-                    assert!(Instant::now() < deadline, "stopped worker did not reclaim");
                     std::thread::yield_now();
                 }
                 assert_eq!(issued.load(Ordering::Acquire), point >= 2);

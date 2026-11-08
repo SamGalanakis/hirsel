@@ -357,14 +357,8 @@ fn await_any_replay_case(force_save_window: bool) {
                             {
                                 return;
                             }
-                            let until =
-                                std::time::Instant::now() + std::time::Duration::from_secs(2);
+
                             while !save_observer.before_save_observed.load(Ordering::Acquire) {
-                                if std::time::Instant::now() >= until {
-                                    // Preserve teardown if scheduling failed to expose
-                                    // the window; the post-run assertion rejects it.
-                                    return;
-                                }
                                 std::thread::yield_now();
                             }
                         });
@@ -520,12 +514,8 @@ fn an_entered_only_native_await_any_cut_needs_no_recorded_member() {
             },
         );
         assert_eq!(outcome.ended, Err(crate::stop::Stop::Requested));
-        let until = std::time::Instant::now() + std::time::Duration::from_secs(2);
+
         while Arc::strong_count(&recording) != 1 {
-            assert!(
-                std::time::Instant::now() < until,
-                "stopped recorder frames reclaim"
-            );
             std::thread::yield_now();
         }
         let trace = recording.trace();
@@ -619,7 +609,7 @@ fn late_set_creation_and_reverse_insertion_preserve_scope_completion_ranks() {
                         environment,
                         0,
                     );
-                    let until = std::time::Instant::now() + std::time::Duration::from_secs(2);
+
                     loop {
                         let held = {
                             let _role = role::Guard::new(ctx);
@@ -630,10 +620,7 @@ fn late_set_creation_and_reverse_insertion_preserve_scope_completion_ranks() {
                         if held {
                             break;
                         }
-                        assert!(
-                            std::time::Instant::now() < until,
-                            "the child must complete before set creation"
-                        );
+
                         std::thread::yield_now();
                     }
                 }

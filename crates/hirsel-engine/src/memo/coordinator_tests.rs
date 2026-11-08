@@ -5,7 +5,6 @@ use super::*;
 use std::collections::BTreeMap;
 use std::sync::Barrier;
 use std::sync::atomic::{AtomicBool, AtomicUsize};
-use std::time::Duration;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Kind {
@@ -226,7 +225,7 @@ fn within<T: Send + 'static>(body: impl FnOnce() -> T + Send + 'static) -> T {
     let (send, receive) = std::sync::mpsc::channel();
     std::thread::spawn(move || send.send(body()).unwrap());
     receive
-        .recv_timeout(Duration::from_secs(60))
+        .recv()
         .expect("the pool deadlocked or a worker panicked")
 }
 

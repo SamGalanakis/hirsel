@@ -61,11 +61,11 @@ class FullGateCounts(unittest.TestCase):
                                               for line in log.splitlines())), 1)
 
     def test_run_forwards_the_buck_test_runner_separator_and_options(self):
-        script = ('import sys; assert sys.argv[1:] == ["--", "--timeout", "14400", '
+        script = ('import sys; assert sys.argv[1:] == ["--", '
                   '"--test-arg=full_gate_", "--test-arg=--ignored"]; '
                   f'print({block("it", ["full_gate_a"], [("full_gate_a", "ok")])!r})')
         run = subprocess.run([sys.executable, str(CHECKER), '--run', sys.executable,
-                              '-c', script, '--', '--timeout', '14400',
+                              '-c', script, '--',
                               '--test-arg=full_gate_', '--test-arg=--ignored'],
                              capture_output=True, text=True)
         self.assertEqual(run.returncode, 0, run.stderr)

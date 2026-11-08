@@ -13,7 +13,7 @@ def call(s,c):
  return json.loads(read_exact(s,struct.unpack('>I',read_exact(s,4))[0]))
 def line(child):
  ready=selectors.DefaultSelector();ready.register(child.stdout,selectors.EVENT_READ)
- assert ready.select(10),'no application-ready handshake'
+ assert ready.select(),'no application-ready handshake'
  return child.stdout.readline()
 with tempfile.TemporaryDirectory(prefix='wq31-') as transport:
  transport=Path(transport);data=a.root/'host-data';data.mkdir();socketpath=transport/'q.sock';control=transport/'control'
@@ -31,12 +31,12 @@ with tempfile.TemporaryDirectory(prefix='wq31-') as transport:
     try:
      prefix=line(child);assert prefix==b'{"ready":true}\n',prefix
      with socket.socket(socket.AF_UNIX) as ctl:
-      ctl.settimeout(5);ctl.connect(str(control));ctl.sendall(b'{"metrics":true}\n');reply=b''
+      ctl.connect(str(control));ctl.sendall(b'{"metrics":true}\n');reply=b''
       while not reply.endswith(b'\n'):reply+=ctl.recv(8192)
      (receipt/'control.json').write_bytes(reply);metrics=json.loads(reply)
      assert metrics['worker_phase']=='running' and metrics['width']['effective']==width and metrics['width']['pending']==0,metrics
      with socket.socket(socket.AF_UNIX) as client:
-      client.settimeout(5);client.connect(str(socketpath))
+      client.connect(str(socketpath))
       if workflow=='cancel':client.sendall(b'\x00')
       else:
        assert call(client,{'op':'group','group':0})=={'group':0}

@@ -464,25 +464,19 @@ fn httpget() {
     let executable = fixture.native_executable();
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
-    // Nonblocking accept keeps a failed client from leaving a stuck server.
+    // Retry accept until the fixture client connects.
     listener.set_nonblocking(true).unwrap();
     let child = std::thread::spawn(move || {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
         let mut stream = loop {
             match listener.accept() {
                 Ok((stream, _)) => break stream,
-                Err(e)
-                    if e.kind() == std::io::ErrorKind::WouldBlock
-                        && std::time::Instant::now() < deadline =>
-                {
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                     std::thread::sleep(std::time::Duration::from_millis(2))
                 }
                 Err(e) => panic!("HTTP client did not connect: {e}"),
             }
         };
-        stream
-            .set_read_timeout(Some(std::time::Duration::from_secs(5)))
-            .unwrap();
+
         let mut request = Vec::new();
         let mut byte = [0u8];
         while !request.ends_with(b"\r\n\r\n") {
@@ -879,9 +873,7 @@ impl TodoServer {
         use std::io::{Read, Write};
         let mut stream =
             std::net::TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, self.port)).unwrap();
-        stream
-            .set_read_timeout(Some(std::time::Duration::from_secs(60)))
-            .unwrap();
+
         stream.write_all(request).unwrap();
         stream.shutdown(std::net::Shutdown::Write).unwrap();
         let mut response = String::new();
@@ -981,8 +973,7 @@ fn todo_api_concurrent_creates(server: &TodoServer, first_id: u64) -> String {
     use std::io::{Read, Write};
     let mut held =
         std::net::TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, server.port)).unwrap();
-    held.set_read_timeout(Some(std::time::Duration::from_secs(60)))
-        .unwrap();
+
     held.write_all(b"GET /todos HTTP/1.1\r\nHost:").unwrap();
     let created: Vec<String> = std::thread::scope(|scope| {
         let clients: Vec<_> = ["sheep", "goats"]
@@ -2912,9 +2903,7 @@ fn tasks_event_streams_hold_no_board_llvm() {
     for _ in 0..STREAMS {
         let mut stream =
             std::net::TcpStream::connect(("127.0.0.1", port.parse::<u16>().unwrap())).unwrap();
-        stream
-            .set_read_timeout(Some(std::time::Duration::from_secs(60)))
-            .unwrap();
+
         write!(
             stream,
             "GET {target} HTTP/1.1\r\nHost: 127.0.0.1\r\nAccept: text/event-stream\r\n\r\n"

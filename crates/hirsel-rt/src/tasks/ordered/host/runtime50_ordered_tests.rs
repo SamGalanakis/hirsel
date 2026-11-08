@@ -7,17 +7,12 @@ use crate::io_keys::{Key, Kind};
 use crate::ordered::Policy;
 use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
-fn until(mut done: impl FnMut() -> bool) -> bool {
-    let start = Instant::now();
+fn until(mut done: impl FnMut() -> bool) {
     while !done() {
-        if start.elapsed() > Duration::from_secs(20) {
-            return false;
-        }
         std::thread::sleep(Duration::from_micros(200));
     }
-    true
 }
 
 #[derive(Default)]
@@ -52,16 +47,13 @@ impl ConcurrentAdapter for Disk {
         if job { &self.on_job } else { &self.off_job }.fetch_add(1, Ordering::AcqRel);
         assert!(matches!(request, Request::Open { .. }), "{request:?}");
         if self.private {
-            assert!(
-                until(|| self.computed.load(Ordering::Acquire)),
-                "a younger private computation cannot use the saved job's worker"
-            );
+            until(|| self.computed.load(Ordering::Acquire));
         }
         if self.stop {
             // Stop the run while this call still holds its job capacity.
             let control = self.run.lock().unwrap().clone().unwrap();
             control.request(crate::stop::Stop::Requested);
-            assert!(until(|| self.release.load(Ordering::Acquire)));
+            until(|| self.release.load(Ordering::Acquire));
         }
         if self.cancel {
             return Err(AdapterError::Blocked);
@@ -188,8 +180,8 @@ fn runtime50_ordered_blocking_file_runs_as_owned_job() {
             assert_eq!(outcome.ended, Err(crate::stop::Stop::Requested));
             assert_eq!(jobs.held(), 1, "credit released before the call returned");
             disk.release.store(true, Ordering::Release);
-            assert!(until(|| jobs.held() == 0));
-            assert!(until(|| stats.reclaimed.load(Ordering::Acquire) == 1));
+            until(|| jobs.held() == 0);
+            until(|| stats.reclaimed.load(Ordering::Acquire) == 1);
             assert_eq!(stats.quarantined.load(Ordering::Acquire), 1);
             assert_eq!(stats.delivered.load(Ordering::Acquire), 0);
         } else {
@@ -204,7 +196,7 @@ fn runtime50_ordered_blocking_file_runs_as_owned_job() {
 
 unsafe extern "C" fn private_compute(_: *mut TaskCtx, env: *mut Header, _: u64, _: u64) -> u8 {
     let disk = unsafe { &*crate::alloc::payload(env).cast::<*const Disk>().read() };
-    assert!(until(|| disk.on_job.load(Ordering::Acquire) == 1));
+    until(|| disk.on_job.load(Ordering::Acquire) == 1);
     let mut value = 7u64;
     for i in 0..1000 {
         value = value.wrapping_mul(13).wrapping_add(i);

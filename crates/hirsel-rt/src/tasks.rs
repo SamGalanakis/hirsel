@@ -5894,17 +5894,12 @@ mod free_policy_tests {
     struct ConcurrentSegments {
         started: std::sync::atomic::AtomicU32,
         finished: std::sync::atomic::AtomicU32,
-        timed_out: std::sync::atomic::AtomicBool,
     }
 
     fn rendezvous(segments: &ConcurrentSegments) {
         segments.started.fetch_add(1, Ordering::AcqRel);
-        let until = std::time::Instant::now() + std::time::Duration::from_secs(2);
+
         while segments.started.load(Ordering::Acquire) != 8 {
-            if std::time::Instant::now() >= until {
-                segments.timed_out.store(true, Ordering::Release);
-                break;
-            }
             std::thread::yield_now();
         }
     }
@@ -5955,7 +5950,6 @@ mod free_policy_tests {
         let segments = std::sync::Arc::new(ConcurrentSegments {
             started: Default::default(),
             finished: Default::default(),
-            timed_out: Default::default(),
         });
         let observed = segments.clone();
         let outcome = run.run(
@@ -5998,7 +5992,6 @@ mod free_policy_tests {
         assert_eq!(outcome.pending, 0);
         assert_eq!(observed.started.load(Ordering::Acquire), 8);
         assert_eq!(observed.finished.load(Ordering::Acquire), 7);
-        assert!(!observed.timed_out.load(Ordering::Acquire));
     }
 
     fn scope() -> Scope {

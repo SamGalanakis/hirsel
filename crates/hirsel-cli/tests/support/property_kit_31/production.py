@@ -104,11 +104,11 @@ for backend in ["llvm", "cranelift"]:
             try:
                 with selectors.DefaultSelector() as selector:
                     selector.register(process.stdout, selectors.EVENT_READ)
-                    assert selector.select(50), "no ready handshake"
+                    assert selector.select(), "no ready handshake"
                 ready = process.stdout.readline()
                 assert ready == b"ready\n", ready
                 with socket.socket(socket.AF_UNIX) as connection:
-                    connection.settimeout(5)
+
                     connection.connect(str(control))
                     connection.sendall(b'{"metrics":true}\n')
                     reply = connection.makefile("rb").readline()

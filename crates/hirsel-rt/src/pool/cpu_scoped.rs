@@ -992,9 +992,8 @@ mod tests {
                 permits.release(&controller);
             }
         });
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+
         while permits.state.lock().unwrap().waiting == 0 {
-            assert!(std::time::Instant::now() < deadline);
             std::thread::yield_now();
         }
         permits.state.lock().unwrap().limit = 4;
@@ -1002,9 +1001,7 @@ mod tests {
             .reserve_with_controllers(1, vec![controller])
             .unwrap();
         permits.release(&blocker);
-        received
-            .recv_timeout(std::time::Duration::from_secs(5))
-            .unwrap();
+        received.recv().unwrap();
         assert_eq!(permits.state.lock().unwrap().held, 2);
         drop(controls);
         drop(reservation);

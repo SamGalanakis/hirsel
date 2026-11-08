@@ -20,7 +20,7 @@ def exact(stream, count):
 
 def answer(stream):
     with stream:
-        stream.settimeout(3)
+
         length, = struct.unpack('!I', exact(stream, 4))
         if not 0 < length <= 2048:
             return

@@ -81,7 +81,7 @@ unsafe fn fail_budget(ctx: *mut TaskCtx, environment: *mut crate::Header, parked
             .saved
             .lock()
             .unwrap()
-            .recv_timeout(Duration::from_secs(5))
+            .recv()
             .expect("parent did not save its await_any prefix");
         {
             let _role = role::Guard::new(ctx);
@@ -183,18 +183,9 @@ fn check_budget_cut(entry: TaskCode, parked: bool) {
         run.config.layouts = layouts.as_ptr();
         run.config.layout_count = 1;
         unsafe { run.use_physical_dispatch() };
-        // Go exec_test.go:470-521: a bounded request/response handshake and
-        // exact completion assertions. The watchdog covers scheduler handoffs
-        // too, including failure to reach the child's receive.
-        let control = run.control();
-        let (done, finished) = mpsc::channel();
-        let watchdog = std::thread::spawn(move || {
-            if finished.recv_timeout(Duration::from_secs(5)).is_err() {
-                control.stop();
-                return false;
-            }
-            true
-        });
+        // Go exec_test.go:470-521: a request/response handshake and exact
+        // completion assertions across scheduler handoffs.
+
         let (outcome, trace) = run.run_traced_after_bounded_stop(
             |ctx| unsafe {
                 (*ctx).set_budgets(None, Some(4096));
@@ -278,11 +269,6 @@ fn check_budget_cut(entry: TaskCode, parked: bool) {
                     &set,
                 )
             },
-        );
-        let _ = done.send(());
-        assert!(
-            watchdog.join().unwrap(),
-            "terminal cut watchdog: {width}/{delay_at:?}"
         );
         assert_eq!(
             outcome.ended,

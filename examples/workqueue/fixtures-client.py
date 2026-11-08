@@ -15,7 +15,7 @@ def exact(stream, count):
     return output
 
 with socket.socket(socket.AF_UNIX) as stream:
-    stream.settimeout(2)
+
     stream.connect(sys.argv[1])
     for number in range(513):
         line = sys.stdin.buffer.readline(8193)

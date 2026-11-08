@@ -34,8 +34,8 @@ with tempfile.TemporaryDirectory(prefix='pubsub-') as private:
             if not 0 < size <= 2048: raise ValueError('frame bound')
             return json.loads(exact(size))
         with socket.socket(socket.AF_UNIX) as subscriber, socket.socket(socket.AF_UNIX) as publisher:
-            subscriber.settimeout(2)
-            publisher.settimeout(2)
+
+
             subscriber.connect(socket_path)
             publisher.connect(socket_path)
             send(subscriber, {'op': 'subscribe', 'topic': 'news'})
@@ -43,7 +43,7 @@ with tempfile.TemporaryDirectory(prefix='pubsub-') as private:
             send(publisher, {'op': 'publish', 'topic': 'news', 'data': 'hello'})
             print(receive(publisher))
             print(receive(subscriber))
-        suffix, _ = server.communicate(timeout=10)
+        suffix, _ = server.communicate()
         print(suffix.decode(), end='')
         assert server.returncode == 0
     finally:

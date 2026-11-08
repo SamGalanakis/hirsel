@@ -321,9 +321,7 @@ fn ordered_qualification_topology_reaches_eight_physical_workers() {
         .unwrap();
     assert_eq!(ready, "ready\n");
     let mut connection = UnixStream::connect(socket).unwrap();
-    connection
-        .set_read_timeout(Some(std::time::Duration::from_secs(5)))
-        .unwrap();
+
     connection.write_all(b"{\"metrics\":true}\n").unwrap();
     let mut reply = String::new();
     BufReader::new(connection).read_line(&mut reply).unwrap();

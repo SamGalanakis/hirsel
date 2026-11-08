@@ -3,7 +3,6 @@
 use std::io::{BufRead, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::Duration;
 
 const PROGRAM: &str = r#"pub type ServerError = Grant(GrantError) | Network(NetError) | Http(
   std@1/http.HttpError
@@ -98,9 +97,7 @@ fn record(mut command: Command) -> Vec<u8> {
         panic!("no port: {line:?} {:?}", child.wait_with_output());
     };
     let mut stream = std::net::TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, port)).unwrap();
-    stream
-        .set_read_timeout(Some(Duration::from_secs(60)))
-        .unwrap();
+
     stream
         .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")
         .unwrap();

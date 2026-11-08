@@ -81,9 +81,7 @@ fn client(port: u16, c: Client) -> std::thread::JoinHandle<Result<Vec<u8>, Strin
     config.alpn_protocols = c.alpn.iter().map(|p| p.to_vec()).collect();
     std::thread::spawn(move || {
         let socket = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
-        socket
-            .set_read_timeout(Some(std::time::Duration::from_secs(5)))
-            .unwrap();
+
         let name = ServerName::try_from(c.name).unwrap();
         let conn = rustls::ClientConnection::new(Arc::new(config), name).unwrap();
         let mut tls = rustls::StreamOwned::new(conn, socket);

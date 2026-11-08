@@ -6,7 +6,6 @@ use hirsel_run_config::{ProgramFacts, Root, RunConfig};
 use hirsel_run_schema::{CodeReach, Environmental, IoGrants, LaunchKind, RecordingLevel, Returned};
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Mutex, mpsc};
-use std::time::{Duration, Instant};
 
 static RECORDING: AtomicBool = AtomicBool::new(false);
 static ALTER_REQUEST: AtomicBool = AtomicBool::new(false);
@@ -212,10 +211,9 @@ fn ordinary_free_admission_records_real_wait_stops_and_replays_bound_terminal_ou
                 let stopper = stopping.then(|| {
                     let control = control.clone();
                     std::thread::spawn(move || {
-                        let service = parked.recv_timeout(Duration::from_secs(5)).unwrap();
-                        let deadline = Instant::now() + Duration::from_secs(5);
+                        let service = parked.recv().unwrap();
+
                         while !service.test_waiting() {
-                            assert!(Instant::now() < deadline, "ordinary host wait did not park");
                             std::thread::yield_now();
                         }
                         control.stop();

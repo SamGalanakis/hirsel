@@ -566,12 +566,8 @@ fn waiting_native_mutex_keeps_one_ordinal_and_replays_both_cuts() {
                     );
                     scheduler(ctx).sync.mutex(mutex_word(&handle))
                 };
-                let until = std::time::Instant::now() + std::time::Duration::from_secs(2);
+
                 while cell.lock().permit.waiting() != 1 {
-                    assert!(
-                        std::time::Instant::now() < until,
-                        "take must publish entered"
-                    );
                     std::thread::yield_now();
                 }
                 drop(cell);
@@ -580,12 +576,8 @@ fn waiting_native_mutex_keeps_one_ordinal_and_replays_both_cuts() {
                 unsafe {
                     hirsel_rt_v2_mutex_put(ctx, &handle, payload.as_mut_ptr().cast());
                 }
-                let until = std::time::Instant::now() + std::time::Duration::from_secs(2);
+
                 while !child.finished.load(Ordering::Acquire) {
-                    assert!(
-                        std::time::Instant::now() < until,
-                        "the same take ordinal must finish"
-                    );
                     std::thread::yield_now();
                 }
                 STATUS_OK

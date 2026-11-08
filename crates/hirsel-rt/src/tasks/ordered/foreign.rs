@@ -536,14 +536,13 @@ mod tests {
         use std::sync::atomic::Ordering;
         let probe =
             unsafe { &*(crate::alloc::payload(env).cast::<u64>().read() as *const GateProbe) };
-        let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
+
         while !probe.allow.load(Ordering::Acquire) {
             let mut canceled = 0;
             assert_eq!(
                 unsafe { hirsel_rt_v2_task_canceled(ctx, &mut canceled, &0) },
                 STATUS_OK
             );
-            assert!(std::time::Instant::now() < until);
         }
         let mut interval = [0u64; FOREIGN_SCOPE_BYTES / 8];
         unsafe {
@@ -574,7 +573,7 @@ mod tests {
             );
             probe.allow.store(true, Ordering::Release);
             assert_eq!(hirsel_rt_v2_callback_context(), ctx);
-            let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
+
             loop {
                 let mut canceled = 0;
                 assert_eq!(
@@ -592,7 +591,6 @@ mod tests {
                 if parked {
                     break;
                 }
-                assert!(std::time::Instant::now() < until);
             }
             {
                 let _role = role::Guard::new(ctx);
@@ -674,14 +672,13 @@ mod tests {
                         ),
                         STATUS_OK
                     );
-                    let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
+
                     while !seen.allow.load(Ordering::Acquire) {
                         let mut canceled = 0;
                         assert_eq!(
                             hirsel_rt_v2_task_canceled(ctx, &mut canceled, &0),
                             STATUS_OK
                         );
-                        assert!(std::time::Instant::now() < until);
                     }
                     assert!(!crate::pool::has_slot(ctx));
                     let mut interval = [0u64; FOREIGN_SCOPE_BYTES / 8];

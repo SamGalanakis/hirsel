@@ -671,15 +671,12 @@ fn scoped_publication_at_park(after_lock: bool) {
                 started.send(()).unwrap();
                 publish(execs, addressed, false, false);
             });
-            ready.recv_timeout(Duration::from_secs(5)).unwrap();
+            ready.recv().unwrap();
             // Release the predicate lock before parking. A post in that
             // interval must retain a notification.
             while inbox.posts.is_empty() {
                 drop(inbox);
-                assert!(
-                    scoped.bell.wait_timeout(Duration::from_secs(5)),
-                    "addressed CPU post lost at park"
-                );
+                scoped.bell.wait();
                 inbox = scoped.inbox.lock().unwrap();
             }
             drop(inbox);

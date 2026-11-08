@@ -27,7 +27,7 @@ loader.exec_module(bench)
 
 
 def exchange(port, method, target, body=None):
-    connection = http.client.HTTPConnection('127.0.0.1', port, timeout=60)
+    connection = http.client.HTTPConnection('127.0.0.1', port)
     connection.request(method, target, body, {'content-type': 'application/json', 'connection': 'close'})
     # Wait for the server to close its half too, rather than sampling while it
     # still owns the response body or is noticing our keep-alive disconnect.

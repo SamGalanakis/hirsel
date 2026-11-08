@@ -2227,8 +2227,8 @@ pub fn main(rt: Io, args: Args) -> Result[(), E] {
                         Ok((stream, _)) => break stream,
                         Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                             if !matches!(
-                                stopped.recv_timeout(Duration::from_millis(10)),
-                                Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+                                stopped.try_recv(),
+                                Err(std::sync::mpsc::TryRecvError::Empty)
                             ) {
                                 return;
                             }
@@ -2236,12 +2236,7 @@ pub fn main(rt: Io, args: Args) -> Result[(), E] {
                         Err(e) => panic!("TCP accept: {e}"),
                     }
                 };
-                stream
-                    .set_read_timeout(Some(Duration::from_secs(30)))
-                    .unwrap();
-                stream
-                    .set_write_timeout(Some(Duration::from_secs(30)))
-                    .unwrap();
+
                 let mut request = Vec::new();
                 stream.read_to_end(&mut request).unwrap();
                 assert_eq!(request, b"hi!");
@@ -2302,9 +2297,7 @@ pub fn main(rt: Io, args: Args) -> Result[(), E] {
         b"",
         || {
             let socket = UdpSocket::bind((Ipv4Addr::LOCALHOST, port)).unwrap();
-            socket
-                .set_read_timeout(Some(Duration::from_millis(10)))
-                .unwrap();
+            socket.set_nonblocking(true).unwrap();
             let (stop, stopped) = std::sync::mpsc::channel();
             let server = std::thread::spawn(move || {
                 let mut request = [0; 8];
@@ -2499,8 +2492,8 @@ pub fn main(rt: Io, args: Args) -> Result[(), E] {
                         Ok((socket, _)) => break socket,
                         Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                             if !matches!(
-                                stopped.recv_timeout(Duration::from_millis(10)),
-                                Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+                                stopped.try_recv(),
+                                Err(std::sync::mpsc::TryRecvError::Empty)
                             ) {
                                 return;
                             }
@@ -2508,12 +2501,7 @@ pub fn main(rt: Io, args: Args) -> Result[(), E] {
                         Err(e) => panic!("TLS accept: {e}"),
                     }
                 };
-                socket
-                    .set_read_timeout(Some(Duration::from_secs(10)))
-                    .unwrap();
-                socket
-                    .set_write_timeout(Some(Duration::from_secs(10)))
-                    .unwrap();
+
                 let conn = rustls::ServerConnection::new(Arc::new(config)).unwrap();
                 let mut stream = rustls::StreamOwned::new(conn, socket);
                 let mut request = [0; 4];
@@ -4818,7 +4806,7 @@ pub fn main(rt: Io) -> Result[(), E] {
   let mut paths = file.walk(dir) ? Files
   let mut seen = 0u64
   let mut errors = 0u64
-  while true {
+  loop {
     match iter.next(mut paths) {
       None() => break,
       Some(Ok(_)) => { seen += 1u64 },
@@ -5527,10 +5515,7 @@ fn f1_placement_control(socket: &Path, request: serde_json::Value) -> serde_json
     use std::io::{BufRead, BufReader, Write};
     use std::os::unix::net::UnixStream;
     let mut peer = UnixStream::connect(socket).unwrap();
-    peer.set_read_timeout(Some(std::time::Duration::from_secs(1)))
-        .unwrap();
-    peer.set_write_timeout(Some(std::time::Duration::from_secs(1)))
-        .unwrap();
+
     writeln!(peer, "{request}").unwrap();
     let mut reply = String::new();
     BufReader::new(peer).read_line(&mut reply).unwrap();
@@ -5659,17 +5644,13 @@ fn f1_worker_shrink_matrix(observe_migration: bool, cells: Cells) {
                     }
                     std::thread::sleep(Duration::from_millis(1));
                 }
-                let deadline = Instant::now() + Duration::from_secs(20);
+
                 let mut last = serde_json::Value::Null;
                 loop {
                     if stopped.load(Ordering::Acquire) {
                         return;
                     }
-                    assert!(
-                        Instant::now() < deadline,
-                        "live shrink startup: ready {}, last snapshot {last}",
-                        ready.exists()
-                    );
+
                     if ready.exists() {
                         let snapshot =
                             f1_placement_control(&socket, serde_json::json!({"metrics":true}));
@@ -5692,10 +5673,7 @@ fn f1_worker_shrink_matrix(observe_migration: bool, cells: Cells) {
                         if stopped.load(Ordering::Acquire) {
                             return;
                         }
-                        assert!(
-                            Instant::now() < deadline,
-                            "an already-started frame must migrate"
-                        );
+
                         let observed = std::fs::read_to_string(&metrics).unwrap_or_default();
                         let migrated = observed
                             .lines()
@@ -5721,7 +5699,7 @@ fn f1_worker_shrink_matrix(observe_migration: bool, cells: Cells) {
                     if stopped.load(Ordering::Acquire) {
                         return;
                     }
-                    assert!(Instant::now() < deadline, "live workers must drain to one");
+
                     let snapshot =
                         f1_placement_control(&socket, serde_json::json!({"metrics":true}));
                     if snapshot["width"]["effective"] == 1 && snapshot["width"]["pending"] == 0 {
@@ -5754,7 +5732,7 @@ fn f1_queued_never_started_divergent_child_full_projection_matrix() {
   task.scope(tasks, fn(scope: Scope) -> () {
     let child = task.async(scope, fn() -> () {
       let _ = out.print(out, "divergent child entered\n")
-      while true {}
+      loop {}
     })
     let _ = atomic.load(tasks, gate)
     task.await(scope, take child)

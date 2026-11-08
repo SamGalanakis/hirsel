@@ -101,7 +101,7 @@ def main():
                             if perf: perf.stop()
                             if client and client.poll() is None: client.terminate();client.communicate()
                             if server:
-                                server.stdin.close();server.wait(timeout=30)
+                                server.stdin.close();server.wait()
                                 if server.returncode: raise ValueError((out/'server.log').read_text())
             a.output.write_text(json.dumps(data,indent=2)+'\n')
             print(f'B1 servers: round {r+1}/{a.rounds}',flush=True)

@@ -50,4 +50,4 @@ with tempfile.TemporaryDirectory(prefix='tasks-e2e-') as temporary:
         server.stop()
         if watcher is not None and watcher.poll() is None:
             watcher.terminate()
-            watcher.wait(15)
+            watcher.wait()

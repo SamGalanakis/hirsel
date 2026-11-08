@@ -22,24 +22,24 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parents[2]
 # Sources whose ignored cases tools/check-native.sh runs, with the stage's selection.
 NATIVE = [
-    ('crates/hirsel-cli/tests/cli/ordered_qualification.rs', '//:hirsel-cli-test-cli-shard-1 -- "${long[@]}" $(libtest ordered_qualification:: runtime50_ordered:: --ignored --test-threads=1)'),
-    ('crates/hirsel-cli/tests/cli/runtime50_ordered.rs', '//:hirsel-cli-test-cli-shard-1 -- "${long[@]}" $(libtest ordered_qualification:: runtime50_ordered:: --ignored --test-threads=1)'),
+    ('crates/hirsel-cli/tests/cli/ordered_qualification.rs', '//:hirsel-cli-test-cli-shard-1 -- $(libtest ordered_qualification:: runtime50_ordered:: --ignored --test-threads=1)'),
+    ('crates/hirsel-cli/tests/cli/runtime50_ordered.rs', '//:hirsel-cli-test-cli-shard-1 -- $(libtest ordered_qualification:: runtime50_ordered:: --ignored --test-threads=1)'),
     ('crates/hirsel-pipeline-tests/tests/rc/flat_storage_audit_16.rs', '$(libtest flat_storage_audit_16::native_flat_region_copy_parity --ignored --test-threads=1)'),
     ('crates/hirsel-pipeline-tests/tests/rc/native_desc_cell_16.rs', '$(libtest native_desc_cell_16:: --ignored --test-threads=1)'),
     ('crates/hirsel-pipeline-tests/tests/rc/native_simd_eq_17.rs', '$(libtest native_simd_eq_17:: --ignored --test-threads=1)'),
     ('crates/hirsel-pipeline-tests/tests/rc/isolate_bytes_leak_17.rs', '$(libtest isolate_bytes_leak_17::isolate_returns_unique_bytes --ignored --test-threads=1)'),
     ('crates/hirsel-pipeline-tests/tests/rc/rc_import.rs', '$(libtest rc_import::loop_version_matches_reference_heap_llvm_and_cranelift --ignored --test-threads=1)'),
-    ('crates/hirsel-llvm/src/', '//:hirsel-llvm-unittest //:hirsel-llvm-test-it -- "${timeout[@]}" $(libtest --include-ignored)'),
-    ('crates/hirsel-llvm/tests/it/', '//:hirsel-llvm-unittest //:hirsel-llvm-test-it -- "${timeout[@]}" $(libtest --include-ignored)'),
-    ('crates/hirsel-lir/tests/it/layout.rs', '//:hirsel-lir-test-it -- "${timeout[@]}" $(libtest layout:: --ignored)'),
+    ('crates/hirsel-llvm/src/', '//:hirsel-llvm-unittest //:hirsel-llvm-test-it -- $(libtest --include-ignored)'),
+    ('crates/hirsel-llvm/tests/it/', '//:hirsel-llvm-unittest //:hirsel-llvm-test-it -- $(libtest --include-ignored)'),
+    ('crates/hirsel-lir/tests/it/layout.rs', '//:hirsel-lir-test-it -- $(libtest layout:: --ignored)'),
     ('crates/hirsel-driver/tests/it/native.rs', '$(libtest native:: --include-ignored --test-threads=4)'),
     ('crates/hirsel-pipeline-tests/tests/rc/rc_library_', '$(libtest rc_library_ --include-ignored --test-threads=4)'),
-    ('crates/hirsel-pipeline-tests/tests/front/llvm_scalar_library.rs', '//:hirsel-pipeline-tests-test-front-shard-1 -- "${timeout[@]}" $(libtest llvm_scalar_library:: --include-ignored)'),
+    ('crates/hirsel-pipeline-tests/tests/front/llvm_scalar_library.rs', '//:hirsel-pipeline-tests-test-front-shard-1 -- $(libtest llvm_scalar_library:: --include-ignored)'),
     ('crates/hirsel-pipeline-tests/tests/rc/rc_maps_native.rs', '$(libtest rc_maps_native:: --include-ignored --test-threads=1)'),
-    ('crates/hirsel-pipeline-tests/tests/rc/unique_copy_nested_20.rs', '//:hirsel-pipeline-tests-test-rc-shard-1 -- "${long[@]}" $(libtest unique_copy_nested_20:: --ignored --test-threads=1)'),
-    ('crates/hirsel-pipeline-tests/tests/rc/rc_borrow_cursor_8.rs', '//:hirsel-pipeline-tests-test-rc-shard-1 -- "${long[@]}" $(libtest rc_borrow_cursor_ --ignored --test-threads=1)'),
-    ('crates/hirsel-pipeline-tests/tests/rc/rc_borrow_cursor_field_match_13.rs', '//:hirsel-pipeline-tests-test-rc-shard-1 -- "${long[@]}" $(libtest rc_borrow_cursor_ --ignored --test-threads=1)'),
-    ('crates/hirsel-pipeline-tests/tests/rc/rc_borrow_cursor_compose_13.rs', '//:hirsel-pipeline-tests-test-rc-shard-1 -- "${long[@]}" $(libtest rc_borrow_cursor_ --ignored --test-threads=1)'),
+    ('crates/hirsel-pipeline-tests/tests/rc/unique_copy_nested_20.rs', '//:hirsel-pipeline-tests-test-rc-shard-1 -- $(libtest unique_copy_nested_20:: --ignored --test-threads=1)'),
+    ('crates/hirsel-pipeline-tests/tests/rc/rc_borrow_cursor_8.rs', '//:hirsel-pipeline-tests-test-rc-shard-1 -- $(libtest rc_borrow_cursor_ --ignored --test-threads=1)'),
+    ('crates/hirsel-pipeline-tests/tests/rc/rc_borrow_cursor_field_match_13.rs', '//:hirsel-pipeline-tests-test-rc-shard-1 -- $(libtest rc_borrow_cursor_ --ignored --test-threads=1)'),
+    ('crates/hirsel-pipeline-tests/tests/rc/rc_borrow_cursor_compose_13.rs', '//:hirsel-pipeline-tests-test-rc-shard-1 -- $(libtest rc_borrow_cursor_ --ignored --test-threads=1)'),
 ]
 # These workers require parent-supplied input and cannot run alone in a gate.
 DELEGATED = {

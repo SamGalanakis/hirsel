@@ -20,7 +20,7 @@ class NativeShards(unittest.TestCase):
         self.assertEqual(set(parts), programs)
         self.assertEqual(len(parts), len(programs))
         command = native.command(programs)
-        self.assertEqual(command[command.index(native.NATIVE_TARGETS[0] + '-shard-1'):-3], native.targets(programs))
+        self.assertEqual(command[command.index(native.NATIVE_TARGETS[0] + '-shard-1'):], native.targets(programs))
 
     def test_measured_costs_pack_longest_first_with_the_slower_backend(self):
         with tempfile.TemporaryDirectory() as directory:

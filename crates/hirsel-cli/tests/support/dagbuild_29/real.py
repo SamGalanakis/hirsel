@@ -58,7 +58,7 @@ def qualify(root,out,binaries,run,env,hirsel,widths):
                         (out/'real-receipts.json').write_text(json.dumps(receipts,indent=2))
                         os.close(fd)
                         continue
-                    connection=socket.socket(socket.AF_UNIX);connection.settimeout(5);connection.connect(str(ctl));connection.sendall(b'{"metrics":true}\n')
+                    connection=socket.socket(socket.AF_UNIX);connection.connect(str(ctl));connection.sendall(b'{"metrics":true}\n')
                     reply=b''
                     while not reply.endswith(b'\n'):reply+=connection.recv(65536)
                     connection.close();snapshot=json.loads(reply);(d/'control.json').write_bytes(reply)

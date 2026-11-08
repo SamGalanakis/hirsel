@@ -293,9 +293,7 @@ fn opaque_saved_home_request_progresses_with_concurrent_timer_and_stops_reclaim_
                 let control = run.control();
                 let stopper = matches!(mode, 1 | 3).then(|| {
                     std::thread::spawn(move || {
-                        waiting
-                            .recv_timeout(std::time::Duration::from_secs(5))
-                            .unwrap();
+                        waiting.recv().unwrap();
                         control.stop();
                     })
                 });

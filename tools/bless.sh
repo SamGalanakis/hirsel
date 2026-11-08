@@ -103,7 +103,7 @@ bless_in_test() {
 for what in "$@"; do
   case "$what" in
     all) for each in "${in_test[@]}"; do bless_in_test "$each"; done ;;
-    exclusions) "$buck2" test -c hirsel.full=true -c hirsel.tests=host //:gate-native-full -- --test-arg=--bless --timeout 14400 ;;
+    exclusions) "$buck2" test -c hirsel.full=true -c hirsel.tests=host //:gate-native-full -- --test-arg=--bless ;;
     native-selection)
       derived="$("$buck2" build -c hirsel.native_selection=derive //:native-selection --show-full-simple-output)"
       cp "$derived" native-tests/regressions/native-selection.json ;;

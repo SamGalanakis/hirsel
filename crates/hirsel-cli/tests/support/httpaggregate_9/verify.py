@@ -39,7 +39,7 @@ class Server(socketserver.TCPServer):
 
 class Handler(socketserver.BaseRequestHandler):
     def handle(self):
-        self.request.settimeout(5)
+
         data = b''
         while b'\r\n\r\n' not in data and len(data) < 8192:
             part = self.request.recv(4096)
@@ -221,7 +221,7 @@ def verify(hirsel, root, output, prebuilt=None):
         server.server_close()
         stopped = True
         try:
-            with socket.create_connection(('127.0.0.1', server.server_address[1]), timeout=1):
+            with socket.create_connection(('127.0.0.1', server.server_address[1])):
                 raise AssertionError('server still reachable')
         except ConnectionRefusedError:
             pass

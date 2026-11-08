@@ -409,8 +409,7 @@ fn assert_closed(events: &[hirsel_rt::io::Event], count: usize) {
 fn loopback_boundaries_decoding_legacy_and_offline_replay() {
     with_compiler_stack(|| {
         let path = fixture("main");
-        // Each live row arms a 30 s accept window. Check the program before any
-        // is armed, so every run of this path reuses its session.
+        // Check before launching live peers so every run reuses its session.
         check_safe_path(&path, hirsel_driver::session::Policy::default()).unwrap();
         let mut loaded = checked(&path);
         let program = ready(&mut loaded);
@@ -516,28 +515,22 @@ fn loopback_boundaries_decoding_legacy_and_offline_replay() {
                     Some(std::thread::spawn(move || {
                         listener.set_nonblocking(true).unwrap();
                         for exchange in 0..if redirect { 2 } else { 1 } {
-                            // Bounded accept avoids a hung helper when a caller fails before connect.
-                            let deadline = std::time::Instant::now() + Duration::from_secs(30);
+                            // Stop accepting once the caller has returned without connecting.
+
                             let (mut stream, request) = loop {
                                 let mut stream = loop {
                                     match listener.accept() {
                                         Ok((stream, _)) => break stream,
                                         Err(error)
                                             if error.kind() == std::io::ErrorKind::WouldBlock
-                                                && !returned.load(Ordering::Acquire)
-                                                && std::time::Instant::now() < deadline =>
+                                                && !returned.load(Ordering::Acquire) =>
                                         {
                                             std::thread::sleep(Duration::from_millis(5))
                                         }
                                         Err(error) => panic!("accept: {error}"),
                                     }
                                 };
-                                stream
-                                    .set_read_timeout(Some(Duration::from_secs(10)))
-                                    .unwrap();
-                                stream
-                                    .set_write_timeout(Some(Duration::from_secs(10)))
-                                    .unwrap();
+
                                 let mut request = vec![];
                                 while !request.ends_with(b"\r\n\r\n") {
                                     let mut byte = [0];

@@ -98,7 +98,7 @@ fn ordered_width_is_installed_before_root_readiness_in_repeated_runs() {
             let (release_tx, release_rx) = std::sync::mpsc::sync_channel(0);
             let observer = manager.clone();
             let observer = std::thread::spawn(move || {
-                ready_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+                ready_rx.recv().unwrap();
                 let sample = observer.snapshot();
                 release_tx.send(()).unwrap();
                 sample
@@ -114,7 +114,7 @@ fn ordered_width_is_installed_before_root_readiness_in_repeated_runs() {
                 move |_| {
                     assert_eq!(control.worker_width(), width);
                     ready_tx.send(()).unwrap();
-                    release_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+                    release_rx.recv().unwrap();
                     crate::STATUS_OK
                 },
             );
@@ -216,7 +216,7 @@ fn admitted_control_answers_before_the_first_pool_claim() {
         None,
     );
     let mut peer = UnixStream::connect(&path).unwrap();
-    peer.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+
     peer.write_all(b"{\"metrics\":true}\n").unwrap();
     let mut reply = String::new();
     std::io::BufRead::read_line(&mut std::io::BufReader::new(peer), &mut reply).unwrap();

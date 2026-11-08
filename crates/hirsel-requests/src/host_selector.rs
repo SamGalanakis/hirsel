@@ -950,13 +950,8 @@ mod tests {
                     .map(|_| ());
                 tx.send(result).unwrap();
             });
-            let result = rx.recv_timeout(std::time::Duration::from_secs(2));
+            let result = rx.recv();
             drop(held);
-            if result.is_err() {
-                // Release the held source before joining even on the old
-                // blocking implementation; this regression cannot hang CI.
-                let _ = rx.recv_timeout(std::time::Duration::from_secs(5));
-            }
             worker.join().unwrap();
             assert!(
                 result

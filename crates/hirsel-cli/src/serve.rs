@@ -238,8 +238,8 @@ fn start(socket: &Path, workspace: &Path) -> Option<UnixStream> {
         });
     }
     let mut child = command.spawn().ok()?;
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while Instant::now() < deadline {
+
+    loop {
         if let Ok(stream) = UnixStream::connect(socket) {
             return Some(stream);
         }
@@ -248,7 +248,6 @@ fn start(socket: &Path, workspace: &Path) -> Option<UnixStream> {
         }
         std::thread::sleep(Duration::from_millis(10));
     }
-    None
 }
 
 fn send_with_fds(stream: &UnixStream, bytes: &[u8], fds: &[RawFd]) -> std::io::Result<()> {

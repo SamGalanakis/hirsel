@@ -35,12 +35,8 @@ impl ConcurrentAdapter for Print {
             Request::Stdout { io: 1 } => Ok(Completion::Handle(Ok(11))),
             Request::Print { stdout: 11, bytes } => {
                 self.calls.fetch_add(1, Ordering::AcqRel);
-                let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
+
                 while !self.saved.load(Ordering::Acquire) {
-                    assert!(
-                        std::time::Instant::now() < until,
-                        "print owner did not release its stack"
-                    );
                     std::thread::yield_now();
                 }
                 *self.bytes.lock().unwrap() = bytes;

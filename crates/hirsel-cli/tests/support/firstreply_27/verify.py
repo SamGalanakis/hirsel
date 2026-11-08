@@ -17,6 +17,7 @@ import socket
 import struct
 import subprocess
 import threading
+import time
 
 
 def compact(value):
@@ -65,25 +66,35 @@ class Peer:
     def __init__(self, path, payload):
         self.path, self.payload = path, payload
         self.ready, self.release = threading.Event(), threading.Event()
+        self.stopped = threading.Event()
         self.events = []
         self.listener = socket.socket(socket.AF_UNIX)
-        self.listener.settimeout(10)
+
         self.listener.bind(str(path))
         self.listener.listen(1)  # bound/listening before the client starts
+        self.listener.setblocking(False)
         self.thread = threading.Thread(target=self.serve, daemon=True)
         self.thread.start()
 
     def serve(self):
         try:
-            with self.listener.accept()[0] as stream:
-                stream.settimeout(10)
+            while not self.stopped.is_set():
+                try:
+                    stream, _ = self.listener.accept()
+                    break
+                except BlockingIOError:
+                    time.sleep(.001)
+            else:
+                return
+            with stream:
+
                 length = struct.unpack('!I', exact_read(stream, 4))[0]
                 assert 0 < length <= 2048
                 request = json.loads(exact_read(stream, length))
                 assert request['method'] in ('ping', 'normalize')
                 self.events.append(dict(request=request))
                 self.ready.set()
-                assert self.release.wait(10), 'release handshake missing'
+                assert self.release.wait(), 'release handshake missing'
                 if self.payload is not None:
                     stream.sendall(self.payload)
                     self.events.append('response-issued')
@@ -97,10 +108,9 @@ class Peer:
             self.listener.close()
 
     def finish(self):
+        self.stopped.set()
         self.release.set()
-        self.thread.join(12)
-        if self.thread.is_alive():
-            self.events.append('thread-timeout')
+        self.thread.join()
         self.path.unlink(missing_ok=True)
 
 
@@ -128,11 +138,11 @@ def real(hirsel, executable, manifest, root, label, deadline, env, width=1, cont
     (cell/'argv.json').write_text(compact(argv)+'\n')
     try:
         child = subprocess.Popen(argv, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        handshakes = [p.ready.wait(15) for p in peers]
+        handshakes = [p.ready.wait() for p in peers]
         (cell/'handshakes.json').write_text(compact(handshakes)+'\n')
         if control and all(handshakes):
             with socket.socket(socket.AF_UNIX) as connection:
-                connection.settimeout(5)
+
                 connection.connect(str(cell/'control'))
                 connection.sendall(b'{"metrics":true}\n')
                 response = b''

@@ -53,27 +53,6 @@ impl Parker {
             }
         }
     }
-    /// Bound the existing publication laws by their original deadlines.
-    #[cfg(test)]
-    pub(crate) fn wait_timeout(&self, timeout: std::time::Duration) -> bool {
-        if self.state.fetch_sub(1, Ordering::Acquire) == NOTIFIED {
-            return true;
-        }
-        let started = std::time::Instant::now();
-        loop {
-            let Some(left) = timeout.checked_sub(started.elapsed()) else {
-                return self.state.swap(EMPTY, Ordering::Acquire) == NOTIFIED;
-            };
-            self.wait.wait_timeout(&self.state, PARKED, left);
-            if self
-                .state
-                .compare_exchange(NOTIFIED, EMPTY, Ordering::Acquire, Ordering::Relaxed)
-                .is_ok()
-            {
-                return true;
-            }
-        }
-    }
 }
 
 /// Multiple predicate waiters. Register before rechecking the event. The SC

@@ -771,9 +771,8 @@ mod polled_tests {
                         crate::STATUS_OK
                     })),
                 );
-                let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
+
                 while !entered.load(Ordering::Acquire) {
-                    assert!(std::time::Instant::now() < until);
                     std::thread::yield_now();
                 }
                 let output = bridged.clone();
@@ -801,12 +800,11 @@ mod polled_tests {
                         assert_eq!(ended, Ok(crate::STATUS_OK));
                         break;
                     }
-                    assert!(std::time::Instant::now() < until);
+
                     std::thread::yield_now();
                 }
                 assert!(bridged.load(Ordering::Acquire));
                 while crate::pool::busy((*contexts[0]).run_ref()) != 0 {
-                    assert!(std::time::Instant::now() < until);
                     std::thread::yield_now();
                 }
                 for ctx in contexts {

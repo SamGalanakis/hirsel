@@ -39,7 +39,7 @@ def main(a):
             while proc.poll() is None:
                 try:
                     with socket.socket(socket.AF_UNIX) as s:
-                        s.settimeout(.05);s.connect(str(placement));s.sendall(b'{"metrics":true}\n');reply=b''
+                        s.connect(str(placement));s.sendall(b'{"metrics":true}\n');reply=b''
                         while not reply.endswith(b'\n'):
                             part=s.recv(65536)
                             if not part:break

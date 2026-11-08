@@ -66,7 +66,7 @@ class Handler(socketserver.BaseRequestHandler):
     def handle(self):
         try:
             started = time.monotonic()
-            self.request.settimeout(5)
+
             data = b''
             while b'\r\n\r\n' not in data:
                 chunk = self.request.recv(4096)
@@ -415,7 +415,7 @@ def verify(hirsel, root, output, case=None):
         server.stop.set()
         server.shutdown()
         server.server_close()
-        thread.join(10)
+        thread.join()
         assert not thread.is_alive()
         tape_hashes = {str(p): hashlib.sha256(p.read_bytes()).hexdigest() for p, _ in tapes}
         result['tape_hashes'] = tape_hashes
@@ -465,7 +465,7 @@ def verify(hirsel, root, output, case=None):
         server.stop.set()
         server.shutdown()
         server.server_close()
-        thread.join(10)
+        thread.join()
 
 
 if __name__ == '__main__':

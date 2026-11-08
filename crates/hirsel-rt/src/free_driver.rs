@@ -256,8 +256,7 @@ mod tests {
         assert!(driver.try_claim().is_none());
         writer.write_all(b"x").unwrap();
         let mut events = Vec::new();
-        turn.poll(Some(Duration::from_secs(2)), &mut events)
-            .unwrap();
+        turn.poll(None, &mut events).unwrap();
         assert!(
             events
                 .iter()
@@ -294,8 +293,7 @@ mod tests {
         turn.acknowledge().unwrap();
         driver.wake().unwrap();
         let mut events = Vec::new();
-        turn.poll(Some(Duration::from_secs(2)), &mut events)
-            .unwrap();
+        turn.poll(None, &mut events).unwrap();
         assert!(events.is_empty(), "wake is not a host observation");
         assert_eq!(
             unsafe { libc::read(driver.wake.as_raw_fd(), (&raw mut count).cast(), 8) },

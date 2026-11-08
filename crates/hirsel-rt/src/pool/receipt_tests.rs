@@ -62,9 +62,7 @@ fn cpu_receipt_delayed_before_claim_is_withdrawn_without_invoking_the_core() {
         );
         EXEC.with(|e| e.set(std::ptr::null()));
     });
-    pending
-        .recv_timeout(std::time::Duration::from_secs(5))
-        .unwrap();
+    pending.recv().unwrap();
     unsafe {
         let run = (*ctx).run_ref();
         run.control.request(Stop::Requested);
@@ -108,9 +106,7 @@ fn cpu_receipt_stop_during_claim_keeps_the_borrow_and_wins_over_a_later_error() 
             assert_eq!(exec.held.load(Ordering::Relaxed), held);
             EXEC.with(|e| e.set(std::ptr::null()));
         });
-        pending
-            .recv_timeout(std::time::Duration::from_secs(5))
-            .unwrap();
+        pending.recv().unwrap();
         unsafe {
             let run = (*ctx).run_ref();
             run.control.request(Stop::Requested);

@@ -966,8 +966,7 @@ fn cooperative_connect_retains_socket_across_handle_allocation() {
 fn udp_host_datagrams_discard_outside_senders_and_replay_without_sockets() {
     use std::net::UdpSocket;
     let peer = UdpSocket::bind("127.0.0.1:0").unwrap();
-    peer.set_read_timeout(Some(std::time::Duration::from_secs(5)))
-        .unwrap();
+
     let peer_addr = SocketAddr::of(peer.local_addr().unwrap());
     let outside = UdpSocket::bind("127.0.0.1:0").unwrap();
     let rules = BTreeSet::from([

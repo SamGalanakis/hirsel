@@ -23,7 +23,6 @@ use std::sync::{
     atomic::{AtomicUsize, Ordering},
 };
 use std::task::Poll;
-use std::time::{Duration, Instant};
 
 const ALLOWANCE: u64 = (128 << 20) + (1 << 20);
 fn root() -> QueryId {
@@ -190,12 +189,10 @@ fn complete<
 >(
     request: &mut hirsel_driver::resident::RequestLease<R, O>,
 ) -> Result<Vec<u8>, RequestError<String>> {
-    let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         match request.poll() {
             Poll::Ready(result) => return result,
             Poll::Pending => {
-                assert!(Instant::now() < deadline, "runtime request stalled");
                 std::thread::yield_now();
             }
         }

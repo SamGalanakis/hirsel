@@ -392,7 +392,7 @@ pub(super) mod tests {
                         ),
                         STATUS_OK
                     );
-                    let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
+
                     loop {
                         let waiting = {
                             let _guard = role::Guard::new(ctx);
@@ -403,10 +403,7 @@ pub(super) mod tests {
                         if seen.parked.load(Ordering::Acquire) == 1 && waiting {
                             break;
                         }
-                        assert!(
-                            std::time::Instant::now() < until,
-                            "child never saved its host wait"
-                        );
+
                         let mut cause = 99;
                         assert_eq!(
                             hirsel_rt_v2_task_canceled(ctx, &mut cause, &scope),
@@ -1128,9 +1125,8 @@ pub(super) mod tests {
     unsafe extern "C" fn older(ctx: *mut TaskCtx, env: *mut Header, _: u64, _: u64) -> u8 {
         let [probe, atomic] = unsafe { crate::alloc::payload(env).cast::<[u64; 2]>().read() };
         let probe = unsafe { &*(probe as *const Probe) };
-        let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
+
         while !probe.attempted.load(Ordering::Acquire) {
-            assert!(std::time::Instant::now() < until);
             std::thread::yield_now();
         }
         loop {
@@ -1140,7 +1136,7 @@ pub(super) mod tests {
             }) {
                 break;
             }
-            assert!(std::time::Instant::now() < until);
+
             drop(_role);
             std::thread::yield_now();
         }

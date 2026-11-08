@@ -1,6 +1,6 @@
 //! The two repaired home/role/compute cycles on real threads and fibers, each
 //! under controlled orderings of its permit, role and home transitions, in an
-//! owned child process with the five-second watchdog of progress_tests.rs and
+//! owned child process as in progress_tests.rs and
 //! progress_audit_45.rs. Each run checks its transition transcript.
 //!
 //! - Contraction: a compute child owns C and R and issues a synchronous home
@@ -12,7 +12,6 @@
 //!   (with or without a contraction once the Call is queued).
 use crate::pool::*;
 use crate::tasks::{self, role};
-use std::sync::mpsc;
 
 const CHILD: &str = "HIRSEL_RUNTIME50_PROGRESS";
 const TEST: &str =
@@ -344,22 +343,11 @@ fn runtime50_composed_home_compute_progress() {
             .stdout(std::process::Stdio::null())
             .spawn()
             .unwrap();
-        let pid = child.id();
-        let (done, ended) = mpsc::channel();
-        let watchdog = std::thread::spawn(move || {
-            done.send(child.wait_with_output().unwrap()).unwrap();
-        });
-        let output = ended.recv_timeout(Duration::from_secs(5));
-        if output.is_err() {
-            // Only our child, so a deadlocked runtime cannot strand workers.
-            unsafe { libc::kill(pid as i32, libc::SIGKILL) };
-        }
-        let output = output.unwrap_or_else(|_| ended.recv().unwrap());
-        watchdog.join().unwrap();
+        let output = child.wait_with_output().unwrap();
         let log = String::from_utf8_lossy(&output.stderr);
         assert!(
             output.status.success() && log.contains("RT50 transcript reproduced"),
-            "variant {variant:?} failed normal progress within the watchdog:\n{log}"
+            "variant {variant:?} failed normal progress:\n{log}"
         );
         eprintln!("RUNTIME50 progress {variant:?}: ok");
     }

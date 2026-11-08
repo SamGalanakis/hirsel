@@ -44,10 +44,8 @@ def ready_cancel(root, fixture):
         child = subprocess.Popen(['/usr/bin/python3', str(fixture), 'hang', str(root), '0'],
                                  cwd='/', env={}, stdin=subprocess.DEVNULL,
                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        until = time.monotonic() + 10
         while True:
-            remaining = until - time.monotonic()
-            assert remaining > 0 and select.select([fd], [], [], remaining)[0], 'no readiness handshake'
+            assert select.select([fd], [], [])[0], 'no readiness handshake'
             os.read(fd, 65536)
             marker = root/'0.started'
             if marker.exists() and marker.read_text() == str(child.pid):

@@ -47,3 +47,7 @@ ignore = .git, buck-out, .buck2, target, tools/buck2/bin
 [buck2_re_client]
 execution_concurrency_limit = 32
 max_concurrent_uploads_per_action = 1
+[test]
+# The pinned OSS runner has no unbounded mode. One outer bound covers all tests.
+timeout_default_s = 86400
+v2_test_executor = tools/buck2/test_executor.py

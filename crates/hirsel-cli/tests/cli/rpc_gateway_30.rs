@@ -608,7 +608,6 @@ fn rpc_gateway_30_disconnect_during_observed_backoff() {
     use std::io::{BufRead, BufReader, Read, Write};
     use std::os::unix::net::{UnixListener, UnixStream};
     use std::process::Stdio;
-    use std::time::{Duration, Instant};
     let root = evidence("rpcgate-backoff-");
     let manifest = package(&root);
     let sockets = tempfile::Builder::new()
@@ -663,17 +662,13 @@ fn rpc_gateway_30_disconnect_during_observed_backoff() {
         reader.read_line(&mut ready).unwrap();
         assert_eq!(ready, "{\"listening\":true}\n");
         let mut client = UnixStream::connect(&socket).unwrap();
-        client
-            .set_read_timeout(Some(Duration::from_secs(5)))
-            .unwrap();
+
         let payload = br#"{"id":"x","method":"echo","args":"value"}"#;
         let mut frame = (payload.len() as u32).to_be_bytes().to_vec();
         frame.extend(payload);
         client.write_all(&frame).unwrap();
         let (mut accepted, _) = peer.accept().unwrap();
-        accepted
-            .set_read_timeout(Some(Duration::from_secs(5)))
-            .unwrap();
+
         let mut header = [0; 4];
         accepted.read_exact(&mut header).unwrap();
         let size = u32::from_be_bytes(header) as usize;
@@ -685,9 +680,8 @@ fn rpc_gateway_30_disconnect_during_observed_backoff() {
         drop(accepted);
         // Public prefix parsing observes the third armed timer: session,
         // request, then retry backoff. No sleep guesses the cancellation phase.
-        let stop = Instant::now() + Duration::from_secs(2);
-        let mut witnessed = None;
-        while Instant::now() < stop {
+
+        let witness = loop {
             if let Ok(bytes) = fs::read(&tape)
                 && let Ok((record, _)) = hirsel_rt::tape_binary::parse_prefix(&bytes)
             {
@@ -697,13 +691,11 @@ fn rpc_gateway_30_disconnect_during_observed_backoff() {
                     .filter(|e| matches!(e.request, hirsel_rt::io::Request::SleepUntil { .. }))
                     .collect();
                 if timers.len() >= 3 {
-                    witnessed = Some(record);
-                    break;
+                    break record;
                 }
             }
             std::thread::yield_now();
-        }
-        let witness = witnessed.expect("backoff timer was never observed");
+        };
         assert_eq!(
             witness
                 .events

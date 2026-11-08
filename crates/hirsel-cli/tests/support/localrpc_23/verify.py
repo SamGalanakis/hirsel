@@ -110,7 +110,7 @@ def verify(hirsel, root, output):
             argv = command(engine, ['serve', str(path)], ('unix_listen',))
             p = subprocess.Popen(list(map(str, argv)), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env, preexec_fn=limits)
             try:
-                assert select.select([p.stdout], [], [], 60)[0], (label, 'no readiness')
+                assert select.select([p.stdout], [], [])[0], (label, 'no readiness')
                 ready = p.stdout.readline()
                 assert ready == b'{"listening":true}\n', (label, ready, p.communicate())
             except BaseException:
@@ -186,7 +186,7 @@ def verify(hirsel, root, output):
                 started = start(engine, label)
                 try:
                     with socket.socket(socket.AF_UNIX) as peer:
-                        peer.settimeout(5)
+
                         peer.connect(str(path))
                         packets = [frame(compact(r)) for r in requests]
                         if label.endswith('exact-frame'):
@@ -212,7 +212,7 @@ def verify(hirsel, root, output):
             started = start(engine, label)
             try:
                 with socket.socket(socket.AF_UNIX) as peer:
-                    peer.settimeout(5); peer.connect(str(path))
+                    peer.connect(str(path))
                     peer.sendall(frame(compact(ping)) + frame(b'{}'))
                     peer.shutdown(socket.SHUT_WR)
                     assert recv(peer) == compact(oracle(ping))
@@ -231,7 +231,7 @@ def verify(hirsel, root, output):
                 started = start(engine, label)
                 try:
                     with socket.socket(socket.AF_UNIX) as peer:
-                        peer.settimeout(5)
+
                         peer.connect(str(path)); peer.sendall(wire); peer.shutdown(socket.SHUT_WR)
                         if error is None and wire:
                             assert recv(peer) == compact(oracle(ping))
@@ -249,13 +249,13 @@ def verify(hirsel, root, output):
             for suffix, request, wire, error in responses:
                 label = engine + '-call-' + suffix
                 with socket.socket(socket.AF_UNIX) as listener:
-                    listener.settimeout(60); listener.bind(str(path)); listener.listen(1)
+                    listener.bind(str(path)); listener.listen(1)
                     argv = command(engine, ['call', str(path), compact(request).decode()], ('unix_connect',))
                     p = subprocess.Popen(list(map(str, argv)), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env, preexec_fn=limits)
                     try:
                         peer, _ = listener.accept()
                         with peer:
-                            peer.settimeout(5)
+
                             assert recv(peer) == compact(request)
                             assert peer.recv(1) == b''
                             peer.sendall(wire)

@@ -255,7 +255,7 @@ with slot(Path(sys.argv[2]), 1, ['crashed']):
                               stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True) as child:
             self.assertEqual(child.stdout.readline(), 'locked\n')
             child.kill()
-            child.wait(5)
+            child.wait()
             path = self.root / f'hirsel-capped-{os.getuid()}.slot-1.lock'
             self.assertEqual(json.loads(path.read_text())['pid'], child.pid)
             with patch.object(capped.time, 'sleep') as sleep, capped.slot(self.root, 1, ['replacement']):

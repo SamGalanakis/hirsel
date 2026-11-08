@@ -67,7 +67,7 @@ for backend in ['llvm','cranelift']:
     while child.poll() is None:
      try:
       with socket.socket(socket.AF_UNIX,socket.SOCK_STREAM) as client:
-       client.settimeout(1);client.connect(str(control));client.sendall(b'{"metrics":true}\n');reply=b''
+       client.connect(str(control));client.sendall(b'{"metrics":true}\n');reply=b''
        while b'\n' not in reply:reply+=client.recv(65536)
        peer_pid,peer_uid,peer_gid=struct.unpack('3i',client.getsockopt(socket.SOL_SOCKET,socket.SO_PEERCRED,12));assert peer_uid==os.getuid();receipt=json.loads(reply);samples.append(receipt)
        if receipt.get('worker_phase')=='running' and receipt.get('width',{}).get('effective')==width and receipt['width'].get('pending')==0:

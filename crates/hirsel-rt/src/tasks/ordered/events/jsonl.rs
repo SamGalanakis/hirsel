@@ -65,18 +65,13 @@ impl Trace {
         Self::completed(log)
     }
 
-    /// A diagnostic for known bounded callbacks, sharing the runtime proof
-    /// harness's existing deadline. No trace is captured before every owner left.
+    /// Wait for stopped callback owners before capturing a diagnostic trace.
     /// # Safety
     /// The admission thread retains the stopped run until this returns.
     pub(crate) unsafe fn bounded_stop(
         run: *mut crate::context::RunShared,
     ) -> Result<(), &'static str> {
-        let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
         while crate::pool::busy(unsafe { &*run }) != 0 {
-            if std::time::Instant::now() >= until {
-                return Err("bounded stopped worker did not leave");
-            }
             std::thread::yield_now();
         }
         Ok(())

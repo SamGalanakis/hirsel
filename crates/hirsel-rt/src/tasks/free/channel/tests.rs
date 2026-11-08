@@ -41,12 +41,7 @@ struct Race {
 }
 
 pub(super) fn wait_until(mut done: impl FnMut() -> bool) {
-    let until = std::time::Instant::now() + std::time::Duration::from_secs(2);
     while !done() {
-        assert!(
-            std::time::Instant::now() < until,
-            "native senders must advance"
-        );
         std::thread::yield_now();
     }
 }

@@ -182,7 +182,7 @@ def stages(stage, tier, *, planning=False):
     if not planning:
         os.environ.update(HIRSEL_BUCK2_CONFIG=' '.join(config), HIRSEL_PRIORITY='40')
     buck2 = [PY, 'tools/buck2/event_logs.py']
-    release, timeout, long = ['--target-platforms', '//tools/buck2:release'], ['--timeout', '1800'], ['--timeout', '14400']
+    release = ['--target-platforms', '//tools/buck2:release']
     stage('Buck2 toolchains and pool configuration', [PY, 'tools/buck2/prepare.py'])
     stage('Buck2 build files and test-cost coverage', [PY, 'tools/buck2/sync.py', '--check'])
     for test in sorted((TREE / 'tools/tests').glob('*.py')):
@@ -204,10 +204,10 @@ def stages(stage, tier, *, planning=False):
 
     def full_crate_tests(*arguments):
         return [PY, 'tools/buck2/full_gate_counts.py', '--run', *buck2, 'test', *config, *arguments,
-                '--', *long, '--test-arg=full_gate_', '--test-arg=--ignored']
+                '--', '--test-arg=full_gate_', '--test-arg=--ignored']
 
-    def test(*targets, after=timeout):
-        return [*buck2, 'test', *config, *targets, '--', *after]
+    def test(*targets):
+        return [*buck2, 'test', *config, *targets]
     from sync import NATIVE_FULL_SHARDS
     build_set = ('root//: - kind("_rust_test", root//:) - attrregexfilter(name, "-clippy$", root//:)'
                  ' - attrfilter(labels, gate, root//:) - kind("_link_hosts_local", root//:)'
@@ -239,9 +239,9 @@ def stages(stage, tier, *, planning=False):
     stage('full gate crate tests in release', full_crate_tests(*release, *libtests))
     stage('native and Lean checks', ['tools/check-native.sh'])
     stage('native matrix: both targets and named exclusions',
-          test('-c', 'hirsel.native_selection=true', *[f'//:gate-native-full-shard-{i}' for i in range(1, NATIVE_FULL_SHARDS + 1)], after=long))
+          test('-c', 'hirsel.native_selection=true', *[f'//:gate-native-full-shard-{i}' for i in range(1, NATIVE_FULL_SHARDS + 1)]))
     stage('agreement campaign on heap and native code (unrestricted)', [PY, 'tools/buck2/agree.py', '--native-full'])
-    stage('native passing corpus with independent second hash seed', test('//:gate-native-hash-sweep', after=long))
+    stage('native passing corpus with independent second hash seed', test('//:gate-native-hash-sweep'))
 
 
 def failing_ids(target, details):

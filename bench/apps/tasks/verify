@@ -10,7 +10,7 @@ from support import APP, Server, free_port
 
 
 def exchange(port, method, target, body=None, media='application/json'):
-    connection = http.client.HTTPConnection('127.0.0.1', port, timeout=30)
+    connection = http.client.HTTPConnection('127.0.0.1', port)
     connection.request(method, target, body, {'content-type': media})
     response = connection.getresponse()
     result = (response.status, response.read())
@@ -61,7 +61,7 @@ with tempfile.TemporaryDirectory(prefix='tasks-verify-') as scratch:
         try:
             pid = json.loads(server.marker.read_text())['pid']
             os.kill(pid, signal.SIGTERM)
-            assert server.process.wait(10) == 0, 'SIGTERM must exit while stdin stays open'
+            assert server.process.wait() == 0, 'SIGTERM must exit while stdin stays open'
         finally:
             server.stop()
     for mode, extra in [('memory', {'TASKS_STORE': 'memory'}), ('durable', {'TASKS_DURABILITY': 'durable'})]:

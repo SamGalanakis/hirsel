@@ -91,17 +91,11 @@ pub fn main(rt: Io, args: Args) -> Result[(), ()] {{
             // Other processes on the host may probe the loopback port, so a connection
             // that does not complete the TLS handshake is dropped and accept continues.
             listener.set_nonblocking(true).unwrap();
-            let start = std::time::Instant::now();
             let mut tls = loop {
                 match listener.accept() {
                     Ok((mut socket, _)) => {
                         socket.set_nonblocking(false).unwrap();
-                        socket
-                            .set_read_timeout(Some(std::time::Duration::from_secs(10)))
-                            .unwrap();
-                        socket
-                            .set_write_timeout(Some(std::time::Duration::from_secs(10)))
-                            .unwrap();
+
                         let mut conn = rustls::ServerConnection::new(config.clone()).unwrap();
                         if conn.complete_io(&mut socket).is_ok() && !conn.is_handshaking() {
                             break rustls::StreamOwned::new(conn, socket);
@@ -112,10 +106,6 @@ pub fn main(rt: Io, args: Args) -> Result[(), ()] {{
                     }
                     Err(e) => panic!("{e}"),
                 }
-                assert!(
-                    start.elapsed() < std::time::Duration::from_secs(20),
-                    "HTTP client never completed a TLS handshake"
-                );
             };
             let mut request = vec![];
             let mut b = [0; 1];

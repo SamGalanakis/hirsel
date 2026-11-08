@@ -6,7 +6,6 @@ use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
-use std::time::Duration;
 
 const FILE: &str = include_str!("stream_replay/file.hir");
 const HTTP: &str = include_str!("stream_replay/http.hir");
@@ -179,21 +178,14 @@ fn accept(listener: &TcpListener, stop: &std::sync::mpsc::Receiver<()>) -> Optio
     let stream = loop {
         match listener.accept() {
             Ok((stream, _)) => break stream,
-            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                match stop.recv_timeout(Duration::from_millis(10)) {
-                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
-                    _ => return None,
-                }
-            }
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => match stop.try_recv() {
+                Err(std::sync::mpsc::TryRecvError::Empty) => continue,
+                _ => return None,
+            },
             Err(e) => panic!("accept: {e}"),
         }
     };
-    stream
-        .set_read_timeout(Some(Duration::from_secs(30)))
-        .unwrap();
-    stream
-        .set_write_timeout(Some(Duration::from_secs(30)))
-        .unwrap();
+
     Some(stream)
 }
 

@@ -47,7 +47,7 @@ try:
   if ctl.exists() and not settled:
    try:
     with socket.socket(socket.AF_UNIX) as sock:
-     sock.settimeout(2);sock.connect(str(ctl));sock.sendall(b'{"metrics":true}\n');f=sock.makefile('rb');reply=json.loads(f.readline())
+     sock.connect(str(ctl));sock.sendall(b'{"metrics":true}\n');f=sock.makefile('rb');reply=json.loads(f.readline())
     snapshots.append(reply)
     settled=reply.get('worker_phase')=='running' and reply['width']['effective']==a.width and reply['width']['pending']==0
    except (FileNotFoundError,ConnectionRefusedError,ConnectionResetError):pass

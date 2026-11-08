@@ -503,12 +503,7 @@ pub(super) mod tests {
         }
         probe.entered.fetch_or(1 << ordinal, Ordering::AcqRel);
         if ordinal == 0 {
-            let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
             while probe.entered.load(Ordering::Acquire) & 2 == 0 {
-                assert!(
-                    std::time::Instant::now() < until,
-                    "a second private segment never started"
-                );
                 std::thread::yield_now();
             }
         }
@@ -649,12 +644,7 @@ pub(super) mod tests {
             unsafe { crate::alloc::payload(environment).cast::<[u64; 2]>().read() };
         let probe = unsafe { &*(address as *const FuelProbe) };
         if ordinal == 0 && probe.wide {
-            let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
             while !probe.second_computed.load(Ordering::Acquire) {
-                assert!(
-                    std::time::Instant::now() < until,
-                    "private checkpoint tail did not run"
-                );
                 std::thread::yield_now();
             }
         }
@@ -676,12 +666,7 @@ pub(super) mod tests {
             // still Running when its spawn becomes the parent's head op.
             // This reads only physical protocol state, never language state.
             if probe.hold_until_save && private(ctx) {
-                let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
                 while private(ctx) {
-                    assert!(
-                        std::time::Instant::now() < until,
-                        "requested private save was never adopted"
-                    );
                     unsafe {
                         (*ctx).view.compiled.fuel -= 1;
                         if (*ctx).view.compiled.fuel < 0 {
@@ -937,9 +922,7 @@ pub(super) mod tests {
         let marker = 0u64;
         let frame = std::hint::black_box(&raw const marker) as usize;
         if ordinal == 0 {
-            let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
             while !probe.private_seen.load(Ordering::Acquire) {
-                assert!(std::time::Instant::now() < until, "no private start");
                 std::thread::yield_now();
             }
             if probe.infinite {

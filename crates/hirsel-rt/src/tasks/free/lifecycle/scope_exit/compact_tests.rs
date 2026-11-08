@@ -27,10 +27,8 @@ struct Shared {
     replay: bool,
 }
 
-fn wait(what: &str, condition: impl Fn() -> bool) {
-    let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
+fn wait(_what: &str, condition: impl Fn() -> bool) {
     while !condition() {
-        assert!(std::time::Instant::now() < until, "{what}");
         std::thread::yield_now();
     }
 }

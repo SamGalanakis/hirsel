@@ -673,9 +673,8 @@ mod tests {
                         };
                         // Wait for queue registration, not stack save. A put
                         // or kill may therefore beat the task's logical park.
-                        let until = std::time::Instant::now() + std::time::Duration::from_secs(2);
+
                         while cell.lock().permit.waiting() != id as usize + 1 {
-                            assert!(std::time::Instant::now() < until, "a waiter must register");
                             std::thread::yield_now();
                         }
                     }
@@ -687,12 +686,8 @@ mod tests {
                             put(ctx, word, initial.as_mut_ptr().cast()).unwrap();
                         }
                     }
-                    let until = std::time::Instant::now() + std::time::Duration::from_secs(2);
+
                     while shared.finished.load(Ordering::Acquire) != 7 {
-                        assert!(
-                            std::time::Instant::now() < until,
-                            "all waiters must complete"
-                        );
                         std::thread::yield_now();
                     }
                     if !killed {

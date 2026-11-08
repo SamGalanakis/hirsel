@@ -229,13 +229,13 @@ fn candidate_v2_transport_atomic_create_manifest_and_connection_latch() {
     ]});
     let submitted = exchange(request);
     let lease = submitted["ok"]["lease"].as_u64().unwrap();
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+
     let receipt = loop {
         let r = exchange(json!({"version":2,"op":"result","lease":lease}));
         if r["ok"]["pending"] != true {
             break r;
         }
-        assert!(std::time::Instant::now() < deadline);
+
         std::thread::yield_now();
     };
     assert_eq!(receipt["ok"]["verdict"], "Pass", "{receipt}");

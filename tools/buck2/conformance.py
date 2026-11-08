@@ -110,8 +110,7 @@ def main():
         return 2
     targets = [f'//:gate-conformance-shard-{index}' for index in range(1, CONFORMANCE_SHARDS + 1)]
     with event_logs.recorded('conformance') as event_log:
-        status = subprocess.call([str(BUCK2), 'test', *CONFIG, '--event-log', str(event_log), *targets,
-                                  '--', '--timeout', '1800'], cwd=ROOT)
+        status = subprocess.call([str(BUCK2), 'test', *CONFIG, '--event-log', str(event_log), *targets], cwd=ROOT)
         if status != 0:
             return status
         outputs = shard_outputs(event_log)

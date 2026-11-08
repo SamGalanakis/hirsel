@@ -15,7 +15,7 @@ def main(cli, manifest, requested):
     selection = select_cells(cases, requested)
     receipts=[]
     def save(): (root/'receipts.json').write_text(json.dumps(receipts,indent=2)+'\n')
-    def run(cmd, stem, timeout=20, measured=True):
+    def run(cmd, stem, measured=True):
         (root/(stem+'.argv.json')).write_text(json.dumps(cmd)+'\n')
         if measured: cmd=[str(capped),*cmd]
         completed=subprocess.run(cmd, env=env,capture_output=True)
@@ -29,7 +29,7 @@ def main(cli, manifest, requested):
     binaries={}
     for backend in ['llvm','cranelift']:
         exe=root/backend
-        code,out,err=run([cli,'build',manifest,'--backend',backend,'-o',str(exe)],backend+'-build',300,False)
+        code,out,err=run([cli,'build',manifest,'--backend',backend,'-o',str(exe)],backend+'-build',False)
         receipts.append({'id':backend+'-build','status':code,'passed':code==0})
         save()
         if code==0:binaries[backend]=exe

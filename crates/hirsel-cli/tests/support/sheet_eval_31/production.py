@@ -31,7 +31,7 @@ for workflow in ([a.workflow] if a.workflow else ['success','domain','cancel']):
       try:
         child.stdin.write(b'recalc\n');child.stdin.flush();head=await_line(child.stdout)
         assert head==b'RECALC 0\n',head
-        connection=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM);connection.settimeout(10);connection.connect(str(ctl));connection.sendall(b'{"metrics":true}\n')
+        connection=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM);connection.connect(str(ctl));connection.sendall(b'{"metrics":true}\n')
         reply=b''
         while not reply.endswith(b'\n'):reply+=connection.recv(8192)
         server_pid=struct.unpack('3i',connection.getsockopt(socket.SOL_SOCKET,socket.SO_PEERCRED,12))[0];connection.close();(d/'control.json').write_bytes(reply);metrics=json.loads(reply)

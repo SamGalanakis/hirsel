@@ -17,7 +17,7 @@ def cell(a):
         if saw_control:
             try:
                 with socket.socket(socket.AF_UNIX) as s:
-                    s.settimeout(2);s.connect(str(control));s.sendall(b'{"metrics":true}\n');payload=b''
+                    s.connect(str(control));s.sendall(b'{"metrics":true}\n');payload=b''
                     while not payload.endswith(b'\n'):
                         chunk=s.recv(65536)
                         if not chunk:break

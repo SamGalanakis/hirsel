@@ -1,7 +1,6 @@
 //! Real Ordered selection with a contracting process grant, without Free policy.
 use super::*;
 use crate::tasks::{self, role};
-use std::sync::mpsc;
 
 struct Probe {
     arrived: (Mutex<bool>, Condvar),
@@ -89,7 +88,7 @@ unsafe extern "C" fn bridge_child(
 fn role_owned_home_bridge_progresses_after_compute_grant_contraction() {
     const CHILD: &str = "HIRSEL_HOME_BRIDGE_CONTRACTION";
     if std::env::var_os(CHILD).is_none() {
-        let child = std::process::Command::new(std::env::current_exe().unwrap())
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
             .args([
                 "--exact",
                 "pool::progress_tests::role_owned_home_bridge_progresses_after_compute_grant_contraction",
@@ -98,20 +97,9 @@ fn role_owned_home_bridge_progresses_after_compute_grant_contraction() {
             .env(CHILD, "1")
             .spawn()
             .unwrap();
-        let pid = child.id();
-        let (done, ended) = mpsc::channel();
-        let watchdog = std::thread::spawn(move || {
-            let mut child = child;
-            done.send(child.wait().unwrap()).unwrap();
-        });
-        let status = ended.recv_timeout(Duration::from_secs(5));
-        if status.is_err() {
-            // Only our child, so a deadlocked runtime cannot strand workers.
-            unsafe { libc::kill(pid as i32, libc::SIGKILL) };
-        }
-        watchdog.join().unwrap();
+        let status = child.wait().unwrap();
         assert!(
-            status.is_ok_and(|status| status.success()),
+            status.success(),
             "role owner could not return from home after the compute grant contracted"
         );
         return;

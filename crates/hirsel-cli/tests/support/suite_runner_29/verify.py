@@ -159,7 +159,7 @@ def main(args):
                             wait_file(state/'0.started')
                             if mode in ['success','domain-error','cutoff']:wait_file(state/'1.done')
                             if backend!='reference':
-                                sock=socket.socket(socket.AF_UNIX);sock.settimeout(5);sock.connect(str(control));sock.sendall(b'{"metrics":true}\n');reply=sock.makefile('rb').readline();sock.close();(state/'control.json').write_bytes(reply);record['control']=json.loads(reply)
+                                sock=socket.socket(socket.AF_UNIX);sock.connect(str(control));sock.sendall(b'{"metrics":true}\n');reply=sock.makefile('rb').readline();sock.close();(state/'control.json').write_bytes(reply);record['control']=json.loads(reply)
                                 assert record['control']['width']['effective']==width
                             if mode in ['success','domain-error','cutoff']:
                                 with (state/'0.release').open('wb') as release:release.write(b'x')

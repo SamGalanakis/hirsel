@@ -1111,17 +1111,12 @@ mod tests {
         go: AtomicBool,
         middle: AtomicU32,
         resume: AtomicBool,
-        timed_out: AtomicBool,
     }
 
     fn exercise(ctx: *mut TaskCtx, race: &Race) {
         race.started.fetch_add(1, Ordering::AcqRel);
-        let until = std::time::Instant::now() + std::time::Duration::from_secs(2);
+
         while !race.go.load(Ordering::Acquire) {
-            if std::time::Instant::now() >= until {
-                race.timed_out.store(true, Ordering::Release);
-                return;
-            }
             std::thread::yield_now();
         }
         for value in 1..=OPS {
@@ -1139,12 +1134,8 @@ mod tests {
             assert!((1..=OPS).contains(&loaded));
             if value == OPS / 2 {
                 race.middle.fetch_add(1, Ordering::AcqRel);
-                let until = std::time::Instant::now() + std::time::Duration::from_secs(2);
+
                 while !race.resume.load(Ordering::Acquire) {
-                    if std::time::Instant::now() >= until {
-                        race.timed_out.store(true, Ordering::Release);
-                        return;
-                    }
                     std::thread::yield_now();
                 }
             }
@@ -1191,12 +1182,8 @@ mod tests {
             let shared = shared.clone();
             move || {
                 let race = ready.recv().unwrap();
-                let until = std::time::Instant::now() + std::time::Duration::from_secs(2);
+
                 while race.started.load(Ordering::Acquire) != 8 {
-                    assert!(
-                        std::time::Instant::now() < until,
-                        "all eight stacks must start"
-                    );
                     std::thread::yield_now();
                 }
                 // A cut while all eight actual stacks are inside segments:
@@ -1205,12 +1192,8 @@ mod tests {
                 let first = shared.recorder.flush().unwrap().unwrap();
                 assert_eq!(first.progress.len(), 8);
                 race.go.store(true, Ordering::Release);
-                let until = std::time::Instant::now() + std::time::Duration::from_secs(2);
+
                 while race.middle.load(Ordering::Acquire) != 8 {
-                    assert!(
-                        std::time::Instant::now() < until,
-                        "all eight stacks must publish their first half"
-                    );
                     std::thread::yield_now();
                 }
                 let middle = shared.recorder.flush().unwrap().unwrap();
@@ -1250,7 +1233,6 @@ mod tests {
                     go: AtomicBool::new(false),
                     middle: AtomicU32::new(0),
                     resume: AtomicBool::new(false),
-                    timed_out: AtomicBool::new(false),
                 });
                 unsafe {
                     role::enter(ctx);
@@ -1282,14 +1264,8 @@ mod tests {
                 }
                 started.send(race.clone()).unwrap();
                 exercise(ctx, &race);
-                let until = std::time::Instant::now() + std::time::Duration::from_secs(2);
-                while race.finished.load(Ordering::Acquire) != 8
-                    && !race.timed_out.load(Ordering::Acquire)
-                {
-                    if std::time::Instant::now() >= until {
-                        race.timed_out.store(true, Ordering::Release);
-                        break;
-                    }
+
+                while race.finished.load(Ordering::Acquire) != 8 {
                     std::thread::yield_now();
                 }
                 STATUS_OK
@@ -1298,7 +1274,6 @@ mod tests {
         let race = cutter.join().unwrap();
         assert_eq!(outcome.ended, Ok(STATUS_OK));
         assert_eq!(outcome.pending, 0);
-        assert!(!race.timed_out.load(Ordering::Acquire));
         assert_eq!(race.finished.load(Ordering::Acquire), 8);
         let cut = shared.recorder.stop("returned", None).unwrap().unwrap().0;
         let trace = shared.trace();

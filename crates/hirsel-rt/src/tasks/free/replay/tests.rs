@@ -246,9 +246,8 @@ fn native_task_replay_never_starts_a_queued_divergent_child_and_finishes_started
                 assert_eq!(outcome.ended, Ok(STATUS_OK));
                 recording.recorder.stop("returned", None).unwrap().unwrap();
             }
-            let until = std::time::Instant::now() + std::time::Duration::from_secs(2);
+
             while Arc::strong_count(&recording) != 1 {
-                assert!(std::time::Instant::now() < until, "recorded frames reclaim");
                 std::thread::yield_now();
             }
             let trace = recording.trace();

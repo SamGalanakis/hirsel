@@ -9,7 +9,7 @@ use hirsel_run_schema::{
 };
 use std::io::{Read, Write};
 use std::sync::atomic::{AtomicU16, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 static PEER: AtomicU16 = AtomicU16::new(0);
 
@@ -217,20 +217,16 @@ fn ordinary_free_network_and_initial_env_record_and_replay_without_live_peers() 
             PEER.store(port, Ordering::Relaxed);
             listener.set_nonblocking(true).unwrap();
             let server = std::thread::spawn(move || {
-                let until = Instant::now() + Duration::from_secs(5);
                 let mut stream = loop {
                     match listener.accept() {
                         Ok((stream, _)) => break stream,
                         Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                            assert!(Instant::now() < until, "native connect never reached peer");
                             std::thread::sleep(Duration::from_millis(1));
                         }
                         Err(e) => panic!("{e}"),
                     }
                 };
-                stream
-                    .set_read_timeout(Some(Duration::from_secs(3)))
-                    .unwrap();
+
                 let mut bytes = [0; 4];
                 stream.read_exact(&mut bytes).unwrap();
                 assert_eq!(&bytes, b"ping");

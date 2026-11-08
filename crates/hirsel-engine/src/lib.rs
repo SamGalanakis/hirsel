@@ -356,6 +356,7 @@ pub trait ModesPhase: Send + Sync {
         signature: &Signature,
         products: &mut PhaseProducts,
         signatures: &mut dyn SignatureProvider,
+        infer: bool,
     ) -> Result<QueryOutput<AnalyzedBody>, QueryError>;
 }
 /// Lowering makes evaluation order and cleanup explicit before execution (LANG-3, DROP-2).

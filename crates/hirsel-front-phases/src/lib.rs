@@ -186,6 +186,7 @@ impl ModesPhase for ModeAdapter {
         signature: &Signature,
         products: &mut PhaseProducts,
         provider: &mut dyn SignatureProvider,
+        infer: bool,
     ) -> Result<QueryOutput<hirsel_query_products::AnalyzedBody>, QueryError> {
         let mut typed = Arc::unwrap_or_clone(typed);
         let syntax = typed.syntax.clone();
@@ -247,6 +248,7 @@ impl ModesPhase for ModeAdapter {
             &output.identity_joins,
             &output.identity_fields,
             provider,
+            infer,
         );
         if let Some(error) = output.failure {
             return Err(error);

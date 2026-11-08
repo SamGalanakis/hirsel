@@ -584,12 +584,13 @@ fn failed_private_inference_cannot_reuse_a_successful_signature_snapshot() {
             signature: &hirsel_types::Signature,
             products: &mut PhaseProducts,
             signatures: &mut dyn hirsel_types::SignatureProvider,
+            infer: bool,
         ) -> Result<
             hirsel_types::QueryOutput<hirsel_query_products::AnalyzedBody>,
             hirsel_types::QueryError,
         > {
             self.0
-                .check_modes(types, memo, body, signature, products, signatures)
+                .check_modes(types, memo, body, signature, products, signatures, infer)
         }
     }
     with_compiler_stack(|| {

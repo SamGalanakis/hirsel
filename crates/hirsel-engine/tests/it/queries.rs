@@ -284,6 +284,7 @@ impl ModesPhase for Fake {
         _signature: &Signature,
         _: &mut PhaseProducts,
         _provider: &mut dyn SignatureProvider,
+        infer: bool,
     ) -> Result<QueryOutput<hirsel_query_products::AnalyzedBody>, QueryError> {
         self.fail("modes", body.syntax.item.origin.span)?;
         Ok(out(hirsel_query_products::AnalyzedBody {
@@ -733,6 +734,7 @@ fn front_keeps_module_proofs_until_their_modes_consumer_finishes() {
             signature: &Signature,
             products: &mut PhaseProducts,
             provider: &mut dyn SignatureProvider,
+            infer: bool,
         ) -> Result<QueryOutput<hirsel_query_products::AnalyzedBody>, QueryError> {
             let front = self.front.lock().unwrap().upgrade().unwrap();
             let definition = &body.syntax.item.definition;
@@ -744,7 +746,7 @@ fn front_keeps_module_proofs_until_their_modes_consumer_finishes() {
                 std::sync::atomic::Ordering::Relaxed,
             );
             self.inner
-                .check_modes(types, memo, body, signature, products, provider)
+                .check_modes(types, memo, body, signature, products, provider, infer)
         }
     }
     with_compiler_stack(|| {

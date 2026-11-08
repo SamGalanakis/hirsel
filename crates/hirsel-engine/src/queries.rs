@@ -1831,6 +1831,7 @@ impl QueryEngine {
                     &signature.value,
                     &mut products,
                     &mut recorder,
+                    false,
                 );
                 recorder.observed.products = Arc::new(products);
                 let observed = recorder.observed;

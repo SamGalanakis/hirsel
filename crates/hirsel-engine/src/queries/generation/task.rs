@@ -188,6 +188,7 @@ impl GeneratorInput {
             &constant,
             products,
             provider,
+            false,
         )?;
         if has_errors(&analyzed.diagnostics) {
             return Err(QueryError::Diagnostics(analyzed.diagnostics));

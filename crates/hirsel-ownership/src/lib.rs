@@ -115,6 +115,7 @@ pub fn check_ownership_with_clauses(
     identity_joins: &[(NameSite, NameSite, Origin)],
     identity_fields: &[(NameSite, NameSite, Origin, Vec<(FieldId, TypeId)>)],
     provider: &mut dyn SignatureProvider,
+    infer: bool,
 ) -> Result<QueryOutput<OwnershipFacts>, QueryError> {
     let tree = &syntax.tree;
     let rows = source_rows::SourceRows::new(body);
@@ -298,7 +299,10 @@ pub fn check_ownership_with_clauses(
         promised.push(ParamId(1));
     }
     let declared_promises = promised.clone();
-    let infer = syntax.item.visibility == hirsel_syntax::Visibility::Private
+    // Only private inference proves candidate claims; a settled check keeps
+    // its declared promises and V validates the published summary.
+    let infer = infer
+        && syntax.item.visibility == hirsel_syntax::Visibility::Private
         && !syntax
             .item
             .attributes

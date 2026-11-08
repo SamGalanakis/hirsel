@@ -1417,10 +1417,11 @@ fn frozen_frontier_releases_completed_typed_bodies_before_next_root() {
             signature: &hirsel_types::Signature,
             products: &mut PhaseProducts,
             provider: &mut dyn hirsel_types::SignatureProvider,
+            infer: bool,
         ) -> Result<QueryOutput<hirsel_query_products::AnalyzedBody>, QueryError> {
             let output = self
                 .inner
-                .check_modes(t, m, body, signature, products, provider)?;
+                .check_modes(t, m, body, signature, products, provider, infer)?;
             let mut bodies = self.bodies.lock().unwrap();
             bodies.retain(|body| body.strong_count() != 0);
             bodies.push(Arc::downgrade(&output.value.typed));

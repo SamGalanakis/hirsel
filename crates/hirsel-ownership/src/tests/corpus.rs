@@ -195,6 +195,7 @@ fn run_with_authority(
             &[],
             &[],
             &mut registry,
+            true,
         )
         .map_err(|e| format!("ownership provider: {e:?}"))?;
         diagnostics.extend(output.diagnostics);

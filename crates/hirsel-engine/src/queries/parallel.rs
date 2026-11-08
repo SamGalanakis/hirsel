@@ -480,6 +480,7 @@ impl Worker<'_> {
                 &signature.value,
                 &mut products,
                 &mut provider,
+                false,
             ),
             None => Err(QueryError::NotImplemented),
         };
@@ -924,6 +925,7 @@ mod frozen_task_tests {
                 _: &Signature,
                 _: &mut PhaseProducts,
                 _: &mut dyn SignatureProvider,
+                infer: bool,
             ) -> Result<QueryOutput<AnalyzedBody>, QueryError> {
                 self.0.store(
                     Arc::as_ptr(&body) as usize,

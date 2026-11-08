@@ -130,6 +130,16 @@ pub(super) fn infer(
                 .collect()
         })
         .collect();
+    // A body that claims nothing has no proof to run: its summary is already
+    // the bottom, it records no unproven claim, and Front checks its modes.
+    let claimless: std::collections::BTreeSet<DefId> = headers
+        .iter()
+        .filter(|(id, header)| {
+            positions.contains_key(id)
+                && header.metadata.inferred_unique == UniqueSummary::default()
+        })
+        .map(|(id, _)| *id)
+        .collect();
     let mut failures = BTreeMap::new();
     let mut rejected = std::collections::BTreeSet::new();
     for component in hirsel_graph::components(&graph) {
@@ -139,6 +149,9 @@ pub(super) fn infer(
             let mut losses = Vec::new();
             for &index in &component {
                 let (body, declared) = &bodies[index];
+                if claimless.contains(&declared.definition) {
+                    continue;
+                }
                 let signature = headers[&declared.definition].clone();
                 if previous.get(&index).is_some_and(|reads| {
                     reads.iter().all(|(id, read)| headers.get(id) == Some(read))
@@ -158,6 +171,7 @@ pub(super) fn infer(
                     &signature,
                     &mut PhaseProducts::default(),
                     &mut assumed,
+                    true,
                 );
                 previous.insert(index, reads);
                 if let Ok(output) = &checked {
@@ -239,6 +253,7 @@ mod tests {
             signature: &Signature,
             _: &mut PhaseProducts,
             provider: &mut dyn SignatureProvider,
+            infer: bool,
         ) -> Result<QueryOutput<hirsel_query_products::AnalyzedBody>, QueryError> {
             *self
                 .calls

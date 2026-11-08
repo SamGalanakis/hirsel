@@ -54,14 +54,11 @@ enum FrontState {
         lowering: lowering::LoweringUse,
     },
 }
-struct PendingBody {
-    product: LiveAnalyzedProduct,
-    charge: u64,
-}
 struct FrontOutcome {
     state: FrontState,
     terminal: Option<Reference>,
-    pending_body: Option<PendingBody>,
+    /// A non-retaining request owns each admitted body until it ends.
+    live_body: Option<LiveAnalyzedProduct>,
     facts: Arc<FrontFacts>,
 }
 impl std::ops::Deref for FrontOutcome {
@@ -104,7 +101,7 @@ impl FrontOutcome {
                 error: Box::new(error),
             },
             terminal: None,
-            pending_body: None,
+            live_body: None,
             facts,
         }
     }
@@ -124,7 +121,7 @@ impl FrontOutcome {
                 lowering,
             },
             terminal: None,
-            pending_body: None,
+            live_body: None,
             facts,
         }
     }
@@ -307,8 +304,6 @@ pub struct FrontBodyQueries {
     verify_store: hirsel_engine_store::VerifyStore,
     slots: Mutex<BTreeMap<Key, FrontOutcome>>,
     input_slots: Mutex<(BTreeMap<DefId, usize>, Option<Arc<LiveSourceBacking>>)>,
-    /// Optional body retention bound within the existing Front allowance.
-    body_cache_limit: u64,
     carry: Mutex<Option<Arc<FrontCarry>>>,
     /// Subscription generations validated against this immutable source view.
     carry_changes: Mutex<Option<Arc<CarryChanges>>>,
@@ -1945,7 +1940,6 @@ impl FrontBodyQueries {
                 )
             }
         };
-        outcome.pending_body.take();
         Some(FrontBodyOutput {
             outcome: ModeResult {
                 definition: outcome.definition.path().clone(),
@@ -2002,21 +1996,6 @@ impl FrontBodyQueries {
                 },
             })
             .count()
-    }
-    /// Discard decoded bodies only when their request checkpoint survives.
-    pub(crate) fn release_pending_bodies(&self) {
-        let mut slots = self.slots.lock().unwrap_or_else(|e| e.into_inner());
-        for outcome in slots.values_mut() {
-            if matches!(
-                outcome.state,
-                FrontState::Settled {
-                    archive: Some(_),
-                    ..
-                }
-            ) {
-                outcome.pending_body.take();
-            }
-        }
     }
     #[cfg(test)]
     pub(super) fn outcomes_for_test(&self) -> Vec<Reference> {
@@ -2449,6 +2428,9 @@ impl BodyTask {
                 let changed = *archive != reference;
                 *archive = reference;
                 *owner = Some(body.downgrade());
+                if !queries.store.persistence().retains() {
+                    current.live_body = Some(body.clone());
+                }
                 if changed {
                     current.terminal = None;
                     queries.store_compact(self.input, current, self.weight.scratch);
@@ -2952,16 +2934,15 @@ impl BodyTask {
             )
         };
         drop(bytes);
-        let pending_body =
-            (!failed && queries.body_cache_limit != 0 && !queries.store.persistence().retains())
-                .then(|| outcome.clone());
+        let live_body =
+            (!failed && !queries.store.persistence().retains()).then(|| outcome.clone());
         let mut cached = queries
             .publish_facts(
                 cx, self.input, record, action, outcome, checked, dead_arms, table_keys, memo_rows,
             )
             .ok_or_else(|| queries.resource_refusal())?;
         queries.store_compact(self.input, &mut cached, self.weight.scratch);
-        if let Some(outcome) = pending_body
+        if let Some(outcome) = live_body
             && let FrontState::Settled {
                 publication, body, ..
             } = &mut cached.state
@@ -2973,8 +2954,7 @@ impl BodyTask {
                 ))
             });
             if charge.is_some_and(|bytes| {
-                bytes <= queries.body_cache_limit
-                    && bytes <= *queries.retention.lock().unwrap_or_else(|e| e.into_inner())
+                bytes <= *queries.retention.lock().unwrap_or_else(|e| e.into_inner())
             }) && let Some(product) = queries.admit_body(
                 cx,
                 queries
@@ -2988,10 +2968,7 @@ impl BodyTask {
                 product.live_value::<crate::products::LiveAnalyzedProduct>()
             {
                 *body = Some(analyzed.downgrade());
-                cached.pending_body = Some(PendingBody {
-                    product: analyzed.clone(),
-                    charge: charge.expect("body admission checked its charge"),
-                });
+                cached.live_body = Some(analyzed.clone());
             }
         }
         let terminal = match &cached.state {
@@ -3449,7 +3426,6 @@ impl QueryEngine {
             terminal_cache,
             slots: Mutex::new(BTreeMap::new()),
             input_slots: Mutex::new((BTreeMap::new(), None)),
-            body_cache_limit: self.hold_bytes,
             carry: Mutex::new(None),
             carry_changes: Mutex::new(None),
             clean_memos: Mutex::new(BTreeSet::new()),

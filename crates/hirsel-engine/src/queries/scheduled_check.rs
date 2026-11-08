@@ -981,7 +981,6 @@ impl Task {
     }
     fn complete(&mut self) -> Result<ProductRef, Reference> {
         let queries = &self.queries;
-        queries.plan.front.release_pending_bodies();
         let reads = self
             .reads
             .finish(&*queries.store, queries.weight.scratch)

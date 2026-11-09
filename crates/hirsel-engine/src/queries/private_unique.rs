@@ -268,11 +268,12 @@ impl QueryEngine {
                             &observed,
                         );
                         next.covered = entry.covered.clone();
+                        let next = Arc::new(next);
                         if self.verify_store != hirsel_engine_store::VerifyStore::Recompute {
-                            self.store_signature(id.path(), &next)?;
+                            self.settle_signature(id.path(), &next)?;
                         }
                         self.private_signature_publications.insert(id);
-                        self.signatures.insert(id, Arc::new(next));
+                        self.signatures.insert(id, next);
                         self.adopted_headers = None;
                         if signature_changed || summary != previous {
                             changed.push(id.path().clone());

@@ -114,3 +114,30 @@ for the existing runners.
 
 The version 3 baseline and startup fractions are recorded below. All rows are
 fresh runs of this version; version 2 ratios are not rescaled or combined.
+
+Measured 2026-11-09, compiler/runtime base `88f7d616`, workload and runner
+revision `ebf700c5`, release profile, CPU2 with observer CPU0, jobs=1, daemon
+off, 2 GiB, ordinary cache state. One fresh pair per row and one zero-work
+startup sample per side. All 16 workload executions and 16 startup executions
+completed; all eight workload stdout pairs matched. Every counter ran at
+100%, without multiplexing.
+
+| Workload | Wall H/R (s) | H/R wall | CPU H/R (s) | Instructions H/R | User instructions H/R | Context switches H/R | Startup H/R |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| json | 2.3951 / 1.7535 | 1.366x | 2.3891 / 1.7428 | 26,443,942,307 / 18,161,966,358 | 25,989,737,039 / 16,107,622,176 | 59 / 7 | 0.42% / 0.39% |
+| log_parser | 9.2051 / 4.1881 | 2.198x | 9.1654 / 4.1764 | 136,308,446,701 / 52,150,838,741 | 135,829,781,300 / 52,103,232,720 | 73 / 23 | 0.10% / 0.19% |
+| gzip | 5.0002 / 0.8754 | 5.712x | 4.9705 / 0.8731 | 37,084,271,692 / 12,169,379,284 | 29,858,393,467 / 12,158,881,896 | 746 / 8 | 0.08% / 0.40% |
+| float_math | 1.5039 / 1.6365 | 0.919x | 1.4994 / 1.6337 | 24,776,008,954 / 23,952,171,852 | 24,753,533,947 / 23,934,421,924 | 36 / 16 | 0.23% / 0.17% |
+| priority_queue | 4.6700 / 0.5647 | 8.269x | 4.6628 / 0.5626 | 67,515,635,120 / 7,502,110,616 | 67,461,114,552 / 7,494,712,012 | 57 / 5 | 0.06% / 0.64% |
+| map_u64 | 3.0000 / 2.1744 | 1.380x | 2.9954 / 2.1713 | 19,091,206,040 / 17,400,026,098 | 15,423,257,078 / 15,703,146,254 | 38 / 21 | 0.12% / 0.18% |
+| strbuild | 4.4955 / 2.4866 | 1.808x | 4.4897 / 2.4768 | 53,843,470,901 / 33,983,181,082 | 51,238,203,950 / 33,955,246,354 | 40 / 13 | 0.16% / 0.15% |
+| channel | 0.3983 / 1.2997 | 0.306x | 0.3926 / 1.2977 | 3,849,322,463 / 2,923,312,489 | 3,832,655,065 / 131,722,571 | 36 / 200,184 | 1.03% / 0.28% |
+| geomean | | 1.777x | | | | | |
+| max | | 8.269x | | | | | |
+Wall budget: MISS (geomean <=1.5x, max <=3x).
+One sample per side has unmeasured spread; near-threshold results are uncertain.
+
+Gzip and priority_queue exceed 3x. The geometric mean exceeds its limit by
+0.277x and the maximum by 5.269x. The fastest participant in any row took
+0.3983 seconds; startup fractions range from 0.06% to 1.03%. The performance
+miss remains visible; changing the metric does not establish Goal 11.

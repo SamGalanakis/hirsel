@@ -106,9 +106,12 @@ Evidence is current for an obligation exactly when its recorded `(ObligationId, 
 equals the export's. The export header names the `TIR_VERSION`, compiler version, spec hash
 and interface version that produced it; a consumer that pins a checker also records them.
 
-## The export: `hirsel.tir.export.v9`
+## The export format
 
 ### PS-8: Encoding
+
+The current format identifier is `hirsel_proof_export::FORMAT`, defined in
+[`crates/hirsel-proof-export/src/lib.rs`](../../crates/hirsel-proof-export/src/lib.rs).
 
 Version 6 carries TIR version 6 (size-generic constant signatures, constant-read size
 actuals, order-bearing empty SortedMap constructors, caller-attribution declaration
@@ -138,9 +141,9 @@ iteration order, file id, type-id provenance, address or host path appears.
 
 ### PS-9: Contents
 
-- **Header:** the format `hirsel.tir.export.v9`, `TIR_VERSION`, compiler version, spec hash,
-  interface version, and the launch entry with its semantic program revision when the
-  program declares one.
+- **Header:** the format identifier `hirsel_proof_export::FORMAT`, `TIR_VERSION`, compiler
+  version, spec hash, interface version, and the launch entry with its semantic program
+  revision when the program declares one.
 - **Definitions,** sorted by `DefPath`: path, location table, TIR, TIR digest, references
   with fingerprints, operations used (callees with a signature in the export and no body,
   exported or skipped: registry operations, whose signatures carry effects and authority),

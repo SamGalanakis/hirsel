@@ -155,12 +155,24 @@ The trial issues the in-doubt attempts too, so each position runs once and its r
 returns the trial's own recorded outcome, as in the live run. For each call, the trial
 reports two things. `same code` means the candidate's callee
 has the code hash and signature fingerprint that the recorded request named. `same`
-means its outcome bytes equal the recorded ones. `open_account` does not reach the
-changed function, so its calls match. Every `transfer` is changed code. The first one
-diverges because of the fee. The 50-cent transfer still matches, since its fee rounds
-to 0. The later calls diverge as the balances drift apart. `--from <n>` starts at
-request `n`. The exit status is 1 when any call diverges, so a trial can gate an
-upgrade.
+means its outcome bytes equal the recorded ones. Every `transfer` is changed code:
+
+- Calls 0 and 1 move 200 cents from 1 to 2 with a 2-cent fee. Call 0 is `unrecorded`
+  because its recorded outcome was in doubt. Its re-send, call 1, diverges because
+  the receipt now reports a fee of 2 instead of 0.
+- Call 2 opens account 3. `open_account` does not reach the changed function, so
+  both its code and outcome match.
+- Call 3 moves 50 cents from 2 to 3. Its outcome matches because the fee rounds to 0.
+- Calls 4 and 5 attempt to move 250 cents from 2 to 1. Account 2 holds 250 cents in
+  both runs, but the candidate needs 252 including its fee, so it refuses the move.
+  Call 4 is `unrecorded` because its recorded outcome was in doubt. Its re-send,
+  call 5, diverges from the recorded success directly because of the fee.
+- Call 6 attempts to move 900 cents from 1 to 2. Both runs refuse it, but report
+  different balances: 550 in the recording and 298 in the trial. The earlier 2-cent
+  fee and refused 250-cent transfer account for this drift.
+
+`--from <n>` starts at request `n`. The exit status is 1 when any call diverges,
+so a trial can gate an upgrade.
 
 ## What is not here yet
 

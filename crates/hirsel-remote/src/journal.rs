@@ -5,15 +5,25 @@
 //!
 //! - `journal.none@1` (the default): nothing survives the process; a restarted host is a
 //!   new incarnation that callers learn of when they reconnect.
-//! - `journal.dir@1` (`{"path"}`): an append-only file of length-framed, checksummed
-//!   records, synced before each record is acknowledged; a torn tail is dropped on recovery.
-//! - `journal.sim@1`: the same records in memory shared with the test, which loses every
-//!   record not yet synced when the test crashes the host.
+//! - `journal.dir@1` (`{"path"}`): an append-only file of sequenced, length-framed,
+//!   checksummed records, synced before each record is acknowledged.
+//! - `journal.sim@1`: the same bytes in memory shared with the test, which scripts failed
+//!   and partial appends.
+//!
+//! **Recovery** (determinism.md, Durable journal) runs when a durable journal is opened and
+//! takes the longest valid prefix. A last record that is short, runs past the end of the
+//! file or fails its checksum is a torn tail and is cut; it was never durable, so nothing
+//! was acted on from it. Damage to any earlier record, a sequence gap or a record that
+//! does not decode refuses recovery as `Corrupt` and leaves the file as it is.
+//!
+//! **Poisoning.** An append that fails, with an error or after writing part of its record,
+//! poisons the journal: every later append fails, so nothing follows a torn record and a
+//! host never acts on a record it failed to write.
 use hirsel_run_schema::CallOutcome;
 use sha2::{Digest, Sha256};
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Write};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 /// A stream's identity at a host: the caller's name and the stream bytes it opened.
@@ -51,15 +61,17 @@ pub enum Entry {
     Acknowledged { stream: StreamKey, position: u64 },
 }
 
-/// A host's call journal.
+/// A host's call journal. Opening a durable journal recovers it.
 pub trait Journal: Send {
     /// Whether records survive a crash of the host process.
     fn durable(&self) -> bool;
     /// The host incarnation: fixed for a durable journal's whole life, fresh otherwise.
     fn incarnation(&self) -> [u8; 16];
-    /// Append `entry`; when this returns, a durable journal keeps it through a crash.
+    /// Append `entry`; when this returns Ok, a durable journal keeps it through a crash.
+    /// An error poisons the journal: every later append fails.
     fn append(&mut self, entry: &Entry) -> io::Result<()>;
-    /// Every record a previous incarnation of this journal kept, in order.
+    /// Every record a previous incarnation of this journal kept, in order. The host takes
+    /// them once, when it starts.
     fn recover(&mut self) -> io::Result<Vec<Entry>>;
 }
 
@@ -87,16 +99,63 @@ impl Journal for NoJournal {
     }
 }
 
-const MAGIC: &[u8; 8] = b"HRJRNL01";
+/// The file header: magic (with the format version) and the incarnation.
+const MAGIC: &[u8; 8] = b"HRJRNL02";
+const HEADER: usize = 24;
+
+/// The records a durable journal recovered, its next sequence number, and whether an
+/// append has failed.
+struct Log {
+    recovered: Vec<Entry>,
+    next: u64,
+    poisoned: bool,
+}
+impl Log {
+    /// Recover `bytes` (the records after the header): the log, and the length of the
+    /// valid prefix when a torn tail follows it.
+    fn recover(bytes: &[u8]) -> io::Result<(Self, Option<usize>)> {
+        let (recovered, valid) = unframe(bytes)?;
+        let log = Self {
+            next: recovered.len() as u64,
+            recovered,
+            poisoned: false,
+        };
+        Ok((log, (valid < bytes.len()).then_some(valid)))
+    }
+    /// Write the next record through `write`; any failure poisons the log.
+    fn append(
+        &mut self,
+        entry: &Entry,
+        write: impl FnOnce(&[u8]) -> io::Result<()>,
+    ) -> io::Result<()> {
+        if self.poisoned {
+            return Err(io::Error::other(
+                "the call journal is poisoned by an earlier failed append",
+            ));
+        }
+        match write(&frame(self.next, entry)) {
+            Ok(()) => {
+                self.next += 1;
+                Ok(())
+            }
+            Err(error) => {
+                self.poisoned = true;
+                Err(error)
+            }
+        }
+    }
+}
 
 /// `journal.dir@1`: `<path>/calls.journal`, created with a random incarnation in its header.
 pub struct DirJournal {
     file: File,
-    path: PathBuf,
     incarnation: [u8; 16],
+    log: Log,
 }
 impl DirJournal {
-    /// Open or create the journal in `dir`, whose incarnation is `fresh` when it is created.
+    /// Open or create the journal in `dir`, whose incarnation is `fresh` when it is
+    /// created, and recover it: a torn tail is cut, and earlier damage is `Corrupt`
+    /// (`InvalidData`), leaving the file untouched.
     pub fn open(dir: &Path, fresh: [u8; 16]) -> io::Result<Self> {
         let path = dir.join("calls.journal");
         let mut file = OpenOptions::new()
@@ -104,26 +163,34 @@ impl DirJournal {
             .append(true)
             .create(true)
             .open(&path)?;
-        let mut header = [0u8; 24];
-        let read = file.read(&mut header)?;
-        let incarnation = if read == 0 {
+        let mut bytes = vec![];
+        file.read_to_end(&mut bytes)?;
+        let incarnation = if bytes.is_empty() {
             file.write_all(MAGIC)?;
             file.write_all(&fresh)?;
             file.sync_all()?;
             File::open(dir)?.sync_all()?;
+            bytes.extend_from_slice(MAGIC);
+            bytes.extend_from_slice(&fresh);
             fresh
-        } else if read == 24 && &header[..8] == MAGIC {
-            header[8..].try_into().unwrap()
+        } else if bytes.len() >= HEADER && &bytes[..8] == MAGIC {
+            bytes[8..HEADER].try_into().unwrap()
         } else {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                "not a hirsel call journal",
+                "not a hirsel call journal of this format",
             ));
         };
+        let (log, torn) = Log::recover(&bytes[HEADER..])?;
+        if let Some(valid) = torn {
+            // The torn tail was never acknowledged: appends follow the last valid record.
+            file.set_len((HEADER + valid) as u64)?;
+            file.sync_all()?;
+        }
         Ok(Self {
             file,
-            path,
             incarnation,
+            log,
         })
     }
 }
@@ -135,48 +202,66 @@ impl Journal for DirJournal {
         self.incarnation
     }
     fn append(&mut self, entry: &Entry) -> io::Result<()> {
-        self.file.write_all(&frame(entry))?;
-        self.file.sync_data()
+        let file = &mut self.file;
+        self.log.append(entry, |frame| {
+            file.write_all(frame)?;
+            file.sync_data()
+        })
     }
     fn recover(&mut self) -> io::Result<Vec<Entry>> {
-        let mut bytes = vec![];
-        File::open(&self.path)?.read_to_end(&mut bytes)?;
-        let (entries, intact) = unframe(&bytes[24.min(bytes.len())..]);
-        // A torn or corrupt tail was never acknowledged: drop it so appends follow the
-        // last intact record.
-        let keep = 24 + intact;
-        if keep < bytes.len() {
-            self.file.set_len(keep as u64)?;
-            self.file.sync_all()?;
-        }
-        Ok(entries)
+        Ok(std::mem::take(&mut self.log.recovered))
     }
 }
 
-/// `journal.sim@1`: records in memory, shared with the test that owns [`SimDisk`].
+/// `journal.sim@1`: the journal's bytes in memory, shared with the test that owns
+/// [`SimDisk`].
 pub struct SimJournal {
     disk: SimDisk,
     incarnation: [u8; 16],
+    log: Log,
 }
-/// The simulated medium: what survived, and what a crash will lose.
+/// The simulated medium: the records' bytes, all synced, and the test's scripted append
+/// failures.
 #[derive(Clone, Default)]
 pub struct SimDisk(Arc<Mutex<SimMedium>>);
 #[derive(Default)]
 struct SimMedium {
-    synced: Vec<Entry>,
+    bytes: Vec<u8>,
     incarnation: Option<[u8; 16]>,
+    /// Appends attempted on this medium, by every journal over it.
+    appends: u64,
+    /// Append attempt -> how many of its record's bytes reach the medium before it fails.
+    faults: std::collections::BTreeMap<u64, usize>,
 }
 impl SimDisk {
-    /// A journal over this medium; the first opener fixes its incarnation.
-    pub fn journal(&self, fresh: [u8; 16]) -> SimJournal {
-        let incarnation = *self.0.lock().unwrap().incarnation.get_or_insert(fresh);
-        SimJournal {
+    /// Open a journal over this medium, recovering it as `journal.dir@1` does; the first
+    /// opener fixes its incarnation.
+    pub fn journal(&self, fresh: [u8; 16]) -> io::Result<SimJournal> {
+        let mut medium = self.0.lock().unwrap();
+        let incarnation = *medium.incarnation.get_or_insert(fresh);
+        let (log, torn) = Log::recover(&medium.bytes)?;
+        if let Some(valid) = torn {
+            medium.bytes.truncate(valid);
+        }
+        Ok(SimJournal {
             disk: self.clone(),
             incarnation,
-        }
+            log,
+        })
     }
-    pub fn records(&self) -> Vec<Entry> {
-        self.0.lock().unwrap().synced.clone()
+    /// Make append attempt `attempt` (counted from 0 over this medium's life) fail after
+    /// writing the first `written` bytes of its record: 0 writes nothing, and a count past
+    /// the record's length writes all of it and still fails, as a failed sync does.
+    pub fn fail_append(&self, attempt: u64, written: usize) {
+        self.0.lock().unwrap().faults.insert(attempt, written);
+    }
+    /// Append attempts made on this medium so far.
+    pub fn appends(&self) -> u64 {
+        self.0.lock().unwrap().appends
+    }
+    /// The medium's raw record bytes.
+    pub fn bytes(&self) -> Vec<u8> {
+        self.0.lock().unwrap().bytes.clone()
     }
 }
 impl Journal for SimJournal {
@@ -186,46 +271,95 @@ impl Journal for SimJournal {
     fn incarnation(&self) -> [u8; 16] {
         self.incarnation
     }
-    // Every append is synced before it returns, as journal.dir@1's is, so a crash loses
-    // nothing an append acknowledged.
     fn append(&mut self, entry: &Entry) -> io::Result<()> {
-        self.disk.0.lock().unwrap().synced.push(entry.clone());
-        Ok(())
+        let disk = &self.disk;
+        self.log.append(entry, |frame| {
+            let mut medium = disk.0.lock().unwrap();
+            let attempt = medium.appends;
+            medium.appends += 1;
+            match medium.faults.remove(&attempt) {
+                None => {
+                    medium.bytes.extend_from_slice(frame);
+                    Ok(())
+                }
+                Some(written) => {
+                    medium
+                        .bytes
+                        .extend_from_slice(&frame[..written.min(frame.len())]);
+                    Err(io::Error::other("simulated append failure"))
+                }
+            }
+        })
     }
     fn recover(&mut self) -> io::Result<Vec<Entry>> {
-        Ok(self.disk.records())
+        Ok(std::mem::take(&mut self.log.recovered))
     }
 }
 
-// Record layout: u32 length, 32-byte SHA-256 of the body, body. The body is a tag byte and
-// fixed-width or length-framed fields.
-fn frame(entry: &Entry) -> Vec<u8> {
+// Record layout: u32 body length, u64 sequence number (0 for the first record), 32-byte
+// SHA-256 of the sequence number and body, body. The body is a tag byte and fixed-width or
+// length-framed fields.
+const FRAME: usize = 44;
+fn checksum(seq: u64, body: &[u8]) -> [u8; 32] {
+    let mut hash = Sha256::new();
+    hash.update(seq.to_le_bytes());
+    hash.update(body);
+    hash.finalize().into()
+}
+fn frame(seq: u64, entry: &Entry) -> Vec<u8> {
     let body = encode(entry);
-    let mut out = Vec::with_capacity(body.len() + 36);
+    let mut out = Vec::with_capacity(body.len() + FRAME);
     out.extend_from_slice(&(body.len() as u32).to_le_bytes());
-    out.extend_from_slice(&Sha256::digest(&body));
+    out.extend_from_slice(&seq.to_le_bytes());
+    out.extend_from_slice(&checksum(seq, &body));
     out.extend_from_slice(&body);
     out
 }
-fn unframe(mut bytes: &[u8]) -> (Vec<Entry>, usize) {
+/// The records of `bytes` and the length of their valid prefix; only the last record may
+/// be torn. Any other damage is `Corrupt`.
+fn unframe(bytes: &[u8]) -> io::Result<(Vec<Entry>, usize)> {
     let mut entries = vec![];
-    let mut intact = 0;
-    while bytes.len() >= 36 {
-        let len = u32::from_le_bytes(bytes[..4].try_into().unwrap()) as usize;
-        let Some(body) = bytes.get(36..36 + len) else {
-            break;
-        };
-        if Sha256::digest(body)[..] != bytes[4..36] {
+    let mut offset = 0;
+    while offset < bytes.len() {
+        let rest = &bytes[offset..];
+        if rest.len() < FRAME {
             break;
         }
-        let Some(entry) = decode(body) else {
+        let len = u32::from_le_bytes(rest[..4].try_into().unwrap()) as usize;
+        let Some(end) = FRAME.checked_add(len).filter(|end| *end <= rest.len()) else {
+            // The record runs past the end: the last write was torn.
             break;
         };
-        entries.push(entry);
-        intact += 36 + len;
-        bytes = &bytes[36 + len..];
+        let seq = u64::from_le_bytes(rest[4..12].try_into().unwrap());
+        let body = &rest[FRAME..end];
+        let last = end == rest.len();
+        // The checksum covers the sequence number and body, so only a checksum failure can
+        // be a torn write, and only in the last record.
+        let entry = if checksum(seq, body)[..] != rest[12..FRAME] {
+            if last {
+                break;
+            }
+            Err("checksum mismatch")
+        } else if seq != entries.len() as u64 {
+            Err("sequence gap")
+        } else {
+            decode(body).ok_or("undecodable record")
+        };
+        match entry {
+            Ok(entry) => entries.push(entry),
+            Err(detail) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "the call journal is corrupt: {detail} in the record at byte {}",
+                        HEADER + offset
+                    ),
+                ));
+            }
+        }
+        offset += end;
     }
-    (entries, intact)
+    Ok((entries, offset))
 }
 
 fn put_stream(out: &mut Vec<u8>, stream: &StreamKey) {

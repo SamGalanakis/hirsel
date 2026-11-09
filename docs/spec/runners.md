@@ -724,10 +724,19 @@ requires a client certificate they issued, and a caller's `identity` is
 with `clients` null, the one caller is `"anonymous"`. A caller's `grants` (the `io`
 schema without `stdin` and `runners`) and `definitions` bound what its requests may
 select. `journal` is the stream seam: `journal.none@1` (the default; a restarted host is
-a new incarnation and does not reconcile) or `journal.dir@1`, an append-only checksummed
-file that keeps every stream, admission and decision durably before it is acted on, so a
-restarted host reconciles, and a call it admitted but never decided is
-`InDoubt(Abandoned())`. `recording` is `none` (the default) or `record`, each callee's
+a new incarnation and does not reconcile) or `journal.dir@1`, an append-only file of
+sequenced, checksummed records that keeps every stream, admission, decision and
+acknowledgement durably before it is acted on, so a restarted host reconciles, and a call
+it admitted but never decided is `InDoubt(Abandoned())`. **Recovery.** A reader takes the
+longest valid prefix. A last record that is short, runs past the end of the file or fails
+its checksum is a torn tail and is cut; it was never durable, so nothing was acted on from
+it. Damage to any earlier record, a sequence gap or a record that does not decode refuse
+recovery as `Corrupt`, leave the file as it is, and the host does not start. **A failed
+append.** An append that fails, with an error or after writing part of its record, poisons
+the journal, and every later append fails. The host never acts on a record whose append
+failed: it sends no outcome, starts no callee, opens no stream and drops no outcome on it.
+It cancels its running callees, closes every session, refuses all later work, and `hirsel
+serve` exits with the error, so the restarted host recovers from the journal. `recording` is `none` (the default) or `record`, each callee's
 tape written to `tapes` under its call key. `runs` (default 1) bounds callees running at
 once and `queue` (default 64) admitted calls waiting, beyond which a call is
 `NotRun(Overloaded())`.

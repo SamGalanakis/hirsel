@@ -1,4 +1,5 @@
-//! The durable call journal keeps every acknowledged record and drops a torn tail.
+//! The durable call journal keeps every acknowledged record, cuts only a torn tail, and
+//! refuses earlier damage as corrupt.
 use hirsel_remote::journal::{DirJournal, Entry, Journal, StreamKey};
 use hirsel_run_schema::CallOutcome;
 
@@ -65,8 +66,11 @@ fn a_dir_journal_recovers_its_records_and_drops_a_torn_tail() {
     assert_eq!(reopened.recover().unwrap(), expected);
 }
 
+/// Damage to a record before the last cannot be a torn write: a flipped byte or a lost
+/// record (a sequence gap) is refused, and the file is left as it is, so the later synced
+/// records are not lost.
 #[test]
-fn a_corrupt_record_ends_recovery() {
+fn interior_damage_is_corrupt_and_leaves_the_file_unchanged() {
     let dir = tempfile::tempdir().unwrap();
     {
         let mut journal = DirJournal::open(dir.path(), [9; 16]).unwrap();
@@ -80,17 +84,19 @@ fn a_corrupt_record_ends_recovery() {
         }
     }
     let path = dir.path().join("calls.journal");
-    let mut bytes = std::fs::read(&path).unwrap();
-    // Flip a byte in the second record's body.
-    let second = 24 + (36 + bytes[24] as usize) + 40;
-    bytes[second] ^= 1;
-    std::fs::write(&path, &bytes).unwrap();
-    let mut journal = DirJournal::open(dir.path(), [8; 16]).unwrap();
-    assert_eq!(
-        journal.recover().unwrap(),
-        vec![Entry::Acknowledged {
-            stream: stream(),
-            position: 1
-        }]
-    );
+    let intact = std::fs::read(&path).unwrap();
+    // A 24-byte header, then records of a 44-byte head and a body; all three are equal in
+    // length.
+    let record = 44 + intact[24] as usize;
+    let second = 24 + record;
+    let mut flipped = intact.clone();
+    flipped[second + 50] ^= 1;
+    let mut lost = intact.clone();
+    lost.drain(second..second + record);
+    for damaged in [flipped, lost] {
+        std::fs::write(&path, &damaged).unwrap();
+        let error = DirJournal::open(dir.path(), [8; 16]).err().unwrap();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData, "{error}");
+        assert_eq!(std::fs::read(&path).unwrap(), damaged);
+    }
 }

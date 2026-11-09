@@ -68,10 +68,22 @@ struct Shared {
     sessions: BTreeMap<SessionId, Sender<Command>>,
     cancels: BTreeMap<RunId, CancelHandle>,
     next_session: SessionId,
-    starts: Sender<(Start, ExternalCancel)>,
+    work: Sender<Work>,
+}
+/// What the callee thread does next.
+enum Work {
+    Start(Start, ExternalCancel),
+    /// The host stopped on a failed journal append: the process exits to recover.
+    Stop,
 }
 impl Shared {
     fn dispatch(&mut self, actions: Vec<Action>) {
+        self.act(actions);
+        if self.host.failure().is_some() {
+            let _ = self.work.send(Work::Stop);
+        }
+    }
+    fn act(&mut self, actions: Vec<Action>) {
         for action in actions {
             match action {
                 Action::Send(session, frame) => {
@@ -87,14 +99,14 @@ impl Shared {
                 Action::Start(start) => match ExternalCancel::pair() {
                     Ok((cancel, handle)) => {
                         self.cancels.insert(start.run, handle);
-                        let _ = self.starts.send((start, cancel));
+                        let _ = self.work.send(Work::Start(start, cancel));
                     }
                     Err(error) => {
                         eprintln!("hirsel serve: a callee's cancellation channel: {error}");
                         let actions =
                             self.host
                                 .ended(start.run, CallOutcome::InDoubt(ABANDONED), None);
-                        self.dispatch(actions);
+                        self.act(actions);
                     }
                 },
                 Action::Cancel(run, _) => {
@@ -115,7 +127,8 @@ fn read(path: &str, what: &str) -> Result<Vec<u8>, ToolError> {
 }
 
 /// Serve `program`'s callee entries under the host configuration at `config` until the
-/// process ends. `ready` is told the listening endpoint once connections are accepted.
+/// process ends, or until a failed call journal append stops the host: then it returns the
+/// failure, so the process exits and its restart recovers from the journal. `ready` is told the listening endpoint once connections are accepted.
 pub fn serve(
     program: &Path,
     config: &Path,
@@ -188,7 +201,7 @@ pub fn serve(
         .map_err(|e| host_error("host.identity", e))?,
     );
     let listener = Listener::bind(&config.listen).map_err(|e| host_error("host.listen", e))?;
-    let (starts, started) = channel();
+    let (work, next) = channel();
     let shared = Arc::new(Mutex::new(Shared {
         host,
         place: Served {
@@ -198,7 +211,7 @@ pub fn serve(
         sessions: BTreeMap::new(),
         cancels: BTreeMap::new(),
         next_session: 1,
-        starts,
+        work,
     }));
     let config = Arc::new(config);
     {
@@ -212,7 +225,20 @@ pub fn serve(
         hirsel_run_schema::Endpoint::Unix(path) => path.clone(),
         hirsel_run_schema::Endpoint::Tcp { address, service } => format!("{address}:{service}"),
     });
-    for (start, cancel) in started {
+    let stopped = |shared: &Shared| {
+        shared
+            .host
+            .failure()
+            .map(|failure| host_error("the call journal", failure))
+    };
+    for work in next {
+        let Work::Start(start, cancel) = work else {
+            break;
+        };
+        // A stopped host acts on nothing more, not even a callee it queued before it stopped.
+        if let Some(error) = stopped(&shared.lock().unwrap()) {
+            return Err(error);
+        }
         let run = start.run;
         let (end, callee) = run_callee(&mut session, &entries, &config, &start, cancel);
         let mut shared = shared.lock().unwrap();
@@ -220,7 +246,7 @@ pub fn serve(
         let actions = shared.host.ended(run, end, callee);
         shared.dispatch(actions);
     }
-    Ok(())
+    stopped(&shared.lock().unwrap()).map_or(Ok(()), Err)
 }
 
 /// Accept connections until the listener fails; each runs on its own thread.

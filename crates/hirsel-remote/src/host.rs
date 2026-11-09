@@ -32,6 +32,13 @@
 //! running one it is forwarded once and acknowledged. A caller whose session is lost has
 //! its running callees cancelled with cause `Parent` and its queued ones decided
 //! `Canceled(Parent())` (RUN-9); the caller learns those outcomes through status queries.
+//!
+//! **A failed journal stops the host.** Every record is appended before it is acted on: a
+//! stream before it opens, an admission before its callee may start, a decision before its
+//! outcome is sent, an acknowledgement before its outcomes are dropped. When an append
+//! fails the journal is poisoned and the host stops: it acts on nothing that record would
+//! have made durable, cancels its running callees, closes every session, refuses every
+//! later frame, and reports [`Host::failure`] so its process exits and recovers.
 use crate::frame::{Call, CallRef, Frame, Outcome};
 use crate::journal::{Entry, Journal, StreamKey};
 use hirsel_run_schema::{CallOutcome, IoGrants, call_key};
@@ -41,7 +48,6 @@ pub type SessionId = u64;
 pub type RunId = u64;
 
 pub const DENIED: u32 = 0;
-pub const UNREACHABLE: u32 = 2;
 pub const OVERLOADED: u32 = 3;
 pub const REJECTED: u32 = 4;
 pub const ABANDONED: u32 = 2;
@@ -174,6 +180,8 @@ pub struct Host {
     queued: VecDeque<RunId>,
     running: u64,
     next_run: RunId,
+    /// The append failure that stopped the host.
+    failure: Option<String>,
 }
 
 impl Host {
@@ -274,7 +282,40 @@ impl Host {
             queued: VecDeque::new(),
             running: 0,
             next_run: 1,
+            failure: None,
         })
+    }
+
+    /// The journal append failure that stopped this host, if one did. A stopped host
+    /// refuses all work; its process must exit and recover from the journal.
+    pub fn failure(&self) -> Option<&str> {
+        self.failure.as_deref()
+    }
+
+    /// Append `entry`, or stop the host: cancel every running callee and close every
+    /// session. False when the host is (now) stopped, and nothing may act on `entry`.
+    fn append(&mut self, entry: &Entry, actions: &mut Vec<Action>) -> bool {
+        if self.failure.is_some() {
+            return false;
+        }
+        let Err(error) = self.journal.append(entry) else {
+            return true;
+        };
+        self.failure = Some(error.to_string());
+        self.queued.clear();
+        for (run, r) in &self.runs {
+            if let Some(Decided {
+                state: State::Running { .. },
+                ..
+            }) = self.streams[&r.stream].decided.get(&r.position)
+            {
+                actions.push(Action::Cancel(*run, PARENT));
+            }
+        }
+        for session in std::mem::take(&mut self.sessions).into_keys() {
+            actions.push(Action::Close(session));
+        }
+        false
     }
 
     /// A connection authenticated as `caller`, or as no admitted caller (None).
@@ -293,6 +334,9 @@ impl Host {
     /// cancelled.
     pub fn disconnected(&mut self, session: SessionId) -> Vec<Action> {
         let mut actions = vec![];
+        if self.failure.is_some() {
+            return actions;
+        }
         let Some(Session {
             stream: Some(key), ..
         }) = self.sessions.remove(&session)
@@ -320,6 +364,9 @@ impl Host {
             .collect();
         for position in positions {
             self.cancel(key, position, cause, actions);
+            if self.failure.is_some() {
+                return;
+            }
         }
     }
 
@@ -365,6 +412,11 @@ impl Host {
         let Some(current) = self.sessions.get(&session) else {
             return actions;
         };
+        if self.failure.is_some() {
+            self.sessions.remove(&session);
+            actions.push(Action::Close(session));
+            return actions;
+        }
         if let Frame::Open {
             stream,
             instance,
@@ -399,7 +451,9 @@ impl Host {
             },
             Frame::Status(r) => self.status(session, &key, r, &mut actions),
             Frame::Close { acknowledged, .. } => {
-                self.acknowledge(&key, acknowledged);
+                if !self.acknowledge(&key, acknowledged, &mut actions) {
+                    return actions;
+                }
                 let stream = self.streams.get_mut(&key).unwrap();
                 stream.session = None;
                 stream.gaps.clear();
@@ -430,16 +484,11 @@ impl Host {
             stream: stream_id,
         };
         if !self.streams.contains_key(&key) {
-            if self
-                .journal
-                .append(&Entry::Stream {
-                    stream: key.clone(),
-                    instance,
-                })
-                .is_err()
-            {
-                actions.push(Action::Send(session, Frame::Refused(UNREACHABLE)));
-                actions.push(Action::Close(session));
+            let entry = Entry::Stream {
+                stream: key.clone(),
+                instance,
+            };
+            if !self.append(&entry, actions) {
                 return;
             }
             stream_of(&mut self.streams, &key).instance = instance;
@@ -472,8 +521,14 @@ impl Host {
         ));
     }
 
-    fn acknowledge(&mut self, key: &StreamKey, acknowledged: u64) {
-        let stream = self.streams.get_mut(key).unwrap();
+    /// Drop the outcomes the caller holds; false when the host stopped instead.
+    fn acknowledge(
+        &mut self,
+        key: &StreamKey,
+        acknowledged: u64,
+        actions: &mut Vec<Action>,
+    ) -> bool {
+        let stream = &self.streams[key];
         // Only outcomes the caller holds can be dropped: decided, finished positions.
         let mut upto = stream.acknowledged;
         while upto < acknowledged.min(stream.applied)
@@ -485,14 +540,18 @@ impl Host {
             upto += 1;
         }
         if upto > stream.acknowledged {
-            stream.acknowledged = upto;
-            stream.decided.retain(|p, _| *p > upto);
-            // A lost acknowledgement only keeps outcomes longer.
-            let _ = self.journal.append(&Entry::Acknowledged {
+            let entry = Entry::Acknowledged {
                 stream: key.clone(),
                 position: upto,
-            });
+            };
+            if !self.append(&entry, actions) {
+                return false;
+            }
+            let stream = self.streams.get_mut(key).unwrap();
+            stream.acknowledged = upto;
+            stream.decided.retain(|p, _| *p > upto);
         }
+        true
     }
 
     fn outcome_frame(stream: &Stream, position: u64, decided: &Decided) -> Option<Frame> {
@@ -577,7 +636,9 @@ impl Host {
         digests: &dyn Digests,
         actions: &mut Vec<Action>,
     ) {
-        self.acknowledge(key, call.acknowledged);
+        if !self.acknowledge(key, call.acknowledged, actions) {
+            return;
+        }
         let digest = digests.digest(&call);
         let stream = self.streams.get_mut(key).unwrap();
         let epoch = stream.epoch;
@@ -660,54 +721,44 @@ impl Host {
                         key: call.key,
                         digest,
                     };
-                    if self.journal.append(&admitted).is_err() {
-                        self.decide_refused(
-                            key,
-                            position,
-                            call.key,
-                            digest,
-                            UNREACHABLE,
-                            vec![],
-                            session,
-                            actions,
-                        );
-                    } else {
-                        let run = self.next_run;
-                        self.next_run += 1;
-                        let stream = self.streams.get_mut(key).unwrap();
-                        stream.applied = position;
-                        stream.decided.insert(
-                            position,
-                            Decided {
-                                key: call.key,
-                                digest,
-                                state: State::Queued(run),
-                            },
-                        );
-                        let instance = stream.instance;
-                        self.runs.insert(
-                            run,
-                            Run {
-                                stream: key.clone(),
-                                position,
-                                start: Start {
-                                    run,
-                                    caller: caller.name.clone(),
-                                    instance,
-                                    digest,
-                                    call,
-                                    grants,
-                                },
-                            },
-                        );
-                        self.queued.push_back(run);
-                        self.dispatch(actions);
+                    if !self.append(&admitted, actions) {
+                        return;
                     }
+                    let run = self.next_run;
+                    self.next_run += 1;
+                    let stream = self.streams.get_mut(key).unwrap();
+                    stream.applied = position;
+                    stream.decided.insert(
+                        position,
+                        Decided {
+                            key: call.key,
+                            digest,
+                            state: State::Queued(run),
+                        },
+                    );
+                    let instance = stream.instance;
+                    self.runs.insert(
+                        run,
+                        Run {
+                            stream: key.clone(),
+                            position,
+                            start: Start {
+                                run,
+                                caller: caller.name.clone(),
+                                instance,
+                                digest,
+                                call,
+                                grants,
+                            },
+                        },
+                    );
+                    self.queued.push_back(run);
+                    self.dispatch(actions);
                 }
             }
         }
         // Gap refusals the decided position now reaches are decided too.
-        loop {
+        while self.failure.is_none() {
             let stream = self.streams.get_mut(key).unwrap();
             let next = stream.applied + 1;
             let Some((k, d)) = stream.gaps.remove(&next) else {
@@ -770,18 +821,20 @@ impl Host {
         missing: Vec<[u8; 32]>,
         actions: &mut Vec<Action>,
     ) {
-        let stream = self.streams.get_mut(key).unwrap();
-        let decided = stream.decided.get_mut(&position).unwrap();
-        // An outcome that cannot be journaled is still the outcome; a durable journal that
-        // fails loses only the ability to answer a later status query from it.
-        let _ = self.journal.append(&Entry::Decided {
+        let decided = &self.streams[key].decided[&position];
+        let entry = Entry::Decided {
             stream: key.clone(),
             position,
             key: decided.key,
             digest: decided.digest,
             end: end.clone(),
             callee,
-        });
+        };
+        if !self.append(&entry, actions) {
+            return;
+        }
+        let stream = self.streams.get_mut(key).unwrap();
+        let decided = stream.decided.get_mut(&position).unwrap();
         decided.state = State::Done {
             end,
             callee,
@@ -796,7 +849,7 @@ impl Host {
 
     /// Start queued callees while the executor has room.
     fn dispatch(&mut self, actions: &mut Vec<Action>) {
-        while self.running < self.limits.runs {
+        while self.failure.is_none() && self.running < self.limits.runs {
             let Some(run) = self.queued.pop_front() else {
                 break;
             };

@@ -1,17 +1,20 @@
 //! The host and client protocols together under a seeded simulated network and executor:
 //! connections that drop with frames in flight, frames duplicated or reordered within a
 //! connection, frames of a closed connection delivered on its successor, cancellations,
-//! timeouts and host crashes with and without a durable journal. Every schedule checks the
-//! protocol's promises:
+//! timeouts, host crashes with and without a durable journal, and durable journal appends
+//! that fail after writing none, part or all of their record (the host stops, and its
+//! process restarts). Every schedule checks the protocol's promises:
 //! - no call key's callee ever starts twice;
 //! - every submitted call completes exactly once;
 //! - `Ok` and `Failed` carry exactly what the callee produced, and a call completed
 //!   `NotRun` or `Canceled` never started, then or later;
-//! - with no faults, every call completes `Ok`.
+//! - with no faults, every call completes `Ok`;
+//! - with a durable journal, every position is decided at most once, and every outcome the
+//!   caller received is the one the recovered journal holds and its `Status` answers.
 use hirsel_remote::client::{Client, ClientAction, Settings};
 use hirsel_remote::frame::{Call, Frame};
 use hirsel_remote::host::{Action, Caller, Digests, Host, Limits, Place, Refusal};
-use hirsel_remote::journal::{Journal, NoJournal, SimDisk};
+use hirsel_remote::journal::{Entry, Journal, NoJournal, SimDisk};
 use hirsel_run_schema::{CallForm, CallOutcome, GrantSet, IoGrants, call_key};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
@@ -70,6 +73,8 @@ struct Faults {
     crash: u64,
     refuse_connect: u64,
     cancel: u64,
+    /// Per journal append, in parts per million: the append fails.
+    append: u64,
 }
 
 struct Connection {
@@ -101,6 +106,8 @@ struct World {
     executor: Executor,
     completed: BTreeMap<u64, Vec<CallOutcome>>,
     calls: BTreeMap<u64, [u8; 32]>,
+    /// Every decided outcome delivered to the caller, by position: its key and end.
+    received: BTreeMap<u64, ([u8; 32], CallOutcome)>,
     now: u64,
 }
 
@@ -112,18 +119,46 @@ fn caller() -> Caller {
     }
 }
 const INSTANCE: [u8; 16] = [7; 16];
+/// `NotRunReason.Rejected()`: also the host's unrecorded answer to a stale, gap or
+/// mismatched request.
+const REJECTED: u32 = 4;
+
+/// Start a host over `disk`, as its process does after a crash or a stop: a start whose
+/// own appends fail exits, and the next one recovers again.
+fn restart(disk: &SimDisk, fresh: [u8; 16], limits: Limits) -> Host {
+    loop {
+        let journal = disk.journal(fresh).expect("the journal recovers");
+        if let Ok(host) = Host::new(Box::new(journal), limits) {
+            return host;
+        }
+    }
+}
 
 impl World {
     fn new(seed: u64, faults: Faults, durable: bool, settings: Settings, limits: Limits) -> Self {
+        let mut rng = Rng(seed);
         let disk = durable.then(SimDisk::default);
-        let journal: Box<dyn Journal> = match &disk {
-            Some(disk) => Box::new(disk.journal([1; 16])),
-            None => Box::new(NoJournal::new([1; 16])),
+        let host = match &disk {
+            Some(disk) => {
+                // Script the failing appends: none, part or all of the record is written.
+                for attempt in 0..1_000 {
+                    if faults.append > 0 && rng.chance(faults.append) {
+                        let written = match rng.below(3) {
+                            0 => 0,
+                            1 => 1 + rng.below(80),
+                            _ => usize::MAX,
+                        };
+                        disk.fail_append(attempt, written);
+                    }
+                }
+                restart(disk, [1; 16], limits)
+            }
+            None => Host::new(Box::new(NoJournal::new([1; 16])), limits).unwrap(),
         };
         Self {
-            rng: Rng(seed),
+            rng,
             faults,
-            host: Host::new(journal, limits).unwrap(),
+            host,
             disk,
             incarnations: 1,
             client: Client::new([3; 32], INSTANCE, settings),
@@ -133,6 +168,7 @@ impl World {
             executor: Executor::default(),
             completed: BTreeMap::new(),
             calls: BTreeMap::new(),
+            received: BTreeMap::new(),
             now: 0,
         }
     }
@@ -233,8 +269,7 @@ impl World {
                         let c = self.connection.as_mut().unwrap();
                         let pending: Vec<Frame> = c.to_client.drain(..).collect();
                         for frame in pending {
-                            let actions = self.client.frame(frame);
-                            self.client_actions(actions);
+                            self.deliver(frame);
                         }
                         if let Some(c) = self.connection.take() {
                             self.ghosts.extend(c.to_host);
@@ -261,6 +296,25 @@ impl World {
         }
     }
 
+    /// A frame reaches the caller.
+    fn deliver(&mut self, frame: Frame) {
+        // Positions restart with a host that forgets its streams.
+        if let Frame::Outcome(o) = &frame
+            && self.disk.is_some()
+            && o.end != CallOutcome::NotRun(REJECTED)
+        {
+            let seen = (o.key, o.end.clone());
+            let earlier = self.received.insert(o.position, seen.clone());
+            assert!(
+                earlier.as_ref().is_none_or(|e| *e == seen),
+                "position {} received {earlier:?} and then {seen:?}",
+                o.position
+            );
+        }
+        let actions = self.client.frame(frame);
+        self.client_actions(actions);
+    }
+
     fn crash_host(&mut self) {
         let connected = self.connection.take().is_some();
         self.ghosts.clear();
@@ -268,11 +322,10 @@ impl World {
         self.executor.running.clear();
         self.incarnations += 1;
         let fresh = [self.incarnations as u8; 16];
-        let journal: Box<dyn Journal> = match &self.disk {
-            Some(disk) => Box::new(disk.journal(fresh)),
-            None => Box::new(NoJournal::new(fresh)),
+        self.host = match &self.disk {
+            Some(disk) => restart(disk, fresh, Limits::default()),
+            None => Host::new(Box::new(NoJournal::new(fresh)), Limits::default()).unwrap(),
         };
-        self.host = Host::new(journal, Limits::default()).unwrap();
         // The client sees its connection drop and reconnects to the restarted host.
         if connected {
             let actions = self.client.lost();
@@ -286,6 +339,11 @@ impl World {
         let actions = self.client.tick(self.now);
         self.client_actions(actions);
         let f = self.faults;
+        // A host stopped by a failed append exits; its process restarts and recovers.
+        if self.host.failure().is_some() {
+            self.crash_host();
+            return true;
+        }
         if self.connection.is_some() && self.rng.chance(f.drop_connection) {
             self.close_connection();
             return true;
@@ -345,8 +403,7 @@ impl World {
                 if self.rng.chance(f.duplicate) {
                     c.to_client.push_front(frame.clone());
                 }
-                let actions = self.client.frame(frame);
-                self.client_actions(actions);
+                self.deliver(frame);
             }
             2 => {
                 let runs: Vec<u64> = self.executor.running.keys().copied().collect();
@@ -416,6 +473,51 @@ impl World {
             }
         }
     }
+    /// The recovered journal decides each position at most once, and holds every outcome
+    /// the caller received; a host restarted over it answers `Status` with that outcome for
+    /// every position the caller has not acknowledged.
+    fn check_recovery(&self) {
+        let Some(disk) = &self.disk else {
+            return;
+        };
+        let mut decided = BTreeMap::new();
+        for entry in disk.journal([0; 16]).unwrap().recover().unwrap() {
+            if let Entry::Decided {
+                position, key, end, ..
+            } = entry
+            {
+                let earlier = decided.insert(position, (key, end));
+                assert!(earlier.is_none(), "position {position} decided twice");
+            }
+        }
+        let mut host = restart(disk, [0; 16], Limits::default());
+        host.connected(1, Some(caller()));
+        let open = Frame::Open {
+            stream: [3; 32],
+            instance: INSTANCE,
+            epoch: u64::MAX,
+        };
+        host.frame(1, open, &mut TestPlace, &TestDigests);
+        for (position, (key, end)) in &self.received {
+            assert_eq!(
+                decided.get(position),
+                Some(&(*key, end.clone())),
+                "position {position}: the caller received {end:?}"
+            );
+            let status = Frame::Status(hirsel_remote::frame::CallRef {
+                epoch: u64::MAX,
+                position: *position,
+                key: *key,
+            });
+            match &host.frame(1, status, &mut TestPlace, &TestDigests)[..] {
+                // The caller acknowledged it.
+                [] => (),
+                [Action::Send(1, Frame::Outcome(o))] => assert_eq!(&o.end, end),
+                other => panic!("position {position}: status after recovery is {other:?}"),
+            }
+        }
+    }
+
     fn calls_denied(&self) -> BTreeSet<u64> {
         self.calls.keys().copied().filter(|t| t % 7 == 6).collect()
     }
@@ -471,7 +573,7 @@ fn without_faults_every_call_runs_once_and_completes_ok() {
     }
 }
 
-fn faulty(seed: u64, durable: bool, crash: u64) {
+fn faulty(seed: u64, durable: bool, crash: u64, append: u64) {
     let faults = Faults {
         drop_connection: 20_000,
         duplicate: 100_000,
@@ -480,6 +582,7 @@ fn faulty(seed: u64, durable: bool, crash: u64) {
         crash,
         refuse_connect: 100_000,
         cancel: 5_000,
+        append,
     };
     let settings = Settings {
         timeout_ns: Some(2_000_000_000),
@@ -489,26 +592,36 @@ fn faulty(seed: u64, durable: bool, crash: u64) {
     };
     let world = run(seed, faults, durable, settings);
     world.check(true);
+    world.check_recovery();
 }
 
 #[test]
 fn lost_duplicated_and_reordered_frames_never_run_a_call_twice() {
     for seed in 0..300 {
-        faulty(seed, false, 0);
+        faulty(seed, false, 0, 0);
     }
 }
 
 #[test]
 fn host_crashes_without_a_journal_leave_sent_calls_in_doubt() {
     for seed in 0..300 {
-        faulty(seed, false, 3_000);
+        faulty(seed, false, 3_000, 0);
     }
 }
 
 #[test]
 fn host_crashes_with_a_durable_journal_resolve_calls_from_it() {
     for seed in 0..300 {
-        faulty(seed, true, 3_000);
+        faulty(seed, true, 3_000, 0);
+    }
+}
+
+/// A failed append stops the host and its process restarts, so no outcome is sent for a
+/// decision the journal does not hold, and no callee starts for an admission it lost.
+#[test]
+fn failed_journal_appends_stop_the_host_and_recovery_agrees_with_every_outcome_sent() {
+    for seed in 0..300 {
+        faulty(seed, true, 3_000, 30_000);
     }
 }
 
@@ -667,4 +780,99 @@ fn a_fenced_session_is_discarded() {
         refused,
         vec![Action::Send(4, Frame::Refused(0)), Action::Close(4)]
     );
+}
+
+/// An append that writes part of its record stops the host, so no later record follows the
+/// torn one; the restarted host cuts it, and the next record it appends survives recovery.
+#[test]
+fn a_partial_append_stops_the_host_and_the_next_record_survives_restart() {
+    let disk = SimDisk::default();
+    let mut host = restart(&disk, [1; 16], Limits::default());
+    let open = |epoch| Frame::Open {
+        stream: [3; 32],
+        instance: INSTANCE,
+        epoch,
+    };
+    let call = |epoch: u64, position: u64| Call {
+        epoch,
+        position,
+        ordinal: position,
+        key: call_key(&INSTANCE, position),
+        form: CallForm::Compute,
+        path: "app@1/m.f".into(),
+        fingerprint: [0; 32],
+        code: [0; 32],
+        grants: GrantSet::default(),
+        definitions: None,
+        argument: vec![position as u8],
+        acknowledged: 0,
+    };
+    let status = |epoch, position| {
+        Frame::Status(hirsel_remote::frame::CallRef {
+            epoch,
+            position,
+            key: call_key(&INSTANCE, position),
+        })
+    };
+    let run_to_end = |host: &mut Host, session, c: Call, end: u8| {
+        let actions = host.frame(
+            session,
+            Frame::Call(Box::new(c)),
+            &mut TestPlace,
+            &TestDigests,
+        );
+        let [Action::Start(start)] = &actions[..] else {
+            panic!("{actions:?}")
+        };
+        host.ended(start.run, CallOutcome::Ok(vec![end]), None)
+    };
+    host.connected(1, Some(caller()));
+    host.frame(1, open(1), &mut TestPlace, &TestDigests);
+    let ended = run_to_end(&mut host, 1, call(1, 1), 41);
+    assert!(
+        matches!(&ended[..], [Action::Send(1, Frame::Outcome(o))] if o.end == CallOutcome::Ok(vec![41]))
+    );
+    // Position 2's admission writes 20 bytes of its record and fails: nothing starts, the
+    // session closes, and the host refuses everything after.
+    let intact = disk.bytes();
+    disk.fail_append(disk.appends(), 20);
+    let actions = host.frame(
+        1,
+        Frame::Call(Box::new(call(1, 2))),
+        &mut TestPlace,
+        &TestDigests,
+    );
+    assert_eq!(actions, vec![Action::Close(1)]);
+    assert!(host.failure().is_some());
+    host.connected(2, Some(caller()));
+    assert_eq!(
+        host.frame(2, open(2), &mut TestPlace, &TestDigests),
+        vec![Action::Close(2)]
+    );
+    assert_eq!(
+        disk.bytes().len(),
+        intact.len() + 20,
+        "nothing follows the torn record"
+    );
+    // The restart cuts the torn record: position 1 stands, position 2 was never decided.
+    let mut host = restart(&disk, [2; 16], Limits::default());
+    assert_eq!(disk.bytes(), intact);
+    host.connected(3, Some(caller()));
+    let opened = host.frame(3, open(3), &mut TestPlace, &TestDigests);
+    assert!(matches!(
+        opened[..],
+        [Action::Send(3, Frame::Opened { applied: 1, .. })]
+    ));
+    run_to_end(&mut host, 3, call(3, 2), 42);
+    // Another restart recovers the record appended after the cut.
+    let mut host = restart(&disk, [3; 16], Limits::default());
+    host.connected(4, Some(caller()));
+    host.frame(4, open(4), &mut TestPlace, &TestDigests);
+    for (position, end) in [(1, 41), (2, 42)] {
+        let answer = host.frame(4, status(4, position), &mut TestPlace, &TestDigests);
+        assert!(
+            matches!(&answer[..], [Action::Send(4, Frame::Outcome(o))] if o.end == CallOutcome::Ok(vec![end])),
+            "position {position}: {answer:?}"
+        );
+    }
 }

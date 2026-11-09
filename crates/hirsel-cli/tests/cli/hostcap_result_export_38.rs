@@ -69,7 +69,7 @@ fn resource_result_and_replay(program: &str) {
                 .collect();
             assert!(
                 rows.iter()
-                    .all(|row| row["schema"] == "hirsel.ordered.events@2")
+                    .all(|row| row["schema"] == "hirsel.ordered.events@3")
             );
             assert!(
                 rows.iter().any(|row| row["outcome"]["kind"] == "task_end"

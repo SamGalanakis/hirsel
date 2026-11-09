@@ -4986,6 +4986,7 @@ pub unsafe extern "C" fn hirsel_rt_v2_channel_receive(
             status
         }
         None => {
+            // A blocked receive parks at once, with no Yield turn before it.
             // SAFETY: the slot is in this task's frame, parked with it.
             unsafe {
                 block(
@@ -4994,7 +4995,7 @@ pub unsafe extern "C" fn hirsel_rt_v2_channel_receive(
                         channel,
                         slot: message,
                     },
-                    true,
+                    false,
                     caller_site,
                 )
             };

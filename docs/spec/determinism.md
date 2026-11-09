@@ -384,7 +384,9 @@ naming one of three contracts, each version 1; any other algorithm or version re
 the launch as unsupported. It chooses only which runnable task runs at each scheduling
 point of `tasks.cooperative@1`, the queue order being that of
 [CONC-1](concurrency.md#conc-1-runtime)'s cooperative runtime: a spawned or woken task joins
-the back, and a yielding task joins the back before the choice. A scheduling point is each
+the back, and a yielding task joins the back before the choice. A receive that blocks parks
+its task with no choice before the park ([CONC-6](concurrency.md#conc-6-channels)); its
+wake joins the back like any other. A scheduling point is each
 choice made while at least one task is runnable. No contract changes what a program means
 ([DET-3](#det-3-no-switches)): every schedule it selects is one a cooperative runtime may
 take, and the seed only selects among them. Each draw `w` is the next SplitMix64 output of
@@ -496,7 +498,7 @@ that issues no request, is never journaled.
 
 ### Durable journal
 
-An ordinary tape starts with `hirsel-io-tape 11` followed by NUL; a durable
+An ordinary tape starts with `hirsel-io-tape 12` followed by NUL; a durable
 journal starts with `hirsel-journal 4` followed by newline. Both use the same
 binary frame envelope: a 32-bit little-endian payload length, 32-bit CRC32C,
 64-bit little-endian sequence number starting at zero, a kind byte, then the raw
@@ -845,7 +847,7 @@ whose exact keys are grants and whose values are UTF-8 strings or null for unset
 ### Canonical task-result traces
 
 The cooperative provider's `--hirsel-trace-events` export uses
-`hirsel.ordered.events@2`. A task result is observed from its live initialized
+`hirsel.ordered.events@3`. A task result is observed from its live initialized
 fields, in declaration order and through only the active variant. A host
 capability in any such field is an **identity-and-kind record**, never the
 capability's carrier bytes, a serialized grant, or an operating-system handle.

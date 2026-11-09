@@ -213,6 +213,10 @@ tape_case!(
     "conformance/CONC/CONC-6-suspended-receiver-run.hir"
 );
 tape_case!(
+    every_engine_records_the_same_tape_under_every_schedule_conc_6_blocked_receive_parks_before_cancel_run,
+    "conformance/CONC/CONC-6-blocked-receive-parks-before-cancel-run.hir"
+);
+tape_case!(
     every_engine_records_the_same_tape_under_every_schedule_conc_8_await_channel_cycle_run,
     "conformance/CONC/CONC-8-await-channel-cycle-run.hir"
 );

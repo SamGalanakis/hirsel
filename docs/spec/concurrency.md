@@ -205,6 +205,15 @@ inside a payload. `channel.send(tasks, mut s, take v) -> Result[(), (T, ChannelE
 buffered values and makes later sends return `Closed`; dropping the last Sender ends
 receiving once the buffer drains.
 
+A receive decides once, when its task reaches it. It first observes cancellation; then,
+if a value is buffered or no Sender is left, it takes the value or returns `Closed` and is
+a scheduling point at which its task yields, as a send is. Otherwise it registers its wait
+in the same step and its task parks, with no scheduling point before the park. A send,
+close or cancellation that ends the wait makes the receiver runnable at the back of the
+cooperative queue ([the scheduler](determinism.md#run-configuration)); it does not run the
+receiver ahead of other runnable tasks. The parked receiver's result is written only once
+its task is suspended.
+
 ```hirsel
 fn pipe(tasks: Tasks) -> Result[u64, ChannelError] {
   let (sender, receiver): (Sender[u64], Receiver[u64]) = channel.open(tasks)

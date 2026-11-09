@@ -468,6 +468,8 @@ pub const OPS: &[OpDescriptor] = &[
         &[Read(CancelState)],
         Phases::Single,
     ),
+    // Alternatives, decided once at the head: a ready receive yields; a
+    // blocked one parks with no Yield turn before it.
     op(
         "channel.receive",
         &[Yield, Park],

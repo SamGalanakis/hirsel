@@ -769,6 +769,9 @@ pub(crate) unsafe fn receive(
     if let Some(binding) = unsafe { (*ctx).ownership_queue.take() } {
         role::with_role(ctx, |s| s.task(me).ownership_queue = Some(binding));
     }
+    // One decision at the logical head: a ready receive consumes or closes and
+    // yields; a blocked one registers its wait in the same effect and parks.
+    // The parked slot is filled only by a poll that sees this frame saved.
     let (status, progress) = engine::head_observed(
         ctx,
         "channel.receive",
@@ -777,9 +780,22 @@ pub(crate) unsafe fn receive(
             let status = role::with_role(ctx, |s| {
                 let channel = s.channels.channel(word, false);
                 // SAFETY: this head callback owns the receiving task and its output.
-                unsafe { receive_ready(s, me, shield, channel, message) }
+                let status = unsafe { receive_ready(s, me, shield, channel, message) };
+                if status.is_none() {
+                    s.task(me).wait_site = caller_site;
+                    s.park(Wait::Receive {
+                        channel,
+                        slot: message,
+                    });
+                }
+                status
             });
-            (status, Next::Yield)
+            let next = if status.is_some() {
+                Next::Yield
+            } else {
+                Next::Park
+            };
+            (status, next)
         },
         |status| {
             unsafe { super::events::receive_immediate(ctx, *status, message) };
@@ -790,18 +806,6 @@ pub(crate) unsafe fn receive(
         engine::continue_at_head(ctx, progress)?;
         status
     } else {
-        engine::continue_at_head(ctx, progress)?;
-        let (_, progress) = engine::head_continuation(ctx, || {
-            role::with_role(ctx, |s| {
-                let channel = s.channels.channel(word, false);
-                s.task(me).wait_site = caller_site;
-                s.park(Wait::Receive {
-                    channel,
-                    slot: message,
-                });
-            });
-            ((), Next::Park)
-        })?;
         engine::save_boundary(ctx, progress)?;
         role::with_role(ctx, |s| s.task(me).status)
     };
@@ -1902,16 +1906,17 @@ pub(super) mod tests {
                         })
                         .cloned()
                         .collect();
-                    assert_eq!(rows.len(), 5);
+                    // A blocked receive parks at its first decision: no Yield row.
+                    assert_eq!(rows.len(), 4);
                     for (subevent, row) in rows.iter().enumerate() {
                         assert_eq!(row.subevent as usize, subevent);
                     }
-                    assert_eq!(rows[0].transition, super::super::events::Transition::Yield);
-                    assert_eq!(rows[2].transition, super::super::events::Transition::Park);
-                    assert_eq!(rows[4].transition, super::super::events::Transition::Keep);
-                    assert_eq!(rows[4].retirement, poll.retirement);
+                    assert_eq!(rows[0].transition, super::super::events::Transition::Park);
+                    assert_eq!(rows[1].transition, super::super::events::Transition::Park);
+                    assert_eq!(rows[3].transition, super::super::events::Transition::Keep);
+                    assert_eq!(rows[3].retirement, poll.retirement);
                     assert_eq!(
-                        rows[4].outcome,
+                        rows[3].outcome,
                         super::super::events::CanonicalOutcome::Received {
                             status: poll.status,
                             payload: poll.payload.clone()

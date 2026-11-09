@@ -331,7 +331,7 @@ fn outcome(outcome: &CanonicalOutcome) -> Value {
 }
 fn row(event: &CanonicalEvent) -> Value {
     json!({
-        "schema":"hirsel.ordered.events@2", "task":event.task, "ordinal":event.ordinal,
+        "schema":"hirsel.ordered.events@3", "task":event.task, "ordinal":event.ordinal,
         "subevent":event.subevent, "op":event.op, "transition":transition(&event.transition),
         "item":item(&event.item), "version":event.version, "outcome":outcome(&event.outcome),
         "retirement":event.retirement, "credit":event.credit,

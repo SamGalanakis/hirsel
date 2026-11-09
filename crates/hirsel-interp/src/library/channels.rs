@@ -166,6 +166,9 @@ impl Library {
                         vec![],
                         context,
                     )?;
+                    // A blocked receive parks in this turn, with no Yield turn
+                    // before it; only sends and ready receives yield.
+                    self.tasks.yield_now = false;
                     return Ok(OperationResult::Park {
                         token,
                         wait: BlockedWait {

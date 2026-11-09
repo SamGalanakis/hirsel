@@ -9,7 +9,7 @@ import ctypes, json, os, pathlib, select, socket, struct, subprocess, sys, time
 
 def stdin_is_blocked(tape):
     data = tape.read_bytes()
-    magic = b'hirsel-io-tape 11\0'
+    magic = b'hirsel-io-tape 12\0'
     if len(data) < len(magic): return False
     assert data.startswith(magic), 'unexpected tape version'
     at = len(magic)

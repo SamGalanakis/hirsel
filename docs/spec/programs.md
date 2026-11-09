@@ -14,11 +14,11 @@ package, version, module and item path. Content digests identify revisions or ar
 never establish nominal type equality. One implementation revision is selected for each
 definition in a program. Two versions of a package define distinct types.
 
-**Revision swaps.** Hirsel has no live-swap feature today: a run executes the one revision
-selected at launch. Any future feature that replaces revisions during a run must obey this
-rule. A definition's selected revision may advance only at recorded swap points. A named
-function value follows its definition, so later calls use the current revision. A closure
-keeps the revision that created it. A run's tape records every swap point.
+**One revision per run.** A run executes the one revision selected when it starts, and
+nothing replaces a revision during a run. Code changes between runs: work that must
+outlive a change of code ends its run by committing its state as data, and a later run
+on the newer revision resumes from that data
+([STORE-18](storage.md#store-18-runs-at-a-place)).
 
 Core nominal roles use the compiler-supplied `core@1` definition paths: core types are
 rooted directly under `core@1`, and operations are `core@1/module.item`. A source file

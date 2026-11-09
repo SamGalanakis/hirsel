@@ -72,7 +72,7 @@ Cost reports (where layer-0 code counts, copies or keeps checks) are tooling.
 | [Capabilities and authority](capabilities.md) | CAP-1 to CAP-6 |
 | [Concurrency](concurrency.md) | CONC-1 to CONC-8 |
 | [Runners](runners.md) (partly shipped): places functions run, entries, calls, outcomes, linked tapes, recording levels, provider seams | RUN-1 to RUN-14 |
-| [Storage](storage.md) (partly shipped): stores over a directory, transactions, the output gate, typed tables, key encoding, schema history, the engine and its storage seam | STORE-1 to STORE-13 |
+| [Storage](storage.md) (partly shipped): places and their stores, transactions as recorded calls, the output gate and durability levels, typed tables, key encoding, schema history, the storage seam, tracked access, evaluation, subscriptions, clients, runs at a place and activation | STORE-1 to STORE-20 |
 | [Failure and destruction](failure.md) | FAIL-1 to FAIL-4, DROP-1 to DROP-4 |
 | [Determinism and replay](determinism.md): run configuration, recording, Blocked | DET-1 to DET-4 |
 | [Everyday semantics](semantics.md): integers, floats, strings, iteration, maps | SEM-1 to SEM-5 |

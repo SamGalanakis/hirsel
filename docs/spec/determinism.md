@@ -354,11 +354,12 @@ rather than identical machine code. Observations carry the same program and run 
 Public signature digests alone are insufficient: a body change invalidates replay even when
 request prefixes match.
 
-**Revision swaps.** Revision selection and any future recorded swap points follow
-[PROG-1](programs.md#prog-1-names). A runner's callee run (planned) executes the revision
-its place selects for the callee, and the place refuses a call whose code hash differs
-from the request's ([RUN-8](runners.md#run-8-identity-and-arrival)); a call never swaps the
-caller's revision.
+**Revisions.** A run executes one revision ([PROG-1](programs.md#prog-1-names)). A
+runner's callee run executes the revision its place selects for the callee, and the place
+refuses a call whose code hash differs from the request's
+([RUN-8](runners.md#run-8-identity-and-arrival)); a call never changes the caller's
+revision. A place changes the revision it selects only by an activation
+([STORE-19](storage.md#store-19-activation)).
 
 **Admission.** Optional time and revocation checks run once, before entry. The launcher
 records the decision and the evidence it used. An accepted grant is an endowment for the
@@ -452,8 +453,11 @@ that a log prefix is complete. A crash after a durable preparation but before is
 conservatively produce InDoubt although no effect happened. Planned exceptions: a compute
 runner call is recorded but not journaled, and recovery re-issues it, because its
 signature proves it has no effect ([RUN-7](runners.md#run-7-retry-classes)); and a store
-commit's in-doubt object create is resolved by reading the object back
-([STORE-10](storage.md#store-10-recording)).
+commit's in-doubt advance is settled by reading the store's history
+([STORE-10](storage.md#store-10-recording)). The journal records of a durable run that
+belongs to a place commit in that place's store, with the run's writes
+([STORE-18](storage.md#store-18-runs-at-a-place)); the rules of this section hold
+unchanged for them.
 
 A terminal trailer proves a complete recording. Its absence alone does not make durable
 completions doubtful: recovery scans the valid records and distinguishes a completed
@@ -473,9 +477,8 @@ or continuation is refused.
 Runner calls are recorded as [RUN-11](runners.md#run-11-linked-tapes) specifies:
 one request and one completion at the caller, parked and readied under
 `tasks.cooperative@1` as network requests are, and replayed without contacting a place.
-Stores are Hirsel code over a `Dir`, so their effects are recorded as file
-effects ([STORE-10](storage.md#store-10-recording)), and replay never opens a real
-directory.
+A store's requests of its backend are capability requests, recorded like any others
+([STORE-10](storage.md#store-10-recording)), and replay never reaches a real backend.
 
 ### Recording levels
 

@@ -7,8 +7,8 @@ caller's execution (RUN-1 to RUN-7, RUN-9, RUN-10's isolation and derived seeds,
 both under a simulation fixture and in a host launch. A host launch records linked tapes
 (RUN-11): with `--record T` each callee run that starts journals its own tape to
 `T.call-<ordinal>`, every tape replays alone, and `hirsel tapes check` joins a set.
-`hirsel tapes trial` replays a tape's calls against a candidate revision
-([upgrade trials](#upgrade-trials)). The
+`hirsel tapes trial` re-issues a tape's calls to a candidate revision; it predates
+[re-execution](#re-execution) and reports byte equality only. The
 arrival check covers the definition allowlists and a runner entry's `admit.safe@1` code
 policy (RUN-8). An interpreted host launch calls `remote.tls@1` runners, and `hirsel serve`
 is their runner host (crate `hirsel-remote`). Native code runs `local.threads@1` and `sim@1`
@@ -17,8 +17,9 @@ static callable (its definition's code and the static empty environment), and ea
 call's callee is a run of the same execution in the process, with the interpreter's place
 decisions, linked tapes and replay; a native host launch from a run record refuses
 runners. Durable callee recording (RUN-14), fetching code from a code store at
-arrival, and the `local.process@1` provider are planned. Items marked **Reserved** are
-designed here but have no implementation owner yet.
+arrival, the `local.process@1` provider, and the transact and query forms with their
+provider `db@1` are planned. Items marked **Reserved** are designed here but have no
+implementation owner yet.
 
 **Interim deviations** of the shipped interpreter: a callee's outcome bytes are recorded
 as its tape's last event, `call_return ok|err|failed <bytes>`, rather than in the
@@ -186,11 +187,14 @@ fn runner.spawn[A: serializable, R: serializable, E: serializable](s: Scope, r: 
   projects from the runner's grant set, exactly as a launch projects `Io` for `main`
   ([PROG-3](programs.md#prog-3-entry)). Each `io.*` projection the grant set lacks returns
   `NotGranted()` inside the callee.
-- **Transact (Reserved).** A transaction body `fn(tx: Tx, call: CallInfo, a: A) ->
-  Result[R, E]` run inside a store at the place ([STORE-12](storage.md#store-12-transactions-at-a-runner)).
+- **Transact.** A transaction entry `fn(mut tx: Tx, call: CallInfo, a: A) ->
+  Result[R, E]` run in the store of the place ([STORE-12](storage.md#store-12-transactions-at-a-runner)).
   Its outcome type is `Result[R, RunError[TxFailure[E]]]`: the body's error arrives as
   `Failed(Aborted(e))` and a storage outcome as another `Failed(..)`; `TxFailure.Canceled`
   never occurs inside `Failed`, because `RunError` reports cancellation itself.
+- **Query.** A query entry `fn(tx: Tx, call: CallInfo, a: A) -> Result[R, E]`, which
+  receives a borrowed `Tx` and so cannot write, run at a durable version of the place's
+  store. Its outcome type is that of the transact form.
 
 `a` is borrowed and encoded once, at the call; the callee receives fresh owned data decoded
 from those bytes, and the caller's `a` is unchanged. The result is fresh owned, unique
@@ -295,12 +299,15 @@ Whether a call may be repeated follows from its form, never from a flag or annot
   cached under (code hash, argument digest), when its configuration enables it; the caller
   observes one outcome. Compute calls are never journaled
   ([RUN-14](#run-14-recording-levels)), and recovery re-issues an unresolved one.
-- **Transactional (transact, Reserved).** Each caller sends its transact calls to a place
+- **Transactional (transact).** Each caller sends its transact calls to a place
   on an ordered **call stream** ([STORE-12](storage.md#store-12-transactions-at-a-runner)).
   The place commits each request's outcome and the stream's new applied position in the
   request's own transaction, so re-sending a request at the same stream position with the
   same request digest returns the recorded outcome instead of running again, and the call
   is exactly once.
+- **Read-only (query).** The outcome is a function of the code identity, the argument
+  bytes, the call information and the version it ran at. It commits nothing, so a
+  provider may run it again or on another machine; the caller observes one outcome.
 - **Effectful (call).** At most once. After the request is sent, no provider re-sends it,
   and a lost outcome is `InDoubt`.
 
@@ -348,7 +355,8 @@ only from the place's grant set, narrowed by the request; the request's grant se
 reduce them. A signature states only the callee's root capability kind (`Io`, `Tx` or
 none), never which projections it will use, so a projection the place lacks fails inside
 the callee with `NotGranted()`, exactly as for `main`; a finer static check waits for
-per-capability footprints in signatures, which are reserved. A place in the caller's own
+per-capability footprints in signatures, which are reserved. A `Tx` is narrowed by the
+callee itself ([STORE-3](storage.md#store-3-transaction-scope)). A place in the caller's own
 process and revision passes checks 2, 3 and 8 by construction and still performs 4 to 7.
 
 ### RUN-9: Cancellation
@@ -473,8 +481,8 @@ only through a named implementation whose contract says so.
 | Scheduling | `inputs.scheduler` | the cooperative FIFO | seeded schedules |
 | Execution width | `placement.cores` | 1 | simulators run on one thread |
 | Fault injection | `faults` | none | `sim@1`, the simulated `Dir` |
-| Store medium | the `dirs` mount a store is opened over ([STORE-11](storage.md#store-11-engine-and-storage-seam)) | a host directory | a simulated `Dir` |
-| Store settings | the store provider's own configuration ([STORE-11](storage.md#store-11-engine-and-storage-seam)) | the provider's defaults | the same |
+| Store backend | the authority a store is opened over ([STORE-11](storage.md#store-11-engine-and-storage-seam)) | a local log | a simulated backend |
+| Store engine settings | the engine provider's own configuration ([STORE-11](storage.md#store-11-engine-and-storage-seam)) | the provider's defaults | the same |
 
 **Code store.** A code store holds immutable objects keyed by definition hash
 ([LANG-6](language.md#lang-6-signatures)). An object, `hirsel.code.object.v1`, is a
@@ -540,7 +548,7 @@ except run-policy members, and has no whitespace.
 | `local.process@1` | a child process per call | compute, call | all except `NotRun(VersionMismatch)` |
 | `sim@1` (simulated) | a node of this process's deterministic simulation | as the modeled contract | exactly the modeled contract's |
 | `remote.tls@1` | another host, over TLS | compute, call | all |
-| `db@1` (Reserved) | inside a store's writer | compute, transact | `Ok`, `Failed`, `Faulted`, `NotRun(Denied, Overloaded, Rejected)`, `InDoubt(Abandoned)`, `Canceled` |
+| `db@1` (planned) | the run that holds a store | compute, transact, query | `Ok`, `Failed`, `Faulted`, `NotRun(Denied, Overloaded, Rejected)`, `InDoubt(Abandoned)`, `Canceled` |
 
 **`local.threads@1`** runs each callee as a separate run with its own heap on a pool of
 `threads` operating-system threads (default 1), admitting at most `queue` calls waiting
@@ -797,24 +805,21 @@ stream until acknowledged; zero is refused as `host.unacknowledged`. A full stre
 refuses new positions with the session-level `Refused(Overloaded())` and closes without
 recording that refusal or advancing `applied`, as described above.
 
-**`db@1`** (Reserved) runs compute and transact callees inside the writer of a store
-([STORE-12](storage.md#store-12-transactions-at-a-runner)).
+**`db@1`** (planned) is the place that holds a store: it serves compute callees and the
+store's transact and query entries, ordering every transact call in the store's history
+([STORE-12](storage.md#store-12-transactions-at-a-runner)). Its serving primitive is an
+open design.
 
-## Upgrade trials
+## Re-execution
 
-`hirsel tapes trial <candidate> --grants <template> [--from <n>] <tape>` issues every
-runner call the caller's tape recorded, from request ordinal `n` on, again and in order,
-each as a live callee run of the candidate revision: the same entry, form, cause and
-argument bytes, admitted under the grant set the template's runner of the request's name
-holds, with seeds derived from the call key as for the original. It reports, per call,
-whether the candidate's callee has the recorded code (its request digest, recomputed with
-the candidate's code hash and signature fingerprint, equals the recorded one), the
-recorded outcome and the trial's, rendered from their codec envelopes, and whether the
-outcome bytes are equal; a recorded `NotRun`, `InDoubt` or `Canceled` holds no outcome to
-compare. It exits 1 when any outcome differs. A trial contacts no other place and never
-runs the caller; pointing its runner at a copy of a store's directory (a store's objects
-are immutable, so a copy is a consistent fork) trials a change against recorded traffic
-without touching the live store.
+A recorded runner call is re-executed as
+[STORE-15](storage.md#store-15-evaluation-and-re-execution) defines: the same entry, form,
+cause and argument bytes, under the recorded code or a candidate's, with its inputs taken
+from the record. A transact or query call takes the state at the version it observed. An
+effectful call takes its callee's tape, and an outside request the tape does not answer
+makes the result unknown; it is never issued live. Each call reports same, different or
+unknown; a recorded `NotRun`, `InDoubt` or `Canceled` holds no outcome to compare and is
+unknown. Re-execution contacts no other place and never runs the caller.
 
 ## Examples
 

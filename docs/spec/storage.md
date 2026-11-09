@@ -552,7 +552,11 @@ the `db@1` provider built on it are not yet designed. The contract they must mee
   `NotRun(Rejected())` when it differs; position `applied + 1` runs the body, and the same
   commit records the outcome, sets `applied`, raises `acknowledged` and drops the outcomes
   at or below it. An outcome that commits no writes is recorded in a transaction of its own
-  that writes only the stream row.
+  that writes only the stream row. The row is one of the commit's writes and counts against
+  the store's limits: when the body's writes and the row recording their outcome exceed
+  them, the outcome is `Limit(..)`, recorded by a commit of the row alone; when not even
+  that row fits (the caller holds too many outcomes unacknowledged), the request is
+  refused `Limit(..)` without being recorded and its position stays `applied + 1`.
 - **Fencing.** A durable caller's executor holds an epoch for each stream, recorded in its
   journal header. A live continuation first commits, on each store the run used, a fence
   request that raises the stream's epoch and returns its `applied` position and retained

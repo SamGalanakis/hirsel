@@ -528,7 +528,8 @@ mod tests {
 /// A run of a Rust stand-in for compiled entry code, launched as [`RunHandle::wait`]
 /// launches a program: its workers, budget, Io binding and stop handle, the launch frame and
 /// a stopped run's detachment (design §6 Stops and worker lifetime). For the runtime's own
-/// tests.
+/// tests. A panic in the Rust body stops the run, then resumes unwinding on the caller's
+/// stack after the run's cleanup.
 #[doc(hidden)]
 pub struct BodyRun {
     pub config: crate::Config,
@@ -711,7 +712,19 @@ impl BodyRun {
                 binding.adapter.wake_on(fd);
             }
         }
-        let entry: crate::stop::Entry = Box::new(move |ctx, _| body(ctx));
+        let panic = Arc::new(std::sync::Mutex::new(None));
+        let body_panic = Arc::clone(&panic);
+        let entry: crate::stop::Entry = Box::new(move |ctx, _| {
+            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| body(ctx))) {
+                Ok(status) => status,
+                Err(payload) => {
+                    *body_panic.lock().unwrap() = Some(payload);
+                    // SAFETY: the Rust body has unwound its locals. The payload belongs
+                    // to the shared slot; no owned local crosses the abandoned entry.
+                    unsafe { crate::stop::raise(ctx, crate::stop::Stop::Requested) }
+                }
+            }
+        });
         // SAFETY: the root context, driven once.
         let ended = unsafe { crate::stop::run_root(ctx, crate::stop::LaunchFrame::bare(entry)) };
         let pending = match &ended {
@@ -736,6 +749,10 @@ impl BodyRun {
         }
         drop(binding);
         self.control.finish(pending);
+        let payload = panic.lock().unwrap().take();
+        if let Some(payload) = payload {
+            std::panic::resume_unwind(payload);
+        }
         (BodyOutcome { ended, pending }, observed)
     }
 }

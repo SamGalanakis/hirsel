@@ -454,12 +454,30 @@ pub(super) mod tests {
 
     #[test]
     fn scoped_private_frames_keep_their_addressed_workers_through_adoption() {
+        const CHILD: &str = "HIRSEL_SCOPED_PRIVATE_FRAMES_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "tasks::ordered::ahead::tests::scoped_private_frames_keep_their_addressed_workers_through_adoption",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
         // Protocol coverage, like the other BodyRun dispatcher fixtures. No
         // claim about on-CPU overlap comes from this synthetic manager grant.
-        let previous = crate::pool::compute_permits().0;
+        // Isolate the grant and all four permits from concurrently running tests.
         crate::pool::set_compute_grant(4);
         private_frames_case(4, true);
-        crate::pool::set_compute_grant(previous);
     }
 
     fn private_frames_case(width: u32, scoped: bool) {

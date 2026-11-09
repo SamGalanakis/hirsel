@@ -817,6 +817,25 @@ mod tests {
 
     #[test]
     fn ordinary_caller_jobs_transfer_results_and_never_restart_after_failure() {
+        const CHILD: &str = "HIRSEL_SERIAL_CALLER_JOBS_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "tasks::ordered::cpu::serial::tests::ordinary_caller_jobs_transfer_results_and_never_restart_after_failure",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
         for failure_first in [false, true] {
             let layout = crate::Layout {
                 magic: crate::LAYOUT_MAGIC,

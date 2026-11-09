@@ -562,6 +562,36 @@ unsafe extern "C" fn fiber_start() {
 mod tests {
     use super::*;
 
+    #[test]
+    fn root_body_panics_return_to_the_caller_after_fiber_cleanup() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        struct Dropped(Arc<AtomicBool>);
+        impl Drop for Dropped {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::Release);
+            }
+        }
+
+        for width in [1, 4] {
+            let dropped = Arc::new(AtomicBool::new(false));
+            let body_dropped = dropped.clone();
+            let panic = std::panic::catch_unwind(move || {
+                crate::host::BodyRun::new(width, false).run(
+                    |_| {},
+                    move |_| {
+                        let _dropped = Dropped(body_dropped.clone());
+                        std::panic::panic_any((width, 652u32));
+                    },
+                );
+            })
+            .expect_err("the body panic must reach the test caller");
+            assert_eq!(*panic.downcast::<(u32, u32)>().unwrap(), (width, 652));
+            assert!(dropped.load(Ordering::Acquire));
+        }
+    }
+
     /// Stacks returned to one worker, as compact leaves return them, stay
     /// mapped only up to its idle bound; the rest are unmapped.
     #[test]

@@ -77,8 +77,11 @@ pub fn check_key(key: &str) -> Result<(), StorageError> {
 
 /// Objects as files under a directory (`objects.dir@1`). A put writes a
 /// temporary file, syncs it, hard-links it to its key (which fails when the
-/// key exists, so creation is atomic and never replaces) and syncs the
-/// directory.
+/// key exists, so creation is atomic and never replaces) and syncs its
+/// directory and every one above it up to the root, so directories the put
+/// created are durable too. A put that finds the key taken runs the same
+/// directory barrier before returning `Exists`, so the existing entry is
+/// durable whoever linked it.
 #[derive(Clone, Debug)]
 pub struct DirObjects {
     root: PathBuf,
@@ -95,6 +98,21 @@ impl DirObjects {
     }
     pub fn root(&self) -> &Path {
         &self.root
+    }
+    /// Sync the directory holding `path` and each one above it through the
+    /// root.
+    fn sync_directories(&self, path: &Path) -> Result<(), StorageError> {
+        let mut directory = path.parent();
+        while let Some(dir) = directory {
+            File::open(dir)
+                .and_then(|handle| handle.sync_all())
+                .map_err(|e| io(dir, e))?;
+            if dir == self.root {
+                break;
+            }
+            directory = dir.parent();
+        }
+        Ok(())
     }
 }
 
@@ -120,6 +138,7 @@ impl ObjectStorage for DirObjects {
             .expect("an object key names a file under the root");
         fs::create_dir_all(parent).map_err(|e| io(parent, e))?;
         if path.exists() {
+            self.sync_directories(&path)?;
             return Ok(Put::Exists);
         }
         // A leading '.' keeps temporary names out of the key space.
@@ -141,12 +160,13 @@ impl ObjectStorage for DirObjects {
         let _ = fs::remove_file(&temporary);
         match linked {
             Ok(()) => {
-                File::open(parent)
-                    .and_then(|dir| dir.sync_all())
-                    .map_err(|e| io(parent, e))?;
+                self.sync_directories(&path)?;
                 Ok(Put::Created)
             }
-            Err(e) if e.kind() == ErrorKind::AlreadyExists => Ok(Put::Exists),
+            Err(e) if e.kind() == ErrorKind::AlreadyExists => {
+                self.sync_directories(&path)?;
+                Ok(Put::Exists)
+            }
             Err(e) => Err(io(&path, e)),
         }
     }

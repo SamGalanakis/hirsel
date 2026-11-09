@@ -910,7 +910,7 @@ impl QueryEngine {
                                 self.front_declaration_store_key(path, kind)
                             } else {
                                 Ok(EntryKey::new(
-                                    self.products_environment(&path.0.package),
+                                    self.product_seed(path),
                                     path,
                                     implementation,
                                     kind,

@@ -479,10 +479,15 @@ impl FrontRegistrationQueries {
         let key = Self::storage_key(input);
         let variant = Entry::load(&*self.lower.store, &key).resolve(&*self.lower.store, &key)?;
         let stored: Stored = bincode::deserialize(&variant.payload).ok()?;
-        if !self
-            .lower
-            .namespace
-            .manifest_holds(stored.manifest, self.weight.scratch)
+        // The key is the seed S; the candidate's typed dependencies must hold.
+        if !variant
+            .reads
+            .iter()
+            .all(|(read, value)| self.observe(input, read) == Some(*value))
+            || !self
+                .lower
+                .namespace
+                .manifest_holds(stored.manifest, self.weight.scratch)
             || stored.output.domain != OUTPUT
             || stored.output.len > self.weight.scratch
             || stored.decode_bytes > self.weight.scratch

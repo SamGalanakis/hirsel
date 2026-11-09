@@ -686,9 +686,10 @@ pub enum VerifyStore {
 /// At most this many variants (distinct inputs) per entry.
 pub const VARIANTS: usize = 4;
 
-/// One entry: up to `VARIANTS` variants, most recently written first. Each
-/// variant's inputs complete its action; an immutable reference names its
-/// output. Its reads are the producer's recorded dependencies, not identity.
+/// One entry: up to `VARIANTS` variants, most recently written first. The
+/// entry's key is the seed S; each variant's reads are the typed
+/// dependencies D its producer consumed, and the witness binds K = H(S, D) to
+/// its immutable output. A consumer accepts a variant only after D validates.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct Entry {
     pub variants: Vec<VariantRef>,
@@ -700,9 +701,7 @@ pub struct Variant {
     pub payload: Bytes,
 }
 
-/// The complete ordinary-query action. The key's address binds the package
-/// input identity (its sources and every dependency's), so the action needs no
-/// record of what the producer observed.
+/// The canonical digest of a variant's typed dependencies D.
 fn reads_witness(reads: &Reads) -> ContentHash {
     // Reads' in-memory ordering is by interned identity. Sorting the canonical
     // row bytes makes the witness independent of DefId assignment order.
@@ -766,8 +765,8 @@ impl VariantRef {
     pub fn action(&self, key: &EntryKey) -> Action {
         query_action(key, self.inputs)
     }
-    // The witness binds the recorded dependencies that restore replays, so a
-    // well-formed frame cannot substitute them. They are not product identity.
+    // The witness binds K = H(S, D) to the output, so a well-formed frame
+    // cannot substitute another product's dependencies or output.
     fn binding(&self, key: &EntryKey) -> ContentHash {
         ContentHash::of_parts(
             "hirsel.result.binding.v2",
@@ -803,11 +802,11 @@ impl VariantRef {
     }
 }
 
-const ENTRY_MAGIC: &[u8; 4] = b"HRE5";
+const ENTRY_MAGIC: &[u8; 4] = b"HRE6";
 
 impl Entry {
-    /// The variant bound to exactly this key's inputs. The key's address
-    /// carries the package input identity, so no recorded read is compared.
+    /// The variant bound to exactly this key's inputs. Its dependencies D are
+    /// not compared here; the consumer validates them before adoption.
     pub fn current(&self, key: &EntryKey) -> Option<&VariantRef> {
         self.variants
             .iter()
@@ -882,7 +881,7 @@ impl Entry {
         let _scope = hirsel_intern::timings::instructions::scope(
             hirsel_intern::timings::instructions::Owner::Store,
         );
-        let mut bytes = b"HRE5".to_vec();
+        let mut bytes = b"HRE6".to_vec();
         bytes.extend(key.0.0);
         bytes.extend(self.encode());
         frame(&bytes)
@@ -900,7 +899,7 @@ impl Entry {
     /// Decodes bytes `encode_for(key)` wrote; damaged or another key's bytes
     /// are None.
     pub fn decode_for(key: &EntryKey, bytes: &Bytes) -> Option<Entry> {
-        let payload = unframe(bytes)?.strip_prefix(b"HRE5")?;
+        let payload = unframe(bytes)?.strip_prefix(b"HRE6")?;
         let payload = payload.strip_prefix(key.0.0.as_slice())?;
         let offset = payload.as_ptr() as usize - bytes.as_ptr() as usize;
         Entry::decode_bytes(bytes.range(offset as u64, payload.len() as u64, 1)?)

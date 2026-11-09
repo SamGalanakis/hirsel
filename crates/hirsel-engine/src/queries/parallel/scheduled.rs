@@ -2202,7 +2202,13 @@ impl BodyTask {
             return None;
         }
         let variant = entry.current(&input.key)?;
-        if variant.output.len > self.weight.scratch {
+        // The key is the seed S: every typed dependency must still hold.
+        if variant.output.len > self.weight.scratch
+            || !variant
+                .reads
+                .iter()
+                .all(|(read, value)| queries.observe(input.definition.path(), read) == Some(*value))
+        {
             return None;
         }
         let bytes = queries.store.get_content(variant.output)?;

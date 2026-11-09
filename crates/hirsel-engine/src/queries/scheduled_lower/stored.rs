@@ -303,6 +303,15 @@ impl FrontLowerQueries {
         let variant = entry.resolve(&*self.store, &storage)?;
         // This outer record contains only fixed-size references.
         let record: Record = bincode::deserialize(&variant.payload).ok()?;
+        // The key is the seed S; the candidate's typed dependencies must hold.
+        if !self.namespace.manifest_source_reads_hold(
+            record.manifest,
+            self.weight.scratch,
+            &variant.reads,
+            |read| self.observe(path, read),
+        ) {
+            return None;
+        }
         let domain = if id.kind == FRONT_LOWER_KIND {
             LOWER_DESCRIPTOR
         } else {

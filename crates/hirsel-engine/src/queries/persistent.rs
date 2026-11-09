@@ -1076,7 +1076,7 @@ impl QueryEngine {
             return None;
         }
         let key = self.store_key(path, QueryKind::Signature)?;
-        let variant = self.stored_variant_at(&key)?;
+        let variant = self.stored_variant_at(path, &key)?;
         let mut record: SignatureRecord = self.decode_record(&variant.payload)?;
         if let Ok(output) = &mut record.output {
             let roles = self.frozen_declarations().metadata().nominal_roles();
@@ -1498,84 +1498,36 @@ impl QueryEngine {
     /// Callers must establish the ordinary gate or an opaque accepted view.
     fn product_store_key(&self, path: &DefPath, kind: QueryKind, text: ContentHash) -> EntryKey {
         EntryKey::new(
-            self.products_environment(&path.0.package),
+            self.product_seed(path),
             path,
             text,
             kind,
             LoweringPolicy::Reachable,
         )
     }
-    /// The environment every stored product of `package` keys on. It binds the
-    /// package's input identity, so identity never comes from producer reads.
-    pub(crate) fn products_environment(&self, package: &hirsel_syntax::PackageId) -> ContentHash {
+    /// The seed S every stored product of `path` is found by: the pass
+    /// environment, compiler identity, the owning package's manifest and the
+    /// owner's own declaration candidates (file, order, headers). It never
+    /// contains another definition's body: what a product consumed from
+    /// other definitions is its typed dependencies D, which every restore
+    /// validates against current values (`stored_variant_at`).
+    pub(crate) fn product_seed(&self, path: &DefPath) -> ContentHash {
+        let package = &path.0.package;
         ContentHash::of_parts(
-            "hirsel.persisted-products.v2",
+            "hirsel.persisted-products.v3",
             [
                 self.environment_value().0.as_slice(),
                 self.store_identity.0.as_slice(),
-                self.package_input(package).0.as_slice(),
-            ],
-        )
-    }
-    /// A package's input content: its manifest and complete sources and every
-    /// dependency's input identity. Without a package graph, every source this
-    /// engine holds stands in for the closure.
-    pub(crate) fn package_input(&self, package: &hirsel_syntax::PackageId) -> ContentHash {
-        let mut seen = BTreeMap::new();
-        self.package_input_in(package, &mut seen)
-            .unwrap_or_else(|| self.unbound_package_input())
-    }
-    fn package_input_in(
-        &self,
-        package: &hirsel_syntax::PackageId,
-        seen: &mut BTreeMap<hirsel_syntax::PackageId, ContentHash>,
-    ) -> Option<ContentHash> {
-        if let Some(identity) = seen.get(package) {
-            return Some(*identity);
-        }
-        let sources = *self.package_sources.get(package)?;
-        // A dependency cycle closes on this placeholder deterministically.
-        seen.insert(package.clone(), ContentHash::default());
-        let mut dependencies = self
-            .declarations
-            .inputs()
-            .package_dependencies
-            .get(package)
-            .cloned()
-            .unwrap_or_default()
-            .iter()
-            .map(|dependency| self.package_input_in(dependency, seen))
-            .collect::<Option<Vec<_>>>()?;
-        dependencies.sort();
-        let manifest = self.package_environment(package).package_manifest_hash;
-        let identity = ContentHash::of_parts(
-            "hirsel.package-input.v1",
-            [
                 package.name.as_bytes(),
                 &[0],
                 package.version.as_bytes(),
-                sources.0.as_slice(),
-                manifest.0.as_slice(),
-            ]
-            .into_iter()
-            .chain(dependencies.iter().map(|d| d.0.as_slice())),
-        );
-        seen.insert(package.clone(), identity);
-        Some(identity)
-    }
-    fn unbound_package_input(&self) -> ContentHash {
-        let files = (0..)
-            .map(hirsel_span::FileId)
-            .map_while(|file| self.sources.file(file));
-        let mut bytes = Vec::new();
-        for file in files {
-            let path = file.path.to_string_lossy();
-            for part in [path.as_ref(), file.text()] {
-                bytes.extend((part.len() as u64).to_le_bytes());
-                bytes.extend(part.as_bytes());
-            }
-        }
-        ContentHash::of_parts("hirsel.package-input.unbound.v1", [bytes.as_slice()])
+                self.package_environment(package)
+                    .package_manifest_hash
+                    .0
+                    .as_slice(),
+                self.candidates_value(path).0.as_slice(),
+            ],
+        )
     }
     /// The bodyless header of a generic generated declaration is an ordinary
     /// front product. This gate cannot admit a mono generator or an instance.
@@ -1783,29 +1735,30 @@ impl QueryEngine {
     }
     fn stored_variant(&mut self, path: &DefPath, kind: QueryKind) -> Option<Variant> {
         let key = self.store_key(path, kind)?;
-        self.stored_variant_at(&key)
+        self.stored_variant_at(path, &key)
     }
-    fn stored_variant_at(&mut self, key: &EntryKey) -> Option<Variant> {
+    fn stored_variant_at(&mut self, owner: &DefPath, key: &EntryKey) -> Option<Variant> {
         let _time = timings::phase(Phase::StoreLookup);
         let store = self.result_store.clone()?;
         let entry = StoredEntry::load(&*store, key);
-        let restores_dependencies = matches!(
-            key.2,
-            QueryKind::Evaluate
-                | QueryKind::Lower
-                | QueryKind::Generate
-                | QueryKind::SourceAudit
-                | QueryKind::SemanticBody
-        );
-        // The key binds the package input identity; a hit only installs the
-        // registrations its recorded dependencies name before adoption.
-        let hit = entry.resolve(&*store, key).filter(|variant| {
-            !restores_dependencies
-                || variant
+        // The key is the seed S; it names no other definition's body. A
+        // candidate is reusable only when every typed dependency D it
+        // recorded still observes the same value now, the same predicate
+        // retained memos hold. Owning registrations restore first so their
+        // dependencies can be observed; the first changed dependency misses.
+        let hit = entry
+            .current(key)
+            .filter(|variant| {
+                variant
                     .reads
                     .iter()
                     .all(|(read, _)| self.restore_dependency(read).is_some())
-        });
+                    && variant
+                        .reads
+                        .iter()
+                        .all(|(read, value)| self.observe(owner, read) == Some(*value))
+            })
+            .and_then(|_| entry.resolve(&*store, key));
         if hit.is_none() {
             timings::count(Count::StoreMisses);
             match key.2 {
@@ -2260,7 +2213,7 @@ impl QueryEngine {
     }
     pub(super) fn load_generated_registration(&mut self, instance: &DefPath) -> Option<()> {
         let (declaration, key) = self.generated_registration_key(instance)?;
-        let variant = self.stored_variant_at(&key)?;
+        let variant = self.stored_variant_at(instance, &key)?;
         let record: GeneratedRegistration = self.decode_record(&variant.payload)?;
         if record.declaration.path() != &declaration
             || !self.valid_generated_registration(instance, &record)
@@ -3140,7 +3093,7 @@ impl QueryEngine {
             }
             let declaration = self.staged_constants.get(path)?.clone();
             let key = self.staged_evaluation_key(path, arguments)?;
-            let variant = self.stored_variant_at(&key)?;
+            let variant = self.stored_variant_at(path, &key)?;
             let record: StagedEvaluationRecord = self.decode_record(&variant.payload)?;
             let (_, shape) = self.lexical_shape(&declaration.owner)?;
             let mut value = record.constant;

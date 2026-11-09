@@ -836,6 +836,156 @@ fn signature_store_keeps_negative_namespace_and_relocated_diagnostic_dependencie
     });
 }
 
+#[path = "../support/canonical_tir.rs"]
+#[allow(dead_code)]
+mod canonical_tir;
+
+/// One restore-versus-fresh differential case: `base` seeds the store, then
+/// `edited` is lowered by a fresh engine restoring from it, by a cache-off
+/// engine and by the recompute oracle. `reused` names whether the target's
+/// stored check and lower products must be adopted rather than rebuilt.
+struct Mutation {
+    name: &'static str,
+    base: &'static str,
+    edited: &'static str,
+    target: &'static str,
+    reused: Option<bool>,
+}
+
+fn lowered_view(
+    engine: &QueryEngine,
+    result: Result<QueryOutput<hirsel_tir::DefinitionRef>, QueryError>,
+) -> Result<(String, Vec<String>), Vec<String>> {
+    let render = |ds: &[hirsel_diag::Diagnostic]| {
+        ds.iter()
+            .map(|d| d.render_human(&engine.sources))
+            .collect::<Vec<_>>()
+    };
+    match result {
+        Ok(output) => Ok((
+            canonical_tir::definition(engine.types(), &output.value),
+            render(&output.diagnostics),
+        )),
+        Err(QueryError::Diagnostics(ds)) => Err(render(&ds)),
+        Err(other) => Err(vec![format!("{other:?}")]),
+    }
+}
+
+/// A stored product is found by its own-input seed and adopted only when the
+/// typed dependencies it consumed still hold. Every mutation must give the
+/// fresh answer, and an ordinary callee body edit must reuse the caller.
+#[test]
+fn restored_products_match_fresh_recompute_across_dependency_mutations() {
+    let cases = [
+        Mutation {
+            name: "ordinary callee body edit, unchanged signature",
+            base: "fn callee()->u32{1u32}\nfn caller()->u32{callee()}\n",
+            edited: "fn callee()->u32{2u32}\nfn caller()->u32{callee()}\n",
+            target: "caller",
+            reused: Some(true),
+        },
+        Mutation {
+            name: "callee signature edit",
+            base: "fn callee()->u32{1u32}\nfn caller()->u32{callee()}\n",
+            edited: "fn callee()->u64{1u64}\nfn caller()->u32{callee()}\n",
+            target: "caller",
+            reused: Some(false),
+        },
+        Mutation {
+            name: "executed helper body edit, unchanged signature",
+            base: "fn helper()->u32{7u32}\nconst A:u32=comptime helper()\n",
+            edited: "fn helper()->u32{8u32}\nconst A:u32=comptime helper()\n",
+            target: "A",
+            reused: Some(false),
+        },
+        Mutation {
+            name: "negative lookup becomes present",
+            base: "fn caller()->u32{missing()}\n",
+            edited: "fn caller()->u32{missing()}\nfn missing()->u32{3u32}\n",
+            target: "caller",
+            reused: Some(false),
+        },
+        Mutation {
+            name: "failed callee signature becomes valid",
+            base: "fn callee(x:Missing)->u32{1u32}\nfn caller()->u32{callee(1u32)}\n",
+            edited: "fn callee(x:Missing)->u32{1u32}\nfn caller()->u32{callee(1u32)}\ntype Missing=u32\n",
+            target: "caller",
+            reused: Some(false),
+        },
+        Mutation {
+            name: "failed callee signature changes its diagnostic",
+            base: "fn callee(x:Missing)->u32{1u32}\nfn caller()->u32{callee(1u32)}\n",
+            edited: "fn callee(x:Absent)->u32{1u32}\nfn caller()->u32{callee(1u32)}\n",
+            target: "caller",
+            reused: None,
+        },
+        Mutation {
+            name: "branch selector drops one executed dependency and adds another",
+            base: "const FLAG:bool=true\nfn f()->u32{1u32}\nfn g()->u32{2u32}\nfn pick()->u32{if FLAG {f()} else {g()}}\nconst A:u32=comptime pick()\n",
+            edited: "const FLAG:bool=false\nfn f()->u32{1u32}\nfn g()->u32{2u32}\nfn pick()->u32{if FLAG {f()} else {g()}}\nconst A:u32=comptime pick()\n",
+            target: "A",
+            reused: Some(false),
+        },
+        Mutation {
+            name: "unexecuted branch body edit",
+            base: "const FLAG:bool=true\nfn f()->u32{1u32}\nfn g()->u32{2u32}\nfn pick()->u32{if FLAG {f()} else {g()}}\nconst A:u32=comptime pick()\n",
+            edited: "const FLAG:bool=true\nfn f()->u32{1u32}\nfn g()->u32{5u32}\nfn pick()->u32{if FLAG {f()} else {g()}}\nconst A:u32=comptime pick()\n",
+            target: "A",
+            reused: Some(true),
+        },
+        Mutation {
+            name: "source-owner relocation",
+            base: "fn callee()->u32{1u32}\nfn caller()->u32{callee()}\n",
+            edited: "fn first()->u32{0u32}\n\n\nfn callee()->u32{1u32}\nfn caller()->u32{callee()}\n",
+            target: "caller",
+            reused: None,
+        },
+        Mutation {
+            name: "duplicate candidate appears",
+            base: "fn callee()->u32{1u32}\nfn caller()->u32{callee()}\n",
+            edited: "fn callee()->u32{1u32}\nfn caller()->u32{callee()}\nfn caller()->u32{2u32}\n",
+            target: "caller",
+            reused: None,
+        },
+    ];
+    with_compiler_stack(|| {
+        for case in cases {
+            let path = definition(case.target);
+            let store = Arc::new(store::MemStore::default());
+            let mut seed = signature_session(store.clone(), case.base, true);
+            let _ = seed.lower_to_tir(&path);
+            drop(seed);
+            let mut fresh = signature_session(store.clone(), case.edited, true);
+            let restored = fresh.lower_to_tir(&path);
+            let restored = lowered_view(&fresh, restored);
+            let mut cold = signature_session(Arc::new(store::NoneStore), case.edited, true);
+            let expected = cold.lower_to_tir(&path);
+            let expected = lowered_view(&cold, expected);
+            assert_eq!(
+                restored, expected,
+                "{}: restore differs from fresh",
+                case.name
+            );
+            if let Some(reused) = case.reused {
+                let rebuilt: usize = [QueryKind::Check, QueryKind::Modes, QueryKind::Lower]
+                    .into_iter()
+                    .map(|kind| fresh.recompute_count(&path, kind))
+                    .sum();
+                assert_eq!(rebuilt == 0, reused, "{}: reuse", case.name);
+            }
+            let mut oracle = signature_session(store, case.edited, true)
+                .with_verify_store(store::VerifyStore::Recompute);
+            let checked = oracle.lower_to_tir(&path);
+            assert_eq!(
+                lowered_view(&oracle, checked),
+                expected,
+                "{}: recompute oracle differs",
+                case.name
+            );
+        }
+    });
+}
+
 #[test]
 fn lower_store_hits_validate_reads_and_v_before_demanding_modes_bodies() {
     with_compiler_stack(|| {

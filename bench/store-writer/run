@@ -25,12 +25,14 @@ def build(out):
     output = subprocess.check_output([str(ROOT / '.buck2/bin/buck2'), 'build',
         '--target-platforms', '//tools/buck2:release', *['//:' + t for t in targets],
         '//tools/buck2/native-toolchain:kit', '//tools/buck2/native-toolchain:glibc_floor',
+        '//tools/buck2/native-toolchain:linker', '//tools/buck2/native-toolchain:runtime-auditor',
         '--show-full-output'], cwd=ROOT, text=True)
     paths = {line.split()[0].rsplit(':', 1)[1]: line.split()[1]
              for line in output.splitlines() if line.startswith('root//')}
     compiler = Path(paths['hirsel-toolchain']) / 'hirsel'
     environment = dict(os.environ, HIRSEL_RUNTIME_ARCHIVES=paths['hirsel-rt-archives'],
         HIRSEL_LINK_KIT=paths['kit'], HIRSEL_GLIBC_FLOOR=paths['glibc_floor'],
+        HIRSEL_CAPTURE_LINKER=paths['linker'], HIRSEL_AUDITOR_PACKAGE=paths['runtime-auditor'],
         LLVM_SYS_231_PREFIX=str(ROOT / 'tools/buck2/toolchains/llvm-files'))
     run([ROOT / 'tools/capped', compiler, 'build', HERE / 'hirsel.json', '--release',
          '-o', out / 'native'], env=environment)
@@ -115,6 +117,9 @@ def sample(kind, group, submitters, workload, out, compiler, profile=False):
         command = [executable, db / 'append.log', *arguments]
         if kind == 'raw':
             command += ['raw']
+    if profile:
+        command = ['strace', '-f', '-T', '-e', 'trace=fsync,fdatasync,write',
+                   '-o', directory / 'sync.trace', *command]
     shim = out / 'alloc.so'
     objects = [(shim, addresses(shim, dict(libc_allocations='store_bench_allocations',
         fsyncs='store_bench_fsyncs', backend_puts='store_bench_puts')))]
@@ -127,8 +132,8 @@ def sample(kind, group, submitters, workload, out, compiler, profile=False):
     control_write = os.open(control_path, os.O_RDWR)
     ack_read = os.open(ack_path, os.O_RDWR)
     metric_file = directory / ('perf.data' if profile else 'perf.csv')
-    perf = ['perf', 'record', '-e', 'cpu-clock:u', '-F', '99', '-g', '--call-graph', 'dwarf',
-            '-o', metric_file] if profile else ['perf', 'stat', '-x', ';', '-e', 'instructions:u', '-o', metric_file]
+    perf = ['perf', 'record', '-e', 'cpu-clock:u', '-F', '999', '-g', '--call-graph', 'dwarf',
+            '-o', metric_file] if profile else ['perf', 'stat', '-x', ';', '-e', 'instructions:u,task-clock', '-o', metric_file]
     perf += ['-D', '-1', f'--control=fifo:{control_path},{ack_path}', '--',
              'env', f'LD_PRELOAD={shim}', *command]
     def control(message):
@@ -200,10 +205,27 @@ def sample(kind, group, submitters, workload, out, compiler, profile=False):
         instructions = next(float(line.split(';')[0].replace(',', ''))
             for line in metric_file.read_text().splitlines() if ';instructions:u;' in line)
         row['instructions_commit'] = instructions / commits
+        clocks = [float(line.split(';')[0].replace(',', ''))
+                  for line in metric_file.read_text().splitlines() if ';task-clock;' in line]
+        if clocks:
+            row['cpu_us_commit'] = clocks[0] * 1000 / commits
     else:
         with (directory / 'owners.txt').open('w') as owners:
             run(['perf', 'report', '-i', metric_file, '--stdio', '--no-children', '--sort',
-                 'symbol,srcline', '--percent-limit', '1'], stdout=owners)
+                 'symbol,srcline', '--percent-limit', '1', '--pid', str(pid)], stdout=owners)
+        syncing = False
+        sync_seconds = []
+        for line in (directory / 'sync.trace').read_text().splitlines():
+            if r'"READY\n"' in line:
+                syncing = True
+            elif r'"DONE\n"' in line:
+                syncing = False
+            elif syncing and re.search(r'(?:fsync|fdatasync)\(', line):
+                match = re.search(r'= 0 <([0-9.]+)>', line)
+                if match:
+                    sync_seconds.append(float(match[1]))
+        row['sync_trace_calls'] = len(sync_seconds)
+        row['sync_us_commit'] = sum(sync_seconds) * 1e6 / commits
         metric_file.unlink()  # Keep the readable attribution, not the raw dwarf stacks.
     (directory / 'result.json').write_text(json.dumps(row, indent=2) + '\n')
     print(json.dumps(row), flush=True)
@@ -222,7 +244,10 @@ def main():
     if len(allowed) < 2:
         parser.error('two allowed CPUs required')
     os.sched_setaffinity(0, allowed[:2])
-    os.environ.update(HIRSEL_MEMORY_LIMIT='2G', HIRSEL_JOBS='2')
+    os.environ.pop('HIRSEL_RT_MIGRATE', None)
+    os.environ.update(HIRSEL_MEMORY_LIMIT='2G', HIRSEL_JOBS='2',
+                      HIRSEL_RT_WORKERS='1', HIRSEL_DAEMON='off',
+                      LD_LIBRARY_PATH=str(ROOT / 'tools/buck2/toolchains/llvm-files/lib'))
     out = args.output.resolve()
     out.mkdir(parents=True, exist_ok=True)
     compiler = args.compiler.resolve() if args.compiler else build(out)

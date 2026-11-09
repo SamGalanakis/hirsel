@@ -12,7 +12,8 @@ sample per workload in each engine and Rust. It restricts affinity to two allowe
 CPUs, uses `tools/capped` with 2 GiB, and measures only one process at a time.
 The checked-in `workload.json` is the workload contract. `workload.hir` computes
 transfer data; `main.hir` adapts it to today's store API and imports the original
-ledger-service's table operations. Port that adapter when the store API changes.
+ledger-service's table operations. It uses `store.transact`; runner transport and
+`store.call` stream replay handling are excluded. Port that adapter when the store API changes.
 
 Eight accounts start with 1,000,000 units each. Transfer i moves 1 + i mod 3 units
 from account i mod 8 to its successor, wrapping at 8. There are 512 successful
@@ -62,10 +63,12 @@ is used in latency samples. Percentiles use nearest rank over 512 or 64 durable
 groups; each transfer in a group shares its completion latency. These are one
 sample's empirical percentiles, not confidence intervals or stable tail estimates.
 
-`--profile` collects separate phase-gated CPU profiles, retaining `owners.txt`
-and deleting raw stacks. Profiles are diagnostics and their times are not used
+`--profile` collects separate phase-gated CPU profiles and syscall-duration traces, retaining `owners.txt`
+and `sync.trace`, and deleting raw stacks. Profiles are diagnostics and their times are not used
 for throughput ratios. Symbols without line information need source-owner lookup.
-Fsync wall time is not CPU time. `result.json`, stdout with one latency per group,
+The profile excludes the strace process; traced fsync durations attribute syscall
+wall time separately from CPU samples. Strace overhead makes these diagnostic
+timings unsuitable for throughput ratios. Fsync wall time is not CPU time. `result.json`, stdout with one latency per group,
 perf counters, and stderr remain beside each database. `results.json` summarizes
 the matrix. To resume the same unchanged build after a failed case, keep its
 failed evidence elsewhere, remove just that incomplete case directory, and use

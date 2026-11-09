@@ -8,7 +8,7 @@ pub fn main() -> Result[(), ()] {
   let mut names: unique Set[String] = set.empty()
   let mut text = ""
   for name in names {
-    text = name
+    text = copy name
   }
   let _ = set.remove(mut names, "a")
   Ok(())

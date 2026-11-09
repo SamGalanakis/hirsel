@@ -3,7 +3,7 @@
 // stdout: ok
 fn same(pair: (u64, List[u64]), take expected: List[((u64, List[u64]), u64)]) -> bool {
   let (k, v) = pair
-  ((k, v), k) == expected[0]
+  ((k, copy v), k) == expected[0]
 }
 
 pub fn main(rt: Io, args: Args) -> Result[(), GrantError] {

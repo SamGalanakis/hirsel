@@ -12,7 +12,7 @@ fn roundtrip(
     TextInvariant()
   )
   failure.check(
-    std@1/base64.decode(encoded, alphabet, padding) == Ok(data),
+    std@1/base64.decode(encoded, alphabet, padding) == Ok(copy data),
     TextInvariant()
   )
 }

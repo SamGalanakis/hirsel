@@ -8,7 +8,7 @@ fn keep(take action: fn() -> () uses {}) -> () {
 fn example(take x: sendable Bytes) -> () {
   keep(
     fn() {
-      let _ = x
+      let _ = copy x
     }
   )
 }

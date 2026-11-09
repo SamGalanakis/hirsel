@@ -8,5 +8,5 @@ type Ast {
 
 fn f(a: Arena, x: String) -> () {
   let mut g: Ast in {a, x} = Ast(s: "y")
-  g.s = x
+  g.s = copy x
 }

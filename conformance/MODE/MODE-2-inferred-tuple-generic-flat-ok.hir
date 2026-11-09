@@ -6,7 +6,7 @@ type R[T] {
 
 fn probe[T: flat](take r: R[T]) {
   let built = (
-    {
+    copy {
       r
     }.part,
     1u8

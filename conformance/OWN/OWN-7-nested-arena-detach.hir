@@ -11,7 +11,7 @@ pub fn main(rt: Io, args: Args) -> Result[(), LaunchError] {
   let kept = arena.with(
     fn(a: Arena) {
       let mut r: unique Rec in a = Rec(items: [1, 2])
-      let old = r.items
+      let old = copy r.items
       r.items[0] = 9
       (old[0], r.items[0]) == (1, 9)
     }

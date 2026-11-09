@@ -5,7 +5,7 @@
 fn visible(m: Map[u64, List[u64]], take expected: List[(u64, List[u64])]) -> bool {
   let mut i: u64 = 0
   for (k, v) in m {
-    if !((k, v) == expected[i]) {
+    if !((k, copy v) == expected[i]) {
       return false
     }
     i += 1

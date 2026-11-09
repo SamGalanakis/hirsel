@@ -18,7 +18,7 @@ fn scripted(t: Test, address: String) -> Net {
     t,
     [
       NetPeer(
-        address: address,
+        address: copy address,
         port: 80u16,
         resolves_to: [V4([127u8, 0u8, 0u8, 1u8])],
         tls: Plain(),

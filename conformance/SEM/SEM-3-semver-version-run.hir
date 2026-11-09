@@ -811,9 +811,9 @@ pub fn main(t: Test) -> Result[(), semver.SemverError] {
     semver.Version(major: 1, minor: 2, patch: 3, pre: "alpha1", build: "build5")
   )
   let long = semver.parse("1.2.3-1.alpha1.9+build5.7.3aedf")?
-  test.equal(t, (long.pre, long.build), ("1.alpha1.9", "build5.7.3aedf"))
+  test.equal(t, (copy long.pre, copy long.build), ("1.alpha1.9", "build5.7.3aedf"))
   let zero = semver.parse("1.2.3-0a.alpha1.9+05build.7.3aedf")?
-  test.equal(t, (zero.pre, zero.build), ("0a.alpha1.9", "05build.7.3aedf"))
+  test.equal(t, (copy zero.pre, copy zero.build), ("0a.alpha1.9", "05build.7.3aedf"))
   test.equal(
     t,
     semver.parse("0.4.0-beta.1+0851523")?,

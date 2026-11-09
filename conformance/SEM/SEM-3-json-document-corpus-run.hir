@@ -69,7 +69,7 @@ pub fn main() -> Result[(), OutputError] {
         }
       }
     )
-    failure.check(observed == Ok(expected), TextInvariant())
+    failure.check(observed == Ok(copy expected), TextInvariant())
     let owned = match json.parse(copy input) {
       Ok(v) => v,
       Error(_) => {

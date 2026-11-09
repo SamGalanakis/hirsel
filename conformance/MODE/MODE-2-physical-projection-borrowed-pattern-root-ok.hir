@@ -10,5 +10,5 @@ type Outer {
 
 fn probe(take o: Outer) {
   let Outer(inner: i) = o
-  let built = box i.xs
+  let built = box copy i.xs
 }

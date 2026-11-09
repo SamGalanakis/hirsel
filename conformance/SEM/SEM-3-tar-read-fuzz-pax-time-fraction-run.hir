@@ -30,7 +30,7 @@ fn feed(mut s: Source, mut buffer: List[u8], requested: u64) -> Result[u64, ()] 
 fn timestamp(data: Bytes) -> Result[i64, tar.ReadError[()]] {
   let mut t = tar.reader(None())
   let mut r = bufio.new(512)
-  let mut source = Source(data: data, at: 0, chunk: 512)
+  let mut source = Source(data: copy data, at: 0, chunk: 512)
   match tar.next(mut t, mut r, mut source, feed)? {
     Some(h) => Ok(h.modified),
     None() => Error(Archive(Truncated())),

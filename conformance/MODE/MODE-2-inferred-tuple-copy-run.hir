@@ -10,7 +10,7 @@ fn output_error[E](take e: E) {}
 pub fn main(rt: Io, args: Args) -> Result[(), ()] {
   let mut r = R(xs: [b"a"])
   let built = (
-    {
+    copy {
       r
     }.xs,
     1u8

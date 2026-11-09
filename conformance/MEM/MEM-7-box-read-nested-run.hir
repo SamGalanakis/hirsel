@@ -21,7 +21,7 @@ fn inspect_pair(x: box (box bool, box bool)) -> bool {
 pub fn main(rt: Io, args: Args) -> Result[(), ()] {
   let mut a = box box Cell(text: "old")
   let old = copy a
-  let shared = a.text
+  let shared = copy a.text
   (a).text = "new"
   failure.check(inspect(old) && shared == "old" && (a).text == "new", TextInvariant())
   failure.check(inspect_pair(box (box true, box false)), TextInvariant())

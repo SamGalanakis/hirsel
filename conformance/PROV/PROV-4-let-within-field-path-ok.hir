@@ -8,7 +8,7 @@ type Two {
 }
 
 fn good(a: Arena, b: Arena, x: Bytes in a, y: Bytes in b) -> u64 {
-  let z = Two(p: y, q: x)
+  let z = Two(p: copy y, q: copy x)
   let v: Bytes in z.p = y
   0
 }

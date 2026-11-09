@@ -6,7 +6,7 @@ fn observe(x: String) -> () {
 
 fn probe(mut xs: List[String]) -> () {
   for x in mut xs {
-    let old = x
+    let old = copy x
     x = "new"
     observe(old)
   }

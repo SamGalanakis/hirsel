@@ -6,7 +6,7 @@ fn field(name: Bytes, value: Bytes) -> std@1/hpack.Field {
 
 fn block(mut d: std@1/hpack.Decoder, encoded: Bytes, expected: List[std@1/hpack.Field]) {
   core@1/failure.check(
-    std@1/hpack.decode(mut d, encoded, 65536) == Ok(expected),
+    std@1/hpack.decode(mut d, encoded, 65536) == Ok(copy expected),
     TextInvariant()
   )
 }
@@ -309,10 +309,10 @@ fn search(t: Test, f: std@1/hpack.Field, prefix: Bytes) {
   let mut d = std@1/hpack.decoder(4096)
   let seed = std@1/hpack.encode(mut e, [field(b"foo", b"bar"), field(b"blake", b"miz")])
   let _ = std@1/hpack.decode(mut d, seed, 65536)
-  let out = std@1/hpack.encode(mut e, [f])
+  let out = std@1/hpack.encode(mut e, [copy f])
   test.check(t, bytes.len(out) >= bytes.len(prefix))
   test.check(t, bytes.slice(out, 0, bytes.len(prefix)) == prefix)
-  test.check(t, std@1/hpack.decode(mut d, out, 65536) == Ok([f]))
+  test.check(t, std@1/hpack.decode(mut d, out, 65536) == Ok([copy f]))
 }
 
 // Go encode_test.go TestEncoderSearchTable. Go seeds its dynamic table with

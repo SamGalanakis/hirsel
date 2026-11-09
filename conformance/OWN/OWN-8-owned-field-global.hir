@@ -6,6 +6,6 @@ type Rec {
 }
 
 fn example(take r: Rec) -> (Rec, Bytes) {
-  let part = r.items
+  let part = copy r.items
   (take r, take part)
 }

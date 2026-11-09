@@ -124,7 +124,7 @@ pub fn sign(
     }
   }
   if map.get(values, "host") == None() || map.get(values, "x-amz-date") != Some(
-    timestamp
+    copy timestamp
   ) {
     return Error(Invalid())
   }

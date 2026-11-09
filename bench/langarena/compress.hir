@@ -253,7 +253,7 @@ fn huff_tree(freq: List[i32]) -> Option[box Node] {
         frequency: nodes[0].frequency,
         byte: 0,
         is_leaf: false,
-        left: Some(nodes[0]),
+        left: Some(copy nodes[0]),
         right: Some(huff_leaf(0, 0))
       )
     )
@@ -290,7 +290,7 @@ fn huff_tree(freq: List[i32]) -> Option[box Node] {
       pos -= 1
     }
   }
-  Some(nodes[0])
+  Some(copy nodes[0])
 }
 
 fn huff_codes(
@@ -544,7 +544,7 @@ fn read_bit(mut reader: BitInput) -> u64 {
 fn arith_decode(encoded: Arith) -> unique List[u8] {
   let t = table(encoded.freq)
   let mut out = zero_bytes(t.total)
-  let mut input = BitInput(data: encoded.data, position: 0)
+  let mut input = BitInput(data: copy encoded.data, position: 0)
   let mut value: u64 = 0
   for _ in 0u64..32u64 {
     value = value << 1 | read_bit(mut input)

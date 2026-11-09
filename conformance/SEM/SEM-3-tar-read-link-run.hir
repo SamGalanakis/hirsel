@@ -46,7 +46,7 @@ fn kind_text(kind: tar.Kind) -> String {
 fn summary(h: tar.Header) -> String {
   let mut out: List[u8] = []
   text.append(mut out, h.name)
-  let texts: List[String] = [kind_text(h.kind), h.linkname]
+  let texts: List[String] = [kind_text(h.kind), copy h.linkname]
   for field in texts {
     list.push(mut out, b'|')
     text.append(mut out, field)
@@ -56,7 +56,7 @@ fn summary(h: tar.Header) -> String {
     list.push(mut out, b'|')
     u64.format_into(n, mut out)
   }
-  let names: List[String] = [h.uname, h.gname]
+  let names: List[String] = [copy h.uname, copy h.gname]
   for field in names {
     list.push(mut out, b'|')
     text.append(mut out, field)

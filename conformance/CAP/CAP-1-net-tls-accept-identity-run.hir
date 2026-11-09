@@ -42,7 +42,7 @@ fn invalid(n: Net, mut listener: Listener of n, chain: Bytes, key: Bytes) -> Res
         n,
         take s,
         TlsServer(
-          identities: [TlsIdentity(chain: chain, key: key)],
+          identities: [TlsIdentity(chain: copy chain, key: copy key)],
           clients: Anonymous(),
           alpn: []
         )

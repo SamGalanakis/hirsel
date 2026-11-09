@@ -143,7 +143,7 @@ fn invalid_uri(error: uri.UriError) -> S3Error uses {} {
 fn grant(env: Env, prefix: String, suffix: String) -> Result[String, S3Error] {
   let found = env.get(env, string.concat(prefix, suffix)) ? missing_grant
   match found {
-    Some(value) => Ok(value),
+    Some(value) => Ok(copy value),
     None() => Error(Grant()),
   }
 }
@@ -324,7 +324,7 @@ fn request(
   )?
   list.push(
     mut headers,
-    http.Header(name: "authorization", value: signed.authorization)
+    http.Header(name: "authorization", value: copy signed.authorization)
   )
   let mut config = http.default_config()
   config.max_redirects = 0
@@ -333,7 +333,7 @@ fn request(
   config.max_body_bytes = c.config.max_object_bytes
   config.max_idle_connections = 0
   config.idle_timeout = None()
-  let mut http_client = http.client(c.network, None(), config) ?
+  let mut http_client = http.client(c.network, None(), config)?
   Ok(
     http.client_fetch(
       mut http_client,
@@ -341,7 +341,7 @@ fn request(
       string.concat(c.config.endpoint, suffix),
       headers,
       body
-    ) ?
+    )?
   )
 }
 
@@ -555,7 +555,7 @@ pub fn list_objects(mut c: Client, prefix: String) -> Result[List[String], S3Err
       return Error(Malformed())
     }
     let next = xml_values(xml, "NextContinuationToken")?
-    if list.len(next) != 1 || next[0] == "" || token == Some(next[0]) {
+    if list.len(next) != 1 || next[0] == "" || token == Some(copy next[0]) {
       return Error(Malformed())
     }
     for visited in visited_tokens {

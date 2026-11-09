@@ -8,7 +8,7 @@ type Rec {
 
 pub fn main(rt: Io, args: Args) -> Result[(), LaunchError] {
   let mut r = Rec(items: [1, 2])
-  let old = r.items
+  let old = copy r.items
   r.items[0] = 9
   if (old[0], r.items[0]) == (1, 9) {
     out.print(io.stdout(rt) ? Grant, "ok\n") ? Output

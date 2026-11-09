@@ -29,9 +29,9 @@ fn decode(input: Bytes, chunk: u64) -> Result[List[sse.Event], sse.SseError] use
 }
 
 fn decodes(t: Test, input: Bytes, expected: List[sse.Event]) {
-  test.check(t, decode(input, bytes.len(input) + 1) == Ok(expected))
-  test.check(t, decode(input, 3) == Ok(expected))
-  test.check(t, decode(input, 1) == Ok(expected))
+  test.check(t, decode(input, bytes.len(input) + 1) == Ok(copy expected))
+  test.check(t, decode(input, 3) == Ok(copy expected))
+  test.check(t, decode(input, 1) == Ok(copy expected))
 }
 
 pub fn main(t: Test) -> Result[(), sse.SseError] {

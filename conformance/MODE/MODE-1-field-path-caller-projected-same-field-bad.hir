@@ -18,8 +18,8 @@ fn get(p: Pair) -> String in p.a {
 }
 
 fn caller(x: String, y: String) -> u64 {
-  let mut q = Outer(p: Pair(a: x, b: x), n: 0u64)
+  let mut q = Outer(p: Pair(a: copy x, b: copy x), n: 0u64)
   let r = get(q.p)
-  q.p.a = y
+  q.p.a = copy y
   string.byte_len(r)
 }

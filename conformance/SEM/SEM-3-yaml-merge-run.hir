@@ -37,7 +37,7 @@ fn want() -> yaml.Value {
 
 // Mappings equal as sets of entries.
 fn same_entries(a: yaml.Value, b: yaml.Value) -> bool {
-  match (a, b) {
+  match (copy a, copy b) {
     (Object(xs), Object(ys)) => {
       if map.len(xs) != map.len(ys) {
         return false

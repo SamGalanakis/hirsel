@@ -38,7 +38,7 @@ fn error_kind(e: tar.ReadError[()]) -> u64 {
 fn scan(data: Bytes, chunk: u64, manual: bool) -> (u64, u64) {
   let mut t = tar.reader(None())
   let mut r = bufio.new(chunk)
-  let mut source = Source(data: data, at: 0, chunk: chunk)
+  let mut source = Source(data: copy data, at: 0, chunk: chunk)
   let mut count: u64 = 0
   while true {
     match tar.next(mut t, mut r, mut source, feed) {

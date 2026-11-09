@@ -10,7 +10,7 @@ fn check(pattern: String, input: String, maximum: u64, expected: List[regex.Capt
     return Error(())
   }
   failure.check(
-    regex.find_all_captures(re, input, maximum, 1000000) == Ok(expected),
+    regex.find_all_captures(re, input, maximum, 1000000) == Ok(copy expected),
     TextInvariant()
   )
   if maximum != 0 {

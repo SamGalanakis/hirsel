@@ -39,7 +39,7 @@ fn nested(xs: List[List[String]]) -> u64 uses {} {
   let mut n: u64 = 0
   for row in mut rows {
     for cell in mut row {
-      let c = cell
+      let c = copy cell
       n += string.byte_len(c)
     }
   }

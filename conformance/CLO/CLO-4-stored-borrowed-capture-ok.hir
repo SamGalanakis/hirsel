@@ -8,7 +8,7 @@ type Holder {
 fn example(take x: Bytes) -> Holder {
   Holder(
     action: fn() {
-      let _ = x
+      let _ = copy x
     }
   )
 }

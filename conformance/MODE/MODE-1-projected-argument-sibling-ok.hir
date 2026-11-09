@@ -18,7 +18,7 @@ fn view(p: Pair) -> String in p {
 }
 
 fn caller(x: String) -> u64 {
-  let mut q = Outer(p: Pair(a: x, b: x), n: 0u64)
+  let mut q = Outer(p: Pair(a: copy x, b: copy x), n: 0u64)
   let r = view(q.p)
   q.n = 1u64
   string.byte_len(r)

@@ -5,7 +5,7 @@ type Value = Leaf | Array(List[Value]) | Tagged(value: box Value)
 
 fn bad(a: Value, b: Value) -> bool uses {} {
   let mut c: Value in {a, b} = a
-  match (a, b) {
+  match (copy a, copy b) {
     (Array(xs), _) => {
       c = xs[0u64]
     },

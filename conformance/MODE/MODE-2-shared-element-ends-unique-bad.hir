@@ -9,7 +9,7 @@ fn bump(mut xs: unique List[String]) -> () {
 
 fn example() -> () {
   let mut xs: unique List[String] = ["a"]
-  let p = xs[0u64]
+  let p = copy xs[0u64]
   let same = p == "a"
   bump(mut xs)
 }

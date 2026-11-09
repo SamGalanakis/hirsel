@@ -20,7 +20,7 @@ fn escaping() -> fn() -> u64 {
   let x: String = copy_to(heap, "x")
   let p = (x, 1u8)
   fn() {
-    let (s, n) = p
+    let (s, n) = copy p
     string.byte_len(s)
   }
 }

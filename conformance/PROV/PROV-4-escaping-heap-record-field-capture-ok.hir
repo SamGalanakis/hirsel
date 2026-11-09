@@ -10,7 +10,7 @@ fn probe() -> Holder {
   let pair = (x, 1u8)
   Holder(
     action: fn() {
-      let (s, n) = pair
+      let (s, n) = copy pair
       string.byte_len(s)
     }
   )

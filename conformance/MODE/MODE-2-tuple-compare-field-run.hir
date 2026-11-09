@@ -6,16 +6,16 @@ type Row {
 }
 
 fn same(row: Row, k: u64, v: List[u64]) -> bool {
-  row.pair == (k, v)
+  row.pair == (k, copy v)
 }
 
 fn reconstructed(row: Row) -> bool {
-  let (k, v) = row.pair
+  let (k, v) = copy row.pair
   row.pair == (k, v)
 }
 
 fn reversed(row: Row) -> bool {
-  let (k, v) = row.pair
+  let (k, v) = copy row.pair
   (k, v) == row.pair
 }
 

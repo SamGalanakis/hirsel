@@ -13,9 +13,9 @@ fn get(p: Pair) -> String in p.a {
 }
 
 fn caller(x: String, y: String) -> u64 {
-  let mut p = Pair(a: x, b: x)
+  let mut p = Pair(a: copy x, b: copy x)
   let r = get(p)
-  p.b = y
-  p.a = y
+  p.b = copy y
+  p.a = copy y
   string.byte_len(r)
 }

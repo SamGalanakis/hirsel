@@ -16,30 +16,30 @@ type Holder {
 
 fn whole(x: String) -> String in x {
   let mut r: String in x = "a"
-  r = x
+  r = copy x
   r
 }
 
 fn after_copy(x: String) -> String in x {
   let mut s = copy x
-  s = x
+  s = copy x
   s
 }
 
 fn field(take dst: Holder, x: String) -> Holder in x {
   let mut owned: Holder in owned = take dst
-  owned.value = x
+  owned.value = copy x
   take owned
 }
 
 fn unannotated_field(x: String) -> () {
   let mut r: Holder in r = Holder(value: "a")
-  r.value = x
+  r.value = copy x
 }
 
 fn unannotated(seed: Bytes) -> () {
   let mut r: Bytes in r = b"a"
-  r = seed
+  r = copy seed
 }
 
 pub fn main(rt: Io, args: Args) -> Result[(), ()] {

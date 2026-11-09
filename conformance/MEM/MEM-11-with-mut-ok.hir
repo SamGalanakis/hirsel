@@ -10,7 +10,7 @@ fn grown(s: Shared[Index]) -> u64 {
   shared.with(
     s,
     fn(i: Index) -> u64 {
-      let mut items = i.items
+      let mut items = copy i.items
       list.push(mut items, 3)
       list.len(items)
     }

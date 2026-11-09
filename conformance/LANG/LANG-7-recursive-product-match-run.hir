@@ -5,7 +5,7 @@
 type Chain = End | Link(u8, box Chain)
 
 fn order(a: Chain, b: Chain) -> i32 {
-  match (a, b) {
+  match (copy a, copy b) {
     (End(), End()) => 0,
     (End(), Link(_, _)) => -1,
     (Link(_, _), End()) => 1,

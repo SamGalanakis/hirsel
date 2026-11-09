@@ -113,7 +113,7 @@ fn result_of(codes: List[u64]) -> Result[u8, String] uses {} {
 }
 
 fn result_order(a: Result[u8, String], b: Result[u8, String]) -> i32 uses {} {
-  match (a, b) {
+  match (copy a, copy b) {
     (Ok(p), Ok(q)) => number_order(int.widen(p), int.widen(q)),
     (Ok(_), Error(_)) => -1,
     (Error(_), Ok(_)) => 1,
@@ -213,7 +213,7 @@ fn tree_of(codes: List[u64]) -> Tree uses {} {
 }
 
 fn tree_order(a: Tree, b: Tree) -> i32 uses {} {
-  match (a, b) {
+  match (copy a, copy b) {
     (Leaf(p), Leaf(q)) => number_order(int.widen(p), int.widen(q)),
     (Leaf(_), Branch(_)) => -1,
     (Branch(p), Branch(q)) => {

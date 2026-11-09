@@ -5,7 +5,7 @@ type R[T] {
 }
 
 fn probe[T: copyable](take r: R[T]) {
-  let built = box {
+  let built = box copy {
     r
   }.part
 }

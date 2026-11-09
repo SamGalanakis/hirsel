@@ -35,7 +35,7 @@ fn bitwise(x: String, y: String, and: String, or: String, xor: String, and_not: 
 
 fn radix(value: u64, base: u8, text: String) {
   failure.check(
-    bigint.format_radix(bigint.from_u64(value), base) == Ok(text),
+    bigint.format_radix(bigint.from_u64(value), base) == Ok(copy text),
     TextInvariant()
   )
   failure.check(

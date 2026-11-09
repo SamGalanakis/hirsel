@@ -19,7 +19,7 @@ fn copied() -> u64 {
 fn bound() -> u64 {
   let x = {
     let v: List[List[u64]] = [[1, 2, 3]]
-    v[0]
+    copy v[0]
   }
   list.len(x)
 }

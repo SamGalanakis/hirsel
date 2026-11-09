@@ -4,7 +4,7 @@
 fn vector(seconds: i128, expected: String) -> () {
   let stamp = time.Timestamp(unix_nanoseconds: seconds * 1000000000)
   failure.check(http_date.parse(expected) == Ok(stamp), TextInvariant())
-  failure.check(http_date.format(stamp) == Ok(expected), TextInvariant())
+  failure.check(http_date.format(stamp) == Ok(copy expected), TextInvariant())
   let Ok(rendered) = http_date.format(stamp) else {
     failure.check(false, TextInvariant())
     return ()

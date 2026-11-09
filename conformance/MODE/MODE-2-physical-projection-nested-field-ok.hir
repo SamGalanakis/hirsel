@@ -9,5 +9,5 @@ type Outer {
 }
 
 fn probe(take o: Outer) {
-  let built = box o.r.xs
+  let built = box copy o.r.xs
 }

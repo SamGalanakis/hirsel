@@ -12,7 +12,7 @@ type R {
 }
 
 fn probe(r: R) {
-  let built = box {
+  let built = box copy {
     r
   }.part
   let frozen = shared.freeze(take built)

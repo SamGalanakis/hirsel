@@ -27,7 +27,7 @@ pub fn main() -> Result[(), OutputError] {
         }
       }
     )
-    failure.check(observed == Ok(input), TextInvariant())
+    failure.check(observed == Ok(copy input), TextInvariant())
   }
   Ok(())
 }

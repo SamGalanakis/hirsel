@@ -147,7 +147,7 @@ fn factor(mut p: Parser) -> box Node {
 }
 
 fn parse(source: Bytes) -> List[box Node] {
-  let mut p = Parser(source: source, pos: 0)
+  let mut p = Parser(source: copy source, pos: 0)
   let mut ast: List[box Node] = []
   while true {
     skip(mut p)

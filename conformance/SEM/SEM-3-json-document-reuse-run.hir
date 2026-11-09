@@ -30,7 +30,7 @@ pub fn main() -> Result[(), u64] {
       }
       let first = json_document.stringify(doc)
       let second = json_document.stringify(doc)
-      failure.check(first == second && first == Ok(input), TextInvariant())
+      failure.check(first == second && first == Ok(copy input), TextInvariant())
       checksum
     }
   )

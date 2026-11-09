@@ -23,7 +23,7 @@ fn revision(tasks: Tasks, m: Mutex[Board]) -> u64 {
 }
 
 fn serve(tasks: Tasks, m: Mutex[Board]) -> u64 {
-  let svc = Services(tasks: tasks, state: m)
+  let svc = Services(tasks: tasks, state: copy m)
   task.scope(
     tasks,
     fn(s: Scope) -> u64 {

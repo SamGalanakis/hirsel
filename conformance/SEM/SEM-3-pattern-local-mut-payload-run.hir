@@ -25,7 +25,7 @@ fn error_kind(e: Err) -> u64 {
 }
 
 fn scan(data: String) -> u64 {
-  let mut s = State(text: data)
+  let mut s = State(text: copy data)
   while true {
     match next(mut s) {
       Ok(None) => return 7,

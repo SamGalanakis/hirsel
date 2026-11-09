@@ -7,7 +7,7 @@ fn probe(mut out: List[fn() -> u64]) {
   list.push(
     mut out,
     fn() {
-      let (s, n) = pair
+      let (s, n) = copy pair
       string.byte_len(s)
     }
   )

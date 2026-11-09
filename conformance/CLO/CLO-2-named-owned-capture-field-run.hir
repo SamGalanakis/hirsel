@@ -7,7 +7,7 @@ type Wrap[T] {
 
 fn probe[T: data](take x: Wrap[T]) -> bool {
   fn inner[U: plain](y: U) -> bool {
-    let v = x.value
+    let v = copy x.value
     v == v
   }
   inner(1u8)

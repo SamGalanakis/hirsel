@@ -5,7 +5,7 @@ fn probe(a: Arena) -> fn() -> u64 {
   let x: String in heap = "x"
   let pair = (x, 1u8)
   fn() {
-    let (s, n) = pair
+    let (s, n) = copy pair
     string.byte_len(s)
   }
 }

@@ -8,6 +8,6 @@ type R {
 fn need(take xs: unique List[Bytes]) {}
 
 fn probe(take r: R) {
-  let xs = r.xs
+  let xs = copy r.xs
   need(take xs)
 }

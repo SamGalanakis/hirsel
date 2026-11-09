@@ -5,5 +5,5 @@ type R {
 }
 
 fn probe(take rs: List[R]) {
-  let built = box rs[0u64].xs
+  let built = box copy rs[0u64].xs
 }

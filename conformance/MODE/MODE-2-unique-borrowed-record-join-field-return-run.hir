@@ -12,7 +12,7 @@ fn magnitude(value: Big) -> List[u64] {
   if list.len(value.magnitude) > 1 {
     current = Big(magnitude: [])
   }
-  current.magnitude
+  copy current.magnitude
 }
 
 pub fn main() -> Result[(), ()] {

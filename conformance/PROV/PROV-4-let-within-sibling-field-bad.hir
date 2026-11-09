@@ -10,7 +10,7 @@ type Two {
 }
 
 fn lax(a: Arena, b: Arena, x: Bytes in a, y: Bytes in b) -> u64 {
-  let z = Two(p: x, q: y)
+  let z = Two(p: copy x, q: copy y)
   let v: Bytes in z.p = y
   0
 }

@@ -35,7 +35,7 @@ pub fn object_state(take c: Client) -> Result[ObjectBackend, S3Error] {
   let rejected = match competing {
     Error(Exists()) => true,
     Ok(()) | Error(Status(501)) => false,
-    Error(e) => return Error(e),
+    Error(e) => return Error(copy e),
   }
   if !rejected || original != b"first" {
     return Error(ConditionalUnsupported(unique checked.config.endpoint))

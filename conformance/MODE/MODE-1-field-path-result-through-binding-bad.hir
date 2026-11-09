@@ -9,6 +9,6 @@ type Pair {
 }
 
 fn get(p: Pair) -> Bytes in p.a {
-  let q = p.b
+  let q = copy p.b
   q
 }

@@ -10,10 +10,10 @@ type R {
 }
 
 fn probe(r: R) {
-  let built = box {
+  let built = box copy {
     r
   }.part
-  let again = box {
+  let again = box copy {
     r
   }.part
 }

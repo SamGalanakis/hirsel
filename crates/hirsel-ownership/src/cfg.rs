@@ -240,15 +240,28 @@ struct BlockTarget {
 }
 /// The places in the value positions of `value` (through transparent block
 /// tails, branches, arms and a labelled block's breaks) that name one of
-/// `locals`, with whether the place is the whole binding (LANG-11).
+/// `locals`, with whether the place is the whole binding (LANG-11). A whole
+/// binding that is a part view (MODE-7) of one of `locals`, through
+/// `view_roots`, is a part of that binding: its storage ends with the block.
+#[allow(clippy::too_many_arguments)]
 fn local_value_places(
     tree: &SyntaxTree,
     body: &CheckedBody,
     rows: &super::source_rows::SourceRows,
     block_breaks: &BTreeMap<ExprId, Vec<ExprId>>,
+    view_roots: &BTreeMap<usize, usize>,
     value: ExprId,
     locals: &[usize],
 ) -> Vec<(ExprId, bool)> {
+    let views_local = |mut binding: usize| {
+        while let Some(&root) = view_roots.get(&binding) {
+            if locals.contains(&root) {
+                return true;
+            }
+            binding = root;
+        }
+        false
+    };
     let mut found = vec![];
     let mut positions = vec![value];
     while let Some(position) = positions.pop() {
@@ -273,7 +286,10 @@ fn local_value_places(
                     .and_then(|_| place(body, position, rows))
                     .filter(|p| locals.contains(&p.binding))
                 {
-                    found.push((position, p.projections.is_empty()));
+                    found.push((
+                        position,
+                        p.projections.is_empty() && !views_local(p.binding),
+                    ));
                 }
             }
         }
@@ -378,6 +394,22 @@ pub(super) fn binders(
         todo.extend(tree.pattern_children(pattern));
     }
     result
+}
+/// MODE-7 (R1): an immutable `let` initialized by a field or element place
+/// (`r.f`, `xs[i]`, however the path is spelled) binds a borrowed view of it.
+fn part_view(
+    tree: &SyntaxTree,
+    body: &CheckedBody,
+    rows: &super::source_rows::SourceRows,
+    value: ExprId,
+) -> bool {
+    !matches!(
+        tree.expressions[value.0 as usize].kind,
+        ExprKind::Unary { .. }
+    ) && rows
+        .source_place(value)
+        .and_then(|_| place(body, value, rows))
+        .is_some_and(|p| !p.projections.is_empty())
 }
 pub(super) fn place<'a>(
     body: &CheckedBody,
@@ -540,6 +572,9 @@ pub(super) fn build(
         // an owned local out instead of borrowing storage about to end.
         let mut leaving: BTreeSet<ExprId> = BTreeSet::new();
         let mut ending: BTreeMap<ExprId, (ExprId, ExprId)> = BTreeMap::new();
+        // Each immutable `let` binding of a part view (MODE-7), with the
+        // binding whose storage it reads.
+        let mut view_roots: BTreeMap<usize, usize> = BTreeMap::new();
         let mut statements = Statements::default();
         // A bare nullary variant is a fresh construction, as a literal is.
         let nullary: BTreeSet<ExprId> = body
@@ -850,6 +885,22 @@ pub(super) fn build(
                             });
                             statement_bindings.dedup();
                             locals.extend(statement_bindings);
+                            for statement in block_statements {
+                                if let StmtKind::Let {
+                                    mutable: false,
+                                    pattern,
+                                    value,
+                                    otherwise: None,
+                                    ..
+                                } = &tree.statements[statement.0 as usize].kind
+                                    && part_view(tree, body, rows, *value)
+                                    && let Some(root) = place(body, *value, rows)
+                                {
+                                    for binding in rows.at(NameSite::Pattern(*pattern)) {
+                                        view_roots.insert(binding, root.binding);
+                                    }
+                                }
+                            }
                             env.lifetime = lifetimes.child(env.lifetime);
                             lifetimes
                                 .bindings
@@ -889,6 +940,7 @@ pub(super) fn build(
                                 body,
                                 rows,
                                 &block_breaks,
+                                &view_roots,
                                 expression,
                                 &locals,
                             ) {
@@ -1276,9 +1328,15 @@ pub(super) fn build(
                                 continue;
                             };
                             let consumer = target.consumer.unwrap_or(target.operation);
-                            for (position, whole) in
-                                local_value_places(tree, body, rows, &block_breaks, *value, &exited)
-                            {
+                            for (position, whole) in local_value_places(
+                                tree,
+                                body,
+                                rows,
+                                &block_breaks,
+                                &view_roots,
+                                *value,
+                                &exited,
+                            ) {
                                 if whole {
                                     leaving.insert(position);
                                 } else {
@@ -1685,12 +1743,7 @@ pub(super) fn build(
                                 // binds a borrowed view; a share is written.
                                 context: if otherwise.is_some() {
                                     Context::Read
-                                } else if !mutable
-                                    && matches!(
-                                        tree.expressions[value.0 as usize].kind,
-                                        ExprKind::Field { .. } | ExprKind::Index { .. }
-                                    )
-                                {
+                                } else if !mutable && part_view(tree, body, rows, *value) {
                                     Context::View
                                 } else {
                                     Context::Own

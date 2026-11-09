@@ -63,7 +63,9 @@ pub fn main(rt: Io, args: Args) -> Result[(), multipart.MultipartError] {
     if valid {
       match multipart.parse_media_type(multipart.form_type(boundary)) {
         Ok((kind, params)) => check(
-          kind == "multipart/form-data" && map.get(params, "boundary") == Some(boundary)
+          kind == "multipart/form-data" && map.get(params, "boundary") == Some(
+            copy boundary
+          )
         ),
         Error(_) => check(false),
       }

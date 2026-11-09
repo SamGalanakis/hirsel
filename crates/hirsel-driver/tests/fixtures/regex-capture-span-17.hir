@@ -216,7 +216,7 @@ fn capture_exhaustive_pattern(pattern: String) -> Result[(), CaptureTestFailure]
   ]
   for src in samples {
     if !capture_case(pattern, src) {
-      return Error(CaptureTestFailure(pattern: unique pattern, src: src, stage: 2))
+      return Error(CaptureTestFailure(pattern: unique pattern, src: copy src, stage: 2))
     }
   }
   Ok(())
@@ -251,7 +251,7 @@ pub fn capture_budgets() -> Result[(), CaptureTestFailure] uses {} {
   let patterns: List[String] = ["(a)", "(a?)*", "(a|ab)", "(?P<x>a)?b", "\\b(a)"]
   for pattern in patterns {
     if !capture_work(pattern, "aba") {
-      return Error(CaptureTestFailure(pattern: pattern, src: "aba", stage: 3))
+      return Error(CaptureTestFailure(pattern: copy pattern, src: "aba", stage: 3))
     }
   }
   Ok(())
@@ -263,7 +263,7 @@ pub fn capture_replacements() -> Result[(), CaptureTestFailure] uses {} {
     let sizes: List[u64] = [0u64, 30u64, 60u64]
     for output_size in sizes {
       if !capture_replace_case(pattern, "aba", output_size) {
-        return Error(CaptureTestFailure(pattern: pattern, src: "aba", stage: 4))
+        return Error(CaptureTestFailure(pattern: copy pattern, src: "aba", stage: 4))
       }
     }
   }
@@ -1770,7 +1770,7 @@ pub fn capture_retention() -> Result[(), CaptureTestFailure] uses {} {
   ]
   for (pattern, src) in cases {
     if !capture_case(pattern, src) {
-      return Error(CaptureTestFailure(pattern: pattern, src: src, stage: 17))
+      return Error(CaptureTestFailure(pattern: copy pattern, src: copy src, stage: 17))
     }
   }
   Ok(())

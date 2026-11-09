@@ -11,5 +11,5 @@ fn view(x: Holder) -> Holder in x {
 fn probe(x: Holder) -> Bytes {
   let mut slot = view(x)
   slot = Holder(value: b"new")
-  slot.value
+  copy slot.value
 }

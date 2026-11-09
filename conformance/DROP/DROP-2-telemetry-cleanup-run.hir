@@ -28,9 +28,9 @@ fn early(t: Telemetry) -> Result[(), ()] {
 fn record(name: String, ctx: std@1/telemetry.TraceContext) -> std@1/telemetry.CheckedLog uses {} {
   let entry = std@1/telemetry.LogRecord(
     level: Info(),
-    name: name,
+    name: copy name,
     message: "canceled",
-    metadata: std@1/telemetry.Metadata(trace: Some(ctx), fields: [])
+    metadata: std@1/telemetry.Metadata(trace: Some(copy ctx), fields: [])
   )
   match std@1/telemetry.check_log(entry) {
     Ok(checked) => checked,

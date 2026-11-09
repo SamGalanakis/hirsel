@@ -5,7 +5,7 @@ type R {
 }
 
 fn probe(r: R) {
-  let built = box {
+  let built = box copy {
     r
   }.xs
 }

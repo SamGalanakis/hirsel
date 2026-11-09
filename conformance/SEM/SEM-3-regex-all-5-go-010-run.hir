@@ -10,7 +10,10 @@ fn check(pattern: String, text: String, max: u64, expected: List[regex.Span]) ->
     Ok(re) => take re,
     Error(_) => return Error(()),
   }
-  failure.check(regex.find_all(re, text, max, 100000) == Ok(expected), TextInvariant())
+  failure.check(
+    regex.find_all(re, text, max, 100000) == Ok(copy expected),
+    TextInvariant()
+  )
   Ok(())
 }
 

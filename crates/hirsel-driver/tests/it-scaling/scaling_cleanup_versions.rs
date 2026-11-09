@@ -14,7 +14,7 @@ fn cleanup_version_joins_share_unchanged_dataflow() {
                 String::from("type Rec { items: Array[u64] }\npub fn main() -> u64 {\n");
             for i in 0..count {
                 source += &format!(
-                    "let mut r{i} = Rec(items: [1, 2])\nlet old{i} = r{i}.items\nr{i}.items[0] = 9\n"
+                    "let mut r{i} = Rec(items: [1, 2])\nlet old{i} = copy r{i}.items\nr{i}.items[0] = 9\n"
                 );
             }
             source += &(0..count)

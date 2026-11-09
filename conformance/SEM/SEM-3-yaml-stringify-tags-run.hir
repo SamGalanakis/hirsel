@@ -15,7 +15,9 @@ fn text(s: String) -> yaml.Value {
 
 // Writes `value`, expects `written` and reads it back to `value`.
 fn writes(value: yaml.Value, written: String) -> bool {
-  yaml.stringify(value) == Ok(unique written) && yaml.parse(unique written) == Ok(value)
+  yaml.stringify(value) == Ok(unique written) && yaml.parse(unique written) == Ok(
+    copy value
+  )
 }
 
 fn invalid(value: yaml.Value) -> bool {

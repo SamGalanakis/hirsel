@@ -5,7 +5,7 @@
 // See docs/x509-prior-art.md for source lines and envelope adaptations.
 fn subject(der: Bytes) -> Option[String] uses {} {
   match x509.parse(der) {
-    Ok(c) => Some(c.subject),
+    Ok(c) => Some(copy c.subject),
     Error(_) => None(),
   }
 }

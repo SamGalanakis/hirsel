@@ -17,7 +17,7 @@ fn check(
   } else {
     regex.replace_all(re, input, replacement, 1000000)
   }
-  failure.check(actual == Ok(expected), TextInvariant())
+  failure.check(actual == Ok(copy expected), TextInvariant())
   Ok(())
 }
 

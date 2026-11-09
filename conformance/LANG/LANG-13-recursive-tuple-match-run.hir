@@ -3,7 +3,7 @@
 type V = I(i64) | T(Map[String, V])
 
 fn same(a: V, b: V) -> bool {
-  match (a, b) {
+  match (copy a, copy b) {
     (T(xs), T(ys)) => map.len(xs) == map.len(ys),
     _ => a == b,
   }

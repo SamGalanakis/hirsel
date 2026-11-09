@@ -7,7 +7,7 @@ fn pick(xs: List[Bytes], x: Bytes) -> Bytes in {xs, x} {
     return e
   }
   {
-    let agree_tail: List[Bytes] = [x]
+    let agree_tail: List[Bytes] = [copy x]
     agree_tail[0]
   }
 }

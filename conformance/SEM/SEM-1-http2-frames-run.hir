@@ -63,7 +63,9 @@ fn roundtrips_and_partial(t: Test) {
     test.check(t, std@1/http2_wire.encode(frame, 16384) == Ok(copy encoded))
     test.check(
       t,
-      std@1/http2_wire.parse(encoded, 0, 16384) == Ok(Some((frame, bytes.len(encoded))))
+      std@1/http2_wire.parse(encoded, 0, 16384) == Ok(
+        Some((copy frame, bytes.len(encoded)))
+      )
     )
     for end in 0u64..bytes.len(encoded) {
       test.check(
@@ -152,7 +154,7 @@ fn literal(t: Test, wire: Bytes, frame: std@1/http2_wire.Frame, fragment: Bytes)
   test.check(t, std@1/http2_wire.encode(frame, 16384) == Ok(copy wire))
   test.check(
     t,
-    std@1/http2_wire.parse(wire, 0, 16384) == Ok(Some((frame, bytes.len(wire))))
+    std@1/http2_wire.parse(wire, 0, 16384) == Ok(Some((copy frame, bytes.len(wire))))
   )
   test.check(t, std@1/http2_wire.fragment(frame) == fragment)
 }

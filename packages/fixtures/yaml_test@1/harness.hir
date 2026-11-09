@@ -24,7 +24,7 @@ fn float_lexeme(lexeme: String) -> bool {
 }
 
 fn matches(actual: yaml.Value, expected: json.Value) -> bool {
-  match (actual, expected) {
+  match (copy actual, copy expected) {
     (Null(), Null()) => true,
     (Bool(a), Bool(b)) => a == b,
     (Integer(n), Number(lexeme)) => !float_lexeme(lexeme) && i64.parse(lexeme) == Ok(n),

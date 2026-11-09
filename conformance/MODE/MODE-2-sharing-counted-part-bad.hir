@@ -11,7 +11,7 @@ fn require_unique(mut r: unique Rec) -> () {
 }
 
 fn example(mut r: unique Rec) -> () {
-  let part = r.items
+  let part = copy r.items
   require_unique(mut r)
   let _ = part
 }

@@ -131,7 +131,10 @@ fn callable_requests_preserve_refusal_names_and_rebind_canonical_abis() {
     let binding = Binding::new(&target, &closures.iter().collect::<Vec<_>>()).unwrap();
     let rebound = restored.bind(&request.key, &binding).unwrap();
     assert_eq!(rebound.key, request.key);
-    assert_eq!(rebound.seeds[0].target.symbol, request.seeds[0].target.symbol);
+    assert_eq!(
+        rebound.seeds[0].target.symbol,
+        request.seeds[0].target.symbol
+    );
     assert_eq!(
         binding.table.fn_abis[rebound.seeds[0].target.abi.0 as usize].key,
         lowered.table.fn_abis[request.seeds[0].target.abi.0 as usize].key

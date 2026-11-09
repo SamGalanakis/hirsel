@@ -496,10 +496,9 @@ fn reachable_indirect(source: &str) -> usize {
     use hirsel_lir::ir::Inst;
     let (_, lowered) = lower_valid(source);
     let find = |s: &hirsel_lir::ir::Symbol| {
-        lowered
-            .units
-            .iter()
-            .position(|u| u.header.definition == s.definition && Some(u.header.instance) == s.instance)
+        lowered.units.iter().position(|u| {
+            u.header.definition == s.definition && Some(u.header.instance) == s.instance
+        })
     };
     let main = lowered
         .units
@@ -519,7 +518,12 @@ fn reachable_indirect(source: &str) -> usize {
                 Callee::Operation(_) => {}
             }
         }
-        symbols.extend(u.tables.closures.iter().filter_map(|c| c.code.map(|c| c.symbol)));
+        symbols.extend(
+            u.tables
+                .closures
+                .iter()
+                .filter_map(|c| c.code.map(|c| c.symbol)),
+        );
         symbols.extend(u.instructions.iter().filter_map(|i| match *i {
             Inst::FunctionRef { symbol, .. } => Some(symbol),
             _ => None,

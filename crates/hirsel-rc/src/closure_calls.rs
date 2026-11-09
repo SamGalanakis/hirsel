@@ -42,9 +42,7 @@ type Target = CallableTarget;
 pub type FieldPath = Vec<u32>;
 
 /// The entry input of a body that a seed names.
-#[derive(
-    Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize,
-)]
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
 pub enum SeedInput {
     /// A declared parameter, by ABI position.
     Parameter(usize),
@@ -64,10 +62,7 @@ pub struct CallableSeed {
 pub type ValueSeed = (ValueId, FieldPath, CallableTarget);
 
 /// Bind portable seeds to the entry values of the body they were requested for.
-pub fn bind_seeds(
-    unit: &LirUnit<Value>,
-    seeds: &[CallableSeed],
-) -> Result<Vec<ValueSeed>, String> {
+pub fn bind_seeds(unit: &LirUnit<Value>, seeds: &[CallableSeed]) -> Result<Vec<ValueSeed>, String> {
     seeds
         .iter()
         .map(|seed| {
@@ -176,7 +171,13 @@ fn place(u: &LirUnit<Value>, address: AddressId) -> Option<(SlotId, Vec<Projecti
         AddressBase::Address(a) => place(u, a)?,
         AddressBase::Value(_) => return None,
     };
-    steps.extend(info.projection.get(&u.pools.projections).unwrap_or(&[]).iter().cloned());
+    steps.extend(
+        info.projection
+            .get(&u.pools.projections)
+            .unwrap_or(&[])
+            .iter()
+            .cloned(),
+    );
     Some((slot, steps))
 }
 
@@ -212,7 +213,12 @@ fn overlap(path: &[u32], steps: &[ProjectionStep]) -> Overlap {
 /// The value itself, then every callable reached through inline record and
 /// tuple fields. Layouts are finite trees, so the list is too.
 fn callable_paths(table: &LayoutTable, layout: LayoutId) -> Vec<FieldPath> {
-    fn walk(table: &LayoutTable, layout: LayoutId, prefix: &mut FieldPath, out: &mut Vec<FieldPath>) {
+    fn walk(
+        table: &LayoutTable,
+        layout: LayoutId,
+        prefix: &mut FieldPath,
+        out: &mut Vec<FieldPath>,
+    ) {
         let Some(record) = table.layout(layout) else {
             return;
         };
@@ -290,7 +296,11 @@ impl Facts {
     ) -> Vec<CallableSeed> {
         let mut seeds = Vec::new();
         for arg in site.arguments.get(&u.pools.call_arguments).unwrap_or(&[]) {
-            let Some(p) = abi.parameters.iter().position(|p| p.source == arg.parameter) else {
+            let Some(p) = abi
+                .parameters
+                .iter()
+                .position(|p| p.source == arg.parameter)
+            else {
                 continue;
             };
             let paths = match arg.value {
@@ -481,11 +491,11 @@ fn discover(
     // A write at `address` defines `version`: covered paths take `value`'s
     // fields (or the callee's carries), sibling fields keep the slot's.
     let write = |facts: &Facts,
-                     eq: &mut Equations,
-                     versions: &mut Vec<Vec<ValueId>>,
-                     version: ValueId,
-                     address: AddressId,
-                     inside: &dyn Fn(&[u32]) -> Option<usize>| {
+                 eq: &mut Equations,
+                 versions: &mut Vec<Vec<ValueId>>,
+                 version: ValueId,
+                 address: AddressId,
+                 inside: &dyn Fn(&[u32]) -> Option<usize>| {
         let Some((slot, steps)) = tracked(address) else {
             for (node, _) in nodes(facts, version) {
                 eq.set(node, Code::Dynamic);
@@ -603,10 +613,13 @@ fn discover(
                     ConstructorKind::Tuple | ConstructorKind::Record(_)
                 );
                 for (node, path) in nodes(&facts, result) {
-                    let from = path.split_first().filter(|_| aggregate).and_then(|(f, rest)| {
-                        let field = values.iter().find(|v| v.field == *f)?;
-                        facts.value(field.value, rest)
-                    });
+                    let from = path
+                        .split_first()
+                        .filter(|_| aggregate)
+                        .and_then(|(f, rest)| {
+                            let field = values.iter().find(|v| v.field == *f)?;
+                            facts.value(field.value, rest)
+                        });
                     eq.link(node, from);
                 }
             }
@@ -650,7 +663,9 @@ fn discover(
         let args = site.arguments.get(&u.pools.call_arguments).unwrap_or(&[]);
         let position = |arg: &CallArgument| {
             let (_, abi) = callee?;
-            abi.parameters.iter().position(|p| p.source == arg.parameter)
+            abi.parameters
+                .iter()
+                .position(|p| p.source == arg.parameter)
         };
         let carried = |exit: Exit, path: &[u32]| {
             let (summary, _) = callee?;

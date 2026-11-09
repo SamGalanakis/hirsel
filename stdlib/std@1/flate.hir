@@ -824,6 +824,7 @@ pub fn zlib_decode(data: Bytes, limit: u64) -> Result[unique Bytes, FlateError] 
 pub opaque type Decoder: copyable + inert + noalloc_drop uses {} {
   state: Inflate,
   window: List[u8],
+  spare: List[u8],
   offset: u64,
 }
 
@@ -832,7 +833,19 @@ pub opaque type Decoder: copyable + inert + noalloc_drop uses {} {
 pub type ReadError[E] = Input(bufio.ReadError[E]) | Data(FlateError)
 
 pub fn decoder(format: Format) -> unique Decoder uses {} {
-  Decoder(state: inflater(format), window: [], offset: 0)
+  Decoder(state: inflater(format), window: [], spare: [], offset: 0)
+}
+
+// Moves the bytes of `window` from `cut` on to its front through `spare`,
+// keeping the storage of both.
+fn keep_tail(mut window: List[u8], mut spare: List[u8], cut: u64) -> () uses {} {
+  core@1/list.truncate(mut spare, 0)
+  core@1/bytes.append(
+    mut spare,
+    core@1/bytes.slice(core@1/bytes.view_list(window), cut, core@1/list.len(window))
+  )
+  core@1/bytes.replace_range(mut window, 0, core@1/bytes.view_list(spare))
+  core@1/list.truncate(mut window, core@1/list.len(spare))
 }
 
 /// Appends at most `max` decoded bytes to `out` and returns how many, zero
@@ -880,15 +893,12 @@ pub fn read[S, E](
         core@1/bytes.slice(core@1/bytes.view_list(d.window), start, end)
       )
     }
-    // Keep the last 32 KiB once the window passes 64 KiB.
-    if end > 65536 {
+    // Keep the last 32 KiB once the window passes 96 KiB, moving it to the
+    // front through `spare`: both lists keep their storage for the whole
+    // stream, and each compaction copies at most twice the bytes it retires.
+    if end > 98304 {
       let cut = end - 32768
-      let mut kept: List[u8] = []
-      core@1/bytes.append(
-        mut kept,
-        core@1/bytes.slice(core@1/bytes.view_list(d.window), cut, end)
-      )
-      d.window = take kept
+      keep_tail(mut d.window, mut d.spare, cut)
       d.state.base = if d.state.base > cut {
         d.state.base - cut
       } else {

@@ -8,10 +8,13 @@ import math
 import os
 from pathlib import Path
 import re
+import selectors
+import shlex
 import shutil
 import statistics
 import subprocess
 import sys
+import time
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT / 'bench/native'), str(ROOT / 'bench/micro')]
@@ -19,30 +22,45 @@ from suite import buck2_build, native_environment  # noqa: E402
 from measure import busy_share, cpu_snapshot, siblings  # noqa: E402
 
 # Version changes when a workload, input, algorithm or process boundary changes.
-VERSION = 2
+VERSION = 3
 CASES = (
-    ('json', 'bench/micro/programs/extended/json.hir', 'json-reference', [], ['2000', '2']),
-    ('log_parser', 'bench/runtime-corpus/log_main.hir', 'log-reference', [], ['10000', '10']),
-    ('gzip', 'bench/micro/programs/extended/gzip_read.hir', 'gzip-reference', [], ['4096']),
-    ('float_math', 'bench/micro/programs/float_math.hir', 'micro-reference', ['float_math'], ['100000', '2']),
-    ('priority_queue', 'bench/priority-queue-combined/topk.hir', 'queue-reference', [], ['0', '1024', '131072', '42']),
-    ('map_u64', 'bench/micro/programs/map_u64.hir', 'micro-reference', ['map_u64'], ['200000', '2']),
-    ('strbuild', 'bench/micro/programs/strbuild.hir', 'micro-reference', ['strbuild'], ['200000', '2']),
-    ('channel', 'bench/micro/programs/channel.hir', 'micro-reference', ['channel'], ['10000']),
+    ('json', 'bench/micro/programs/extended/json.hir', 'json-reference', [], ['2000', '64']),
+    ('log_parser', 'bench/runtime-corpus/log_main.hir', 'log-reference', [], ['10000', '1000']),
+    ('gzip', 'bench/micro/programs/extended/gzip_read.hir', 'gzip-reference', [], ['4096', '2048']),
+    ('float_math', 'bench/micro/programs/float_math.hir', 'micro-reference', ['float_math'], ['100000', '32']),
+    ('priority_queue', 'bench/priority-queue-combined/topk.hir', 'queue-reference', [], ['0', '1024', '131072', '42', '2048']),
+    ('map_u64', 'bench/micro/programs/map_u64.hir', 'micro-reference', ['map_u64'], ['200000', '128']),
+    ('strbuild', 'bench/micro/programs/strbuild.hir', 'micro-reference', ['strbuild'], ['200000', '512']),
+    ('channel', 'bench/micro/programs/channel.hir', 'micro-reference', ['channel'], ['100000']),
 )
 
 
+METRICS = ('seconds', 'cpu_seconds', 'instructions', 'user_instructions')
+
+
 def perf_result(text):
-    instructions = re.search(r'^\s*([\d.]+)\s+instructions:u\b(.*)$', text, re.M)
-    elapsed = re.search(r'^\s*([\d.]+)\s+seconds time elapsed\s*$', text, re.M)
-    if not instructions or not elapsed:
-        raise ValueError('perf instructions or elapsed summary missing/unsupported')
-    count, seconds = float(instructions[1]), float(elapsed[1])
-    if not all(math.isfinite(value) and value > 0 for value in (count, seconds)):
-        raise ValueError('invalid perf instructions or elapsed summary')
-    percent = re.search(r'\(\s*([\d.]+)%\)', instructions[2])
-    return dict(instructions=count, seconds=seconds,
-                running_percent=float(percent[1]) if percent else 100.0)
+    def value(label):
+        match = re.search(r'^\s*([\d.]+)\s+' + re.escape(label) + r'(?:\s|$)(.*)$', text, re.M)
+        if not match:
+            raise ValueError('perf counter missing/unsupported: ' + label)
+        number = float(match[1])
+        if not math.isfinite(number) or number < 0:
+            raise ValueError('invalid perf counter: ' + label)
+        percent = re.search(r'\(\s*([\d.]+)%\)', match[2])
+        return number, float(percent[1]) if percent else 100.0
+
+    inclusive, inclusive_percent = value('instructions')
+    user, user_percent = value('instructions:u')
+    switches, switches_percent = value('context-switches')
+    user_cpu, _ = value('seconds user')
+    system_cpu, _ = value('seconds sys')
+    if inclusive <= 0 or user <= 0 or user_cpu + system_cpu <= 0:
+        raise ValueError('nonpositive perf work or CPU time')
+    return dict(instructions=inclusive, user_instructions=user,
+                cpu_seconds=user_cpu + system_cpu, context_switches=switches,
+                running_percent=dict(instructions=inclusive_percent,
+                                     user_instructions=user_percent,
+                                     context_switches=switches_percent))
 
 
 def build(output, env):
@@ -85,29 +103,73 @@ def commands(output, case):
                 rust=[str(output / reference), *prefix, *args])
 
 
+def startup_case(case):
+    # Same executable and fixed input; suppress its repeated work. LogParser
+    # still prepares its log and regexes, and channel still joins its worker.
+    name, source, reference, prefix, args = case
+    args = list(args)
+    args[-1 if name != 'channel' else 0] = '0'
+    return name, source, reference, prefix, args
+
+
 def sample(command, directory, cpu, env):
     directory.mkdir()
     counters, before, after = [directory / p for p in ('perf.txt', 'before.stat', 'after.stat')]
-    # Linux v6.8 tools/perf/builtin-stat.c:872-884 starts the child BEFORE t0.
-    # Keep perf on another CPU so a short child cannot run to completion before
-    # its observer starts the elapsed clock. The counted taskset places only
-    # the workload and all of its child threads on the benchmark CPU.
     observer = next(c for c in sorted(os.sched_getaffinity(0))
-                    if c != cpu and c not in siblings(cpu))
-    # perf inherits every task/thread, including the Rust channel's worker.
-    # Both hooks execute inside capped, excluding slot wait from observations.
-    import shlex
+                    if c != cpu and c not in siblings(cpu)
+                    and c not in (*range(12, 16), *range(28, 32)))
+    events, release = [directory / p for p in ('events.fifo', 'release.fifo')]
+    for fifo in (events, release):
+        os.mkfifo(fifo)
+    # perf's --pre runs before workload release; --post runs after wait4 has
+    # reaped it (Linux v6.8 tools/perf/builtin-stat.c, run_perf_stat).
+    # The parent timestamps release and completion on CLOCK_MONOTONIC, never
+    # perf's racy elapsed summary. Admission and observer launch are excluded.
+    pre = ('cat /proc/stat > ' + shlex.quote(str(before)) +
+           '; printf R > ' + shlex.quote(str(events)) +
+           '; read go < ' + shlex.quote(str(release)))
+    post = ('cat /proc/stat > ' + shlex.quote(str(after)) +
+            '; printf D > ' + shlex.quote(str(events)))
     perf = ['taskset', '-c', str(observer), 'perf', 'stat', '--no-big-num',
-            '-e', 'instructions:u', '-o', str(counters),
-            '--pre', 'cat /proc/stat > ' + shlex.quote(str(before)),
-            '--post', 'cat /proc/stat > ' + shlex.quote(str(after)),
-            '--', 'taskset', '-c', str(cpu), *command]
-    with (directory / 'stdout').open('wb') as out, (directory / 'stderr').open('wb') as err:
-        process = subprocess.run([str(ROOT / 'tools/capped'), *perf], cwd=ROOT, env=env,
-                                 stdin=subprocess.DEVNULL, stdout=out, stderr=err)
-    if process.returncode:
-        raise ValueError(f'exit {process.returncode}; see {directory / "stderr"}')
+            '-e', 'instructions,instructions:u,context-switches', '-o', str(counters),
+            '--pre', pre, '--post', post, '--', 'taskset', '-c', str(cpu), *command]
+    affinity = os.sched_getaffinity(0)
+    os.sched_setaffinity(0, {observer})
+    event_fd = os.open(events, os.O_RDWR | os.O_NONBLOCK)
+    release_fd = os.open(release, os.O_RDWR | os.O_NONBLOCK)
+    try:
+        with selectors.DefaultSelector() as selector, \
+                (directory / 'stdout').open('wb') as out, \
+                (directory / 'stderr').open('wb') as err:
+            selector.register(event_fd, selectors.EVENT_READ)
+            with subprocess.Popen([str(ROOT / 'tools/capped'), *perf], cwd=ROOT, env=env,
+                                  stdin=subprocess.DEVNULL, stdout=out, stderr=err) as process:
+                started = stopped = None
+                while stopped is None:
+                    if selector.select(0.1):
+                        event = os.read(event_fd, 1)
+                        if event == b'R' and started is None:
+                            started = time.monotonic_ns()
+                            os.write(release_fd, b'go\n')
+                        elif event == b'D' and started is not None:
+                            stopped = time.monotonic_ns()
+                        else:
+                            raise ValueError('invalid measurement handshake')
+                    elif process.poll() is not None:
+                        raise ValueError(f'measurement exited before handshake; see {directory / "stderr"}')
+                status = process.wait()
+        if status:
+            raise ValueError(f'exit {status}; see {directory / "stderr"}')
+    finally:
+        os.sched_setaffinity(0, affinity)
+        os.close(event_fd)
+        os.close(release_fd)
+        for fifo in (events, release):
+            fifo.unlink()
     measured = perf_result(counters.read_text())
+    measured.update(seconds=(stopped - started) / 1e9,
+                    cpu_utilization=measured['cpu_seconds'] / ((stopped - started) / 1e9),
+                    started_monotonic_ns=started, stopped_monotonic_ns=stopped)
     sibling_cpus = siblings(cpu)
     return dict(measured, command=command, observer_cpu=observer,
                 sibling_busy_share=busy_share(cpu_snapshot(sibling_cpus, before),
@@ -120,7 +182,7 @@ def summarize(rows, repeats):
     for row in rows:
         if row['status'] != 'OK':
             continue
-        for metric in ('instructions', 'seconds'):
+        for metric in METRICS:
             values = {side: [s[metric] for s in row[side]] for side in ('hirsel', 'rust')}
             if any(len(v) != repeats for v in values.values()):
                 raise ValueError('incomplete samples')
@@ -129,36 +191,38 @@ def summarize(rows, repeats):
                 side: 100 * (max(v) - min(v)) / statistics.median(v) if repeats > 1 else None
                 for side, v in values.items()}
     result = dict(complete=complete)
-    for metric in ('instructions', 'seconds'):
+    for metric in METRICS:
         ratios = [row[metric + '_ratio'] for row in rows if row['status'] == 'OK']
         # A failed/missing workload never disappears from the fixed denominator.
         result[metric] = (dict(geomean=math.exp(statistics.mean(map(math.log, ratios))),
                                max=max(ratios)) if complete else None)
-    result['within_budget'] = complete and result['instructions']['geomean'] <= 1.5 and result['instructions']['max'] <= 3
+    result['within_budget'] = complete and result['seconds']['geomean'] <= 1.5 and result['seconds']['max'] <= 3
     return result
 
 
 def table(record):
-    lines = ['| Workload | Hirsel instructions:u | Rust instructions:u | H/R instructions | H/R wall | Spread H/R |',
-             '|---|---:|---:|---:|---:|---:|']
+    lines = ['| Workload | Wall H/R (s) | H/R wall | CPU H/R (s) | Instructions H/R | User instructions H/R | Context switches H/R | Startup H/R |',
+             '|---|---:|---:|---:|---:|---:|---:|---:|']
     for row in record['rows']:
         if row['status'] != 'OK':
-            lines.append(f'| {row["name"]} | {row["status"]} | | | | |')
+            lines.append(f'| {row["name"]} | {row["status"]} | | | | | | |')
             continue
-        h, r = [statistics.median(s['instructions'] for s in row[side]) for side in ('hirsel', 'rust')]
-        spread = row['instructions_spread_pct']
-        shown = ('unmeasured, n=1' if record['repeats'] == 1 else
-                 f'{spread["hirsel"]:.2f}% / {spread["rust"]:.2f}%')
-        lines.append(f'| {row["name"]} | {h:,.0f} | {r:,.0f} | {row["instructions_ratio"]:.3f}x | {row["seconds_ratio"]:.3f}x | {shown} |')
+        def pair(metric, pattern):
+            return ' / '.join(format(statistics.median(s[metric] for s in row[side]), pattern)
+                              for side in ('hirsel', 'rust'))
+        startup = ' / '.join(f'{100 * row["startup_fraction"][side]:.2f}%'
+                             for side in ('hirsel', 'rust'))
+        lines.append(f'| {row["name"]} | {pair("seconds", ".4f")} | {row["seconds_ratio"]:.3f}x | '
+                     f'{pair("cpu_seconds", ".4f")} | {pair("instructions", ",.0f")} | '
+                     f'{pair("user_instructions", ",.0f")} | {pair("context_switches", ",.0f")} | {startup} |')
     for label in ('geomean', 'max'):
         metrics = record['summary']
-        if metrics['complete']:
-            lines.append(f'| {label} | | | {metrics["instructions"][label]:.3f}x | {metrics["seconds"][label]:.3f}x | |')
-        else:
-            lines.append(f'| {label} | incomplete | | | | |')
+        value = f'{metrics["seconds"][label]:.3f}x' if metrics['complete'] else 'incomplete'
+        lines.append(f'| {label} | | {value} | | | | | |')
     verdict = ('INCOMPLETE' if not record['summary']['complete'] else
                'PASS' if record['summary']['within_budget'] else 'MISS')
-    lines.append('Instruction budget: ' + verdict)
+    lines.append('Wall budget: ' + verdict + ' (geomean <=1.5x, max <=3x).')
+    lines.append('One sample per side has unmeasured spread; near-threshold results are uncertain.')
     return '\n'.join(lines) + '\n'
 
 
@@ -203,6 +267,7 @@ def main():
         for index, case in enumerate(CASES):
             row = dict(name=case[0], status='OK', hirsel=[], rust=[])
             pair = commands(output, case)
+            startup = commands(output, startup_case(case))
             expected = None
             try:
                 for repeat in range(args.repeats):
@@ -218,6 +283,16 @@ def main():
                             raise ValueError('empty stdout cannot prove equivalent work')
                         row[side].append(measured)
                 row['stdout'] = expected.decode('utf-8')
+                row['startup'] = {side: sample(startup[side], output / f'{case[0]}-startup-{side}',
+                                               args.cpu, env) for side in ('hirsel', 'rust')}
+                row['startup_fraction'] = {
+                    side: row['startup'][side]['seconds'] / statistics.median(s['seconds'] for s in row[side])
+                    for side in ('hirsel', 'rust')}
+                row['long_enough'] = all(statistics.median(s['seconds'] for s in row[side]) >= 0.2
+                                        and row['startup_fraction'][side] < 0.05
+                                        for side in ('hirsel', 'rust'))
+                if not row['long_enough']:
+                    raise ValueError('row too short or startup >=5%; version shared work counts before rebaseline')
                 print(case[0] + ': identical stdout', flush=True)
             except (ValueError, OSError) as error:
                 row.update(status='FAILED', error=str(error))

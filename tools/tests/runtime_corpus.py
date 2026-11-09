@@ -13,30 +13,46 @@ loader.exec_module(corpus)
 
 def rows(ratios, repeats=1):
     return [dict(name=case[0], status='OK',
-                 hirsel=[dict(instructions=100 * ratio, seconds=ratio / 100) for _ in range(repeats)],
-                 rust=[dict(instructions=100, seconds=0.01) for _ in range(repeats)])
+                 hirsel=[dict(instructions=100, user_instructions=90, cpu_seconds=ratio / 100,
+                              context_switches=2, seconds=ratio / 100) for _ in range(repeats)],
+                 rust=[dict(instructions=100, user_instructions=90, cpu_seconds=0.01,
+                           context_switches=2, seconds=0.01) for _ in range(repeats)])
             for case, ratio in zip(corpus.CASES, ratios)]
 
 
 class Acceptance(unittest.TestCase):
-    def test_wall_time_comes_from_elapsed_summary_not_duration_event(self):
-        # The actual first run reported 1,272 ns for a process doing 6M instructions.
-        # Never treat that event as wall time or accept it without a summary.
-        raw = '6213737 instructions:u\n1272 ns duration_time\n0.001234567 seconds time elapsed\n'
+    def test_perf_reports_diagnostics_without_using_its_elapsed_clock(self):
+        # perf's elapsed timer can start after a short child finishes. Only the
+        # independent release/teardown timer supplies seconds to the aggregate.
+        raw = ('1000 instructions\n900 instructions:u\n20 context-switches\n'
+               '0.04 seconds user\n0.06 seconds sys\n0.000001 seconds time elapsed\n')
         result = corpus.perf_result(raw)
-        self.assertEqual(result['instructions'], 6213737)
-        self.assertEqual(result['seconds'], 0.001234567)
+        self.assertEqual(result['instructions'], 1000)
+        self.assertEqual(result['user_instructions'], 900)
+        self.assertAlmostEqual(result['cpu_seconds'], 0.1)
+        self.assertEqual(result['context_switches'], 20)
+        self.assertNotIn('seconds', result)
         with self.assertRaises(ValueError):
-            corpus.perf_result('6213737 instructions:u\n1272 ns duration_time\n')
-        with self.assertRaises(ValueError):
-            corpus.perf_result('<not counted> instructions:u\n0.01 seconds time elapsed\n')
+            corpus.perf_result(raw.replace('1000 instructions', '<not counted> instructions'))
+
+    def test_only_wall_time_controls_budget(self):
+        data = rows([1] * 8)
+        for row in data:
+            row['hirsel'][0]['instructions'] = 100000
+            row['hirsel'][0]['user_instructions'] = 100000
+            row['hirsel'][0]['cpu_seconds'] = 100
+        self.assertTrue(corpus.summarize(data, 1)['within_budget'])
+        for row in data:
+            row['hirsel'][0]['instructions'] = 1
+            row['hirsel'][0]['seconds'] = 0.02
+        self.assertFalse(corpus.summarize(data, 1)['within_budget'])
 
     def test_geomean_is_not_arithmetic_mean_and_max_is_independent(self):
         # Four 1/4 and four 4 ratios have geometric mean 1, arithmetic mean 2.125.
         # The per-row ceiling still refuses this otherwise acceptable geomean.
         result = corpus.summarize(rows([0.25] * 4 + [4] * 4), 1)
-        self.assertAlmostEqual(result['instructions']['geomean'], 1)
-        self.assertEqual(result['instructions']['max'], 4)
+        self.assertAlmostEqual(result['seconds']['geomean'], 1)
+        self.assertEqual(result['seconds']['max'], 4)
         self.assertFalse(result['within_budget'])
 
     def test_failed_or_missing_row_cannot_turn_into_a_passing_subset(self):
@@ -59,10 +75,11 @@ class Acceptance(unittest.TestCase):
         corpus.summarize(one, 1)
         self.assertIsNone(one[0]['instructions_spread_pct']['hirsel'])
         repeated = rows([1] * 8, 3)
-        repeated[0]['hirsel'] = [dict(instructions=n, seconds=n / 100) for n in (90, 100, 110)]
+        for sample, n in zip(repeated[0]['hirsel'], (0.009, 0.01, 0.011)):
+            sample['seconds'] = n
         corpus.summarize(repeated, 3)
-        self.assertEqual(repeated[0]['instructions_ratio'], 1)
-        self.assertEqual(repeated[0]['instructions_spread_pct']['hirsel'], 20)
+        self.assertEqual(repeated[0]['seconds_ratio'], 1)
+        self.assertEqual(repeated[0]['instructions_spread_pct']['hirsel'], 0)
         self.assertAlmostEqual(repeated[0]['seconds_spread_pct']['hirsel'], 20)
 
     def test_partial_repetition_is_not_accepted(self):

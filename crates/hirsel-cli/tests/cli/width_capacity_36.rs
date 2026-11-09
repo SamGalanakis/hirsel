@@ -244,18 +244,21 @@ fn capacity(
             &format!("\"effective\":{}", width + 1),
         )
         .into_bytes();
-    let frame =
-        hirsel_run_schema::tape::read(&frozen, hirsel_run_schema::tape::MAGIC.len(), 0).unwrap();
+    let start = hirsel_run_schema::tape::FORMAT.len();
+    let frame = hirsel_run_schema::frame::recover(&frozen, start, |_| true)
+        .unwrap()
+        .frames[0]
+        .clone();
     let offset = frame
-        .payload
+        .body
         .windows(encoded.len())
         .position(|w| w == encoded)
         .unwrap();
     assert_eq!(encoded.len(), replacement.len());
-    let mut payload = frame.payload.to_vec();
+    let mut payload = frame.body.to_vec();
     payload[offset..offset + encoded.len()].copy_from_slice(&replacement);
-    let mut forged = hirsel_run_schema::tape::MAGIC.to_vec();
-    hirsel_run_schema::tape::frame(&mut forged, 0, 1, &payload).unwrap();
+    let mut forged = frozen[..start].to_vec();
+    hirsel_run_schema::frame::append(&mut forged, 0, 1, &payload).unwrap();
     forged.extend_from_slice(&frozen[frame.range.end..]);
     assert!(
         hirsel_rt::launch::parse_recording_bytes(&forged)

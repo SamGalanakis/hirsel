@@ -16,9 +16,11 @@ fn events(tape: &Path, what: &str, output: &std::process::Output) -> Vec<u8> {
     let bytes =
         std::fs::read(tape).unwrap_or_else(|e| panic!("{what} wrote no tape ({e}): {output:?}"));
     assert!(bytes.starts_with(hirsel_run_schema::tape::MAGIC));
-    let header =
-        hirsel_run_schema::tape::read(&bytes, hirsel_run_schema::tape::MAGIC.len(), 0).unwrap();
-    // Compare exact binary event frames (including CRC and sequence), excluding
+    let frames =
+        hirsel_run_schema::frame::recover(&bytes, hirsel_run_schema::tape::FORMAT.len(), |_| true)
+            .unwrap();
+    let header = &frames.frames[0];
+    // Compare exact binary event frames (including checksums and sequence), excluding
     // admission provenance that legitimately differs between live launches.
     bytes[header.range.end..].to_vec()
 }

@@ -1,9 +1,10 @@
-//! Ordinary v9 tapes: a header, event frames and a terminal event count.
+//! Ordinary v13 tapes: a header, event frames and a terminal event count.
 //! The same payload codec is used by ordinary and durable recording, in both engines.
 use crate::io::Event;
 use crate::launch::{RecordedRun, Recording};
 use crate::tape_wire::{Decode, Wire, decode};
-use hirsel_run_schema::tape::{self, MAGIC};
+use hirsel_run_schema::frame::{self, Opening};
+use hirsel_run_schema::tape::{FORMAT, MAGIC};
 use std::{io, io::Write};
 
 impl Wire for RecordedRun {
@@ -76,33 +77,39 @@ pub struct Tape {
 }
 impl Tape {
     pub fn read(bytes: std::sync::Arc<Vec<u8>>) -> Result<(Recording, Self), String> {
-        if !bytes.starts_with(MAGIC) {
-            return Err("not a v9 binary tape".into());
+        let (identity, frames) = frames(&bytes)?;
+        if frames.valid != bytes.len() {
+            return Err("torn binary tape frame".into());
         }
-        let header = tape::read(&bytes, MAGIC.len(), 0)?;
+        let mut frames = frames.frames.into_iter();
+        let header = frames.next().ok_or("binary tape without header")?;
         if header.kind != 1 {
             return Err("binary tape without header".into());
         }
-        let record: Recording = decode(header.payload)?;
+        let record: Recording = decode(header.body)?;
         validate_header(&record)?;
-        let mut at = header.range.end;
+        if identity != record.run_identity {
+            return Err("the tape's run identity disagrees with its file header".into());
+        }
         let mut events = vec![];
         let mut complete = false;
         let mut outcome = None;
-        while at < bytes.len() {
-            let frame = tape::read(&bytes, at, events.len() as u64 + 1)?;
+        for frame in frames {
+            if complete {
+                return Err("bytes after complete recording".into());
+            }
             match frame.kind {
-                3 if !complete => events.push(at + tape::FRAME..frame.range.end),
-                6 if !complete => {
-                    let (count, text): (u64, String) = decode(frame.payload)?;
+                3 => events.push(frame.range.start + frame::HEADER..frame.range.end),
+                6 => {
+                    let (count, text): (u64, String) = decode(frame.body)?;
                     if count != events.len() as u64 {
                         return Err("the trailer's event count disagrees".into());
                     }
                     outcome = Some(crate::journal::parse_outcome(&text)?);
                     complete = true;
                 }
-                5 if !complete => {
-                    let count: u64 = decode(frame.payload)?;
+                5 => {
+                    let count: u64 = decode(frame.body)?;
                     if count != events.len() as u64 {
                         return Err("the trailer's event count disagrees".into());
                     }
@@ -110,11 +117,8 @@ impl Tape {
                 }
                 _ => return Err("unexpected binary tape frame".into()),
             }
-            at = frame.range.end;
-            if complete && at != bytes.len() {
-                return Err("bytes after complete recording".into());
-            }
         }
+        let valid = bytes.len();
         Ok((
             record,
             Self {
@@ -122,7 +126,7 @@ impl Tape {
                 events,
                 complete,
                 outcome,
-                valid: at,
+                valid,
             },
         ))
     }
@@ -200,15 +204,17 @@ impl<W: Write> Writer<W> {
             count: 0,
             finished: false,
         };
-        value.writer.write_all(MAGIC)?;
+        value
+            .writer
+            .write_all(&FORMAT.header(&record.run_identity, 0))?;
         value.write(0, 1, record)?;
         Ok(value)
     }
     fn write<T: Wire>(&mut self, seq: u64, kind: u8, payload: &T) -> io::Result<()> {
         self.buffer.clear();
-        let start = tape::begin(&mut self.buffer);
+        let start = frame::begin(&mut self.buffer);
         payload.encode(&mut self.buffer);
-        tape::finish(&mut self.buffer, start, seq, kind).map_err(io::Error::other)?;
+        frame::finish(&mut self.buffer, start, seq, kind).map_err(io::Error::other)?;
         self.writer.write_all(&self.buffer)?;
         self.writer.flush()
     }
@@ -313,28 +319,30 @@ pub(crate) fn validate_header(record: &Recording) -> Result<(), String> {
     }
     Ok(())
 }
-/// Inspect a flushed prefix after interruption: only a partial final frame can
-/// be omitted. A complete frame with an invalid CRC remains corruption.
+/// The frames of a binary tape (determinism.md, Frames and recovery): an incomplete tail
+/// lies past `valid`; any other damage is an error.
+fn frames(bytes: &[u8]) -> Result<(&[u8], frame::Frames<'_>), String> {
+    let header = match FORMAT.open(bytes) {
+        Ok(Opening::Header(header)) if header.generation == 0 => header,
+        Ok(Opening::Header(_)) => return Err("unsupported binary tape generation".into()),
+        Ok(Opening::Short) => return Err("torn binary tape header".into()),
+        Err(frame::FileError::Foreign) => return Err("not a v13 binary tape".into()),
+        Err(frame::FileError::Corrupt(e)) => return Err(e.to_string()),
+    };
+    let frames = frame::recover(bytes, header.len, |kind| matches!(kind, 1 | 3 | 5 | 6))
+        .map_err(|e| e.to_string())?;
+    Ok((header.identity, frames))
+}
+/// Inspect a flushed prefix after interruption: only an incomplete final frame is
+/// omitted. A complete frame that fails its checksums remains corruption.
 pub fn confirmed_prefix(bytes: &[u8]) -> Result<usize, String> {
     if !bytes.starts_with(MAGIC) {
         return Ok(bytes.iter().rposition(|b| *b == b'\n').map_or(0, |n| n + 1));
     }
-    let mut at = MAGIC.len();
-    let mut seq = 0;
-    while at < bytes.len() {
-        let rest = &bytes[at..];
-        if rest.len() < tape::FRAME {
-            break;
-        }
-        let len = u32::from_le_bytes(rest[..4].try_into().unwrap()) as usize;
-        if len > rest.len() - tape::FRAME {
-            break;
-        }
-        let frame = tape::read(bytes, at, seq)?;
-        at = frame.range.end;
-        seq += 1;
+    if matches!(FORMAT.open(bytes), Ok(Opening::Short)) {
+        return Ok(0);
     }
-    Ok(at)
+    Ok(frames(bytes)?.1.valid)
 }
 
 /// Load a complete replay, retaining the original allocation for binary events.

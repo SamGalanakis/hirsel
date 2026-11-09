@@ -498,15 +498,33 @@ that issues no request, is never journaled.
 
 ### Durable journal
 
-An ordinary tape starts with `hirsel-io-tape 12` followed by NUL; a durable
-journal starts with `hirsel-journal 4` followed by newline. Both use the same
-binary frame envelope: a 32-bit little-endian payload length, 32-bit CRC32C,
-64-bit little-endian sequence number starting at zero, a kind byte, then the raw
-payload. CRC32C covers the encoded length, sequence, kind and payload (everything
-except the checksum slot). The reader validates lengths, CRCs and sequence before
-interpreting a payload. Checksums stream over existing spans without a second
-payload encoding or copy. Writes use reusable buffers and preserve every existing
-flush and synchronization point.
+An ordinary tape's magic is `hirsel-io-tape 13` followed by NUL; a durable
+journal's is `hirsel-journal 5` followed by newline. Both are framed files (below) whose
+identity is the 32-byte run identity and whose generation is 0; the header record's run
+identity must equal the file's. The remote call journal (`journal.dir@1`,
+[runners](runners.md)) is the third framed file. Every framed file uses one envelope
+and one recovery classifier, in `hirsel-run-schema`'s `frame` module. Bodies are encoded
+in place after a reserved header, without a second payload encoding or copy. Writes use
+reusable buffers and preserve every existing flush and synchronization point. Older
+tape and journal versions are refused by name; there is no second decoder.
+
+**Frames and recovery.** A framed file starts with a file header: the format's magic
+(which names its version), the file's identity, a 64-bit little-endian generation, and a
+SHA-256 of those three. Frames follow, each a fixed 77-byte header and a body. The header
+holds a SHA-256 of the rest of the header, a SHA-256 of the body, a 64-bit little-endian
+sequence number starting at zero, the 32-bit little-endian body length and a kind byte. A
+reader validates a complete header before it trusts the length, then checks the sequence,
+the kind, that the body is complete, the body's digest and the body's decoding. Recovery
+assumes the prefix-write crash model: a crash keeps every synced byte and a prefix of the
+last unsynced write. Under that model only a physically short final header, or a valid
+final header whose body runs past the end of the file, is a torn tail: it was never
+durable, so nothing was acted on from it, and it is cut. Any other damage is `Corrupt`
+wherever it lies, including a complete last frame that fails a checksum, breaks the
+sequence, has an unknown kind or does not decode: the crash model cannot produce it, and
+the reader cannot tell it from damage to synced data. A reader never scans a body for a
+plausible next header, and a refused file is left byte-for-byte as it is. A file header
+shorter than its format's was never durable. The checksums do not authenticate a
+coherently rewritten file, and nothing detects the loss of a whole synced suffix.
 
 Payloads use fixed-width little-endian integers, explicit 32-bit enum tags,
 64-bit collection/string lengths, one-byte booleans and option tags, and raw
@@ -572,13 +590,12 @@ replayed, but old v1 durable journals require regeneration. Both engines write
 v8 tapes and v2 journals through the same runtime adapter.
 
 The structure follows rr `src/TraceStream.cc:408-557` (binary event frames over
-its buffered compressed stream) and SQLite `src/wal.c:47-68,990-1022` (frame
-header, payload and checksum). Deviations: no compression because ordinary tape
-completions must flush individually; no SQLite page numbers, salts or rolling
-checksum because these are ordered run events, not database pages. Sequence and
-CRC32C protect each frame. The CRC implementation follows crc32c's runtime SSE4.2
-dispatch and slicing-by-8 fallback; unaligned bounded loads replace its alignment
-prefix and parallel-lane tables. Fixed integer payload encoding follows bincode
+its buffered compressed stream) and TigerBeetle's independent header and body
+checksums (`src/vsr/message_header.zig:17-41,108-122`, `src/vsr/journal.zig:1345-1358`).
+Deviations: no compression because ordinary tape completions must flush individually;
+a sequential append file instead of TigerBeetle's circular slots and replica repair,
+since no repair service exists, so recovery claims only the prefix-write model; SHA-256
+for both digests. Fixed integer payload encoding follows bincode
 1.3.3, with explicit declarations to avoid JSON omission/rename attributes.
 
 The spawn path and issue ordinal identify a request to an operator and are the same in
@@ -605,11 +622,9 @@ is covered by a barrier before it is issued, and a completion's barrier also cov
 record appended before it. An effect is never issued before its `Prepared` record is
 durable, and a barrier that fails before issue prevents issuance.
 
-**Recovery.** A reader takes the longest valid prefix. A last record that is short, runs past
-the end of the file, fails its checksum or breaks the sequence is a torn tail and is cut; it
-was never durable, so nothing was delivered on it. Damage to any earlier record, a second
-header, a record after the trailer, or records that disagree (an event of an unprepared
-request, a request completed twice) refuse recovery as `Corrupt`. A journal with no durable
+**Recovery.** A durable journal recovers by the frame rule above. A second header, a
+record after the trailer, or records that disagree (an event of an unprepared request, a
+request completed twice) are also `Corrupt`. A journal with no durable
 header was never entered. The recovered journal reports the replayable events, every
 `Prepared` request, the requests in doubt (prepared with neither a completion nor a
 withdrawal, in preparation order) and the trailer's outcome when present. A complete journal
@@ -1122,7 +1137,7 @@ cells. Neither a requested width nor a semantic fixture pass earns capacity cred
 Placement remains outside semantic run identity and is never replay placement
 input. Tape readers validate the evidence's arithmetic and consistency with the
 bound run's provider before replay; replay never consults topology or sidecars.
-Frame CRCs detect damage; unsigned tapes do not authenticate a coherently rewritten
+Frame checksums detect damage; unsigned tapes do not authenticate a coherently rewritten
 entire recording. Native result receipts carry the same placement encoding.
 
 This changes the stored run binding: ordinary tape 8, durable journal 2 and Free

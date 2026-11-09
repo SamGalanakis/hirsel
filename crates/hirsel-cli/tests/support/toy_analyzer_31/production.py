@@ -3,31 +3,31 @@ Read the application-ready line before requesting settled worker diagnostics.
 Send stdin only after its recorded read blocks and home waits in the kernel.
 No worker test knobs, no Free, no sleeps. Real input files are removed for replay.
 """
-import ctypes, json, os, pathlib, select, socket, struct, subprocess, sys, time
+import ctypes, hashlib, json, os, pathlib, select, socket, struct, subprocess, sys, time
 # Adapted from depsolve_29/child.py and chunk_backup_31/production.py.
 # tape_binary.rs flushes each completion; observe it without changing the tape.
 
 def stdin_is_blocked(tape):
     data = tape.read_bytes()
-    magic = b'hirsel-io-tape 12\0'
+    magic = b'hirsel-io-tape 13\0'
+    # File header: magic, 32-byte run identity, u64 generation, SHA-256 of the three.
     if len(data) < len(magic): return False
     assert data.startswith(magic), 'unexpected tape version'
-    at = len(magic)
+    at = len(magic) + 32 + 8 + 32
     expected = 0
-    while at + 17 <= len(data):
-        length, checksum, seq, kind = struct.unpack_from('<IIQB', data, at)
+    # Frame header: SHA-256 of the rest of the header, SHA-256 of the body, u64 sequence,
+    # u32 body length, kind (determinism.md, Frames and recovery).
+    while at + 77 <= len(data):
+        header = data[at:at + 77]
+        assert hashlib.sha256(header[32:]).digest() == header[:32], 'frame header checksum'
+        seq, length, kind = struct.unpack_from('<QIB', header, 64)
         assert seq == expected, 'unexpected tape sequence'
-        end = at + 17 + length
+        end = at + 77 + length
         if end > len(data): return False
-        payload = data[at + 17:end]
+        payload = data[at + 77:end]
+        assert hashlib.sha256(payload).digest() == header[32:64], 'frame body checksum'
         # ReadStdin(stdin: u64, max: u64) followed by Completion::Blocked.
         if kind == 3 and payload[:4] == struct.pack('<I', 2) and payload[20:24] == struct.pack('<I', 37):
-            crc = 0xffffffff
-            for byte in data[at:at + 4] + data[at + 8:at + 17] + payload:
-                crc ^= byte
-                for _ in range(8):
-                    crc = (crc >> 1) ^ (0x82f63b78 if crc & 1 else 0)
-            assert (crc ^ 0xffffffff) == checksum, 'stdin frame CRC'
             return True
         at = end
         expected += 1

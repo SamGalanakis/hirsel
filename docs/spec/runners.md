@@ -727,11 +727,26 @@ select. `journal` is the stream seam: `journal.none@1` (the default; a restarted
 a new incarnation and does not reconcile) or `journal.dir@1`, an append-only file of
 sequenced, checksummed records that keeps every stream, admission, decision and
 acknowledgement durably before it is acted on, so a restarted host reconciles, and a call
-it admitted but never decided is `InDoubt(Abandoned())`. **Recovery.** A reader takes the
-longest valid prefix. A last record that is short, runs past the end of the file or fails
-its checksum is a torn tail and is cut; it was never durable, so nothing was acted on from
-it. Damage to any earlier record, a sequence gap or a record that does not decode refuse
-recovery as `Corrupt`, leave the file as it is, and the host does not start. **A failed
+it admitted but never decided is `InDoubt(Abandoned())`. Its file header's magic is `HRJRNL03`, its identity the host's 16-byte
+incarnation and its generation 0; a record's kind is its entry's tag. **Frames and recovery.** A framed file starts with a file header: the format's magic
+(which names its version), the file's identity, a 64-bit little-endian generation, and a
+SHA-256 of those three. Frames follow, each a fixed 77-byte header and a body. The header
+holds a SHA-256 of the rest of the header, a SHA-256 of the body, a 64-bit little-endian
+sequence number starting at zero, the 32-bit little-endian body length and a kind byte. A
+reader validates a complete header before it trusts the length, then checks the sequence,
+the kind, that the body is complete, the body's digest and the body's decoding. Recovery
+assumes the prefix-write crash model: a crash keeps every synced byte and a prefix of the
+last unsynced write. Under that model only a physically short final header, or a valid
+final header whose body runs past the end of the file, is a torn tail: it was never
+durable, so nothing was acted on from it, and it is cut. Any other damage is `Corrupt`
+wherever it lies, including a complete last frame that fails a checksum, breaks the
+sequence, has an unknown kind or does not decode: the crash model cannot produce it, and
+the reader cannot tell it from damage to synced data. A reader never scans a body for a
+plausible next header, and a refused file is left byte-for-byte as it is. A file header
+shorter than its format's was never durable. The checksums do not authenticate a
+coherently rewritten file, and nothing detects the loss of a whole synced suffix. The host
+recovers when it opens the journal: it cuts a torn tail and appends after it, re-creates
+a journal whose file header was never durable, and on `Corrupt` does not start. **A failed
 append.** An append that fails, with an error or after writing part of its record, poisons
 the journal, and every later append fails. The host never acts on a record whose append
 failed: it sends no outcome, starts no callee, opens no stream and drops no outcome on it.

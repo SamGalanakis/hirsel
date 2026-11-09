@@ -784,7 +784,7 @@ mod tests {
 
     #[test]
     fn ordinary_torn_tail_is_cut_but_interior_damage_is_refused() {
-        let end = ordinary().len() - hirsel_run_schema::tape::FRAME - 8;
+        let end = ordinary().len() - hirsel_run_schema::frame::HEADER - 8;
         let prefix = &ordinary()[..end];
         let view = document(prefix);
         assert_eq!(view["complete"], false);
@@ -812,16 +812,17 @@ mod tests {
         assert_eq!(view["torn_tail"], true);
         assert_eq!(view["events"].as_array().unwrap().len(), 2);
         let mut corrupt = durable().to_vec();
-        // CRC-32C covers the header frame's payload; later valid frames follow it.
-        corrupt[journal::MAGIC.len() + 17] ^= 1;
+        // The body digest covers the header frame's payload; later valid frames follow it.
+        corrupt[journal::FORMAT.len() + hirsel_run_schema::frame::HEADER] ^= 1;
         assert!(
             View::parse("fixture", &corrupt)
                 .err()
                 .unwrap()
                 .contains("corrupt")
         );
-        let header = hirsel_run_schema::tape::read(durable(), journal::MAGIC.len(), 0).unwrap();
-        let prepared = hirsel_run_schema::tape::read(durable(), header.range.end, 1).unwrap();
+        let frames =
+            hirsel_run_schema::frame::recover(durable(), journal::FORMAT.len(), |_| true).unwrap();
+        let prepared = &frames.frames[1];
         let prefix = &durable()[..prepared.range.end];
         let view = document(prefix);
         assert_eq!(view["in_doubt"][0]["request_id"], 0);

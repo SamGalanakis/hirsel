@@ -116,17 +116,13 @@ impl Drop for Fixture {
 
 const MAGIC: &[u8] = hirsel_rt::journal::MAGIC;
 
-/// Each record's end offset, from the frame lengths (len, crc, seq, kind, payload).
+/// Each record's end offset.
 fn boundaries(bytes: &[u8]) -> Vec<usize> {
-    let mut ends = vec![];
-    let mut at = MAGIC.len();
-    while at < bytes.len() {
-        let len = u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap()) as usize;
-        at += 17 + len;
-        ends.push(at);
-    }
-    assert_eq!(at, bytes.len());
-    ends
+    let frames =
+        hirsel_run_schema::frame::recover(bytes, hirsel_rt::journal::FORMAT.len(), |_| true)
+            .unwrap();
+    assert_eq!(frames.valid, bytes.len());
+    frames.frames.iter().map(|f| f.range.end).collect()
 }
 
 fn assert_ran(output: &Output, what: &str) {
@@ -177,7 +173,7 @@ fn durable_journals_replay_in_either_engine_and_a_cut_journal_names_its_requests
             doubted += usize::from(stderr.contains("in doubt: request"));
         }
         assert!(doubted > 0, "native={native}");
-        // A torn last record is cut like a boundary; earlier damage is corruption.
+        // A torn last record is cut like a boundary; any other damage is corruption.
         let cut = fixture.0.join("torn.journal");
         std::fs::write(&cut, &bytes[..bytes.len() - 1]).unwrap();
         assert!(String::from_utf8_lossy(&fixture.replay(true, &cut).stderr).contains("no trailer"));

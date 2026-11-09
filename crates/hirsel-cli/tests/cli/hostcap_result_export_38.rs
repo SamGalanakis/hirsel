@@ -130,9 +130,14 @@ fn hostcap_result_export_38_forged_task_result_is_not_replay_authority() {
         let original = std::fs::read(&tape).unwrap();
         // Keep the real bound header. Replace everything after it with a
         // well-framed fabricated task result, without a stdout launch grant.
-        let header =
-            hirsel_run_schema::tape::read(&original, hirsel_run_schema::tape::MAGIC.len(), 0)
-                .unwrap();
+        let header = hirsel_run_schema::frame::recover(
+            &original,
+            hirsel_run_schema::tape::FORMAT.len(),
+            |_| true,
+        )
+        .unwrap()
+        .frames[0]
+            .clone();
         for (kind, creator, ordinal, field) in [
             ("Stdout", vec![], 1, 0),
             ("File", vec![], 1, 0),
@@ -142,7 +147,7 @@ fn hostcap_result_export_38_forged_task_result_is_not_replay_authority() {
             let claimed = serde_json::json!({"kind":"task_result", "value":{"kind":kind,
                 "identity":{"creator":creator,"ordinal":ordinal,"field":field}}});
             let mut bytes = original[..header.range.end].to_vec();
-            hirsel_run_schema::tape::frame(&mut bytes, 1, 0x38, claimed.to_string().as_bytes())
+            hirsel_run_schema::frame::append(&mut bytes, 1, 0x38, claimed.to_string().as_bytes())
                 .unwrap();
             std::fs::write(&tape, &bytes).unwrap();
             let output = Command::new(&executable)

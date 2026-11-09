@@ -5,22 +5,24 @@
 //!
 //! - `journal.none@1` (the default): nothing survives the process; a restarted host is a
 //!   new incarnation that callers learn of when they reconnect.
-//! - `journal.dir@1` (`{"path"}`): an append-only file of sequenced, length-framed,
-//!   checksummed records, synced before each record is acknowledged.
+//! - `journal.dir@1` (`{"path"}`): an append-only [`frame`] file of sequenced, checksummed
+//!   records, synced before each record is acknowledged.
 //! - `journal.sim@1`: the same bytes in memory shared with the test, which scripts failed
 //!   and partial appends.
 //!
-//! **Recovery** (determinism.md, Durable journal) runs when a durable journal is opened and
-//! takes the longest valid prefix. A last record that is short, runs past the end of the
-//! file or fails its checksum is a torn tail and is cut; it was never durable, so nothing
-//! was acted on from it. Damage to any earlier record, a sequence gap or a record that
-//! does not decode refuses recovery as `Corrupt` and leaves the file as it is.
+//! **Recovery** (determinism.md, Frames and recovery) runs when a durable journal is opened,
+//! through the shared frame classifier. Only an incomplete final frame (a short header, or a
+//! valid header whose body runs past the end of the file) is a torn tail and is cut; it was
+//! never durable, so nothing was acted on from it. Any other damage, including a complete
+//! last record that fails a checksum, breaks the sequence or does not decode, refuses
+//! recovery as `Corrupt` and leaves the file as it is. A file header that is itself short
+//! was never durable: the journal is created again.
 //!
 //! **Poisoning.** An append that fails, with an error or after writing part of its record,
 //! poisons the journal: every later append fails, so nothing follows a torn record and a
 //! host never acts on a record it failed to write.
 use hirsel_run_schema::CallOutcome;
-use sha2::{Digest, Sha256};
+use hirsel_run_schema::frame::{self, FileError, Format, Opening};
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::Path;
@@ -99,9 +101,15 @@ impl Journal for NoJournal {
     }
 }
 
-/// The file header: magic (with the format version) and the incarnation.
-const MAGIC: &[u8; 8] = b"HRJRNL02";
-const HEADER: usize = 24;
+/// The file format: its identity is the incarnation; its generation is 0.
+pub const FORMAT: Format = Format {
+    magic: b"HRJRNL03",
+    identity: 16,
+};
+/// Record kinds are the entry tags.
+pub fn known(kind: u8) -> bool {
+    kind <= 3
+}
 
 /// The records a durable journal recovered, its next sequence number, and whether an
 /// append has failed.
@@ -111,16 +119,55 @@ struct Log {
     poisoned: bool,
 }
 impl Log {
-    /// Recover `bytes` (the records after the header): the log, and the length of the
-    /// valid prefix when a torn tail follows it.
-    fn recover(bytes: &[u8]) -> io::Result<(Self, Option<usize>)> {
-        let (recovered, valid) = unframe(bytes)?;
+    /// Recover a journal file's `bytes`: its incarnation, its log, and the length of the
+    /// valid prefix when an incomplete tail follows it; `None` when the file was never
+    /// created durably (empty, or a short file header) and is to be created again.
+    #[allow(clippy::type_complexity)]
+    fn recover(bytes: &[u8]) -> io::Result<Option<([u8; 16], Self, Option<usize>)>> {
+        let corrupt = |detail: String| io::Error::new(io::ErrorKind::InvalidData, detail);
+        let header = match FORMAT.open(bytes) {
+            Ok(Opening::Short) => return Ok(None),
+            Ok(Opening::Header(header)) if header.generation == 0 => header,
+            Ok(Opening::Header(_)) => {
+                return Err(corrupt(
+                    "the call journal has an unsupported generation".into(),
+                ));
+            }
+            Err(FileError::Foreign) => {
+                return Err(corrupt("not a hirsel call journal of this format".into()));
+            }
+            Err(FileError::Corrupt(e)) => {
+                return Err(corrupt(format!("the call journal is {e}")));
+            }
+        };
+        let frames = frame::recover(bytes, header.len, known)
+            .map_err(|e| corrupt(format!("the call journal is {e}")))?;
+        let recovered = frames
+            .frames
+            .iter()
+            .map(|f| {
+                decode(f.kind, f.body).ok_or_else(|| {
+                    corrupt(format!(
+                        "the call journal is corrupt at byte {}: undecodable record",
+                        f.range.start
+                    ))
+                })
+            })
+            .collect::<io::Result<Vec<_>>>()?;
         let log = Self {
             next: recovered.len() as u64,
             recovered,
             poisoned: false,
         };
-        Ok((log, (valid < bytes.len()).then_some(valid)))
+        let torn = (frames.valid < bytes.len()).then_some(frames.valid);
+        Ok(Some((header.identity.try_into().unwrap(), log, torn)))
+    }
+    fn new() -> Self {
+        Self {
+            recovered: vec![],
+            next: 0,
+            poisoned: false,
+        }
     }
     /// Write the next record through `write`; any failure poisons the log.
     fn append(
@@ -133,7 +180,10 @@ impl Log {
                 "the call journal is poisoned by an earlier failed append",
             ));
         }
-        match write(&frame(self.next, entry)) {
+        let (kind, body) = encode(entry);
+        let mut record = vec![];
+        frame::append(&mut record, self.next, kind, &body).map_err(io::Error::other)?;
+        match write(&record) {
             Ok(()) => {
                 self.next += 1;
                 Ok(())
@@ -165,28 +215,23 @@ impl DirJournal {
             .open(&path)?;
         let mut bytes = vec![];
         file.read_to_end(&mut bytes)?;
-        let incarnation = if bytes.is_empty() {
-            file.write_all(MAGIC)?;
-            file.write_all(&fresh)?;
-            file.sync_all()?;
-            File::open(dir)?.sync_all()?;
-            bytes.extend_from_slice(MAGIC);
-            bytes.extend_from_slice(&fresh);
-            fresh
-        } else if bytes.len() >= HEADER && &bytes[..8] == MAGIC {
-            bytes[8..HEADER].try_into().unwrap()
-        } else {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "not a hirsel call journal of this format",
-            ));
+        let (incarnation, log) = match Log::recover(&bytes)? {
+            None => {
+                file.set_len(0)?;
+                file.write_all(&FORMAT.header(&fresh, 0))?;
+                file.sync_all()?;
+                File::open(dir)?.sync_all()?;
+                (fresh, Log::new())
+            }
+            Some((incarnation, log, torn)) => {
+                if let Some(valid) = torn {
+                    // The torn tail was never acknowledged: appends follow the last valid record.
+                    file.set_len(valid as u64)?;
+                    file.sync_all()?;
+                }
+                (incarnation, log)
+            }
         };
-        let (log, torn) = Log::recover(&bytes[HEADER..])?;
-        if let Some(valid) = torn {
-            // The torn tail was never acknowledged: appends follow the last valid record.
-            file.set_len((HEADER + valid) as u64)?;
-            file.sync_all()?;
-        }
         Ok(Self {
             file,
             incarnation,
@@ -220,14 +265,13 @@ pub struct SimJournal {
     incarnation: [u8; 16],
     log: Log,
 }
-/// The simulated medium: the records' bytes, all synced, and the test's scripted append
-/// failures.
+/// The simulated medium: the journal file's bytes, all synced, and the test's scripted
+/// append failures.
 #[derive(Clone, Default)]
 pub struct SimDisk(Arc<Mutex<SimMedium>>);
 #[derive(Default)]
 struct SimMedium {
     bytes: Vec<u8>,
-    incarnation: Option<[u8; 16]>,
     /// Appends attempted on this medium, by every journal over it.
     appends: u64,
     /// Append attempt -> how many of its record's bytes reach the medium before it fails.
@@ -238,11 +282,18 @@ impl SimDisk {
     /// opener fixes its incarnation.
     pub fn journal(&self, fresh: [u8; 16]) -> io::Result<SimJournal> {
         let mut medium = self.0.lock().unwrap();
-        let incarnation = *medium.incarnation.get_or_insert(fresh);
-        let (log, torn) = Log::recover(&medium.bytes)?;
-        if let Some(valid) = torn {
-            medium.bytes.truncate(valid);
-        }
+        let (incarnation, log) = match Log::recover(&medium.bytes)? {
+            None => {
+                medium.bytes = FORMAT.header(&fresh, 0);
+                (fresh, Log::new())
+            }
+            Some((incarnation, log, torn)) => {
+                if let Some(valid) = torn {
+                    medium.bytes.truncate(valid);
+                }
+                (incarnation, log)
+            }
+        };
         Ok(SimJournal {
             disk: self.clone(),
             incarnation,
@@ -259,7 +310,7 @@ impl SimDisk {
     pub fn appends(&self) -> u64 {
         self.0.lock().unwrap().appends
     }
-    /// The medium's raw record bytes.
+    /// The medium's raw file bytes.
     pub fn bytes(&self) -> Vec<u8> {
         self.0.lock().unwrap().bytes.clone()
     }
@@ -296,72 +347,6 @@ impl Journal for SimJournal {
     }
 }
 
-// Record layout: u32 body length, u64 sequence number (0 for the first record), 32-byte
-// SHA-256 of the sequence number and body, body. The body is a tag byte and fixed-width or
-// length-framed fields.
-const FRAME: usize = 44;
-fn checksum(seq: u64, body: &[u8]) -> [u8; 32] {
-    let mut hash = Sha256::new();
-    hash.update(seq.to_le_bytes());
-    hash.update(body);
-    hash.finalize().into()
-}
-fn frame(seq: u64, entry: &Entry) -> Vec<u8> {
-    let body = encode(entry);
-    let mut out = Vec::with_capacity(body.len() + FRAME);
-    out.extend_from_slice(&(body.len() as u32).to_le_bytes());
-    out.extend_from_slice(&seq.to_le_bytes());
-    out.extend_from_slice(&checksum(seq, &body));
-    out.extend_from_slice(&body);
-    out
-}
-/// The records of `bytes` and the length of their valid prefix; only the last record may
-/// be torn. Any other damage is `Corrupt`.
-fn unframe(bytes: &[u8]) -> io::Result<(Vec<Entry>, usize)> {
-    let mut entries = vec![];
-    let mut offset = 0;
-    while offset < bytes.len() {
-        let rest = &bytes[offset..];
-        if rest.len() < FRAME {
-            break;
-        }
-        let len = u32::from_le_bytes(rest[..4].try_into().unwrap()) as usize;
-        let Some(end) = FRAME.checked_add(len).filter(|end| *end <= rest.len()) else {
-            // The record runs past the end: the last write was torn.
-            break;
-        };
-        let seq = u64::from_le_bytes(rest[4..12].try_into().unwrap());
-        let body = &rest[FRAME..end];
-        let last = end == rest.len();
-        // The checksum covers the sequence number and body, so only a checksum failure can
-        // be a torn write, and only in the last record.
-        let entry = if checksum(seq, body)[..] != rest[12..FRAME] {
-            if last {
-                break;
-            }
-            Err("checksum mismatch")
-        } else if seq != entries.len() as u64 {
-            Err("sequence gap")
-        } else {
-            decode(body).ok_or("undecodable record")
-        };
-        match entry {
-            Ok(entry) => entries.push(entry),
-            Err(detail) => {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!(
-                        "the call journal is corrupt: {detail} in the record at byte {}",
-                        HEADER + offset
-                    ),
-                ));
-            }
-        }
-        offset += end;
-    }
-    Ok((entries, offset))
-}
-
 fn put_stream(out: &mut Vec<u8>, stream: &StreamKey) {
     put_bytes(out, stream.caller.as_bytes());
     out.extend_from_slice(&stream.stream);
@@ -382,13 +367,14 @@ fn put_end(out: &mut Vec<u8>, end: &CallOutcome) {
     out.push(tag);
     put_bytes(out, &payload);
 }
-fn encode(entry: &Entry) -> Vec<u8> {
+/// A record's kind (the entry's tag) and body: fixed-width or length-framed fields.
+fn encode(entry: &Entry) -> (u8, Vec<u8>) {
     let mut out = vec![];
-    match entry {
+    let kind = match entry {
         Entry::Stream { stream, instance } => {
-            out.push(0);
             put_stream(&mut out, stream);
             out.extend_from_slice(instance);
+            0
         }
         Entry::Admitted {
             stream,
@@ -396,11 +382,11 @@ fn encode(entry: &Entry) -> Vec<u8> {
             key,
             digest,
         } => {
-            out.push(1);
             put_stream(&mut out, stream);
             out.extend_from_slice(&position.to_le_bytes());
             out.extend_from_slice(key);
             out.extend_from_slice(digest);
+            1
         }
         Entry::Decided {
             stream,
@@ -410,7 +396,6 @@ fn encode(entry: &Entry) -> Vec<u8> {
             end,
             callee,
         } => {
-            out.push(2);
             put_stream(&mut out, stream);
             out.extend_from_slice(&position.to_le_bytes());
             out.extend_from_slice(key);
@@ -423,14 +408,15 @@ fn encode(entry: &Entry) -> Vec<u8> {
                     out.extend_from_slice(c);
                 }
             }
+            2
         }
         Entry::Acknowledged { stream, position } => {
-            out.push(3);
             put_stream(&mut out, stream);
             out.extend_from_slice(&position.to_le_bytes());
+            3
         }
-    }
-    out
+    };
+    (kind, out)
 }
 
 struct Cursor<'a>(&'a [u8]);
@@ -474,10 +460,9 @@ impl Cursor<'_> {
         })
     }
 }
-fn decode(body: &[u8]) -> Option<Entry> {
+fn decode(kind: u8, body: &[u8]) -> Option<Entry> {
     let mut c = Cursor(body);
-    let tag = c.fixed::<1>()?[0];
-    let entry = match tag {
+    let entry = match kind {
         0 => Entry::Stream {
             stream: c.stream()?,
             instance: c.fixed()?,

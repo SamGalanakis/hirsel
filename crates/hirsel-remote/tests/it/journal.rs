@@ -1,5 +1,5 @@
-//! The durable call journal keeps every acknowledged record, cuts only a torn tail, and
-//! refuses earlier damage as corrupt.
+//! The durable call journal keeps every acknowledged record, cuts only an incomplete final
+//! frame, and refuses any other damage as corrupt.
 use hirsel_remote::journal::{DirJournal, Entry, Journal, StreamKey};
 use hirsel_run_schema::CallOutcome;
 
@@ -66,11 +66,13 @@ fn a_dir_journal_recovers_its_records_and_drops_a_torn_tail() {
     assert_eq!(reopened.recover().unwrap(), expected);
 }
 
-/// Damage to a record before the last cannot be a torn write: a flipped byte or a lost
-/// record (a sequence gap) is refused, and the file is left as it is, so the later synced
-/// records are not lost.
+/// The shared damage table (determinism.md, Frames and recovery): only an incomplete final
+/// frame is cut, every other damage is refused, and a refused file is left byte-identical,
+/// so no later synced record is lost.
 #[test]
-fn interior_damage_is_corrupt_and_leaves_the_file_unchanged() {
+fn the_shared_damage_table_holds_and_a_refusal_leaves_the_file_unchanged() {
+    use hirsel_remote::journal::{FORMAT, known};
+    use hirsel_run_schema::frame::damage::{Expect, cases};
     let dir = tempfile::tempdir().unwrap();
     {
         let mut journal = DirJournal::open(dir.path(), [9; 16]).unwrap();
@@ -85,18 +87,46 @@ fn interior_damage_is_corrupt_and_leaves_the_file_unchanged() {
     }
     let path = dir.path().join("calls.journal");
     let intact = std::fs::read(&path).unwrap();
-    // A 24-byte header, then records of a 44-byte head and a body; all three are equal in
-    // length.
-    let record = 44 + intact[24] as usize;
-    let second = 24 + record;
-    let mut flipped = intact.clone();
-    flipped[second + 50] ^= 1;
-    let mut lost = intact.clone();
-    lost.drain(second..second + record);
-    for damaged in [flipped, lost] {
-        std::fs::write(&path, &damaged).unwrap();
-        let error = DirJournal::open(dir.path(), [8; 16]).err().unwrap();
-        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData, "{error}");
-        assert_eq!(std::fs::read(&path).unwrap(), damaged);
+    for case in cases(&intact, FORMAT.len(), known, 9) {
+        std::fs::write(&path, &case.bytes).unwrap();
+        match (DirJournal::open(dir.path(), [8; 16]), case.expect) {
+            (Ok(mut journal), Expect::Valid(valid)) => {
+                assert_eq!(journal.incarnation(), [9; 16], "{}", case.name);
+                assert_eq!(
+                    std::fs::read(&path).unwrap(),
+                    case.bytes[..valid],
+                    "{}",
+                    case.name
+                );
+                let records = journal.recover().unwrap();
+                assert_eq!(
+                    records.len(),
+                    if valid == intact.len() { 3 } else { 2 },
+                    "{}",
+                    case.name
+                );
+            }
+            (Err(error), Expect::Corrupt) => {
+                assert_eq!(
+                    error.kind(),
+                    std::io::ErrorKind::InvalidData,
+                    "{}: {error}",
+                    case.name
+                );
+                assert_eq!(std::fs::read(&path).unwrap(), case.bytes, "{}", case.name);
+            }
+            (got, expect) => panic!("{}: {:?} where {expect:?}", case.name, got.map(|_| ())),
+        }
     }
+    // The file header protects the incarnation; a short one was never durable.
+    let mut identity = intact.clone();
+    identity[FORMAT.magic.len()] ^= 1;
+    std::fs::write(&path, &identity).unwrap();
+    assert!(DirJournal::open(dir.path(), [8; 16]).is_err());
+    assert_eq!(std::fs::read(&path).unwrap(), identity);
+    std::fs::write(&path, &intact[..FORMAT.len() - 1]).unwrap();
+    assert_eq!(
+        DirJournal::open(dir.path(), [8; 16]).unwrap().incarnation(),
+        [8; 16]
+    );
 }

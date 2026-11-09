@@ -1,14 +1,16 @@
 //! The recording seam (determinism.md, Recording and resuming). Every capability request of a
 //! host run passes through its [`Journaled`] gate, whose [`Journal`] is the recording level the
-//! run record selects: [`NoJournal`] (none), [`TapeJournal`] (record: the v9 binary tape), or [`DurableJournal`] (durable: framed, checksummed records over a [`JournalFile`],
+//! run record selects: [`NoJournal`] (none), [`TapeJournal`] (record: the binary tape), or [`DurableJournal`] (durable: framed, checksummed records over a [`JournalFile`],
 //! the host's file or the simulated disk's [`SimJournalFile`]). The performer (`RealIo`) only
 //! performs; the gate decides when a request may be issued and when its completion may be
-//! delivered. [`recover`] reads a durable journal back: a torn tail is cut, earlier damage is
-//! `Corrupt`, and a `Prepared` request with no completion is in doubt.
+//! delivered. [`recover`] reads a durable journal back through the shared frame classifier: an
+//! incomplete final frame is cut, any other damage is `Corrupt`, and a `Prepared` request with
+//! no completion is in doubt.
 use crate::io::{Completion, Event, Request};
 use crate::launch::{Recording, RecordingWriter, render_tape};
 use crate::tape_wire::{Decode, Wire, decode};
 use hirsel_run_schema::RunOutcome;
+use hirsel_run_schema::frame::{self, FileError, Format, Opening};
 use std::collections::BTreeMap;
 use std::io;
 use std::time::{Duration, Instant};
@@ -123,9 +125,12 @@ impl JournalFile for std::fs::File {
 }
 
 /// The first bytes of every durable journal.
-pub const MAGIC: &[u8] = b"hirsel-journal 4\n";
-/// Frame header: payload length, CRC-32C, sequence number, kind.
-const FRAME: usize = 4 + 4 + 8 + 1;
+pub const MAGIC: &[u8] = b"hirsel-journal 5\n";
+/// A [`frame`] file whose identity is the run identity and whose generation is 0.
+pub const FORMAT: Format = Format {
+    magic: MAGIC,
+    identity: 32,
+};
 /// Group commit bounds (determinism.md, Durable journal).
 pub const BATCH_RECORDS: usize = 64;
 pub const BATCH_BYTES: usize = 1 << 20;
@@ -171,7 +176,7 @@ impl<F: JournalFile> DurableJournal<F> {
         }
         let mut journal = Self {
             file: {
-                file.append(MAGIC)?;
+                file.append(&FORMAT.header(&header.run_identity, 0))?;
                 file
             },
             seq: 0,
@@ -187,10 +192,9 @@ impl<F: JournalFile> DurableJournal<F> {
         &self.file
     }
     fn frame<T: Wire>(&mut self, kind: Kind, payload: &T) -> io::Result<()> {
-        let start = hirsel_run_schema::tape::begin(&mut self.buffer);
+        let start = frame::begin(&mut self.buffer);
         payload.encode(&mut self.buffer);
-        hirsel_run_schema::tape::finish(&mut self.buffer, start, self.seq, kind as u8)
-            .map_err(io::Error::other)?;
+        frame::finish(&mut self.buffer, start, self.seq, kind as u8).map_err(io::Error::other)?;
         self.seq += 1;
         Ok(())
     }
@@ -212,10 +216,10 @@ impl<F: JournalFile> Journal for DurableJournal<F> {
     }
     fn event(&mut self, id: Option<u64>, event: &Event) -> io::Result<()> {
         self.open()?;
-        let start = hirsel_run_schema::tape::begin(&mut self.buffer);
+        let start = frame::begin(&mut self.buffer);
         id.encode(&mut self.buffer);
         event.encode(&mut self.buffer);
-        hirsel_run_schema::tape::finish(&mut self.buffer, start, self.seq, Kind::Event as u8)
+        frame::finish(&mut self.buffer, start, self.seq, Kind::Event as u8)
             .map_err(io::Error::other)?;
         self.seq += 1;
         self.events += 1;
@@ -239,10 +243,10 @@ impl<F: JournalFile> Journal for DurableJournal<F> {
     }
     fn end(&mut self, outcome: &RunOutcome) -> io::Result<()> {
         self.open()?;
-        let start = hirsel_run_schema::tape::begin(&mut self.buffer);
+        let start = frame::begin(&mut self.buffer);
         self.events.encode(&mut self.buffer);
         outcome.encode(&mut self.buffer);
-        hirsel_run_schema::tape::finish(&mut self.buffer, start, self.seq, Kind::Trailer as u8)
+        frame::finish(&mut self.buffer, start, self.seq, Kind::Trailer as u8)
             .map_err(io::Error::other)?;
         self.seq += 1;
         self.ended = true;
@@ -271,14 +275,6 @@ fn canonical_number(word: &str) -> Result<u64, String> {
         .ok()
         .filter(|n| n.to_string() == word)
         .ok_or_else(|| format!("bad journal number {word:?}"))
-}
-
-/// CRC-32C (Castagnoli, reflected) over the encoded length, sequence number, kind and payload.
-fn checksum(seq: u64, kind: u8, payload: &[u8]) -> u32 {
-    use hirsel_run_schema::tape::crc32c_append;
-    let crc = crc32c_append(0, &(payload.len() as u32).to_le_bytes());
-    let crc = crc32c_append(crc, &seq.to_le_bytes());
-    crc32c_append(crc32c_append(crc, &[kind]), payload)
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -475,17 +471,21 @@ pub fn parse_outcome(text: &str) -> Result<RunOutcome, String> {
 /// Why a durable journal cannot be recovered.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Unrecoverable {
-    /// Not a durable journal.
+    /// Not a durable journal of this format.
     NotJournal,
     /// The header never became durable: the run never entered.
     NoHeader,
-    /// A record before the last is damaged, or the records disagree.
+    /// Damage the crash model cannot explain, or records that disagree.
     Corrupt { offset: usize, detail: String },
 }
 impl std::fmt::Display for Unrecoverable {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::NotJournal => f.write_str("not a durable journal"),
+            Self::NotJournal => write!(
+                f,
+                "not a durable journal of this format ({})",
+                String::from_utf8_lossy(MAGIC).trim_end()
+            ),
             Self::NoHeader => f.write_str("the journal has no durable header"),
             Self::Corrupt { offset, detail } => {
                 write!(f, "the journal is corrupt at byte {offset}: {detail}")
@@ -545,73 +545,61 @@ pub fn incomplete(recovered: &Recovered) -> String {
     text
 }
 
-/// Whether `bytes` begin a durable journal (rather than an ordinary tape).
+/// Whether `bytes` begin a durable journal of any version (rather than an ordinary tape).
 pub fn is_journal(bytes: &[u8]) -> bool {
-    bytes.starts_with(MAGIC) || (!bytes.is_empty() && MAGIC.starts_with(bytes))
+    FORMAT.is(bytes) || bytes.starts_with(b"hirsel-journal ")
 }
 
-/// Read a durable journal back (determinism.md, Durable journal). The last record may be torn
-/// and is cut; damage to an earlier record, a sequence gap or a record after the trailer is
-/// `Corrupt`.
+/// Read a durable journal back (determinism.md, Frames and recovery). Only an incomplete
+/// final frame is cut; any other damage, a second header, a record after the trailer or
+/// records that disagree are `Corrupt`.
 pub fn recover(bytes: &[u8]) -> Result<Recovered, Unrecoverable> {
     // An empty file is a journal created but never synced.
     if bytes.is_empty() {
         return Err(Unrecoverable::NoHeader);
     }
-    if !is_journal(bytes) {
-        return Err(Unrecoverable::NotJournal);
-    }
-    let mut offset = MAGIC.len().min(bytes.len());
-    let mut records = vec![];
-    while offset < bytes.len() {
-        let rest = &bytes[offset..];
-        if rest.len() < FRAME {
-            break;
-        }
-        let len = u32::from_le_bytes(rest[0..4].try_into().unwrap()) as usize;
-        let end = FRAME.checked_add(len).filter(|end| *end <= rest.len());
-        let Some(end) = end else {
-            // The record runs past the end: the last write was torn.
-            break;
-        };
-        let crc = u32::from_le_bytes(rest[4..8].try_into().unwrap());
-        let seq = u64::from_le_bytes(rest[8..16].try_into().unwrap());
-        let kind = rest[16];
-        let payload = &rest[FRAME..end];
-        let last = end == rest.len();
-        let damage = if checksum(seq, kind, payload) != crc {
-            Some("checksum mismatch")
-        } else if seq != records.len() as u64 {
-            Some("sequence gap")
-        } else if Kind::of(kind).is_none() {
-            Some("unknown record kind")
-        } else {
-            None
-        };
-        if let Some(detail) = damage {
-            if last {
-                break;
-            }
+    let file = match FORMAT.open(bytes) {
+        Ok(Opening::Header(file)) => file,
+        Ok(Opening::Short) => return Err(Unrecoverable::NoHeader),
+        Err(FileError::Foreign) => return Err(Unrecoverable::NotJournal),
+        Err(FileError::Corrupt(e)) => {
             return Err(Unrecoverable::Corrupt {
-                offset,
-                detail: detail.into(),
+                offset: e.offset,
+                detail: e.detail,
             });
         }
-        records.push((offset, Kind::of(kind).unwrap(), payload));
-        offset += end;
-    }
-    let valid = records
-        .last()
-        .map_or(MAGIC.len().min(bytes.len()), |(at, _, payload)| {
-            at + FRAME + payload.len()
+    };
+    if file.generation != 0 {
+        return Err(Unrecoverable::Corrupt {
+            offset: 0,
+            detail: "unsupported journal generation".into(),
         });
+    }
+    let frames = frame::recover(bytes, file.len, |kind| Kind::of(kind).is_some()).map_err(|e| {
+        Unrecoverable::Corrupt {
+            offset: e.offset,
+            detail: e.detail,
+        }
+    })?;
+    let valid = frames.valid;
+    let mut records = frames
+        .frames
+        .into_iter()
+        .map(|f| (f.range.start, Kind::of(f.kind).unwrap(), f.body));
     let corrupt = |offset: usize, detail: String| Unrecoverable::Corrupt { offset, detail };
-    let mut records = records.into_iter();
-    let Some((at, Kind::Header, header)) = records.next() else {
-        return Err(Unrecoverable::NoHeader);
+    let (at, header) = match records.next() {
+        None => return Err(Unrecoverable::NoHeader),
+        Some((at, Kind::Header, header)) => (at, header),
+        Some((at, _, _)) => return Err(corrupt(at, "the first record is not the header".into())),
     };
     let mut recording: Recording = decode(header).map_err(|e| corrupt(at, e))?;
     crate::tape_binary::validate_header(&recording).map_err(|e| corrupt(at, e))?;
+    if recording.run_identity[..] != *file.identity {
+        return Err(corrupt(
+            at,
+            "the run identity disagrees with the file header".into(),
+        ));
+    }
     if !recording.events.is_empty() {
         return Err(corrupt(at, "header contains events".into()));
     }
@@ -1196,9 +1184,11 @@ mod tests {
         gate.end(&RunOutcome::Returned(Returned::Ok)).unwrap();
         let bytes = file.lock().unwrap().bytes().to_vec();
         let complete = recover(&bytes).unwrap();
-        let header_end = MAGIC.len()
-            + FRAME
-            + u32::from_le_bytes(bytes[MAGIC.len()..MAGIC.len() + 4].try_into().unwrap()) as usize;
+        let header_end = frame::recover(&bytes, FORMAT.len(), |_| true)
+            .unwrap()
+            .frames[0]
+            .range
+            .end;
         for cut in 0..bytes.len() {
             match recover(&bytes[..cut]) {
                 Ok(prefix) => {
@@ -1247,22 +1237,31 @@ mod tests {
     }
 
     #[test]
-    fn damage_before_the_last_record_is_corrupt_and_a_torn_last_record_is_cut() {
+    fn the_shared_damage_table_holds_for_the_run_journal() {
+        use frame::damage::{Expect, cases};
         let file = Arc::new(Mutex::new(SimJournalFile::default()));
         let mut gate = run(file.clone());
         gate.end(&RunOutcome::Returned(Returned::Ok)).unwrap();
         let bytes = file.lock().unwrap().bytes().to_vec();
-        let mut last = bytes.clone();
-        *last.last_mut().unwrap() ^= 1;
-        let cut = recover(&last).unwrap();
-        assert_eq!(cut.outcome, None);
-        assert!(cut.valid < bytes.len());
-        let mut early = bytes.clone();
-        early[MAGIC.len() + FRAME + 2] ^= 1;
+        for case in cases(&bytes, FORMAT.len(), |k| Kind::of(k).is_some(), 9) {
+            let got = match recover(&case.bytes) {
+                Ok(recovered) => Expect::Valid(recovered.valid),
+                Err(Unrecoverable::Corrupt { .. }) => Expect::Corrupt,
+                Err(error) => panic!("{}: {error}", case.name),
+            };
+            assert_eq!(got, case.expect, "{}", case.name);
+        }
+        // The file header protects the run identity; another version is refused by name.
+        let mut identity = bytes.clone();
+        identity[MAGIC.len()] ^= 1;
         assert!(matches!(
-            recover(&early),
-            Err(Unrecoverable::Corrupt { .. })
+            recover(&identity),
+            Err(Unrecoverable::Corrupt { offset: 0, .. })
         ));
+        let mut old = bytes.clone();
+        old[..MAGIC.len()].copy_from_slice(b"hirsel-journal 4\n");
+        assert!(is_journal(&old));
+        assert_eq!(recover(&old), Err(Unrecoverable::NotJournal));
         assert_eq!(recover(b"hirsel-tape 7\n"), Err(Unrecoverable::NotJournal));
     }
 

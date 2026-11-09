@@ -1,9 +1,11 @@
 // Reads and writes inside a std@1/store transaction. Reads see the snapshot
 // the transaction began at with its own earlier writes applied; nothing is
 // visible to anyone else until store.commit. Under SerializableSnapshot a
-// read records its key or range, so a commit after the transaction began that
-// writes it makes store.commit return Conflict(), as SlateDB's
-// DbTransaction::get and scan track reads (db_transaction.rs:150, 299).
+// read enters the transaction's access set (store.Access), so a commit after
+// the transaction began that writes into it makes store.commit return
+// Conflict(), as SlateDB's DbTransaction::get and scan track reads
+// (db_transaction.rs:150, 299), except that a scan records the interval it
+// consumed rather than the range it asked for.
 /// Stores `value` under `key` when the transaction commits.
 pub fn put(mut t: store.Txn, take key: Bytes, take value: Bytes) -> () uses {} {
   ordered_map.insert(mut t.state, copy key, copy value)
@@ -20,15 +22,16 @@ pub fn delete(mut t: store.Txn, take key: Bytes) -> () uses {} {
 /// transaction records the read.
 pub fn get(mut t: store.Txn, key: Bytes) -> Option[Bytes] in t uses {} {
   if let SerializableSnapshot() = t.isolation {
-    ordered_map.insert(mut t.reads, unique key, true)
+    store.read_point(mut t.access, unique key)
   }
   ordered_map.get(t.state, key)
 }
 
 /// At most `limit` entries with keys between `from` and `to` as this
 /// transaction sees them, in `direction` order, as fresh copies. A
-/// serializable transaction records the whole range it asked for, entries
-/// it did not return included.
+/// serializable transaction records the interval the scan consumed: up to the
+/// last entry returned when it returned `limit` of them, the whole range
+/// otherwise.
 pub fn range(
   mut t: store.Txn,
   from: ordered_map.Bound[Bytes],
@@ -36,15 +39,23 @@ pub fn range(
   direction: ordered_map.Direction,
   limit: u64
 ) -> List[(Bytes, Bytes)] uses {} {
+  let rows = store.entries_in(t.state, from, to, direction, limit)
   if let SerializableSnapshot() = t.isolation {
-    list.push(mut t.ranges, txn_manager.ReadRange(from: unique from, to: unique to))
+    return store.read_span(
+      mut t.access,
+      unique from,
+      unique to,
+      direction,
+      limit,
+      take rows
+    )
   }
-  store.entries_in(t.state, from, to, direction, limit)
+  rows
 }
 
 /// Records `key` as read, under either isolation, without reading it
 /// (DbTransaction::mark_read, db_transaction.rs:410): a commit after the
 /// transaction began that writes `key` makes its commit conflict.
 pub fn mark_read(mut t: store.Txn, take key: Bytes) -> () uses {} {
-  ordered_map.insert(mut t.reads, take key, true)
+  list.push(mut t.access.points, take key)
 }

@@ -30,11 +30,11 @@ pub fn main(t: Test) -> Result[(), store.StoreError] {
   let evolved = store.transact(
     mut reopened,
     fn(mut tx: store.Tx) -> Result[bool, table.TxError] {
-      let value = table.get(tx, reordered, 1)?
+      let value = table.get(mut tx, reordered, 1)?
       if value != Some(table_models@2/model.Row(count: 42, label: "one")) {
         return Ok(false)
       }
-      match table.get(tx, renamed, 1) {
+      match table.get(mut tx, renamed, 1) {
         Error(Schema(Renamed(_, _))) => (),
         _ => return Ok(false),
       }
@@ -44,15 +44,15 @@ pub fn main(t: Test) -> Result[(), store.StoreError] {
         "table_models/model/Row.count",
         "table_models/model/Row.total"
       )?
-      if table.get(tx, renamed, 1)? != Some(
+      if table.get(mut tx, renamed, 1)? != Some(
         table_models@3/model.Row(total: 42, label: "one")
       ) {
         return Ok(false)
       }
-      if table.get(tx, retyped, 1) != Error(Schema(ValueMismatch())) {
+      if table.get(mut tx, retyped, 1) != Error(Schema(ValueMismatch())) {
         return Ok(false)
       }
-      let history = table.history(tx, "rows")?
+      let history = table.history(mut tx, "rows")?
       Ok(list.len(history) == 2 && history[0].epoch == 0 && history[1].epoch == 1)
     }
   )

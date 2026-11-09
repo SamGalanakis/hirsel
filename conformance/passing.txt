@@ -7409,6 +7409,7 @@ conformance/SER/SER-2-vectors-run.hir
 conformance/STORE/STORE-12-call-stream-run.hir
 conformance/STORE/STORE-12-call-row-limit-run.hir
 conformance/STORE/STORE-12-sim-call-stream-run.hir
+conformance/STORE/STORE-14-access-run.hir
 conformance/STORE/STORE-2-sim-transact-run.hir
 conformance/STORE/STORE-2-transact-run.hir
 conformance/STORE/STORE-2-txn-conflicts-run.hir

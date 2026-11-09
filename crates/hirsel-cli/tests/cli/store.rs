@@ -8,8 +8,8 @@ use std::process::{Command, Output};
 /// call it already made in an earlier run.
 const PROGRAM: &str = r#"pub type AppError = Grant(GrantError) | Files(FileError) | Store(store.StoreError) | Output(OutputError)
 
-fn runs(tx: store.Tx) -> u64 {
-  match store.tx_get(tx, b"runs") {
+fn runs(mut tx: store.Tx) -> u64 {
+  match store.tx_get(mut tx, b"runs") {
     Some(b) => int.widen(b[0]),
     None() => 0,
   }
@@ -22,7 +22,7 @@ pub fn main(rt: Io) -> Result[(), AppError] {
   let counted: Result[u64, store.TxFailure[String]] = store.transact(
     mut s,
     fn(mut tx: store.Tx) -> Result[u64, String] {
-      let n = runs(tx) + 1
+      let n = runs(mut tx) + 1
       store.tx_put(mut tx, b"runs", bytes.from_list([int.truncate(n)]))
       Ok(n)
     }
@@ -39,7 +39,7 @@ pub fn main(rt: Io) -> Result[(), AppError] {
     mut s,
     first,
     fn(mut tx: store.Tx) -> Result[u64, String] {
-      Ok(runs(tx) * 10)
+      Ok(runs(mut tx) * 10)
     }
   )
   store.close(take s) ? Store

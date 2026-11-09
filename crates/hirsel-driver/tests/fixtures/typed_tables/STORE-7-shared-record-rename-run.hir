@@ -32,7 +32,7 @@ pub fn main(t: Test) -> Result[(), store.StoreError] {
   let read = store.transact(
     mut s,
     fn(mut tx: store.Tx) -> Result[Option[table_models@2/model.Pair], table.TxError] {
-      table.get(tx, b, 1)
+      table.get(mut tx, b, 1)
     }
   )
   test.check(

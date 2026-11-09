@@ -3,8 +3,8 @@
 // manager knows the transactions begun and not yet ended and, while any is
 // active, the write keys of every commit since the oldest began. A commit
 // conflicts when a commit after its transaction began wrote a key it writes
-// (snapshot isolation), read or marked read, or that lies in a range it read
-// (serializable snapshot isolation).
+// (snapshot isolation), or one in its access set: read, marked read, or inside
+// an interval a scan consumed (serializable snapshot isolation).
 //
 // Deviations from SlateDB. A store.Txn is a copyable value with no drop hook,
 // so an abandoned transaction never ends; the manager therefore also bounds
@@ -15,7 +15,9 @@
 // Transactions hand their key sets to `has_conflict` and `track_committed`
 // instead of tracking them in the manager (track_write_keys and
 // track_read_keys, transaction_manager.rs:160-180): a Txn already holds them.
-// Key lists are ascending and free of duplicates; sequences are tracked in
+// A scan's read is the interval it consumed, not the range it asked for, so a
+// commit past a limited scan's last key does not conflict with it. Write key
+// lists are ascending and free of duplicates; sequences are tracked in
 // ascending order, so recycling drops a prefix (SlateDB retains by filter).
 
 /// The most a manager retains: `commits` committed write sets or `key_bytes`
@@ -51,12 +53,6 @@ pub opaque type Manager: () uses {} {
 type Committed {
   seq: u64,
   keys: List[Bytes],
-}
-
-/// A key range read: both ends, as `ordered_map.fold_range` takes them.
-pub type ReadRange {
-  from: ordered_map.Bound[Bytes],
-  to: ordered_map.Bound[Bytes],
 }
 
 fn order_u64(a: u64, b: u64) -> i32 uses {} {
@@ -129,18 +125,12 @@ fn forget(mut m: Manager, id: u64) -> () uses {} {
 }
 
 /// Whether a transaction that began at `started` conflicts with a commit
-/// after it: one that wrote a key in `writes` or `reads`, or a key inside one
-/// of `ranges` (check_has_conflict, has_write_write_conflict and
-/// has_read_write_conflict, transaction_manager.rs:190, 324 and 350). Pass
-/// empty `reads` and `ranges` for snapshot isolation.
-pub fn has_conflict(
-  m: Manager,
-  started: u64,
-  writes: List[Bytes],
-  reads: List[Bytes],
-  ranges: List[ReadRange]
-) -> bool uses {} {
-  if list.len(writes) == 0 && list.len(reads) == 0 && list.len(ranges) == 0 {
+/// after it: one that wrote a key in `writes` or in `reads`
+/// (check_has_conflict, has_write_write_conflict and has_read_write_conflict,
+/// transaction_manager.rs:190, 324 and 350). Under snapshot isolation `reads`
+/// holds only the keys marked read.
+pub fn has_conflict(m: Manager, started: u64, writes: List[Bytes], reads: store.Access) -> bool uses {} {
+  if list.len(writes) == 0 && list.len(reads.points) == 0 && list.len(reads.spans) == 0 {
     return false
   }
   if started >= m.last {
@@ -154,13 +144,8 @@ pub fn has_conflict(
       continue
     }
     for k in c.keys {
-      if member(writes, k) || member(reads, k) {
+      if member(writes, k) || store.touches(reads, k) {
         return true
-      }
-      for r in ranges {
-        if contains(r, k) {
-          return true
-        }
       }
     }
   }
@@ -330,21 +315,6 @@ pub fn horizon(m: Manager) -> u64 uses {} {
 /// The last committed sequence the manager has seen.
 pub fn last_committed(m: Manager) -> u64 uses {} {
   m.last
-}
-
-/// Whether `key` lies in `r`.
-pub fn contains(r: ReadRange, key: Bytes) -> bool uses {} {
-  let above = match r.from {
-    Unbounded() => true,
-    Included(low) => !(key < low),
-    Excluded(low) => low < key,
-  }
-  let below = match r.to {
-    Unbounded() => true,
-    Included(high) => !(high < key),
-    Excluded(high) => key < high,
-  }
-  above && below
 }
 
 // Whether the ascending `keys` hold `key`, by binary search.

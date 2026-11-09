@@ -38,7 +38,7 @@ fn bump(mut s: store.Store[Dir], req: store.CallRequest, n: u64) -> Result[
     mut s,
     req,
     fn(mut tx: store.Tx) -> Result[Bytes, Short] {
-      let c: u64 = match store.tx_get(tx, b"counter") {
+      let c: u64 = match store.tx_get(mut tx, b"counter") {
         Some(b) => int.widen(b[0]),
         None() => 0,
       }

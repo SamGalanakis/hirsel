@@ -30,7 +30,7 @@ fn bump(mut s: store.Store[s3.Sim], req: store.CallRequest, fail: bool) -> Resul
     mut s,
     req,
     fn(mut tx: store.Tx) -> Result[u64, Short] {
-      let n: u64 = match store.tx_get(tx, b"counter") {
+      let n: u64 = match store.tx_get(mut tx, b"counter") {
         Some(b) => int.widen(b[0]),
         None() => 0,
       }

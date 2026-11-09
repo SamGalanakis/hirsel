@@ -22,24 +22,31 @@ pub fn main(t: Test) -> Result[(), store.StoreError] {
   let read = store.transact(
     mut s,
     fn(mut tx: store.Tx) -> Result[(), table.TxError] {
-      let ordered = table.range(tx, rows, Unbounded(), Unbounded(), 10, Ascending())?
+      let ordered = table.range(mut tx, rows, Unbounded(), Unbounded(), 10, Ascending())?
       if ordered != [(-2, "negative"), (0, "zero"), (1, "replaced"), (256, "large")] {
         return Error(InvalidInput())
       }
-      let reversed = table.range(tx, rows, Included(0), Excluded(256), 10, Descending())?
+      let reversed = table.range(
+        mut tx,
+        rows,
+        Included(0),
+        Excluded(256),
+        10,
+        Descending()
+      )?
       if reversed != [(1, "replaced"), (0, "zero")] {
         return Error(InvalidInput())
       }
-      if table.get(tx, rows, 3)? != None() {
+      if table.get(mut tx, rows, 3)? != None() {
         return Error(InvalidInput())
       }
       if !table.delete(mut tx, rows, 0)? || table.delete(mut tx, rows, 0)? {
         return Error(InvalidInput())
       }
-      if table.get(tx, rows, 0)? != None() {
+      if table.get(mut tx, rows, 0)? != None() {
         return Error(InvalidInput())
       }
-      if table.range(tx, rows, Unbounded(), Unbounded(), 0, Ascending()) != Error(
+      if table.range(mut tx, rows, Unbounded(), Unbounded(), 0, Ascending()) != Error(
         InvalidInput()
       ) {
         return Error(InvalidInput())
@@ -53,7 +60,7 @@ pub fn main(t: Test) -> Result[(), store.StoreError] {
   let read_again = store.transact(
     mut reopened,
     fn(mut tx: store.Tx) -> Result[Option[String], table.TxError] {
-      table.get(tx, rows, 256)
+      table.get(mut tx, rows, 256)
     }
   )
   test.check(t, read_again == Ok(Some("large")))

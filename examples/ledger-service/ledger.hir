@@ -32,10 +32,10 @@ pub fn transfer(mut tx: store.Tx, from: u64, to: u64, cents: u64) -> Result[
   Receipt,
   Refusal
 ] {
-  let Some(have) = table.get(tx, balances(), from) ? Table else {
+  let Some(have) = table.get(mut tx, balances(), from) ? Table else {
     return Error(NoAccount(from))
   }
-  let Some(other) = table.get(tx, balances(), to) ? Table else {
+  let Some(other) = table.get(mut tx, balances(), to) ? Table else {
     return Error(NoAccount(to))
   }
   if have < cents {

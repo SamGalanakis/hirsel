@@ -5,6 +5,12 @@
 // returned out of the body's helper.
 fn reader(tx: store.Tx) -> once fn() -> bool {
   fn() {
-    store.tx_get(tx, b"k") != None()
+    open(tx)
   }
+}
+
+// Any use of the Tx; reads take `mut tx` and a closure cannot write a capture.
+fn open(tx: store.Tx) -> bool uses {} {
+  let _ = tx
+  true
 }

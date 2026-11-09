@@ -21,8 +21,8 @@
 // Transactions begun with `begin` detect conflicts per key at commit through
 // std@1/txn_manager, after SlateDB's transaction_manager.rs: a commit
 // conflicts only with commits made after it began that wrote a key it writes
-// or, under serializable snapshot isolation, a key it read or a key inside a
-// range it read.
+// or, under serializable snapshot isolation, a key in its access set: a key
+// it read or a key inside an interval a scan of it consumed.
 /// The storage seam: immutable whole-object reads, conditional creation,
 /// ordered prefix discovery, deletion and directory setup. `put_new` returns
 /// `Ok` only once an object with exactly these bytes holds the name, durably
@@ -219,9 +219,28 @@ pub opaque type Snapshot: copyable uses {} {
 /// How a transaction's commit detects conflicts, after SlateDB's
 /// IsolationLevel (transaction_manager.rs:13). `SnapshotIsolation` conflicts
 /// with a later commit that wrote a key it writes or marked read;
-/// `SerializableSnapshot` also with one that wrote a key it read with
-/// `txn.get` or inside a range it read with `txn.range`.
+/// `SerializableSnapshot` also with one that wrote a key in its access set.
 pub type Isolation = SnapshotIsolation | SerializableSnapshot
+
+/// What one run of a body read (STORE-14), over byte keys. `points` holds
+/// every key it read, whether or not the key held a value, in the order read
+/// and possibly repeated; `spans` every interval a scan consumed. The run's
+/// writes are its write set. A commit that writes no key in it cannot change
+/// the run's outcome.
+pub type Access {
+  points: List[Bytes],
+  spans: List[Span],
+}
+
+/// The interval one scan consumed, from `from` to `to` in key order whatever
+/// its `direction`: from the bound the scan started at to the last key it
+/// examined, or to the range's far bound when it exhausted the range. A scan
+/// cut short by its limit depends on no key past the cut.
+pub type Span {
+  from: ordered_map.Bound[Bytes],
+  to: ordered_map.Bound[Bytes],
+  direction: ordered_map.Direction,
+}
 
 /// A transaction: reads see the snapshot it began at plus its own writes.
 /// Dropping it aborts it; `rollback` also frees its conflict tracking at once.
@@ -232,8 +251,9 @@ pub opaque type Txn: copyable uses {} {
   isolation: Isolation,
   state: ordered_map.OrderedMap[Bytes, Bytes],
   writes: ordered_map.OrderedMap[Bytes, Option[Bytes]],
-  reads: ordered_map.OrderedMap[Bytes, bool],
-  ranges: List[txn_manager.ReadRange],
+  // Under `SerializableSnapshot` and in every `Tx`, every read; marked reads
+  // under either isolation.
+  access: Access,
 }
 
 /// The scoped capability a `transact` body holds: reads see the commit the
@@ -253,6 +273,9 @@ pub opaque type Store[S]: () uses {S} {
   epoch: u64,
   index: ordered_map.OrderedMap[Bytes, Bytes],
   txns: txn_manager.Manager,
+  // An empty access set whose lists keep the capacity an earlier run grew,
+  // so a run records its reads without allocating once the store is warm.
+  spare: Access,
   // The last commit applied (V) and the last one in a written log object (D).
   visible: u64,
   durable: u64,
@@ -387,6 +410,7 @@ pub fn open_backend[S](take state: S, take backend: Backend[S], config: StoreCon
     epoch: 0,
     index: ordered_map.empty(compare_keys),
     txns: txn_manager.new(0, txn_manager.default_limits()),
+    spare: Access(points: [], spans: []),
     visible: 0,
     durable: 0,
     pending: [],
@@ -471,15 +495,93 @@ fn fresh[S](mut s: Store[S], base: u64, id: u64, isolation: Isolation) -> Txn us
     isolation: isolation,
     state: current(mut s),
     writes: ordered_map.empty(compare_keys),
-    reads: ordered_map.empty(compare_keys),
-    ranges: []
+    access: replace(mut s.spare, Access(points: [], spans: []))
   )
+}
+
+// Keeps `a`'s list capacity for the next run, emptied.
+fn reuse[S](mut s: Store[S], take a: Access) -> () uses {} {
+  let mut kept = take a
+  core@1/list.truncate(mut kept.points, 0)
+  core@1/list.truncate(mut kept.spans, 0)
+  s.spare = take kept
 }
 
 /// Ends `t` without committing it, as dropping it does, and frees what the
 /// store tracks for its conflicts (DbTransaction::rollback).
 pub fn rollback[S](mut s: Store[S], take t: Txn) -> () uses {} {
   txn_manager.end(mut s.txns, t.id)
+  discard(mut s, take t)
+}
+
+// Drops a transaction no manager tracks, keeping its access set's capacity.
+fn discard[S](mut s: Store[S], take t: Txn) -> () uses {} {
+  let Txn(access: access, ..) = take t
+  reuse(mut s, take access)
+}
+
+// Records that the run read `key`, whether or not it holds a value.
+fn read_point(mut a: Access, take key: Bytes) -> () uses {} {
+  list.push(mut a.points, take key)
+}
+
+// Records the interval a scan from `from` to `to` in `direction`, limited to
+// `limit` entries, consumed when it returned `rows`: up to the last row when
+// it returned `limit` of them, the whole range otherwise. A scan limited to
+// none examined nothing.
+fn read_span(
+  mut a: Access,
+  take from: ordered_map.Bound[Bytes],
+  take to: ordered_map.Bound[Bytes],
+  direction: ordered_map.Direction,
+  limit: u64,
+  take rows: List[(Bytes, Bytes)]
+) -> List[(Bytes, Bytes)] uses {} {
+  if limit == 0 {
+    return take rows
+  }
+  let n = list.len(rows)
+  if n < limit {
+    list.push(mut a.spans, Span(from: take from, to: take to, direction: direction))
+    return take rows
+  }
+  let (last, _) = rows[n - 1]
+  let cut = copy last
+  let span = match direction {
+    Ascending() => Span(from: take from, to: Included(take cut), direction: direction),
+    Descending() => Span(from: Included(take cut), to: take to, direction: direction),
+  }
+  list.push(mut a.spans, take span)
+  take rows
+}
+
+// Whether a write to `key` can change what `a` read.
+fn touches(a: Access, key: Bytes) -> bool uses {} {
+  for p in a.points {
+    if p == key {
+      return true
+    }
+  }
+  for span in a.spans {
+    if within(span, key) {
+      return true
+    }
+  }
+  false
+}
+
+fn within(span: Span, key: Bytes) -> bool uses {} {
+  let above = match span.from {
+    Unbounded() => true,
+    Included(low) => !(key < low),
+    Excluded(low) => low < key,
+  }
+  let below = match span.to {
+    Unbounded() => true,
+    Included(high) => !(high < key),
+    Excluded(high) => key < high,
+  }
+  above && below
 }
 
 // A share of the index that outlives this call: the index moves out of the
@@ -509,11 +611,11 @@ pub fn commit[S](mut s: Store[S], take t: Txn) -> Result[Ticket, StoreError] use
     isolation: _,
     state: state,
     writes: writes,
-    reads: reads,
-    ranges: ranges
+    access: access
   ) = take t
   if let Some(l) = over_limit(s.config.limits, writes) {
     txn_manager.end(mut s.txns, id)
+    reuse(mut s, take access)
     return Error(Limit(l))
   }
   // Nothing committed since `t` began, the common case and every
@@ -521,11 +623,13 @@ pub fn commit[S](mut s: Store[S], take t: Txn) -> Result[Ticket, StoreError] use
   let latest = base == s.visible
   if !latest {
     let keys = write_keys(writes)
-    if txn_manager.has_conflict(s.txns, base, keys, read_keys(reads), ranges) {
+    if txn_manager.has_conflict(s.txns, base, keys, access) {
       txn_manager.end(mut s.txns, id)
+      reuse(mut s, take access)
       return Error(Conflict())
     }
   }
+  reuse(mut s, take access)
   let set = write_set(writes)
   // A group never outgrows one object: one that this commit would push past
   // the cap is written first. The commit alone fits, as `open` checked.
@@ -632,7 +736,9 @@ pub fn transact[S, R: inert, E: inert](
       Ok(take v)
     },
     Error(e) => {
-      gate(mut s, t.base) ? released
+      let base = t.base
+      discard(mut s, take t)
+      gate(mut s, base) ? released
       Error(Aborted(take e))
     },
   }
@@ -656,7 +762,8 @@ pub fn call[S, R: inert + serializable, E: inert + serializable](
     return Error(Tx(Storage(Closed())))
   }
   let key = stream_key(req.stream)
-  let t = serial(mut s)
+  let mut t = serial(mut s)
+  read_point(mut t.access, copy key)
   let base = t.base
   let mut row = match ordered_map.get(t.state, key) {
     None() => StreamRow(epoch: 0, applied: 0, acknowledged: 0, retained: []),
@@ -749,9 +856,12 @@ pub fn call[S, R: inert + serializable, E: inert + serializable](
   }
 }
 
-/// The value under `key` as the transaction sees it.
-pub fn tx_get(tx: Tx, key: Bytes) -> Option[Bytes] in tx uses {} {
-  ordered_map.get(tx.txn.state, key)
+/// The value under `key` as the transaction sees it. The read enters the
+/// run's access set, whether or not `key` holds a value.
+pub fn tx_get(mut tx: Tx, take key: Bytes) -> Option[Bytes] in tx uses {} {
+  read_point(mut tx.txn.access, take key)
+  let points = tx.txn.access.points
+  ordered_map.get(tx.txn.state, points[list.len(points) - 1])
 }
 
 /// Stores `value` under `key` when the transaction commits.
@@ -767,15 +877,18 @@ pub fn tx_delete(mut tx: Tx, take key: Bytes) -> () uses {}
 }
 
 /// At most `limit` entries with keys between `from` and `to` as the
-/// transaction sees them, in `direction` order, as fresh copies.
+/// transaction sees them, in `direction` order, as fresh copies. The interval
+/// the scan consumed enters the run's access set: up to the last entry
+/// returned when it returned `limit` of them, the whole range otherwise.
 pub fn tx_range(
-  tx: Tx,
-  from: ordered_map.Bound[Bytes],
-  to: ordered_map.Bound[Bytes],
+  mut tx: Tx,
+  take from: ordered_map.Bound[Bytes],
+  take to: ordered_map.Bound[Bytes],
   direction: ordered_map.Direction,
   limit: u64
 ) -> List[(Bytes, Bytes)] uses {} {
-  entries_in(tx.txn.state, from, to, direction, limit)
+  let rows = entries_in(tx.txn.state, from, to, direction, limit)
+  read_span(mut tx.txn.access, take from, take to, direction, limit, take rows)
 }
 
 fn stream_key(stream: Bytes) -> Bytes uses {} {
@@ -890,7 +1003,9 @@ fn gate[S](mut s: Store[S], version: u64) -> Result[(), Unreleased] {
 // transaction without writes waits for the commit it began at.
 fn settle[S](mut s: Store[S], take t: Txn) -> Result[(), Unreleased] {
   if ordered_map.len(t.writes) == 0 {
-    return gate(mut s, t.base)
+    let base = t.base
+    discard(mut s, take t)
+    return gate(mut s, base)
   }
   let base = t.base
   let ticket = match commit(mut s, take t) {
@@ -975,23 +1090,6 @@ fn write_keys(writes: ordered_map.OrderedMap[Bytes, Option[Bytes]]) -> List[Byte
     Ascending(),
     take first,
     fn(take acc: List[Bytes], k: Bytes, _v: Option[Bytes]) -> (List[Bytes], bool) {
-      let mut out = take acc
-      list.push(mut out, unique k)
-      (take out, true)
-    }
-  )
-}
-
-// The keys a transaction read, ascending.
-fn read_keys(reads: ordered_map.OrderedMap[Bytes, bool]) -> List[Bytes] uses {} {
-  let first: List[Bytes] = []
-  ordered_map.fold_range(
-    reads,
-    Unbounded(),
-    Unbounded(),
-    Ascending(),
-    take first,
-    fn(take acc: List[Bytes], k: Bytes, _v: bool) -> (List[Bytes], bool) {
       let mut out = take acc
       list.push(mut out, unique k)
       (take out, true)

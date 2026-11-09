@@ -4188,10 +4188,10 @@ CallFailure[E] = Tx(TxFailure[E]) | Denied | Rejected
 fn store.default_config() -> store.StoreConfig uses {}
 fn store.transact[S, R: inert, E: inert](mut s: store.Store[S], body: fn(mut tx: store.Tx) -> Result[R, E] uses {}) -> Result[R, store.TxFailure[E]] uses {s}
 fn store.call[S, R: inert + serializable, E: inert + serializable](mut s: store.Store[S], req: store.CallRequest, body: fn(mut tx: store.Tx) -> Result[R, E] uses {}) -> Result[R, store.CallFailure[E]] uses {s}
-fn store.tx_get(tx: store.Tx, key: Bytes) -> Option[Bytes] in tx uses {}
+fn store.tx_get(mut tx: store.Tx, take key: Bytes) -> Option[Bytes] in tx uses {}
 fn store.tx_put(mut tx: store.Tx, take key: Bytes, take value: Bytes) -> () uses {} requires !store.reserved(key)
 fn store.tx_delete(mut tx: store.Tx, take key: Bytes) -> () uses {} requires !store.reserved(key)
-fn store.tx_range(tx: store.Tx, from: ordered_map.Bound[Bytes], to: ordered_map.Bound[Bytes], direction: ordered_map.Direction, limit: u64) -> List[(Bytes, Bytes)] uses {}
+fn store.tx_range(mut tx: store.Tx, take from: ordered_map.Bound[Bytes], take to: ordered_map.Bound[Bytes], direction: ordered_map.Direction, limit: u64) -> List[(Bytes, Bytes)] uses {}
 fn store.reserved(key: Bytes) -> bool uses {}
 fn store.open(d: Dir, config: store.StoreConfig) -> Result[store.Store[Dir], store.StoreError] uses {d}
 fn store.snapshot[S](mut s: store.Store[S]) -> store.Snapshot uses {}
@@ -4201,6 +4201,8 @@ fn store.range(snap: store.Snapshot, from: ordered_map.Bound[Bytes], to: ordered
 fn store.prefix_bounds(prefix: Bytes) -> (ordered_map.Bound[Bytes], ordered_map.Bound[Bytes]) uses {}
 fn store.compare_keys(a: Bytes, b: Bytes) -> i32 uses {}
 type store.Isolation = SnapshotIsolation | SerializableSnapshot
+type store.Access { points: List[Bytes], spans: List[store.Span] }
+type store.Span { from: ordered_map.Bound[Bytes], to: ordered_map.Bound[Bytes], direction: ordered_map.Direction }
 fn store.begin[S](mut s: store.Store[S]) -> store.Txn uses {}
 fn store.begin_with[S](mut s: store.Store[S], isolation: store.Isolation) -> store.Txn uses {}
 fn store.rollback[S](mut s: store.Store[S], take t: store.Txn) -> () uses {}
@@ -4234,8 +4236,12 @@ consecutive sequences from 1, visible at once to later `snapshot`s and `begin`s,
 returns its `Ticket`. Conflicts are per key, after SlateDB's transaction manager
 (`std@1/txn_manager`): `commit` returns `Conflict()` with no effect when a commit made
 after the transaction began wrote a key it writes or marked with `txn.mark_read`
-(`SnapshotIsolation`), or also a key it read with `txn.get` or one inside a range it
-asked `txn.range` for (`SerializableSnapshot`, the default, so write skew conflicts too).
+(`SnapshotIsolation`), or also a key in its access set (`SerializableSnapshot`, the
+default, so write skew conflicts too). The access set (`Access`,
+[STORE-14](storage.md#store-14-tracked-access)) holds every key `txn.get` read, present
+or absent, and every interval a `txn.range` consumed as a `Span` in key order: up to the
+last entry it returned when it returned `limit` of them, the whole range otherwise, so a
+scan cut short by its limit conflicts with no write past the cut.
 The store retains the write sets of at most 4096 recent commits or 1 MiB of their keys
 while a transaction is open; a transaction older than what it retains conflicts whenever
 it writes or read anything. `range` and `txn.range`
@@ -4247,7 +4253,8 @@ change it: holding one never holds up the writer.
 **Transactions with a body.** `transact` runs `body` once with a fresh `Tx`, the scoped
 capability ([MODE-6](ownership.md#mode-6-scoped-capabilities)) of a transaction begun at
 the latest commit; `tx_get`, `tx_put`, `tx_delete` and `tx_range` read and write through it
-as the `txn` operations do. `Ok(v)` commits the writes as one commit (none when the body
+as the `txn` operations do, and every read enters the transaction's access set under
+either isolation; the reads take `mut tx` to record it. `Ok(v)` commits the writes as one commit (none when the body
 wrote nothing) and returns `v`; `Error(e)` discards them and returns `Aborted(e)`; a
 failure in the body discards them and propagates. Every outcome is released only once
 every commit the body could see, and its own, is durable: `transact` calls `durable`
@@ -5752,11 +5759,11 @@ refused with STORE-6, including nested and inactive-arm occurrences.
 ```text
 fn table.named[K: key + serializable, V: serializable](name: String) -> table.Table[K, V]
 fn table.create[K: key + serializable, V: serializable](mut tx: store.Tx, t: table.Table[K, V]) -> Result[(), table.TxError]
-fn table.get[K: key + serializable, V: serializable](tx: store.Tx, t: table.Table[K, V], key: K) -> Result[Option[V], table.TxError]
+fn table.get[K: key + serializable, V: serializable](mut tx: store.Tx, t: table.Table[K, V], key: K) -> Result[Option[V], table.TxError]
 fn table.put[K: key + serializable, V: serializable](mut tx: store.Tx, t: table.Table[K, V], key: K, value: V) -> Result[(), table.TxError]
 fn table.delete[K: key + serializable, V: serializable](mut tx: store.Tx, t: table.Table[K, V], key: K) -> Result[bool, table.TxError]
-fn table.range[K: key + serializable, V: serializable](tx: store.Tx, t: table.Table[K, V], from: table.RangeBound[K], to: table.RangeBound[K], limit: u64, order: table.ScanOrder) -> Result[List[(K, V)], table.TxError]
-fn table.history(tx: store.Tx, name: String) -> Result[List[table.SchemaEntry], table.TxError]
+fn table.range[K: key + serializable, V: serializable](mut tx: store.Tx, t: table.Table[K, V], from: table.RangeBound[K], to: table.RangeBound[K], limit: u64, order: table.ScanOrder) -> Result[List[(K, V)], table.TxError]
+fn table.history(mut tx: store.Tx, name: String) -> Result[List[table.SchemaEntry], table.TxError]
 fn table.rename(mut tx: store.Tx, name: String, from: String, to: String) -> Result[(), table.TxError]
 ```
 

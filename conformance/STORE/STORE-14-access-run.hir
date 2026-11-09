@@ -1,0 +1,93 @@
+// rule: STORE-14
+// expect: run
+// The access set a read records, observed through validation: a serializable
+// transaction's commit conflicts exactly when a later commit wrote into what
+// it read. A key read conflicts whether it held a value or not; a scan that
+// exhausted its range conflicts with an insert into any gap inside it and not
+// with one outside it; a scan cut short by its limit depends on no key past
+// the last one it returned, in either direction.
+fn db_put(mut s: store.Store[Dir], k: Bytes) -> Result[(), store.StoreError] {
+  let key = unique k
+  let done: Result[(), store.TxFailure[()]] = store.transact(
+    mut s,
+    fn(mut tx: store.Tx) -> Result[(), ()] {
+      store.tx_put(mut tx, unique key, b"v")
+      Ok(())
+    }
+  )
+  match done {
+    Ok(()) => Ok(()),
+    Error(_) => Error(Closed()),
+  }
+}
+
+fn conflicted(r: Result[store.Ticket, store.StoreError]) -> bool uses {} {
+  r == Error(Conflict())
+}
+
+fn committed(r: Result[store.Ticket, store.StoreError]) -> bool uses {} {
+  match r {
+    Ok(_) => true,
+    Error(_) => false,
+  }
+}
+
+// Begins a serializable transaction, lets `read` read through it, commits
+// `k` outside it and reports whether its commit then conflicted.
+fn after_write(mut s: store.Store[Dir], read: fn(mut store.Txn) -> (), k: Bytes) -> Result[
+  bool,
+  store.StoreError
+] {
+  let mut t = store.begin_with(mut s, SerializableSnapshot())
+  read(mut t)
+  db_put(mut s, k)?
+  let r = store.commit(mut s, take t)
+  if conflicted(r) {
+    return Ok(true)
+  }
+  if committed(r) {
+    return Ok(false)
+  }
+  Error(Closed())
+}
+
+pub fn main(t: Test) -> Result[(), store.StoreError] {
+  let d = test.dir(t, [])
+  let mut s = store.open(d, store.default_config())?
+  db_put(mut s, b"p/held")?
+  db_put(mut s, b"g/c")?
+  db_put(mut s, b"g/m")?
+  // A point read, of a present key and of an absent one.
+  let held = fn(mut x: store.Txn) -> () {
+    let _ = txn.get(mut x, b"p/held")
+  }
+  let absent = fn(mut x: store.Txn) -> () {
+    let _ = txn.get(mut x, b"p/none")
+  }
+  test.check(t, after_write(mut s, held, b"p/held")?)
+  test.check(t, after_write(mut s, absent, b"p/none")?)
+  test.check(t, !after_write(mut s, absent, b"p/other")?)
+  // An exhausted scan of [g/a, g/z): the phantom in its gap conflicts, an
+  // insert outside it does not.
+  let whole = fn(mut x: store.Txn) -> () {
+    let _ = txn.range(mut x, Included(b"g/a"), Excluded(b"g/z"), Ascending(), 10)
+  }
+  test.check(t, after_write(mut s, whole, b"g/f")?)
+  test.check(t, !after_write(mut s, whole, b"g/z")?)
+  test.check(t, !after_write(mut s, whole, b"h/a")?)
+  // An ascending scan cut at its first row, g/c, consumed [g/a, g/c].
+  let first = fn(mut x: store.Txn) -> () {
+    let _ = txn.range(mut x, Included(b"g/a"), Excluded(b"g/z"), Ascending(), 1)
+  }
+  test.check(t, after_write(mut s, first, b"g/c")?)
+  test.check(t, !after_write(mut s, first, b"g/d")?)
+  test.check(t, after_write(mut s, first, b"g/b")?)
+  // A descending scan cut at its first row, the greatest, consumed it to g/z.
+  let last = fn(mut x: store.Txn) -> () {
+    let _ = txn.range(mut x, Included(b"g/a"), Excluded(b"g/z"), Descending(), 1)
+  }
+  test.check(t, after_write(mut s, last, b"g/y")?)
+  test.check(t, !after_write(mut s, last, b"g/e")?)
+  store.close(take s)?
+  Ok(())
+}

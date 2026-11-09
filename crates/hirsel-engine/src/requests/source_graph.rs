@@ -114,15 +114,6 @@ impl LoadingAdmission {
     pub fn take_transport(&mut self) -> hirsel_engine_admission::MemoryReservation {
         self.transport.split(self.transport.bytes()).unwrap()
     }
-    pub fn lend_runtime(&mut self) -> hirsel_engine_admission::MemoryReservation {
-        self.runtime.split(self.runtime.bytes()).unwrap()
-    }
-    pub fn return_runtime(&mut self, reservation: hirsel_engine_admission::MemoryReservation) {
-        self.runtime
-            .join(reservation)
-            .ok()
-            .expect("same runtime partition");
-    }
     /// Lend the whole runtime and snapshot charge to work that finishes and
     /// releases it before any final producer takes a partition.
     pub fn lend(
@@ -567,12 +558,7 @@ fn plan_source(
                 Some(namespace) => {
                     engine.front_run_inputs_in(namespace.clone(), limits.snapshot_bytes)
                 }
-                None => {
-                    if !shape.check_variants || store.installation_output().is_some() {
-                        engine.prepare_private_summaries();
-                    }
-                    engine.front_run_inputs(limits.snapshot_bytes)
-                }
+                None => engine.front_run_inputs(limits.snapshot_bytes),
             };
             match captured {
                 Ok(inputs) => {
@@ -661,7 +647,8 @@ pub fn prepare_source_scope(
     if roots.is_empty() {
         return Ok((None, limits));
     }
-    engine.admit_private_inference(loading.lend_runtime());
+    // Headers this request produces are charged to its existing partition.
+    engine.headers_hosted = true;
     let definitions = selected_definitions(engine);
     let generators = engine
         .front_generator_roots(&definitions)
@@ -670,10 +657,6 @@ pub fn prepare_source_scope(
         .front_staged_roots(&definitions)
         .map_err(|error| engine_error(engine, error))?;
     if generators.is_empty() && staged.is_empty() {
-        let runtime = engine
-            .release_private_inference_admission()
-            .map_err(|error| engine_error(engine, error))?;
-        loading.return_runtime(runtime);
         return Ok((None, limits));
     }
     let planned = plan_source(
@@ -692,10 +675,6 @@ pub fn prepare_source_scope(
     let plan = planned.plan;
     drop(planned.run_inputs);
     drop(planned.catalogue);
-    let inference = engine
-        .release_private_inference_admission()
-        .map_err(|error| engine_error(engine, error))?;
-    loading.return_runtime(inference);
     // The scope's producers reserve what they hold from the request
     // footprint, so the snapshot loan is released while they run.
     let (runtime, snapshot) = loading.lend();
@@ -743,11 +722,11 @@ pub fn install(
     jobs: Jobs,
     limits: RequestLimits,
     host: &dyn SourceHost,
-    mut loading: LoadingAdmission,
+    loading: LoadingAdmission,
     store: &dyn ResultStore,
     carry: Option<&SourceCarry>,
     scope: Option<FrontDemandScope>,
-) -> Result<InstalledSource, ToolError> {
+) -> Result<(InstalledSource, hirsel_engine_admission::MemoryReservation), ToolError> {
     let prepared_front = scope.as_ref().and_then(|scope| scope.front().cloned());
     let front_carry = scope
         .as_ref()
@@ -755,7 +734,7 @@ pub fn install(
         .or_else(|| carry.map(|carry| carry.front.clone()));
     let operation = scope.as_ref().map(FrontDemandScope::lease);
     let namespace = scope.map(|scope| scope.namespace().clone());
-    engine.admit_private_inference(loading.lend_runtime());
+    engine.headers_hosted = true;
     let planner = SourcePlanner {
         selection,
         host,
@@ -780,9 +759,6 @@ pub fn install(
     if (shape.run || shape.ownership) && namespace.is_none() {
         if let Err(error) = engine.prepare_namespace_registrations(&registrations) {
             return Err(loading.failed(engine_error(engine, error)));
-        }
-        if !shape.check_variants || store.installation_output().is_some() {
-            engine.prepare_private_summaries();
         }
     }
     let namespace = match namespace {
@@ -887,11 +863,6 @@ pub fn install(
         prepared_front.filter(|front| front.covers_scope(&definitions, &namespace, plan.body));
     let reuse_front = prepared_front.is_some();
     let sources = engine.sources.clone();
-    let inference = match engine.release_private_inference_admission() {
-        Ok(allowance) => allowance,
-        Err(error) => return Err(loading.failed(engine_error(engine, error))),
-    };
-    loading.return_runtime(inference);
     let GraphAdmission {
         runtime,
         mut source,
@@ -900,7 +871,6 @@ pub fn install(
         run,
     } = loading.finish(plan.snapshots)?;
     let request = source.budget().clone();
-    engine.admit_private_inference(runtime);
     let source_index = source
         .split(plan.source_index_bytes)
         .ok_or_else(|| uninstalled())?;
@@ -973,7 +943,7 @@ pub fn install(
             Ok::<_, ToolError>((recipes, graph))
         })
         .transpose()?;
-    Ok(InstalledSource {
+    Ok((InstalledSource {
         operation,
         definitions,
         plan,
@@ -991,7 +961,7 @@ pub fn install(
         source_index,
         sources,
         errors,
-    })
+    }, runtime))
 }
 
 impl InstalledSource {
@@ -1118,8 +1088,6 @@ impl QueryEngine {
         }
         let previous = self.result_store.replace(store.clone());
         let result = self.check_installed(selection, jobs, limits, budget, loading, &store);
-        // A failed installation can leave its inference grant behind.
-        drop(self.release_private_inference_admission());
         self.result_store = previous;
         result
     }
@@ -1210,7 +1178,7 @@ impl QueryEngine {
             store.as_ref(),
             carry.as_ref(),
         )?;
-        let mut installed = install(
+        let (mut installed, runtime) = install(
             self,
             selection,
             shape,
@@ -1223,9 +1191,6 @@ impl QueryEngine {
             scope,
         )?;
         let check = installed.check(self, selection)?;
-        let runtime = self
-            .release_private_inference_admission()
-            .map_err(|error| installed.query_error(error))?;
         let mut runtime =
             AdmittedRuntime::new(jobs, runtime, installed.errors).map_err(ToolError::Io)?;
         installed.register(&mut runtime, &check)?;

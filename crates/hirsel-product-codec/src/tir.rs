@@ -128,7 +128,6 @@ impl<'a> Rows<'a> {
 #[derive(Serialize, Deserialize, Clone, Debug, Eq, PartialEq)]
 pub struct TirHeader {
     pub version: u32,
-    pub inferred_unique: hirsel_types::UniqueSummary,
     pub path: DefId,
     pub signature_hash: ContentHash,
     pub entry: BodyId,
@@ -668,7 +667,6 @@ impl CheckedTir {
     pub fn materialize(&self) -> Option<Definition> {
         let header = self.header()?;
         Some(Definition {
-            inferred_unique: header.inferred_unique,
             path: header.path,
             signature_hash: header.signature_hash,
             entry: header.entry,

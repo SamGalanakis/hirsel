@@ -23,8 +23,8 @@ use hirsel_types::{
 /// v11 adds contextual consumable arena scope entries (MEM-4).
 /// v12 binds the combined grant and logical invocation semantics.
 /// v13 adds compile-time source-event charges (CT-4).
-/// v14 publishes inferred private-helper uniqueness evidence.
-pub const TIR_VERSION: u32 = 16;
+/// v14 published inferred private-helper uniqueness evidence; v17 removes it (MODE-2: declared contracts only).
+pub const TIR_VERSION: u32 = 17;
 
 pub mod representation;
 
@@ -579,8 +579,6 @@ pub struct ProtocolAssociationReceipt {
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Eq, PartialEq)]
 pub struct Definition {
-    /// Body-checked private evidence, usable only at same-module direct calls.
-    pub inferred_unique: hirsel_types::UniqueSummary,
     /// Sorted bodies that inherit attribution: the marked entry and its own contract bodies.
     /// Ordinary closures and their contracts remain separate invocation boundaries.
     pub caller_bodies: Vec<BodyId>,
@@ -727,7 +725,6 @@ mod tests {
             protocol_associations: vec![],
             types: vec![].into(),
             path: DefId::intern(&hirsel_syntax::DefPath::core("main")),
-            inferred_unique: Default::default(),
             signature_hash: ContentHash::default(),
             bodies: vec![body, shaped],
             entry: BodyId(0),

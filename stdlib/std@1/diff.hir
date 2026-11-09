@@ -32,7 +32,7 @@ pub type Patched {
 pub type PatchError = Malformed(u64)
 
 // --- Lines ----------------------------------------------------------------
-fn piece(data: Bytes, start: u64, end: u64) -> String uses {} {
+fn piece(data: Bytes, start: u64, end: u64) -> unique String uses {} {
   let mut out: List[u8] = []
   core@1/bytes.append(mut out, core@1/bytes.slice(data, start, end))
   text.finish_valid(take out)
@@ -1236,6 +1236,7 @@ type Change {
   inserted: u64,
 }
 
+@preserves_unique(out)
 fn emit(mark: u8, line: String, mut out: List[u8]) -> () uses {} {
   core@1/list.push(mut out, mark)
   text.append(mut out, line)
@@ -1244,6 +1245,7 @@ fn emit(mark: u8, line: String, mut out: List[u8]) -> () uses {} {
   }
 }
 
+@preserves_unique(out)
 fn range_into(start: u64, count: u64, mut out: List[u8]) -> () uses {} {
   if count == 0 {
     std@1/u64.format_into(start, mut out)

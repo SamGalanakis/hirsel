@@ -58,7 +58,7 @@ const ORDER: Inline[u64, 19] = [
   15
 ]
 
-fn zeros(n: u64) -> List[u64] uses {} {
+fn zeros(n: u64) -> unique List[u64] uses {} {
   let mut out: List[u64] = []
   let mut i: u64 = 0
   while i < n {
@@ -361,7 +361,7 @@ type Inflate {
   adler: adler32.State,
 }
 
-fn inflater(format: Format) -> Inflate uses {} {
+fn inflater(format: Format) -> unique Inflate uses {} {
   Inflate(
     format: format,
     phase: Header(),
@@ -400,6 +400,7 @@ fn sum(mut z: Inflate, out: List[u8]) -> () uses {} {
 }
 
 // Copies the pending match while the output bound allows; true once done.
+@preserves_unique(out)
 fn copy_match(mut z: Inflate, limit: u64, mut out: List[u8]) -> bool uses {} {
   let end = core@1/list.len(out)
   let room = limit - end
@@ -417,6 +418,7 @@ fn copy_match(mut z: Inflate, limit: u64, mut out: List[u8]) -> bool uses {} {
 
 // Go huffmanBlock, one symbol at a time from `mark`: a distance may reach back
 // only within this member's output. Ended means the block ended.
+@preserves_unique(out)
 fn decode_symbols(data: Bytes, mut z: Inflate, limit: u64, mut out: List[u8]) -> Result[
   Status,
   FlateError
@@ -536,6 +538,7 @@ fn unread_bytes(data: Bytes, s: Bits) -> u64 uses {} {
 
 // Advances one unit. Truncated leaves the cursor inside the unit, to be
 // restored to `mark`; None means continue.
+@preserves_unique(out)
 fn advance(data: Bytes, mut z: Inflate, last_input: bool, limit: u64, mut out: List[u8]) -> Result[
   Option[Status],
   FlateError
@@ -754,6 +757,7 @@ fn advance(data: Bytes, mut z: Inflate, last_input: bool, limit: u64, mut out: L
 
 // Decodes from `data` until the stream ends, `out` reaches `limit` bytes or
 // the input runs out; `last_input` says no input follows `data`.
+@preserves_unique(out)
 fn run_inflate(
   data: Bytes,
   mut z: Inflate,
@@ -1305,6 +1309,7 @@ pub fn encoder(format: Format, level: u64) -> unique Encoder uses {} {
   )
 }
 
+@preserves_unique(out, w)
 fn send_bits(mut w: Writer, mut out: List[u8], value: u64, length: u64) -> () uses {} {
   w.bits = w.bits | value << w.nbits
   w.nbits += length
@@ -1316,6 +1321,7 @@ fn send_bits(mut w: Writer, mut out: List[u8], value: u64, length: u64) -> () us
 }
 
 // zlib bi_windup: pads the last byte with zero bits.
+@preserves_unique(out)
 fn windup(mut w: Writer, mut out: List[u8]) -> () uses {} {
   if w.nbits > 0 {
     core@1/list.push(mut out, core@1/int.truncate(w.bits & 255))
@@ -1595,11 +1601,13 @@ fn scan_tree(mut t: Tree, mut lengths: Tree) -> () uses {} {
   }
 }
 
+@preserves_unique(w, out)
 fn send_code(mut w: Writer, mut out: List[u8], t: Tree, c: u64) -> () uses {} {
   send_bits(mut w, mut out, t.code[c], t.len[c])
 }
 
 // zlib send_tree.
+@preserves_unique(out)
 fn send_tree(mut w: Writer, mut out: List[u8], t: Tree, max_code: u64, lengths: Tree) -> () uses {} {
   let mut previous: u64 = 0xFFFF
   let mut next = t.len[0]
@@ -1664,6 +1672,7 @@ fn dcode_of(dist: u64) -> u64 uses {} {
 
 // zlib compress_block: each symbol is `distance << 8 | length - 3`, or a
 // literal byte with distance 0.
+@preserves_unique(out)
 fn compress_block(
   mut w: Writer,
   mut out: List[u8],
@@ -1696,6 +1705,7 @@ fn compress_block(
 }
 
 // zlib _tr_stored_block.
+@preserves_unique(out)
 fn stored_out(
   mut w: Writer,
   mut out: List[u8],
@@ -1729,6 +1739,7 @@ fn stored_out(
 // zlib _tr_flush_block and init_block: the block's symbols as a stored, fixed
 // or dynamic block, whichever is smallest; stored only while its bytes are in
 // the window.
+@preserves_unique(out)
 fn flush_block(mut e: Encoder, mut out: List[u8], last: bool) -> () uses {} {
   build_tree(mut e.literal, mut e.work, 0)
   build_tree(mut e.distance, mut e.work, 1)
@@ -1973,6 +1984,7 @@ fn longest_match(mut e: Encoder, start: u64) -> u64 uses {} {
 }
 
 // zlib deflate_fast for levels 1 to 3: no lazy matching.
+@preserves_unique(out)
 fn deflate_fast(
   mut e: Encoder,
   data: Bytes,
@@ -2032,6 +2044,7 @@ fn deflate_fast(
 
 // zlib deflate_slow for levels 4 to 9: a match is taken only if the next
 // string has no longer one.
+@preserves_unique(out)
 fn deflate_slow(
   mut e: Encoder,
   data: Bytes,
@@ -2103,6 +2116,7 @@ fn deflate_slow(
   flush_block(mut e, mut out, true)
 }
 
+@preserves_unique(out)
 fn write_header(mut e: Encoder, mut out: List[u8]) -> () uses {} {
   if e.started {
     return
@@ -2150,6 +2164,7 @@ fn write_header(mut e: Encoder, mut out: List[u8]) -> () uses {} {
   }
 }
 
+@preserves_unique(out)
 fn run(mut e: Encoder, data: Bytes, last_input: bool, mut out: List[u8]) -> () uses {} {
   write_header(mut e, mut out)
   let format = e.format
@@ -2188,6 +2203,7 @@ pub fn encode(mut e: Encoder, data: Bytes, mut out: List[u8]) -> () uses {} {
   run(mut e, data, false, mut out)
 }
 
+@preserves_unique(out)
 fn push_be(mut out: List[u8], value: u64) -> () uses {} {
   let mut shift: u64 = 32
   while shift > 0 {
@@ -2196,6 +2212,7 @@ fn push_be(mut out: List[u8], value: u64) -> () uses {} {
   }
 }
 
+@preserves_unique(out)
 fn push_le(mut out: List[u8], value: u64) -> () uses {} {
   let mut shift: u64 = 0
   while shift < 32 {
@@ -2227,7 +2244,7 @@ pub fn finish(mut e: Encoder, mut out: List[u8]) -> () uses {} {
 }
 
 @track_caller
-fn encode_all(format: Format, data: Bytes, level: u64) -> Bytes uses {} {
+fn encode_all(format: Format, data: Bytes, level: u64) -> unique Bytes uses {} {
   let mut e = encoder(format, level)
   let mut out: List[u8] = []
   encode(mut e, data, mut out)

@@ -2,7 +2,7 @@
 //! this validation; no archived Definition, Body or arena vector is rebuilt.
 use hirsel_product_codec::{TirBlockView, TirBodyView, TirMatchView, TirView};
 use hirsel_tir::*;
-use hirsel_types::{SiteRef, TypeId, UniqueSummary};
+use hirsel_types::{SiteRef, TypeId};
 use std::{cell::OnceCell, ops::Index};
 
 pub(super) enum Rows<'a, T> {
@@ -70,7 +70,6 @@ impl<T: PartialEq> PartialEq<Vec<T>> for Rows<'_, T> {
 }
 
 pub(super) struct ReadDefinition<'a> {
-    pub(super) inferred_unique: UniqueSummary,
     pub(super) path: hirsel_syntax::DefId,
     pub(super) entry: BodyId,
     pub(super) caller_bodies: Rows<'a, BodyId>,
@@ -93,7 +92,6 @@ impl<'a> ReadDefinition<'a> {
         }
         let header = view.header()?;
         Some(Self {
-            inferred_unique: header.inferred_unique,
             path: header.path,
             entry: header.entry,
             caller_bodies: match view {

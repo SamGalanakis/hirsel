@@ -1436,7 +1436,6 @@ impl QueryEngine {
             .as_ref()
             .is_some_and(|store| store.installation_output().is_some())
         {
-            self.prepare_private_summaries();
         }
         let definitions = self.source_paths();
         let namespace = self.capture_namespace(&definitions, &[], limit)?;

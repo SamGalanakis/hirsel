@@ -44,7 +44,6 @@ pub fn decoded_tir_bytes(definition: &Definition) -> u64 {
 fn tir_bytes(definition: &Definition, mut weight: Weight) -> u64 {
     weight.add(arc_bytes(definition));
     let Definition {
-        inferred_unique,
         caller_bodies,
         protocol_associations,
         types,
@@ -54,9 +53,6 @@ fn tir_bytes(definition: &Definition, mut weight: Weight) -> u64 {
         entry: _,
         contracts,
     } = definition;
-    weight.flat_vec(&inferred_unique.preserves_unique);
-    weight.flat_vec(&inferred_unique.results);
-    weight.flat_vec(&inferred_unique.nonretaining);
     weight.flat_vec(caller_bodies);
     weight.vec(protocol_associations, |w, r| {
         w.def_path(&r.association.source)
@@ -510,7 +506,6 @@ impl Weight<'_> {
         } = &**value;
         let hirsel_types::SignatureMetadata {
             retention: _,
-            inferred_unique,
             visibility: _,
             alias: _,
             constant_alias,
@@ -522,9 +517,6 @@ impl Weight<'_> {
             recursive_group: _,
             implementations,
         } = metadata;
-        self.flat_vec(&inferred_unique.preserves_unique);
-        self.flat_vec(&inferred_unique.results);
-        self.flat_vec(&inferred_unique.nonretaining);
         for binder in implementations {
             self.def_path(binder.family.path());
         }

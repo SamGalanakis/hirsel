@@ -590,7 +590,6 @@ mod tests {
                         protocol_associations: vec![],
                         types: Arc::from([]),
                         path: DefId::intern(&b),
-                        inferred_unique: Default::default(),
                         signature_hash: ContentHash([3; 32]),
                         bodies: vec![],
                         entry: BodyId(0),

@@ -358,13 +358,6 @@ impl QueryEngine {
             groups: BTreeMap::new(),
         };
         let result = step(&types, &memo, &mut recorder);
-        // The helper's header can probe several signatures after the same
-        // private proof failed. Return that producer's original failure once,
-        // retaining every read the callback recorded before it stopped.
-        let result = match recorder.engine.current_private_summary_failure() {
-            Some(error) => Err(error.clone()),
-            None => result,
-        };
         reads.observed = recorder.observed;
         reads.reads = recorder.reads;
         result
@@ -394,7 +387,6 @@ impl QueryEngine {
         }
         // Durable Lower anchor preparation also enters here without Modes.
         // Settle private headers before selecting a generated Check memo.
-        self.prepare_private_summaries();
         let signature = self.signature_output(definition)?;
         let _timing = timings::phase(Phase::Check);
         let id = DefId::intern(definition);
@@ -466,9 +458,6 @@ impl QueryEngine {
         self.s1.leave();
         self.merge_execution(entry.reads());
         self.depth_requested(&depth, site);
-        if !self.private_summary_active && entry.result().is_ok() {
-            self.private_summary_revision = None;
-        }
         entry.result()
     }
 

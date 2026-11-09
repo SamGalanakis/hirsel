@@ -484,12 +484,11 @@ fn front_store_retains_prior_actions_at_one_logical_address() {
             assert!(outputs.iter().all(|o| o.result.is_ok()));
             let count = store.indexes.lock().unwrap().len();
             // Each definition publishes Signature, Modes, a request association and compact Front facts.
-            // The parsed source (93611be0) and the module's PrivateInference
-            // proof (6507acbf) each have one independent logical address.
+            // The parsed source (93611be0) has one independent logical address.
             assert_eq!(
                 count,
-                2 * 4 + 1 + 1,
-                "eight per-definition addresses, one parse and one module proof"
+                2 * 4 + 1,
+                "eight per-definition addresses and one parse"
             );
             let changed = source.replace("{1u32}", "{2u32}");
             let (_, outputs, edited) = publish_front(store.clone(), &changed, jobs);

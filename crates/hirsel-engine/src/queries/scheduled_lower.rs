@@ -3359,7 +3359,7 @@ impl QueryEngine {
         front.namespace().require_environment(self)?;
         let pending = generator.is_none()
             && !front.namespace().consumers_admitted()
-            && !self.private_bootstrap_active
+            && !self.bootstrap_active
             && (!self.front_staged_roots(definitions)?.is_empty()
                 || !front.namespace().instances.declarations.is_empty()
                 || definitions.iter().any(|path| {

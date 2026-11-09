@@ -171,8 +171,8 @@ impl QueryEngine {
         let metadata = request
             .reserve(required)
             .map_err(|_| admission_error("scope cursors exceed the request footprint"))?;
-        let previous = self.private_bootstrap_active;
-        self.private_bootstrap_active = true;
+        let previous = self.bootstrap_active;
+        self.bootstrap_active = true;
         let prepared = (|| {
             let capture = self.capture_namespace(definitions, &[], request.free())?;
             let front =
@@ -183,7 +183,7 @@ impl QueryEngine {
             }
             self.front_lower_queries(definitions, front, weight, max_reads, &request, errors)
         })();
-        self.private_bootstrap_active = previous;
+        self.bootstrap_active = previous;
         let initial = prepared.map_err(|error| {
             FrontDemandError::Generator(FrontRegistrationBootstrapError::Admission(error))
         })?;
@@ -338,13 +338,6 @@ impl QueryEngine {
             self.generated
                 .insert(id.path().clone(), registration.source());
         }
-        self.private_summary_inputs = private_unique::registration_inputs(
-            &namespace
-                .registrations
-                .values()
-                .cloned()
-                .collect::<Vec<_>>(),
-        );
         self.snapshot = Some((
             self.snapshot_stamp(),
             crate::snapshot::SnapshotCache::new(&namespace.snapshot),

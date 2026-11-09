@@ -38,16 +38,12 @@ pub enum Owner {
     Wait,
     /// An existing `--timings` phase, outside every finer scope inside it.
     Phase(Phase),
-    /// Actual structural checking (H), ordinary or for private inference.
-    StructuralProduction { inference: bool },
+    /// Actual structural checking (H).
+    StructuralProduction,
     /// A structural-cache hit: recipe probe, replay and restoration.
     StructuralHit,
     /// Receipt normalization, completion and binding of read rows.
     ReceiptBinding,
-    /// Private-inference computation outside its structural checks and solve.
-    PrivateSetup,
-    /// Private-summary solving (`infer_unique`).
-    PrivateSolve,
     /// Full independent V over an artifact.
     VExecution,
     /// Exact V receipt reuse: lookup and read re-observation.
@@ -60,13 +56,10 @@ pub enum Owner {
     Diagnostic,
 }
 
-const FINE: [Owner; 13] = [
-    Owner::StructuralProduction { inference: false },
-    Owner::StructuralProduction { inference: true },
+const FINE: [Owner; 10] = [
+    Owner::StructuralProduction,
     Owner::StructuralHit,
     Owner::ReceiptBinding,
-    Owner::PrivateSetup,
-    Owner::PrivateSolve,
     Owner::VExecution,
     Owner::VReuse,
     Owner::Store,
@@ -105,16 +98,9 @@ impl Owner {
             Owner::Outside => "worker outside scopes".into(),
             Owner::Wait => "wait".into(),
             Owner::Phase(phase) => format!("phase {}", phase.name()),
-            Owner::StructuralProduction { inference: false } => {
-                "structural production ordinary".into()
-            }
-            Owner::StructuralProduction { inference: true } => {
-                "structural production inference".into()
-            }
+            Owner::StructuralProduction => "structural production".into(),
             Owner::StructuralHit => "structural cache hit".into(),
             Owner::ReceiptBinding => "receipt normalization/binding".into(),
-            Owner::PrivateSetup => "private inference setup".into(),
-            Owner::PrivateSolve => "private summary solving".into(),
             Owner::VExecution => "V execution".into(),
             Owner::VReuse => "V exact reuse".into(),
             Owner::Store => "store/transport".into(),
@@ -229,7 +215,7 @@ const DEPTH: usize = 64;
 struct Totals {
     owners: [AtomicU64; OWNERS],
     entries: [AtomicU64; OWNERS],
-    census: [[AtomicU64; Census::ALL.len()]; 2],
+    census: [AtomicU64; Census::ALL.len()],
     volumes: [AtomicU64; Volume::ALL.len()],
     /// Sum over threads of each thread's independent `last - first` reads.
     threads_total: AtomicU64,
@@ -241,7 +227,7 @@ struct Totals {
 static TOTALS: Totals = Totals {
     owners: [const { AtomicU64::new(0) }; OWNERS],
     entries: [const { AtomicU64::new(0) }; OWNERS],
-    census: [const { [const { AtomicU64::new(0) }; Census::ALL.len()] }; 2],
+    census: [const { AtomicU64::new(0) }; Census::ALL.len()],
     volumes: [const { AtomicU64::new(0) }; Volume::ALL.len()],
     threads_total: AtomicU64::new(0),
     threads: AtomicU64::new(0),
@@ -255,11 +241,11 @@ static REFUSAL: Mutex<Option<String>> = Mutex::new(None);
 /// Instructions one counter read costs, calibrated at request start.
 static READ_COST: AtomicU64 = AtomicU64::new(0);
 
-/// Per definition: bit 0/1 ordinary/inference produced, bit 2 signature dirty.
-/// Then per mode the low 32 bits of the last produced input.
+/// Per definition: bit 0 produced, bit 1 signature dirty; then the low 32
+/// bits of the last produced input.
 struct CensusTable {
     flags: Box<[AtomicU8]>,
-    inputs: [Box<[AtomicU32]>; 2],
+    inputs: Box<[AtomicU32]>,
 }
 static CENSUS: Mutex<Option<std::sync::Arc<CensusTable>>> = Mutex::new(None);
 
@@ -375,7 +361,7 @@ pub(super) fn start_request() {
         .owners
         .iter()
         .chain(&TOTALS.entries)
-        .chain(TOTALS.census.iter().flatten())
+        .chain(&TOTALS.census)
         .chain(&TOTALS.volumes)
         .chain([
             &TOTALS.threads_total,
@@ -389,9 +375,7 @@ pub(super) fn start_request() {
     *REFUSAL.lock().unwrap_or_else(|e| e.into_inner()) = None;
     let table = CensusTable {
         flags: (0..CENSUS_DEFINITIONS).map(|_| AtomicU8::new(0)).collect(),
-        inputs: std::array::from_fn(|_| {
-            (0..CENSUS_DEFINITIONS).map(|_| AtomicU32::new(0)).collect()
-        }),
+        inputs: (0..CENSUS_DEFINITIONS).map(|_| AtomicU32::new(0)).collect(),
     };
     *CENSUS.lock().unwrap_or_else(|e| e.into_inner()) = Some(std::sync::Arc::new(table));
     EPOCH.fetch_add(1, Relaxed);
@@ -510,7 +494,7 @@ impl Drop for Scope {
 
 /// Record how a structural production of `definition` (by session index)
 /// with checked-input digest `input` relates to earlier ones.
-pub fn census_production(definition: u32, inference: bool, input: u32) {
+pub fn census_production(definition: u32, input: u32) {
     if !active() {
         return;
     }
@@ -522,26 +506,24 @@ pub fn census_production(definition: u32, inference: bool, input: u32) {
         TOTALS.census_overflow.fetch_add(1, Relaxed);
         return;
     }
-    let mode = usize::from(inference);
-    let produced = 1u8 << mode;
-    let flags = table.flags[index].fetch_or(produced, Relaxed);
-    let previous = table.inputs[mode][index].swap(input, Relaxed);
-    let census = if flags & produced == 0 {
+    let flags = table.flags[index].fetch_or(1, Relaxed);
+    let previous = table.inputs[index].swap(input, Relaxed);
+    let census = if flags & 1 == 0 {
         Census::First
-    } else if table.flags[index].fetch_and(!4, Relaxed) & 4 != 0 {
+    } else if table.flags[index].fetch_and(!2, Relaxed) & 2 != 0 {
         Census::SignatureInvalidated
     } else if previous != input {
         Census::ChangedInput
     } else {
         Census::Repeated
     };
-    TOTALS.census[mode][census as usize].fetch_add(1, Relaxed);
+    TOTALS.census[census as usize].fetch_add(1, Relaxed);
 }
 
 /// Record a structural-cache restoration instead of a production.
-pub fn census_restored(inference: bool) {
+pub fn census_restored() {
     if active() {
-        TOTALS.census[usize::from(inference)][Census::Restored as usize].fetch_add(1, Relaxed);
+        TOTALS.census[Census::Restored as usize].fetch_add(1, Relaxed);
     }
 }
 
@@ -554,7 +536,7 @@ pub fn census_signature_invalidated(definition: u32) {
         return;
     };
     if let Some(flags) = table.flags.get(definition as usize) {
-        flags.fetch_or(4, Relaxed);
+        flags.fetch_or(2, Relaxed);
     }
 }
 
@@ -608,8 +590,8 @@ pub struct Report {
     /// Counter reads and the calibrated instructions one read costs.
     pub reads: u64,
     pub read_cost: u64,
-    /// Ordinary then inference structural-production census.
-    pub census: [Vec<(Census, u64)>; 2],
+    /// Structural-production census.
+    pub census: Vec<(Census, u64)>,
     pub census_overflow: u64,
     pub volumes: Vec<(Volume, u64)>,
 }
@@ -631,12 +613,10 @@ pub(super) fn report() -> Report {
         threads: TOTALS.threads.load(Relaxed),
         reads: TOTALS.reads.load(Relaxed),
         read_cost: READ_COST.load(Relaxed),
-        census: std::array::from_fn(|mode| {
-            Census::ALL
-                .iter()
-                .map(|&c| (c, TOTALS.census[mode][c as usize].load(Relaxed)))
-                .collect()
-        }),
+        census: Census::ALL
+            .iter()
+            .map(|&c| (c, TOTALS.census[c as usize].load(Relaxed)))
+            .collect(),
         census_overflow: TOTALS.census_overflow.load(Relaxed),
         volumes: Volume::ALL
             .iter()

@@ -1891,12 +1891,6 @@ impl QueryEngine {
             })
             .collect()
     }
-    pub(crate) fn module_source_paths(&self, owner: &DefPath) -> Vec<DefPath> {
-        self.source_paths_iter()
-            .filter(|path| hirsel_types::unique_summary::same_module(path, owner))
-            .cloned()
-            .collect()
-    }
     pub(super) fn source_paths_iter(&self) -> impl Iterator<Item = &DefPath> {
         // alloc/collections/btree/merge_iter.rs:52-94, MergeIterInner::nexts:
         // advance the lesser head, or both equal heads. Peekable permits the

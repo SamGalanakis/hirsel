@@ -671,7 +671,7 @@ pub const TYPE_RECORDS: Domain = hirsel_product_codec::TypeRecords::DOMAIN;
 pub fn is_result_content(domain: Domain) -> bool {
     domain == TYPE_RECORDS
         || domain.schema == product_domain(QueryKind::Check).schema
-            && (16..=QueryKind::PrivateInference as u32 + 16).contains(&domain.kind)
+            && (16..=QueryKind::SemanticBody as u32 + 16).contains(&domain.kind)
 }
 
 /// Whether a store hit is recomputed and compared byte for byte

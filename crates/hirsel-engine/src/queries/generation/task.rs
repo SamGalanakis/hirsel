@@ -188,8 +188,7 @@ impl GeneratorInput {
             &constant,
             products,
             provider,
-            false,
-        )?;
+                    )?;
         if has_errors(&analyzed.diagnostics) {
             return Err(QueryError::Diagnostics(analyzed.diagnostics));
         }
@@ -323,17 +322,6 @@ impl SignatureProvider for GeneratorRecorder<'_> {
                 .push((path.into(), output.result.is_ok()));
         }
         output
-    }
-    fn cite_unique_failure(
-        &mut self,
-        definition: &DefPath,
-        claim: hirsel_types::UniqueClaim,
-    ) -> Result<Option<hirsel_types::UniqueFailure>, QueryError> {
-        let failure = self.provider.cite_unique_failure(definition, claim)?;
-        self.detail
-            .citations
-            .push((definition.clone(), failure.as_ref().map(|f| f.span)));
-        Ok(failure)
     }
     fn cite_name(&mut self, definition: &DefPath) -> Option<Span> {
         let cited = self.provider.cite_name(definition);

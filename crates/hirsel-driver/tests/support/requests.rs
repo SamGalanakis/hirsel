@@ -75,7 +75,7 @@ impl Graph {
             unsafe_ffi: vec![],
         };
         let built: Result<_, ToolError> = (|| {
-            let mut installed = install(
+            let (mut installed, allowance) = install(
                 engine,
                 &selection,
                 SourceShape {
@@ -91,12 +91,11 @@ impl Graph {
                 None,
             )?;
             let check = installed.check(engine, &selection)?;
-            Ok((installed, check))
+            Ok((installed, allowance, check))
         })();
-        let (installed, check) = match built {
+        let (installed, allowance, check) = match built {
             Ok(built) => built,
             Err(error) => {
-                drop(engine.release_private_inference_admission());
                 let owned = std::mem::replace(
                     engine,
                     QueryEngine::new(default_environment(), Default::default()),
@@ -105,7 +104,6 @@ impl Graph {
                 return Err(error);
             }
         };
-        let allowance = engine.release_private_inference_admission().unwrap();
         let mut runtime = AdmittedRuntime::new(jobs, allowance, installed.errors).unwrap();
         installed.register(&mut runtime, &check).unwrap();
         let owned = std::mem::replace(

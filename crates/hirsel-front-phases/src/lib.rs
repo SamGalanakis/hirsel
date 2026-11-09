@@ -131,26 +131,8 @@ impl CheckerPhase for BodyAdapter {
         })
     }
 }
-#[path = "private_unique.rs"]
-mod private_unique;
 pub struct ModeAdapter;
 impl ModesPhase for ModeAdapter {
-    fn infers_private_unique(&self) -> bool {
-        true
-    }
-    fn infer_unique(
-        &self,
-        t: &hirsel_types::TypeInterner,
-        m: &hirsel_types::TypeMemo,
-        bodies: &[(
-            Arc<hirsel_query_products::TypedBody>,
-            hirsel_types::SignatureRef,
-        )],
-        provider: &mut dyn SignatureProvider,
-    ) -> Result<Vec<(DefId, hirsel_types::UniqueInference)>, QueryError> {
-        private_unique::infer(self, t, m, bodies, provider)
-    }
-
     fn storage(
         &self,
         t: &hirsel_types::TypeInterner,
@@ -186,7 +168,6 @@ impl ModesPhase for ModeAdapter {
         signature: &Signature,
         products: &mut PhaseProducts,
         provider: &mut dyn SignatureProvider,
-        infer: bool,
     ) -> Result<QueryOutput<hirsel_query_products::AnalyzedBody>, QueryError> {
         let mut typed = Arc::unwrap_or_clone(typed);
         let syntax = typed.syntax.clone();
@@ -248,7 +229,6 @@ impl ModesPhase for ModeAdapter {
             &output.identity_joins,
             &output.identity_fields,
             provider,
-            infer,
         );
         if let Some(error) = output.failure {
             return Err(error);
@@ -388,23 +368,6 @@ impl LoweringPhase for LowerAdapter {
             None,
             &comptime.materialized,
         )?;
-        value.inferred_unique = signature.metadata.inferred_unique.clone();
-        let entry = &mut value.bodies[value.entry.0 as usize];
-        entry
-            .scoped_parameters
-            .extend(
-                signature
-                    .metadata
-                    .inferred_unique
-                    .nonretaining
-                    .iter()
-                    .map(|p| hirsel_tir::ScopedParameter {
-                        parameter: p.0,
-                        fields: Vec::new(),
-                    }),
-            );
-        entry.scoped_parameters.sort();
-        entry.scoped_parameters.dedup();
         Ok(QueryOutput {
             value,
             diagnostics: vec![],

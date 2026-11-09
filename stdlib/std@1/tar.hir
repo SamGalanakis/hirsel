@@ -1217,6 +1217,7 @@ fn pax_name(name: String) -> String uses {} {
 // Go Writer.writeRawFile for a PAX header: a V7 block with zero numbers and
 // the name made ASCII, cut to 100 bytes and stripped of trailing slashes,
 // then the records padded to a block.
+@preserves_unique(out)
 fn raw_file(mut out: List[u8], name: String, data: List[u8], flag: u8) -> () uses {} {
   let mut short = to_ascii(name)
   if string.byte_len(short) > 100 {
@@ -1249,6 +1250,7 @@ fn raw_file(mut out: List[u8], name: String, data: List[u8], flag: u8) -> () use
 }
 
 // Go Writer.Flush: the previous entry must be complete; pads it to a block.
+@preserves_unique(out)
 fn flush(mut w: Writer, mut out: List[u8]) -> Result[(), WriteError] uses {} {
   if w.closed {
     return Error(Closed())

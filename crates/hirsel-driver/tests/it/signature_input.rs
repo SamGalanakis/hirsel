@@ -53,7 +53,6 @@ fn hand_built_opaque_construction_needs_the_owner_input_and_checks_fields() {
             caller_bodies: vec![],
             protocol_associations: vec![],
             path: hirsel_syntax::DefId::intern(&build),
-            inferred_unique: function.metadata.inferred_unique.clone(),
             signature_hash: function.fingerprint,
             types: std::sync::Arc::from([]),
             entry: BodyId(0),

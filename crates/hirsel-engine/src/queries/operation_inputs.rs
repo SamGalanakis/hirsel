@@ -13,11 +13,8 @@ type HeaderProjection = (
 #[derive(Default)]
 pub(crate) struct OperationOwner {
     pub(crate) structural: parallel::structural::Checks,
-    /// Actual private inference work survives temporary header owners and proof
-    /// eviction. Source and Front observations share this operation counter.
-    pub(crate) private_work: Mutex<BTreeMap<DefId, usize>>,
     pub(crate) fact_graph: Arc<hirsel_validate::FactGraph>,
-    pub(crate) inference: Mutex<Vec<Arc<header_products::PrivateInferenceScope>>>,
+    pub(crate) header_scope: Mutex<Option<Arc<header_products::HeaderScope>>>,
     pub(crate) captures: Mutex<Vec<Weak<NamespaceCapture>>>,
     pub(crate) inputs: Mutex<Option<Weak<header_products::SourceInputs>>>,
     pub(crate) payloads: Mutex<Vec<Weak<header_products::HeaderPayload>>>,
@@ -27,31 +24,6 @@ pub(crate) struct OperationOwner {
     pub(crate) front: Mutex<Option<Weak<parallel::OperationFrontInputs>>>,
     pub(crate) headers: Mutex<BTreeMap<DefId, Vec<Weak<header_products::HeaderProduct>>>>,
     pub(crate) projections: Mutex<BTreeMap<usize, HeaderProjection>>,
-}
-
-impl OperationOwner {
-    pub(crate) fn private_work_snapshot(&self) -> Vec<(DefPath, QueryKind, u64)> {
-        self.private_work
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .iter()
-            .map(|(id, count)| {
-                (
-                    id.path().clone(),
-                    QueryKind::PrivateInference,
-                    *count as u64,
-                )
-            })
-            .collect()
-    }
-    pub(crate) fn private_work_count(&self, definition: &DefPath) -> usize {
-        self.private_work
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(&DefId::intern(definition))
-            .copied()
-            .unwrap_or(0)
-    }
 }
 
 pub(crate) struct InputIndex<K, V>(Arc<Rows<K, V>>);

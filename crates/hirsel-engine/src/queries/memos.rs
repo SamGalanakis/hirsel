@@ -104,18 +104,12 @@ pub(crate) fn optional(hash: Option<ContentHash>) -> ContentHash {
         None => tag("hirsel.read.none", &[]),
     }
 }
-/// Inference reads declared structure without depending on its own outputs.
+/// A declaration read: the signature's own structure, without its dependencies.
 pub(crate) fn declared_signature_value(
     types: &hirsel_types::TypeInterner,
     signature: &hirsel_types::Signature,
 ) -> Option<ContentHash> {
-    let mut declaration = signature.clone();
-    declaration.metadata.inferred_unique = Default::default();
-    hirsel_types::encoding::fingerprint(types, &declaration, &[]).ok()
-}
-pub(crate) fn private_summary_value(summary: &hirsel_types::UniqueSummary) -> ContentHash {
-    let encoded = bincode::serialize(summary).expect("in-memory private summary encoding");
-    tag("hirsel.read.private-summary.v1", &[&encoded])
+    hirsel_types::encoding::fingerprint(types, signature, &[]).ok()
 }
 /// The observed value of a signature read: its fingerprint, or failure.
 pub(crate) fn signature_value(result: Option<ContentHash>) -> ContentHash {
@@ -480,17 +474,6 @@ impl QueryEngine {
     /// The value `owner` observes for `read` now.
     pub(crate) fn observe(&mut self, owner: &DefPath, read: &ReadKey) -> Option<ContentHash> {
         Some(match *read {
-            ReadKey::PrivateSummary(d) => {
-                if !self.private_summary_active
-                    && self
-                        .private_summary_failure
-                        .as_ref()
-                        .is_some_and(|(revision, _)| *revision == self.revision)
-                {
-                    return None;
-                }
-                private_summary_value(&self.restored_private_summary(d).unwrap_or_default())
-            }
             ReadKey::DeclaredSignature(d) => self
                 .current_snapshot_signature(d)
                 .or_else(|| self.observed_signature(d))
@@ -676,7 +659,6 @@ impl QueryEngine {
         self.adopt_completed_headers();
         let mut changes = Changes::default();
         let mut any_names_changed = false;
-        let mut private_body_changed = false;
         for path in paths {
             let mut names_changed = false;
             let id = DefId::intern(&path);
@@ -702,18 +684,6 @@ impl QueryEngine {
                         read(ReadKey::LayoutBody(id));
                         read(ReadKey::Representation(id));
                         read(ReadKey::CitedText(id));
-                        private_body_changed |= self
-                            .adapters
-                            .modes
-                            .as_ref()
-                            .is_some_and(|modes| modes.infers_private_unique())
-                            && self.items.get(&path).is_some_and(|items| {
-                                items.first().is_some_and(|syntax| {
-                                    syntax.item.visibility == hirsel_syntax::Visibility::Private
-                                        && matches!(syntax.item.kind, ItemKind::Function { .. })
-                                })
-                            })
-                            && self.private_body_may_change_signature(id);
                     }
                     if b.header != n.header {
                         if hirsel_types::specialization_parts(&path).is_none() {
@@ -789,11 +759,6 @@ impl QueryEngine {
         }
         changes.lookups |= any_names_changed;
         self.apply_changes(&changes);
-        if private_body_changed {
-            // Declared headers can survive a body edit; their immutable
-            // private-proof producer must capture the new body before demand.
-            self.retire_snapshot();
-        }
     }
 
     /// S0's signature step: recomputes every forgotten signature in DefPath
@@ -865,13 +830,6 @@ impl QueryEngine {
         self.settle_signatures();
     }
 
-    /// Inferred uniqueness changes values, never declaration membership,
-    /// visibility or namespace. Lookup observations therefore remain valid.
-    pub(super) fn note_private_signature_values(&mut self, paths: &[DefPath]) {
-        let changes = self.signature_value_changes(paths);
-        self.apply_changes(&changes);
-        self.settle_signatures();
-    }
 
     fn signature_value_changes(&mut self, paths: &[DefPath]) -> Changes {
         let mut changes = Changes::default();
@@ -885,7 +843,6 @@ impl QueryEngine {
             for k in [
                 ReadKey::Signature(id),
                 ReadKey::DeclaredSignature(id),
-                ReadKey::PrivateSummary(id),
                 ReadKey::FailedSignature(id),
                 ReadKey::ExecutedSignature(id),
                 ReadKey::DeclarationCandidates(id),

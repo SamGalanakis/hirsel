@@ -159,7 +159,6 @@ structure!(tir::ProtocolAssociationReceipt {
     next
 });
 structure!(tir::Definition {
-    inferred_unique,
     caller_bodies,
     protocol_associations,
     types,
@@ -183,7 +182,6 @@ variants!(ty::CaptureContext {
 });
 structure!(crate::TirHeader {
     version,
-    inferred_unique,
     path,
     signature_hash,
     entry

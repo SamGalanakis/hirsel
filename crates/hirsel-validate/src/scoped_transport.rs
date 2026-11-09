@@ -554,18 +554,7 @@ pub(super) fn check(
                                 a.value.usage,
                                 hirsel_types::UseKind::Borrow | hirsel_types::UseKind::Copy
                             );
-                        let data_helper = matches!(
-                            a.value.usage,
-                            hirsel_types::UseKind::Borrow | hirsel_types::UseKind::Copy
-                        ) && function.as_ref().is_some_and(|f| {
-                            f.parameters.get(a.parameter.0 as usize).is_some_and(|p| {
-                                p.passing == PassingMode::Borrow && original_data_shape(t, p.ty)
-                            })
-                        }) && matches!(callee, Callee::Definition { path, .. }
-                                if signatures.get(DefId::intern(path)).is_some_and(|s|
-                                    s.metadata.inferred_unique.nonretaining.contains(&a.parameter)));
                         let allowed = data_observer
-                            || data_helper
                             || function
                                 .as_ref()
                                 .and_then(|f| f.parameters.get(a.parameter.0 as usize))
@@ -579,7 +568,7 @@ pub(super) fn check(
                         if !allowed {
                             error(&mut errors, None, "scoped may-retain source call");
                         }
-                        if allowed && !data_observer && !data_helper {
+                        if allowed && !data_observer {
                             let expected =
                                 function.as_ref().unwrap().parameters[a.parameter.0 as usize].ty;
                             let actual = body.places[a.value.place.0 as usize].ty;
@@ -604,7 +593,7 @@ mod tests {
     use crate::support::*;
     use hirsel_types::{SignatureKind, TypeKind, UseKind};
 
-    fn helper_call(actual: TypeKind, declared: TypeKind, nonretaining: bool) -> Vec<Violation> {
+    fn helper_call(actual: TypeKind, declared: TypeKind) -> Vec<Violation> {
         let mut f = Fixture::unit();
         let argument = f.slot(actual, Storage::Parameter);
         f.body().parameters = vec![LocalId(argument)];
@@ -612,14 +601,11 @@ mod tests {
             parameter: 0,
             fields: vec![],
         }];
-        let mut signature = function_signature(
+        let signature = function_signature(
             "helper",
             vec![(PassingMode::Borrow, declared)],
             TypeKind::Tuple(vec![].into()),
         );
-        if nonretaining {
-            signature.metadata.inferred_unique.nonretaining = vec![hirsel_types::ParamId(0)];
-        }
         f.signatures.insert(signature.definition, signature);
         f.body().blocks[0].terminator = Terminator::Call {
             callee: Callee::Definition {
@@ -641,10 +627,10 @@ mod tests {
     }
 
     #[test]
-    fn data_helper_needs_an_original_data_contract() {
+    fn borrowed_data_helper_may_retain_scoped_content() {
+        // MODE-2: no helper body supplies a nonretention promise to its caller.
         let bytes = TypeKind::Primitive(hirsel_types::Primitive::Bytes);
-        assert!(helper_call(bytes.clone(), bytes.clone(), true).is_empty());
-        assert!(!helper_call(bytes.clone(), bytes.clone(), false).is_empty());
+        assert!(!helper_call(bytes.clone(), bytes.clone()).is_empty());
         let generic = TypeKind::Parameter(hirsel_types::TypeParameterRef::bound(
             hirsel_types::TypeParamId(0),
         ));
@@ -655,7 +641,7 @@ mod tests {
         };
         let callable = TypeKind::Function(callback);
         for actual in [bytes, callable.clone()] {
-            let errors = helper_call(actual, generic.clone(), true);
+            let errors = helper_call(actual, generic.clone());
             assert!(
                 errors.iter().any(|v| matches!(
                     v.kind,
@@ -668,7 +654,7 @@ mod tests {
         }
         let actual = TypeKind::Tuple(vec![interner().intern(ty(callable))].into());
         let declared = TypeKind::Tuple(vec![interner().intern(ty(generic))].into());
-        assert!(!helper_call(actual, declared, true).is_empty());
+        assert!(!helper_call(actual, declared).is_empty());
     }
 
     fn capture(scoped: bool, context: CaptureContext) -> Vec<Violation> {

@@ -717,17 +717,10 @@ the logical declaration and compiler policy. Manifest discovery order and
 unrelated source membership do not change the address; complete namespace,
 signature and execution reads validate the selected dependencies before reuse.
 
-Private inference owns its module's body, membership and declaration reads.
-A normalized private signature reads the settled `PrivateSummary` output,
-so a body edit with the same inferred proof preserves the header and its
-subscribers. A changed proof updates the signature before the next immutable
-snapshot is published. Persisted reads append the private-summary kind after
-all existing tags. Ordinary declaration queries publish their conservative
-headers immediately. Inference delays only its own provisional publications,
-then verifies each result against the stored variant for the settled proof.
-When a restored header needs a different proof, the engine restores or
-recomputes the complete signature product before persisting it; a header-only
-projection never overwrites syntax-backed auxiliary products.
+A signature is its declaration alone, whatever the definition's visibility:
+no body fact enters a header (ownership.md MODE-2). A body edit that leaves the
+declaration unchanged therefore preserves the header and its subscribers, and
+declaration queries publish their headers immediately.
 
 The `MemoGraph` keeps each memo's record and the reverse index `ReadKey →
 subscribers`. Indexing a file diffs each affected definition's inputs (body,
@@ -1011,19 +1004,12 @@ Compact eviction retains admitted phase observations. A
 missing cached record takes ordinary recomputation. Check and instance bootstrap consume roots in bounded
 groups. Header slots share the Front allowance and release unpinned signature
 payloads and metadata under pressure. Explicit archives keep their own leases.
-Settled module proofs are entries of the same cache: holding a `ModuleProof`
-pins one, and pressure evicts unpinned proofs, which recompute through the
-ordinary producer on their next demand. A Front worker pins the resident proofs
-it consumes through Check, Modes and publication. The group's buffer capacity
-uses the same header partition; creating a group never infers an inactive module.
-A header row and a module proof hold one
-kind of charge: engine-retained (uncharged, never evicted), standalone, or lent
+The group's buffer capacity uses the same header partition.
+A header row holds one kind of charge: engine-retained (uncharged, never evicted), standalone, or lent
 by a live Front partition. When the partition ends, every charge it lent returns
 exactly once and its entries stay as uncharged engine rows. A resource refusal
-of a header or proof read returns to its demander and is never settled as a row
-or a verdict; a later demand recomputes it. A module proof's semantic failure is
-that module's verdict only. A recomputed signature that disagrees twice with the
-proof that named it is an operational fault, not a diagnostic.
+of a header read returns to its demander and is never settled as a row or a
+verdict; a later demand recomputes it.
 A synchronous Front body check or generator preparation holds its validation
 demand through execution. Completed tasks, reusable factories and immutable
 captures retain no demand pin. Escaping validation views keep their own charges;
@@ -1088,13 +1074,5 @@ Changing retention or the configured allowance updates existing scalar holds.
 Compact read/diagnostic/depth receipts and table/interner storage remain session
 metadata outside the body allowance; caller-owned output Arcs remain in flight.
 
-Admitted Check demands private uniqueness facts by module after capturing its
-front snapshot. The producer runs on the existing compiler worker and retains
-the Modes adapter's SCC fixed point. Final private headers observe the settled
-module proof. Run, native and complete V consumers demand their full catalogues.
-Inference products use the ordinary result provider and complete read receipts;
-unchanged inputs reuse facts without resolving or checking bodies. Source
-membership, private body text, lookups, private representations and normalized
-declared signatures are observed inputs. Declared-signature reads exclude
-inferred uniqueness, so the fixed point does not depend on its own output.
+Run, native and complete V consumers demand their full catalogues.
 The engine's compact facts also serve requests with persistence disabled.

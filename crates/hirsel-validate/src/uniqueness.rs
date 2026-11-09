@@ -1405,7 +1405,7 @@ impl Checker<'_, '_> {
                         .get(self.definition.path)
                         .map(|s| s.metadata.roles.clone())
                         .unwrap_or_default();
-                    for (row, _) in hirsel_types::unique_summary::result_rows(
+                    for (row, _) in hirsel_types::unique_rows::result_rows(
                         self.t,
                         self.place_type(destination),
                         &roles,

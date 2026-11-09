@@ -75,7 +75,7 @@ fn limits_ok(limits: Limits) -> Result[(), ErrorKind] uses {} {
   Ok(())
 }
 
-fn spend(mut work: u64, amount: u64) -> Result[(), ErrorKind] uses {} {
+fn spend(mut work: u64, amount: u64) -> unique Result[(), ErrorKind] uses {} {
   if amount > work {
     return Error(WorkLimit())
   }
@@ -311,7 +311,7 @@ pub fn parse_text(take text: String, limits: Limits) -> Result[Patch, PatchError
 }
 
 // Checked RFC6901 array index grammar. Only add at the final token accepts '-'.
-fn array_index(token: String, length: u64, add: bool) -> Result[u64, ErrorKind] uses {} {
+fn array_index(token: String, length: u64, add: bool) -> unique Result[u64, ErrorKind] uses {} {
   if add && token == "-" {
     return Ok(length)
   }
@@ -357,7 +357,7 @@ fn edit(
   at: u64,
   mode: Edit,
   take replacement: unique json.Value
-) -> Result[json.Value, ErrorKind] uses {} {
+) -> unique Result[json.Value, ErrorKind] uses {} {
   let last = at + 1 == core@1/list.len(tokens)
   let token = tokens[at]
   match take target {
@@ -413,7 +413,7 @@ fn change(
   selected_path: Path,
   mode: Edit,
   take replacement: unique json.Value
-) -> Result[Option[json.Value], ErrorKind] uses {} {
+) -> unique Result[Option[json.Value], ErrorKind] uses {} {
   if core@1/list.len(selected_path.tokens) == 0 {
     if mode != Insert() && !match document {
       Some(_) => true,
@@ -441,7 +441,7 @@ type Decimal {
   exponent: bigint.BigInt,
 }
 
-fn decimal(number: String, mut work: u64) -> Result[Decimal, ErrorKind] uses {} {
+fn decimal(number: String, mut work: u64) -> unique Result[Decimal, ErrorKind] uses {} {
   let data = core@1/string.as_bytes(number)
   let size = core@1/bytes.len(data)
   spend(mut work, size * 4 + 1)?
@@ -505,7 +505,7 @@ fn decimal(number: String, mut work: u64) -> Result[Decimal, ErrorKind] uses {} 
   Ok(Decimal(negative: negative, digits: take significant, exponent: take exponent))
 }
 
-fn equivalent(a: json.Value, b: json.Value, mut work: u64) -> Result[bool, ErrorKind] uses {} {
+fn equivalent(a: json.Value, b: json.Value, mut work: u64) -> unique Result[bool, ErrorKind] uses {} {
   spend(mut work, 8)?
   match (a, b) {
     (Null, Null) => Ok(true),
@@ -580,7 +580,7 @@ fn check_test(
   selected: Path,
   expected: json.Value,
   mut work: u64
-) -> Result[(), ErrorKind] uses {} {
+) -> unique Result[(), ErrorKind] uses {} {
   let matched: Result[bool, ErrorKind] = match document {
     Some(target) => match json_pointer.get(target, selected.pointer) {
       Some(actual) => equivalent(actual, expected, mut work),
@@ -599,7 +599,7 @@ fn execute(
   op: Operation,
   limits: Limits,
   mut work: u64
-) -> Result[Option[json.Value], ErrorKind] uses {} {
+) -> unique Result[Option[json.Value], ErrorKind] uses {} {
   match op {
     Add(p, v) => change(take document, p, Insert(), unique v),
     Remove(p) => change(take document, p, Delete(), Null()),

@@ -3,10 +3,8 @@
 #[cfg(test)]
 hirsel_guard::install!();
 
-pub mod unique_summary;
-pub use unique_summary::{
-    UniqueClaim, UniqueFailure, UniqueInference, UniqueResultRow, UniqueSummary,
-};
+pub mod unique_rows;
+pub use unique_rows::UniqueResultRow;
 pub mod core_roles;
 pub mod encoding;
 pub mod entry;
@@ -1044,8 +1042,6 @@ pub struct BorrowCursorDecision {
 /// Complete static decisions; cleanup lowering still determines ordered drops.
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Default, Eq, PartialEq)]
 pub struct OwnershipFacts {
-    pub inferred_unique: UniqueSummary,
-    pub unique_failures: Vec<UniqueFailure>,
     /// Confined counted-result owners released after a completed statement.
     /// Lowering emits ordinary cleanup; V reconstructs shares independently.
     #[serde(default)]
@@ -1382,16 +1378,6 @@ pub trait SignatureProvider {
         _stage: GroupStage,
     ) -> Result<RecursiveGroup, QueryError> {
         Ok(RecursiveGroup::default())
-    }
-    /// The failed unique claim, for a secondary label in the citing body.
-    /// A refused proof read is an error, never an absent citation. The caller
-    /// must refuse the body rather than retain a diagnostic without its cause.
-    fn cite_unique_failure(
-        &mut self,
-        _definition: &DefPath,
-        _claim: UniqueClaim,
-    ) -> Result<Option<UniqueFailure>, QueryError> {
-        Ok(None)
     }
     /// The name site in the checked definition's own source file. The span
     /// is relative to the cited item's anchor, and the provider records the

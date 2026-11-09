@@ -144,7 +144,6 @@ pub fn definition() -> Definition {
         protocol_associations: vec![],
         types: vec![unit].into(),
         path: hirsel_syntax::DefId::intern(&DefPath::core("held")),
-        inferred_unique: Default::default(),
         signature_hash: Default::default(),
         bodies: vec![Body {
             arena_scope_grant: None,

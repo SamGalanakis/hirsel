@@ -22,12 +22,13 @@ const TOOM3_THRESHOLD: u64 = 128
 const LIMB_MAX: u64 = 18446744073709551615
 
 // Magnitudes are little-endian limb lists without high zero limbs; zero is empty.
+@preserves_unique(magnitude)
 fn make(negative: bool, take magnitude: List[u64]) -> BigInt uses {} {
   let nonzero = core@1/list.len(magnitude) != 0
   BigInt(negative: negative && nonzero, magnitude: take magnitude)
 }
 
-fn zeros(count: u64) -> List[u64] uses {} {
+fn zeros(count: u64) -> unique List[u64] uses {} {
   let mut out: unique List[u64] = []
   core@1/list.reserve(mut out, count)
   for _ in 0u64..count {
@@ -79,7 +80,7 @@ fn compare_magnitudes(a: List[u64], b: List[u64]) -> i32 uses {} {
   0
 }
 
-fn add_magnitudes(a: List[u64], b: List[u64]) -> List[u64] uses {} {
+fn add_magnitudes(a: List[u64], b: List[u64]) -> unique List[u64] uses {} {
   let la = core@1/list.len(a)
   let lb = core@1/list.len(b)
   let longest = if la < lb {
@@ -108,7 +109,7 @@ fn add_magnitudes(a: List[u64], b: List[u64]) -> List[u64] uses {} {
 }
 
 // a - b for a >= b.
-fn sub_magnitudes(a: List[u64], b: List[u64]) -> List[u64] uses {} {
+fn sub_magnitudes(a: List[u64], b: List[u64]) -> unique List[u64] uses {} {
   let la = core@1/list.len(a)
   let lb = core@1/list.len(b)
   let mut out: unique List[u64] = []
@@ -388,7 +389,7 @@ fn trailing_zero_bits(a: List[u64]) -> u64 uses {} {
   i * 64 + core@1/int.trailing_zeros(a[i])
 }
 
-fn shift_left_magnitude(a: List[u64], bits: u64) -> List[u64] uses {} {
+fn shift_left_magnitude(a: List[u64], bits: u64) -> unique List[u64] uses {} {
   let length = core@1/list.len(a)
   if length == 0 {
     let empty: unique List[u64] = []
@@ -617,6 +618,7 @@ fn digit_byte(digit: u64) -> u8 uses {} {
 }
 
 // Appends `width` digits of `value`, most significant first.
+@preserves_unique(out)
 fn append_chunk(mut out: List[u8], value: u64, radix: u64, width: u64) -> () uses {} {
   let mut scale: u64 = 1
   for _ in 1u64..width {
@@ -631,6 +633,7 @@ fn append_chunk(mut out: List[u8], value: u64, radix: u64, width: u64) -> () use
 }
 
 // Go natconv utoa: divide by the largest limb power of the radix, then expand each chunk.
+@preserves_unique(out)
 fn append_magnitude(mut out: List[u8], magnitude: List[u64], radix: u64) -> () uses {} {
   if core@1/list.len(magnitude) == 0 {
     core@1/list.push(mut out, 48)
@@ -660,12 +663,12 @@ fn append_magnitude(mut out: List[u8], magnitude: List[u64], radix: u64) -> () u
 }
 
 /// Zero.
-pub fn zero() -> BigInt uses {} {
+pub fn zero() -> unique BigInt uses {} {
   make(false, [])
 }
 
 /// The value of an unsigned 128-bit integer; the narrower widths widen to it.
-pub fn from_u128(value: u128) -> BigInt uses {} {
+pub fn from_u128(value: u128) -> unique BigInt uses {} {
   let low: u64 = core@1/int.truncate(value)
   let high: u64 = core@1/int.narrow(value >> 64)
   let mut magnitude: unique List[u64] = [low, high]
@@ -694,7 +697,7 @@ pub fn from_u32(value: u32) -> BigInt uses {} {
   from_u128(core@1/int.widen(value))
 }
 
-pub fn from_u64(value: u64) -> BigInt uses {} {
+pub fn from_u64(value: u64) -> unique BigInt uses {} {
   from_u128(core@1/int.widen(value))
 }
 
@@ -858,7 +861,7 @@ pub fn abs(value: BigInt) -> BigInt uses {} {
 }
 
 // The sum of signed magnitudes.
-fn combine(a_negative: bool, a: List[u64], b_negative: bool, b: List[u64]) -> BigInt uses {} {
+fn combine(a_negative: bool, a: List[u64], b_negative: bool, b: List[u64]) -> unique BigInt uses {} {
   if a_negative == b_negative {
     return make(a_negative, add_magnitudes(a, b))
   }
@@ -876,7 +879,7 @@ pub fn add(a: BigInt, b: BigInt) -> BigInt uses {} {
   combine(a.negative, a.magnitude, b.negative, b.magnitude)
 }
 
-pub fn sub(a: BigInt, b: BigInt) -> BigInt uses {} {
+pub fn sub(a: BigInt, b: BigInt) -> unique BigInt uses {} {
   combine(a.negative, a.magnitude, !b.negative, b.magnitude)
 }
 

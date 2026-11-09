@@ -544,7 +544,6 @@ fn ownership_retains_named_function_type_separately_from_its_body_result() {
         &[],
         &[],
         &mut registry,
-        true,
     )
     .unwrap();
     assert!(owned.diagnostics.is_empty(), "{:?}", owned.diagnostics);

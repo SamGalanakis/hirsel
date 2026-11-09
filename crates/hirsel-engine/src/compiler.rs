@@ -439,7 +439,6 @@ pub(crate) mod tests {
             _signature: &Signature,
             _products: &mut PhaseProducts,
             _signatures: &mut dyn SignatureProvider,
-            infer: bool,
         ) -> Result<QueryOutput<AnalyzedBody>, QueryError> {
             panic!("declaration loading entered a body phase")
         }

@@ -58,7 +58,6 @@ pub enum QueryKind {
     GeneratedRegistration,
     SourceAudit,
     SemanticBody,
-    PrivateInference,
 }
 impl QueryKind {
     pub fn phase_name(self) -> &'static str {
@@ -80,7 +79,6 @@ impl QueryKind {
             Self::GeneratedRegistration => "generated instance registration",
             Self::SourceAudit => "source allocation audit",
             Self::SemanticBody => "semantic source body",
-            Self::PrivateInference => "private uniqueness inference",
         }
     }
 }

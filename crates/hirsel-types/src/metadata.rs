@@ -73,8 +73,6 @@ pub struct SignatureMetadata {
     /// The in-process owner; it grants no verifier or replay authority.
     #[serde(skip)]
     pub retention: ast::PayloadLease,
-    /// Private body facts, never part of FunctionType or indirect-call evidence.
-    pub inferred_unique: UniqueSummary,
     pub visibility: ast::Visibility,
     pub alias: bool,
     /// Explicit GEN-6 constant alias edge; consumers normalize terminal identity.
@@ -110,7 +108,6 @@ impl Default for SignatureMetadata {
     fn default() -> Self {
         Self {
             retention: Default::default(),
-            inferred_unique: UniqueSummary::default(),
             visibility: ast::Visibility::Private,
             alias: false,
             constant_alias: None,

@@ -90,11 +90,10 @@ impl ModesPhase for CaptureModes {
         signature: &Signature,
         products: &mut PhaseProducts,
         provider: &mut dyn SignatureProvider,
-        infer: bool,
     ) -> Result<hirsel_types::QueryOutput<hirsel_query_products::AnalyzedBody>, QueryError> {
         let output = self
             .inner
-            .check_modes(t, m, body, signature, products, provider, infer)?;
+            .check_modes(t, m, body, signature, products, provider)?;
         if signature.definition.path().0.name == "probe" {
             *self.body.lock().unwrap() = Some(output.value.clone());
         }

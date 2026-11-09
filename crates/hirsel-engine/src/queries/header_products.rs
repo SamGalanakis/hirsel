@@ -6,11 +6,7 @@ use std::sync::{
     OnceLock, Weak,
     atomic::{AtomicBool, AtomicU64, Ordering},
 };
-mod private;
 mod sources;
-pub(crate) use private::AdoptedPrivate;
-pub(in crate::queries) use private::ConsumerProofs;
-pub use private::ModuleProof;
 use sources::HeaderSources;
 pub(super) use sources::source_refusal;
 pub(crate) use sources::{CapturedText, SourceInputs};
@@ -21,7 +17,6 @@ pub(crate) struct HeaderProduct {
     pub(crate) entry: Option<Arc<Entry<hirsel_types::SignatureRef>>>,
     pub(crate) recomputes: usize,
     graph_work: usize,
-    publication: bool,
     charge: Charge,
     _row_charge: Charge,
     origin: Weak<Entry<hirsel_types::SignatureRef>>,
@@ -32,7 +27,7 @@ pub(crate) trait HeaderAllowance: Send + Sync {
     fn take_header(&self, bytes: u64) -> Option<hirsel_engine_admission::MemoryReservation>;
     fn available_header_bytes(&self) -> u64;
 }
-/// What one settled header row or module proof holds against a budget.
+/// What one settled header row holds against a budget.
 enum HeaderCharge {
     /// Charged to the shared standalone source-inference budget.
     Standalone(
@@ -143,31 +138,26 @@ struct HeaderAdmission {
     partition: Weak<dyn HeaderAllowance>,
     tables: Arc<std::sync::Mutex<Vec<Weak<HeaderProducts>>>>,
 }
-/// Exact inference inputs and admission identity, retained by the operation.
-/// Every payload reference is weak; this value owns no reservation.
+/// The header admission every table of one operation shares, retained by
+/// the operation. Every payload reference is weak; this value owns no reservation.
 #[derive(Default)]
-pub(crate) struct PrivateInferenceScope {
-    inputs: Box<[[ContentHash; 3]]>,
-    working: AtomicU64,
-    registrations: Vec<Weak<AcceptedFrontRegistration>>,
+pub(crate) struct HeaderScope {
     admission: std::sync::Mutex<Option<HeaderAdmission>>,
 }
 impl operation_inputs::OperationOwner {
-    fn inference_scope(&self, inputs: &[[ContentHash; 3]]) -> Arc<PrivateInferenceScope> {
-        self.inference
+    fn header_scope(&self) -> Arc<HeaderScope> {
+        self.header_scope
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .iter()
-            .rev()
-            .find(|scope| scope.inputs.as_ref() == inputs)
-            .cloned()
-            .unwrap_or_else(|| {
-                Arc::new(PrivateInferenceScope {
-                    inputs: inputs.into(),
-                    ..Default::default()
-                })
-            })
+            .clone()
+            .unwrap_or_default()
     }
+}
+/// Headers produced without a host partition reserve from this shared budget.
+pub(in crate::queries) fn standalone_budget() -> &'static Arc<hirsel_engine_admission::ProcessBudget>
+{
+    static BUDGET: OnceLock<Arc<hirsel_engine_admission::ProcessBudget>> = OnceLock::new();
+    BUDGET.get_or_init(|| hirsel_engine_admission::ProcessBudget::new(512 << 20))
 }
 impl HeaderAdmission {
     fn lend(&self, charge: FrontCharge) -> Charge {
@@ -251,18 +241,15 @@ pub(crate) struct HeaderProducts {
     /// Bumped by every row this table publishes after construction. An engine
     /// adopts the completed rows once per revision, not once per read.
     revision: AtomicU64,
-    scope: std::sync::Mutex<Arc<PrivateInferenceScope>>,
+    scope: std::sync::Mutex<Arc<HeaderScope>>,
     validation_caches: ValidationCaches,
     environment: QueryEnvironment,
     adapters: HeaderPhases,
     sources: SourceMap,
     owners: Arc<crate::NativeRecordContext>,
-    provisional: bool,
     standalone: bool,
-    failure: Option<QueryError>,
     syntax: Arc<HeaderSources>,
     inputs: Arc<SourceInputs>,
-    private: Option<private::PrivateProducts>,
     declarations: crate::DeclarationIndex,
     catalog: catalog::Catalog,
     installed_sources: BTreeSet<FileId>,
@@ -279,13 +266,27 @@ pub(crate) struct HeaderProducts {
     verify: Verify,
     limits: crate::ComptimeLimits,
     staged: BTreeMap<DefPath, crate::comptime::StagedConstant>,
-    summaries: Arc<hirsel_syntax::DefMap<hirsel_types::UniqueSummary>>,
-    /// The reads each carried summary's module proof recorded: a module
-    /// producer validates them like any previous proof.
-    summary_reads: Arc<hirsel_syntax::DefMap<Arc<hirsel_query_products::reads::Reads>>>,
-    failures: BTreeMap<DefId, Vec<hirsel_types::UniqueFailure>>,
 }
 impl HeaderProducts {
+    /// A header produced without a host partition charges the shared
+    /// standalone budget, with its reservation handle.
+    fn reserve_standalone(
+        &self,
+        bytes: u64,
+    ) -> Result<hirsel_engine_admission::MemoryReservation, QueryError> {
+        let bytes = bytes
+            .checked_add(
+                (size_of::<hirsel_engine_admission::MemoryReservation>() + 2 * size_of::<usize>())
+                    as u64,
+            )
+            .ok_or_else(|| source_refusal("standalone header charge overflows"))?;
+        standalone_budget().reserve(bytes).map_err(|error| {
+            QueryError::Operational(hirsel_types::OperationalFailure {
+                operation: "header admission".into(),
+                message: format!("standalone header owner: {error}"),
+            })
+        })
+    }
     pub(in crate::queries) fn structural_checks(
         &self,
         checker: &dyn CheckerPhase,
@@ -304,7 +305,7 @@ impl HeaderProducts {
             )
     }
 
-    fn scope(&self) -> Arc<PrivateInferenceScope> {
+    fn scope(&self) -> Arc<HeaderScope> {
         self.scope.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
     fn track_scope(self: &Arc<Self>) {
@@ -336,8 +337,6 @@ impl HeaderProducts {
     }
     pub(crate) fn capture(engine: &QueryEngine) -> Arc<Self> {
         let inputs = SourceInputs::capture(engine);
-        let private = private::PrivateProducts::capture(engine);
-        let declarations = engine.declarations.frozen();
         let paths: Arc<[_]> = engine
             .header_products
             .as_ref()
@@ -349,15 +348,10 @@ impl HeaderProducts {
             .copied()
             .map(|id| {
                 let cell = HeaderSlot::default();
-                if engine.unmarked_signature(id).is_some()
-                    && private
-                        .as_ref()
-                        .is_none_or(|private| !private.requires_proof(id))
-                {
+                if engine.unmarked_signature(id).is_some() {
                     let entry = engine.signatures[&id].clone();
                     let projected = engine.operation.header_entry(&entry);
-                    let publication = engine.private_signature_publications.contains(&id);
-                    let existing = engine.operation.header(&projected, publication);
+                    let existing = engine.operation.header(&projected);
                     if let Some(existing) = existing {
                         cell.set_shared(existing);
                     } else {
@@ -366,7 +360,6 @@ impl HeaderProducts {
                             entry: Some(projected),
                             recomputes: 0,
                             graph_work: 0,
-                            publication: engine.private_signature_publications.contains(&id),
                             charge: Charge::engine(),
                             _row_charge: Charge::engine(),
                             origin: Arc::downgrade(&entry),
@@ -379,23 +372,6 @@ impl HeaderProducts {
             })
             .collect();
         let owners = Arc::new(engine.source_records());
-        let summaries: hirsel_syntax::DefMap<_> = engine
-            .private_summaries
-            .iter()
-            .filter(|(id, _)| {
-                declarations
-                    .metadata()
-                    .definitions
-                    .get(id.path())
-                    .is_some_and(|metadata| !metadata.public)
-                    && engine.source_facts(id.path()).is_some_and(|facts| {
-                        (facts.body_kind == BodyKind::Function || facts.generator)
-                            && facts.body_kind != BodyKind::Constant
-                            && !facts.instance_bodied
-                    })
-            })
-            .map(|(id, summary)| (*id, summary.clone()))
-            .collect();
         let headers = Arc::new(Self {
             operation: engine.operation.clone(),
             rows,
@@ -408,24 +384,16 @@ impl HeaderProducts {
                     .header_products
                     .as_ref()
                     .map(|headers| headers.scope())
-                    .filter(|scope| scope.inputs == engine.private_summary_inputs)
-                    .unwrap_or_else(|| {
-                        engine
-                            .operation
-                            .inference_scope(&engine.private_summary_inputs)
-                    }),
+                    .unwrap_or_else(|| engine.operation.header_scope()),
             ),
             validation_caches: Default::default(),
             environment: engine.environment.clone(),
             adapters: HeaderPhases::capture(&engine.adapters),
             sources: engine.sources.clone(),
             owners: owners.clone(),
-            provisional: engine.private_summary_active,
-            standalone: !engine.private_inference_hosted && !engine.private_summary_active,
-            failure: engine.current_private_summary_failure().cloned(),
+            standalone: !engine.headers_hosted,
             syntax: inputs.syntax.clone(),
             inputs: inputs.clone(),
-            private,
             declarations: engine.declarations.header_inputs(),
             catalog: inputs.catalog.clone(),
             installed_sources: engine.installed_sources.clone(),
@@ -442,48 +410,17 @@ impl HeaderProducts {
             verify: engine.verify,
             limits: engine.comptime_limits,
             staged: engine.staged_constants.clone(),
-            summary_reads: Arc::new(
-                summaries
-                    .keys()
-                    .filter_map(|id| Some((*id, engine.private_summary_reads.get(id)?.clone())))
-                    .collect(),
-            ),
-            summaries: Arc::new(summaries),
-            failures: engine.private_unique_failures.clone(),
         });
         headers.track_scope();
         headers
-    }
-    fn declared_inputs(self: &Arc<Self>, engine: &QueryEngine) -> Option<Arc<Self>> {
-        (self.provisional
-            && engine.private_summary_active
-            && self.declarations.revision() == engine.declarations.revision()
-            && self.staged.len() == engine.staged_constants.len()
-            && self.staged.iter().all(|(path, previous)| {
-                engine.staged_constants.get(path).is_some_and(|current| {
-                    previous.owner == current.owner
-                        && previous.expression == current.expression
-                        && previous.inputs == current.inputs
-                        && previous.signature.fingerprint == current.signature.fingerprint
-                })
-            })
-            && self.environment == engine.environment
-            && self.verify == engine.verify
-            && self.limits == engine.comptime_limits
-            && self.published_manifest == engine.published_manifest
-            && Arc::ptr_eq(&self.types, &engine.types)
-            && engine.private_signature_publications.is_empty())
-        .then(|| self.clone())
     }
     pub(in crate::queries) fn execution(self: &Arc<Self>) -> QueryEngine {
         let mut engine =
             QueryEngine::new_with_hold_bytes(self.environment.clone(), self.adapters.adapters(), 0);
         engine.operation = self.operation.clone();
-        engine.private_summary_inputs = self.scope().inputs.clone();
         engine.sources = self.sources.clone();
         engine.source_ownership = Arc::default();
-        engine.private_summary_active = self.provisional;
-        engine.private_summary_failure = self.failure.clone().map(|error| (engine.revision, error));
+        engine.headers_hosted = !self.standalone;
         engine.items = native_records::SourceTable::new(engine.source_ownership.clone());
         engine.declarations = self.declarations.clone();
         engine.catalog = self.catalog.clone();
@@ -528,8 +465,7 @@ impl HeaderProducts {
             let versions = rows.entry(id).or_default();
             versions.retain(|row| row.strong_count() != 0);
             if let Some(existing) = versions.iter().filter_map(Weak::upgrade).find(|existing| {
-                existing.publication == product.publication
-                    && existing
+                existing
                         .entry
                         .as_ref()
                         .zip(product.entry.as_ref())
@@ -582,7 +518,7 @@ impl HeaderProducts {
             .ok()
             .map(|output| output.value.clone())
     }
-    pub(crate) fn source_fact_index_bytes(engine: &QueryEngine, private: bool) -> u64 {
+    pub(crate) fn source_fact_index_bytes(engine: &QueryEngine) -> u64 {
         let definitions = engine.source_paths_iter().count();
         HeaderSources::facts_index_bytes(definitions)
             .saturating_add(size_of::<AtomicU64>() as u64)
@@ -593,11 +529,6 @@ impl HeaderProducts {
                     .catalog
                     .source_carry_bytes(&engine.items, &engine.indexed_sources),
             )
-            .saturating_add(if private {
-                private::PrivateProducts::index_bytes(engine)
-            } else {
-                0
-            })
     }
     pub(crate) fn source_environment(&self) -> &QueryEnvironment {
         &self.environment
@@ -622,18 +553,6 @@ impl HeaderProducts {
     }
     pub(crate) fn definitions(&self) -> impl Iterator<Item = DefId> + '_ {
         self.paths.iter().copied()
-    }
-    /// The settled summary of `id`. Err only for a resource refusal of its
-    /// module proof; a failed proof has no summary.
-    pub(super) fn summary(
-        &self,
-        id: DefId,
-    ) -> Result<Option<hirsel_types::UniqueSummary>, QueryError> {
-        if self.private.is_some() {
-            self.demanded_summary(id)
-        } else {
-            Ok(self.summaries.get(&id).cloned())
-        }
     }
     pub(crate) fn owners(&self) -> &Arc<crate::NativeRecordContext> {
         &self.owners
@@ -666,14 +585,8 @@ impl HeaderProducts {
         if let Some(product) = cell.get() {
             return Some(Ok(product));
         }
-        let mut working = None;
-        let scratch = self.scope().working.load(Ordering::Relaxed);
-        let demanded = self.produce_with_working(
-            &mut self.execution(),
-            id,
-            (self.provisional && scratch != 0).then_some((&mut working, scratch)),
-        );
-        match (cell.get().or(working), demanded) {
+        let demanded = self.produce(&mut self.execution(), id);
+        match (cell.get(), demanded) {
             (Some(product), _) => Some(Ok(product)),
             (None, Err(error)) => Some(Err(error)),
             (None, Ok(_)) => None,
@@ -702,7 +615,7 @@ impl HeaderProducts {
                 (Some(product), _) => return Some(Ok(product)),
                 (None, Err(error)) => {
                     if matches!(&error, QueryError::Operational(failure)
-                        if matches!(failure.operation.as_str(), "header admission" | "private inference admission"))
+                        if matches!(failure.operation.as_str(), "header admission"))
                     {
                         let refused_credit = self.header_credit();
                         loop {
@@ -768,14 +681,6 @@ impl HeaderProducts {
         working: Option<(&mut Option<Arc<HeaderProduct>>, u64)>,
     ) -> SignatureOutput {
         self.track_scope();
-        if let Some(failures) = self.failures.get(&id) {
-            engine
-                .private_unique_failures
-                .entry(id)
-                .or_insert_with(|| failures.clone());
-        }
-        // Only producing a row needs its module proof. A settled row is used
-        // as is, so an evicted proof is not re-inferred for it.
         if engine.header_products.is_some()
             && let Some(product) = self.rows.get(&id).and_then(HeaderSlot::get)
             && !engine
@@ -783,17 +688,6 @@ impl HeaderProducts {
                 .contains(&(id.path().clone(), QueryKind::Signature))
         {
             return self.use_product(engine, id, &product);
-        }
-        // The held proof pins this module while its header is produced. A
-        // failed module proof is a verdict, not a refusal: the header settles
-        // through its ordinary query, which reads that same failure.
-        let mut proof = match self.private_product(id) {
-            Ok(proof) => proof,
-            Err(QueryError::Diagnostics(_)) => None,
-            Err(error) => return Err(error),
-        };
-        if engine.header_products.is_none() {
-            self.adopt_private_products(engine)?;
         }
         let Some(cell) = self.rows.get(&id) else {
             return engine.signature_query_local(id);
@@ -807,7 +701,7 @@ impl HeaderProducts {
         if let Some(product) = cell.get() {
             return self.use_product(engine, id, &product);
         }
-        // A header or proof read refused inside this producer leaves a
+        // A header read refused inside this producer leaves a
         // conservative result, so the result is never published.
         crate::queries::operation_owner_trace(format_args!(
             "OWNER HEADER PRODUCE table={:p} id={id:?}",
@@ -820,39 +714,6 @@ impl HeaderProducts {
         if let Some(refusal) = refusal {
             return Err(refusal);
         }
-        if let Some(stale) = proof.take().filter(|proof| {
-            proof
-                .signature_identity(id)
-                .is_some_and(|expected| *expected != private::identity(&result))
-        }) {
-            // The recomputed payload disagrees with the proof that named it.
-            // Recompute the proof once; a second disagreement is a fault.
-            self.invalidate_private(id, &stale);
-            let fresh = match self.private_product(id) {
-                Ok(proof) => proof,
-                Err(QueryError::Diagnostics(_)) => None,
-                Err(error) => return Err(error),
-            };
-            if engine.header_products.is_none() {
-                self.adopt_private_products(engine)?;
-            }
-            if let Some(product) = cell.get() {
-                return self.use_product(engine, id, &product);
-            }
-            if fresh.is_some_and(|proof| {
-                proof
-                    .signature_identity(id)
-                    .is_some_and(|expected| *expected != private::identity(&result))
-            }) {
-                return Err(QueryError::Operational(hirsel_types::OperationalFailure {
-                    operation: "private signature identity".into(),
-                    message: format!(
-                        "{} recomputes to a different signature than its module proof",
-                        id.path()
-                    ),
-                }));
-            }
-        }
         let source = engine.signatures.get(&id);
         let local = engine.header_products.is_none();
         let origin = source
@@ -861,7 +722,7 @@ impl HeaderProducts {
         let entry = source.map(|entry| self.operation.header_entry(entry));
         if let Some(existing) = entry
             .as_ref()
-            .and_then(|entry| self.operation.header(entry, self.provisional))
+            .and_then(|entry| self.operation.header(entry))
         {
             let (product, settled) = cell.set_shared(existing);
             if settled {
@@ -880,38 +741,16 @@ impl HeaderProducts {
             .saturating_add(hirsel_engine_admission::retained_arc_bytes(
                 &std::mem::MaybeUninit::<HeaderProduct>::uninit(),
             ));
-        let private_working = self.provisional
-            && engine.private_summary_active
-            && self.scope().working.load(Ordering::Relaxed) != 0;
-        let working_bytes = || {
-            let mut weight = hirsel_query_products::retained::MetadataWeight::default();
-            weight.tree::<DefId, Arc<Entry<hirsel_types::SignatureRef>>>(engine.signatures.len());
-            engine
-                .signatures
-                .values()
-                .try_fold(weight.bytes(), |bytes, entry| {
-                    bytes.checked_add(crate::memo::retained::retained_signature_entry_bytes(
-                        entry,
-                    )?)
-                })?
-                .checked_add(bytes)
-        };
         let (charge, transient) = match self.admit_signature(entry.as_ref(), bytes) {
             Ok(charge) => (charge, false),
             Err(_)
-                if if private_working {
-                    working_bytes().is_some_and(|required| {
-                        required <= self.scope().working.load(Ordering::Relaxed) / 2
-                    })
-                } else {
-                    working.as_ref().is_some_and(|(_, scratch)| {
-                        bytes
-                            .checked_add(hirsel_engine_admission::retained_arc_bytes(
-                                &std::mem::MaybeUninit::<std::sync::Mutex<HeaderCharge>>::uninit(),
-                            ))
-                            .is_some_and(|required| required <= *scratch)
-                    })
-                } =>
+                if working.as_ref().is_some_and(|(_, scratch)| {
+                    bytes
+                        .checked_add(hirsel_engine_admission::retained_arc_bytes(
+                            &std::mem::MaybeUninit::<std::sync::Mutex<HeaderCharge>>::uninit(),
+                        ))
+                        .is_some_and(|required| required <= *scratch)
+                }) =>
             {
                 ((Charge::engine(), Charge::engine()), true)
             }
@@ -923,7 +762,6 @@ impl HeaderProducts {
             entry,
             recomputes,
             graph_work: if local { 0 } else { recomputes },
-            publication: self.provisional,
             charge: charge.0,
             origin,
             recent: AtomicBool::new(true),
@@ -954,10 +792,7 @@ impl HeaderProducts {
         if engine.header_products.is_none() {
             engine.adopt_header_product(id, product);
         } else if let Some(entry) = &product.entry {
-            if product.charge.evictable()
-                && !engine.private_summary_active
-                && product.result.is_ok()
-            {
+            if product.charge.evictable() && product.result.is_ok() {
                 engine.signatures.remove(&id);
                 engine.snapshot_sources.remove(&id);
             } else {
@@ -1114,7 +949,7 @@ impl HeaderProducts {
             )?,
         ))
     }
-    /// Charge one settled row or proof to the front's header grant, evicting
+    /// Charge one settled row to the front's header grant, evicting
     /// unpinned entries first. A refusal is a resource failure, never a verdict.
     fn admit(&self, bytes: u64) -> Result<Charge, QueryError> {
         self.admit_with_eviction(bytes, true)
@@ -1196,7 +1031,6 @@ impl HeaderProducts {
                         .collect::<Vec<_>>();
                     let mut seen = BTreeSet::new();
                     for table in tables {
-                        let proofs = table.private.as_ref().map(|private| private.trace());
                         let mut rows = 0;
                         let mut charged = 0;
                         let mut aliases = 0;
@@ -1223,10 +1057,6 @@ impl HeaderProducts {
                             rows,
                             charged,
                             aliases
-                        ));
-                        crate::queries::operation_owner_trace(format_args!(
-                            "OWNER PROOFS table={:p} counts={proofs:?}",
-                            Arc::as_ptr(&table)
                         ));
                     }
                     crate::queries::operation_owner_trace(format_args!(
@@ -1327,7 +1157,7 @@ impl HeaderProducts {
         if cell.get().is_some() {
             return;
         }
-        if let Some(existing) = self.operation.header(&entry, false) {
+        if let Some(existing) = self.operation.header(&entry) {
             let (_, settled) = cell.set_shared(existing);
             if settled {
                 self.revision.fetch_add(1, Ordering::Release);
@@ -1351,7 +1181,6 @@ impl HeaderProducts {
                 entry: Some(entry),
                 recomputes: 0,
                 graph_work: 0,
-                publication: false,
                 charge: charge.0,
                 origin: Weak::new(),
                 recent: AtomicBool::new(true),
@@ -1389,37 +1218,8 @@ impl HeaderProducts {
         backing
     }
     /// Headers a later snapshot of the same request captured are charged to
-    /// the Front partition, and prove private modules in its working space,
-    /// exactly as the Front producer's own headers are.
-    pub(crate) fn inherit_snapshot_scope(
-        self: &Arc<Self>,
-        front: &Self,
-        inputs: &[[ContentHash; 3]],
-    ) {
-        let shared = front
-            .scope()
-            .admission
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone();
-        let scope = self.scope();
-        let mut admission = scope.admission.lock().unwrap_or_else(|e| e.into_inner());
-        if admission.is_none() {
-            if let Some(shared) = &shared {
-                let mut tables = shared.tables.lock().unwrap_or_else(|e| e.into_inner());
-                tables.retain(|table| table.strong_count() != 0);
-                tables.push(Arc::downgrade(self));
-            }
-            *admission = shared;
-        }
-        drop(admission);
-        self.inherit_private_snapshot(front, inputs);
-    }
-    pub(crate) fn inherit_registration_scope(
-        self: &Arc<Self>,
-        previous: &Self,
-        registrations: &[Arc<AcceptedFrontRegistration>],
-    ) {
+    /// the Front partition exactly as the Front producer's own headers are.
+    pub(crate) fn inherit_scope(self: &Arc<Self>, previous: &Self) {
         let shared = previous
             .scope()
             .admission
@@ -1436,8 +1236,14 @@ impl HeaderProducts {
             }
             *admission = shared;
         }
-        drop(admission);
-        self.inherit_private_scope(previous, registrations);
+    }
+    /// Later captures of this operation share this table's header admission.
+    pub(crate) fn share_scope(&self) {
+        *self
+            .operation
+            .header_scope
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(self.scope());
     }
     pub(crate) fn retain_validation_cache(
         &self,
@@ -1491,13 +1297,12 @@ impl HeaderProducts {
         }
         false
     }
-    /// Evict one unpinned settled entry: a header row, else a module proof.
+    /// Evict one unpinned settled entry.
     pub(crate) fn evict(&self) -> bool {
         if self.reclaim_validation_payloads()
             || self.operation.structural.evict()
             || self.evict_validation_cache()
             || self.evict_row()
-            || self.evict_proof()
             || self.syntax.evict()
         {
             return true;
@@ -1519,7 +1324,7 @@ impl HeaderProducts {
             if tables
                 .iter()
                 .filter(|table| !std::ptr::eq(self, &***table))
-                .any(|table| table.evict_row() || table.evict_proof() || table.syntax.evict())
+                .any(|table| table.evict_row() || table.syntax.evict())
             {
                 return true;
             }
@@ -1694,23 +1499,18 @@ pub(crate) struct AdoptedHeaders {
     current: bool,
 }
 impl QueryEngine {
-    pub(crate) fn declared_header_inputs(&self) -> Option<Arc<HeaderProducts>> {
-        self.header_products
-            .as_ref()
-            .and_then(|headers| headers.declared_inputs(self))
-    }
     pub(crate) fn inherit_demand_header_scope(
         &self,
         headers: &Arc<header_products::HeaderProducts>,
     ) {
-        if self.private_bootstrap_active
+        if self.bootstrap_active
             && let Some(previous) = self
                 .snapshot
                 .as_ref()
                 .and_then(|(_, snapshot)| snapshot.get())
                 .and_then(|snapshot| snapshot.header_products().cloned())
         {
-            headers.inherit_snapshot_scope(&previous, &self.private_summary_inputs);
+            headers.inherit_scope(&previous);
         }
     }
     pub(crate) fn adopt_completed_headers(&mut self) {
@@ -1724,9 +1524,6 @@ impl QueryEngine {
         let Some(headers) = snapshot.header_products().cloned() else {
             return;
         };
-        if current {
-            let _ = headers.adopt_private_products(self);
-        }
         // Adopting a row is idempotent until the table publishes another row
         // or this engine replaces a signature (which clears the record).
         let revision = headers.revision();
@@ -1739,7 +1536,7 @@ impl QueryEngine {
         }
         if current {
             self.adopt_header_products(&headers);
-            // These signatures and private facts came from this exact table.
+            // These signatures came from this exact table.
             // Their publication advances the engine, not the captured inputs.
             // Preserve the cache ownership mode when adopting completed rows.
             self.snapshot.as_mut().unwrap().0 = self.snapshot_stamp();
@@ -1783,7 +1580,7 @@ impl QueryEngine {
         // reader's payload after that reader finishes.
         if product.charge.evictable()
             && (self.header_products.is_none()
-                || (!self.private_summary_active && product.result.is_ok()))
+                || product.result.is_ok())
         {
             if same {
                 self.signatures.remove(&id);
@@ -1795,17 +1592,28 @@ impl QueryEngine {
             return;
         }
         self.signatures.insert(id, entry.clone());
-        if self.private_summary_active {
-            if product.publication {
-                self.private_signature_publications.insert(id);
-            }
-        } else {
-            self.private_signature_publications.remove(&id);
-        }
         self.snapshot_sources.insert(id, Arc::downgrade(entry));
     }
 }
 
+impl QueryEngine {
+    /// A header read refused while this engine produces a header. The
+    /// producing demand fails with it instead of publishing a conservative row.
+    pub(super) fn record_header_refusal(&self, refusal: Option<QueryError>) {
+        if let Some(refusal) = refusal {
+            self.header_refusal
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .get_or_insert(refusal);
+        }
+    }
+    pub(super) fn take_header_refusal(&self) -> Option<QueryError> {
+        self.header_refusal
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
+    }
+}
 /// The complete product a header row owns. Only engine-local evaluation
 /// state stays with its producer; resolver products and dependency detail
 /// stay, so no reader ever recomputes what a row already settled.
@@ -1835,7 +1643,6 @@ impl operation_inputs::OperationOwner {
     fn header(
         &self,
         entry: &Arc<Entry<hirsel_types::SignatureRef>>,
-        publication: bool,
     ) -> Option<Arc<HeaderProduct>> {
         self.headers
             .lock()
@@ -1844,8 +1651,7 @@ impl operation_inputs::OperationOwner {
             .iter()
             .filter_map(Weak::upgrade)
             .find(|product| {
-                product.publication == publication
-                    && product
+                product
                         .entry
                         .as_ref()
                         .is_some_and(|old| Arc::ptr_eq(old, entry))
@@ -2339,8 +2145,7 @@ mod retention_tests {
                     entry: Some(entry),
                     recomputes: 0,
                     graph_work: 0,
-                    publication: false,
-                    charge,
+                        charge,
                     _row_charge: row_charge,
                     origin: Weak::new(),
                     recent: AtomicBool::new(true),
@@ -2414,8 +2219,7 @@ mod retention_tests {
                     entry: Some(entry.clone()),
                     recomputes: 0,
                     graph_work: 0,
-                    publication: false,
-                    charge,
+                        charge,
                     _row_charge: row_charge,
                     origin: Weak::new(),
                     recent: AtomicBool::new(true),

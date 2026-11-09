@@ -337,7 +337,7 @@ fn instructions_json(report: &timings::instructions::Report) -> serde_json::Valu
         "threads": report.threads,
         "reads": report.reads,
         "read_cost": report.read_cost,
-        "census": { "ordinary": census(&report.census[0]), "inference": census(&report.census[1]) },
+        "census": census(&report.census),
         "census_overflow": report.census_overflow,
         "volumes": report.volumes
             .iter()

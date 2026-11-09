@@ -406,7 +406,6 @@ impl Fixture {
             &[],
             &[],
             &mut self.provider,
-            true,
         )
         .unwrap()
     }

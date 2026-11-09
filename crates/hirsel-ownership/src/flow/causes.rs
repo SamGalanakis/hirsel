@@ -66,19 +66,6 @@ pub(super) struct Provenance {
 }
 
 impl Checker<'_, '_> {
-    pub(super) fn unique_failure(
-        &self,
-        path: &hirsel_syntax::DefPath,
-        claim: UniqueClaim,
-    ) -> Option<UniqueFailure> {
-        match self.signatures.unique_failure(path, claim) {
-            Ok(failure) => failure,
-            Err(error) => {
-                self.proof_error.borrow_mut().get_or_insert(error);
-                None
-            }
-        }
-    }
     /// Inspect a transfer only in a failed graph's replay. These are candidate
     /// losses, not new flow facts: loop inputs may already be aliased.
     fn uniqueness_step(
@@ -193,28 +180,6 @@ impl Checker<'_, '_> {
                     if !self.callee_preserves_unique(*callee, requirement.parameter) {
                         let part = self.spelled(argument.value).unwrap_or_else(|| name.clone());
                         step.losses.push((self.span_of(*expression), format!("this plain `mut` handback through `{part}` may install counted shares in `{name}`")));
-                        if let Some(path) = self.callee_definition(*callee)
-                            && hirsel_types::unique_summary::same_module(
-                                path,
-                                self.own.definition.path(),
-                            )
-                            && let Some(failure) = self.unique_failure(
-                                path,
-                                UniqueClaim::Parameter(ParamId(requirement.parameter as u32)),
-                            )
-                        {
-                            step.items.push(Fact::new(
-                                Cause::UniquenessLoss,
-                                failure.span,
-                                &[
-                                    &name,
-                                    &format!(
-                                        "`{}` no longer hands this parameter back unique: {}",
-                                        path.0.name, failure.message
-                                    ),
-                                ],
-                            ));
-                        }
                         // Consult only the written direct signature. A body in
                         // another module or a foreign/bodyless declaration is
                         // not a local declaration edit we can recommend.
@@ -408,6 +373,31 @@ impl Checker<'_, '_> {
         });
     }
 
+    /// `-> unique T` for a same-package helper whose declared result is not
+    /// unique. MODE-2: a caller sees only the declared contract, so this is
+    /// the only repair that makes the call's result unique without a copy.
+    pub(super) fn helper_result_repair(&self, callee: ExprId) -> Option<Repair> {
+        let path = self.callee_definition(callee)?;
+        let owner = &self.syntax.item.definition;
+        if path.0.package != owner.0.package
+            || path.0.modules != owner.0.modules
+            || path.package_is("core", "1")
+        {
+            return None;
+        }
+        let TypeKind::Function(function) = &self.t.get(self.ty(callee)?)?.kind else {
+            return None;
+        };
+        if function.foreign.is_some()
+            || self.t.row(function.result).modes.uniqueness == Uniqueness::Unique
+        {
+            return None;
+        }
+        Some(Repair::UniqueResultContract {
+            helper: path.0.name.clone(),
+            ty: hirsel_types::CanonicalSpelling::closed(self.t, function.result),
+        })
+    }
     fn helper_unique_repair(&self, callee: ExprId, ordinal: usize) -> Option<Repair> {
         let path = self.callee_definition(callee)?;
         let owner = &self.syntax.item.definition;
@@ -421,15 +411,6 @@ impl Checker<'_, '_> {
             return None;
         };
         if function.foreign.is_some() {
-            return None;
-        }
-        if self
-            .signatures
-            .cached(DefId::intern(path))?
-            .metadata
-            .visibility
-            == hirsel_syntax::Visibility::Private
-        {
             return None;
         }
         let parameter = function.parameters.get(ordinal)?;

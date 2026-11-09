@@ -290,26 +290,20 @@ unique too), so `bufio.read_until(mut reader, mut stream, .., mut out, ..)` hand
 from a literal and unique elements unique, while a list copied first, or given an aliased
 element, stays aliased.
 
-A private function with a body, excluding `extern` declarations and `@test` entries,
-carries a body-checked uniqueness summary. For each `mut` parameter it records the
-`preserves_unique` promise that the body proves under the same entry and failure-exit
-rules as a written annotation. It also records unique evidence independently for the
-result root and each direct payload row of `Result`, `Option` and tuples. Every return
-must prove a recorded result row. Summaries are the greatest fixed point of each
-same-module call-graph component: begin with all candidate bits, re-prove the bodies,
-drop failed bits and repeat until stable.
-
-Only a direct call in the defining module uses this evidence. A function value keeps
-its declared header; callable variance and generic inference use that header too.
-Exported functions and calls across modules keep their declared contracts. H publishes
-inferred bits separately from callable types, and V independently re-proves each bit
-against the callee body, assuming its peers' published headers. A body change that loses
-a bit invalidates the helper's callers. A resulting caller diagnostic names the helper
-and labels the body site that lost the proof.
+**No body-derived summaries.** A call uses only the callee's declared contracts, whatever
+the callee's visibility or module. A private helper's body never supplies a uniqueness bit
+to its callers. To hand a `mut` argument back unique, the helper declares
+`@preserves_unique(x)` or `mut x: unique T`; to return a unique result, it declares
+`-> unique T`. An unannotated `mut` parameter promises nothing about uniqueness, for
+private and public functions alike. A promise a body cannot keep is MODE-2 at the body;
+a missing promise that a caller needs is MODE-2 at the caller's demand, with a repair that
+adds the promise to the callee, whose precondition is that the callee's body passes the
+promise's check.
 
 ```hirsel
+@preserves_unique(xs)
 fn add(mut xs: List[u64]) { list.push(mut xs, 1) }
-fn code(n: u64) -> String { "x" }
+fn code(n: u64) -> unique String { "x" }
 fn need(take xs: unique List[u64]) {}
 fn need_s(take s: unique String) {}
 pub fn main() {
@@ -320,15 +314,12 @@ pub fn main() {
 }
 ```
 
-Both hand-offs check from their private helpers' bodies. Installing a counted share in
-`add` loses its preservation bit. A `pub add` in another module supplies no inferred
-promise, and calling `add` through `let f: fn(mut List[u64]) -> () = add` supplies none.
-A helper that installs a share before a possibly failing evaluation loses the bit even
-if it repairs the value afterwards. A producer returning a counted constant, such as
-`const NAME: String = "x"; fn code() -> String { NAME }`, has no unique-result evidence.
-In a recursive component, a share-installing member loses its bit and re-proof removes
-any dependent bits in its peers. These six cases remain rejected at a subsequent
-uniqueness demand, including when inferred bits are forged into TIR.
+Both hand-offs check from the helpers' signatures alone. Deleting `@preserves_unique(xs)`
+makes `need(take xs)` MODE-2 in `main`, with a repair that adds it to `add`; deleting
+`unique` from `code`'s result makes `need_s(code(1))` MODE-2 with a repair that writes
+`-> unique String`. Installing a counted share in `add`, or returning a counted constant
+from `code` (`const NAME: String = "x"; fn code() -> unique String { NAME }`), is MODE-2
+in the helper's own body, because it no longer keeps its declared promise.
 
 A call is **parametric** when it directly calls a generic function whose owned result holds
 no counted content except values of type parameters it has no copying permission for
@@ -543,10 +534,10 @@ declaration cannot remove those bounds.
 
 ### MODE-7: Inference
 
-Modes inside bodies are inferred. Callable type rows and exported headers are declared;
-private helpers additionally carry the body-checked direct-call summaries of
-[MODE-2](#mode-2-uniqueness)
-([LANG-6](language.md#lang-6-signatures)). Defaults: borrowed and `mut` parameters are
+Modes inside bodies are inferred. Every mode a caller relies on is declared in the
+signature, for private and public definitions alike; nothing is inferred across a
+definition boundary ([MODE-2](#mode-2-uniqueness),
+[LANG-6](language.md#lang-6-signatures)). Defaults: borrowed and `mut` parameters are
 local to themselves, taken parameters and results are global (no relation), everything is
 aliased, and closures are many.
 

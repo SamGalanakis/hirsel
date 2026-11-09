@@ -11,7 +11,6 @@ pub use candidate_products::{CheckedProductEncoder, CheckedProducts};
 mod arm_fixes;
 mod frontier;
 pub(crate) mod header_products;
-pub use header_products::ModuleProof;
 mod source_index;
 pub use source_index::SourceIndexState;
 pub(crate) mod recipes;
@@ -120,7 +119,6 @@ mod retention;
 mod safety;
 mod summaries;
 pub use safety::{Escape, UnsafeReach};
-mod private_unique;
 mod type_groups;
 use hirsel_diag::Severity;
 use hirsel_intern::timings::{self, Count, Interval, Phase};
@@ -292,7 +290,6 @@ pub struct QueryEngine {
     signatures: Table<hirsel_types::SignatureRef>,
     /// Cleared whenever `signatures` changes outside header adoption.
     adopted_headers: Option<header_products::AdoptedHeaders>,
-    adopted_private: Option<header_products::AdoptedPrivate>,
     header_products: Option<Arc<header_products::HeaderProducts>>,
     source_inputs: Option<Arc<header_products::SourceInputs>>,
     /// A header or module proof read refused while this engine produces a row.
@@ -382,18 +379,12 @@ pub struct QueryEngine {
     pub(crate) types: Arc<hirsel_types::TypeInterner>,
     /// The session's structural memo over `types`.
     pub(crate) memo: Arc<hirsel_types::TypeMemo>,
-    private_summary_reads: BTreeMap<DefId, Arc<Reads>>,
-    private_summaries: hirsel_syntax::DefMap<hirsel_types::UniqueSummary>,
-    private_unique_failures: BTreeMap<DefId, Vec<hirsel_types::UniqueFailure>>,
-    private_summary_revision: Option<hirsel_query_products::reads::Revision>,
-    private_summary_inputs: private_unique::RegistrationInputs,
-    private_summary_active: bool,
-    private_bootstrap_active: bool,
-    private_inference_hosted: bool,
-    private_inference_allowance:
-        Option<Result<hirsel_engine_admission::MemoryReservation, QueryError>>,
-    private_signature_publications: BTreeSet<DefId>,
-    private_summary_failure: Option<(hirsel_query_products::reads::Revision, QueryError)>,
+    /// Metadata assembly and generator bootstrap: no pending generated
+    /// consumers are scheduled, and demanded headers share the snapshot's admission.
+    bootstrap_active: bool,
+    /// A host admits this engine's header partitions; before that, headers
+    /// are charged to the engine rather than the standalone budget.
+    pub(crate) headers_hosted: bool,
     signature_stack: Vec<DefPath>,
     recomputes: BTreeMap<(DefPath, QueryKind), usize>,
     /// Memos recorded (computed, not reused), by query kind.
@@ -460,7 +451,6 @@ impl Drop for QueryEngine {
         );
         released("engine: signatures", take(&mut self.signatures));
         self.adopted_headers = None;
-        self.adopted_private = None;
         released(
             "engine: pending signatures",
             take(&mut self.pending_signatures),
@@ -726,7 +716,6 @@ impl QueryEngine {
             syntax_keys: BTreeMap::new(),
             signatures: Default::default(),
             adopted_headers: None,
-            adopted_private: None,
             header_products: None,
             source_inputs: None,
             header_refusal: Default::default(),
@@ -770,17 +759,8 @@ impl QueryEngine {
             snapshot_inputs_revision: 0,
             types: hirsel_registry::session_types(),
             memo: Arc::new(hirsel_types::TypeMemo::new()),
-            private_summary_reads: Default::default(),
-            private_summaries: Default::default(),
-            private_unique_failures: BTreeMap::new(),
-            private_summary_revision: None,
-            private_summary_inputs: private_unique::registration_inputs(&[]),
-            private_summary_active: false,
-            private_bootstrap_active: false,
-            private_inference_hosted: false,
-            private_inference_allowance: None,
-            private_signature_publications: BTreeSet::new(),
-            private_summary_failure: None,
+            bootstrap_active: false,
+            headers_hosted: false,
             signature_stack: vec![],
             recomputes: BTreeMap::new(),
             recorded: BTreeMap::new(),
@@ -819,9 +799,6 @@ impl QueryEngine {
             .collect()
     }
     pub fn recompute_count(&self, definition: &DefPath, kind: QueryKind) -> usize {
-        if kind == QueryKind::PrivateInference {
-            return self.operation.private_work_count(definition);
-        }
         let pending = if kind == QueryKind::Signature {
             self.snapshot
                 .as_ref()
@@ -864,7 +841,6 @@ impl QueryEngine {
     pub fn memo_reads(&self, definition: &DefPath, kind: QueryKind) -> Option<&Reads> {
         let id = DefId::intern(definition);
         match kind {
-            QueryKind::PrivateInference => self.private_summary_reads.get(&id).map(Arc::as_ref),
             QueryKind::Signature => self.signatures.get(&id).map(|e| e.reads()),
             QueryKind::Resolve => self.resolutions.get(&id).map(|e| e.reads()),
             QueryKind::Check => self.checked.get(&id).map(|e| e.reads()),
@@ -883,7 +859,6 @@ impl QueryEngine {
     pub fn shared_memo_reads(&self, definition: &DefPath, kind: QueryKind) -> Option<Arc<Reads>> {
         let id = DefId::intern(definition);
         match kind {
-            QueryKind::PrivateInference => self.private_summary_reads.get(&id).cloned(),
             QueryKind::Signature => self.signatures.get(&id).map(|e| e.memo.reads.clone()),
             QueryKind::Resolve => self.resolutions.get(&id).map(|e| e.memo.reads.clone()),
             QueryKind::Check => self.checked.get(&id).map(|e| e.memo.reads.clone()),
@@ -1043,16 +1018,6 @@ impl QueryEngine {
         self.signature_query_id(DefId::intern(definition))
     }
 
-    fn current_private_summary_failure(&self) -> Option<&QueryError> {
-        if self.private_summary_active {
-            return None;
-        }
-        self.private_summary_failure
-            .as_ref()
-            .filter(|(revision, _)| *revision == self.revision)
-            .map(|(_, error)| error)
-    }
-
     /// Association preflight always validates current declarations, but can
     /// read their unmarked source heads without demanding signature queries.
     pub(crate) fn association_signature_provider(&mut self) -> impl SignatureProvider + '_ {
@@ -1063,12 +1028,6 @@ impl QueryEngine {
         &mut self,
         id: DefId,
     ) -> Result<Arc<QueryOutput<hirsel_types::SignatureRef>>, QueryError> {
-        // This engine already owns the declared row and is responsible for
-        // attaching its module proof. A frozen declared view cannot replace
-        // that row again while the final publication pass is settling it.
-        if self.private_summary_active && self.private_signature_publications.contains(&id) {
-            return self.signature_query_local(id);
-        }
         if let Some(headers) = self.header_products.clone() {
             return headers.demand(self, id);
         }
@@ -1090,9 +1049,6 @@ impl QueryEngine {
         &mut self,
         id: DefId,
     ) -> Result<Arc<QueryOutput<hirsel_types::SignatureRef>>, QueryError> {
-        if let Some(error) = self.current_private_summary_failure() {
-            return Err(error.clone());
-        }
         // Indexing forgets each signature that read a changed header or
         // candidate. A kept memo needs neither a text hash nor a path-based probe.
         self.note_environment();
@@ -1131,34 +1087,19 @@ impl QueryEngine {
                 return entry.result();
             }
         }
-        // Private inference can demand a header before the producer's module
-        // proof is installed. Normalize that provisional header, then select
-        // and verify its stored variant in the final publication pass.
-        let provisional = self.verify_store == hirsel_engine_store::VerifyStore::Recompute
-            && self.private_summary_active
-            && self
-                .source_facts(definition)
-                .is_some_and(|facts| facts.body_kind == BodyKind::Function);
         // Read the complete previous action before invoking normalization or
         // reconstructing its private view. Active cycles retain the ordinary
         // provisional-group/reentrant path and are never restored as settled.
-        if !provisional
-            && !self
-                .active
-                .contains(&(definition.clone(), QueryKind::Signature))
+        if !self
+            .active
+            .contains(&(definition.clone(), QueryKind::Signature))
         {
             self.active
                 .insert((definition.clone(), QueryKind::Signature));
             let stored = self.load_signature(definition);
             self.active
                 .remove(&(definition.clone(), QueryKind::Signature));
-            if let Some(entry) = stored.filter(|entry| {
-                self.private_summary(id).is_none_or(|summary| {
-                    entry
-                        .result()
-                        .is_ok_and(|output| output.value.metadata.inferred_unique == summary)
-                })
-            }) {
+            if let Some(entry) = stored {
                 self.signatures.insert(id, entry.clone());
                 self.adopted_headers = None;
                 return entry.result();
@@ -1196,13 +1137,8 @@ impl QueryEngine {
         };
         recorder.engine.signature_stack.pop();
         recorder.observed.products = Arc::new(products);
-        let mut observed = recorder.observed;
+        let observed = recorder.observed;
         let reads = recorder.reads;
-        let mut result = result;
-        if let Ok(output) = &mut result {
-            self.attach_private_summary(&mut output.value, &output.dependencies);
-            self.observe_private_summary(&output.value, &mut observed);
-        }
         let covered = result
             .as_ref()
             .map(|output| output.dependencies.clone())
@@ -1211,15 +1147,7 @@ impl QueryEngine {
         let mut entry = self.finish(key, text, reads, result.map(shared_output), observed);
         entry.covered = covered;
         let entry = Arc::new(entry);
-        // Provisional proofs are explicit reads, so their canonical records
-        // are safe variants too. Share them before a header projection drops
-        // resolver products or another module producer demands this key.
-        if !provisional {
-            self.publish_signature(definition, &entry)?;
-        }
-        if self.private_summary_active {
-            self.private_signature_publications.insert(id);
-        }
+        self.publish_signature(definition, &entry)?;
         self.adopted_headers = None;
         keep(
             &mut self.signatures,
@@ -1238,7 +1166,6 @@ impl QueryEngine {
     /// retained signature snapshots so ordinary body edits stay observable.
     pub fn citation_source(&self) -> impl CitationSource + '_ {
         crate::snapshot::SourceContext {
-            unique_failures: &self.private_unique_failures,
             sources: &self.sources,
             items: &self.items,
             declarations: &self.declarations,
@@ -1782,7 +1709,6 @@ impl QueryEngine {
         &mut self,
         definition: &DefPath,
     ) -> Result<Arc<QueryOutput<AnalyzedBody>>, QueryError> {
-        self.prepare_private_summaries();
         let id = DefId::intern(definition);
         let text = self.key_text(definition, QueryKind::Modes)?;
         if let Some(entry) = self.modes.get(&id).cloned()
@@ -1847,8 +1773,7 @@ impl QueryEngine {
                     &signature.value,
                     &mut products,
                     &mut recorder,
-                    false,
-                );
+                                    );
                 recorder.observed.products = Arc::new(products);
                 let observed = recorder.observed;
                 let reads = recorder.reads;
@@ -2074,7 +1999,6 @@ impl QueryEngine {
     /// type the run names, so they cover only types its closure reaches.
     pub fn runtime_types(&mut self) -> Result<hirsel_interp::aggregate::RuntimeTypes, QueryError> {
         let entry = self.adapters.lowering.as_ref().map(|l| l.entry_body());
-        self.prepare_private_summaries();
         Ok(self.signature_inputs().runtime_types(entry))
     }
     /// Runtime metadata plus the declared facts checked execution enforces
@@ -2462,9 +2386,6 @@ impl DefinitionQueries for QueryEngine {
 struct AssociationSignatures<'a>(&'a mut QueryEngine);
 impl SignatureProvider for AssociationSignatures<'_> {
     fn signature(&mut self, definition: DefId) -> Result<hirsel_types::SignatureRef, QueryError> {
-        if let Some(error) = self.0.current_private_summary_failure() {
-            return Err(error.clone());
-        }
         self.0.note_environment();
         self.0
             .observed_signature(definition)
@@ -2645,21 +2566,6 @@ impl SignatureProvider for Recorder<'_> {
         } else {
             result
         }
-    }
-    fn cite_unique_failure(
-        &mut self,
-        definition: &DefPath,
-        claim: hirsel_types::UniqueClaim,
-    ) -> Result<Option<hirsel_types::UniqueFailure>, QueryError> {
-        let failure = self.engine.citation_source().unique_failure(
-            DefId::intern(&self.owner),
-            DefId::intern(definition),
-            claim,
-        );
-        self.reads
-            .citations
-            .push((definition.clone(), failure.as_ref().map(|f| f.span)));
-        Ok(failure)
     }
     fn cite_name(&mut self, definition: &DefPath) -> Option<Span> {
         let cited = self.engine.cited_name(&self.owner, definition);

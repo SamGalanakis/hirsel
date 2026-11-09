@@ -1,13 +1,15 @@
 # Implementation
 
 This part states what implementations must agree on and how agreement is checked: the
-reference interpreter is the oracle, the conformance corpus pins every rule, an independent
-IR checker re-proves what the source checker accepts, checked execution audits memory and
-lifetime behaviour, and native code must match the interpreter observably. The choices
-below the observable contract (data layout, calling convention, failure propagation) are
-implementation design, not language rules; they may change without changing any program's
-meaning. Every executable artifact an
-implementation publishes is independently validated, in debug and release builds alike.
+reference interpreter is the oracle, the conformance corpus pins every rule, the IR
+checker V proves every flow obligation of the lowered program, checked execution audits
+memory and lifetime behaviour, and native code must match the interpreter observably. The
+choices below the observable contract (data layout, calling convention, failure
+propagation) are implementation design, not language rules; they may change without
+changing any program's meaning. Every executable artifact is derived from TIR validated
+once by V in debug and release builds alike; V derives its judgments independently of
+producer analysis claims. Source fidelity of lowering, the correctness of transformations
+after V, and the integrity of imported artifacts remain separate obligations.
 
 ## Shared graph algorithms
 
@@ -147,9 +149,10 @@ cases supplies no execution evidence. Unspecified contracts remain decisions und
 
 ## Agreement
 
-The source checker and the independent IR checker must agree: no program the source checker
-accepts may have a lowering the IR checker rejects, and no phase may report an internal
-error. The agreement campaign applies a fixed catalogue of single syntax edits to every
+V is the only flow checker. Every program the front end resolves and elaborates lowers to
+TIR that V either accepts or rejects with a rule diagnostic ([DIAG-1](diagnostics.md));
+no phase may report an internal error, and no rejection explanation may authorize
+acceptance. The agreement campaign applies a fixed catalogue of single syntax edits to every
 corpus program that is not expected to be rejected (passing modes, `mut` on bindings, mode,
 brand and placement annotations, a second use of a binding, statements moved into or out of
 loops and branches, swapped or repeated statements, operands replaced by another binding of
@@ -203,13 +206,13 @@ C-origin `FnPtr` values are opaque pass-back values; Hirsel cannot call them
 
 ### Aliasing facts
 
-The native backends state an aliasing fact only where both checkers prove it. The fact
+The native backends state an aliasing fact only where V proves it. The fact
 derives from the parameter's passing mode in the specialized `FnAbi`, never from a
 callee's name, and the unit partition never changes it.
 
 | Passing | What is proved | What native code states |
 |---|---|---|
-| `mut x` (an exclusive address) | The source checker gives the argument a write loan from callee entry to return, and every overlapping access conflicts with it ([OWN-3](ownership.md#own-3-exclusive-access); a scoped closure's captures count as arguments). The IR checker re-proves it at every call (`CallAlias`): no other `mut` argument overlaps the place, and no other argument or callee value holds a loan on an overlapping place, whether through its own views, borrowed record fields or a closure's borrowed captures. The place is a live, aligned allocation of its layout for the call's duration, as detailed below. | LLVM `noalias dereferenceable(size) align alignment` on the address, with size and alignment from the place's layout. For the whole call, the place's bytes are reached only through pointers derived from it. |
+| `mut x` (an exclusive address) | The argument holds a write loan from callee entry to return, and every overlapping access conflicts with it ([OWN-3](ownership.md#own-3-exclusive-access); a scoped closure's captures count as arguments). V proves it at every call (`CallAlias`): no other `mut` argument overlaps the place, and no other argument or callee value holds a loan on an overlapping place, whether through its own views, borrowed record fields or a closure's borrowed captures. The place is a live, aligned allocation of its layout for the call's duration, as detailed below. | LLVM `noalias dereferenceable(size) align alignment` on the address, with size and alignment from the place's layout. For the whole call, the place's bytes are reached only through pointers derived from it. |
 | `mut x` where `x` is a Block or Box root of a private library body | The same | Nothing. The root travels by value as the block pointer the place holds, and that block may be shared. |
 | `take x` (an inline aggregate) | The caller passes a fresh copy of the moved value | Nothing |
 | `x` borrowed (an inline aggregate) | The caller passes a fresh read-only copy, and the IR checker rejects writes to borrowed storage | Nothing (no `readonly`). A drop wrapper passes the dying block's payload in place of a copy. |

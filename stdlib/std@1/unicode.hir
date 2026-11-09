@@ -147,7 +147,7 @@ fn decompose(mut points: List[u32], cp: u32, compatibility: bool) -> () uses {} 
   }
 }
 
-fn normalize(s: String, compatibility: bool, compose: bool) -> String uses {} {
+fn normalize(s: String, compatibility: bool, compose: bool) -> unique String uses {} {
   // Every ASCII scalar is a starter and has no decomposition or composition.
   if string.is_ascii(s) {
     return unique s

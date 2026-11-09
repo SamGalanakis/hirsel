@@ -33,7 +33,7 @@ use hirsel_types::{
     ProtocolAssociation, Reach, RegionId, Relation, RelationPlace, ScalarDomain, SchemaConstraint,
     Sendability, SendabilityRequirement, SerializableCheck, SharedPath, SharedSlice, Signature,
     SignatureDependency, SignatureKind, SignatureMetadata, Size, SizeParamId, StatePromise, Type,
-    TypeDefinition, TypeId, TypeInterner, TypeKind, TypeParamId, UniqueResultRow, UniqueSummary,
+    TypeDefinition, TypeId, TypeInterner, TypeKind, TypeParamId,
     Uniqueness, UseKind, Uses, Variant, VariantId, WrapperKind,
 };
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -864,7 +864,6 @@ snapshot_enum!(SchemaConstraint {
 impl Snapshot<Cx> for SignatureMetadata {
     fn write(&self, w: &mut Writer<Cx>) {
         w.open("SignatureMetadata");
-        self.inferred_unique.write(w);
         self.track_caller.write(w);
         self.visibility.write(w);
         self.alias.write(w);
@@ -889,7 +888,6 @@ impl Snapshot<Cx> for SignatureMetadata {
         r.open("SignatureMetadata")?;
         let value = SignatureMetadata {
             retention: Default::default(),
-            inferred_unique: Snapshot::read(r)?,
             track_caller: Snapshot::read(r)?,
             visibility: Snapshot::read(r)?,
             alias: Snapshot::read(r)?,
@@ -1130,18 +1128,11 @@ snapshot_struct!(ProtocolAssociationReceipt {
     open,
     next
 } in Cx);
-snapshot_enum!(UniqueResultRow {
-    Root,
-    Tuple(field),
-    Payload { variant, field }
-} in Cx);
-snapshot_struct!(UniqueSummary { preserves_unique, results, nonretaining } in Cx);
 /// `types` is not written: it is the definition's closure, recomputed on read.
 impl Snapshot<Cx> for Definition {
     fn write(&self, w: &mut Writer<Cx>) {
         w.open("Definition");
         tabled(w, |w| {
-            self.inferred_unique.write(w);
             self.caller_bodies.write(w);
             self.protocol_associations.write(w);
             self.path.write(w);
@@ -1160,7 +1151,6 @@ impl Snapshot<Cx> for Definition {
         r.open("Definition")?;
         read_table(r)?;
         let mut value = Definition {
-            inferred_unique: Snapshot::read(r)?,
             caller_bodies: Snapshot::read(r)?,
             protocol_associations: Snapshot::read(r)?,
             types: Arc::from([]),
@@ -1271,42 +1261,3 @@ mod tests {
     }
 }
 
-#[cfg(test)]
-#[test]
-fn definition_header_summary_round_trips_in_written_field_order() {
-    let types = TypeInterner::new(None);
-    let locator: Locator = Rc::new(|_| Location::unknown());
-    for inferred_unique in [
-        UniqueSummary::default(),
-        UniqueSummary {
-            nonretaining: vec![hirsel_types::ParamId(0)],
-            preserves_unique: vec![hirsel_types::ParamId(2)],
-            results: vec![
-                UniqueResultRow::Root,
-                UniqueResultRow::Payload {
-                    variant: 1,
-                    field: 0,
-                },
-            ],
-        },
-    ] {
-        let definition = Definition {
-            inferred_unique,
-            caller_bodies: vec![],
-            protocol_associations: vec![],
-            types: Arc::from([]),
-            path: hirsel_syntax::DefId::intern(&DefPath::core("round_trip")),
-            signature_hash: ContentHash::default(),
-            bodies: vec![],
-            entry: BodyId(0),
-            contracts: vec![],
-        };
-        let mut writer = Writer::with_context(Cx::new(locator.clone(), types.clone()));
-        definition.write(&mut writer);
-        let (text, _) = writer.finish();
-        let mut reader = Reader::with_context(&text, Cx::new(locator.clone(), types.clone()));
-        let decoded = Definition::read(&mut reader).unwrap();
-        reader.finish().unwrap();
-        assert_eq!(decoded, definition);
-    }
-}

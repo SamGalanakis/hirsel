@@ -360,12 +360,6 @@ impl Walk for ast::ItemSyntax {
         ast::ContentHash::walk(scan)
     }
 }
-variants!(ty::UniqueResultRow { Root, Tuple(f0), Payload{variant,field} });
-structure!(ty::UniqueSummary {
-    preserves_unique,
-    results,
-    nonretaining
-});
 variants!(ty::WrapperKind {
     Pure,
     Handle,
@@ -394,7 +388,7 @@ structure!(ty::ImplementationBinder {
     family,
     members
 });
-structure!(ty::SignatureMetadata { inferred_unique, visibility, alias, constant_alias, track_caller, unsafe_ffi, wrapper, roles, schema, recursive_group, implementations } skip retention);
+structure!(ty::SignatureMetadata { visibility, alias, constant_alias, track_caller, unsafe_ffi, wrapper, roles, schema, recursive_group, implementations } skip retention);
 structure!(ty::RelationPlace { parameter, fields });
 structure!(ty::StatePromise {
     selector,

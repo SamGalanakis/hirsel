@@ -101,7 +101,7 @@ fn le64(b: Bytes, at: u64) -> u64 uses {} {
   le32(b, at) | le32(b, at + 4) << 32
 }
 
-fn text_of(b: Bytes, start: u64, end: u64) -> Result[String, ()] uses {} {
+fn text_of(b: Bytes, start: u64, end: u64) -> unique Result[String, ()] uses {} {
   let mut builder: List[u8] = []
   let mut i = start
   while i < end {
@@ -555,7 +555,7 @@ pub fn file_read(dir: Dir, mut f: File of dir, e: Entry, limit: u64) -> Result[
 
 // A name extraction accepts, as for tar: relative, without "..", NUL or
 // backslash, and not only "." pieces; returns its components.
-fn local_parts(name: String) -> Option[List[String]] uses {} {
+fn local_parts(name: String) -> unique Option[List[String]] uses {} {
   if name == "" || string.starts_with(name, "/") || string.contains(name, "\x00") || string.contains(
     name,
     "\\"
@@ -764,21 +764,25 @@ pub fn entry(take name: String) -> Entry uses {} {
   )
 }
 
+@preserves_unique(out)
 fn put16(mut out: List[u8], value: u64) -> () uses {} {
   core@1/list.push(mut out, core@1/int.truncate(value & 255))
   core@1/list.push(mut out, core@1/int.truncate(value >> 8 & 255))
 }
 
+@preserves_unique(out)
 fn put32(mut out: List[u8], value: u64) -> () uses {} {
   put16(mut out, value & MAX16)
   put16(mut out, value >> 16 & MAX16)
 }
 
+@preserves_unique(out)
 fn put64(mut out: List[u8], value: u64) -> () uses {} {
   put32(mut out, value & MAX32)
   put32(mut out, value >> 32)
 }
 
+@preserves_unique(out)
 fn put_text(mut out: List[u8], s: String) -> () uses {} {
   text.append(mut out, s)
 }
@@ -838,6 +842,7 @@ fn dos_of(seconds: i64) -> u64 uses {} {
 
 // Go Writer.prepare and fileWriter.close: finishes the entry being written
 // with its data descriptor.
+@preserves_unique(out)
 fn finish_entry(mut w: Writer, mut out: List[u8]) -> () uses {} {
   if !w.open {
     return
@@ -874,6 +879,7 @@ fn finish_entry(mut w: Writer, mut out: List[u8]) -> () uses {} {
 }
 
 // Go writeHeader: the local file header.
+@preserves_unique(out)
 fn local_header(mut out: List[u8], e: Entry, extra: List[u8], known: bool) -> () uses {} {
   let big = known && (e.compressed > MAX32 || e.size > MAX32)
   put32(mut out, LOCAL)

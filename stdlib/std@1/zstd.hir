@@ -952,6 +952,7 @@ fn offset(value: u64, literal_length: u64, mut t: Tables) -> Result[u64, ZstdErr
   Ok(distance)
 }
 
+@preserves_unique(out)
 fn compressed_block(
   data: Bytes,
   mut t: Tables,

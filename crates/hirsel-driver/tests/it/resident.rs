@@ -1529,11 +1529,10 @@ fn batch_publication_releases_completed_worker_bodies_before_the_next_task() {
             signature: &Signature,
             products: &mut PhaseProducts,
             provider: &mut dyn SignatureProvider,
-            infer: bool,
         ) -> Result<QueryOutput<hirsel_query_products::AnalyzedBody>, QueryError> {
             let output = self
                 .inner
-                .check_modes(t, m, body, signature, products, provider, infer)?;
+                .check_modes(t, m, body, signature, products, provider)?;
             let mut bodies = self.bodies.lock().unwrap();
             bodies.retain(|body| body.strong_count() != 0);
             bodies.push(Arc::downgrade(&output.value.typed));
@@ -1847,12 +1846,11 @@ fn batch_warning_phase_lives_with_the_summary_and_retires_with_its_owner() {
             signature: &Signature,
             products: &mut PhaseProducts,
             provider: &mut dyn SignatureProvider,
-            infer: bool,
         ) -> Result<QueryOutput<hirsel_query_products::AnalyzedBody>, QueryError> {
             let syntax = body.syntax.clone();
             let mut output = self
                 .0
-                .check_modes(t, m, body, signature, products, provider, infer)?;
+                .check_modes(t, m, body, signature, products, provider)?;
             if syntax.item.definition.0.name == "warn" {
                 let mut warning = hirsel_diag::Diagnostic::error(
                     const { hirsel_diag::RuleId::of("LANG-1") },
@@ -1993,11 +1991,10 @@ fn batch_serial_compile_time_demands_release_bodies_after_each_root() {
             signature: &Signature,
             products: &mut PhaseProducts,
             provider: &mut dyn SignatureProvider,
-            infer: bool,
         ) -> Result<QueryOutput<hirsel_query_products::AnalyzedBody>, QueryError> {
             let output = self
                 .inner
-                .check_modes(types, memo, body, signature, products, provider, infer)?;
+                .check_modes(types, memo, body, signature, products, provider)?;
             self.bodies
                 .lock()
                 .unwrap()
@@ -2177,11 +2174,10 @@ fn durable_front_workers_drain_payloads_before_accepting_another_task() {
             signature: &Signature,
             products: &mut PhaseProducts,
             provider: &mut dyn SignatureProvider,
-            infer: bool,
         ) -> Result<QueryOutput<hirsel_query_products::AnalyzedBody>, QueryError> {
             let output = self
                 .0
-                .check_modes(types, memo, body, signature, products, provider, infer)?;
+                .check_modes(types, memo, body, signature, products, provider)?;
             let pending = self.1.pending.fetch_add(1, Ordering::SeqCst) + 1;
             self.1.peak.fetch_max(pending, Ordering::SeqCst);
             Ok(output)

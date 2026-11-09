@@ -11,14 +11,6 @@ use std::sync::Arc;
 pub trait CitationSource: Sync {
     fn cited_name(&self, owner: DefId, target: DefId) -> Option<Span>;
     fn cited_text(&self, target: DefId) -> ContentHash;
-    fn unique_failure(
-        &self,
-        _owner: DefId,
-        _target: DefId,
-        _claim: hirsel_types::UniqueClaim,
-    ) -> Option<hirsel_types::UniqueFailure> {
-        None
-    }
     fn arm_insertion(&self, _owner: &DefPath, _site: Span) -> Option<(Span, ContentHash)> {
         None
     }
@@ -28,7 +20,6 @@ pub trait CitationSource: Sync {
 }
 
 pub(crate) struct SourceContext<'a> {
-    pub unique_failures: &'a BTreeMap<DefId, Vec<hirsel_types::UniqueFailure>>,
     pub sources: &'a SourceMap,
     pub items: &'a BTreeMap<DefPath, Vec<Arc<ItemSyntax>>>,
     pub declarations: &'a DeclarationIndex,
@@ -40,19 +31,6 @@ impl SourceContext<'_> {
     }
 }
 impl CitationSource for SourceContext<'_> {
-    fn unique_failure(
-        &self,
-        owner: DefId,
-        target: DefId,
-        claim: hirsel_types::UniqueClaim,
-    ) -> Option<hirsel_types::UniqueFailure> {
-        self.cited_name(owner, target)?;
-        self.unique_failures
-            .get(&target)?
-            .iter()
-            .find(|f| f.claim == claim)
-            .cloned()
-    }
     fn cited_name(&self, owner: DefId, target: DefId) -> Option<Span> {
         let file = match self.items.get(owner.path()).and_then(|v| v.first()) {
             Some(first) => self.file(first)?,
@@ -116,7 +94,6 @@ impl CitationSource for SourceContext<'_> {
 
 /// Owned immutable citation inputs for admitted tasks that outlive preparation.
 pub(crate) struct OwnedSourceContext {
-    pub unique_failures: BTreeMap<DefId, Vec<hirsel_types::UniqueFailure>>,
     pub sources: SourceMap,
     pub items: Arc<BTreeMap<DefPath, Vec<Arc<ItemSyntax>>>>,
     pub declarations: DeclarationIndex,
@@ -129,7 +106,6 @@ pub(crate) struct OwnedSourceContext {
 impl OwnedSourceContext {
     fn borrowed(&self) -> SourceContext<'_> {
         SourceContext {
-            unique_failures: &self.unique_failures,
             sources: &self.sources,
             items: &self.items,
             declarations: &self.declarations,
@@ -138,14 +114,6 @@ impl OwnedSourceContext {
     }
 }
 impl CitationSource for OwnedSourceContext {
-    fn unique_failure(
-        &self,
-        owner: DefId,
-        target: DefId,
-        claim: hirsel_types::UniqueClaim,
-    ) -> Option<hirsel_types::UniqueFailure> {
-        self.borrowed().unique_failure(owner, target, claim)
-    }
     fn cited_name(&self, owner: DefId, target: DefId) -> Option<Span> {
         self.borrowed().cited_name(owner, target)
     }

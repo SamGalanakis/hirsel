@@ -28,8 +28,8 @@ fn ordered_check_preserves_source_diagnostics_and_file_failure_prefixes() {
                 false,
                 true,
             ),
-            // A rejected private definition fails its module proof: that is a
-            // Check verdict, never a query protocol failure.
+            // A rejected private definition is a Check verdict, never a query
+            // protocol failure.
             (
                 "fn twin()->u64{1}\nfn user()->u64{twin()}\npub fn main()->u64{user()}\nfn twin()->u64{1}\n",
                 false,
@@ -436,7 +436,6 @@ fn check_settled_front_eviction(
                     .unwrap()
                     .unwrap()
                     .clone();
-                let proof = front.module_proof(&program.entry);
                 let eviction = crate::scheduled_front::EvictCompact(
                     QueryId {
                         kind: 0x410c,
@@ -450,7 +449,7 @@ fn check_settled_front_eviction(
                 let evict = eviction.0;
                 runtime.register(evict.kind, Arc::new(eviction)).unwrap();
                 while front.factory().evict_cache(weight.scratch) {}
-                (header, proof, front.retained_bytes(), evict)
+                (header, front.retained_bytes(), evict)
             });
             let request = runtime.request(&[front.query(&program.entry).unwrap()]);
             runtime.wait(request).unwrap();
@@ -485,7 +484,7 @@ fn check_settled_front_eviction(
             }
             assert_eq!(front.live_body_count(), 0);
             if archive_readers {
-                let evict = warmed.as_ref().unwrap().3;
+                let evict = warmed.as_ref().unwrap().2;
                 let request = runtime.request(&[evict]);
                 drop(runtime.wait(request).unwrap());
                 while front.factory().evict_cache(weight.scratch) {}
@@ -493,7 +492,7 @@ fn check_settled_front_eviction(
                     front.retained_bytes(),
                     // The completed memo index and work counters remain
                     // inspectable. Their layout is independent of read payloads.
-                    warmed.as_ref().unwrap().2 + front.retained_observation_metadata_bytes(),
+                    warmed.as_ref().unwrap().1 + front.retained_observation_metadata_bytes(),
                     "completed Check/Growth root readers must not retain Front read arrays or dictionary rows"
                 );
                 let scope = check

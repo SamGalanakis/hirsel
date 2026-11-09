@@ -67,7 +67,7 @@ fn slice_text(data: Bytes, start: u64, end: u64) -> List[u8] uses {} {
   out
 }
 
-fn lower_text(data: Bytes, start: u64, end: u64) -> String uses {} {
+fn lower_text(data: Bytes, start: u64, end: u64) -> unique String uses {} {
   let mut out: List[u8] = []
   let mut i = start
   while i < end {
@@ -687,6 +687,7 @@ pub fn form_type(boundary: String) -> unique String uses {} {
 }
 
 // Go escapeQuotes.
+@preserves_unique(out)
 fn escape_quotes(value: String, mut out: List[u8]) -> () uses {} {
   for b in string.as_bytes(value) {
     if b == b'\\' {

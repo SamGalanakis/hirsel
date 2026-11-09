@@ -4719,15 +4719,6 @@ impl Checker<'_, '_> {
             let SignatureKind::Function(f) = &signature.kind else {
                 return false;
             };
-            if hirsel_types::unique_summary::same_module(path, self.definition.path.path())
-                && signature
-                    .metadata
-                    .inferred_unique
-                    .preserves_unique
-                    .contains(&ordinal)
-            {
-                return true;
-            }
             // A foreign declaration has no body to prove a promise (LANG-7).
             f.foreign.is_none()
                 && (f.state_promises.iter().any(|p| {
@@ -6654,21 +6645,7 @@ impl Checker<'_, '_> {
                         a.value.usage == UseKind::Take
                             && self.callee_preserves_unique(callee, a.parameter)
                     });
-                let inferred = match callee {
-                    Callee::Definition { path, .. }
-                        if hirsel_types::unique_summary::same_module(
-                            path,
-                            self.definition.path.path(),
-                        ) =>
-                    {
-                        self.signatures
-                            .get(path)
-                            .map(|s| s.metadata.inferred_unique.clone())
-                            .unwrap_or_default()
-                    }
-                    _ => hirsel_types::UniqueSummary::default(),
-                };
-                let mut inferred_parts = crossing::Parts::default();
+                let mut declared_parts = crossing::Parts::default();
                 let declared = match callee {
                     Callee::Definition { path, arguments } => {
                         self.signatures.get(path).and_then(|s| {
@@ -6726,28 +6703,25 @@ impl Checker<'_, '_> {
                     )
                 {
                     for (row, ty) in
-                        hirsel_types::unique_summary::result_rows(self.t, root, &roles, &mut |d| {
+                        hirsel_types::unique_rows::result_rows(self.t, root, &roles, &mut |d| {
                             self.signatures.get(d).cloned().map(std::sync::Arc::new)
                         })
                     {
                         if self.t.row(ty).modes.uniqueness == hirsel_types::Uniqueness::Unique {
-                            inferred_parts.set(&unique_row_path(row), true);
+                            declared_parts.set(&unique_row_path(row), true);
                         }
                     }
-                }
-                for row in &inferred.results {
-                    inferred_parts.set(&unique_row_path(*row), true);
                 }
                 self.install_unique_parts(
                     state,
                     destination,
-                    &inferred_parts,
+                    &declared_parts,
                     model.crossing_depth,
                 );
                 self.set_current_unique(
                     state,
                     destination,
-                    protocol_receipt && (inferred.results.contains(&hirsel_types::UniqueResultRow::Root) || promised
+                    protocol_receipt && (promised
                         || parametric
                         || awaited_unique
                         // An owning core cursor transfers parts of its
@@ -6834,38 +6808,6 @@ impl Checker<'_, '_> {
             }
             Terminator::Return { value, cleanup } => {
                 self.return_creation(model, state, value, report);
-                if self.site.body == self.definition.entry {
-                    let rows = hirsel_types::unique_summary::result_rows(
-                        self.t,
-                        self.body.result,
-                        &self
-                            .signatures
-                            .get(self.definition.path)
-                            .map(|s| s.metadata.roles.clone())
-                            .unwrap_or_default(),
-                        &mut |d| self.signatures.get(d).cloned().map(std::sync::Arc::new),
-                    );
-                    let parts = self.operand_unique_parts(state, value);
-                    for claimed in &self.definition.inferred_unique.results {
-                        let valid =
-                            rows.iter()
-                                .find(|(row, _)| row == claimed)
-                                .is_some_and(|(_, ty)| {
-                                    !needs_release(self, *ty, self.t)
-                                        || super::handle_root(self.t, *ty)
-                                        || self.operand_unique(state, value)
-                                        || parts.get(&unique_row_path(*claimed)) == Some(true)
-                                });
-                        if !valid {
-                            self.flow_error(
-                                report,
-                                ViolationKind::TypeMismatch {
-                                    entity: "private unique result proof",
-                                },
-                            );
-                        }
-                    }
-                }
                 if model
                     .unique_proof
                     .is_some_and(|root| !model.mutable_parameters[root])

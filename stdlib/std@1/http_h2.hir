@@ -754,6 +754,7 @@ fn http_h2_receive_head(mut r: Request) -> Result[ResponseHead, HttpError] {
 }
 
 @preserves_captures(r)
+@preserves_unique(out)
 fn http_h2_read_body(mut r: Request, mut out: List[u8], max: u64) -> Result[
   u64,
   HttpError

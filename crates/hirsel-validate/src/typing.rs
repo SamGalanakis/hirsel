@@ -789,16 +789,6 @@ impl<'a, 'input> Checker<'a, 'input> {
                 fields: Vec::new(),
             })
             .collect();
-        expected.extend(
-            self.definition
-                .inferred_unique
-                .nonretaining
-                .iter()
-                .map(|p| ScopedParameter {
-                    parameter: p.0,
-                    fields: Vec::new(),
-                }),
-        );
         expected.sort();
         expected.dedup();
         if !scoped_parameters_valid(self.t, f, &self.body.scoped_parameters, &expected) {
@@ -2597,40 +2587,6 @@ impl<'a, 'input> Checker<'a, 'input> {
         });
         let expected =
             expected.and_then(|root| hirsel_types::declared_receipt_evidence(target, root).ok());
-        let expected = expected.map(|root| {
-            if let Callee::Definition { path, .. } = callee
-                && hirsel_types::unique_summary::same_module(path, self.definition.path.path())
-                && let Some(signature) = self.signatures.get(path)
-            {
-                let actual_rows = hirsel_types::unique_summary::result_rows(
-                    target,
-                    actual_result,
-                    &signature.metadata.roles,
-                    &mut |id| self.signatures.get(id).cloned().map(std::sync::Arc::new),
-                );
-                let claimed: Vec<_> = signature
-                    .metadata
-                    .inferred_unique
-                    .results
-                    .iter()
-                    .copied()
-                    .filter(|fact| {
-                        actual_rows.iter().any(|(row, ty)| {
-                            row == fact && target.row(*ty).modes.uniqueness == Uniqueness::Unique
-                        })
-                    })
-                    .collect();
-                hirsel_types::unique_summary::result_evidence(
-                    target,
-                    root,
-                    &claimed,
-                    &signature.metadata.roles,
-                    &mut |id| self.signatures.get(id).cloned().map(std::sync::Arc::new),
-                )
-            } else {
-                root
-            }
-        });
         let sharing_result = match &store.get(f.result).unwrap().kind {
             TypeKind::Parameter(TypeParameterRef::Bound {
                 depth: 0,

@@ -727,6 +727,11 @@ pub enum Repair {
         helper: String,
         parameter: String,
     },
+    /// A declaration edit, conditional on the callee's returns being unique.
+    UniqueResultContract {
+        helper: String,
+        ty: String,
+    },
     /// A Shared root's copy is a counted, global handle (MEM-11).
     CopyShared(String),
     UseOwner {
@@ -802,6 +807,9 @@ impl Repair {
             ),
             Repair::PreserveUnique { helper, parameter } => format!(
                 "declare `@preserves_unique({parameter})` on `{helper}` only if its body checks the contract: the selected parameter must stay deeply unique at every exit, including failure handback; other non-plain `take` inputs must also be unique at this call (no cost; checked exported signature promise)"
+            ),
+            Repair::UniqueResultContract { helper, ty } => format!(
+                "declare `{helper}`'s result `-> unique {ty}` only if its body checks the contract: every return must be deeply unique, so its callers receive unique content (no cost; checked signature contract)"
             ),
             Repair::UniqueResult { ty, expression } => format!(
                 "return a `unique {ty}` value with `unique {expression}` (deep copy: may allocate and costs O(size))"
@@ -1054,6 +1062,7 @@ impl Repair {
                 deep_copy: false, ..
             } => 0,
             Repair::PreserveUnique { .. }
+            | Repair::UniqueResultContract { .. }
             | Repair::TakeParameter(_)
             | Repair::LocalResult { .. }
             | Repair::PlaceParameter { .. }

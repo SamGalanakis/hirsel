@@ -29,7 +29,6 @@ impl<'a> TirView<'a> {
         match self {
             Self::Live(value) => Some(TirHeader {
                 version: TIR_VERSION,
-                inferred_unique: value.inferred_unique.clone(),
                 path: value.path,
                 signature_hash: value.signature_hash,
                 entry: value.entry,

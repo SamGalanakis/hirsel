@@ -29,7 +29,7 @@ use hirsel_query_products::LoweringPolicy;
 use hirsel_query_products::QueryKind;
 
 use hirsel_span::SourceMap;
-use hirsel_syntax::{ContentHash, DefPath};
+use hirsel_syntax::DefPath;
 use std::sync::{Arc, Mutex};
 
 /// The checked-product receipt of the completed Check root: its captured
@@ -1320,7 +1320,7 @@ pub(super) fn install(
         CompileOperation::NativeSources { roots } => roots.clone(),
         _ => demand_roots.clone(),
     });
-    let mut installed = hirsel_engine::requests::source_graph::install(
+    let (mut installed, runtime) = hirsel_engine::requests::source_graph::install(
         &mut program.engine,
         &selection,
         shape,
@@ -1897,10 +1897,6 @@ pub(super) fn install(
             hirsel_engine_runtime::profile::definition(query, path);
         }
     }
-    let runtime = program
-        .engine
-        .release_private_inference_admission()
-        .map_err(query_error)?;
     let native_budget = runtime.bytes();
     let mut runtime = AdmittedRuntime::new(config.jobs, runtime, errors).map_err(ToolError::Io)?;
     if (native.is_some() || native_artifacts.is_some()) && hirsel_intern::timings::enabled() {

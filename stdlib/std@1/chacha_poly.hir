@@ -193,7 +193,7 @@ fn rounds(mut x: Inline[u32, 16]) -> () uses {} {
 }
 
 // `data` XORed with the ChaCha20 keystream from block `counter` on.
-fn xor(key: Bytes, nonce: Bytes, counter: u32, data: Bytes) -> Bytes uses {} {
+fn xor(key: Bytes, nonce: Bytes, counter: u32, data: Bytes) -> unique Bytes uses {} {
   let len = core@1/bytes.len(data)
   let mut out: List[u8] = []
   core@1/list.reserve(mut out, len)

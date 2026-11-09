@@ -36,11 +36,8 @@ Wire tests use run-config's shared `hex` formatter as a dev dependency.
   representation is an alias, are private. `FunctionType.foreign` is an extern's
   ForeignContract (PROG-4). Manifest `Metadata` (with each selected `unsafe ffi`
   package's wrappers)/`DefinitionMetadata`/`DeclarationSite` are shared inputs.
-- Private `UniqueSummary` rows also carry whole borrowed-data parameters whose
-  content does not escape the invocation. The module inference query publishes
-  these facts with its reads; callers perform a summary lookup. They do not
-  change callable types. Source V and physical C check the body obligations,
-  and linked C settles the transitive dependency equations independently.
+- Signatures carry declared contracts only. `unique_rows::result_rows` lists a
+  declared `-> unique` result's rows; no body-derived summary is published.
 - `Type.drop_allocation` is independent of function invocation allocation:
   NoAlloc, MayAllocate, or a conjunction of generic NoallocDrop obligations.
   Unproved erased cleanup defaults to MayAllocate. Resource

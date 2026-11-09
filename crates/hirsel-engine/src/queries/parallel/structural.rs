@@ -3,10 +3,9 @@
 //! compiler/rustc_query_system/src/dep_graph/graph.rs:959-990.
 //! A retained result is reused only after every consumed provider facet matches.
 //! Here the dependencies are exact provider results rather than dep-node colors.
-//! Signatures passed to Check contain declaration fields, not inferred ownership.
 use super::*;
 use hirsel_intern::timings::instructions::{self as counted, Owner};
-use hirsel_types::{DependencyRead, Signature, TypeInterner};
+use hirsel_types::{DependencyRead, TypeInterner};
 use std::hash::{Hash, Hasher};
 use std::sync::{Mutex, OnceLock, Weak};
 
@@ -16,11 +15,6 @@ enum Facet {
     Signature(DefId, Result<SignatureRef, QueryError>),
     Lookup(FileContext, hirsel_syntax::Path, hirsel_types::LookupOutput),
     Name(DefPath, Option<Span>),
-    Unique(
-        DefPath,
-        hirsel_types::UniqueClaim,
-        Result<Option<hirsel_types::UniqueFailure>, QueryError>,
-    ),
 }
 struct Input {
     types: Arc<TypeInterner>,
@@ -99,29 +93,6 @@ impl Checks {
 fn retain(result: &Result<Arc<QueryOutput<TypedBody>>, QueryError>) -> bool {
     result.is_ok() || result.as_ref().is_err_and(|error| error.cacheable())
 }
-/// `signature` without inferred uniqueness, as the checked relation reads
-/// it. Derived once per signature identity when `types` is the snapshot's own
-/// interner.
-fn declaration(
-    snapshot: &SignatureSnapshot,
-    types: &TypeInterner,
-    signature: &SignatureRef,
-) -> Result<SignatureRef, QueryError> {
-    let derive = || {
-        let mut signature = (**signature).clone();
-        signature.metadata.inferred_unique = Default::default();
-        signature.fingerprint = hirsel_types::encoding::fingerprint(types, &signature, &[])
-            .map_err(|error| {
-                header_products::source_refusal(format!("structural signature: {error:?}"))
-            })?;
-        Ok(Arc::new(signature))
-    };
-    if std::ptr::eq(types, &**snapshot.types()) {
-        snapshot.structural_declaration(signature, derive)
-    } else {
-        derive()
-    }
-}
 struct Provider<'a> {
     inner: &'a mut dyn SignatureProvider,
     snapshot: &'a SignatureSnapshot,
@@ -131,9 +102,8 @@ struct Provider<'a> {
 }
 impl SignatureProvider for Provider<'_> {
     fn signature(&mut self, id: DefId) -> Result<SignatureRef, QueryError> {
-        let result = self.inner.signature(id).and_then(|signature| {
+        let result = self.inner.signature(id).inspect(|signature| {
             self.actual.insert(id, signature.fingerprint);
-            declaration(self.snapshot, self.types, &signature)
         });
         self.facets.push(Facet::Signature(id, result.clone()));
         result
@@ -153,16 +123,6 @@ impl SignatureProvider for Provider<'_> {
         self.facets.push(Facet::Name(path.clone(), result));
         result
     }
-    fn cite_unique_failure(
-        &mut self,
-        path: &DefPath,
-        claim: hirsel_types::UniqueClaim,
-    ) -> Result<Option<hirsel_types::UniqueFailure>, QueryError> {
-        let result = self.inner.cite_unique_failure(path, claim);
-        self.facets
-            .push(Facet::Unique(path.clone(), claim, result.clone()));
-        result
-    }
 }
 impl Provider<'_> {
     fn replay(&mut self, facets: &[Facet]) -> Result<bool, QueryError> {
@@ -176,9 +136,6 @@ impl Provider<'_> {
                 }
                 Facet::Name(path, _) => {
                     self.cite_name(path);
-                }
-                Facet::Unique(path, claim, _) => {
-                    self.cite_unique_failure(path, *claim)?;
                 }
             }
             if self.facets.last() != Some(facet) {
@@ -250,10 +207,9 @@ impl Worker<'_> {
         mut resolution: Resolution,
         signature: &SignatureRef,
         provider: &mut dyn SignatureProvider,
-        inference: bool,
     ) -> ResultBody {
         let checker = self.checker.ok_or(QueryError::NotImplemented)?;
-        let production = Owner::StructuralProduction { inference };
+        let production = Owner::StructuralProduction;
         // The census identifies the checked input by its text and declared
         // signature; a 32-bit digest suffices to tell a changed input apart.
         let census_input = {
@@ -266,11 +222,7 @@ impl Worker<'_> {
             ])
         };
         let census = || {
-            counted::census_production(
-                signature.definition.session_index(),
-                inference,
-                census_input,
-            )
+            counted::census_production(signature.definition.session_index(), census_input)
         };
         let binding = counted::scope(Owner::ReceiptBinding);
         let mut actual = BTreeMap::from([(signature.definition, signature.fingerprint)]);
@@ -292,9 +244,7 @@ impl Worker<'_> {
                         actual.insert(*definition, signature.fingerprint);
                         Ok(DependencyRead::Signature {
                             definition: *definition,
-                            fingerprint: Some(
-                                declaration(self.snapshot, self.types, &signature)?.fingerprint,
-                            ),
+                            fingerprint: Some(signature.fingerprint),
                         }
                         .shared())
                     }
@@ -302,7 +252,7 @@ impl Worker<'_> {
                 })
                 .collect::<Result<_, QueryError>>()?,
         );
-        let declared = declaration(self.snapshot, self.types, signature)?;
+        let declared = signature.clone();
         drop(binding);
         let headers = self.snapshot.header_products();
         let cache = headers.and_then(|headers| headers.structural_checks(checker));
@@ -396,7 +346,7 @@ impl Worker<'_> {
                     retain,
                 );
                 if !produced.get() {
-                    counted::census_restored(inference);
+                    counted::census_restored();
                 }
                 return current.restore(result.map(|output| (*output).clone()));
             }
@@ -425,7 +375,7 @@ impl Worker<'_> {
             && !current
                 .facets
                 .iter()
-                .any(|facet| matches!(facet, Facet::Signature(_, Err(error)) | Facet::Unique(_, _, Err(error)) if !error.cacheable()))
+                .any(|facet| matches!(facet, Facet::Signature(_, Err(error)) if !error.cacheable()))
         {
             let _admission = counted::scope(Owner::Store);
             current.facets.shrink_to_fit();
@@ -493,16 +443,6 @@ fn retained_bytes(input: &Input, facets: &[Facet], result: &ResultBody) -> u64 {
                 hirsel_query_products::retained::retained_structural_lookup_bytes(
                     context, path, output,
                 )
-            }
-            Facet::Unique(path, _, failure) => {
-                hirsel_query_products::retained::retained_structural_path_bytes(path)
-                    .saturating_add(match failure {
-                        Ok(Some(failure)) => failure.message.capacity() as u64,
-                        Ok(None) => 0,
-                        Err(error) => {
-                            hirsel_query_products::retained::retained_query_error_bytes(error)
-                        }
-                    })
             }
             Facet::Name(path, _) => {
                 hirsel_query_products::retained::retained_structural_path_bytes(path)

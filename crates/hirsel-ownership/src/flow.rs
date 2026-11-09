@@ -1453,8 +1453,6 @@ struct Checker<'a, 's> {
     /// Proving `@preserves_unique` on this parameter: it and every non-plain
     /// taken or `mut` parameter enter unique, and it must leave unique.
     unique_proof: Option<ParamId>,
-    unique_results: Option<BTreeSet<UniqueResultRow>>,
-    unique_failures: Vec<UniqueFailure>,
     arenas: crate::arenas::Arenas,
     /// The holders live after each graph node (LANG-3).
     live: &'a LiveSets,
@@ -1482,8 +1480,6 @@ pub(super) const UNIQUE_PROOF_FAILED: &str =
     "this body does not prove its @preserves_unique promise";
 
 pub(super) struct FlowOutput {
-    pub unique_results: Vec<UniqueResultRow>,
-    pub unique_failures: Vec<UniqueFailure>,
     pub mutation_sites: Vec<ExprId>,
     pub replacements: BTreeMap<ExprId, Option<bool>>,
     pub return_uniqueness: BTreeMap<ParamId, bool>,
@@ -1951,8 +1947,6 @@ pub(super) fn check(
         confined: BTreeSet::new(),
         confined_nodes: BTreeSet::new(),
         unique_proof: proof,
-        unique_results: None,
-        unique_failures: vec![],
         live,
         constants: prepared
             .constants
@@ -2182,28 +2176,6 @@ pub(super) fn check(
         return Err(error);
     }
     Ok(FlowOutput {
-        unique_failures: checker.unique_failures,
-        unique_results: checker
-            .unique_results
-            .unwrap_or_else(|| {
-                checker
-                    .graph
-                    .result_ty
-                    .map(|root| {
-                        hirsel_types::unique_summary::result_rows(
-                            t,
-                            root,
-                            &own.metadata.roles,
-                            &mut |d| signatures.cached(d),
-                        )
-                        .into_iter()
-                        .map(|(row, _)| row)
-                        .collect()
-                    })
-                    .unwrap_or_default()
-            })
-            .into_iter()
-            .collect(),
         mutation_sites: checker.mutation_sites,
         replacements: checker.replacement_live,
         return_uniqueness: checker.return_uniqueness,
@@ -3538,19 +3510,7 @@ impl Checker<'_, '_> {
                         .is_some()
                     })
             });
-        (promised && self.callee_definition(callee).is_some())
-            || self.callee_definition(callee).is_some_and(|path| {
-                hirsel_types::unique_summary::same_module(path, self.own.definition.path())
-                    && self
-                        .signatures
-                        .cached(DefId::intern(path))
-                        .is_some_and(|s| {
-                            s.metadata
-                                .inferred_unique
-                                .preserves_unique
-                                .contains(&ParamId(ordinal as u32))
-                        })
-            })
+        promised && self.callee_definition(callee).is_some()
     }
     /// User-visible destruction (DROP-1/2): a noncopyable value, which may
     /// hold a resource, or a once callable.
@@ -7325,7 +7285,7 @@ impl Checker<'_, '_> {
                             &call.target
                             && let Some(root) = self.ty(*expression)
                         {
-                            for (row, _) in hirsel_types::unique_summary::result_rows(
+                            for (row, _) in hirsel_types::unique_rows::result_rows(
                                 self.t,
                                 root,
                                 &self.own.metadata.roles,
@@ -7924,7 +7884,7 @@ impl Checker<'_, '_> {
                     && !replaced
                     // A bare generic result keeps its declared aliased root.
                     // Its instantiated actual is not an independent uniqueness
-                    // promise; parametric/inferred evidence is handled above.
+                    // promise; parametric evidence is handled above.
                     && self.ty(*callee).is_some_and(|ty| {
                         let TypeKind::Function(function) = &self.t.row(ty).kind else {
                             return false;
@@ -7939,7 +7899,7 @@ impl Checker<'_, '_> {
                         TypeKind::Named { .. } | TypeKind::Tuple(_)
                     )
                 {
-                    for (row, ty) in hirsel_types::unique_summary::result_rows(
+                    for (row, ty) in hirsel_types::unique_rows::result_rows(
                         self.t,
                         root,
                         &self.own.metadata.roles,
@@ -7957,25 +7917,6 @@ impl Checker<'_, '_> {
                                 value
                                     .unique_parts
                                     .insert(vec![Projection::VariantField { variant, field }]);
-                            }
-                        }
-                    }
-                }
-                if let Some(path) = self.callee_definition(*callee)
-                    && hirsel_types::unique_summary::same_module(path, self.own.definition.path())
-                    && let Some(header) = self.signatures.cached(DefId::intern(path))
-                {
-                    for row in &header.metadata.inferred_unique.results {
-                        match row {
-                            UniqueResultRow::Root => value.modes.uniqueness = Uniqueness::Unique,
-                            UniqueResultRow::Tuple(field) => {
-                                value.unique_parts.insert(vec![Projection::Field(*field)]);
-                            }
-                            UniqueResultRow::Payload { variant, field } => {
-                                value.unique_parts.insert(vec![Projection::VariantField {
-                                    variant: *variant,
-                                    field: *field,
-                                }]);
                             }
                         }
                     }
@@ -8000,7 +7941,6 @@ impl Checker<'_, '_> {
                 result,
             } => self.propagate(state, *expression, *value, result),
             Op::Return { value, result } => {
-                self.observe_unique_result(&self.value(state, *value), self.span_of(*value));
                 self.creation_return(state, *value);
                 let mut result = result.clone();
                 if self.environment_frame {
@@ -8093,66 +8033,6 @@ impl Checker<'_, '_> {
         };
         if let Some(expression) = failure_site {
             self.mutable_crossing_exit(state, self.span_of(expression), &BTreeSet::new());
-        }
-    }
-    fn observe_unique_result(&mut self, actual: &Value, site: Span) {
-        if !self.emit
-            || self.unique_proof.is_some()
-            || self.graph.owner != NameSite::Item
-            || self.graph.clause.is_some()
-        {
-            return;
-        }
-        let proven: BTreeSet<_> = self
-            .graph
-            .result_ty
-            .into_iter()
-            .flat_map(|root| {
-                hirsel_types::unique_summary::result_rows(
-                    self.t,
-                    root,
-                    &self.own.metadata.roles,
-                    &mut |d| self.signatures.cached(d),
-                )
-            })
-            .filter_map(|(row, ty)| {
-                let path = match row {
-                    UniqueResultRow::Root => vec![],
-                    UniqueResultRow::Tuple(field) => vec![Projection::Field(field)],
-                    UniqueResultRow::Payload { variant, field } => {
-                        vec![Projection::VariantField { variant, field }]
-                    }
-                };
-                let plain = self
-                    .properties
-                    .get(ty)
-                    .is_some_and(|p| p.plain || p.handle_root);
-                let unique = actual.modes.uniqueness == Uniqueness::Unique
-                    || plain
-                    || !path.is_empty() && actual.unique_parts.iter().any(|p| path.starts_with(p));
-                unique.then_some(row)
-            })
-            .collect();
-        for (row, _) in self.graph.result_ty.into_iter().flat_map(|root| {
-            hirsel_types::unique_summary::result_rows(
-                self.t,
-                root,
-                &self.own.metadata.roles,
-                &mut |d| self.signatures.cached(d),
-            )
-        }) {
-            let claim = UniqueClaim::Result(row);
-            if !proven.contains(&row) && !self.unique_failures.iter().any(|f| f.claim == claim) {
-                self.unique_failures.push(UniqueFailure {
-                    claim,
-                    span: site,
-                    message: "this return may retain counted shared storage".into(),
-                });
-            }
-        }
-        match &mut self.unique_results {
-            Some(old) => old.retain(|row| proven.contains(row)),
-            None => self.unique_results = Some(proven),
         }
     }
     /// LANG-8: `value ?` returns `Error(e)` for the error payload `e` of
@@ -8309,12 +8189,6 @@ impl Checker<'_, '_> {
         let mapped_unique = if let Some((path, signature)) = mapper {
             if let SignatureKind::Function(function) = &signature.kind {
                 self.t.row(function.result).modes.uniqueness == Uniqueness::Unique
-                    || hirsel_types::unique_summary::same_module(path, self.own.definition.path())
-                        && signature
-                            .metadata
-                            .inferred_unique
-                            .results
-                            .contains(&UniqueResultRow::Root)
             } else {
                 false
             }
@@ -8329,7 +8203,7 @@ impl Checker<'_, '_> {
             Uniqueness::Aliased
         };
         if let Some(root) = self.graph.result_ty {
-            for (row, _) in hirsel_types::unique_summary::result_rows(
+            for (row, _) in hirsel_types::unique_rows::result_rows(
                 self.t,
                 root,
                 &self.own.metadata.roles,
@@ -8344,7 +8218,6 @@ impl Checker<'_, '_> {
                 }
             }
         }
-        self.observe_unique_result(&returned, self.span_of(expression));
         if property.is_some_and(|p| p.plain) || self.mapper_releases(expression) {
             return;
         }
@@ -9148,22 +9021,9 @@ impl Checker<'_, '_> {
                     if let Some(call) = c.owned_call_source(state, expression)
                         && let ExprKind::Call { callee, .. } =
                             c.tree.expressions[call.0 as usize].kind
-                        && let Some(path) = c.callee_definition(callee)
-                        && hirsel_types::unique_summary::same_module(path, c.own.definition.path())
-                        && let Some(failure) =
-                            c.unique_failure(path, UniqueClaim::Result(UniqueResultRow::Root))
+                        && let Some(repair) = c.helper_result_repair(callee)
                     {
-                        pending.explanation.provided.push(Fact::new(
-                            Cause::UniquenessLoss,
-                            failure.span,
-                            &[
-                                "the result",
-                                &format!(
-                                    "`{}` no longer returns unique content: {}",
-                                    path.0.name, failure.message
-                                ),
-                            ],
-                        ));
+                        pending.explanation.repairs.push(repair);
                     }
                     pending
                 },

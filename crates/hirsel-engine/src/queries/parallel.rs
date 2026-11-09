@@ -136,7 +136,6 @@ pub(crate) struct Completed {
     pub(crate) result: Result<Arc<QueryOutput<AnalyzedBody>>, QueryError>,
     pub(crate) phase: QueryKind,
     signature_reads: Arc<Reads>,
-    proofs: header_products::ConsumerProofs,
 }
 
 impl Completed {
@@ -266,9 +265,6 @@ pub(crate) struct Worker<'a> {
 }
 impl Worker<'_> {
     pub(crate) fn run(&self, task: Task) -> Completed {
-        self.run_to(task, false)
-    }
-    pub(crate) fn run_to(&self, task: Task, inference: bool) -> Completed {
         let mut done = Completed {
             index: task.index,
             definition: task.definition.clone(),
@@ -279,13 +275,8 @@ impl Worker<'_> {
             result: Err(QueryError::NotImplemented),
             phase: QueryKind::Resolve,
             signature_reads: task.signature_reads.clone(),
-            proofs: Default::default(),
         };
         let owner = DefId::intern(&task.definition);
-        if let Err(error) = done.proofs.retain(self.snapshot.header_products(), owner) {
-            done.result = Err(error);
-            return done;
-        }
         // A checked memo already includes the complete resolution reads. A
         // partial hit needs no resolver work, but remains the same task path.
         let mut resolution_provider_reads = None;
@@ -303,7 +294,7 @@ impl Worker<'_> {
                     unavailable: None,
                 };
                 let mut products = PhaseProducts::default();
-                let mut provider = WorkerRecorder::new(self, owner, &mut stage, &mut done.proofs);
+                let mut provider = WorkerRecorder::new(self, owner, &mut stage);
                 let result = match self.resolver {
                     Some(adapter) => adapter.resolve(
                         self.types,
@@ -366,9 +357,7 @@ impl Worker<'_> {
                 None
             };
             let _timing = timings::phase(Phase::Check);
-            if !inference {
-                timings::count(Count::Definitions);
-            }
+            timings::count(Count::Definitions);
             let mut stage = Stage {
                 result: Err(QueryError::NotImplemented),
                 detail: initial,
@@ -382,7 +371,13 @@ impl Worker<'_> {
                             .record(ReadKey::DeclaredSignature(owner), value);
                     }
                     for &(key, value) in task.registration.iter().flat_map(|r| r.reads.iter()) {
-                        if private_unique::inherited_registration_read(&key) {
+                        if !matches!(
+                            key,
+                            ReadKey::ValidationView(_)
+                                | ReadKey::ValidationUniverse(_)
+                                | ReadKey::UniverseErrors
+                                | ReadKey::HeapRole
+                        ) {
                             observed.merged.record(key, value);
                         }
                     }
@@ -391,13 +386,12 @@ impl Worker<'_> {
                 unavailable: None,
             };
             let initial_signatures = stage.detail.signatures.len();
-            let mut provider = WorkerRecorder::new(self, owner, &mut stage, &mut done.proofs);
+            let mut provider = WorkerRecorder::new(self, owner, &mut stage);
             let mut result = self.structural_check(
                 task.syntax,
                 resolution.value.clone(),
                 &signature.value,
                 &mut provider,
-                inference,
             );
             if let Ok(output) = &mut result {
                 arm_fixes::place_with(
@@ -450,9 +444,6 @@ impl Worker<'_> {
                 return done;
             }
         };
-        if inference {
-            return done;
-        }
         done.phase = QueryKind::Signature;
         let signature = match task.signature {
             Ok(value) => value,
@@ -470,7 +461,7 @@ impl Worker<'_> {
             unavailable: None,
         };
         let mut products = PhaseProducts::default();
-        let mut provider = WorkerRecorder::new(self, owner, &mut stage, &mut done.proofs);
+        let mut provider = WorkerRecorder::new(self, owner, &mut stage);
         let window = hirsel_intern::timings::instructions::WorkWindow::open();
         let result = match self.modes {
             Some(adapter) => adapter.check_modes(
@@ -480,8 +471,7 @@ impl Worker<'_> {
                 &signature.value,
                 &mut products,
                 &mut provider,
-                false,
-            ),
+                            ),
             None => Err(QueryError::NotImplemented),
         };
         window.close();
@@ -503,14 +493,12 @@ struct WorkerRecorder<'a> {
     snapshot: &'a SignatureSnapshot,
     detail: &'a mut DependencyReads,
     unavailable: &'a mut Option<QueryKind>,
-    proofs: &'a mut header_products::ConsumerProofs,
 }
 impl<'a> WorkerRecorder<'a> {
     fn new<T>(
         worker: &'a Worker<'_>,
         owner: DefId,
         stage: &'a mut Stage<T>,
-        proofs: &'a mut header_products::ConsumerProofs,
     ) -> Self {
         Self {
             provider: FrozenProvider::for_definition(
@@ -522,17 +510,12 @@ impl<'a> WorkerRecorder<'a> {
             snapshot: worker.snapshot,
             detail: &mut stage.detail,
             unavailable: &mut stage.unavailable,
-            proofs,
         }
     }
 }
 impl SignatureProvider for WorkerRecorder<'_> {
     fn signature(&mut self, definition: DefId) -> Result<SignatureRef, QueryError> {
-        let result = self.provider.signature(definition).and_then(|signature| {
-            self.proofs
-                .retain(self.snapshot.header_products(), definition)?;
-            Ok(signature)
-        });
+        let result = self.provider.signature(definition);
         if matches!(result, Err(QueryError::NotImplemented))
             && self.snapshot.signature(definition).is_some()
         {
@@ -557,28 +540,6 @@ impl SignatureProvider for WorkerRecorder<'_> {
             }
         }
         result
-    }
-    fn cite_unique_failure(
-        &mut self,
-        definition: &DefPath,
-        claim: hirsel_types::UniqueClaim,
-    ) -> Result<Option<hirsel_types::UniqueFailure>, QueryError> {
-        let result = self
-            .provider
-            .cite_unique_failure(definition, claim)
-            .and_then(|failure| {
-                self.proofs
-                    .retain(self.snapshot.header_products(), DefId::intern(definition))?;
-                Ok(failure)
-            });
-        if let Err(QueryError::Operational(error)) = &result {
-            self.detail.operational_failure = Some(error.clone());
-        }
-        let failure = result?;
-        self.detail
-            .citations
-            .push((definition.clone(), failure.as_ref().map(|f| f.span)));
-        Ok(failure)
     }
     fn cite_name(&mut self, definition: &DefPath) -> Option<Span> {
         let cited = self.provider.cite_name(definition);
@@ -912,7 +873,6 @@ mod frozen_task_tests {
                 _: &Signature,
                 _: &mut PhaseProducts,
                 _: &mut dyn SignatureProvider,
-                infer: bool,
             ) -> Result<QueryOutput<AnalyzedBody>, QueryError> {
                 self.0.store(
                     Arc::as_ptr(&body) as usize,
@@ -1097,7 +1057,7 @@ mod frozen_task_tests {
         }
     }
     #[test]
-    fn structural_check_reuses_declarations_and_rebinds_receipts_after_inference() {
+    fn structural_check_reuses_declarations_and_rebinds_changed_receipts() {
         hirsel_intern::jobs::with_compiler_stack(|| {
             let (mut engine, path) = fixture();
             let id = DefId::intern(&path);
@@ -1114,22 +1074,9 @@ mod frozen_task_tests {
                 dependency_id,
             ));
             engine.adapters.checker = Some(checker.clone());
-            let mut inferred = first.clone();
-            Arc::make_mut(&mut inferred)
-                .metadata
-                .inferred_unique
-                .preserves_unique
-                .push(hirsel_types::ParamId(0));
-            Arc::make_mut(&mut inferred).fingerprint = ContentHash::of_bytes(b"inferred receipt");
             let mut dependency = first.clone();
             Arc::make_mut(&mut dependency).definition = dependency_id;
-            let mut dependency_proof = dependency.clone();
-            Arc::make_mut(&mut dependency_proof)
-                .metadata
-                .inferred_unique = inferred.metadata.inferred_unique.clone();
-            Arc::make_mut(&mut dependency_proof).fingerprint =
-                ContentHash::of_bytes(b"provider inferred receipt");
-            let mut changed = dependency_proof.clone();
+            let mut changed = dependency.clone();
             if let hirsel_types::SignatureKind::Function(function) =
                 &mut Arc::make_mut(&mut changed).kind
             {
@@ -1139,19 +1086,13 @@ mod frozen_task_tests {
                 ContentHash::of_bytes(b"changed provider declaration");
             for (signature, dependency, expected_type, computations) in [
                 (
-                    first,
+                    first.clone(),
                     dependency,
                     engine.types.intern(hirsel_types::Type::unit()),
                     1,
                 ),
                 (
-                    inferred.clone(),
-                    dependency_proof,
-                    engine.types.intern(hirsel_types::Type::unit()),
-                    1,
-                ),
-                (
-                    inferred,
+                    first,
                     changed,
                     engine.types.intern(hirsel_types::Type::boolean()),
                     2,
@@ -1195,7 +1136,6 @@ mod frozen_task_tests {
                         Resolution::default(),
                         &signature,
                         &mut provider,
-                        false,
                     )
                     .unwrap();
                 assert_eq!(output.value.unit, expected_type);

@@ -158,7 +158,6 @@ impl Fixture {
                 protocol_associations: vec![],
                 types,
                 path: id("main"),
-                inferred_unique: Default::default(),
                 signature_hash: ContentHash::default(),
                 entry: BodyId(0),
                 contracts: vec![],

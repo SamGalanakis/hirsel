@@ -357,38 +357,3 @@ fn nested_header_uniqueness_stays_exact() {
     }]);
 }
 
-#[test]
-fn unpublished_private_uniqueness_evidence_is_not_verifier_authority() {
-    for summary in [
-        UniqueSummary {
-            nonretaining: Vec::new(),
-            preserves_unique: vec![ParamId(0)],
-            results: vec![],
-        },
-        UniqueSummary {
-            nonretaining: Vec::new(),
-            preserves_unique: vec![],
-            results: vec![UniqueResultRow::Root],
-        },
-        UniqueSummary {
-            nonretaining: Vec::new(),
-            preserves_unique: vec![],
-            results: vec![UniqueResultRow::Tuple(0)],
-        },
-        UniqueSummary {
-            nonretaining: Vec::new(),
-            preserves_unique: vec![],
-            results: vec![UniqueResultRow::Payload {
-                variant: 0,
-                field: 0,
-            }],
-        },
-    ] {
-        let mut fixture = Fixture::unit();
-        fixture.valid();
-        fixture.definition.inferred_unique = summary;
-        assert!(fixture.kinds().contains(&ViolationKind::TypeMismatch {
-            entity: "unproved private uniqueness summary"
-        }));
-    }
-}

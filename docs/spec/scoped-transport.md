@@ -78,15 +78,11 @@ owning `OwningScoped` environments keep their current safe heap behavior. Strict
 qualification still refuses unknown forwarding and ownership-creating transport
 of scoped origins. V similarly exposes a separate strict qualification check;
 ordinary declaration/classification and existing escape validation remain in force.
-The retention-origin solver runs at explicit qualification and when ordinary V
-rechecks an inferred nonretention claim. A private borrowed-data helper summary
-qualifies forwarding only when its original
-parameter graph has no unresolved type parameter or callable node. Specialization
-does not supply a missing nested callable contract. No generic declaration acquires
-a nonretaining promise through specialization. Private inference excludes those
-parameter graphs from its summaries and declines functions with written contracts
-until its proof covers the generated clause calls and their
-data-parameter entry contracts.
+The retention-origin solver runs at explicit qualification. Nonretention comes only
+from declared callable contracts; no body-derived summary supplies it
+([MODE-2](ownership.md#mode-2-uniqueness)). Specialization does not supply a missing
+nested callable contract, and no generic declaration acquires a nonretaining promise
+through specialization.
 Any future optimization must qualify its supported subset again after every
 transformation; receipt identity alone cannot replace that check.
 

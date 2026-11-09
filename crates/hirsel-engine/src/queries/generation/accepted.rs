@@ -332,7 +332,6 @@ struct AcceptanceInputs {
     parser: Option<Arc<dyn ParserPhase>>,
     signer: Option<Arc<dyn SignaturePhase>>,
     current: Vec<(ReadKey, Option<ContentHash>)>,
-    private_failure: Option<QueryError>,
     verify: Verify,
     schema_origins: Vec<(std::ops::Range<usize>, hirsel_diag::Label)>,
 }
@@ -359,13 +358,6 @@ impl SignatureProvider for NormalizationProvider<'_> {
     }
     fn cite_name(&mut self, path: &DefPath) -> Option<Span> {
         self.frozen.cite_name(path)
-    }
-    fn cite_unique_failure(
-        &mut self,
-        path: &DefPath,
-        claim: hirsel_types::UniqueClaim,
-    ) -> Result<Option<hirsel_types::UniqueFailure>, QueryError> {
-        self.frozen.cite_unique_failure(path, claim)
     }
 }
 
@@ -448,9 +440,6 @@ impl AcceptanceInputs {
                 .iter()
                 .find(|(key, current)| execution_reads.get(key) != *current)
             {
-                if let Some(failure) = &self.private_failure {
-                    return Err(failure.clone());
-                }
                 return Err(QueryError::Operational(hirsel_types::OperationalFailure {
                     operation: "generated syntax acceptance".into(),
                     message: format!(
@@ -637,10 +626,6 @@ impl QueryEngine {
                 let observed = self.observe(&definition, key);
                 current.push((*key, observed));
             }
-            let private_failure = self
-                .private_summary_failure
-                .as_ref()
-                .map(|(_, failure)| failure.clone());
             let schema_origins = output.text().ok().map_or_else(Vec::new, |text| {
                 crate::diagnostics::schema_hook_contexts(text)
                     .filter_map(|(range, parent, member, contract)| {
@@ -668,13 +653,12 @@ impl QueryEngine {
             Ok((
                 original,
                 current,
-                private_failure,
                 schema_origins,
                 snapshot,
                 self.frozen_declarations(),
             ))
         })();
-        let (original, current, private_failure, schema_origins, snapshot, declarations) =
+        let (original, current, schema_origins, snapshot, declarations) =
             match captured {
                 Ok(inputs) => inputs,
                 Err(error) => {
@@ -692,7 +676,6 @@ impl QueryEngine {
                 }
             };
         let citations = crate::snapshot::OwnedSourceContext {
-            unique_failures: self.private_unique_failures.clone(),
             sources: self.sources.clone(),
             items: self.items.observations(),
             declarations: self.declarations.observations(),
@@ -704,7 +687,6 @@ impl QueryEngine {
         let inputs = AcceptanceInputs {
             original,
             current,
-            private_failure,
             schema_origins,
             snapshot,
             declarations,

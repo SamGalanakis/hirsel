@@ -191,8 +191,6 @@ impl Weight<'_> {
     }
     fn ownership(&mut self, value: &OwnershipFacts) {
         let OwnershipFacts {
-            inferred_unique,
-            unique_failures,
             confined_releases,
             borrow_cursors,
             cursor_rebindings,
@@ -211,12 +209,6 @@ impl Weight<'_> {
             allocating_mutations,
             replacements,
         } = value;
-        self.flat_vec(&inferred_unique.preserves_unique);
-        self.flat_vec(&inferred_unique.results);
-        self.flat_vec(&inferred_unique.nonretaining);
-        self.vec(unique_failures, |w, failure| {
-            w.add(failure.message.capacity())
-        });
         self.flat_vec(confined_releases);
         self.vec(borrow_cursors, |w, cursor| {
             if let Some(cover) = &cursor.cover {

@@ -1,5 +1,5 @@
 //! Source-only carry across admitted requests. Move original anchors, body-free
-//! heads, private proofs and reverse reads; never retain a LoadedProgram, body memo or
+//! heads and reverse reads; never retain a LoadedProgram, body memo or
 //! an S1 coordinator. A fresh engine supplies the current adapters and policy.
 use super::*;
 
@@ -10,11 +10,6 @@ pub struct SourceIndexState {
     syntax_keys: Box<[(DefId, ContentHash)]>,
     signatures: Vec<(DefId, SourceHeader)>,
     specialization_dependencies: BTreeMap<DefId, parallel::SpecializationDependencies>,
-    private_summary_reads: Box<[(DefId, Arc<Reads>)]>,
-    private_summaries: Box<[(DefId, hirsel_types::UniqueSummary)]>,
-    private_unique_failures: Box<[(DefId, Vec<hirsel_types::UniqueFailure>)]>,
-    private_summary_revision: Option<hirsel_query_products::reads::Revision>,
-    private_summary_inputs: private_unique::RegistrationInputs,
     revision: hirsel_query_products::reads::Revision,
     pending_signatures: BTreeMap<DefId, Option<ContentHash>>,
     front_changes: frontier::FrontTracker,
@@ -191,9 +186,6 @@ impl QueryEngine {
             || !self.generated.is_empty()
             || !self.staged_constants.is_empty()
             || !self.staged_values.is_empty()
-            || self.private_summary_active
-            || self.private_summary_failure.is_some()
-            || !self.private_signature_publications.is_empty()
         {
             return Err(invalid());
         }
@@ -236,34 +228,6 @@ impl QueryEngine {
             w.add(reads.bytes.try_into().unwrap_or(usize::MAX));
             w.vec(&entry.paths, |w, path| w.path(path));
         });
-        weight
-            .add(self.private_summaries.len() * size_of::<(DefId, hirsel_types::UniqueSummary)>());
-        for summary in self.private_summaries.values() {
-            weight.flat_vec(&summary.preserves_unique);
-            weight.flat_vec(&summary.results);
-            weight.flat_vec(&summary.nonretaining);
-        }
-        weight.add(
-            self.private_unique_failures.len()
-                * size_of::<(DefId, Vec<hirsel_types::UniqueFailure>)>(),
-        );
-        for failures in self.private_unique_failures.values() {
-            weight.vec(failures, |w, failure| w.add(failure.message.capacity()));
-        }
-        weight.add(self.private_summary_inputs.len() * size_of::<[ContentHash; 3]>());
-        weight.add(self.private_summary_reads.len() * size_of::<(DefId, Arc<Reads>)>());
-        let mut previous: Option<&Arc<Reads>> = None;
-        for reads in self.private_summary_reads.values() {
-            // Module proofs share receipts and sort together by DefPath. Any
-            // nonadjacent sharing is conservatively charged more than once.
-            if previous.is_none_or(|prior| !Arc::ptr_eq(prior, reads)) {
-                weight.arc(reads);
-                for (_, bytes) in reads.allocations() {
-                    weight.add(bytes);
-                }
-            }
-            previous = Some(reads);
-        }
         weight.add(self.inputs.len() * size_of::<(DefId, memos::DefInputs)>());
         for value in self.inputs.values() {
             weight.add(value.retained_bytes());
@@ -504,20 +468,6 @@ impl QueryEngine {
                 .into_boxed_slice(),
             signatures,
             specialization_dependencies: std::mem::take(&mut self.specialization_dependencies),
-            private_summary_reads: std::mem::take(&mut self.private_summary_reads)
-                .into_iter()
-                .collect::<Vec<_>>()
-                .into_boxed_slice(),
-            private_summaries: std::mem::take(&mut self.private_summaries)
-                .into_iter()
-                .collect::<Vec<_>>()
-                .into_boxed_slice(),
-            private_unique_failures: std::mem::take(&mut self.private_unique_failures)
-                .into_iter()
-                .collect::<Vec<_>>()
-                .into_boxed_slice(),
-            private_summary_revision: self.private_summary_revision,
-            private_summary_inputs: self.private_summary_inputs.clone(),
             revision: self.revision,
             pending_signatures: std::mem::take(&mut self.pending_signatures),
             front_changes: std::mem::take(&mut self.front_changes),
@@ -578,13 +528,7 @@ impl SourceIndexState {
         engine.store_identity = compiler;
         self.restore(&mut engine).map_err(|_| invalid())?;
         engine.types = headers.source_types().clone();
-        headers.adopt_private_products(&mut engine)?;
         engine.adopt_header_products(headers);
-        // A proved but still undemanded private header remains absent. Its
-        // ordinary producer will publish it on the next actual header demand.
-        for id in std::mem::take(&mut engine.private_signature_publications) {
-            engine.signatures.remove(&id);
-        }
         let mut state = engine.into_source_index_owner(allowance)?;
         state.pending_headers = Arc::downgrade(headers);
         state.completed_generation = headers.generation();
@@ -618,11 +562,6 @@ impl SourceIndexState {
             syntax_keys,
             signatures,
             specialization_dependencies,
-            private_summary_reads,
-            private_summaries,
-            private_unique_failures,
-            private_summary_revision,
-            private_summary_inputs,
             revision,
             pending_signatures,
             front_changes,
@@ -655,11 +594,6 @@ impl SourceIndexState {
             .map(|(id, header)| (id, header.restore()))
             .collect();
         engine.specialization_dependencies = specialization_dependencies;
-        engine.private_summary_reads = private_summary_reads.into_vec().into_iter().collect();
-        engine.private_summaries = private_summaries.into_vec().into_iter().collect();
-        engine.private_unique_failures = private_unique_failures.into_vec().into_iter().collect();
-        engine.private_summary_revision = private_summary_revision;
-        engine.private_summary_inputs = private_summary_inputs;
         engine.revision = revision;
         engine.pending_signatures = pending_signatures;
         engine.front_changes = front_changes;
@@ -889,7 +823,7 @@ mod tests {
         });
     }
     #[test]
-    fn source_carry_drops_syntax_products_and_restores_private_proofs_with_exact_reads() {
+    fn source_carry_drops_syntax_products() {
         hirsel_intern::jobs::with_compiler_stack(|| {
             let mut prior = QueryEngine::new(environment(), crate::phases::engine_only_adapters());
             let context = default_context();
@@ -907,24 +841,6 @@ mod tests {
             let anchor = syntax.anchor;
             let weak = Arc::downgrade(&syntax);
             let text = prior.cited_value(&path);
-            let reads = Arc::new(Reads::from_vec(vec![(ReadKey::CitedText(id), text)]).unwrap());
-            prior.private_summary_reads.insert(id, reads.clone());
-            prior.private_summaries.insert(
-                id,
-                hirsel_types::UniqueSummary {
-                    preserves_unique: vec![hirsel_types::ParamId(0)],
-                    results: vec![],
-                    ..Default::default()
-                },
-            );
-            prior.private_unique_failures.insert(
-                id,
-                vec![hirsel_types::UniqueFailure {
-                    claim: hirsel_types::UniqueClaim::Parameter(hirsel_types::ParamId(0)),
-                    span: syntax.item.name_span,
-                    message: "exact failure provenance".into(),
-                }],
-            );
             // A header's resolver product is another independent route to the
             // complete expression arena. Neither route may survive the carry.
             let signature = engine(&[path.clone()]).signatures.remove(&id).unwrap();
@@ -954,12 +870,6 @@ mod tests {
             assert!(fresh.items.is_empty());
             assert_eq!(fresh.catalog.anchor(&path, 0), Some(anchor));
             assert!(fresh.signatures[&id].products.resolution.is_none());
-            assert_eq!(
-                fresh.private_summaries[&id].preserves_unique,
-                [hirsel_types::ParamId(0)]
-            );
-            assert_eq!(fresh.private_unique_failures[&id][0].span.anchor, anchor);
-            assert!(Arc::ptr_eq(&fresh.private_summary_reads[&id], &reads));
             assert_eq!(fresh.observe(&path, &ReadKey::CitedText(id)), Some(text));
             fresh.materialize(&path).unwrap();
             assert_eq!(fresh.items[&path][0].anchor, anchor);

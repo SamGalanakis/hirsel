@@ -931,10 +931,9 @@ fn admitted_front_pressure_refused_citation_caches_nothing_and_recomputes_the_ci
         }
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("main.hir");
-        // `main`'s MODE-2 cites `code`'s failed unique-result claim, which
-        // only `code`'s module proof records.
-        // Shared header metadata can be reclaimed before the proof. These
-        // bodies keep the citation read under real pressure at the original cap.
+        // `main`'s MODE-2 rejection cites `code`, whose result does not
+        // declare `unique` (repair: `-> unique String`). These bodies keep the
+        // citation read under real pressure.
         let need = "let _=0u64;".repeat(10);
         let code_body = "let _=0u64;".repeat(8);
         std::fs::write(
@@ -1026,14 +1025,10 @@ fn admitted_front_pressure_refused_citation_caches_nothing_and_recomputes_the_ci
                 assert!(cites(&front, Err(main)), "with room the citation is read");
                 continue;
             }
-            // `code`'s pinned body fills the partition; `need`'s demand
-            // evicts the unpinned settled proof, which cannot be admitted
-            // again while the pin holds.
+            // `code`'s pinned body fills the partition.
             let pin = front.outcome(Ok(code.clone())).unwrap();
-            assert!(front.module_proof_resident(&definitions[0]));
             let request = runtime.request(&[bodies[1]]);
             let _ = runtime.wait(request);
-            assert!(!front.module_proof_resident(&definitions[0]));
             let request = runtime.request(&[bodies[2]]);
             assert_eq!(
                 runtime.wait(request),
@@ -1119,7 +1114,7 @@ fn admitted_front_pressure_evicts_only_unpinned_settled_bodies_and_recomputes_eq
         let mut limit = 8 << 20;
         // First measure the complete metadata and one body through the same harness.
         let mut body_modes = || {
-            for mode in 0..9 {
+            for mode in [0, 1, 2, 3, 4, 5, 7, 8] {
                 // std is a source dependency: as in production, V gives its
                 // importers std's once-computed universe summary, warmed here by
                 // another program before the body fills the partition.
@@ -1216,8 +1211,6 @@ fn admitted_front_pressure_evicts_only_unpinned_settled_bodies_and_recomputes_eq
                 let universe = (mode == 7 || mode == 8).then(|| {
                     let signatures = front.signatures();
                     let package = &definitions[0].0.package;
-                    let before: std::collections::BTreeMap<_, _> =
-                        front.module_inferences().into_iter().collect();
                     let started = std::time::Instant::now();
                     let built = signatures.validation(package).map(|universe| {
                         universe
@@ -1226,23 +1219,6 @@ fn admitted_front_pressure_evicts_only_unpinned_settled_bodies_and_recomputes_eq
                             .unwrap()
                             .digest()
                     });
-                    // One universe build reads every row: each module's private
-                    // proof is inferred at most once per build, whether it
-                    // settles or is refused.
-                    let inferred: Vec<_> = front
-                        .module_inferences()
-                        .into_iter()
-                        .map(|(module, count)| {
-                            (count - before.get(&module).copied().unwrap_or(0), module)
-                        })
-                        .filter(|(count, _)| *count != 0)
-                        .collect();
-                    let repeated: Vec<_> =
-                        inferred.iter().filter(|(count, _)| *count > 1).collect();
-                    assert!(
-                        repeated.is_empty(),
-                        "proofs inferred more than once in one build: {repeated:?}"
-                    );
                     if mode == 8 {
                         assert!(started.elapsed() < std::time::Duration::from_secs(60));
                     }
@@ -1282,16 +1258,7 @@ fn admitted_front_pressure_evicts_only_unpinned_settled_bodies_and_recomputes_eq
                     limit,
                     "partition fits exactly one body"
                 );
-                let pin = (mode == 2 || mode == 6).then(|| front.outcome(Ok(a.clone())).unwrap());
-                // The settled module proof is an entry of the same admitted cache.
-                assert!(front.module_proof_resident(&definitions[0]));
-                let proof = front
-                    .module_proof(&definitions[0])
-                    .unwrap()
-                    .unwrap()
-                    .settled();
-                let proof_pin =
-                    (mode == 6).then(|| front.module_proof(&definitions[0]).unwrap().unwrap());
+                let pin = (mode == 2).then(|| front.outcome(Ok(a.clone())).unwrap());
                 drop(a);
                 struct DependencyFactory(Vec<QueryId>, QueryId);
                 struct DependencyTask(Vec<QueryId>, QueryId);
@@ -1386,25 +1353,6 @@ fn admitted_front_pressure_evicts_only_unpinned_settled_bodies_and_recomputes_eq
                     assert_eq!(runtime.stats().body_evictions, 0);
                     assert!(pin.outcome.result.is_ok());
                     assert_eq!(front.live_body_count(), 1);
-                    // Pressure evicts an unpinned settled proof and never a pinned
-                    // one; an evicted proof recomputes equal on its next demand.
-                    if let Some(held) = &proof_pin {
-                        assert!(front.module_proof_resident(&definitions[0]));
-                        assert_eq!(held.settled(), proof);
-                    } else {
-                        assert!(!front.module_proof_resident(&definitions[0]));
-                        // Equal facts. Rows the first proof settled stay settled, so
-                        // the recomputed proof names only identities it re-derives,
-                        // and each agrees with what the first proof recorded.
-                        let (facts, identities) = front
-                            .module_proof(&definitions[0])
-                            .unwrap()
-                            .unwrap()
-                            .settled();
-                        assert_eq!(facts, proof.0);
-                        assert!(identities.iter().all(|row| proof.1.contains(row)));
-                        assert!(front.module_proof_resident(&definitions[0]));
-                    }
                 } else {
                     drop(b.unwrap());
                     assert_eq!(runtime.stats().body_evictions, 1);
@@ -1486,9 +1434,6 @@ fn admitted_front_pressure_evicts_only_unpinned_settled_bodies_and_recomputes_eq
                         .clone()
                 })
                 .collect::<Vec<_>>();
-            // Their settled module proof is pinned too, so pressure here
-            // can only evict compact owners.
-            let proof_pin = front.module_proof(&definitions[0]).unwrap().unwrap();
             let mut runtime = AdmittedRuntime::new(
                 hirsel_intern::jobs::Jobs::ONE,
                 budget
@@ -1570,7 +1515,6 @@ fn admitted_front_pressure_evicts_only_unpinned_settled_bodies_and_recomputes_eq
                     runtime.shutdown();
                     drop(front);
                     drop(_header_pins);
-                    drop(proof_pin);
                     drop(program);
                     assert_eq!(checked.summary.summary, summary);
                     let held = budget.reserved();
@@ -1622,8 +1566,7 @@ fn admitted_front_pressure_evicts_only_unpinned_settled_bodies_and_recomputes_eq
         body_modes();
         // A header demand refused under pressure is a resource failure, not a
         // settled row: once eviction frees room the same demand succeeds with
-        // the unpressured signature. A Front that ends while its partition
-        // charges a module proof returns that charge too.
+        // the unpressured signature. A Front that ends returns every charge.
         let mut tight = None;
         let mut unpressured = None;
         for _ in 0..2 {
@@ -1662,10 +1605,9 @@ fn admitted_front_pressure_evicts_only_unpinned_settled_bodies_and_recomputes_eq
                     .unwrap()
             };
             let a_pin = signature(&a).unwrap();
-            let proof_pin = front.module_proof(&a).unwrap().unwrap();
             let Some(expected) = &unpressured else {
-                // Room for `a`, its proof and `b`'s row, less one byte. The
-                // proof seeds what fits; pinned `a` leaves `b` unsettled.
+                // Room for `a`'s and `b`'s rows, less one byte: pinned `a`
+                // leaves `b` unsettled.
                 unpressured = Some(signature(&b).unwrap());
                 let free = front.admitted_bytes() - front.retained_bytes();
                 tight = Some(reservation - free - 1);
@@ -1674,17 +1616,15 @@ fn admitted_front_pressure_evicts_only_unpinned_settled_bodies_and_recomputes_eq
             assert!(!front.header_resident(&b));
             assert!(matches!(signature(&b), Err(QueryError::Operational(_))));
             assert!(!front.header_resident(&b));
-            // Only the pinned proof could make room; unpinning it lets the
-            // retried demand evict it and settle `b`.
-            drop(proof_pin);
+            // Only pinned `a` could make room; unpinning it lets the retried
+            // demand evict it and settle `b`.
+            drop(a_pin);
             assert_eq!(signature(&b).unwrap().fingerprint, expected.fingerprint);
             assert!(front.header_resident(&b));
-            assert!(!front.module_proof_resident(&a));
-            // Recompute the proof under the partition, then end the Front.
-            // The engine keeps its rows and proof uncharged.
+            assert!(!front.header_resident(&a));
+            // Recompute `a` under the partition, then end the Front. The
+            // engine keeps its rows uncharged.
             drop(signature(&a));
-            drop(front.module_proof(&a).unwrap().unwrap());
-            drop(a_pin);
             drop(front);
             assert_eq!(budget.reserved(), held, "no charge outlives its Front");
             drop(program);
@@ -1923,7 +1863,6 @@ fn archived_front_releases_observation_arrays_when_their_readers_finish() {
                 .unwrap()
                 .unwrap()
                 .clone();
-            let _proof = front.module_proof(&program.entry);
             let initial = front.retained_bytes();
             let request = runtime.request(&[front.query(&program.entry).unwrap()]);
             drop(runtime.wait(request).unwrap());

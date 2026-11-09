@@ -3,7 +3,7 @@ use super::*;
 
 #[test]
 fn sealed_regions_33_combined_format_refuses_each_previous_identity() {
-    assert_eq!(TIR_VERSION, 16);
+    assert_eq!(TIR_VERSION, 17);
     assert_eq!(FORMAT, "hirsel.tir.export.v16");
     let environment = Environment {
         interface_version: 1,
@@ -127,31 +127,3 @@ fn bounded_export_output_includes_digest_and_refuses_partial_text() {
     }
 }
 
-#[test]
-fn private_uniqueness_rows_round_trip_without_entering_callable_types() {
-    use hirsel_types::{ParamId, UniqueResultRow, UniqueSummary};
-    let types = TypeInterner::new(None);
-    let locator: Locator = Rc::new(|_| Location::unknown());
-    let summary = UniqueSummary {
-        nonretaining: vec![ParamId(1)],
-        preserves_unique: vec![ParamId(0), ParamId(2)],
-        results: vec![
-            UniqueResultRow::Root,
-            UniqueResultRow::Tuple(1),
-            UniqueResultRow::Payload {
-                variant: 0,
-                field: 0,
-            },
-            UniqueResultRow::Payload {
-                variant: 1,
-                field: 0,
-            },
-        ],
-    };
-    let mut writer = Writer::with_context(Cx::new(locator.clone(), types.clone()));
-    summary.write(&mut writer);
-    let (text, _) = writer.finish();
-    let mut reader = Reader::with_context(&text, Cx::new(locator, types));
-    assert_eq!(UniqueSummary::read(&mut reader).unwrap(), summary);
-    reader.finish().unwrap();
-}

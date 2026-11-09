@@ -172,6 +172,7 @@ fn float(kind: u8) -> bool uses {} {
 
 // Appends the key encoding of the value of schema node `node` whose canonical
 // payload starts at `at`, and returns the offset just past that payload.
+@preserves_unique(out)
 fn emit(nodes: List[Node], node: u64, data: Bytes, at: u64, mut out: List[u8]) -> u64 uses {} {
   match nodes[node] {
     Scalar(kind) => emit_scalar(kind, data, at, mut out),
@@ -221,6 +222,7 @@ fn emit(nodes: List[Node], node: u64, data: Bytes, at: u64, mut out: List[u8]) -
   }
 }
 
+@preserves_unique(out)
 fn emit_scalar(kind: u8, data: Bytes, at: u64, mut out: List[u8]) -> u64 uses {} {
   let n = scalar_width(kind)
   if n == 0 {
@@ -337,6 +339,7 @@ fn absorb(nodes: List[Node], node: u64, key: Bytes, at: u64, mut out: List[u8]) 
   }
 }
 
+@preserves_unique(out)
 fn append(mut out: List[u8], data: Bytes) -> () uses {} {
   let n = core@1/bytes.len(data)
   let mut i: u64 = 0

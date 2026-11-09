@@ -480,16 +480,13 @@ impl NamespaceCapture {
         engine.result_store = Some(self.store.clone());
         engine.instance_bodies = (*self.instances).clone();
         engine.generated.bind(engine.source_ownership.clone());
-        // Metadata assembly must never invoke the standalone execution driver.
-        engine.private_bootstrap_active = true;
+        // Metadata assembly never schedules pending generated consumers.
+        engine.bootstrap_active = true;
         for (id, registration) in &self.registrations {
             engine
                 .generated
                 .insert(id.path().clone(), registration.source());
         }
-        engine.private_summary_inputs = private_unique::registration_inputs(
-            &self.registrations.values().cloned().collect::<Vec<_>>(),
-        );
         engine.snapshot = Some((
             engine.snapshot_stamp(),
             crate::snapshot::SnapshotCache::new(&self.snapshot),
@@ -796,21 +793,13 @@ impl QueryEngine {
         &mut self,
         registrations: &[Arc<AcceptedFrontRegistration>],
     ) -> Result<(), QueryError> {
-        self.prepare_namespace_scope(registrations);
+        self.prepare_namespace_scope();
         for registration in registrations {
             registration.validate(self)?;
         }
         Ok(())
     }
-    pub(super) fn prepare_namespace_scope(
-        &mut self,
-        registrations: &[Arc<AcceptedFrontRegistration>],
-    ) {
-        if !private_unique::registrations_covered(&self.private_summary_inputs, registrations) {
-            self.private_summary_inputs = private_unique::registration_inputs(registrations);
-            self.private_summary_revision = None;
-            self.retire_snapshot();
-        }
+    pub(super) fn prepare_namespace_scope(&mut self) {
         let previous = self
             .snapshot
             .as_ref()
@@ -820,7 +809,7 @@ impl QueryEngine {
         if let (Some(previous), Some(current)) = (previous, snapshot.header_products())
             && !Arc::ptr_eq(&previous, current)
         {
-            current.inherit_registration_scope(&previous, registrations);
+            current.inherit_scope(&previous);
         }
     }
     pub fn capture_namespace(
@@ -829,7 +818,7 @@ impl QueryEngine {
         registrations: &[Arc<AcceptedFrontRegistration>],
         limit: u64,
     ) -> Result<Arc<NamespaceCapture>, QueryError> {
-        self.prepare_namespace_scope(registrations);
+        self.prepare_namespace_scope();
         let snapshot = self.signature_inputs();
         if let Some((_, cache)) = self.snapshot.as_mut() {
             cache.release();

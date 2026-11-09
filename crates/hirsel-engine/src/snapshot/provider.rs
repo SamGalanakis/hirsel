@@ -171,29 +171,6 @@ impl SignatureProvider for FrozenProvider<'_> {
             self.public_signature(definition)
         }
     }
-    fn cite_unique_failure(
-        &mut self,
-        target: &hirsel_syntax::DefPath,
-        claim: hirsel_types::UniqueClaim,
-    ) -> Result<Option<hirsel_types::UniqueFailure>, QueryError> {
-        let (Some(source), Some(owner)) = (self.citations, self.definition) else {
-            return Ok(None);
-        };
-        let target = DefId::intern(target);
-        self.reads
-            .record(ReadKey::CitedText(target), source.cited_text(target));
-        if let Some(failure) = source.unique_failure(owner, target, claim) {
-            return Ok(Some(failure));
-        }
-        let Some(headers) = self
-            .snapshot
-            .header_products()
-            .filter(|_| source.cited_name(owner, target).is_some())
-        else {
-            return Ok(None);
-        };
-        headers.unique_failure(target, claim)
-    }
     fn cite_name(&mut self, target: &hirsel_syntax::DefPath) -> Option<hirsel_span::Span> {
         let source = self.citations?;
         let owner = self.definition?;

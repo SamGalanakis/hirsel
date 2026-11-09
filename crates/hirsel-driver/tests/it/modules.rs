@@ -175,7 +175,6 @@ mod packed_walk;
 mod phase_admission;
 mod pipeline;
 mod prepared_source_inputs_49;
-mod private_inference_83;
 mod program_revision;
 mod proof_export;
 mod proof_limits;

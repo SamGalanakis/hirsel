@@ -202,7 +202,6 @@ impl DefinitionKey {
             QueryKind::GeneratedRegistration => 14,
             QueryKind::SourceAudit => 15,
             QueryKind::SemanticBody => 16,
-            QueryKind::PrivateInference => 17,
             QueryKind::Lex => 4,
             QueryKind::Resolve => 5,
             QueryKind::Modes => 6,
@@ -322,20 +321,6 @@ pub trait CheckerPhase: Send + Sync {
 }
 /// Modes consume the complete typed artifact and refine its shared tables (OWN-1/8).
 pub trait ModesPhase: Send + Sync {
-    fn infers_private_unique(&self) -> bool {
-        false
-    }
-    /// Greatest fixed point over the supplied same-module direct-call graph.
-    fn infer_unique(
-        &self,
-        _t: &hirsel_types::TypeInterner,
-        _m: &hirsel_types::TypeMemo,
-        _bodies: &[(std::sync::Arc<TypedBody>, hirsel_types::SignatureRef)],
-        _provider: &mut dyn SignatureProvider,
-    ) -> Result<Vec<(DefId, hirsel_types::UniqueInference)>, QueryError> {
-        Ok(vec![])
-    }
-
     /// Demand-driven source equations after modes have completed. This is
     /// separate from signature lookup and from per-body checking.
     fn storage(
@@ -356,7 +341,6 @@ pub trait ModesPhase: Send + Sync {
         signature: &Signature,
         products: &mut PhaseProducts,
         signatures: &mut dyn SignatureProvider,
-        infer: bool,
     ) -> Result<QueryOutput<AnalyzedBody>, QueryError>;
 }
 /// Lowering makes evaluation order and cleanup explicit before execution (LANG-3, DROP-2).

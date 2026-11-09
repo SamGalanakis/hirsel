@@ -41,8 +41,7 @@ impl Serialize for TirView<'_> {
         let header = self
             .header()
             .ok_or_else(|| S::Error::custom("unavailable checked TIR header"))?;
-        let mut value = serializer.serialize_struct("Definition", 9)?;
-        value.serialize_field("inferred_unique", &header.inferred_unique)?;
+        let mut value = serializer.serialize_struct("Definition", 8)?;
         value.serialize_field(
             "caller_bodies",
             &sequence!(self, caller_body_count, caller_body),

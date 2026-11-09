@@ -96,7 +96,7 @@ pub(super) fn standalone_syntax(bytes: u64) -> Result<Charge, QueryError> {
             &std::mem::MaybeUninit::<std::sync::Mutex<HeaderCharge>>::uninit(),
         ))
         .ok_or_else(|| source_refusal("syntax size overflow"))?;
-    let reservation = private_unique::scheduled::standalone_budget()
+    let reservation = super::standalone_budget()
         .reserve(bytes)
         .map_err(source_refusal)?;
     Ok(Charge::retained(HeaderCharge::Standalone(reservation)))

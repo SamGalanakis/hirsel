@@ -288,7 +288,7 @@ fn check_printable(data: Bytes) -> Result[(), YamlError] uses {} {
   Ok(())
 }
 
-fn owned_text(data: Bytes, start: u64, end: u64) -> String uses {} {
+fn owned_text(data: Bytes, start: u64, end: u64) -> unique String uses {} {
   let mut output: List[u8] = []
   let mut i = start
   while i < end {
@@ -302,6 +302,7 @@ fn signed(value: u64) -> i64 uses {} {
   core@1/int.narrow(value)
 }
 
+@preserves_unique(out)
 fn push_breaks(mut out: List[u8], count: u64) -> () uses {} {
   let mut i: u64 = 0
   while i < count {
@@ -310,6 +311,7 @@ fn push_breaks(mut out: List[u8], count: u64) -> () uses {} {
   }
 }
 
+@preserves_unique(out)
 fn push_bytes(mut out: List[u8], add: List[u8]) -> () uses {} {
   for c in add {
     core@1/list.push(mut out, c)
@@ -639,6 +641,7 @@ fn skip_blanks(mut s: unique Scanner, data: Bytes) -> () uses {} {
 }
 
 // %XX escapes of one UTF-8 sequence inside a tag or tag prefix.
+@preserves_unique(out)
 fn uri_escapes(mut s: unique Scanner, data: Bytes, mark: u64, mut out: List[u8]) -> Result[
   (),
   YamlError
@@ -678,7 +681,7 @@ fn uri_escapes(mut s: unique Scanner, data: Bytes, mark: u64, mut out: List[u8])
   Ok(())
 }
 
-fn finish_tag_text(data: Bytes, mark: u64, take out: unique List[u8]) -> Result[
+fn finish_tag_text(data: Bytes, mark: u64, take out: unique List[u8]) -> unique Result[
   String,
   YamlError
 ] uses {} {
@@ -689,7 +692,7 @@ fn finish_tag_text(data: Bytes, mark: u64, take out: unique List[u8]) -> Result[
 }
 
 // `!`, `!!` or `!name!`; inside %TAG a named handle must close with `!`.
-fn tag_handle(mut s: unique Scanner, data: Bytes, directive: bool, mark: u64) -> Result[
+fn tag_handle(mut s: unique Scanner, data: Bytes, directive: bool, mark: u64) -> unique Result[
   String,
   YamlError
 ] uses {} {
@@ -710,7 +713,7 @@ fn tag_handle(mut s: unique Scanner, data: Bytes, directive: bool, mark: u64) ->
 }
 
 // saphyr scan_tag_prefix (6.8.2.2): a local `!...` or global prefix of URI characters.
-fn tag_prefix(mut s: unique Scanner, data: Bytes, mark: u64) -> Result[
+fn tag_prefix(mut s: unique Scanner, data: Bytes, mark: u64) -> unique Result[
   String,
   YamlError
 ] uses {} {
@@ -795,7 +798,7 @@ fn fetch_directive(mut s: unique Scanner, data: Bytes) -> Result[(), YamlError] 
   Ok(())
 }
 
-fn tag_suffix(mut s: unique Scanner, data: Bytes, head: String, mark: u64) -> Result[
+fn tag_suffix(mut s: unique Scanner, data: Bytes, head: String, mark: u64) -> unique Result[
   String,
   YamlError
 ] uses {} {
@@ -1210,6 +1213,7 @@ fn fetch_block_scalar(mut s: unique Scanner, data: Bytes, literal: bool) -> Resu
 }
 
 // Double-quoted escapes (5.7); pos is at the backslash.
+@preserves_unique(out)
 fn escape(mut s: unique Scanner, data: Bytes, mut out: List[u8], mark: u64) -> Result[
   (),
   YamlError
@@ -1752,7 +1756,7 @@ type Parser {
   entry: u64,
 }
 
-fn event(kind: u8, start: u64, end: u64) -> Event uses {} {
+fn event(kind: u8, start: u64, end: u64) -> unique Event uses {} {
   Event(
     kind: kind,
     style: 0,
@@ -1919,7 +1923,7 @@ fn document_end(mut p: unique Parser, data: Bytes, tokens: List[Token]) -> Resul
 
 // saphyr Parser::resolve_tag: `!!` names the core prefix unless %TAG overrides it;
 // a named handle must have been declared.
-fn resolve_tag(p: Parser, data: Bytes, t: Token) -> Result[String, YamlError] uses {} {
+fn resolve_tag(p: Parser, data: Bytes, t: Token) -> unique Result[String, YamlError] uses {} {
   let handle = t.text
   if let Some(prefix) = core@1/map.get(p.tags, handle) {
     return Ok(string.concat(prefix, t.suffix))
@@ -2949,6 +2953,7 @@ const SEQ_ITEM: u8 = 2
 // The longest key written as an implicit key (7.4: at most 1024 scalars).
 const IMPLICIT_KEY_BYTES: u64 = 1024
 
+@preserves_unique(out)
 fn push_spaces(mut out: List[u8], count: u64) -> () uses {} {
   let mut i: u64 = 0
   while i < count {
@@ -3095,6 +3100,7 @@ fn hex_digit(nibble: u8) -> u8 uses {} {
   }
 }
 
+@preserves_unique(out)
 fn push_hex_escape(mut out: List[u8], prefix: u8, code: u64, digits: u64) -> () uses {} {
   core@1/list.push(mut out, b'\\')
   core@1/list.push(mut out, prefix)
@@ -3107,6 +3113,7 @@ fn push_hex_escape(mut out: List[u8], prefix: u8, code: u64, digits: u64) -> () 
 
 // A double-quoted scalar (7.3.1) escaping `"`, `\`, controls, DEL, C1 controls,
 // U+2028, U+2029, the byte order mark, U+FFFE and U+FFFF.
+@preserves_unique(out)
 fn write_quoted(s: String, mut out: List[u8]) -> () uses {} {
   let data = core@1/string.as_bytes(s)
   let n = core@1/bytes.len(data)
@@ -3164,6 +3171,7 @@ fn write_quoted(s: String, mut out: List[u8]) -> () uses {} {
 
 // A literal block scalar (8.1.2) whose lines are indented to `indent`; the
 // chomping indicator keeps the trailing line breaks.
+@preserves_unique(out)
 fn write_literal(s: String, indent: u64, mut out: List[u8]) -> () uses {} {
   let data = core@1/string.as_bytes(s)
   let n = core@1/bytes.len(data)
@@ -3199,6 +3207,7 @@ fn write_literal(s: String, indent: u64, mut out: List[u8]) -> () uses {} {
   }
 }
 
+@preserves_unique(out)
 fn write_float(f: f64, mut out: List[u8]) -> () uses {} {
   if f != f {
     text.append(mut out, ".nan")
@@ -3262,6 +3271,7 @@ fn quoted_len(s: String) -> u64 uses {} {
 // A key is implicit (`key:`) when it is at most 1024 bytes as written, and
 // otherwise explicit (`? key` with `:` on the next line, 8.2.2), which has no
 // length limit.
+@preserves_unique(out)
 fn write_key(key: String, indent: u64, mut out: List[u8]) -> () uses {} {
   let plain = plain_safe(key)
   let length = if plain {
@@ -3301,6 +3311,7 @@ fn writable_tag(tag: String, value: Value) -> bool uses {} {
 
 // `text` from byte `from`, with `%` and each byte that is not a tag character (a URI
 // character, for a verbatim tag) written as a %XX escape.
+@preserves_unique(out)
 fn write_tag_text(text: String, from: u64, verbatim: bool, mut out: List[u8]) -> () uses {} {
   let data = core@1/string.as_bytes(text)
   let mut i = from
@@ -3324,6 +3335,7 @@ fn write_tag_text(text: String, from: u64, verbatim: bool, mut out: List[u8]) ->
 
 // A tag as `!!suffix` for the core prefix, `!suffix` for a local tag and
 // `!<tag>` otherwise.
+@preserves_unique(out)
 fn write_tag(tag: String, mut out: List[u8]) -> () uses {} {
   let n = core@1/string.byte_len(tag)
   if std@1/string.starts_with(tag, CORE) && n > core@1/string.byte_len(CORE) {
@@ -3343,6 +3355,7 @@ fn write_tag(tag: String, mut out: List[u8]) -> () uses {} {
 // after a key's `:` or after a sequence entry's `- `. `indent` is the column of
 // that key or dash (0 at the root); every write ends with a line break. A Tagged
 // value writes its tag there and its content as a mapping value would follow it.
+@preserves_unique(out)
 fn write_node(value: Value, indent: u64, context: u8, mut out: List[u8], depth: u64) -> Result[
   (),
   YamlError

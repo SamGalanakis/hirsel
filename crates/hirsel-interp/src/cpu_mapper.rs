@@ -340,7 +340,6 @@ mod tests {
         let path = hirsel_syntax::DefPath::core("mapper");
         let span = Span::default();
         let mut program = Program(Arc::new(Definition {
-            inferred_unique: Default::default(),
             caller_bodies: vec![],
             protocol_associations: vec![],
             types: vec![ty].into(),

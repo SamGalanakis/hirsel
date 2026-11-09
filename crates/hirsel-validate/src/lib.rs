@@ -519,22 +519,6 @@ fn validate_input(
     if !errors.is_empty() {
         return Validation { violations: errors };
     }
-    // A private-summary mismatch rejects the definition, but does not make
-    // its already type-checked bodies unsafe to analyze. Keep independent
-    // source, loan and cleanup violations visible beside the forged claim.
-    let inferred_header = signatures.get(definition.path);
-    if inferred_header.map_or(!definition.inferred_unique.is_empty(), |s| {
-        s.metadata.inferred_unique != definition.inferred_unique
-    }) {
-        errors.push(Violation {
-            body: None,
-            block: None,
-            instruction: None,
-            kind: ViolationKind::TypeMismatch {
-                entity: "unproved private uniqueness summary",
-            },
-        });
-    }
     // Closure environments participate in the same finite flow proof. Compute
     // entry snapshots before reporting, so body arena order has no significance.
     // A single entry body with no closure producer has no environment edges.
@@ -715,9 +699,6 @@ fn validate_input(
             }),
         }
     }
-    if errors.is_empty() && !definition.inferred_unique.nonretaining.is_empty() {
-        errors.extend(scoped_transport::check(definition, t, signatures));
-    }
     Validation { violations: errors }
 }
 
@@ -730,10 +711,7 @@ fn unique_promises(
     let Some(hirsel_types::SignatureKind::Function(f)) = signature.map(|s| &s.kind) else {
         return Vec::new();
     };
-    let mut promised: Vec<_> = signature
-        .into_iter()
-        .flat_map(|s| s.metadata.inferred_unique.preserves_unique.iter().copied())
-        .collect();
+    let mut promised: Vec<_> = Vec::new();
     promised.extend(
         f.state_promises
             .iter()

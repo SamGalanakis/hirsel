@@ -1229,7 +1229,7 @@ impl DemandProducer {
         definitions: &[DefPath],
         registrations: &[Arc<AcceptedFrontRegistration>],
     ) -> Result<Arc<FrontLowerQueries>, QueryError> {
-        engine.prepare_namespace_scope(registrations);
+        engine.prepare_namespace_scope();
         let refreshed = registrations
             .iter()
             .map(|registration| registration.in_engine(engine, &self.request))

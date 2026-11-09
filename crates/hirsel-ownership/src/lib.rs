@@ -115,7 +115,6 @@ pub fn check_ownership_with_clauses(
     identity_joins: &[(NameSite, NameSite, Origin)],
     identity_fields: &[(NameSite, NameSite, Origin, Vec<(FieldId, TypeId)>)],
     provider: &mut dyn SignatureProvider,
-    infer: bool,
 ) -> Result<QueryOutput<OwnershipFacts>, QueryError> {
     let tree = &syntax.tree;
     let rows = source_rows::SourceRows::new(body);
@@ -298,29 +297,6 @@ pub fn check_ownership_with_clauses(
     if association.is_some() && !promised.contains(&ParamId(1)) {
         promised.push(ParamId(1));
     }
-    let declared_promises = promised.clone();
-    // Only private inference proves candidate claims; a settled check keeps
-    // its declared promises and V validates the published summary.
-    let infer = infer
-        && syntax.item.visibility == hirsel_syntax::Visibility::Private
-        && !syntax
-            .item
-            .attributes
-            .iter()
-            .any(|a| a.name.as_str() == "test")
-        && matches!(
-            &syntax.item.kind,
-            hirsel_syntax::ItemKind::Function { body: Some(_), .. }
-        )
-        && matches!(&signature.kind, SignatureKind::Function(f) if f.foreign.is_none());
-    if infer && let SignatureKind::Function(f) = &signature.kind {
-        for (i, p) in f.parameters.iter().enumerate() {
-            let id = ParamId(i as u32);
-            if p.passing == PassingMode::Mut && !promised.contains(&id) {
-                promised.push(id);
-            }
-        }
-    }
     // The entry is first after clause sorting. Proofs clone its checked rows;
     // no earlier graph can publish a changed input before the ordinary run.
     let prepared = graphs
@@ -373,32 +349,10 @@ pub fn check_ownership_with_clauses(
             );
             signatures.record(Arc::make_mut(&mut body.resolution.reads));
             checked?;
-            if infer
-                && let Some(d) = proof_diagnostics
-                    .iter()
-                    .find(|d| d.message.starts_with(flow::UNIQUE_PROOF_FAILED))
-            {
-                let cause = d
-                    .secondary
-                    .iter()
-                    .find(|l| l.message.starts_with("provided:") && l.span != d.primary);
-                facts.unique_failures.push(UniqueFailure {
-                    claim: UniqueClaim::Parameter(parameter),
-                    span: cause.map_or(d.primary, |l| l.span),
-                    message: cause.map_or_else(|| d.message.clone(), |l| l.message.clone()),
-                });
-            }
-            if infer
-                && !proof_diagnostics
-                    .iter()
-                    .any(|d| d.message.starts_with(flow::UNIQUE_PROOF_FAILED))
-            {
-                facts.inferred_unique.preserves_unique.push(parameter);
-            }
             diagnostics.extend(
                 proof_diagnostics
                     .into_iter()
-                    .filter(|d| declared_promises.contains(&parameter) && d.message.starts_with(flow::UNIQUE_PROOF_FAILED))
+                    .filter(|d| d.message.starts_with(flow::UNIQUE_PROOF_FAILED))
                     .map(|mut d| {
                         if let Some(nominal) = &association {
                             d.primary = syntax.item.name_span;
@@ -445,10 +399,6 @@ pub fn check_ownership_with_clauses(
             &checked.return_uniqueness,
             &checked.return_sendability,
         );
-        if infer && graph.owner == NameSite::Item && graph.clause.is_none() {
-            facts.inferred_unique.results = checked.unique_results;
-            facts.unique_failures.extend(checked.unique_failures);
-        }
         mutation_sites.extend(checked.mutation_sites);
         for (expression, live) in checked.replacements {
             replacement_live

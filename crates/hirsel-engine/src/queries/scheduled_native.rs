@@ -926,7 +926,6 @@ impl QueryEngine {
         definitions: &[DefPath],
         limit: u64,
     ) -> Result<FrontNativeDefinitionInputs, QueryError> {
-        self.prepare_private_summaries();
         let namespace = self.capture_namespace(definitions, &[], limit)?;
         self.front_native_definition_inputs_in(definitions, namespace, limit)
     }

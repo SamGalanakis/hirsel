@@ -1092,34 +1092,7 @@ impl FrontBodyQueries {
         self._allowance.request.reserved()
     }
 
-    /// The settled proof of the private module declaring `definition`,
-    /// demanded again through the ordinary producer if it was evicted.
-    pub fn module_proof(
-        &self,
-        definition: &DefPath,
-    ) -> Option<Result<header_products::ModuleProof, QueryError>> {
-        self.namespace
-            .snapshot
-            .header_products()?
-            .module_proof(DefId::intern(definition))
-            .transpose()
-    }
-    /// Whether that proof is currently retained in the admitted cache.
-    pub fn module_proof_resident(&self, definition: &DefPath) -> bool {
-        self.namespace
-            .snapshot
-            .header_products()
-            .is_some_and(|headers| headers.module_proof_resident(DefId::intern(definition)))
-    }
 
-    /// How many times each private module's proof was inferred in this
-    /// front, evictions included, by a representative definition.
-    pub fn module_inferences(&self) -> Vec<(DefPath, u64)> {
-        self.namespace
-            .snapshot
-            .header_products()
-            .map_or_else(Vec::new, |headers| headers.module_inferences())
-    }
     /// Whether `definition`'s settled header row is retained in the admitted cache.
     pub fn header_resident(&self, definition: &DefPath) -> bool {
         self.namespace
@@ -1196,15 +1169,6 @@ impl FrontBodyQueries {
         }
         use hirsel_query_products::reads::LookupSource;
         Some(match *read {
-            ReadKey::PrivateSummary(id) => memos::private_summary_value(
-                &self
-                    .namespace
-                    .snapshot
-                    .signature(id)
-                    .and_then(Result::ok)?
-                    .metadata
-                    .inferred_unique,
-            ),
             ReadKey::DeclaredSignature(id) => {
                 let signature = self.namespace.snapshot.signature(id).and_then(Result::ok)?;
                 memos::declared_signature_value(&self.types, &signature)?
@@ -1349,13 +1313,11 @@ impl FrontBodyQueries {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .iter()
-            .filter(|((_, kind), _)| *kind != QueryKind::PrivateInference)
             .map(|((path, kind), count)| (path.path().clone(), *kind, *count))
             .collect::<Vec<_>>();
         if let Some(headers) = self.namespace.snapshot.header_products() {
             work.extend(headers.work_snapshot());
         }
-        work.extend(self.namespace.operation.private_work_snapshot());
         work
     }
     pub fn recompute_count(&self, definition: &DefPath, kind: QueryKind) -> u64 {
@@ -2992,7 +2954,7 @@ impl QueryEngine {
         }
         let snapshot = namespace.snapshot.clone();
         if let Some(headers) = snapshot.header_products() {
-            headers.configure_private(weight.scratch, registrations);
+            headers.share_scope();
         }
         let mut inputs = BTreeMap::new();
         for (definition, text, implementation, key, registration) in selected {
@@ -3106,7 +3068,6 @@ impl QueryEngine {
             namespace,
             declarations: declarations.with_archived_siblings(sibling_sources),
             citations: OwnedSourceContext {
-                unique_failures: self.private_unique_failures.clone(),
                 sources: namespace_sources,
                 items,
                 declarations: self.declarations.observations(),

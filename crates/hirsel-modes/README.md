@@ -1004,9 +1004,8 @@ forwarding result. I checks its construction through the existing Capture operat
 the lexical generic body's own frame remains checked at its declaration.
 
 
-Private helpers publish body-checked `UniqueSummary` evidence beside their declared
-signature. The engine settles each same-module call-graph SCC before freezing front
-headers. `FunctionType` stays declared, so indirect calls and generic inference cannot
-consume these bits. Ownership reuses the preservation proof and independently tracks
-result root and direct Result/Option/tuple payload evidence. V re-proves every published
-bit on the callee, and consumes peer bits only at direct calls in the same module.
+A call reads only the callee's declared contracts (`@preserves_unique(p)`,
+`mut p: unique T`, `-> unique T`, authority and capture declarations), whatever the
+callee's visibility. No body-derived summary exists. A refused unique flow through a
+same-package helper's result offers the `-> unique T` repair; its precondition is that
+the helper's body returns a fresh value on every path.

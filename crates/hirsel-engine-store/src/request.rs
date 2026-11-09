@@ -1677,7 +1677,6 @@ mod tests {
             Arc::new(hirsel_artifact_store::Memory::default()),
         );
         let definition = hirsel_tir::Definition {
-            inferred_unique: Default::default(),
             caller_bodies: vec![],
             protocol_associations: vec![],
             types: Arc::from([]),

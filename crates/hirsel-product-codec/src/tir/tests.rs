@@ -62,7 +62,6 @@ fn fixture(reverse: bool) -> (Arc<TypeRecords>, Definition, Anchor) {
     (
         TypeRecords::new(types, store),
         Definition {
-            inferred_unique: Default::default(),
             caller_bodies: vec![],
             protocol_associations: vec![],
             types: vec![unit].into(),

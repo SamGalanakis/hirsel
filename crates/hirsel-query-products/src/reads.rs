@@ -161,10 +161,8 @@ pub enum ReadKey {
     ValidationUniverse(PackageKey),
     /// A representation body consumed by H, without interpreting its code.
     LayoutBody(DefId),
-    /// Normalized declaration structure, before private inference evidence.
+    /// Normalized declaration structure.
     DeclaredSignature(DefId),
-    /// Settled private inference output, independent of its module inputs.
-    PrivateSummary(DefId),
 }
 
 /// The kind of a read, for counters and durability rules.
@@ -186,10 +184,9 @@ pub enum ReadKind {
     ValidationUniverse,
     LayoutBody,
     DeclaredSignature,
-    PrivateSummary,
 }
 impl ReadKind {
-    pub const ALL: [ReadKind; 17] = [
+    pub const ALL: [ReadKind; 16] = [
         ReadKind::Signature,
         ReadKind::FailedSignature,
         ReadKind::Lookup,
@@ -206,13 +203,11 @@ impl ReadKind {
         ReadKind::ValidationUniverse,
         ReadKind::LayoutBody,
         ReadKind::DeclaredSignature,
-        ReadKind::PrivateSummary,
     ];
     pub fn name(self) -> &'static str {
         match self {
             ReadKind::Signature => "signature",
             ReadKind::DeclaredSignature => "declared signature",
-            ReadKind::PrivateSummary => "private summary",
             ReadKind::FailedSignature => "failed signature",
             ReadKind::Lookup => "lookup",
             ReadKind::NameSet => "name set",
@@ -236,7 +231,6 @@ impl ReadKey {
         match self {
             ReadKey::Signature(_) => ReadKind::Signature,
             ReadKey::DeclaredSignature(_) => ReadKind::DeclaredSignature,
-            ReadKey::PrivateSummary(_) => ReadKind::PrivateSummary,
             ReadKey::FailedSignature(_) => ReadKind::FailedSignature,
             ReadKey::Lookup(_) => ReadKind::Lookup,
             ReadKey::NameSet(..) => ReadKind::NameSet,
@@ -258,7 +252,6 @@ impl ReadKey {
         match *self {
             ReadKey::Signature(d)
             | ReadKey::DeclaredSignature(d)
-            | ReadKey::PrivateSummary(d)
             | ReadKey::FailedSignature(d)
             | ReadKey::Representation(d)
             | ReadKey::ExecutedBody(d)
@@ -287,7 +280,6 @@ impl ReadKey {
         let payload = match *self {
             Self::Signature(d)
             | Self::DeclaredSignature(d)
-            | Self::PrivateSummary(d)
             | Self::FailedSignature(d)
             | Self::Representation(d)
             | Self::ExecutedBody(d)
@@ -325,7 +317,6 @@ impl ReadKey {
         match *self {
             ReadKey::Signature(d)
             | ReadKey::DeclaredSignature(d)
-            | ReadKey::PrivateSummary(d)
             | ReadKey::FailedSignature(d)
             | ReadKey::Representation(d)
             | ReadKey::ExecutedBody(d)
@@ -795,7 +786,6 @@ fn decode_key(input: &mut &[u8]) -> Option<ReadKey> {
     Some(match kind {
         ReadKind::Signature => ReadKey::Signature(take_def(input)?),
         ReadKind::DeclaredSignature => ReadKey::DeclaredSignature(take_def(input)?),
-        ReadKind::PrivateSummary => ReadKey::PrivateSummary(take_def(input)?),
         ReadKind::FailedSignature => ReadKey::FailedSignature(take_def(input)?),
         ReadKind::Representation => ReadKey::Representation(take_def(input)?),
         ReadKind::ExecutedBody => ReadKey::ExecutedBody(take_def(input)?),
@@ -1312,7 +1302,6 @@ mod admission_tests {
             ReadKey::ExecutedBody(id),
             ReadKey::LayoutBody(id),
             ReadKey::DeclaredSignature(id),
-            ReadKey::PrivateSummary(id),
             ReadKey::ExecutedSignature(id),
             ReadKey::CitedText(id),
             ReadKey::DeclarationCandidates(id),
@@ -1412,8 +1401,7 @@ impl hirsel_product_codec::decode_schema::Walk for Reads {
                 | ReadKind::DeclarationCandidates
                 | ReadKind::ValidationView
                 | ReadKind::LayoutBody
-                | ReadKind::DeclaredSignature
-                | ReadKind::PrivateSummary => path(&mut rows)?,
+                | ReadKind::DeclaredSignature => path(&mut rows)?,
             }
             rows.take(32)?;
         }

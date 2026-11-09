@@ -1114,7 +1114,6 @@ impl QueryEngine {
         };
         // The modules holding a generated private body, at one declaration
         // revision: their Front roots are ordered.
-        let mut generated_private = (None, BTreeSet::new());
         for (file, context, lowering) in &plan.files {
             if !capture.file_holds(&self.sources, *file) {
                 return Err(QueryError::Operational(hirsel_types::OperationalFailure {
@@ -1152,26 +1151,6 @@ impl QueryEngine {
             }
             if input.error.is_none() && !has_errors(&input.diagnostics) {
                 let linted = plan.lint_package.as_ref() == Some(&context.package);
-                let revision = self.declarations.revision();
-                if generated_private.0 != Some(revision) {
-                    let declarations = self.declarations.frozen();
-                    generated_private = (
-                        Some(revision),
-                        capture
-                            .bodies
-                            .iter()
-                            .filter(|(id, body)| {
-                                body.generated
-                                    && declarations
-                                        .metadata()
-                                        .definitions
-                                        .get(id.path())
-                                        .is_some_and(|metadata| !metadata.public)
-                            })
-                            .map(|(id, _)| private_unique::scheduled::inference_module(id.path()))
-                            .collect(),
-                    );
-                }
                 for item in self.source_items(*file) {
                     if linted {
                         lint.insert(&item);
@@ -1191,11 +1170,7 @@ impl QueryEngine {
                     input.paths.push(RootInput {
                         path: item.definition.clone(),
                         executable: item.facts.executable,
-                        ordered_front: item.facts.generator
-                            || item.facts.specializes
-                            || generated_private.1.contains(
-                                &private_unique::scheduled::inference_module(&item.definition),
-                            ),
+                        ordered_front: item.facts.generator || item.facts.specializes,
                     });
                     if item.facts.fact {
                         input.paths.push(RootInput {

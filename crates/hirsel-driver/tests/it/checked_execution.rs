@@ -1227,7 +1227,7 @@ fn a_forged_private_unique_result_still_traps_with_both_checkers_bypassed() {
     with_compiler_stack(|| {
         let source = r#"
 fn counted(input: List[u64]) -> List[u64] in input { copy input }
-fn fresh(input: List[u64]) -> List[u64] { [1] }
+fn fresh(input: List[u64]) -> unique List[u64] { [1] }
 fn need(take values: unique List[u64]) {}
 pub fn main(rt: Io, args: Args) -> Result[(), GrantError] {
     let original = [2u64]
@@ -1239,14 +1239,8 @@ pub fn main(rt: Io, args: Args) -> Result[(), GrantError] {
         let mut engine = accepted(source);
         assert_eq!(printed(run(&mut engine, &[], true)), "");
         let mut fresh = lowered(&mut engine, "fresh");
-        assert!(
-            fresh
-                .inferred_unique
-                .results
-                .contains(&hirsel_types::UniqueResultRow::Root)
-        );
         // Reuse a lowered producer that shares its borrowed input, keeping
-        // the proved header and the caller's unique parameter. The caller
+        // the declared unique header and the caller's unique parameter. The caller
         // retains the other owner after this producer returns.
         let counted = lowered(&mut engine, "counted");
         fresh.bodies = counted.bodies;

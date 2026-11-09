@@ -16,14 +16,13 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-pub(super) const KINDS: [QueryKind; 7] = [
+pub(super) const KINDS: [QueryKind; 6] = [
     QueryKind::Resolve,
     QueryKind::Signature,
     QueryKind::Check,
     QueryKind::Modes,
     QueryKind::Lower,
     QueryKind::Evaluate,
-    QueryKind::PrivateInference,
 ];
 #[derive(Clone, Copy, Default)]
 pub(super) struct Counters {
@@ -246,8 +245,7 @@ impl GraphMeter {
             .unwrap_or_else(|error| error.into_inner());
         let mut current = self.s0.clone();
         for (path, kind, count) in self.front.work_snapshot() {
-            // Source parsing is outside this semantic-phase ledger, including
-            // when a demanded private module materializes its written inputs.
+            // Source parsing is outside this semantic-phase ledger.
             if matches!(kind, QueryKind::Lex | QueryKind::Parse) {
                 continue;
             }
@@ -256,13 +254,7 @@ impl GraphMeter {
                 .position(|selected| *selected == kind)
                 .ok_or_else(unavailable)?;
             let slot = &mut current.entry(path).or_default().phases[index];
-            // Private inference has one shared operation counter, already
-            // present in S0. Front can observe later work on that same counter.
-            *slot = if kind == QueryKind::PrivateInference {
-                (*slot).max(count)
-            } else {
-                slot.checked_add(count).ok_or_else(unavailable)?
-            };
+            *slot = slot.checked_add(count).ok_or_else(unavailable)?;
         }
         for (path, work) in self.lower.work_snapshot() {
             let counts = current.entry(path).or_default();

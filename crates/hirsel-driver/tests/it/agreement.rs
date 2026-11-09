@@ -1180,9 +1180,7 @@ fn an_arena_only_argument_bounds_a_result_by_its_arena_unless_it_is_taken_storag
             ),
             "f",
         );
-        // Only the declared result relation changes. Private uniqueness facts
-        // still describe the original body, not the replacement header's stub.
-        signatures.get_mut(f.path).unwrap().metadata.inferred_unique = f.inferred_unique.clone();
+        // Only the declared result relation changes.
         let violations = kinds(&forged, &signatures);
         assert!(
             violations.iter().any(|v| matches!(

@@ -977,6 +977,7 @@ pub fn to_string(v: Version) -> unique String uses {} {
   text.finish_valid(take out)
 }
 
+@preserves_unique(out)
 fn comparator_into(c: Comparator, mut out: List[u8]) -> () uses {} {
   let op = match c.op {
     Exact() => "=",

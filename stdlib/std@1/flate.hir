@@ -870,20 +870,20 @@ pub fn read[S, E](
     d.offset += used
     sum(mut d.state, d.window)
     let end = core@1/list.len(d.window)
-    let mut i = start
-    while i < end {
-      core@1/list.push(mut out, d.window[i])
-      i += 1
+    if end > start {
+      core@1/bytes.append(
+        mut out,
+        core@1/bytes.slice(core@1/bytes.view_list(d.window), start, end)
+      )
     }
     // Keep the last 32 KiB once the window passes 64 KiB.
     if end > 65536 {
       let cut = end - 32768
       let mut kept: List[u8] = []
-      let mut j = cut
-      while j < end {
-        core@1/list.push(mut kept, d.window[j])
-        j += 1
-      }
+      core@1/bytes.append(
+        mut kept,
+        core@1/bytes.slice(core@1/bytes.view_list(d.window), cut, end)
+      )
       d.window = take kept
       d.state.base = if d.state.base > cut {
         d.state.base - cut

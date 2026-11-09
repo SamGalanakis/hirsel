@@ -193,6 +193,7 @@ pub struct InlineLowering {
 pub const INLINE: &[&InlineLowering] = &[
     &arena::HEAP,
     &bytes::FROM_LIST,
+    &bytes::VIEW_LIST,
     &bytes::TEXT_FINISH,
     &slots::EMPTY,
     &list::FORGET,

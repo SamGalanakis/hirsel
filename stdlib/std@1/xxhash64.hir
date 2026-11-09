@@ -155,37 +155,6 @@ fn write_bytes_blocks(mut state: State, data: Bytes, start: u64, end: u64) -> u6
   at
 }
 
-@noalloc
-fn list_word(data: List[u8], at: u64) -> u64 uses {} {
-  let b0: u64 = core@1/int.widen(data[at])
-  let b1: u64 = core@1/int.widen(data[at + 1])
-  let b2: u64 = core@1/int.widen(data[at + 2])
-  let b3: u64 = core@1/int.widen(data[at + 3])
-  let b4: u64 = core@1/int.widen(data[at + 4])
-  let b5: u64 = core@1/int.widen(data[at + 5])
-  let b6: u64 = core@1/int.widen(data[at + 6])
-  let b7: u64 = core@1/int.widen(data[at + 7])
-  b0 | b1 << 8 | b2 << 16 | b3 << 24 | b4 << 32 | b5 << 40 | b6 << 48 | b7 << 56
-}
-
-@noalloc
-fn write_list_blocks(mut state: State, data: List[u8], start: u64, end: u64) -> u64 uses {} {
-  let mut lanes = state.lanes
-  let mut at = start
-  while end - at >= 32 {
-    lanes = stripe(
-      lanes,
-      list_word(data, at),
-      list_word(data, at + 8),
-      list_word(data, at + 16),
-      list_word(data, at + 24)
-    )
-    at += 32
-  }
-  state.lanes = lanes
-  at
-}
-
 // cespare/xxhash xxhash.go:72-109 (Digest.Write): fill, stripes, tail.
 @noalloc
 pub fn update(mut state: State, data: Bytes) -> () uses {} {
@@ -222,33 +191,8 @@ pub fn update(mut state: State, data: Bytes) -> () uses {} {
 @noalloc
 pub fn update_list(mut state: State, data: List[u8], start: u64) -> () uses {} {
   let end = core@1/list.len(data)
-  if start >= end {
-    return
-  }
-  let mut at = start
-  state.total = core@1/int.wrapping_add(state.total, end - at)
-  if end - at < 32 - state.used {
-    while at < end {
-      state.mem[state.used] = data[at]
-      state.used += 1
-      at += 1
-    }
-    return
-  }
-  if state.used > 0 {
-    while state.used < 32 {
-      state.mem[state.used] = data[at]
-      state.used += 1
-      at += 1
-    }
-    buffered_stripe(mut state)
-    state.used = 0
-  }
-  at = write_list_blocks(mut state, data, at, end)
-  while at < end {
-    state.mem[state.used] = data[at]
-    state.used += 1
-    at += 1
+  if start < end {
+    update(mut state, core@1/bytes.slice(core@1/bytes.view_list(data), start, end))
   }
 }
 

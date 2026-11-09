@@ -339,6 +339,7 @@ N fn bytes.decimal_word(value: u64, mut buffer: Inline[u8, 20]) -> u64
 @preserves_unique(builder) @unretained(data) fn bytes.replace_range(mut builder: List[u8], start: u64, data: Bytes) -> ()
 @preserves_unique(out) fn bytes.append_from_history(mut out: List[u8], distance: u64, count: u64) -> ()
 @preserves_unique(src) fn bytes.from_list(take src: List[u8]) -> Bytes
+N fn bytes.view_list(src: List[u8]) -> Bytes in src
 N fn bytes.slice(src: Bytes, start: u64, end: u64) -> Bytes in src
 N fn string.as_bytes(s: String) -> Bytes in s
 N fn string.position(s: String, offset: u64) -> Option[StrPos of s]
@@ -1680,8 +1681,10 @@ MEM-14 when `i` is out of range; mutable indexing is rejected. `bytes.len` retur
 slice's byte count. Byte and string slices share the exact owner and interval and expose no
 mutable alias or uniqueness. `bytes.slice` accepts `0 <= start <= end <= len` and otherwise
 fails SEM-3 before creating a result. `bytes.from_list` consumes the list once, reusing its
-storage when the layouts are compatible and copying otherwise. `string.as_bytes` views a
-string's bytes. Native physical layout keys identify `String` and `Bytes` as the same
+storage when the layouts are compatible and copying otherwise. `bytes.view_list` borrows a
+byte list as Bytes of all its elements without copying; the view holds its own owner credit,
+so a later mutation of the list copies on write and the view keeps the bytes it was given.
+`string.as_bytes` views a string's bytes. Native physical layout keys identify `String` and `Bytes` as the same
 owner/start/length slice, also within containing types. Source type identity and semantic
 instance keys still distinguish them. `string.position` returns `Some` exactly at a UTF-8 scalar boundary within
 the source, zero and the terminal offset included, and `None` for an offset inside a scalar

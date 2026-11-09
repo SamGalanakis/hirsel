@@ -1,7 +1,7 @@
-//! Byte-list freezing and checked forward history appends.
+//! Byte-list freezing and viewing, and checked forward history appends.
 use super::{CallShape, InlineLowering, R};
 use crate::import::ImportCx;
-use hirsel_lir::ir::{ConstantValue, ConstructorKind, Holding, Inst};
+use hirsel_lir::ir::{ConstantValue, ConstructorKind, Holding, Inst, ValueId};
 use hirsel_lir::layout::sequence_slice_start;
 use hirsel_lir::layout_types::LayoutKind;
 use hirsel_types::UseKind;
@@ -18,6 +18,37 @@ pub static TEXT_FINISH: InlineLowering = InlineLowering {
     lower: from_list,
 };
 
+// A borrowed whole-list view: the Bytes result holds its own owner credit,
+// so later mutation of the list copies on write and never moves the view.
+pub static VIEW_LIST: InlineLowering = InlineLowering {
+    path: || hirsel_syntax::DefPath::core("bytes.view_list"),
+    lower: view_list,
+};
+
+fn view_list(cx: &mut ImportCx<'_>, call: &CallShape<'_>) -> R<bool> {
+    let [argument] = call.arguments else {
+        return Ok(false);
+    };
+    let slice = cx.place_layout(call.destination)?;
+    if argument.value.usage != UseKind::Borrow
+        || !matches!(cx.record(slice).kind, LayoutKind::Slice { .. })
+    {
+        return Ok(false);
+    }
+    let (address, reaching) = cx.place_address(argument.value.place)?;
+    let list = cx.place_layout(argument.value.place)?;
+    let owner = cx.fresh(list);
+    let failure = cx.failure(None)?;
+    cx.push(Inst::Copy {
+        result: owner,
+        address,
+        reaching,
+        failure,
+    });
+    cx.pending(owner);
+    whole(cx, call, owner)
+}
+
 fn from_list(cx: &mut ImportCx<'_>, call: &CallShape<'_>) -> R<bool> {
     let [argument] = call.arguments else {
         return Ok(false);
@@ -26,6 +57,11 @@ fn from_list(cx: &mut ImportCx<'_>, call: &CallShape<'_>) -> R<bool> {
         return Ok(false);
     }
     let owner = cx.operand(&argument.value)?;
+    whole(cx, call, owner)
+}
+
+/// The Bytes slice of every element of the owned sequence `owner`.
+fn whole(cx: &mut ImportCx<'_>, call: &CallShape<'_>, owner: ValueId) -> R<bool> {
     let layout = cx.place_layout(call.destination)?;
     let word = cx.record(layout).fields[1].layout;
     let length = cx.value(word, Holding::Plain);

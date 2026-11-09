@@ -25,6 +25,7 @@ pub const LEAF_OPERATIONS: &[&str] = &[
     "list.push",
     "list.reserve",
     "bytes.from_list",
+    "bytes.view_list",
 ];
 
 /// Whether a direct call of `callee` adds an activation (LANG-10). Like operators,

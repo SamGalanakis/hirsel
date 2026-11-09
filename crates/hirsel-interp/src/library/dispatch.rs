@@ -2610,6 +2610,16 @@ primary_operations! { library, call, context, name, a, value;
             arg(a, 0)?.string_view(String::from_utf8(result).map_err(|_| invalid("compiler text invariant"))?)
         } else { arg(a, 0)?.byte_view(result) }, arguments: vec![], consumed: vec![0], released: vec![] }));
     },
+    Primitive: "bytes.view_list" => {
+        let values = collection::elements(arg(a, 0)?, BuiltinType::List)?;
+        let mut result = Vec::with_capacity(values.len());
+        for v in values {
+            let Value::Integer(i) = v else { return Err(invalid("byte list element")); };
+            if i.kind() != Primitive::U8 { return Err(invalid("byte list element kind")); }
+            result.push(i.bits() as u8);
+        }
+        arg(a, 0)?.byte_view(result)
+    },
     Primitive: "bytes.slice" => {
         let src = bytes(arg(a, 0)?)?;
         let start = index(arg(a, 1)?)?;

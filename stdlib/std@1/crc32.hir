@@ -97,19 +97,13 @@ pub fn update(mut state: State, data: Bytes) -> () uses {} {
 }
 
 /// Extends the checksum with the bytes of a list builder from `start` on.
-// Keep Go's simpleUpdate for this surface: native slicing over an arbitrary
-// List offset retains bounds checks and measured 27% more instructions.
+/// A start at or beyond the end is an empty update.
 @noalloc
 pub fn update_list(mut state: State, data: List[u8], start: u64) -> () uses {} {
-  let mut value = state.crc
-  let mut i = start
-  while i < core@1/list.len(data) {
-    let byte: u32 = core@1/int.widen(data[i])
-    let index: u64 = core@1/int.widen(value & 255u32 ^ byte)
-    value = TABLE[index] ^ value >> 8
-    i += 1
+  let end = core@1/list.len(data)
+  if start < end {
+    update(mut state, core@1/bytes.slice(core@1/bytes.view_list(data), start, end))
   }
-  state.crc = value
 }
 
 @noalloc

@@ -40,28 +40,13 @@ pub fn update(mut state: State, data: Bytes) -> () uses {} {
 }
 
 /// Extends the checksum with the bytes of a list builder from `start` on.
+/// A start at or beyond the end is an empty update.
 @noalloc
 pub fn update_list(mut state: State, data: List[u8], start: u64) -> () uses {} {
-  let len = core@1/list.len(data)
-  let mut a = state.a
-  let mut b = state.b
-  let mut i = start
-  while i < len {
-    let mut end = i + NMAX
-    if end > len {
-      end = len
-    }
-    while i < end {
-      let byte: u32 = core@1/int.widen(data[i])
-      a += byte
-      b += a
-      i += 1
-    }
-    a %= MOD
-    b %= MOD
+  let end = core@1/list.len(data)
+  if start < end {
+    update(mut state, core@1/bytes.slice(core@1/bytes.view_list(data), start, end))
   }
-  state.a = a
-  state.b = b
 }
 
 @noalloc

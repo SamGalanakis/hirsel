@@ -3,7 +3,7 @@
 // steps: 3000000
 // each stop point opens the store three times and crashes it twice
 // std@1/store stopped before each of its storage writes from the ninth on in
-// turn (a compaction's manifest and removals, then a third commit group), then
+// turn (a compaction's snapshot and manifest, then a third commit group), then
 // crashed and reopened: the store holds exactly the commits whose durable() returned, and
 // accepts and keeps a new commit afterwards.
 fn config(stop: Option[u64]) -> store.StoreConfig {
@@ -90,6 +90,6 @@ pub fn main(t: Test) -> Result[(), store.StoreError] {
     store.close(take again)?
     stop += 1
   }
-  test.check(t, stop == 15)
+  test.check(t, stop == 11)
   Ok(())
 }

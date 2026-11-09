@@ -460,8 +460,12 @@ When no intact state exists the open refuses rather than guess. Recovery never r
 a body.
 
 **Compaction.** `store.compact` writes a snapshot object of the durable state, then the
-next manifest naming it, and only after that manifest is durable removes the objects no
-manifest at or after it reaches. A crash at any point recovers.
+next manifest naming it, so recovery replays only the log objects after it. It removes no
+object, and recovery skips older manifests, unreached snapshots and log objects before the
+manifest's first log id without reading them. Fencing rests on every created name staying
+taken: a freed name would let a superseded writer's next `put_new` succeed where it must
+collide, acknowledging a commit no recovery reads or replacing a successor's snapshot. A
+crash at any point recovers.
 
 `db.local@1`'s configuration, `StoreConfig`, is its own: `durability` (`Durable()` by
 default, or `Volatile()`, under which `D = V` at all times, outcomes are released without a

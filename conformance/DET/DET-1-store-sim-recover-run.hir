@@ -1,7 +1,7 @@
 // rule: DET-1
 // expect: run
-// std@1/store recovery: compaction leaves one manifest, one snapshot and only
-// the logs after it, and a reopen restores the same state; a bad Durable log
+// std@1/store recovery: compaction adds a snapshot and a manifest and removes
+// nothing, and a reopen restores the same state; a bad Durable log
 // object, the last one included, refuses the open with Corrupt() naming it and
 // is left as it was, since a Durable create is whole or nothing; a missing log
 // object before the last refuses the same way; a Volatile store crashed after
@@ -73,7 +73,7 @@ pub fn main(t: Test) -> Result[(), store.StoreError] {
   store.compact(mut s)?
   test.check(
     t,
-    count(d, "manifest") == 1 && count(d, "snap") == 1 && count(d, "log") == 0
+    count(d, "manifest") == 2 && count(d, "snap") == 1 && count(d, "log") == 3
   )
   put(mut s, b"c", b"3")?
   put(mut s, b"d", b"4")?
@@ -81,7 +81,7 @@ pub fn main(t: Test) -> Result[(), store.StoreError] {
   store.close(take s)?
   // Logs 3, 4 and 5 hold c, d and e, each acknowledged durable. A bad last
   // log is corruption after its acknowledgement, never a torn tail.
-  test.check(t, count(d, "log") == 3)
+  test.check(t, count(d, "log") == 6)
   let original = file.read_bytes(d, path.of(name("log", 5)))
   let _ = corrupt(d, name("log", 5))
   let tail = match store.open_backend(

@@ -13,7 +13,10 @@
 //   snap/N      every entry as of one commit, written by compaction
 // A writer claims the store by creating a fence log at the next log id and
 // then the next manifest with the next epoch. A stale writer's next create
-// finds its id taken and the store reports Fenced().
+// finds its id taken and the store reports Fenced(). Fencing rests on every
+// created name staying taken, so the store never removes a durable object:
+// a freed name would let a superseded writer's create succeed. Compaction
+// only lets recovery skip what the newest manifest no longer reaches.
 //
 // Transactions begun with `begin` detect conflicts per key at commit through
 // std@1/txn_manager, after SlateDB's transaction_manager.rs: a commit
@@ -493,10 +496,11 @@ pub fn durable[S](mut s: Store[S], t: Ticket) -> Result[(), StoreError] uses {s}
   flush(mut s)
 }
 
-/// Writes every commit into a new snapshot object, publishes it with a new
-/// manifest and removes the objects it supersedes. A crash at any point
-/// recovers: until the manifest exists the old state is current, and after it
-/// the superseded objects are garbage that the next open removes.
+/// Writes every commit into a new snapshot object and publishes it with a new
+/// manifest, so recovery replays only the logs after it. It removes nothing:
+/// every created name stays taken, which is what fences a superseded writer.
+/// A crash at any point recovers: until the manifest exists the old state is
+/// current, and after it the older objects are never read again.
 pub fn compact[S](mut s: Store[S]) -> Result[(), StoreError] uses {s} {
   if s.closed {
     return Error(Closed())
@@ -508,8 +512,7 @@ pub fn compact[S](mut s: Store[S]) -> Result[(), StoreError] uses {s} {
   s.next_snap += 1
   s.snap = Some((snap_id, s.durable))
   s.log_start = s.next_log
-  publish_manifest(mut s)?
-  collect(mut s)
+  publish_manifest(mut s)
 }
 
 /// Writes any pending commits and closes the store.
@@ -1045,45 +1048,6 @@ fn publish_manifest[S](mut s: Store[S]) -> Result[(), StoreError] {
   Ok(())
 }
 
-// Removes every object the current manifest no longer reaches: older
-// manifests and snapshots, and logs before its first log id.
-fn collect[S](mut s: Store[S]) -> Result[(), StoreError] {
-  let manifests = list_ids(mut s, "manifest")?
-  let snaps = list_ids(mut s, "snap")?
-  let logs = list_ids(mut s, "log")?
-  remove_garbage(mut s, manifests, snaps, logs)
-}
-
-// Removes, among the listed objects, every one the current manifest does not
-// reach: older manifests, other snapshots and logs before its first log id.
-fn remove_garbage[S](
-  mut s: Store[S],
-  manifests: List[u64],
-  snaps: List[u64],
-  logs: List[u64]
-) -> Result[(), StoreError] {
-  for id in manifests {
-    if id + 1 < s.next_manifest {
-      remove(mut s, manifest_name(id))?
-    }
-  }
-  for id in snaps {
-    let reached = match s.snap {
-      Some((snap_id, _)) => snap_id == id,
-      None() => false,
-    }
-    if !reached {
-      remove(mut s, snap_name(id))?
-    }
-  }
-  for id in logs {
-    if id < s.log_start {
-      remove(mut s, log_name(id))?
-    }
-  }
-  Ok(())
-}
-
 // Loads the newest valid state, then claims the store at the next epoch.
 fn recover[S](mut s: Store[S]) -> Result[(), StoreError] {
   make_dir(mut s, "manifest")?
@@ -1180,8 +1144,7 @@ fn recover[S](mut s: Store[S]) -> Result[(), StoreError] {
   } else {
     max_epoch
   }
-  claim(mut s, newest + 1)?
-  remove_garbage(mut s, manifests, snaps, logs)
+  claim(mut s, newest + 1)
 }
 
 fn apply(mut index: ordered_map.OrderedMap[Bytes, Bytes], set: List[Write]) -> () uses {} {

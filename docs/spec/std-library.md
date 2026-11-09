@@ -4301,10 +4301,11 @@ another writer and returns `Fenced()`. `Storage`, `Corrupt`, `Fenced` and `Injec
 close the store; every later call returns `Closed()`.
 
 **Compaction.** `compact` writes any pending group, writes every entry into the next
-snapshot object, publishes it with the next manifest (whose first log id is the next log
-id), then removes older manifests and snapshots and the logs before it. Until the
-manifest exists the old state is current; after it, the superseded objects are garbage
-that the next `open` removes, so a crash at any point recovers.
+snapshot object and publishes it with the next manifest, whose first log id is the next log
+id. It removes nothing: every created name stays taken, so a superseded writer's next
+create collides and returns `Fenced()` rather than reusing a freed name. Older manifests,
+unreached snapshots and logs before the first log id are never read again, so a crash at
+any point recovers.
 
 **Storage contract.** The engine needs exactly these operations of its storage, which an
 object-storage provider must offer: create an object whole if its name is absent

@@ -1178,10 +1178,11 @@ fn role_tables(ctx: *mut TaskCtx) -> &'static mut Scheduler {
     // Admission also builds row zero before code starts; only code entries
     // may abandon a fiber here. Observe a host stop before a synchronizing
     // entry touches the object, rather than after its effect at yield.
-    if crate::stop::running() == ctx {
-        unsafe {
-            crate::stop::check(ctx, crate::stop::observe(ctx));
-        }
+    if let Err(stop) = crate::stop::observe(ctx)
+        && crate::stop::running() == ctx
+    {
+        // SAFETY: the running task raises its own run's stop.
+        unsafe { crate::stop::raise(ctx, stop) };
     }
     // SAFETY: the context and its run are live for the whole run, and the scheduler is only
     // reached through them, by the one running task; no reference is kept across a switch.

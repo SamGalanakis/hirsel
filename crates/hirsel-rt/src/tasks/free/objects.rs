@@ -166,11 +166,16 @@ pub(crate) unsafe fn parked(ctx: *mut TaskCtx) -> Option<(Wait, u64)> {
 /// at this task's next role entry, with no latch held.
 /// # Safety
 /// The caller owns the run's tables: the role, W1's run token or the end.
+#[inline(always)]
 pub(crate) unsafe fn retire(ctx: *mut TaskCtx) {
-    let retired = unsafe { &mut (*ctx).free_ops.retired };
-    if retired.is_empty() {
-        return;
+    if unsafe { !(*ctx).free_ops.retired.is_empty() } {
+        unsafe { retire_queued(ctx) };
     }
+}
+
+#[inline(never)]
+unsafe fn retire_queued(ctx: *mut TaskCtx) {
+    let retired = unsafe { &mut (*ctx).free_ops.retired };
     let Some(s) = (unsafe { (*(*(*ctx).run_ptr()).tasks.get()).as_deref_mut() }) else {
         return;
     };

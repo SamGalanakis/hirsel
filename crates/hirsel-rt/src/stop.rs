@@ -240,11 +240,16 @@ impl Control {
         stop
     }
     /// The run's stop, once one was requested.
-    #[inline]
+    #[inline(always)]
     pub(crate) fn stopped(&self) -> Option<Stop> {
         if !self.stopped.load(Ordering::Acquire) {
             return None;
         }
+        self.requested()
+    }
+    #[cold]
+    #[inline(never)]
+    fn requested(&self) -> Option<Stop> {
         self.stop.lock().unwrap().clone()
     }
     /// A host took a stop handle: a stop may come from outside the run.
@@ -326,7 +331,7 @@ impl Control {
     }
 }
 
-#[inline]
+#[inline(always)]
 pub(crate) fn observe(ctx: *mut TaskCtx) -> Stopped<()> {
     // SAFETY: the context and its run are live; a callee run's root outlives it, and the
     // root's stop ends the whole execution (RUN-10).

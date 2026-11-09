@@ -238,6 +238,11 @@ impl std::ops::DerefMut for RoleTables<'_> {
     }
 }
 
+/// Whether [`Lent`] tracks table borrows: in tests and the checked profile
+/// (debug assertions) and diagnostic archives. Release archives keep the
+/// lexical borrow rule without a per-access thread-local write.
+const TRACK_LENT: bool = cfg!(any(test, debug_assertions, feature = "diagnostic"));
+
 struct Lent;
 
 // Keep TLS addresses inside non-suspending calls. An inlined TLS access can
@@ -252,22 +257,35 @@ fn check_lent() {
 }
 
 impl Lent {
-    #[inline(never)]
+    #[inline(always)]
     #[track_caller]
     fn new() -> Self {
-        let location = Location::caller();
-        if let Some(outer) = LENT.with(|lent| lent.replace(Some(location))) {
-            spanned(outer, "another role table borrow");
+        if TRACK_LENT {
+            lend(Location::caller());
         }
         Self
     }
 }
 
-impl Drop for Lent {
-    #[inline(never)]
-    fn drop(&mut self) {
-        LENT.with(|lent| lent.set(None));
+#[inline(never)]
+fn lend(location: &'static Location<'static>) {
+    if let Some(outer) = LENT.with(|lent| lent.replace(Some(location))) {
+        spanned(outer, "another role table borrow");
     }
+}
+
+impl Drop for Lent {
+    #[inline(always)]
+    fn drop(&mut self) {
+        if TRACK_LENT {
+            unlend();
+        }
+    }
+}
+
+#[inline(never)]
+fn unlend() {
+    LENT.with(|lent| lent.set(None));
 }
 
 /// Run `f` with the role's tables, entering the role for `ctx`'s task as a
@@ -310,8 +328,15 @@ pub(crate) unsafe fn with_held<T>(
 
 /// No role table borrow may span `boundary` on this thread. Like every
 /// runtime panic, this aborts at the compiled-code boundary.
-#[inline(never)]
+#[inline(always)]
 pub(crate) fn unlent(boundary: &str) {
+    if TRACK_LENT {
+        check_unlent(boundary);
+    }
+}
+
+#[inline(never)]
+fn check_unlent(boundary: &str) {
     if let Some(lent) = LENT.with(Cell::get) {
         spanned(lent, boundary);
     }
@@ -460,12 +485,25 @@ pub(crate) unsafe fn claim(run: *mut crate::context::RunShared, task: u32) -> *m
 /// # Safety
 /// `ctx` belongs to the running fiber; no scheduler borrow is retained while
 /// acquiring. The run outlives every caller.
+#[inline(always)]
 pub(crate) unsafe fn enter(ctx: *mut TaskCtx) {
+    // SAFETY: caller contract. This step already entered: no release or
+    // fiber switch has happened since, so the role is still this task's.
+    if unsafe { (*ctx).role_entered } {
+        unsafe { super::free::objects::retire(ctx) };
+        return;
+    }
+    unsafe { enter_step(ctx) };
+}
+
+#[inline(never)]
+unsafe fn enter_step(ctx: *mut TaskCtx) {
     // SAFETY: caller contract; these immutable fields outlive every worker.
     let run = unsafe { (*ctx).run_ptr() };
     let role = unsafe { &(*run).role };
     if !role.enabled.load(Ordering::Acquire) {
-        // W1's run token owns the tables.
+        // W1's run token owns the tables. Admission may still enable the
+        // role, so no step entry is remembered.
         unsafe { super::free::objects::retire(ctx) };
         return;
     }
@@ -473,7 +511,10 @@ pub(crate) unsafe fn enter(ctx: *mut TaskCtx) {
         // This task already installed current and its shield when it acquired
         // the role. A switch or compiled-code segment releases ownership;
         // shield changes publish themselves through shield_changed.
-        unsafe { super::free::objects::retire(ctx) };
+        unsafe {
+            (*ctx).role_entered = true;
+            super::free::objects::retire(ctx);
+        }
         return;
     }
     // A home foreign callback can wait for a child's R while that child
@@ -491,6 +532,7 @@ pub(crate) unsafe fn enter(ctx: *mut TaskCtx) {
             scheduler.current = (*ctx).task_id;
             super::snapshot_shield(scheduler, ctx);
         }
+        (*ctx).role_entered = true;
         super::free::objects::retire(ctx);
     }
 }
@@ -509,6 +551,8 @@ pub(crate) unsafe fn release(ctx: *mut TaskCtx) {
 /// task accounting may own the role without opening a semantic entry guard.
 unsafe fn release_owned(ctx: *mut TaskCtx) -> bool {
     unlent("a role release");
+    // The step's role entry ends here; the next table access re-enters.
+    unsafe { (*ctx).role_entered = false };
     // SAFETY: caller contract.
     let role = unsafe { &(*(*ctx).run_ptr()).role };
     if role.enabled.load(Ordering::Acquire) {

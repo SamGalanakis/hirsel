@@ -135,6 +135,10 @@ pub struct TaskCtx {
     pub(crate) task_id: u32,
     pub(crate) task_sp: *mut u8,
     pub(crate) role_depth: u32,
+    /// This scheduling step already holds the role (`tasks::role::enter`).
+    /// A role release or a fiber switch ends the step and clears it; until
+    /// then a further entry reuses the held role.
+    pub(crate) role_entered: bool,
     /// Top of the release worklist (an intrusive stack of dead headers and continuations).
     pub(crate) work: *mut Header,
     pub(crate) shield: u32,
@@ -522,6 +526,7 @@ impl TaskCtx {
             task_id: 0,
             task_sp: ptr::null_mut(),
             role_depth: 0,
+            role_entered: false,
             work: ptr::null_mut(),
             shield: 0,
             failure: FailureState::default(),
@@ -665,6 +670,7 @@ impl TaskCtx {
     pub(crate) unsafe fn switch_in(ctx: *mut TaskCtx, worker: *mut Worker) {
         // SAFETY: caller contract.
         unsafe {
+            (*ctx).role_entered = false;
             TaskCtx::attach(ctx, worker);
             if (*ctx)
                 .run_ref()
@@ -709,6 +715,7 @@ impl TaskCtx {
     #[inline(never)]
     pub(crate) fn switch_out(&mut self) {
         crate::tasks::role::unlent("a fiber switch");
+        self.role_entered = false;
         if self
             .run_ref()
             .ordered_mode

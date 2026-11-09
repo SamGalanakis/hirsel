@@ -4,7 +4,7 @@ Generated from manifest-selected public declarations. Do not edit by hand.
 Signatures retain modes, brands, attributes, relations and `uses` clauses.
 Opaque representations stay hidden; bodies are not checked or evaluated.
 
-2301 exported definitions; 1014 variants.
+2302 exported definitions; 1014 variants.
 
 ## Types and roots
 
@@ -2112,6 +2112,7 @@ References: [`core@1/Bytes`](#def-core_401_2fBytes), [`std@1/adler32/State`](#de
 - `@noalloc pub fn adler32.update_list(mut state: State, data: List[u8], start: u64) -> () uses {}`
 
 Extends the checksum with the bytes of a list builder from `start` on.
+A start at or beyond the end is an empty update.
 
 References: [`core@1/List`](#def-core_401_2fList), [`core@1/u64`](#def-core_401_2fu64), [`core@1/u8`](#def-core_401_2fu8), [`std@1/adler32/State`](#def-std_401_2fadler32_2fState)
 
@@ -3571,6 +3572,10 @@ References: [`core@1/Bytes`](#def-core_401_2fBytes)
 
 - `@noalloc fn bytes.slice(src: Bytes, start: u64, end: u64) -> Bytes in src`
 
+<a id="def-core_401_2fbytes_2fview_5flist"></a>
+
+- `@noalloc fn bytes.view_list(src: List[u8]) -> Bytes in src`
+
 
 ## capture
 
@@ -4122,6 +4127,7 @@ References: [`core@1/Bytes`](#def-core_401_2fBytes), [`std@1/crc32/State`](#def-
 - `@noalloc pub fn crc32.update_list(mut state: State, data: List[u8], start: u64) -> () uses {}`
 
 Extends the checksum with the bytes of a list builder from `start` on.
+A start at or beyond the end is an empty update.
 
 References: [`core@1/List`](#def-core_401_2fList), [`core@1/u64`](#def-core_401_2fu64), [`core@1/u8`](#def-core_401_2fu8), [`std@1/crc32/State`](#def-std_401_2fcrc32_2fState)
 

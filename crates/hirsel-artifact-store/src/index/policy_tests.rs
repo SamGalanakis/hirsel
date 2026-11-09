@@ -52,7 +52,7 @@ fn protocol_epoch_factory_observes_pin_and_compaction_lock_order() {
         let epoch = crate::pack::index_benchmark_epoch(root).unwrap();
         let delta = build(root, &[entry(n)], crate::Durability::Rebuildable).unwrap();
         assert!(matches!(
-            publish_delta(root, delta, &epoch).unwrap(),
+            publish_delta(root, &delta, &epoch).unwrap(),
             PublishOutcome::Published { .. }
         ));
     }

@@ -265,8 +265,8 @@ impl Store {
         // private lease is released only after the publication outcome is known.
         state.pinned = state.depth != 0 && state.index.is_some();
         drop(epoch);
-        // Explicit owner-boundary maintenance, separately counted and bounded;
-        // publish_delta itself never compacts or retries.
+        // Owner-boundary maintenance, separately counted and bounded; an
+        // admission refusal above has already merged and retried.
         self.maintain_index(state)?;
         self.run_scheduled_collection();
         Ok(())

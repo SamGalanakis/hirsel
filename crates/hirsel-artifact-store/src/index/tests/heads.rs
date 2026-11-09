@@ -56,7 +56,7 @@ fn nonlexical_layers_merge_uniquely_to_canonical_bytes_with_held_epoch_and_pin()
             expected.insert(entry.key, entry);
         }
         assert!(matches!(
-            publish_delta(root, delta, &epoch).unwrap(),
+            publish_delta(root, &delta, &epoch).unwrap(),
             PublishOutcome::Published { .. }
         ));
     }
@@ -77,8 +77,10 @@ fn nonlexical_layers_merge_uniquely_to_canonical_bytes_with_held_epoch_and_pin()
         fs::read(storage::layer_path(root, output)).unwrap(),
         format::encode_layer(&expected).unwrap()
     );
+    // The swap itself retired every superseded layer; the held pin keeps
+    // its mapped inodes.
     for descriptor in original.layers {
-        fs::remove_file(storage::layer_path(root, descriptor)).unwrap();
+        assert!(!storage::layer_path(root, descriptor).exists());
     }
     for entry in expected {
         assert_eq!(find(&held, entry.key), Some(entry.location));
@@ -97,7 +99,7 @@ fn shadowed_corrupt_layer_is_lazy_on_lookup_but_refuses_compaction() {
         for i in [0, 3] {
             let delta = build(root, &entries(i), Durability::Rebuildable).unwrap();
             assert!(matches!(
-                publish_delta(root, delta, &epoch).unwrap(),
+                publish_delta(root, &delta, &epoch).unwrap(),
                 PublishOutcome::Published { .. }
             ));
         }
@@ -156,7 +158,7 @@ fn merge_orders_late_digest_bytes_and_kinds_with_newest_tie_precedence() {
         }
         let delta = build(root, &entries, Durability::Rebuildable).unwrap();
         assert!(matches!(
-            publish_delta(root, delta, &epoch).unwrap(),
+            publish_delta(root, &delta, &epoch).unwrap(),
             PublishOutcome::Published { .. }
         ));
     }

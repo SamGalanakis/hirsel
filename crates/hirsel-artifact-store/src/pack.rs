@@ -17,6 +17,13 @@ thread_local! {
     pub(super) static INDEX_LOADED: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Maintenance {
+    Idle,
+    Merged,
+    Conflict,
+}
+
 pub(super) const SMALL: usize = 4096;
 const LIMIT: usize = 1 << 20;
 const RECORDS: usize = 1024;
@@ -448,31 +455,49 @@ impl Store {
         delta: index::PreparedDelta,
         epoch: &EpochLease,
     ) -> io::Result<()> {
-        self.count(Counter::IndexPublicationAttempts, 1);
-        match index::publish_delta(&self.root, delta, epoch)? {
-            index::PublishOutcome::Published {
-                maintenance_due, ..
-            } => {
-                self.count(Counter::IndexPublications, 1);
-                // One immutable layer installation and one atomic manifest.
-                self.count(Counter::Publications, 2);
-                state.maintenance_due |= maintenance_due;
-                self.sync_strict_index()?;
-                state.index = self.load_index(state.depth == 0);
-                state.pinned = state.depth != 0;
-            }
-            index::PublishOutcome::Skipped(_) => {
-                self.count(Counter::SkippedPersistence, 1);
-                self.count(Counter::IndexPublicationSkips, 1);
-                if state.retentions != 0 {
-                    return Err(io::Error::other(
-                        "complete publication exceeds index admission",
-                    ));
+        // A merge always shrinks the root it replaced, so retrying after one
+        // terminates unless other publishers keep refilling it. A conflicting
+        // concurrent root change earns one retry.
+        let mut conflict_retry = true;
+        loop {
+            self.count(Counter::IndexPublicationAttempts, 1);
+            match index::publish_delta(&self.root, &delta, epoch)? {
+                index::PublishOutcome::Published {
+                    maintenance_due, ..
+                } => {
+                    self.count(Counter::IndexPublications, 1);
+                    // One immutable layer installation and one atomic manifest.
+                    self.count(Counter::Publications, 2);
+                    state.maintenance_due |= maintenance_due;
+                    self.sync_strict_index()?;
+                    state.index = self.load_index(state.depth == 0);
+                    state.pinned = state.depth != 0;
                 }
+                index::PublishOutcome::Skipped(reason) => {
+                    // A refused root is exactly when merging is due.
+                    if reason != index::SkipReason::Contended {
+                        state.maintenance_due = true;
+                        match self.maintain_index(state)? {
+                            Maintenance::Merged => continue,
+                            Maintenance::Conflict if conflict_retry => {
+                                conflict_retry = false;
+                                continue;
+                            }
+                            Maintenance::Conflict | Maintenance::Idle => {}
+                        }
+                    }
+                    self.count(Counter::SkippedPersistence, 1);
+                    self.count(Counter::IndexPublicationSkips, 1);
+                    if state.retentions != 0 {
+                        return Err(io::Error::other(
+                            "complete publication exceeds index admission",
+                        ));
+                    }
+                }
+                index::PublishOutcome::Empty => {}
             }
-            index::PublishOutcome::Empty => {}
+            return Ok(());
         }
-        Ok(())
     }
     fn sync_strict_index(&self) -> io::Result<()> {
         if self.durability != Durability::Strict {
@@ -492,9 +517,11 @@ impl Store {
         self.count(Counter::DirectorySyncs, 1);
         File::open(&directory)?.sync_all()
     }
-    fn maintain_index(&self, state: &mut State) -> io::Result<()> {
+    /// Whether a merge published, so a refused publication may retry. A
+    /// conflict (a concurrent root change) is reported as `Conflict`.
+    fn maintain_index(&self, state: &mut State) -> io::Result<Maintenance> {
         if !state.maintenance_due {
-            return Ok(());
+            return Ok(Maintenance::Idle);
         }
         self.count(Counter::IndexMaintenanceAttempts, 1);
         let outcome = index::compact(
@@ -518,11 +545,15 @@ impl Store {
                     // bound on the compacted file and bounded manifest bytes.
                     self.record_growth(pin.generation.retained_bytes() + 420);
                 }
+                Ok(Maintenance::Merged)
             }
-            index::CompactOutcome::NotNeeded => state.maintenance_due = false,
-            index::CompactOutcome::Deferred | index::CompactOutcome::Conflict => {}
+            index::CompactOutcome::NotNeeded => {
+                state.maintenance_due = false;
+                Ok(Maintenance::Idle)
+            }
+            index::CompactOutcome::Conflict => Ok(Maintenance::Conflict),
+            index::CompactOutcome::Deferred => Ok(Maintenance::Idle),
         }
-        Ok(())
     }
     #[cfg(test)]
     pub(super) fn crash_before_next_index(&self) {
@@ -532,7 +563,7 @@ impl Store {
     pub(crate) fn publish_test_routes(&self, entries: &[index::Entry]) -> io::Result<()> {
         let lease = EpochLease::new(&self.root, self.durability)?;
         let delta = index::build(&self.root, entries, self.durability)?;
-        match index::publish_delta(&self.root, delta, &lease)? {
+        match index::publish_delta(&self.root, &delta, &lease)? {
             index::PublishOutcome::Published { .. } => Ok(()),
             outcome => Err(io::Error::other(format!(
                 "test route publication: {outcome:?}"

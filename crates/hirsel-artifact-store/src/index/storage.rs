@@ -53,9 +53,6 @@ impl Lock {
             Ok(None)
         }
     }
-    pub(super) fn publication(root: &Path, exclusive: bool) -> io::Result<Option<Self>> {
-        Self::for_store(root, exclusive, Durability::Rebuildable)
-    }
     pub(super) fn for_store(
         root: &Path,
         exclusive: bool,
@@ -63,12 +60,8 @@ impl Lock {
     ) -> io::Result<Option<Self>> {
         Self::open(&root.join(".pack-lock"), exclusive, durability)
     }
-    pub(super) fn maintenance(root: &Path) -> io::Result<Option<Self>> {
-        Self::open(
-            &root.join(".index-maintenance-lock"),
-            true,
-            Durability::Rebuildable,
-        )
+    pub(super) fn maintenance(root: &Path, durability: Durability) -> io::Result<Option<Self>> {
+        Self::open(&root.join(".index-maintenance-lock"), true, durability)
     }
 }
 

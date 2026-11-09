@@ -28,7 +28,7 @@ fn entry(n: u64) -> Entry {
 fn write(root: &Path, entries: &[Entry]) {
     let outcome = publish_delta(
         root,
-        build(root, entries, crate::Durability::Rebuildable).unwrap(),
+        &build(root, entries, crate::Durability::Rebuildable).unwrap(),
         &index_benchmark_epoch(root).unwrap(),
     )
     .unwrap();
@@ -187,7 +187,7 @@ fn cooperating_child() {
     assert_eq!(go, [1]);
     assert_eq!(find(&stale, record.key), None);
     assert!(matches!(
-        publish_delta(&root, delta, &epoch).unwrap(),
+        publish_delta(&root, &delta, &epoch).unwrap(),
         PublishOutcome::Published { .. }
     ));
     socket.write_all(&[2]).unwrap();

@@ -20,7 +20,7 @@ fn entry(n: u64) -> Entry {
 fn publish(root: &Path, entries: &[Entry]) -> PublishOutcome {
     publish_delta(
         root,
-        build(root, entries, crate::Durability::Rebuildable).unwrap(),
+        &build(root, entries, crate::Durability::Rebuildable).unwrap(),
         &index_benchmark_epoch(root).unwrap(),
     )
     .unwrap()
@@ -88,7 +88,7 @@ fn empty_drop_duplicate_and_root_mismatch_never_publish() {
     assert!(
         publish_delta(
             root,
-            build(root, &[entry(2)], crate::Durability::Rebuildable).unwrap(),
+            &build(root, &[entry(2)], crate::Durability::Rebuildable).unwrap(),
             &index_benchmark_epoch(other.path()).unwrap()
         )
         .is_err()
@@ -212,11 +212,12 @@ fn lock_contention_is_bounded_and_live_staging_has_owner() {
     assert_eq!(unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX) }, 0);
     assert_eq!(find(&load_pinned(root, crate::Durability::Rebuildable).unwrap(), entry(1).key), None);
     assert_eq!(
-        publish_delta(root, delta, &epoch).unwrap(),
+        publish_delta(root, &delta, &epoch).unwrap(),
         PublishOutcome::Skipped(SkipReason::Contended)
     );
     assert_eq!(compact(root, budget(), crate::Durability::Rebuildable).unwrap(), CompactOutcome::Deferred);
     drop(lock);
+    drop(delta);
     assert!(!stage.exists());
 }
 
@@ -235,7 +236,8 @@ fn layer_installed_but_manifest_write_failure_never_changes_root_or_recovers_orp
         .path();
     // Fail create-new of the staged manifest after the completed layer link.
     fs::write(stage.join("manifest"), b"injected fault").unwrap();
-    assert!(publish_delta(root, delta, &index_benchmark_epoch(root).unwrap()).is_err());
+    assert!(publish_delta(root, &delta, &index_benchmark_epoch(root).unwrap()).is_err());
+    drop(delta);
     assert_eq!(fs::read(root.join("index/MANIFEST")).unwrap(), original);
     assert!(!stage.exists());
     let pin = load_pinned(root, crate::Durability::Rebuildable).unwrap();

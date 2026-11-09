@@ -293,7 +293,7 @@ fn selection(layers: &[Descriptor]) -> usize {
 
 pub(crate) fn publish_delta(
     root: &Path,
-    delta: PreparedDelta,
+    delta: &PreparedDelta,
     epoch: &crate::pack::EpochLease,
 ) -> io::Result<PublishOutcome> {
     if root.canonicalize()? != delta.root || epoch.root().canonicalize()? != delta.root {
@@ -413,11 +413,13 @@ pub(crate) fn compact(
     if !root.exists() {
         return Ok(CompactOutcome::NotNeeded);
     }
-    let Some(_owner) = Lock::maintenance(root)? else {
+    // Strict owners wait for both locks: a contended durable store must still
+    // make progress, or a full manifest refuses every later publication.
+    let Some(_owner) = Lock::maintenance(root, durability)? else {
         return Ok(CompactOutcome::Deferred);
     };
     let (original, selected, pinned) = {
-        let Some(_lock) = Lock::publication(root, false)? else {
+        let Some(_lock) = Lock::for_store(root, false, durability)? else {
             return Ok(CompactOutcome::Deferred);
         };
         let original = Manifest::read(root)?;
@@ -463,7 +465,7 @@ pub(crate) fn compact(
     let stage = Stage::new(root, durability)?;
     stage.write("layer", &bytes)?;
     drop(bytes);
-    let Some(_lock) = Lock::publication(root, true)? else {
+    let Some(_lock) = Lock::for_store(root, true, durability)? else {
         return Ok(CompactOutcome::Deferred);
     };
     let mut latest = Manifest::read(root)?;
@@ -497,10 +499,51 @@ pub(crate) fn compact(
         return Ok(CompactOutcome::Deferred);
     }
     let generation = latest.publish(root, &stage, durability)?;
+    retire_unlisted(root, &latest, durability);
     Ok(CompactOutcome::Published {
         generation,
         layers: latest.layers.len() as u8,
     })
+}
+
+/// Unlink every layer name the just-published root does not list. Called with
+/// the exclusive publication lock, so no publisher holds an installed but
+/// unlisted layer and no reader sits between its root read and layer opens;
+/// existing pins keep their mapped inodes. The new root's rename is durable
+/// first, so a crash can never revert to a root naming an unlinked layer.
+/// Earlier crashes' leftovers are swept by the next compaction; a failure here
+/// only leaves orphans, never an unreadable root.
+fn retire_unlisted(root: &Path, latest: &Manifest, durability: Durability) {
+    let directory = root.join("index");
+    // Strict commit_staged already synced the directory after its rename.
+    if durability != Durability::Strict
+        && std::fs::File::open(&directory)
+            .and_then(|d| d.sync_all())
+            .is_err()
+    {
+        return;
+    }
+    let listed: Vec<_> = latest
+        .layers
+        .iter()
+        .map(|d| storage::layer_path(root, *d))
+        .collect();
+    let Ok(entries) = std::fs::read_dir(&directory) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(id) = name.to_str().and_then(|n| n.strip_prefix("L-")) else {
+            continue;
+        };
+        if id.len() != 64 || !id.bytes().all(|b| b.is_ascii_hexdigit()) {
+            continue;
+        }
+        let path = entry.path();
+        if !listed.contains(&path) {
+            let _ = std::fs::remove_file(path);
+        }
+    }
 }
 
 #[cfg(test)]

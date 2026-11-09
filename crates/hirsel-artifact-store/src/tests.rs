@@ -770,9 +770,10 @@ fn collection_bounds_files_and_preserves_live_mappings() {
         .associate(Address(hash(b"root")), Action(hash(b"action")), reference)
         .unwrap();
     let report = store.collect(0);
-    // Two payload packs, two original layers, their compacted layer and root.
-    assert_eq!(report.entries, 6);
-    assert_eq!(report.removed, 6);
+    // Two payload packs, the compacted layer and root; the merge already
+    // retired both superseded layers.
+    assert_eq!(report.entries, 4);
+    assert_eq!(report.removed, 4);
     assert_eq!(report.removed_bytes, report.bytes);
     assert_eq!(&*mapped, b"mapped across collection");
     assert!(store.get(reference).is_none());
@@ -1526,4 +1527,61 @@ fn installation_path_work_follows_pack_count_instead_of_reference_count() {
                 .is_err()
         );
     }
+}
+
+// Bug (store-compact-639): a full root whose last merge was deferred refused
+// every later publication, and superseded layers were never unlinked, so the
+// shared accepted-execution store stopped admitting and grew per publication.
+#[test]
+fn a_full_strict_root_with_no_pending_merge_admits_and_retires_superseded_layers() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().to_owned();
+    let store = Store::new(root.clone());
+    let old = store.put(DOMAIN, b"old").unwrap();
+    // Newest-first sizes 1,5,...,15625 never meet the 4x merge ratio: the
+    // eight-layer root a contended (deferred) merge leaves behind.
+    let mut next = 0u64;
+    for n in [15625u64, 3125, 625, 125, 25, 5, 1] {
+        let routes: Vec<_> = (next..next + n)
+            .map(|i| {
+                let mut digest = [0xa5; 32];
+                digest[..8].copy_from_slice(&i.to_be_bytes());
+                index::Entry {
+                    key: index::Key {
+                        kind: index::KeyKind::Content,
+                        digest: ContentHash(digest),
+                    },
+                    location: index::Location {
+                        segment: ContentHash([7; 32]),
+                        offset: 64,
+                        len: 128,
+                    },
+                }
+            })
+            .collect();
+        next += n;
+        store.publish_test_routes(&routes).unwrap();
+    }
+    let layer_files = || {
+        fs::read_dir(root.join("index"))
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().starts_with("L-"))
+            .count()
+    };
+    assert_eq!(layer_files(), 8);
+    // A crash between an earlier root swap and its unlinks left this orphan.
+    let orphan = root.join(format!("index/L-{}", "0".repeat(64)));
+    fs::write(&orphan, b"orphaned layer").unwrap();
+    let retention = store.retention_scope().unwrap();
+    let new = store.put(DOMAIN, b"new").unwrap();
+    drop(retention);
+    let reopened = Store::new(root.clone());
+    assert_eq!(&*reopened.get(new).unwrap(), b"new");
+    assert_eq!(&*reopened.get(old).unwrap(), b"old");
+    let listed = index::current_layer_ids_locked(&root).unwrap();
+    assert!(listed.len() <= 8);
+    // Only listed layers remain on disk, including no pre-existing orphan.
+    assert_eq!(layer_files(), listed.len());
+    assert!(!orphan.exists());
 }

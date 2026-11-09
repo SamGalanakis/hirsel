@@ -86,14 +86,39 @@ fn object_read(mut state: ObjectBackend, name: String) -> Result[Bytes, FileErro
   Ok(take data)
 }
 
+// An acknowledged S3 PUT is durable, so an existing object with equal bytes
+// is this create's success (its first attempt's lost response). Errors raised
+// before the request is sent, and 4xx refusals, created nothing; a transport
+// error, a 5xx or a malformed response leaves the outcome undecided.
 fn object_put(mut state: ObjectBackend, name: String, data: Bytes, mode: Durability) -> Result[
   (),
-  FileError
+  store.PutError
 ] {
   state.cached = []
   state.cached_bytes = 0
-  put(mut state.client, name, data, Create()) ? file_error
-  Ok(())
+  match put(mut state.client, name, data, Create()) {
+    Ok(()) => Ok(()),
+    Error(Exists()) => {
+      let limit = state.client.config.max_object_bytes
+      match range_get(mut state.client, name, 0, limit) {
+        Ok((stored, total)) => if total == bytes.len(data) && stored == data {
+          Ok(())
+        } else {
+          Error(Taken())
+        },
+        Error(e) => Error(Undecided(file_error(e))),
+      }
+    },
+    Error(Invalid()) | Error(Denied()) | Error(Grant()) | Error(Clock()) => Error(
+      Refused(FileFault(1))
+    ),
+    Error(Status(code)) => if code >= 400 && code < 500 {
+      Error(Refused(FileFault(1)))
+    } else {
+      Error(Undecided(FileFault(1)))
+    },
+    Error(e) => Error(Undecided(file_error(e))),
+  }
 }
 
 fn object_list(mut state: ObjectBackend, prefix: String) -> Result[

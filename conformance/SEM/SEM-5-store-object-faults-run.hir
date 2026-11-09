@@ -1,7 +1,10 @@
 // rule: SEM-5
 // expect: run
 // The exact immutable log resolves an acknowledged PUT with a lost response;
-// a racing different log fences, and a pre-write fault publishes no group.
+// a racing different log fences; a pre-write fault publishes no group and is a
+// definite Refused(); and a create whose durability barrier failed after it
+// became visible is acknowledged only once the store has redone the barrier,
+// so the commit survives a crash.
 fn write_one(mut s: store.Store[s3.Sim]) -> Result[(), store.StoreError] {
   let mut tx = store.begin(mut s)
   txn.put(mut tx, b"key", b"value")
@@ -42,8 +45,25 @@ pub fn main(t: Test) -> Result[(), store.StoreError] {
     store.default_config()
   )
   match failed {
-    Error(Storage(_)) => {},
+    Error(Refused(_)) => {},
     _ => test.check(t, false),
   }
+  // The ninth backend call is the first commit's log creation.
+  let b = test.dir(t, [])
+  let mut barrier = store.open_backend(
+    s3.with_failed_barrier(s3.simulated(b, 0, 0, 0, 0), 9),
+    s3.simulated_backend(),
+    store.default_config()
+  )?
+  write_one(mut barrier)?
+  let _ = store.into_state(take barrier)
+  test.crash(t, b, 1)
+  let mut crashed = store.open_backend(
+    s3.simulated(b, 0, 0, 0, 0),
+    s3.simulated_backend(),
+    store.default_config()
+  )?
+  test.check(t, store.get(store.snapshot(mut crashed), b"key") == Some(b"value"))
+  store.close(take crashed)?
   Ok(())
 }

@@ -77,6 +77,7 @@ fn request(position: u64, op: Op) -> store.CallRequest {
 fn store_error(e: store.StoreError) -> String {
   match e {
     Storage(_) => "storage",
+    Refused(_) => "refused",
     Corrupt(name) => f"corrupt {name}",
     Fenced() => "fenced",
     Conflict() => "conflict",

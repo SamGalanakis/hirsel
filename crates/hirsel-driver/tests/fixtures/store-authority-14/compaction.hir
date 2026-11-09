@@ -1,5 +1,5 @@
 // Bounded vectors from DET-1-std-store-crash-{boundaries,compaction}-run:
-// two acknowledged commits leave b=2,c=3; stop 9 interrupts compaction.
+// two acknowledged commits leave b=2,c=3; stop 8 interrupts compaction's manifest.
 fn commit(mut s: store.Store[Dir], writes: List[(Bytes, Option[Bytes])]) -> Result[
   (),
   store.StoreError
@@ -49,6 +49,6 @@ pub fn main(t: Test) -> Result[(), store.StoreError] {
   workload(success, None())?
   recovered(t, success)?
   let failed = test.dir(t, [])
-  test.check(t, workload(failed, Some(9)) == Error(Injected()))
+  test.check(t, workload(failed, Some(8)) == Error(Injected()))
   recovered(t, failed)
 }

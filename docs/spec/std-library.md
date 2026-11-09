@@ -4180,7 +4180,7 @@ entries, and all subsequent lookups retain the existing Dir confinement.
 StoreConfig { durability: Durability, group_limit: u64, faults: StoreFaults, limits: StoreLimits }
 StoreLimits { key_bytes: u64, value_bytes: u64, transaction_bytes: u64, range_rows: u64 }
 StoreFaults = NoFaults | StopAfterWrites(u64)
-StoreError = Storage(FileError) | Corrupt(String) | Fenced | Conflict | Injected | Closed
+StoreError = Storage(FileError) | Refused(FileError) | Corrupt(String) | Fenced | Conflict | Injected | Closed
 TxFailure[E] = Aborted(E) | Canceled(CancelCause) | Storage(StoreError) | Limit(TxLimit) | Unknown(StoreError)
 TxLimit = KeyBytes | ValueBytes | TransactionBytes | RangeRows
 CallRequest { stream: Bytes, epoch: u64, position: u64, digest: Bytes, acknowledged: u64 }
@@ -4317,7 +4317,9 @@ removals and directory creations, from `open` on) returns `Injected()` with no e
 
 **Backend interface.** `store.Backend[S]` contains `read(mut state: S, name: String)`
 returning `Result[Bytes, FileError]`, `put_new(mut state: S, name: String, data: Bytes,
-mode: Durability)` returning `Result[(), FileError]`, `list(mut state: S, prefix: String)`
+mode: Durability)` returning `Result[(), PutError]` (STORE-11: `Taken()`, `Refused(e)` before
+any effect, or `Undecided(e)`; `Ok` only once equal bytes hold the name durably), `list(mut
+state: S, prefix: String)`
 returning `Result[List[String], FileError]`, and `remove` and `mkdir` with the same
 state/name inputs and unit result. Every callback declares `uses {state}`. `list` returns
 full relative names in byte order. The shipped dictionaries use top-level functions and put provider authority in

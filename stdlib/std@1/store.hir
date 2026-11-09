@@ -24,16 +24,29 @@
 // or, under serializable snapshot isolation, a key it read or a key inside a
 // range it read.
 /// The storage seam: immutable whole-object reads, conditional creation,
-/// ordered prefix discovery, deletion and directory setup. A successful durable
-/// create acknowledges the exact bytes; an uncertain create must be read back.
-/// Implementations may issue range GETs and cache immutable data behind `read`.
+/// ordered prefix discovery, deletion and directory setup. `put_new` returns
+/// `Ok` only once an object with exactly these bytes holds the name, durably
+/// under `Durable()`: for an existing object with equal bytes it first redoes
+/// its durability barrier. Its errors say whether the create may have happened
+/// (`PutError`). Implementations may issue range GETs and cache immutable data
+/// behind `read`.
 pub type Backend[S] {
   read: fn(mut state: S, String) -> Result[Bytes, FileError] uses {state},
-  put_new: fn(mut state: S, String, Bytes, Durability) -> Result[(), FileError] uses {state},
+  put_new: fn(mut state: S, String, Bytes, Durability) -> Result[(), PutError] uses {state},
   list: fn(mut state: S, String) -> Result[List[String], FileError] uses {state},
   remove: fn(mut state: S, String) -> Result[(), FileError] uses {state},
   mkdir: fn(mut state: S, String) -> Result[(), FileError] uses {state},
 }
+
+/// How a backend's `put_new` failed. `Taken()`: an object with other bytes
+/// holds the name. `Refused(e)`: the request was refused before it had any
+/// effect, so no object was created. `Undecided(e)`: the object may hold the
+/// name, with or without its durability barrier: a lost response, or a barrier
+/// that failed after the object became visible. The store settles an undecided
+/// create by issuing the same create again, which succeeds only with its
+/// barrier; reading the object back would prove existence, not durability.
+@serializable
+pub type PutError = Taken | Refused(FileError) | Undecided(FileError)
 
 /// The default backend: an explicitly granted local or simulated Dir.
 pub fn local_backend() -> Backend[Dir] uses {} {
@@ -50,11 +63,17 @@ fn local_read(mut d: Dir, name: String) -> Result[Bytes, FileError] uses {d} {
   file.read_bytes(d, path.of(name))
 }
 
+// `file.put_new` reports a failed directory barrier after the link as a fault
+// like any other, so only `AlreadyExists` (other bytes) is decided.
 fn local_put(mut d: Dir, name: String, data: Bytes, mode: Durability) -> Result[
   (),
-  FileError
+  PutError
 ] uses {d} {
-  file.put_new(d, path.of(name), unique data, mode)
+  match file.put_new(d, path.of(name), unique data, mode) {
+    Ok(()) => Ok(()),
+    Error(AlreadyExists()) => Error(Taken()),
+    Error(e) => Error(Undecided(e)),
+  }
 }
 
 fn local_list(mut d: Dir, name: String) -> Result[List[String], FileError] uses {d} {
@@ -104,14 +123,16 @@ pub type StoreLimits {
 /// with no effect, as a crash at that point would; the store then closes.
 pub type StoreFaults = NoFaults | StopAfterWrites(u64)
 
-/// Why a store operation failed. `Storage` is the Dir's own error; `Corrupt`
+/// Why a store operation failed. `Storage` is the Dir's own error, after which
+/// a create's outcome may be undecided; `Refused` is a create the backend
+/// refused before it had any effect; `Corrupt`
 /// names an object that fails its checksum or the layout's rules (in a
 /// `Volatile()` store, a bad log instead ends the recovered log); `Fenced` means another writer claimed the store; `Conflict` means
 /// a commit after the transaction began wrote a key it conflicts on; `Injected` is a
-/// `StopAfterWrites` stop. After `Storage`, `Corrupt`, `Fenced` or `Injected`
-/// the store is closed and every later call returns `Closed`.
+/// `StopAfterWrites` stop. After `Storage`, `Refused`, `Corrupt`, `Fenced` or
+/// `Injected` the store is closed and every later call returns `Closed`.
 @serializable
-pub type StoreError = Storage(FileError) | Corrupt(String) | Fenced | Conflict | Injected | Closed
+pub type StoreError = Storage(FileError) | Refused(FileError) | Corrupt(String) | Fenced | Conflict | Injected | Closed
 
 /// How a transaction ended without its outcome: `Aborted(e)` when the body
 /// returned `Error(e)` and its writes were discarded; `Canceled(cause)` before
@@ -803,7 +824,8 @@ fn settle[S](mut s: Store[S], take t: Txn) -> Result[(), Unreleased] {
 }
 
 // A storage error from a create that may have happened leaves the commit's
-// durability undecided; the store's other errors prove it did not happen.
+// durability undecided; the store's other errors, `Refused` included, prove it
+// did not happen.
 fn unsettled(take e: StoreError) -> Unreleased uses {} {
   match e {
     Storage(f) => Unknown(Storage(f)),
@@ -947,19 +969,17 @@ fn create[S](mut s: Store[S], name: String, take data: Bytes, mode: Durability) 
   mutation(mut s)?
   match s.backend.put_new(mut s.state, name, data, mode) {
     Ok(()) => Ok(()),
-    Error(error) => {
-      // An S3 conditional PUT can commit and lose its response. The exact
-      // immutable object is the proof of success; never resend blindly.
-      match s.backend.read(mut s.state, name) {
-        Ok(stored) => if stored == data {
-          Ok(())
-        } else {
-          Error(stop(mut s, Fenced()))
-        },
-        Error(_) => match error {
-          AlreadyExists() => Error(stop(mut s, Fenced())),
-          _ => Error(stop(mut s, Storage(error))),
-        },
+    Error(Taken()) => Error(stop(mut s, Fenced())),
+    Error(Refused(e)) => Error(stop(mut s, Refused(e))),
+    Error(Undecided(_)) => {
+      // A lost response or a barrier that failed after the object became
+      // visible. The same create again succeeds on equal bytes only once they
+      // are durable, and finds other bytes taken; anything else leaves the
+      // outcome undecided.
+      match s.backend.put_new(mut s.state, name, data, mode) {
+        Ok(()) => Ok(()),
+        Error(Taken()) => Error(stop(mut s, Fenced())),
+        Error(Refused(e)) | Error(Undecided(e)) => Error(stop(mut s, Storage(e))),
       }
     },
   }

@@ -383,9 +383,11 @@ changes what a transaction does.
 At the `durable` level ([RUN-14](runners.md#run-14-recording-levels)) a commit's
 durability point is its log object's create, journaled like any file effect. A crash
 between that create's `Prepared` and `Completed` records leaves it in doubt for recovery,
-which resolves it by reading the object back: the create is whole or nothing and its bytes
-carry the writer's nonce, so an object with equal bytes proves the commit durable and an
-absent one proves it never happened. That is a provider recovery procedure
+which resolves it by issuing the same create again: the create is whole or nothing and its
+bytes carry the writer's nonce, so an object with equal bytes proves the lost create
+happened, and the repeated `put_new` returns only once that object is durable; other bytes
+prove another writer took the name. Equal bytes settle existence, never durability past a
+barrier that failed. That is a provider recovery procedure
 [recording and resuming](determinism.md#recording-and-resuming) allows.
 
 ### STORE-11: Engine and storage seam
@@ -396,8 +398,9 @@ selects `local_backend()` with state `Dir`. The local implementation uses these 
 
 - `file.put_new(d, path, bytes, mode)`: create an immutable object only if no object has
   that path, whole or nothing; an existing object with equal bytes is success, any other is
-  `AlreadyExists`. `Durable()` returns once the object and its directory entry are durable;
-  `Volatile()` returns without a barrier.
+  `AlreadyExists`. `Durable()` returns once the object and its directory entry are durable,
+  for an existing equal object too, whose barrier it redoes; `Volatile()` returns without a
+  barrier. A barrier that fails after the object became visible is an error like any other.
 - reading a whole object, listing a prefix in byte order, and removing an object.
 
 There is no append, no rewrite in place, no rename, no lock and no read at an offset. A
@@ -405,8 +408,9 @@ host chooses the medium by the mount it grants ([RUN-13](runners.md#run-13-provi
 a host directory by default; a simulated directory for tests, whose crash drops every
 unsynced write, tears the last write at a seeded byte and loses unsynced directory entries;
 or an **object-storage backend**, which presents the same operations over explicit
-network grants, mapping `put_new` to a conditional create (`If-None-Match: *`) and a
-lost response to a read-back. The pure Hirsel package `s3@1` supplies the S3 backend; std never depends on it.
+network grants, mapping `put_new` to a conditional create (`If-None-Match: *`) whose
+`412` is success when the existing object holds equal bytes (an acknowledged S3 object is
+durable) and `Taken()` otherwise. The pure Hirsel package `s3@1` supplies the S3 backend; std never depends on it.
 The host `ObjectStorage` trait is reserved for code fetching and is not this seam.
 The run-config `object_stores` declaration below supplies S3 grants.
 The S3 backend probes conditional-create support before opening the store. An
@@ -415,11 +419,19 @@ raw S3 GET and LIST remain usable directly.
 
 `Backend[S]` has callbacks `read`, `put_new`, `list`, `remove` and `mkdir`, each
 taking `mut state: S` and a relative name. `list` returns full relative names sorted
-by bytes. `open_backend` owns state and dictionary. `Store[S]` is affine ordinary
+by bytes. `put_new` returns `Ok` only once an object with exactly its bytes holds the
+name, durably under `Durable()`, redoing the barrier for an existing equal object. Its
+error is a `PutError`: `Taken()` when other bytes hold the name, `Refused(e)` when the
+request was refused before it had any effect, and `Undecided(e)` when the object may hold
+the name with or without its barrier (a lost response, or a barrier that failed after the
+object became visible). The local callback reports every error but `AlreadyExists` as
+`Undecided`, since a failed directory sync after the link is indistinguishable from an
+earlier fault. `open_backend` owns state and dictionary. `Store[S]` is affine ordinary
 opaque state with captured backend authority, rather than a resource destructor:
 only explicit `close`, `durable` and `into_state` flush. The local callback maps
 to Dir operations; the S3 callback maps to HTTP, and the simulated callback injects
-pre-write failures, lost responses, racing conditional creates and virtual latency.
+pre-write failures, lost responses, racing conditional creates, creates whose barrier
+fails after they became visible, and virtual latency.
 They run exactly the same engine.
 
 **Layout.** Under its directory the store keeps `manifest/`, `log/` and `snap/`, each a
@@ -444,9 +456,12 @@ fenced by a later claim: it fails with `Fenced()` and closes, releasing nothing 
 (raising `V`) and queue; a queue is written as one log object when an outcome awaits its
 durability or a group bound in the configuration is reached, never on a timer. `D` is the
 highest commit version whose log object, and every earlier one, has been created
-durably. A `put_new` whose outcome is lost is resolved by reading the object back; if that
-read fails too, durability cannot be decided, the waiting transaction returns `Unknown(..)`
-and the store closes.
+durably. An `Undecided` `put_new` is settled by issuing the same `put_new` once more:
+equal bytes succeed only with their barrier, other bytes are `Fenced()`. Reading the object
+back would prove only that it exists, not that a failed barrier was redone. If the second
+attempt fails too, durability cannot be decided, the waiting transaction returns
+`Unknown(..)` and the store closes. A `Refused` create had no effect: the store closes with
+`Refused(e)` and the waiting transaction returns `Storage(..)`.
 
 **Recovery.** Opening reads the newest manifest whose checksum verifies, loads its
 snapshot, and applies the log objects after it in id order. A `Durable()` object cannot be
@@ -585,7 +600,9 @@ TxFailure[E] = Aborted(E) | Canceled(CancelCause) | Storage(StoreError) | Limit(
 TxError      = NoTable() | TableExists() | Schema(SchemaError) | Migrating() | ReadOnly()
              | InvalidInput() | Limit(TxLimit) | Storage(StoreError)
 SchemaError  = KeyMismatch() | ValueMismatch() | Renamed(stored: String, expected: String)
-StoreError   = Storage(FileError) | Corrupt(String) | Fenced() | Conflict() | Injected() | Closed()
+StoreError   = Storage(FileError) | Refused(FileError) | Corrupt(String) | Fenced() | Conflict()
+             | Injected() | Closed()
+PutError     = Taken() | Refused(FileError) | Undecided(FileError)
 TxLimit      = KeyBytes() | ValueBytes() | TransactionBytes() | RangeRows()
 ```
 

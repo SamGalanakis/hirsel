@@ -1,6 +1,7 @@
 /// A deterministic object medium over a Test Dir. All objects are immutable;
 /// every completed call adds virtual ticks without delaying a thread. The
-/// administrator chooses operation ordinals for failures, lost replies or races.
+/// administrator chooses operation ordinals for failures, lost replies, races
+/// or a create whose durability barrier fails after it became visible.
 pub type Sim {
   dir: Dir,
   operations: u64,
@@ -9,6 +10,7 @@ pub type Sim {
   fail_at: u64,
   lost_reply_at: u64,
   race_at: u64,
+  barrier_fail_at: u64,
 }
 
 pub fn simulated(d: Dir, latency: u64, fail_at: u64, lost_reply_at: u64, race_at: u64) -> Sim {
@@ -19,8 +21,18 @@ pub fn simulated(d: Dir, latency: u64, fail_at: u64, lost_reply_at: u64, race_at
     latency: latency,
     fail_at: fail_at,
     lost_reply_at: lost_reply_at,
-    race_at: race_at
+    race_at: race_at,
+    barrier_fail_at: 0
   )
+}
+
+/// The same medium whose create at operation `at` becomes visible without its
+/// durability barrier and reports the failure, as a host whose directory sync
+/// fails after the link does.
+pub fn with_failed_barrier(take sim: Sim, at: u64) -> Sim {
+  let mut failing = take sim
+  failing.barrier_fail_at = at
+  failing
 }
 
 pub fn simulated_backend() -> store.Backend[Sim] uses {} {
@@ -49,17 +61,35 @@ fn sim_read(mut state: Sim, name: String) -> Result[Bytes, FileError] {
 
 fn sim_put(mut state: Sim, name: String, data: Bytes, mode: Durability) -> Result[
   (),
-  FileError
+  store.PutError
 ] {
-  advance(mut state)?
-  if state.operations == state.race_at {
-    file.put_new(state.dir, path.of(name), b"competing writer", Durable())?
+  // An injected failure happens before the request has any effect.
+  if let Error(e) = advance(mut state) {
+    return Error(Refused(e))
   }
-  file.put_new(state.dir, path.of(name), unique data, mode)?
+  if state.operations == state.race_at {
+    put_object(state.dir, name, b"competing writer", Durable())?
+  }
+  if state.operations == state.barrier_fail_at {
+    put_object(state.dir, name, data, Volatile())?
+    return Error(Undecided(FileFault(3)))
+  }
+  put_object(state.dir, name, data, mode)?
   if state.operations == state.lost_reply_at {
-    return Error(FileFault(2))
+    return Error(Undecided(FileFault(2)))
   }
   Ok(())
+}
+
+fn put_object(d: Dir, name: String, data: Bytes, mode: Durability) -> Result[
+  (),
+  store.PutError
+] uses {d} {
+  match file.put_new(d, path.of(name), unique data, mode) {
+    Ok(()) => Ok(()),
+    Error(AlreadyExists()) => Error(Taken()),
+    Error(e) => Error(Undecided(e)),
+  }
 }
 
 fn sim_list(mut state: Sim, name: String) -> Result[List[String], FileError] {

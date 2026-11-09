@@ -346,7 +346,7 @@ fn task_capture_requests_preserve_existing_adapter_identity_and_owned_finish() {
     )
     .unwrap();
     let mut malformed = serde_json::to_value(&recipe).unwrap();
-    malformed["target"]["parameter"] = 1.into();
+    malformed["target"]["input"] = serde_json::json!({ "Parameter": 1 });
     assert!(
         serde_json::from_value::<TaskCaptureRecipe>(malformed)
             .unwrap()

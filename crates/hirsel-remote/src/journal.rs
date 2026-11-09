@@ -21,9 +21,22 @@
 //! **Poisoning.** An append that fails, with an error or after writing part of its record,
 //! poisons the journal: every later append fails, so nothing follows a torn record and a
 //! host never acts on a record it failed to write.
+//!
+//! **Generations and compaction.** The file header's generation counts the journal's
+//! compactions. Generation 0 is the file as created; its frames are records. Every later
+//! generation starts with a checkpoint record (frame 0) holding its base, the records all
+//! earlier generations held (so a record's journal-wide sequence is the base plus its
+//! frame's), and the count of records that follow it as the checkpoint: the records that
+//! recover the host's state when it compacted. Appends follow them. A journal is due for
+//! compaction once this generation holds twice its checkpoint, and at least
+//! [`COMPACT_AFTER`] records. Compaction writes the next generation whole to
+//! `calls.journal.next`, syncs it, renames it over `calls.journal` and syncs the directory
+//! before anything is appended to it, so a crash leaves one whole generation: the old one,
+//! or the new one. Opening removes a leftover `calls.journal.next`, which was never
+//! published. A failed compaction poisons the journal as a failed append does.
 use hirsel_run_schema::CallOutcome;
 use hirsel_run_schema::frame::{self, FileError, Format, Opening};
-use std::fs::{File, OpenOptions};
+use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -75,6 +88,12 @@ pub trait Journal: Send {
     /// Every record a previous incarnation of this journal kept, in order. The host takes
     /// them once, when it starts.
     fn recover(&mut self) -> io::Result<Vec<Entry>>;
+    /// Whether the current generation has grown enough to compact.
+    fn due(&self) -> bool;
+    /// Publish the next generation, whose checkpoint is `live`: records whose recovery
+    /// gives the host's present state. When this returns Ok, only the new generation
+    /// survives a crash; an error poisons the journal.
+    fn compact(&mut self, live: &[Entry]) -> io::Result<()>;
 }
 
 /// `journal.none@1`.
@@ -99,23 +118,42 @@ impl Journal for NoJournal {
     fn recover(&mut self) -> io::Result<Vec<Entry>> {
         Ok(vec![])
     }
+    fn due(&self) -> bool {
+        false
+    }
+    fn compact(&mut self, _: &[Entry]) -> io::Result<()> {
+        Ok(())
+    }
 }
 
-/// The file format: its identity is the incarnation; its generation is 0.
+/// The file format: its identity is the incarnation; its generation counts compactions.
 pub const FORMAT: Format = Format {
-    magic: b"HRJRNL03",
+    magic: b"HRJRNL04",
     identity: 16,
 };
-/// Record kinds are the entry tags.
+/// The kind of a generation's checkpoint record; every other kind is an entry's tag.
+const CHECKPOINT: u8 = 4;
+/// Record kinds: the entry tags and the checkpoint.
 pub fn known(kind: u8) -> bool {
-    kind <= 3
+    kind <= CHECKPOINT
 }
+/// The fewest records a generation holds before it is due for compaction.
+pub const COMPACT_AFTER: u64 = 4096;
+const FILE: &str = "calls.journal";
+const NEXT: &str = "calls.journal.next";
 
-/// The records a durable journal recovered, its next sequence number, and whether an
+/// A durable journal's current generation: the records it recovered, and whether an
 /// append has failed.
 struct Log {
     recovered: Vec<Entry>,
+    generation: u64,
+    /// The records earlier generations held.
+    base: u64,
+    /// This generation's frames, its checkpoint's included: the next frame's sequence.
     next: u64,
+    /// This generation's checkpoint frames (0 for generation 0).
+    checkpoint: u64,
+    compact_after: u64,
     poisoned: bool,
 }
 impl Log {
@@ -123,16 +161,14 @@ impl Log {
     /// valid prefix when an incomplete tail follows it; `None` when the file was never
     /// created durably (empty, or a short file header) and is to be created again.
     #[allow(clippy::type_complexity)]
-    fn recover(bytes: &[u8]) -> io::Result<Option<([u8; 16], Self, Option<usize>)>> {
+    fn recover(
+        bytes: &[u8],
+        compact_after: u64,
+    ) -> io::Result<Option<([u8; 16], Self, Option<usize>)>> {
         let corrupt = |detail: String| io::Error::new(io::ErrorKind::InvalidData, detail);
         let header = match FORMAT.open(bytes) {
             Ok(Opening::Short) => return Ok(None),
-            Ok(Opening::Header(header)) if header.generation == 0 => header,
-            Ok(Opening::Header(_)) => {
-                return Err(corrupt(
-                    "the call journal has an unsupported generation".into(),
-                ));
-            }
+            Ok(Opening::Header(header)) => header,
             Err(FileError::Foreign) => {
                 return Err(corrupt("not a hirsel call journal of this format".into()));
             }
@@ -142,8 +178,34 @@ impl Log {
         };
         let frames = frame::recover(bytes, header.len, known)
             .map_err(|e| corrupt(format!("the call journal is {e}")))?;
-        let recovered = frames
-            .frames
+        // A later generation was synced whole before it was published: its checkpoint is
+        // complete, and is the only one.
+        let (base, checkpoint) = match frames.frames.first() {
+            _ if header.generation == 0 => (0, 0),
+            Some(f) if f.kind == CHECKPOINT => {
+                let mut c = Cursor(f.body);
+                let (Some(base), Some(records), true) = (c.u64(), c.u64(), c.0.is_empty()) else {
+                    return Err(corrupt(format!(
+                        "the call journal is corrupt at byte {}: undecodable checkpoint",
+                        f.range.start
+                    )));
+                };
+                (base, records.saturating_add(1))
+            }
+            _ => {
+                return Err(corrupt(format!(
+                    "the call journal is corrupt: generation {} has no checkpoint",
+                    header.generation
+                )));
+            }
+        };
+        if (frames.frames.len() as u64) < checkpoint {
+            return Err(corrupt(
+                "the call journal is corrupt: its checkpoint is incomplete".into(),
+            ));
+        }
+        let skip = usize::from(checkpoint > 0);
+        let recovered = frames.frames[skip..]
             .iter()
             .map(|f| {
                 decode(f.kind, f.body).ok_or_else(|| {
@@ -155,18 +217,69 @@ impl Log {
             })
             .collect::<io::Result<Vec<_>>>()?;
         let log = Self {
-            next: recovered.len() as u64,
+            next: frames.frames.len() as u64,
             recovered,
+            generation: header.generation,
+            base,
+            checkpoint,
+            compact_after,
             poisoned: false,
         };
         let torn = (frames.valid < bytes.len()).then_some(frames.valid);
         Ok(Some((header.identity.try_into().unwrap(), log, torn)))
     }
-    fn new() -> Self {
+    fn new(compact_after: u64) -> Self {
         Self {
             recovered: vec![],
+            generation: 0,
+            base: 0,
             next: 0,
+            checkpoint: 0,
+            compact_after,
             poisoned: false,
+        }
+    }
+    fn due(&self) -> bool {
+        !self.poisoned && self.next >= self.compact_after.max(2 * self.checkpoint)
+    }
+    /// Publish the next generation, checkpointing `live`, through `publish`, which returns
+    /// once it is the journal's only generation; any failure poisons the log.
+    fn compact<T>(
+        &mut self,
+        incarnation: &[u8; 16],
+        live: &[Entry],
+        publish: impl FnOnce(&[u8]) -> io::Result<T>,
+    ) -> io::Result<T> {
+        if self.poisoned {
+            return Err(io::Error::other(
+                "the call journal is poisoned by an earlier failed append",
+            ));
+        }
+        let base = self.base + self.next;
+        let mut file = FORMAT.header(incarnation, self.generation + 1);
+        let mut body = base.to_le_bytes().to_vec();
+        body.extend_from_slice(&(live.len() as u64).to_le_bytes());
+        let framed = frame::append(&mut file, 0, CHECKPOINT, &body).and_then(|()| {
+            live.iter().zip(1..).try_for_each(|(entry, seq)| {
+                let (kind, body) = encode(entry);
+                frame::append(&mut file, seq, kind, &body)
+            })
+        });
+        let published = framed
+            .map_err(io::Error::other)
+            .and_then(|()| publish(&file));
+        match published {
+            Ok(published) => {
+                self.generation += 1;
+                self.base = base;
+                self.checkpoint = live.len() as u64 + 1;
+                self.next = self.checkpoint;
+                Ok(published)
+            }
+            Err(error) => {
+                self.poisoned = true;
+                Err(error)
+            }
         }
     }
     /// Write the next record through `write`; any failure poisons the log.
@@ -198,6 +311,7 @@ impl Log {
 
 /// `journal.dir@1`: `<path>/calls.journal`, created with a random incarnation in its header.
 pub struct DirJournal {
+    dir: std::path::PathBuf,
     file: File,
     incarnation: [u8; 16],
     log: Log,
@@ -207,7 +321,12 @@ impl DirJournal {
     /// created, and recover it: a torn tail is cut, and earlier damage is `Corrupt`
     /// (`InvalidData`), leaving the file untouched.
     pub fn open(dir: &Path, fresh: [u8; 16]) -> io::Result<Self> {
-        let path = dir.join("calls.journal");
+        // An unpublished next generation: the published one is whole.
+        match fs::remove_file(dir.join(NEXT)) {
+            Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error),
+            _ => (),
+        }
+        let path = dir.join(FILE);
         let mut file = OpenOptions::new()
             .read(true)
             .append(true)
@@ -215,13 +334,13 @@ impl DirJournal {
             .open(&path)?;
         let mut bytes = vec![];
         file.read_to_end(&mut bytes)?;
-        let (incarnation, log) = match Log::recover(&bytes)? {
+        let (incarnation, log) = match Log::recover(&bytes, COMPACT_AFTER)? {
             None => {
                 file.set_len(0)?;
                 file.write_all(&FORMAT.header(&fresh, 0))?;
                 file.sync_all()?;
                 File::open(dir)?.sync_all()?;
-                (fresh, Log::new())
+                (fresh, Log::new(COMPACT_AFTER))
             }
             Some((incarnation, log, torn)) => {
                 if let Some(valid) = torn {
@@ -233,6 +352,7 @@ impl DirJournal {
             }
         };
         Ok(Self {
+            dir: dir.to_path_buf(),
             file,
             incarnation,
             log,
@@ -256,6 +376,27 @@ impl Journal for DirJournal {
     fn recover(&mut self) -> io::Result<Vec<Entry>> {
         Ok(std::mem::take(&mut self.log.recovered))
     }
+    fn due(&self) -> bool {
+        self.log.due()
+    }
+    fn compact(&mut self, live: &[Entry]) -> io::Result<()> {
+        let dir = &self.dir;
+        self.file = self.log.compact(&self.incarnation, live, |bytes| {
+            let next = dir.join(NEXT);
+            let mut file = OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .open(&next)?;
+            file.write_all(bytes)?;
+            file.sync_all()?;
+            fs::rename(&next, dir.join(FILE))?;
+            File::open(dir)?.sync_all()?;
+            // Appends follow the checkpoint, at the end of the written file.
+            Ok(file)
+        })?;
+        Ok(())
+    }
 }
 
 /// `journal.sim@1`: the journal's bytes in memory, shared with the test that owns
@@ -266,14 +407,17 @@ pub struct SimJournal {
     log: Log,
 }
 /// The simulated medium: the journal file's bytes, all synced, and the test's scripted
-/// append failures.
+/// append and compaction failures. A next generation that was never published is
+/// dropped, as opening `journal.dir@1` removes it.
 #[derive(Clone, Default)]
 pub struct SimDisk(Arc<Mutex<SimMedium>>);
 #[derive(Default)]
 struct SimMedium {
     bytes: Vec<u8>,
-    /// Appends attempted on this medium, by every journal over it.
+    /// Appends and compactions attempted on this medium, by every journal over it.
     appends: u64,
+    /// The fewest records before compaction; [`COMPACT_AFTER`] when unset.
+    compact_after: Option<u64>,
     /// Append attempt -> how many of its record's bytes reach the medium before it fails.
     faults: std::collections::BTreeMap<u64, usize>,
 }
@@ -282,10 +426,11 @@ impl SimDisk {
     /// opener fixes its incarnation.
     pub fn journal(&self, fresh: [u8; 16]) -> io::Result<SimJournal> {
         let mut medium = self.0.lock().unwrap();
-        let (incarnation, log) = match Log::recover(&medium.bytes)? {
+        let compact_after = medium.compact_after.unwrap_or(COMPACT_AFTER);
+        let (incarnation, log) = match Log::recover(&medium.bytes, compact_after)? {
             None => {
                 medium.bytes = FORMAT.header(&fresh, 0);
-                (fresh, Log::new())
+                (fresh, Log::new(compact_after))
             }
             Some((incarnation, log, torn)) => {
                 if let Some(valid) = torn {
@@ -300,11 +445,18 @@ impl SimDisk {
             log,
         })
     }
-    /// Make append attempt `attempt` (counted from 0 over this medium's life) fail after
-    /// writing the first `written` bytes of its record: 0 writes nothing, and a count past
-    /// the record's length writes all of it and still fails, as a failed sync does.
+    /// Make append or compaction attempt `attempt` (counted from 0 over this medium's life)
+    /// fail after writing the first `written` bytes of its record or next generation: 0
+    /// writes nothing, and a count past the length writes all of it and still fails, as a
+    /// failed sync does. A compaction that writes all of its generation fails before it
+    /// publishes it, and one given a count past its length publishes it and then fails, as
+    /// a failed directory sync does.
     pub fn fail_append(&self, attempt: u64, written: usize) {
         self.0.lock().unwrap().faults.insert(attempt, written);
+    }
+    /// Journals opened from now on compact once a generation holds `records` records.
+    pub fn compact_after(&self, records: u64) {
+        self.0.lock().unwrap().compact_after = Some(records);
     }
     /// Append attempts made on this medium so far.
     pub fn appends(&self) -> u64 {
@@ -344,6 +496,30 @@ impl Journal for SimJournal {
     }
     fn recover(&mut self) -> io::Result<Vec<Entry>> {
         Ok(std::mem::take(&mut self.log.recovered))
+    }
+    fn due(&self) -> bool {
+        self.log.due()
+    }
+    fn compact(&mut self, live: &[Entry]) -> io::Result<()> {
+        let disk = &self.disk;
+        self.log.compact(&self.incarnation, live, |file| {
+            let mut medium = disk.0.lock().unwrap();
+            let attempt = medium.appends;
+            medium.appends += 1;
+            match medium.faults.remove(&attempt) {
+                None => {
+                    medium.bytes = file.to_vec();
+                    Ok(())
+                }
+                Some(written) if written <= file.len() => {
+                    Err(io::Error::other("simulated compaction failure"))
+                }
+                Some(_) => {
+                    medium.bytes = file.to_vec();
+                    Err(io::Error::other("simulated directory sync failure"))
+                }
+            }
+        })
     }
 }
 

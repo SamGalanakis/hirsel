@@ -140,6 +140,11 @@ impl World {
         let disk = durable.then(SimDisk::default);
         let host = match &disk {
             Some(disk) => {
+                // Most seeds compact the journal every few records, so crashes and
+                // failures land on every step of a compaction too.
+                if !seed.is_multiple_of(4) {
+                    disk.compact_after(2 + seed % 9);
+                }
                 // Script the failing appends: none, part or all of the record is written.
                 for attempt in 0..1_000 {
                     if faults.append > 0 && rng.chance(faults.append) {
@@ -481,13 +486,17 @@ impl World {
             return;
         };
         let mut decided = BTreeMap::new();
+        let mut acknowledged = 0;
         for entry in disk.journal([0; 16]).unwrap().recover().unwrap() {
-            if let Entry::Decided {
-                position, key, end, ..
-            } = entry
-            {
-                let earlier = decided.insert(position, (key, end));
-                assert!(earlier.is_none(), "position {position} decided twice");
+            match entry {
+                Entry::Decided {
+                    position, key, end, ..
+                } => {
+                    let earlier = decided.insert(position, (key, end));
+                    assert!(earlier.is_none(), "position {position} decided twice");
+                }
+                Entry::Acknowledged { position, .. } => acknowledged = position,
+                _ => (),
             }
         }
         let mut host = restart(disk, [0; 16], Limits::default());
@@ -499,11 +508,18 @@ impl World {
         };
         host.frame(1, open, &mut TestPlace, &TestDigests);
         for (position, (key, end)) in &self.received {
-            assert_eq!(
-                decided.get(position),
-                Some(&(*key, end.clone())),
-                "position {position}: the caller received {end:?}"
-            );
+            // A compaction keeps no decision the caller acknowledged.
+            match decided.get(position) {
+                None => assert!(
+                    *position <= acknowledged,
+                    "position {position}: the caller received {end:?}, and it is lost"
+                ),
+                recovered => assert_eq!(
+                    recovered,
+                    Some(&(*key, end.clone())),
+                    "position {position}: the caller received {end:?}"
+                ),
+            }
             let status = Frame::Status(hirsel_remote::frame::CallRef {
                 epoch: u64::MAX,
                 position: *position,
@@ -790,18 +806,15 @@ fn a_fenced_session_is_discarded() {
     );
 }
 
-/// An append that writes part of its record stops the host, so no later record follows the
-/// torn one; the restarted host cuts it, and the next record it appends survives recovery.
-#[test]
-fn a_partial_append_stops_the_host_and_the_next_record_survives_restart() {
-    let disk = SimDisk::default();
-    let mut host = restart(&disk, [1; 16], Limits::default());
-    let open = |epoch| Frame::Open {
+fn open(epoch: u64) -> Frame {
+    Frame::Open {
         stream: [3; 32],
         instance: INSTANCE,
         epoch,
-    };
-    let call = |epoch: u64, position: u64| Call {
+    }
+}
+fn call(epoch: u64, position: u64) -> Call {
+    Call {
         epoch,
         position,
         ordinal: position,
@@ -814,26 +827,35 @@ fn a_partial_append_stops_the_host_and_the_next_record_survives_restart() {
         definitions: None,
         argument: vec![position as u8],
         acknowledged: 0,
+    }
+}
+fn status(epoch: u64, position: u64) -> Frame {
+    Frame::Status(hirsel_remote::frame::CallRef {
+        epoch,
+        position,
+        key: call_key(&INSTANCE, position),
+    })
+}
+/// Send `c`, which starts its callee, and end the callee with `Ok([end])`.
+fn run_to_end(host: &mut Host, session: u64, c: Call, end: u8) -> Vec<Action> {
+    let actions = host.frame(
+        session,
+        Frame::Call(Box::new(c)),
+        &mut TestPlace,
+        &TestDigests,
+    );
+    let [Action::Start(start)] = &actions[..] else {
+        panic!("{actions:?}")
     };
-    let status = |epoch, position| {
-        Frame::Status(hirsel_remote::frame::CallRef {
-            epoch,
-            position,
-            key: call_key(&INSTANCE, position),
-        })
-    };
-    let run_to_end = |host: &mut Host, session, c: Call, end: u8| {
-        let actions = host.frame(
-            session,
-            Frame::Call(Box::new(c)),
-            &mut TestPlace,
-            &TestDigests,
-        );
-        let [Action::Start(start)] = &actions[..] else {
-            panic!("{actions:?}")
-        };
-        host.ended(start.run, CallOutcome::Ok(vec![end]), None)
-    };
+    host.ended(start.run, CallOutcome::Ok(vec![end]), None)
+}
+
+/// An append that writes part of its record stops the host, so no later record follows the
+/// torn one; the restarted host cuts it, and the next record it appends survives recovery.
+#[test]
+fn a_partial_append_stops_the_host_and_the_next_record_survives_restart() {
+    let disk = SimDisk::default();
+    let mut host = restart(&disk, [1; 16], Limits::default());
     host.connected(1, Some(caller()));
     host.frame(1, open(1), &mut TestPlace, &TestDigests);
     let ended = run_to_end(&mut host, 1, call(1, 1), 41);
@@ -883,6 +905,46 @@ fn a_partial_append_stops_the_host_and_the_next_record_survives_restart() {
             "position {position}: {answer:?}"
         );
     }
+}
+
+/// A checkpoint drops the outcomes the caller acknowledged and keeps their positions: a
+/// host recovered from it answers `Opened` with the same applied position, and runs the
+/// next position rather than refusing it as a gap.
+#[test]
+fn a_compacted_journal_keeps_the_applied_position_of_acknowledged_outcomes() {
+    let disk = SimDisk::default();
+    disk.compact_after(2);
+    let mut host = restart(&disk, [1; 16], Limits::default());
+    // Run and acknowledge one call per session until a checkpoint holds the stream's
+    // acknowledgement and none of its decisions.
+    let mut position = 0;
+    loop {
+        position += 1;
+        assert!(
+            position < 20,
+            "no checkpoint dropped the acknowledged decisions"
+        );
+        host.connected(position, Some(caller()));
+        host.frame(position, open(position), &mut TestPlace, &TestDigests);
+        run_to_end(&mut host, position, call(position, position), 40);
+        let close = Frame::Close {
+            epoch: position,
+            acknowledged: position,
+        };
+        host.frame(position, close, &mut TestPlace, &TestDigests);
+        let records = disk.journal([0; 16]).unwrap().recover().unwrap();
+        if !records.iter().any(|e| matches!(e, Entry::Decided { .. })) {
+            break;
+        }
+    }
+    let mut host = restart(&disk, [2; 16], Limits::default());
+    host.connected(99, Some(caller()));
+    let opened = host.frame(99, open(99), &mut TestPlace, &TestDigests);
+    assert!(
+        matches!(&opened[..], [Action::Send(99, Frame::Opened { applied, .. })] if *applied == position),
+        "{opened:?}"
+    );
+    run_to_end(&mut host, 99, call(99, position + 1), 41);
 }
 
 /// A caller that sends whatever it likes: positions far past the next one, repeated and

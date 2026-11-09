@@ -47,6 +47,11 @@
 //! fails the journal is poisoned and the host stops: it acts on nothing that record would
 //! have made durable, cancels its running callees, closes every session, refuses every
 //! later frame, and reports [`Host::failure`] so its process exits and recovers.
+//!
+//! **Compaction.** After each frame, callee end and disconnect, once every record so far is
+//! reflected in its state, the host compacts a journal that is due: the checkpoint holds
+//! each stream, its acknowledged position, and every position above it, decided or
+//! admitted, so recovering the checkpoint gives what recovering the whole journal would.
 use crate::frame::{Call, CallRef, Frame, Outcome};
 use crate::journal::{Entry, Journal, StreamKey};
 use hirsel_run_schema::{CallOutcome, IoGrants, call_key};
@@ -258,8 +263,10 @@ impl Host {
                     stream: key,
                     position,
                 } => {
+                    // A checkpoint keeps no decision the caller acknowledged.
                     let s = stream_of(&mut streams, &key);
                     s.acknowledged = s.acknowledged.max(position);
+                    s.applied = s.applied.max(position);
                     s.decided.retain(|p, _| *p > position);
                 }
             }
@@ -351,6 +358,12 @@ impl Host {
         let Err(error) = self.journal.append(entry) else {
             return true;
         };
+        self.stop(error, actions);
+        false
+    }
+
+    /// Stop on a failed journal: cancel every running callee and close every session.
+    fn stop(&mut self, error: std::io::Error, actions: &mut Vec<Action>) {
         self.failure = Some(error.to_string());
         self.queued.clear();
         for (run, r) in &self.runs {
@@ -365,7 +378,55 @@ impl Host {
         for session in std::mem::take(&mut self.sessions).into_keys() {
             actions.push(Action::Close(session));
         }
-        false
+    }
+
+    /// Compact a journal that is due, once every record appended so far is reflected in
+    /// this host's state. A failed compaction stops the host.
+    fn checkpoint(&mut self, actions: &mut Vec<Action>) {
+        if self.failure.is_some() || !self.journal.due() {
+            return;
+        }
+        let live = self.live();
+        if let Err(error) = self.journal.compact(&live) {
+            self.stop(error, actions);
+        }
+    }
+
+    /// The records whose recovery gives this host's state: each stream, its acknowledged
+    /// position, and each position above it decided, or admitted and not yet decided.
+    fn live(&self) -> Vec<Entry> {
+        let mut live = vec![];
+        for (key, stream) in &self.streams {
+            live.push(Entry::Stream {
+                stream: key.clone(),
+                instance: stream.instance,
+            });
+            if stream.acknowledged > 0 {
+                live.push(Entry::Acknowledged {
+                    stream: key.clone(),
+                    position: stream.acknowledged,
+                });
+            }
+            for (&position, decided) in &stream.decided {
+                live.push(match &decided.state {
+                    State::Done { end, callee, .. } => Entry::Decided {
+                        stream: key.clone(),
+                        position,
+                        key: decided.key,
+                        digest: decided.digest,
+                        end: end.clone(),
+                        callee: *callee,
+                    },
+                    State::Queued(_) | State::Running { .. } => Entry::Admitted {
+                        stream: key.clone(),
+                        position,
+                        key: decided.key,
+                        digest: decided.digest,
+                    },
+                });
+            }
+        }
+        live
     }
 
     /// A connection authenticated as `caller`, or as no admitted caller (None).
@@ -383,6 +444,12 @@ impl Host {
     /// caller's queued calls are decided `Canceled(Parent())` and its running callees
     /// cancelled.
     pub fn disconnected(&mut self, session: SessionId) -> Vec<Action> {
+        let mut actions = self.disconnect(session);
+        self.checkpoint(&mut actions);
+        actions
+    }
+
+    fn disconnect(&mut self, session: SessionId) -> Vec<Action> {
         let mut actions = vec![];
         if self.failure.is_some() {
             return actions;
@@ -452,6 +519,18 @@ impl Host {
 
     /// One frame from a session.
     pub fn frame(
+        &mut self,
+        session: SessionId,
+        frame: Frame,
+        place: &mut dyn Place,
+        digests: &dyn Digests,
+    ) -> Vec<Action> {
+        let mut actions = self.receive(session, frame, place, digests);
+        self.checkpoint(&mut actions);
+        actions
+    }
+
+    fn receive(
         &mut self,
         session: SessionId,
         frame: Frame,
@@ -969,6 +1048,7 @@ impl Host {
         self.running -= 1;
         self.decide_end(&stream, position, end, callee, &mut actions);
         self.dispatch(&mut actions);
+        self.checkpoint(&mut actions);
         actions
     }
 

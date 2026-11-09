@@ -732,8 +732,23 @@ select. `journal` is the stream seam: `journal.none@1` (the default; a restarted
 a new incarnation and does not reconcile) or `journal.dir@1`, an append-only file of
 sequenced, checksummed records that keeps every stream, admission, decision and
 acknowledgement durably before it is acted on, so a restarted host reconciles, and a call
-it admitted but never decided is `InDoubt(Abandoned())`. Its file header's magic is `HRJRNL03`, its identity the host's 16-byte
-incarnation and its generation 0; a record's kind is its entry's tag. **Frames and recovery.** A framed file starts with a file header: the format's magic
+it admitted but never decided is `InDoubt(Abandoned())`. Its file header's magic is `HRJRNL04`, its identity the host's 16-byte
+incarnation and its generation the number of times the journal was compacted; a record's
+kind is its entry's tag, or 4 for a checkpoint. **Compaction.** Generation 0 is the file as
+created. Every later generation's frame 0 is a checkpoint record: its base, the records
+all earlier generations held (a record's journal-wide sequence is the base plus its frame's
+sequence), and the count of the records that follow it as the checkpoint. Recovering
+those records gives the host's state when it compacted: each stream, its acknowledged
+position, each decision above that position and each admission not yet decided. Records
+appended later follow them. A later generation without a checkpoint record, with fewer
+records than its checkpoint counts, or with a second checkpoint is `Corrupt`, since it was
+synced whole before it was published. Once every record so far is reflected in its state,
+the host compacts when the current generation holds twice its checkpoint and at least 4096
+records: it writes the next generation whole to `calls.journal.next`, syncs it, renames it
+over `calls.journal` and syncs the directory, and appends to it only after that. A crash
+therefore leaves one whole generation, the old or the new, and opening the journal
+removes a leftover `calls.journal.next`. A failed compaction stops the host as a failed
+append does. **Frames and recovery.** A framed file starts with a file header: the format's magic
 (which names its version), the file's identity, a 64-bit little-endian generation, and a
 SHA-256 of those three. Frames follow, each a fixed 77-byte header and a body. The header
 holds a SHA-256 of the rest of the header, a SHA-256 of the body, a 64-bit little-endian

@@ -195,6 +195,20 @@ fn capture_memory(ctx: *mut TaskCtx) {
     capture_frees(ctx, task, driver);
 }
 
+/// Capture this segment's memory and close its tuning segment, under the one
+/// dispatch-state derivation of a switch-out or head boundary.
+fn segment_out(ctx: *mut TaskCtx) -> (TaskId, &'static mut Driver) {
+    let (task, driver) = dispatch_state(ctx);
+    retire_allocation_lease(driver, task);
+    capture_frees(ctx, task, driver);
+    let nonhead = driver
+        .frontier
+        .as_ref()
+        .is_some_and(|f| f.head() != Some(task));
+    driver.tuning.end(task, nonhead);
+    (task, driver)
+}
+
 fn capture_frees(ctx: *mut TaskCtx, task: TaskId, driver: &mut Driver) {
     let freed = unsafe { (*ctx).ordered_freed.replace(0) };
     if freed == 0 {
@@ -221,23 +235,11 @@ pub(crate) fn task_out(ctx: *mut TaskCtx) {
     if super::ahead::private(ctx) {
         return;
     }
-    capture_memory(ctx);
-    let (task, driver) = dispatch_state(ctx);
-    let nonhead = driver
-        .frontier
-        .as_ref()
-        .is_some_and(|f| f.head() != Some(task));
-    driver.tuning.end(task, nonhead);
+    segment_out(ctx);
 }
 
 fn stretch(ctx: *mut TaskCtx) -> Stretch {
-    capture_memory(ctx);
-    let (task, driver) = dispatch_state(ctx);
-    let nonhead = driver
-        .frontier
-        .as_ref()
-        .is_some_and(|f| f.head() != Some(task));
-    driver.tuning.end(task, nonhead);
+    let (task, driver) = segment_out(ctx);
     #[allow(unused_mut)]
     let mut before = driver
         .stretches
@@ -530,6 +532,10 @@ pub(super) fn poll(ctx: *mut TaskCtx) -> Stopped<()> {
 
 pub(super) fn notify(ctx: *mut TaskCtx) {
     let selected = with_driver(ctx, |d| d.select());
+    schedule(ctx, selected);
+}
+
+fn schedule(ctx: *mut TaskCtx, selected: crate::tasks::picks::Picks<TaskId>) {
     if selected.is_empty() {
         return;
     }
@@ -545,42 +551,73 @@ pub(super) fn notify(ctx: *mut TaskCtx) {
     }
 }
 
+/// Drive the owned frontier to its next wait, then notify what it selects.
+/// A table-only step (no log to absorb) reads its status, clears the save
+/// wait and selects under one role borrow; only an absorbable log crosses the
+/// commit bridge, and only a retirement poll releases the role.
 fn advance(ctx: *mut TaskCtx) -> Stopped<()> {
-    let deferred = with_driver(ctx, |driver| {
-        driver.head_job.is_some() || driver.host_poll || driver.poll_deferred()
-    });
-    if deferred {
-        return Ok(());
+    enum Step {
+        Deferred,
+        Absorb,
+        Poll,
+        Stopped,
+        Selected(crate::tasks::picks::Picks<TaskId>),
     }
+    let mut first = true;
     loop {
-        // Empty logs have no backend work or callback. Keep the frontier in
-        // place rather than moving its tables through an empty commit bridge.
-        // Polls and selection below still run at their canonical positions.
-        let status = with_driver(ctx, |d| d.frontier.as_ref().unwrap().absorb_status());
-        let progress = match status {
-            Some(progress) => progress,
-            None => {
-                with_frontier(ctx, |f, backend| f.absorb(backend)).map_err(Stop::BudgetExceeded)?
+        let step = with_driver(ctx, |d| {
+            if std::mem::take(&mut first)
+                && (d.head_job.is_some() || d.host_poll || d.poll_deferred())
+            {
+                return Step::Deferred;
             }
-        };
-        // A successful retry has discharged the save wait. The owned log,
-        // rather than a notification alone, remains the readiness authority.
-        with_driver(ctx, |d| {
-            d.awaiting_save = matches!(progress, Progress::NeedSave(_))
+            match d.frontier.as_ref().unwrap().absorb_status() {
+                None => Step::Absorb,
+                Some(progress) => {
+                    d.awaiting_save = false;
+                    match progress {
+                        Progress::Poll => Step::Poll,
+                        Progress::Stopped => Step::Stopped,
+                        _ => Step::Selected(d.select()),
+                    }
+                }
+            }
         });
-        match progress {
-            Progress::Poll => poll(ctx)?,
-            Progress::Absorbed(_) | Progress::Called(_) | Progress::Retired => {}
-            Progress::NeedSave(_) => {
-                with_driver(ctx, |d| d.awaiting_save = true);
-                break;
+        match step {
+            Step::Deferred => return Ok(()),
+            Step::Poll => poll(ctx)?,
+            Step::Stopped => return Err(Stop::Failed),
+            Step::Selected(selected) => {
+                schedule(ctx, selected);
+                return Ok(());
             }
-            Progress::NeedSegment(_) | Progress::Idle => break,
-            Progress::Stopped => return Err(Stop::Failed),
+            Step::Absorb => {
+                let progress = with_frontier(ctx, |f, backend| f.absorb(backend))
+                    .map_err(Stop::BudgetExceeded)?;
+                // A successful retry has discharged the save wait. The owned
+                // log, rather than a notification alone, remains the
+                // readiness authority.
+                let waits = with_driver(ctx, |d| {
+                    d.awaiting_save = matches!(progress, Progress::NeedSave(_));
+                    match progress {
+                        Progress::NeedSave(_) | Progress::NeedSegment(_) | Progress::Idle => {
+                            Some(d.select())
+                        }
+                        _ => None,
+                    }
+                });
+                match (progress, waits) {
+                    (_, Some(selected)) => {
+                        schedule(ctx, selected);
+                        return Ok(());
+                    }
+                    (Progress::Poll, None) => poll(ctx)?,
+                    (Progress::Stopped, None) => return Err(Stop::Failed),
+                    _ => {}
+                }
+            }
         }
     }
-    notify(ctx);
-    Ok(())
 }
 
 fn accepted(ctx: *mut TaskCtx, task: TaskId, waiting: bool) {

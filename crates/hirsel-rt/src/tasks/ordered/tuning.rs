@@ -43,8 +43,10 @@ impl Tuning {
         }
     }
 
+    /// A strict window's sample is discarded when it closes, so only a
+    /// probing window samples the clock.
     pub(super) fn start(&mut self, task: TaskId) {
-        if self.enabled {
+        if self.enabled && self.probing {
             self.running
                 .entry(task)
                 .or_default()
@@ -73,7 +75,7 @@ impl Tuning {
     }
 
     pub(super) fn clock(&self) -> Option<Instant> {
-        self.enabled.then(Instant::now)
+        (self.enabled && self.probing).then(Instant::now)
     }
 
     pub(super) fn offer(&mut self, task: TaskId, offer: Offer, overhead_ns: u64) {

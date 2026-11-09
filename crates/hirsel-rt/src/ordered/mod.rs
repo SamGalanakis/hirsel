@@ -190,9 +190,11 @@ struct Task<P, R> {
     /// cannot be reclaimed merely because its last accepted log entry retires.
     open_speculative_bytes: u64,
     calls: Option<(VecDeque<TaskId>, bool)>,
-    /// Rule 1 snapshot: `(epoch, turn)` when this task was queued at the
-    /// snapshot numbered `epoch`, with its retiring turn at that moment.
-    eligible: (u64, u64),
+    /// The snapshot number current when this task was pushed onto the queue,
+    /// while it is queued. The queue shrinks only immediately before a
+    /// snapshot and only the head retires, so a queued row with an older push
+    /// number was queued at the latest snapshot with its current retiring turn.
+    queued: Option<u64>,
 }
 
 impl<P, R> Task<P, R> {
@@ -205,7 +207,7 @@ impl<P, R> Task<P, R> {
             speculative_bytes: 0,
             open_speculative_bytes: 0,
             calls: None,
-            eligible: (0, 0),
+            queued: None,
         }
     }
 }
@@ -299,7 +301,9 @@ impl<P, R> Frontier<P, R> {
     pub fn enqueue(&mut self, task: TaskId, handles: Held) {
         assert!(!self.stopped, "enqueue after the terminal prefix");
         assert!(!self.tasks.contains_key(&task), "task id reused while live");
-        self.tasks.insert(task, Task::queued());
+        let mut row = Task::queued();
+        row.queued = Some(self.epoch);
+        self.tasks.insert(task, row);
         self.held.insert(task, handles);
         self.queue.push_back(task);
     }
@@ -336,27 +340,26 @@ impl<P, R> Frontier<P, R> {
             let row = self.tasks.get_mut(&task).expect("a live waiter");
             assert_eq!(row.state, State::Parked);
             row.state = State::Queued;
+            row.queued = Some(self.epoch);
             self.queue.push_back(task);
         }
-        self.head = self.queue.pop_front();
-        self.snapshot_eligible();
+        self.next_head();
     }
 
-    /// Capture rule 1's queue and first turns in place: one new snapshot
-    /// number, written into the rows of exactly the queued tasks.
-    fn snapshot_eligible(&mut self) {
-        self.epoch += 1;
-        let epoch = self.epoch;
-        for id in &self.queue {
-            let row = self.tasks.get_mut(id).expect("a queued task");
-            row.eligible = (epoch, row.retiring);
+    /// Pop the next head and take rule 1's snapshot: the remaining queue and
+    /// its first turns. A new snapshot number is all the snapshot writes.
+    fn next_head(&mut self) {
+        self.head = self.queue.pop_front();
+        if let Some(head) = self.head {
+            self.tasks.get_mut(&head).expect("a queued task").queued = None;
         }
+        self.epoch += 1;
     }
 
     /// Rule 1 membership: the row was queued at the current snapshot with
-    /// captured first turn `turn`.
+    /// first turn `turn`.
     fn eligible_turn(&self, row: &Task<P, R>, turn: u64) -> bool {
-        row.eligible == (self.epoch, turn)
+        row.queued.is_some_and(|pushed| pushed < self.epoch) && row.retiring == turn
     }
 
     pub fn state(&self, task: TaskId) -> State {
@@ -857,14 +860,15 @@ impl<P, R> Frontier<P, R> {
             let waiter = self.tasks.get_mut(&woken).expect("poll names a live task");
             assert_eq!(waiter.state, State::Parked);
             waiter.state = State::Queued;
+            waiter.queued = Some(self.epoch);
             self.queue.push_back(woken);
         }
         if next == Next::Yield {
+            self.tasks.get_mut(&task).expect("the retiring task").queued = Some(self.epoch);
             self.queue.push_back(task);
         }
-        self.head = self.queue.pop_front();
         self.retired += 1;
-        self.snapshot_eligible();
+        self.next_head();
         Progress::Retired
     }
 }

@@ -237,8 +237,12 @@ fn every_unresolved_predecessor_and_not_just_the_head_counts() {
     f.enqueue(3, Held::empty());
     // Start the next turn with 2 and 3 in the head's captured queue.
     f.queue.push_front(1);
+    for id in f.queue.clone() {
+        f.tasks.get_mut(&id).unwrap().queued = Some(f.epoch);
+    }
     f.head = Some(0);
-    f.snapshot_eligible();
+    f.tasks.get_mut(&0).unwrap().queued = None;
+    f.epoch += 1;
     f.held.get_mut(&2).unwrap().objects.insert(object(7));
     assert!(!f.eligible(3, &store(7, 1)));
     assert!(f.eligible(3, &store(8, 1)));

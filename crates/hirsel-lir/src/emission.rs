@@ -90,7 +90,7 @@ pub struct EmitInputs<'a> {
     /// The operation manifest every unit's receipt names.
     pub manifest: &'a Manifest,
     /// The bytes of each static a `ReadStatic` names: a constant slot copies pointer-free
-    /// ones (`statics::constant_slots`); glue defines the blocks.
+    /// ones (`statics::constants`); glue defines the blocks.
     pub statics: &'a [crate::statics::StaticData],
     /// Source specializations and known callable bodies replicated by the driver.
     pub inline_instances: &'a BTreeSet<ContentHash>,

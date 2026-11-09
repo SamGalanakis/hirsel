@@ -924,6 +924,8 @@ fn a_boxed_nullary_variant_reads_one_static_block() {
 /// A slot holding a constant inline table that is only read is a constant slot: native code
 /// indexes the table's read-only data in place. The local a program writes after copying
 /// the table into it stays an ordinary slot; the table it copies from is still constant.
+/// A table passed to a borrowed parameter is a constant argument, however many
+/// temporaries lowering copies it through, so the call passes the read-only data.
 #[test]
 fn a_constant_table_read_in_place_is_a_constant_slot() {
     use hirsel_lir::ir::SlotKind;
@@ -932,16 +934,17 @@ fn a_constant_table_read_in_place_is_a_constant_slot() {
         .collect::<Vec<_>>()
         .join(", ");
     let (_, lowered) = lower_valid(&format!(
-        "const T: Inline[u8, 16] = [{table}]\nfn get(i: u64) -> u8 {{ T[i] }}\nfn set(i: u64) -> u8 {{\n  let mut t = T\n  t[0] = 9u8\n  t[i]\n}}\nfn main() -> u64 {{ int.widen(get(1u64)) + int.widen(set(0u64)) }}",
+        "const T: Inline[u8, 16] = [{table}]\nfn get(i: u64) -> u8 {{ T[i] }}\nfn set(i: u64) -> u8 {{\n  let mut t = T\n  t[0] = 9u8\n  t[i]\n}}\nfn first(t: Inline[u8, 16]) -> u8 {{ t[0] }}\nfn pass() -> u8 {{ first(T) }}\nfn main() -> u64 {{ int.widen(get(1u64)) + int.widen(set(0u64)) + int.widen(pass()) }}",
     ));
     let constant = |name: &str| {
         let unit = unit_named(&lowered, name);
-        let slots = hirsel_lir::statics::constant_slots(unit, &lowered.statics);
-        let bytes: Vec<Vec<u8>> = slots
+        let slots = hirsel_lir::statics::constants(unit, &lowered.statics).slots;
+        let mut bytes: Vec<Vec<u8>> = slots
             .iter()
             .flatten()
             .map(|slot| slot.bytes.to_vec())
             .collect();
+        bytes.dedup();
         let locals: Vec<bool> = unit
             .slots
             .iter()
@@ -953,7 +956,21 @@ fn a_constant_table_read_in_place_is_a_constant_slot() {
     };
     let table: Vec<u8> = (1..=16).collect();
     assert_eq!(constant("get"), (vec![table.clone()], vec![]));
-    assert_eq!(constant("set"), (vec![table], vec![false]));
+    assert_eq!(constant("set"), (vec![table.clone()], vec![false]));
+    let pass = unit_named(&lowered, "pass");
+    let values = hirsel_lir::statics::constants(pass, &lowered.statics).values;
+    let arguments: Vec<Option<Vec<u8>>> = pass
+        .pools
+        .call_arguments
+        .iter()
+        .filter_map(|argument| match argument.value {
+            hirsel_lir::ir::ArgumentValue::Value(value) => {
+                Some(values[value.index()].map(<[u8]>::to_vec))
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(arguments, vec![Some(table)]);
 }
 
 #[test]

@@ -13,11 +13,13 @@
 //! block)` cell, which the heap checker installs as a handle and emission as
 //! a relocation, so the data is independent of where the blocks land.
 //!
-//! A *constant slot* ([`constant_slots`]) holds pointer-free static data for
-//! its whole life: its one write stores a `ReadStatic` value and nothing else
-//! writes it. Backends address such a slot in place, in a private read-only
+//! A *constant slot* ([`constants`]) holds pointer-free static data for its
+//! whole life: its one write stores a `ReadStatic` value, or a read of another
+//! constant slot, and nothing else writes it. Backends address such a slot in place, in a private read-only
 //! copy of the bytes named by their content ([`constant_data_name`]), so an
-//! indexed constant table is never copied to the stack.
+//! indexed constant table is never copied to the stack. A read-only address
+//! argument holding such bytes (a constant value) is passed as the address
+//! of the same read-only copy.
 use crate::ir::{AddressBase, AddressId, ArgumentValue, Inst, LirUnit, Ref, Symbol, ValueRepr};
 use crate::layout_types::LayoutId;
 use hirsel_codec::{DecodeError, Reader, Snapshot, Writer};
@@ -238,15 +240,47 @@ pub fn constant_data_name(align: u32, bytes: &[u8]) -> String {
     format!("hirsel.data.{hex}")
 }
 
-/// Per slot of `unit`, its static content when it is a constant slot: its only write is one
-/// whole `Store` of an aggregate `ReadStatic` value whose static is one block without
-/// references at the slot's layout, and every other operation on it, or on an address within it, only
-/// prepares, reads, copies, borrows or ends its storage. A `mut` loan or argument, a
-/// replace, a sequence or flat write, and any operation not listed rules a slot out.
-pub fn constant_slots<'a, S>(
+// The static block each value reads when it is a `ReadStatic` result of one block
+// without references or functions.
+fn static_blocks<'a, S>(
     unit: &LirUnit<S>,
     statics: &'a [StaticData],
-) -> Vec<Option<ConstantSlot<'a>>> {
+) -> Vec<Option<&'a StaticBlock>> {
+    let mut statics_of = vec![None; unit.values.len()];
+    for inst in &unit.instructions {
+        if let Inst::ReadStatic { result, symbol } = *inst
+            && let Some(symbol) = unit.tables.symbols.get(symbol.index())
+            && let Some(data) = statics.iter().find(|d| d.symbol == *symbol)
+            && let [block] = data.blocks.as_slice()
+            && block.references.is_empty()
+            && block.functions.is_empty()
+            && let Some(slot) = statics_of.get_mut(result.index())
+        {
+            *slot = Some(block);
+        }
+    }
+    statics_of
+}
+
+/// The pointer-free static content of a unit's slots and values (see the module).
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct Constants<'a> {
+    /// Per slot, its content when it is a constant slot.
+    pub slots: Vec<Option<ConstantSlot<'a>>>,
+    /// Per value, the static bytes it holds when it is a pointer-free aggregate constant:
+    /// a `ReadStatic` result at its own layout, or a read of a whole constant slot. A
+    /// backend passes such a value to a read-only address parameter as the address of its
+    /// read-only data.
+    pub values: Vec<Option<&'a [u8]>>,
+}
+
+/// The constant slots and values of `unit`. A constant slot's only write is one whole
+/// `Store` of a constant aggregate value at the slot's layout, and every other operation on
+/// it, or on an address within it, only prepares, reads, copies, borrows or ends its
+/// storage. A `mut` loan or argument, a replace, a sequence or flat write, and any
+/// operation not listed rules a slot out. A slot stored from a read of another constant
+/// slot is constant too, so a constant copied through temporaries stays in place.
+pub fn constants<'a, S>(unit: &LirUnit<S>, statics: &'a [StaticData]) -> Constants<'a> {
     let slots = unit.slots.len();
     let root = |address: AddressId| {
         let mut at = address;
@@ -267,20 +301,6 @@ pub fn constant_slots<'a, S>(
                 _ => None,
             })
     };
-    // The static each value reads, if it is a `ReadStatic` result.
-    let mut statics_of = vec![None; unit.values.len()];
-    for inst in &unit.instructions {
-        if let Inst::ReadStatic { result, symbol } = *inst
-            && let Some(symbol) = unit.tables.symbols.get(symbol.index())
-            && let Some(data) = statics.iter().find(|d| d.symbol == *symbol)
-            && let [block] = data.blocks.as_slice()
-            && block.references.is_empty()
-            && block.functions.is_empty()
-            && let Some(slot) = statics_of.get_mut(result.index())
-        {
-            *slot = Some(block);
-        }
-    }
     let mut stores: Vec<Vec<crate::ir::ValueId>> = vec![Vec::new(); slots];
     let mut ruled_out = vec![false; slots];
     let mut rule_out = |address: AddressId, ruled_out: &mut Vec<bool>| {
@@ -331,24 +351,80 @@ pub fn constant_slots<'a, S>(
             _ => {}
         });
     }
-    (0..slots)
-        .map(|slot| {
-            let [stored] = stores[slot].as_slice() else {
+    let aggregate = |value: crate::ir::ValueId| {
+        unit.values
+            .get(value.index())
+            .and_then(|v| unit.types.get(v.ty.index()))
+            .filter(|ty| ty.repr == ValueRepr::Aggregate)
+            .map(|ty| ty.layout)
+    };
+    let slot_layout = |slot: usize| {
+        unit.slots
+            .get(slot)
+            .and_then(|s| unit.types.get(s.ty.index()))
+            .map(|ty| ty.layout)
+    };
+    let read_whole = |address: AddressId| {
+        let mut at = address;
+        loop {
+            let info = unit.addresses.get(at.index())?;
+            if info.projection.len != 0 {
                 return None;
-            };
-            let block = statics_of.get(stored.index()).copied().flatten()?;
-            let slot_layout = unit.types.get(unit.slots[slot].ty.index())?.layout;
-            let value = unit
-                .types
-                .get(unit.values.get(stored.index())?.ty.index())?;
-            (!ruled_out[slot]
-                && value.repr == ValueRepr::Aggregate
-                && value.layout == slot_layout
-                && block.layout == slot_layout)
-                .then_some(ConstantSlot {
-                    stored: *stored,
-                    bytes: &block.bytes,
-                })
+            }
+            match info.base {
+                AddressBase::Slot(slot) => return Some(slot.index()),
+                AddressBase::Address(base) => at = base,
+                AddressBase::Value(_) => return None,
+            }
+        }
+    };
+    let mut values: Vec<Option<&'a [u8]>> = static_blocks(unit, statics)
+        .into_iter()
+        .enumerate()
+        .map(|(value, block)| {
+            let block = block?;
+            (aggregate(crate::ir::ValueId(value as u32))? == block.layout)
+                .then_some(block.bytes.as_slice())
         })
-        .collect()
+        .collect();
+    let mut constant: Vec<Option<ConstantSlot<'a>>> = vec![None; slots];
+    loop {
+        let mut changed = false;
+        for slot in 0..slots {
+            if constant[slot].is_some() || ruled_out[slot] {
+                continue;
+            }
+            let [stored] = stores[slot].as_slice() else {
+                continue;
+            };
+            if let Some(Some(bytes)) = values.get(stored.index())
+                && aggregate(*stored).is_some_and(|layout| Some(layout) == slot_layout(slot))
+            {
+                constant[slot] = Some(ConstantSlot {
+                    stored: *stored,
+                    bytes,
+                });
+                changed = true;
+            }
+        }
+        for inst in &unit.instructions {
+            if let Inst::Read {
+                result, address, ..
+            } = *inst
+                && let Some(slot) = read_whole(address)
+                && let Some(Some(slot_constant)) = constant.get(slot)
+                && aggregate(result).is_some_and(|layout| Some(layout) == slot_layout(slot))
+                && let Some(value @ None) = values.get_mut(result.index())
+            {
+                *value = Some(slot_constant.bytes);
+                changed = true;
+            }
+        }
+        if !changed {
+            return Constants {
+                slots: constant,
+                values,
+            };
+        }
+    }
 }

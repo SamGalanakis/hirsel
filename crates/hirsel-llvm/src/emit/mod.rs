@@ -1429,6 +1429,9 @@ struct FnEmitter<'m, 'a> {
     /// Slots that always hold one static's pointer-free bytes, addressed in place in
     /// read-only data (`hirsel_lir::statics::constant_slots`).
     constant_slots: Vec<Option<hirsel_lir::statics::ConstantSlot<'a>>>,
+    /// Values that hold pointer-free static bytes (`hirsel_lir::statics::Constants::values`):
+    /// a read-only address argument passes their read-only data instead of a stack copy.
+    constant_values: Vec<Option<&'a [u8]>>,
     /// A root parameter slot's `defer` companion: false when its caller keeps the
     /// count in the block, so a `SeqSetLen` stores it and the return flushes.
     defer_params: Vec<Option<Value<'m>>>,

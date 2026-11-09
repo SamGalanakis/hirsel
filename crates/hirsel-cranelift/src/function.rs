@@ -133,8 +133,11 @@ pub(crate) struct FnEmitter<'e, 'a, 'f> {
     versions: BTreeSet<ValueId>,
     pub(crate) slots: Vec<Option<Place>>,
     /// Slots that always hold one static's pointer-free bytes, addressed in place in
-    /// read-only data (`hirsel_lir::statics::constant_slots`).
+    /// read-only data (`hirsel_lir::statics::Constants::slots`).
     pub(crate) constant_slots: Vec<Option<hirsel_lir::statics::ConstantSlot<'a>>>,
+    /// Values that hold pointer-free static bytes (`hirsel_lir::statics::Constants::values`):
+    /// a read-only address argument passes their read-only data instead of a stack copy.
+    constant_values: Vec<Option<&'a [u8]>>,
     pub(crate) addresses: Vec<Option<Place>>,
     /// Per address of a variable flat element, where its sequence's elements begin.
     pub(crate) flat_contents: Vec<Option<Value>>,
@@ -215,7 +218,10 @@ impl<'e, 'a, 'f> FnEmitter<'e, 'a, 'f> {
         let environment = sig
             .hidden_index(Hidden::Environment)
             .map(|index| entry_params[index]);
-        let constant_slots = hirsel_lir::statics::constant_slots(unit, em.inputs.unit().statics);
+        let hirsel_lir::statics::Constants {
+            slots: constant_slots,
+            values: constant_values,
+        } = hirsel_lir::statics::constants(unit, em.inputs.unit().statics);
         let checkpoint_points = if em.inputs.unit().alternate {
             hirsel_lir::checkpoints::checkpoint_points(unit)
         } else {
@@ -234,6 +240,7 @@ impl<'e, 'a, 'f> FnEmitter<'e, 'a, 'f> {
             versions: BTreeSet::new(),
             slots: vec![None; unit.slots.len()],
             constant_slots,
+            constant_values,
             addresses: vec![None; unit.addresses.len()],
             flat_contents: vec![None; unit.addresses.len()],
             flat_content: None,
@@ -332,6 +339,14 @@ impl<'e, 'a, 'f> FnEmitter<'e, 'a, 'f> {
                 align: record.align,
             },
         })
+    }
+
+    /// The bytes of `value` when it holds a pointer-free static aggregate at `layout`
+    /// (`hirsel_lir::statics::Constants::values`).
+    fn constant_argument(&self, value: ValueId, layout: LayoutId) -> Emitted<Option<&'a [u8]>> {
+        let ty = self.value_type(value)?;
+        Ok(self.constant_values[value.index()]
+            .filter(|_| ty.repr == ValueRepr::Aggregate && ty.layout == layout))
     }
 
     pub(crate) fn value_shape(&self, value: ValueId) -> Emitted<Shape> {
@@ -2384,6 +2399,16 @@ impl<'e, 'a, 'f> FnEmitter<'e, 'a, 'f> {
             let Some(argument) = arguments.iter().find(|a| a.parameter == parameter.source) else {
                 return self.invalid("a call without an argument for a parameter");
             };
+            // A borrowed pointer-free constant is read in place in its read-only data.
+            if let (ParameterPassing::ReadOnlyAddress, ArgumentValue::Value(value)) =
+                (parameter.passing, argument.value)
+                && let Some(bytes) = self.constant_argument(value, parameter.layout)?
+            {
+                let align = self.layout(parameter.layout)?.align;
+                let data = self.em.constant_data(align, bytes)?;
+                args.push(self.data_addr(data, 0));
+                continue;
+            }
             match (parameter.passing, argument.value) {
                 (ParameterPassing::ByValue, ArgumentValue::Value(value)) => {
                     let v = self.get(value)?;

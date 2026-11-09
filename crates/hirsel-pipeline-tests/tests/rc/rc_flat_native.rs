@@ -232,7 +232,7 @@ fn an_owned_flat_source_initialized_in_a_loop_is_not_a_frame_constant() {
     let lowered = hirsel_rc::import::lower(&input, &target()).unwrap();
     assert!(violations(&input, &lowered).is_empty());
     let main = unit_named(&lowered, "main");
-    let constants = hirsel_lir::statics::constant_slots(main, &lowered.statics);
+    let constants = hirsel_lir::statics::constants(main, &lowered.statics).slots;
     let owned_flat: Vec<_> = main.slots.iter().enumerate().filter(|(_, slot)| {
         slot.kind == SlotKind::Local
             && matches!(lowered.table.layouts[main.types[slot.ty.index()].layout.0 as usize].kind,

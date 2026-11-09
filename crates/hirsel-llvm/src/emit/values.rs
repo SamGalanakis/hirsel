@@ -12,6 +12,10 @@ impl<'m, 'a> FnEmitter<'m, 'a> {
         let prologue_block = module.append_block(function);
         let prologue = Builder::new(module);
         prologue.position(prologue_block);
+        let hirsel_lir::statics::Constants {
+            slots: constant_slots,
+            values: constant_values,
+        } = hirsel_lir::statics::constants(unit, inputs.statics);
         let context = module.parameter(function, 0);
         let environment = signature
             .hidden_index(|h| matches!(h, Hidden::Environment))
@@ -39,7 +43,8 @@ impl<'m, 'a> FnEmitter<'m, 'a> {
             deferred: vec![false; unit.slots.len()],
             viewed: vec![false; unit.slots.len()],
             companion_slots: vec![false; unit.slots.len()],
-            constant_slots: hirsel_lir::statics::constant_slots(unit, inputs.statics),
+            constant_slots,
+            constant_values,
             defer_params: vec![None; unit.slots.len()],
             fresh_detaches: BTreeSet::new(),
             detach_untracked: BTreeMap::new(),

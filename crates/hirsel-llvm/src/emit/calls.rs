@@ -572,6 +572,14 @@ impl<'m, 'a> FnEmitter<'m, 'a> {
             let Some(argument) = arguments.iter().find(|a| a.parameter == parameter.source) else {
                 return self.invalid("a call without an argument for a parameter");
             };
+            // A borrowed pointer-free constant is read in place in its read-only data.
+            if let (ParameterPassing::ReadOnlyAddress, ArgumentValue::Value(value)) =
+                (parameter.passing, argument.value)
+                && let Some(bytes) = self.constant_argument(value, parameter.layout)?
+            {
+                args.push(self.constant_data(parameter.layout, bytes)?.ptr);
+                continue;
+            }
             match (parameter.passing, argument.value) {
                 (ParameterPassing::ByValue, ArgumentValue::Value(value)) => {
                     let slots = self.disassemble(parameter.layout, self.get(value)?)?;
@@ -1019,5 +1027,13 @@ impl<'m, 'a> FnEmitter<'m, 'a> {
         self.cpu_publish(call)?;
         self.ownership_call(call, true)?;
         self.jump(normal)
+    }
+
+    /// The bytes of `value` when it holds a pointer-free static aggregate at `layout`
+    /// (`hirsel_lir::statics::Constants::values`).
+    fn constant_argument(&self, value: ValueId, layout: LayoutId) -> Emitted<Option<&'a [u8]>> {
+        let ty = self.value_type(value)?;
+        Ok(self.constant_values[value.index()]
+            .filter(|_| ty.repr == ValueRepr::Aggregate && ty.layout == layout))
     }
 }

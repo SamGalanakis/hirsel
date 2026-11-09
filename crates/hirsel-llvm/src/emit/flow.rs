@@ -232,7 +232,7 @@ impl<'m, 'a> FnEmitter<'m, 'a> {
 
     /// The place of a constant slot: its bytes in a private read-only global named by their
     /// content, which every read indexes in place and no store writes.
-    fn constant_data(&mut self, layout: LayoutId, bytes: &[u8]) -> Emitted<Place<'m>> {
+    pub(super) fn constant_data(&mut self, layout: LayoutId, bytes: &[u8]) -> Emitted<Place<'m>> {
         let align = self.layout(layout)?.align;
         let name = hirsel_lir::statics::constant_data_name(align, bytes);
         let ptr = match self.module.named_global(&name) {

@@ -1,10 +1,10 @@
 // rule: CONC-5
 // expect: accept
-fn make() -> Result[Body[fn() -> Result[List[u64], ()]], String] {
-  Ok(codegen.body("fn() -> Result[List[u64], ()] { Ok([1]) }"))
+fn make() -> Result[Body[fn() -> Result[unique List[u64], ()]], String] {
+  Ok(codegen.body("fn() -> Result[unique List[u64], ()] { Ok([1]) }"))
 }
 
-fn load() -> Result[List[u64], ()] = comptime make()
+fn load() -> Result[unique List[u64], ()] = comptime make()
 
 pub fn main(rt: Io) -> Result[(), ()] {
   let Ok(tasks) = io.tasks(rt) else {

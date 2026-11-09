@@ -38,11 +38,14 @@ not replace an already attributed failure or its causes.
 ### FAIL-2: Boundary
 
 `task.isolate(tasks, body) -> Result[R, Failure]` is the only place a failure is caught,
-besides `arena.bounded` for its own `OutOfSpace` and a runner call (planned), whose callee
-runs as a separate run: a failure that ends the callee run reaches the caller as the
-outcome `Faulted(failure)` ([RUN-6](runners.md#run-6-outcomes)) and never unwinds the
-caller. A failure in a store transaction's body discards its writes and propagates
-([STORE-2](storage.md#store-2-transactions)). Elsewhere a failure propagates: a failed
+besides `arena.bounded` for its own `OutOfSpace`, `runner.apply` and `runner.apply_mut`,
+which return a failure of the entry they apply as `Error(failure)`
+([RUN-3](runners.md#run-3-entries)), and a runner call (planned), whose callee runs as a
+separate run: a failure that ends the callee run reaches the caller as the outcome
+`Faulted(failure)` ([RUN-6](runners.md#run-6-outcomes)) and never unwinds the caller. A
+store transaction's body is applied this way, so its failure discards its writes and is
+the transaction's outcome `Faulted(failure)` ([STORE-2](storage.md#store-2-transactions)).
+Elsewhere a failure propagates: a failed
 child cancels its siblings, the scope joins them, and the failure continues outward; with
 several, the first in spawn order is reported. `Failure` is `data`: its kind, rule ID,
 source site, the path of spawn indices and an optional boxed cause

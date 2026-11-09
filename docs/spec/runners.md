@@ -17,8 +17,9 @@ static callable (its definition's code and the static empty environment), and ea
 call's callee is a run of the same execution in the process, with the interpreter's place
 decisions, linked tapes and replay; a native host launch from a run record refuses
 runners. Durable callee recording (RUN-14), fetching code from a code store at
-arrival, the `local.process@1` provider, and the transact and query forms with their
-provider `db@1` are planned. Items marked **Reserved** are designed here but have no
+arrival, the `local.process@1` provider, `runner.entry_id`, `runner.apply` and
+`runner.apply_mut`, and the transact and query forms with their provider `db@1` and its
+`Inbox` are planned. Items marked **Reserved** are designed here but have no
 implementation owner yet.
 
 **Interim deviations** of the shipped interpreter: a callee's outcome bytes are recorded
@@ -126,9 +127,10 @@ unsorted or duplicated `keep` returns `NotGranted()`.
 
 `Entry[F]` is a root core type: a reference to one top-level function definition whose
 callable type is `F`. It is plain, `copyable`, `inert` and `sendable`; it is not `data`,
-`key` or `serializable` ([SER-1](serialization.md#ser-1-serializable-schemas)), and it
-cannot be called from source: calling it locally would duplicate a direct call by name,
-and `local.threads@1` is the local path.
+`key` or `serializable` ([SER-1](serialization.md#ser-1-serializable-schemas)). Source
+calls it only through `runner.apply` and `runner.apply_mut` below, which exist so that a
+library can run an entry as a failure boundary; a plain local call is a direct call by
+name, and `local.threads@1` is the local path to another run.
 
 Where the expected type of an expression is `Entry[F]`, a path naming a top-level function
 definition forms an entry of that definition, as a named definition forms a callback where
@@ -162,11 +164,25 @@ call through it runs the revision the receiving place selects for that definitio
 receiver checks that it is the caller's ([RUN-8](#run-8-identity-and-arrival)).
 
 ```text
-fn runner.entry_path[F](f: Entry[F]) -> String
+EntryId = { path: String, fingerprint: Bytes, code: Bytes }
+fn runner.entry_id[F](f: Entry[F]) -> EntryId
+fn runner.apply[C, I, A: serializable, R: serializable, E: serializable](f: Entry[fn(c: C, call: I, a: A) -> Result[R, E]], c: C, call: I, a: A) -> Result[Result[R, E], Failure]
+fn runner.apply_mut[C, I, A: serializable, R: serializable, E: serializable](f: Entry[fn(mut c: C, call: I, a: A) -> Result[R, E]], mut c: C, call: I, a: A) -> Result[Result[R, E], Failure]
 ```
 
-`runner.entry_path` returns the definition's full versioned path, the spelling `runner.only`
-takes.
+`EntryId` is a root core data type: an entry's **identity**, its definition's full
+versioned path (the spelling `runner.only` takes), signature fingerprint and code hash
+([RUN-8](#run-8-identity-and-arrival)). Two entries of one revision are equal exactly when
+their identities are.
+
+`runner.apply` and `runner.apply_mut` call `f` in the current run, on the current task,
+as a failure boundary ([FAIL-2](failure.md#fail-2-boundary)): a failure in `f` unwinds to
+the call and is returned as `Error(failure)`, its cleanup having run
+([FAIL-3](failure.md#fail-3-what-runs)); any other outcome is `Ok` of `f`'s result. `c`
+and `call` are passed as to a direct call; `a` is borrowed. They add no authority: `f`
+reaches only what `c` carries. They are the evaluation operation of a store
+([STORE-15](storage.md#store-15-evaluation-and-re-execution)), which passes a `Tx` as `c`
+and a `CallInfo` as `call`.
 
 ### RUN-4: Calls
 
@@ -190,8 +206,10 @@ fn runner.spawn[A: serializable, R: serializable, E: serializable](s: Scope, r: 
 - **Transact.** A transaction entry `fn(mut tx: Tx, call: CallInfo, a: A) ->
   Result[R, E]` run in the store of the place ([STORE-12](storage.md#store-12-transactions-at-a-runner)).
   Its outcome type is `Result[R, RunError[TxFailure[E]]]`: the body's error arrives as
-  `Failed(Aborted(e))` and a storage outcome as another `Failed(..)`; `TxFailure.Canceled`
-  never occurs inside `Failed`, because `RunError` reports cancellation itself.
+  `Failed(Aborted(e))`, an exceeded limit as `Failed(Limit(..))`, the body's failure as
+  `Faulted(f)` and a commit the place cannot decide as `InDoubt(Abandoned())`;
+  `TxFailure`'s `Canceled`, `Faulted` and `Unknown` never occur inside `Failed`, because
+  `RunError` reports them itself ([STORE-12](storage.md#store-12-transactions-at-a-runner)).
 - **Query.** A query entry `fn(tx: Tx, call: CallInfo, a: A) -> Result[R, E]`, which
   receives a borrowed `Tx` and so cannot write, run at a durable version of the place's
   store. Its outcome type is that of the transact form.
@@ -359,6 +377,11 @@ per-capability footprints in signatures, which are reserved. A `Tx` is narrowed 
 callee itself ([STORE-3](storage.md#store-3-transaction-scope)). A place in the caller's own
 process and revision passes checks 2, 3 and 8 by construction and still performs 4 to 7.
 
+At a `db@1` place the host makes checks 1, 2, 4 (without its allowlist), 6 and 7, and the
+place's head run makes check 3 and the allowlist against the entries it serves, then 5 and
+8, in that order ([STORE-12](storage.md#store-12-transactions-at-a-runner)). The head
+holds only its own revision and loads no code to serve a call.
+
 ### RUN-9: Cancellation
 
 Cancellation before the commit point is CONC-3 cancellation: the call returns
@@ -380,8 +403,10 @@ it. A place that loses its connection to a caller cancels that caller's running 
 
 ### RUN-10: Callee runs
 
-Every call that passes arrival runs the callee as its own run, with its own validated run
-record, admitted under the place's grants. Its record states:
+Every compute or call that passes arrival runs the callee as its own run, with its own
+validated run record, admitted under the place's grants. A transact or query call runs no
+callee run: its body is an evaluation in the head run, recorded by the store's history and
+the head's tape ([STORE-12](storage.md#store-12-transactions-at-a-runner)). Its record states:
 
 - `program`: the place's semantic program revision; `entry`: the callee's path; `launch`:
   `call`;
@@ -548,7 +573,7 @@ except run-policy members, and has no whitespace.
 | `local.process@1` | a child process per call | compute, call | all except `NotRun(VersionMismatch)` |
 | `sim@1` (simulated) | a node of this process's deterministic simulation | as the modeled contract | exactly the modeled contract's |
 | `remote.tls@1` | another host, over TLS | compute, call | all |
-| `db@1` (planned) | the run that holds a store | compute, transact, query | `Ok`, `Failed`, `Faulted`, `NotRun(Denied, Overloaded, Rejected)`, `InDoubt(Abandoned)`, `Canceled` |
+| `db@1` (planned) | the run that holds a store | compute, transact, query | `Ok`, `Failed`, `Faulted`, `NotRun(Denied, Overloaded, Rejected, VersionMismatch)`, `InDoubt(Abandoned)`, `Canceled` |
 
 **`local.threads@1`** runs each callee as a separate run with its own heap on a pool of
 `threads` operating-system threads (default 1), admitting at most `queue` calls waiting
@@ -674,7 +699,7 @@ RemoteCall    = { epoch: u64, position: u64, ordinal: u64, key: Bytes, form: Cal
                   definitions: Option[List[String]], argument: Bytes, acknowledged: u64 }
 RemoteOutcome = { epoch: u64, position: u64, key: Bytes, digest: Bytes, end: CallEnd,
                   callee: Option[Bytes], missing: List[Bytes] }
-CallForm      = Compute() | Call()
+CallForm      = Compute() | Call() | Transact() | Query()
 CallEnd       = Returned(Bytes) | Failed(Bytes) | Faulted(Bytes) | NotRun(NotRunReason)
               | InDoubt(InDoubtReason) | Canceled(CancelCause)
 ```
@@ -805,10 +830,36 @@ stream until acknowledged; zero is refused as `host.unacknowledged`. A full stre
 refuses new positions with the session-level `Refused(Overloaded())` and closes without
 recording that refusal or advancing `applied`, as described above.
 
-**`db@1`** (planned) is the place that holds a store: it serves compute callees and the
-store's transact and query entries, ordering every transact call in the store's history
-([STORE-12](storage.md#store-12-transactions-at-a-runner)). Its serving primitive is an
-open design.
+**`db@1`** (planned) is the place that holds a store. Its host is a `hirsel serve` host
+whose configuration gains a `place` member, naming the head entry, the run that holds the
+store, and the head's grants; it serves compute callees as above and hands transact and
+query calls to the head through its inbox:
+
+```text
+Inbox    // core capability: resource, sendable; a place's arrived transact and query calls
+Arrival  // core opaque: affine, sendable; one arrived call, owed exactly one end
+Arrived  = { form: CallForm, entry: EntryId, caller: String, request: CallRequest,
+             level: String, argument: Bytes }
+CallRequest = { stream: Bytes, epoch: u64, position: u64, digest: Bytes, acknowledged: u64 }
+N fn io.inbox(rt: Io) -> Result[Inbox, GrantError]
+fn inbox.take(mut i: Inbox, wait: bool) -> Option[List[Arrival]]
+fn arrival.request(a: Arrival) -> Arrived
+fn arrival.end(take a: Arrival, end: CallEnd) -> ()
+```
+
+`io.inbox` is granted only to a place's head run, once; elsewhere it is `NotGranted()`.
+`inbox.take` returns the arrivals that passed the host's checks, in the order they
+arrived, waiting for one when `wait` is true; it is `None` once the host
+stops. `caller` is the admitted caller's identity, or a client's principal; `level` is
+the level the request names, or `""`. `arrival.end` sends the call's end; an `Arrival`
+dropped without one ends its call `InDoubt(Abandoned())`, as does the head run's own end.
+The head records each take and each end on its tape.
+
+A caller's `db@1` runner takes the fields of `remote.tls@1` and an optional `level`, the
+durability level its transact calls wait for ([STORE-2](storage.md#store-2-transactions)).
+Transact and query calls travel as `Call` frames of form `Transact()` or `Query()`; a
+transact call's `epoch` and `position` are its call-stream request, and a query uses
+position 0, which no stream decides. The outcomes are those of the providers table.
 
 ## Re-execution
 
@@ -859,7 +910,13 @@ N fn io.runner(rt: Io, name: String) -> Result[Runner, GrantError]
 fn runner.grants(r: Runner) -> GrantSet
 fn runner.narrow(r: Runner, keep: GrantSet) -> Result[Runner, GrantError]
 fn runner.only(r: Runner, definitions: List[String]) -> Result[Runner, GrantError]
-fn runner.entry_path[F](f: Entry[F]) -> String
+fn runner.entry_id[F](f: Entry[F]) -> EntryId
+fn runner.apply[C, I, A: serializable, R: serializable, E: serializable](f: Entry[fn(c: C, call: I, a: A) -> Result[R, E]], c: C, call: I, a: A) -> Result[Result[R, E], Failure]
+fn runner.apply_mut[C, I, A: serializable, R: serializable, E: serializable](f: Entry[fn(mut c: C, call: I, a: A) -> Result[R, E]], mut c: C, call: I, a: A) -> Result[Result[R, E], Failure]
+N fn io.inbox(rt: Io) -> Result[Inbox, GrantError]
+fn inbox.take(mut i: Inbox, wait: bool) -> Option[List[Arrival]]
+fn arrival.request(a: Arrival) -> Arrived
+fn arrival.end(take a: Arrival, end: CallEnd) -> ()
 fn runner.compute[A: serializable, R: serializable, E: serializable](r: Runner, f: Entry[fn(a: A) -> Result[R, E]], a: A) -> unique Result[R, RunError[E]]
 fn runner.call[A: serializable, R: serializable, E: serializable](r: Runner, f: Entry[fn(rt: Io, a: A) -> Result[R, E]], a: A) -> unique Result[R, RunError[E]]
 fn runner.spawn[A: serializable, R: serializable, E: serializable](s: Scope, r: Runner, f: Entry[fn(rt: Io, a: A) -> Result[R, E]], a: A) -> Task[Result[R, RunError[E]]] of s

@@ -17,9 +17,8 @@ implementation is converging on it:
   operations until then. The history format (STORE-11) replaces that layout.
 - **Planned (their names do not resolve yet):** everything else in this part.
 - **Open designs,** where this part states the contract and the declarations are still to
-  be written: the serving primitive behind `db@1` (STORE-12); the declarations of the
-  authority seam and its grant (STORE-11); and the wire format of the subscription feed
-  and the client ingress (STORE-16, STORE-17).
+  be written: the declarations of the authority seam and its grant (STORE-11); and the
+  wire format of the subscription feed and the client ingress (STORE-16, STORE-17).
 - Items marked **Reserved** have no implementation owner.
 
 A **store** is one strictly serializable, ordered key-value database: a **history** of
@@ -36,8 +35,13 @@ writers and reports durability (STORE-11). The **engine**, `std@1/store`, orders
 transactions over byte keys, tracks every access and matches commits to subscriptions.
 Everything else is a library over the engine: typed tables (`std@1/table`), indexes,
 query languages, maintained views, workflows, migrations, verification and trial tools.
-The engine knows no table. No core operation, TIR or LIR construct is added for stores:
-`Tx` is the scoped capability of [MODE-6](ownership.md#mode-6-scoped-capabilities).
+The engine knows no table. Stores add no TIR or LIR construct, and `Tx` is the scoped
+capability of [MODE-6](ownership.md#mode-6-scoped-capabilities). The engine is std code
+over three core additions, which concern entries and places rather than stores:
+`runner.apply` and `runner.apply_mut` run a named entry in the current run as a failure
+boundary, `runner.entry_id` states an entry's identity ([RUN-3](runners.md#run-3-entries)),
+and a place's `Inbox` hands its head the calls that arrived for it
+([STORE-12](#store-12-transactions-at-a-runner)).
 
 ### STORE-1: Stores
 
@@ -83,11 +87,26 @@ fn store.query[A: serializable, R: serializable, E: serializable](snap: Snapshot
 ```
 
 There is no other way to run code against a store. A closure is never a transaction: a
-transaction is identified by its **call record**, the definition path, code hash and
-runtime contract revision of its entry, its call information
-([STORE-4](#store-4-call-information)) and its argument bytes, and a call record can be
-recorded, sent and run again ([STORE-10](#store-10-recording),
+transaction is identified by its **call record**, the identity of its entry
+(`runner.entry_id`: definition path, signature fingerprint and code hash,
+[RUN-3](runners.md#run-3-entries)), the runtime contract revision in force, its call
+information ([STORE-4](#store-4-call-information)) and its argument bytes, and a call
+record can be recorded, sent and run again ([STORE-10](#store-10-recording),
 [STORE-15](#store-15-evaluation-and-re-execution)).
+
+**Argument and outcome bytes.** The **argument bytes** are the canonical codec encoding of
+`a` ([SER-2](serialization.md#ser-2-canonical-codec)), the same bytes a runner call sends;
+the store encodes them once, at the call, and records them. Every run receives fresh owned
+data decoded from them, never the caller's `a`, because a codec round trip canonicalizes
+NaNs and `Set` order and re-execution decodes from the record. The **outcome bytes** are
+the canonical encoding of the `Result[R, TxFailure[E]]` the call returned, which its call
+record holds and a served call's end carries ([STORE-12](#store-12-transactions-at-a-runner)),
+and a caller receives fresh owned data equal to decoding them, whichever form it called,
+so a local and a served call of one entry return equal values
+([RUN-5](runners.md#run-5-placement-independence)). An engine skips a decode, or computes
+no outcome bytes, only where that is observably identical: for a schema with no float and
+no `Set`, a local call passes `a` and returns the body's value directly, and encodes the
+outcome only for a stream row or a reply.
 
 **The outcome rule.** A transaction's outcome, its writes and any failure it propagates
 are those of one run of its body, with its call information, on the state left by the
@@ -99,9 +118,10 @@ never retries: there is no conflict outcome.
 
 1. The **deciding run** sees every commit before it and its own earlier writes.
 2. `Ok(v)`: the writes commit at the next commit version. `Error(e)`: the writes are
-   discarded and the outcome is `Error(Aborted(e))`. A language failure in the body
-   discards the writes and propagates ([FAIL-2](failure.md#fail-2-boundary)); nothing is
-   committed.
+   discarded and the outcome is `Error(Aborted(e))`. A language failure `f` in the body
+   discards the writes and the outcome is `Error(Faulted(f))`; nothing is committed. Every
+   run is a failure boundary ([FAIL-2](failure.md#fail-2-boundary)), so the failure of a
+   discarded run is discarded with it, and only the deciding run's reaches the caller.
 3. The outcome is released by the output gate below.
 
 A query entry receives a borrowed `Tx`, so it cannot write
@@ -318,23 +338,24 @@ later transaction, which the store's limits bound.
 ### STORE-4: Call information
 
 ```text
-CallInfo   // opaque: copyable, data, key, inert, sendable; minted only by a store's head
+CallInfo   // opaque: copyable, data, key, inert, sendable; minted only by the engine
 fn call_info.caller(c: CallInfo) -> String
 fn call_info.at(c: CallInfo) -> i64
 fn call_info.seed(c: CallInfo) -> u64
 ```
 
-A store's head mints one `CallInfo` for each transaction it orders, records it in the
-transaction's call record, and passes it to the body as its `call` parameter. Because
-only a head constructs one, a body can trust it as the place's statement of:
+A store's head mints one `CallInfo` for each transaction it orders, before any run of it,
+records it in the transaction's call record, and passes the same value to every run of
+the body as its `call` parameter. Because only the engine constructs one, a body can
+trust it as the place's statement of:
 
 - `caller`: the **principal** the place admitted. For a runner caller it is `run:`
   followed by the 32 lowercase hexadecimal digits of the run instance
   ([RUN-11](runners.md#run-11-linked-tapes)) for an in-process or child-process caller,
   or the caller name the host's configuration assigns to an authenticated remote caller.
   For a client it is the principal the place derived from the token it verified at
-  ingress ([STORE-17](#store-17-clients)). It is the empty string for a transaction the
-  head runs itself.
+  ingress ([STORE-17](#store-17-clients)). It is the empty string for a call made locally,
+  through `store.transact`, `store.query` or `store.call`.
 - `at`: the commit-order time, signed Unix nanoseconds from the head's clock. It never
   decreases in commit order on one store, and is 0 when the head has no clock.
 - `seed`: eight bytes the head fixes when it orders the transaction, by default derived
@@ -344,6 +365,13 @@ only a head constructs one, a body can trust it as the place's statement of:
 
 The recorded call information is the deciding run's. `CallInfo` is the only way time,
 randomness or caller identity enter a body, and it does so as recorded data.
+
+A query is not ordered, so its call information holds only its caller: `at` and `seed`
+are 0. A query's outcome is then a function of its entry, its argument, its caller and
+the state at its version, and of nothing that changes when a commit leaves its access set
+alone ([STORE-14](#store-14-tracked-access)), which subscriptions and result caches rely
+on; a query that depends on time takes it as an argument
+([STORE-16](#store-16-subscriptions)).
 
 ### STORE-5: Tables
 
@@ -600,8 +628,9 @@ change schema together, their final publications are part of one activation
 
 **Call records.** Every commit records its ordered write set of puts and deletes on byte
 keys and values, whose SHA-256 is its write-set digest, and the call record of the
-transaction that made it, with the outcome it returned ([STORE-2](#store-2-transactions)), with its call stream and position when
-it arrived on one ([STORE-12](#store-12-transactions-at-a-runner)). A commit the engine
+transaction that made it, with the outcome it returned ([STORE-2](#store-2-transactions)),
+with its call stream, position and request digest when it arrived on one
+([STORE-12](#store-12-transactions-at-a-runner)). A commit the engine
 makes on its own behalf records which engine operation made it. The history therefore
 states, for every change, what changed and which call, under which code, changed it.
 How long call records are retained is store state
@@ -683,7 +712,14 @@ and no other machine, so a contended key is served at memory speed whatever the 
 `range_rows` 10000 by default. They are store state, recorded by the Genesis commit and
 bounded by what its backend can hold in one advance (**Bounds** below). A refused limit has no effect and is
 definite, never `Unknown(..)`. A deterministic bound on the work one body may do, equal
-on every engine, is **Reserved**.
+on every engine, is **Reserved**. It must charge every core operation by its operands, as
+the [long pure primitives](determinism.md#run-configuration) are charged, because an
+operation the host implements costs one step whatever its size; and its charges belong to
+the runtime contract revision a call record names, because step counts follow how a
+compiler lowers the code. Until it exists a body is bounded only by its run's memory
+budget, which is not equal across engines and so decides no outcome: exceeding it stops
+the run that holds the store, and every call that run had not released ends
+`InDoubt(Abandoned())`.
 
 A store must survive, by detecting and refusing, never by returning wrong data: the loss
 of anything not yet durable, torn and garbage writes, lost or ambiguous advances, and
@@ -717,7 +753,7 @@ nothing. A format change is a new magic and a cutover, never a second reader.
 
 ```text
 group  = "HSHIST01" prev:[32] first:u64 epoch:u64 defs:u32 count:u32 def* commit*
-def    = path:bytes code:[32] revision:bytes
+def    = path:bytes fingerprint:bytes code:[32] revision:bytes
 commit = kind:u8 body writes
 writes = n:u32 { op:u8 key:bytes [value:bytes if op = 1] }*
 ```
@@ -725,8 +761,8 @@ writes = n:u32 { op:u8 key:bytes [value:bytes if op = 1] }*
 `prev` is the **digest** `H(group)` of the previous group, all zeros for the first;
 `first` is the commit version of its first commit (versions start at 1); `epoch` is the
 writer epoch of the head that wrote it. The definition table names each distinct entry
-the group's commits ran (definition path, code hash, runtime contract revision,
-[RUN-8](runners.md#run-8-identity-and-arrival)) once, and commits refer to it by index.
+the group's commits ran (its identity: definition path, signature fingerprint and code
+hash, with the runtime contract revision, [RUN-8](runners.md#run-8-identity-and-arrival)) once, and commits refer to it by index.
 A write is a put (`op` 1) or a delete (`op` 2); keys strictly ascend, so a key occurs
 once. The SHA-256 of a commit's `writes` bytes is its write-set digest; it is derived,
 never stored. A group is valid only if every field decodes, nothing follows its last
@@ -738,7 +774,7 @@ Commit kinds:
 
 | Kind | Body after `kind` | Records |
 |---|---|---|
-| 1 Transaction | `def:u32 at:i64 seed:u64 caller:bytes stream:u8 [identity:[32] position:u64 if stream = 1] args:bytes outcome:bytes` | The call record ([STORE-2](#store-2-transactions)): the entry, the call information ([STORE-4](#store-4-call-information)), the call stream and position it arrived on ([STORE-12](#store-12-transactions-at-a-runner)), the argument bytes and the canonical bytes of the `Result[R, TxFailure[E]]` it returned. |
+| 1 Transaction | `def:u32 at:i64 seed:u64 caller:bytes stream:u8 [identity:[32] position:u64 digest:[32] if stream = 1] args:bytes outcome:bytes` | The call record ([STORE-2](#store-2-transactions)): the entry, the call information ([STORE-4](#store-4-call-information)), the call stream, position and request digest it arrived with ([STORE-12](#store-12-transactions-at-a-runner)), the argument bytes and the canonical bytes of the `Result[R, TxFailure[E]]` it returned. |
 | 2 Engine | `op:u8 payload:bytes` | A commit the engine makes on its own behalf, one of the operations below. An unknown `op` is corruption. |
 | 3 Run | `run:[16] n:u32 { kind:u8 payload:bytes }*` | The journal records of a run at the place ([STORE-18](#store-18-runs-at-a-place)), with the kinds and payloads of the [durable journal](determinism.md#durable-journal). |
 
@@ -853,7 +889,8 @@ the state's size and at least 64 MiB, so recovery reads at most about twice the 
 ### STORE-12: Transactions at a runner
 
 A place serves its store's entries to callers as runner calls
-([RUN-4](runners.md#run-4-calls)), through the provider `db@1`:
+([RUN-4](runners.md#run-4-calls)), through the provider `db@1`
+([providers](runners.md#providers)):
 
 ```text
 fn runner.transact[A: serializable, R: serializable, E: serializable](r: Runner, f: Entry[fn(mut tx: Tx, call: CallInfo, a: A) -> Result[R, E]], a: A) -> Result[R, RunError[TxFailure[E]]]
@@ -861,18 +898,93 @@ fn runner.query[A: serializable, R: serializable, E: serializable](r: Runner, f:
 ```
 
 `runner.transact` and `runner.query` name `Tx`, `CallInfo` and `TxFailure`, which
-`std@1/store` declares, so they are declared beside them. The run that holds a `Store`
-accepts an arrived entry after the arrival checks of
-[RUN-8](runners.md#run-8-identity-and-arrival), orders it, runs it as
-[STORE-2](#store-2-transactions) says and releases its outcome through the gate. A query
-runs at a durable version on any machine that follows the store
-([STORE-20](#store-20-one-history-many-machines)). A place serves only the entries on its
-allowlist; no caller reaches a store's rows any other way.
+`std@1/store` declares, so they are declared beside them. A place serves only the entries
+its head serves; no caller reaches a store's rows any other way.
 
-The store's side of a transact call is one request on a call stream:
+#### Serving
 
 ```text
-CallRequest    = { stream: Bytes, epoch: u64, position: u64, digest: Bytes, acknowledged: u64 }
+Served   // opaque: copyable, inert, sendable; one entry a head serves, with its form
+fn store.served_transact[A: serializable, R: serializable, E: serializable](f: Entry[fn(mut tx: Tx, call: CallInfo, a: A) -> Result[R, E]]) -> Served
+fn store.served_query[A: serializable, R: serializable, E: serializable](f: Entry[fn(tx: Tx, call: CallInfo, a: A) -> Result[R, E]]) -> Served
+fn store.serve(mut s: Store, take inbox: Inbox, entries: List[Served]) -> Result[(), StoreError]
+```
+
+The **head run** of a place is the run that holds its `Store`. Its host routes to it the
+transact and query calls that pass the host's arrival checks, through the `Inbox` its
+`Io` projects ([`db@1`](runners.md#providers)), and the head serves them with
+`store.serve` until the inbox closes, which returns `Ok(())`, or the store closes, which
+returns the store's error. An `entries` list that names one path twice is a failure of
+rule STORE-12.
+
+**Naming and resolution.** A served call names its entry only by identity: its path,
+signature fingerprint and code hash ([RUN-3](runners.md#run-3-entries)), never by a
+closure, a code address or a name the caller chose. The head resolves it against
+`entries`, whose identities are those of the head run's own revision: a path it does not
+serve, or serves in the other form, is `NotRun(Denied())`; a path it serves whose
+fingerprint or code hash differs is `NotRun(VersionMismatch())`, reporting the head's
+hashes as missing. The head never loads code to serve a call. These are, for a place,
+check 3 and the allowlist of check 4 of [RUN-8](runners.md#run-8-identity-and-arrival);
+the host makes the other checks before the call reaches the head.
+
+**Each arrival.** For each arrival, in the order it chooses, `store.serve`:
+
+1. resolves its entry as above;
+2. for a transact call, decides its stream request in the transaction that would run it
+   (call streams, below); a position with a recorded outcome runs nothing;
+3. decodes the argument bytes against `A` ([SER-2](serialization.md#ser-2-canonical-codec)),
+   else `NotRun(Rejected())`;
+4. mints the call information ([STORE-4](#store-4-call-information)) with the arrival's
+   caller, and evaluates the entry ([STORE-15](#store-15-evaluation-and-re-execution)): a
+   transaction on the head's state, committing as [STORE-2](#store-2-transactions) says,
+   or a query on `store.snapshot(s, L)`;
+5. ends the arrival with its **call end** once the gate releases it: when `D(L)` reaches
+   its gate version, for `L` the stronger of the level the request names and the place's
+   floor ([STORE-2](#store-2-transactions)).
+
+`store.serve` waits on no backend request to order or evaluate an arrival; only each end
+waits for its release. It promises no order between arrivals on different streams.
+`db.local@1` evaluates them one at a time, in the order the inbox delivers them.
+
+**Call ends.** A call's outcome is one value of the core type `CallEnd`
+([frames](runners.md#providers)), the same on the wire, in a stream row and in a
+recording; its canonical bytes are the call's outcome bytes
+([STORE-2](#store-2-transactions)):
+
+| The call | `store.transact`, `store.query` | `runner.transact`, `runner.query` | `CallEnd` | On the stream |
+|---|---|---|---|---|
+| The body returned `Ok(r)` | `Ok(r)` | `Ok(r)` | `Returned`, the bytes of `r` | recorded |
+| The body returned `Error(e)` | `Error(Aborted(e))` | `Error(Failed(Aborted(e)))` | `Failed`, the bytes of the `TxFailure[E]` | recorded |
+| The commit exceeded a limit `l` | `Error(Limit(l))` | `Error(Failed(Limit(l)))` | `Failed` | recorded by the stream rows alone |
+| The body failed with `f` | `Error(Faulted(f))` | `Error(Faulted(f))` | `Faulted` | not recorded |
+| The backend refused or failed the commit (`e`) | `Error(Storage(e))` | `Error(InDoubt(Abandoned()))` | `InDoubt` | not recorded |
+| Durability could not be decided (`e`) | `Error(Unknown(e))` | `Error(InDoubt(Abandoned()))` | `InDoubt` | not recorded |
+| Cancelled before the head took it | | `Error(Canceled(cause))` | `Canceled` | not recorded |
+| Refused at arrival, resolution or the stream | | `Error(NotRun(..))` | `NotRun` | not recorded |
+
+`TxFailure`'s `Canceled`, `Faulted` and `Unknown` never occur inside `Failed`: the runner
+reports cancellation, failure and doubt itself ([RUN-6](runners.md#run-6-outcomes)). A
+served call can be cancelled ([RUN-9](runners.md#run-9-cancellation)) only until the head
+takes it from its inbox; from then on it ends with its own outcome.
+
+**Recording.** A served call starts no callee run
+([RUN-10](runners.md#run-10-callee-runs)): its body runs as an evaluation inside the head
+run, and its record is its call record in the history ([STORE-10](#store-10-recording)),
+whose stream, position and request digest link it to the caller's recorded request
+([RUN-11](runners.md#run-11-linked-tapes)). The head run records each arrival it takes and
+each end it gives as capability inputs and effects at its own level
+([RUN-14](runners.md#run-14-recording-levels)), so it replays, bodies included, from its
+tape. A durable caller journals a request before it is sent and its completion after the
+end arrives; an end is released only at its level, so no completion a caller journals
+depends on state that level could lose.
+
+**Local calls.** `store.transact`, `store.query` and `store.call` evaluate as
+`store.serve` does, with the entry the caller names from its own revision and an empty
+caller ([STORE-4](#store-4-call-information)). The store's side of a transact call is one
+request on a call stream, `CallRequest`, a root core data type
+([frames](runners.md#providers)):
+
+```text
 CallFailure[E] = Tx(TxFailure[E]) | Denied() | Rejected()
 fn store.call[A: serializable, R: serializable, E: serializable](mut s: Store, req: CallRequest, f: Entry[fn(mut tx: Tx, call: CallInfo, a: A) -> Result[R, E]], a: A) -> Result[R, CallFailure[E]]
 ```
@@ -885,53 +997,59 @@ below says. `Denied()` and `Rejected()` are the runner's `NotRun(Denied())` and
   stream, so the state a store keeps grows with the number of callers, not of calls. A
   stream belongs to one caller at one store: a caller run, with identity
   `H("hirsel.stream.v1", caller name, run instance)`, or a client session
-  ([STORE-17](#store-17-clients)). The store keeps one row per stream under the reserved
-  key `hirsel.streams/` followed by the stream identity: its `epoch`, its `applied`
-  position, its `acknowledged` position, and the request digest and outcome bytes (`Ok`,
-  `Aborted` or `Limit`) of each position above `acknowledged` and at most `applied`. A
-  stream's identity and positions are logical: they do not change when the head moves to
-  another machine or the store to another backend.
+  ([STORE-17](#store-17-clients)); every stream identity is 32 bytes, and a request whose
+  identity is not is `NotRun(Rejected())`. Under the reserved key `hirsel.streams/`
+  followed by the identity, the store keeps the stream's **head row**: its `epoch`, its
+  `applied` position and its `acknowledged` position. Under that key followed by a
+  position as a big-endian `u64`, it keeps one **outcome row** for each position above
+  `acknowledged` and at most `applied`: the request digest and the call end. A stream's
+  identity and positions are logical: they do not change when the head moves to another
+  machine or the store to another backend.
 - A request carries the stream identity, the caller's epoch, a position, the request
   digest and the highest position whose outcome the caller has made durable. Positions
   start at 1 and are consecutive, and a caller has at most one request in flight per
-  stream; a request that ends in `NotRun` leaves its position to the caller's next
-  request. The store decides each request in the transaction that would run it: an epoch
-  below the row's is `NotRun(Denied())`; a position at or below `acknowledged`, or above
-  `applied + 1`, is `NotRun(Rejected())`; a position above `acknowledged` and at most
-  `applied` returns its recorded outcome when the digest is equal and is
-  `NotRun(Rejected())` when it differs; position `applied + 1` runs the body, and the same
-  commit records the outcome, sets `applied`, raises `acknowledged` and drops the outcomes
-  at or below it. A request whose epoch exceeds the row's raises it in the commit that
-  decides the request, a duplicate's included. An outcome that commits no writes is
-  recorded in a transaction of its own that writes only the stream row. The row is one of
-  the commit's writes and counts against the store's limits: when the body's writes and
-  the row recording their outcome exceed them, the outcome is `Limit(..)`, recorded by a
-  commit of the row alone; when not even that row fits (the caller holds too many outcomes
-  unacknowledged), the request is refused `Limit(..)` without being recorded and its
+  stream; a request that ends in `NotRun` or `Faulted` leaves its position to the caller's
+  next request. The store decides each request in the transaction that would run it: an
+  epoch below the head row's is `NotRun(Denied())`; a position at or below
+  `acknowledged`, or above `applied + 1`, is `NotRun(Rejected())`; a position above
+  `acknowledged` and at most `applied` returns its recorded end when the digest is equal,
+  without decoding it at a served call, and is `NotRun(Rejected())` when it differs;
+  position `applied + 1` runs the body, and the same commit puts its outcome row, sets
+  `applied`, raises `acknowledged` and deletes the outcome rows at or below it. A request
+  whose epoch exceeds the head row's raises it in the commit that decides the request, a
+  duplicate's included. An end that commits no writes is recorded in a transaction of its
+  own that writes only the stream rows. The stream rows are writes of the commit and count
+  against the store's limits: when the body's writes and the rows recording their end
+  exceed them, the end is `Limit(..)`, recorded by a commit of the stream rows alone; when
+  not even those fit, the request is refused `Limit(..)` without being recorded and its
   position stays `applied + 1`.
 - **Fencing.** A durable caller's executor holds an epoch for each stream, recorded in its
   journal header. A live continuation first commits, on each store the run used, a fence
   request that raises the stream's epoch and returns its `applied` position and retained
-  outcomes. A `Prepared` position at or below `applied` then has its recorded outcome, and
-  one above it proves the transaction never committed, so a transact is never in doubt. A
+  ends. A `Prepared` position at or below `applied` then has its recorded end, and one
+  above it proves the transaction never committed, so a transact is never in doubt. A
   caller ends its stream by acknowledging its last position; an administrator may purge
   abandoned streams, which the store records, and a purged stream's requests are
   unresolvable thereafter rather than "never run".
-- A store that is fenced or whose durability cannot be decided ends every unreleased call
-  with `InDoubt(Abandoned())`, which the caller's stream resolves.
+- A store that is fenced, whose backend fails, or whose durability cannot be decided ends
+  every unreleased call with `InDoubt(Abandoned())`, which the caller's stream resolves.
 
 **Across places.** Places exchange only runner calls. A transact call is exactly once at
 its place; no call makes two places commit together. A library protocol over call
 streams, in which each place first commits a hold on the keys it will change and a
 coordinator then commits one decision, is **Reserved**. Its one requirement of the engine
 is that the store, which chooses the order, runs a transaction that touches a held key
-range only after the hold is decided.
+range only after the hold is decided. Serving leaves that open: the engine may evaluate
+an arrival, find in its access set ([STORE-14](#store-14-tracked-access)) a held range,
+discard the run unobserved and order the arrival again once the hold is decided. Its
+stream position is consumed only by the commit that decides it, `store.serve` promises no
+order across streams, and the wait is for another commit, never for a backend request.
 
 ### STORE-13: Failures
 
 ```text
-TxFailure[E] = Aborted(E) | Canceled(CancelCause) | Storage(StoreError) | Limit(TxLimit)
-             | Unknown(StoreError)
+TxFailure[E] = Aborted(E) | Canceled(CancelCause) | Faulted(Failure) | Storage(StoreError)
+             | Limit(TxLimit) | Unknown(StoreError)
 TxError      = NoTable() | TableExists() | Schema(SchemaError) | Migrating() | ReadOnly()
              | OutOfScope() | InvalidInput() | Limit(TxLimit) | Storage(StoreError)
 SchemaError  = KeyMismatch() | ValueMismatch() | Renamed(stored: String, expected: String)
@@ -941,7 +1059,8 @@ TxLimit      = KeyBytes() | ValueBytes() | TransactionBytes() | RangeRows()
 
 Variant ordinals in the order written, `serializable` (`TxFailure[E]` when `E` is).
 `TxFailure` is the outcome of a transaction: `Aborted(e)` when the body returned
-`Error(e)`; `Canceled(cause)` before any run; `Storage(..)` and `Limit(..)` when the
+`Error(e)`; `Canceled(cause)` before any run; `Faulted(f)` when the body failed with `f`
+([FAIL-2](failure.md#fail-2-boundary)), with no effect; `Storage(..)` and `Limit(..)` when the
 commit could not be made, with no effect; and `Unknown(..)` when the commit was attempted
 and its durability could not be decided (STORE-11), which never claims an effect or its
 absence. `TxError` is the outcome of one operation inside a body. `Storage(e)` is an
@@ -977,7 +1096,14 @@ such as fetching ahead of a run and placement statistics, may approximate it.
 nothing. It yields the outcome bytes, the write set and the access set
 ([STORE-14](#store-14-tracked-access)). It is the engine's one way to run a body: a
 commit is an evaluation at the head followed by an advance of the history, and a query is
-the evaluation of a query entry. A place loads the code a call record names by its hash
+the evaluation of a query entry. Local, served, replicated and re-executed calls evaluate
+alike: the engine decodes the argument bytes ([STORE-2](#store-2-transactions)) and applies
+the entry with `runner.apply_mut` to a `Tx` of its transaction, or with `runner.apply` to a
+`Tx` of a query ([RUN-3](runners.md#run-3-entries)), so a body's failure is an outcome of
+the evaluation and never escapes it. Whether a body exceeds a limit is part of its outcome
+and the same in every engine; where an engine stops it is not, since its writes are
+discarded ([STORE-11](#store-11-engine-and-storage-seam)). A place that evaluates a call
+record it did not serve loads the code it names by its hash
 ([RUN-13](runners.md#run-13-provider-seams)). A body can perform no effect
 ([STORE-3](#store-3-transaction-scope)), so an evaluation needs no confinement and leaves
 no trace.

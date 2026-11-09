@@ -965,6 +965,9 @@ fn an_adversarial_caller_keeps_host_state_and_frame_work_within_its_limits() {
         assert!(actions.len() <= window + 1, "seed {seed}: {actions:?}");
         let held = host.retained();
         assert!(held.gaps < window, "seed {seed}: {held:?}");
+        // Only the main stream receives calls. The lane's requested unacknowledged
+        // bound is the window here; extra streams hold no decided positions.
+        assert!(held.decided <= window, "seed {seed}: {held:?}");
         assert!(
             held.streams <= limits.streams as usize,
             "seed {seed}: {held:?}"

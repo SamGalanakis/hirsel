@@ -623,12 +623,8 @@ pub fn call[S, R: inert + serializable, E: inert + serializable](
   let mut tx = Tx(txn: take t, limits: s.config.limits)
   let returned = body(mut tx)
   let Tx(txn: done, limits: _) = take tx
-  let limit = over_limit(s.config.limits, done)
-  let outcome: Result[R, TxFailure[E]] = match take returned {
-    Ok(v) => match limit {
-      Some(l) => Error(Limit(l)),
-      None() => Ok(take v),
-    },
+  let mut outcome: Result[R, TxFailure[E]] = match take returned {
+    Ok(v) => Ok(take v),
     Error(e) => Error(Aborted(take e)),
   }
   row.epoch = req.epoch
@@ -642,20 +638,27 @@ pub fn call[S, R: inert + serializable, E: inert + serializable](
       list.push(mut kept, copy r)
     }
   }
-  list.push(
-    mut kept,
-    Retained(
-      position: req.position,
-      digest: unique req.digest,
-      outcome: codec.encode(outcome)
-    )
-  )
   row.retained = take kept
   let mut commit_set = match outcome {
     Ok(_) => take done,
     Error(_) => serial(mut s),
   }
-  txn.put(mut commit_set, take key, codec.encode(row))
+  put_row(mut commit_set, copy key, unique row, req, outcome)
+  // The row counts against the limits like the body's writes: when the writes
+  // and the row recording them exceed them, the outcome is the limit, recorded
+  // by a commit of the row alone.
+  if let Some(l) = over_limit(s.config.limits, commit_set) {
+    outcome = Error(Limit(l))
+    commit_set = serial(mut s)
+    put_row(mut commit_set, copy key, take row, req, outcome)
+    // Not even the row recording the limit fits (its caller holds too many
+    // outcomes unacknowledged): the request is refused unrecorded, and its
+    // position stays the next one.
+    if let Some(full) = over_limit(s.config.limits, commit_set) {
+      gate(mut s, base) ? released_call
+      return Error(Tx(Limit(full)))
+    }
+  }
   settle(mut s, take commit_set) ? released_call
   match take outcome {
     Ok(v) => Ok(take v),
@@ -701,6 +704,27 @@ fn stream_key(stream: Bytes) -> Bytes uses {} {
     list.push(mut out, b)
   }
   bytes.from_list(take out)
+}
+
+// Puts into `set` the stream row `row`, its retained outcomes followed by
+// `outcome` at `req`'s position.
+fn put_row[R: inert + serializable, E: inert + serializable](
+  mut set: Txn,
+  take key: Bytes,
+  take row: StreamRow,
+  req: CallRequest,
+  outcome: Result[R, TxFailure[E]]
+) -> () uses {} {
+  let mut recorded = take row
+  list.push(
+    mut recorded.retained,
+    Retained(
+      position: req.position,
+      digest: unique req.digest,
+      outcome: codec.encode(outcome)
+    )
+  )
+  txn.put(mut set, take key, codec.encode(recorded))
 }
 
 // Releases a refusal once every commit the request could see is durable.

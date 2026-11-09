@@ -11,7 +11,7 @@
 //!               "grants": {"tasks": "tasks.cooperative@1"}, "definitions": null}],
 //!  "journal": {"provider": "journal.dir@1", "path": "/var/lib/hirsel/calls"},
 //!  "recording": "record", "tapes": "/var/lib/hirsel/tapes",
-//!  "runs": 1, "queue": 64}
+//!  "runs": 1, "queue": 64, "streams": 65536}
 //! ```
 //!
 //! `clients` null serves clients without certificates, all of them the one caller whose
@@ -51,6 +51,9 @@ pub struct HostConfig {
     /// Admitted calls waiting for a run (default 64).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub queue: Option<u64>,
+    /// Call streams one caller holds (default 65536).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub streams: Option<u64>,
     /// The largest frame read, in bytes (default 64 MiB).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub frame_bytes: Option<u64>,
@@ -90,6 +93,7 @@ pub struct JournalEntry {
 
 pub const DEFAULT_RUNS: u64 = 1;
 pub const DEFAULT_QUEUE: u64 = 64;
+pub const DEFAULT_STREAMS: u64 = 65_536;
 pub const DEFAULT_FRAME_BYTES: u64 = 64 * 1024 * 1024;
 
 impl HostConfig {
@@ -237,6 +241,7 @@ impl HostConfig {
         for (field, value, default) in [
             ("host.runs", &mut config.runs, DEFAULT_RUNS),
             ("host.queue", &mut config.queue, DEFAULT_QUEUE),
+            ("host.streams", &mut config.streams, DEFAULT_STREAMS),
             (
                 "host.frame_bytes",
                 &mut config.frame_bytes,
@@ -256,6 +261,9 @@ impl HostConfig {
     }
     pub fn queue(&self) -> u64 {
         self.queue.unwrap_or(DEFAULT_QUEUE)
+    }
+    pub fn streams(&self) -> u64 {
+        self.streams.unwrap_or(DEFAULT_STREAMS)
     }
     pub fn frame_bytes(&self) -> u64 {
         self.frame_bytes.unwrap_or(DEFAULT_FRAME_BYTES)

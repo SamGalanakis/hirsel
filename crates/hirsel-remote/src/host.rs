@@ -12,14 +12,22 @@
 //! - a decided position with the same digest is a duplicate: it gets the stored outcome
 //!   (or, while its callee runs, the outcome when it ends) and never runs again; with a
 //!   different digest it is `NotRun(Rejected())`;
-//! - a position beyond the next is a gap, refused with `NotRun(Rejected())`, and that
-//!   refusal is sticky: when the gap closes the position is decided `Rejected` too, so the
-//!   host never contradicts an answer it gave;
+//! - a position beyond the next but within the stream's window (`applied + runs + queue`,
+//!   the farthest position capacity could admit) is a gap, refused with
+//!   `NotRun(Rejected())`, and that refusal is sticky: when the gap closes the position is
+//!   decided `Rejected` too, so the host never contradicts an answer it gave;
+//! - a position beyond the window is refused with `NotRun(Overloaded())` before anything
+//!   is stored, and the session refuses every position from it on the same way (deciding
+//!   each `Overloaded` when it is the next) until the session reopens, so a session keeps
+//!   at most `runs + queue - 1` gaps and one frame decides at most that many;
 //! - a position at or below the acknowledged one is stale and refused.
 //!
 //! The stream position is decided before the code and authority checks of RUN-8 (whose
 //! order the spec gives for a single request), so every decision, refusals included, is
 //! recorded at its position and a duplicate is answered without being checked again.
+//!
+//! **Streams per caller.** A caller holds at most `streams` streams; opening another is
+//! `Refused(Overloaded())` before its journal record is written.
 //!
 //! **Sessions.** A session is one connection's view of a stream at an epoch. Opening at a
 //! higher epoch fences the previous session: its connection is closed and frames carrying
@@ -113,11 +121,26 @@ pub struct Limits {
     pub runs: u64,
     /// Admitted calls waiting for a run.
     pub queue: u64,
+    /// Streams one caller holds.
+    pub streams: u64,
 }
 impl Default for Limits {
     fn default() -> Self {
-        Self { runs: 1, queue: 64 }
+        Self {
+            runs: 1,
+            queue: 64,
+            streams: 65_536,
+        }
     }
+}
+
+/// What a host keeps in memory: its streams, their sessions' gap refusals, and the decided
+/// positions their callers have not acknowledged.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct Retained {
+    pub streams: usize,
+    pub gaps: usize,
+    pub decided: usize,
 }
 
 #[derive(Clone, Debug)]
@@ -148,6 +171,16 @@ struct Stream {
     decided: BTreeMap<u64, Decided>,
     /// This session's gap refusals above `applied + 1`: key and digest.
     gaps: BTreeMap<u64, ([u8; 32], [u8; 32])>,
+    /// The lowest position this session refused beyond its window: it and every later
+    /// position are refused `Overloaded` until the session reopens.
+    walled: Option<u64>,
+}
+impl Stream {
+    /// A new session, or none: its gap refusals end with it.
+    fn reset_session(&mut self) {
+        self.gaps.clear();
+        self.walled = None;
+    }
 }
 fn stream_of<'a>(streams: &'a mut BTreeMap<StreamKey, Stream>, key: &StreamKey) -> &'a mut Stream {
     streams.entry(key.clone()).or_insert_with(|| Stream {
@@ -158,6 +191,7 @@ fn stream_of<'a>(streams: &'a mut BTreeMap<StreamKey, Stream>, key: &StreamKey) 
         acknowledged: 0,
         decided: BTreeMap::new(),
         gaps: BTreeMap::new(),
+        walled: None,
     })
 }
 struct Session {
@@ -176,6 +210,8 @@ pub struct Host {
     limits: Limits,
     sessions: BTreeMap<SessionId, Session>,
     streams: BTreeMap<StreamKey, Stream>,
+    /// Streams held per caller name.
+    held: BTreeMap<String, u64>,
     runs: BTreeMap<RunId, Run>,
     queued: VecDeque<RunId>,
     running: u64,
@@ -273,11 +309,16 @@ impl Host {
                 },
             );
         }
+        let mut held = BTreeMap::new();
+        for key in streams.keys() {
+            *held.entry(key.caller.clone()).or_insert(0) += 1;
+        }
         Ok(Self {
             journal,
             limits,
             sessions: BTreeMap::new(),
             streams,
+            held,
             runs: BTreeMap::new(),
             queued: VecDeque::new(),
             running: 0,
@@ -290,6 +331,15 @@ impl Host {
     /// refuses all work; its process must exit and recover from the journal.
     pub fn failure(&self) -> Option<&str> {
         self.failure.as_deref()
+    }
+
+    /// What this host keeps in memory.
+    pub fn retained(&self) -> Retained {
+        Retained {
+            streams: self.streams.len(),
+            gaps: self.streams.values().map(|s| s.gaps.len()).sum(),
+            decided: self.streams.values().map(|s| s.decided.len()).sum(),
+        }
     }
 
     /// Append `entry`, or stop the host: cancel every running callee and close every
@@ -350,7 +400,7 @@ impl Host {
             return actions;
         }
         stream.session = None;
-        stream.gaps.clear();
+        stream.reset_session();
         self.cancel_stream(&key, PARENT, &mut actions);
         actions
     }
@@ -456,7 +506,7 @@ impl Host {
                 }
                 let stream = self.streams.get_mut(&key).unwrap();
                 stream.session = None;
-                stream.gaps.clear();
+                stream.reset_session();
                 self.sessions.remove(&session);
                 actions.push(Action::Close(session));
             }
@@ -484,6 +534,12 @@ impl Host {
             stream: stream_id,
         };
         if !self.streams.contains_key(&key) {
+            let held = self.held.get(&caller.name).copied().unwrap_or(0);
+            if held >= self.limits.streams {
+                actions.push(Action::Send(session, Frame::Refused(OVERLOADED)));
+                actions.push(Action::Close(session));
+                return;
+            }
             let entry = Entry::Stream {
                 stream: key.clone(),
                 instance,
@@ -492,6 +548,7 @@ impl Host {
                 return;
             }
             stream_of(&mut self.streams, &key).instance = instance;
+            *self.held.entry(caller.name.clone()).or_insert(0) += 1;
         }
         let stream = self.streams.get_mut(&key).unwrap();
         // A stale epoch, or another run's stream bytes, is refused.
@@ -508,7 +565,7 @@ impl Host {
             actions.push(Action::Close(old));
         }
         stream.epoch = epoch;
-        stream.gaps.clear();
+        stream.reset_session();
         self.sessions.get_mut(&session).unwrap().stream = Some(key);
         actions.push(Action::Send(
             session,
@@ -609,6 +666,7 @@ impl Host {
         epoch: u64,
         call: &Call,
         digest: [u8; 32],
+        reason: u32,
         actions: &mut Vec<Action>,
     ) {
         actions.push(Action::Send(
@@ -618,7 +676,7 @@ impl Host {
                 position: call.position,
                 key: call.key,
                 digest,
-                end: CallOutcome::NotRun(REJECTED),
+                end: CallOutcome::NotRun(reason),
                 callee: None,
                 missing: vec![],
             })),
@@ -644,27 +702,51 @@ impl Host {
         let epoch = stream.epoch;
         let position = call.position;
         if position <= stream.acknowledged {
-            return Self::refuse(session, epoch, &call, digest, actions);
+            return Self::refuse(session, epoch, &call, digest, REJECTED, actions);
         }
         if position <= stream.applied {
             let decided = &stream.decided[&position];
             if decided.digest != digest || decided.key != call.key {
-                return Self::refuse(session, epoch, &call, digest, actions);
+                return Self::refuse(session, epoch, &call, digest, REJECTED, actions);
             }
             // A duplicate: its outcome now if it has one, else when its callee ends.
             return self.resend(session, key, call.reference(), actions);
         }
+        // Past the window no capacity could admit the position: it is refused before
+        // anything is stored, and so is every later one this session sends.
+        let window = stream
+            .applied
+            .saturating_add(self.limits.runs)
+            .saturating_add(self.limits.queue);
+        if position > window {
+            stream.walled = Some(stream.walled.map_or(position, |w| w.min(position)));
+        }
+        let walled = stream.walled.is_some_and(|w| position >= w);
         if position > stream.applied + 1 {
+            if walled {
+                return Self::refuse(session, epoch, &call, digest, OVERLOADED, actions);
+            }
             match stream.gaps.get(&position) {
                 Some(&(k, d)) if (k, d) != (call.key, digest) => (),
                 _ => {
                     stream.gaps.insert(position, (call.key, digest));
                 }
             }
-            return Self::refuse(session, epoch, &call, digest, actions);
+            return Self::refuse(session, epoch, &call, digest, REJECTED, actions);
         }
         // The next position: decide it.
-        if stream.gaps.remove(&position).is_some() {
+        if walled {
+            self.decide_refused(
+                key,
+                position,
+                call.key,
+                digest,
+                OVERLOADED,
+                vec![],
+                session,
+                actions,
+            );
+        } else if stream.gaps.remove(&position).is_some() {
             // Refused while it was a gap: that answer stands for whatever arrives here.
             self.decide_refused(
                 key,

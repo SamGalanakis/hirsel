@@ -688,8 +688,13 @@ session. Within an epoch the caller numbers its calls 1, 2, ...; the host decide
 position exactly once and in order, and every decided position, `NotRun` included, keeps
 its outcome until the caller acknowledges it (`acknowledged` on a later `Call`, or
 `Close`). A `Call` for a decided position with the same digest is answered the stored
-outcome without running; with another digest it is `NotRun(Rejected())`; a position past
-the next one is refused and the stream refuses until the session reopens. The host decides
+outcome without running; with another digest it is `NotRun(Rejected())`. A position past
+the next one is refused `NotRun(Rejected())` and that refusal stands when the position is
+reached. The stream's **window** ends at `applied + runs + queue`, the farthest position
+the host's capacity could admit: a position past it is refused `NotRun(Overloaded())`
+(RUN-8 check 6) before anything is stored, and the session refuses it and every later
+position the same way, each decided `Overloaded` when it is the next, until the session
+reopens. A session so holds at most `runs + queue - 1` refused gaps. The host decides
 the position before the code and authority checks, so a call those refuse still consumes
 its position.
 
@@ -715,7 +720,7 @@ the program's own package defines:
  "admission": {"code": "admit.safe@1"},
  "journal": {"provider": "journal.dir@1", "path": "/var/lib/hirsel/calls"},
  "recording": "record", "tapes": "/var/lib/hirsel/tapes",
- "runs": 1, "queue": 64, "frame_bytes": 67108864}
+ "runs": 1, "queue": 64, "streams": 65536, "frame_bytes": 67108864}
 ```
 
 `listen` is an endpoint as in the runner entry. With `clients` trust anchors the host
@@ -754,7 +759,11 @@ It cancels its running callees, closes every session, refuses all later work, an
 serve` exits with the error, so the restarted host recovers from the journal. `recording` is `none` (the default) or `record`, each callee's
 tape written to `tapes` under its call key. `runs` (default 1) bounds callees running at
 once and `queue` (default 64) admitted calls waiting, beyond which a call is
-`NotRun(Overloaded())`.
+`NotRun(Overloaded())`. `streams` (default 65536) bounds the call streams one caller
+holds: an `Open` of another is `Refused(Overloaded())` before its stream is recorded.
+Until the administrative purge ([STORE-12](storage.md#store-12-transactions-at-a-runner))
+exists a host keeps every stream it recorded, so the bound counts every caller run that
+has opened one.
 
 **`db@1`** (Reserved) runs compute and transact callees inside the writer of a store
 ([STORE-12](storage.md#store-12-transactions-at-a-runner)).

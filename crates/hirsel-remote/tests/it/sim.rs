@@ -529,7 +529,11 @@ fn run(seed: u64, faults: Faults, durable: bool, settings: Settings) -> World {
         faults,
         durable,
         settings,
-        Limits { runs: 2, queue: 64 },
+        Limits {
+            runs: 2,
+            queue: 64,
+            ..Limits::default()
+        },
     );
     let calls = 12;
     let mut submitted = 0;
@@ -639,7 +643,11 @@ fn a_crash_mid_call_is_abandoned_and_an_undelivered_call_never_ran() {
             reconcile: true,
             ..Settings::default()
         },
-        Limits { runs: 1, queue: 8 },
+        Limits {
+            runs: 1,
+            queue: 8,
+            ..Limits::default()
+        },
     );
     world.submit(0, "app@1/m.charge");
     // Deliver Open, Opened and the Call: the callee starts.
@@ -874,5 +882,152 @@ fn a_partial_append_stops_the_host_and_the_next_record_survives_restart() {
             matches!(&answer[..], [Action::Send(4, Frame::Outcome(o))] if o.end == CallOutcome::Ok(vec![end])),
             "position {position}: {answer:?}"
         );
+    }
+}
+
+/// A caller that sends whatever it likes: positions far past the next one, repeated and
+/// changed requests, random acknowledgements and more streams than it may hold. The host's
+/// memory and its work per frame stay within its limits, whatever arrives: a session keeps
+/// at most `runs + queue - 1` gap refusals, a caller at most `streams` streams, and one
+/// frame answers at most `runs + queue + 1` actions. No position runs twice, and a position
+/// refused before it was reached is decided with that refusal.
+#[test]
+fn an_adversarial_caller_keeps_host_state_and_frame_work_within_its_limits() {
+    let limits = Limits {
+        runs: 1,
+        queue: 2,
+        streams: 4,
+    };
+    let window = (limits.runs + limits.queue) as usize;
+    let check = |seed: u64, host: &Host, actions: &[Action]| {
+        assert!(actions.len() <= window + 1, "seed {seed}: {actions:?}");
+        let held = host.retained();
+        assert!(held.gaps < window, "seed {seed}: {held:?}");
+        assert!(
+            held.streams <= limits.streams as usize,
+            "seed {seed}: {held:?}"
+        );
+    };
+    for seed in 0..50 {
+        let mut rng = Rng(seed);
+        let mut host = Host::new(Box::new(NoJournal::new([1; 16])), limits).unwrap();
+        // Positions whose callee started.
+        let mut started: BTreeSet<u64> = BTreeSet::new();
+        let mut running: Vec<u64> = vec![];
+        let mut session = 0;
+        let mut epoch = 0;
+        let mut applied = 0;
+        let mut opened = 0;
+        // This session's refusals of positions not yet reached.
+        let mut refused: BTreeMap<u64, CallOutcome> = BTreeMap::new();
+        for step in 0..4_000u64 {
+            if step % 500 == 0 {
+                // The caller's main stream reopens, which ends its refusals.
+                session += 1;
+                epoch += 1;
+                host.connected(session, Some(caller()));
+                let open = Frame::Open {
+                    stream: [0; 32],
+                    instance: INSTANCE,
+                    epoch,
+                };
+                let actions = host.frame(session, open, &mut TestPlace, &TestDigests);
+                check(seed, &host, &actions);
+                let [.., Action::Send(_, Frame::Opened { applied: a, .. })] = actions[..] else {
+                    panic!("seed {seed}: {actions:?}")
+                };
+                applied = a;
+                refused.clear();
+                // Six more streams, of which the caller may hold four in all.
+                for _ in 0..6 {
+                    opened += 1;
+                    let other = 1_000 + opened;
+                    host.connected(other, Some(caller()));
+                    let open = Frame::Open {
+                        stream: [opened as u8; 32],
+                        instance: INSTANCE,
+                        epoch: 1,
+                    };
+                    let actions = host.frame(other, open, &mut TestPlace, &TestDigests);
+                    check(seed, &host, &actions);
+                    let expected = if opened < limits.streams {
+                        matches!(actions[..], [Action::Send(_, Frame::Opened { .. })])
+                    } else {
+                        actions
+                            == vec![Action::Send(other, Frame::Refused(3)), Action::Close(other)]
+                    };
+                    assert!(expected, "seed {seed}: stream {opened}: {actions:?}");
+                }
+            }
+            let mut actions = vec![];
+            let mut sent = None;
+            if !running.is_empty() && rng.chance(300_000) {
+                let run = running.remove(rng.below(running.len()));
+                actions = host.ended(run, CallOutcome::Ok(vec![1]), None);
+            } else {
+                let position = match rng.below(4) {
+                    0 => applied + 1,
+                    1 => applied + 1 + rng.below(window + 2) as u64,
+                    _ => applied + 1 + rng.below(200_000) as u64,
+                };
+                let ordinal = rng.below(64) as u64;
+                let call = Call {
+                    epoch,
+                    position,
+                    ordinal,
+                    key: call_key(&INSTANCE, ordinal),
+                    form: CallForm::Compute,
+                    path: "app@1/m.f".into(),
+                    fingerprint: [0; 32],
+                    code: [0; 32],
+                    grants: GrantSet::default(),
+                    definitions: None,
+                    argument: vec![rng.below(2) as u8],
+                    acknowledged: if rng.chance(100_000) { applied } else { 0 },
+                };
+                sent = Some(position);
+                actions.extend(host.frame(
+                    session,
+                    Frame::Call(Box::new(call)),
+                    &mut TestPlace,
+                    &TestDigests,
+                ));
+            }
+            check(seed, &host, &actions);
+            let mut outcomes: BTreeMap<u64, CallOutcome> = BTreeMap::new();
+            for action in &actions {
+                match action {
+                    Action::Start(start) => {
+                        assert!(
+                            started.insert(start.call.position),
+                            "seed {seed}: position {} ran twice",
+                            start.call.position
+                        );
+                        running.push(start.run);
+                    }
+                    Action::Send(_, Frame::Outcome(o)) => {
+                        outcomes.entry(o.position).or_insert(o.end.clone());
+                    }
+                    _ => (),
+                }
+            }
+            // The next position is decided, then every refused gap it reaches.
+            let mut next = sent.filter(|p| *p == applied + 1);
+            while let Some(position) = next {
+                let decided = outcomes.remove(&position);
+                if let Some(earlier) = refused.remove(&position) {
+                    assert_eq!(decided, Some(earlier), "seed {seed}: position {position}");
+                }
+                applied = position;
+                next = outcomes
+                    .contains_key(&(position + 1))
+                    .then_some(position + 1);
+            }
+            for (position, end) in outcomes {
+                if position > applied && matches!(end, CallOutcome::NotRun(_)) {
+                    refused.entry(position).or_insert(end);
+                }
+            }
+        }
     }
 }

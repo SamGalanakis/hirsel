@@ -185,6 +185,7 @@ pub fn serve(
         Limits {
             runs: config.runs(),
             queue: config.queue(),
+            streams: config.streams(),
         },
     )
     .map_err(|e| host_error("the call journal", e))?;

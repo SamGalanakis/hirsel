@@ -489,3 +489,71 @@ fn scope_callbacks_with_different_phi_targets_keep_the_general_instance() {
             .any(|call| matches!(call.callee, Callee::Indirect(_)))
     );
 }
+
+/// Indirect calls in the bodies main can reach through direct calls,
+/// bound codes, closure codes and function references.
+fn reachable_indirect(source: &str) -> usize {
+    use hirsel_lir::ir::Inst;
+    let (_, lowered) = lower_valid(source);
+    let find = |s: &hirsel_lir::ir::Symbol| {
+        lowered
+            .units
+            .iter()
+            .position(|u| u.header.definition == s.definition && Some(u.header.instance) == s.instance)
+    };
+    let main = lowered
+        .units
+        .iter()
+        .position(|u| u.header.definition.0.name == "main")
+        .unwrap();
+    let mut seen = std::collections::BTreeSet::from([main]);
+    let mut work = vec![main];
+    let mut count = 0;
+    while let Some(at) = work.pop() {
+        let u = &lowered.units[at];
+        let mut symbols = Vec::new();
+        for call in &u.tables.calls {
+            match call.callee {
+                Callee::Indirect(_) => count += 1,
+                Callee::Direct(s) | Callee::Bound { code: s, .. } => symbols.push(s),
+                Callee::Operation(_) => {}
+            }
+        }
+        symbols.extend(u.tables.closures.iter().filter_map(|c| c.code.map(|c| c.symbol)));
+        symbols.extend(u.instructions.iter().filter_map(|i| match *i {
+            Inst::FunctionRef { symbol, .. } => Some(symbol),
+            _ => None,
+        }));
+        for s in symbols {
+            if let Some(i) = find(&u.tables.symbols[s.index()])
+                && seen.insert(i)
+            {
+                work.push(i);
+            }
+        }
+    }
+    count
+}
+
+#[test]
+fn a_comparator_carried_in_a_heap_field_is_called_directly() {
+    // The comparator is the only callable: every call through `by`, including
+    // the sift callback that wraps it, can name `compare`.
+    assert_eq!(
+        reachable_indirect(
+            "@noalloc\nfn compare(a:u64,b:u64)->i32 uses {} {if a<b {-1} else if a>b {1} else {0}}\nfn main()->u64 {let order=compare;let mut h=std@1/priority_queue.empty(copy order);let mut s=0u64;for i in 0u64..16u64 {std@1/priority_queue.push(mut h,i)};for i in 0u64..16u64 {s+=std@1/priority_queue.push_pop(mut h,i)};s}"
+        ),
+        0
+    );
+}
+
+#[test]
+fn a_field_an_updater_overwrites_keeps_indirect_dispatch() {
+    // `keep` preserves `a.f`; `reset` stores another body into `b.f`.
+    assert_eq!(
+        reachable_indirect(
+            "type Op { f: fn(u64)->u64 uses {} }\nfn inc(x:u64)->u64 uses {} {x+1u64}\nfn make(take f:fn(u64)->u64 uses {})->Op uses {} {Op(f: f)}\nfn keep(mut o:Op, n:u64) uses {} {}\nfn reset(mut o:Op) uses {} {o.f=fn(x:u64)->u64 uses {} {x+9u64}}\nfn main()->u64 {let mut a=make(inc);keep(mut a,1u64);let mut b=make(inc);reset(mut b);a.f(1u64)+b.f(1u64)}"
+        ),
+        1
+    );
+}

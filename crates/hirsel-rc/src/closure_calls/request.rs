@@ -1,6 +1,6 @@
 //! Portable requests for the sole callable rewrite. These records are data;
 //! the consumer still admits the selected original and validates its result.
-use super::{CallableRequest, CallableTarget};
+use super::{CallableRequest, CallableSeed, CallableTarget, SeedInput};
 use hirsel_layout::instance::InstanceKey;
 use hirsel_lir::{
     LayoutKeys,
@@ -11,26 +11,36 @@ use hirsel_lir::{
 use hirsel_syntax::{ContentHash, DefPath};
 use serde::{Deserialize, Serialize};
 
-/// Exact existing key encoding from closure_calls.rs. ABI content identities
-/// are query reads, not a change to the callable instance's established name.
+/// One canonical encoding per seed: its input (parameter or capture ordinal),
+/// the field path inside that input, and the code identity it is proven to
+/// hold. ABI content identities are query reads, not part of the name.
 pub(super) fn specialization_key<'a>(
     source: &InstanceKey,
-    targets: impl IntoIterator<Item = (usize, &'a DefPath, Option<ContentHash>, bool)>,
+    seeds: impl IntoIterator<Item = &'a CallableSeed>,
     flags: u64,
 ) -> InstanceKey {
     let mut encoded = Vec::new();
-    for (parameter, definition, instance, environment) in targets {
-        encoded.extend((parameter as u64).to_le_bytes());
-        encoded.extend(definition.fingerprint().0);
-        encoded.push(u8::from(instance.is_some()));
-        encoded.extend(instance.unwrap_or_default().0);
-        encoded.push(u8::from(environment));
+    for seed in seeds {
+        let (tag, index) = match seed.input {
+            SeedInput::Parameter(i) => (0u8, i),
+            SeedInput::Capture(i) => (1u8, i),
+        };
+        encoded.push(tag);
+        encoded.extend((index as u64).to_le_bytes());
+        encoded.extend((seed.path.len() as u64).to_le_bytes());
+        for step in &seed.path {
+            encoded.extend(step.to_le_bytes());
+        }
+        encoded.extend(seed.target.symbol.definition.fingerprint().0);
+        encoded.push(u8::from(seed.target.symbol.instance.is_some()));
+        encoded.extend(seed.target.symbol.instance.unwrap_or_default().0);
+        encoded.push(u8::from(seed.target.environment));
     }
     if source.definition().is_core("task.async") {
         encoded.extend(flags.to_le_bytes());
     }
     source.derived(
-        "hirsel.callable-target-specialization.v1",
+        "hirsel.callable-target-specialization.v2",
         &[encoded.as_slice()],
     )
 }
@@ -38,7 +48,8 @@ pub(super) fn specialization_key<'a>(
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Seed {
-    parameter: u32,
+    input: SeedInput,
+    path: Vec<u32>,
     definition: DefPath,
     instance: Option<ContentHash>,
     abi: ContentHash,
@@ -110,7 +121,8 @@ impl TaskCaptureRecipe {
             body: source.body(),
             source: source.encoding().to_vec(),
             target: Seed {
-                parameter: 0,
+                input: SeedInput::Capture(0),
+                path: Vec::new(),
                 definition: target.symbol.definition.clone(),
                 instance: target.symbol.instance,
                 abi: LayoutKeys::new(table)
@@ -126,7 +138,8 @@ impl TaskCaptureRecipe {
     }
     pub fn source(&self) -> Result<InstanceKey, String> {
         if self.schema != 1
-            || self.target.parameter != 0
+            || self.target.input != SeedInput::Capture(0)
+            || !self.target.path.is_empty()
             || !self.definition.is_core("$native.task_main")
         {
             return Err("noncanonical task capture recipe".into());
@@ -195,13 +208,14 @@ impl CallableRecipe {
         let seeds = request
             .seeds
             .iter()
-            .map(|(parameter, target)| {
+            .map(|seed| {
+                let target = &seed.target;
                 if target.symbol.kind != SymbolKind::Function {
                     return Err("callable seed is not a function".to_string());
                 }
                 Ok(Seed {
-                    parameter: u32::try_from(*parameter)
-                        .map_err(|_| "callable parameter exceeds source representation")?,
+                    input: seed.input,
+                    path: seed.path.clone(),
                     definition: target.symbol.definition.clone(),
                     instance: target.symbol.instance,
                     abi: keys
@@ -230,7 +244,7 @@ impl CallableRecipe {
             || self
                 .seeds
                 .windows(2)
-                .any(|pair| pair[0].parameter >= pair[1].parameter)
+                .any(|pair| (pair[0].input, &pair[0].path) >= (pair[1].input, &pair[1].path))
             || self.spawn_flags & !(crate::spawn::IMMEDIATE | crate::spawn::OP_FREE) != 0
             || (!self.definition.is_core("task.async") && self.spawn_flags != 0)
         {
@@ -241,18 +255,25 @@ impl CallableRecipe {
     }
     pub fn key(&self) -> Result<InstanceKey, String> {
         let source = self.source()?;
-        Ok(specialization_key(
-            &source,
-            self.seeds.iter().map(|seed| {
-                (
-                    seed.parameter as usize,
-                    &seed.definition,
-                    seed.instance,
-                    seed.environment,
-                )
-            }),
-            self.spawn_flags,
-        ))
+        let seeds = self
+            .seeds
+            .iter()
+            .map(|seed| CallableSeed {
+                input: seed.input,
+                path: seed.path.clone(),
+                target: CallableTarget {
+                    symbol: Symbol {
+                        kind: SymbolKind::Function,
+                        definition: seed.definition.clone(),
+                        instance: seed.instance,
+                    },
+                    // The key never encodes a table-local ABI id.
+                    abi: hirsel_lir::FnAbiId(0),
+                    environment: seed.environment,
+                },
+            })
+            .collect::<Vec<_>>();
+        Ok(specialization_key(&source, &seeds, self.spawn_flags))
     }
     /// The requested owner is independently selected by the consumer. Do not
     /// turn an arbitrary recipe into a different current instance silently.
@@ -269,9 +290,10 @@ impl CallableRecipe {
             .seeds
             .iter()
             .map(|seed| {
-                Ok((
-                    seed.parameter as usize,
-                    CallableTarget {
+                Ok(CallableSeed {
+                    input: seed.input,
+                    path: seed.path.clone(),
+                    target: CallableTarget {
                         symbol: Symbol {
                             kind: SymbolKind::Function,
                             definition: seed.definition.clone(),
@@ -280,7 +302,7 @@ impl CallableRecipe {
                         abi: binding.abi(seed.abi).ok_or("missing callable seed ABI")?,
                         environment: seed.environment,
                     },
-                ))
+                })
             })
             .collect::<Result<Vec<_>, String>>()?;
         Ok(CallableRequest {

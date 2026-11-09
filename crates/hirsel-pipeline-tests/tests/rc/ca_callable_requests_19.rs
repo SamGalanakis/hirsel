@@ -41,6 +41,7 @@ fn callable_requests_preserve_refusal_names_and_rebind_canonical_abis() {
                     abi: unit.header.abi,
                     origin: unit.header.origin,
                     op_free: false,
+                    fields: Default::default(),
                 },
             )
         })
@@ -89,7 +90,8 @@ fn callable_requests_preserve_refusal_names_and_rebind_canonical_abis() {
             requests.push(request.clone());
             false
         },
-    );
+    )
+    .unwrap();
     assert_eq!(requests.len(), 1);
     assert_eq!(before, hirsel_codec::to_text(&selected));
     assert_eq!(requests[0].key.digest(), expected_digest);
@@ -104,7 +106,8 @@ fn callable_requests_preserve_refusal_names_and_rebind_canonical_abis() {
             assert_eq!(request.key, requests[0].key);
             true
         },
-    );
+    )
+    .unwrap();
     assert_eq!(
         hirsel_codec::to_text(&accepted),
         hirsel_codec::to_text(original)
@@ -128,10 +131,10 @@ fn callable_requests_preserve_refusal_names_and_rebind_canonical_abis() {
     let binding = Binding::new(&target, &closures.iter().collect::<Vec<_>>()).unwrap();
     let rebound = restored.bind(&request.key, &binding).unwrap();
     assert_eq!(rebound.key, request.key);
-    assert_eq!(rebound.seeds[0].1.symbol, request.seeds[0].1.symbol);
+    assert_eq!(rebound.seeds[0].target.symbol, request.seeds[0].target.symbol);
     assert_eq!(
-        binding.table.fn_abis[rebound.seeds[0].1.abi.0 as usize].key,
-        lowered.table.fn_abis[request.seeds[0].1.abi.0 as usize].key
+        binding.table.fn_abis[rebound.seeds[0].target.abi.0 as usize].key,
+        lowered.table.fn_abis[request.seeds[0].target.abi.0 as usize].key
     );
     assert!(restored.bind(&invoke.key, &binding).is_err());
     let empty = Binding::new(&target, &[]).unwrap();
@@ -160,19 +163,18 @@ fn callable_requests_preserve_refusal_names_and_rebind_canonical_abis() {
         &rebound
             .seeds
             .iter()
-            .map(|(p, target)| {
-                (
-                    *p,
-                    hirsel_rc::closure_calls::CallableTarget {
-                        abi: request.seeds[0].1.abi,
-                        ..target.clone()
-                    },
-                )
+            .map(|seed| hirsel_rc::closure_calls::CallableSeed {
+                target: hirsel_rc::closure_calls::CallableTarget {
+                    abi: request.seeds[0].target.abi,
+                    ..seed.target.clone()
+                },
+                ..seed.clone()
             })
             .collect::<Vec<_>>(),
         0,
         |_, _| false,
-    );
+    )
+    .unwrap();
     assert!(
         body.tables
             .calls
@@ -309,6 +311,7 @@ fn task_capture_requests_preserve_existing_adapter_identity_and_owned_finish() {
             abi: rebound.target.abi,
             origin: target_body.header.origin,
             op_free: false,
+            fields: Default::default(),
         },
     )]);
     rewrite_task_capture(&mut unit, &binding.table, &entries, &rebound, |_, _| false).unwrap();

@@ -6,7 +6,7 @@ use hirsel_lir::{
     products::Binding,
     stage::Value,
 };
-use hirsel_rc::closure_calls::{CallableEntry, CallableRecipe, TaskCaptureRecipe};
+use hirsel_rc::closure_calls::{CallableEntry, CallableRecipe, FieldSummary, TaskCaptureRecipe};
 use std::collections::{HashMap, VecDeque};
 
 const WINDOW_RECORD: Domain = Domain {
@@ -481,6 +481,15 @@ impl DemandInstances {
             })?);
         }
         drop(freedom);
+        // Originals are rewritten callee-first; a field summary is visible to
+        // a caller in another component, and to every specialization.
+        let mut component = vec![0usize; originals.len()];
+        for (c, members) in components.iter().enumerate() {
+            for &m in members {
+                component[m] = c;
+            }
+        }
+        let mut summaries: Vec<Option<FieldSummary>> = vec![None; originals.len()];
         let mut pending = VecDeque::new();
         for members in &components {
             for &origin in members {
@@ -516,6 +525,15 @@ impl DemandInstances {
             w.tree::<ContentHash, ()>(selected.len());
             w.add(pending.capacity() * size_of::<Reference>());
             w.flat_vec(&rewritten);
+            w.flat_vec(&component);
+            w.add(
+                summaries.capacity() * size_of::<Option<FieldSummary>>()
+                    + summaries
+                        .iter()
+                        .flatten()
+                        .map(FieldSummary::retained_bytes)
+                        .sum::<usize>(),
+            );
             resize(&mut graph_charge, graph_bytes + w.bytes())?;
             let selection: Selection = read_json(self.store.as_ref(), selection_record)?;
             let key = self.address(selection.key.bind()?);
@@ -593,6 +611,14 @@ impl DemandInstances {
             let mut entries = HashMap::new();
             for (i, interface) in declarations {
                 let original = &originals[i].0;
+                let fields = match &summaries[i] {
+                    Some(summary)
+                        if selection.seeds.is_some() || component[i] != component[origin] =>
+                    {
+                        summary.clone()
+                    }
+                    _ => FieldSummary::default(),
+                };
                 entries.insert(
                     Symbol {
                         kind: SymbolKind::Function,
@@ -610,19 +636,17 @@ impl DemandInstances {
                             UnitOrigin::Library
                         },
                         op_free: interface.op_free,
+                        fields,
                     },
                 );
             }
+            let original_selection = selection.seeds.is_none();
             let (seeds, flags) = match selection.seeds {
                 None => (Vec::new(), 0),
                 Some(Seeds::Parameters(recipe)) => {
                     let request = recipe.bind(&key.instance, &binding)?;
                     (
-                        request
-                            .seeds
-                            .into_iter()
-                            .map(|(p, target)| (unit.parameters[p], target))
-                            .collect(),
+                        hirsel_rc::closure_calls::bind_seeds(&unit, &request.seeds)?,
                         request.spawn_flags,
                     )
                 }
@@ -634,6 +658,7 @@ impl DemandInstances {
                                 .captures
                                 .first()
                                 .ok_or("task_main has no callable capture")?,
+                            Vec::new(),
                             request.target,
                         )],
                         0,
@@ -681,7 +706,7 @@ impl DemandInstances {
             };
             let enqueue = std::cell::RefCell::new(&mut enqueue);
             let failure = std::cell::RefCell::new(None);
-            let inline = hirsel_rc::closure_calls::rewrite_window(
+            let (inline, summary) = hirsel_rc::closure_calls::rewrite_window(
                 &mut unit,
                 &binding.table,
                 &entries,
@@ -716,6 +741,9 @@ impl DemandInstances {
                 return Err(error);
             }
             pending.extend(additions.into_inner());
+            if original_selection {
+                summaries[origin] = Some(summary);
+            }
             // Ordinary staging holds the transformed body until the dependency
             // identities close. Only publication below grants C acceptance.
             let value = self.snapshot(&(binding.table, unit))?;

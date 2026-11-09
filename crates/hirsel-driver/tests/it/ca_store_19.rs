@@ -885,6 +885,13 @@ fn restored_products_match_fresh_recompute_across_dependency_mutations() {
             reused: Some(true),
         },
         Mutation {
+            name: "owner body edit",
+            base: "fn callee()->u32{1u32}\nfn caller()->u32{callee()}\n",
+            edited: "fn callee()->u32{1u32}\nfn caller()->u32{callee()+1u32}\n",
+            target: "caller",
+            reused: Some(false),
+        },
+        Mutation {
             name: "callee signature edit",
             base: "fn callee()->u32{1u32}\nfn caller()->u32{callee()}\n",
             edited: "fn callee()->u64{1u64}\nfn caller()->u32{callee()}\n",

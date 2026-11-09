@@ -78,6 +78,7 @@ fn load_record(
     store: &dyn ResultStore,
     key: &EntryKey,
     scratch: u64,
+    mut observe: impl FnMut(&ReadKey) -> Option<ContentHash>,
 ) -> Option<(hirsel_engine_store::Variant, u64)> {
     let key = storage_key(key);
     let bytes = store.get(&key)?;
@@ -91,6 +92,16 @@ fn load_record(
             .checked_mul(8)
             .is_some_and(|bytes| bytes <= remaining)
     });
+    // The seed binds this body's text, not the declarations it read.
+    // Validate the candidate's typed dependencies before fetching its facts.
+    if entry
+        .current(&key)?
+        .reads
+        .first_changed(&mut observe)
+        .is_some()
+    {
+        return None;
+    }
     entry
         .resolve(store, &key)
         .map(|variant| (variant, index_bytes))
@@ -113,6 +124,7 @@ pub(in crate::queries) fn load_publication(
         &*store,
         &key,
         (hirsel_engine_store::MAX_RECORD as u64).checked_mul(8)?,
+        |read| engine.observe(path, read),
     )?;
     let record = decode_record(
         &*store,
@@ -297,7 +309,10 @@ impl BodyTask {
             return None;
         }
         let input = &queries.inputs[&self.input];
-        let (variant, index_bytes) = load_record(&*queries.store, &input.key, self.weight.scratch)?;
+        let (variant, index_bytes) =
+            load_record(&*queries.store, &input.key, self.weight.scratch, |read| {
+                queries.observe(input.definition.path(), read)
+            })?;
         let record = decode_record(
             &*queries.store,
             variant.payload.clone(),

@@ -780,6 +780,7 @@ mod tests {
     fn shared_graph_budget_evicts_idle_views_but_refuses_to_overcommit_live_leases() {
         struct Empty {
             source: Arc<hirsel_engine_admission::MemoryReservation>,
+            _producer: hirsel_engine_admission::MemoryReservation,
         }
         impl GraphProducts for Empty {
             fn check_source_owner(&self) -> Option<Arc<dyn Send + Sync>> {
@@ -844,7 +845,7 @@ mod tests {
             };
             let admission = owner
                 .begin(limits, false, 0)?
-                .finish(SnapshotPlan { source: 2, run: 0 })?;
+                .finish(SnapshotPlan { source: 1, run: 0 })?;
             let error = hirsel_engine_store::Domain {
                 kind: 0x4600_00fe,
                 schema: 1,
@@ -869,6 +870,9 @@ mod tests {
                 runtime: Arc::new(Mutex::new(runtime)),
                 products: Arc::new(Empty {
                     source: Arc::new(admission.source),
+                    // Producer storage is admitted on demand and retires with
+                    // the graph; detached Check sources keep only their byte.
+                    _producer: owner.process_budget().reserve(1).map_err(ToolError::Io)?,
                 }),
             }))
         };

@@ -679,15 +679,17 @@ impl ValueData {
     fn extract_unique(&mut self, captures: bool) {
         self.set_alias(None);
         self.content.clear_access();
-        if self.unplaced() {
-            self.bound_by(super::cfg::LifetimeScopes::FRAME, Site::Frame);
-        } else if self.deep_copy {
+        // A deep copy is fresh whatever its operand's placement (MODE-2, D4),
+        // as V's placement of the copy keeps only arena and region reaches.
+        if self.deep_copy {
             self.shared_parts = SharedParts::default();
             if !captures {
                 self.crossing_parts = CrossingParts::default();
                 self.content = Content::default();
                 self.modes.relation = Relation::global();
             }
+        } else if self.unplaced() {
+            self.bound_by(super::cfg::LifetimeScopes::FRAME, Site::Frame);
         }
     }
     /// An acquired copy ends cursor access.
@@ -2041,16 +2043,31 @@ pub(super) fn check(
         checker.emit = true;
     }
     // Node storage order is not evaluation order. Publish extraction facts
-    // after all uses so a child use cannot overwrite its enclosing unique
-    // decision. Deep copy reads the source without consuming its slot.
-    for decision in checker.facts.unique.clone() {
-        let ExprKind::Unary { value: child, .. } =
-            tree.expressions[decision.expression.0 as usize].kind
-        else {
-            continue;
-        };
-        let extraction = decision.action.usage();
-        checker.usage(child, extraction);
+    // after all uses so a child use cannot overwrite its enclosing `unique`.
+    // The deep copy reads a place without consuming its slot (MODE-2, D4); a
+    // computed or written `take` operand is first taken into the temporary
+    // the copy reads.
+    for expression in &tree.expressions {
+        if let ExprKind::Unary {
+            op: UnaryOp::Unique,
+            value: child,
+        } = expression.kind
+        {
+            let written_take = matches!(
+                tree.expressions[child.0 as usize].kind,
+                ExprKind::Unary {
+                    op: UnaryOp::Take,
+                    ..
+                }
+            );
+            let usage =
+                if !written_take && place(checker.body, child, checker.source_rows).is_some() {
+                    UseKind::Copy
+                } else {
+                    UseKind::Take
+                };
+            checker.usage(child, usage);
+        }
     }
     // Published modes are judgments at a use, not mutable arena rows shared by
     // unrelated expressions. Append one refined immutable row per changed type.
@@ -3138,25 +3155,6 @@ impl Checker<'_, '_> {
     // judgment and must be removed before emitting executable instructions.
     fn unreachable_facts(&mut self, op: &Op) {
         match op {
-            Op::Finish { expression, .. }
-                if matches!(
-                    self.tree.expressions[expression.0 as usize].kind,
-                    ExprKind::Unary {
-                        op: UnaryOp::Unique,
-                        ..
-                    }
-                ) =>
-            {
-                let action = if self.property(*expression).is_some_and(|p| p.plain) {
-                    UniqueAction::AlreadyUnique
-                } else {
-                    UniqueAction::DeepCopy
-                };
-                self.facts.unique.push(UniqueDecision {
-                    expression: *expression,
-                    action,
-                });
-            }
             Op::Bind {
                 pattern,
                 value,
@@ -3499,16 +3497,7 @@ impl Checker<'_, '_> {
                 function.state_promises.iter().any(|p| {
                     p.selector.parameter == ParameterRef::bound(ParamId(ordinal as u32))
                         && p.preserve_unique
-                }) || ordinal == 1
-                    && self.callee_definition(callee).is_some_and(|path| {
-                        super::properties::format_association(
-                            self.t,
-                            function,
-                            path,
-                            self.signatures,
-                        )
-                        .is_some()
-                    })
+                })
             });
         promised && self.callee_definition(callee).is_some()
     }
@@ -5442,27 +5431,10 @@ impl Checker<'_, '_> {
                             ..
                         }
                     ) {
-                        if (value.modes.uniqueness != Uniqueness::Unique
-                            || value.aliased().is_some())
-                            && !property.plain
-                        {
+                        // MODE-2 (D4): every `unique x` of counted content is a
+                        // deep copy; only V may elide it (SPEC 4.4).
+                        if !property.plain {
                             value.deep_copy = true;
-                        }
-                        if self.emit {
-                            // A plain place copies its empty owned graph; unlike
-                            // an owned temporary, extracting it must not move the
-                            // caller's scalar slot. This needs no allocation.
-                            let copy_plain_place = property.plain
-                                && place(self.body, child, self.source_rows).is_some();
-                            let action = if value.deep_copy || copy_plain_place {
-                                UniqueAction::DeepCopy
-                            } else {
-                                UniqueAction::AlreadyUnique
-                            };
-                            self.facts.unique.push(UniqueDecision {
-                                expression: *expression,
-                                action,
-                            });
                         }
                         if value.deep_copy {
                             if !property.copyable {

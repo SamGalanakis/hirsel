@@ -70,7 +70,7 @@ fn association_preflight_reuses_unchanged_headers_and_rechecks_an_edited_target(
         let directory = tempfile::tempdir().unwrap();
         let manifest = directory.path().join("hirsel.json");
         let file = directory.path().join("main.hir");
-        let source = "@format(render)\ntype View { value:u64 }\nfn render(v:View, mut out:List[u8]) {}\nfn neighbor()->u64 { 1u64 }\npub fn main() {}\n";
+        let source = "@format(render)\ntype View { value:u64 }\n@preserves_unique(out)\nfn render(v:View, mut out:List[u8]) {}\nfn neighbor()->u64 { 1u64 }\npub fn main() {}\n";
         std::fs::write(&file, source).unwrap();
         std::fs::write(&manifest, r#"{"schema":1,"package":{"name":"association","version":"1"},"sources":[{"path":"main.hir","module":[]}],"dependencies":[],"entry":{"module":[],"name":"main"}}"#).unwrap();
         let mut session = hirsel_driver::session::Session::open_configured(

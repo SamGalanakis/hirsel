@@ -8,6 +8,7 @@ type Broken {
   value: u64,
 }
 
+@preserves_unique(output)
 fn broken_text(value: Broken, mut output: List[u8]) -> () uses {} {
   text.append(mut output, "partial")
   failure.check(false, TextInvariant())

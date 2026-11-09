@@ -8,7 +8,7 @@
 // otherwise the results are in add order.
 pub fn all[T, E](s: Scope, take set: TaskSet[Result[T, E]] of s) -> Result[List[T], E] {
   let mut members = take set
-  let mut results: unique List[Option[T]] = unique []
+  let mut results: unique List[Option[T]] = []
   while let Some(index) = core@1/task.await_any(s, members) {
     match core@1/task.await_at(s, mut members, index) {
       Ok(value) => {

@@ -4721,10 +4721,9 @@ impl Checker<'_, '_> {
             };
             // A foreign declaration has no body to prove a promise (LANG-7).
             f.foreign.is_none()
-                && (f.state_promises.iter().any(|p| {
+                && f.state_promises.iter().any(|p| {
                     p.selector.parameter == ParameterRef::bound(ordinal) && p.preserve_unique
-                }) || ordinal == hirsel_types::ParamId(1)
-                    && super::format_association(self.t, signature, self.signatures))
+                })
         })
     }
     /// MODE-2: a direct generic call whose result holds only values of type

@@ -547,27 +547,21 @@ impl Builder<'_, '_> {
                         value
                     }
                     UnaryOp::Unique => {
-                        let Some(fact) = self.decisions.unique.get(&id).iter().copied().next()
-                        else {
-                            return self
-                                .error(span, "unique needs I's checked deep-copy/detach plan");
-                        };
-                        value.usage = fact.action.usage();
+                        // MODE-2 (D4): source `unique x` is an explicit deep copy.
+                        // Only V's UniqueDecision may remove it (SPEC 4.4).
+                        value.usage = UseKind::Copy;
                         let _ = self.loan(&mut value, span);
                         let failure = self.cleanup();
                         let value = self.consume(value);
-                        let operation = if fact.action == hirsel_types::UniqueAction::AlreadyUnique
-                        {
-                            Rvalue::Use(value)
-                        } else {
-                            // Preserve the checked operation: an ordinary Copy
-                            // shares blocks and cannot establish deep uniqueness.
+                        self.rvalue_with_failure(
+                            row.ty,
                             Rvalue::Unary {
                                 op: UnaryOp::Unique,
                                 value,
-                            }
-                        };
-                        self.rvalue_with_failure(row.ty, operation, span, failure)
+                            },
+                            span,
+                            failure,
+                        )
                     }
                     UnaryOp::Box => {
                         let value = self.transport(value, Storage::Temporary, span);

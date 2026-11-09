@@ -674,7 +674,7 @@ fn decode[T: serializable](stored: Bytes, data: Bytes, renames: List[(String, St
   bytes.append(mut whole, transformed)
   let decoded: Option[T] = codec.decode(bytes.from_list(take whole))?
   match take decoded {
-    Some(value) => Ok(unique value),
+    Some(value) => Ok(value),
     None() => Error(Tag()),
   }
 }

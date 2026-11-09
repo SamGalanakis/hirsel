@@ -273,13 +273,7 @@ pub fn check_ownership_with_clauses(
     // MODE-2: a `@preserves_unique` body is checked again with its selected
     // parameter and its taken and `mut` inputs entering unique; only whether
     // the selected parameter leaves unique is kept from that run.
-    let association = match &signature.kind {
-        SignatureKind::Function(f) => {
-            properties::format_association(t, f, signature.definition.path(), &signatures)
-        }
-        _ => None,
-    };
-    let mut promised: Vec<ParamId> = match &signature.kind {
+    let promised: Vec<ParamId> = match &signature.kind {
         SignatureKind::Function(f) => f
             .state_promises
             .iter()
@@ -294,9 +288,6 @@ pub fn check_ownership_with_clauses(
             .collect(),
         _ => Vec::new(),
     };
-    if association.is_some() && !promised.contains(&ParamId(1)) {
-        promised.push(ParamId(1));
-    }
     // The entry is first after clause sorting. Proofs clone its checked rows;
     // no earlier graph can publish a changed input before the ordinary run.
     let prepared = graphs
@@ -352,16 +343,7 @@ pub fn check_ownership_with_clauses(
             diagnostics.extend(
                 proof_diagnostics
                     .into_iter()
-                    .filter(|d| d.message.starts_with(flow::UNIQUE_PROOF_FAILED))
-                    .map(|mut d| {
-                        if let Some(nominal) = &association {
-                            d.primary = syntax.item.name_span;
-                            d.notes.push(format!(
-                                "the @format association on {nominal} implies @preserves_unique on the output builder"
-                            ));
-                        }
-                        d
-                    }),
+                    .filter(|d| d.message.starts_with(flow::UNIQUE_PROOF_FAILED)),
             );
         }
     }
@@ -570,8 +552,6 @@ pub fn check_ownership_with_clauses(
     diagnostics.dedup();
     facts.call_arguments.sort_by_key(|r| (r.0, r.1));
     facts.call_arguments.dedup();
-    facts.unique.sort_by_key(|d| d.expression);
-    facts.unique.dedup();
     facts.guarded_patterns.sort_by_key(|d| d.pattern);
     facts.guarded_patterns.dedup();
     facts.borrow_cursors.sort_by_key(|cursor| cursor.binding);

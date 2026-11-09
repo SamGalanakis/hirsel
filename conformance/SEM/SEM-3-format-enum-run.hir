@@ -4,6 +4,7 @@
 @format(light_text)
 type Light = Red | Amber(u8) | Green(minutes: u64, arrow: bool)
 
+@preserves_unique(out)
 fn light_text(light: Light, mut out: List[u8]) -> () uses {} {
   match light {
     Red => text.append(mut out, "red"),
@@ -18,6 +19,7 @@ fn light_text(light: Light, mut out: List[u8]) -> () uses {} {
 @format(offset_text)
 type Offset {}
 
+@preserves_unique(out)
 fn offset_text(value: Offset, mut out: List[u8]) -> () uses {} {
   u64.format_into(list.len(out), mut out)
 }

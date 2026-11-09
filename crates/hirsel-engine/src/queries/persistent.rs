@@ -405,7 +405,6 @@ fn valid_ownership(syntax: &ItemSyntax, facts: &OwnershipFacts) -> bool {
             .physical_projections
             .iter()
             .all(|(id, _)| expression(*id))
-        && facts.unique.iter().all(|row| expression(row.expression))
         && facts
             .guarded_patterns
             .iter()

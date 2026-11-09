@@ -158,47 +158,18 @@ fn loops_reach_a_fixed_point_and_reinitialisation_repairs_a_move() {
 }
 
 #[test]
-fn unique_decisions_cover_places_and_fresh_temporaries() {
-    let mut f = Fixture::new();
-    let x = f.parameter(f.bytes, PassingMode::Borrow);
-    let read = f.read(x);
-    let copied = f.unary(UnaryOp::Unique, read);
-    f.bind(copied, false);
-    let fresh = f.literal(f.bytes);
-    let unchanged = f.unary(UnaryOp::Unique, fresh);
-    f.bind(unchanged, false);
-    let out = f.check();
-    assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
-    assert_eq!(
-        out.value.unique,
-        vec![
-            UniqueDecision {
-                expression: copied,
-                action: UniqueAction::DeepCopy
-            },
-            UniqueDecision {
-                expression: unchanged,
-                action: UniqueAction::AlreadyUnique
-            }
-        ]
-    );
-}
-#[test]
 fn guarded_moving_patterns_test_borrows_and_commit_takes() {
     use hirsel_syntax::{MatchArm, Pattern, PatternId, PatternKind};
     for (moving, unreachable) in [(false, false), (true, false), (false, true), (true, true)] {
         let mut f = Fixture::new();
         let x = f.parameter(f.bytes, PassingMode::Take);
-        let dead_unique = if unreachable {
+        if unreachable {
             let result = f.expr(ExprKind::Return(None), f.unit);
             f.expr_stmt(result);
             let read = f.read(x);
             let unique = f.unary(UnaryOp::Unique, read);
             f.expr_stmt(unique);
-            Some(unique)
-        } else {
-            None
-        };
+        }
         let read = f.read(x);
         let source = if moving {
             f.unary(UnaryOp::Take, read)
@@ -243,15 +214,6 @@ fn guarded_moving_patterns_test_borrows_and_commit_takes() {
         f.expr_stmt(match_);
         let out = f.check();
         assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
-        if let Some(expression) = dead_unique {
-            assert_eq!(
-                out.value.unique,
-                vec![UniqueDecision {
-                    expression,
-                    action: UniqueAction::DeepCopy
-                }]
-            );
-        }
         assert_eq!(
             out.value.guarded_patterns,
             vec![GuardedPatternUse {

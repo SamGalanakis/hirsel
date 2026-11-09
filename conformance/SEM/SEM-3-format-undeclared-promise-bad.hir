@@ -1,0 +1,18 @@
+// rule: SEM-3
+// expect: reject SEM-3 at line 6
+// twin: SEM/SEM-3-format-record-run.hir
+// The builder promise is a declared contract: an @format function without
+// `@preserves_unique` on its builder is refused at the association (MODE-2).
+@format(point_text)
+type Point {
+  x: i64,
+}
+
+fn point_text(p: Point, mut out: List[u8]) -> () uses {} {
+  text.append(mut out, f"{p.x}")
+}
+
+pub fn main(t: Test) -> Result[(), ()] {
+  test.check(t, f"{Point(x: 1)}" == "1")
+  Ok(())
+}

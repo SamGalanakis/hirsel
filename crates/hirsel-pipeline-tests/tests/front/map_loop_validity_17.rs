@@ -74,33 +74,6 @@ fn retained_two_operation_loop() {
 }
 
 #[test]
-fn extraction_actions_remain_distinct() {
-    for (source, expected) in [
-        (
-            "fn main(take xs: unique List[u64]) -> unique List[u64] { unique xs }",
-            hirsel_types::UniqueAction::AlreadyUnique,
-        ),
-        (
-            "fn main(xs: List[u64]) -> unique List[u64] { unique xs }",
-            hirsel_types::UniqueAction::DeepCopy,
-        ),
-    ] {
-        let mut engine = QueryEngine::new(
-            default_environment(),
-            hirsel_front_phases::compiler_adapters(),
-        );
-        let file = engine.sources.add("extraction.hir", source.into()).unwrap();
-        engine.parse_file(file, &default_context()).unwrap();
-        let result = engine
-            .mode_definition(&hirsel_engine::entry_path(&default_context()))
-            .unwrap();
-        assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
-        assert_eq!(result.value.ownership.unique.len(), 1);
-        assert_eq!(result.value.ownership.unique[0].action, expected);
-    }
-}
-
-#[test]
 fn v_rejects_the_original_conditional_replacement_and_a_moved_owner() {
     use hirsel_tir::{InstructionKind, Rvalue};
     use hirsel_types::UseKind;

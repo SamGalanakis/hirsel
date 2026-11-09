@@ -293,14 +293,6 @@ impl ModesPhase for ModeAdapter {
         );
         output.diagnostics.extend(owned.diagnostics);
         output.dependencies.extend(owned.dependencies);
-        let allocating_copies: Vec<_> = owned
-            .value
-            .unique
-            .iter()
-            .filter(|r| r.action != hirsel_types::UniqueAction::AlreadyUnique)
-            .map(|r| r.expression)
-            .collect();
-
         let audited = hirsel_check::audit::check(
             hirsel_check::audit::Input {
                 types: t,
@@ -310,7 +302,6 @@ impl ModesPhase for ModeAdapter {
                 checked: &output.body,
                 loops: &typed.plans.loops,
                 call_allocations: &output.call_allocations,
-                allocating_copies: &allocating_copies,
                 allocating_mutations: &owned.value.allocating_mutations,
             },
             provider,

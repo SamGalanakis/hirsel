@@ -103,7 +103,7 @@ diagnostic.
 
 `codec.encode[T: serializable](value: T) -> Bytes` borrows a valid value and
 encodes one version-1 envelope. `codec.decode[T: serializable](data: Bytes) ->
-Result[T, DecodeError]` borrows the input and validates it against the concrete
+Result[unique T, DecodeError]` borrows the input and validates it against the concrete
 schema of `T` before returning fresh owned data. Both operations require the
 whole SER-1 schema, including explicit opt-in for user nominal types.
 

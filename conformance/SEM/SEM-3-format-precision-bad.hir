@@ -1,5 +1,5 @@
 // rule: SEM-3
-// expect: reject SEM-3 at line 16
+// expect: reject SEM-3 at line 17
 // twin: SEM/SEM-3-format-precision-ok.hir
 // Precision does not apply to a @format type's text.
 @format(point_text)
@@ -8,6 +8,7 @@ type Point {
   y: i64,
 }
 
+@preserves_unique(out)
 fn point_text(p: Point, mut out: List[u8]) -> () uses {} {
   text.append(mut out, f"({p.x}, {p.y})")
 }

@@ -1226,7 +1226,7 @@ module's `format_into(value, mut builder)` appends that scalar's text. Both only
 valid UTF-8, keep existing content and fail only by allocation exhaustion.
 `text.finish_valid(take builder)` returns the builder's text as a `String` and fails `TextInvariant` on invalid UTF-8, which no protocol append produces.
 A declared type formats when it names its function with `@format(function)`, a
-`fn(value: T, mut out: List[u8]) -> ()` that preserves the builder's uniqueness
+`fn(value: T, mut out: List[u8]) -> ()` that declares `@preserves_unique(out)`
 ([SEM-3](semantics.md#sem-3-strings)); it follows the same append contract.
 A scalar's `to_string` is its `format_into` applied to an empty builder, then
 `text.finish_valid`; an f-string is the same with one append per piece and hole

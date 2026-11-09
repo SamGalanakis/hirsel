@@ -135,25 +135,6 @@ impl<'q> Signatures<'q> {
     }
 }
 
-/// SEM-3: naming a function in a nominal receiver's association promises
-/// uniqueness of its builder, including for ordinary direct calls.
-pub(super) fn format_association(
-    types: &TypeInterner,
-    function: &FunctionType,
-    path: &DefPath,
-    signatures: &Signatures,
-) -> Option<DefPath> {
-    let receiver = function.parameters.first()?;
-    let TypeKind::Named { definition, .. } = &types.get(receiver.ty)?.kind else {
-        return None;
-    };
-    let signature = signatures.cached(*definition)?;
-    let SignatureKind::Type(nominal) = &signature.kind else {
-        return None;
-    };
-    (nominal.format.as_ref() == Some(path)).then(|| definition.path().clone())
-}
-
 /// The properties of each row the ownership pass reads: every row of the
 /// body's tables when it starts, and each row it derives, which keeps the
 /// structural proof of the row it was derived from.

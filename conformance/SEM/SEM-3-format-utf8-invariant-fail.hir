@@ -1,9 +1,10 @@
 // rule: SEM-3
-// expect: fail SEM-3 at line 13
+// expect: fail SEM-3 at line 14
 // A user formatter may append arbitrary bytes; only primitive formatters are trusted.
 @format(append_bad)
 type Bad {}
 
+@preserves_unique(out)
 fn append_bad(value: Bad, mut out: List[u8]) -> () uses {} {
   list.push(mut out, 255u8)
 }

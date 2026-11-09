@@ -851,8 +851,8 @@ mean 2.5, all done: false
 
 A type joins f-strings by naming one function with `@format`. The function borrows
 the value and appends its text to a `mut out: List[u8]` builder, usually with another
-f-string. The association promises that the function keeps the builder unique;
-the compiler proves its body, so no ownership annotation is needed. A hole of
+f-string. The function declares `@preserves_unique(out)`, its promise to keep the
+builder unique, and the compiler proves its body against it. A hole of
 that type calls it, so records, variants and generic types (with a function generic
 over the same parameters) format like scalars; nothing formats without the
 attribute. Fill, alignment and width pad the produced text as they pad strings.
@@ -876,6 +876,7 @@ type Ticket {
   done: bool,
 }
 
+@preserves_unique(out)
 fn ticket_text(ticket: Ticket, mut out: List[u8]) -> () uses {} {
   let state = if ticket.done {
     "done"

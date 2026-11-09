@@ -137,8 +137,8 @@ pub fn validate_loop_source(
 /// Validate an `@format(function)` association even when no f-string formats
 /// the type (SEM-3). After substituting the type's own generic parameters, the
 /// function is exactly `fn(value: T, mut out: List[u8]) -> ()`: an unlabelled
-/// borrowed receiver, an unlabelled `mut` UTF-8 builder implicitly preserved unique,
-/// and no error result.
+/// borrowed receiver, an unlabelled `mut` UTF-8 builder the function declares
+/// `@preserves_unique`, and no error result.
 pub fn validate_format(
     t: &TypeInterner,
     m: &TypeMemo,
@@ -188,6 +188,23 @@ pub fn validate_format(
         || !matches!(&t.row(result).kind, TypeKind::Tuple(items) if items.is_empty())
     {
         return Err(error());
+    }
+    // MODE-2: the builder's uniqueness is a declared contract like any other.
+    let preserved = f.state_promises.iter().any(|p| {
+        p.preserve_unique
+            && p.selector.fields.is_empty()
+            && p.selector.parameter == ParameterRef::bound(ParamId(1))
+    });
+    if !preserved {
+        let name = out.name.as_deref().unwrap_or("out");
+        return Err(diagnostic(
+            const { RuleId::of("SEM-3") },
+            span,
+            &format!(
+                "an @format function keeps its builder unique only by declaring it: \
+                 add `@preserves_unique({name})` to the function"
+            ),
+        ));
     }
     Ok(())
 }

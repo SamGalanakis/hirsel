@@ -466,7 +466,7 @@ pub fn decode[K: serializable](data: Bytes) -> Result[unique K, DecodeError] use
     core@1/bytes.from_list(take whole)
   )
   match decoded? {
-    Some(key) => Ok(unique key),
+    Some(key) => Ok(key),
     None() => Error(Tag()),
   }
 }

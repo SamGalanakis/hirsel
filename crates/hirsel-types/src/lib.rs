@@ -990,26 +990,6 @@ pub enum UseKind {
     Copy,
     Mut,
 }
-/// The lowering action selected for a unary `unique` operation.
-#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, Eq, PartialEq)]
-pub enum UniqueAction {
-    AlreadyUnique,
-    DeepCopy,
-}
-#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Eq, PartialEq)]
-pub struct UniqueDecision {
-    pub expression: ExprId,
-    pub action: UniqueAction,
-}
-impl UniqueAction {
-    /// The source extraction selected by the ownership operation.
-    pub fn usage(self) -> UseKind {
-        match self {
-            Self::AlreadyUnique => UseKind::Take,
-            Self::DeepCopy => UseKind::Copy,
-        }
-    }
-}
 /// A guard tests borrowed payloads before committing ownership to its arm.
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Eq, PartialEq)]
 pub struct GuardedPatternUse {
@@ -1075,7 +1055,6 @@ pub struct OwnershipFacts {
     /// Declaration-owned pattern payloads before receipt locality is inferred.
     /// Lowering adds the physical owner's bounds at each projection step.
     pub physical_patterns: Vec<(hirsel_syntax::PatternId, TypeId)>,
-    pub unique: Vec<UniqueDecision>,
     pub guarded_patterns: Vec<GuardedPatternUse>,
     /// Assignment sites that detach receiver storage into allocation.
     pub allocating_mutations: Vec<ExprId>,

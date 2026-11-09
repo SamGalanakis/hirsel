@@ -6,6 +6,7 @@ type Label {
   value: String,
 }
 
+@preserves_unique(out)
 fn label_text(label: Label, mut out: List[u8]) -> () uses {} {
   text.append(mut out, label.value)
 }

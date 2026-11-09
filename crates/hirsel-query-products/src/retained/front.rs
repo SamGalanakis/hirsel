@@ -204,7 +204,6 @@ impl Weight<'_> {
             identity_fields,
             physical_projections,
             physical_patterns,
-            unique,
             guarded_patterns,
             allocating_mutations,
             replacements,
@@ -248,7 +247,6 @@ impl Weight<'_> {
         });
         self.flat_vec(physical_projections);
         self.flat_vec(physical_patterns);
-        self.flat_vec(unique);
         self.flat_vec(guarded_patterns);
         self.flat_vec(allocating_mutations);
         self.flat_vec(replacements);

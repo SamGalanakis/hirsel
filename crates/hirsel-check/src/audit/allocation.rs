@@ -1211,8 +1211,14 @@ impl<'a> Audit<'a, '_> {
                         .execution
                         .add(expression.origin.span, AllocationReasonKind::Call);
                 }
-                if self.input.allocating_copies.contains(&e)
-                    && !self.placed(&row.modes.relation)
+                // MODE-2 (D4): `unique x` lowers to a deep copy until V elides it.
+                if matches!(
+                    expression.kind,
+                    ast::ExprKind::Unary {
+                        op: ast::UnaryOp::Unique,
+                        ..
+                    }
+                ) && !self.placed(&row.modes.relation)
                     && self.copy_has_blocks(ty)?
                 {
                     result

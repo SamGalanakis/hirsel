@@ -19,7 +19,6 @@ pub struct Input<'a> {
     pub syntax: &'a ast::ItemSyntax,
     pub signature: &'a Signature,
     pub call_allocations: &'a [(ExprId, Allocation)],
-    pub allocating_copies: &'a [ExprId],
     pub allocating_mutations: &'a [ExprId],
     pub checked: &'a CheckedBody,
     pub loops: &'a [hirsel_check_protocol::body::ForPlan],

@@ -41,7 +41,7 @@ declarations but are exempt from runtime dispatch and operation manifests.
 
 // SER-1/2
 fn codec.encode[T: serializable](value: T) -> Bytes
-fn codec.decode[T: serializable](data: Bytes) -> Result[T, DecodeError]
+fn codec.decode[T: serializable](data: Bytes) -> Result[unique T, DecodeError]
 
 // CT-3
 fn type_shape.info[T](s: TypeShape[T]) -> ShapeInfo

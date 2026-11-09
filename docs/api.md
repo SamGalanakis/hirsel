@@ -2625,7 +2625,7 @@ References: [`core@1/i8`](#def-core_401_2fi8), [`std@1/bigint/BigInt`](#def-std_
 
 <a id="def-std_401_2fbigint_2ffrom_5fu128"></a>
 
-- `pub fn bigint.from_u128(value: u128) -> BigInt uses {}`
+- `pub fn bigint.from_u128(value: u128) -> unique BigInt uses {}`
 
 The value of an unsigned 128-bit integer; the narrower widths widen to it.
 
@@ -2645,7 +2645,7 @@ References: [`core@1/u32`](#def-core_401_2fu32), [`std@1/bigint/BigInt`](#def-st
 
 <a id="def-std_401_2fbigint_2ffrom_5fu64"></a>
 
-- `pub fn bigint.from_u64(value: u64) -> BigInt uses {}`
+- `pub fn bigint.from_u64(value: u64) -> unique BigInt uses {}`
 
 References: [`core@1/u64`](#def-core_401_2fu64), [`std@1/bigint/BigInt`](#def-std_401_2fbigint_2fBigInt)
 
@@ -2742,7 +2742,7 @@ References: [`core@1/i32`](#def-core_401_2fi32), [`std@1/bigint/BigInt`](#def-st
 
 <a id="def-std_401_2fbigint_2fsub"></a>
 
-- `pub fn bigint.sub(a: BigInt, b: BigInt) -> BigInt uses {}`
+- `pub fn bigint.sub(a: BigInt, b: BigInt) -> unique BigInt uses {}`
 
 References: [`std@1/bigint/BigInt`](#def-std_401_2fbigint_2fBigInt)
 
@@ -2820,7 +2820,7 @@ References: [`core@1/Option`](#def-core_401_2fOption), [`core@1/u8`](#def-core_4
 
 <a id="def-std_401_2fbigint_2fzero"></a>
 
-- `pub fn bigint.zero() -> BigInt uses {}`
+- `pub fn bigint.zero() -> unique BigInt uses {}`
 
 Zero.
 

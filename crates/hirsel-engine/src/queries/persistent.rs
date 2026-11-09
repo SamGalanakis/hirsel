@@ -1049,14 +1049,6 @@ impl QueryEngine {
                         || engine.observe(path, read) == Some(*value)
                 })
             };
-            // This request's table shadows the restored variant of the same key.
-            if let Some(settled) = self.operation.settled_signature(&key, self) {
-                if !declared_reads_hold(self, settled.reads()) {
-                    return None;
-                }
-                let output = settled.result().ok()?;
-                return memos::declared_signature_value(&self.types, &output.value);
-            }
             let store = self.result_store.clone()?;
             let entry = StoredEntry::load(&*store, &key);
             for variant in entry.variants {
@@ -1087,12 +1079,6 @@ impl QueryEngine {
             return None;
         }
         let key = self.store_key(path, QueryKind::Signature)?;
-        // Verification reconstructs every product independently of this request.
-        if self.verify_store != hirsel_engine_store::VerifyStore::Recompute
-            && let Some(settled) = self.operation.settled_signature(&key, self)
-        {
-            return Some(settled);
-        }
         let variant = self.stored_variant_at(&key)?;
         let mut record: SignatureRecord = self.decode_record(&variant.payload)?;
         if let Ok(output) = &mut record.output {
@@ -1169,13 +1155,13 @@ impl QueryEngine {
         self.store_adoptions += 1;
         Some(entry)
     }
-    /// Settle a computed signature in this request's table, where every engine
-    /// of the operation reads it. The store sees its record only when the
-    /// request publishes, or when verification compares a restored variant.
-    pub(super) fn settle_signature(
+    /// Publish a computed signature's record. Engines of this request take the
+    /// product itself from its header row; the store sees the record only when
+    /// the request publishes, or when verification compares a restored variant.
+    pub(super) fn publish_signature(
         &mut self,
         path: &DefPath,
-        entry: &Arc<Entry<hirsel_types::SignatureRef>>,
+        entry: &Entry<hirsel_types::SignatureRef>,
     ) -> Result<(), QueryError> {
         let Some(store) = self.result_store.clone() else {
             return Ok(());
@@ -1193,9 +1179,6 @@ impl QueryEngine {
         if self.key_text(path, QueryKind::Signature).ok() != Some(entry.memo.text) {
             return Ok(());
         }
-        let Some(key) = self.store_key(path, QueryKind::Signature) else {
-            return Ok(());
-        };
         if store.persistence().publishes()
             || self
                 .pending_store_checks
@@ -1208,17 +1191,13 @@ impl QueryEngine {
                 &SignatureRecord::capture(entry),
             )?;
         }
-        if self.verify_store == hirsel_engine_store::VerifyStore::Recompute {
-            return Ok(());
-        }
-        self.operation.settle_signature(key, entry, self);
         Ok(())
     }
 
-    /// Recover the complete product behind a header projection. Match the
-    /// projection's exact reads, including its previous private proof. This
-    /// only restores discarded auxiliary products; the caller still validates
-    /// the memo before using or publishing a signature under current inputs.
+    /// Recover the syntax-backed products a restored signature omits from its
+    /// stored record. Match the restored entry's exact reads, including its
+    /// previous private proof; the caller still validates the memo before
+    /// using or publishing a signature under current inputs.
     pub(super) fn complete_signature_source(
         &mut self,
         entry: &Arc<Entry<hirsel_types::SignatureRef>>,
@@ -1233,49 +1212,15 @@ impl QueryEngine {
             return None;
         }
         let key = self.store_key(path, QueryKind::Signature)?;
-        let (detail, resolution) =
-            if let Some(settled) = self.operation.settled_signature(&key, self) {
-                // This request's table shadows the restored variant of the same key.
-                if !Arc::ptr_eq(&settled.memo.reads, &entry.memo.reads)
-                    && settled.reads() != entry.reads()
-                {
-                    return None;
-                }
-                (settled.detail.clone(), settled.products.resolution.clone())
-            } else {
-                self.restored_signature_source(path, &key, entry)?
-            };
-        Some(Arc::new(Entry {
-            memo: entry.memo.clone(),
-            detail,
-            products: Arc::new(PhaseProducts {
-                signature_persisted: true,
-                resolution,
-                ..(*entry.products).clone()
-            }),
-            covered: entry.covered.clone(),
-            depth: entry.depth.clone(),
-            acceptance: entry.acceptance.clone(),
-            verification: Default::default(),
-            selections: entry.selections.clone(),
-            consistent: entry.consistent,
-        }))
-    }
-    fn restored_signature_source(
-        &mut self,
-        path: &DefPath,
-        key: &EntryKey,
-        entry: &Entry<hirsel_types::SignatureRef>,
-    ) -> Option<(DependencyReads, Option<ResolverSnapshot>)> {
         let store = self.result_store.clone()?;
-        let stored = StoredEntry::load(&*store, key);
+        let stored = StoredEntry::load(&*store, &key);
         let variant = stored
             .variants
             .iter()
             .find(|variant| {
-                variant.inputs == key.1 && variant.valid(key) && &variant.reads == entry.reads()
+                variant.inputs == key.1 && variant.valid(&key) && &variant.reads == entry.reads()
             })?
-            .resolve(&*store, key)?;
+            .resolve(&*store, &key)?;
         let record: SignatureRecord = self.decode_record(&variant.payload)?;
         if record
             .output
@@ -1300,7 +1245,21 @@ impl QueryEngine {
         } else {
             None
         };
-        Some((record.detail, resolution))
+        Some(Arc::new(Entry {
+            memo: entry.memo.clone(),
+            detail: record.detail,
+            products: Arc::new(PhaseProducts {
+                signature_persisted: true,
+                resolution,
+                ..(*entry.products).clone()
+            }),
+            covered: entry.covered.clone(),
+            depth: entry.depth.clone(),
+            acceptance: entry.acceptance.clone(),
+            verification: Default::default(),
+            selections: entry.selections.clone(),
+            consistent: entry.consistent,
+        }))
     }
 
     pub(super) fn load_publication(&mut self, path: &DefPath) -> Option<PublishedResult> {
@@ -3082,7 +3041,7 @@ impl QueryEngine {
                     pending.insert(*dependency);
                 }
             }
-            self.settle_signature(id.path(), &entry)?;
+            self.publish_signature(id.path(), &entry)?;
         }
         Ok(())
     }
@@ -5094,8 +5053,6 @@ mod malformed_tests {
                         .collect(),
                     )
                     .unwrap();
-                // A request-local projection is recomputed under the new proof.
-                engine.signature_query_local(id).unwrap();
                 let published = engine.signatures[&id].clone();
                 let bytes = engine
                     .encode_record(&SignatureRecord::capture(&published))
@@ -5103,7 +5060,7 @@ mod malformed_tests {
                 let key = engine.store_key(id.path(), QueryKind::Signature).unwrap();
                 if request_local {
                     // A request-local store publishes nothing and so restores
-                    // nothing to verify; engines hand settled products over live.
+                    // nothing to verify; header rows hand the product over live.
                     continue;
                 }
                 let store = engine.result_store.clone().unwrap();

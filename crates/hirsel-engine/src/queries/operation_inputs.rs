@@ -27,21 +27,6 @@ pub(crate) struct OperationOwner {
     pub(crate) front: Mutex<Option<Weak<parallel::OperationFrontInputs>>>,
     pub(crate) headers: Mutex<BTreeMap<DefId, Vec<Weak<header_products::HeaderProduct>>>>,
     pub(crate) projections: Mutex<BTreeMap<usize, HeaderProjection>>,
-    /// The request's signature table: the complete product last settled under
-    /// each store key by any engine of this operation. Engines hand these
-    /// entries to each other directly; the request store sees a signature only
-    /// when it publishes one or verifies a restored one.
-    signatures: Mutex<BTreeMap<hirsel_engine_store::EntryKey, SignatureRow>>,
-}
-
-/// One engine's settled signature, held only while its producer keeps it.
-/// The interner and placement revision fix what its type ids and anchors
-/// mean; anchors are process-unique, so one revision is one anchor map.
-struct SignatureRow {
-    source: Weak<Entry<hirsel_types::SignatureRef>>,
-    settled: Weak<Entry<hirsel_types::SignatureRef>>,
-    types: Weak<hirsel_types::TypeInterner>,
-    placement: u64,
 }
 
 impl OperationOwner {
@@ -58,71 +43,6 @@ impl OperationOwner {
                 )
             })
             .collect()
-    }
-    /// The signature settled under `key`, when its producer still holds it,
-    /// it binds `engine`'s interner and anchors, and no engine has observed a
-    /// change that forgets it. Readers see only what a publication carries.
-    pub(crate) fn settled_signature(
-        &self,
-        key: &hirsel_engine_store::EntryKey,
-        engine: &QueryEngine,
-    ) -> Option<Arc<Entry<hirsel_types::SignatureRef>>> {
-        let mut rows = self.signatures.lock().unwrap_or_else(|e| e.into_inner());
-        let row = rows.get_mut(key)?;
-        if !row.types.ptr_eq(&Arc::downgrade(engine.types()))
-            || row.placement != engine.sources.placement_revision()
-        {
-            return None;
-        }
-        let source = row.source.upgrade()?;
-        if source.memo.is_stale() {
-            return None;
-        }
-        if let Some(settled) = row.settled.upgrade() {
-            return Some(settled);
-        }
-        // Engine-local evaluation state stays with its producer.
-        let settled = Arc::new(Entry {
-            memo: source.memo.clone(),
-            detail: source.detail.clone(),
-            products: Arc::new(PhaseProducts {
-                signature_persisted: true,
-                mode_archive: None,
-                resolution: source.products.resolution.clone(),
-                representation: source.products.representation.clone(),
-                mode_diagnostics: vec![],
-            }),
-            covered: source.covered.clone(),
-            depth: None,
-            acceptance: None,
-            verification: Default::default(),
-            selections: vec![],
-            consistent: true,
-        });
-        row.settled = Arc::downgrade(&settled);
-        Some(settled)
-    }
-    /// Settle `entry` as `engine`'s signature of `key`, replacing an earlier
-    /// one. The row retains nothing: the producer's memo owns and charges it.
-    pub(crate) fn settle_signature(
-        &self,
-        key: hirsel_engine_store::EntryKey,
-        entry: &Arc<Entry<hirsel_types::SignatureRef>>,
-        engine: &QueryEngine,
-    ) {
-        let mut rows = self.signatures.lock().unwrap_or_else(|e| e.into_inner());
-        if rows.len().is_multiple_of(256) {
-            rows.retain(|_, row| row.source.strong_count() != 0);
-        }
-        rows.insert(
-            key,
-            SignatureRow {
-                source: Arc::downgrade(entry),
-                settled: Weak::new(),
-                types: Arc::downgrade(engine.types()),
-                placement: engine.sources.placement_revision(),
-            },
-        );
     }
     pub(crate) fn private_work_count(&self, definition: &DefPath) -> usize {
         self.private_work

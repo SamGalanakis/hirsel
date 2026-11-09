@@ -496,7 +496,7 @@ impl QueryEngine {
                     .remove(&(id, QueryKind::Signature));
                 self.load_signature(id.path());
             }
-            self.settle_signature(id.path(), &entry)?;
+            self.publish_signature(id.path(), &entry)?;
         }
         self.private_signature_publications.remove(&id);
         Ok(())

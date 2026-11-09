@@ -229,7 +229,7 @@ impl PrivateProducts {
                 let declared = engine
                     .unmarked_signature(id)
                     .and_then(|_| engine.signatures.get(&id))
-                    .map(|entry| engine.operation.project_header(entry));
+                    .map(|entry| engine.operation.header_entry(entry));
                 (
                     id,
                     Candidate {
@@ -500,7 +500,7 @@ impl HeaderProducts {
                 signatures
                     .entry(candidate.module)
                     .or_default()
-                    .push((*definition, self.operation.project_header(entry)));
+                    .push((*definition, self.operation.header_entry(entry)));
             }
         }
         // Work on a definition outside the proved modules was done for the

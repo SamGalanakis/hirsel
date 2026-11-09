@@ -220,9 +220,7 @@ impl QueryEngine {
                     if summary == previous && output.value.metadata.inferred_unique == summary {
                         continue;
                     }
-                    let complete = if entry.products.resolution.is_none()
-                        || entry.products.signature_persisted
-                    {
+                    let complete = if entry.products.signature_persisted {
                         self.complete_signature_source(&entry)
                     } else {
                         Some(entry.clone())
@@ -232,7 +230,7 @@ impl QueryEngine {
                     } else {
                         // A restored header can omit syntax-backed auxiliary
                         // products. Restore or recompute the complete product
-                        // under the new proof instead of rewriting that projection.
+                        // under the new proof instead of rewriting that restored entry.
                         self.signatures.remove(&id);
                         self.adopted_headers = None;
                         self.private_signature_publications.insert(id);
@@ -268,12 +266,11 @@ impl QueryEngine {
                             &observed,
                         );
                         next.covered = entry.covered.clone();
-                        let next = Arc::new(next);
                         if self.verify_store != hirsel_engine_store::VerifyStore::Recompute {
-                            self.settle_signature(id.path(), &next)?;
+                            self.publish_signature(id.path(), &next)?;
                         }
                         self.private_signature_publications.insert(id);
-                        self.signatures.insert(id, next);
+                        self.signatures.insert(id, Arc::new(next));
                         self.adopted_headers = None;
                         if signature_changed || summary != previous {
                             changed.push(id.path().clone());

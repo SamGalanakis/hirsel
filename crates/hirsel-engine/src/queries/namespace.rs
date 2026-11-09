@@ -1520,7 +1520,6 @@ mod tests {
                     .capture_namespace(&definitions, &[], 8 << 20)
                     .unwrap();
                 drop(engine);
-                header_products::PROJECTIONS.set(0);
                 if cold {
                     capture.header(&definitions[0]).unwrap();
                     let barrier = std::sync::Barrier::new(8);
@@ -1560,14 +1559,7 @@ mod tests {
                 }
                 // One immutable source and one declared header, shared by eight
                 // demanders of the same request: each producer runs exactly once.
-                assert_eq!(
-                    (
-                        calls.load(Ordering::Relaxed),
-                        header_products::PROJECTIONS.get()
-                    ),
-                    (1, 1),
-                    "source parses and header projections",
-                );
+                assert_eq!(calls.load(Ordering::Relaxed), 1, "source parses");
                 assert_eq!(store.writes.load(Ordering::Relaxed), 0);
             }
         });

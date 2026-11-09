@@ -355,7 +355,7 @@ impl HeaderProducts {
                         .is_none_or(|private| !private.requires_proof(id))
                 {
                     let entry = engine.signatures[&id].clone();
-                    let projected = engine.operation.project_header(&entry);
+                    let projected = engine.operation.header_entry(&entry);
                     let publication = engine.private_signature_publications.contains(&id);
                     let existing = engine.operation.header(&projected, publication);
                     if let Some(existing) = existing {
@@ -858,7 +858,7 @@ impl HeaderProducts {
         let origin = source
             .filter(|_| local)
             .map_or_else(Weak::new, Arc::downgrade);
-        let entry = source.map(|entry| self.operation.project_header(entry));
+        let entry = source.map(|entry| self.operation.header_entry(entry));
         if let Some(existing) = entry
             .as_ref()
             .and_then(|entry| self.operation.header(entry, self.provisional))
@@ -1806,38 +1806,20 @@ impl QueryEngine {
     }
 }
 
-#[cfg(test)]
-thread_local! {
-    pub(super) static PROJECTIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-}
-
-fn project(
+/// The complete product a header row owns. Only engine-local evaluation
+/// state stays with its producer; resolver products and dependency detail
+/// stay, so no reader ever recomputes what a row already settled.
+fn owned_entry(
     entry: &Arc<Entry<hirsel_types::SignatureRef>>,
 ) -> Arc<Entry<hirsel_types::SignatureRef>> {
-    // Validity uses the complete memo. Program revision and semantic body
-    // nodes still need the closure, so keep only the definitions it names.
-    if entry.products.resolution.is_none()
-        && !crate::memo::retained::source_projection(entry).detail
-    {
+    if entry.products.mode_archive.is_none() && entry.verification.lock().unwrap().is_none() {
         return entry.clone();
     }
-    #[cfg(test)]
-    PROJECTIONS.update(|count| count + 1);
     Arc::new(Entry {
         memo: entry.memo.clone(),
-        detail: DependencyReads {
-            operational_failure: entry.detail.operational_failure.clone(),
-            closure: {
-                let mut closure: Vec<_> = entry.detail.semantic_definitions().collect();
-                closure.sort_unstable();
-                closure.dedup();
-                closure.shrink_to_fit();
-                closure
-            },
-            ..Default::default()
-        },
+        detail: entry.detail.clone(),
         products: Arc::new(PhaseProducts {
-            resolution: None,
+            mode_archive: None,
             ..(*entry.products).clone()
         }),
         covered: entry.covered.clone(),
@@ -1869,7 +1851,7 @@ impl operation_inputs::OperationOwner {
                         .is_some_and(|old| Arc::ptr_eq(old, entry))
             })
     }
-    fn project_header(
+    pub(super) fn header_entry(
         &self,
         entry: &Arc<Entry<hirsel_types::SignatureRef>>,
     ) -> Arc<Entry<hirsel_types::SignatureRef>> {
@@ -1888,7 +1870,7 @@ impl operation_inputs::OperationOwner {
                 source.strong_count() != 0 && projected.strong_count() != 0
             });
         }
-        let projected = project(entry);
+        let projected = owned_entry(entry);
         entries.insert(key, (Arc::downgrade(entry), Arc::downgrade(&projected)));
         projected
     }

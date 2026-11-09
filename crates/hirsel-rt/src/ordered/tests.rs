@@ -238,7 +238,7 @@ fn every_unresolved_predecessor_and_not_just_the_head_counts() {
     // Start the next turn with 2 and 3 in the head's captured queue.
     f.queue.push_front(1);
     f.head = Some(0);
-    f.eligible_turns = [(1, 0), (2, 0), (3, 0)].into();
+    f.snapshot_eligible();
     f.held.get_mut(&2).unwrap().objects.insert(object(7));
     assert!(!f.eligible(3, &store(7, 1)));
     assert!(f.eligible(3, &store(8, 1)));

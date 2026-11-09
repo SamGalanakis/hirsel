@@ -24,6 +24,70 @@ enum Execution {
     Done,
 }
 
+/// Physical execution per task: one row per native index, holding its newest
+/// generation. Slot generations only grow and never wrap (`crate::slots`), and
+/// an index's newer generation is admitted only once its older one is `Done`.
+/// So an older generation reads as `Done` and a newer one as absent: the same
+/// answers as one map entry per task that is never removed.
+#[derive(Debug, Default)]
+struct Executions(Vec<Option<(u32, Execution)>>);
+
+impl Executions {
+    fn split(task: TaskId) -> (usize, u32) {
+        (task as u32 as usize, (task >> 32) as u32)
+    }
+
+    fn get(&self, task: TaskId) -> Option<Execution> {
+        let (index, generation) = Self::split(task);
+        match self.0.get(index)? {
+            Some((row, execution)) if *row == generation => Some(*execution),
+            Some((row, _)) if *row > generation => Some(Execution::Done),
+            _ => None,
+        }
+    }
+
+    fn get_mut(&mut self, task: TaskId) -> Option<&mut Execution> {
+        let (index, generation) = Self::split(task);
+        match self.0.get_mut(index)? {
+            Some((row, execution)) if *row == generation => Some(execution),
+            Some((row, _)) => {
+                assert!(*row < generation, "an older generation is only read");
+                None
+            }
+            None => None,
+        }
+    }
+
+    /// The previous state of this generation, as `BTreeMap::insert` returns.
+    fn insert(&mut self, task: TaskId, execution: Execution) -> Option<Execution> {
+        if let Some(row) = self.get_mut(task) {
+            return Some(std::mem::replace(row, execution));
+        }
+        let (index, generation) = Self::split(task);
+        if self.0.len() <= index {
+            self.0.resize(index + 1, None);
+        }
+        let row = &mut self.0[index];
+        assert!(
+            row.is_none_or(|(_, older)| older == Execution::Done),
+            "a native index is reused only after its older generation is done"
+        );
+        *row = Some((generation, execution));
+        None
+    }
+}
+
+impl std::ops::Index<&TaskId> for Executions {
+    type Output = Execution;
+    fn index(&self, task: &TaskId) -> &Execution {
+        let (index, generation) = Self::split(*task);
+        match &self.0[index] {
+            Some((row, execution)) if *row == generation => execution,
+            _ => panic!("a live task's execution"),
+        }
+    }
+}
+
 /// Policy metadata intended for Scheduler.logical::Ordered. Native boundary,
 /// budget and canonical-event adapters must be installed before admission can
 /// select this driver; constructing this metadata alone activates no workers.
@@ -31,7 +95,7 @@ pub(crate) struct Driver {
     pub(super) tuning: super::tuning::Tuning,
     pub(super) frontier: Option<Frontier<Command, Outcome>>,
     pub(super) objects: Registry,
-    execution: BTreeMap<TaskId, Execution>,
+    execution: Executions,
     pub(super) reserved: BTreeMap<u32, super::ahead::Reserved>,
     pub(super) awaiting_save: bool,
     pub(super) private_enabled: bool,
@@ -43,6 +107,8 @@ pub(crate) struct Driver {
     pub(super) after_save: Option<SaveHook>,
     pub(super) waiting: BTreeMap<TaskId, u64>,
     pub(super) returned: BTreeMap<TaskId, super::Returned>,
+    /// One commit's recorded returns, reused by each nonreentrant commit.
+    pub(super) records: Vec<(TaskId, super::Returned)>,
     pub(super) host_poll: bool,
     /// A physical file job retains its logical head until completion.
     pub(super) head_job: Option<(TaskId, u64)>,
@@ -81,7 +147,11 @@ impl Driver {
             tuning: super::tuning::Tuning::new(policy.reorder == hirsel_run_config::Reorder::Auto),
             frontier: Some(frontier),
             objects,
-            execution: BTreeMap::from([(root, Execution::Saved { head_only: false })]),
+            execution: {
+                let mut execution = Executions::default();
+                execution.insert(root, Execution::Saved { head_only: false });
+                execution
+            },
             reserved: BTreeMap::new(),
             awaiting_save: false,
             private_enabled: policy.run_ahead != 0
@@ -93,6 +163,7 @@ impl Driver {
             after_save: None,
             waiting: BTreeMap::new(),
             returned: BTreeMap::new(),
+            records: Vec::new(),
             host_poll: false,
             head_job: None,
             in_operations: BTreeMap::new(),
@@ -172,7 +243,7 @@ impl Driver {
             if self.head_job.is_some_and(|(owner, _)| owner == task) {
                 continue;
             }
-            let Some(Execution::Saved { head_only }) = self.execution.get(&task).copied() else {
+            let Some(Execution::Saved { head_only }) = self.execution.get(task) else {
                 continue;
             };
             let state = frontier.state(task);
@@ -193,7 +264,7 @@ impl Driver {
     /// A head with a pending log resumes its boundary to absorb that log first.
     /// A moved frame's running claim passes to `worker`.
     pub(crate) fn claimed(&mut self, task: TaskId, worker: u16) {
-        let execution = self.execution.get_mut(&task).expect("a dispatched task");
+        let execution = self.execution.get_mut(task).expect("a dispatched task");
         assert_eq!(*execution, Execution::Selected);
         *execution = Execution::Running;
         let frontier = self.frontier.as_mut().expect("restored frontier");
@@ -213,7 +284,7 @@ impl Driver {
 
     pub(super) fn dispatch_owned(&self, task: TaskId) -> bool {
         matches!(
-            self.execution.get(&task),
+            self.execution.get(task),
             Some(Execution::Selected | Execution::Running)
         )
     }
@@ -257,7 +328,7 @@ impl Driver {
     /// A Full log or an allocation pause must wait for head, even if the last
     /// accepted D operation left its protocol state Ahead rather than Pending.
     pub(crate) fn suspending(&mut self, task: TaskId, head_only: bool) {
-        let execution = self.execution.get_mut(&task).expect("a live task");
+        let execution = self.execution.get_mut(task).expect("a live task");
         assert_eq!(*execution, Execution::Running);
         *execution = Execution::Saving { head_only };
     }
@@ -278,20 +349,20 @@ impl Driver {
 
     pub(super) fn is_finishing(&self, task: TaskId) -> bool {
         matches!(
-            self.execution.get(&task),
+            self.execution.get(task),
             Some(Execution::Finishing | Execution::Done)
         )
     }
 
     pub(crate) fn finishing(&mut self, task: TaskId) {
-        let execution = self.execution.get_mut(&task).expect("a live task");
+        let execution = self.execution.get_mut(task).expect("a live task");
         assert_eq!(*execution, Execution::Running);
         *execution = Execution::Finishing;
     }
 
     #[cfg(test)]
     pub(super) fn head_paused(&self, task: TaskId) -> bool {
-        self.execution.get(&task) == Some(&Execution::Saved { head_only: true })
+        self.execution.get(task) == Some(Execution::Saved { head_only: true })
     }
 
     /// A retirement barrier belongs to a full logical identity, not a reusable
@@ -299,7 +370,7 @@ impl Driver {
     /// its host poll; Done remains proof that this generation physically saved.
     pub(super) fn physically_saved(&self, task: TaskId) -> bool {
         matches!(
-            self.execution.get(&task),
+            self.execution.get(task),
             Some(Execution::Saved { .. } | Execution::Done)
         )
     }
@@ -311,7 +382,7 @@ impl Driver {
         if completed {
             self.tuning.finished(task);
         }
-        let execution = self.execution.get_mut(&task).expect("a saving task");
+        let execution = self.execution.get_mut(task).expect("a saving task");
         *execution = match (*execution, completed) {
             (Execution::Saving { head_only }, false) => Execution::Saved { head_only },
             (Execution::Finishing, true) => Execution::Done,
@@ -365,13 +436,16 @@ pub(crate) fn after_save(
             // SAFETY: generic after_save owns IdleGuard and published saved.
             && unsafe { super::super::readiness::poll_ordered(s, pool_available) }
         {
-            let ready = std::mem::take(&mut s.runnable)
-                .into_iter()
-                .map(|task| super::super::handle(task, s.task(task).generation))
-                .collect();
             let super::super::Logical::Ordered(driver) = &mut s.logical else {
                 unreachable!()
             };
+            let tasks = &s.tasks;
+            let ready = s.runnable.drain(..).map(|task| {
+                let row = tasks[task as usize]
+                    .as_ref()
+                    .unwrap_or_else(|| crate::fault("a vacant task row"));
+                super::super::handle(task, row.generation)
+            });
             assert!(driver.frontier.as_ref().unwrap().retiring_task().is_some());
             driver.frontier.as_mut().unwrap().complete_poll(ready);
             driver.poll_after_save = None;

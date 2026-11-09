@@ -190,6 +190,9 @@ struct Task<P, R> {
     /// cannot be reclaimed merely because its last accepted log entry retires.
     open_speculative_bytes: u64,
     calls: Option<(VecDeque<TaskId>, bool)>,
+    /// Rule 1 snapshot: `(epoch, turn)` when this task was queued at the
+    /// snapshot numbered `epoch`, with its retiring turn at that moment.
+    eligible: (u64, u64),
 }
 
 impl<P, R> Task<P, R> {
@@ -202,6 +205,7 @@ impl<P, R> Task<P, R> {
             speculative_bytes: 0,
             open_speculative_bytes: 0,
             calls: None,
+            eligible: (0, 0),
         }
     }
 }
@@ -249,8 +253,9 @@ pub struct Frontier<P, R> {
     head: Option<TaskId>,
     polling: Option<(TaskId, Next)>,
     queue: VecDeque<TaskId>,
-    /// Rule 1: queue and first turn captured when this head started.
-    eligible_turns: BTreeMap<TaskId, u64>,
+    /// Rule 1: the snapshot number whose rows hold the queue and first turn
+    /// captured when this head started. Rows of older snapshots are absent.
+    epoch: u64,
     pub held: BTreeMap<TaskId, Held>,
     pub carries: Carries,
     pub settled: Settled,
@@ -277,7 +282,7 @@ impl<P, R> Frontier<P, R> {
             head: Some(root),
             polling: None,
             queue: VecDeque::new(),
-            eligible_turns: BTreeMap::new(),
+            epoch: 1,
             held,
             carries: Carries::default(),
             settled,
@@ -334,11 +339,24 @@ impl<P, R> Frontier<P, R> {
             self.queue.push_back(task);
         }
         self.head = self.queue.pop_front();
-        self.eligible_turns = self
-            .queue
-            .iter()
-            .map(|&id| (id, self.tasks[&id].retiring))
-            .collect();
+        self.snapshot_eligible();
+    }
+
+    /// Capture rule 1's queue and first turns in place: one new snapshot
+    /// number, written into the rows of exactly the queued tasks.
+    fn snapshot_eligible(&mut self) {
+        self.epoch += 1;
+        let epoch = self.epoch;
+        for id in &self.queue {
+            let row = self.tasks.get_mut(id).expect("a queued task");
+            row.eligible = (epoch, row.retiring);
+        }
+    }
+
+    /// Rule 1 membership: the row was queued at the current snapshot with
+    /// captured first turn `turn`.
+    fn eligible_turn(&self, row: &Task<P, R>, turn: u64) -> bool {
+        row.eligible == (self.epoch, turn)
     }
 
     pub fn state(&self, task: TaskId) -> State {
@@ -386,7 +404,7 @@ impl<P, R> Frontier<P, R> {
             || row.log.len() > usize::from(self.policy.run_ahead)
             || self.policy.reorder == Reorder::Off
             || !self.auto
-            || self.eligible_turns.get(&task) != Some(&row.producing)
+            || !self.eligible_turn(row, row.producing)
         {
             return false;
         }
@@ -469,7 +487,7 @@ impl<P, R> Frontier<P, R> {
         if self.stopped
             || self.policy.reorder == Reorder::Off
             || !self.auto
-            || self.eligible_turns.get(&task) != Some(&row.producing)
+            || !self.eligible_turn(row, row.producing)
             || !E.contains(&operation.descriptor.name)
             || !operation.descriptor.objects_only()
             || !operation.footprint.objects_only()
@@ -832,7 +850,7 @@ impl<P, R> Frontier<P, R> {
     /// Complete exactly one retirement's poll after restoring the policy into
     /// its role-owned slot. Wake order precedes the yielding task's requeue;
     /// only then is the next head and rule-1 eligibility snapshot selected.
-    pub fn complete_poll(&mut self, woken: Vec<TaskId>) -> Progress {
+    pub fn complete_poll(&mut self, woken: impl IntoIterator<Item = TaskId>) -> Progress {
         let (task, next) = self.polling.take().expect("a deferred retirement poll");
         assert!(!self.stopped, "poll completion after a terminal prefix");
         for woken in woken {
@@ -846,11 +864,7 @@ impl<P, R> Frontier<P, R> {
         }
         self.head = self.queue.pop_front();
         self.retired += 1;
-        self.eligible_turns = self
-            .queue
-            .iter()
-            .map(|&task| (task, self.tasks[&task].retiring))
-            .collect();
+        self.snapshot_eligible();
         Progress::Retired
     }
 }

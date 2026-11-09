@@ -471,9 +471,9 @@ fn with_frontier_here<T>(
     ctx: *mut TaskCtx,
     action: impl FnOnce(&mut Frontier<Command, Outcome>, &mut Objects<'_>) -> T,
 ) -> T {
-    let mut frontier =
-        with_driver(ctx, |d| d.frontier.take()).expect("nonreentrant ordered commit");
-    let mut records = Vec::new();
+    let (frontier, mut records) =
+        with_driver(ctx, |d| (d.frontier.take(), std::mem::take(&mut d.records)));
+    let mut frontier = frontier.expect("nonreentrant ordered commit");
     let mut record = |task, _, outcome: &Outcome, _| records.push((task, outcome.returned()));
     let mut backend = unsafe { Objects::deferred(ctx, &mut record) };
     let result = action(&mut frontier, &mut backend);
@@ -489,7 +489,7 @@ fn with_frontier_here<T>(
     for (task, held) in spawned {
         driver.enqueue(task, held);
     }
-    for (task, returned) in records {
+    for (task, returned) in records.drain(..) {
         let ordinal = driver.recorded.entry(task).or_default();
         if driver.waiting.get(&task) == Some(ordinal) {
             assert!(driver.returned.insert(task, returned).is_none());
@@ -497,6 +497,7 @@ fn with_frontier_here<T>(
         }
         *ordinal += 1;
     }
+    driver.records = records;
     let level = driver.frontier.as_ref().unwrap().settled.level;
     unsafe { (*ctx).heap_ref().meter.settled(level) };
     result
@@ -509,14 +510,18 @@ pub(super) fn poll(ctx: *mut TaskCtx) -> Stopped<()> {
         "one poll owner"
     );
     unsafe { super::super::poll_parked(ctx) }?;
-    let ready = role::with_role(ctx, |s| {
-        let ready = std::mem::take(&mut s.runnable);
-        ready
-            .into_iter()
-            .map(|task| handle(task, s.task(task).generation))
-            .collect()
-    });
-    with_driver(ctx, |driver| {
+    role::with_role(ctx, |s| {
+        let s: &mut super::super::Scheduler = s;
+        let Logical::Ordered(driver) = &mut s.logical else {
+            unreachable!()
+        };
+        let tasks = &s.tasks;
+        let ready = s.runnable.drain(..).map(|task| {
+            let row = tasks[task as usize]
+                .as_ref()
+                .unwrap_or_else(|| crate::fault("a vacant task row"));
+            handle(task, row.generation)
+        });
         driver.frontier.as_mut().unwrap().complete_poll(ready);
         driver.host_poll = false;
     });

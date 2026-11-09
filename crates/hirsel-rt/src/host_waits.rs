@@ -1746,7 +1746,14 @@ pub(crate) unsafe fn process_batch_home(
     ready
 }
 
+/// A quiet run has no parked, native or armed request and no process source, so
+/// its adapter's batch is empty and records nothing, and `canceled` names no
+/// binding row: the home bridge would return `Tokens([])`. It is not taken.
 pub(crate) unsafe fn process_batch(ctx: *mut TaskCtx, canceled: &[u64]) -> Stopped<Ready> {
+    // SAFETY: caller contract.
+    if unsafe { quiet(ctx) } {
+        return Ok(Ready::Tokens(Vec::new()));
+    }
     unsafe { at_home(ctx, || process_batch_home((*ctx).run_ptr(), canceled)) }?
 }
 

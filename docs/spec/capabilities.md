@@ -102,7 +102,9 @@ the default action as well.
 with a grant set the run configuration fixes; it can only be narrowed, a call through it
 carries data and a definition's identity, never authority, and the callee's capabilities
 come only from the place ([runners](runners.md)). A store is opened over an `Authority`
-(planned), and its authority is exactly that one store's; a transaction on it gives its
+(planned), which `io.authority` returns for a name the run configuration grants
+([STORE-11](storage.md#store-11-engine-and-storage-seam)), and its authority is exactly
+that one store's history and objects; a transaction on it gives its
 body only a scoped `Tx`, which the body can only narrow
 ([STORE-3](storage.md#store-3-transaction-scope)).
 

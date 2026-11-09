@@ -10,15 +10,16 @@ implementation is converging on it:
   requests (STORE-10). `packages/s3@1` implements object-storage requests and grants.
 - **Shipped, removed by this part, and deleted at the cutover:** closure bodies for
   `store.transact` and `store.call`; `store.begin`, `store.begin_with`, `store.commit`,
-  `store.rollback`, `Txn`, `Isolation` and `Conflict()`; the `Backend[S]` record and its
-  layout of numbered manifest, log and snapshot objects with fence objects, under which
-  no object is ever removed; `StoreConfig.durability`; the `StopAfterWrites` seam and
+  `store.rollback`, `Txn`, `Isolation` and `Conflict()`; the `Backend[S]` record,
+  `local_backend` and `PutError`, and their layout of numbered manifest, log and snapshot
+  objects with fence objects, under which no object is ever removed;
+  `StoreConfig.durability` and `StoreConfig.faults`; the `StopAfterWrites` seam and
   `Injected()`; `store.sequence`. The [standard library](std-library.md) lists the shipped
   operations until then. The history format (STORE-11) replaces that layout.
 - **Planned (their names do not resolve yet):** everything else in this part.
 - **Open designs,** where this part states the contract and the declarations are still to
-  be written: the declarations of the authority seam and its grant (STORE-11); and the
-  wire format of the subscription feed and the client ingress (STORE-16, STORE-17).
+  be written: the wire format of the subscription feed and the client ingress (STORE-16,
+  STORE-17).
 - Items marked **Reserved** have no implementation owner.
 
 A **store** is one strictly serializable, ordered key-value database: a **history** of
@@ -30,18 +31,19 @@ are named top-level definitions holding nothing but a scoped `Tx`, their call in
 and data. A transaction's outcome is released only once every commit it observed is
 durable at the level its release requires.
 
-The layers are fixed. A **backend** keeps the history and immutable objects, fences
+The layers are fixed. An **authority** keeps the history and immutable objects, fences
 writers and reports durability (STORE-11). The **engine**, `std@1/store`, orders and runs
 transactions over byte keys, tracks every access and matches commits to subscriptions.
 Everything else is a library over the engine: typed tables (`std@1/table`), indexes,
 query languages, maintained views, workflows, migrations, verification and trial tools.
-The engine knows no table. Stores add no TIR or LIR construct, and `Tx` is the scoped
-capability of [MODE-6](ownership.md#mode-6-scoped-capabilities). The engine is std code
-over three core additions, which concern entries and places rather than stores:
-`runner.apply` and `runner.apply_mut` run a named entry in the current run as a failure
-boundary, `runner.entry_id` states an entry's identity ([RUN-3](runners.md#run-3-entries)),
-and a place's `Inbox` hands its head the calls that arrived for it
-([STORE-12](#store-12-transactions-at-a-runner)).
+The engine knows no table. The authority is a host provider seam like a directory's; no
+TIR or LIR construct is added for stores: `Tx` is the scoped capability of
+[MODE-6](ownership.md#mode-6-scoped-capabilities). Beside the authority seam, the engine
+is std code over three core additions, which concern entries and places rather than
+stores: `runner.apply` and `runner.apply_mut` run a named entry in the current run as a
+failure boundary, `runner.entry_id` states an entry's identity
+([RUN-3](runners.md#run-3-entries)), and a place's `Inbox` hands its head the calls that
+arrived for it ([STORE-12](#store-12-transactions-at-a-runner)).
 
 ### STORE-1: Stores
 
@@ -51,25 +53,33 @@ fn store.close(take s: Store) -> Result[(), StoreError]
 ```
 
 `store.open` opens or creates the store kept by the authority `a`
-([STORE-11](#store-11-engine-and-storage-seam)) and claims it as its writer: it recovers
-the newest state the history holds, takes the next **writer epoch**, and returns a
-`Store`. `Store` is an ordinary affine opaque type; it exports no copying or sending
+([STORE-11](#store-11-engine-and-storage-seam)) and claims it as its writer: it appends a
+claim entry with the next **writer epoch** to the history, recovers the newest state the
+history holds, and returns a `Store`. Of openers that race, exactly one claim succeeds and
+every other open returns `Fenced()`. `Store` is an ordinary affine opaque type; it exports no copying or sending
 bound, and every operation that changes it takes it `mut`. One `Store` value is the
 store's **head**: its only writer. A later claim of the same authority, in this process
-or any other, fences the earlier head, whose next commit fails and which closes with
-`Fenced()`. Other runs and hosts reach a store only through its head
+or any other, fences the earlier head: its next advance of the history returns
+`Fenced()`, and it closes. Other runs and hosts reach a store only through its head
 ([STORE-12](#store-12-transactions-at-a-runner)) or by following its history
 ([STORE-20](#store-20-one-history-many-machines)).
 
-`store.close` waits until every commit is durable at the strongest level the backend
+`store.close` waits until every commit is durable at the strongest level the authority
 declares and releases the in-memory state; a store dropped without `close` loses only
 commits that were not yet durable. Holding a `Store` grants nothing outside its
 authority.
 
-`StoreConfig` holds the settings of the engine provider, `db.local@1`. A setting that can
-decide an outcome, a limit above all, is recorded in the store when it is created and is
-the same for every run of every body; an opener cannot change it
-([STORE-11](#store-11-engine-and-storage-seam)).
+```text
+StoreConfig = { group_commits: u64, group_bytes: u64, limits: StoreLimits }
+StoreLimits = { key_bytes: u64, value_bytes: u64, transaction_bytes: u64, range_rows: u64 }
+```
+
+`StoreConfig` holds the settings of the engine provider, `db.local@1`: the group bounds
+of [STORE-11](#store-11-engine-and-storage-seam) and the limits. A setting that can decide
+an outcome, a limit above all, is recorded in the store when it is created and is the same
+for every run of every body; an opener cannot change it, and the limits it passes to an
+existing store are ignored. Durability is not a setting: each wait names its level
+([STORE-2](#store-2-transactions)), and faults come only from a simulated authority.
 
 ### STORE-2: Transactions
 
@@ -143,13 +153,16 @@ It is that provider's cost model, not part of the contract.
 #### Visibility and the output gate
 
 Commits on one store are numbered by consecutive **commit versions**. The store's
-**visible version** `V` is the highest commit applied to the head's state. A backend
+**visible version** `V` is the highest commit applied to the head's state. An authority
 declares its **durability levels** ([STORE-11](#store-11-engine-and-storage-seam)); for
 each level `L`, the **durable version** `D(L)` is the highest commit version such that
 it and every lower one are durable at `L`. No `D(L)` decreases or exceeds `V`, and a
 stronger level's is never ahead of a weaker one's.
 
 ```text
+Level  = Nothing() | ProcessCrash() | HostCrash() | MachineLoss() | ZoneLoss() | RegionLoss()
+Ticket // opaque: copyable, data, inert, sendable
+fn store.ticket(s: Store) -> Ticket
 fn store.durable(mut s: Store, ticket: Ticket, at: Level) -> Result[(), StoreError]
 ```
 
@@ -165,9 +178,20 @@ fn store.durable(mut s: Store, ticket: Ticket, at: Level) -> Result[(), StoreErr
   transaction that observed a lost commit has `g` above it, so no outcome released at `L`
   depends on lost state.
 
-`store.durable` returns once `D(at)` reaches the ticket's version, advancing the queued
-group if needed. `Level` is the level type the store's backend declares; a `Ticket` names
-the commit version of one transaction.
+`Level` names what a failure destroys, weakest first, variant ordinals in the order
+written: nothing survives; the process; the operating system or power, the disk
+surviving; the machine and its disks; one zone; one region. A level survives every
+failure a weaker one survives. An authority declares the levels it provides
+([STORE-11](#store-11-engine-and-storage-seam)), and a wait or floor at a level it does
+not declare is served at the weakest declared level that is at least as strong; when
+there is none the operation returns `NoLevel()`.
+
+`store.ticket` names the store's visible version `V` in its history: a transaction's own
+commit when taken right after it. A ticket carries the store identity, so it never names
+a version of another history. `store.durable` returns once `D(at)` reaches the ticket's
+version, advancing the queued group if needed; a ticket of another store returns
+`Foreign()`. Neither changes the store. Any other error closes the store and never claims
+that the ticket's commit is lost: the next open settles it.
 
 ### STORE-3: Transaction scope
 
@@ -536,19 +560,29 @@ fails either check is `Storage(Corrupt())`.
 ```text
 Version    // opaque: copyable, data, key, inert, sendable; ordered
 Snapshot   // opaque: copyable, inert, sendable; holds no authority
-fn store.snapshot(s: Store, at: Level) -> Snapshot
+fn store.snapshot(s: Store, at: Level) -> Result[Snapshot, StoreError]
+fn store.version(snap: Snapshot) -> Version
 fn store.at(a: Authority, v: Version) -> Result[Snapshot, StoreError]
 fn store.fork(from: Authority, v: Version, to: Authority) -> Result[(), StoreError]
+fn store.retain(mut s: Store, floor: Version) -> Result[(), StoreError]
+fn store.pin(mut s: Store, name: String, v: Version) -> Result[(), StoreError]
+fn store.unpin(mut s: Store, name: String) -> Result[(), StoreError]
 ```
 
 A **version** names one commit version of one store. It is an opaque ordered token:
 versions of one store compare, and nothing else about them is observable; in particular
 no program learns how many commits a store has made.
 
-A **snapshot** is the immutable state of a store at one version. `store.snapshot` takes
-one at `D(at)` and waits for nothing, so what a query reads from it depends on no commit
-that a failure level `at` survives could lose; releasing that result at a stronger level
-waits for that level like any outcome ([STORE-2](#store-2-transactions)). `store.at` opens the state at a retained version from the store's authority without
+A **snapshot** is the immutable state of a store at one version, together with the store
+identity and the level it was taken at. `store.snapshot` takes one at `D(at)`, for the
+level `at` resolves to ([STORE-2](#store-2-transactions)), and waits for nothing, so what
+a query reads from it depends on no commit that a failure level `at` survives could lose.
+Releasing that result at a stronger level waits for that level like any outcome, and
+reading one's own write takes `store.durable` on its ticket and then a new snapshot; a
+snapshot never advances. The head keeps the state at `V` and at each declared level's
+`D(L)`, sharing equal states, so the snapshots it can take cost O(levels) retained states.
+`store.snapshot` returns `NoLevel()` when no declared level covers `at`, and
+`store.version` names a snapshot's version. `store.at` opens the state at a retained version from the store's authority without
 claiming it: a read "as of" that version, available to any holder of the authority, on
 any machine. A query runs against a snapshot on any task, in parallel with the store's
 transactions. Under `db.local@1` taking a snapshot of the head's state costs O(1).
@@ -558,15 +592,25 @@ begins as `from`'s history up to version `v`. The fork has its own identity and 
 writer epochs, and shares the immutable objects of its origin; it copies none. A fork is
 never merged back. What the origin's history had promised to send or to wake (outgoing
 calls and triggers, [STORE-18](#store-18-runs-at-a-place)) stays inert in the fork until
-its head is granted the runners to act on it, so a fork never acts as its origin.
+its head is granted the runners to act on it, so a fork never acts as its origin. A run
+the fork continues takes a new run instance derived from the fork's store identity and
+the origin's instance, so each of its call streams at another place
+([STORE-12](#store-12-transactions-at-a-runner)) is a new stream: the fork never sends on
+or fences a stream of its origin, and a call the origin had in doubt stays in doubt for
+the fork, which can only abandon it.
 
 **Retention.** Which versions a store retains is store state, recorded in its history by
 Retain commits ([STORE-11](#store-11-engine-and-storage-seam)): a floor version, a set of
 named **pins**, and the checkpoints the retained versions rely on. A retained version
 keeps what reading it, forking it and re-executing from it need: a checkpoint at or
 below it, the groups from that checkpoint on and the code their call records name.
-Reclamation frees only groups and nodes that no retained version and no fork reaches, and
-only after the Retain commit that released them is durable.
+`store.retain` raises the floor and never lowers it: a floor at or below the current one
+changes nothing, and one above `D` of the strongest declared level waits for it.
+`store.pin` and `store.unpin` set and remove a pin; a pin below the floor returns
+`InvalidInput()`. Each is a commit the engine makes on its own behalf. Reclamation frees
+only groups and nodes that no retained version and no fork reaches, and only after the
+Retain commit that released them is durable
+([STORE-11](#store-11-engine-and-storage-seam)).
 
 ### STORE-9: Schema history, renames and migrations
 
@@ -641,51 +685,163 @@ Recovery is physical: it applies recorded write sets and never runs a body
 ([STORE-15](#store-15-evaluation-and-re-execution)), never recovery, so no stored state
 depends on old code remaining runnable.
 
-**Backend requests.** The requests a store makes of its backend are capability requests,
+**Authority requests.** The requests a store makes of its authority are capability requests,
 recorded as [determinism](determinism.md#recording-and-resuming) specifies, with the exact
 bytes read. A recording therefore holds every byte the store loaded, including the rows
 any transaction read, and is as secret-bearing as the store. Replay re-runs the engine
-and every body against the recorded completions; it never reaches a real backend, and it
+and every body against the recorded completions; it never reaches a real authority, and it
 refuses a request that differs from the recorded one in any byte. The recording level
 never changes what a transaction does.
 
 At the `durable` level ([RUN-14](runners.md#run-14-recording-levels)) a commit's
 durability point is the advance of the history that carries it, journaled like any
 request. A crash between that request's `Prepared` and `Completed` records leaves it in
-doubt, and recovery settles it by reading the history: an advance is one group whose
-digest the writer computed before it sent it, so the history either holds that group or
-holds another in its place. That is a provider recovery procedure
+doubt, and recovery settles it by reading the history: every advance carries its
+writer's claim and is one group whose digest the writer computed before it sent it, so
+the history either holds that group or holds another in its place. That is a provider recovery procedure
 [recording and resuming](determinism.md#recording-and-resuming) allows.
 
 ### STORE-11: Engine and storage seam
 
-A store's **backend** is a provider of the **authority** seam
-([RUN-13](runners.md#run-13-provider-seams)), chosen by the host. An `Authority` is the
-capability for one store's history and objects. A place's meaning never depends on its
-backend: the backend decides only how long a release waits, what each failure can lose,
-and which other machines can reach the store.
+A store's history and objects are kept by an **authority**, a provider of the authority
+seam ([RUN-13](runners.md#run-13-provider-seams)) that the host grants by name. An
+`Authority` is the capability for one store's history and objects and nothing else. A
+place's meaning never depends on its authority: the authority decides only how long a
+release waits, what each failure can lose, and which other machines can reach the store.
 
-**The contract.** An authority provides exactly these:
+```text
+Authority      // opaque capability: copyable, sendable; not data
+Claim          // opaque: affine, neither copyable nor sendable; valid for one authority
+Claimed        = { claim: Claim, end: u64 }
+Advanced       = Advanced(end: u64) | Fenced() | Refused(AuthorityError) | Undecided(AuthorityError)
+AuthorityError = Io(FileError) | Status(u16) | Unreachable() | Unsupported()
 
-| Operation | Contract |
-|---|---|
-| Claim | Become the writer at the next writer epoch. Every earlier writer's next advance fails with `Fenced()`. The fence is part of the history, never a separate object that reclamation could remove. |
-| Advance | Conditionally extend the history from version `n` with the payloads of the next commits. It succeeds only for the current writer and only when the history ends at `n`. It is whole or nothing. |
-| Read | Read the history from a version, and read an object. Reading needs no claim. |
-| Put | Create an immutable object, only if its name is free; an existing object with equal bytes is success. |
-| Durability | Declare the level type, a closed set of levels each documented by the failures it survives, and report each level's durable version, which never decreases. |
-| Retention | Record the floor and the pins ([STORE-8](#store-8-versions-snapshots-and-forks)) in the history, and reclaim only what no retained version needs. |
+fn io.authority(rt: Io, name: String) -> Result[Authority, GrantError]
+fn authority.levels(a: Authority) -> List[Level]
+fn authority.floor(a: Authority) -> Level
+fn authority.max_entry(a: Authority) -> u64
+fn authority.claim(a: Authority) -> Result[Claimed, StoreError]
+fn authority.advance(a: Authority, mut c: Claim of a, from: u64, take entry: Bytes, at: Level) -> Advanced
+fn authority.durable(a: Authority, mut c: Claim of a, at: Level) -> Result[u64, StoreError]
+fn authority.read(a: Authority, from: u64, at: Level, max: u64) -> Result[List[Bytes], StoreError]
+fn authority.get(a: Authority, name: String) -> Result[Option[Bytes], StoreError]
+fn authority.put(a: Authority, name: String, take data: Bytes) -> Result[(), StoreError]
+fn authority.reclaim(a: Authority, mut c: Claim of a) -> Result[(), StoreError]
+```
 
-An advance has one of four results: it happened; the writer was fenced; it was refused
-before it had any effect; or it is **undecided** (a lost response, or a barrier that
-failed after the advance became visible). An undecided advance is settled by reading the
-history, never guessed. If it cannot be settled, the waiting transaction returns
-`Unknown(..)` and the store closes.
+The engine, `std@1/store`, is the caller these operations serve. Holding an `Authority`
+grants what holding the store's files grants: an entry written outside the engine is read
+by recovery like any other and refused if it breaks the format.
 
-How a backend represents an advance is its own: one conditional append to a log, synced
-once for the group; or a data object followed by a conditional replacement of a head
-object. There is no second way to extend a history, and a commit exists exactly when the
-history holds it.
+**Positions.** The history is a sequence of **entries** at positions 1, 2, and so on; its
+**end** is the position of the last one, 0 for none. An entry is bytes to the authority.
+What an entry holds (a commit group, a claim, a retention change) and how it is framed
+and checked is the format's (below); commit versions are numbered inside entries, never by positions.
+
+**Claim.** `authority.claim` makes its caller the history's only writer. It reads the
+history to its end, settles a torn tail (see Recovery), and appends a **claim entry**
+naming a fresh **claim identity**, drawn by the provider and recorded as a provider
+outcome, and the next writer epoch. Of claims that race, exactly one succeeds; each other
+returns `Fenced()` and appends nothing. The first claim of an empty authority mints the
+**store identity**, which every later claim entry, ticket and frontier carries and which
+no other history uses, a fork's included. The fence is the claim entry itself: there is
+no fence object, so nothing that reclaims objects can remove one.
+
+**Advance.** `authority.advance(a, c, from, entry, at)` puts `entry` at position
+`from + 1`, whole or nothing, only if `c` is the claim of the newest claim entry and the
+history ends at `from`, and returns once the entry is durable at `at`:
+
+- `Advanced(end)`: the entry is in the history at `end` and durable at `at`.
+- `Fenced()`: a later claim entry is in the history, and nothing was appended.
+- `Refused(e)`: the request was refused before it had any effect.
+- `Undecided(e)`: whether the entry is in the history could not be read, or the entry is
+  in the history and the barrier for `at` failed. The provider settles a lost response
+  itself by reading the history (its own claim at `from + 1` means it happened; a later
+  claim means `Fenced()`) and returns `Undecided` only when it cannot read. A failed
+  barrier is never retried into success.
+
+After `Fenced()` or `Undecided(..)` the claim is dead: every later operation with it
+returns `Fenced()`. The engine closes the store, a waiting transaction returns
+`Unknown(..)` on `Undecided`, and the next claim settles what survived. A head has at most
+one advance in flight; the groups behind it queue. A superseded head learns that it was
+fenced at its next `advance`, `durable` or `reclaim`; it never released an outcome that
+depends on a commit the history does not hold, because the gate waited for the advance.
+There is no second way to extend a history, and a commit exists exactly when the history
+holds it.
+
+**Durability and reads.** `authority.durable(a, c, at)` returns the highest position
+durable at `at`, issuing at most one barrier for every entry since the last.
+`authority.read(a, from, at, max)` returns up to `max` entries after position `from`
+that are durable at `at`. It needs no claim: followers and `store.at` read this way.
+`authority.levels` lists the levels the provider declares, weakest first;
+`authority.floor` is the deployment's floor for the place, taken from the grant;
+`authority.max_entry` bounds the bytes of one entry.
+
+**Objects.** `authority.put` creates an immutable named object only if its name is free;
+an existing object with equal bytes is success, and one with other bytes is
+`Corrupt(name)`. `authority.get` reads one, `None` when it is absent. No object is ever
+replaced. Object names are the format's.
+
+**Reclamation.** `authority.reclaim` removes only what no retained version needs, and
+decides it from the history alone: the floor and pins its retention entries record
+([STORE-8](#store-8-versions-snapshots-and-forks)), durable at the strongest declared
+level. It removes entries and derived objects that only versions below the floor need,
+and objects written under a claim older than the newest that no entry names. A floor
+never decreases and a claim is never reused, so a reclaim that runs from a stale reading
+of the history removes nothing that a newer reading keeps, a successor's checkpoint
+included. Recovery never lists objects; only reclamation does, so an incomplete listing leaves garbage for a later reclaim and
+never loses state.
+
+**Providers.** The run configuration grants authorities by name
+([determinism](determinism.md#authority-grants)); each entry names its provider and
+floor.
+
+| Provider | History | Levels |
+|---|---|---|
+| `authority.memory@1` | host memory | `Nothing()` |
+| `authority.log@1` | segment files and a lock file in a granted directory | `ProcessCrash()`, `HostCrash()` |
+| `authority.objects@1` | a head object and immutable segment objects in an object-storage entry | the one level its grant states, such as `ZoneLoss()` or `RegionLoss()` |
+| `authority.sim@1` | either representation, simulated | as its grant states |
+
+- **Local log.** An advance takes the lock file's open-file-description lock (`flock` or
+  `F_OFD_SETLK`; never a process-associated `fcntl` lock, which closing any descriptor of
+  the file releases), compares the active segment's length with the length the writer's
+  own last append left, appends the entry with one `write`, and releases the lock; a
+  different length means another claim appended, and the advance returns `Fenced()` with
+  no effect. It then issues one `fdatasync` when `at` is `HostCrash()`. A new segment
+  adds a directory sync when it is created. A claim takes the same lock, truncates only a
+  torn tail, appends its claim entry and synchronizes. A reader at `HostCrash()` notes the
+  file's length, synchronizes the file and returns entries up to that length, so it never
+  returns an entry a host crash could lose. A failed `fdatasync` returns
+  `Undecided(Io(..))`.
+- **Object storage.** The head object is the only mutable object and changes only by a
+  conditional replace. An advance puts the entry as a segment object named by its claim
+  and position, create-if-absent, then replaces the head with one that names the new
+  segment and its digest, conditional on the entity tag the writer's own previous replace
+  returned. The writer takes that tag only from its own replace's response, or from a
+  read of the head that shows its own claim at its own end, never from any other read. A
+  head names its claim and end, so no two heads have equal bytes and no tag recurs. A
+  claim reads the head and replaces it conditionally, or creates it when absent; of racing
+  claims one replace succeeds. The head names every segment and checkpoint the retained
+  history needs, with its digest, so recovery reads the head and the objects it names. An
+  object-storage entry whose endpoint does not honour create-if-absent and conditional
+  replace refuses every claim with `Refused(Unsupported())`; `objects.s3@1` uses
+  `If-None-Match: *` and `If-Match`.
+- **Memory** keeps the history in the host process for tests and scratch stores.
+- **Simulated.** `authority.sim@1` represents a log or object storage by the same rules
+  and injects, by seed, what the store must survive by detecting and refusing, never by
+  returning wrong data: the loss of anything not yet durable at a level, torn and garbage
+  writes, refused requests, lost responses, failed barriers, racing claims, incomplete
+  listings and virtual latency. Its decisions are recorded provider outcomes, it runs
+  exactly the same engine, and it is the one fault path; the engine has no other fault
+  seam.
+
+**Cost per commit group.** The log: one `write` and, at `HostCrash()`, one `fdatasync`,
+plus the lock, unlock and length check, with no read. Object storage: two requests (the
+segment put and the head replace); the next group's segment put may be in flight while
+this group's head replace is pending, and head replaces are serialized. A claim costs a
+read of the history to its end and one synchronized append, or two requests. Taking a
+snapshot costs no request.
 
 **History and derived objects.** The history is **authoritative**: only the head writes
 it. Every other object (a checkpoint of the state at a version, an index part) is
@@ -695,22 +851,25 @@ and two that derive the same object write equal bytes. The history records the r
 contract revision in force beside every code hash it names. Their bytes are declared
 under **History format** below.
 
-**Levels.** A backend that keeps nothing across a crash declares a single level that
-survives nothing. A local log declares a level that survives a process crash and not the
-loss of its disk. An object-storage backend declares the levels its service provides, for
-example one zone or one region. A backend that acknowledges at a fast level and publishes
-to a stronger one later declares both, and each `D(L)` reports its own progress. There is
-no level every backend must offer ([RUN-13](runners.md#run-13-provider-seams)).
+**Levels.** A provider declares the levels of [STORE-2](#store-2-transactions) whose
+failures it survives, and documents how. A provider that acknowledges at a fast level and
+publishes to a stronger one later declares both, and each `D(L)` reports its own
+progress. There is no level every provider must offer
+([RUN-13](runners.md#run-13-provider-seams)). Opening a store resolves the floor as a
+wait resolves its level, and refuses with `NoLevel()` when no declared level covers it.
 
 **Group commit.** Commits apply to the head's state at once, raising `V`, and queue. A
 queue is advanced as one group when an outcome awaits its durability or a group bound in
-the configuration is reached, never on a timer. **The head never holds a key across a
-backend request:** ordering and running a transaction wait on no advance, no object read
-and no other machine, so a contended key is served at memory speed whatever the backend.
+the configuration is reached, never on a timer. **The head never holds a key across an
+authority request:** ordering and running a transaction wait on no advance, no object
+read and no other machine, so a contended key is served at memory speed whatever the
+authority.
 
 **Limits.** `key_bytes` 4096, `value_bytes` 1048576, `transaction_bytes` 16777216 and
-`range_rows` 10000 by default. They are store state, recorded by the Genesis commit and
-bounded by what its backend can hold in one advance (**Bounds** below). A refused limit has no effect and is
+`range_rows` 10000 by default. They are store state, fixed when the store is created and
+recorded by its Genesis commit. A creation whose largest group the format could not frame
+within `authority.max_entry` (**Bounds** below) refuses with `Refused(Unsupported())`, so
+no commit within the limits is undecidable for size. A refused limit has no effect and is
 definite, never `Unknown(..)`. A deterministic bound on the work one body may do, equal
 on every engine, is **Reserved**. It must charge every core operation by its operands, as
 the [long pure primitives](determinism.md#run-configuration) are charged, because an
@@ -720,12 +879,6 @@ compiler lowers the code. Until it exists a body is bounded only by its run's me
 budget, which is not equal across engines and so decides no outcome: exceeding it stops
 the run that holds the store, and every call that run had not released ends
 `InDoubt(Abandoned())`.
-
-A store must survive, by detecting and refusing, never by returning wrong data: the loss
-of anything not yet durable, torn and garbage writes, lost or ambiguous advances, and
-corruption on read. A simulated backend injects each of these, with refused requests,
-lost responses, racing claims and virtual latency, and runs exactly the same engine; it
-is the one fault path.
 
 The engine provider is `db.local@1`: one head on one machine, every key and value in
 memory, bodies run one at a time. Those are its costs, and so are the promises that a
@@ -746,7 +899,7 @@ records the commit.
 Every integer is fixed-width little-endian. `H(x)` is SHA-256. A **byte string** is a
 `u32` length followed by that many bytes. There is one format version, named by the
 magic at the start of every record; a reader that meets another magic refuses the open
-with `Storage(Corrupt(..))` naming the magic and the object, removes nothing and writes
+with `Corrupt(..)` naming the magic and the object, removes nothing and writes
 nothing. A format change is a new magic and a cutover, never a second reader.
 
 **Groups.** The history is a chain of **groups**, each the commits of one advance:
@@ -849,9 +1002,9 @@ fenced or undecided before its head replace, is not history and is reclaimed. A 
 only finds candidates: every object is checked against the digest that names it.
 
 **Bounds.** `transaction_bytes` bounds one encoded commit, its call record and outcome
-included, so whether a transaction fits depends only on its run. Opening refuses a store
-whose `transaction_bytes` plus 8 KiB of group and definition overhead exceeds the
-largest advance its backend accepts, and a group is cut before it would exceed that, so
+included, so whether a transaction fits depends only on its run. Creating a store whose
+`transaction_bytes` plus 8 KiB of group and definition overhead exceeds
+`authority.max_entry` refuses with `Refused(Unsupported())`, and a group is cut before it would exceed that, so
 every commit the limits admit fits in one advance. The frame's `u32` length bounds a
 local group at 4 GiB.
 
@@ -870,7 +1023,7 @@ Only the last frame of the last local segment can be **torn**: an incomplete fin
 frame, which recovery cuts. Anything else that fails is **corruption**: a bad digest,
 sum, chain field or decoding, a missing referenced object, or a log that ends below the
 head record's `end`. Corruption refuses the open with
-`Storage(Corrupt(..))` naming the object, and removes nothing. A crash may tear or lose a
+`Corrupt(..)` naming the object, and removes nothing. A crash may tear or lose a
 suffix no level had reported durable, and recovery ends the history before it. When no
 intact state exists the open refuses rather than guess. Recovery never runs a body. The
 claim of the new head follows recovery.
@@ -1053,7 +1206,8 @@ TxFailure[E] = Aborted(E) | Canceled(CancelCause) | Faulted(Failure) | Storage(S
 TxError      = NoTable() | TableExists() | Schema(SchemaError) | Migrating() | ReadOnly()
              | OutOfScope() | InvalidInput() | Limit(TxLimit) | Storage(StoreError)
 SchemaError  = KeyMismatch() | ValueMismatch() | Renamed(stored: String, expected: String)
-StoreError   = Storage(FileError) | Refused(FileError) | Corrupt(String) | Fenced() | Closed()
+StoreError   = Storage(AuthorityError) | Refused(AuthorityError) | Corrupt(String) | Fenced()
+             | Closed() | NoLevel() | Foreign() | InvalidInput()
 TxLimit      = KeyBytes() | ValueBytes() | TransactionBytes() | RangeRows()
 ```
 
@@ -1064,10 +1218,13 @@ Variant ordinals in the order written, `serializable` (`TxFailure[E]` when `E` i
 commit could not be made, with no effect; and `Unknown(..)` when the commit was attempted
 and its durability could not be decided (STORE-11), which never claims an effect or its
 absence. `TxError` is the outcome of one operation inside a body. `Storage(e)` is an
-error from the backend, a full medium included; `Refused(e)` that the backend refused a
-request before it had any effect; `Corrupt(name)` that the named part of the history or
-object failed a checksum, decoding or structural check; `Fenced()` that a later writer
-claimed the store; `Closed()` that the store closed earlier. Every one closes the store.
+error from the authority, a full medium included; `Refused(e)` that the authority refused
+a request before it had any effect; `Corrupt(name)` that the named part of the history or
+object failed a checksum, decoding or structural check, or is missing; `Fenced()` that a
+later writer claimed the store; `Closed()` that the store closed earlier. Each of these
+closes the store. `NoLevel()` (no declared level covers the one asked for), `Foreign()` (a
+ticket of another store) and `InvalidInput()` are definite, have no effect and leave the
+store open.
 No outcome reports a conflict or an exhausted retry ([STORE-2](#store-2-transactions)).
 
 ### STORE-14: Tracked access
@@ -1249,7 +1406,7 @@ many places one activation at a time, and no activation spans two places.
 ### STORE-20: One history, many machines
 
 No result of any program depends on which machine holds a store's head, on how many
-machines follow its history, on where its objects are kept, or on which backend keeps
+machines follow its history, on where its objects are kept, or on which authority keeps
 them ([DET-3](determinism.md#det-3-no-switches)). These change cost, latency and what a
 failure can lose, and nothing else.
 

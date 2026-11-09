@@ -477,8 +477,11 @@ or continuation is refused.
 Runner calls are recorded as [RUN-11](runners.md#run-11-linked-tapes) specifies:
 one request and one completion at the caller, parked and readied under
 `tasks.cooperative@1` as network requests are, and replayed without contacting a place.
-A store's requests of its backend are capability requests, recorded like any others
-([STORE-10](storage.md#store-10-recording)), and replay never reaches a real backend.
+A store's requests of its authority are capability requests, recorded like any others
+([STORE-10](storage.md#store-10-recording)), and replay never reaches a real authority.
+A simulated authority's crash is the simulated disk's crash below, applied to its log or
+objects: it keeps exactly what the levels the crash spares had made durable, and the
+crash seed chooses the rest.
 
 ### Recording levels
 
@@ -639,7 +642,7 @@ withdrawal, in preparation order) and the trailer's outcome when present. A comp
 incomplete one refuses replay and names its requests in doubt. This release offers no live
 continuation: continuation is refused, since no provider supports reacquisition.
 
-**Simulated disk.** Every simulated `Dir` and the simulated journal share one crash model
+**Simulated disk.** Every simulated `Dir`, the simulated journal and `authority.sim@1` share one crash model
 ([Durability](core-library.md#durability)): a crash keeps each file's last synchronized bytes and each
 directory's last synchronized listing, and the last unsynced write survives as a prefix
 chosen by the crash seed when everything before it in its file is durable.
@@ -1086,6 +1089,31 @@ while preserving original capture identity. Lost ack retries use identical bytes
 and may duplicate accepted data; receipts mark that ambiguity. Operator re-export
 can duplicate data too. Replay never invokes the exporter or reconnects to a
 collector; source has no global exporter or exporter-controlled enabled branch.
+
+### Authority grants
+
+A run record or grants template may declare a sorted object `authorities`, naming the
+store authorities `io.authority` returns ([STORE-11](storage.md#store-11-engine-and-storage-seam)).
+Omission and the empty object normalize to no member. Names follow the rules of
+`object_stores` names. Each entry has `provider`, `floor` (a level name of
+[STORE-2](storage.md#store-2-transactions), such as `"HostCrash"`) and the provider's
+settings:
+
+- `authority.memory@1`: none.
+- `authority.log@1`: `mount` (the virtual path of an explicitly granted writable Dir) and
+  `path` (a canonical relative directory within it).
+- `authority.objects@1`: `objects` (an entry of the host's object-storage seam, as for
+  `code.object@1`, [RUN-13](runners.md#run-13-provider-seams)) and `level`, the one level
+  the operator states that storage provides.
+- `authority.sim@1`: `seed`, `represent` (`"log"` or `"objects"`), `levels` (a nonempty
+  list, weakest first) and `faults`, a sorted object mapping each fault the simulated
+  authority injects to a `fail_one_in` count (u64, 0 for never).
+
+A floor no declared level covers, two entries over the same directory or object prefix,
+unknown fields and references outside a granted mount refuse before entry. An authority
+grant gives the run nothing else: its provider reaches its directory or objects itself,
+and `io.authority` on an undeclared name returns `NotGranted()`. The grants determine
+admission, subset checks, run identity, recording and replay like any other.
 
 ### Object-store grants
 

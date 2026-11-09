@@ -506,7 +506,7 @@ only through a named implementation whose contract says so.
 | Scheduling | `inputs.scheduler` | the cooperative FIFO | seeded schedules |
 | Execution width | `placement.cores` | 1 | simulators run on one thread |
 | Fault injection | `faults` | none | `sim@1`, the simulated `Dir` |
-| Store backend | the authority a store is opened over ([STORE-11](storage.md#store-11-engine-and-storage-seam)) | a local log | a simulated backend |
+| Store authority | the run configuration's `authorities` ([STORE-11](storage.md#store-11-engine-and-storage-seam)) | `authority.log@1` | `authority.sim@1` |
 | Store engine settings | the engine provider's own configuration ([STORE-11](storage.md#store-11-engine-and-storage-seam)) | the provider's defaults | the same |
 
 **Code store.** A code store holds immutable objects keyed by definition hash
@@ -839,7 +839,7 @@ query calls to the head through its inbox:
 Inbox    // core capability: resource, sendable; a place's arrived transact and query calls
 Arrival  // core opaque: affine, sendable; one arrived call, owed exactly one end
 Arrived  = { form: CallForm, entry: EntryId, caller: String, request: CallRequest,
-             level: String, argument: Bytes }
+             level: Option[Level], argument: Bytes }
 CallRequest = { stream: Bytes, epoch: u64, position: u64, digest: Bytes, acknowledged: u64 }
 N fn io.inbox(rt: Io) -> Result[Inbox, GrantError]
 fn inbox.take(mut i: Inbox, wait: bool) -> Option[List[Arrival]]
@@ -851,12 +851,12 @@ fn arrival.end(take a: Arrival, end: CallEnd) -> ()
 `inbox.take` returns the arrivals that passed the host's checks, in the order they
 arrived, waiting for one when `wait` is true; it is `None` once the host
 stops. `caller` is the admitted caller's identity, or a client's principal; `level` is
-the level the request names, or `""`. `arrival.end` sends the call's end; an `Arrival`
+the level ([STORE-2](storage.md#store-2-transactions)) the request names, if any. `arrival.end` sends the call's end; an `Arrival`
 dropped without one ends its call `InDoubt(Abandoned())`, as does the head run's own end.
 The head records each take and each end on its tape.
 
 A caller's `db@1` runner takes the fields of `remote.tls@1` and an optional `level`, the
-durability level its transact calls wait for ([STORE-2](storage.md#store-2-transactions)).
+`Level` name its transact calls wait for ([STORE-2](storage.md#store-2-transactions)).
 Transact and query calls travel as `Call` frames of form `Transact()` or `Query()`; a
 transact call's `epoch` and `position` are its call-stream request, and a query uses
 position 0, which no stream decides. The outcomes are those of the providers table.

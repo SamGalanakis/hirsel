@@ -4217,7 +4217,9 @@ fn store.close[S](take store: store.Store[S]) -> Result[(), store.StoreError] us
 ```
 
 `std@1/store` is an embedded, transactional, ordered key-value store written in Hirsel
-over an explicit `Backend[S]` function dictionary and owned backend state `S`.
+over an explicit `Backend[S]` function dictionary and owned backend state `S`. The store
+cutover replaces `Backend[S]`, `StoreFaults` and `Injected` with the authority seam of
+[STORE-11](storage.md#store-11-engine-and-storage-seam).
 `open(d, config)` selects the local Dir backend; real files, Test dirs and recordings
 work unchanged. Keys and values are `Bytes`, ordered
 byte-lexicographically (`compare_keys`). An affine `Store[S]` is the single writer of its backend;

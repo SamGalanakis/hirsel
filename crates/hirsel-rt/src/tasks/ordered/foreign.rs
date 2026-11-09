@@ -32,7 +32,7 @@ pub(crate) fn unpin_compute(ctx: *mut TaskCtx) {
 }
 
 pub(crate) fn gate_enter(ctx: *mut TaskCtx, gate: u32, site: u64) -> Stopped<bool> {
-    engine::at_head(ctx)?;
+    let head = engine::head(ctx)?;
     let nested = role::with_role(ctx, |s| {
         let me = s.current;
         let row = s.gate(gate);
@@ -49,8 +49,7 @@ pub(crate) fn gate_enter(ctx: *mut TaskCtx, gate: u32, site: u64) -> Stopped<boo
         .extern_metrics
         .as_ref()
         .map(|_| std::time::Instant::now());
-    let (_, progress) = engine::head_canonical(
-        ctx,
+    let (_, progress) = head.canonical(
         "gate.enter",
         || {
             role::with_role(ctx, |s| {
@@ -90,7 +89,7 @@ pub(crate) fn gate_enter(ctx: *mut TaskCtx, gate: u32, site: u64) -> Stopped<boo
 }
 
 pub(crate) fn gate_leave(ctx: *mut TaskCtx, gate: u32, outermost: bool) -> Stopped<()> {
-    engine::at_head(ctx)?;
+    let head = engine::head(ctx)?;
     let effect = || {
         role::with_role(ctx, |s| {
             let me = s.current;
@@ -109,7 +108,7 @@ pub(crate) fn gate_leave(ctx: *mut TaskCtx, gate: u32, outermost: bool) -> Stopp
         ((), Next::Keep)
     };
     if outermost {
-        engine::head_canonical(ctx, "gate.leave", effect, |_| {
+        head.canonical("gate.leave", effect, |_| {
             super::events::gate_event(ctx, gate, super::events::CanonicalOutcome::GateReleased)
         })?;
     } else {

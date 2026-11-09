@@ -655,9 +655,9 @@ unsafe fn exit_scope(
     error: u8,
     caller_site: u64,
 ) -> Stopped<(u8, bool)> {
-    engine::at_head(ctx)?;
+    let head = engine::head(ctx)?;
     super::events::prepare_scope_exit(ctx, unsafe { scope.read() });
-    let ((scope, waited), progress) = engine::head_effect(ctx, "task.scope_exit", || {
+    let ((scope, waited), progress) = head.effect("task.scope_exit", || {
         let (scope, waited) = role::with_role(ctx, |s| {
             let scope = s.scope_handle(unsafe { scope.read() });
             let me = s.current;
@@ -760,7 +760,7 @@ pub(crate) unsafe fn receive(
     out: *mut u32,
     caller_site: u64,
 ) -> Stopped<u8> {
-    engine::at_head(ctx)?;
+    let head = engine::head(ctx)?;
     let word = unsafe { receiver.read() };
     let descriptor = engine::carrier_descriptor(ctx, Kind::Receiver, word);
     unsafe { super::events::prepare_receive(ctx, word, descriptor) };
@@ -772,8 +772,7 @@ pub(crate) unsafe fn receive(
     // One decision at the logical head: a ready receive consumes or closes and
     // yields; a blocked one registers its wait in the same effect and parks.
     // The parked slot is filled only by a poll that sees this frame saved.
-    let (status, progress) = engine::head_observed(
-        ctx,
+    let (status, progress) = head.observed(
         "channel.receive",
         || {
             let shield = unsafe { (*ctx).shield };

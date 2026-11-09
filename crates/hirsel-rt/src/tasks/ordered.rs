@@ -692,7 +692,9 @@ impl Backend<Command> for Objects<'_> {
                     (
                         Outcome {
                             status,
-                            image: image.clone(),
+                            // An operation commits once; its image now holds
+                            // the returned None carrier, which nothing else reads.
+                            image: std::mem::take(&mut *image),
                             chain: Vec::new(),
                             canonical: events::value_subevent(observed, status),
                             inheritance: None,

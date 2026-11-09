@@ -93,8 +93,8 @@ fn tail_enabled(ctx: *mut TaskCtx) -> bool {
 }
 
 pub(crate) fn begin(ctx: *mut TaskCtx, close: bool) -> Stopped<()> {
-    engine::at_head(ctx)?;
-    let task = engine::current(ctx);
+    let head = engine::head(ctx)?;
+    let task = head.task();
     if engine::with_driver(ctx, |d| d.host_ops.contains_key(&task)) {
         return Ok(());
     }
@@ -103,7 +103,7 @@ pub(crate) fn begin(ctx: *mut TaskCtx, close: bool) -> Stopped<()> {
     } else {
         "host.request"
     };
-    engine::head_effect(ctx, name, || ((), Next::Keep))?;
+    head.effect(name, || ((), Next::Keep))?;
     assert!(engine::with_driver(ctx, |d| d
         .host_ops
         .insert(task, name)

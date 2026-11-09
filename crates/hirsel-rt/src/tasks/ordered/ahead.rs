@@ -5,6 +5,7 @@
 //! Rayon join's unwind path (ee0a00bd, join/mod.rs:180-196), adoption waits for
 //! that owner to save before transferring the storage it may still reference.
 
+use super::super::picks::Picks;
 use super::super::registry::TaskKey;
 use super::super::{Logical, Scheduler, Task, handle};
 use crate::TaskCtx;
@@ -199,7 +200,7 @@ pub(crate) fn after_save(
     key: TaskKey,
     completed: bool,
     stopped: bool,
-) -> Option<Vec<(TaskKey, crate::pool::Owner)>> {
+) -> Option<Picks<(TaskKey, crate::pool::Owner)>> {
     let index = key.slot;
     if !matches!(&s.logical, Logical::Ordered(d) if d.reserved.contains_key(&index)) {
         return None;
@@ -215,7 +216,7 @@ pub(crate) fn after_save(
         frame.mark_saved();
     }
     if stopped {
-        return Some(Vec::new());
+        return Some(Picks::new());
     }
     let Logical::Ordered(driver) = &mut s.logical else {
         unreachable!()

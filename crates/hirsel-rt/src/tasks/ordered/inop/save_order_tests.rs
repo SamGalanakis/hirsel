@@ -80,7 +80,7 @@ fn need_save_preserves_one_retirement_when_producer_or_waiter_saves_first() {
                 task: Box::new(Task::new(2, std::ptr::null_mut(), Some(0), vec![0], None)),
             },
         );
-        assert_eq!(driver.select(), [waiter]);
+        assert_eq!(driver.select(), vec![waiter]);
         driver.claimed(waiter, 0);
         let mut before = Stretch::new(Budgets { memory: true });
         before.alloc(12).unwrap();

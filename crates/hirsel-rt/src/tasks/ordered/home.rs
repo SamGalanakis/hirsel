@@ -1,5 +1,6 @@
 //! Home-only continuations of saved retirement polls and idle host readiness.
 //! Adapter calls retain no Scheduler, Frontier or parked TaskCtx borrow.
+use super::super::picks::Picks;
 use super::super::{Logical, Scheduler, TaskKey, Wait, handle, readiness, role};
 use crate::{context::RunShared, stop::Stopped};
 use std::collections::BTreeMap;
@@ -69,7 +70,7 @@ pub(crate) unsafe fn service(run: *mut RunShared) -> bool {
                     let row = super::ahead::physical(s, key).expect("live head-job continuation");
                     (key, row.owner)
                 })
-                .collect::<Vec<_>>()
+                .collect::<Picks<_>>()
         };
         let mut batch = unsafe { crate::pool::free::ReadyBatch::new(run) };
         for (key, owner) in selected {

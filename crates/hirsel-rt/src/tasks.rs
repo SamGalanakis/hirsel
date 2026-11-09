@@ -48,6 +48,7 @@ pub(crate) mod compact;
 pub(crate) mod entered_yield;
 pub(crate) mod free;
 pub(crate) mod ordered;
+pub(crate) mod picks;
 #[cfg(feature = "measurement")]
 pub(crate) mod profile;
 mod readiness;
@@ -2023,7 +2024,7 @@ unsafe fn saved(
         match s.logical {
             Logical::Cooperative => return resume_on,
             Logical::Free(_) => unsafe {
-                free::after_save(s, task, completed, crate::pool::has_slot_run(run))
+                free::after_save(s, task, completed, crate::pool::has_slot_run(run)).into()
             },
             Logical::Ordered(_) => ordered::driver::after_save(
                 s,

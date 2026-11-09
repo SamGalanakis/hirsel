@@ -169,9 +169,9 @@ pub(crate) unsafe fn await_any(
     caller_site: u64,
 ) -> Stopped<u8> {
     let set_word = unsafe { set.read() };
-    engine::at_head(ctx)?;
+    let head = engine::head(ctx)?;
     super::events::prepare_await_any(ctx, unsafe { scope.read() }, set_word);
-    let ((set, waiting, must_wait), progress) = engine::head_effect(ctx, "task.await_any", || {
+    let ((set, waiting, must_wait), progress) = head.effect("task.await_any", || {
         let found = role::with_role(ctx, |s| {
             let scope = s.scope_handle(unsafe { scope.read() });
             let set = s.set_handle(set_word, scope);

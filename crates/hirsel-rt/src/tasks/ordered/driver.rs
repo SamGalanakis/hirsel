@@ -11,6 +11,7 @@ use crate::budget::stretch::Settled;
 use crate::ordered::footprint::{Held, TaskId};
 use crate::ordered::objects::Registry;
 use crate::ordered::{Frontier, Policy, State};
+use crate::tasks::picks::Picks;
 
 use super::{Command, Outcome};
 
@@ -29,8 +30,15 @@ enum Execution {
 /// an index's newer generation is admitted only once its older one is `Done`.
 /// So an older generation reads as `Done` and a newer one as absent: the same
 /// answers as one map entry per task that is never removed.
+///
+/// `free_saved` counts the rows that are `Saved { head_only: false }`: the
+/// only frames [`Driver::select`] may notify while they are not head. Every
+/// state change goes through [`Executions::set`], which keeps it exact.
 #[derive(Debug, Default)]
-struct Executions(Vec<Option<(u32, Execution)>>);
+struct Executions {
+    rows: Vec<Option<(u32, Execution)>>,
+    free_saved: usize,
+}
 
 impl Executions {
     fn split(task: TaskId) -> (usize, u32) {
@@ -39,16 +47,20 @@ impl Executions {
 
     fn get(&self, task: TaskId) -> Option<Execution> {
         let (index, generation) = Self::split(task);
-        match self.0.get(index)? {
+        match self.rows.get(index)? {
             Some((row, execution)) if *row == generation => Some(*execution),
             Some((row, _)) if *row > generation => Some(Execution::Done),
             _ => None,
         }
     }
 
+    fn free(execution: Execution) -> usize {
+        usize::from(execution == Execution::Saved { head_only: false })
+    }
+
     fn get_mut(&mut self, task: TaskId) -> Option<&mut Execution> {
         let (index, generation) = Self::split(task);
-        match self.0.get_mut(index)? {
+        match self.rows.get_mut(index)? {
             Some((row, execution)) if *row == generation => Some(execution),
             Some((row, _)) => {
                 assert!(*row < generation, "an older generation is only read");
@@ -58,21 +70,30 @@ impl Executions {
         }
     }
 
+    /// Replace a live row's state, returning the previous one.
+    fn set(&mut self, task: TaskId, execution: Execution) -> Option<Execution> {
+        let row = self.get_mut(task)?;
+        let previous = std::mem::replace(row, execution);
+        self.free_saved = self.free_saved - Self::free(previous) + Self::free(execution);
+        Some(previous)
+    }
+
     /// The previous state of this generation, as `BTreeMap::insert` returns.
     fn insert(&mut self, task: TaskId, execution: Execution) -> Option<Execution> {
-        if let Some(row) = self.get_mut(task) {
-            return Some(std::mem::replace(row, execution));
+        if let Some(previous) = self.set(task, execution) {
+            return Some(previous);
         }
         let (index, generation) = Self::split(task);
-        if self.0.len() <= index {
-            self.0.resize(index + 1, None);
+        if self.rows.len() <= index {
+            self.rows.resize(index + 1, None);
         }
-        let row = &mut self.0[index];
+        let row = &mut self.rows[index];
         assert!(
             row.is_none_or(|(_, older)| older == Execution::Done),
             "a native index is reused only after its older generation is done"
         );
         *row = Some((generation, execution));
+        self.free_saved += Self::free(execution);
         None
     }
 }
@@ -81,7 +102,7 @@ impl std::ops::Index<&TaskId> for Executions {
     type Output = Execution;
     fn index(&self, task: &TaskId) -> &Execution {
         let (index, generation) = Self::split(*task);
-        match &self.0[index] {
+        match &self.rows[index] {
             Some((row, execution)) if *row == generation => execution,
             _ => panic!("a live task's execution"),
         }
@@ -109,6 +130,8 @@ pub(crate) struct Driver {
     pub(super) returned: BTreeMap<TaskId, super::Returned>,
     /// One commit's recorded returns, reused by each nonreentrant commit.
     pub(super) records: Vec<(TaskId, super::Returned)>,
+    /// Storage of the last send's returned carrier, reused by the next send.
+    pub(super) spare_image: Vec<u8>,
     pub(super) host_poll: bool,
     /// A physical file job retains its logical head until completion.
     pub(super) head_job: Option<(TaskId, u64)>,
@@ -164,6 +187,7 @@ impl Driver {
             waiting: BTreeMap::new(),
             returned: BTreeMap::new(),
             records: Vec::new(),
+            spare_image: Vec::new(),
             host_poll: false,
             head_job: None,
             in_operations: BTreeMap::new(),
@@ -212,19 +236,26 @@ impl Driver {
     /// Return notifications in logical order, without retaining row references.
     /// Selected frames are omitted from later scans until claimed and saved.
     /// During a deferred poll no new turn may be selected before wake merge.
-    pub(crate) fn select(&mut self) -> Vec<TaskId> {
+    pub(crate) fn select(&mut self) -> Picks<TaskId> {
         if self.awaiting_save || self.poll_after_save.is_some() || self.return_after_save.is_some()
         {
-            return Vec::new();
+            return Picks::new();
         }
         let Some(frontier) = &mut self.frontier else {
-            return Vec::new();
+            return Picks::new();
         };
         self.tuning.retire(frontier);
         let Some(head) = frontier.head() else {
-            return Vec::new();
+            return Picks::new();
         };
-        let mut ready = Vec::new();
+        // Every notified frame is Saved, and a non-head one is not head_only:
+        // with no such frame and an unsaved head, the walk selects nothing.
+        if self.execution.free_saved == 0
+            && !matches!(self.execution.get(head), Some(Execution::Saved { .. }))
+        {
+            return Picks::new();
+        }
+        let mut ready = Picks::new();
         for task in std::iter::once(head).chain(frontier.queue()) {
             if self
                 .cpu_withdrawal
@@ -264,9 +295,8 @@ impl Driver {
     /// A head with a pending log resumes its boundary to absorb that log first.
     /// A moved frame's running claim passes to `worker`.
     pub(crate) fn claimed(&mut self, task: TaskId, worker: u16) {
-        let execution = self.execution.get_mut(task).expect("a dispatched task");
-        assert_eq!(*execution, Execution::Selected);
-        *execution = Execution::Running;
+        let previous = self.execution.set(task, Execution::Running);
+        assert_eq!(previous, Some(Execution::Selected), "a dispatched task");
         let frontier = self.frontier.as_mut().expect("restored frontier");
         let moved = self.moved.remove(&task);
         if moved && matches!(frontier.state(task), State::Running(_)) {
@@ -328,9 +358,8 @@ impl Driver {
     /// A Full log or an allocation pause must wait for head, even if the last
     /// accepted D operation left its protocol state Ahead rather than Pending.
     pub(crate) fn suspending(&mut self, task: TaskId, head_only: bool) {
-        let execution = self.execution.get_mut(task).expect("a live task");
-        assert_eq!(*execution, Execution::Running);
-        *execution = Execution::Saving { head_only };
+        let previous = self.execution.set(task, Execution::Saving { head_only });
+        assert_eq!(previous, Some(Execution::Running), "a live task");
     }
 
     /// A compact frame leaves its stack (`engine::transfer`). A frame that
@@ -355,9 +384,8 @@ impl Driver {
     }
 
     pub(crate) fn finishing(&mut self, task: TaskId) {
-        let execution = self.execution.get_mut(task).expect("a live task");
-        assert_eq!(*execution, Execution::Running);
-        *execution = Execution::Finishing;
+        let previous = self.execution.set(task, Execution::Finishing);
+        assert_eq!(previous, Some(Execution::Running), "a live task");
     }
 
     #[cfg(test)]
@@ -382,12 +410,13 @@ impl Driver {
         if completed {
             self.tuning.finished(task);
         }
-        let execution = self.execution.get_mut(task).expect("a saving task");
-        *execution = match (*execution, completed) {
-            (Execution::Saving { head_only }, false) => Execution::Saved { head_only },
-            (Execution::Finishing, true) => Execution::Done,
+        let saved = match (self.execution.get(task), completed) {
+            (Some(Execution::Saving { head_only }), false) => Execution::Saved { head_only },
+            (Some(Execution::Finishing), true) => Execution::Done,
+            (None, _) => panic!("a saving task"),
             _ => panic!("logical completion disagrees with physical save"),
         };
+        self.execution.set(task, saved);
     }
 }
 
@@ -399,7 +428,7 @@ pub(crate) fn after_save(
     completed: bool,
     host_timers: bool,
     pool_available: bool,
-) -> Vec<(super::super::TaskKey, crate::pool::Owner)> {
+) -> Picks<(super::super::TaskKey, crate::pool::Owner)> {
     // The generation is part of the logical identity, even if the runtime
     // later recycles this native row index for a different child.
     let id = super::super::handle(task, s.task(task).generation);
@@ -765,7 +794,7 @@ mod tests {
                 );
             } else {
                 assert_eq!(
-                    ready.iter().map(|(key, _)| *key).collect::<Vec<_>>(),
+                    ready.iter().map(|(key, _)| key).collect::<Vec<_>>(),
                     [TaskKey::from_word(head)]
                 );
             }

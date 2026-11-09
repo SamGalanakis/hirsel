@@ -123,7 +123,7 @@ pub(crate) unsafe fn enable(ctx: *mut TaskCtx, policy: Policy) {
         .unwrap()
         .held
         .insert(root, Held::empty());
-    assert_eq!(driver.select(), vec![root]);
+    assert!(driver.select().iter().eq([root]));
     role::with_role(ctx, |s| s.logical = Logical::Ordered(driver));
     unsafe { (*ctx).heap_ref().meter.ordered((*ctx).run_ptr()) };
     unsafe {
@@ -876,12 +876,25 @@ pub(super) fn head(ctx: *mut TaskCtx) -> Stopped<Head> {
 }
 
 impl Head {
+    pub(super) fn task(&self) -> TaskId {
+        self.task
+    }
+
     pub(super) fn effect<T>(
         self,
         name: &'static str,
         effect: impl FnOnce() -> (T, Next),
     ) -> Stopped<(T, Progress)> {
         self.outcome(name, effect, |_| Outcome::image(0, Vec::new()))
+    }
+
+    pub(super) fn observed<T>(
+        self,
+        name: &'static str,
+        effect: impl FnOnce() -> (T, Next),
+        outcome: impl FnOnce(&T) -> Vec<u8>,
+    ) -> Stopped<(T, Progress)> {
+        self.outcome(name, effect, |value| Outcome::image(0, outcome(value)))
     }
 
     pub(super) fn canonical<T>(
@@ -1352,8 +1365,12 @@ pub(crate) unsafe fn channel_send(
     message: *mut u8,
     out: *mut u32,
 ) -> Stopped<()> {
-    let size = with_driver(ctx, |d| d.carriers[&(Kind::Sender, sender)].none.len());
-    let image = unsafe { std::slice::from_raw_parts(message, size) }.to_vec();
+    let (size, mut image) = with_driver(ctx, |d| {
+        let size = d.carriers[&(Kind::Sender, sender)].none.len();
+        (size, std::mem::take(&mut d.spare_image))
+    });
+    image.clear();
+    image.extend_from_slice(unsafe { std::slice::from_raw_parts(message, size) });
     let operation = Command::Send {
         sender,
         image: std::cell::RefCell::new(image),
@@ -1366,6 +1383,8 @@ pub(crate) unsafe fn channel_send(
         std::ptr::copy_nonoverlapping(returned.image.as_ptr(), message, size);
         out.write(returned.status);
     }
+    // The returned carrier's storage holds the next send's image.
+    with_driver(ctx, |d| d.spare_image = returned.image);
     Ok(())
 }
 

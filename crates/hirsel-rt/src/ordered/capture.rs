@@ -122,6 +122,11 @@ unsafe fn scan_with(
     layout: u32,
     descriptor: impl Fn(u32) -> *const Layout,
 ) -> Captures {
+    // A value whose layout scans no words holds no handle: nothing to walk.
+    // SAFETY: the caller guarantees a matching descriptor for `layout`.
+    if unsafe { (*descriptor(layout)).scan_words } == 0 {
+        return Captures::default();
+    }
     let mut out = Captures::default();
     let mut pending = vec![(value, layout)];
     let mut blocks = BTreeSet::new();

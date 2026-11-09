@@ -120,7 +120,7 @@ pub(crate) unsafe fn endpoint(
         )?;
         return Ok(STATUS_OK);
     }
-    engine::at_head(ctx)?;
+    let head = engine::head(ctx)?;
     let (_, sender) = role::with_role(ctx, |s| s.channels.endpoint_of(word));
     let name = if sender {
         "drop.trivial"
@@ -133,8 +133,7 @@ pub(crate) unsafe fn endpoint(
             "drop.leftovers"
         }
     };
-    let (left, progress) = engine::head_canonical(
-        ctx,
+    let (left, progress) = head.canonical(
         name,
         || {
             let left = role::with_role(ctx, |s| {
@@ -233,7 +232,7 @@ pub(crate) unsafe fn mutex(
         )?;
         return Ok(STATUS_OK);
     }
-    engine::at_head(ctx)?;
+    let head = engine::head(ctx)?;
     let descriptor = engine::carrier_descriptor(ctx, Kind::Mutex, word);
     let layout = unsafe { &*(*ctx).descriptor(descriptor) };
     let name = if layout.finalizer.is_none() && layout.step_count == 0 {
@@ -241,8 +240,7 @@ pub(crate) unsafe fn mutex(
     } else {
         "drop.leftovers"
     };
-    let (left, progress) = engine::head_canonical(
-        ctx,
+    let (left, progress) = head.canonical(
         name,
         || {
             let left = role::with_role(ctx, |s| {

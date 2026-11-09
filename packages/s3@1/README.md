@@ -43,7 +43,8 @@ let value = s3.get(mut reader, "tenant/item")?
 implement GET, validated Range GET, conditional PUT, paginated ListObjectsV2
 and idempotent DELETE. Failed requests are not retried. LIST requests URL
 encoding, decodes keys, rejects keys outside the prefix, and returns sorted
-unique keys. No object exceeds `max_object_bytes`, so there is no multipart
+unique keys. One listing reads at most `max_list_pages` pages and `max_list_keys`
+keys and refuses with `ListLimit()` past either, whatever the server sends. No object exceeds `max_object_bytes`, so there is no multipart
 upload: the store backend declares that cap, `store.open_backend` refuses a
 `transaction_bytes` limit an object cannot hold, group commits are cut to fit
 it, and compaction writes a snapshot as as many objects as it needs.

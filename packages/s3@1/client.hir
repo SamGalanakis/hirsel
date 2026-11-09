@@ -1,5 +1,6 @@
 /// One S3-compatible path-style endpoint. Prefixes have no leading/trailing slash.
 /// Reads are bounded by max_object_bytes; cache_bytes=0 is the cheap default.
+/// One list_objects reads at most max_list_pages pages and max_list_keys keys.
 pub type Config {
   endpoint: String,
   bucket: String,
@@ -7,6 +8,8 @@ pub type Config {
   prefix: String,
   cache_bytes: u64,
   max_object_bytes: u64,
+  max_list_pages: u64,
+  max_list_keys: u64,
 }
 
 /// Authority stays inside the package, as in std http.Client.
@@ -36,7 +39,7 @@ pub fn client(
   if scheme != "https" && scheme != "http" {
     return Error(Invalid())
   }
-  if config.bucket == "" || config.region == "" || config.max_object_bytes == 0 || credentials.access_key == "" || bytes.len(
+  if config.bucket == "" || config.region == "" || config.max_object_bytes == 0 || config.max_list_pages == 0 || config.max_list_keys == 0 || credentials.access_key == "" || bytes.len(
     credentials.secret_key
   ) == 0 {
     return Error(Invalid())
@@ -208,7 +211,9 @@ pub fn from_grants(io: Io, env: Env, name: String) -> Result[Client, S3Error] {
       region: grant(env, prefix, "REGION")?,
       prefix: grant(env, prefix, "PREFIX")?,
       cache_bytes: cache,
-      max_object_bytes: 16777216
+      max_object_bytes: 16777216,
+      max_list_pages: 4096,
+      max_list_keys: 1048576
     ),
     Credentials(
       access_key: field(object, "access_key")?,
@@ -505,13 +510,22 @@ fn xml_values(source: String, tag: String) -> Result[List[String], S3Error] uses
 
 /// List v2 follows every continuation token. Keys are decoded, confined to the
 /// selected prefix, sorted, and deduplicated before returning relative names.
+/// A listing past max_list_pages pages or max_list_keys keys is ListLimit,
+/// whatever the server sends.
 pub fn list_objects(mut c: Client, prefix: String) -> Result[List[String], S3Error] {
   check_key(c, prefix)?
   let full_prefix = object_key(c, prefix)
   let mut token: Option[String] = None()
-  let mut visited_tokens: List[String] = []
+  let mut visited_tokens: ordered_map.OrderedMap[String, ()] = ordered_map.empty(
+    string.compare
+  )
   let mut keys: unique List[String] = unique []
+  let mut pages: u64 = 0
   while true {
+    if pages == c.config.max_list_pages {
+      return Error(ListLimit())
+    }
+    pages += 1
     let mut query: List[(String, String)] = [
       ("list-type", "2"),
       ("encoding-type", "url"),
@@ -545,6 +559,9 @@ pub fn list_objects(mut c: Client, prefix: String) -> Result[List[String], S3Err
       } else {
         part(key, string.byte_len(c.config.prefix) + 1, string.byte_len(key))
       }
+      if list.len(keys) == c.config.max_list_keys {
+        return Error(ListLimit())
+      }
       list.push(mut keys, take relative)
     }
     let truncated = xml_values(xml, "IsTruncated")?
@@ -558,12 +575,10 @@ pub fn list_objects(mut c: Client, prefix: String) -> Result[List[String], S3Err
     if list.len(next) != 1 || next[0] == "" || token == Some(copy next[0]) {
       return Error(Malformed())
     }
-    for visited in visited_tokens {
-      if visited == next[0] {
-        return Error(Malformed())
-      }
+    if ordered_map.contains(visited_tokens, next[0]) {
+      return Error(Malformed())
     }
-    list.push(mut visited_tokens, unique next[0])
+    ordered_map.insert(mut visited_tokens, unique next[0], ())
     token = Some(unique next[0])
   }
   let mut sorted_keys = unique keys

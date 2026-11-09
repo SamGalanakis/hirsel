@@ -595,7 +595,8 @@ starts: `InDoubt(Lost())`), `lose_reply` (after the callee completes:
 its simulated directories that was not yet durable is lost, and the call is
 `InDoubt(Abandoned())`, never `Lost`; the node restarts for its next call) and `partition` (calls to
 the node are `refuse` until a later poll heals it). Every decision is recorded as the
-completion it produced, so a simulated tape replays without the seed. Each node writes its
+completion it produced. Replay binds the embedded run record and uses recorded completions,
+so it needs no separately supplied fault seed or live callees. Each node writes its
 callees' tapes in the real format, and running the same record twice must produce
 byte-identical tapes.
 

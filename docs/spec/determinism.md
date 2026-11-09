@@ -97,7 +97,7 @@ zero. Process snapshots contribute to the admitted run identity like any other i
 | `program` | Digest of the selected semantic program revision: transitive source and core implementations, selected constant dependencies and the runtime's semantic contract. |
 | `entry`, `launch` | The entry's full versioned definition path, and `main` or `test`; planned: `call` for a callee run ([RUN-10](runners.md#run-10-callee-runs)). |
 | `call` | Planned. Present exactly when `launch` is `call`: the call form; the cause (the caller's run instance, request ordinal and request digest); and the argument bytes as lowercase hexadecimal. |
-| `inputs` | `hash_seed`, `random_seed` and `test_seed`, each an explicit `u64`; and, for a simulation, a separate scheduler algorithm, version and seed; planned: `fault_seed`, the seed of simulated providers' fault decisions. |
+| `inputs` | `hash_seed`, `random_seed` and `test_seed`, each an explicit `u64`; and, for a simulation, a separate scheduler algorithm, version and seed; optional `fault_seed`, a `u64` that seeds `sim@1` runners' fault decisions and defaults to zero when absent. |
 | `io` | Absent or null, or a closed grant record: stdout sink, Tasks provider, monotonic clock, wall clock, Random provider, directory mounts, network grant and process grant, and optionally the Telemetry provider (`telemetry`, absent from canonical bytes when absent); planned: runners (`runners`, [providers](runners.md#providers)). Each absent projection is denied. |
 | `args` | Absent or null, or the exact ordered UTF-8 snapshot, explicit empty included. |
 | `env` | Absent or null, or exact key-to-value entries, with null for a granted key that is unset; denied keys are distinguishable from granted unset keys. |
@@ -373,9 +373,12 @@ again; a recording is never authority to reconnect ([PROG-6](programs.md#prog-6-
 
 **Seeds.** The hash placement seed affects only placement ([SEM-5](semantics.md#sem-5-maps)).
 The Random and Test seeds are separate even when a user chooses equal numbers, and so is
-the planned fault seed, which drives only simulated providers' fault decisions, each
-recorded as the outcome it produced, so replay never needs it. A scheduler
-seed describes simulator policy; the recorded event and scheduling trace is the
+`inputs.fault_seed`, which drives `sim@1` runners' fault-site enablement, firing and crash
+points ([providers](runners.md#providers)). When present, it contributes to run identity
+and appears in the canonical run record embedded in a recording. Replay binds that
+record, checks locally decided outcomes against recorded completions, and takes callee
+outcomes from the tape without running callees. It needs no separately supplied fault
+seed. A scheduler seed describes simulator policy; the recorded event and scheduling trace is the
 authoritative replay input. A user `Hasher` receives only an explicit seed from its caller,
 never the hidden placement seed.
 

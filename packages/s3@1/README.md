@@ -43,7 +43,10 @@ let value = s3.get(mut reader, "tenant/item")?
 implement GET, validated Range GET, conditional PUT, paginated ListObjectsV2
 and idempotent DELETE. Failed requests are not retried. LIST requests URL
 encoding, decodes keys, rejects keys outside the prefix, and returns sorted
-unique keys. Multipart is unnecessary for the bounded commit objects.
+unique keys. No object exceeds `max_object_bytes`, so there is no multipart
+upload: the store backend declares that cap, `store.open_backend` refuses a
+`transaction_bytes` limit an object cannot hold, group commits are cut to fit
+it, and compaction writes a snapshot as as many objects as it needs.
 
 `object_state` and `object_backend` implement store.Backend[ObjectBackend].
 Open with `store.open_backend(s3.object_state(client)?, s3.object_backend(),

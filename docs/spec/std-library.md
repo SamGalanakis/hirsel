@@ -4180,7 +4180,7 @@ entries, and all subsequent lookups retain the existing Dir confinement.
 StoreConfig { durability: Durability, group_limit: u64, faults: StoreFaults, limits: StoreLimits }
 StoreLimits { key_bytes: u64, value_bytes: u64, transaction_bytes: u64, range_rows: u64 }
 StoreFaults = NoFaults | StopAfterWrites(u64)
-StoreError = Storage(FileError) | Refused(FileError) | Corrupt(String) | Fenced | Conflict | Injected | Closed
+StoreError = Storage(FileError) | Refused(FileError) | Corrupt(String) | Fenced | Conflict | Limit(TxLimit) | Injected | Closed
 TxFailure[E] = Aborted(E) | Canceled(CancelCause) | Storage(StoreError) | Limit(TxLimit) | Unknown(StoreError)
 TxLimit = KeyBytes | ValueBytes | TransactionBytes | RangeRows
 CallRequest { stream: Bytes, epoch: u64, position: u64, digest: Bytes, acknowledged: u64 }
@@ -4250,8 +4250,11 @@ wrote nothing) and returns `v`; `Error(e)` discards them and returns `Aborted(e)
 failure in the body discards them and propagates. Every outcome is released only once
 every commit the body could see, and its own, is durable: `transact` calls `durable`
 itself. A commit with a key over `limits.key_bytes`, a value over `limits.value_bytes`, or
-keys and values over `limits.transaction_bytes` in total returns `Limit(..)` with no
-effect. A failed storage write before the commit is `Storage(e)`; a create that failed
+an encoded size over `limits.transaction_bytes` returns `Limit(..)` with no effect; the
+encoded size is that of the log object holding the commit alone, 50 bytes plus 17 and the
+key and value per put and 9 and the key per delete. `store.commit` applies the same check
+and returns `Limit(..)`, leaving the store open. `open` refuses with
+`Limit(TransactionBytes())` a `transaction_bytes` over the backend's `max_object_bytes`. A failed storage write before the commit is `Storage(e)`; a create that failed
 with a file error leaves the commit's durability to the next `open` and is `Unknown(e)`.
 `transact` checks no cancellation; `Canceled` is the runner form's. Keys beginning with
 `hirsel.` (`reserved`) are the store's own: `tx_put` and `tx_delete` require a key outside
@@ -4271,8 +4274,9 @@ A request with a higher epoch raises the row's, a duplicate's included. A storag
 records nothing, so the caller resends the same position.
 
 **Output gate and group commit.** Commits queue in memory until `durable` is awaited or
-`group_limit` of them are pending; the group is then written as one log object, the
-commit point of every commit in it. `durable(t)` returns once `t`'s commit and every
+`group_limit` of them are pending, or until the next commit would carry the group's log
+object past the backend's `max_object_bytes`; the group is then written as one log object,
+the commit point of every commit in it. `durable(t)` returns once `t`'s commit and every
 earlier one are in a written log object, writing the pending group when `t` is in it;
 for a ticket already written it writes nothing. With `durability` `Durable()` (the
 default) a log object is created with `file.put_new(.., Durable())` and so is synced
@@ -4281,9 +4285,12 @@ any suffix of the commits, never part of one. Groups are deterministic: no timer
 
 **Layout.** Under the `Dir`, every object is immutable and created only by `put_new`,
 named by a kind directory and a 20-digit decimal id: `manifest/N` names the writer epoch,
-the current snapshot object and the first log id to replay; `log/N` holds one commit
-group, the first commit's sequence and each commit's ordered write set; `snap/N` holds
-every entry as of one commit. Every object is a header (magic `HSTR`, format version 1,
+the current snapshot's first object, sequence and part count and the first log id to
+replay; `log/N` holds one commit group, the first commit's sequence and each commit's
+ordered write set; consecutive `snap/N` objects hold one snapshot, each its sequence, part
+index, part count and its share of the entry stream (the entry count, then each key and
+value), none over the backend's `max_object_bytes`. Every object is a header (magic
+`HSTR`, format version 2,
 kind, its own id, the writer epoch), a body and a CRC-32C of everything before it,
 integers little-endian, so a misdirected or torn object fails its check.
 
@@ -4301,7 +4308,7 @@ another writer and returns `Fenced()`. `Storage`, `Corrupt`, `Fenced` and `Injec
 close the store; every later call returns `Closed()`.
 
 **Compaction.** `compact` writes any pending group, writes every entry into the next
-snapshot object and publishes it with the next manifest, whose first log id is the next log
+snapshot, as many objects as the object cap requires, and publishes it with the next manifest, whose first log id is the next log
 id. It removes nothing: every created name stays taken, so a superseded writer's next
 create collides and returns `Fenced()` rather than reusing a freed name. Older manifests,
 unreached snapshots and logs before the first log id are never read again, so a crash at
@@ -4320,8 +4327,9 @@ returning `Result[Bytes, FileError]`, `put_new(mut state: S, name: String, data:
 mode: Durability)` returning `Result[(), PutError]` (STORE-11: `Taken()`, `Refused(e)` before
 any effect, or `Undecided(e)`; `Ok` only once equal bytes hold the name durably), `list(mut
 state: S, prefix: String)`
-returning `Result[List[String], FileError]`, and `remove` and `mkdir` with the same
-state/name inputs and unit result. Every callback declares `uses {state}`. `list` returns
+returning `Result[List[String], FileError]`, `remove` and `mkdir` with the same
+state/name inputs and unit result, and `max_object_bytes(mut state: S)` returning the
+largest object `put_new` accepts as `u64`. Every callback declares `uses {state}`. `list` returns
 full relative names in byte order. The shipped dictionaries use top-level functions and put provider authority in
 the state; any captured callback authority remains explicit erased evidence. `Store[S]` is ordinary opaque, with `@captures(backend)` and `uses {S}`:
 it exports no copying bound, has no automatic flush and keeps its callbacks' erased

@@ -11,6 +11,8 @@ pub type Sim {
   lost_reply_at: u64,
   race_at: u64,
   barrier_fail_at: u64,
+  // The largest object a create accepts; a larger one is refused unwritten.
+  max_object_bytes: u64,
 }
 
 pub fn simulated(d: Dir, latency: u64, fail_at: u64, lost_reply_at: u64, race_at: u64) -> Sim {
@@ -22,8 +24,16 @@ pub fn simulated(d: Dir, latency: u64, fail_at: u64, lost_reply_at: u64, race_at
     fail_at: fail_at,
     lost_reply_at: lost_reply_at,
     race_at: race_at,
-    barrier_fail_at: 0
+    barrier_fail_at: 0,
+    max_object_bytes: 16777216
   )
+}
+
+/// The same medium accepting objects of at most `cap` bytes.
+pub fn with_object_cap(take sim: Sim, cap: u64) -> Sim {
+  let mut capped = take sim
+  capped.max_object_bytes = cap
+  capped
 }
 
 /// The same medium whose create at operation `at` becomes visible without its
@@ -41,8 +51,13 @@ pub fn simulated_backend() -> store.Backend[Sim] uses {} {
     put_new: sim_put,
     list: sim_list,
     remove: sim_remove,
-    mkdir: sim_mkdir
+    mkdir: sim_mkdir,
+    max_object_bytes: sim_max_object_bytes
   )
+}
+
+fn sim_max_object_bytes(mut state: Sim) -> u64 uses {} {
+  state.max_object_bytes
 }
 
 fn advance(mut state: Sim) -> Result[(), FileError] uses {} {
@@ -66,6 +81,9 @@ fn sim_put(mut state: Sim, name: String, data: Bytes, mode: Durability) -> Resul
   // An injected failure happens before the request has any effect.
   if let Error(e) = advance(mut state) {
     return Error(Refused(e))
+  }
+  if bytes.len(data) > state.max_object_bytes {
+    return Error(Refused(FileFault(1)))
   }
   if state.operations == state.race_at {
     put_object(state.dir, name, b"competing writer", Durable())?

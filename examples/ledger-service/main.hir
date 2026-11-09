@@ -81,6 +81,7 @@ fn store_error(e: store.StoreError) -> String {
     Corrupt(name) => f"corrupt {name}",
     Fenced() => "fenced",
     Conflict() => "conflict",
+    Limit(_) => "limit",
     Injected() => "injected",
     Closed() => "closed",
   }

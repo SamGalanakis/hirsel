@@ -418,7 +418,9 @@ endpoint that ignores it refuses open with `ConditionalUnsupported(endpoint)`;
 raw S3 GET and LIST remain usable directly.
 
 `Backend[S]` has callbacks `read`, `put_new`, `list`, `remove` and `mkdir`, each
-taking `mut state: S` and a relative name. `list` returns full relative names sorted
+taking `mut state: S` and a relative name, and `max_object_bytes`, the largest object its
+`put_new` accepts (the local backend's is the runtime's largest byte extent, the S3
+backend's its client's `max_object_bytes`); a larger create is `Refused`. `list` returns full relative names sorted
 by bytes. `put_new` returns `Ok` only once an object with exactly its bytes holds the
 name, durably under `Durable()`, redoing the barrier for an existing equal object. Its
 error is a `PutError`: `Taken()` when other bytes hold the name, `Refused(e)` when the
@@ -442,9 +444,11 @@ ends with a CRC-32C checksum of its contents, and carries the writer's nonce.
 - A **log object** holds one commit group: for each commit, its version and its ordered
   write set of puts and deletes on byte keys and values. Writing it with `put_new(Durable)`
   is the commit point of every commit in the group.
-- A **snapshot object** holds a complete state at a commit version.
-- A **manifest** names the writer epoch, the newest snapshot and the first log id after
-  it. A new manifest is written only when a writer claims the store and at compaction,
+- A **snapshot** holds a complete state at a commit version: its entry stream cut into
+  as many consecutive snapshot objects as the backend's object cap requires, each naming
+  the version, its part index and the part count.
+- A **manifest** names the writer epoch, the newest snapshot (its first object, version
+  and part count) and the first log id after it. A new manifest is written only when a writer claims the store and at compaction,
   always with `put_new` at the next manifest id, never by overwriting.
 
 **Claim and fencing.** Opening as writer recovers, then claims the next writer epoch by
@@ -456,7 +460,8 @@ fenced by a later claim: it fails with `Fenced()` and closes, releasing nothing 
 (raising `V`) and queue; a queue is written as one log object when an outcome awaits its
 durability or a group bound in the configuration is reached, never on a timer. `D` is the
 highest commit version whose log object, and every earlier one, has been created
-durably. An `Undecided` `put_new` is settled by issuing the same `put_new` once more:
+durably. A group also ends before the commit that would carry its log object past the
+backend's `max_object_bytes`. An `Undecided` `put_new` is settled by issuing the same `put_new` once more:
 equal bytes succeed only with their barrier, other bytes are `Fenced()`. Reading the object
 back would prove only that it exists, not that a failed barrier was redone. If the second
 attempt fails too, durability cannot be decided, the waiting transaction returns
@@ -474,8 +479,8 @@ first bad log object ends the recovered log there and it and every later one are
 When no intact state exists the open refuses rather than guess. Recovery never re-executes
 a body.
 
-**Compaction.** `store.compact` writes a snapshot object of the durable state, then the
-next manifest naming it, so recovery replays only the log objects after it. It removes no
+**Compaction.** `store.compact` writes a snapshot of the durable state, in as many objects
+as the object cap requires, then the next manifest naming it, so recovery replays only the log objects after it. It removes no
 object, and recovery skips older manifests, unreached snapshots and log objects before the
 manifest's first log id without reading them. Fencing rests on every created name staying
 taken: a freed name would let a superseded writer's next `put_new` succeed where it must
@@ -486,7 +491,14 @@ crash at any point recovers.
 default, or `Volatile()`, under which `D = V` at all times, outcomes are released without a
 barrier and a crash may lose any suffix of commits), the group bound, and `limits`
 (`key_bytes` 4096, `value_bytes` 1048576, `transaction_bytes` 16777216, `range_rows`
-10000). There is no general durability setting: another store provider defines its own
+10000). `transaction_bytes` bounds a commit's encoded size: the log object holding that
+commit alone, 50 bytes of framing plus 17 bytes and the key and value per put and 9 bytes
+and the key per delete. Limits compose with the backend: `open` refuses with
+`Limit(TransactionBytes())`, before any I/O, a `transaction_bytes` over the backend's
+`max_object_bytes` (or a cap too small for a manifest or a snapshot part), so every
+admitted commit fits one object, and every engine commit, `transact`, `call` and `Tx`
+operation applies the same check. A refused limit has no effect and is definite, never
+`Unknown(..)`. There is no general durability setting: another store provider defines its own
 settings and defaults. A store must survive, by detecting and refusing, never by returning
 wrong data: the loss of anything not yet durable, torn and garbage writes, lost or
 ambiguous creates, and corruption on read. These are file-effect outcomes, recorded like

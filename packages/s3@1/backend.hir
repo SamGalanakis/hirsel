@@ -49,8 +49,13 @@ pub fn object_backend() -> store.Backend[ObjectBackend] uses {} {
     put_new: object_put,
     list: object_list,
     remove: object_remove,
-    mkdir: object_mkdir
+    mkdir: object_mkdir,
+    max_object_bytes: object_max_bytes
   )
+}
+
+fn object_max_bytes(mut state: ObjectBackend) -> u64 uses {} {
+  state.client.config.max_object_bytes
 }
 
 fn file_error(error: S3Error) -> FileError uses {} {

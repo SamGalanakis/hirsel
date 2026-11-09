@@ -36,6 +36,8 @@ pub type Backend[S] {
   list: fn(mut state: S, String) -> Result[List[String], FileError] uses {state},
   remove: fn(mut state: S, String) -> Result[(), FileError] uses {state},
   mkdir: fn(mut state: S, String) -> Result[(), FileError] uses {state},
+  // The largest object `put_new` accepts; a larger one is `Refused`.
+  max_object_bytes: fn(mut state: S) -> u64 uses {state},
 }
 
 /// How a backend's `put_new` failed. `Taken()`: an object with other bytes
@@ -55,8 +57,14 @@ pub fn local_backend() -> Backend[Dir] uses {} {
     put_new: local_put,
     list: local_list,
     remove: local_remove,
-    mkdir: local_mkdir
+    mkdir: local_mkdir,
+    max_object_bytes: local_max_object_bytes
   )
+}
+
+// A Dir object is bounded only by the runtime's largest byte extent.
+fn local_max_object_bytes(mut d: Dir) -> u64 uses {} {
+  4611686018427387839
 }
 
 fn local_read(mut d: Dir, name: String) -> Result[Bytes, FileError] uses {d} {
@@ -108,9 +116,13 @@ pub type StoreConfig {
   limits: StoreLimits,
 }
 
-/// The most a `transact` commit may write: any key over `key_bytes`, any value
-/// over `value_bytes`, or keys and values together over `transaction_bytes`
-/// refuse the commit with `Limit(..)` and no effect.
+/// The most a commit may write: any key over `key_bytes`, any value over
+/// `value_bytes`, or an encoded commit over `transaction_bytes` refuses the
+/// commit with `Limit(..)` and no effect. A commit's encoded size is that of
+/// the log object holding it alone: its keys and values, 17 bytes per put, 9
+/// per delete and 50 of object framing. `open` refuses a `transaction_bytes`
+/// over the backend's `max_object_bytes`, so every admitted commit can be
+/// written.
 pub type StoreLimits {
   key_bytes: u64,
   value_bytes: u64,
@@ -128,11 +140,15 @@ pub type StoreFaults = NoFaults | StopAfterWrites(u64)
 /// refused before it had any effect; `Corrupt`
 /// names an object that fails its checksum or the layout's rules (in a
 /// `Volatile()` store, a bad log instead ends the recovered log); `Fenced` means another writer claimed the store; `Conflict` means
-/// a commit after the transaction began wrote a key it conflicts on; `Injected` is a
-/// `StopAfterWrites` stop. After `Storage`, `Refused`, `Corrupt`, `Fenced` or
-/// `Injected` the store is closed and every later call returns `Closed`.
+/// a commit after the transaction began wrote a key it conflicts on; `Limit`
+/// is a commit over the configured limits, or at `open` a `transaction_bytes`
+/// the backend's objects cannot hold; `Injected` is a `StopAfterWrites` stop.
+/// After `Storage`, `Refused`, `Corrupt`, `Fenced` or `Injected` the store is
+/// closed and every later call returns `Closed`.
 @serializable
-pub type StoreError = Storage(FileError) | Refused(FileError) | Corrupt(String) | Fenced | Conflict | Injected | Closed
+pub type StoreError = Storage(FileError) | Refused(FileError) | Corrupt(String) | Fenced | Conflict | Limit(
+  TxLimit
+) | Injected | Closed
 
 /// How a transaction ended without its outcome: `Aborted(e)` when the body
 /// returned `Error(e)` and its writes were discarded; `Canceled(cause)` before
@@ -241,12 +257,14 @@ pub opaque type Store[S]: () uses {S} {
   visible: u64,
   durable: u64,
   pending: List[List[Write]],
+  // The encoded size of the pending commits and the backend's object cap.
+  pending_bytes: u64,
+  object_bytes: u64,
   next_log: u64,
   next_manifest: u64,
   next_snap: u64,
-  // The current snapshot object's id and commit, if any, and the first log id
-  // recovery replays.
-  snap: Option[(u64, u64)],
+  // The current snapshot, if any, and the first log id recovery replays.
+  snap: Option[SnapRef],
   log_start: u64,
   writes: u64,
   closed: bool,
@@ -254,7 +272,7 @@ pub opaque type Store[S]: () uses {S} {
 
 const MAGIC: u32 = 0x52545348
 
-const VERSION: u8 = 1
+const VERSION: u8 = 2
 
 const KIND_LOG: u8 = 1
 
@@ -265,6 +283,20 @@ const KIND_MANIFEST: u8 = 3
 const OP_PUT: u8 = 1
 
 const OP_DELETE: u8 = 2
+
+// A log object's bytes besides its commits: header, first sequence, commit
+// count and checksum; and a commit's own write count.
+const LOG_FRAME: u64 = 42
+
+const COMMIT_FRAME: u64 = 8
+
+// A snapshot part's bytes besides its share of the entry stream: header,
+// sequence, part index, part count and checksum.
+const SNAP_FRAME: u64 = 50
+
+// A manifest with a snapshot: header, flag, snapshot id, sequence and part
+// count, first log id and checksum.
+const MANIFEST_BYTES: u64 = 59
 
 /// Durable log objects, 64 commits per group, no injected faults, and limits
 /// of 4096-byte keys, 1 MiB values and 16 MiB per transaction.
@@ -358,6 +390,8 @@ pub fn open_backend[S](take state: S, take backend: Backend[S], config: StoreCon
     visible: 0,
     durable: 0,
     pending: [],
+    pending_bytes: 0,
+    object_bytes: 0,
     next_log: 0,
     next_manifest: 0,
     next_snap: 0,
@@ -366,6 +400,12 @@ pub fn open_backend[S](take state: S, take backend: Backend[S], config: StoreCon
     writes: 0,
     closed: false
   )
+  s.object_bytes = s.backend.max_object_bytes(mut s.state)
+  // Every admitted commit must fit one log object, and a snapshot part must
+  // carry some of its stream.
+  if config.limits.transaction_bytes > s.object_bytes || s.object_bytes <= SNAP_FRAME || s.object_bytes < MANIFEST_BYTES {
+    return Error(Limit(TransactionBytes()))
+  }
   match recover(mut s) {
     Ok(()) => {
       s.txns = txn_manager.new(s.visible, txn_manager.default_limits())
@@ -455,8 +495,10 @@ fn current[S](mut s: Store[S]) -> ordered_map.OrderedMap[Bytes, Bytes] uses {} {
 /// snapshots and transactions, and returns its ticket. `Conflict()` when a
 /// commit after `t` began wrote a key `t` conflicts on (see `Isolation`); a
 /// transaction older than the store's conflict retention conflicts whenever
-/// it writes or read anything. A commit that fills its group writes the
-/// group's log object; await its durability with `durable`.
+/// it writes or read anything. `Limit(..)` when `t`'s writes exceed the
+/// configured limits; the commit has no effect and the store stays open. A
+/// commit that fills its group, by count or by the backend's object cap,
+/// writes the group's log object; await its durability with `durable`.
 pub fn commit[S](mut s: Store[S], take t: Txn) -> Result[Ticket, StoreError] uses {s} {
   if s.closed {
     return Error(Closed())
@@ -470,6 +512,10 @@ pub fn commit[S](mut s: Store[S], take t: Txn) -> Result[Ticket, StoreError] use
     reads: reads,
     ranges: ranges
   ) = take t
+  if let Some(l) = over_limit(s.config.limits, writes) {
+    txn_manager.end(mut s.txns, id)
+    return Error(Limit(l))
+  }
   // Nothing committed since `t` began, the common case and every
   // `transact`: nothing to check, and `t`'s state is the index plus its writes.
   let latest = base == s.visible
@@ -481,6 +527,15 @@ pub fn commit[S](mut s: Store[S], take t: Txn) -> Result[Ticket, StoreError] use
     }
   }
   let set = write_set(writes)
+  // A group never outgrows one object: one that this commit would push past
+  // the cap is written first. The commit alone fits, as `open` checked.
+  let size = commit_bytes(set)
+  if list.len(s.pending) > 0 && LOG_FRAME + s.pending_bytes + size > s.object_bytes {
+    if let Error(e) = flush(mut s) {
+      txn_manager.end(mut s.txns, id)
+      return Error(e)
+    }
+  }
   if latest {
     s.index = take state
   } else {
@@ -498,6 +553,7 @@ pub fn commit[S](mut s: Store[S], take t: Txn) -> Result[Ticket, StoreError] use
   }
   txn_manager.track_batch(mut s.txns, s.visible, take retained)
   list.push(mut s.pending, take set)
+  s.pending_bytes += size
   if list.len(s.pending) >= s.config.group_limit {
     flush(mut s)?
   }
@@ -517,8 +573,9 @@ pub fn durable[S](mut s: Store[S], t: Ticket) -> Result[(), StoreError] uses {s}
   flush(mut s)
 }
 
-/// Writes every commit into a new snapshot object and publishes it with a new
-/// manifest, so recovery replays only the logs after it. It removes nothing:
+/// Writes every commit into a new snapshot, as many objects as the backend's
+/// object cap requires, and publishes it with a new manifest, so recovery
+/// replays only the logs after it. It removes nothing:
 /// every created name stays taken, which is what fences a superseded writer.
 /// A crash at any point recovers: until the manifest exists the old state is
 /// current, and after it the older objects are never read again.
@@ -527,11 +584,20 @@ pub fn compact[S](mut s: Store[S]) -> Result[(), StoreError] uses {s} {
     return Error(Closed())
   }
   flush(mut s)?
-  let snap_id = s.next_snap
-  let data = encode_snapshot(snap_id, s.epoch, s.durable, s.index)
-  create(mut s, snap_name(snap_id), take data, Durable())?
-  s.next_snap += 1
-  s.snap = Some((snap_id, s.durable))
+  let first = s.next_snap
+  let parts = encode_snapshot(
+    first,
+    s.epoch,
+    s.durable,
+    s.index,
+    s.object_bytes - SNAP_FRAME
+  )
+  let count = list.len(parts)
+  for part in parts {
+    create(mut s, snap_name(s.next_snap), copy part, Durable())?
+    s.next_snap += 1
+  }
+  s.snap = Some(SnapRef(first: first, seq: s.durable, parts: count))
   s.log_start = s.next_log
   publish_manifest(mut s)
 }
@@ -562,10 +628,6 @@ pub fn transact[S, R: inert, E: inert](
   let Tx(txn: t, limits: _) = take tx
   match take returned {
     Ok(v) => {
-      if let Some(l) = over_limit(s.config.limits, t) {
-        gate(mut s, t.base) ? released
-        return Error(Limit(l))
-      }
       settle(mut s, take t) ? released
       Ok(take v)
     },
@@ -668,14 +730,14 @@ pub fn call[S, R: inert + serializable, E: inert + serializable](
   // The row counts against the limits like the body's writes: when the writes
   // and the row recording them exceed them, the outcome is the limit, recorded
   // by a commit of the row alone.
-  if let Some(l) = over_limit(s.config.limits, commit_set) {
+  if let Some(l) = over_limit(s.config.limits, commit_set.writes) {
     outcome = Error(Limit(l))
     commit_set = serial(mut s)
     put_row(mut commit_set, copy key, take row, req, outcome)
     // Not even the row recording the limit fits (its caller holds too many
     // outcomes unacknowledged): the request is refused unrecorded, and its
     // position stays the next one.
-    if let Some(full) = over_limit(s.config.limits, commit_set) {
+    if let Some(full) = over_limit(s.config.limits, commit_set.writes) {
       gate(mut s, base) ? released_call
       return Error(Tx(Limit(full)))
     }
@@ -757,11 +819,14 @@ fn refuse[S, R, E](mut s: Store[S], base: u64, take f: CallFailure[E]) -> Result
   Error(f)
 }
 
-// The limit a transaction's writes exceed, if any.
-fn over_limit(limits: StoreLimits, t: Txn) -> Option[TxLimit] uses {} {
-  let start: (u64, Option[TxLimit]) = (0, None())
+// The limit a transaction's writes exceed, if any. The total is the encoded
+// size of the log object holding this commit alone.
+fn over_limit(limits: StoreLimits, writes: ordered_map.OrderedMap[Bytes, Option[Bytes]]) -> Option[
+  TxLimit
+] uses {} {
+  let start: (u64, Option[TxLimit]) = (LOG_FRAME + COMMIT_FRAME, None())
   let (total, found) = ordered_map.fold_range(
-    t.writes,
+    writes,
     Unbounded(),
     Unbounded(),
     Ascending(),
@@ -774,14 +839,16 @@ fn over_limit(limits: StoreLimits, t: Txn) -> Option[TxLimit] uses {} {
       if bytes.len(k) > limits.key_bytes {
         return ((sum, Some(KeyBytes())), false)
       }
-      let value_len = match v {
-        Some(value) => bytes.len(value),
-        None() => 0,
+      let encoded = match v {
+        Some(value) => {
+          if bytes.len(value) > limits.value_bytes {
+            return ((sum, Some(ValueBytes())), false)
+          }
+          17 + bytes.len(k) + bytes.len(value)
+        },
+        None() => 9 + bytes.len(k),
       }
-      if value_len > limits.value_bytes {
-        return ((sum, Some(ValueBytes())), false)
-      }
-      ((sum + bytes.len(k) + value_len, None()), true)
+      ((sum + encoded, None()), true)
     }
   )
   match found {
@@ -792,6 +859,18 @@ fn over_limit(limits: StoreLimits, t: Txn) -> Option[TxLimit] uses {} {
       None()
     },
   }
+}
+
+// A commit's encoded size inside a log object.
+fn commit_bytes(set: List[Write]) -> u64 uses {} {
+  let mut total = COMMIT_FRAME
+  for w in set {
+    total += match w {
+      Put(key: k, value: v) => 17 + bytes.len(k) + bytes.len(v),
+      Delete(key: k) => 9 + bytes.len(k),
+    }
+  }
+  total
 }
 
 // The output gate at `version`: writes the pending group when a commit at or
@@ -813,8 +892,13 @@ fn settle[S](mut s: Store[S], take t: Txn) -> Result[(), Unreleased] {
   if ordered_map.len(t.writes) == 0 {
     return gate(mut s, t.base)
   }
+  let base = t.base
   let ticket = match commit(mut s, take t) {
     Ok(k) => k,
+    Error(Limit(l)) => {
+      gate(mut s, base)?
+      return Error(Limit(l))
+    },
     Error(e) => return Error(unsettled(take e)),
   }
   match durable(mut s, ticket) {
@@ -835,12 +919,13 @@ fn unsettled(take e: StoreError) -> Unreleased uses {} {
 
 // Why an outcome could not be released: nothing was committed, or a commit's
 // durability is undecided.
-type Unreleased = Storage(StoreError) | Unknown(StoreError)
+type Unreleased = Storage(StoreError) | Unknown(StoreError) | Limit(TxLimit)
 
 fn released[E](take u: Unreleased) -> TxFailure[E] uses {} {
   match u {
     Storage(e) => Storage(copy e),
     Unknown(e) => Unknown(copy e),
+    Limit(l) => Limit(l),
   }
 }
 
@@ -1081,6 +1166,7 @@ fn flush[S](mut s: Store[S]) -> Result[(), StoreError] {
   s.next_log += 1
   s.durable = s.visible
   s.pending = []
+  s.pending_bytes = 0
   Ok(())
 }
 
@@ -1112,15 +1198,21 @@ fn recover[S](mut s: Store[S]) -> Result[(), StoreError] {
     s.log_start = m.log_start
   }
   s.next_log = s.log_start
-  if let Some((snap_id, snap_seq)) = s.snap {
-    let name = snap_name(snap_id)
-    let data = read(mut s, copy name)?
-    let Ok(index) = decode_snapshot(data, snap_id, snap_seq) else {
-      return Error(stop(mut s, Corrupt(name)))
+  if let Some(snap) = s.snap {
+    let mut stream: List[u8] = []
+    for i in 0u64..snap.parts {
+      let name = snap_name(snap.first + i)
+      let data = read(mut s, copy name)?
+      let Ok(()) = decode_snapshot_part(data, snap, i, mut stream) else {
+        return Error(stop(mut s, Corrupt(name)))
+      }
+    }
+    let Ok(index) = decode_entries(bytes.from_list(take stream)) else {
+      return Error(stop(mut s, Corrupt(snap_name(snap.first))))
     }
     s.index = take index
-    s.visible = snap_seq
-    s.next_snap = snap_id + 1
+    s.visible = snap.seq
+    s.next_snap = snap.first + snap.parts
   }
   let snaps = list_ids(mut s, "snap")?
   if list.len(snaps) > 0 && snaps[list.len(snaps) - 1] >= s.next_snap {
@@ -1217,8 +1309,15 @@ fn claim[S](mut s: Store[S], epoch: u64) -> Result[(), StoreError] {
 // CRC-32C of everything before it, all integers little-endian.
 type Manifest {
   epoch: u64,
-  snap: Option[(u64, u64)],
+  snap: Option[SnapRef],
   log_start: u64,
+}
+
+// A snapshot: the commit it reflects, held as `parts` objects from `first`.
+type SnapRef {
+  first: u64,
+  seq: u64,
+  parts: u64,
 }
 
 type Group {
@@ -1290,16 +1389,18 @@ fn encode_log(id: u64, epoch: u64, first_seq: u64, commits: List[List[Write]]) -
   seal(take out)
 }
 
+// A snapshot is its entry stream (the entry count, then each key and value)
+// cut into parts of at most `payload` bytes, one object each from `first`.
 fn encode_snapshot(
-  id: u64,
+  first: u64,
   epoch: u64,
   seq: u64,
-  index: ordered_map.OrderedMap[Bytes, Bytes]
-) -> Bytes uses {} {
-  let mut start = header(KIND_SNAP, id, epoch)
-  put_u64(mut start, seq)
+  index: ordered_map.OrderedMap[Bytes, Bytes],
+  payload: u64
+) -> List[Bytes] uses {} {
+  let mut start: List[u8] = []
   put_u64(mut start, ordered_map.len(index))
-  let out = ordered_map.fold_range(
+  let stream = ordered_map.fold_range(
     index,
     Unbounded(),
     Unbounded(),
@@ -1312,16 +1413,35 @@ fn encode_snapshot(
       (take buffer, true)
     }
   )
-  seal(take out)
+  let total = list.len(stream)
+  let parts = (total + payload - 1) / payload
+  let mut objects: List[Bytes] = []
+  for i in 0u64..parts {
+    let mut part = header(KIND_SNAP, first + i, epoch)
+    put_u64(mut part, seq)
+    put_u64(mut part, i)
+    put_u64(mut part, parts)
+    let end = if (i + 1) * payload < total {
+      (i + 1) * payload
+    } else {
+      total
+    }
+    for at in i * payload..end {
+      list.push(mut part, stream[at])
+    }
+    list.push(mut objects, seal(take part))
+  }
+  objects
 }
 
-fn encode_manifest(id: u64, epoch: u64, snap: Option[(u64, u64)], log_start: u64) -> Bytes uses {} {
+fn encode_manifest(id: u64, epoch: u64, snap: Option[SnapRef], log_start: u64) -> Bytes uses {} {
   let mut out = header(KIND_MANIFEST, id, epoch)
   match snap {
-    Some((snap_id, snap_seq)) => {
+    Some(r) => {
       put_u8(mut out, 1)
-      put_u64(mut out, snap_id)
-      put_u64(mut out, snap_seq)
+      put_u64(mut out, r.first)
+      put_u64(mut out, r.seq)
+      put_u64(mut out, r.parts)
     },
     None() => put_u8(mut out, 0),
   }
@@ -1409,12 +1529,16 @@ fn open_object(data: Bytes, kind: u8, id: u64) -> Result[(Cursor, u64), ()] uses
 fn decode_manifest(data: Bytes, id: u64) -> Result[Manifest, ()] uses {} {
   let (c0, epoch) = open_object(data, KIND_MANIFEST, id)?
   let mut c = c0
-  let snap: Option[(u64, u64)] = match get_u8(data, mut c)? {
+  let snap: Option[SnapRef] = match get_u8(data, mut c)? {
     0 => None(),
     1 => {
-      let snap_id = get_u64(data, mut c)?
-      let snap_seq = get_u64(data, mut c)?
-      Some((snap_id, snap_seq))
+      let first = get_u64(data, mut c)?
+      let seq = get_u64(data, mut c)?
+      let parts = get_u64(data, mut c)?
+      if parts == 0 {
+        return Error(())
+      }
+      Some(SnapRef(first: first, seq: seq, parts: parts))
     },
     _ => return Error(()),
   }
@@ -1454,15 +1578,27 @@ fn decode_log(data: Bytes, id: u64) -> Result[Group, ()] uses {} {
   Ok(Group(epoch: epoch, first_seq: first_seq, commits: take commits))
 }
 
-fn decode_snapshot(data: Bytes, id: u64, seq: u64) -> Result[
-  ordered_map.OrderedMap[Bytes, Bytes],
+// Checks part `i` of `snap` and appends its share of the entry stream.
+fn decode_snapshot_part(data: Bytes, snap: SnapRef, i: u64, mut stream: List[u8]) -> Result[
+  (),
   ()
 ] uses {} {
-  let (c0, _) = open_object(data, KIND_SNAP, id)?
+  let (c0, _) = open_object(data, KIND_SNAP, snap.first + i)?
   let mut c = c0
-  if get_u64(data, mut c)? != seq {
+  if get_u64(data, mut c)? != snap.seq || get_u64(data, mut c)? != i || get_u64(
+    data,
+    mut c
+  )? != snap.parts {
     return Error(())
   }
+  for at in c.at..c.end {
+    list.push(mut stream, data[at])
+  }
+  Ok(())
+}
+
+fn decode_entries(data: Bytes) -> Result[ordered_map.OrderedMap[Bytes, Bytes], ()] uses {} {
+  let mut c = Cursor(at: 0, end: bytes.len(data))
   let count = get_u64(data, mut c)?
   let mut index: ordered_map.OrderedMap[Bytes, Bytes] = ordered_map.empty(compare_keys)
   for _ in 0u64..count {
@@ -1481,13 +1617,13 @@ fn decode_snapshot(data: Bytes, id: u64, seq: u64) -> Result[
 fn check_put(tx: Tx, key: Bytes, value: Bytes) -> Option[TxLimit] uses {} {
   let mut trial = copy tx.txn
   txn.put(mut trial, unique key, unique value)
-  over_limit(tx.limits, trial)
+  over_limit(tx.limits, trial.writes)
 }
 
 fn check_delete(tx: Tx, key: Bytes) -> Option[TxLimit] uses {} {
   let mut trial = copy tx.txn
   txn.delete(mut trial, unique key)
-  over_limit(tx.limits, trial)
+  over_limit(tx.limits, trial.writes)
 }
 
 // Only the typed-table module writes its reserved catalog and row namespaces.

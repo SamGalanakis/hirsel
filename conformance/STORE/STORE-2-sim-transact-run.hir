@@ -3,7 +3,10 @@
 // store.transact commits a body's writes as one commit when it returns Ok,
 // discards them and returns Aborted when it returns Error, refuses a commit
 // over a limit with no effect, and a reopened store holds exactly the
-// committed transactions.
+// committed transactions. Every object fits the backend's cap: a limit no
+// object can hold is refused at open, a commit encoding past
+// transaction_bytes is refused definitely and leaves the store open, groups
+// are cut to the cap, and compaction splits a snapshot larger than the cap.
 type Short = TooFew(u64)
 
 fn count(tx: store.Tx) -> u64 {
@@ -19,7 +22,83 @@ fn set_count(mut tx: store.Tx, n: u64) -> () {
   store.tx_put(mut tx, b"count", bytes.from_list(take v))
 }
 
+fn filled(n: u64) -> Bytes {
+  let mut v: List[u8] = []
+  for _ in 0u64..n {
+    list.push(mut v, 97)
+  }
+  bytes.from_list(take v)
+}
+
+fn put(mut s: store.Store[s3.Sim], k: Bytes, v: Bytes) -> Result[
+  store.Ticket,
+  store.StoreError
+] {
+  let mut x = store.begin(mut s)
+  txn.put(mut x, unique k, unique v)
+  store.commit(mut s, take x)
+}
+
+// A store whose backend holds objects of at most 200 bytes.
+fn capped(d: Dir, transaction_bytes: u64) -> Result[
+  store.Store[s3.Sim],
+  store.StoreError
+] uses {d} {
+  let mut config = store.default_config()
+  config.limits.transaction_bytes = transaction_bytes
+  config.group_limit = 10
+  store.open_backend(
+    s3.with_object_cap(s3.simulated(d, 0, 0, 0, 0), 200),
+    s3.simulated_backend(),
+    config
+  )
+}
+
+fn object_cap(t: Test) -> Result[(), store.StoreError] {
+  let d = test.dir(t, [])
+  test.check(
+    t,
+    match capped(d, 201) {
+      Error(Limit(TransactionBytes())) => true,
+      _ => false,
+    }
+  )
+  let mut s = capped(d, 200)?
+  // One put of a 3-byte key and a 131-byte value encodes to 50 + 17 + 134 =
+  // 201 bytes: refused with no effect, and the store stays open.
+  test.check(
+    t,
+    match put(mut s, b"big", filled(131)) {
+      Error(Limit(TransactionBytes())) => true,
+      _ => false,
+    }
+  )
+  // At exactly 200 bytes it is admitted and written.
+  let at_cap = put(mut s, b"big", filled(130))?
+  store.durable(mut s, at_cap)?
+  // Each commit takes 8 + 17 + 2 + 40 = 67 bytes of a log: two fill a
+  // 42 + 134 = 176-byte group, and a third would pass the cap.
+  let mut last = at_cap
+  for k in [b"k1", b"k2", b"k3", b"k4", b"k5"] {
+    last = put(mut s, k, filled(40))?
+  }
+  store.durable(mut s, last)?
+  // The live state streams 8 + (16 + 133) + 5 * (16 + 42) = 447 bytes, three
+  // parts of at most 150.
+  store.compact(mut s)?
+  store.close(take s)?
+  let mut again = capped(d, 200)?
+  let reopened = store.snapshot(mut again)
+  test.check(t, store.get(reopened, b"big") == Some(filled(130)))
+  for k in [b"k1", b"k2", b"k3", b"k4", b"k5"] {
+    test.check(t, store.get(reopened, k) == Some(filled(40)))
+  }
+  test.check(t, store.snapshot_sequence(reopened) == 6)
+  store.close(take again)
+}
+
 pub fn main(t: Test) -> Result[(), store.StoreError] {
+  object_cap(t)?
   let d = test.dir(t, [])
   let mut config = store.default_config()
   config.limits.value_bytes = 4

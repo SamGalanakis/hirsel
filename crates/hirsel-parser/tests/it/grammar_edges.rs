@@ -199,3 +199,66 @@ fn incomplete_bindings_continue_types_but_complete_type_aliases_do_not_reopen() 
         assert!(!support::parse(source).0.diagnostics.is_empty(), "{source}");
     }
 }
+
+#[test]
+fn drop_is_a_finalizer_only_after_a_resource_body_and_a_name_elsewhere() {
+    // (source, finalizer binding, field or variant names) per resource item.
+    let finalized: [(&str, Option<&str>, &[&str]); 4] = [
+        (
+            "resource type R { drop: u32 }\ndrop(r) { drop(r.drop) }",
+            Some("r"),
+            &["drop"],
+        ),
+        (
+            "resource type R = A | drop(u8)\ndrop(d) {}",
+            Some("d"),
+            &["A", "drop"],
+        ),
+        ("resource type R = A | drop(u8)", None, &["A", "drop"]),
+        (
+            "resource type R = A\n@noalloc drop(drop) {}",
+            Some("drop"),
+            &[],
+        ),
+    ];
+    for (source, binding, names) in finalized {
+        let (output, _) = support::parse(source);
+        assert!(output.diagnostics.is_empty(), "{source}");
+        assert_eq!(output.syntax.items.len(), 1, "{source}");
+        let ItemKind::Type { body, drop, .. } = &output.syntax.items[0].item.kind else {
+            panic!("{source}");
+        };
+        assert_eq!(
+            drop.as_ref().map(|d| d.binding.as_str()),
+            binding,
+            "{source}"
+        );
+        let declared: Vec<&str> = match body {
+            TypeBody::Record(fields) => fields.iter().map(|f| f.name.as_str()).collect(),
+            TypeBody::Variants(variants) => variants.iter().map(|v| v.name.as_str()).collect(),
+            _ => vec![],
+        };
+        assert_eq!(declared, names, "{source}");
+    }
+    // Outside a resource body `drop` is an ordinary function, parameter,
+    // local and member name.
+    let (output, _) = support::parse(
+        "fn drop(drop: u32) -> u32 { let dropped = drop\n x.drop(drop).drop }\nfn g() { drop(1) }",
+    );
+    assert!(output.diagnostics.is_empty());
+    assert_eq!(output.syntax.items[0].item.name.as_str(), "drop");
+    // A copyable type still cannot declare destruction.
+    for source in [
+        "type C { x: u32 }\ndrop(c) {}",
+        "type C = A\n@noalloc drop(c) {}",
+    ] {
+        let (output, _) = support::parse(source);
+        assert!(
+            output
+                .diagnostics
+                .iter()
+                .any(|d| d.rule.as_str() == "DROP-1"),
+            "{source}"
+        );
+    }
+}

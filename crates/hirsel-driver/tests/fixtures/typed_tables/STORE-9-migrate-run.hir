@@ -1,0 +1,405 @@
+// rule: STORE-9
+// expect: run
+// A value and key migration rewrites every row under the new schema across
+// batches; a failing row function, a key collision or cancellation leaves the
+// table unchanged. Runs as a module of std, which keeps the engine private.
+@serializable
+type Item {
+  label: String,
+  count: u32,
+}
+
+@serializable
+type Priced {
+  label: String,
+  cents: u64,
+}
+
+@serializable
+type Rejected = Unpriced(u32)
+
+fn price(key: u32, old: Item) -> Result[(u32, Priced), Rejected] {
+  Ok((key, Priced(label: unique old.label, cents: int.widen(old.count) * 100)))
+}
+
+// Reverses key order, so the new rows sort the other way round.
+fn reverse(key: u32, old: Item) -> Result[(u64, Item), Rejected] {
+  Ok((1000 - int.widen(key), unique old))
+}
+
+fn refuse_third(key: u32, old: Item) -> Result[(u32, Priced), Rejected] {
+  if key == 3 {
+    return Error(Unpriced(key))
+  }
+  price(key, old)
+}
+
+fn collapse(key: u32, old: Item) -> Result[(u32, Priced), Rejected] {
+  Ok((7, Priced(label: unique old.label, cents: 0)))
+}
+
+fn items() -> table.Table[u32, Item] {
+  table.named("items")
+}
+
+fn priced() -> table.Table[u32, Priced] {
+  table.named("items")
+}
+
+fn reversed() -> table.Table[u64, Item] {
+  table.named("items")
+}
+
+fn seed[S](mut s: store.Store[S], name: String) -> bool {
+  let t: table.Table[u32, Item] = table.named(name)
+  let written = store.transact(
+    mut s,
+    fn(mut tx: store.Tx) -> Result[(), store.TxError] {
+      table.create(mut tx, t)?
+      for k in 1u32..6u32 {
+        table.put(mut tx, t, k, Item(label: f"item {k}", count: k))?
+      }
+      Ok(())
+    }
+  )
+  written == Ok(())
+}
+
+// Nothing of a discarded migration remains in the store's reserved spaces.
+fn no_leftovers[S](mut s: store.Store[S]) -> bool {
+  let snap = store.snapshot(mut s)
+  let (low, high) = store.prefix_bounds(b"hirsel.migrations/")
+  let (shadow_low, shadow_high) = store.prefix_bounds(b"hirsel.shadow/")
+  list.len(store.range(snap, low, high, Ascending(), 10)) == 0 && list.len(
+    store.range(snap, shadow_low, shadow_high, Ascending(), 10)
+  ) == 0
+}
+
+// The five seeded rows are intact and the table accepts writes again.
+fn unchanged[S](mut s: store.Store[S]) -> bool {
+  let read = store.transact(
+    mut s,
+    fn(mut tx: store.Tx) -> Result[bool, store.TxError] {
+      let rows = table.range(mut tx, items(), Unbounded(), Unbounded(), 10, Ascending())?
+      if list.len(rows) != 5 || rows[2] != (3, Item(label: "item 3", count: 3)) {
+        return Ok(false)
+      }
+      if list.len(table.history(mut tx, "items")?) != 1 {
+        return Ok(false)
+      }
+      table.put(mut tx, items(), 6, Item(label: "item 6", count: 6))?
+      Ok(table.delete(mut tx, items(), 6)?)
+    }
+  )
+  read == Ok(true)
+}
+
+pub fn main(t: Test) -> Result[(), store.StoreError] {
+  task.scope(
+    test.tasks(t),
+    fn(sc: Scope) -> Result[(), store.StoreError] {
+      scenario(t, sc)
+    }
+  )
+}
+
+fn scenario(t: Test, sc: Scope) -> Result[(), store.StoreError] {
+  let d = test.dir(t, [])
+  let mut s = store.open(d, store.default_config())?
+  test.check(t, seed(mut s, "items"))
+  // A row function's error and a key collision discard the migration.
+  test.check(
+    t,
+    table.migrate_with(
+      sc,
+      mut s,
+      items(),
+      priced(),
+      refuse_third,
+      "app.refuse_third",
+      "h1",
+      2
+    ) == Error(Failed(Unpriced(3)))
+  )
+  test.check(t, no_leftovers(mut s) && unchanged(mut s))
+  test.check(
+    t,
+    table.migrate_with(sc, mut s, items(), priced(), collapse, "app.collapse", "h2", 2) == Error(
+      Collision()
+    )
+  )
+  test.check(t, no_leftovers(mut s) && unchanged(mut s))
+  // A scope cancelled before the first batch discards the mark it finds.
+  test.check(t, canceled_before_first_batch(t))
+  // Invalid arguments.
+  let other: table.Table[u32, Priced] = table.named("other")
+  test.check(
+    t,
+    table.migrate_with(sc, mut s, items(), other, price, "app.price", "h3", 2) == Error(
+      Table(InvalidInput())
+    )
+  )
+  test.check(
+    t,
+    table.migrate_with(sc, mut s, items(), priced(), price, "app.price", "h3", 0) == Error(
+      Table(InvalidInput())
+    )
+  )
+  test.check(
+    t,
+    table.migrate_with(sc, mut s, items(), priced(), price, "app.price", "h3", 4097) == Error(
+      Table(InvalidInput())
+    )
+  )
+  let missing: table.Table[u32, Item] = table.named("missing")
+  let missing_priced: table.Table[u32, Priced] = table.named("missing")
+  test.check(
+    t,
+    table.migrate_with(sc, mut s, missing, missing_priced, price, "app.price", "h3", 2) == Error(
+      Table(NoTable())
+    )
+  )
+  // `from` must match the current schema.
+  test.check(
+    t,
+    table.migrate_with(
+      sc,
+      mut s,
+      reversed(),
+      priced(),
+      price_reversed,
+      "app.price_reversed",
+      "h4",
+      2
+    ) == Error(Table(Schema(KeyMismatch())))
+  )
+  // A value migration over three batches.
+  test.check(
+    t,
+    table.migrate_with(sc, mut s, items(), priced(), price, "app.price", "h3", 2) == Ok(
+      5
+    )
+  )
+  test.check(t, no_leftovers(mut s))
+  let migrated = store.transact(
+    mut s,
+    fn(mut tx: store.Tx) -> Result[bool, store.TxError] {
+      match table.get(mut tx, items(), 1) {
+        Error(Schema(_)) => (),
+        _ => return Ok(false),
+      }
+      let rows = table.range(
+        mut tx,
+        priced(),
+        Unbounded(),
+        Unbounded(),
+        10,
+        Ascending()
+      )?
+      if rows != [
+        (1, Priced(label: "item 1", cents: 100)),
+        (2, Priced(label: "item 2", cents: 200)),
+        (3, Priced(label: "item 3", cents: 300)),
+        (4, Priced(label: "item 4", cents: 400)),
+        (5, Priced(label: "item 5", cents: 500))
+      ] {
+        return Ok(false)
+      }
+      let history = table.history(mut tx, "items")?
+      if list.len(history) != 2 || history[1].epoch != 1 || history[1].change != Migrated(
+        "app.price",
+        "h3"
+      ) || history[1].key_schema != history[0].key_schema || history[1].value_schema == history[0].value_schema {
+        return Ok(false)
+      }
+      // The new schema takes writes at its own epoch.
+      table.put(mut tx, priced(), 6, Priced(label: "item 6", cents: 1))?
+      Ok(table.get(mut tx, priced(), 6)? == Some(Priced(label: "item 6", cents: 1)))
+    }
+  )
+  test.check(t, migrated == Ok(true))
+  // Already at the target schema: nothing to do.
+  test.check(
+    t,
+    table.migrate_with(sc, mut s, items(), priced(), price, "app.price", "h3", 2) == Ok(
+      0
+    )
+  )
+  // A key migration reverses the stored order and survives reopening.
+  test.check(t, seed(mut s, "keyed"))
+  let keyed: table.Table[u32, Item] = table.named("keyed")
+  let keyed_reversed: table.Table[u64, Item] = table.named("keyed")
+  test.check(
+    t,
+    table.migrate_with(
+      sc,
+      mut s,
+      keyed,
+      keyed_reversed,
+      reverse,
+      "app.reverse",
+      "h5",
+      3
+    ) == Ok(5)
+  )
+  store.close(take s)?
+  let mut reopened = store.open(d, store.default_config())?
+  let ordered = store.transact(
+    mut reopened,
+    fn(mut tx: store.Tx) -> Result[bool, store.TxError] {
+      let rows = table.range(
+        mut tx,
+        keyed_reversed,
+        Unbounded(),
+        Included(997),
+        2,
+        Ascending()
+      )?
+      if rows != [
+        (995, Item(label: "item 5", count: 5)),
+        (996, Item(label: "item 4", count: 4))
+      ] {
+        return Ok(false)
+      }
+      Ok(
+        table.get(mut tx, keyed_reversed, 999)? == Some(Item(label: "item 1", count: 1))
+      )
+    }
+  )
+  test.check(t, ordered == Ok(true))
+  Ok(())
+}
+
+fn price_reversed(key: u64, old: Item) -> Result[(u32, Priced), Rejected] {
+  Ok((7, Priced(label: unique old.label, cents: 0)))
+}
+
+// Objects held in memory: the cancelled child's store does no file Io, so
+// `migrate_with`'s check is the only place it observes cancellation.
+type Memory {
+  objects: List[(String, Bytes)],
+}
+
+fn memory_backend() -> store.Backend[Memory] {
+  store.Backend(
+    read: memory_read,
+    put_new: memory_put,
+    list: memory_list,
+    remove: memory_remove,
+    mkdir: memory_mkdir,
+    max_object_bytes: memory_max
+  )
+}
+
+fn memory_read(mut m: Memory, name: String) -> Result[Bytes, FileError] uses {m} {
+  for (held, data) in m.objects {
+    if held == name {
+      return Ok(unique data)
+    }
+  }
+  Error(NotFound())
+}
+
+fn memory_put(mut m: Memory, name: String, data: Bytes, mode: Durability) -> Result[
+  (),
+  store.PutError
+] uses {m} {
+  for (held, existing) in m.objects {
+    if held == name {
+      if existing == data {
+        return Ok(())
+      }
+      return Error(Taken())
+    }
+  }
+  list.push(mut m.objects, (unique name, unique data))
+  Ok(())
+}
+
+// Names are put in ascending order within a kind, so insertion order is
+// the listing order.
+fn memory_list(mut m: Memory, kind: String) -> Result[List[String], FileError] uses {m} {
+  let prefix = f"{kind}/"
+  let mut names: List[String] = []
+  for (held, _) in m.objects {
+    if string.starts_with(held, prefix) {
+      list.push(mut names, unique held)
+    }
+  }
+  Ok(take names)
+}
+
+fn memory_remove(mut m: Memory, name: String) -> Result[(), FileError] uses {m} {
+  let mut kept: List[(String, Bytes)] = []
+  for (held, data) in m.objects {
+    if held != name {
+      list.push(mut kept, (unique held, unique data))
+    }
+  }
+  m.objects = take kept
+  Ok(())
+}
+
+fn memory_mkdir(mut m: Memory, name: String) -> Result[(), FileError] uses {m} {
+  Ok(())
+}
+
+fn memory_max(mut m: Memory) -> u64 uses {m} {
+  4611686018427387839
+}
+
+// Migrates in a child task cancelled before its first batch: the call
+// returns `Canceled` and leaves no mark, no shadow and the table as it was.
+fn canceled_before_first_batch(t: Test) -> bool {
+  let tasks = test.tasks(t)
+  task.scope(
+    tasks,
+    fn(s: Scope) -> bool {
+      let (go_tx, go_rx): (Sender[u8], Receiver[u8]) = channel.open(tasks)
+      let h = task.async(
+        s,
+        fn() -> bool {
+          let mut go = take go_rx
+          // Returns `Canceled` once the parent cancels this task.
+          let _ = channel.receive(tasks, mut go)
+          task.scope(
+            tasks,
+            fn(inner: Scope) -> bool {
+              let opened = store.open_backend(
+                Memory(objects: []),
+                memory_backend(),
+                store.default_config()
+              )
+              let mut held = match take opened {
+                Ok(o) => o,
+                Error(_) => return false,
+              }
+              if !seed(mut held, "items") {
+                return false
+              }
+              let outcome = table.migrate_with(
+                inner,
+                mut held,
+                items(),
+                priced(),
+                price,
+                "app.price",
+                "h3",
+                2
+              )
+              let canceled = match outcome {
+                Error(Canceled(_)) => true,
+                _ => false,
+              }
+              canceled && no_leftovers(mut held) && unchanged(mut held)
+            }
+          )
+        }
+      )
+      task.cancel(s, h)
+      let outcome = task.await(s, take h)
+      let _ = take go_tx
+      outcome
+    }
+  )
+}

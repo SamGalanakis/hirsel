@@ -330,7 +330,6 @@ fn tape(source: &str, file: Anchor) -> Vec<Token> {
                 "distinct" => Some(Distinct),
                 "flat" => Some(Flat),
                 "resource" => Some(Resource),
-                "drop" => Some(Drop),
                 "box" => Some(Box),
                 "pub" => Some(Pub),
                 "opaque" => Some(Opaque),

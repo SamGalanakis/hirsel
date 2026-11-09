@@ -474,10 +474,71 @@ pub fn open_backend[S](take state: S, take backend: Backend[S], config: StoreCon
   match recover(mut s) {
     Ok(()) => {
       s.txns = txn_manager.new(s.visible, txn_manager.default_limits())
+      discard_migrations(mut s)?
       Ok(take s)
     },
     Error(e) => Error(e),
   }
+}
+
+// The typed-table library's pending migrations (STORE-9): one mark per table
+// under the first prefix, the rows written so far under the second. Opening a
+// store discards every pending migration by deleting both in one commit.
+fn migration_marks() -> Bytes uses {} {
+  b"hirsel.migrations/"
+}
+
+fn migration_shadows() -> Bytes uses {} {
+  b"hirsel.shadow/"
+}
+
+fn discard_migrations[S](mut s: Store[S]) -> Result[(), StoreError] {
+  // Shadow rows go before marks: a table is never writable while rows of its
+  // shadow remain. Each commit stays within the limits, and a crash between
+  // them leaves the rest for the next open.
+  for prefix in [migration_shadows(), migration_marks()] {
+    let (low, high) = prefix_bounds(prefix)
+    let mut done = false
+    while !done {
+      let mut t = serial(mut s)
+      done = delete_within(mut t, s.config.limits, low, high)
+      if ordered_map.len(t.writes) == 0 {
+        discard(mut s, take t)
+        break
+      }
+      let ticket = commit(mut s, take t)?
+      durable(mut s, ticket)?
+    }
+  }
+  Ok(())
+}
+
+// Deletes keys in [low, high) in key order while the commit of `t`, which
+// writes nothing else, stays within `limits`; true when none remain. The
+// whole span is in `t`'s reads.
+fn delete_within(
+  mut t: Txn,
+  limits: StoreLimits,
+  low: ordered_map.Bound[Bytes],
+  high: ordered_map.Bound[Bytes]
+) -> bool uses {} {
+  let _ = read_span(mut t.access, unique low, unique high, Ascending(), 1, [])
+  let mut total = LOG_FRAME + COMMIT_FRAME
+  // Every delete costs at least ten bytes, so no more keys than this fit.
+  for (key, _) in entries_in(
+    t.state,
+    low,
+    high,
+    Ascending(),
+    limits.transaction_bytes / 10 + 1
+  ) {
+    total += 9 + bytes.len(key)
+    if total > limits.transaction_bytes {
+      return false
+    }
+    txn.delete(mut t, unique key)
+  }
+  list.len(entries_in(t.state, low, high, Ascending(), 1)) == 0
 }
 
 /// A stable view of every commit so far, durable or not. Later commits never
@@ -2252,4 +2313,42 @@ fn check_delete(tx: Tx, key: Bytes) -> Option[TxLimit] uses {} {
   let mut trial = copy tx.txn
   txn.delete(mut trial, unique key)
   over_limit(tx.limits, trial.writes)
+}
+
+// Preflights deleting every key in `doomed` together, as `check_delete` does one.
+fn check_delete_all(tx: Tx, doomed: List[Bytes]) -> Option[TxLimit] uses {} {
+  let mut trial = copy tx.txn
+  for key in doomed {
+    txn.delete(mut trial, unique key)
+  }
+  over_limit(tx.limits, trial.writes)
+}
+
+// Every entry in [lo, hi), reserved keys included, after checking read (or,
+// with `write`, write) access to all of it: for a library operation over a
+// whole namespace of its own, such as dropping a table. `range_rows` does not
+// bound it; the commit's limits do.
+fn table_all(mut tx: Tx, take lo: Bytes, take hi: Option[Bytes], write: bool) -> Result[
+  List[(Bytes, Bytes)],
+  TxError
+] {
+  if !tx.scope.whole {
+    check(spans_hold(tx.scope.spans, lo, hi, write), write)?
+  }
+  Ok(scan(mut tx, Some((take lo, take hi)), true, 18446744073709551615))
+}
+
+// Deletes the keys starting with `prefix` in key order within the
+// transaction's limits, after checking write access to all of them; true when
+// none remain. The transaction must write nothing else.
+fn table_delete_within(mut tx: Tx, prefix: Bytes) -> Result[bool, TxError] {
+  let (low, high) = prefix_bounds(prefix)
+  if !tx.scope.whole {
+    let hi: Option[Bytes] = match high {
+      Excluded(h) => Some(unique h),
+      _ => None(),
+    }
+    check(spans_hold(tx.scope.spans, prefix, hi, true), true)?
+  }
+  Ok(delete_within(mut tx.txn, tx.limits, low, high))
 }

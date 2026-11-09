@@ -1766,7 +1766,6 @@ conformance/LANG/LANG-14-keyword-copy-bad.hir
 conformance/LANG/LANG-14-keyword-copy-ok.hir
 conformance/LANG/LANG-14-keyword-distinct-bad.hir
 conformance/LANG/LANG-14-keyword-distinct-ok.hir
-conformance/LANG/LANG-14-keyword-drop-bad.hir
 conformance/LANG/LANG-14-keyword-drop-ok.hir
 conformance/LANG/LANG-14-keyword-else-bad.hir
 conformance/LANG/LANG-14-keyword-else-ok.hir

@@ -48,7 +48,7 @@ The reserved keywords are exactly:
 
 ```text
 fn let mut match if else for in while break continue return take copy unique
-type distinct flat resource drop box pub opaque const comptime shape heap
+type distinct flat resource box pub opaque const comptime shape heap
 before requires ensures result where uses of local global once todo extern
 unsafe true false
 ```
@@ -58,6 +58,9 @@ unsafe true false
 (`unique List[T]`); `sendable` is a modifier only when a type follows it. `in` also
 introduces a relation (`T in x`), where the contextual name `env` denotes a callable's
 environment. `local` and `global` are reserved keywords but are not type qualifiers.
+`drop` is contextual: directly after a `resource` type's body, `drop(binding) { ... }`,
+optionally `@noalloc`, declares its finalizer
+([DROP-2](failure.md#drop-2-resources)); everywhere else `drop` is an ordinary name.
 
 A keyword cannot be declared as a name. After `.`, a keyword may be a member spelling.
 

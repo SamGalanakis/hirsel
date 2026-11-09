@@ -55,7 +55,6 @@ variants!(ast::Keyword {
     Distinct,
     Flat,
     Resource,
-    Drop,
     Box,
     Pub,
     Opaque,

@@ -117,7 +117,13 @@ pub fn sites(source: &str) -> Result<Vec<usize>, String> {
                             break;
                         }
                         match text(t) {
-                            "drop" | "@" if depth == 0 => break,
+                            // `drop` is contextual: after `=` or `|` it names a variant.
+                            "@" if depth == 0 => break,
+                            "drop"
+                                if depth == 0 && !matches!(text(significant[i - 1]), "=" | "|") =>
+                            {
+                                break;
+                            }
                             "(" if depth == 0
                                 && i > 0
                                 && matches!(significant[i - 1].kind, TokenKind::Ident(_)) =>

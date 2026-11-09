@@ -4,7 +4,7 @@
 implementation is converging on it:
 
 - **Shipped and unchanged here:** the key encoding (STORE-6, `std@1/keys`); typed tables'
-  create, get, put, delete and range, row epochs, storage identity and rename history
+  create, drop, get, put, delete and range, row epochs, storage identity and rename history
   (STORE-5, STORE-7, STORE-9); the output gate over one durable version (STORE-2); the
   call-stream decisions as `store.call` (STORE-12); and recording of a store's backend
   requests (STORE-10). `packages/s3@1` implements object-storage requests and grants.
@@ -633,7 +633,7 @@ SchemaChange    = Created() | Renamed(from: String, to: String) | Migrated(defin
 MigrateError[E] = Failed(E) | Collision() | Table(TxError) | Canceled(CancelCause)
 
 fn table.rename(mut tx: Tx, name: String, from: String, to: String) -> Result[(), TxError]
-fn table.migrate[J: key + serializable, A: serializable, K: key + serializable, B: serializable, E: serializable](mut s: Store, from: Table[J, A], to: Table[K, B], f: Entry[fn(key: J, old: A) -> Result[(K, B), E]], batch: u64) -> Result[u64, MigrateError[E]]
+fn table.migrate[J: key + serializable, A: serializable, K: key + serializable, B: serializable, E: serializable](within: Scope, mut s: Store, from: Table[J, A], to: Table[K, B], f: Entry[fn(key: J, old: A) -> Result[(K, B), E]], batch: u64) -> Result[u64, MigrateError[E]]
 ```
 
 Every table keeps its **schema history**: one entry per schema it has had, numbered from
@@ -661,7 +661,8 @@ between 1 and the store's `range_rows` limit, else `Table(InvalidInput())`. Then
    `from` continue.
 3. Successive transactions each read up to `batch` rows after the cursor in key order,
    apply `f` to each in order, write the results into a shadow table under the new
-   schema, and advance the cursor. Cancellation is checked between these transactions.
+   schema, and advance the cursor. Cancellation of `within` is checked between these
+   transactions.
 4. One final transaction replaces the table's rows with the shadow's, appends the new
    schema entry, clears the mark, and the call returns `Ok(n)` with the number of rows
    migrated.

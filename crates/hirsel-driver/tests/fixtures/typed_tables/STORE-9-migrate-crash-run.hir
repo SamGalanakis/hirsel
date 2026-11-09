@@ -1,0 +1,124 @@
+// rule: STORE-9
+// expect: run
+// A crash at each storage write of a migration leaves either the old table,
+// after reopening discards the pending migration, or the migrated one. Runs
+// as a module of std, which keeps the engine private.
+@serializable
+type Item {
+  label: String,
+  count: u32,
+}
+
+@serializable
+type Priced {
+  label: String,
+  cents: u64,
+}
+
+fn price(key: u32, old: Item) -> Result[(u32, Priced), ()] {
+  Ok((key, Priced(label: unique old.label, cents: int.widen(old.count) * 100)))
+}
+
+fn items() -> table.Table[u32, Item] {
+  table.named("items")
+}
+
+fn priced() -> table.Table[u32, Priced] {
+  table.named("items")
+}
+
+fn leftovers(mut s: store.Store[Dir]) -> u64 {
+  let snap = store.snapshot(mut s)
+  let (low, high) = store.prefix_bounds(b"hirsel.migrations/")
+  let (shadow_low, shadow_high) = store.prefix_bounds(b"hirsel.shadow/")
+  list.len(store.range(snap, low, high, Ascending(), 10)) + list.len(
+    store.range(snap, shadow_low, shadow_high, Ascending(), 10)
+  )
+}
+
+pub fn main(t: Test) -> Result[(), store.StoreError] {
+  task.scope(
+    test.tasks(t),
+    fn(sc: Scope) -> Result[(), store.StoreError] {
+      scenario(t, sc)
+    }
+  )
+}
+
+fn scenario(t: Test, sc: Scope) -> Result[(), store.StoreError] {
+  let d = test.dir(t, [])
+  let mut s = store.open(d, store.default_config())?
+  let seeded = store.transact(
+    mut s,
+    fn(mut tx: store.Tx) -> Result[(), store.TxError] {
+      table.create(mut tx, items())?
+      for k in 1u32..4u32 {
+        table.put(mut tx, items(), k, Item(label: f"item {k}", count: k))?
+      }
+      Ok(())
+    }
+  )
+  test.check(t, seeded == Ok(()))
+  store.close(take s)?
+  let mut crashes: u64 = 0
+  let mut done = false
+  let mut n: u64 = 0
+  while !done && n < 30 {
+    let mut config = store.default_config()
+    config.faults = StopAfterWrites(n)
+    n += 1
+    let opened = store.open(d, config)
+    let mut faulty = match take opened {
+      Ok(opened_store) => opened_store,
+      Error(_) => continue,
+    }
+    match table.migrate_with(
+      sc,
+      mut faulty,
+      items(),
+      priced(),
+      price,
+      "app.price",
+      "h",
+      2
+    ) {
+      Ok(3) => {
+        done = true
+        store.close(take faulty)?
+      },
+      Error(Table(Storage(_))) => {
+        crashes += 1
+        let mut reopened = store.open(d, store.default_config())?
+        test.check(t, leftovers(mut reopened) == 0)
+        let intact = store.transact(
+          mut reopened,
+          fn(mut tx: store.Tx) -> Result[bool, store.TxError] {
+            let rows = table.range(
+              mut tx,
+              items(),
+              Unbounded(),
+              Unbounded(),
+              10,
+              Ascending()
+            )?
+            table.put(mut tx, items(), 9, Item(label: "written", count: 9))?
+            Ok(list.len(rows) == 3 && table.delete(mut tx, items(), 9)?)
+          }
+        )
+        test.check(t, intact == Ok(true))
+        store.close(take reopened)?
+      },
+      _ => test.check(t, false),
+    }
+  }
+  test.check(t, done && crashes >= 3)
+  let mut last = store.open(d, store.default_config())?
+  let migrated = store.transact(
+    mut last,
+    fn(mut tx: store.Tx) -> Result[bool, store.TxError] {
+      Ok(table.get(mut tx, priced(), 3)? == Some(Priced(label: "item 3", cents: 300)))
+    }
+  )
+  test.check(t, migrated == Ok(true) && leftovers(mut last) == 0)
+  Ok(())
+}

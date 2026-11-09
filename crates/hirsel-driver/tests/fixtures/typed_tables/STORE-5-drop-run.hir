@@ -1,0 +1,89 @@
+// rule: STORE-5
+// expect: run
+// Dropping a table removes its rows and history and nothing else; refusals
+// and an aborted body change nothing.
+fn rows(mut s: store.Store[Dir], name: String) -> u64 {
+  let snap = store.snapshot(mut s)
+  let mut prefix: List[u8] = []
+  bytes.append(mut prefix, b"hirsel.rows/")
+  bytes.append(mut prefix, keys.encode(name))
+  let (low, high) = store.prefix_bounds(bytes.from_list(take prefix))
+  list.len(store.range(snap, low, high, Ascending(), 100))
+}
+
+pub fn main(t: Test) -> Result[(), store.StoreError] {
+  let d = test.dir(t, [])
+  let mut s = store.open(d, store.default_config())?
+  let item: table.Table[u32, String] = table.named("item")
+  let items: table.Table[u32, String] = table.named("items")
+  let seeded = store.transact(
+    mut s,
+    fn(mut tx: store.Tx) -> Result[(), store.TxError] {
+      table.create(mut tx, item)?
+      table.create(mut tx, items)?
+      for k in 1u32..6u32 {
+        table.put(mut tx, item, k, "kept")?
+        table.put(mut tx, items, k, "dropped")?
+      }
+      Ok(())
+    }
+  )
+  test.check(t, seeded == Ok(()))
+  store.close(take s)?
+  // Five deletes and the catalog's exceed 60 bytes: refused, nothing changes.
+  let mut tight = store.default_config()
+  tight.limits.transaction_bytes = 60
+  let mut small = store.open(d, tight)?
+  let refused = store.transact(
+    mut small,
+    fn(mut tx: store.Tx) -> Result[bool, store.TxError] {
+      if table.drop(mut tx, items) != Error(Limit(TransactionBytes())) {
+        return Ok(false)
+      }
+      Ok(table.get(mut tx, items, 3)? == Some("dropped"))
+    }
+  )
+  test.check(t, refused == Ok(true))
+  store.close(take small)?
+  let mut again = store.open(d, store.default_config())?
+  let aborted = store.transact(
+    mut again,
+    fn(mut tx: store.Tx) -> Result[(), store.TxError] {
+      table.drop(mut tx, items)?
+      Error(InvalidInput())
+    }
+  )
+  test.check(t, aborted == Error(Aborted(InvalidInput())))
+  test.check(t, rows(mut again, "items") == 5)
+  let wrong: table.Table[u32, u64] = table.named("items")
+  let invalid: table.Table[u32, String] = table.named("hirsel.items")
+  let missing: table.Table[u32, String] = table.named("missing")
+  let dropped = store.transact(
+    mut again,
+    fn(mut tx: store.Tx) -> Result[bool, store.TxError] {
+      if table.drop(mut tx, wrong) != Error(Schema(ValueMismatch())) || table.drop(
+        mut tx,
+        invalid
+      ) != Error(InvalidInput()) || table.drop(mut tx, missing) != Error(NoTable()) {
+        return Ok(false)
+      }
+      table.drop(mut tx, items)?
+      if table.get(mut tx, items, 1) != Error(NoTable()) || table.history(
+        mut tx,
+        "items"
+      ) != Error(NoTable()) {
+        return Ok(false)
+      }
+      if table.drop(mut tx, items) != Error(NoTable()) {
+        return Ok(false)
+      }
+      // A table of the same name starts empty with a fresh history.
+      table.create(mut tx, wrong)?
+      let fresh = table.range(mut tx, wrong, Unbounded(), Unbounded(), 10, Ascending())?
+      Ok(list.len(fresh) == 0 && list.len(table.history(mut tx, "items")?) == 1)
+    }
+  )
+  test.check(t, dropped == Ok(true))
+  test.check(t, rows(mut again, "items") == 0 && rows(mut again, "item") == 5)
+  Ok(())
+}

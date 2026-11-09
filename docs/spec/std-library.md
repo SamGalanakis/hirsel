@@ -5798,6 +5798,7 @@ refused with STORE-6, including nested and inactive-arm occurrences.
 ```text
 fn table.named[K: key + serializable, V: serializable](name: String) -> table.Table[K, V]
 fn table.create[K: key + serializable, V: serializable](mut tx: store.Tx, t: table.Table[K, V]) -> Result[(), store.TxError]
+fn table.drop[K: key + serializable, V: serializable](mut tx: store.Tx, t: table.Table[K, V]) -> Result[(), store.TxError]
 fn table.get[K: key + serializable, V: serializable](mut tx: store.Tx, t: table.Table[K, V], key: K) -> Result[Option[V], store.TxError]
 fn table.put[K: key + serializable, V: serializable](mut tx: store.Tx, t: table.Table[K, V], key: K, value: V) -> Result[(), store.TxError]
 fn table.delete[K: key + serializable, V: serializable](mut tx: store.Tx, t: table.Table[K, V], key: K) -> Result[bool, store.TxError]
@@ -5808,8 +5809,11 @@ fn table.scope[K: key + serializable, V: serializable](t: table.Table[K, V], acc
 fn table.scope_keys[K: key + serializable, V: serializable](mut tx: store.Tx, t: table.Table[K, V], from: store.RangeBound[K], to: store.RangeBound[K], access: store.Access) -> Result[store.KeyScope, store.TxError]
 ```
 
-Creation is explicit. `get` returns fresh owned data; `delete` reports whether a
-row existed. `RangeBound` is `Unbounded | Included(K) | Excluded(K)` and
+Creation is explicit. `drop` removes the table, its rows and its schema
+history in the transaction; it refuses a table under migration with
+`Migrating()` and preflights every delete against the limits, so a refused
+drop changes nothing, and a later `create` starts a new history at epoch 0.
+`get` returns fresh owned data; `delete` reports whether a row existed. `RangeBound` is `Unbounded | Included(K) | Excluded(K)` and
 `ScanOrder` is `Ascending | Descending`; scans return at most a positive `limit`
 rows, with `Excluded(last key)` for paging. Names are 1–255 UTF-8 bytes with no
 NUL and no `hirsel.` prefix.
@@ -5832,18 +5836,20 @@ Failures are `store.TxError` and `store.SchemaError`
 ([Stores](#stores)); they and the history records are serializable. An operation's refusal leaves
 the transaction running with no changes from that operation.
 
-`table.migrate` and the reserved `table.drop` spelling are not implemented yet.
-The former needs pure Entry invocation and code identity support; the latter
-conflicts with the current reserved `drop` keyword.
+`table.migrate` is not implemented yet: it needs pure Entry invocation and
+code identity support. Until then a write to a table never returns
+`Migrating()`. Opening a store discards every pending migration's mark and
+shadow rows, in commits within the store limits.
 
-A table has one key order, the byte order of its encoded keys. Reordering the
-fields of a record in the key is a key change, refused with
-`Schema(KeyMismatch)` until a migration; ranges are always a bounded index scan.
+A table has one key order, the byte order of its encoded keys under the key
+layout of its creation or its latest migration. Reordering the fields of a
+record in the key is a key change, refused with `Schema(KeyMismatch)` until a
+migration; ranges are always a bounded index scan.
 
 `table.scope(t, access)` is the key scope of the whole table with `access`: its
-rows and its catalog entry. `table.scope_keys(tx, t, from, to, access)` holds
-the rows between `from` and `to` with `access` and the catalog entry with
-`Read`. Neither holds another table's catalog entry, so a `Tx` narrowed to one
+rows and its catalog entry, and its migration mark with `Read`.
+`table.scope_keys(tx, t, from, to, access)` holds the rows between `from` and
+`to` with `access` and the catalog entry and migration mark with `Read`. Neither holds another table's catalog entry, so a `Tx` narrowed to one
 cannot tell whether another table exists.
 
 ## Scoped CSV stream consumption

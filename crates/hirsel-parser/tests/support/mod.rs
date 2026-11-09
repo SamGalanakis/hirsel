@@ -193,7 +193,6 @@ pub fn tokenize(file: Anchor, source: &str) -> Vec<Token> {
                 "distinct" => TokenKind::Keyword(Keyword::Distinct),
                 "flat" => TokenKind::Keyword(Keyword::Flat),
                 "resource" => TokenKind::Keyword(Keyword::Resource),
-                "drop" => TokenKind::Keyword(Keyword::Drop),
                 "box" => TokenKind::Keyword(Keyword::Box),
                 "pub" => TokenKind::Keyword(Keyword::Pub),
                 "opaque" => TokenKind::Keyword(Keyword::Opaque),

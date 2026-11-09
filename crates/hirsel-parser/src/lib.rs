@@ -339,7 +339,6 @@ impl Parser<'_> {
                         "true" | "false" => "a boolean literal",
                         "let" | "const" | "pub" => "a declaration",
                         "box" => "boxed storage",
-                        "drop" => "a resource finalizer",
                         "comptime" => "compile-time evaluation",
                         "shape" => "a type shape expression",
                         "heap" => "the heap allocation destination",

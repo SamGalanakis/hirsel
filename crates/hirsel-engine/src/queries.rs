@@ -637,7 +637,7 @@ impl QueryEngine {
                 .filter(|(id, entry)| {
                     self.source_facts(id.path())
                         .is_some_and(|facts| !facts.requires_execution())
-                        && !self.lower_requires_execution(id.path(), entry.reads())
+                        && !self.execution_requirement(id.path(), entry.reads())
                 })
                 .map(|(id, _)| *id)
                 .collect();
@@ -1174,15 +1174,8 @@ impl QueryEngine {
     }
     /// A failed signature's key: its own content and what it read.
     pub(crate) fn failed_signature_key(&self, path: &DefPath) -> Option<ContentHash> {
-        self.signatures.get(&DefId::intern(path)).map(|entry| {
-            ContentHash::of_parts(
-                "hirsel.failed-signature.v1",
-                [
-                    entry.memo.text.0.as_slice(),
-                    entry.memo.reads.digest().0.as_slice(),
-                ],
-            )
-        })
+        let entry = self.signatures.get(&DefId::intern(path))?;
+        memos::failed_signature_identity(entry.memo.text, &entry.memo.value)
     }
     fn reentrant<T>(&mut self, definition: &DefPath, kind: QueryKind) -> Result<T, QueryError> {
         if kind == QueryKind::Signature
@@ -2186,7 +2179,7 @@ impl QueryEngine {
             if let Some(depth) = &entry.depth {
                 self.depth_replay_requests(depth)?;
             }
-            let required = self.lower_requires_execution(definition, entry.reads());
+            let required = self.execution_requirement(definition, entry.reads());
             self.merge_lower_acceptance(entry.acceptance.as_ref(), required);
             self.record_selections(&entry.selections)?;
             self.merge_execution(entry.reads());
@@ -2196,7 +2189,7 @@ impl QueryEngine {
             .demand_evicted(&MemoKey::new(QueryKind::Lower, id));
         if let Some(entry) = self.load_lower(definition)? {
             self.depth_replay_requests(entry.depth.as_ref().expect("stored depth receipt"))?;
-            let required = self.lower_requires_execution(definition, entry.reads());
+            let required = self.execution_requirement(definition, entry.reads());
             self.merge_lower_acceptance(entry.acceptance.as_ref(), required);
             self.record_selections(&entry.selections)?;
             self.merge_execution(entry.reads());
@@ -2258,7 +2251,7 @@ impl QueryEngine {
         let mut verification = None;
         if result.is_ok()
             && self.verify == Verify::On
-            && self.lower_requires_execution(definition, &Reads::empty())
+            && self.execution_requirement(definition, &Reads::empty())
         {
             let package = definition.0.package.clone();
             match self.signature_snapshot().validation_input_digest(&package) {

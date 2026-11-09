@@ -670,7 +670,6 @@ impl Catalog {
                 part.extend(c.occurrence.to_le_bytes());
                 part.extend(c.head.name.start.to_le_bytes());
                 part.extend(c.head.name.end.to_le_bytes());
-                part.extend(c.head.body.0);
                 part
             })
             .collect();

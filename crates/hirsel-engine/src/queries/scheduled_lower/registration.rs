@@ -496,7 +496,7 @@ impl FrontRegistrationQueries {
         }
         let acceptance = if self.lower.verify == Verify::On {
             Some(self.lower.store.verifier()?.execution(
-                persistent::evaluation_subject(&key, &variant.payload),
+                persistent::evaluation_subject(&key, &variant.reads, &variant.payload),
                 |package| {
                     self.lower
                         .namespace
@@ -584,7 +584,10 @@ impl FrontRegistrationQueries {
         if let Some(receipt) = &data.acceptance
             && let Some(cache) = self.lower.store.verifier()
         {
-            cache.publish_execution(persistent::evaluation_subject(&key, &payload), receipt);
+            cache.publish_execution(
+                persistent::evaluation_subject(&key, &reads, &payload),
+                receipt,
+            );
         }
         self.lower.store.cache_query(&key, reads, &payload);
     }

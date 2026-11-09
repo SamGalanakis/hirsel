@@ -720,6 +720,20 @@ fn reads_witness(reads: &Reads) -> ContentHash {
     )
 }
 
+/// A product's complete identity K = H(S, D): its seed key and the canonical
+/// digest of the typed dependencies it was produced from. Execution receipts
+/// bind K and the output, so a seed-only hit never carries acceptance.
+pub fn product_identity(key: &EntryKey, reads: &Reads) -> ContentHash {
+    ContentHash::of_parts(
+        "hirsel.product.identity.v1",
+        [
+            key.0.0.as_slice(),
+            key.1.0.as_slice(),
+            reads_witness(reads).0.as_slice(),
+        ],
+    )
+}
+
 pub fn query_action(key: &EntryKey, inputs: ContentHash) -> Action {
     Action(ContentHash::of_parts(
         "hirsel.result.action.v2",

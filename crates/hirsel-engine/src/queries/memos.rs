@@ -97,6 +97,22 @@ fn tag(domain: &str, parts: &[&[u8]]) -> ContentHash {
 pub(crate) fn no_candidates() -> ContentHash {
     tag("hirsel.read.no-candidates", &[])
 }
+/// A failed signature product's identity: its own text and its deterministic
+/// diagnostic result. Its dependencies are validated by the failed product
+/// itself; a caller binds only what it consumed, the failure.
+pub(crate) fn failed_signature_identity<T>(
+    text: ContentHash,
+    value: &Result<T, hirsel_types::QueryError>,
+) -> Option<ContentHash> {
+    let Err(hirsel_types::QueryError::Diagnostics(diagnostics)) = value else {
+        return None;
+    };
+    let diagnostics = bincode::serialize(diagnostics).ok()?;
+    Some(ContentHash::of_parts(
+        "hirsel.failed-signature.v2",
+        [text.0.as_slice(), diagnostics.as_slice()],
+    ))
+}
 /// The observed value of an optional hash.
 pub(crate) fn optional(hash: Option<ContentHash>) -> ContentHash {
     match hash {
@@ -425,7 +441,7 @@ impl QueryEngine {
             parts.iter().map(Vec::as_slice),
         )
     }
-    /// Every candidate's name site and text: which one a citation picks
+    /// Every candidate's name site, never its body: which one a citation picks
     /// depends on the citing owner's file, but the observed value may not,
     /// so readers in different files merge.
     pub(crate) fn cited_value(&self, path: &DefPath) -> ContentHash {

@@ -209,7 +209,7 @@ impl QueryEngine {
         if has_errors(&output.diagnostics) {
             return Err(QueryError::Diagnostics(output.diagnostics.clone()));
         }
-        let required = self.lower_requires_execution(path, receipt.reads());
+        let required = self.execution_requirement(path, receipt.reads());
         if !self.lower_acceptance_holds(receipt.acceptance.as_ref()) {
             return Ok(false);
         }

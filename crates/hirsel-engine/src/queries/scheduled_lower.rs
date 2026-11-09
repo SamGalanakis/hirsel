@@ -1802,7 +1802,7 @@ impl FrontLowerQueries {
             return Err(self.errors.resource);
         }
         let domain = FAILURE;
-        let execution_subject = persistent::evaluation_subject(&key, &bytes);
+        let execution_subject = persistent::evaluation_subject(&key, &observed, &bytes);
         let outcome = Outcome {
             diagnostic_sources: source.diagnostic_sources.borrow().clone(),
             phase: source.phase.get(),

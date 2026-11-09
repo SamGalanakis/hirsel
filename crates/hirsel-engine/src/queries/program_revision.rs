@@ -222,7 +222,7 @@ impl QueryEngine {
                 if has_errors(&output.diagnostics) {
                     return Err(QueryError::Diagnostics(output.diagnostics));
                 }
-                let required = self.lower_requires_execution(path, entry.reads());
+                let required = self.execution_requirement(path, entry.reads());
                 self.merge_lower_acceptance(entry.acceptance.as_ref(), required);
                 self.merge_execution(entry.reads());
                 let syntax = self.items[path]

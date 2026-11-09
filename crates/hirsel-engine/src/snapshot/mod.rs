@@ -1196,6 +1196,10 @@ impl SignatureSnapshot {
             result,
         }
     }
+    /// `d`'s own source facts at this snapshot's revision.
+    pub(crate) fn source_facts(&self, d: DefId) -> Option<hirsel_query_products::SourceFacts> {
+        self.headers.as_ref()?.source_facts(d)
+    }
     /// `DeclarationCandidates(d)` at this snapshot's revision.
     pub fn declaration_candidates(&self, d: DefId) -> Option<ContentHash> {
         self.headers.as_ref()?.declaration_candidates(d)
@@ -1209,15 +1213,12 @@ impl SignatureSnapshot {
     pub(crate) fn failed_signature_key(&self, d: DefId) -> Option<ContentHash> {
         if let Some(product) = self.headers.as_ref().and_then(|headers| headers.product(d)) {
             // A refused demand has no failed-signature key of its own.
-            return product.ok()?.entry.as_ref().map(|entry| {
-                ContentHash::of_parts(
-                    "hirsel.failed-signature.v1",
-                    [
-                        entry.memo.text.0.as_slice(),
-                        entry.memo.reads.digest().0.as_slice(),
-                    ],
-                )
-            });
+            let product = product.ok()?;
+            let entry = product.entry.as_ref()?;
+            return crate::queries::memos::failed_signature_identity(
+                entry.memo.text,
+                &entry.memo.value,
+            );
         }
         self.lookup.failed.get(&d).copied().flatten()
     }
@@ -2811,7 +2812,7 @@ extern "unused" fn unused()"#
         );
     }
     #[test]
-    fn frozen_citations_select_occurrences_and_observe_current_body_text() {
+    fn frozen_citations_select_occurrences_and_ignore_cited_body_text() {
         let mut engine =
             QueryEngine::new(default_environment(), crate::phases::engine_only_adapters());
         let context = default_context();
@@ -2871,7 +2872,9 @@ extern "unused" fn unused()"#
             .iter()
             .find_map(|(key, value)| (*key == ReadKey::CitedText(target)).then_some(*value))
             .unwrap();
-        assert_ne!(before, now);
+        // A body edit that leaves every cited name site in place is not a
+        // citation change: callers never bind the cited body.
+        assert_eq!(before, now);
         assert_eq!(now, source.cited_text(target));
     }
 }

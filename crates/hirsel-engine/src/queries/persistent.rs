@@ -628,10 +628,32 @@ pub(super) fn persisted_execution_reads(
     }
     Reads::from_vec(reads).ok()
 }
-pub(super) fn evaluation_subject(key: &EntryKey, payload: &[u8]) -> ContentHash {
+/// Whether a Lower-family product needs a genuine execution receipt for its
+/// subject. The receiver decides it from the owner's own source facts and the
+/// product's validated dependencies D; no producer-supplied flag can waive it.
+pub(crate) fn execution_requirement(
+    facts: Option<&hirsel_query_products::SourceFacts>,
+    reads: &Reads,
+) -> bool {
+    facts.is_some_and(|facts| facts.requires_execution())
+        || reads.iter().any(|(read, _)| {
+            matches!(
+                read,
+                ReadKey::ExecutedBody(_) | ReadKey::ValidationUniverse(_)
+            )
+        })
+}
+/// The subject an execution receipt accepts: the product identity K = H(S, D)
+/// and the exact output bytes.
+pub(super) fn evaluation_subject(key: &EntryKey, reads: &Reads, payload: &[u8]) -> ContentHash {
     ContentHash::of_parts(
-        "hirsel.validate.evaluated-output.v1",
-        [key.0.0.as_slice(), key.1.0.as_slice(), payload],
+        "hirsel.validate.evaluated-output.v2",
+        [
+            hirsel_engine_store::product_identity(key, reads)
+                .0
+                .as_slice(),
+            payload,
+        ],
     )
 }
 /// Completion facts consumed by checking and source growth, independently of
@@ -2245,15 +2267,10 @@ impl QueryEngine {
         Some(())
     }
 
-    pub(crate) fn lower_requires_execution(&self, path: &DefPath, reads: &Reads) -> bool {
-        reads.iter().any(|(read, _)| {
-            matches!(
-                read,
-                ReadKey::ExecutedBody(_) | ReadKey::ValidationUniverse(_)
-            )
-        }) || self
-            .source_facts(path)
-            .is_some_and(|facts| facts.requires_execution())
+    /// The receiver's execution requirement for `path`'s Lower-family product
+    /// with validated dependencies `reads`.
+    pub(crate) fn execution_requirement(&self, path: &DefPath, reads: &Reads) -> bool {
+        execution_requirement(self.source_facts(path).as_ref(), reads)
     }
     fn staged_declaration_owner(&self, path: &DefPath) -> Option<DefPath> {
         if let Some(constant) = self.staged_constants.get(path) {
@@ -2473,7 +2490,11 @@ impl QueryEngine {
             if self.verify == Verify::On {
                 record.acceptance = Some(cached_result!(
                     replay_error,
-                    self.load_execution_receipt(evaluation_subject(&key, &variant.payload))
+                    self.load_execution_receipt(evaluation_subject(
+                        &key,
+                        &variant.reads,
+                        &variant.payload
+                    ))
                 )?);
             }
             if self.verify_store == hirsel_engine_store::VerifyStore::Recompute {
@@ -2524,7 +2545,7 @@ impl QueryEngine {
         if let Some(receipt) = &record.acceptance
             && let Some(cache) = store.verifier()
         {
-            cache.publish_execution(evaluation_subject(&key, &payload), receipt);
+            cache.publish_execution(evaluation_subject(&key, &reads, &payload), receipt);
         }
         EncodedWriter {
             types: self.type_records().expect("enabled generation types"),
@@ -2569,11 +2590,15 @@ impl QueryEngine {
                 );
                 return None;
             }
-            if self.lower_requires_execution(path, &variant.reads) {
+            if self.execution_requirement(path, &variant.reads) {
                 let key = self.store_key(path, QueryKind::SemanticBody)?;
                 let receipt = cached_result!(
                     replay_error,
-                    self.load_execution_receipt(evaluation_subject(&key, &variant.payload))
+                    self.load_execution_receipt(evaluation_subject(
+                        &key,
+                        &variant.reads,
+                        &variant.payload
+                    ))
                 )?;
                 self.merge_lower_acceptance(Some(&receipt), true);
             }
@@ -2633,7 +2658,7 @@ impl QueryEngine {
         if let Some(receipt) = acceptance
             && let Some(cache) = store.verifier()
         {
-            cache.publish_execution(evaluation_subject(&key, &payload), receipt);
+            cache.publish_execution(evaluation_subject(&key, &reads, &payload), receipt);
         }
         EncodedWriter {
             types: self.type_records().expect("enabled semantic types"),
@@ -2682,11 +2707,15 @@ impl QueryEngine {
             {
                 return None;
             }
-            let required = self.lower_requires_execution(path, &variant.reads);
+            let required = self.execution_requirement(path, &variant.reads);
             let acceptance = if required && self.verify == Verify::On {
                 Some(cached_result!(
                     replay_error,
-                    self.load_execution_receipt(evaluation_subject(&key, &variant.payload))
+                    self.load_execution_receipt(evaluation_subject(
+                        &key,
+                        &variant.reads,
+                        &variant.payload
+                    ))
                 )?)
             } else {
                 None
@@ -2750,7 +2779,7 @@ impl QueryEngine {
         if let Some(receipt) = acceptance.as_ref()
             && let Some(cache) = store.verifier()
         {
-            cache.publish_execution(evaluation_subject(&key, &payload), receipt);
+            cache.publish_execution(evaluation_subject(&key, &reads, &payload), receipt);
         }
         EncodedWriter {
             types: self.type_records().expect("enabled audit types"),
@@ -2844,27 +2873,26 @@ impl QueryEngine {
                     return None;
                 }
             }
-            let acceptance = if self.verify == Verify::On
-                && self.lower_requires_execution(path, &variant.reads)
-            {
-                let key = self.store_key(path, QueryKind::Lower)?;
-                let subject = evaluation_subject(&key, &variant.payload);
-                let receipt = if staged {
-                    self.load_staged_lower_receipt(subject)
+            let acceptance =
+                if self.verify == Verify::On && self.execution_requirement(path, &variant.reads) {
+                    let key = self.store_key(path, QueryKind::Lower)?;
+                    let subject = evaluation_subject(&key, &variant.reads, &variant.payload);
+                    let receipt = if staged {
+                        self.load_staged_lower_receipt(subject)
+                    } else {
+                        cached_result!(replay_error, self.load_execution_receipt(subject))
+                    };
+                    let Some(receipt) = receipt else {
+                        // A body product does not supply private execution authority.
+                        // Retain only existing mode inputs for the required replay.
+                        self.restore_execution_dependencies(&variant.reads);
+                        *replay = true;
+                        return None;
+                    };
+                    Some(receipt)
                 } else {
-                    cached_result!(replay_error, self.load_execution_receipt(subject))
+                    None
                 };
-                let Some(receipt) = receipt else {
-                    // A body product does not supply private execution authority.
-                    // Retain only existing mode inputs for the required replay.
-                    self.restore_execution_dependencies(&variant.reads);
-                    *replay = true;
-                    return None;
-                };
-                Some(receipt)
-            } else {
-                None
-            };
             if self.verify_store == hirsel_engine_store::VerifyStore::Recompute {
                 self.pending_store_checks.insert(
                     (DefId::intern(path), QueryKind::Lower),
@@ -2930,7 +2958,11 @@ impl QueryEngine {
             if self.verify == Verify::On {
                 let Some(receipt) = cached_result!(
                     replay_error,
-                    self.load_execution_receipt(evaluation_subject(&key, &variant.payload))
+                    self.load_execution_receipt(evaluation_subject(
+                        &key,
+                        &variant.reads,
+                        &variant.payload
+                    ))
                 ) else {
                     // The old action and its complete observed reads have held, but
                     // this reader must independently execute and verify the value.
@@ -3027,7 +3059,7 @@ impl QueryEngine {
         if let Some(receipt) = &value.acceptance
             && let Some(cache) = store.verifier()
         {
-            cache.publish_execution(evaluation_subject(&key, &payload), receipt);
+            cache.publish_execution(evaluation_subject(&key, &value.executed, &payload), receipt);
         }
         EncodedWriter {
             types: self.type_records().expect("enabled evaluation types"),
@@ -3118,7 +3150,11 @@ impl QueryEngine {
             if self.verify == Verify::On {
                 let receipt = cached_result!(
                     replay_error,
-                    self.load_execution_receipt(evaluation_subject(&key, &variant.payload))
+                    self.load_execution_receipt(evaluation_subject(
+                        &key,
+                        &variant.reads,
+                        &variant.payload
+                    ))
                 )?;
                 value.validation = Some(receipt.contexts().to_vec().into());
                 value.acceptance = Some(receipt);
@@ -3174,7 +3210,7 @@ impl QueryEngine {
         if let Some(receipt) = &value.acceptance
             && let Some(cache) = store.verifier()
         {
-            cache.publish_execution(evaluation_subject(&key, &payload), receipt);
+            cache.publish_execution(evaluation_subject(&key, &value.executed, &payload), receipt);
         }
         let instance = hirsel_tir::constant_instance_path(path, arguments);
         EncodedWriter {
@@ -3376,7 +3412,7 @@ impl QueryEngine {
             let cache = self.result_store.as_ref()?.verifier()?;
             let snapshot = self.signature_snapshot();
             let policy = self.source_verification_policy();
-            let subject = evaluation_subject(&key, &variant.payload);
+            let subject = evaluation_subject(&key, &variant.reads, &variant.payload);
             let output = cache.definition_output(
                 subject,
                 DefId::intern(path),
@@ -3396,7 +3432,7 @@ impl QueryEngine {
             {
                 return None;
             }
-            if self.lower_requires_execution(path, &variant.reads) {
+            if self.execution_requirement(path, &variant.reads) {
                 cached_result!(replay_error, self.load_execution_receipt(subject))?;
             }
             cached_result!(replay_error, self.replay_selections(&metadata.selections))?;
@@ -3504,15 +3540,15 @@ impl QueryEngine {
             .as_ref()
             .expect("enabled lower store")
             .clone();
-        if let Some(receipt) = &entry.acceptance
-            && let Some(cache) = store.verifier()
-        {
-            cache.publish_execution(evaluation_subject(&key, &payload), receipt);
-        }
         let Some(reads) = persisted_execution_reads(entry.reads(), entry.acceptance.as_ref())
         else {
             return Ok(());
         };
+        if let Some(receipt) = &entry.acceptance
+            && let Some(cache) = store.verifier()
+        {
+            cache.publish_execution(evaluation_subject(&key, &reads, &payload), receipt);
+        }
         if let (Some(cache), Some(metadata), Some(evidence)) = (
             store.verifier(),
             identity_metadata,
@@ -3522,7 +3558,7 @@ impl QueryEngine {
             // A refused universe publishes no output; the body stays local.
             if let Ok(views) = snapshot.validation(&path.0.package) {
                 cache.publish_definition(
-                    evaluation_subject(&key, &payload),
+                    evaluation_subject(&key, &reads, &payload),
                     &definition,
                     self.types.clone(),
                     self.source_verification_policy(),
@@ -3645,12 +3681,12 @@ mod malformed_tests {
             (ReadKey::Representation(id), digest),
         ])
         .unwrap();
-        assert!(!engine.lower_requires_execution(path, &layout));
+        assert!(!engine.execution_requirement(path, &layout));
         let mut executed: Vec<_> = layout.iter().cloned().collect();
         executed.push((ReadKey::ExecutedBody(id), digest));
-        assert!(engine.lower_requires_execution(path, &Reads::from_vec(executed).unwrap()));
+        assert!(engine.execution_requirement(path, &Reads::from_vec(executed).unwrap()));
         assert!(
-            engine.lower_requires_execution(
+            engine.execution_requirement(
                 path,
                 &Reads::from_vec(vec![
                     (ReadKey::ExecutedBody(id), digest),
@@ -3660,7 +3696,7 @@ mod malformed_tests {
             )
         );
         assert!(
-            engine.lower_requires_execution(
+            engine.execution_requirement(
                 path,
                 &Reads::from_vec(vec![(
                     ReadKey::ValidationUniverse(hirsel_query_products::reads::PackageKey::of(

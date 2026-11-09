@@ -6,7 +6,7 @@ use hirsel_syntax::{ContentHash, DefId, ItemSyntax};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-/// Occurrence-aware names and exact cited-text inputs from one source revision.
+/// Occurrence-aware names and cited name sites from one source revision.
 /// Kept separate from a signature snapshot, which may survive body edits.
 pub trait CitationSource: Sync {
     fn cited_name(&self, owner: DefId, target: DefId) -> Option<Span>;
@@ -84,7 +84,6 @@ impl CitationSource for SourceContext<'_> {
                 part.extend(candidate.occurrence.to_le_bytes());
                 part.extend(candidate.item.name_span.start.to_le_bytes());
                 part.extend(candidate.item.name_span.end.to_le_bytes());
-                part.extend(candidate.text_hash.0);
                 part
             })
             .collect();

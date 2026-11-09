@@ -137,7 +137,7 @@ impl FrontLowerQueries {
                 .validation(&output.value.path.path().0.package)
         {
             cache.publish_definition(
-                persistent::evaluation_subject(key, &bytes),
+                persistent::evaluation_subject(key, &reads, &bytes),
                 &output.value,
                 self.namespace.snapshot.types().clone(),
                 self.namespace.snapshot.source_verification_policy(),
@@ -149,7 +149,7 @@ impl FrontLowerQueries {
         if let Some(receipt) = &outcome.execution
             && let Some(cache) = self.store.verifier()
         {
-            cache.publish_execution(persistent::evaluation_subject(key, &bytes), receipt);
+            cache.publish_execution(persistent::evaluation_subject(key, &reads, &bytes), receipt);
         }
         self.remember_stored(id, key, descriptor, outcome);
         Some(())
@@ -408,7 +408,7 @@ impl FrontLowerQueries {
                 let views = self.namespace.snapshot.validation(&path.0.package).ok()?;
                 if self.lowering.is_none() {
                     let output = self.store.verifier()?.definition_output(
-                        persistent::evaluation_subject(key, &descriptor),
+                        persistent::evaluation_subject(key, &reads, &descriptor),
                         definition,
                         self.namespace.snapshot.types(),
                         self.namespace.snapshot.source_verification_policy(),
@@ -444,7 +444,7 @@ impl FrontLowerQueries {
                 if let Some(evidence) = evidence
                     && let Some(cache) = self.store.verifier()
                     && let Some(output) = cache.publish_definition(
-                        persistent::evaluation_subject(key, &descriptor),
+                        persistent::evaluation_subject(key, &reads, &descriptor),
                         &decoded,
                         self.namespace.snapshot.types().clone(),
                         self.namespace.snapshot.source_verification_policy(),
@@ -512,8 +512,17 @@ impl FrontLowerQueries {
         if depth.first.len() != dependency_limit(self.namespace.limits.call_depth) as usize + 1 {
             return None;
         }
-        let execution_subject = persistent::evaluation_subject(key, &descriptor);
-        let execution = if self.verify == Verify::On && executed {
+        let execution_subject = persistent::evaluation_subject(key, &reads, &descriptor);
+        // The producer's `executed` flag can only add the obligation.
+        let required = executed
+            || persistent::execution_requirement(
+                self.namespace
+                    .snapshot
+                    .source_facts(DefId::intern(path))
+                    .as_ref(),
+                &reads,
+            );
+        let execution = if self.verify == Verify::On && required {
             match self.store.verifier()?.execution_revalidated(
                 execution_subject,
                 self.namespace.snapshot.types().clone(),

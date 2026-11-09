@@ -1066,14 +1066,8 @@ impl<'a> Validator<'a> {
         }
     }
 
-    /// Whether the pointer word at `offset` among `fields` is never null while
-    /// they are live: it is a counted block reference, Ptr or FnPtr leaf, or a
-    /// String or Bytes slice's owner word, reached only through aligned fields
-    /// of inline Aggregates. A word inside a variant, environment, callable,
-    /// sequence or padding may be null or uninitialized. `fuel` bounds the walk
-    /// on a cyclic table.
-    fn nonnull_word(&self, fields: &[FieldLayout], offset: u64, fuel: usize) -> bool {
-        let Some(fuel) = fuel.checked_sub(1) else {
+    fn nonnull_word(&self, fields: &[FieldLayout], offset: u64, remaining_work: usize) -> bool {
+        let Some(remaining_work) = remaining_work.checked_sub(1) else {
             return false;
         };
         let holder = fields.iter().find(|f| {
@@ -1092,7 +1086,7 @@ impl<'a> Validator<'a> {
                 | LayoutKind::Box { .. }
                 | LayoutKind::Scalar(ScalarKind::Pointer)
                 | LayoutKind::Slice { .. } => within == 0,
-                LayoutKind::Aggregate => self.nonnull_word(&child.fields, within, fuel),
+                LayoutKind::Aggregate => self.nonnull_word(&child.fields, within, remaining_work),
                 _ => false,
             }
     }

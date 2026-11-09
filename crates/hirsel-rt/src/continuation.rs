@@ -1,26 +1,3 @@
-//! One ownership interface for native continuations (r6 S2/S7).
-//!
-//! A continuation is `Fresh` until its body first executes; after that it is
-//! exclusively `Active` or `Saved` until `Complete`. Only a `Fresh`
-//! continuation may enter its body's entry, so no representation can restart
-//! executed work. Saving records the exact resume point: a stackful fiber's
-//! stack pointer or a compact frame's resume state and live image.
-//!
-//! Private ahead execution saves through the same record: adoption takes the
-//! exact saved PC, the custody generation and the private fuel once, after the
-//! physical owner acknowledged its save (Rayon join's stolen-job lifetime,
-//! `rayon-core/src/join/mod.rs:132-185`: the owner never resumes storage it
-//! already handed off).
-//!
-//! A resumable task body runs through [`hirsel_rt_v2_resume_run`]. It saves
-//! only at a boundary where the task would wait (see
-//! [`hirsel_rt_v2_resume_point`]). Under the
-//! shared physical dispatcher a saved compact frame has exactly one owner, the
-//! dispatcher, and no stack: its task's stack goes back to its worker after
-//! the unwind, and any worker activates it on a stack of its own (Rayon join's
-//! stolen job, `rayon-core/src/join/mod.rs:132-165`: whoever pops the job
-//! runs it once, wherever). Stackful fibers keep their own switch until the
-//! dispatcher's saved-fiber cutover (S2), so only tests save a `Fiber` here.
 #![cfg_attr(not(test), allow(dead_code))]
 
 use crate::{RESUME_EARLY, RESUME_LEAVES, RESUME_LOGGED};
@@ -149,7 +126,6 @@ impl SavedPc {
 pub(crate) struct PrivateSave {
     pub(crate) pc: SavedPc,
     pub(crate) generation: u32,
-    pub(crate) fuel: u64,
     /// The selected original result descriptor of a host-return segment.
     pub(crate) descriptor: Option<u32>,
 }
@@ -175,7 +151,6 @@ impl Custody {
         }
     }
 
-    /// Adopt the saved private segment once, with its exact PC and fuel.
     pub(crate) fn adopt(&mut self, save: PrivateSave) -> PrivateSave {
         self.generation(save.generation, "custody");
         assert!(

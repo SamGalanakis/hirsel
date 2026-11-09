@@ -209,7 +209,7 @@ fn bootstrap_link_refusal(test_table: bool, emit_only: bool) {
                     debug: false,
                     verify_backend: true,
                     measurement: false,
-                    fuel: false,
+
                     requested_run: None,
                     output: if emit_only {
                         CompilationOutput::Objects
@@ -625,7 +625,7 @@ fn actual_native_bootstrap_links_both_backends_and_restores_after_runtime_drop()
                     debug: false,
                     verify_backend: true,
                     measurement: false,
-                    fuel: false,
+
                     requested_run: None,
                     test_entries: Vec::new(),
                     output: CompilationOutput::Executable,
@@ -993,7 +993,7 @@ fn native_bootstrap_policy_case(bind_run: bool) {
                 supplemental_sources: Vec::new(),
                 output: crate::requests::NativeOutput::Executable,
                 run: validated_run,
-                fuel: false,
+
                 evidence: None,
             };
             let NativePlatformSelection { mut plan, platform } = NativePlatformSelection::capture(
@@ -1489,7 +1489,7 @@ fn native_bootstrap_assesses_evidence_against_its_settled_source_root_before_ins
             debug: false,
             verify_backend: true,
             measurement: false,
-            fuel: false,
+
             requested_run: None,
             test_entries: Vec::new(),
             output: CompilationOutput::Executable,
@@ -1784,7 +1784,7 @@ fn original_plan_inputs_bind_source_edits_membership_options_and_foreign_bytes()
                 debug: false,
                 verify_backend: true,
                 measurement: false,
-                fuel: case == 3,
+
                 requested_run: None,
                 test_entries: vec![],
                 output: CompilationOutput::Executable,
@@ -1829,7 +1829,7 @@ fn original_plan_inputs_bind_source_edits_membership_options_and_foreign_bytes()
             bootstrap.query()
         };
         let base = query(0, vec![]);
-        for case in [1, 2, 3] {
+        for case in [1, 2] {
             assert_ne!(base, query(case, vec![]));
         }
         let foreign = directory.path().join("foreign.o");

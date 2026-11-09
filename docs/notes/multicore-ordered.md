@@ -186,23 +186,7 @@ The remaining native boundaries, budget hooks and production admission still
 need installation. These controls are not a parallel ordered
 corpus or speed gate.
 
-Native ordered fuel now uses task-owned grants and real stretches. Switch-in
-claims physical dispatch even for a task that reaches only fuel points; switch-out
-captures consumed fuel before clearing the compiled word. It never leases fuel
-from the shared Free pool. Operation boundaries attach consumed points to their
-owned logs, retained full-log commands keep their original stretches, and head
-promotion settles the preceding segment before granting further fuel. Refills
-and physical pauses add no semantic operation or readiness poll. A younger task
-whose own logged and segment fuel exceed the settled remainder saves its frame
-until promotion, so an older turn's effects retire before the fuel stop.
-Switch accounting raw-projects policy under the role without observing stops;
-the compiled refill entry drops its temporary guard before reporting its result.
-This also permits external-stop abandonment without recursively entering the
-stop path. Tests cover exact exhaustion at widths 2/4/8, partial chunks, multiple
-unbounded refills, external stops, and younger exhaustion with and without fuel
-in earlier logged turns. Memory preflight, positional credit events and the
-combined memory/fuel native gate remain unfinished. Allocation allowance pauses
-must precede any worker-heap or region-pool borrow.
+Ordered native execution settles task-owned memory summaries at retirement.
 
 Finite ordered speculation allowances now preflight heap creation, sequence
 growth/detach, the bare-system reuse conversion, and regional segment growth.
@@ -397,7 +381,7 @@ timing rows; there is no worker-local or global adaptive state.
 Focused native controls exercise real shared-object siblings at widths 2/4/8
 under shared and dedicated commit, including fallback, periodic recovery and
 refusal of conflicting early mutation. The existing allowance, envelope,
-fuel/memory order, stop and dedicated-loan controls retain their bounds.
+memory order, stop and dedicated-loan controls retain their bounds.
 These controls and the measured speed gate passed before production activation.
 
 ## Prior art and deviations
@@ -462,7 +446,7 @@ E1's final gate covers the same-engine canonical corpus at widths 1/2/4/8,
 forced migration, reorder off/auto and shared/dedicated commit, with immutable
 recorded host inputs and interpreter outcome agreement. Runtime controls cover
 alias/lifetime discovery, saved host phases, exact output prefixes, stop cuts,
-permit loans, memory/fuel bounds, initialized values and auto fallback/recovery.
+permit loans, memory bounds, initialized values and auto fallback/recovery.
 Placement, managed-core admission and scheduler-role audits remain separate
 checks. The measured independent-sibling case reports a 1.85x width-one/two
 speedup under the reserved timing campaign; it is not a universal workload floor.
@@ -483,13 +467,13 @@ joins remain result-dependent boundaries. Unknown footprints still block early
 shared-object commit.
 
 On x86-64 SysV, both native backends emit separate scalar DAG bodies with original
-fuel-point identity, independent physical checkpoints and final machine-frame
+checkpoint identity, independent physical checkpoints and final machine-frame
 evidence. Recursive calls, opaque work, allocation, mutable/resource captures and
 user destruction are refused. A bounded capture recipe keeps task_main's callable
 move, live mask and held Option result intact. A fixed assembly handoff saves to
 the dispatcher's idle stack before any refill, role or stop handling. Saved
 acknowledgement precedes promotion or original-mask restoration on discard.
-Physical progress has no event, logical fuel charge or completion rank of its own.
+Physical progress has no event, memory charge or completion rank of its own.
 
 A pending private notification may outlive spawn retirement. The dispatcher
 revalidates its logical selection before switch-in and returns an unselected

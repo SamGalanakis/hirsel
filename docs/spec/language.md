@@ -648,7 +648,7 @@ returns, the partial result is unobservable: nothing reads, borrows, compares, h
 publishes, shares, sends or captures it. If an iteration fails, the failure is reported
 at its own site as usual, and the partial result is released once, every part already
 built included; its unfilled `box` frees its storage without being read. A reused activation still pays each source call's charges, including its
-`requires` checks, fuel and steps, but not an activation. Every other site stays ordinary
+`requires` checks and tooling steps, but not an activation. Every other site stays ordinary
 recursion under the limit above: a field after the call, a `let`-bound result, an
 `ensures`, a mutual or indirect call, and a constructor function.
 

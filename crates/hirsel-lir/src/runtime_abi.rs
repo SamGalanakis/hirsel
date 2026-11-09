@@ -12,7 +12,7 @@
 use crate::layout_types::{ScalarKind, StorageKind};
 use hirsel_codec::snapshot_enum;
 
-pub const ABI_VERSION: u32 = 105;
+pub const ABI_VERSION: u32 = 107;
 /// Original CPU worker capture in the runtime's fixed native record prefix.
 /// The runtime asserts this existing offset; no Rust service frame is read.
 pub const AHEAD_WORKER_ENVIRONMENT_OFFSET: u64 = 40;
@@ -158,16 +158,7 @@ pub const CTX_FREE_INLINE_OFFSET: u64 = 4;
 pub const CTX_IDLE_SLABS_OFFSET: u64 = 8;
 pub const CTX_PAGES_OFFSET: u64 = 16;
 pub const POOL_COUNT: u64 = 64;
-/// After the pages, the running task's `i64` fuel chunk (`budgets.limits@2`, runtime ABI 27): a
-/// fuel build's code subtracts one at each fuel point and, when the result is negative, calls
-/// `hirsel_rt_v2_fuel_refill`, which stores the next chunk in the word and returns (or stops the
-/// run), so the code continues after the call.
-pub const CTX_FUEL_OFFSET: u64 = CTX_PAGES_OFFSET + 8 * POOL_COUNT;
-/// After the fuel word, the `u32` id of the running worker's heap (runtime ABI 26). A page's
-/// `u32` owner at [`PAGE_OWNER_OFFSET`] is its heap's id: compiled code frees a small block
-/// inline only on a page whose owner equals it, and sends any other to `hirsel_rt_v2_free`,
-/// which publishes it on the page's [`PAGE_XTHREAD_FREE_OFFSET`] list for its owner.
-pub const CTX_HEAP_ID_OFFSET: u64 = CTX_FUEL_OFFSET + 8;
+pub const CTX_HEAP_ID_OFFSET: u64 = CTX_PAGES_OFFSET + 8 * POOL_COUNT;
 /// After the view (the compiled words, then its `u32` heap and `u64` epoch stamp), the
 /// task's LANG-10 counters (runtime ABI 65): the `u16` foreground and cleanup admission
 /// counts, then the `u32` finalizer nesting. An admission in cleanup mode (nesting or
@@ -184,7 +175,7 @@ pub const PAGE_LIVE_OFFSET: u64 = 24;
 pub const PAGE_LOCAL_FREE_OFFSET: u64 = 72;
 pub const PAGE_OWNER_OFFSET: u64 = 96;
 pub const PAGE_XTHREAD_FREE_OFFSET: u64 = 104;
-const _: () = assert!(CTX_HEAP_ID_OFFSET == 536 && CTX_FOREGROUND_COUNT_OFFSET == 560);
+const _: () = assert!(CTX_HEAP_ID_OFFSET == 528 && CTX_FOREGROUND_COUNT_OFFSET == 552);
 
 /// The small pool serving `extent` payload bytes at `align`: the size class (16-byte steps to
 /// 256 bytes, then quarter powers of two to [`SMALL_MAX`]), offset by the class count when the
@@ -574,10 +565,6 @@ pub enum RuntimeEntry {
     /// A callback failed: the process ends (PROG-4).
     CallbackFailed,
     ExitReport,
-    /// A fuel point found the running task's chunk spent: the runtime stores the next chunk
-    /// and returns, or ends the run with BudgetExceeded (runtime ABI 27).
-    FuelRefill,
-    /// A context for a new worker of a run, on its own heap (runtime ABI 26).
     WorkerCreate,
     /// A worker retires; its heap stays in the run, orphaned.
     WorkerRetire,
@@ -704,7 +691,7 @@ const OPERATION_SITE: CParam = p("operation_site", U64);
 const REGION: CParam = p("region", ptr(CName::Region, 1));
 
 impl RuntimeEntry {
-    pub const ALL: [RuntimeEntry; 120] = [
+    pub const ALL: [RuntimeEntry; 119] = [
         Self::DepthEnter,
         Self::DepthEnterAtSite,
         Self::DepthLeave,
@@ -782,7 +769,6 @@ impl RuntimeEntry {
         Self::CallbackContext,
         Self::CallbackFailed,
         Self::ExitReport,
-        Self::FuelRefill,
         Self::WorkerCreate,
         Self::WorkerRetire,
         Self::WorkerCollect,
@@ -1562,7 +1548,6 @@ impl RuntimeEntry {
                         p("state", ptr(N::AheadPhysical, 1)),
                         p("slot", U32),
                         p("block", ptr(N::Header, 1)),
-                        p("fuel", U64),
                     ]
                 },
             ),
@@ -1697,7 +1682,6 @@ impl RuntimeEntry {
                     ]
                 },
             ),
-            Self::FuelRefill => ("hirsel_rt_v2_fuel_refill", VOID, const { &[CTX] }),
             Self::WorkerCreate => (
                 "hirsel_rt_v2_worker_create",
                 ptr(N::Ctx, 1),
@@ -1832,7 +1816,6 @@ snapshot_enum!(RuntimeEntry {
     CallbackContext,
     CallbackFailed,
     ExitReport,
-    FuelRefill,
     WorkerCreate,
     WorkerRetire,
     WorkerCollect,

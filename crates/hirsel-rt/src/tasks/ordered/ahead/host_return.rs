@@ -40,12 +40,10 @@ const MAX_RESUME_FRAME_BYTES: u32 = 4096;
 #[derive(Clone, Copy)]
 struct Pending {
     block: *mut Header,
-    fuel: i64,
     charged: u8,
 }
 const EMPTY: Pending = Pending {
     block: std::ptr::null_mut(),
-    fuel: 0,
     charged: 0,
 };
 const IDLE: u32 = 0;
@@ -70,7 +68,7 @@ const _: () = {
     assert!(std::mem::offset_of!(ResumeInfo, frame_bytes) == 40);
     assert!(std::mem::offset_of!(ResumeInfo, reserved) == 44);
     assert!(std::mem::offset_of!(ResumeInfo, dispatcher) == 48);
-    assert!(size_of::<Pending>() == 24);
+    assert!(size_of::<Pending>() == 16);
 };
 impl State {
     pub(super) fn new(root: *const Root) -> Self {
@@ -385,16 +383,12 @@ pub unsafe extern "C" fn hirsel_rt_v2_host_defer(
     _state: *mut Physical,
     _slot: u32,
     _block: *mut Header,
-    _fuel: u64,
 ) {
-    core::arch::naked_asm!("mov esi, esi", "imul rsi, rsi, 24", "add rsi, rdi",
-        "mov [rsi + {pending}], rdx", "mov [rsi + {pending} + 8], rcx", "mov byte ptr [rsi + {pending} + 16], 0", "ret",
+    core::arch::naked_asm!("mov esi, esi", "imul rsi, rsi, 16", "add rsi, rdi",
+        "mov [rsi + {pending}], rdx", "mov byte ptr [rsi + {pending} + 8], 0", "ret",
         pending = const std::mem::offset_of!(Native, host) + std::mem::offset_of!(State, pending));
 }
 
-/// Idle, before capturing the current fuel word. Insert each inert free at
-/// its original word, then normal capture accounts the intervening pure points.
-/// Physical storage remains owned by this fixed task record until admission.
 pub(crate) unsafe fn flush_logical(ctx: *mut TaskCtx, n: *mut Native) {
     let state = unsafe { &mut (*n).host };
     if state.root.is_null() {
@@ -428,7 +422,7 @@ pub(crate) unsafe fn flush_logical(ctx: *mut TaskCtx, n: *mut Native) {
             } else {
                 crate::budget::small_charge(capacity)
             };
-            unsafe { (*ctx).ordered_charge_trace.free(pending.fuel, bytes) };
+            unsafe { (*ctx).ordered_charge_trace.free(bytes) };
             unsafe {
                 (*ctx)
                     .ordered_freed
@@ -455,9 +449,6 @@ pub(super) unsafe fn admit(ctx: *mut TaskCtx, n: *mut Native) {
             .iter()
             .all(|p| p.block.is_null() || p.charged == 1)
     );
-    // An active segment's exact resume point and selected original
-    // descriptor, recorded once; a repeated admission adopts nothing. Its
-    // fuel is logical throughout, so nothing private moves with it.
     if state.phase == ACTIVE {
         unsafe {
             (*n).admitted = Some(crate::continuation::PrivateSave {
@@ -465,7 +456,6 @@ pub(super) unsafe fn admit(ctx: *mut TaskCtx, n: *mut Native) {
                     sp: (*n).physical.saved_sp,
                 }),
                 generation: 0,
-                fuel: 0,
                 descriptor: Some((*state.armed).buffer_descriptor),
             })
         };

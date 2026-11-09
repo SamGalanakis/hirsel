@@ -645,7 +645,7 @@ The original loop handles source and quota tails, preserving the exact
 1024-point handoff position. Partial failure exits retain their exact consumed
 quota and loop state through LCSSA exit PHIs. Volatile and atomic accesses,
 non-checkpoint calls, variable checkpoint paths and unproved bounds retain
-their original checkpoints. Fuel builds also retain that path. LLVM's final
+their original checkpoints. LLVM's final
 stack-size records cover chunk exits in the same function's frame; the separate
 certificate checker still derives its bound from the actual final object.
 

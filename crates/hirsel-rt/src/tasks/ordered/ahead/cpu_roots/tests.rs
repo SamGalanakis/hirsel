@@ -99,7 +99,7 @@ fn withdrawal(published: bool, diagnostic: bool) {
     let outcome = run.run(
         move |ctx| unsafe {
             (*ctx).run().cpu_grant = Some(setup_grant);
-            (*ctx).set_budgets(Some(100), Some(grant.max_batch_bytes));
+            (*ctx).set_budgets(Some(grant.max_batch_bytes));
             (*ctx).heap_ref().meter.cpu.set(configured).ok().unwrap();
             engine::enable(
                 ctx,
@@ -108,7 +108,7 @@ fn withdrawal(published: bool, diagnostic: bool) {
             events::enable(ctx);
         },
         move |ctx| unsafe {
-            engine::fuel_in(ctx);
+            engine::task_in(ctx);
             assert_eq!(cpu::control(ctx, 4, 2, 2, || 0), Ok(0));
             assert_eq!(cpu::control(ctx, 4, 3, 0, || 0), Ok(0));
             let younger = handle(1, 7);
@@ -206,12 +206,8 @@ fn withdrawal(published: bool, diagnostic: bool) {
             (*other).ahead.as_mut().unwrap().native = Some(child_native);
             let child_native = &raw mut **(*other).ahead.as_mut().unwrap().native.as_mut().unwrap();
             (*other).ahead_physical = &raw mut (*child_native).physical;
-            let budgets = Budgets {
-                fuel: true,
-                memory: true,
-            };
+            let budgets = Budgets { memory: true };
             let mut local_prefix = Stretch::new(budgets);
-            local_prefix.fuel_points(2);
             local_prefix.alloc(60).unwrap();
             engine::with_driver(ctx, |d| {
                 if published {

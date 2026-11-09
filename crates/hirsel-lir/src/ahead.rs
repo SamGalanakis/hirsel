@@ -41,7 +41,7 @@ pub const MAX_STACK_BYTES: u64 = 65536;
 pub struct ScalarBody {
     pub body: ContentHash,
     pub calls: BTreeSet<ContentHash>,
-    pub fuel_points: Vec<bool>,
+    pub checkpoint_points: Vec<bool>,
 }
 
 /// The complete scalar call closure, still awaiting final machine evidence.
@@ -127,7 +127,6 @@ pub fn scalar_graph(
     table: &LayoutTable,
     target: &TargetSpec,
     root: ContentHash,
-    logical_fuel: bool,
     helper_identity: ContentHash,
 ) -> Result<ScalarGraph, Refusal> {
     if target.triple != "x86_64-unknown-linux-gnu"
@@ -161,13 +160,12 @@ pub fn scalar_graph(
     bytes.extend_from_slice(&target.digest().0);
     bytes.extend_from_slice(&table.digest().0);
     bytes.extend_from_slice(&helper_identity.0);
-    bytes.push(u8::from(logical_fuel));
     bytes.extend_from_slice(&(graph.bodies.len() as u32).to_le_bytes());
     for (id, body) in &graph.bodies {
         bytes.extend_from_slice(&id.0);
         bytes.extend_from_slice(&body.body.0);
-        bytes.extend_from_slice(&(body.fuel_points.len() as u32).to_le_bytes());
-        bytes.extend(body.fuel_points.iter().map(|v| u8::from(*v)));
+        bytes.extend_from_slice(&(body.checkpoint_points.len() as u32).to_le_bytes());
+        bytes.extend(body.checkpoint_points.iter().map(|v| u8::from(*v)));
     }
     Ok(ScalarGraph {
         root,
@@ -408,7 +406,7 @@ impl Walker<'_> {
             ScalarBody {
                 body: unit.digest(),
                 calls,
-                fuel_points: crate::fuel::fuel_points(unit),
+                checkpoint_points: crate::checkpoints::checkpoint_points(unit),
             },
         );
         Ok(())
@@ -473,8 +471,6 @@ pub fn stack_bound_with_depth(
     (bound <= MAX_STACK_BYTES).then_some(bound)
 }
 
-/// Final-object sidecar. The plan binds complete bodies, layouts, target,
-/// original fuel points and helper implementation; object binds exact code.
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub struct MachineEvidence {
     pub plan: ContentHash,

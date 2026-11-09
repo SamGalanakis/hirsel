@@ -12,7 +12,8 @@ using a dead mutex) are **failures**: deterministic, fail-stop, and reported at 
 position in program order. Environmental failures (heap exhaustion, guard-page overflow, a
 foreign crash) end the process and are outside the determinism contract. Global quiescence
 is noncompletion under [CONC-8](concurrency.md#conc-8-global-quiescence), not a failure
-kind.
+kind. A host memory limit produces the tooling outcome `BudgetExceeded(memory)`,
+not a language failure.
 
 A host timeout or forced abandonment is tooling or environmental termination and does not
 imply that language cleanup ran. Environmental termination may interrupt an external effect

@@ -20,7 +20,6 @@ pub fn build_path_native(
         profile,
         super::Backend::Llvm,
         evidence,
-        false,
         crate::session::Policy::default(),
     )
 }
@@ -34,7 +33,7 @@ pub fn build_path_native_backend(
     profile: BuildProfile,
     backend: super::Backend,
     evidence: Option<&super::Evidence>,
-    fuel: bool,
+
     policy: crate::session::Policy,
 ) -> Result<Result<Vec<String>, NativeError>, ToolError> {
     build_path_native_backend_with_validation(
@@ -44,7 +43,6 @@ pub fn build_path_native_backend(
         profile,
         backend,
         evidence,
-        fuel,
         policy,
         super::Validation::Ready,
     )
@@ -102,7 +100,7 @@ pub fn build_path_native_backend_with_validation(
     profile: BuildProfile,
     backend: super::Backend,
     evidence: Option<&super::Evidence>,
-    fuel: bool,
+
     policy: crate::session::Policy,
     validation: super::Validation,
 ) -> Result<Result<Vec<String>, NativeError>, ToolError> {
@@ -120,7 +118,7 @@ pub fn build_path_native_backend_with_validation(
             test_entries: vec![],
             supplemental_sources: vec![],
             output: crate::requests::NativeOutput::Executable,
-            fuel,
+
             evidence: evidence.cloned().map(std::sync::Arc::new),
         }),
     )?;

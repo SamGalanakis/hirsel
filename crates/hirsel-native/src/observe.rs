@@ -33,7 +33,7 @@ pub struct Observation {
     pub exit_code: Option<i32>,
     /// The run is Blocked (CONC-8, schema 2): it neither returned nor failed.
     pub blocked: bool,
-    /// The run spent this budget (`budgets.limits@2`) and stopped as a Blocked run does.
+    /// The run spent this budget (`budgets.limits@3`) and stopped as a Blocked run does.
     pub budget: Option<hirsel_run_schema::BudgetKind>,
     /// The run ended by this signal's default action (schema 4): a native executable is
     /// terminated by the signal itself, which an ordinary exit status never matches.

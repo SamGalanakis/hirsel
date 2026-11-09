@@ -1235,7 +1235,6 @@ fn every_target_agrees_with_the_interpreter_on_every_scalar_library_operation() 
                     tracking: false,
                     opt,
                     measurement: false,
-                    fuel: false,
                 };
                 emit_object(&program.units(), &inputs).unwrap().bytes
             };

@@ -114,11 +114,6 @@ pub struct EmitInputs<'a> {
     pub verify_backend: bool,
     /// Instrument inline count edges. Set only when linking a measurement runtime archive.
     pub measurement: bool,
-    /// Charge the run's fuel at every fuel point (`crate::fuel::fuel_points`): the word at
-    /// `runtime_abi::CTX_FUEL_OFFSET` loses one, and a negative result calls
-    /// `hirsel_rt_v2_fuel_refill` and continues. Without it no code reads the word, so a run without a
-    /// fuel budget pays nothing.
-    pub fuel: bool,
 }
 
 /// A C callback thunk glue defines: the definition, its instance and its entry's FnAbi.
@@ -488,9 +483,7 @@ pub fn artifact(
     if inputs.measurement {
         options.push_str(" measurement");
     }
-    if inputs.fuel {
-        options.push_str(" fuel");
-    }
+
     if inputs.callbacks {
         options.push_str(" callbacks");
     }
@@ -757,7 +750,6 @@ mod tests {
             tracking: false,
             opt: OptLevel::None,
             measurement: false,
-            fuel: false,
         };
         artifact(file, manifested, &inputs, "fixture")
     }
@@ -777,8 +769,6 @@ mod tests {
                 check_ahead(file(&[], &[]), manifested(&[], &[]), Some(&plan)).unwrap(),
                 baseline
             );
-            // The metadata path must still bind any nonempty plan's identity;
-            // actual frame/custody/fuel validation is exercised by ahead_native.
             plan.roots.insert(
                 identity,
                 RootPlan {

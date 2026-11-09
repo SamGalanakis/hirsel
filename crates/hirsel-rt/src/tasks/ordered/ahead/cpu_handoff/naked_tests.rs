@@ -116,7 +116,7 @@ fn run_prefix(
                 max_physical_bytes: 2 << 30,
                 max_batch_bytes: 1 << 20,
             });
-            (*ctx).set_budgets(Some(100), Some(1 << 20));
+            (*ctx).set_budgets(Some(1 << 20));
             engine::enable(
                 ctx,
                 crate::ordered::Policy::admit(&Default::default(), None),
@@ -124,7 +124,7 @@ fn run_prefix(
             events::enable(ctx);
         },
         move |ctx| unsafe {
-            engine::fuel_in(ctx);
+            engine::task_in(ctx);
             assert_eq!(cpu::control(ctx, 4, 2, 1, || 0), Ok(0));
             assert_eq!(cpu::control(ctx, 4, 3, 0, || 0), Ok(0));
             let mut live = 1;
@@ -186,7 +186,6 @@ fn run_prefix(
                     })
                 });
                 for bytes in [16, 32] {
-                    (*ctx).view.compiled.fuel -= 1;
                     let allocation = engine::ahead_allocation(ctx, bytes).unwrap();
                     assert!(matches!(
                         (nonhead, allocation),
@@ -195,9 +194,9 @@ fn run_prefix(
                     ));
                 }
                 if let Some(head) = head {
-                    engine::fuel_out(ctx);
+                    engine::task_out(ctx);
                     engine::with_driver(ctx, |d| d.frontier = Some(head));
-                    engine::fuel_in(ctx);
+                    engine::task_in(ctx);
                 }
                 crate::tasks::role::release(ctx);
                 crate::stop::set_running(ctx);
@@ -208,7 +207,6 @@ fn run_prefix(
                 before_publication, initial,
                 "allocation leases stay private"
             );
-            (*ctx).view.compiled.fuel -= 3;
             crate::fiber::switch(&raw mut native.physical.idle_sp, sp);
             assert_eq!(native.physical.reason, 16);
             assert_eq!(native.physical.saved_sp, sp.wrapping_sub(32));
@@ -222,10 +220,7 @@ fn run_prefix(
             assert_eq!(serve(ctx, &raw mut *native), Ok(true));
             assert_eq!(summary.phase, SUMMARY_RETIRED);
             assert!(native.summary.is_null());
-            assert_eq!(
-                engine::with_driver(ctx, |d| d.frontier.as_ref().unwrap().settled.fuel),
-                initial.fuel - if nonhead.is_some() { 5 } else { 3 }
-            );
+
             crate::tasks::role::release(ctx);
             crate::stop::set_running(ctx);
             let saved = native.physical.saved_sp;
@@ -256,18 +251,7 @@ fn settled_native_summary_records_once_and_replays_at_every_runtime_width() {
     assert_eq!(summary.value, 42u64.to_le_bytes());
     assert_eq!(summary.ordinal, 0);
     assert_eq!(summary.retirement, 0);
-    assert_eq!(
-        summary
-            .native
-            .as_ref()
-            .unwrap()
-            .pieces
-            .iter()
-            .map(|p| p.fuel)
-            .sum::<u64>(),
-        3
-    );
-    assert_eq!(summary.native.as_ref().unwrap().fuel, 97);
+
     assert_eq!(summary.stop, None);
     for width in [1, 2, 4, 8] {
         let replay = run_summary(
@@ -301,14 +285,11 @@ fn head_and_nonhead_allocation_prefixes_record_identical_charges_at_every_runtim
                 panic!("summary follows the claim")
             };
             assert_eq!(summary.native.as_ref().unwrap().pieces.len(), 1);
-            assert_eq!(summary.native.as_ref().unwrap().pieces[0].fuel, 5);
+
             assert_eq!(summary.native.as_ref().unwrap().pieces[0].net, 48);
-            assert_eq!(
-                summary.native.as_ref().unwrap().pieces[0].envelope,
-                [(1, 16), (2, 48)]
-            );
+            assert_eq!(summary.native.as_ref().unwrap().pieces[0].high, 48);
             assert_eq!(summary.native.as_ref().unwrap().level, 48);
-            assert_eq!(summary.native.as_ref().unwrap().fuel, 95);
+
             if let Some(canonical) = &canonical {
                 assert_eq!(&events, canonical, "W{width}, nonhead {nonhead}");
             } else {

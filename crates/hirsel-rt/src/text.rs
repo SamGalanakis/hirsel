@@ -758,7 +758,7 @@ pub unsafe extern "C" fn hirsel_rt_v2_bytes_json_number_end(
         })
     };
     let (result, cost) = hirsel_kernels::numeric::json_number(source, offset);
-    let charged = unsafe { crate::budget::charge_primitive(ctx, cost) };
+    let charged = crate::stop::observe(ctx);
     unsafe { crate::stop::check(ctx, charged) };
     unsafe { out.write(result) };
     STATUS_OK
@@ -781,7 +781,7 @@ pub unsafe extern "C" fn hirsel_rt_v2_bytes_integer(
     negative_hi: u64,
     negative_lo: u64,
 ) -> u8 {
-    let charged = unsafe { crate::budget::charge_primitive(ctx, length.saturating_add(1)) };
+    let charged = crate::stop::observe(ctx);
     unsafe { crate::stop::check(ctx, charged) };
     let source = unsafe {
         bytes(Slice {
@@ -811,7 +811,7 @@ pub unsafe extern "C" fn hirsel_rt_v2_bytes_decimal_word(
     value: u64,
     buffer: *mut [u8; 20],
 ) -> u8 {
-    let charged = unsafe { crate::budget::charge_primitive(ctx, 9) };
+    let charged = crate::stop::observe(ctx);
     unsafe { crate::stop::check(ctx, charged) };
     let count = hirsel_kernels::numeric::decimal_word(value, unsafe { &mut *buffer });
     unsafe { out.write(count) };

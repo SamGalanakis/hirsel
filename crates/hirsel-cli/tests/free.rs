@@ -16,13 +16,10 @@ const ENGINES: [&[&str]; 3] = [&[], &["--native"], &["--native", "--backend", "c
 
 const GRANTS: &str =
     r#"{"io":{"stdout":"stdout.bytes@1","tasks":"tasks.cooperative@1","dirs":[]},"args":[]}"#;
-/// `finite_release` spends its fuel inside a releasing walk.
-const FUEL_GRANTS: &str = r#"{"io":{"stdout":"stdout.bytes@1","tasks":"tasks.cooperative@1","dirs":[]},"args":[],"budgets":{"provider":"budgets.limits@2","fuel":200000}}"#;
 
 /// Each trace, its grants and the live outcome every recording of it ends with.
-const TRACES: [(&str, &str, &str); 8] = [
+const TRACES: [(&str, &str, &str); 7] = [
     ("gap", GRANTS, "returned"),
-    ("finite_release", FUEL_GRANTS, "fuel"),
     ("mutex_cycle", GRANTS, "returned"),
     ("parked_receive", GRANTS, "blocked"),
     ("nested_root", GRANTS, "returned"),
@@ -44,7 +41,6 @@ fn source(name: &str) -> &'static str {
     match name {
         "gap" => include_str!("free/gap.hir"),
         "deadline" => include_str!("free/deadline.hir"),
-        "finite_release" => include_str!("free/finite_release.hir"),
         "mutex_cycle" => include_str!("free/mutex_cycle.hir"),
         "parked_receive" => include_str!("free/parked_receive.hir"),
         "nested_root" => include_str!("free/nested_root.hir"),
@@ -118,7 +114,7 @@ fn run(engine: &[&str], program: &Path, grants: &str, hook: &str) -> Output {
         command.arg("run").arg(program).arg("--grants").arg(grants);
         command
     } else {
-        let mut command = Command::new(native_trace(engine, program, grants));
+        let mut command = Command::new(native_trace(engine, program));
         command.args(["--hirsel-grants", grants]);
         command
     };
@@ -144,19 +140,14 @@ fn run(engine: &[&str], program: &Path, grants: &str, hook: &str) -> Output {
     output
 }
 
-// A trace source is immutable for its scratch directory's lifetime. Compile
-// each backend/fuel configuration once, then run every prefix on that image,
-// as the existing standalone external-stop and queued-stop fixtures do.
-fn native_trace(engine: &[&str], program: &Path, grants: &str) -> PathBuf {
+fn native_trace(engine: &[&str], program: &Path) -> PathBuf {
     static BUILDS: std::sync::Mutex<()> = std::sync::Mutex::new(());
     let backend = match engine {
         ["--native"] => "llvm",
         ["--native", "--backend", "cranelift"] => "cranelift",
         _ => panic!("unsupported native trace engine: {engine:?}"),
     };
-    let grants: serde_json::Value = serde_json::from_str(grants).unwrap();
-    let fueled = !grants["budgets"]["fuel"].is_null();
-    let executable = program.with_extension(format!("{backend}-fuel-{fueled}"));
+    let executable = program.with_extension(backend);
     let _build = BUILDS.lock().unwrap();
     if !executable.exists() {
         let mut build = Command::new(env!("CARGO_BIN_EXE_hirsel"));
@@ -165,9 +156,7 @@ fn native_trace(engine: &[&str], program: &Path, grants: &str) -> PathBuf {
             .arg(program)
             .arg("-o")
             .arg(&executable);
-        if fueled {
-            build.arg("--fuel");
-        }
+
         let output = captured_output(&mut build, program, "native trace build");
         assert!(output.status.success(), "{engine:?}: {output:?}");
     }
@@ -350,21 +339,6 @@ fn every_f0_trace_replays_to_its_live_projection_at_every_cut_gap_llvm_durable()
 #[test]
 fn every_f0_trace_replays_to_its_live_projection_at_every_cut_gap_cranelift() {
     every_f0_trace_all("gap", ENGINES[2]);
-}
-
-#[test]
-fn every_f0_trace_replays_to_its_live_projection_at_every_cut_finite_release_interpreter() {
-    every_f0_trace_all("finite_release", ENGINES[0]);
-}
-
-#[test]
-fn every_f0_trace_replays_to_its_live_projection_at_every_cut_finite_release_llvm() {
-    every_f0_trace_all("finite_release", ENGINES[1]);
-}
-
-#[test]
-fn every_f0_trace_replays_to_its_live_projection_at_every_cut_finite_release_cranelift() {
-    every_f0_trace_all("finite_release", ENGINES[2]);
 }
 
 #[test]
@@ -4983,47 +4957,6 @@ fn f1_recorded_thaws(tape: &hirsel_free::tape::Tape) -> Vec<bool> {
             _ => None,
         })
         .collect()
-}
-
-#[test]
-fn f1_required_finite_release_records_unfinished_child_and_failed_thaw_record_interpreter() {
-    f1_required_finite_release_matrix(Cells::part(false, false));
-}
-
-#[test]
-fn f1_required_finite_release_records_unfinished_child_and_failed_thaw_record_native() {
-    f1_required_finite_release_matrix(Cells::part(false, true));
-}
-
-#[test]
-fn f1_required_finite_release_records_unfinished_child_and_failed_thaw_durable_interpreter() {
-    f1_required_finite_release_matrix(Cells::part(true, false));
-}
-
-#[test]
-fn f1_required_finite_release_records_unfinished_child_and_failed_thaw_durable_native() {
-    f1_required_finite_release_matrix(Cells::part(true, true));
-}
-
-fn f1_required_finite_release_matrix(cells: Cells) {
-    f1_corpus_matrix_cells(
-        "required-finite-release-witness",
-        source("finite_release"),
-        |_| serde_json::json!({"io":{"stdout":"stdout.bytes@1","tasks":"tasks.free@1","dirs":[]},"args":[],"budgets":{"provider":"budgets.limits@2","fuel":200000}}),
-        (
-            hirsel_run_schema::exit::BUDGET_EXCEEDED,
-            |live, tape, _, _| {
-                assert_eq!(live.stdout, b"shared\n", "{live:?}");
-                assert_eq!(f1_recorded_thaws(tape), [false]);
-                let child = tape.cut.get(&vec![0]).expect("admitted child store");
-                assert!(child.op > 0, "{child:?}");
-                assert_eq!(child.phase, hirsel_free::phase::Phase::Done);
-            },
-        ),
-        b"",
-        || Box::new(|| {}),
-        cells,
-    );
 }
 
 #[test]

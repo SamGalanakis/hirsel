@@ -81,9 +81,9 @@ pub(crate) fn promotion_adopts_the_actual_moved_mask_and_same_physical_record() 
     local.save_requested.store(true, Ordering::Release);
     let address = &raw const local.native.as_ref().unwrap().physical;
     mask = 0;
-    let save = local.adopt(73, std::ptr::dangling_mut(), 5);
+    let save = local.adopt(73, std::ptr::dangling_mut());
     assert!(!local.save_requested.load(Ordering::Acquire));
-    assert_eq!((save.generation, save.fuel, save.descriptor), (73, 5, None));
+
     let native = local.native.as_ref().unwrap();
     assert_eq!(&raw const native.physical, address);
     assert_eq!(native.physical.points_left, i64::MAX);
@@ -143,7 +143,7 @@ pub(crate) fn stale_generation_cannot_restore_or_adopt_custody() {
     for adopt in [false, true] {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             if adopt {
-                local.adopt(92, std::ptr::null_mut(), 0);
+                local.adopt(92, std::ptr::null_mut());
             } else {
                 unsafe { local.restore(92) }
             }

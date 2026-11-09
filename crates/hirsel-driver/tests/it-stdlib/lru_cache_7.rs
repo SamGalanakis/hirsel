@@ -54,7 +54,6 @@ fn fixture(name: &str, steps: Option<u64>) {
                 hirsel_native::BuildProfile::Default,
                 backend,
                 None,
-                false,
                 hirsel_driver::session::Policy::default(),
                 hirsel_native::Validation::EveryStage,
             )

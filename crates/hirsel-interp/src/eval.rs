@@ -1104,11 +1104,7 @@ pub(crate) fn execute_frames<O: crate::ownership_trace::Observer>(
                                         limit.saturating_sub(execution.steps).saturating_sub(1),
                                     )
                                 });
-                                budgets
-                                    .run
-                                    .primitive(allowed)
-                                    .map_err(Error::BudgetExceeded)?;
-                                operations.fuel_charged(allowed);
+                                budgets.run.sample_work(allowed);
                                 execution.steps = execution.steps.saturating_add(1 + allowed);
                                 profile.add(frame.definition.path.path(), 1 + allowed);
                                 primitive_limit = allowed != cost;
@@ -2342,12 +2338,9 @@ pub(crate) fn execute_frames<O: crate::ownership_trace::Observer>(
             }
             continue;
         }
-        // Fuel is charged at function entries and back-edges, and the memory model is
-        // measured before the step after a charge that may pass the budget.
-        if frames.last().is_some_and(|f| f.fuel_due) {
-            frames.last_mut().unwrap().fuel_due = false;
-            budgets.run.fuel().map_err(Error::BudgetExceeded)?;
-            operations.fuel_charged(1);
+        if frames.last().is_some_and(|f| f.sample_due) {
+            frames.last_mut().unwrap().sample_due = false;
+            budgets.run.sample_point();
         }
         if budgets.run.due() {
             let live = frames
@@ -2894,11 +2887,7 @@ pub(crate) fn execute_frames<O: crate::ownership_trace::Observer>(
                             let allowed = limits.steps.map_or(cost, |limit| {
                                 cost.min(limit.saturating_sub(execution.steps))
                             });
-                            budgets
-                                .run
-                                .primitive(allowed)
-                                .map_err(Error::BudgetExceeded)?;
-                            operations.fuel_charged(allowed);
+                            budgets.run.sample_work(allowed);
                             execution.steps = execution.steps.saturating_add(allowed);
                             profile.add(frame.definition.path.path(), allowed);
                             if allowed != cost {
@@ -3250,11 +3239,6 @@ pub(crate) fn execute_frames<O: crate::ownership_trace::Observer>(
         }
     }
 }
-/// Step the top frame through its resolved ops while each one completes without
-/// failure, a call or queued work, with exactly the general step's effects, step
-/// count and trace. Returns true when the general step must execute the current op,
-/// and false when the scheduler must look at the frame again first (a jump that
-/// charges fuel).
 fn dispatch(
     frame: &mut Frame,
     code: &crate::code::Code,
@@ -3458,7 +3442,7 @@ fn dispatch(
             &OpKind::Goto(block) => {
                 step(frame, execution, true);
                 frame.goto(block);
-                if frame.fuel_due {
+                if frame.sample_due {
                     return false;
                 }
                 ops = code.block_ops(frame.block);
@@ -3471,7 +3455,7 @@ fn dispatch(
                 step(frame, execution, true);
                 frame.commit(condition);
                 frame.goto(if value { yes } else { no });
-                if frame.fuel_due {
+                if frame.sample_due {
                     return false;
                 }
                 ops = code.block_ops(frame.block);

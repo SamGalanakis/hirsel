@@ -146,7 +146,6 @@ pub struct Drive {
     pub durable: bool,
     /// Live: flush at a step with probability 1/n (0: never).
     pub flush_one_in: u64,
-    /// Live: stop the run (a fuel stop by the chosen task) at this step.
     pub stop_at: Option<u64>,
     /// The mutation that removes deferral: every release applies at once.
     pub immediate_releases: bool,
@@ -835,7 +834,7 @@ pub fn record(program: &Program, drive: Drive) -> Recorded {
                 .collect();
             if !running.is_empty() {
                 let t = running[(exec.word() % running.len() as u64) as usize];
-                outcome = Some(("fuel".to_string(), Some(exec.path(t))));
+                outcome = Some(("memory".to_string(), Some(exec.path(t))));
                 break;
             }
         }
@@ -867,7 +866,7 @@ pub fn record(program: &Program, drive: Drive) -> Recorded {
             .iter()
             .position(|task| task.status == Status::Looping)
         {
-            ("fuel".to_string(), Some(exec.path(t)))
+            ("memory".to_string(), Some(exec.path(t)))
         } else if exec.tasks[0].status == Status::Done {
             ("returned".to_string(), None)
         } else {

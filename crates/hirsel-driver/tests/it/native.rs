@@ -878,7 +878,7 @@ fn requested_ready_views_agree_with_the_reference_under_the_smoke_matrix() {
                                     hirsel_native::OptLevel::Default,
                                 ),
                                 run: None,
-                                fuel: false,
+
                                 evidence: None,
                             }),
                         )
@@ -1431,8 +1431,8 @@ fn agreement_rejects_exit_codes_that_disagree_with_the_run_outcome() {
                 RunOutcome::Blocked(waits),
             ),
             (
-                "budget_exceeded fuel\naudit unavailable\n".into(),
-                RunOutcome::BudgetExceeded(BudgetKind::Fuel),
+                "budget_exceeded memory\naudit unavailable\n".into(),
+                RunOutcome::BudgetExceeded(BudgetKind::Memory),
             ),
         ] {
             let mut launched = Launched {

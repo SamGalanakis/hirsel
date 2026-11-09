@@ -199,7 +199,6 @@ fn facts() -> ProgramFacts {
         launch: LaunchKind::Main,
         roots: vec![Root::Io, Root::Env],
         code: CodeReach::Safe,
-        fueled: false,
     }
 }
 

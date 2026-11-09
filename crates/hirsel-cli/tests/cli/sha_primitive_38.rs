@@ -1,4 +1,3 @@
-//! SHA primitive fuel, native recording, semantic binding and format-reset controls.
 use std::process::Command;
 
 #[test]
@@ -66,54 +65,5 @@ fn sha_primitive_38_native_tapes_replay_and_refuse_changed_program_or_old_format
             "historical generation accepted: {old:?}"
         );
         assert!(old.stdout.is_empty());
-    }
-}
-
-#[test]
-fn sha_primitive_38_spends_fuel_on_both_block_families_and_native_backends() {
-    for algorithm in ["sha256", "sha512"] {
-        let text = format!(
-            "pub fn main(rt: Io, args: Args) -> Result[(), GrantError] {{\nlet output=io.stdout(rt)?\nlet _=out.print(output,\"start\\n\")\nlet _=core@1/bytes.{algorithm}(b\"{}\")\nlet _=out.print(output,\"done\\n\")\nOk(())\n}}",
-            "a".repeat(32768)
-        );
-        let source = super::file(&text);
-        for engine in [
-            &[][..],
-            &["--native"][..],
-            &["--native", "--backend", "cranelift"][..],
-        ] {
-            for (fuel, success, expected) in [
-                (100, false, b"start\n".as_slice()),
-                (10000, true, b"start\ndone\n".as_slice()),
-            ] {
-                if std::env::var("SHA_PRIMITIVE_38_FUEL_MISSING").is_ok()
-                    && (algorithm == "sha256" || engine.is_empty())
-                {
-                    continue;
-                }
-                let grants = format!(
-                    r#"{{"io":{{"stdout":"stdout.bytes@1","dirs":[]}},"args":[],"budgets":{{"provider":"budgets.limits@2","fuel":{fuel}}}}}"#
-                );
-                let output = Command::new(env!("CARGO_BIN_EXE_hirsel"))
-                    .arg("run")
-                    .args(engine)
-                    .arg(&source)
-                    .arg("--grants")
-                    .arg(grants)
-                    .output()
-                    .unwrap();
-                assert_eq!(
-                    output.status.code(),
-                    Some(if success { 0 } else { 5 }),
-                    "{algorithm} {engine:?}: {output:?}"
-                );
-                assert_eq!(output.stdout, expected, "{algorithm} {engine:?}");
-                if !success {
-                    assert_eq!(output.stderr, b"budget exceeded: fuel\n");
-                }
-                eprintln!("SHA_FUEL_PASS {algorithm} {engine:?} {fuel}");
-            }
-        }
-        std::fs::remove_file(source).unwrap();
     }
 }

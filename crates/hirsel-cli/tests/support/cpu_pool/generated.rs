@@ -16,7 +16,7 @@ fn qual_build(
     let executable = root.join(backend);
     checked(
         cpu_compiler()
-            .args(["build", "--fuel", "--validate-stages", "--backend", backend])
+            .args(["build", "--validate-stages", "--backend", backend])
             .arg(manifest)
             .arg("-o")
             .arg(&executable)

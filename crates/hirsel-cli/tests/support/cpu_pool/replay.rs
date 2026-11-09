@@ -136,7 +136,7 @@ pub fn main(rt: Io) -> Result[(), GrantError] {{
     let executable = root.join(backend);
     checked(
         cpu_compiler()
-            .args(["build", "--fuel", "--validate-stages", "--backend", backend])
+            .args(["build", "--validate-stages", "--backend", backend])
             .arg(&manifest)
             .arg("-o")
             .arg(&executable)
@@ -161,29 +161,9 @@ pub fn main(rt: Io) -> Result[(), GrantError] {{
             _ => None,
         })
         .unwrap();
-    let job_fuel: u64 = recording
-        .events
-        .iter()
-        .filter_map(|event| match &event.request {
-            hirsel_rt::io::Request::CpuSummary(summary) => summary.native.as_ref(),
-            _ => None,
-        })
-        .flat_map(|summary| &summary.pieces)
-        .map(|piece| piece.fuel)
-        .sum();
-    for fueled in [false, true] {
-        if fueled {
-            authority["budgets"] = serde_json::json!({
-                "provider": "budgets.limits@2", "fuel": job_fuel + 65536
-            });
-        }
-        fs::write(&grants, authority.to_string()).unwrap();
-        for grant_only in [false, true] {
-            eprintln!(
-                "original 2 MiB/2 MiB W{width} {backend}, fueled={fueled}, grant_only={grant_only}"
-            );
-            ordered_allocation_memory_cut(&executable, &root, &grants, summary, grant_only);
-        }
+    for grant_only in [false, true] {
+        eprintln!("original 2 MiB/2 MiB W{width} {backend}, grant_only={grant_only}");
+        ordered_allocation_memory_cut(&executable, &root, &grants, summary, grant_only);
     }
 }
 
@@ -198,7 +178,7 @@ fn ordered_allocation_memory_cut(
     assert_eq!(native.pieces.len(), 1);
     let piece = &native.pieces[0];
     let start = native.level.checked_add_signed(-piece.net).unwrap();
-    let peak = piece.envelope.last().unwrap().1 as u64;
+    let peak = piece.high as u64;
     // The older job retains a large result while the younger job allocates.
     // Half the younger peak fits above that settled prefix, so its cut is
     // inside job 1 rather than in publisher backing or the older job.
@@ -212,7 +192,7 @@ fn ordered_allocation_memory_cut(
             authority["io"]["cpu"]["max_batch_bytes"] = serde_json::json!(limit);
         } else {
             if authority["budgets"].is_null() {
-                authority["budgets"] = serde_json::json!({"provider": "budgets.limits@2"});
+                authority["budgets"] = serde_json::json!({"provider": "budgets.limits@3"});
             }
             authority["budgets"]["memory_bytes"] = serde_json::json!(limit);
         }
@@ -328,7 +308,7 @@ fn ordered_replay_width_mode(width: usize, allocating: bool) {
         let executable = root.join(backend);
         checked(
             cpu_compiler()
-                .args(["build", "--fuel", "--validate-stages", "--backend", backend])
+                .args(["build", "--validate-stages", "--backend", backend])
                 .arg(&manifest)
                 .arg("-o")
                 .arg(&executable)
@@ -378,7 +358,7 @@ fn ordered_replay_width_mode(width: usize, allocating: bool) {
                 ordered_allocation_memory_fixture(width, backend, root);
             }
             for (ordinal, summary) in summaries.iter().enumerate() {
-                assert_eq!(summary.version, 3);
+                assert_eq!(summary.version, 4);
                 assert_eq!(summary.ordinal, ordinal as u64);
                 let encoded = if allocating {
                     let values: Vec<u64> = expected[ordinal]
@@ -421,7 +401,7 @@ fn ordered_replay_width_mode(width: usize, allocating: bool) {
                     })
                     .unwrap();
                 let value_bytes = summaries[0].value.len();
-                for byte in 0..value_bytes + if allocating { 16 } else { 15 } {
+                for byte in 0..value_bytes + 13 {
                     let mut changed = recording.clone();
                     let hirsel_rt::io::Request::CpuSummary(summary) =
                         &mut changed.events[index].request
@@ -437,7 +417,7 @@ fn ordered_replay_width_mode(width: usize, allocating: bool) {
                         n if n == value_bytes + 2 => summary.retirement += 1,
                         n if n == value_bytes + 3 => summary.ordinal += 1,
                         n if n == value_bytes + 4 => {
-                            summary.stop = Some(hirsel_run_schema::BudgetKind::Fuel)
+                            summary.stop = Some(hirsel_run_schema::BudgetKind::Memory)
                         }
                         n if n == value_bytes + 5 => {
                             summary.native.as_mut().unwrap().descriptor += 1
@@ -449,28 +429,14 @@ fn ordered_replay_width_mode(width: usize, allocating: bool) {
                             summary.native.as_mut().unwrap().retained_count += 1
                         }
                         n if n == value_bytes + 8 => {
-                            let fuel = &mut summary.native.as_mut().unwrap().pieces[0].fuel;
-                            if allocating {
-                                *fuel += 1;
-                            } else {
-                                *fuel ^= 1;
-                            }
+                            summary.native.as_mut().unwrap().pieces[0].net -= 1
                         }
                         n if n == value_bytes + 9 => {
-                            summary.native.as_mut().unwrap().pieces[0].net ^= 1
+                            summary.native.as_mut().unwrap().pieces[0].high += 1;
                         }
-                        n if n == value_bytes + 10 => {
-                            let envelope = &mut summary.native.as_mut().unwrap().pieces[0].envelope;
-                            if let Some((_, peak)) = envelope.last_mut() {
-                                *peak += 1;
-                            } else {
-                                envelope.push((0, 1));
-                            }
-                        }
-                        n if n == value_bytes + 11 => summary.native.as_mut().unwrap().level ^= 1,
-                        n if n == value_bytes + 12 => summary.native.as_mut().unwrap().limit ^= 1,
-                        n if n == value_bytes + 13 => summary.native.as_mut().unwrap().fuel ^= 1,
-                        n if n == value_bytes + 14 => {
+                        n if n == value_bytes + 10 => summary.native.as_mut().unwrap().level ^= 1,
+                        n if n == value_bytes + 11 => summary.native.as_mut().unwrap().limit ^= 1,
+                        n if n == value_bytes + 12 => {
                             summary
                                 .native
                                 .as_mut()
@@ -478,22 +444,18 @@ fn ordered_replay_width_mode(width: usize, allocating: bool) {
                                 .pieces
                                 .push(hirsel_rt::io::CpuPiece {
                                     credit: 1,
-                                    fuel: 0,
+
                                     net: 0,
-                                    envelope: vec![],
+                                    high: 0,
                                 })
                         }
-                        _ => summary.native.as_mut().unwrap().pieces[0]
-                            .envelope
-                            .push((0, 1)),
+                        _ => unreachable!(),
                     }
                     let bad_tape = root.join("corrupted.tape");
                     write_cpu_recording(&bad_tape, &changed);
-                    let malformed = allocating && byte == value_bytes + 15;
-                    assert_eq!(
+                    assert!(
                         hirsel_rt::launch::parse_recording_bytes(&fs::read(&bad_tape).unwrap())
-                            .is_err(),
-                        malformed,
+                            .is_ok(),
                         "{backend}: corruption {byte} framing"
                     );
                     let outcome = Command::new(&executable)
@@ -515,7 +477,7 @@ fn ordered_replay_width_mode(width: usize, allocating: bool) {
                         .arg(&bad_tape)
                         .output()
                         .unwrap();
-                    if byte <= value_bytes + 4 || malformed {
+                    if byte <= value_bytes + 4 {
                         assert_eq!(
                             interpreted.status.code(),
                             Some(hirsel_run_schema::exit::REFUSED),
@@ -556,56 +518,6 @@ fn ordered_replay_width_mode(width: usize, allocating: bool) {
             assert_eq!(fs::read(&replayed).unwrap(), reference.as_ref().unwrap().0);
             assert_eq!(cpu_job_stages(&root.join("replay.probe.jobs")), jobs);
             assert!(fs::read(&probe).unwrap().is_empty());
-            if width == 8 && reorder == "auto" {
-                for budget in [1, 1000] {
-                    let mut limited: serde_json::Value =
-                        serde_json::from_slice(&fs::read(&grants).unwrap()).unwrap();
-                    limited["budgets"] = serde_json::json!({
-                        "provider": "budgets.limits@2", "fuel": budget
-                    });
-                    let limited_grants = root.join("limited.json");
-                    fs::write(&limited_grants, limited.to_string()).unwrap();
-                    let stopped_tape = root.join("stopped.tape");
-                    let stopped = Command::new(&executable)
-                        .arg("--hirsel-grants")
-                        .arg(&limited_grants)
-                        .arg("--hirsel-record")
-                        .arg(&stopped_tape)
-                        .output()
-                        .unwrap();
-                    assert_eq!(
-                        stopped.status.code(),
-                        Some(hirsel_run_schema::exit::BUDGET_EXCEEDED),
-                        "{backend}: {stopped:?}"
-                    );
-                    let replayed = Command::new(&executable)
-                        .arg("--hirsel-replay")
-                        .arg(&stopped_tape)
-                        .output()
-                        .unwrap();
-                    assert_eq!(
-                        replayed.status.code(),
-                        stopped.status.code(),
-                        "{backend}: {replayed:?}"
-                    );
-                    let interpreted = cpu_interpreter_cli(width, !allocating)
-                        .arg("run")
-                        .arg(&manifest)
-                        .arg("--replay")
-                        .arg(&stopped_tape)
-                        .output()
-                        .unwrap();
-                    assert_eq!(
-                        interpreted.status.code(),
-                        Some(hirsel_run_schema::exit::REFUSED),
-                        "{backend}: native CPU fuel cuts are engine-specific: {interpreted:?}"
-                    );
-                    assert!(
-                        String::from_utf8_lossy(&interpreted.stderr).contains("CPU"),
-                        "{backend}: {interpreted:?}"
-                    );
-                }
-            }
         }
         eprintln!(
             "D02 {backend} W{width}: serial off == physical auto == one-permit replay, complete canonical trace and projected tape"
@@ -650,7 +562,7 @@ pub fn main(rt: Io) -> Result[(), AppError] {
         let executable = root.join(backend);
         checked(
             cpu_compiler()
-                .args(["build", "--fuel", "--validate-stages", "--backend", backend])
+                .args(["build", "--validate-stages", "--backend", backend])
                 .arg(&manifest)
                 .arg("-o")
                 .arg(&executable)
@@ -816,7 +728,7 @@ pub fn main(rt: Io) -> Result[(), AppError] {
         let executable = root.join(backend);
         checked(
             Command::new(env!("CARGO_BIN_EXE_hirsel"))
-                .args(["build", "--fuel", "--validate-stages", "--backend", backend])
+                .args(["build", "--validate-stages", "--backend", backend])
                 .arg(&manifest)
                 .arg("-o")
                 .arg(&executable)

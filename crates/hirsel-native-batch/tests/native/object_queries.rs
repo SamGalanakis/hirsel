@@ -108,7 +108,6 @@ impl NativeProducts for NativeFixture {
             opt: self.opt,
             verify_backend: true,
             measurement: false,
-            fuel: program.fuel,
         };
         use_units(&units, &inputs)
     }

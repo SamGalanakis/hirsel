@@ -53,7 +53,7 @@ fn cpu_source_with_jitter(width: usize, source: &str, domain_count: usize) {
             let executable = root.join(format!("{backend}-{provider}"));
             checked(
                 cpu_compiler()
-                    .args(["build", "--fuel", "--validate-stages", "--backend", backend])
+                    .args(["build", "--validate-stages", "--backend", backend])
                     .arg(&manifest)
                     .arg("-o")
                     .arg(&executable)

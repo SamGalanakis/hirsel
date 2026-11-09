@@ -61,7 +61,6 @@ pub(crate) fn select(
     entry: &str,
     roots: u8,
     escapes: bool,
-    fueled: bool,
 ) -> Result<Selected, RunRefusal> {
     let options = live_options(&arguments)?;
     let policy = options
@@ -106,14 +105,14 @@ pub(crate) fn select(
                     "replay policy never changes identity"
                 );
             }
-            run.bind(&facts(program, entry, roots, escapes, fueled)?)
+            run.bind(&facts(program, entry, roots, escapes)?)
         });
     }
     if policy.is_some() {
         return Err(replay_policy_error("requires --hirsel-replay <tape>"));
     }
     Ok(Selected::Live {
-        run: select_run(options.input, program, entry, roots, escapes, fueled)?,
+        run: select_run(options.input, program, entry, roots, escapes)?,
         tape: options.tape,
         revocations: options.revocations,
     })
@@ -276,7 +275,6 @@ pub(crate) fn facts(
     entry: &str,
     roots: u8,
     escapes: bool,
-    fueled: bool,
 ) -> Result<ProgramFacts, RunRefusal> {
     Ok(ProgramFacts {
         program,
@@ -288,7 +286,6 @@ pub(crate) fn facts(
         } else {
             CodeReach::Safe
         },
-        fueled,
     })
 }
 
@@ -309,7 +306,6 @@ fn select_run(
     entry: &str,
     roots: u8,
     escapes: bool,
-    fueled: bool,
 ) -> Result<BoundRun, RunRefusal> {
     let launch = launch_kind(roots);
     let invalid = || {
@@ -340,7 +336,7 @@ fn select_run(
             // One validation: the record with its snapshot, checked against the code.
             let run = record.into_validated()?;
             run.check_program(program, entry, launch)?;
-            return run.bind(&facts(program, entry, roots, escapes, fueled)?);
+            return run.bind(&facts(program, entry, roots, escapes)?);
         }
         Some(flag) if flag == "--" => {
             let mut record = RunConfig::empty(program, entry.into(), launch);
@@ -355,7 +351,7 @@ fn select_run(
     // only changed field and contributes to the admitted run's identity.
     record
         .into_validated()?
-        .bind(&facts(program, entry, roots, escapes, fueled)?)
+        .bind(&facts(program, entry, roots, escapes)?)
 }
 
 #[cfg(test)]
@@ -376,7 +372,7 @@ mod tests {
                 }
             })
             .collect();
-        select(words, [1; 32], "options@1/main", ROOT_ARGS, false, false)
+        select(words, [1; 32], "options@1/main", ROOT_ARGS, false)
     }
 
     #[test]
@@ -500,7 +496,6 @@ mod tests {
                 [1; 32],
                 "entry@1/main",
                 0,
-                false,
                 false
             )
             .is_err()
@@ -548,7 +543,6 @@ mod tests {
                 [1; 32],
                 entry,
                 ROOT_IO,
-                false,
                 false,
             );
             if provider == "tasks.cooperative@1" {
@@ -605,7 +599,6 @@ mod tests {
                 entry,
                 0,
                 false,
-                false,
             )
         };
         assert!(matches!(replay([1; 32]), Ok(Selected::Replay { .. })));
@@ -621,20 +614,12 @@ mod tests {
                 entry,
                 0,
                 false,
-                false,
             ),
             Err(RunRefusal::Invalid { .. })
         ));
         std::fs::remove_file(&tape).unwrap();
         assert!(matches!(
-            select(
-                vec!["--hirsel-record".into()],
-                [1; 32],
-                entry,
-                0,
-                false,
-                false
-            ),
+            select(vec!["--hirsel-record".into()], [1; 32], entry, 0, false),
             Err(RunRefusal::Invalid { .. })
         ));
         assert!(matches!(
@@ -644,7 +629,6 @@ mod tests {
                 entry,
                 ROOT_ARGS,
                 false,
-                false,
             ),
             Ok(Selected::Live { tape: Some(_), run, .. }) if run.run().record().args.as_deref() == Some(["x".to_string()].as_slice())
         ));
@@ -652,9 +636,9 @@ mod tests {
     #[test]
     fn unconfigured_process_denies_roots_and_explicit_argv_grants_only_args() {
         let entry = "standalone@0/main";
-        assert!(select_run(vec![], [0; 32], entry, 0, false, false).is_ok());
+        assert!(select_run(vec![], [0; 32], entry, 0, false).is_ok());
         assert!(matches!(
-            select_run(vec![], [0; 32], entry, ROOT_ARGS, false, false),
+            select_run(vec![], [0; 32], entry, ROOT_ARGS, false),
             Err(RunRefusal::NotGranted { .. })
         ));
         let run = select_run(
@@ -662,7 +646,6 @@ mod tests {
             [0; 32],
             entry,
             ROOT_ARGS,
-            false,
             false,
         )
         .unwrap();
@@ -674,7 +657,7 @@ mod tests {
         assert!(run.record().io.is_none());
         assert!(run.record().env.is_none());
         assert!(matches!(
-            select_run(vec!["--".into()], [0; 32], entry, ROOT_IO, false, false),
+            select_run(vec!["--".into()], [0; 32], entry, ROOT_IO, false),
             Err(RunRefusal::NotGranted { .. })
         ));
     }

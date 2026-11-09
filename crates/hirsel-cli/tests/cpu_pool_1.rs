@@ -62,12 +62,6 @@ include!("support/cpu_pool/interpreter_receipts.rs");
 fn cpu_interpreter_cut_withdrawal_and_cancellation_receipts() {
     cpu_interpreter_receipt_cuts(1);
 }
-include!("support/cpu_pool/interpreter_fuel.rs");
-#[test]
-fn cpu_interpreter_cut_exact_source_fuel_stops() {
-    cpu_interpreter_fuel_cuts(1);
-}
-
 include!("support/cpu_pool/four_engine.rs");
 include!("support/cpu_pool/replay.rs");
 

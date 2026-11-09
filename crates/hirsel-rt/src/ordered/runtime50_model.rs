@@ -148,12 +148,8 @@ impl Scenario {
             settled: Settled {
                 level: 0,
                 limit: u64::MAX,
-                fuel: u64::MAX,
             },
-            budgets: stretch::Budgets {
-                fuel: false,
-                memory: false,
-            },
+            budgets: stretch::Budgets { memory: false },
             failures: false,
         }
     }
@@ -164,7 +160,6 @@ impl Scenario {
             settled: Settled {
                 level: self.settled.level,
                 limit: u64::MAX,
-                fuel: u64::MAX,
             },
             failures: false,
             ..self.clone()
@@ -719,7 +714,6 @@ pub(crate) fn reference_stop(scenario: &Scenario, canonical: &Canonical) -> Opti
         charges
             .iter()
             .flat_map(|charge| match *charge {
-                Charge::Fuel(points) => vec![Event::Fuel; points as usize],
                 Charge::Alloc(bytes) => vec![Event::Alloc(bytes)],
                 Charge::Free(bytes) => vec![Event::Free(bytes)],
                 Charge::Credit(bytes) => vec![Event::Credit(bytes)],
@@ -766,7 +760,7 @@ pub(crate) fn generated(seed: u64, charged_ops: bool) -> Scenario {
                 let mut live = 0;
                 for _ in 0..if charged_ops { draw(4) } else { 0 } {
                     charges.push(match draw(4) {
-                        0 | 1 => Event::Fuel,
+                        0 | 1 => Event::Free(0),
                         2 => {
                             let bytes = 8 + draw(24);
                             live += bytes;

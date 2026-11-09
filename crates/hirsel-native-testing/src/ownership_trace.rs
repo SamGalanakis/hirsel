@@ -91,7 +91,6 @@ pub fn emit_leaf(
         foreign: &program.foreign_dispatch,
         opt,
         measurement: false,
-        fuel: program.fuel,
     };
     emit_relocated(
         program,
@@ -577,14 +576,6 @@ impl LeafObjects {
         run: Option<&hirsel_run_config::ValidatedRun>,
         tape: hirsel_native::Tape<'_>,
     ) -> Result<LeafExecution, NativeError> {
-        if run.is_some_and(|run| run.budgets().is_some_and(|budgets| budgets.fuel.is_some()))
-            && !program.fuel
-        {
-            return Err(NativeError::new(
-                StageName::Launch,
-                "the selected ownership executable has no fuel checks",
-            ));
-        }
         if run.is_some_and(|run| run.record().inputs != program.launch) {
             return Err(NativeError::new(
                 StageName::Launch,

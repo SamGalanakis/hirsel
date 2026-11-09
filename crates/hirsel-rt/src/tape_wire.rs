@@ -862,7 +862,6 @@ wire_enum!(hirsel_run_schema::SignalKind {
 });
 
 wire_enum!(hirsel_run_schema::BudgetKind {
-    0 => Fuel,
     1 => Memory
 });
 
@@ -1115,16 +1114,14 @@ fn cpu_bounded<T: Wire>(input: &mut Decode<'_>, limit: usize) -> Result<Vec<T>, 
 impl Wire for crate::io::CpuPiece {
     fn encode(&self, out: &mut Vec<u8>) {
         self.credit.encode(out);
-        self.fuel.encode(out);
         self.net.encode(out);
-        self.envelope.encode(out);
+        self.high.encode(out);
     }
     fn decode(input: &mut Decode<'_>) -> Result<Self, String> {
         Ok(Self {
             credit: Wire::decode(input)?,
-            fuel: Wire::decode(input)?,
             net: Wire::decode(input)?,
-            envelope: cpu_bounded(input, crate::budget::stretch::ENVELOPE_MAX)?,
+            high: Wire::decode(input)?,
         })
     }
 }
@@ -1158,7 +1155,6 @@ impl Wire for crate::io::CpuNativeSummary {
         self.pieces.encode(out);
         self.level.encode(out);
         self.limit.encode(out);
-        self.fuel.encode(out);
     }
     fn decode(input: &mut Decode<'_>) -> Result<Self, String> {
         Ok(Self {
@@ -1168,7 +1164,6 @@ impl Wire for crate::io::CpuNativeSummary {
             pieces: cpu_bounded(input, crate::budget::stretch::PIECES_MAX)?,
             level: Wire::decode(input)?,
             limit: Wire::decode(input)?,
-            fuel: Wire::decode(input)?,
         })
     }
 }

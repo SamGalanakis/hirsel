@@ -69,8 +69,6 @@ fn byte_stream_upload_finishes_only_after_clean_eof() {
     });
 }
 
-// Tokio ce685ee tokio-util/tests/io_reader_stream.rs:39-67. The exact 8000-byte
-// vector exceeds the corpus's 1M steps; this execution test uses normal fuel.
 #[test]
 fn byte_stream_tokio_short_read_then_error_vector() {
     with_compiler_stack(|| {

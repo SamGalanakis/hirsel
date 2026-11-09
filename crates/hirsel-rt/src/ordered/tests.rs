@@ -103,10 +103,7 @@ impl Backend<Command> for Objects {
     }
 }
 
-const BOTH: Budgets = Budgets {
-    fuel: true,
-    memory: true,
-};
+const BOTH: Budgets = Budgets { memory: true };
 fn stretch(events: &[Event]) -> Stretch {
     summarise(BOTH, events).unwrap()
 }
@@ -145,7 +142,6 @@ fn frontier() -> (Frontier<Command, u64>, Objects) {
         Settled {
             level: 0,
             limit: u64::MAX,
-            fuel: u64::MAX,
         },
     );
     let mut b = Objects::default();
@@ -416,7 +412,6 @@ fn credit_events_split_stretches_at_the_committing_op() {
     f.settled = Settled {
         level: 90,
         limit: 100,
-        fuel: 1,
     };
     let close = operation("drop.trivial", Command::Step(Next::Keep, 80), &[], &[7]);
     f.offer(2, empty(), close, &mut b);
@@ -430,21 +425,11 @@ fn credit_events_split_stretches_at_the_committing_op() {
 
 #[test]
 fn speculative_budget_stops_expose_only_the_retired_prefix() {
-    for (events, expected) in [
-        (
-            vec![Event::Alloc(20), Event::Fuel, Event::Fuel, Event::Free(20)],
-            BudgetKind::Memory,
-        ),
-        (
-            vec![Event::Fuel, Event::Fuel, Event::Alloc(20), Event::Free(20)],
-            BudgetKind::Fuel,
-        ),
-    ] {
+    for (events, expected) in [(vec![Event::Alloc(20), Event::Free(20)], BudgetKind::Memory)] {
         let (mut f, mut b) = frontier();
         f.settled = Settled {
             level: 90,
             limit: 100,
-            fuel: 1,
         };
         assert_eq!(
             f.offer(2, stretch(&events), store(7, 1), &mut b).0,
@@ -464,14 +449,12 @@ fn speculative_budget_stops_expose_only_the_retired_prefix() {
 fn speculation_allowance_does_not_charge_or_block_the_head() {
     let (mut f, mut b) = frontier();
     f.policy.speculation_bytes = 16;
-    f.settled.fuel = 10;
-    assert_eq!(f.reserve(2, 16, 10), Ok(()));
-    assert_eq!(f.reserve(2, 1, 10), Err(Pause::Allowance));
-    assert_eq!(f.reserve(2, 0, 11), Err(Pause::Fuel));
-    assert_eq!(f.reserve(1, 1024, 100), Ok(()));
+    assert_eq!(f.reserve(2, 16), Ok(()));
+    assert_eq!(f.reserve(2, 1), Err(Pause::Allowance));
+    assert_eq!(f.reserve(1, 1024), Ok(()));
     assert_eq!(f.settled.level, 0);
     f.free_speculative(2, 8);
-    assert_eq!(f.reserve(2, 8, 10), Ok(()));
+    assert_eq!(f.reserve(2, 8), Ok(()));
     f.offer(2, empty(), store(7, 1), &mut b);
     f.apply_head(empty(), step("task.check_canceled", Next::Park), &mut b)
         .unwrap();
@@ -485,9 +468,9 @@ fn a_full_command_keeps_its_open_allocation_reservation_after_the_last_logged_tu
     f.policy.speculation_bytes = 16;
     b.deferred = true;
     f.enqueue(3, Held::empty());
-    f.reserve(2, 8, 0).unwrap();
+    f.reserve(2, 8).unwrap();
     assert_eq!(f.offer(2, empty(), store(7, 1), &mut b).0, Offer::Early);
-    f.reserve(2, 8, 0).unwrap();
+    f.reserve(2, 8).unwrap();
     // This may free older logged storage; it does not prove that any of the
     // eight bytes in the open stretch have died.
     f.credit_speculative(2, 4);
@@ -502,7 +485,7 @@ fn a_full_command_keeps_its_open_allocation_reservation_after_the_last_logged_tu
     assert_eq!(f.physical, 8, "unsubmitted stretch still owns its storage");
     f.complete_poll(Vec::new());
     assert_eq!(f.head(), Some(3));
-    assert_eq!(f.reserve(2, 9, 0), Err(Pause::Allowance));
+    assert_eq!(f.reserve(2, 9), Err(Pause::Allowance));
     assert_eq!(
         f.apply_head(empty(), step("task.check_canceled", Next::Park), &mut b),
         Ok(Progress::Poll)
@@ -551,7 +534,6 @@ fn differential_width_jitter_reorder_matrix() {
             Settled {
                 level: 0,
                 limit: u64::MAX,
-                fuel: u64::MAX,
             },
         );
         let mut b = Objects::default();
@@ -673,7 +655,7 @@ fn a_pending_keep_can_resume_its_saved_frame_after_absorption() {
 #[test]
 fn retirement_metadata_keeps_early_stretches_and_positional_credits() {
     let (mut f, mut b) = frontier();
-    let before = stretch(&[Event::Alloc(24), Event::Fuel, Event::Free(8)]);
+    let before = stretch(&[Event::Alloc(24), Event::Free(8)]);
     let prior = b.retirements.len();
     assert_eq!(
         f.offer(2, before.clone(), store(7, 9), &mut b).0,
@@ -703,7 +685,7 @@ fn waiting_continuations_record_their_stretch_without_inventing_an_op() {
     f.apply_head(empty(), step("host.request", Next::Keep), &mut b)
         .unwrap();
     let operations = b.trace.len();
-    let before = stretch(&[Event::Fuel, Event::Alloc(8)]);
+    let before = stretch(&[Event::Alloc(8)]);
     f.continue_head(before.clone(), &mut b, || Next::Yield)
         .unwrap();
     assert_eq!(b.trace.len(), operations);
@@ -732,7 +714,6 @@ fn a_physical_save_wait_retains_the_exact_operation_and_stretch_without_polling(
     let settled = Settled {
         level: 0,
         limit: 100,
-        fuel: 100,
     };
     let mut frontier = Frontier::new(0, policy, settled);
     frontier.held.insert(0, Held::empty());
@@ -741,11 +722,7 @@ fn a_physical_save_wait_retains_the_exact_operation_and_stretch_without_polling(
         block_retirement: true,
         ..Default::default()
     };
-    let mut before = Stretch::new(Budgets {
-        fuel: true,
-        memory: true,
-    });
-    before.fuel_points(7);
+    let mut before = Stretch::new(Budgets { memory: true });
     before.alloc(12).unwrap();
     let op = Operation {
         descriptor: op_descriptor("task.async").unwrap(),
@@ -757,7 +734,7 @@ fn a_physical_save_wait_retains_the_exact_operation_and_stretch_without_polling(
         Ok(Progress::NeedSave(0))
     );
     assert!(!frontier.head_ready(0));
-    assert_eq!(frontier.settled.fuel, 100);
+
     assert_eq!(frontier.settled.level, 0);
     assert_eq!(frontier.retired(), 0);
     assert!(backend.committed.is_empty());
@@ -767,7 +744,7 @@ fn a_physical_save_wait_retains_the_exact_operation_and_stretch_without_polling(
     assert!(!frontier.head_ready(0));
     backend.block_retirement = false;
     assert_eq!(frontier.absorb(&mut backend), Ok(Progress::Retired));
-    assert_eq!(frontier.settled.fuel, 93);
+
     assert_eq!(frontier.settled.level, 12);
     assert_eq!(frontier.retired(), 1);
     assert_eq!(backend.committed.len(), 1);

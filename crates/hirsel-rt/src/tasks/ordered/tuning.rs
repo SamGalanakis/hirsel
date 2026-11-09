@@ -149,7 +149,6 @@ mod tests {
             Settled {
                 level: 0,
                 limit: u64::MAX,
-                fuel: u64::MAX,
             },
         );
         frontier
@@ -162,10 +161,7 @@ mod tests {
         for _ in 0..AUTO_WINDOW_TURNS {
             frontier
                 .apply_head(
-                    Stretch::new(Budgets {
-                        fuel: false,
-                        memory: false,
-                    }),
+                    Stretch::new(Budgets { memory: false }),
                     Operation {
                         descriptor: op_descriptor("atomic.store").unwrap(),
                         footprint: Default::default(),

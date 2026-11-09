@@ -333,7 +333,6 @@ fn compile_settled<R>(
         source.foreign_dispatch(),
         true,
         false,
-        false,
     );
     let inputs = NativeInstanceInputs::from_products(declarations, original).unwrap();
     let policy = ContentHash::of_bytes(b"original native object controls");

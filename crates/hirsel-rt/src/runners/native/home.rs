@@ -119,7 +119,6 @@ impl Home {
                     vec![]
                 },
                 code: facts.reach.clone(),
-                fueled: true,
             })
             .map_err(refused)?;
         let mut host = crate::host_launch::HostGrants::sharing(

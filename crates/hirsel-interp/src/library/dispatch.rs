@@ -1557,11 +1557,6 @@ impl Operations for Library {
     fn cpu_mapper_certified(&mut self, certified: bool) {
         self.cpu_certified = certified;
     }
-    fn fuel_charged(&mut self, cost: u64) {
-        if let Some(trace) = &mut self.cpu_trace {
-            trace.fuel = trace.fuel.saturating_add(cost);
-        }
-    }
     fn immediate_poll(&self, token: u64) -> bool {
         !self.simulation.config.tasks_free
             && self
@@ -2419,7 +2414,6 @@ primary_operations! { library, call, context, name, a, value;
         if algorithm.block_size() == 64 && bytes(arg(a, 0)?)?.len() as u64 > u64::MAX / 8 {
             return Ok(Some(OperationResult::Failed(fail(&call, context, "SEM-1", "SHA input length overflow"))));
         }
-        // eval charged steps and fuel before offering this borrowed-only operation.
         let digest = hirsel_kernels::sha::digest(algorithm, bytes(arg(a, 0)?)?, |_| Ok::<_, std::convert::Infallible>(())).unwrap();
         collection::sequence(BuiltinType::Inline, digest[..algorithm.output_size()].iter().map(|&n| Value::Integer(Integer::new(Primitive::U8, u128::from(n)).unwrap())))
     },

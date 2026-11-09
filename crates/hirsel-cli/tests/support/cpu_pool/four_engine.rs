@@ -43,10 +43,12 @@ fn cpu_fixture_four_engine_source_grant(
     runtimes: &[hirsel_native_testing::Runtime],
 ) {
     let _compiler = QUAL_COMPILER.lock().unwrap_or_else(|e| e.into_inner());
+    use hirsel_engine::{
+        QueryEngine, RunConfiguration, default_context, default_environment, entry_path,
+        run_observed_checked, run_observed_snapshot, source_check_request,
+    };
     use hirsel_front_phases::compiler_adapters;
-    use hirsel_driver::native;
-    use hirsel_engine::{QueryEngine,RunConfiguration,source_check_request,default_context,default_environment,entry_path,run_observed_checked,run_observed_snapshot};
-use hirsel_intern::jobs::{with_compiler_stack};
+    use hirsel_intern::jobs::with_compiler_stack;
 
     with_compiler_stack(|| {
         let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
@@ -60,8 +62,8 @@ use hirsel_intern::jobs::{with_compiler_stack};
             inputs: vec![],
         };
         let target = hirsel_native::TargetSpec::x86_64_unknown_linux_gnu();
-        let engines = std::iter::once(hirsel_native_testing::Engine::Heap { campaign: false }).chain(
-            runtimes.iter().flat_map(|&runtime| {
+        let engines = std::iter::once(hirsel_native_testing::Engine::Heap { campaign: false })
+            .chain(runtimes.iter().flat_map(|&runtime| {
                 [
                     hirsel_native_testing::Engine::Native {
                         opt: hirsel_native::OptLevel::Default,
@@ -73,8 +75,7 @@ use hirsel_intern::jobs::{with_compiler_stack};
                         runtime,
                     },
                 ]
-            }),
-        );
+            }));
         let matrix: Vec<_> = engines
             .map(|engine| hirsel_native_testing::Configuration {
                 options: hirsel_native::Options::new(target.clone()),
@@ -83,7 +84,8 @@ use hirsel_intern::jobs::{with_compiler_stack};
             .collect();
         let root = tempfile::tempdir().unwrap();
         let mut tools =
-            hirsel_native_testing::toolchain_for_matrix(&root.path().join("runtime"), &matrix).unwrap();
+            hirsel_native_testing::toolchain_for_matrix(&root.path().join("runtime"), &matrix)
+                .unwrap();
         tools.execution = hirsel_native::Execution::Executable;
         let mut cases = Vec::new();
         for &free in policies {
@@ -100,7 +102,8 @@ use hirsel_intern::jobs::{with_compiler_stack};
             };
             let run = run_observed_snapshot(&mut engine, &config, (&fixture).into()).unwrap();
             assert!(run.observation.is_some(), "W{width} Free={free}: {run:?}");
-            let reference = hirsel_native::Observation::of_reference(run.observation.as_ref().unwrap());
+            let reference =
+                hirsel_native::Observation::of_reference(run.observation.as_ref().unwrap());
             assert_eq!(
                 reference.output, expected_output,
                 "W{width} Free={free}: {reference:?}"

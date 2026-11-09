@@ -179,7 +179,6 @@ impl ExecutionTasks {
             &program.table,
             &program.target,
             &ahead,
-            program.fuel,
         ) {
             return Err("invalid CPU ahead certificate".into());
         }

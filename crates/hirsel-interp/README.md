@@ -526,12 +526,11 @@ The scheduler accepts the internal Blocked stop signal without executing pending
 cleanup or checked resource-exit audits. Its observation retains stdout, confirmed
 effects and stable wait rows (spawn path, source anchor, kind, logical targets).
 
-Run budgets (`RuntimeTypes.budgets`, `budgets.limits@2`; `budget.rs`) stop a run the
-same way, as `Outcome::BudgetExceeded(kind)`. Fuel is charged at each block start a frame
-reaches by entry, self-tail restart or a jump to the same or an earlier block. Memory is
+Run budgets (`RuntimeTypes.budgets`, `budgets.limits@3`; `budget.rs`) stop a run the
+same way, as `Outcome::BudgetExceeded(Memory)`. Memory is
 `Value::logical_bytes` over every frame of every task plus `Operations::retained_bytes`,
 measured before the next step once constructions' and library results' shallow charges
-pass the headroom left at the last measurement, or once enough fuel has passed; the
+pass the headroom left at the last measurement, or the memory sampling interval has passed; the
 decision uses only the exact measurement, so frees never cause a stop and replay stops
 alike.
 
@@ -744,7 +743,7 @@ Native operation result derivation borrows argument lifetime summaries. Complete
 mutable updates move their shadows back to caller storage and retain their exact
 lifetime totals for callback propagation. The shared work counter
 `hirsel_intern::work::Counter::InterpClonedShadowNodes` counts administrative shadow
-node copies, including roots detached by a write, without changing fuel or semantic
+node copies, including roots detached by a write, without changing semantic
 observations. Shadow child vectors and ownership/view contents use copy-on-write
 `Rc` storage. Administrative snapshots share descendants and preserve holder tokens;
 semantic copies still create new holders. Projection and list writes detach their

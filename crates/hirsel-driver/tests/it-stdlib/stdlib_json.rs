@@ -110,7 +110,7 @@ fn native_measurement(source: &str, label: &str) -> String {
                 supplemental_sources: vec![],
                 output: NativeOutput::Executable,
                 run: None,
-                fuel: false,
+
                 evidence: None,
             }),
         )
@@ -262,7 +262,6 @@ fn execute_native_source(name: &str, source: &str) {
                 hirsel_native::BuildProfile::Debug,
                 backend,
                 None,
-                false,
                 hirsel_driver::session::Policy::default(),
                 hirsel_native::Validation::EveryStage,
             )

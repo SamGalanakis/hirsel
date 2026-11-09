@@ -56,11 +56,10 @@ Hold          == Mk("hold", "", 0, 0, "")
 Work          == Mk("work", "", 0, 0, "")
 Alloc(n)      == Mk("alloc", "", n, 0, "")
 Free(n)       == Mk("free", "", n, 0, "")
-Fuel(n)       == Mk("fuel", "", n, 0, "")
 NoOp          == Mk("none", "", 0, 0, "")
 
 (* Segment work: charges and pure computation, not ops (locality L).       *)
-IsCharge(op) == op.k \in {"alloc", "free", "fuel", "work"}
+IsCharge(op) == op.k \in {"alloc", "free", "work"}
 
 HObj(h) == Cfg.hobj[h]
 Trivial(c) == Cfg.fin[c] = NoOp
@@ -93,6 +92,7 @@ Items(op) == (IF op.h # "" THEN {HObj(op.h)} ELSE {})
 
 Range(f) == {f[i] : i \in DOMAIN f}
 Min(S) == CHOOSE x \in S : \A y \in S : x <= y
+Max(S) == CHOOSE x \in S : \A y \in S : x >= y
 Last(q) == q[Len(q)]
 IndexOf(q, x) == CHOOSE i \in 1 .. Len(q) : q[i] = x
 Ev(t, o, k, out) == [t |-> t, o |-> o, k |-> k, out |-> out]
@@ -104,7 +104,7 @@ Insert(q, i, ins) == SubSeq(q, 1, i - 1) \o ins \o SubSeq(q, i, Len(q))
 Str(n) == ToString(n)
 
 NoWait == [k |-> "", h |-> "", o |-> 0, at |-> 0, issued |-> 0]
-EmptyPiece == [f |-> 0, n |-> 0, env |-> <<>>]
+EmptyPiece == [n |-> 0, high |-> 0]
 
 -----------------------------------------------------------------------------
 (* The initial state. *)
@@ -123,13 +123,13 @@ InitTask(p, t) ==
    canceled |-> FALSE, detached |-> FALSE, handoff |-> 0, calls |-> <<>>,
    callYield |-> FALSE, callLogged |-> FALSE]
 
-InitState(p, memlim, fuellim) ==
+InitState(p, memlim) ==
   [obj |-> Obj0, hist |-> [x \in Objects |-> <<>>],
    tk |-> [t \in Tasks |-> InitTask(p, t)],
    head |-> Head(Cfg.queue), lq |-> Tail(Cfg.queue),
    parked |-> Cfg.parked0, parks |-> Len(Cfg.parked0), woken |-> {}, touched |-> {},
    tick |-> 0, sps |-> 0, turns |-> <<>>, cur |-> <<>>, polls |-> <<>>, out |-> <<>>,
-   level |-> Cfg.level0, fuel |-> 0, memlim |-> memlim, fuellim |-> fuellim,
+   level |-> Cfg.level0, memlim |-> memlim,
    spec |-> 0, stop |-> "none", early |-> {}, fault |-> "", p |-> p]
 
 -----------------------------------------------------------------------------
@@ -332,50 +332,32 @@ Eff(s0, t, o, op, early) ==
          ELSE Res([s EXCEPT !.tk[t].wait = [NoWait EXCEPT !.k = "hold"]], "", "hold")
 
 -----------------------------------------------------------------------------
-(* Budgets (section 6, budgets.limits@2). The head charges live against    *)
-(* the settled level; a non-head segment keeps pieces with an envelope of  *)
-(* record highs (u, h), settled at retirement in program order.            *)
+(* Budgets (section 6, budgets.limits@3). The head charges live against    *)
+(* the settled level; non-head pieces keep a net change and memory high.  *)
 
 LiveCharge(s, op) ==
   CASE op.k = "alloc" ->
          IF s.level + op.v + (IF "headseesspec" \in Mut THEN s.spec ELSE 0) > s.memlim
            THEN DoStop(s, "memory") ELSE [s EXCEPT !.level = @ + op.v]
     [] op.k = "free" -> [s EXCEPT !.level = @ - op.v]
-    [] op.k = "fuel" ->
-         IF s.fuel + op.v > s.fuellim THEN DoStop(s, "fuel") ELSE [s EXCEPT !.fuel = @ + op.v]
     [] OTHER -> s
-
-MaxH(env) == IF env = <<>> THEN 0 ELSE Last(env)[2]
 
 AddCharge(p, op) ==
   CASE op.k = "alloc" ->
          LET n2 == p.n + op.v IN
-         [p EXCEPT !.n = n2,
-                   !.env = IF n2 <= MaxH(p.env) THEN @
-                           ELSE IF @ # <<>> /\ Last(@)[1] = p.f
-                             THEN Append(SubSeq(@, 1, Len(@) - 1), <<p.f, n2>>)
-                             ELSE Append(@, <<p.f, n2>>)]
+         [p EXCEPT !.n = n2, !.high = Max({@, n2})]
     [] op.k = "free" -> [p EXCEPT !.n = @ - op.v]
-    [] op.k = "fuel" -> [p EXCEPT !.f = @ + op.v]
     [] OTHER -> p
 
-(* Settlement of one piece at level l with phi fuel left.                  *)
 Settle(s, p) ==
-  LET phi == s.fuellim - s.fuel
-      hits == {i \in 1 .. Len(p.env) : s.level + p.env[i][2] > s.memlim}
-      mem == CASE "peakonly" \in Mut -> hits # {}
-               [] "netonly" \in Mut -> s.level + p.n > s.memlim
-               [] OTHER -> hits # {} /\ p.env[Min(hits)][1] <= phi
+  LET mem == IF "netonly" \in Mut THEN s.level + p.n > s.memlim
+             ELSE s.level + p.high > s.memlim
   IN IF mem THEN DoStop(s, "memory")
-     ELSE IF p.f > phi THEN DoStop(s, "fuel")
-     ELSE [s EXCEPT !.level = @ + p.n, !.fuel = @ + p.f, !.spec = @ - p.n]
+     ELSE [s EXCEPT !.level = @ + p.n, !.spec = @ - p.n]
 
-(* Sequential composition of two pieces (used only by "mergepieces").      *)
+(* Sequential composition of two memory pieces. *)
 Compose(p1, p2) ==
-  [f |-> p1.f + p2.f, n |-> p1.n + p2.n,
-   env |-> p1.env \o SelectSeq([i \in 1 .. Len(p2.env) |->
-                                  <<p1.f + p2.env[i][1], p1.n + p2.env[i][2]>>],
-                               LAMBDA e : e[2] > MaxH(p1.env))]
+  [n |-> p1.n + p2.n, high |-> Max({p1.high, p1.n + p2.high})]
 
 RECURSIVE ComposeAll(_)
 ComposeAll(ps) == IF ps = <<>> THEN EmptyPiece ELSE Compose(Head(ps), ComposeAll(Tail(ps)))
@@ -471,8 +453,8 @@ RunSerial(s, n) == IF ~Running(s) \/ n = 0 THEN s ELSE RunSerial(HeadStep(s), n 
 
 (* With the scenario's budgets (turns, outputs, stop) and without them     *)
 (* (object histories: early commits past a budget stop are internal).      *)
-SB == [p \in Cfg.progs |-> RunSerial(InitState(p, Cfg.memlim, Cfg.fuellim), 400)]
-SF == [p \in Cfg.progs |-> RunSerial(InitState(p, Big, Big), 400)]
+SB == [p \in Cfg.progs |-> RunSerial(InitState(p, Cfg.memlim), 400)]
+SF == [p \in Cfg.progs |-> RunSerial(InitState(p, Big), 400)]
 
 ASSUME \A p \in Cfg.progs : SB[p].stop # "none" /\ SB[p].fault = ""
                              /\ SF[p].stop # "none" /\ SF[p].fault = ""
@@ -518,9 +500,6 @@ Eligible(s, t, op) ==
   /\ "norule3" \in Mut \/ \A r \in Before(s, t) : Items(op) \cap (Fp(s, r) \cup SpTerm(s)) = {}
 
 OpEntries(log) == Len(SelectSeq(log, NotPiece))
-StretchFuel(log) == LET ps == SelectSeq(log, IsPiece) IN
-                    IF ps = <<>> THEN 0 ELSE ComposeAll([i \in 1 .. Len(ps) |-> ps[i].p]).f
-
 CanAhead(s, t) ==
   LET k == s.tk[t] IN
   /\ t \in Range(s.lq)
@@ -541,11 +520,8 @@ ChargeAhead(s, t, op) ==
       dspec == CASE op.k = "alloc" -> op.v [] op.k = "free" -> - op.v [] OTHER -> 0
   IN [s EXCEPT !.tk[t].log = new, !.tk[t].pc = @ + 1, !.spec = @ + dspec]
 
-(* A non-head segment pauses (unobservably) at an allocation beyond the    *)
-(* speculation allowance, or when its own fuel exceeds the fuel left.      *)
-Paused(s, t, op) ==
-  \/ op.k = "alloc" /\ s.spec + op.v > Cfg.allowance
-  \/ op.k = "fuel" /\ StretchFuel(s.tk[t].log) + op.v > s.fuellim - s.fuel
+(* A non-head segment pauses at an allocation beyond speculation allowance. *)
+Paused(s, t, op) == op.k = "alloc" /\ s.spec + op.v > Cfg.allowance
 
 EarlyCommit(s, t, op, o) ==
   LET r == Eff([s EXCEPT !.tk[t].ord = o], t, o, op, TRUE)
@@ -579,7 +555,7 @@ AheadSucc(s, t) ==
 
 VARIABLE st
 
-Init == \E p \in Cfg.progs : st = InitState(p, Cfg.memlim, Cfg.fuellim)
+Init == \E p \in Cfg.progs : st = InitState(p, Cfg.memlim)
 
 AheadAny(s) == UNION {IF CanAhead(s, t) THEN AheadSucc(s, t) ELSE {} : t \in Tasks}
 
@@ -631,7 +607,7 @@ QueueEqual ==
 FinalEqual ==
   ~Running(st) =>
     /\ st.turns = Ref.turns /\ st.out = Ref.out /\ st.stop = Ref.stop
-    /\ st.stop \notin {"memory", "fuel"} => st.hist = Full.hist
+    /\ st.stop # "memory" => st.hist = Full.hist
 
 (* What a run exposes: mutation runs must fail on this, not on bookkeeping. *)
 Behavior == NoFault /\ TurnsPrefix /\ HistPrefix /\ QueueEqual /\ FinalEqual

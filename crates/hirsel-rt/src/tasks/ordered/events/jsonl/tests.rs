@@ -17,10 +17,7 @@ pub(super) fn event(outcome: CanonicalOutcome) -> CanonicalEvent {
         version: u64::MAX,
         outcome,
         retirement: u64::MAX,
-        before: Stretch::new(crate::budget::stretch::Budgets {
-            fuel: true,
-            memory: true,
-        }),
+        before: Stretch::new(crate::budget::stretch::Budgets { memory: true }),
         credit: u64::MAX,
     }
 }
@@ -31,7 +28,6 @@ fn canonical_jsonl_preserves_exact_integers_escaping_stretches_and_initialized_b
         status: 0,
         payload: Some(vec![0, 255, 7]),
     });
-    row.before.fuel_points(2);
     row.before.alloc(24).unwrap();
     row.before.free(8);
     row.before.credit(16).unwrap();
@@ -46,13 +42,7 @@ fn canonical_jsonl_preserves_exact_integers_escaping_stretches_and_initialized_b
     assert_eq!(parsed["subevent"].as_u64(), Some(u32::MAX as u64));
     assert_eq!(parsed["op"], "test.\"escape\nλ");
     assert_eq!(parsed["outcome"]["payload"], "00ff07");
-    assert_eq!(
-        parsed["before"],
-        json!([
-            {"credit":0,"fuel":2,"net":16,"envelope":[[2,24]]},
-            {"credit":16,"fuel":0,"net":32,"envelope":[[0,32]]},
-        ])
-    );
+
     assert_eq!(
         parsed["transition"],
         json!({"kind":"call","members":[[1],[0,2]],"then_yield":true})

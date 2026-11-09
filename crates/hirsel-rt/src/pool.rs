@@ -1089,12 +1089,6 @@ pub(crate) unsafe fn hand_off(
     // SAFETY: `me` is this thread's exec, alive as long as the run's execs; `to` is idle, so
     // its worker's heap holds no task.
     unsafe {
-        // The run's fuel travels with the run, so a budget charges every thread's code once.
-        let (from, into) = ((*me).worker.get(), (*to).worker.get());
-        if from != into {
-            let fuel = (*from).heap().parked_fuel();
-            (*into).heap().park_fuel(fuel);
-        }
         (*me)
             .deferred
             .set(Some((to, Post::Run { task: next, permit })));

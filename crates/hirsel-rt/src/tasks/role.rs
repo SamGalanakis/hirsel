@@ -541,8 +541,6 @@ impl Guard {
         unsafe { Self::physical(ctx) }
     }
 
-    /// # Safety
-    /// Physical dispatch/fuel only; this does not authorize a semantic op.
     pub(crate) unsafe fn physical(ctx: *mut TaskCtx) -> Self {
         // SAFETY: caller contract.
         unsafe {

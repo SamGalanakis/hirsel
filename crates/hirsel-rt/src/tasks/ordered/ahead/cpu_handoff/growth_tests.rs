@@ -64,7 +64,7 @@ fn run_growth_with_sharing(
     let outcome = run.run(
         move |ctx| unsafe {
             (*ctx).run().cpu_grant = Some(setup_grant.clone());
-            (*ctx).set_budgets(Some(100), Some(setup_grant.max_batch_bytes));
+            (*ctx).set_budgets(Some(setup_grant.max_batch_bytes));
             (*ctx).heap().idle_cap = 0;
             (*ctx).heap_ref().meter.cpu.set(configured).ok().unwrap();
             engine::enable(
@@ -74,7 +74,7 @@ fn run_growth_with_sharing(
             events::enable(ctx);
         },
         move |ctx| unsafe {
-            engine::fuel_in(ctx);
+            engine::task_in(ctx);
             assert_eq!(cpu::control(ctx, 4, 2, 1, || 0), Ok(0));
             assert_eq!(cpu::control(ctx, 4, 3, 0, || 0), Ok(0));
             let child = holders.then(|| {
@@ -433,7 +433,7 @@ fn run_region_storage(
     let outcome = run.run(
         move |ctx| unsafe {
             (*ctx).run().cpu_grant = Some(setup_grant.clone());
-            (*ctx).set_budgets(Some(100), Some(setup_grant.max_batch_bytes));
+            (*ctx).set_budgets(Some(setup_grant.max_batch_bytes));
             (*ctx).heap_ref().meter.cpu.set(configured).ok().unwrap();
             (*ctx).heap().idle_cap = 0;
             engine::enable(
@@ -443,7 +443,7 @@ fn run_region_storage(
             events::enable(ctx);
         },
         move |ctx| unsafe {
-            engine::fuel_in(ctx);
+            engine::task_in(ctx);
             assert_eq!(cpu::control(ctx, 4, 2, 1, || 0), Ok(0));
             assert_eq!(cpu::control(ctx, 4, 3, 0, || 0), Ok(0));
             let mut region = std::mem::MaybeUninit::<Region>::uninit();

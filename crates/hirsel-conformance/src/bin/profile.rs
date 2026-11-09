@@ -102,7 +102,7 @@ fn ready_view(
             output: NativeOutput::Ready,
             options,
             run: None,
-            fuel: false,
+
             evidence: None,
         }),
     )?;

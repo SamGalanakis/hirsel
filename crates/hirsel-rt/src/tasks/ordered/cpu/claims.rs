@@ -161,7 +161,6 @@ mod tests {
         let mut state = Settled {
             level: 0,
             limit: 100,
-            fuel: 20,
         };
         let mut batch = Batch::new(&grant, 4, 1, state);
         let key = TaskKey::new(7, 3);
@@ -181,10 +180,7 @@ mod tests {
         assert_eq!(
             batch.settle(
                 key.word(),
-                &Stretch::new(Budgets {
-                    fuel: true,
-                    memory: true
-                }),
+                &Stretch::new(Budgets { memory: true }),
                 &mut state,
                 true
             ),

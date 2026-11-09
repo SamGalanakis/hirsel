@@ -387,7 +387,7 @@
       "hirsel.ownership_trace=true"
     ]
   },
-  "ownership_launch_71::native_ownership_keeps_the_admitted_fuel_checks_while_tracing_loop_lifetimes": {
+  "ownership_launch_71::native_ownership_traces_loop_lifetimes": {
     "source": "crates/hirsel-cli/tests/cli/ownership_launch_71.rs",
     "inputs": [],
     "config": [

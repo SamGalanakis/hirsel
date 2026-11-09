@@ -327,7 +327,6 @@ fn runtime50_capacity_target_and_lost_permit() {
     assert_eq!((sample.width.effective, sample.width.pending), (3, 4));
     partial.finish(0);
 
-    // A stopped nonfuel pure loop keeps its worker and permit, reported lost.
     set_compute_grant(2);
     let release = Arc::new(AtomicBool::new(false));
     let run = crate::host::BodyRun::new(2, false);

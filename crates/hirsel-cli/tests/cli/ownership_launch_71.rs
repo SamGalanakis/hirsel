@@ -220,7 +220,7 @@ pub fn main(rt:Io)->Result[(),GrantError] {
 
 #[test]
 #[ignore = "requires diagnostic runtime: -c hirsel.ownership_trace=true -- --test-arg=--include-ignored"]
-fn native_ownership_keeps_the_admitted_fuel_checks_while_tracing_loop_lifetimes() {
+fn native_ownership_traces_loop_lifetimes() {
     let path = file(
         r#"
 resource type Token {}
@@ -236,13 +236,12 @@ pub fn main()->Result[(),()] {
 "#,
     );
     let directory = tempfile::tempdir().unwrap();
-    let grants = r#"{"budgets":{"provider":"budgets.limits@2","fuel":1000000}}"#;
     for backend in ["llvm", "cranelift"] {
         let sidecar = directory.path().join(format!("{backend}.json"));
         let output = Command::new(env!("CARGO_BIN_EXE_hirsel"))
             .arg("run")
             .arg(&path)
-            .args(["--native", "--backend", backend, "--grants", grants])
+            .args(["--native", "--backend", backend])
             .arg("--trace-ownership")
             .arg(&sidecar)
             .output()

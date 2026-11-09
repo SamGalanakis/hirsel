@@ -49,15 +49,6 @@ fn ordered_qualification_cancel_after_claim() {
     ordered_remaining("cancel-after", ORDERED_CANCEL, 0);
 }
 #[test]
-fn ordered_qualification_fuel_stop() {
-    ordered_remaining(
-        "fuel",
-        ORDERED_FUEL,
-        hirsel_run_schema::exit::BUDGET_EXCEEDED,
-    );
-}
-
-#[test]
 fn ordered_qualification_reserves_ordinary_control_capacity_before_preparation() {
     ordered_remaining("no-controller", ORDERED_NO_CONTROLLER, 0);
 }
@@ -90,16 +81,6 @@ fn ordered_allocating_cancel_before_claim() {
 #[test]
 fn ordered_allocating_cancel_after_claim() {
     ordered_remaining_mode("cancel-after", ORDERED_CANCEL, 0, true);
-}
-
-#[test]
-fn ordered_allocating_fuel_stop() {
-    ordered_remaining_mode(
-        "fuel",
-        ORDERED_FUEL,
-        hirsel_run_schema::exit::BUDGET_EXCEEDED,
-        true,
-    );
 }
 
 #[test]

@@ -17,7 +17,7 @@
 extern "C" {
 #endif
 
-#define HIRSEL_RT_V2_ABI_VERSION 105
+#define HIRSEL_RT_V2_ABI_VERSION 107
 /* TaskSpawn trailing flags: compiler proofs, ignored in ordered execution and replay. */
 #define HIRSEL_RT_V2_SPAWN_IMMEDIATE_AWAIT 1
 #define HIRSEL_RT_V2_SPAWN_OP_FREE 2
@@ -124,29 +124,25 @@ extern "C" {
 #define HIRSEL_RT_V2_CTX_IDLE_SLABS_OFFSET 8
 #define HIRSEL_RT_V2_CTX_PAGES_OFFSET 16
 #define HIRSEL_RT_V2_POOL_COUNT 64
-/* Run budgets (budgets.limits@2, runtime ABI 27): after the pages, the running task's i64 fuel
- * chunk. A fuel build's code subtracts one at each fuel point and, when the result is negative,
- * calls hirsel_rt_v2_fuel_refill and continues after the call. */
-#define HIRSEL_RT_V2_CTX_FUEL_OFFSET 528
-/* Runtime ABI 26: after the fuel word, the u32 id of the heap whose pages the context holds
+/* Runtime ABI 107: after the pages, the u32 id of the heap whose pages the context holds
  * (the running worker's). A slab's u32 owner is its heap's id; its xthread_free word is the
  * runtime's list of blocks other heaps freed, which compiled code never touches. */
-#define HIRSEL_RT_V2_CTX_HEAP_ID_OFFSET 536
+#define HIRSEL_RT_V2_CTX_HEAP_ID_OFFSET 528
 /* Runtime ABI 65: after the context's view (the words above, then a u32 heap and a u64
  * epoch), the task's LANG-10 counters, written only by the runtime: the u16 foreground
  * and cleanup admission counts and the u32 finalizer nesting. Compiled code reads them to
  * test a depth-leaf callee's room: in cleanup mode (nesting or cleanup count nonzero)
  * while the cleanup count is below 64, otherwise while the foreground count is below 1024. */
-#define HIRSEL_RT_V2_CTX_FOREGROUND_COUNT_OFFSET 560
-#define HIRSEL_RT_V2_CTX_CLEANUP_COUNT_OFFSET 562
-#define HIRSEL_RT_V2_CTX_CLEANUP_MODE_OFFSET 564
+#define HIRSEL_RT_V2_CTX_FOREGROUND_COUNT_OFFSET 552
+#define HIRSEL_RT_V2_CTX_CLEANUP_COUNT_OFFSET 554
+#define HIRSEL_RT_V2_CTX_CLEANUP_MODE_OFFSET 556
 #define HIRSEL_RT_V2_PAGE_FREE_OFFSET 16
 #define HIRSEL_RT_V2_PAGE_LIVE_OFFSET 24
 #define HIRSEL_RT_V2_PAGE_LOCAL_FREE_OFFSET 72
 #define HIRSEL_RT_V2_PAGE_OWNER_OFFSET 96
 #define HIRSEL_RT_V2_PAGE_XTHREAD_FREE_OFFSET 104
-_Static_assert(HIRSEL_RT_V2_CTX_HEAP_ID_OFFSET == HIRSEL_RT_V2_CTX_FUEL_OFFSET + 8,
-               "the heap id follows the fuel word");
+_Static_assert(HIRSEL_RT_V2_CTX_HEAP_ID_OFFSET == HIRSEL_RT_V2_CTX_PAGES_OFFSET + 8 * HIRSEL_RT_V2_POOL_COUNT,
+               "the heap id follows the pages");
 _Static_assert(HIRSEL_RT_V2_PAGE_XTHREAD_FREE_OFFSET == HIRSEL_RT_V2_PAGE_OWNER_OFFSET + 8,
                "the xthread list follows the owner id and its padding");
 
@@ -438,7 +434,6 @@ typedef uint8_t (*hirsel_rt_v2_roots_entry)(hirsel_rt_v2_ctx *, uint8_t *, uint8
 #define HIRSEL_RT_V2_PROGRAM_UNREPLAYABLE 1u
 #define HIRSEL_RT_V2_PROGRAM_STANDALONE 2u
 #define HIRSEL_RT_V2_PROGRAM_ESCAPES 4u
-#define HIRSEL_RT_V2_PROGRAM_FUELED 8u
 typedef struct {
     const void *code;
     const uint8_t *path;
@@ -941,7 +936,7 @@ uint8_t hirsel_rt_v2_cpu_publish(hirsel_rt_v2_ctx *ctx, hirsel_rt_v2_cpu_summary
 uint8_t hirsel_rt_v2_cpu_ahead_publish(hirsel_rt_v2_ahead_physical *state, hirsel_rt_v2_cpu_summary *summary);
 uint8_t hirsel_rt_v2_cpu_ahead_grow(hirsel_rt_v2_ahead_physical *state, hirsel_rt_v2_cpu_growth *request);
 uint8_t hirsel_rt_v2_host_active(hirsel_rt_v2_ahead_physical *state);
-void hirsel_rt_v2_host_defer(hirsel_rt_v2_ahead_physical *state, uint32_t slot, hirsel_rt_v2_header *block, uint64_t fuel);
+void hirsel_rt_v2_host_defer(hirsel_rt_v2_ahead_physical *state, uint32_t slot, hirsel_rt_v2_header *block);
 /* A resumable frame at a boundary: 0 proceeds with the boundary call, 1 suspends. */
 uint8_t hirsel_rt_v2_resume_point(hirsel_rt_v2_ctx *ctx, uint8_t *frame, uint32_t state);
 void hirsel_rt_v2_resume_tail(hirsel_rt_v2_ctx *ctx, uint8_t *frame, uint32_t state, uint32_t kind, uint32_t bytes, uint64_t anchor, uint64_t operation_site);
@@ -950,11 +945,7 @@ void hirsel_rt_v2_resume_cleanup(hirsel_rt_v2_ctx *ctx, uint8_t *frame, uint32_t
 uint8_t hirsel_rt_v2_resume_run(hirsel_rt_v2_ctx *ctx, hirsel_rt_v2_header *environment, uint64_t caller_site, uint64_t operation_site, void *dispatcher, uint32_t bytes);
 
 
-/* A fuel point found the running task's chunk spent (its fuel word is negative): the runtime
-   stores the next chunk, less the point the failed charge spent, in the word and returns, so
-   the code continues; when the run's fuel is spent the run ends with BudgetExceeded (fuel), as
-   a Blocked run ends, and the call does not return (runtime ABI 27). */
-void hirsel_rt_v2_fuel_refill(hirsel_rt_v2_ctx *ctx);
+
 
 uint8_t hirsel_rt_v2_ordered_join(hirsel_rt_v2_ctx *ctx, uint64_t caller_site, uint64_t operation_site, uint64_t *scope, uint64_t *child, uint8_t *slot, uint64_t size, uint32_t align);
 uint8_t hirsel_rt_v2_ordered_sleep_until(hirsel_rt_v2_ctx *ctx, uint64_t caller_site, uint64_t operation_site, uint8_t *destination, uint8_t *out, uint64_t *clock, uint64_t *deadline);

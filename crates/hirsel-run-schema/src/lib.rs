@@ -148,7 +148,7 @@ impl ProviderContract {
             Self::AdmitAny => "admit.any@1",
             Self::AdmitSafe => "admit.safe@1",
             Self::BudgetsNone => "budgets.none@1",
-            Self::BudgetsLimits => "budgets.limits@2",
+            Self::BudgetsLimits => "budgets.limits@3",
             Self::RunnerLocalThreads => "local.threads@1",
             Self::RunnerSim => "sim@1",
             Self::RunnerRemoteTls => "remote.tls@1",
@@ -325,17 +325,12 @@ pub enum CodeReach {
     /// spelling; empty where the launcher keeps only the verdict (an executable).
     Escapes(Vec<String>),
 }
-/// The run's resource budgets: host policy, never authority. `budgets.none@1`
-/// imposes none and normalizes to an absent entry; `budgets.limits@2` bounds the
-/// run's fuel (function entries and loop back-edges) and its logical storage (live blocks'
-/// size classes, large requests rounded up to 4 KiB, regions' canonical segments), each null
-/// for unbounded and at least one present; it retires `budgets.limits@1`, which refuses.
+/// Host memory policy. Limits require a positive `memory_bytes`; the none
+/// provider accepts no limit and normalizes to absence.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Budgets {
     pub provider: String,
-    #[serde(default)]
-    pub fuel: Option<u64>,
     #[serde(default)]
     pub memory_bytes: Option<u64>,
 }
@@ -343,14 +338,11 @@ impl BudgetKind {
     /// The kind's name in an observation record and a diagnostic.
     pub const fn name(self) -> &'static str {
         match self {
-            Self::Fuel => "fuel",
             Self::Memory => "memory",
         }
     }
     pub fn parse(name: &str) -> Option<Self> {
-        [Self::Fuel, Self::Memory]
-            .into_iter()
-            .find(|kind| kind.name() == name)
+        [Self::Memory].into_iter().find(|kind| kind.name() == name)
     }
 }
 

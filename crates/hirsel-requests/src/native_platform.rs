@@ -65,14 +65,8 @@ pub(super) fn profile_options(request: &NativeRequest) -> Result<ContentHash, Na
         hirsel_native::Partition::Singleton => (1, 0),
         hirsel_native::Partition::Random(seed) => (2, seed),
     };
-    let bytes = serde_json::to_vec(&(
-        options.backend.name(),
-        opt,
-        partition,
-        options.debug_tables,
-        request.fuel,
-    ))
-    .map_err(|error| NativeError::new(StageName::Emission, error.to_string()))?;
+    let bytes = serde_json::to_vec(&(options.backend.name(), opt, partition, options.debug_tables))
+        .map_err(|error| NativeError::new(StageName::Emission, error.to_string()))?;
     Ok(ContentHash::of_parts(
         "hirsel.host.native-profile.v4",
         [bytes.as_slice()],
@@ -164,7 +158,7 @@ impl NativePlatformSelection {
                     debug: options.debug_tables,
                     verify_backend: true,
                     measurement: inputs.tools.runtime_build.measurement,
-                    fuel: request.fuel,
+
                     requested_run: None,
                     test_entries: if matches!(output, CompilationOutput::Ready) {
                         request.test_entries.clone()
@@ -293,7 +287,7 @@ impl NativePlatformSelection {
                 debug: options.debug_tables,
                 verify_backend: true,
                 measurement: inputs.tools.runtime_build.measurement,
-                fuel: request.fuel,
+
                 requested_run: request.run.clone(),
                 test_entries: request.test_entries.clone(),
                 output: CompilationOutput::Executable,
@@ -318,14 +312,14 @@ mod tests {
     /// product is reused across another backend selection.
     #[test]
     fn every_codegen_choice_is_explicit_in_codegen_profile_identity() {
-        let request = |options: hirsel_native::BuildOptions, fuel| NativeRequest {
+        let request = |options: hirsel_native::BuildOptions| NativeRequest {
             definition: None,
             test_entries: Vec::new(),
             supplemental_sources: Vec::new(),
             output: super::super::NativeOutput::Executable,
             options,
             run: None,
-            fuel,
+
             evidence: None,
         };
         let base = hirsel_native::BuildProfile::Default
@@ -335,10 +329,10 @@ mod tests {
                 hirsel_native::Validation::EveryStage,
             )
             .unwrap();
-        let identity = |options, fuel| profile_options(&request(options, fuel)).unwrap();
-        let plain = identity(base.clone(), false);
-        assert_eq!(plain, identity(base.clone(), false));
-        let mut variants = vec![identity(base.clone(), true)];
+        let identity = |options| profile_options(&request(options)).unwrap();
+        let plain = identity(base.clone());
+        assert_eq!(plain, identity(base.clone()));
+        let mut variants = vec![];
         for change in [
             |o: &mut hirsel_native::BuildOptions| o.backend = Backend::Cranelift,
             |o: &mut hirsel_native::BuildOptions| o.opt = hirsel_native::OptLevel::None,
@@ -348,7 +342,7 @@ mod tests {
         ] {
             let mut options = base.clone();
             change(&mut options);
-            variants.push(identity(options, false));
+            variants.push(identity(options));
         }
         for (index, variant) in variants.iter().enumerate() {
             assert_ne!(

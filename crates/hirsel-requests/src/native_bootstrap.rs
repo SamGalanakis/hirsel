@@ -43,7 +43,7 @@ pub(super) struct NativePlan {
     pub debug: bool,
     pub verify_backend: bool,
     pub measurement: bool,
-    pub fuel: bool,
+
     pub backends: Vec<CompilationBackend>,
     pub requested_run: Option<Arc<hirsel_run_config::ValidatedRun>>,
     pub test_entries: Vec<(DefPath, u64)>,
@@ -146,7 +146,6 @@ impl NativeBootstrap {
             plan.debug,
             plan.verify_backend,
             plan.measurement,
-            plan.fuel,
             plan.backends
                 .iter()
                 .map(|backend| {
@@ -428,7 +427,6 @@ impl NativeBootstrap {
             source.foreign_dispatch(),
             plan.verify_backend,
             plan.measurement,
-            plan.fuel,
         );
         let root = NativeRootKey {
             roots: facts.roots.definitions.clone(),

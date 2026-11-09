@@ -1248,7 +1248,6 @@ impl Example {
                 Default::default(),
                 hirsel_native::Backend::Llvm,
                 None,
-                false,
                 hirsel_driver::session::Policy::default(),
                 hirsel_native::Validation::EveryStage,
             )

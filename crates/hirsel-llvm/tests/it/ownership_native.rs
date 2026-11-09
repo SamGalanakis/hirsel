@@ -227,7 +227,6 @@ fn inputs(program: &support::programs::Program) -> EmitInputs<'_> {
         tracking: false,
         opt: OptLevel::None,
         measurement: false,
-        fuel: false,
     }
 }
 

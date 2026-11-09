@@ -254,7 +254,7 @@ impl Native {
                             hirsel_native::OptLevel::Default,
                         ),
                         run: None,
-                        fuel: false,
+
                         evidence: None,
                     }),
                 })

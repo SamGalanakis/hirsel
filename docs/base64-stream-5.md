@@ -133,7 +133,7 @@ Each Rust case ran through `//:hirsel-driver-test-it-stdlib-shard-1` with
 `-- --test-arg=<case substring>`; the final two used respectively
 `base64_stream_5_every_partition` and `base64_stream_5_long_native`.
 Interpreter budgets remain 100M for exhaustive partitions and 50M for the 6 KiB
-control, inside the bounded Rust harness; corpus fuel is unchanged. Native
+control, inside the bounded Rust harness; corpus tooling Steps is unchanged. Native
 fixture builds use every-stage validation. All outputs/statuses are asserted.
 
 Corpus command:
@@ -158,4 +158,4 @@ Final distinct lane Rust controls: 4 passing / 0 failing (initial fixture run:
 0 passing / 3 failing). Corpus adds 2 cases to the 4 existing selected controls,
 all 6 passing; no unmodified-baseline test execution is claimed. The 24 KiB
 interpreter tooling limit is an expected harness limit, covered natively without
-a fuel increase. No production bug or minimal reproducer remains open.
+a tooling Steps increase. No production bug or minimal reproducer remains open.

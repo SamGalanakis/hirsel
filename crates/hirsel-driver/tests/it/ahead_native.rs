@@ -171,7 +171,6 @@ fn request_objects(
         Default::default(),
         true,
         false,
-        false,
     );
     let inputs = NativeInstanceInputs::from_products(declarations, lower).unwrap();
     let weight = MemoryWeight {
@@ -278,7 +277,7 @@ fn metadata(
         foreign: &program.foreign_dispatch,
         opt: OptLevel::Default,
         measurement: false,
-        fuel: program.fuel,
+
         verify_backend: true,
     };
     let registry = hirsel_lir::descriptor_registry::DescriptorRegistry::new(
@@ -372,7 +371,7 @@ fn both_backends_emit_real_alternate_dags_across_partitions_and_reject_corruptio
                     match mutation {
                         0 => {
                             bad[meta].ahead.as_mut().unwrap().plan =
-                                ContentHash::of_bytes(b"stale body/fuel/layout/helper/target")
+                                ContentHash::of_bytes(b"stale body/layout/helper/target")
                         }
                         1 => bad[code].bytes[0] ^= 1,
                         2 => bad[code].ahead.as_mut().unwrap().frames[0].1 += 16,
@@ -542,7 +541,7 @@ fn bounded_ordinary_spawn_twin_agrees_on_reference_checked_heap_and_both_natives
 }
 
 #[test]
-fn certificates_bind_transitive_bodies_layouts_fuel_helpers_and_target_options() {
+fn certificates_bind_transitive_bodies_layouts_helpers_and_target_options() {
     with_compiler_stack(|| {
         let (mut program, _) = request_objects(
             hirsel_native::Backend::Llvm,
@@ -550,7 +549,6 @@ fn certificates_bind_transitive_bodies_layouts_fuel_helpers_and_target_options()
         );
         let helper = ContentHash::of_bytes(b"helper assembly v1");
         let proposed = |p: &hirsel_native::ReadyProgram,
-                        fuel,
                         helpers,
                         table: &hirsel_lir::layout_types::LayoutTable,
                         target: &hirsel_native::TargetSpec| {
@@ -559,21 +557,16 @@ fn certificates_bind_transitive_bodies_layouts_fuel_helpers_and_target_options()
                 table,
                 target,
                 &p.ahead_environments,
-                fuel,
                 helpers,
             )
         };
-        let original = proposed(&program, false, helper, &program.table, &program.target);
+        let original = proposed(&program, helper, &program.table, &program.target);
         assert_eq!(original.roots.len(), 1);
-        assert_ne!(
-            original.identity,
-            proposed(&program, true, helper, &program.table, &program.target).identity
-        );
+
         assert_ne!(
             original.identity,
             proposed(
                 &program,
-                false,
                 ContentHash::of_bytes(b"helper assembly v2"),
                 &program.table,
                 &program.target
@@ -584,16 +577,16 @@ fn certificates_bind_transitive_bodies_layouts_fuel_helpers_and_target_options()
         layout.layout_version += 1;
         assert_ne!(
             original.identity,
-            proposed(&program, false, helper, &layout, &program.target).identity
+            proposed(&program, helper, &layout, &program.target).identity
         );
         let mut target = program.target.clone();
         target.features.push("+avx2".into());
-        let refused = proposed(&program, false, helper, &program.table, &target);
+        let refused = proposed(&program, helper, &program.table, &target);
         assert!(refused.roots.is_empty());
         assert_ne!(original.identity, refused.identity);
         target = hirsel_native::TargetSpec::aarch64_unknown_linux_gnu();
         assert!(
-            proposed(&program, false, helper, &program.table, &target)
+            proposed(&program, helper, &program.table, &target)
                 .roots
                 .is_empty()
         );
@@ -625,7 +618,7 @@ fn certificates_bind_transitive_bodies_layouts_fuel_helpers_and_target_options()
         program
             .units
             .push(hirsel_lir::validate::validate_ready(unit, &inputs).unwrap());
-        let changed = proposed(&program, false, helper, &program.table, &program.target);
+        let changed = proposed(&program, helper, &program.table, &program.target);
         assert_eq!(changed.roots.len(), 1);
         assert_eq!(
             original.roots.keys().collect::<Vec<_>>(),
@@ -788,7 +781,7 @@ fn cli_request_builds_define_and_adopt_ahead_on_both_backends() {
                     supplemental_sources: vec![],
                     output: NativeOutput::Executable,
                     run: None,
-                    fuel: false,
+
                     evidence: None,
                 }))
                 .unwrap();

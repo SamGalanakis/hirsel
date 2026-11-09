@@ -184,13 +184,7 @@ pub fn emit_ahead_object(
     CodegenError,
 > {
     if inputs.ahead.is_some_and(|plan| {
-        !hirsel_lir::ahead::validate_cpu_workers(
-            units,
-            inputs.layouts,
-            inputs.target,
-            plan,
-            inputs.fuel,
-        )
+        !hirsel_lir::ahead::validate_cpu_workers(units, inputs.layouts, inputs.target, plan)
     }) {
         return Err(CodegenError::Object {
             message: "invalid CPU ahead certificate".into(),

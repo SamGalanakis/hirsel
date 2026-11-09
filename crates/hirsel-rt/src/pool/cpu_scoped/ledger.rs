@@ -239,21 +239,13 @@ mod tests {
             let state = Settled {
                 level: 0,
                 limit: u64::MAX,
-                fuel: 100,
             };
             let mut live = Jobs::cpu(&grant, width, width as usize * 2, state);
             let mut recorded = Vec::new();
             // Jobs one and two retain 200 bytes. The next physical request
             // belongs to job five, while job three is the first serial stop.
             for job in [0, 1, 4, 3, 2] {
-                let charges = summarise(
-                    Budgets {
-                        fuel: true,
-                        memory: true,
-                    },
-                    &[Event::Fuel, Event::Alloc(100)],
-                )
-                .unwrap();
+                let charges = summarise(Budgets { memory: true }, &[Event::Alloc(100)]).unwrap();
                 recorded.push((job, charges.clone(), job < 2));
                 let backing = ledger.try_charge_job_heap(100);
                 assert_eq!(backing.is_ok(), job < 2);

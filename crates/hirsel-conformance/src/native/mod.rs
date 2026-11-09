@@ -746,7 +746,7 @@ fn visit_test_suite(
                                 hirsel_native::OptLevel::Default,
                             ),
                             run: None,
-                            fuel: false,
+
                             evidence: None,
                         }),
                     })

@@ -16,18 +16,8 @@ the validators derive their own normal and failure graph from the IR.
 implement: `EmitInputs`, failure codes, link names, site codes, descriptor names,
 the immortal prefix, the register-result rule, the receipt check and the object
 manifest; `object.rs` reads an emitted ELF object's symbol interface.
-`fuel.rs` names a unit's fuel points, its entry block and the targets of its control-flow
-graph's feedback edges, where code emitted with `EmitInputs::fuel` charges one unit of a
-run's fuel budget (`CTX_FUEL_OFFSET`); the mode changes no LIR and is part of the object's
-options.
-`profile.rs` shares immutable source ownership and source/cleanup anchor selection
-between native backends.
-`persistent.rs` is the structure-sharing vector that
-dataflow states are built from, here and in `hirsel-rc`: a state costs what it
-changes, so an analysis stays near-linear in the size of a function. Immutable
-rows can reuse structurally proven node equality between fixed-point visits.
-The proofs hold weak references and expire on writes; ordinary equality stays
-independent for differential checks against the reference solver.
+`checkpoints.rs` names function entries and feedback-edge targets used by
+private native execution to yield its physical frame for scheduling.
 
 Allowed dependencies: the dependency-free `hirsel-graph` utility and shared data crates (`hirsel-span`, `hirsel-syntax`, `hirsel-core-contract`, `hirsel-codec`); no external production
 dependency. Never an implementation crate or `hirsel-driver`: the driver will

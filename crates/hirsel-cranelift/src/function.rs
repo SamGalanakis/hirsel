@@ -151,8 +151,7 @@ pub(crate) struct FnEmitter<'e, 'a, 'f> {
     pub(crate) regions: Vec<Value>,
     funcs: HashMap<FuncId, FuncRef>,
     globals: HashMap<DataId, GlobalValue>,
-    /// Per block, whether it charges fuel (`hirsel_lir::fuel`); empty without `inputs.fuel`.
-    fuel_points: Vec<bool>,
+    checkpoint_points: Vec<bool>,
     pub(crate) instruction_index: usize,
     pub(crate) root_facts: Vec<Option<cranelift_frontend::Variable>>,
     pub(crate) root_facts_active: bool,
@@ -217,8 +216,8 @@ impl<'e, 'a, 'f> FnEmitter<'e, 'a, 'f> {
             .hidden_index(Hidden::Environment)
             .map(|index| entry_params[index]);
         let constant_slots = hirsel_lir::statics::constant_slots(unit, em.inputs.unit().statics);
-        let fuel_points = if em.inputs.unit().fuel || em.inputs.unit().alternate {
-            hirsel_lir::fuel::fuel_points(unit)
+        let checkpoint_points = if em.inputs.unit().alternate {
+            hirsel_lir::checkpoints::checkpoint_points(unit)
         } else {
             Vec::new()
         };
@@ -247,7 +246,7 @@ impl<'e, 'a, 'f> FnEmitter<'e, 'a, 'f> {
             regions: Vec::new(),
             funcs: HashMap::new(),
             globals: HashMap::new(),
-            fuel_points,
+            checkpoint_points,
             instruction_index: 0,
             root_facts: Vec::new(),
             root_facts_active: false,
@@ -1394,8 +1393,13 @@ impl<'e, 'a, 'f> FnEmitter<'e, 'a, 'f> {
                 }
             }
         }
-        if self.fuel_points.get(b.index()).copied().unwrap_or(false) {
-            self.charge_fuel()?;
+        if self
+            .checkpoint_points
+            .get(b.index())
+            .copied()
+            .unwrap_or(false)
+        {
+            self.ahead_point()?;
         }
         self.emit_block_suffix(b, 0, false)
     }
@@ -1431,38 +1435,6 @@ impl<'e, 'a, 'f> FnEmitter<'e, 'a, 'f> {
             self.ownership_point(hirsel_lir::ownership_trace::Point::Return(b))?;
         }
         self.terminator(terminator)
-    }
-
-    // Runtime ABI 26 puts the running worker's heap id right after the fuel word. Cranelift's
-    // code frees every block through the runtime, which checks the page owner itself, so it
-    // reads neither; the layout it shares with LLVM's inline paths is pinned here too.
-    const _HEAP_ID_AFTER_FUEL: () = assert!(
-        hirsel_lir::runtime_abi::CTX_HEAP_ID_OFFSET == hirsel_lir::runtime_abi::CTX_FUEL_OFFSET + 8
-    );
-
-    /// One unit of the run's fuel (`EmitInputs::fuel`): the context's fuel word, the running
-    /// task's chunk, loses one, and a negative result calls `hirsel_rt_v2_fuel_refill`, which
-    /// stores the next chunk (or stops the run) and returns to the code after the charge.
-    fn charge_fuel(&mut self) -> Emitted {
-        if self.em.inputs.unit().alternate {
-            return self.ahead_point(true);
-        }
-        let offset = hirsel_lir::runtime_abi::CTX_FUEL_OFFSET;
-        let fuel = self.load_ty(types::I64, self.context, offset);
-        let left = self.b.ins().iadd_imm(fuel, -1);
-        self.b
-            .ins()
-            .store(flags(), left, self.context, offset as i32);
-        let spent = self.b.ins().icmp_imm(IntCC::SignedLessThan, left, 0);
-        let (cold, next) = (self.b.create_block(), self.b.create_block());
-        self.b.set_cold_block(cold);
-        self.b.ins().brif(spent, cold, &[], next, &[]);
-        self.b.switch_to_block(cold);
-        let context = self.context;
-        self.rt(RuntimeEntry::FuelRefill, &[context])?;
-        self.b.ins().jump(next, &[]);
-        self.b.switch_to_block(next);
-        Ok(())
     }
 
     /// A depth-leaf callee's admission (`invocations::room`): whether the task has no
@@ -1896,7 +1868,7 @@ impl<'e, 'a, 'f> FnEmitter<'e, 'a, 'f> {
     /// Returns `status` and, with a register result, `value` (a zero word when absent).
     fn return_status(&mut self, status: i64, value: Option<V>) -> Emitted {
         self.ownership_leave()?;
-        self.ahead_point(false)?;
+        self.ahead_point()?;
         self.ahead_flush();
         let status = self.b.ins().iconst(types::I8, status);
         let mut returned = Vec::new();

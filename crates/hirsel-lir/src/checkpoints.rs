@@ -1,13 +1,8 @@
-//! Fuel points (`budgets.limits@2`, docs/spec/determinism.md "Budgets"): the blocks where
-//! a fuel build charges one unit of the run's fuel each time the block starts. They are
-//! the entry block and the target of every feedback edge of the loop nesting forest
-//! (`hirsel_graph::feedback_edges`), over normal and failure edges alike, so every
-//! cycle of the control-flow graph, irreducible ones included, passes a fuel point on
-//! each trip. Both backends charge at exactly these blocks.
+//! Function entries and feedback-edge targets used by private execution checkpoints.
 use crate::ir::{BlockId, Inst, LirUnit};
 
-/// Per block of `unit`, whether it is a fuel point.
-pub fn fuel_points<S>(unit: &LirUnit<S>) -> Vec<bool> {
+/// Per block of `unit`, whether it is a checkpoint.
+pub fn checkpoint_points<S>(unit: &LirUnit<S>) -> Vec<bool> {
     let tables = &unit.tables;
     let target = |edge: crate::ir::EdgeId| tables.edges.get(edge.index()).map(|e| e.target);
     let failure_target = |failure: crate::ir::FailureId| {

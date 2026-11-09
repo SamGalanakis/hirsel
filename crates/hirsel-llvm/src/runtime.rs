@@ -153,7 +153,6 @@ pub(crate) fn substrate(module: &Module<'_>, function: Function<'_>, entry: Runt
         | R::CallbackFailed
         | R::ForeignViolation
         | R::ExitReport
-        | R::FuelRefill
         | R::WorkerCreate
         | R::WorkerRetire
         | R::WorkerCollect => (MemoryEffects::ReadWrite, false, &[]),
@@ -675,19 +674,6 @@ fn idle_slabs<'m>(
     builder.store(builder.binary(op, idle, module.const_int(i64_ty, 1)), at, 8);
 }
 
-/// T16 Free of a dead block (its last credit consumed, its fields released) under the compiled
-/// fast path contract: a small block of the running worker's heap goes on its page's
-/// `local_free` list, and a page left with no live block joins the idle count. A first
-/// deferred free of a page (its `local_free` list is empty, so the page may have to join its
-/// class's available list), a block of another worker's heap (its page's owner is not the
-/// context's heap id, runtime ABI 26: the runtime publishes it to its owner), a large block,
-/// and every block while the context's inline-free flag is zero (diagnostic mode, measurement
-/// builds, the system allocator) go to `hirsel_rt_v2_free`.
-// The inline free reads the page owner and the context's heap id at their runtime ABI 26
-// places: right after the fuel word, and after the page's last runtime-only word.
-const _: () = assert!(
-    hirsel_lir::runtime_abi::CTX_HEAP_ID_OFFSET == hirsel_lir::runtime_abi::CTX_FUEL_OFFSET + 8
-);
 const _: () = assert!(
     hirsel_lir::runtime_abi::PAGE_OWNER_OFFSET > hirsel_lir::runtime_abi::PAGE_LOCAL_FREE_OFFSET
 );

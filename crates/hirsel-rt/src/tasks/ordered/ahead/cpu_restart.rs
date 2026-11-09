@@ -16,12 +16,9 @@ struct Checkpoint {
     stack: Vec<MaybeUninit<u8>>,
     request: super::cpu_allocation::Request,
     growth: *mut super::cpu_handoff::Growth,
-    fuel: i64,
-    private_fuel: super::cpu_fuel::Fuel,
     freed: u64,
     charges: crate::budget::stretch_trace::Local,
     before: Option<Stretch>,
-    grant: Option<u64>,
     ledger: Arc<Ledger>,
     owner: crate::pool::cpu_scoped::ledger::blocks::Owner,
     _reservation: HeapReservation,
@@ -192,9 +189,9 @@ unsafe fn prepare_at(ctx: *mut TaskCtx, native: *mut Native, sp: *mut u8, top: *
         let Ok(reservation) = ledger.reserve_heap(size as u64) else {
             return;
         };
-        let (before, grant) = engine::with_driver(ctx, |d| {
+        let before = engine::with_driver(ctx, |d| {
             assert!(!d.cpu_allocation_leases.contains_key(&task));
-            (d.stretches.get(&task).cloned(), d.saved_grant(task))
+            d.stretches.get(&task).cloned()
         });
         let mut stack = vec![MaybeUninit::uninit(); size];
         // SAFETY: copy padding as MaybeUninit; Rust never interprets it.
@@ -204,12 +201,9 @@ unsafe fn prepare_at(ctx: *mut TaskCtx, native: *mut Native, sp: *mut u8, top: *
             stack,
             request: (*native).allocation,
             growth: (*native).growth,
-            fuel: (*ctx).view.compiled.fuel,
-            private_fuel: (*native).cpu_fuel.clone(),
             freed: (*ctx).ordered_freed.get(),
             charges: (*ctx).ordered_charge_trace.clone(),
             before,
-            grant,
             ledger,
             owner,
             _reservation: reservation,
@@ -219,14 +213,12 @@ unsafe fn prepare_at(ctx: *mut TaskCtx, native: *mut Native, sp: *mut u8, top: *
         // this native record. Its dispatch token exclusively owns the attempt.
         let private = NonNull::new_unchecked(registry.as_ref().private_heap());
         (*ctx).heap().unbind();
-        let fuel = checkpoint.fuel;
         (*native).restart = State::Active(PrivateAttempt {
             heap: private,
             registry,
             checkpoint,
         });
         (*private.as_ptr()).bind(&raw mut (*ctx).view);
-        (*private.as_ptr()).set_fuel(fuel);
     }
 }
 
@@ -272,10 +264,6 @@ impl PrivateAttempt {
                 if let Some(before) = checkpoint.before.clone() {
                     d.stretches.insert(task, before);
                 }
-                d.release_grant(task);
-                if let Some(grant) = checkpoint.grant {
-                    d.grant(task, grant);
-                }
             });
             let private = heap.as_ptr();
             discard_storage(&checkpoint, private, &(*native).arena);
@@ -289,13 +277,10 @@ impl PrivateAttempt {
             (*ctx).ordered_freed.set(checkpoint.freed);
             (*ctx).ordered_charge_trace = checkpoint.charges.clone();
             (*ctx).heap().bind(&raw mut (*ctx).view);
-            (*ctx).heap().set_fuel(checkpoint.fuel);
             (*ctx).task_sp = checkpoint.sp;
             (*native).physical.saved_sp = checkpoint.sp;
             (*native).physical.points_left = 1024;
             (*native).physical.reason = super::cpu_allocation::REASON;
-            (*native).cpu_fuel = checkpoint.private_fuel;
-            (*native).pending_refill = false;
             (*native).allocation = checkpoint.request;
             (*native).growth = checkpoint.growth;
             (*native).growth_status = 0;

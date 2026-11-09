@@ -113,7 +113,6 @@ pub(crate) unsafe fn enable(ctx: *mut TaskCtx, policy: Policy) {
         Settled {
             level: 0,
             limit: u64::MAX,
-            fuel: u64::MAX,
         },
         objects,
     );
@@ -135,11 +134,7 @@ pub(crate) unsafe fn enable(ctx: *mut TaskCtx, policy: Policy) {
     };
 }
 
-/// Switch-in/out run under the scheduler role. Leases belong to a task, never
-/// to its worker, and ordered fuel never comes out of the shared Free pool.
-/// These projections deliberately avoid scheduler(ctx): switch-out can be part
-/// of stop abandonment, where observing the requested stop would recurse.
-fn fuel_state(ctx: *mut TaskCtx) -> (TaskId, &'static mut Driver) {
+fn dispatch_state(ctx: *mut TaskCtx) -> (TaskId, &'static mut Driver) {
     // An outer compiled entry drops its temporary guard before raising a
     // stop. Abandonment still needs exclusive policy access for switch-out.
     // enter acquires the role without observing the run's stop word.
@@ -157,19 +152,17 @@ fn fuel_state(ctx: *mut TaskCtx) -> (TaskId, &'static mut Driver) {
     (task, driver)
 }
 
-pub(crate) fn fuel_in(ctx: *mut TaskCtx) {
+pub(crate) fn task_in(ctx: *mut TaskCtx) {
     if super::ahead::private(ctx) {
-        super::ahead::fuel_in(ctx);
+        unsafe { (*ctx).view.private() };
         return;
     }
-    let initial = unsafe { (*ctx).run_ref().fuel.remaining() };
     let memory_limit = unsafe { (*ctx).heap_ref().meter.limit() };
     let memory_level = unsafe { (*ctx).heap_ref().meter.held() };
-    let (task, driver) = fuel_state(ctx);
+    let (task, driver) = dispatch_state(ctx);
     driver.enter(task, crate::pool::compute_index().unwrap_or(0));
-    let frontier = driver.frontier.as_mut().expect("restored fuel frontier");
-    if !driver.fuel_initialized {
-        frontier.settled.fuel = initial;
+    let frontier = driver.frontier.as_mut().expect("restored memory frontier");
+    if !driver.meter_initialized {
         frontier.settled.limit = if memory_limit == 0 {
             u64::MAX
         } else {
@@ -178,7 +171,6 @@ pub(crate) fn fuel_in(ctx: *mut TaskCtx) {
         frontier.settled.level = memory_level;
         driver.memory = memory_limit != 0;
         driver.budgets = Budgets {
-            fuel: initial != u64::MAX,
             memory: driver.memory,
         };
         unsafe {
@@ -190,31 +182,17 @@ pub(crate) fn fuel_in(ctx: *mut TaskCtx) {
         if let Some(log) = &mut driver.events {
             super::events::charges::initialize(log, frontier.settled, driver.budgets);
         }
-        driver.fuel_initialized = true;
+        driver.meter_initialized = true;
     }
-    let fuel = driver
-        .stretches
-        .get(&task)
-        .map_or(0, Stretch::fuel_charges)
-        .saturating_add(frontier.logged_fuel(task));
-    let room = frontier.settled.fuel.saturating_sub(fuel);
-    let grant = room.min(crate::budget::FUEL_CHUNK);
     let level = frontier.settled.level;
-    driver.grant(task, grant);
-    let native = unsafe { (*ctx).ahead_physical }.cast::<super::ahead::native::Native>();
-    if !native.is_null() && unsafe { (*native).cpu_owner().is_some() } {
-        unsafe { (*native).cpu_fuel.grant(grant, room) };
-    }
     unsafe { (*ctx).heap_ref().meter.settled(level) };
-    unsafe { (*ctx).heap().set_fuel(grant as i64) };
-    unsafe { (*ctx).ordered_charge_trace.grant(grant as i64) };
     driver.tuning.start(task);
 }
 
-fn capture_fuel(ctx: *mut TaskCtx) {
-    let (task, driver) = fuel_state(ctx);
+fn capture_memory(ctx: *mut TaskCtx) {
+    let (task, driver) = dispatch_state(ctx);
     retire_allocation_lease(driver, task);
-    capture_charges(ctx, task, driver);
+    capture_frees(ctx, task, driver);
 }
 
 fn capture_frees(ctx: *mut TaskCtx, task: TaskId, driver: &mut Driver) {
@@ -239,55 +217,22 @@ fn capture_frees(ctx: *mut TaskCtx, task: TaskId, driver: &mut Driver) {
     }
 }
 
-fn capture_charges(ctx: *mut TaskCtx, task: TaskId, driver: &mut Driver) {
-    let word = unsafe { (*ctx).view.compiled.fuel };
-    unsafe { (*ctx).ordered_charge_trace.capture(word) };
-    let remaining = word.max(0) as u64;
-    capture_frees(ctx, task, driver);
-    let grant = driver.grant(task, remaining).unwrap_or(remaining);
-    let native = unsafe { (*ctx).ahead_physical }.cast::<super::ahead::native::Native>();
-    let private = if !native.is_null() && unsafe { (*native).cpu_owner().is_some() } {
-        unsafe { (*native).cpu_fuel.capture(word) }
-    } else {
-        None
-    };
-    let consumed = private.unwrap_or_else(|| {
-        grant
-            .saturating_sub(remaining)
-            .saturating_add(u64::from(word < 0))
-    });
-    if consumed != 0 {
-        let budgets = driver.budgets;
-        driver
-            .stretches
-            .entry(task)
-            .or_insert_with(|| Stretch::new(budgets))
-            .fuel_points(consumed);
-    }
-    if word < 0 {
-        unsafe { (*ctx).heap().set_fuel(0) };
-    }
-}
-
-pub(crate) fn fuel_out(ctx: *mut TaskCtx) {
+pub(crate) fn task_out(ctx: *mut TaskCtx) {
     if super::ahead::private(ctx) {
-        super::ahead::fuel_out(ctx);
         return;
     }
-    capture_fuel(ctx);
-    let (task, driver) = fuel_state(ctx);
+    capture_memory(ctx);
+    let (task, driver) = dispatch_state(ctx);
     let nonhead = driver
         .frontier
         .as_ref()
         .is_some_and(|f| f.head() != Some(task));
     driver.tuning.end(task, nonhead);
-    driver.release_grant(task);
-    unsafe { (*ctx).heap().set_fuel(0) };
 }
 
 fn stretch(ctx: *mut TaskCtx) -> Stretch {
-    capture_fuel(ctx);
-    let (task, driver) = fuel_state(ctx);
+    capture_memory(ctx);
+    let (task, driver) = dispatch_state(ctx);
     let nonhead = driver
         .frontier
         .as_ref()
@@ -304,9 +249,6 @@ fn stretch(ctx: *mut TaskCtx) -> Stretch {
     before
 }
 
-/// CPU preclaim retains the publisher's head until all closures are installed.
-/// Its serial child does not enter or step that head; retire only the parent's
-/// intervening allocation/fuel prefix before lending its ordinary stack.
 pub(super) fn serial_cpu_prefix(ctx: *mut TaskCtx) -> Stopped<()> {
     assert!(with_current_driver(ctx, |task, d| d.head_ready(task)));
     let before = stretch(ctx);
@@ -409,9 +351,6 @@ pub(crate) fn reserve_allocation(
     }
     if lease_cpu_allocation(ctx, bytes).is_some() {
         unsafe {
-            (*ctx)
-                .ordered_charge_trace
-                .capture((*ctx).view.compiled.fuel);
             (*ctx).ordered_charge_trace.allocation(bytes);
             assert_eq!(
                 (*ctx).ordered_allocation.replace(bytes),
@@ -425,7 +364,7 @@ pub(crate) fn reserve_allocation(
         driver.enter(task, crate::pool::compute_index().unwrap_or(0));
         task
     });
-    capture_fuel(ctx);
+    capture_memory(ctx);
     advance(ctx)?;
     let blocked_head = with_driver(ctx, |driver| {
         driver.frontier.as_ref().unwrap().head() == Some(task) && !driver.head_ready(task)
@@ -433,29 +372,13 @@ pub(crate) fn reserve_allocation(
     if blocked_head {
         at_head(ctx)?;
     }
-    let (memory, budgets, envelope_full) = with_driver(ctx, |driver| {
-        (
-            driver.memory,
-            driver.budgets,
-            driver.memory
-                && driver
-                    .stretches
-                    .get(&task)
-                    .is_some_and(|stretch| stretch.allocation_pauses(bytes)),
-        )
-    });
-    if envelope_full {
-        at_head(ctx)?;
-    }
+    let (memory, budgets) = with_driver(ctx, |driver| (driver.memory, driver.budgets));
     let reserved = with_driver(ctx, |driver| {
         let frontier = driver
             .frontier
             .as_mut()
             .expect("restored allocation frontier");
-        let fuel = frontier
-            .logged_fuel(task)
-            .saturating_add(driver.stretches.get(&task).map_or(0, Stretch::fuel_charges));
-        frontier.reserve(task, bytes, fuel)
+        frontier.reserve(task, bytes)
     });
     if reserved.is_err() {
         at_head(ctx)?;
@@ -518,45 +441,13 @@ pub(crate) fn memory_freed(ctx: *mut TaskCtx, bytes: u64) {
         return;
     }
     unsafe {
-        let word = (*ctx).view.compiled.fuel;
-        (*ctx).ordered_charge_trace.free(word, bytes);
+        (*ctx).ordered_charge_trace.free(bytes);
     }
     unsafe {
         (*ctx)
             .ordered_freed
             .set((*ctx).ordered_freed.get().saturating_add(bytes))
     };
-}
-
-/// A refill is a physical budget boundary, never a semantic operation or poll.
-/// An exhausted younger segment waits for promotion before exposing its stop.
-pub(crate) fn fuel_refill(ctx: *mut TaskCtx) -> Stopped<()> {
-    capture_fuel(ctx);
-    advance(ctx)?;
-    let task = current(ctx);
-    let blocked_head = with_driver(ctx, |driver| {
-        driver.frontier.as_ref().unwrap().head() == Some(task) && !driver.head_ready(task)
-    });
-    if blocked_head {
-        at_head(ctx)?;
-    }
-    let must_wait = with_driver(ctx, |driver| {
-        let frontier = driver.frontier.as_ref().unwrap();
-        let consumed = frontier
-            .logged_fuel(task)
-            .saturating_add(driver.stretches.get(&task).map_or(0, Stretch::fuel_charges));
-        frontier.head() != Some(task) && consumed > frontier.settled.fuel
-    });
-    if must_wait {
-        at_head(ctx)?;
-    }
-    if with_driver(ctx, |d| d.head_ready(task)) {
-        super::host::retire_return(ctx);
-        let before = stretch(ctx);
-        settle_head(ctx, &before)?;
-    }
-    fuel_in(ctx);
-    Ok(())
 }
 
 /// All callbacks here are bounded internal object work. Objects::deferred
@@ -741,7 +632,7 @@ pub(super) fn head_step(ctx: *mut TaskCtx) -> Stopped<bool> {
     super::host::retire_return(ctx);
     let before = stretch(ctx);
     settle_head(ctx, &before)?;
-    fuel_in(ctx);
+    task_in(ctx);
     Ok(true)
 }
 
@@ -1095,7 +986,7 @@ pub(super) fn continue_after_read(ctx: *mut TaskCtx, progress: Progress) -> Stop
         poll(ctx)?;
     }
     advance(ctx)?;
-    fuel_in(ctx);
+    task_in(ctx);
     Ok(())
 }
 
@@ -1178,7 +1069,7 @@ pub(super) fn submit(
                     suspend(ctx, task, true);
                     advance(ctx)?;
                     if let Some(result) = with_driver(ctx, |d| d.returned.remove(&task)) {
-                        fuel_in(ctx);
+                        task_in(ctx);
                         return Ok(Some(result));
                     }
                 }
@@ -1189,7 +1080,7 @@ pub(super) fn submit(
             advance(ctx)?;
             let result =
                 with_driver(ctx, |d| d.returned.remove(&task)).expect("head outcome recorded");
-            fuel_in(ctx);
+            task_in(ctx);
             return Ok(Some(result));
         }
         let started = with_driver(ctx, |d| d.tuning.clock());
@@ -1205,12 +1096,12 @@ pub(super) fn submit(
         match offer {
             Offer::Early => {
                 accepted(ctx, task, false);
-                fuel_in(ctx);
+                task_in(ctx);
                 return Ok(result);
             }
             Offer::Logged => {
                 accepted(ctx, task, false);
-                fuel_in(ctx);
+                task_in(ctx);
                 return Ok(None);
             }
             Offer::Pending => {
@@ -1219,7 +1110,7 @@ pub(super) fn submit(
                     suspend(ctx, task, false);
                     advance(ctx)?;
                     if let Some(returned) = with_driver(ctx, |d| d.returned.remove(&task)) {
-                        fuel_in(ctx);
+                        task_in(ctx);
                         return Ok(Some(returned));
                     }
                 }
@@ -1590,7 +1481,7 @@ pub(super) mod tests {
                 let outcome = run.run(
                     |ctx| unsafe {
                         let limit = crate::region::SEGMENT_SIZE as u64;
-                        (*ctx).set_budgets(None, Some(limit));
+                        (*ctx).set_budgets(Some(limit));
                         enable(ctx, Policy::admit(&Default::default(), Some(limit)));
                     },
                     move |ctx| unsafe {
@@ -1662,7 +1553,7 @@ pub(super) mod tests {
             unsafe { run.use_physical_dispatch() };
             let outcome = run.run(
                 move |ctx| unsafe {
-                    (*ctx).set_budgets(None, Some(limit));
+                    (*ctx).set_budgets(Some(limit));
                     enable(ctx, Policy::admit(&Default::default(), Some(limit)));
                 },
                 move |ctx| unsafe {
@@ -1692,10 +1583,10 @@ pub(super) mod tests {
     }
 
     #[test]
-    fn ordered_native_memory_and_fuel_stop_in_request_order_and_frees_restore_room() {
+    fn ordered_native_memory_stops_in_request_order_and_frees_restore_room() {
         use hirsel_run_schema::BudgetKind;
         for width in [2, 4, 8] {
-            for case in 0..3 {
+            for case in [0, 2] {
                 let layout = image_layout(16);
                 let layouts = [&layout as *const crate::Layout];
                 let mut run = crate::host::BodyRun::new(width, true);
@@ -1705,10 +1596,7 @@ pub(super) mod tests {
                 let outcome = run.run(
                     move |ctx| unsafe {
                         let charge = crate::alloc::allocation_charge(ctx, 2, 16, 8);
-                        (*ctx).set_budgets(
-                            Some(1),
-                            Some(if case == 2 { charge } else { 2 * charge - 1 }),
-                        );
+                        (*ctx).set_budgets(Some(if case == 2 { charge } else { 2 * charge - 1 }));
                         enable(ctx, Policy::admit(&Default::default(), Some(charge)));
                     },
                     move |ctx| unsafe {
@@ -1723,10 +1611,7 @@ pub(super) mod tests {
                             )
                         };
                         let first = allocate();
-                        if case == 1 {
-                            charge(ctx);
-                            charge(ctx);
-                        }
+
                         if case == 2 {
                             assert_eq!(
                                 crate::release::hirsel_rt_v2_release(
@@ -1767,7 +1652,6 @@ pub(super) mod tests {
                     outcome.ended,
                     match case {
                         0 => Err(Stop::BudgetExceeded(BudgetKind::Memory)),
-                        1 => Err(Stop::BudgetExceeded(BudgetKind::Fuel)),
                         _ => Ok(0),
                     },
                     "width {width}, case {case}"
@@ -1776,24 +1660,15 @@ pub(super) mod tests {
         }
     }
 
-    unsafe fn charge(ctx: *mut TaskCtx) {
-        unsafe {
-            (*ctx).view.compiled.fuel -= 1;
-            if (*ctx).view.compiled.fuel < 0 {
-                crate::budget::hirsel_rt_v2_fuel_refill(ctx);
-            }
-        }
-    }
-
     #[derive(Default)]
-    struct FuelOrder {
+    struct MemoryOrder {
         start: std::sync::atomic::AtomicBool,
         older_retired: std::sync::atomic::AtomicBool,
         younger_passed: std::sync::atomic::AtomicBool,
         younger: std::sync::atomic::AtomicU64,
     }
 
-    unsafe extern "C" fn fuel_child(
+    unsafe extern "C" fn memory_child(
         ctx: *mut TaskCtx,
         environment: *mut crate::Header,
         _: u64,
@@ -1803,7 +1678,7 @@ pub(super) mod tests {
         use std::sync::atomic::Ordering;
         let [probe, mode, atomic] =
             unsafe { crate::alloc::payload(environment).cast::<[u64; 3]>().read() };
-        let probe = unsafe { &*(probe as *const FuelOrder) };
+        let probe = unsafe { &*(probe as *const MemoryOrder) };
         if matches!(mode, 0 | 10) {
             while !probe.start.load(Ordering::Acquire) {
                 let mut cause = 0;
@@ -1826,31 +1701,21 @@ pub(super) mod tests {
                 std::thread::yield_now();
             }
             assert!(!probe.younger_passed.load(Ordering::Acquire));
-            if mode == 0 {
-                unsafe { charge(ctx) };
-            }
+
             let _role = unsafe { role::Guard::new(ctx) };
             let value = 7u64;
             assert_eq!(
                 unsafe { hirsel_rt_v2_atomic_store(ctx, &atomic, (&raw const value).cast(), 8) },
                 0
             );
-            if mode == 0 {
-                assert!(driver(ctx).frontier.as_ref().unwrap().settled.fuel <= 19);
-            }
+
             probe.older_retired.store(true, Ordering::Release);
         } else {
             {
                 let _role = unsafe { role::Guard::new(ctx) };
                 probe.younger.store(current(ctx), Ordering::Release);
             }
-            if matches!(mode, 5 | 6 | 7) {
-                if mode == 6 {
-                    unsafe {
-                        charge(ctx);
-                        charge(ctx);
-                    }
-                }
+            if matches!(mode, 5 | 7) {
                 let block = unsafe {
                     crate::alloc::hirsel_rt_v2_alloc(ctx, 2, 16, 8, crate::alloc::DOMAIN_HEAP, 0)
                 };
@@ -1869,16 +1734,16 @@ pub(super) mod tests {
                         0
                     );
                 }
-                unsafe {
-                    charge(ctx);
-                    charge(ctx);
-                }
+                let settled = {
+                    let _role = unsafe { role::Guard::new(ctx) };
+                    at_head(ctx)
+                };
+                unsafe { crate::stop::check(ctx, settled) };
                 probe.younger_passed.store(true, Ordering::Release);
-                panic!("combined-budget exhausted segment must stop on promotion");
-            } else if matches!(mode, 8 | 9) {
+                panic!("memory-limited segment must stop on promotion");
+            } else if mode == 9 {
                 let mut blocks = Vec::new();
-                for _ in 0..=crate::budget::stretch::ENVELOPE_MAX {
-                    unsafe { charge(ctx) };
+                for _ in 0..=crate::budget::stretch::RETAINED_MAX {
                     blocks.push(unsafe {
                         crate::alloc::hirsel_rt_v2_alloc(
                             ctx,
@@ -1894,10 +1759,10 @@ pub(super) mod tests {
                     let _role = unsafe { role::Guard::new(ctx) };
                     let task = current(ctx);
                     let d = driver(ctx);
-                    assert!(!d.budgets.fuel);
                     assert_eq!(
-                        d.stretches[&task].pieces().next().unwrap().1.envelope.len(),
-                        1
+                        d.stretches[&task].pieces().next().unwrap().1.high,
+                        (crate::budget::stretch::RETAINED_MAX as i64 + 1)
+                            * crate::alloc::allocation_charge(ctx, 2, 24, 8) as i64
                     );
                 }
                 for block in blocks {
@@ -1914,9 +1779,6 @@ pub(super) mod tests {
                         },
                         0
                     );
-                }
-                if mode == 8 {
-                    probe.younger_passed.store(true, Ordering::Release);
                 }
             } else if mode >= 3 {
                 unsafe {
@@ -1961,29 +1823,6 @@ pub(super) mod tests {
                     }
                 }
                 probe.younger_passed.store(true, Ordering::Release);
-            } else {
-                let remaining = if mode == 2 {
-                    for _ in 0..5 {
-                        unsafe { charge(ctx) };
-                    }
-                    let value = 3u64;
-                    assert_eq!(
-                        unsafe {
-                            hirsel_rt_v2_atomic_store(ctx, &atomic, (&raw const value).cast(), 8)
-                        },
-                        0
-                    );
-                    16
-                } else {
-                    21
-                };
-                // Include fuel in earlier logged turns when bounding this segment.
-                // Without that term the logged variant would return past point21.
-                for _ in 0..remaining {
-                    unsafe { charge(ctx) };
-                }
-                probe.younger_passed.store(true, Ordering::Release);
-                panic!("the younger's exhausted point must stop at promotion");
             }
         }
         let mut result = [1u64, 0];
@@ -2013,7 +1852,7 @@ pub(super) mod tests {
             .into_iter()
             .flat_map(|width| modes.iter().copied().map(move |mode| (width, mode)))
         {
-            let probe = Arc::new(FuelOrder::default());
+            let probe = Arc::new(MemoryOrder::default());
             let seen = probe.clone();
             let scan = [TYPED_HANDLE, 16, Kind::Atomic.code(), 2, 0, 0, 0, 0];
             let environment = crate::Layout {
@@ -2025,30 +1864,18 @@ pub(super) mod tests {
             let mut run = crate::host::BodyRun::new(width, true);
             run.config.layouts = layouts.as_ptr();
             run.config.layout_count = 1;
-            if mode < 5 {
-                run.fuel = Some(20);
-            }
             unsafe { run.use_physical_dispatch() };
             let outcome = run.run(
                 move |ctx| unsafe {
                     let memory = if mode >= 5 {
                         let environment = crate::alloc::allocation_charge(ctx, 2, 24, 8);
                         let small = crate::alloc::allocation_charge(ctx, 2, 16, 8);
-                        let limit = if matches!(mode, 8 | 9) {
-                            environment * (crate::budget::stretch::ENVELOPE_MAX as u64 + 4)
+                        let limit = if mode == 9 {
+                            environment * (crate::budget::stretch::RETAINED_MAX as u64 + 4)
                         } else {
                             2 * environment + small - 1
                         };
-                        (*ctx).set_budgets(
-                            if mode == 9 {
-                                None
-                            } else if mode == 8 {
-                                Some(1_000_000)
-                            } else {
-                                Some(1)
-                            },
-                            Some(limit),
-                        );
+                        (*ctx).set_budgets(Some(limit));
                         Some(limit)
                     } else {
                         None
@@ -2108,7 +1935,7 @@ pub(super) mod tests {
                                 std::ptr::null_mut(),
                                 &mut child,
                                 &scope,
-                                fuel_child,
+                                memory_child,
                                 environment,
                                 0,
                             ),
@@ -2139,7 +1966,7 @@ pub(super) mod tests {
                     );
                     assert!(
                         matches!(mode, 3 | 4 | 8 | 9),
-                        "the younger fuel stop must precede root continuation"
+                        "the younger memory stop must precede root continuation"
                     );
                     assert_eq!(hirsel_rt_v2_task_scope_exit(ctx, 0, 0, &scope, 0), 0);
                     let _role = role::Guard::new(ctx);
@@ -2153,11 +1980,7 @@ pub(super) mod tests {
                 if matches!(mode, 3 | 4 | 8 | 9) {
                     Ok(0)
                 } else {
-                    Err(Stop::BudgetExceeded(if matches!(mode, 5 | 7) {
-                        hirsel_run_schema::BudgetKind::Memory
-                    } else {
-                        hirsel_run_schema::BudgetKind::Fuel
-                    }))
+                    Err(Stop::BudgetExceeded(hirsel_run_schema::BudgetKind::Memory))
                 }
             );
             assert!(probe.older_retired.load(Ordering::Acquire));
@@ -2169,172 +1992,18 @@ pub(super) mod tests {
     }
 
     #[test]
-    fn ordered_native_younger_fuel_exhaustion_waits_for_the_older_retiring_turn() {
-        younger_budget(&[1, 2]);
-    }
-
-    #[test]
     fn ordered_native_heap_and_region_allowance_pauses_resume_only_after_head_promotion() {
         younger_budget(&[3, 4]);
     }
 
     #[test]
-    fn ordered_native_speculative_envelopes_choose_the_first_memory_or_fuel_stop() {
-        younger_budget(&[5, 6, 7]);
+    fn ordered_native_speculative_highs_preserve_the_memory_stop() {
+        younger_budget(&[5, 7]);
     }
 
     #[test]
-    fn ordered_native_envelope_overflow_saves_before_borrowing_the_heap() {
-        younger_budget(&[8, 9]);
-    }
-
-    #[test]
-    fn ordered_native_pure_fuel_loop_observes_external_stop_without_reentering_abandonment() {
-        use std::sync::{
-            Arc,
-            atomic::{AtomicBool, Ordering},
-        };
-        for width in [2, 8] {
-            let started = Arc::new(AtomicBool::new(false));
-            let seen = started.clone();
-            let mut run = crate::host::BodyRun::new(width, true);
-            unsafe { run.use_physical_dispatch() };
-            let control = run.control();
-            let stopper = std::thread::spawn(move || {
-                while !started.load(Ordering::Acquire) {
-                    std::thread::yield_now();
-                }
-                control.stop();
-            });
-            let outcome = run.run(
-                |ctx| unsafe { enable(ctx, Policy::admit(&Default::default(), None)) },
-                move |ctx| {
-                    seen.store(true, Ordering::Release);
-                    loop {
-                        unsafe { charge(ctx) };
-                    }
-                },
-            );
-            stopper.join().unwrap();
-            assert_eq!(outcome.ended, Err(Stop::Requested));
-        }
-    }
-
-    #[test]
-    fn ordered_native_fuel_exhaustion_is_exact_across_chunks_and_worker_widths() {
-        use std::sync::{
-            Arc,
-            atomic::{AtomicU64, Ordering},
-        };
-        for width in [2, 4, 8] {
-            for limit in [
-                0,
-                1,
-                crate::budget::FUEL_CHUNK,
-                crate::budget::FUEL_CHUNK + 3,
-            ] {
-                let charged = Arc::new(AtomicU64::new(0));
-                let seen = charged.clone();
-                let mut run = crate::host::BodyRun::new(width, true);
-                run.fuel = Some(limit);
-                unsafe { run.use_physical_dispatch() };
-                let outcome = run.run(
-                    |ctx| unsafe { enable(ctx, Policy::admit(&Default::default(), None)) },
-                    move |ctx| loop {
-                        unsafe { charge(ctx) };
-                        seen.fetch_add(1, Ordering::Relaxed);
-                    },
-                );
-                assert_eq!(
-                    outcome.ended,
-                    Err(Stop::BudgetExceeded(hirsel_run_schema::BudgetKind::Fuel))
-                );
-                assert_eq!(
-                    charged.load(Ordering::Relaxed),
-                    limit,
-                    "width {width}, limit {limit}"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn ordered_native_boundaries_settle_partial_chunks_without_fuel_operations_or_polls() {
-        for width in [2, 4, 8] {
-            let mut run = crate::host::BodyRun::new(width, true);
-            run.fuel = Some(11);
-            unsafe { run.use_physical_dispatch() };
-            let outcome = run.run(
-                |ctx| unsafe { enable(ctx, Policy::admit(&Default::default(), None)) },
-                |ctx| unsafe {
-                    let mut word = 0;
-                    let zero = 0u64;
-                    assert_eq!(
-                        crate::tasks::hirsel_rt_v2_atomic_create(
-                            ctx,
-                            std::ptr::null_mut(),
-                            &mut word,
-                            (&raw const zero).cast(),
-                            8,
-                            0,
-                            8,
-                        ),
-                        0
-                    );
-                    for consumed in [3, 8] {
-                        for _ in 0..consumed {
-                            charge(ctx);
-                        }
-                        let value = consumed;
-                        assert_eq!(
-                            crate::tasks::hirsel_rt_v2_atomic_store(
-                                ctx,
-                                &word,
-                                (&raw const value).cast(),
-                                8
-                            ),
-                            0
-                        );
-                        let _role = crate::tasks::role::Guard::new(ctx);
-                        let driver = driver(ctx);
-                        let frontier = driver.frontier.as_ref().unwrap();
-                        assert_eq!(frontier.settled.fuel, if consumed == 3 { 8 } else { 0 });
-                        assert_eq!(frontier.retired(), if consumed == 3 { 2 } else { 3 });
-                        assert_eq!(driver.recorded[&current(ctx)], frontier.retired());
-                    }
-                    charge(ctx);
-                    panic!("the twelfth point must stop");
-                },
-            );
-            assert_eq!(
-                outcome.ended,
-                Err(Stop::BudgetExceeded(hirsel_run_schema::BudgetKind::Fuel))
-            );
-        }
-    }
-
-    #[test]
-    fn ordered_unbounded_native_fuel_refills_preserve_semantic_ordinals() {
-        let mut run = crate::host::BodyRun::new(4, true);
-        unsafe { run.use_physical_dispatch() };
-        let outcome = run.run(
-            |ctx| unsafe { enable(ctx, Policy::admit(&Default::default(), None)) },
-            |ctx| unsafe {
-                for _ in 0..(3 * crate::budget::FUEL_CHUNK + 5) {
-                    charge(ctx);
-                }
-                let _role = crate::tasks::role::Guard::new(ctx);
-                let task = current(ctx);
-                let driver = driver(ctx);
-                assert_eq!(driver.frontier.as_ref().unwrap().settled.fuel, u64::MAX);
-                assert_eq!(driver.frontier.as_ref().unwrap().retired(), 0);
-                assert!(driver.submitted.is_empty());
-                assert!(driver.recorded.is_empty());
-                driver.finishing(task);
-                0
-            },
-        );
-        assert_eq!(outcome.ended, Ok(0));
+    fn ordered_native_memory_highs_stay_bounded() {
+        younger_budget(&[9]);
     }
 
     fn image_layout(size: u64) -> crate::Layout {
@@ -2620,36 +2289,6 @@ pub(super) mod tests {
     }
 }
 
-/// Idle-side counterpart of fuel_refill. It never saves a Rust idle frame as
-/// the task's continuation. A blocked refill retains its already charged point
-/// in the ordinary stretch until head readiness permits canonical settlement.
-pub(crate) fn ahead_refill(ctx: *mut TaskCtx) -> Stopped<bool> {
-    capture_fuel(ctx);
-    advance(ctx)?;
-    let task = current(ctx);
-    let wait = with_driver(ctx, |d| {
-        let f = d.frontier.as_ref().unwrap();
-        (f.head() == Some(task) && !d.head_ready(task))
-            || (f.head() != Some(task)
-                && f.logged_fuel(task)
-                    .saturating_add(d.stretches.get(&task).map_or(0, Stretch::fuel_charges))
-                    > f.settled.fuel)
-    });
-    if wait {
-        return Ok(false);
-    }
-    if with_driver(ctx, |d| d.head_ready(task)) {
-        if super::ahead::cpu_restart::active(ctx) {
-            return Ok(false);
-        }
-        super::host::retire_return(ctx);
-        let before = stretch(ctx);
-        settle_head(ctx, &before)?;
-    }
-    fuel_in(ctx);
-    Ok(true)
-}
-
 /// Idle-only admission of the actual post-read continuation. This neither
 /// observes cancellation nor adds a semantic operation, yield or poll.
 pub(crate) fn host_segment_barrier(ctx: *mut TaskCtx) -> Stopped<bool> {
@@ -2664,7 +2303,7 @@ pub(crate) fn host_segment_barrier(ctx: *mut TaskCtx) -> Stopped<bool> {
     super::host::retire_return(ctx);
     let before = stretch(ctx);
     settle_head(ctx, &before)?;
-    fuel_in(ctx);
+    task_in(ctx);
     Ok(true)
 }
 
@@ -2691,9 +2330,6 @@ fn retire_allocation_lease(driver: &mut Driver, task: TaskId) {
     }
 }
 
-/// Allocation consumes private capacity. Refills bound a head prefix by its
-/// run/grant room and reserve a younger prefix's speculative capacity in one
-/// batch. Actual charges retain the bounded envelope and exact fuel offsets.
 fn lease_cpu_allocation(ctx: *mut TaskCtx, bytes: u64) -> Option<CpuAllocation> {
     with_current_driver(ctx, |task, driver| {
         if !driver.memory {
@@ -2703,28 +2339,7 @@ fn lease_cpu_allocation(ctx: *mut TaskCtx, bytes: u64) -> Option<CpuAllocation> 
         if !nonhead && !driver.head_ready(task) {
             return None;
         }
-        if driver.budgets.fuel {
-            capture_charges(ctx, task, driver);
-        } else {
-            capture_frees(ctx, task, driver);
-        }
-        if driver.budgets.fuel && nonhead {
-            let frontier = driver.frontier.as_ref().unwrap();
-            let fuel = frontier
-                .logged_fuel(task)
-                .saturating_add(driver.stretches.get(&task).map_or(0, Stretch::fuel_charges));
-            if fuel > frontier.settled.fuel {
-                return None;
-            }
-        }
-        if driver.budgets.fuel
-            && driver
-                .stretches
-                .get(&task)
-                .is_some_and(|prefix| prefix.allocation_pauses(bytes))
-        {
-            return None;
-        }
+        capture_frees(ctx, task, driver);
         let covered = driver
             .cpu_allocation_leases
             .get_mut(&task)
@@ -2756,12 +2371,10 @@ fn lease_cpu_allocation(ctx: *mut TaskCtx, bytes: u64) -> Option<CpuAllocation> 
             }
             let mut capacity = room.min(bytes.max(64 * 1024));
             if nonhead {
-                let prefix_fuel = driver.stretches.get(&task).map_or(0, Stretch::fuel_charges);
                 let frontier = driver.frontier.as_mut().unwrap();
-                let fuel = frontier.logged_fuel(task).saturating_add(prefix_fuel);
-                if frontier.reserve(task, capacity, fuel).is_err() {
+                if frontier.reserve(task, capacity).is_err() {
                     capacity = bytes;
-                    if frontier.reserve(task, capacity, fuel).is_err() {
+                    if frontier.reserve(task, capacity).is_err() {
                         return None;
                     }
                 }
@@ -2795,9 +2408,6 @@ fn lease_cpu_allocation(ctx: *mut TaskCtx, bytes: u64) -> Option<CpuAllocation> 
 pub(crate) fn ahead_allocation(ctx: *mut TaskCtx, bytes: u64) -> Stopped<CpuAllocation> {
     if let Some(admission) = lease_cpu_allocation(ctx, bytes) {
         unsafe {
-            (*ctx)
-                .ordered_charge_trace
-                .capture((*ctx).view.compiled.fuel);
             (*ctx).ordered_charge_trace.allocation(bytes);
         }
         return Ok(admission);
@@ -2810,20 +2420,11 @@ pub(crate) fn ahead_allocation(ctx: *mut TaskCtx, bytes: u64) -> Stopped<CpuAllo
                 .is_some_and(|batch| batch.limit(task).is_some())
     });
     if nonhead {
-        capture_fuel(ctx);
+        capture_memory(ctx);
         let accepted = with_driver(ctx, |d| {
             let budgets = d.budgets;
-            if d.stretches
-                .get(&task)
-                .is_some_and(|stretch| stretch.allocation_pauses(bytes))
-            {
-                return false;
-            }
             let frontier = d.frontier.as_mut().unwrap();
-            let fuel = frontier
-                .logged_fuel(task)
-                .saturating_add(d.stretches.get(&task).map_or(0, Stretch::fuel_charges));
-            if frontier.reserve(task, bytes, fuel).is_err() {
+            if frontier.reserve(task, bytes).is_err() {
                 return false;
             }
             if d.memory {

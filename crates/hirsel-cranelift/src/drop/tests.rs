@@ -241,7 +241,6 @@ fn object(target: &TargetSpec) -> (Vec<u8>, String) {
         tracking: false,
         opt: OptLevel::None,
         measurement: false,
-        fuel: false,
     };
     // The probes and the descriptors they name share one object: unit and glue inputs.
     let mut em = Emitter::new(

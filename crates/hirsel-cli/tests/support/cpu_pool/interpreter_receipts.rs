@@ -63,7 +63,7 @@ fn cpu_interpreter_receipt_cuts(width: usize) {
         let executable = root.join(backend);
         checked(
             cpu_interpreter_cli(width, true)
-                .args(["build", "--fuel", "--validate-stages", "--backend", backend])
+                .args(["build", "--validate-stages", "--backend", backend])
                 .arg(&manifest)
                 .arg("-o")
                 .arg(&executable)

@@ -124,12 +124,7 @@ pub(crate) fn run_bound_output(
                 "native launch differs from the selected validated run",
             ));
         }
-        if run.budgets().is_some_and(|budgets| budgets.fuel.is_some()) && !input.request.fuel {
-            return Err(NativeError::new(
-                StageName::Launch,
-                "the selected executable has no fuel checks",
-            ));
-        }
+
         let scratch = Scratch::new()?;
         #[cfg(test)]
         super::tool::before_request_link(&scratch.0);
@@ -223,8 +218,8 @@ mod tests {
                 RunOutcome::Returned(Returned::Error),
             ),
             (
-                "budget_exceeded fuel\naudit unavailable\n",
-                RunOutcome::BudgetExceeded(BudgetKind::Fuel),
+                "budget_exceeded memory\naudit unavailable\n",
+                RunOutcome::BudgetExceeded(BudgetKind::Memory),
             ),
         ] {
             let process = launched(body, expected.exit_code());

@@ -435,10 +435,6 @@ pub(crate) struct RunShared {
     pub(crate) root_overflow: crate::roots::Overflow,
     /// Every worker's heap, until the run ends (`crate::heaps`).
     pub(crate) heaps: Box<crate::heaps::HeapRegistry>,
-    /// The fuel not yet handed out as chunks (`crate::budget`).
-    pub(crate) fuel: crate::budget::FuelPool,
-    /// The home thread and blocking-pool threads, from the first pool dispatch
-    /// (`crate::pool`).
     pub(crate) execs: RoleCell<Option<Box<crate::pool::Execs>>>,
     pub(crate) pool_cleanup: std::sync::OnceLock<&'static PoolCleanup>,
     /// The extern row's headroom counters, when metrics are enabled (`crate::pool`).
@@ -675,10 +671,7 @@ impl TaskCtx {
                 .ordered_mode
                 .load(std::sync::atomic::Ordering::Acquire)
             {
-                crate::tasks::ordered::engine::fuel_in(ctx);
-            } else if crate::pool::wide((*ctx).run_ref()) && (*ctx).run_ref().fuel.active() {
-                let chunk = (*ctx).run_ref().fuel.take();
-                (*ctx).heap().set_fuel(chunk as i64);
+                crate::tasks::ordered::engine::task_in(ctx);
             }
             crate::stop::set_running(ctx);
             crate::foreign::restore((*ctx).foreign);
@@ -721,11 +714,7 @@ impl TaskCtx {
             .ordered_mode
             .load(std::sync::atomic::Ordering::Acquire)
         {
-            crate::tasks::ordered::engine::fuel_out(self);
-        } else if crate::pool::wide(self.run_ref()) && self.run_ref().fuel.active() {
-            let points = self.view.compiled.fuel.max(0) as u64;
-            self.run_ref().fuel.put(points);
-            self.heap().set_fuel(0);
+            crate::tasks::ordered::engine::task_out(self);
         }
         self.heap().unbind();
         #[cfg(feature = "measurement")]
@@ -795,17 +784,7 @@ impl TaskCtx {
             .io_data
             .store(data, std::sync::atomic::Ordering::Release);
     }
-    /// Apply the run's budgets (`budgets.limits@2`) before its entry runs, after its workers
-    /// start. At width 1 without a host's stop handle the fuel pool hands the whole budget out
-    /// as one chunk; the running
-    /// task's word is emptied, so its next fuel point takes that chunk. Under a memory budget
-    /// every heap of the run stops allocating and freeing inline, so the meter sees each one.
-    pub(crate) fn set_budgets(&mut self, fuel: Option<u64>, memory_bytes: Option<u64>) {
-        // A refill is where a loop observes a stop: a run with compute workers or a host's
-        // stop handle takes its fuel in chunks.
-        let whole = !crate::pool::wide(self.run_ref()) && !self.run_ref().control.hosted();
-        self.run().fuel = crate::budget::FuelPool::new(fuel, whole);
-        self.heap().set_fuel(0);
+    pub(crate) fn set_budgets(&mut self, memory_bytes: Option<u64>) {
         let limit = memory_bytes.unwrap_or(0);
         self.heap().meter.set_limit(limit);
         if limit != 0 {
@@ -922,7 +901,6 @@ impl TaskCtx {
                 let budget = self.budget_counters();
                 measurement.meter_ops = budget.meter_ops;
                 measurement.metered_allocations = budget.allocations;
-                measurement.fuel_refills = budget.fuel_refills;
                 if let Some(mut output) = measurement_output {
                     measurement.write(&mut output).unwrap_or_else(|_| {
                         crate::environmental("could not write the measurement report")
@@ -1136,7 +1114,6 @@ pub unsafe extern "C" fn hirsel_rt_v2_ctx_create(
         ordered_image: Default::default(),
         root_overflow: Default::default(),
         heaps,
-        fuel: Default::default(),
         execs: RoleCell::new(None),
         pool_cleanup: Default::default(),
         extern_metrics: None,

@@ -169,8 +169,6 @@ pub fn main() -> () { let _ = bounded("a:b", ":", 2) }
         assert_eq!(go_rows.len(), 18);
         eprintln!("string-splitn-5: 18 Go table rows (10 returns, 8 empty-separator failures)");
 
-        // Diagnostic only: a delimiter-rich 1 MiB suffix yields three pieces.
-        // Default interpreter fuel also rules out a full split and discard.
         let tail = "detail=value|".repeat(90_000);
         let input = format!("INFO|worker|{tail}");
         let mut library = Library::new(&configuration, Default::default()).unwrap();

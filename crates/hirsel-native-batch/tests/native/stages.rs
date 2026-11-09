@@ -68,7 +68,7 @@ pub fn main(rt:Io)->Result[(),GrantError] {
             &Options::new(TargetSpec::x86_64_unknown_linux_gnu()),
         )
         .unwrap();
-        ready.fuel = true;
+
         let sites = Sites::new(validated.snapshot());
         for backend in [Backend::Llvm, Backend::Cranelift] {
             let objects = crate::emit_backend_objects(
@@ -80,7 +80,7 @@ pub fn main(rt:Io)->Result[(),GrantError] {
                 None,
             )
             .unwrap();
-            for kind in [None, Some(BudgetKind::Fuel), Some(BudgetKind::Memory)] {
+            for kind in [None, Some(BudgetKind::Memory)] {
                 let dir = scratch
                     .0
                     .join(format!("logical-depth-budget-{backend:?}-{kind:?}"));
@@ -95,8 +95,7 @@ pub fn main(rt:Io)->Result[(),GrantError] {
                     ..Default::default()
                 });
                 record.budgets = kind.map(|kind| Budgets {
-                    provider: "budgets.limits@2".into(),
-                    fuel: (kind == BudgetKind::Fuel).then_some(10),
+                    provider: "budgets.limits@3".into(),
                     memory_bytes: (kind == BudgetKind::Memory).then_some(1),
                 });
                 let run = record.validated().unwrap();

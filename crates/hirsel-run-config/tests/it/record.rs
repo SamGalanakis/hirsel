@@ -20,7 +20,6 @@ fn bound(run: &ValidatedRun) -> BoundRun {
         launch: run.record().launch,
         roots: vec![],
         code: CodeReach::Safe,
-        fueled: true,
     };
     run.clone().bind(&facts).unwrap()
 }
@@ -345,7 +344,6 @@ fn safe_code_policy_refuses_an_escaping_program_at_bind() {
             launch: run.record().launch,
             roots: vec![],
             code,
-            fueled: true,
         })
     };
     let safe = valid(&policy(Some("admit.safe@1")));
@@ -923,117 +921,76 @@ fn launch_inputs_select_inline_json_without_widening_validation() {
 }
 
 #[test]
-fn a_fuel_budget_binds_only_to_code_that_charges_fuel_and_a_memory_budget_to_any() {
-    let facts = |run: &ValidatedRun, fueled| ProgramFacts {
-        program: run.program(),
-        entry: run.record().entry.clone(),
-        launch: run.record().launch,
-        roots: vec![],
-        code: CodeReach::Safe,
-        fueled,
-    };
-    let mut record = empty();
-    record.budgets = Some(Budgets {
-        provider: "budgets.limits@2".into(),
-        fuel: Some(1000),
-        memory_bytes: None,
-    });
-    let run = valid(&record);
-    assert!(run.clone().bind(&facts(&run, true)).is_ok());
-    assert!(matches!(
-        run.clone().bind(&facts(&run, false)),
-        Err(RunRefusal::Unsupported { field }) if field == "budgets.fuel"
-    ));
-    record.budgets = Some(Budgets {
-        provider: "budgets.limits@2".into(),
-        fuel: None,
-        memory_bytes: Some(1 << 20),
-    });
-    let run = valid(&record);
-    assert!(run.clone().bind(&facts(&run, false)).is_ok());
-}
-
-#[test]
 fn budgets_name_a_provider_none_normalizes_away_and_limits_need_a_nonzero_bound() {
-    let limits = |fuel, memory_bytes| Budgets {
-        provider: "budgets.limits@2".into(),
-        fuel,
+    let limits = |memory_bytes| Budgets {
+        provider: "budgets.limits@3".into(),
         memory_bytes,
     };
     let mut record = empty();
-    record.budgets = Some(limits(Some(1000), None));
+    record.budgets = Some(limits(Some(1000)));
     let run = valid(&record);
-    assert_eq!(run.budgets(), Some(&limits(Some(1000), None)));
+    assert_eq!(run.budgets(), Some(&limits(Some(1000))));
     let text = std::str::from_utf8(run.canonical()).unwrap();
     assert!(
-        text.ends_with(
-            r#""budgets":{"provider":"budgets.limits@2","fuel":1000,"memory_bytes":null}}"#
-        ),
+        text.ends_with(r#""budgets":{"provider":"budgets.limits@3","memory_bytes":1000}}"#),
         "{text}"
     );
     assert_eq!(RunConfig::validate(run.canonical()).unwrap(), run);
-    // The budget is part of the run's identity.
     assert_ne!(run.identity(), valid(&empty()).identity());
-    record.budgets = Some(limits(None, Some(1 << 20)));
-    assert_eq!(valid(&record).budgets(), Some(&limits(None, Some(1 << 20))));
-    // budgets.none@1 is the default: it has one canonical spelling, the absent entry.
+    assert_eq!(bound(&run).run(), &run);
     record.budgets = Some(Budgets {
         provider: "budgets.none@1".into(),
-        fuel: None,
         memory_bytes: None,
     });
     assert_eq!(valid(&record), valid(&empty()));
-    for (budgets, refusal) in [
-        (limits(None, None), "invalid"),
-        (limits(Some(0), None), "invalid"),
-        (limits(None, Some(0)), "invalid"),
+    for (budgets, unsupported) in [
+        (limits(None), false),
+        (limits(Some(0)), false),
         (
             Budgets {
                 provider: "budgets.none@1".into(),
-                fuel: Some(1),
-                memory_bytes: None,
+                memory_bytes: Some(1),
             },
-            "invalid",
+            false,
         ),
-        // `budgets.limits@2` retires @1.
         (
             Budgets {
                 provider: "budgets.limits@1".into(),
-                fuel: Some(1),
-                memory_bytes: None,
+                memory_bytes: Some(1),
             },
-            "unsupported",
+            true,
+        ),
+        (
+            Budgets {
+                provider: "budgets.limits@2".into(),
+                memory_bytes: Some(1),
+            },
+            true,
         ),
     ] {
         record.budgets = Some(budgets);
         let error = RunConfig::validate(&bytes(&record)).unwrap_err();
         assert!(
             matches!(
-                (&error, refusal),
-                (RunRefusal::Invalid { .. }, "invalid")
-                    | (RunRefusal::Unsupported { .. }, "unsupported")
+                (&error, unsupported),
+                (RunRefusal::Invalid { .. }, false) | (RunRefusal::Unsupported { .. }, true)
             ),
             "{error}"
         );
     }
-    // A grants template chooses the budget like any other host policy.
-    let run = RunConfig::bind_grants(
-        br#"{"budgets":{"provider":"budgets.limits@2","fuel":5}}"#,
-        [0; 32],
-        "probe@1/main".into(),
-        LaunchKind::Main,
-    )
-    .unwrap();
-    assert_eq!(run.budgets(), Some(&limits(Some(5), None)));
-    assert!(
-        RunConfig::bind_grants(
-            br#"{"budgets":{"provider":"budgets.limits@2","fuel":5,"wall":1}}"#,
-            [0; 32],
-            "probe@1/main".into(),
-            LaunchKind::Main,
-        )
-        .is_err()
-    );
+    let template = |text: &[u8]| {
+        RunConfig::bind_grants(text, [0; 32], "probe@1/main".into(), LaunchKind::Main)
+    };
+    let run = template(br#"{"budgets":{"provider":"budgets.limits@3","memory_bytes":5}}"#).unwrap();
+    assert_eq!(run.budgets(), Some(&limits(Some(5))));
+    for text in [
+        br#"{"budgets":{"provider":"budgets.limits@3"}}"#.as_slice(),
+        br#"{"budgets":{"provider":"budgets.limits@3","memory_bytes":null}}"#,
+        br#"{"budgets":{"provider":"budgets.limits@3","memory_bytes":0}}"#,
+        br#"{"budgets":{"provider":"budgets.limits@3","memory_bytes":5,"wall":1}}"#,
+    ] {
+        assert!(template(text).is_err());
+    }
 }
 
 #[test]

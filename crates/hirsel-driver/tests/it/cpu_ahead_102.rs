@@ -173,7 +173,6 @@ fn cpu_worker_ownership_protocol_binds_the_shared_loan_job_move_and_result_sink(
             &program.table,
             &program.target,
             &plan,
-            program.fuel
         ));
         for field in 0..7 {
             let mut bad = plan.clone();
@@ -209,7 +208,6 @@ fn cpu_worker_ownership_protocol_binds_the_shared_loan_job_move_and_result_sink(
                     &program.table,
                     &program.target,
                     &bad,
-                    program.fuel
                 ),
                 "changed CPU field {field}"
             );
@@ -392,7 +390,6 @@ fn cpu_allocating_mapper_graph_binds_heap_handoffs_cleanup_and_both_final_frames
             &program.table,
             &program.target,
             mapper,
-            program.fuel,
             mapper.helpers
         ));
         assert!(hirsel_lir::ahead::validate_cpu_workers(
@@ -400,7 +397,6 @@ fn cpu_allocating_mapper_graph_binds_heap_handoffs_cleanup_and_both_final_frames
             &program.table,
             &program.target,
             &plan,
-            program.fuel
         ));
         for field in 0..5 {
             let mut forged = mapper.clone();
@@ -431,7 +427,6 @@ fn cpu_allocating_mapper_graph_binds_heap_handoffs_cleanup_and_both_final_frames
                     &program.table,
                     &program.target,
                     &forged,
-                    program.fuel,
                     mapper.helpers
                 ),
                 "forged field {field}"
@@ -540,7 +535,7 @@ fn canonical_caller_keeps_an_ordinary_call_to_a_cpu_mapper() {
         let body = ScalarBody {
             body: caller.digest(),
             calls: BTreeSet::new(),
-            fuel_points: hirsel_lir::fuel::fuel_points(caller),
+            checkpoint_points: hirsel_lir::checkpoints::checkpoint_points(caller),
         };
         let graph = ScalarGraph {
             root: caller_id,
@@ -575,7 +570,6 @@ fn canonical_caller_keeps_an_ordinary_call_to_a_cpu_mapper() {
             &program.table,
             &program.target,
             &plan,
-            program.fuel
         ));
         let mut bad = plan.clone();
         let host = bad.roots.get_mut(&caller_id).unwrap();
@@ -598,7 +592,7 @@ fn canonical_caller_keeps_an_ordinary_call_to_a_cpu_mapper() {
                 .clone(),
         );
         assert!(
-            !validate_cpu_workers(&all, &program.table, &program.target, &bad, program.fuel),
+            !validate_cpu_workers(&all, &program.table, &program.target, &bad),
             "a non-CPU frame graph cannot borrow CPU allocation frames"
         );
         let full_plan = plan.clone();
@@ -631,7 +625,7 @@ fn canonical_caller_keeps_an_ordinary_call_to_a_cpu_mapper() {
             foreign: &program.foreign_dispatch,
             opt: OptLevel::Default,
             measurement: false,
-            fuel: program.fuel,
+
             verify_backend: true,
         };
         let symbol = &plan.symbols[&mapper_id];
@@ -730,7 +724,6 @@ fn cpu_saved_summary_checks_live_result_ordinal_and_retained_owner_on_both_emitt
                 &program.table,
                 &program.target,
                 &plan,
-                program.fuel
             ));
             for field in 0..9 {
                 let mut forged = plan.clone();
@@ -749,13 +742,7 @@ fn cpu_saved_summary_checks_live_result_ordinal_and_retained_owner_on_both_emitt
                     _ => cpu.summary = None,
                 }
                 assert!(
-                    !validate_cpu_workers(
-                        &all,
-                        &program.table,
-                        &program.target,
-                        &forged,
-                        program.fuel
-                    ),
+                    !validate_cpu_workers(&all, &program.table, &program.target, &forged,),
                     "forged summary field {field}"
                 );
                 let empty = std::collections::BTreeSet::new();
@@ -777,7 +764,7 @@ fn cpu_saved_summary_checks_live_result_ordinal_and_retained_owner_on_both_emitt
                     foreign: &program.foreign_dispatch,
                     opt: hirsel_lir::emission::OptLevel::Default,
                     measurement: false,
-                    fuel: program.fuel,
+
                     verify_backend: true,
                 };
                 assert!(matches!(hirsel_llvm::emit_object(&all, &inputs),
@@ -965,7 +952,6 @@ fn cpu_save_roots_check_inputs_mapper_locals_results_and_parent_frames() {
             &program.table,
             &program.target,
             &plan,
-            program.fuel
         ));
         let mut accepted = Vec::new();
         for kind in 0..10 {
@@ -1024,7 +1010,7 @@ fn cpu_save_roots_check_inputs_mapper_locals_results_and_parent_frames() {
                     .clear(),
             }
             assert_ne!(bad, plan, "forge {kind} changes actual roots");
-            if validate_cpu_workers(&all, &program.table, &program.target, &bad, program.fuel) {
+            if validate_cpu_workers(&all, &program.table, &program.target, &bad) {
                 accepted.push(kind);
             }
         }
@@ -1095,7 +1081,6 @@ fn cpu_saved_growth_checks_inputs_and_composes_private_helper_frames() {
             &program.table,
             &program.target,
             &plan,
-            program.fuel
         ));
         for field in 0..8 {
             let mut forged = plan.clone();
@@ -1148,7 +1133,6 @@ fn cpu_saved_growth_checks_inputs_and_composes_private_helper_frames() {
                     program.table.digest().0.as_slice(),
                     program.target.digest().0.as_slice(),
                     mapper.helpers.0.as_slice(),
-                    &[u8::from(program.fuel)],
                     format!(
                         "{:?}{:?}{:?}{:?}{:?}{:?}{:?}",
                         mapper.graph.root,
@@ -1168,7 +1152,6 @@ fn cpu_saved_growth_checks_inputs_and_composes_private_helper_frames() {
                     &program.table,
                     &program.target,
                     &forged,
-                    program.fuel
                 ),
                 "forged growth {field}"
             );
@@ -1245,7 +1228,6 @@ fn cpu_saved_growth_checks_inputs_and_composes_private_helper_frames() {
             &mixed.table,
             &mixed.target,
             &plan,
-            mixed.fuel
         ));
         for backend in [
             hirsel_native::Backend::Llvm,
@@ -1343,7 +1325,6 @@ fn cpu_saved_retained_recipes_cover_multiple_owners_and_active_arms() {
                     &program.table,
                     &program.target,
                     &bad,
-                    program.fuel,
                 ) {
                     accepted.push((result, kind));
                 }
@@ -1440,13 +1421,8 @@ fn cpu_saved_regional_recipe_is_reconstructed_before_emission() {
                 _ => mapper.regional.clear(),
             }
             refresh_cpu_mapper_identity(&program, mapper);
-            if hirsel_lir::ahead::validate_cpu_workers(
-                &all,
-                &program.table,
-                &program.target,
-                &bad,
-                program.fuel,
-            ) {
+            if hirsel_lir::ahead::validate_cpu_workers(&all, &program.table, &program.target, &bad)
+            {
                 accepted.push(kind);
             }
         }
@@ -1545,7 +1521,6 @@ fn refresh_cpu_mapper_identity(
             program.table.digest().0.as_slice(),
             program.target.digest().0.as_slice(),
             mapper.helpers.0.as_slice(),
-            &[u8::from(program.fuel)],
             format!(
                 "{:?}{:?}{:?}{:?}{:?}{:?}{:?}",
                 mapper.graph.root,

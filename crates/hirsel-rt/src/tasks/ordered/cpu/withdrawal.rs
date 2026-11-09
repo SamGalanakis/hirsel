@@ -22,10 +22,7 @@ mod tests {
     #[test]
     fn withdrawn_cpu_prefixes_restore_exact_results_and_charge_once() {
         for width in [1, 4, 8, 16] {
-            let budgets = Budgets {
-                fuel: true,
-                memory: true,
-            };
+            let budgets = Budgets { memory: true };
             let grant = hirsel_run_schema::CpuGrant {
                 provider: "cpu.scoped@1".into(),
                 max_workers: 16,
@@ -36,7 +33,6 @@ mod tests {
             let mut state = Settled {
                 level: 0,
                 limit: 100,
-                fuel: 20,
             };
             let initial = state;
             let head = (3 << 32) | 7;
@@ -56,7 +52,7 @@ mod tests {
                 retained_count: 1,
                 retained: roots.as_ptr(),
             };
-            let charges = summarise(budgets, &[Event::Fuel, Event::Alloc(60)]).unwrap();
+            let charges = summarise(budgets, &[Event::Alloc(60)]).unwrap();
             batch
                 .publish(
                     younger,
@@ -103,7 +99,6 @@ mod tests {
                 Settled {
                     level: 60,
                     limit: 100,
-                    fuel: 19
                 },
                 "restored prefixes charge once"
             );
@@ -154,8 +149,6 @@ impl Batch {
             .collect()
     }
 
-    /// Transfer each existing prefix back once. No allocation or fuel event is
-    /// repeated, and no pointer or charge is reconstructed from the mapper.
     pub(in crate::tasks::ordered) fn restore(&mut self, withdrawn: Vec<Withdrawn>) {
         for row in withdrawn {
             assert_eq!(self.ordinal(row.task), Some(row.ordinal));

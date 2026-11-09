@@ -83,7 +83,7 @@ unsafe fn program(ctx: *mut TaskCtx, mode: u8) {
     let deadline = [0u64; 3];
     if mode == 4 {
         let _role = unsafe { role::Guard::new(ctx) };
-        unsafe { (*ctx).set_budgets(None, Some(50)) };
+        unsafe { (*ctx).set_budgets(Some(50)) };
     }
     let mut out = std::mem::MaybeUninit::<ProcessResult>::uninit();
     assert_eq!(

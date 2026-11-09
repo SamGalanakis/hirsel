@@ -78,7 +78,7 @@ fn compile_objects(source: &str) {
                     supplemental_sources: vec![],
                     output: NativeOutput::Objects { roots: vec![first] },
                     run: None,
-                    fuel: false,
+
                     evidence: None,
                 }),
             };

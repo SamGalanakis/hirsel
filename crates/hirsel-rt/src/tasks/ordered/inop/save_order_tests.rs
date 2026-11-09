@@ -71,7 +71,6 @@ fn need_save_preserves_one_retirement_when_producer_or_waiter_saves_first() {
             Settled {
                 level: 0,
                 limit: 100,
-                fuel: 100,
             },
             crate::ordered::objects::Registry::default(),
         );
@@ -83,11 +82,7 @@ fn need_save_preserves_one_retirement_when_producer_or_waiter_saves_first() {
         );
         assert_eq!(driver.select(), [waiter]);
         driver.claimed(waiter, 0);
-        let mut before = Stretch::new(Budgets {
-            fuel: true,
-            memory: true,
-        });
-        before.fuel_points(7);
+        let mut before = Stretch::new(Budgets { memory: true });
         before.alloc(12).unwrap();
         let operation = Command::AtomicLoad { word: 0, bytes: 8 }.operation(Default::default());
         assert_eq!(
@@ -113,7 +108,7 @@ fn need_save_preserves_one_retirement_when_producer_or_waiter_saves_first() {
             };
             let f = d.frontier.as_ref().unwrap();
             assert_eq!(f.retired(), 0);
-            assert_eq!((f.settled.fuel, f.settled.level), (100, 0));
+
             assert_eq!(backend.committed, 0);
             assert!(backend.recorded.is_empty());
             if is_producer == producer_first {
@@ -135,25 +130,20 @@ fn need_save_preserves_one_retirement_when_producer_or_waiter_saves_first() {
         let f = d.frontier.as_mut().unwrap();
         assert_eq!(f.absorb(&mut backend), Ok(Progress::Absorbed(waiter)));
         assert_eq!(f.retired(), 0, "Keep absorbs without ending the turn");
-        assert_eq!((f.settled.fuel, f.settled.level), (93, 12));
+
         assert_eq!(backend.committed, 1);
         assert_eq!(backend.recorded, [(0, before)]);
         assert_eq!(f.absorb(&mut backend), Ok(Progress::NeedSegment(waiter)));
         assert_eq!(backend.committed, 1);
         assert_eq!(
-            f.continue_head(
-                Stretch::new(Budgets {
-                    fuel: true,
-                    memory: true
-                }),
-                &mut backend,
-                || Next::Yield
-            ),
+            f.continue_head(Stretch::new(Budgets { memory: true }), &mut backend, || {
+                Next::Yield
+            }),
             Ok(Progress::Poll)
         );
         f.complete_poll(vec![]);
         assert_eq!(f.retired(), 1);
-        assert_eq!((f.settled.fuel, f.settled.level), (93, 12));
+
         assert_eq!(backend.committed, 1);
     }
 }

@@ -63,7 +63,6 @@ fn a_diverging_call_branches_on_status_without_noreturn() {
         tracking: false,
         opt: OptLevel::None,
         measurement: false,
-        fuel: false,
     };
     let ir = emit_ir(&program.units(), &inputs).unwrap();
     assert!(!ir.contains("noreturn"), "{ir}");

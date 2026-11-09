@@ -854,10 +854,7 @@ mod tests {
         }
     }
     fn empty() -> Stretch {
-        Stretch::new(Budgets {
-            fuel: false,
-            memory: false,
-        })
+        Stretch::new(Budgets { memory: false })
     }
     fn policy() -> Policy {
         Policy {
@@ -944,7 +941,6 @@ mod tests {
             Settled {
                 level: 0,
                 limit: u64::MAX,
-                fuel: u64::MAX,
             },
         );
         f.held.insert(0, Held::empty());
@@ -1005,7 +1001,6 @@ mod tests {
             Settled {
                 level: 0,
                 limit: u64::MAX,
-                fuel: u64::MAX,
             },
         );
         f.held.insert(0, Held::empty());
@@ -1097,7 +1092,6 @@ mod tests {
             Settled {
                 level: 0,
                 limit: u64::MAX,
-                fuel: u64::MAX,
             },
         );
         f.held.insert(0, Held::empty());
@@ -1210,7 +1204,6 @@ mod tests {
             Settled {
                 level: 0,
                 limit: u64::MAX,
-                fuel: u64::MAX,
             },
         );
         f.held.insert(0, Held::empty());
@@ -1288,7 +1281,6 @@ mod tests {
             Settled {
                 level: 0,
                 limit: u64::MAX,
-                fuel: u64::MAX,
             },
         );
         f.held.insert(0, Held::empty());
@@ -1367,7 +1359,6 @@ mod tests {
             Settled {
                 level: 0,
                 limit: u64::MAX,
-                fuel: u64::MAX,
             },
         );
         f.held.insert(0, Held::empty());
@@ -1449,7 +1440,6 @@ mod tests {
             Settled {
                 level: 0,
                 limit: u64::MAX,
-                fuel: u64::MAX,
             },
         );
         f.enqueue(1, Held::empty());
@@ -1668,7 +1658,6 @@ mod tests {
             Settled {
                 level: 0,
                 limit: u64::MAX,
-                fuel: u64::MAX,
             },
         );
         f.held.insert(0, Held::empty());
@@ -1757,7 +1746,6 @@ mod tests {
             Settled {
                 level: 0,
                 limit: u64::MAX,
-                fuel: u64::MAX,
             },
         );
         f.held.insert(0, Held::empty());

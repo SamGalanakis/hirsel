@@ -144,7 +144,7 @@ action ([CAP-1](capabilities.md#cap-1-authority)).
 and replay: `stdout.bytes@1`, `random.splitmix64@1`, `random.system@1`,
 `clock.monotonic.ns@1`, `clock.wall.unix_ns@1`, `tasks.cooperative@1`, `tasks.free@1`,
 `net.stream@1`, `net.script@2`, `process.spawn@1`, `process.script@1`,
-`telemetry.capture@1`, `telemetry.null@1`, `budgets.none@1` and `budgets.limits@2`. Planned: the runner providers `local.threads@1`,
+`telemetry.capture@1`, `telemetry.null@1`, `budgets.none@1` and `budgets.limits@3`. Planned: the runner providers `local.threads@1`,
 `local.process@1`, `sim@1` and `remote.tls@1` and the code stores `code.none@1`,
 `code.dir@1`, `code.object@1` and `code.sim@1`. Each is a seam under
 [RUN-13](runners.md#run-13-provider-seams): its choice changes cost, latency and crash
@@ -253,34 +253,26 @@ process would (**The Signaled end** below).
 **Budgets.** A host bounds the resources one run may use, for example to host untrusted
 code, by choosing a budget implementation in the record; budgets are host policy and grant
 nothing. `budgets.none@1`, the default, bounds nothing; its canonical spelling omits the
-`budgets` member. `budgets.limits@2`, which retires `budgets.limits@1`, takes `fuel` and
-`memory_bytes`, each a positive `u64` or null for unbounded, at least one present, for
-example `{"provider": "budgets.limits@2", "fuel": 100000000, "memory_bytes": null}`.
-**Fuel** is charged once at every function entry and at least once per iteration of every
-loop; each engine places its loop charges (the interpreter at every jump to the same or an
-earlier block, native code at the targets of the control-flow graph's feedback edges), so
-counts differ between engines. A run whose next charge would exceed `fuel` stops before
-it. Native code charges fuel only when compiled with fuel checks (`hirsel build --fuel`,
-or `hirsel run --native` with a fuel budget); an executable without them refuses a fuel
-budget and costs nothing when it has none. **Memory** is the run's logical storage: for
+`budgets` member. `budgets.limits@3` requires one positive `u64` field,
+`memory_bytes`, for example `{"provider":"budgets.limits@3","memory_bytes":1048576}`.
+Earlier versions of this provider are unknown and refused. **Memory** is the run's logical storage: for
 each live counted block, its size class; for each live large block, its request rounded up
 to 4 KiB; for each open region, the canonical segment sequence its own requests would take
 from an empty pool. A charge happens when a task allocates and a credit when a logical
 lifetime ends, in the order the run's scheduler gives. The first charge, in that order,
 that exceeds its budget decides the stop and its kind. The interpreter charges the same
 quantities from its value model. A stopped run's outcome is **BudgetExceeded** with the
-budget's kind, `fuel` or `memory`: like Blocked, it runs no user code, cancellation or
+budget's only kind, `memory`: like Blocked, it runs no user code, cancellation or
 destruction after the stop, keeps the output it produced, and is a tooling outcome whose
 position is comparable only within one engine and compilation ([the reference
 interpreter](implementation.md#the-reference-interpreter)). A native executable records
-`budget_exceeded <kind>` and exits with status 5. A budget changes no other outcome
+`budget_exceeded memory` and exits with status 5. A budget changes no other outcome
 ([DET-3](#det-3-no-switches)). The budgets are part of the validated record. In ordered
 mode a replay applies them again and stops where the recorded run stopped. Under
-`tasks.free@1`: Fuel is apportioned to running tasks in chunks, returned when a task stops
-running. The run stops when a charge finds no fuel left in its chunk or the run's pool, so
-up to one chunk per running task may remain unspent. A replay does not re-enforce budgets;
+`tasks.free@1`, a replay does not re-enforce the memory budget;
 it stops at the recorded cut. An engine that cannot enforce a requested budget refuses the
-launch.
+launch. A host that bounds CPU use kills the run; this is a host stop, and the
+prefix law applies to its confirmed effects.
 
 **Long pure primitives.** The one-shot `bytes.sha1`, `bytes.sha224`,
 `bytes.sha256`, `bytes.sha384`, `bytes.sha512` and `bytes.sha512_256` operations
@@ -293,16 +285,12 @@ avoid overflow, including the empty input's mandatory padding block.
 The reference evaluator, its checked mode and independent post-RC H add this
 charge to their tooling Steps before hashing; the call terminator still costs
 its ordinary step. H derives the charge from its checked byte operands before
-provider entry, without depending on runtime or kernel code. The reference
-modes also preflight fuel in the same order and stop without publishing a
-result if either allowance is insufficient. Both native engines charge the identical primitive fuel cost,
-including when invoked from code without loop fuel checks; ordinary function
-and loop charges remain engine-specific. Native work checks the host stop at
+provider entry, without depending on runtime or kernel code. Native work checks the host stop at
 entry, before every group of at most 64 full blocks, and before tail/padding.
 A rejected checkpoint publishes no digest and does no later hashing. No
 implicit task yield or task-cancellation observation is introduced: explicit
 `task.check_canceled` points keep their ordinary recorded contract. These
-host-stop checks follow fuel-refill stop behaviour and add no tape event.
+host-stop checks add no tape event.
 Incremental std `new/update/finish` retains its source-level checks and costs;
 one-shot hashing does not execute or double-charge those wrappers.
 
@@ -1147,6 +1135,6 @@ The numeric byte primitives also charge deterministic work before publishing a
 result: `bytes.json_number_end` charges 1 plus inspected input bytes (terminating
 lookahead included, EOF excluded); `bytes.integer` charges 1 plus full input byte
 length; `bytes.decimal_word` charges 9 for its fixed eight-byte u64 input. These
-are extra Steps/fuel, besides ordinary TIR instructions and function/back-edge
-fuel points. Reference/checked execution clips Steps to the unchanged limit;
-native execution uses exact run fuel and preserves ordered chunk accounting.
+are extra tooling Steps besides ordinary TIR instructions. Reference and checked
+execution clip Steps to the unchanged tooling limit. Native execution observes
+host stops at primitive checkpoints.

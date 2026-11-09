@@ -304,7 +304,6 @@ fn probe(target: &TargetSpec, malformed: u8) -> Vec<u8> {
         tracking: false,
         opt: OptLevel::None,
         measurement: false,
-        fuel: false,
     };
     let mut em = Emitter::new(crate::module::Inputs::units(&inputs), false).unwrap();
     for publish in [false, true] {

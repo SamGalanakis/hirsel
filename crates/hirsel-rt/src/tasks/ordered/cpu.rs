@@ -260,7 +260,7 @@ impl Batch {
         unsafe { (*summary).phase = super::ahead::cpu_handoff::SUMMARY_RETIRED };
         let settled = self.jobs.settled();
         let record = crate::io::CpuSummary {
-            version: 3,
+            version: 4,
             retirement: self.retirement,
             ordinal: job as u64,
             value,
@@ -274,7 +274,6 @@ impl Batch {
                 pieces: crate::io::CpuSummary::pieces(row.recorded_prefix.as_ref().unwrap()),
                 level: settled.level,
                 limit: settled.limit,
-                fuel: settled.fuel,
             }),
         };
         self.retirement = self
@@ -580,7 +579,7 @@ mod tests {
             let outcome = crate::host::BodyRun::new(1, false).run(
                 |ctx| unsafe {
                     (*ctx).run().cpu_grant = Some(grant(64));
-                    (*ctx).set_budgets(Some(100), None);
+                    (*ctx).set_budgets(None);
                     engine::enable(
                         ctx,
                         crate::ordered::Policy::admit(&Default::default(), None),
@@ -592,7 +591,6 @@ mod tests {
                     assert_eq!(control(ctx, width, 2, 2, || 0), Ok(0));
                     for ordinal in 0..2 {
                         assert_eq!(control(ctx, width, 3, ordinal, || 0), Ok(0));
-                        (*ctx).view.compiled.fuel -= 3;
                         let block = crate::alloc::hirsel_rt_v2_alloc(
                             ctx,
                             0,
@@ -609,7 +607,7 @@ mod tests {
                         let state = d.frontier.as_ref().unwrap().settled;
                         assert_eq!(state.level, 0);
                         assert_eq!(state.limit, u64::MAX, "grant does not replace run limit");
-                        assert_eq!(state.fuel, 94);
+
                         let batch = d.cpu_batch.as_mut().unwrap();
                         assert!(batch.records.iter().all(|row| !row.active));
                         assert_eq!(batch.jobs.retire(), Ok(2));
@@ -646,7 +644,7 @@ mod tests {
                     |ctx| unsafe {
                         let bytes = crate::alloc::allocation_charge(ctx, 0, 16, 8);
                         (*ctx).run().cpu_grant = Some(grant(bytes * 2));
-                        (*ctx).set_budgets(Some(100), None);
+                        (*ctx).set_budgets(None);
                         engine::enable(
                             ctx,
                             crate::ordered::Policy::admit(&Default::default(), None),
@@ -663,7 +661,6 @@ mod tests {
                         for ordinal in 0..4 {
                             assert_eq!(control(ctx, width, 3, ordinal, live), Ok(0));
                             seen.store(ordinal, Ordering::Relaxed);
-                            (*ctx).view.compiled.fuel -= 1;
                             let _block = crate::alloc::hirsel_rt_v2_alloc(
                                 ctx,
                                 0,
@@ -701,14 +698,10 @@ mod tests {
     #[test]
     fn job_frontier_imports_orchestration_charges_and_preserves_the_run_limit() {
         use crate::budget::stretch::{Budgets, Event, summarise};
-        let budgets = Budgets {
-            memory: true,
-            fuel: true,
-        };
+        let budgets = Budgets { memory: true };
         let mut state = Settled {
             level: 10,
             limit: 90,
-            fuel: 20,
         };
         let mut batch = Batch::new(&grant(100), 4, 2, state);
         batch.claim_for_test(7, 4, 0);
@@ -723,19 +716,18 @@ mod tests {
         );
         // A parent/result rest can credit and charge between two jobs.
         state.level = 30;
-        state.fuel = 12;
         batch.claim_for_test(9, 4, 1);
         assert_eq!(
             batch.settle(
                 9,
-                &summarise(budgets, &[Event::Fuel, Event::Alloc(61)]).unwrap(),
+                &summarise(budgets, &[Event::Alloc(61)]).unwrap(),
                 &mut state,
                 false
             ),
             Some(Err(hirsel_run_schema::BudgetKind::Memory))
         );
         assert_eq!(state.level, 30);
-        assert_eq!(state.fuel, 12);
+
         assert_eq!(state.limit, 90);
         assert_eq!(batch.jobs.retire().unwrap_err().job, 1);
     }
@@ -748,7 +740,6 @@ mod tests {
             let mut state = Settled {
                 level: 0,
                 limit: 100,
-                fuel: 20,
             };
             let mut batch = Batch::new(&grant(100), width, 2, state);
             batch.claim_for_test(7, width, 0);
@@ -770,14 +761,11 @@ mod tests {
                 retained_count: 1,
                 retained: retained.as_ptr(),
             };
-            let budgets = Budgets {
-                memory: true,
-                fuel: true,
-            };
+            let budgets = Budgets { memory: true };
             batch
                 .publish(
                     9,
-                    summarise(budgets, &[Event::Fuel, Event::Alloc(60)]).unwrap(),
+                    summarise(budgets, &[Event::Alloc(60)]).unwrap(),
                     &raw mut summary,
                     value.to_le_bytes().to_vec(),
                 )
@@ -802,7 +790,7 @@ mod tests {
             assert_eq!(record.ordinal, 1);
             assert_eq!(record.retirement, 0);
             assert_eq!(record.native.as_ref().unwrap().level, 60);
-            assert_eq!(record.native.as_ref().unwrap().fuel, 19);
+
             assert_eq!(record.stop, None);
             record.validate().unwrap();
             assert_eq!(result, Ok(()));
@@ -812,7 +800,6 @@ mod tests {
                 Settled {
                     level: 60,
                     limit: 100,
-                    fuel: 19
                 }
             );
             assert!(batch.retire_summary(9, &mut state).is_none());
@@ -821,7 +808,6 @@ mod tests {
                 Settled {
                     level: 60,
                     limit: 100,
-                    fuel: 19
                 }
             );
             assert_eq!(
@@ -838,7 +824,6 @@ mod tests {
                 Settled {
                     level: 0,
                     limit: 100,
-                    fuel: 19
                 }
             );
             assert!(batch.records.iter().all(|row| !row.active));
@@ -851,17 +836,10 @@ mod tests {
         use crate::budget::stretch::{Budgets, Event as Charge, summarise};
         use crate::io::Event;
         use hirsel_run_schema::BudgetKind;
-        for (limit, fuel, stop) in [(64, 20, BudgetKind::Memory), (128, 1, BudgetKind::Fuel)] {
-            let mut state = Settled {
-                level: 0,
-                limit,
-                fuel,
-            };
+        for (limit, stop) in [(64, BudgetKind::Memory)] {
+            let mut state = Settled { level: 0, limit };
             let mut batch = Batch::new(&grant(128), 4, 2, state);
-            let budgets = Budgets {
-                fuel: true,
-                memory: true,
-            };
+            let budgets = Budgets { memory: true };
             let mut summaries = [0, 1].map(|ordinal| Summary {
                 version: VERSION,
                 phase: SUMMARY_PUBLISHED,
@@ -878,7 +856,7 @@ mod tests {
             batch
                 .publish(
                     9,
-                    summarise(budgets, &[Charge::Fuel, Charge::Alloc(48)]).unwrap(),
+                    summarise(budgets, &[Charge::Alloc(48)]).unwrap(),
                     &raw mut summaries[1],
                     Vec::new(),
                 )
@@ -886,7 +864,7 @@ mod tests {
             batch
                 .publish(
                     7,
-                    summarise(budgets, &[Charge::Fuel, Charge::Alloc(32)]).unwrap(),
+                    summarise(budgets, &[Charge::Alloc(32)]).unwrap(),
                     &raw mut summaries[0],
                     Vec::new(),
                 )
@@ -943,7 +921,6 @@ mod tests {
             let [width, ordinal] = crate::alloc::payload(env).cast::<[u64; 2]>().read();
             let _role = crate::tasks::role::Guard::new(ctx);
             assert_eq!(control(ctx, width as u32, 3, ordinal, || 0), Ok(0));
-            (*ctx).view.compiled.fuel -= 1;
             let block =
                 crate::alloc::hirsel_rt_v2_alloc(ctx, 0, 16, 8, crate::alloc::DOMAIN_HEAP, 0);
             (*ctx).heap().free(block);
@@ -962,7 +939,7 @@ mod tests {
             let outcome = run.run(
                 |ctx| unsafe {
                     (*ctx).run().cpu_grant = Some(grant(1 << 20));
-                    (*ctx).set_budgets(Some(1000), None);
+                    (*ctx).set_budgets(None);
                     engine::enable(
                         ctx,
                         crate::ordered::Policy::admit(&Default::default(), None),
@@ -1036,7 +1013,6 @@ mod commit_tests {
             Settled {
                 level: 0,
                 limit: 100,
-                fuel: 20,
             },
             crate::ordered::objects::Registry::default(),
         );

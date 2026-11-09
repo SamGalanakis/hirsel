@@ -24,7 +24,7 @@ fn revoking_a_younger_two_mib_attempt_restores_input_and_the_heads_reserve() {
         let outcome = crate::host::BodyRun::new(1, false).run(
             |ctx| unsafe {
                 (*ctx).run().cpu_grant = Some(cpu_grant);
-                (*ctx).set_budgets(Some(100), Some(3 << 20));
+                (*ctx).set_budgets(Some(3 << 20));
                 (*ctx).heap().idle_cap = 0;
                 (*ctx).heap_ref().meter.cpu.set(body_ledger).ok().unwrap();
                 engine::enable(
@@ -33,7 +33,7 @@ fn revoking_a_younger_two_mib_attempt_restores_input_and_the_heads_reserve() {
                 );
             },
             move |ctx| unsafe {
-                engine::fuel_in(ctx);
+                engine::task_in(ctx);
                 crate::tasks::ordered::cpu::control(ctx, width, 2, 1, || 0).unwrap();
                 crate::tasks::ordered::cpu::control(ctx, width, 3, 0, || 0).unwrap();
                 let mut live = 1;

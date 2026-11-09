@@ -171,11 +171,6 @@ pub(crate) struct Switch {
     to: *mut u8,
 }
 
-/// Save the ordinary CPU worker at its first mapper fuel refill. Free has no
-/// Ordered claim receipt; the emitted-PC oracle verifies the resumed mapper.
-/// # Safety
-/// The running context owns this worker. The naked caller must tail-jump to
-/// fiber_switch after refill returns, without retaining any Rust frame.
 pub(crate) unsafe extern "C" fn ordinary_prepare(ctx: *mut TaskCtx) -> Switch {
     let none = Switch {
         save: std::ptr::null_mut(),

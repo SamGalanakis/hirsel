@@ -676,7 +676,7 @@ mod tests {
                 ));
                 assert!(
                     library
-                        .cpu_budget_stop(hirsel_run_schema::BudgetKind::Fuel)
+                        .cpu_budget_stop(hirsel_run_schema::BudgetKind::Memory)
                         .is_none(),
                     "Free CPU stops belong exclusively to the phase tape"
                 );

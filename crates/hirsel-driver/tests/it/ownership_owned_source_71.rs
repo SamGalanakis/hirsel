@@ -57,7 +57,6 @@ fn source_owned_and_resource_selections_keep_distinct_products_in_the_same_sessi
                     target: hirsel_native::TargetSpec::x86_64_unknown_linux_gnu(),
                     validation: hirsel_native::Validation::EveryStage,
                     launch: Default::default(),
-                    fuel: false,
                 }))
                 .unwrap();
             let CompileResult::Ownership(execution) = &output.result else {

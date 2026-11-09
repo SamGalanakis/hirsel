@@ -378,7 +378,6 @@ fn ready_case_inner_mutation(
                         Default::default(),
                         true,
                         false,
-                        false,
                     ),
                     MemoryWeight {
                         scratch: 16 << 20,
@@ -495,7 +494,6 @@ fn ready_case_inner_mutation(
                     false,
                     Default::default(),
                     true,
-                    false,
                     false,
                 ),
                 manifest,

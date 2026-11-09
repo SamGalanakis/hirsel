@@ -437,7 +437,6 @@ impl HostLibrary {
                     CallForm::Compute => vec![],
                 },
                 code: facts.reach.clone(),
-                fueled: true,
             })
             .map_err(refused)?;
         let HostIo::Live(io) = &self.io else {

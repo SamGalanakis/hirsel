@@ -1765,9 +1765,7 @@ done:
     if program.escaping.contains(entry) {
         flags |= hirsel_rt::program::ESCAPES;
     }
-    if program.fuel {
-        flags |= hirsel_rt::program::FUELED;
-    }
+
     if standalone {
         flags |= hirsel_rt::program::STANDALONE;
     }

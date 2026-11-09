@@ -107,7 +107,7 @@ pub fn main(rt: Io) -> Result[(), GrantError] {
                         foreign: &program.foreign_dispatch,
                         opt: OptLevel::Default,
                         measurement: false,
-                        fuel: program.fuel,
+
                         verify_backend: true,
                     };
                     for (backend, result) in [

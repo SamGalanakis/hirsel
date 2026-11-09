@@ -178,7 +178,6 @@ fn object(program: &Program, opt: OptLevel) -> Vec<u8> {
         tracking: false,
         opt,
         measurement: false,
-        fuel: false,
     };
     emit_object(&program.units(), &inputs).unwrap().bytes
 }

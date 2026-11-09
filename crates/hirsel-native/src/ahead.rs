@@ -5,11 +5,6 @@ use hirsel_syntax::ContentHash;
 use std::collections::BTreeMap;
 
 pub fn helper_identity() -> ContentHash {
-    // This names the actual helper contract embedded in ahead metadata. The
-    // complete compiler identity belongs to object/cache producer binding, not
-    // to a link symbol: an unrelated, disabled diagnostic module must not alter
-    // otherwise identical native code. AheadPlan additionally binds every body,
-    // layout, target, fuel choice and capture recipe used by these helpers.
     ContentHash::of_parts(
         "hirsel.ahead.helpers.v6",
         [
@@ -42,7 +37,6 @@ pub fn plan(program: &ReadyProgram) -> AheadPlan {
         &program.table,
         &program.target,
         &program.ahead_environments,
-        program.fuel,
         helper_identity(),
     )
 }
@@ -99,7 +93,7 @@ pub fn inputs<'a>(
         foreign: &program.foreign_dispatch,
         opt,
         measurement: false,
-        fuel: program.fuel,
+
         verify_backend: program.validation == super::stages::Validation::EveryStage,
     }
 }
@@ -245,7 +239,7 @@ pub fn check_objects_with_plan(
     }) {
         let bounds = if let Some(e) = &metadata.ahead {
             if e.plan != plan.identity {
-                return Err(fail("stale plan/body/layout/fuel/helper identity"));
+                return Err(fail("stale plan/body/layout/helper identity"));
             }
             let code = objects
                 .iter()

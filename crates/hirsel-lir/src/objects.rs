@@ -635,11 +635,10 @@ fn unit_digest<S: crate::stage::Stage + Clone>(
         .into_bytes(),
         inputs.target.digest().0.to_vec(),
         format!(
-            "{:?} callbacks {} tracking {} fuel {} measurement {} debug {} inline {} copy {}",
+            "{:?} callbacks {} tracking {} measurement {} debug {} inline {} copy {}",
             inputs.opt,
             inputs.callbacks,
             inputs.tracking,
-            inputs.fuel,
             inputs.measurement,
             debug,
             inputs.inline_instances.contains(&unit.header.instance),

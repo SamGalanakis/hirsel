@@ -61,7 +61,7 @@ fn native_upsert_initializer_preserves_prepared_map_entry_addresses() {
                     supplemental_sources: vec![],
                     output: NativeOutput::Objects { roots: vec![entry] },
                     run: None,
-                    fuel: false,
+
                     evidence: None,
                 }),
             };

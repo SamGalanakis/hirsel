@@ -188,7 +188,7 @@ fn check_budget_cut(entry: TaskCode, parked: bool) {
 
         let (outcome, trace) = run.run_traced_after_bounded_stop(
             |ctx| unsafe {
-                (*ctx).set_budgets(None, Some(4096));
+                (*ctx).set_budgets(Some(4096));
                 super::super::engine::enable(
                     ctx,
                     crate::ordered::Policy::admit(&Default::default(), Some(4096)),

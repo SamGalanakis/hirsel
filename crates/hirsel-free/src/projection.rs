@@ -1,14 +1,3 @@
-//! The normalised projection a free-mode tape is checked against (design §4.2).
-//!
-//! The live run and a replay of its tape each emit [`Event`]s, stamped with the phase whose
-//! section produced them. A projection keeps the events a cut admits and normalises away what
-//! the tape deliberately leaves free. It compares the run outcome, the cut, external outputs
-//! per logical sink (in the sink key's epoch order), per-object sequences of (path, ordinal,
-//! sub-event, outcome) in version order for every object except atomics, a channel's receives
-//! in its receiver's op order, per-key host epochs (each epoch's members as a set), and each
-//! task's observed cancellation, deadline, `await_any`, thaw and atomic-load outcomes. Atomic
-//! store order, atomic versions, fuel and the meter are not compared.
-
 use crate::phase::Progress;
 use crate::record::ObjectId;
 use std::collections::BTreeMap;

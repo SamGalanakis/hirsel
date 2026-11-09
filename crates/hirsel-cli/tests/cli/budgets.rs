@@ -1,28 +1,10 @@
-//! Run budgets (`budgets.limits@2`): on the interpreter and both native backends, an
+//! Run budgets (`budgets.limits@3`): on the interpreter and both native backends, an
 //! infinite loop and an unbounded allocation each end their run with a typed
 //! BudgetExceeded outcome after the output they produced, and their twins, a bounded loop
 //! and an allocation that frees what it allocates, run to completion under the same
 //! budgets.
 use std::process::Command;
 
-const SPIN: &str = r#"pub fn main(rt: Io, args: Args) -> Result[(), GrantError] {
-  let _ = out.print(io.stdout(rt)?, "start\n")
-  let mut i: u64 = 0
-  while true {
-    i += 1
-  }
-  Ok(())
-}
-"#;
-const COUNT: &str = r#"pub fn main(rt: Io, args: Args) -> Result[(), GrantError] {
-  let mut i: u64 = 0
-  while i < 1000u64 {
-    i += 1
-  }
-  let _ = out.print(io.stdout(rt)?, "done\n")
-  Ok(())
-}
-"#;
 const GROW: &str = r#"pub fn main(rt: Io, args: Args) -> Result[(), GrantError] {
   let _ = out.print(io.stdout(rt)?, "start\n")
   let mut l: List[u64] = []
@@ -75,10 +57,9 @@ complete 2\n\
 
 fn grants(budgets: &str) -> String {
     format!(
-        r#"{{"io":{{"stdout":"stdout.bytes@1","dirs":[]}},"args":[],"budgets":{{"provider":"budgets.limits@2",{budgets}}}}}"#
+        r#"{{"io":{{"stdout":"stdout.bytes@1","dirs":[]}},"args":[],"budgets":{{"provider":"budgets.limits@3",{budgets}}}}}"#
     )
 }
-const FUEL: &str = r#""fuel":100000"#;
 const MEMORY: &str = r#""memory_bytes":65536"#;
 /// Natively memory is logical storage: size classes, large requests rounded up to 4 KiB and
 /// canonical region segments.
@@ -117,14 +98,6 @@ fn assert_done(output: &std::process::Output) {
 }
 
 #[test]
-fn an_infinite_loop_spends_its_fuel_and_a_bounded_loop_finishes_on_every_engine() {
-    for engine in ENGINES {
-        assert_exceeded(&run(SPIN, FUEL, engine, &[]), "fuel");
-        assert_done(&run(COUNT, FUEL, engine, &[]));
-    }
-}
-
-#[test]
 fn unbounded_allocation_exceeds_memory_and_freed_allocation_does_not_on_every_engine() {
     for engine in ENGINES {
         let (memory, twin) = if engine.is_empty() {
@@ -140,9 +113,7 @@ fn unbounded_allocation_exceeds_memory_and_freed_allocation_does_not_on_every_en
 #[test]
 fn a_recorded_budget_stop_replays_to_the_same_stop() {
     for (engine, source, budgets, kind) in [
-        (ENGINES[0], SPIN, FUEL, "fuel"),
         (ENGINES[0], GROW, MEMORY, "memory"),
-        (ENGINES[1], SPIN, FUEL, "fuel"),
         (ENGINES[1], GROW, NATIVE_MEMORY, "memory"),
     ] {
         let tape_scratch = tempfile::Builder::new()
@@ -265,29 +236,7 @@ fn a_run_without_budgets_keeps_historical_identity_and_events_with_placement_pro
 }
 
 #[test]
-fn an_executable_built_without_fuel_checks_refuses_a_fuel_budget() {
-    let source = super::file(SPIN);
-    let exe = source.with_extension("exe");
-    let built = Command::new(env!("CARGO_BIN_EXE_hirsel"))
-        .arg("build")
-        .arg(&source)
-        .arg("-o")
-        .arg(&exe)
-        .output()
-        .unwrap();
-    assert_eq!(built.status.code(), Some(0), "{built:?}");
-    let refused = Command::new(&exe)
-        .arg("--hirsel-grants")
-        .arg(grants(FUEL))
-        .output()
-        .unwrap();
-    assert_eq!(refused.status.code(), Some(3), "{refused:?}");
-    assert!(refused.stdout.is_empty());
-    assert!(
-        String::from_utf8_lossy(&refused.stderr).contains("budgets.fuel"),
-        "{refused:?}"
-    );
-    // A memory budget needs no compiled checks: one built from GROW enforces it.
+fn a_built_executable_enforces_a_memory_budget() {
     let grow = super::file(GROW);
     let grow_exe = grow.with_extension("exe");
     let built = Command::new(env!("CARGO_BIN_EXE_hirsel"))
@@ -307,113 +256,4 @@ fn an_executable_built_without_fuel_checks_refuses_a_fuel_budget() {
     assert_eq!(stopped.stdout, b"start\n", "{stopped:?}");
     std::fs::remove_file(grow).unwrap();
     std::fs::remove_file(grow_exe).unwrap();
-    // Built with fuel checks, the same program spends its fuel.
-    let built = Command::new(env!("CARGO_BIN_EXE_hirsel"))
-        .arg("build")
-        .arg("--fuel")
-        .arg(&source)
-        .arg("-o")
-        .arg(&exe)
-        .output()
-        .unwrap();
-    assert_eq!(built.status.code(), Some(0), "{built:?}");
-    let spent = Command::new(&exe)
-        .arg("--hirsel-grants")
-        .arg(grants(FUEL))
-        .output()
-        .unwrap();
-    assert_eq!(spent.status.code(), Some(5), "{spent:?}");
-    assert_eq!(spent.stdout, b"start\n", "{spent:?}");
-    std::fs::remove_file(source).unwrap();
-    std::fs::remove_file(exe).unwrap();
-}
-
-/// A fuel build without a fuel budget takes a 64 Ki-point chunk at a time: a loop of 300 000
-/// iterations refills its chunk several times (`hirsel_rt_v2_fuel_refill` returns into the
-/// loop) and finishes on both backends, and a budget below its charges still stops it.
-#[test]
-fn a_fuel_build_without_a_budget_refills_its_chunk_and_finishes_on_both_backends() {
-    const LONG: &str = r#"pub fn main(rt: Io, args: Args) -> Result[(), GrantError] {
-  let mut i: u64 = 0
-  while i < 300000u64 {
-    i += 1
-  }
-  let _ = out.print(io.stdout(rt)?, "done\n")
-  Ok(())
-}
-"#;
-    let source = super::file(LONG);
-    for backend in ["llvm", "cranelift"] {
-        let exe = source.with_extension(format!("{backend}.exe"));
-        let built = Command::new(env!("CARGO_BIN_EXE_hirsel"))
-            .arg("build")
-            .arg("--fuel")
-            .arg("--backend")
-            .arg(backend)
-            .arg(&source)
-            .arg("-o")
-            .arg(&exe)
-            .output()
-            .unwrap();
-        assert_eq!(built.status.code(), Some(0), "{built:?}");
-        let finished = Command::new(&exe)
-            .arg("--hirsel-grants")
-            .arg(r#"{"io":{"stdout":"stdout.bytes@1","dirs":[]},"args":[]}"#)
-            .output()
-            .unwrap();
-        assert_done(&finished);
-        let spent = Command::new(&exe)
-            .arg("--hirsel-grants")
-            .arg(grants(FUEL))
-            .output()
-            .unwrap();
-        assert_eq!(spent.status.code(), Some(5), "{spent:?}");
-        assert!(spent.stdout.is_empty(), "{spent:?}");
-        std::fs::remove_file(exe).unwrap();
-    }
-    std::fs::remove_file(source).unwrap();
-}
-
-/// A host's stop (`HIRSEL_RT_STOP_AFTER_MS`, as `RunControl::stop`) reaches an optimised,
-/// allocation-free loop of a fuel build at its next fuel refill, within one chunk: the loop's
-/// budget outlasts the test by far, so only the stop ends it, on one worker and on three
-/// compute workers, in an LLVM release build and a Cranelift one (design §6 Stops, W1).
-#[test]
-fn a_stop_ends_a_fuel_builds_loop_at_its_next_refill_on_both_backends() {
-    let source = super::file(SPIN);
-    // Release builds are LLVM's; Cranelift builds its default.
-    for build in [&["--release"][..], &["--backend", "cranelift"]] {
-        let exe = source.with_extension(format!("stop.{}.exe", build.len()));
-        let built = Command::new(env!("CARGO_BIN_EXE_hirsel"))
-            .args(["build", "--fuel"])
-            .args(build)
-            .arg(&source)
-            .arg("-o")
-            .arg(&exe)
-            .output()
-            .unwrap();
-        assert_eq!(built.status.code(), Some(0), "{built:?}");
-        for workers in ["1", "3"] {
-            let started = std::time::Instant::now();
-            let stopped = Command::new(&exe)
-                .env("HIRSEL_RT_STOP_AFTER_MS", "200")
-                .env("HIRSEL_RT_WORKERS", workers)
-                .arg("--hirsel-grants")
-                .arg(grants(r#""fuel":1000000000000000"#))
-                .output()
-                .unwrap();
-            assert!(
-                started.elapsed() < std::time::Duration::from_secs(60),
-                "{stopped:?}"
-            );
-            assert_eq!(stopped.stdout, b"start\n", "{stopped:?}");
-            assert_eq!(
-                String::from_utf8_lossy(&stopped.stderr),
-                "hirsel-rt: environmental failure: its place stopped the run\n",
-                "{stopped:?}"
-            );
-        }
-        std::fs::remove_file(exe).unwrap();
-    }
-    std::fs::remove_file(source).unwrap();
 }

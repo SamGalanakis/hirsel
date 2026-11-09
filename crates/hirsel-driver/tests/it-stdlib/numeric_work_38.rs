@@ -1,4 +1,3 @@
-//! Primitive work is part of both interpreter step limits and fuel budgets.
 use hirsel_driver::*;
 use hirsel_engine::*;
 use hirsel_front_phases::*;
@@ -28,7 +27,6 @@ fn run(
     engine: &mut QueryEngine,
     checked: bool,
     steps: Option<u64>,
-    fuel: Option<u64>,
 ) -> Result<Execution, hirsel_interp::ExecutionError> {
     let sources = engine.sources.clone();
     let config = RunConfiguration {
@@ -43,10 +41,7 @@ fn run(
     } else {
         engine.runtime_types().unwrap()
     };
-    runtime.budgets = RunBudgets {
-        fuel,
-        memory_bytes: None,
-    };
+    runtime.budgets = RunBudgets { memory_bytes: None };
     let mut library = hirsel_interp::library::Library::new(&config, Default::default()).unwrap();
     hirsel_interp::run_with_runtime(
         engine,
@@ -61,25 +56,6 @@ fn run(
         &mut library,
         &runtime,
     )
-}
-fn minimum_fuel(engine: &mut QueryEngine, checked: bool) -> u64 {
-    let (mut low, mut high) = (0, 256);
-    while low < high {
-        let mid = (low + high) / 2;
-        if matches!(
-            run(engine, checked, None, Some(mid)).unwrap().outcome,
-            Outcome::Returned { .. }
-        ) {
-            high = mid;
-        } else {
-            low = mid + 1;
-        }
-    }
-    assert!(matches!(
-        run(engine, checked, None, Some(low)).unwrap().outcome,
-        Outcome::Returned { .. }
-    ));
-    low
 }
 #[test]
 fn numeric_primitives_charge_each_byte_before_publishing() {
@@ -96,19 +72,15 @@ fn numeric_primitives_charge_each_byte_before_publishing() {
             let mut short = engine(&source("1"));
             let mut long = engine(&source("12345678901234567890"));
             for checked in [false, true] {
-                let before = run(&mut short, checked, None, None).unwrap();
-                let after = run(&mut long, checked, None, None).unwrap();
+                let before = run(&mut short, checked, None).unwrap();
+                let after = run(&mut long, checked, None).unwrap();
                 assert!(matches!(after.outcome, Outcome::Returned { .. }));
                 assert_eq!(
                     after.steps - before.steps,
                     19,
                     "{operation}, checked={checked}"
                 );
-                assert_eq!(
-                    minimum_fuel(&mut long, checked) - minimum_fuel(&mut short, checked),
-                    19
-                );
-                let bounded = run(&mut long, checked, Some(before.steps), None).unwrap();
+                let bounded = run(&mut long, checked, Some(before.steps)).unwrap();
                 assert_eq!(bounded.steps, before.steps);
                 assert!(matches!(bounded.outcome, Outcome::ToolingLimit(_)));
             }

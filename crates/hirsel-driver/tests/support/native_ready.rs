@@ -85,7 +85,7 @@ fn supplier_with_compiler(
                     output: NativeOutput::Ready,
                     options: BuildOptions::new(options.clone(), Backend::Llvm, OptLevel::Default),
                     run: None,
-                    fuel: false,
+
                     evidence: None,
                 }),
             })

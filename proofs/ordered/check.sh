@@ -43,7 +43,6 @@ runs=(
   "budget-review2-1|Budget2a|{}|FALSE|Soundness|pass"
   "budget-review2-2|Budget2b|{}|FALSE|Soundness|pass"
   "budget-review3-1a|Budget3a|{}|FALSE|Soundness|pass"
-  "budget-review3-1b|Budget3b|{}|FALSE|Soundness|pass"
   "budget-review3-2|Budget3c|{}|FALSE|Soundness|pass"
   "pass-mutex-atomic|PassMutexAtomic|{}|FALSE|Soundness|pass"
   "pass-send-load|PassSendLoad|{}|FALSE|Soundness|pass"
@@ -80,7 +79,6 @@ runs=(
   "mutation-early-poll|ReadinessCounts|{\"earlysp\"}|FALSE|Behavior|Behavior"
   "mutation-head-sees-speculation|Budget2a|{\"headseesspec\"}|FALSE|Behavior|Behavior"
   "mutation-net-only|Budget2b|{\"netonly\"}|FALSE|Behavior|Behavior"
-  "mutation-peak-only|Budget3b|{\"peakonly\"}|FALSE|Behavior|Behavior"
   "mutation-merged-pieces|Budget3c|{\"mergepieces\"}|FALSE|Behavior|Behavior"
 )
 

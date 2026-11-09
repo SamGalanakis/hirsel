@@ -469,7 +469,7 @@ only through a named implementation whose contract says so.
 | Re-sending `NotRun` requests | runner `retry` | `{"attempts": 0}` | the same |
 | Compute caching | runner `cache` | `null` (none) | the same |
 | Code store, fetch and signatures | runner and host `code` | `code.none@1` | `code.sim@1` |
-| Limits (queues, request bytes, per-call budgets) | provider settings | each provider's stated defaults | the same |
+| Limits (queues, request bytes, per-call memory budgets) | provider settings | each provider's stated defaults | the same |
 | Scheduling | `inputs.scheduler` | the cooperative FIFO | seeded schedules |
 | Execution width | `placement.cores` | 1 | simulators run on one thread |
 | Fault injection | `faults` | none | `sim@1`, the simulated `Dir` |

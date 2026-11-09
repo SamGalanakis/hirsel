@@ -162,18 +162,13 @@ fn saved_cpu_envelopes_keep_exact_jobs_stops_and_verdict_before_cleanup() {
     use hirsel_free_loom::cpu_budget::{self, stretch::*};
     use hirsel_run_schema::BudgetKind;
     model(|| {
-        let budgets = Budgets {
-            fuel: true,
-            memory: true,
-        };
+        let budgets = Budgets { memory: true };
         let mut state = Settled {
             level: 0,
             limit: 100,
-            fuel: 5,
         };
         let mut jobs = Jobs::new(4, 2, state);
         let mut first = Stretch::new(budgets);
-        first.fuel();
         first.alloc(60).unwrap();
         jobs.pause(0, first);
         assert!(cpu_budget::retire(&mut jobs, 0, &mut state).1.is_ok());
@@ -181,7 +176,6 @@ fn saved_cpu_envelopes_keep_exact_jobs_stops_and_verdict_before_cleanup() {
         // The real holding rest can insert non-CPU charges between summaries.
         let mut rest = Stretch::new(budgets);
         rest.free(20);
-        rest.fuel();
         rest.alloc(5).unwrap();
         state.settle(&rest).unwrap();
         let slot = Arc::new(Publication::default());
@@ -191,7 +185,6 @@ fn saved_cpu_envelopes_keep_exact_jobs_stops_and_verdict_before_cleanup() {
             let cleaned = cleaned.clone();
             move || {
                 let mut charges = Stretch::new(budgets);
-                charges.fuel_points(2);
                 charges.alloc(60).unwrap();
                 slot.publish((charges, vec![42u64, 99]));
                 let accepted = loop {
@@ -239,14 +232,10 @@ fn withdrawal_keeps_the_frozen_charge_and_borrow_until_the_real_head_restores_it
     use hirsel_free_loom::batch::publication::Publication;
     use hirsel_free_loom::cpu_budget::{self, stretch::*};
     model(|| {
-        let budgets = Budgets {
-            fuel: true,
-            memory: true,
-        };
+        let budgets = Budgets { memory: true };
         let mut state = Settled {
             level: 0,
             limit: 100,
-            fuel: 10,
         };
         let initial = state;
         let mut jobs = Jobs::new(4, 2, state);
@@ -255,7 +244,6 @@ fn withdrawal_keeps_the_frozen_charge_and_borrow_until_the_real_head_restores_it
             let slot = slot.clone();
             move || {
                 let mut prefix = Stretch::new(budgets);
-                prefix.fuel();
                 prefix.alloc(60).unwrap();
                 slot.publish(prefix);
                 loop {
@@ -304,7 +292,6 @@ fn withdrawal_keeps_the_frozen_charge_and_borrow_until_the_real_head_restores_it
             Settled {
                 level: 60,
                 limit: 100,
-                fuel: 9
             }
         );
     });

@@ -157,8 +157,6 @@ fn plain_scratch_policy_above_full_allocation_limit() {
 }
 
 fn large_scratch(name: &str) {
-    // Rust's 1_100_000-element length vector crosses the 8MB index scratch cap.
-    // This explicit native harness avoids exceeding corpus/interpreter fuel.
     with_compiler_stack(|| {
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join(format!("tests/fixtures/list_sort/drift-{name}.hir"));

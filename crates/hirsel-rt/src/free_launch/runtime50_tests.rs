@@ -183,8 +183,6 @@ fn cooperative_shrink(width: u32, recorded: Option<bool>) {
     finish(recording, "returned");
 }
 
-/// A stopped non-fuel pure loop returns the run at once. Its worker keeps its
-/// permit, reported as lost, until the loop exits; no replacement is admitted.
 fn lost_permit(width: u32, recorded: Option<bool>) {
     let looping = Arc::new(AtomicBool::new(false));
     let release = Arc::new(AtomicBool::new(false));

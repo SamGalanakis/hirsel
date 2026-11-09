@@ -149,7 +149,6 @@ pub fn emit_ir(program: &ReadyProgram, opt: OptLevel) -> Result<String, NativeEr
         foreign: &program.foreign_dispatch,
         opt,
         measurement: false,
-        fuel: program.fuel,
     };
     hirsel_llvm::emit_optimized_ir(&units, &inputs)
         .map_err(|e| NativeError::new(StageName::Emission, e.to_string()))
@@ -179,7 +178,6 @@ pub fn emit_clif(program: &ReadyProgram) -> Result<String, NativeError> {
         foreign: &program.foreign_dispatch,
         opt: OptLevel::None,
         measurement: false,
-        fuel: program.fuel,
     };
     hirsel_cranelift::emit_clif(&units, &inputs)
         .map_err(|e| NativeError::new(StageName::Emission, e.to_string()))
@@ -222,7 +220,6 @@ pub fn emit_registered(
         foreign: &program.foreign_dispatch,
         opt,
         measurement,
-        fuel: program.fuel,
     };
     // A debug build records intervals; the link's debug object resolves them.
     let profile = hirsel_lir::debug::Profile {

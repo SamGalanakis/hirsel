@@ -45,7 +45,6 @@ fn custody_adopts_once_and_withdrawal_is_terminal() {
             sp: std::ptr::dangling_mut(),
         }),
         generation: 3,
-        fuel: 11,
         descriptor: None,
     };
     let mut custody = Custody::Private { generation: 3 };
@@ -91,7 +90,6 @@ fn compact_private_saves_adopt_their_resume_state_once_never_the_entry() {
     let save = PrivateSave {
         pc,
         generation: 5,
-        fuel: 7,
         descriptor: None,
     };
     let mut custody = Custody::Private { generation: 5 };

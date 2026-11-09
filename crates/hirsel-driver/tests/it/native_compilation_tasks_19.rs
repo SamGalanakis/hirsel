@@ -528,7 +528,6 @@ fn run_program_case_with_frame(
             inline_instances: Default::default(),
             verify_backend: true,
             measurement: false,
-            fuel: false,
         };
         let inputs = NativeInstanceInputs::from_products(declarations, lower).unwrap();
         drop(facts);

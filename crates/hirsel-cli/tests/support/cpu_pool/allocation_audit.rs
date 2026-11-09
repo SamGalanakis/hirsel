@@ -20,7 +20,6 @@ fn typed_prefix_allocation_audit(width: usize) {
 }
 
 fn cpu_owned_allocation_audit(width: usize, source: &str, provider: &str, label: &str) {
-    use hirsel_driver::native;
     use hirsel_native::Backend;
     use hirsel_native::OptLevel;
     use hirsel_native::Options;
@@ -41,7 +40,8 @@ fn cpu_owned_allocation_audit(width: usize, source: &str, provider: &str, label:
         let input = loaded.engine.export_native_input().unwrap();
         let validated = loaded.engine.import_native_input(input).unwrap();
         let target = TargetSpec::x86_64_unknown_linux_gnu();
-        let program = hirsel_native_batch::build(&validated, &Options::new(target.clone())).unwrap();
+        let program =
+            hirsel_native_batch::build(&validated, &Options::new(target.clone())).unwrap();
         let toolchain = Toolchain::in_tree_diagnostic(&root.join("runtime"), &[&target]).unwrap();
         for backend in [Backend::Llvm, Backend::Cranelift] {
             let objects = hirsel_native::emit_backend_objects(
@@ -222,7 +222,7 @@ pub fn main(rt: Io) -> Result[(), GrantError] {
         for (cores, reorder) in [(1, "off"), (4, "auto")] {
             let mut authority = qual_grants(4);
             authority["budgets"] =
-                serde_json::json!({"provider":"budgets.limits@2","memory_bytes":64 << 20});
+                serde_json::json!({"provider":"budgets.limits@3","memory_bytes":64 << 20});
             authority["io"]["tasks"] = serde_json::json!("tasks.cooperative@1");
             authority["placement"] = serde_json::json!({"cores":cores,"reorder":reorder});
             fs::write(&grants, authority.to_string()).unwrap();
@@ -267,7 +267,7 @@ pub fn main(rt: Io) -> Result[(), GrantError] {
                     summaries.iter().all(|summary| {
                         summary.native.as_ref().is_some_and(|native| {
                             native.limit == 8 << 20
-                                && native.pieces.iter().any(|piece| !piece.envelope.is_empty())
+                                && native.pieces.iter().any(|piece| piece.high > 0)
                         })
                     }),
                     "{backend} cores={cores} trace={traced}: {summaries:#?}"

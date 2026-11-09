@@ -39,7 +39,7 @@ fn private_recurrence_has_checkpoint_free_chunks_and_an_exact_tail() {
 }
 
 #[test]
-fn observable_atomic_fuel_and_unbounded_loops_keep_every_checkpoint() {
+fn observable_atomic_loads_and_unbounded_loops_keep_every_checkpoint() {
     for source in [
         LOOP.replace(
             "%shift = lshr",
@@ -47,7 +47,7 @@ fn observable_atomic_fuel_and_unbounded_loops_keep_every_checkpoint() {
         ),
         LOOP.replace(
             "%shift = lshr",
-            "%fuel = load atomic i64, ptr %state monotonic, align 8\n %shift = lshr",
+            "%counter = load atomic i64, ptr %state monotonic, align 8\n %shift = lshr",
         ),
         LOOP.replace("%done = icmp eq i64 %i, %n", "%done = icmp eq i64 %x, %n"),
         LOOP.replace("i32 1)", "i32 3)"),

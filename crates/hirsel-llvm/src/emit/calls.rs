@@ -30,7 +30,7 @@ impl<'m, 'a> FnEmitter<'m, 'a> {
     /// Returns `status` and, on success with a register result, `value`.
     pub(super) fn return_status(&mut self, status: u128, value: Option<Value<'m>>) -> Emitted {
         self.ownership_leave()?;
-        self.ahead_point(false)?;
+        self.ahead_point()?;
         if self.signature.ahead.is_none() {
             self.ahead_flush();
         }

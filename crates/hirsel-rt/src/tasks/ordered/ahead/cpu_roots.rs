@@ -73,7 +73,7 @@ impl Saved {
             let mut retained = vec![native.environment, native.source, growth_input];
             let result = if !summary.is_null() && (*summary).version == cpu_handoff::VERSION {
                 let count = (*summary).retained_count as usize;
-                if count <= crate::budget::stretch::ENVELOPE_MAX && count != 0 {
+                if count <= crate::budget::stretch::RETAINED_MAX && count != 0 {
                     assert!(!(*summary).retained.is_null(), "a saved CPU root table");
                     retained
                         .extend_from_slice(std::slice::from_raw_parts((*summary).retained, count));
@@ -129,7 +129,7 @@ impl Saved {
                 assert_eq!(self.result, (*self.summary).value);
                 let mut retained = vec![self.input, self.mapper, self.growth_input];
                 let count = (*self.summary).retained_count as usize;
-                if count <= crate::budget::stretch::ENVELOPE_MAX && count != 0 {
+                if count <= crate::budget::stretch::RETAINED_MAX && count != 0 {
                     retained.extend_from_slice(std::slice::from_raw_parts(
                         (*self.summary).retained,
                         count,

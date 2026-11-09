@@ -183,7 +183,6 @@ fn call_probe(target: &TargetSpec, malformed: u8) -> (Vec<u8>, String) {
         tracking: false,
         opt: OptLevel::None,
         measurement: false,
-        fuel: false,
     };
     let mut manifested = Manifested::default();
     let signature = Signature::runtime(&module, &abi, &unit.header.definition).unwrap();

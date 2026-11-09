@@ -1,17 +1,3 @@
-const ORDERED_FUEL: &str = r#"
-pub fn main(rt: Io) -> Result[(), GrantError] {
-  let tasks = io.tasks(rt)?
-  let outcome = core@1/cpu.map_scoped(tasks, 4u32,
-    fn() -> List[u64] uses {} { [0u64, 0u64, 0u64, 100000u64] },
-    fn(take job: u64) -> u64 uses {} {
-      let mut x = job
-      for i in 0u64..job { x = int.wrapping_add(int.wrapping_mul(x, 6364136223846793005u64), i) }
-      x
-    })
-  failure.check(false, Bounds())
-  Ok(())
-}
-"#;
 const ORDERED_FAILURE: &str = r#"
 fn batch(tasks: Tasks, fail: bool) -> Result[List[u64], CpuPoolError] {
   core@1/cpu.map_scoped(tasks, 4u32,
@@ -109,28 +95,16 @@ fn ordered_remaining_mode(name: &str, template: &str, status: i32, allocating: b
     let grants = root.join("grants.json");
     let mut authority = serde_json::json!({"io":{"dirs":[],"tasks":"tasks.cooperative@1","cpu":{"provider":"cpu.scoped@1",
             "max_workers":4,"max_domains":1,"max_physical_bytes":1073741824u64,"max_batch_bytes":8388608}}});
-    if name == "fuel" {
-        authority["budgets"] = serde_json::json!({"provider":"budgets.limits@2","fuel":10000});
-    }
+
     if name == "no-controller" {
         authority["io"]["cpu"]["max_workers"] = serde_json::json!(8);
     }
     fs::write(&grants, authority.to_string()).unwrap();
-    let fuel_modes: &[bool] = if allocating && name != "fuel" {
-        &[true, false]
-    } else {
-        &[true]
-    };
-    for (backend, fueled) in ["llvm", "cranelift"]
-        .into_iter()
-        .flat_map(|backend| fuel_modes.iter().map(move |&fueled| (backend, fueled)))
-    {
+    for backend in ["llvm", "cranelift"] {
         let executable = root.join(backend);
         let mut build = cpu_compiler();
         build.args(["build", "--validate-stages", "--backend", backend]);
-        if fueled {
-            build.arg("--fuel");
-        }
+
         checked(
             build
                 .arg(&manifest)
@@ -171,24 +145,7 @@ fn ordered_remaining_mode(name: &str, template: &str, status: i32, allocating: b
                     && row["outcome"]["outcome"] == 0
             })
             .collect();
-        if name == "fuel" {
-            assert_eq!(claims.last().unwrap()["outcome"]["count"], 3);
-            let terminal = events
-                .lines()
-                .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
-                .find(|row| row["outcome"]["kind"] == "stopped")
-                .unwrap();
-            assert_eq!(terminal["task"], serde_json::json!([3]), "{events}");
-            assert!(
-                fs::read_to_string(&observation)
-                    .unwrap()
-                    .contains("budget_exceeded fuel")
-            );
-            eprintln!(
-                "{backend} fuel stop live job 4, ordinal 3, task {}",
-                terminal["task"]
-            );
-        } else if matches!(name, "cancel-before" | "no-controller") {
+        if matches!(name, "cancel-before" | "no-controller") {
             assert!(claims.is_empty(), "{events}");
         } else if name == "cancel-after" {
             assert!(!claims.is_empty(), "{events}");
@@ -292,6 +249,6 @@ fn ordered_remaining_mode(name: &str, template: &str, status: i32, allocating: b
                 .unwrap()
                 .is_empty()
         );
-        eprintln!("{backend} {name} fuel={fueled}: live == replay, cleanup completed");
+        eprintln!("{backend} {name}: live == replay, cleanup completed");
     }
 }

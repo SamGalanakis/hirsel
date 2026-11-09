@@ -192,7 +192,7 @@ fn logical_stop_returns_unconsumed_cpu_backing_during_run_reclamation() {
     let topology = ledger.topology(4).unwrap();
     let outcome = crate::host::BodyRun::new(1, false).run(
         |ctx| unsafe {
-            (*ctx).set_budgets(None, Some(1));
+            (*ctx).set_budgets(Some(1));
             (*ctx)
                 .heap_ref()
                 .meter

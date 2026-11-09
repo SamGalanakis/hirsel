@@ -61,7 +61,6 @@ fn source_request(explicit_manifest: bool) {
                 target: hirsel_native::TargetSpec::x86_64_unknown_linux_gnu(),
                 validation: hirsel_native::Validation::EveryStage,
                 launch: Default::default(),
-                fuel: false,
             }))
             .unwrap_or_else(|e| panic!("ownership source request: {e}"));
         let CompileResult::Ownership(execution) = &output.result else {

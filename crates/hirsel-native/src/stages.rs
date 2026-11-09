@@ -209,9 +209,7 @@ pub struct ReadyProgram {
     /// The launch entries that reach an escape from capability checking, which
     /// `admit.safe@1` refuses (CAP-6).
     pub(crate) escaping: BTreeSet<DefPath>,
-    /// Emit fuel checks (`EmitInputs::fuel`), so the executable enforces a fuel budget
-    /// (`budgets.limits@2`); without them it refuses one.
-    pub fuel: bool,
+
     /// The failure table a program that isolates registers at launch (FAIL-2), bound with
     /// the revisions.
     pub(crate) failure_table: Option<super::observe::FailureTable>,
@@ -820,7 +818,7 @@ pub fn build_program_with_sources(
         foreign_unreplayable: false,
         foreign_dispatch: BTreeMap::new(),
         escaping: BTreeSet::new(),
-        fuel: false,
+
         failure_table: None,
     })
 }

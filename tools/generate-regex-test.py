@@ -366,7 +366,7 @@ def main():
                'Their exact generated programs live in crates/hirsel-driver/tests/fixtures/',
                'regex-go-invalid-*.hir and run as bounded Rust execution tests. No corpus',
                'step limit is raised. Search batches have at most 20 calls, after two original',
-               'anchor-heavy batches exhausted fuel when combined in one program.', '',
+               'anchor-heavy batches exhausted tooling Steps when combined in one program.', '',
                'Before this import the three regex-go programs held 96 checks over 63 patterns,',
                'covering 153 RE2 source rows. Coverage is now 1524 source rows over 396 patterns',
                '(1371 previously uncovered rows). The audit counted 2 applicable findTests rows',

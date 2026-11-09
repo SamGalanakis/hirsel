@@ -276,7 +276,6 @@ fn request_key(request: &OwnershipRequest) -> Result<ContentHash, ToolError> {
         request.target.digest(),
         format!("{:?}", request.validation),
         &request.launch,
-        request.fuel,
     ))
     .map_err(|e| ToolError::Runtime(e.to_string()))?;
     Ok(ContentHash::of_parts(
@@ -351,7 +350,7 @@ impl OwnershipSelection {
             ownership_bootstrap::Plan {
                 options,
                 selection: request.selection,
-                fuel: request.fuel,
+
                 policy: request_key,
                 verify_store,
                 admission: Admission {

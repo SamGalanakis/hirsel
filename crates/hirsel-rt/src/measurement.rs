@@ -57,11 +57,8 @@ pub struct Counters {
     pub remote_collected: u64,
     /// Orphaned heaps a new worker took over.
     pub heap_adoptions: u64,
-    /// Logical charges and credits under a memory budget, heap allocations charged and fuel
-    /// chunks handed out (`crate::budget`; design §5 headroom row "Meter, permits").
     pub meter_ops: u64,
     pub metered_allocations: u64,
-    pub fuel_refills: u64,
 }
 
 impl Default for Counters {
@@ -86,7 +83,6 @@ impl Default for Counters {
             heap_adoptions: 0,
             meter_ops: 0,
             metered_allocations: 0,
-            fuel_refills: 0,
         }
     }
 }
@@ -142,7 +138,6 @@ impl Counters {
             ("heap_adoptions", self.heap_adoptions),
             ("meter_ops", self.meter_ops),
             ("metered_allocations", self.metered_allocations),
-            ("fuel_refills", self.fuel_refills),
         ] {
             writeln!(out, "{name} {value}")?;
         }
@@ -289,7 +284,6 @@ impl Accounting {
             heap_adoptions: a.heap_adoptions + b.heap_adoptions,
             meter_ops: a.meter_ops + b.meter_ops,
             metered_allocations: a.metered_allocations + b.metered_allocations,
-            fuel_refills: a.fuel_refills + b.fuel_refills,
         };
         for (&id, site) in &other.sites {
             let merged = self.sites.entry(id).or_default();

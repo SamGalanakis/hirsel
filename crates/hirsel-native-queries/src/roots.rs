@@ -545,7 +545,6 @@ impl RootProducts {
         serde_json::to_vec(&(
             self.source.manifest_bytes()?,
             &snapshot.options.launch,
-            snapshot.emission.fuel,
             snapshot.emission.tracking,
             snapshot.context,
         ))
@@ -927,7 +926,6 @@ impl NativeRoots for RootProducts {
                 options: &snapshot.options,
                 input: &snapshot.emission.input,
                 manifest: &snapshot.manifest,
-                fuel: snapshot.emission.fuel,
             },
             &self.source,
             hirsel_native::root_source::LinkAssembly {

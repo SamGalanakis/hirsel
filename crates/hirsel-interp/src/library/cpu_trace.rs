@@ -24,8 +24,6 @@ pub struct CpuBoundary {
 #[derive(Default)]
 pub(super) struct Trace {
     pub events: Vec<CpuBoundary>,
-    pub fuel: u64,
-    pub event_fuel: Vec<u64>,
     pub jobs: std::collections::BTreeSet<Vec<u32>>,
 }
 
@@ -116,12 +114,6 @@ impl Library {
         self.cpu_trace.as_ref().map(|trace| trace.events.as_slice())
     }
 
-    pub fn cpu_fuel_trace(&self) -> Option<&[u64]> {
-        self.cpu_trace
-            .as_ref()
-            .map(|trace| trace.event_fuel.as_slice())
-    }
-
     pub(super) fn cpu_rest(&mut self) {
         let task = self.tasks.path();
         if self
@@ -142,7 +134,6 @@ impl Library {
             if let CpuPhase::Spawn(path) = &phase {
                 trace.jobs.insert(path.clone());
             }
-            trace.event_fuel.push(trace.fuel);
             trace.events.push(CpuBoundary { task, phase });
         }
     }

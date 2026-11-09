@@ -98,7 +98,7 @@ pub(super) fn propose(
     table: &LayoutTable,
     target: &TargetSpec,
     source: ContentHash,
-    fuel: bool,
+
     helpers: ContentHash,
 ) -> Result<HostReturnGraph, Refusal> {
     if target.triple != "x86_64-unknown-linux-gnu"
@@ -202,7 +202,7 @@ pub(super) fn propose(
             if let Some(next) = callee(unit, call) {
                 if reaches_read.contains(&next) {
                     calls.insert(next);
-                } else if let Ok(graph) = scalar_graph(units, table, target, next, fuel, helpers) {
+                } else if let Ok(graph) = scalar_graph(units, table, target, next, helpers) {
                     calls.insert(next);
                     scalar_calls.insert(CallId(i as u32));
                     bodies.extend(graph.bodies);
@@ -432,7 +432,7 @@ pub(super) fn propose(
             ScalarBody {
                 body: unit.digest(),
                 calls,
-                fuel_points: crate::fuel::fuel_points(unit),
+                checkpoint_points: crate::checkpoints::checkpoint_points(unit),
             },
         );
         spines.insert(
@@ -460,7 +460,6 @@ pub(super) fn propose(
             table.digest().0.as_slice(),
             target.digest().0.as_slice(),
             helpers.0.as_slice(),
-            &[u8::from(fuel)],
         ],
     );
     Ok(HostReturnGraph {

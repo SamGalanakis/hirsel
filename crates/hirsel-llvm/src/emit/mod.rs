@@ -345,13 +345,7 @@ fn emit_object_inner(
     // Ahead code also carries each resumable plan's state-0 alternate.
     if inputs.alternate
         && inputs.ahead.is_some_and(|plan| {
-            !hirsel_lir::ahead::validate_cpu_workers(
-                units,
-                inputs.layouts,
-                inputs.target,
-                plan,
-                inputs.fuel,
-            )
+            !hirsel_lir::ahead::validate_cpu_workers(units, inputs.layouts, inputs.target, plan)
         })
     {
         return Err(CodegenError::Object {
@@ -1469,8 +1463,7 @@ struct FnEmitter<'m, 'a> {
     /// zeroed as each drop starts, so promoting it is one pass over the function
     /// rather than one per drop.
     drop_status: Option<Value<'m>>,
-    /// Per block, whether it charges fuel (`hirsel_lir::fuel`); empty without `inputs.fuel`.
-    fuel_points: Vec<bool>,
+    checkpoint_points: Vec<bool>,
     ahead_state: Option<Value<'m>>,
     ahead_counter: Option<Value<'m>>,
     ownership: Option<&'a hirsel_lir::ownership_trace::native::LeafPlan>,

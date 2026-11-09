@@ -6,7 +6,6 @@
 /// The budget a run spent (`RunOutcome::BudgetExceeded`).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum BudgetKind {
-    Fuel,
     Memory,
 }
 

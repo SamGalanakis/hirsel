@@ -357,7 +357,7 @@ fn selected_authority_requires_empty_exclusive_buffer_and_exact_read_maximum() {
 }
 
 #[test]
-fn deferred_byte_frees_keep_old_fuel_words_and_release_only_at_admission() {
+fn deferred_byte_frees_release_only_at_admission() {
     use crate::budget::stretch_trace::Charge;
     use std::sync::atomic::Ordering;
     let wrapper = layout(24);
@@ -438,10 +438,9 @@ fn deferred_byte_frees_keep_old_fuel_words_and_release_only_at_admission() {
                 .ordered_memory
                 .store(true, Ordering::Release);
             (*ctx).ordered_charge_trace.enable();
-            (*ctx).ordered_charge_trace.grant(100);
-            hirsel_rt_v2_host_defer(&raw mut n.physical, 0, first, 91);
-            hirsel_rt_v2_host_defer(&raw mut n.physical, 1, second, 87);
-            hirsel_rt_v2_host_defer(&raw mut n.physical, 2, immortal, 83);
+            hirsel_rt_v2_host_defer(&raw mut n.physical, 0, first);
+            hirsel_rt_v2_host_defer(&raw mut n.physical, 1, second);
+            hirsel_rt_v2_host_defer(&raw mut n.physical, 2, immortal);
             assert_eq!((*first).count, 1);
             assert_eq!(crate::alloc::payload(first).add(16).read(), 71);
             assert_eq!((*ctx).ordered_freed.get(), 0);
@@ -457,16 +456,9 @@ fn deferred_byte_frees_keep_old_fuel_words_and_release_only_at_admission() {
             assert!(!valid_pending(ctx, &n.host), "slot outside recipe bound");
             n.host.pending[7] = EMPTY;
             flush_logical(ctx, &raw mut *n);
-            (*ctx).ordered_charge_trace.capture(80);
             assert_eq!(
                 (*ctx).ordered_charge_trace.take().unwrap(),
-                vec![
-                    Charge::Fuel(9),
-                    Charge::Free(amount),
-                    Charge::Fuel(4),
-                    Charge::Free(amount),
-                    Charge::Fuel(7)
-                ]
+                vec![Charge::Free(amount), Charge::Free(amount),]
             );
             assert_eq!((*ctx).ordered_freed.get(), 2 * amount);
             assert_eq!(n.host.pending[0].block, first);
@@ -749,12 +741,10 @@ fn unmetered_cleanup_consumes_each_owner_once_only_after_admission() {
             let large = crate::alloc::allocate_sequence(ctx, 2, 8192, 1, 1);
             state.pending[0] = Pending {
                 block: small,
-                fuel: 91,
                 charged: 0,
             };
             state.pending[1] = Pending {
                 block: large,
-                fuel: 87,
                 charged: 0,
             };
             // No native execution is needed: the same custody record is admitted
@@ -894,9 +884,8 @@ unsafe fn selected_pending_lifecycle(stop: bool) {
             .ordered_memory
             .store(true, Ordering::Release);
         (*ctx).ordered_charge_trace.enable();
-        (*ctx).ordered_charge_trace.grant(100);
-        hirsel_rt_v2_host_defer(&raw mut (*native).physical, 0, first, 91);
-        hirsel_rt_v2_host_defer(&raw mut (*native).physical, 1, second, 87);
+        hirsel_rt_v2_host_defer(&raw mut (*native).physical, 0, first);
+        hirsel_rt_v2_host_defer(&raw mut (*native).physical, 1, second);
         if stop {
             (*ctx)
                 .run_ref()
@@ -1066,7 +1055,7 @@ pub(in crate::tasks::ordered::ahead) fn selected_descriptor_admission() {
                 n.physical.saved_sp = std::ptr::dangling_mut::<u8>().wrapping_add(0x1230);
                 let descriptor = if foreign { 5 } else { read.buffer_descriptor };
                 let block = crate::alloc::allocate_sequence(ctx, descriptor, 1, 1, 1);
-                hirsel_rt_v2_host_defer(&raw mut n.physical, 0, block, 7);
+                hirsel_rt_v2_host_defer(&raw mut n.physical, 0, block);
                 let flushed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     flush_logical(ctx, &raw mut *n)
                 }));

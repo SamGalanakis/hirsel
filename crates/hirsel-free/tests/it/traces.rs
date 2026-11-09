@@ -110,7 +110,7 @@ fn finite_release_infinite_suffix() {
         vec![Store("x", 1), Release("s"), Loop],
     ]);
     for run in all("finite release", &program) {
-        assert_eq!(run.live.outcome, "fuel");
+        assert_eq!(run.live.outcome, "memory");
         // The release after A's last op stays pending: B's thaw never sees count 1.
         assert_eq!(thaws(&run), vec![false]);
     }

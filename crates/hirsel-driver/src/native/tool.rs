@@ -158,7 +158,7 @@ pub fn run_path_native_backend_with_trace_events(
                     options
                 },
                 run: Some(std::sync::Arc::new(run.clone())),
-                fuel: run.budgets().is_some_and(|budgets| budgets.fuel.is_some()),
+
                 evidence: evidence.cloned().map(std::sync::Arc::new),
                 test_entries: vec![],
                 supplemental_sources: vec![],

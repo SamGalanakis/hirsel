@@ -708,7 +708,6 @@ pub struct LinkContextInput<'a> {
     pub options: &'a super::Options,
     pub input: &'a hirsel_lir::stage::InputIdentity,
     pub manifest: &'a hirsel_core_contract::Manifest,
-    pub fuel: bool,
 }
 /// Shared body-free linker projection. Both ordinary and ownership consumers
 /// supply only summaries/layouts derived from their own exact current C scope.
@@ -783,7 +782,7 @@ pub fn with_link_assembly<R>(
         foreign_unreplayable: false,
         foreign_dispatch: BTreeMap::new(),
         escaping: BTreeSet::new(),
-        fuel: input.fuel,
+
         failure_table: None,
     };
     source.bind(&mut program).map_err(|e| e.to_string())?;

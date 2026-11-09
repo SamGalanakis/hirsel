@@ -36,7 +36,7 @@ pub(crate) fn supplier(
                         hirsel_native::OptLevel::Default,
                     ),
                     run: None,
-                    fuel: false,
+
                     evidence: None,
                 }),
             )

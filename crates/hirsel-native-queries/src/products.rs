@@ -30,7 +30,6 @@ pub struct EmissionOptions {
     pub inline_instances: BTreeSet<ContentHash>,
     pub verify_backend: bool,
     pub measurement: bool,
-    pub fuel: bool,
 }
 impl EmissionOptions {
     /// Host request fields only. The snapshot derives callback, recovery and
@@ -42,7 +41,6 @@ impl EmissionOptions {
         foreign: BTreeMap<hirsel_syntax::DefPath, u64>,
         verify_backend: bool,
         measurement: bool,
-        fuel: bool,
     ) -> Self {
         Self {
             input,
@@ -54,7 +52,6 @@ impl EmissionOptions {
             inline_instances: BTreeSet::new(),
             verify_backend,
             measurement,
-            fuel,
         }
     }
     pub fn encode(&self) -> Result<Vec<u8>, String> {
@@ -76,7 +73,6 @@ impl EmissionOptions {
             &self.inline_instances,
             self.verify_backend,
             self.measurement,
-            self.fuel,
         ))
         .map_err(|e| e.to_string())
     }
@@ -745,7 +741,6 @@ impl NativeProducts for DemandProducts {
             opt: snapshot.emission.opt,
             verify_backend: snapshot.emission.verify_backend,
             measurement: snapshot.emission.measurement,
-            fuel: snapshot.emission.fuel,
         };
         let units = units.iter().collect::<Vec<_>>();
         use_units(&units, &emit)

@@ -204,7 +204,6 @@ pub fn main(rt:Io)->Result[(),GrantError] {
         let target = TargetSpec::x86_64_unknown_linux_gnu();
         let mut program =
             hirsel_native_batch::build(&validated, &Options::new(target.clone())).unwrap();
-        program.fuel = true;
         let root = tempfile::tempdir().unwrap();
         let configuration = Configuration {
             options: Options::new(target.clone()),
@@ -235,7 +234,6 @@ pub fn main(rt:Io)->Result[(),GrantError] {
             assert_eq!(outcome, Outcome::Agree);
         }
         let mut baselines = std::collections::BTreeMap::new();
-        let mut stop_fuel = None;
         for backend in [Backend::Llvm, Backend::Cranelift] {
             let objects = hirsel_native::emit_backend_objects(
                 &program,
@@ -252,9 +250,11 @@ pub fn main(rt:Io)->Result[(),GrantError] {
                 hirsel_native::link_standalone_objects(&program, &entry, &objects, &tools, &dir)
                     .unwrap();
             for width in [1, 4] {
-                for stopped in [false, true] {
+                {
+                    let stopped = false;
                     let mut grants = serde_json::json!({"args":[], "io":{"stdout":"stdout.bytes@1","tasks":"tasks.cooperative@1","dirs":[]},"placement":{"cores":width}});
-                    grants["budgets"] = serde_json::json!({"provider":"budgets.limits@2","fuel":if stopped {stop_fuel.expect("successful trace defines the cut")} else {1000000},"memory_bytes":1048576});
+                    grants["budgets"] =
+                        serde_json::json!({"provider":"budgets.limits@3","memory_bytes":1048576});
                     let tape = dir.join(format!("{width}-{stopped}.tape"));
                     for mode in ["live", "record", "replay"] {
                         let trace = dir.join(format!("{width}-{stopped}-{mode}.jsonl"));
@@ -292,7 +292,7 @@ pub fn main(rt:Io)->Result[(),GrantError] {
                         let mut expected = expected.clone();
                         if stopped {
                             expected.exit_code = None;
-                            expected.budget = Some(hirsel_run_schema::BudgetKind::Fuel);
+                            expected.budget = Some(hirsel_run_schema::BudgetKind::Memory);
                         }
                         assert_eq!(
                             observed, expected,
@@ -304,22 +304,7 @@ pub fn main(rt:Io)->Result[(),GrantError] {
                             .lines()
                             .map(|line| serde_json::from_str(line).unwrap())
                             .collect();
-                        if stop_fuel.is_none() {
-                            let mut boundaries = std::collections::BTreeSet::new();
-                            let total = rows
-                                .iter()
-                                .filter(|r| {
-                                    boundaries.insert((
-                                        r["task"].to_string(),
-                                        r["ordinal"].as_u64().unwrap(),
-                                        r["retirement"].as_u64().unwrap(),
-                                    ))
-                                })
-                                .flat_map(|r| r["before"].as_array().unwrap())
-                                .map(|b| b["fuel"].as_u64().unwrap())
-                                .sum::<u64>();
-                            stop_fuel = Some(total.checked_sub(1).unwrap());
-                        }
+
                         assert!(rows.iter().any(|r| r["op"] == "task.join"));
                         let output_rows: Vec<_> = rows
                             .iter()
@@ -327,11 +312,7 @@ pub fn main(rt:Io)->Result[(),GrantError] {
                             .collect();
                         assert_eq!(output_rows.len(), 1);
                         assert_eq!(output_rows[0]["outcome"]["bytes"], "78");
-                        assert!(
-                            rows.iter()
-                                .flat_map(|r| r["before"].as_array().unwrap())
-                                .any(|b| b["fuel"].as_u64().unwrap() > 0)
-                        );
+
                         assert!(
                             rows.iter()
                                 .flat_map(|r| r["before"].as_array().unwrap())

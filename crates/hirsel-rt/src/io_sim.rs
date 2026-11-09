@@ -2571,8 +2571,8 @@ mod terminal_outcome_tests {
                 O::Returned(hirsel_run_schema::Returned::Error),
             ),
             (
-                O::BudgetExceeded(hirsel_run_schema::BudgetKind::Fuel),
                 O::BudgetExceeded(hirsel_run_schema::BudgetKind::Memory),
+                O::Returned(hirsel_run_schema::Returned::Ok),
             ),
         ] {
             let io = replay(binary(&a));

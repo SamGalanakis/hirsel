@@ -352,7 +352,6 @@ fn run_provider_on_host(
     // A replay re-applies the recorded budgets, so it stops where the run stopped.
     if let Some(budgets) = run.budgets() {
         runtime.budgets = hirsel_interp::RunBudgets {
-            fuel: budgets.fuel,
             memory_bytes: budgets.memory_bytes,
         };
     }
@@ -427,8 +426,7 @@ fn run_provider_on_host(
         source: None,
     };
     let cpu_trace = std::env::var_os("HIRSEL_TIR_CPU_PHASES");
-    let cpu_fuel = std::env::var_os("HIRSEL_TIR_CPU_FUEL");
-    if cpu_trace.is_some() || cpu_fuel.is_some() {
+    if cpu_trace.is_some() {
         operations.library.enable_cpu_trace();
     }
     let execution = if let Some(capture) = ownership {
@@ -484,34 +482,11 @@ fn run_provider_on_host(
         std::fs::write(path, text)
             .map_err(|error| ToolError::Runtime(format!("CPU phase trace: {error}")))?;
     }
-    if let Some(path) = cpu_fuel {
-        let trace = operations.library.cpu_trace().unwrap();
-        let fuel = operations.library.cpu_fuel_trace().unwrap();
-        let events: Vec<_> = trace.iter().zip(fuel).map(|(event, fuel)| serde_json::json!({
-            "task":event.task, "phase":format!("{:?}", event.phase),
-            "end":matches!(event.phase, hirsel_interp::library::CpuPhase::End(_)), "fuel":fuel,
-        })).collect();
-        std::fs::write(
-            path,
-            serde_json::to_vec(
-                &serde_json::json!({"task":operations.library.task_path(),"events":events}),
-            )
-            .unwrap(),
-        )
-        .map_err(|error| ToolError::Runtime(format!("CPU fuel trace: {error}")))?;
-    }
+
     let replay = matches!(operations.io, hirsel_host_io::HostIo::Replay(_));
     if let Some(refusal) = operations.refused.take() {
         return Err(ToolError::Runtime(if replay {
-            if run.budgets().is_some_and(|budget| budget.fuel.is_some())
-                && run.record().io.as_ref().is_some_and(|io| {
-                    io.cpu.is_some() && io.tasks.as_deref() != Some("tasks.free@1")
-                })
-            {
-                format!("replay refused: Ordered CPU fuel accounting is engine-specific; {refusal}")
-            } else {
-                format!("replay refused: {refusal}")
-            }
+            format!("replay refused: {refusal}")
         } else {
             format!("host Io: {refusal}")
         }));

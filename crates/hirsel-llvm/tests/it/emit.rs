@@ -37,7 +37,6 @@ fn inputs<'a>(program: &'a Program, input: &'a InputIdentity, opt: OptLevel) -> 
         tracking: false,
         opt,
         measurement: false,
-        fuel: false,
     }
 }
 

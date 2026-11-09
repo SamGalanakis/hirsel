@@ -85,11 +85,6 @@ pub(super) unsafe fn inert_layout(layout: &crate::Layout) -> bool {
         .all(|op| matches!(op[0], TYPE_EDGE | VALUE | VALUE_FIELD | VALUE_COLUMN))
 }
 
-/// Register fresh canonical backing, without changing its already admitted
-/// logical allocation. Only layouts with no child owners or finalizers enter
-/// these lists. Fuel-bearing jobs retain their exact canonical interleaving.
-/// # Safety
-/// Idle owns the role, this Native and the fresh, initialized header.
 pub(super) unsafe fn adopt(
     ctx: *mut TaskCtx,
     native: *mut Native,
@@ -107,9 +102,7 @@ pub(super) unsafe fn adopt(
         {
             return;
         }
-        if super::super::engine::with_driver(ctx, |driver| driver.budgets.fuel) {
-            return;
-        }
+
         let Some(owner) = (unsafe { (*native).cpu_owner() }) else {
             return;
         };

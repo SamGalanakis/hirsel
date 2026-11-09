@@ -57,7 +57,7 @@ impl FnEmitter<'_, '_, '_> {
         }
         Ok(())
     }
-    pub(crate) fn ahead_point(&mut self, logical: bool) -> Emitted {
+    pub(crate) fn ahead_point(&mut self) -> Emitted {
         let (Some(state), Some(counter)) = (self.ahead_state, self.ahead_counter) else {
             return Ok(());
         };
@@ -65,17 +65,8 @@ impl FnEmitter<'_, '_, '_> {
         let left = self.b.ins().iadd_imm(left, -1);
         self.b.def_var(counter, left);
         let expired = self.b.ins().icmp_imm(IntCC::SignedLessThanOrEqual, left, 0);
-        let mut reason = self.b.ins().uextend(types::I32, expired);
-        if logical && self.em.inputs.unit().fuel {
-            let offset = hirsel_lir::runtime_abi::CTX_FUEL_OFFSET as i32;
-            let fuel = self.b.ins().load(types::I64, flags(), self.context, offset);
-            let fuel = self.b.ins().iadd_imm(fuel, -1);
-            self.b.ins().store(flags(), fuel, self.context, offset);
-            let spent = self.b.ins().icmp_imm(IntCC::SignedLessThan, fuel, 0);
-            let spent = self.b.ins().uextend(types::I32, spent);
-            let spent = self.b.ins().ishl_imm(spent, 1);
-            reason = self.b.ins().bor(reason, spent);
-        }
+        let reason = self.b.ins().uextend(types::I32, expired);
+
         let spent = self.b.ins().icmp_imm(IntCC::NotEqual, reason, 0);
         let (cold, next) = (self.b.create_block(), self.b.create_block());
         self.b.set_cold_block(cold);
@@ -427,14 +418,8 @@ impl FnEmitter<'_, '_, '_> {
         self.b.ins().brif(active, held, &[], ordinary, &[]);
         self.b.switch_to_block(held);
         let block = self.get1(value)?;
-        let fuel = self.b.ins().load(
-            types::I64,
-            flags(),
-            self.context,
-            hirsel_lir::runtime_abi::CTX_FUEL_OFFSET as i32,
-        );
         let slot = self.b.ins().iconst(types::I32, i64::from(slot));
-        self.rt(RuntimeEntry::HostDefer, &[state, slot, block, fuel])?;
+        self.rt(RuntimeEntry::HostDefer, &[state, slot, block])?;
         self.b.ins().jump(next, &[]);
         self.b.switch_to_block(ordinary);
         self.ahead_barrier()?;
@@ -783,7 +768,7 @@ impl FnEmitter<'_, '_, '_> {
 
 impl FnEmitter<'_, '_, '_> {
     fn cpu_ownership(&mut self) -> Emitted<bool> {
-        if self.ownership.is_some() || self.em.inputs.unit().fuel {
+        if self.ownership.is_some() {
             return Ok(false);
         }
         let Some(state) = self.ahead_state else {

@@ -147,7 +147,7 @@ pub(super) unsafe fn drive(ctx: *mut TaskCtx) -> Stopped<Drive<Result<Completion
             Phase::Begun => {
                 // A stop selected during metadata must prevent a new attempt.
                 // After the attempt, InitialOutcome preserves evidence first.
-                unsafe { crate::stop::observe(ctx) }?;
+                crate::stop::observe(ctx)?;
                 let request = unsafe { &*request_ptr(ctx) };
                 let blocking = adapter.blocking(request);
                 crate::stop::observe(ctx)?;

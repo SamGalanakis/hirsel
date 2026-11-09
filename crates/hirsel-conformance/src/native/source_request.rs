@@ -223,7 +223,7 @@ impl Source {
                     output: NativeOutput::Ready,
                     options: BuildOptions::new(options.clone(), Backend::Llvm, OptLevel::Default),
                     run: None,
-                    fuel: false,
+
                     evidence: None,
                 }),
             })

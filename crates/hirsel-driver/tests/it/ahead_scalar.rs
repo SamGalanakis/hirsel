@@ -30,14 +30,13 @@ fn analyze(source: &str, name: &str) -> Result<ScalarGraph, Refusal> {
             &ready.table,
             &target,
             root,
-            false,
             ContentHash::of_bytes(b"test helper identity"),
         )
     })
 }
 
 #[test]
-fn scalar_cfg_loop_keeps_original_fuel_points() {
+fn scalar_cfg_loop_keeps_original_checkpoint_points() {
     for source in [
         "fn main()->u64 {let mut x=1u64; for i in 0u64..64u64 {x=int.wrapping_add(int.wrapping_mul(x ^ (x >> 7),0x9e3779b97f4a7c15u64),i)}; x}",
         "fn main()->f64 {let mut x=1.0f64; for i in 0u64..64u64 {x=x*1.0000000000000002f64+0.0000000000000001f64}; x}",
@@ -47,7 +46,7 @@ fn scalar_cfg_loop_keeps_original_fuel_points() {
             graph
                 .bodies
                 .values()
-                .any(|b| b.fuel_points.iter().filter(|p| **p).count() > 1)
+                .any(|b| b.checkpoint_points.iter().filter(|p| **p).count() > 1)
         );
     }
 }
@@ -127,7 +126,6 @@ fn scalar_alternate_loop_ir() {
             foreign: &program.foreign_dispatch,
             opt: hirsel_lir::emission::OptLevel::Speed,
             measurement: false,
-            fuel: false,
         };
         let after = hirsel_llvm::emit_optimized_ir(&units, &inputs).unwrap();
         assert!(after.contains("ahead.boundary"), "{after}");

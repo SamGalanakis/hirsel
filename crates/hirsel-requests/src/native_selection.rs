@@ -297,7 +297,6 @@ fn request_key(request: &NativeRequest, _: NativePurpose) -> Result<ContentHash,
             super::native_bootstrap::discharge_rows(&passes.discharge),
         ),
         request.run.as_ref().map(|run| run.identity()),
-        request.fuel,
         request
             .evidence
             .as_deref()
@@ -374,7 +373,7 @@ pub(super) fn artifacts(
                 debug: false,
                 verify_backend: true,
                 measurement: false,
-                fuel: false,
+
                 requested_run: None,
                 test_entries: vec![],
                 output: hirsel_native_queries::compilation_tasks::CompilationOutput::Objects,

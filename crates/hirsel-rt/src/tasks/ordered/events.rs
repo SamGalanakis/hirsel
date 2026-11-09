@@ -4134,7 +4134,6 @@ mod tests {
                 Settled {
                     level: 0,
                     limit: u64::MAX,
-                    fuel: u64::MAX,
                 },
                 Default::default(),
             ));
@@ -4182,10 +4181,7 @@ mod tests {
             .operation(Default::default());
             let mut ignored_record = |_, _, _: &Outcome, _| {};
             let mut objects = unsafe { super::super::Objects::deferred(ctx, &mut ignored_record) };
-            let stretch = Stretch::new(Budgets {
-                fuel: false,
-                memory: false,
-            });
+            let stretch = Stretch::new(Budgets { memory: false });
             for retirement in 0..2 {
                 let receipt = objects.commit(root, &op, false);
                 if observing {
@@ -8332,7 +8328,6 @@ mod tests {
                 Settled {
                     level: 0,
                     limit: u64::MAX,
-                    fuel: u64::MAX,
                 },
                 Default::default(),
             );

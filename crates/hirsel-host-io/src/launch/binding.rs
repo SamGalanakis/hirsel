@@ -66,20 +66,14 @@ impl LaunchSelection {
         Ok(selected)
     }
 
-    pub fn compiler_inputs(&self) -> Result<(hirsel_run_schema::Inputs, bool), ToolError> {
+    pub fn compiler_inputs(&self) -> Result<hirsel_run_schema::Inputs, ToolError> {
         let record = self
             .captured
             .as_ref()
             .map(|captured| &captured.record)
             .or_else(|| self.replay.as_ref().map(|(_, run)| run.record()))
             .ok_or_else(|| ToolError::Runtime("ownership launch policy was not captured".into()))?;
-        Ok((
-            record.inputs.clone(),
-            record
-                .budgets
-                .as_ref()
-                .is_some_and(|budgets| budgets.fuel.is_some()),
-        ))
+        Ok(record.inputs.clone())
     }
 
     pub fn replay_product(&self) -> Option<([u8; 32], DefPath)> {
@@ -329,9 +323,8 @@ mod tests {
                 record: None,
             };
             let selected = LaunchSelection::read_for_compilation(launch).unwrap();
-            let (inputs, fuel) = selected.compiler_inputs().unwrap();
+            let inputs = selected.compiler_inputs().unwrap();
             assert_eq!(inputs, run.record().inputs);
-            assert!(!fuel);
             assert_eq!(selected.entry().unwrap().to_string(), revision.entry());
             let BoundHostRunParts::Live(bound) = selected
                 .bind(launch, &types, &signature, &revision, CodeReach::Safe)
@@ -345,12 +338,12 @@ mod tests {
         });
     }
     #[test]
-    fn ownership_policy_capture_keeps_inputs_fuel_and_grants_after_the_file_changes() {
+    fn ownership_policy_capture_keeps_inputs_and_grants_after_the_file_changes() {
         hirsel_intern::jobs::with_compiler_stack(|| {
             let (types, signature, revision) = fixture("main", "args:Args");
             let directory = tempfile::tempdir().unwrap();
             let path = directory.path().join("grants.json");
-            std::fs::write(&path, r#"{"args":["kept"],"inputs":{"hash_seed":17,"random_seed":0,"test_seed":0,"scheduler":null},"budgets":{"provider":"budgets.limits@2","fuel":1000}}"#).unwrap();
+            std::fs::write(&path, r#"{"args":["kept"],"inputs":{"hash_seed":17,"random_seed":0,"test_seed":0,"scheduler":null},"budgets":{"provider":"budgets.limits@3","memory_bytes":1000}}"#).unwrap();
             let launch = HostLaunch::Live {
                 config: super::LaunchConfig::Grants {
                     input: path.as_os_str(),
@@ -360,9 +353,8 @@ mod tests {
                 revocations: None,
             };
             let selection = LaunchSelection::read_for_compilation(launch).unwrap();
-            let (inputs, fuel) = selection.compiler_inputs().unwrap();
+            let inputs = selection.compiler_inputs().unwrap();
             assert_eq!(inputs.hash_seed, 17);
-            assert!(fuel);
             std::fs::write(&path, "no longer a grants template").unwrap();
             let BoundHostRunParts::Live(bound) = selection
                 .bind(launch, &types, &signature, &revision, CodeReach::Safe)
@@ -373,7 +365,7 @@ mod tests {
             };
             assert_eq!(bound.run().record().inputs, inputs);
             assert_eq!(bound.run().record().args.as_ref().unwrap(), &["kept"]);
-            assert_eq!(bound.run().budgets().unwrap().fuel, Some(1000));
+            assert_eq!(bound.run().budgets().unwrap().memory_bytes, Some(1000));
             assert_eq!(bound.run().record().entry, revision.entry());
         });
     }

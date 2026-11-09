@@ -50,7 +50,6 @@ pub(crate) struct Native {
     pub(super) environment: *mut Header,
     operation_site: u64,
     status: u8,
-    pub pending_refill: bool,
     pub(super) ctx: *mut TaskCtx,
     live: *mut u64,
     original_mask: u64,
@@ -81,7 +80,6 @@ pub(crate) struct Native {
     pub(super) input_blocks: Vec<crate::pool::cpu_scoped::ledger::blocks::Observed>,
     pub(super) arena: super::cpu_arena::Arena,
     pub(crate) cpu_claim: Option<std::sync::Arc<super::super::cpu::ClaimIdentity>>,
-    pub(crate) cpu_fuel: super::cpu_fuel::Fuel,
     pub(super) restart: super::cpu_restart::State,
 }
 impl Drop for Native {
@@ -351,7 +349,6 @@ impl Native {
             environment,
             operation_site,
             status: 0,
-            pending_refill: false,
             ctx,
             live: certificate.live,
             original_mask: certificate.mask,
@@ -375,7 +372,6 @@ impl Native {
             input_blocks,
             arena: super::cpu_arena::Arena::new(),
             cpu_claim: None,
-            cpu_fuel: super::cpu_fuel::Fuel::default(),
             restart: super::cpu_restart::State::new(certificate.preclaimed),
         })
     }
@@ -514,18 +510,7 @@ pub(crate) unsafe fn run(ctx: *mut TaskCtx, exec: &crate::pool::Exec, mut sp: *m
                     .save_requested
                     .load(Ordering::Acquire);
             }
-            if !returned && !pause && (*native).pending_refill && !private(ctx) {
-                match super::super::engine::ahead_refill(ctx) {
-                    Ok(ready) => {
-                        pause = !ready;
-                        (*native).pending_refill = !ready;
-                    }
-                    Err(stop) => {
-                        (*run).control.request_inside(stop);
-                        pause = true;
-                    }
-                }
-            }
+
             if !pause
                 && ((*native).host.active() || (*native).cpu_phase == 2)
                 && (*native).physical.reason & 4 != 0
@@ -548,32 +533,10 @@ pub(crate) unsafe fn run(ctx: *mut TaskCtx, exec: &crate::pool::Exec, mut sp: *m
             if returned && !pause {
                 let reason = (*native).physical.reason;
                 if private(ctx) {
-                    if reason & 2 != 0 {
-                        fuel_out(ctx);
-                        let local = (*ctx).ahead.as_ref().unwrap();
-                        if local.fuel.get() > (*ctx).run_ref().fuel.remaining() {
-                            pause = true;
-                            (*native).pending_refill = true;
-                        } else {
-                            fuel_in(ctx);
-                        }
-                    }
                     let local = (*ctx).ahead.as_ref().unwrap();
                     pause |= reason & 4 != 0 || local.save_requested.load(Ordering::Acquire);
                     (*native).physical.points_left = 1024;
                 } else {
-                    if reason & 2 != 0 && !(*native).pending_refill {
-                        match super::super::engine::ahead_refill(ctx) {
-                            Ok(ready) => {
-                                pause = !ready;
-                                (*native).pending_refill = !ready;
-                            }
-                            Err(stop) => {
-                                (*run).control.request_inside(stop);
-                                pause = true;
-                            }
-                        }
-                    }
                     (*native).physical.points_left =
                         if (*native).host.active() || (*native).cpu_phase == 2 {
                             1024
@@ -641,41 +604,6 @@ pub(crate) unsafe fn run(ctx: *mut TaskCtx, exec: &crate::pool::Exec, mut sp: *m
                 #[cfg(all(feature = "tsan", target_arch = "x86_64", target_os = "linux"))]
                 crate::tsan_callbacks::clear();
                 crate::pool::cpu_scoped::probe::checkpoint(ctx);
-                // A scalar private or CPU quantum owns no shared state. Keep the same
-                // 1024-point checkpoint and every stop/save/fuel/barrier test,
-                // without taking the scheduler role for a quota-only return.
-                if (*native).cpu
-                    && (*native).cpu_phase == 2
-                    && !private(ctx)
-                    && (*native).physical.reason == 2
-                    && (*run).control.stopped().is_none()
-                    && !(*ctx)
-                        .ahead
-                        .as_ref()
-                        .unwrap()
-                        .save_requested
-                        .load(Ordering::Acquire)
-                    && !(*native).pending_refill
-                    && !(*native).allocation.pending()
-                    && (*native).summary.is_null()
-                    && (*native).growth.is_null()
-                    && exec.leaving.get().is_none()
-                    && let Some(grant) = (*native)
-                        .cpu_fuel
-                        .refill((*ctx).view.compiled.fuel, crate::budget::FUEL_CHUNK)
-                {
-                    (*ctx)
-                        .ordered_charge_trace
-                        .capture((*ctx).view.compiled.fuel);
-                    (*ctx).heap().set_fuel(grant as i64);
-                    (*ctx).ordered_charge_trace.grant(grant as i64);
-                    (*native).physical.points_left = 1024;
-                    (*native).physical.reason = 0;
-                    sp = (*native).physical.saved_sp;
-                    #[cfg(all(feature = "tsan", target_arch = "x86_64"))]
-                    crate::pool::free::double_claim::mapper(ctx, sp);
-                    continue;
-                }
                 if (((*native).cpu && (*native).cpu_phase == 2 && !private(ctx))
                     || (!(*native).cpu && private(ctx) && (*native).host.root.is_null()))
                     && (*native).physical.reason == 1
@@ -686,7 +614,6 @@ pub(crate) unsafe fn run(ctx: *mut TaskCtx, exec: &crate::pool::Exec, mut sp: *m
                         .unwrap()
                         .save_requested
                         .load(Ordering::Acquire)
-                    && !(*native).pending_refill
                     && !(*native).allocation.pending()
                     && (*native).summary.is_null()
                     && (*native).growth.is_null()

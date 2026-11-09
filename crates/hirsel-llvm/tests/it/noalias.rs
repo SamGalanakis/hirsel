@@ -40,7 +40,6 @@ fn ir(program: &Program, opt: OptLevel, callbacks: &BTreeSet<DefPath>) -> String
         foreign: &hirsel_lir::emission::NO_FOREIGN,
         opt,
         measurement: false,
-        fuel: false,
     };
     emit_optimized_ir(&program.units(), &inputs)
         .unwrap_or_else(|e| panic!("{}: {e}", program.table.target.triple))

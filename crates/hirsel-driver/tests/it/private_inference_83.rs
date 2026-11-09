@@ -1093,7 +1093,7 @@ fn demanded_private_headers_preserve_canonical_records_under_cache_verification(
                     hirsel_native::OptLevel::Default,
                 ),
                 run: None,
-                fuel: false,
+
                 evidence: None,
             }),
         ] {

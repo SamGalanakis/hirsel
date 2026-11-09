@@ -15,7 +15,6 @@ fn pending() -> Log {
             transition: Transition::Keep,
             retirement: 3,
             before: crate::budget::stretch::Stretch::new(crate::budget::stretch::Budgets {
-                fuel: false,
                 memory: false,
             }),
             credit: 0,

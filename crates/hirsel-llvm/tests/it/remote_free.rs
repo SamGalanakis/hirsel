@@ -89,7 +89,6 @@ fn inputs<'a>(
         foreign: &hirsel_lir::emission::NO_FOREIGN,
         opt,
         measurement: false,
-        fuel: false,
     }
 }
 

@@ -453,7 +453,6 @@ impl OwnershipTasks {
             opt: snapshot.emission.opt,
             verify_backend: snapshot.emission.verify_backend,
             measurement: snapshot.emission.measurement,
-            fuel: snapshot.emission.fuel,
         };
         let units = units.iter().collect::<Vec<_>>();
         use_units(&units, &emit, &plans)
@@ -591,7 +590,6 @@ impl OwnershipTasks {
                     options: &snapshot.options,
                     input: &snapshot.emission.input,
                     manifest: &snapshot.manifest,
-                    fuel: snapshot.emission.fuel,
                 },
                 source,
                 hirsel_native::root_source::LinkAssembly {

@@ -79,7 +79,7 @@ pub fn table(w: &mut W, value: &LayoutTable) {
 }
 fn body(w: &mut W, value: &ScalarBody) {
     w.tree::<hirsel_syntax::ContentHash, ()>(value.calls.len());
-    w.flat_vec(&value.fuel_points);
+    w.flat_vec(&value.checkpoint_points);
 }
 fn graph(w: &mut W, value: &ScalarGraph) {
     w.map(&value.bodies, |w, _, b| body(w, b));

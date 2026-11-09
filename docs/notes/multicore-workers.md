@@ -30,7 +30,7 @@ The compiled `CONC-8-watch-no-event-blocked` fixture covers this path.
 
 `RunControl` can request a stop or read status from any thread. A stopped pure
 loop can retain its worker, heap, stack and compute permit until it reaches an
-operation or fuel refill. A home foreign interval delays return until a supported
+operation. A home foreign interval delays return until a supported
 boundary; status exposes `home_busy`. An external stop at a callback operation
 abandons the callback. A callback failure or a language stop inside C remains
 process-fatal. The last holder reclaims the detached run.
@@ -44,11 +44,6 @@ host waits release it. `RunStatus::lost_permits` counts permits retained after a
 stopped run returned. Width and forced migration remain test controls until the
 mode-specific differential gates enable managed execution.
 
-At greater widths a task returns unspent fuel on switch-out and takes a chunk on
-switch-in. Only its executing worker writes its fuel word. The width-one exact
-budget path remains unchanged. Fuel builds observe a stop at least once every
-64 Ki points. Uninstrumented pure loops retain their workers by design.
-
 Worker metrics are collected only when requested and use the metric names in
 `bench/multicore/telemetry.json`. The ordinary path reads no metric clocks.
 
@@ -56,7 +51,7 @@ Worker metrics are collected only when requested and use the metric names in
 
 - Runtime integration module `workers` covers migration, divergence, callback
   failure, cleanup exhaustion, allocation versus stop, late roots, home C and
-  callback boundaries, affinity, fuel and retained process permits.
+  callback boundaries, affinity and retained process permits.
 - `native --migrate` / `gate-native-migrate` runs the executable corpus through
   LLVM Speed and Cranelift using optimized runtime archives, and compares its
   observations with the interpreter. Build with `-c hirsel.full=true`; explicit
@@ -64,7 +59,6 @@ Worker metrics are collected only when requested and use the metric names in
   remain failures; they do not prove migration.
 - `tools/workers-tsan` compiles these same worker tests with instrumented std and
   fiber annotations, without the regular IT binary's custom test allocator.
-- `budgets::a_stop_ends_a_fuel_builds_loop_at_its_next_refill_on_both_backends`
   checks optimized allocation-free generated loops on both native backends.
 
 ## Prior art

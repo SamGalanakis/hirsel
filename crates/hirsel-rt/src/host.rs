@@ -377,10 +377,6 @@ impl RunControl {
         control.host();
         Self(control)
     }
-    /// Stop the run. The first stop of a run wins, whoever asks: a later one, or a stop the
-    /// run raised itself, leaves it as it is. A stopped run ends `Environmental(Stopped)` at
-    /// its next operation, scheduling point or fuel refill, never inside a foreign call: one
-    /// in C ends when the call returns.
     pub fn stop(&self) {
         self.0.request(crate::stop::Stop::Requested);
     }
@@ -467,8 +463,6 @@ impl RunHandle<'_> {
     pub fn execution(&self) -> &Execution {
         &self.execution
     }
-    /// The run's stop handle. A run whose host holds one takes its fuel in chunks and wakes
-    /// its idle waits for a stop.
     pub fn control(&self) -> RunControl {
         self.control.host();
         RunControl(std::sync::Arc::clone(&self.control))
@@ -547,7 +541,6 @@ pub struct BodyRun {
     physical_dispatch: bool,
     #[cfg(test)]
     ordered_home_dispatch: bool,
-    pub fuel: Option<u64>,
     pub adapter: Option<Box<dyn crate::io::Adapter>>,
     /// Explicit Ordered wait-service lifetime, retained until all workers leave.
     pub concurrent_adapter: Option<Arc<dyn crate::io_concurrent::ConcurrentAdapter>>,
@@ -575,7 +568,6 @@ impl BodyRun {
             physical_dispatch: false,
             #[cfg(test)]
             ordered_home_dispatch: false,
-            fuel: None,
             adapter: None,
             concurrent_adapter: None,
             control: Default::default(),
@@ -705,9 +697,6 @@ impl BodyRun {
             if self.physical_dispatch {
                 assert!(crate::pool::wide((*ctx).run_ref()));
                 crate::pool::free::enable(ctx);
-            }
-            if self.fuel.is_some() {
-                (*ctx).set_budgets(self.fuel, None);
             }
         }
         let mut binding = self

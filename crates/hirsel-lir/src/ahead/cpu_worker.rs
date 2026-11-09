@@ -261,7 +261,6 @@ pub fn validate_cpu_workers(
     table: &LayoutTable,
     target: &TargetSpec,
     plan: &AheadPlan,
-    fuel: bool,
 ) -> bool {
     for (root, proposal) in &plan.roots {
         let Some(cpu) = &proposal.cpu else { continue };
@@ -376,7 +375,7 @@ pub fn validate_cpu_workers(
         }
         let mut graph = if let Some(mapper) = &cpu.mapper {
             if mapper.graph.root != callback
-                || !validate_cpu_mapper_graph(units, table, target, mapper, fuel, mapper.helpers)
+                || !validate_cpu_mapper_graph(units, table, target, mapper, mapper.helpers)
             {
                 return false;
             }
@@ -392,8 +391,7 @@ pub fn validate_cpu_workers(
             }
             mapper.graph.clone()
         } else {
-            let Ok(graph) =
-                scalar_graph(units, table, target, callback, fuel, ContentHash::default())
+            let Ok(graph) = scalar_graph(units, table, target, callback, ContentHash::default())
             else {
                 return false;
             };
@@ -411,7 +409,7 @@ pub fn validate_cpu_workers(
             ScalarBody {
                 body: worker.unit().digest(),
                 calls: BTreeSet::from([callback]),
-                fuel_points: crate::fuel::fuel_points(worker.unit()),
+                checkpoint_points: crate::checkpoints::checkpoint_points(worker.unit()),
             },
         );
         if (cpu.mapper.is_some()
@@ -531,7 +529,7 @@ pub(super) fn propose(
     target: &TargetSpec,
     worker: &ValidatedUnit<Ready>,
     environments: &BTreeMap<ContentHash, Option<LayoutId>>,
-    fuel: bool,
+
     helpers: ContentHash,
 ) -> Result<RootPlan, Refusal> {
     let u = worker.unit();
@@ -600,10 +598,10 @@ pub(super) fn propose(
     {
         return Err(no("non-inert CPU mapper captures"));
     }
-    let (mut graph, mapper) = match scalar_graph(units, table, target, source, fuel, helpers) {
+    let (mut graph, mapper) = match scalar_graph(units, table, target, source, helpers) {
         Ok(graph) => (graph, None),
         Err(_) => {
-            let mapper = cpu_mapper_graph(units, table, target, source, fuel, helpers)?;
+            let mapper = cpu_mapper_graph(units, table, target, source, helpers)?;
             (mapper.graph.clone(), Some(mapper))
         }
     };
@@ -673,7 +671,7 @@ pub(super) fn propose(
         ScalarBody {
             body: u.digest(),
             calls: BTreeSet::from([source]),
-            fuel_points: crate::fuel::fuel_points(u),
+            checkpoint_points: crate::checkpoints::checkpoint_points(u),
         },
     );
     graph.root = u.header.instance;

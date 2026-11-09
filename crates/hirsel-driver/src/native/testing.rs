@@ -101,7 +101,7 @@ impl Executable {
                 },
                 output: crate::requests::NativeOutput::Executable,
                 run: None,
-                fuel: false,
+
                 evidence: None,
             }),
         };

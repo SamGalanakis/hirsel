@@ -64,7 +64,7 @@ pub(crate) unsafe fn plan(
         }
         let mut active = (*ctx).region;
         let mut found = false;
-        for _ in 0..crate::budget::stretch::ENVELOPE_MAX {
+        for _ in 0..crate::budget::stretch::RETAINED_MAX {
             if active.is_null() {
                 break;
             }
@@ -191,7 +191,7 @@ pub(crate) unsafe fn raw_plan(
     unsafe {
         let mut active = (*ctx).region;
         let mut found = false;
-        for _ in 0..crate::budget::stretch::ENVELOPE_MAX {
+        for _ in 0..crate::budget::stretch::RETAINED_MAX {
             if active.is_null() {
                 break;
             }
@@ -233,7 +233,7 @@ mod tests {
             run.config.flags |= crate::context::CONFIG_DIAGNOSTIC;
         }
         let outcome = run.run(
-            |ctx| unsafe { (*ctx).set_budgets(None, Some(2 << 20)) },
+            |ctx| unsafe { (*ctx).set_budgets(Some(2 << 20)) },
             move |ctx| unsafe {
                 let mut region = std::mem::MaybeUninit::<Region>::uninit();
                 let region = region.as_mut_ptr();
@@ -285,7 +285,7 @@ mod tests {
             run.config.flags |= crate::context::CONFIG_DIAGNOSTIC;
         }
         let outcome = run.run(
-            |ctx| unsafe { (*ctx).set_budgets(None, Some(2 << 20)) },
+            |ctx| unsafe { (*ctx).set_budgets(Some(2 << 20)) },
             move |ctx| unsafe {
                 let mut storage = std::mem::MaybeUninit::<Region>::uninit();
                 let region = storage.as_mut_ptr();

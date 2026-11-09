@@ -636,7 +636,7 @@ pub(super) mod tests {
             let outcome = run.run(
                 |ctx| unsafe {
                     let charge = crate::alloc::allocation_charge(ctx, 2, 8, 8);
-                    (*ctx).set_budgets(None, Some(2 * charge));
+                    (*ctx).set_budgets(Some(2 * charge));
                 },
                 move |ctx| unsafe {
                     let _role = role::Guard::new(ctx);
@@ -699,19 +699,13 @@ pub(super) mod tests {
                             .sync
                             .create_image((&0u64 as *const u64).cast(), 8, 0, 8);
                     (*ctx).heap_ref().meter.ordered((*ctx).run_ptr());
-                    let empty = || {
-                        Stretch::new(Budgets {
-                            fuel: false,
-                            memory: true,
-                        })
-                    };
+                    let empty = || Stretch::new(Budgets { memory: true });
                     let mut frontier = Frontier::new(
                         0,
                         Policy::admit(&Default::default(), None),
                         Settled {
                             level: 2 * charge,
                             limit: 2 * charge,
-                            fuel: u64::MAX,
                         },
                     );
                     frontier.enqueue(2, Default::default());
@@ -790,7 +784,7 @@ pub(super) mod tests {
             let outcome = run.run(
                 |ctx| unsafe {
                     let charge = crate::alloc::allocation_charge(ctx, 2, 8, 8);
-                    (*ctx).set_budgets(None, Some(charge));
+                    (*ctx).set_budgets(Some(charge));
                     engine::enable(ctx, Policy::admit(&Default::default(), Some(charge)));
                 },
                 |ctx| unsafe {
@@ -1145,7 +1139,7 @@ pub(super) mod tests {
             let outcome = run.run(
                 |ctx| unsafe {
                     let charge = crate::alloc::allocation_charge(ctx, 2, 8, 8);
-                    (*ctx).set_budgets(None, Some(2 * charge));
+                    (*ctx).set_budgets(Some(2 * charge));
                     engine::enable(ctx, Policy::admit(&Default::default(), Some(2 * charge)));
                     super::super::events::enable(ctx);
                 },
@@ -1243,7 +1237,7 @@ pub(super) mod tests {
         let outcome = run.run(
             |ctx| unsafe {
                 let charge = crate::alloc::allocation_charge(ctx, 2, 8, 8);
-                (*ctx).set_budgets(None, Some(2 * charge));
+                (*ctx).set_budgets(Some(2 * charge));
             },
             |ctx| unsafe {
                 let _role = role::Guard::new(ctx);
@@ -1260,10 +1254,7 @@ pub(super) mod tests {
                         .sync
                         .create_image((&0u64 as *const u64).cast(), 8, 0, 8);
                 (*ctx).heap_ref().meter.ordered((*ctx).run_ptr());
-                let budgets = Budgets {
-                    fuel: false,
-                    memory: true,
-                };
+                let budgets = Budgets { memory: true };
                 let empty = || Stretch::new(budgets);
                 let mut frontier = Frontier::new(
                     0,
@@ -1271,7 +1262,6 @@ pub(super) mod tests {
                     Settled {
                         level: 2 * charge,
                         limit: 2 * charge,
-                        fuel: u64::MAX,
                     },
                 );
                 frontier.enqueue(2, Default::default());

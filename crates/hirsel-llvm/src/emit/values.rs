@@ -69,8 +69,8 @@ impl<'m, 'a> FnEmitter<'m, 'a> {
             depth_mode: None,
             foreground_entry: None,
             foreground_calls: None,
-            fuel_points: if inputs.fuel || inputs.alternate {
-                hirsel_lir::fuel::fuel_points(unit)
+            checkpoint_points: if inputs.alternate {
+                hirsel_lir::checkpoints::checkpoint_points(unit)
             } else {
                 Vec::new()
             },

@@ -22,10 +22,7 @@ pub const STANDALONE: u32 = 2;
 /// [`ProgramDescriptor::flags`]: the entry reaches an escape from capability checking, so an
 /// `admit.safe@1` run of it is refused (CAP-6).
 pub const ESCAPES: u32 = 4;
-/// [`ProgramDescriptor::flags`]: the code charges fuel at its fuel points, so a run of it can
-/// be given a fuel budget (`budgets.limits@2`).
-pub const FUELED: u32 = 8;
-const KNOWN_FLAGS: u32 = UNREPLAYABLE | STANDALONE | ESCAPES | FUELED;
+const KNOWN_FLAGS: u32 = UNREPLAYABLE | STANDALONE | ESCAPES;
 
 /// A compiled program at the runtime boundary (`hirsel_rt_v2.h`).
 #[repr(C)]
@@ -254,9 +251,6 @@ impl Program {
     }
     pub(crate) fn escapes(&self) -> bool {
         self.flags & ESCAPES != 0
-    }
-    pub(crate) fn fueled(&self) -> bool {
-        self.flags & FUELED != 0
     }
 }
 

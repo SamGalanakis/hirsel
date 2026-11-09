@@ -4,7 +4,7 @@
 still Unit, its consumed argument list is `[1]`, and its replacement and release
 lists are empty. The mutable owner is updated in place. Argument extraction,
 collection validation and mutation, interpreter completion, cleanup, tracing,
-step limits, fuel and logical memory charges keep their existing paths.
+step limits and logical memory charges keep their existing paths.
 
 The previous `returned(Unit).transferring([1])` first constructed an empty
 completion and extended its consumed vector. In the measured profiling build,
@@ -28,7 +28,7 @@ The lane's interpreter tests cover exact transfer fields, owned and nested
 values, shared snapshots, extra arguments, malformed-call ordering and state,
 and every step cut around a real mutation. Existing completion tests compare
 immediate and scheduled execution across traces, checked execution, step limits,
-fuel and memory budgets. Selected MEM-6 and DROP-2 cases cover bounded-arena
+memory budgets. Selected MEM-6 and DROP-2 cases cover bounded-arena
 exhaustion, shared/nested writes, resources and cleanup on the interpreter and
 both native backends with the diagnostic runtime.
 

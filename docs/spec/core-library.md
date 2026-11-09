@@ -1872,7 +1872,7 @@ The numeric byte leaves back std's existing lossless JSON and scalar APIs.
 `bytes.json_number_end` returns the cursor immediately after a strict JSON number
 and status 1; on malformed grammar it returns the exact error cursor and status 0.
 It never converts/rounds the lexeme. Out-of-extent starts return that start/status 0.
-The extra deterministic Steps and fuel charge is 1 plus the distinct source bytes
+The extra deterministic Steps charge is 1 plus the distinct source bytes
 examined, including a terminating lookahead byte when present; EOF adds no byte.
 
 `bytes.integer` takes radix 2..36, a signed policy and positive/negative u128 limits
@@ -1882,12 +1882,12 @@ letters are accepted up to radix; plus, underscore, whitespace and non-ASCII are
 invalid. Minus requires signed=true and at least one digit. Validate through
 magnitude overflow: a later invalid digit wins over OutOfRange. Leading zeros
 and signed negative zero retain their spelling-independent integer semantics.
-It charges 1 plus the full input extent length in both Steps and fuel, even on
+It charges 1 plus the full input extent length in both Steps, even on
 invalid radix or malformed input.
 
 `bytes.decimal_word` writes the unsigned u64's shortest decimal prefix into the
 caller's twenty-byte inline array, returns its length and preserves the tail.
-It allocates nothing and charges 9 extra Steps and fuel (1 plus its eight input
+It allocates nothing and charges 9 extra Steps (1 plus its eight input
 bytes). The std wrapper retains signs, arbitrary-capacity atomic BufferTooSmall,
 and its existing public error types. All three work charges precede result
 publication, including named runtime callback routing; budget refusal publishes

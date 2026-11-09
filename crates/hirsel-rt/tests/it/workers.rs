@@ -1,11 +1,3 @@
-//! Several compute workers beside the admission thread (design §6 Stops and worker lifetime,
-//! lane W1): migration at every suspension, the run's stop word observed by every worker, a
-//! stopped run that returns while a worker still computes, home foreign intervals, home
-//! state destroyed on the admission thread, and fuel refills as stop points. Each root and
-//! child is a Rust stand-in for compiled code, launched as `RunHandle::wait` launches a
-//! program (`hirsel_rt::host::BodyRun`). Trace state is process-wide, since a task's thread
-//! changes under it.
-
 use crate::support::*;
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::SeqCst};
@@ -135,20 +127,6 @@ unsafe extern "C" fn yielding(
             16,
             u32::MAX,
         )
-    }
-}
-
-/// One fuel point as compiled code charges it (`hirsel-llvm` `charge_fuel`).
-fn charge(ctx: *mut TaskCtx) {
-    unsafe {
-        let word = ctx
-            .cast::<u8>()
-            .add(hirsel_rt::CTX_FUEL_OFFSET)
-            .cast::<i64>();
-        *word -= 1;
-        if *word < 0 {
-            hirsel_rt::budget::hirsel_rt_v2_fuel_refill(ctx);
-        }
     }
 }
 
@@ -340,63 +318,6 @@ fn a_divergence_on_a_migrated_child_ends_the_run() {
     // The request reached the adapter on the home thread, and the binding died there.
     assert_eq!(take_threads(), [admission]);
     assert_eq!(*dropped.lock().unwrap(), Some(admission));
-}
-
-/// Fuel spent inside cleanup (a finalizer a child's release runs, on a compute worker) ends
-/// the run BudgetExceeded.
-#[test]
-fn budget_exhaustion_inside_cleanup_ends_the_run() {
-    let _serial = serial();
-    unsafe extern "C" fn spending(
-        ctx: *mut TaskCtx,
-        _value: *mut u8,
-        _anchor: u64,
-        _operation_site: u64,
-    ) -> u8 {
-        loop {
-            charge(ctx);
-        }
-    }
-    fn finalized() -> &'static Layout {
-        cached_layout("workers-finalized", 0, || {
-            layout(8, 0, Some(spending), Vec::new())
-        })
-    }
-    unsafe extern "C" fn cleaning(
-        ctx: *mut TaskCtx,
-        _environment: *mut Header,
-        _caller_site: u64,
-        _operation_site: u64,
-    ) -> u8 {
-        unsafe {
-            yield_now(&mut *ctx);
-            let block =
-                hirsel_rt::alloc::hirsel_rt_v2_alloc(ctx, 3, 8, 8, hirsel_rt::DOMAIN_HEAP, 0);
-            hirsel_rt::release::hirsel_rt_v2_release(ctx, block, 3, std::ptr::null(), 0, 0);
-        }
-        unreachable!("the cleanup's budget ran out")
-    }
-    let layouts: &'static [*const Layout] = Box::leak(
-        vec![environment() as *const Layout, finalized() as *const Layout].into_boxed_slice(),
-    );
-    let mut run = BodyRun::new(2, true);
-    run.config = Config {
-        layouts: layouts.as_ptr(),
-        layout_count: layouts.len() as u32,
-        ..Config::new()
-    };
-    run.fuel = Some(3 * hirsel_rt::budget::FUEL_CHUNK + 11);
-    let ended = run.run(
-        |_| {},
-        |ctx| {
-            let scope = enter(ctx);
-            let task = spawn(ctx, scope, cleaning, 1);
-            join(ctx, scope, task);
-            unreachable!("the run's budget ran out")
-        },
-    );
-    assert_eq!(ended.ended, Err(Stop::BudgetExceeded(BudgetKind::Fuel)));
-    assert_eq!(ended.pending, 0);
 }
 
 /// A host's stop while a migrated root runs a loop with no runtime entry: `wait` returns at
@@ -629,96 +550,6 @@ fn a_stop_racing_another_workers_allocation_ends_the_run() {
         }
     }
     assert!(stopped > 0, "no round was stopped");
-}
-
-static CHARGES_AFTER_STOP: AtomicU64 = AtomicU64::new(0);
-
-/// A loop with no runtime entry but fuel points: the run's stop ends it at its next refill,
-/// within one chunk of fuel, at width 2 without a budget and at width 1 under a host's stop
-/// handle with one.
-#[test]
-fn a_fuel_loop_observes_a_stop_within_one_chunk() {
-    let _serial = serial();
-    for (width, fuel) in [(2, None), (1, Some(u64::MAX / 2)), (2, Some(u64::MAX / 2))] {
-        static STOP_SENT: AtomicBool = AtomicBool::new(false);
-        static LOOPING: AtomicBool = AtomicBool::new(false);
-        STOP_SENT.store(false, SeqCst);
-        LOOPING.store(false, SeqCst);
-        CHARGES_AFTER_STOP.store(0, SeqCst);
-        let mut run = BodyRun::new(width, false);
-        run.fuel = fuel;
-        let control = run.control();
-        let status = run.control();
-        let stopper = std::thread::spawn(move || {
-            eventually("the loop", || LOOPING.load(SeqCst));
-            control.stop();
-            STOP_SENT.store(true, SeqCst);
-        });
-        let ended = run.run(
-            |_| {},
-            |ctx| {
-                LOOPING.store(true, SeqCst);
-                loop {
-                    charge(ctx);
-                    if STOP_SENT.load(SeqCst) {
-                        CHARGES_AFTER_STOP.fetch_add(1, SeqCst);
-                    }
-                }
-            },
-        );
-        stopper.join().unwrap();
-        assert_eq!(
-            ended.ended,
-            Err(Stop::Requested),
-            "width {width}, fuel {fuel:?}"
-        );
-        // A detached root leaves at its next refill too, before the next run counts.
-        eventually("the root to leave", || {
-            status.status().reclamation_pending == 0
-        });
-        assert!(
-            CHARGES_AFTER_STOP.load(SeqCst) <= hirsel_rt::budget::FUEL_CHUNK,
-            "width {width}: {} charges after the stop",
-            CHARGES_AFTER_STOP.load(SeqCst)
-        );
-    }
-}
-
-/// R4 at width > 1: refills after the task migrated, then a concurrent stop at a refill.
-#[test]
-fn fuel_refills_after_migration_and_a_concurrent_stop() {
-    let _serial = serial();
-    static MIGRATED: AtomicBool = AtomicBool::new(false);
-    MIGRATED.store(false, SeqCst);
-    let mut run = BodyRun::new(2, true);
-    run.fuel = Some(u64::MAX / 2);
-    let metrics = run.worker_metrics();
-    let control = run.control();
-    let stopper = std::thread::spawn({
-        let control = control.clone();
-        move || {
-            eventually("the refills after migration", || MIGRATED.load(SeqCst));
-            control.stop();
-        }
-    });
-    let ended = run.run(
-        |_| {},
-        move |ctx| {
-            for _ in 0..3 {
-                for _ in 0..3 * hirsel_rt::budget::FUEL_CHUNK {
-                    charge(ctx);
-                }
-                unsafe { yield_now(&mut *ctx) };
-            }
-            MIGRATED.store(true, SeqCst);
-            loop {
-                charge(ctx);
-            }
-        },
-    );
-    stopper.join().unwrap();
-    assert_eq!(ended.ended, Err(Stop::Requested));
-    assert!(metrics.migrations() >= 3);
 }
 
 /// PROG-4: a callback's failure on a run with compute workers ends the process, as on one.

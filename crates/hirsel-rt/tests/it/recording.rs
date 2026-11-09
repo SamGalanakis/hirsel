@@ -487,7 +487,7 @@ fn placement_header_is_diagnostic_validated_and_not_replayed() {
 fn settled_cpu_summary() -> hirsel_rt::io::CpuSummary {
     use hirsel_rt::io::{CpuPiece, CpuSummary};
     CpuSummary {
-        version: 3,
+        version: 4,
         retirement: 0,
         ordinal: 1,
         value: 42u64.to_le_bytes().to_vec(),
@@ -498,13 +498,12 @@ fn settled_cpu_summary() -> hirsel_rt::io::CpuSummary {
             retained_count: 0,
             pieces: vec![CpuPiece {
                 credit: 0,
-                fuel: 3,
+
                 net: 16,
-                envelope: vec![(2, 16)],
+                high: 16,
             }],
             level: 24,
             limit: 1024,
-            fuel: 97,
         }),
     }
 }
@@ -649,13 +648,11 @@ fn cpu_summary_replay_checks_all_fields_and_never_consumes_a_mismatch() {
         |s| s.native.as_mut().unwrap().retained_count += 1,
         |s| s.value[0] ^= 1,
         |s| s.value.pop().map(|_| ()).unwrap(),
-        |s| s.native.as_mut().unwrap().pieces[0].fuel += 1,
         |s| s.native.as_mut().unwrap().pieces[0].net += 1,
-        |s| s.native.as_mut().unwrap().pieces[0].envelope[0].1 += 1,
+        |s| s.native.as_mut().unwrap().pieces[0].high += 1,
         |s| s.native.as_mut().unwrap().level += 1,
         |s| s.native.as_mut().unwrap().limit += 1,
-        |s| s.native.as_mut().unwrap().fuel += 1,
-        |s| s.stop = Some(hirsel_run_schema::BudgetKind::Fuel),
+        |s| s.stop = Some(hirsel_run_schema::BudgetKind::Memory),
     ] {
         let mut changed = summary.clone();
         change(&mut changed);
@@ -691,7 +688,7 @@ fn cpu_summary_portable_replay_checks_results_without_native_layout_inputs() {
             (|s: &mut hirsel_rt::io::CpuSummary| s.retirement += 1)
                 as fn(&mut hirsel_rt::io::CpuSummary),
             |s| s.ordinal += 1,
-            |s| s.stop = Some(hirsel_run_schema::BudgetKind::Fuel),
+            |s| s.stop = Some(hirsel_run_schema::BudgetKind::Memory),
             |s| s.value[0] ^= 1,
             |s| {
                 s.value.pop();

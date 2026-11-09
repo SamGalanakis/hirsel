@@ -163,7 +163,6 @@ mod tests {
             Default::default(),
             true,
             false,
-            false,
         );
         let mut path = hirsel_syntax::DefPath::core("foreign");
         path.0.name.reserve(4096);

@@ -97,7 +97,6 @@ fn probe(target: &TargetSpec, malformed: u8, inventory: bool, shared: bool) -> V
         tracking: false,
         opt: OptLevel::None,
         measurement: false,
-        fuel: false,
     };
     let mut em = Emitter::new(crate::module::Inputs::units(&inputs), false).unwrap();
     let sig = em.runtime_signature(&abi, &unit.header.definition).unwrap();

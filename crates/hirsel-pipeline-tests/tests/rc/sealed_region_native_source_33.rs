@@ -88,7 +88,6 @@ fn execute(source: &str, root: TypeKind, native: NativeType) {
         opt: OptLevel::None,
         verify_backend: true,
         measurement: false,
-        fuel: false,
     };
     let entry = units
         .iter()

@@ -1653,13 +1653,8 @@ fn facts(
     } else {
         (program.digest, program.entry_name.as_str())
     };
-    let mut facts = crate::standalone::facts(
-        digest,
-        entry,
-        program.code.roots(),
-        program.escapes(),
-        program.fueled(),
-    )?;
+    let mut facts =
+        crate::standalone::facts(digest, entry, program.code.roots(), program.escapes())?;
     // Bound executables also bind the complete run identity below. A Call
     // record cannot select another entry or replace a main launch's record.
     if !program.standalone() && run.record().launch == hirsel_run_schema::LaunchKind::Call {
@@ -1688,7 +1683,6 @@ unsafe fn launch(program: &Program, mut arguments: Vec<std::ffi::OsString>) -> R
             &program.entry_name,
             program.code.roots(),
             program.escapes(),
-            program.fueled(),
         ) {
             Ok(selected) => Some(selected),
             Err(error) => return refuse(&error.to_string()),
@@ -1905,7 +1899,6 @@ pub(crate) unsafe fn execute(
         .map(|run| crate::runners::native::replay_state(program, run))
         .transpose()?;
     let callee_replay = replay_call.is_some();
-    // Binding refused a fuel budget this code cannot enforce (`ProgramFacts::fueled`).
     let budgets = requested.as_ref().and_then(|run| run.budgets()).cloned();
     // F0's explicit test channel replaces the logical schedule and suppresses
     // worker startup below. It cannot also install the production Ordered policy.
@@ -2824,10 +2817,8 @@ pub(crate) unsafe fn execute(
     if production_free {
         unsafe { crate::tasks::free::host::native::enable(ctx) };
     }
-    // After the workers start: a run with compute workers takes its fuel in chunks, and a
-    // memory budget meters every worker's heap.
     if let Some(budgets) = &budgets {
-        unsafe { &mut *ctx }.set_budgets(budgets.fuel, budgets.memory_bytes);
+        unsafe { &mut *ctx }.set_budgets(budgets.memory_bytes);
     }
     if let Some(ordered) = ordered {
         // SAFETY: fresh root, after topology/budgets and before root publication.

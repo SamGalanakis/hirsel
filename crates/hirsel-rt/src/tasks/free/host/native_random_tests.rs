@@ -196,7 +196,7 @@ fn native_conversion_keeps_buffers_task_owned_through_allocation_and_stop() {
                             ));
                             observer.store(true, std::sync::atomic::Ordering::Release);
                             if stop {
-                                (*ctx).set_budgets(None, Some(1));
+                                (*ctx).set_budgets(Some(1));
                             }
                             let out = crate::text::allocate_bytes(ctx, bytes);
                             assert_eq!(
@@ -275,7 +275,7 @@ fn native_random_abi_allocation_stop_reclaims_the_completed_request() {
                 assert_eq!(grant.tag, 0);
                 {
                     let _role = role::Guard::new(ctx);
-                    (*ctx).set_budgets(None, Some(1));
+                    (*ctx).set_budgets(Some(1));
                 }
                 reached.store(true, std::sync::atomic::Ordering::Release);
                 let mut result = std::mem::MaybeUninit::<BytesResult>::uninit();

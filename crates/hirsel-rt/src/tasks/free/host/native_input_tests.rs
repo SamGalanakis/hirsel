@@ -41,7 +41,7 @@ unsafe fn program(ctx: *mut TaskCtx, mode: u8) {
     }
     if mode == 5 {
         let _role = unsafe { role::Guard::new(ctx) };
-        unsafe { (*ctx).set_budgets(None, Some(64)) };
+        unsafe { (*ctx).set_budgets(Some(64)) };
     }
     let mut buffer = unsafe { crate::text::allocate_bytes(ctx, b"prefix/").owner };
     for (word, max) in [(first.value, 3), (second.value, 100), (first.value, 100)] {

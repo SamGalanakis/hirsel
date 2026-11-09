@@ -492,14 +492,12 @@ pub const CTX_DUP_MAX_OFFSET: usize = std::mem::offset_of!(Compiled, dup_max);
 pub const CTX_FREE_INLINE_OFFSET: usize = std::mem::offset_of!(Compiled, free_inline);
 pub const CTX_IDLE_SLABS_OFFSET: usize = std::mem::offset_of!(Compiled, idle_slabs);
 pub const CTX_PAGES_OFFSET: usize = std::mem::offset_of!(Compiled, pages);
-pub const CTX_FUEL_OFFSET: usize = std::mem::offset_of!(Compiled, fuel);
 pub const CTX_HEAP_ID_OFFSET: usize = std::mem::offset_of!(Compiled, heap_id);
 pub const PAGE_FREE_OFFSET: usize = std::mem::offset_of!(Slab, free);
 pub const PAGE_LIVE_OFFSET: usize = std::mem::offset_of!(Slab, live);
 pub const PAGE_LOCAL_FREE_OFFSET: usize = std::mem::offset_of!(Slab, local_free);
 pub const PAGE_OWNER_OFFSET: usize = std::mem::offset_of!(Slab, owner);
 pub const PAGE_XTHREAD_FREE_OFFSET: usize = std::mem::offset_of!(Slab, xthread);
-const _: () = assert!(CTX_HEAP_ID_OFFSET == CTX_FUEL_OFFSET + 8);
 const _: () = assert!(PAGE_OWNER_OFFSET == 96 && PAGE_XTHREAD_FREE_OFFSET == 104);
 const _: () = assert!(size_of::<Xthread<Header>>() == 8);
 const _: () = assert!(std::mem::offset_of!(View, compiled) == 0);
@@ -632,12 +630,6 @@ pub(crate) struct Compiled {
     /// Per pool, the current allocation page, or null where compiled code calls
     /// `hirsel_rt_v2_alloc`. Mirrors [`Class::current`].
     pub(crate) pages: [*mut Slab; POOL_COUNT],
-    /// The running task's fuel chunk (`budgets.limits@2`, `crate::budget`): a fuel build's
-    /// code subtracts one at each fuel point and, when the result is negative, calls
-    /// `hirsel_rt_v2_fuel_refill`, which stores the next chunk here and returns.
-    pub(crate) fuel: i64,
-    /// The id of the heap whose pages these are (runtime ABI 26): compiled code frees a small
-    /// block inline only when its slab's `owner` equals it.
     pub(crate) heap_id: u32,
     _reserved: u32,
 }
@@ -674,7 +666,6 @@ impl View {
                 free_inline: 0,
                 idle_slabs: 0,
                 pages: [ptr::null_mut(); POOL_COUNT],
-                fuel: 0,
                 heap_id: 0,
                 _reserved: 0,
             },
@@ -698,8 +689,6 @@ struct IdleLarge {
 
 /// One worker's heap domain.
 pub(crate) struct Heap {
-    /// The worker's own [`Compiled`] words. While a task runs its bound view holds the live
-    /// counters (`idle_slabs`, `fuel`); these hold them between tasks, and the pages always.
     compiled: Compiled,
     /// This heap's id in its run's registry (nonzero, never reused within the run), and the
     /// epoch of its pages, which every page change bumps.
@@ -928,7 +917,6 @@ impl Heap {
                 free_inline: Self::inline(diagnostic) as u32,
                 idle_slabs: 0,
                 pages: [ptr::null_mut(); POOL_COUNT],
-                fuel: 0,
                 heap_id: 1,
                 _reserved: 0,
             },
@@ -1042,7 +1030,6 @@ impl Heap {
         }
         self.parked.compiled.pages = self.compiled.pages;
         self.parked.compiled.idle_slabs = self.compiled.idle_slabs;
-        self.parked.compiled.fuel = self.compiled.fuel;
         self.parked.compiled.heap_id = self.id;
         self.parked.heap = self.id;
         self.parked.epoch = self.epoch;
@@ -1093,7 +1080,6 @@ impl Heap {
             v.epoch = self.epoch;
         }
         v.compiled.idle_slabs = self.compiled.idle_slabs;
-        v.compiled.fuel = self.compiled.fuel;
         self.view = view;
     }
 
@@ -1107,9 +1093,8 @@ impl Heap {
     #[inline]
     pub(crate) fn unbind(&mut self) {
         let v = self.view();
-        let (idle_slabs, fuel) = (v.idle_slabs, v.fuel);
+        let idle_slabs = v.idle_slabs;
         self.compiled.idle_slabs = idle_slabs;
-        self.compiled.fuel = fuel;
     }
 
     /// The bound view.
@@ -1121,22 +1106,6 @@ impl Heap {
     pub(crate) fn set_dup_max(&mut self, dup_max: u32) {
         self.compiled.dup_max = dup_max;
         self.epoch += 1;
-    }
-
-    /// The fuel this heap holds between tasks.
-    pub(crate) fn parked_fuel(&self) -> i64 {
-        self.compiled.fuel
-    }
-    /// Hold `fuel` between tasks: the next task bound takes it (`crate::pool` hands the run's
-    /// fuel to the thread it hands the run to).
-    pub(crate) fn park_fuel(&mut self, fuel: i64) {
-        self.compiled.fuel = fuel;
-    }
-
-    /// Set the running task's fuel, which it hands on at its switch-out.
-    pub(crate) fn set_fuel(&mut self, fuel: i64) {
-        self.compiled.fuel = fuel;
-        self.view().fuel = fuel;
     }
 
     /// Change the page compiled code allocates `pool` from: in the worker's words and the bound

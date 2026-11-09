@@ -335,7 +335,7 @@ fn row(event: &CanonicalEvent) -> Value {
         "subevent":event.subevent, "op":event.op, "transition":transition(&event.transition),
         "item":item(&event.item), "version":event.version, "outcome":outcome(&event.outcome),
         "retirement":event.retirement, "credit":event.credit,
-        "before":event.before.pieces().map(|(credit,piece)|json!({"credit":credit,"fuel":piece.fuel,"net":piece.net,"envelope":piece.envelope})).collect::<Vec<_>>()
+        "before":event.before.pieces().map(|(credit,piece)|json!({"credit":credit,"net":piece.net,"high":piece.high})).collect::<Vec<_>>()
     })
 }
 

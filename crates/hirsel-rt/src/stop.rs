@@ -112,11 +112,8 @@ impl Default for Driver {
     }
 }
 
-/// A run's stop word and what its host may ask of it from any thread (design §6 Stops and
-/// worker lifetime). The first stop requested wins ([`Control::request`]), whichever thread
-/// raised it, and every later one takes the winner's place: every runtime entry that is an
-/// operation, every switch-in and every fuel refill reads the word with acquire ordering
-/// and ends the run's code there ([`observe`]).
+/// The first requested stop wins. Runtime operations and switch-in observe it
+/// with acquire ordering; a host can stop divergent pure code by killing its process.
 #[derive(Default)]
 pub(crate) struct Control {
     pub(crate) width: AtomicU32,
@@ -329,8 +326,6 @@ impl Control {
     }
 }
 
-/// End the run's code here when its stop was requested: the next runtime entry that is an
-/// operation, switch-in or fuel refill of every worker observes it.
 #[inline]
 pub(crate) fn observe(ctx: *mut TaskCtx) -> Stopped<()> {
     // SAFETY: the context and its run are live; a callee run's root outlives it, and the

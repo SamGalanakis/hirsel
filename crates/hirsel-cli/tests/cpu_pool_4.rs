@@ -35,8 +35,8 @@ fn free_generated_typed_batches_replay_with_one_permit() {
 include!("support/cpu_pool/watchdog.rs");
 include!("support/cpu_pool/stops.rs");
 #[test]
-fn free_diverging_mappers_stop_for_fuel_or_external_stop_and_replay() {
-    free_native_stops(4);
+fn free_diverging_mappers_external_stop_and_replay() {
+    free_native_host_stop(4);
 }
 
 #[test]
@@ -109,12 +109,6 @@ include!("support/cpu_pool/interpreter_receipts.rs");
 fn cpu_interpreter_cut_withdrawal_and_cancellation_receipts() {
     cpu_interpreter_receipt_cuts(4);
 }
-include!("support/cpu_pool/interpreter_fuel.rs");
-#[test]
-fn cpu_interpreter_cut_exact_source_fuel_stops() {
-    cpu_interpreter_fuel_cuts(4);
-}
-
 #[test]
 #[ignore = "requires exclusive CPUs; tools/cpu-overlap reports host-blocked without counting a pass"]
 fn ordered_allocating_mappers_overlap_and_replay() {

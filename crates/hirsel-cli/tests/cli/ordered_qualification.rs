@@ -440,29 +440,18 @@ fn ordered_qualification_corpus_head_calls_child_before_independent_send() {
     corpus(CALLED_BEFORE_SEND, b"");
 }
 
-fn prerecorded_corpus(
-    program: &str,
-    expected: &[u8],
-    io: serde_json::Value,
-    budgets: Option<serde_json::Value>,
-    status: i32,
-) {
+fn prerecorded_corpus(program: &str, expected: &[u8], io: serde_json::Value, status: i32) {
     let scratch = tempfile::tempdir().unwrap();
     let source = scratch.path().join("main.hir");
     std::fs::write(&source, program).unwrap();
-    let mut grants = serde_json::json!({"io":io,"args":[],"placement":{"cores":1,"commit":"shared","reorder":"off"}});
-    if let Some(budgets) = &budgets {
-        grants["budgets"] = budgets.clone();
-    }
+    let grants = serde_json::json!({"io":io,"args":[],"placement":{"cores":1,"commit":"shared","reorder":"off"}});
     let grant_path = scratch.path().join("grants.json");
     std::fs::write(&grant_path, grants.to_string()).unwrap();
     for backend in ["llvm", "cranelift"] {
         let executable = scratch.path().join(backend);
         let mut build = Command::new(env!("CARGO_BIN_EXE_hirsel"));
         build.args(["build", "--backend", backend]);
-        if budgets.is_some() {
-            build.arg("--fuel");
-        }
+
         let built = build
             .arg(&source)
             .arg("-o")
@@ -534,36 +523,7 @@ fn ordered_qualification_corpus_cancel_older_saved_host_wait() {
         CANCEL_OLDER_HOST,
         b"canceled\n",
         serde_json::json!({"tasks":"tasks.cooperative@1","stdout":"stdout.bytes@1","monotonic_clock":"clock.monotonic.ns@1","dirs":[]}),
-        None,
         0,
-    );
-}
-
-const FIRST_BUDGET_STOP: &str = r#"pub fn main(rt: Io) -> Result[(), GrantError] {
-  let tasks = io.tasks(rt)?
-  let output = io.stdout(rt)?
-  let _ = out.print(output, "start\n")
-  task.scope(tasks, fn(s: Scope) {
-    let a = task.async(s, fn() {
-      let mut i: u64 = 0
-      while true { i += 1 }
-    })
-    let b = task.async(s, fn() { let _ = out.print(output, "younger suffix\n") })
-    task.await(s, take a)
-    task.await(s, take b)
-  })
-  Ok(())
-}"#;
-
-#[test]
-#[ignore = "native Ordered matrix; run on the host to prove widths through eight"]
-fn ordered_qualification_corpus_first_budget_stop_truncates_younger_suffix() {
-    prerecorded_corpus(
-        FIRST_BUDGET_STOP,
-        b"start\n",
-        serde_json::json!({"tasks":"tasks.cooperative@1","stdout":"stdout.bytes@1","dirs":[]}),
-        Some(serde_json::json!({"provider":"budgets.limits@2","fuel":10000})),
-        5,
     );
 }
 

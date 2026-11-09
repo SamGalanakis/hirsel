@@ -75,7 +75,6 @@ fn inputs<'a>(
         tracking: false,
         opt,
         measurement: false,
-        fuel: false,
     }
 }
 

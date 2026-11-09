@@ -69,7 +69,7 @@ fn source_finalizer_resolver_is_checked_at_both_native_entry_points() {
                 foreign: &program.foreign_dispatch,
                 opt: OptLevel::Default,
                 measurement: false,
-                fuel: program.fuel,
+
                 verify_backend: true,
             };
             for (backend, result) in [

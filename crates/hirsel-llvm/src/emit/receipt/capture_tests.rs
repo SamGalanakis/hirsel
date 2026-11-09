@@ -346,7 +346,6 @@ fn probe(target: &TargetSpec, once: bool, usage: CaptureUse, malformed: u8) -> (
         tracking: false,
         opt: OptLevel::None,
         measurement: false,
-        fuel: false,
     };
     let mut manifested = Manifested::default();
     for kind in 0..4 {

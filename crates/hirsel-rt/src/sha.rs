@@ -16,9 +16,7 @@ unsafe fn hash(
             length,
         })
     };
-    hirsel_kernels::sha::digest(algorithm, source, |cost| unsafe {
-        crate::budget::charge_primitive(ctx, cost)
-    })
+    hirsel_kernels::sha::digest(algorithm, source, |_| crate::stop::observe(ctx))
 }
 
 /// Hash exactly the borrowed byte extent, without allocation or owner transfer.

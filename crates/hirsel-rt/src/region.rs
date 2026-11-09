@@ -781,7 +781,7 @@ impl RegionPool {
     /// Under a memory budget the region is charged the segment an empty pool would give it
     /// ([`canonical_size`]), and an oversized request takes only a pooled segment of exactly
     /// that size, so the region's segment sequence, and every later charge, is the one a cold
-    /// pool gives (`budgets.limits@2`).
+    /// pool gives (`budgets.limits@3`).
     fn take(&mut self, need: u64) -> *mut Segment {
         let size = canonical_size(need);
         self.meter.charge(size);

@@ -342,7 +342,6 @@ impl Fixture {
             hirsel_native::BuildProfile::Default,
             backend,
             None,
-            false,
             hirsel_driver::session::Policy::default(),
         )
         .map_err(|error| {

@@ -230,7 +230,7 @@ fn isolate_cleanup_source_and_cursor_forgeries_refuse_both_emitters() {
                 foreign: &program.foreign_dispatch,
                 opt: OptLevel::Default,
                 measurement: false,
-                fuel: program.fuel,
+
                 verify_backend: true,
             };
             assert_eq!(

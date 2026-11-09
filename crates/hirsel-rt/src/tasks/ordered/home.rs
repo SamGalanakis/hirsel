@@ -335,7 +335,6 @@ mod notification_tests {
             crate::budget::stretch::Settled {
                 level: 0,
                 limit: u64::MAX,
-                fuel: u64::MAX,
             },
             crate::ordered::objects::Registry::default(),
         ));

@@ -33,7 +33,7 @@ Base ==
    q0 |-> [x \in DataObjs |-> <<>>], carries |-> [x \in AllObjs |-> {}],
    fin |-> [x \in DataObjs |-> NoOp], msgsz |-> [x \in DataObjs |-> 0],
    delay |-> [h \in {"h"} |-> -1],
-   memlim |-> Big, fuellim |-> Big, level0 |-> 0, allowance |-> Big,
+   memlim |-> Big, level0 |-> 0, allowance |-> Big,
    runahead |-> 4, rootsz |-> 0, expect |-> {}]
 
 -----------------------------------------------------------------------------
@@ -177,22 +177,14 @@ Budget2b ==
      !.held = <<{"y"}, {"x"}, {}>>,
      !.memlim = 100]
 
-(* Review-3 finding 3, first example: settled 90, limit 100, one fuel      *)
-(* point left. "allocate 20; 2 fuel; free 20" stops with kind memory ...   *)
+(* A memory high stops even when the net change is zero. *)
 Budget3a ==
   [Base EXCEPT
-     !.progs = {<<<<Fuel(5), Store("y", 1)>>,
-                  <<Alloc(20), Fuel(2), Free(20), Store("x", 1)>>,
+     !.progs = {<<<<Store("y", 1)>>,
+                  <<Alloc(20), Free(20), Store("x", 1)>>,
                   <<>>>>},
      !.held = <<{"y"}, {"x"}, {}>>,
-     !.memlim = 100, !.level0 = 90, !.fuellim = 6]
-
-(* ... and "2 fuel; allocate 20; free 20" with kind fuel.                  *)
-Budget3b ==
-  [Budget3a EXCEPT
-     !.progs = {<<<<Fuel(5), Store("y", 1)>>,
-                  <<Fuel(2), Alloc(20), Free(20), Store("x", 1)>>,
-                  <<>>>>}]
+     !.memlim = 100, !.level0 = 90]
 
 (* Review-3 finding 3, second example: a close of a trivially droppable    *)
 (* Receiver frees 80 before a 20-byte allocation: 90 - 80 + 20 = 30.       *)

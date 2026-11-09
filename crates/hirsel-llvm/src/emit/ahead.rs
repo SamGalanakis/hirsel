@@ -61,7 +61,7 @@ impl<'m, 'a> FnEmitter<'m, 'a> {
         self.ahead_reload();
         Ok(())
     }
-    pub(super) fn ahead_point(&mut self, logical: bool) -> Emitted {
+    pub(super) fn ahead_point(&mut self) -> Emitted {
         let (Some(state), Some(counter)) = (self.ahead_state, self.ahead_counter) else {
             return Ok(());
         };
@@ -79,36 +79,12 @@ impl<'m, 'a> FnEmitter<'m, 'a> {
         let expired = self
             .builder
             .icmp(IntPredicate::Eq, left, self.module.const_zero(i64t));
-        let mut reason = self.builder.select(
+        let reason = self.builder.select(
             expired,
             self.module.const_int(i32t, 1),
             self.module.const_zero(i32t),
         );
-        if logical && self.inputs.fuel {
-            let at = self.builder.offset(
-                self.context,
-                self.module
-                    .const_int(i64t, hirsel_lir::runtime_abi::CTX_FUEL_OFFSET.into()),
-            );
-            let fuel = self.builder.binary(
-                BinOp::Sub,
-                self.builder.load(i64t, at, 8),
-                self.module.const_int(i64t, 1),
-            );
-            self.builder.store(fuel, at, 8);
-            let spent = self
-                .builder
-                .icmp(IntPredicate::Slt, fuel, self.module.const_zero(i64t));
-            reason = self.builder.binary(
-                BinOp::Or,
-                reason,
-                self.builder.select(
-                    spent,
-                    self.module.const_int(i32t, 2),
-                    self.module.const_zero(i32t),
-                ),
-            );
-        }
+
         let cold = self.module.append_block(self.function);
         let next = self.module.append_block(self.function);
         let spent = self
@@ -182,8 +158,6 @@ impl<'m, 'a> FnEmitter<'m, 'a> {
         Ok(())
     }
 
-    /// Retain the selected inert buffer without a count mutation or runtime
-    /// allocator on the private stack. Its old fuel position is journaled on idle.
     pub(super) fn host_instruction(&mut self, inst: &Inst) -> Emitted<bool> {
         if self.cpu_ownership()? {
             return Ok(true);
@@ -221,14 +195,6 @@ impl<'m, 'a> FnEmitter<'m, 'a> {
         self.builder.cond_br(active, held, ordinary);
         self.builder.position(held);
         let block = self.get(value)?;
-        let at = self.builder.offset(
-            self.context,
-            self.module.const_int(
-                self.module.int_type(64),
-                hirsel_lir::runtime_abi::CTX_FUEL_OFFSET.into(),
-            ),
-        );
-        let fuel = self.builder.load(self.module.int_type(64), at, 8);
         let helper = self.runtime(RuntimeEntry::HostDefer)?;
         self.builder.call(
             helper,
@@ -236,7 +202,6 @@ impl<'m, 'a> FnEmitter<'m, 'a> {
                 state,
                 self.module.const_int(self.module.int_type(32), slot.into()),
                 block,
-                fuel,
             ],
         );
         self.builder.br(next);
@@ -668,7 +633,7 @@ impl<'m, 'a> FnEmitter<'m, 'a> {
 
 impl<'m, 'a> FnEmitter<'m, 'a> {
     fn cpu_ownership(&mut self) -> Emitted<bool> {
-        if self.ownership.is_some() || self.inputs.fuel {
+        if self.ownership.is_some() {
             return Ok(false);
         }
         let Some(state) = self.ahead_state else {

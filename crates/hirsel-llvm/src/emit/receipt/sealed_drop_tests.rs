@@ -106,7 +106,6 @@ fn probe(target: &TargetSpec) -> Vec<u8> {
         tracking: false,
         opt: OptLevel::None,
         measurement: false,
-        fuel: false,
     };
 
     let mut manifested = Manifested::default();

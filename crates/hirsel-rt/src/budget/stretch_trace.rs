@@ -10,42 +10,24 @@ use std::collections::BTreeMap;
 mod charge;
 pub(crate) use charge::Charge;
 
-/// Owner-local journal: meter callbacks hold a heap borrow and cannot reach a
-/// scheduler. Read only the task's compiled fuel word and this disjoint field.
 #[derive(Clone, Default)]
 pub(crate) struct Local {
     journal: Option<Box<Journal>>,
 }
 #[derive(Clone, Default)]
 struct Journal {
-    fuel: i64,
     charges: Vec<Charge>,
 }
 impl Local {
     pub(crate) fn enable(&mut self) {
         self.journal.get_or_insert_default();
     }
-    pub(crate) fn grant(&mut self, fuel: i64) {
-        if let Some(journal) = &mut self.journal {
-            journal.fuel = fuel;
-        }
-    }
-    pub(crate) fn capture(&mut self, word: i64) {
-        if let Some(journal) = &mut self.journal {
-            let points = journal.fuel.saturating_sub(word).max(0) as u64;
-            if points != 0 {
-                journal.charges.push(Charge::Fuel(points));
-            }
-            journal.fuel = word.max(0);
-        }
-    }
     pub(crate) fn allocation(&mut self, bytes: u64) {
         if let Some(journal) = &mut self.journal {
             journal.charges.push(Charge::Alloc(bytes));
         }
     }
-    pub(crate) fn free(&mut self, word: i64, bytes: u64) {
-        self.capture(word);
+    pub(crate) fn free(&mut self, bytes: u64) {
         if let Some(journal) = &mut self.journal {
             journal.charges.push(Charge::Free(bytes));
         }
@@ -90,11 +72,6 @@ impl Observer {
         let pending = self.pending.entry(task).or_default();
         for &charge in &stretch.exact {
             let failure = match charge {
-                Charge::Fuel(points) if points > self.state.fuel => {
-                    append(pending, Charge::Fuel(self.state.fuel + 1));
-                    self.state.fuel = 0;
-                    Some(BudgetKind::Fuel)
-                }
                 Charge::Alloc(bytes)
                     if self.state.level.saturating_add(bytes) > self.state.limit =>
                 {
@@ -104,16 +81,12 @@ impl Observer {
                 _ => {
                     append(pending, charge);
                     match charge {
-                        Charge::Fuel(points) if self.state.fuel != u64::MAX => {
-                            self.state.fuel -= points
-                        }
                         Charge::Alloc(bytes) => {
                             self.state.level = self.state.level.saturating_add(bytes)
                         }
                         Charge::Free(bytes) | Charge::Credit(bytes) => {
                             self.state.level = self.state.level.saturating_sub(bytes)
                         }
-                        Charge::Fuel(_) => {}
                     }
                     None
                 }
@@ -146,11 +119,7 @@ impl Observer {
 }
 
 fn append(charges: &mut Vec<Charge>, charge: Charge) {
-    if let (Some(Charge::Fuel(previous)), Charge::Fuel(points)) = (charges.last_mut(), charge) {
-        *previous = previous.saturating_add(points);
-    } else {
-        charges.push(charge);
-    }
+    charges.push(charge);
 }
 
 /// An unbounded trace summary, built from the exact accepted prefix. Unlike
@@ -159,20 +128,12 @@ fn summary(budgets: Budgets, charges: Vec<Charge>) -> Stretch {
     let mut stretch = Stretch::new(budgets);
     for &charge in &charges {
         match charge {
-            Charge::Fuel(points) => {
-                stretch.piece().fuel = stretch.piece().fuel.saturating_add(points)
-            }
             Charge::Alloc(bytes) => {
                 let piece = stretch.piece();
                 piece.level = piece.level.saturating_add(bytes as i64);
                 piece.net = piece.level;
-                if budgets.memory && piece.level > piece.envelope.last().map_or(0, |&(_, h)| h) {
-                    let u = if budgets.fuel { piece.fuel } else { 0 };
-                    let high = piece.level;
-                    match piece.envelope.last_mut() {
-                        Some(last) if last.0 == u => *last = (u, high),
-                        _ => piece.envelope.push((u, high)),
-                    }
+                if budgets.memory {
+                    piece.high = piece.high.max(piece.level);
                 }
             }
             Charge::Free(bytes) => {
@@ -197,104 +158,62 @@ mod tests {
     fn untraced_local_charges_keep_no_journal_or_buffer() {
         let mut local = Local::default();
         for _ in 0..128 {
-            local.grant(64);
-            local.capture(63);
             local.allocation(32);
-            local.free(62, 32);
+            local.free(32);
             local.committed_credit(32);
             assert!(local.take().is_none());
             assert!(local.journal.is_none());
         }
         local.enable();
-        local.grant(64);
-        local.capture(63);
         local.allocation(32);
-        local.free(62, 32);
+        local.free(32);
         local.committed_credit(32);
-        assert_eq!(
-            local.take(),
-            Some(vec![Charge::Fuel(1), Charge::Alloc(32), Charge::Fuel(1)])
-        );
+        assert_eq!(local.take(), Some(vec![Charge::Alloc(32)]));
         assert_eq!(local.take(), Some(vec![]));
     }
 
     use crate::budget::stretch::{Event, summarise};
     #[test]
-    fn exact_witness_truncates_coalesced_highs_and_fuel_batches_after_first_stop() {
-        for budgets in [
-            Budgets {
-                fuel: false,
-                memory: true,
-            },
-            Budgets {
-                fuel: true,
-                memory: true,
-            },
-        ] {
-            let state = Settled {
-                level: 90,
-                limit: 100,
-                fuel: 1,
-            };
-            let serial = summarise(budgets, &[Event::Alloc(20)]).unwrap();
-            let speculative = summarise(
-                budgets,
-                &[
-                    Event::Alloc(20),
-                    Event::Free(20),
-                    Event::Alloc(80),
-                    Event::Fuel,
-                    Event::Fuel,
-                    Event::Free(80),
-                ],
-            )
-            .unwrap();
-            assert_eq!(speculative.pieces().next().unwrap().1.envelope[0], (0, 80));
-            let mut one = Observer::new(state, budgets);
-            let mut wide = Observer::new(state, budgets);
-            assert_eq!(one.settle(7, &serial), Err(BudgetKind::Memory));
-            assert_eq!(wide.settle(7, &speculative), Err(BudgetKind::Memory));
-            assert_eq!(one.take(7), wide.take(7));
-        }
-        let budgets = Budgets {
-            fuel: true,
-            memory: true,
-        };
+    fn exact_witness_truncates_coalesced_highs_after_first_stop() {
+        let budgets = Budgets { memory: true };
         let state = Settled {
             level: 90,
             limit: 100,
-            fuel: 1,
         };
-        let mut long = Stretch::new(budgets);
-        long.fuel_points(1000);
-        long.alloc(80).unwrap();
-        let mut trace = Observer::new(state, budgets);
-        assert_eq!(trace.settle(0, &long), Err(BudgetKind::Fuel));
-        assert_eq!(trace.take(0).exact, [Charge::Fuel(2)]);
+        let serial = summarise(budgets, &[Event::Alloc(20)]).unwrap();
+        let speculative = summarise(
+            budgets,
+            &[
+                Event::Alloc(20),
+                Event::Free(20),
+                Event::Alloc(80),
+                Event::Free(80),
+            ],
+        )
+        .unwrap();
+        assert_eq!(speculative.pieces().next().unwrap().1.high, 80);
+        let mut one = Observer::new(state, budgets);
+        let mut wide = Observer::new(state, budgets);
+        assert_eq!(one.settle(7, &serial), Err(BudgetKind::Memory));
+        assert_eq!(wide.settle(7, &speculative), Err(BudgetKind::Memory));
+        assert_eq!(one.take(7), wide.take(7));
     }
 
     #[test]
     fn exact_witness_accumulates_head_settlements_without_inventing_boundaries() {
-        let budgets = Budgets {
-            fuel: true,
-            memory: true,
-        };
+        let budgets = Budgets { memory: true };
         let state = Settled {
             level: 50,
             limit: 100,
-            fuel: 8,
         };
         let events = [
-            Event::Fuel,
             Event::Alloc(20),
             Event::Free(10),
-            Event::Fuel,
             Event::Alloc(50),
             Event::Free(50),
-            Event::Fuel,
         ];
         let mut serial = Observer::new(state, budgets);
-        for event in &events[..5] {
+        for event in &events[..3] {
             let result = serial.settle(3, &summarise(budgets, &[*event]).unwrap());
             if result.is_err() {
                 break;

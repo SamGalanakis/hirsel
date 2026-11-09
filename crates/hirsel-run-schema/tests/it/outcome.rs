@@ -48,7 +48,6 @@ fn every_run_ending_has_one_exit_policy() {
             }]),
             4,
         ),
-        (RunOutcome::BudgetExceeded(BudgetKind::Fuel), 5),
         (RunOutcome::BudgetExceeded(BudgetKind::Memory), 5),
         (RunOutcome::Environmental(Environmental::CodecLimit), 6),
         (

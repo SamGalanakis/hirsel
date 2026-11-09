@@ -374,7 +374,6 @@ pub fn main() -> Result[(), String] uses {} {
                 hirsel_native::BuildProfile::Default,
                 backend,
                 None,
-                false,
                 hirsel_driver::session::Policy::default(),
             )
             .unwrap();

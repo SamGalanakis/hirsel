@@ -112,7 +112,7 @@ impl std::fmt::Display for UndefinedBehavior {
 pub enum Outcome {
     /// CONC-8: stopped without exit, failure or speculative destruction.
     Blocked(Vec<BlockedWait>),
-    /// The run spent a host budget (`budgets.limits@2`) and stopped where it was, as a
+    /// The run spent a host budget (`budgets.limits@3`) and stopped where it was, as a
     /// Blocked run does: no cleanup, finalizer or further effect ran.
     BudgetExceeded(BudgetKind),
     ToolingLimit(hirsel_tir::ToolingLimit),
@@ -403,7 +403,7 @@ operation_boundary! {
     /// from its poll still parks normally; this never bypasses an observed yield.
     fn immediate_poll(&self, _token: u64) -> bool { false }
     /// The logical bytes of the values this layer holds for the run (channel buffers,
-    /// task results), measured with the evaluator's own (`budgets.limits@2`).
+    /// task results), measured with the evaluator's own (`budgets.limits@3`).
     fn retained_bytes(&self) -> u64 { 0 }
     /// Canonical provider task path, requested only by opt-in ownership observation.
     fn ownership_task_path(&self, _id: u64) -> Option<Vec<u32>> { None }
@@ -471,8 +471,6 @@ operation_boundary! {
     fn take_drop_failure(&mut self) -> Option<(String, String)> {
         None
     }
-    /// Diagnostic accounting after successful fuel preflight, before source work.
-    fn fuel_charged(&mut self, _cost: u64) {}
     /// Independent scalar TIR graph evidence for the immediately following CPU call.
     fn cpu_mapper_certified(&mut self, _certified: bool) {}
     fn take_tasks(&mut self) -> Vec<TaskStart> {

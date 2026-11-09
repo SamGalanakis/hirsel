@@ -82,7 +82,7 @@ fn run_request(refuse: bool, extent: u64, align: u64, diagnostic: bool, nonhead:
     let outcome = run.run(
         |ctx| unsafe {
             (*ctx).run().cpu_grant = Some(admission_grant);
-            (*ctx).set_budgets(Some(100), Some(batch_limit));
+            (*ctx).set_budgets(Some(batch_limit));
             (*ctx).heap().idle_cap = 0;
             (*ctx)
                 .heap_ref()
@@ -98,7 +98,7 @@ fn run_request(refuse: bool, extent: u64, align: u64, diagnostic: bool, nonhead:
             events::enable(ctx);
         },
         move |ctx| unsafe {
-            engine::fuel_in(ctx);
+            engine::task_in(ctx);
             assert_eq!(
                 crate::tasks::ordered::cpu::control(ctx, 4, 2, 1, || 0),
                 Ok(0)
@@ -117,7 +117,6 @@ fn run_request(refuse: bool, extent: u64, align: u64, diagnostic: bool, nonhead:
             let sp = stack.prepare(requesting, ctx.cast(), (&raw mut *native).cast());
             let before = (*ctx).heap_ref().backing_bytes();
             let initial = engine::with_driver(ctx, |d| d.frontier.as_ref().unwrap().settled);
-            (*ctx).view.compiled.fuel -= 3;
             enter(&mut native, sp);
             assert_eq!(native.physical.reason, REASON);
             // The fresh frame starts at sp + 64. Startup/requesting use 16
@@ -160,7 +159,7 @@ fn run_request(refuse: bool, extent: u64, align: u64, diagnostic: bool, nonhead:
                 }
                 // The real dispatcher captures a saved younger prefix before
                 // promotion. Return its unused lease on that same frontier.
-                engine::fuel_out(ctx);
+                engine::task_out(ctx);
                 engine::with_driver(ctx, |d| d.frontier = Some(head));
                 assert_eq!(serve(ctx, &raw mut *native), Ok(false));
             } else {
@@ -171,7 +170,7 @@ fn run_request(refuse: bool, extent: u64, align: u64, diagnostic: bool, nonhead:
                     state
                 });
                 assert_eq!(projected.level, initial.level + bytes);
-                assert_eq!(projected.fuel, initial.fuel - 3);
+
                 if refuse {
                     // A physical retry, rather than each allocation, closes
                     // the head lease and settles this admitted prefix once.
@@ -182,7 +181,7 @@ fn run_request(refuse: bool, extent: u64, align: u64, diagnostic: bool, nonhead:
             }
             let admitted = engine::with_driver(ctx, |d| d.frontier.as_ref().unwrap().settled);
             assert_eq!(admitted.level, initial.level + bytes);
-            assert_eq!(admitted.fuel, initial.fuel - 3);
+
             if refuse {
                 assert_eq!(native.allocation.phase, CHARGED);
                 assert!(native.allocation.result.is_null());
@@ -284,7 +283,7 @@ fn logical_allocation_stop_precedes_backing_admission() {
     let body_ledger = ledger.clone();
     let outcome = crate::host::BodyRun::new(1, false).run(
         |ctx| unsafe {
-            (*ctx).set_budgets(None, Some(1));
+            (*ctx).set_budgets(Some(1));
             (*ctx)
                 .heap_ref()
                 .meter

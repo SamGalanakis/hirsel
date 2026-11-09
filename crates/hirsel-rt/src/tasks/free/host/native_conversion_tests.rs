@@ -161,7 +161,7 @@ fn bulk_native_abi_conversions_keep_completed_payloads_owned_at_allocation_cuts(
                     let mut buffer = crate::text::allocate_bytes(ctx, b"").owner;
                     {
                         let _role = role::Guard::new(ctx);
-                        (*ctx).set_budgets(None, Some(1));
+                        (*ctx).set_budgets(Some(1));
                     }
                     let mut word = crate::net_abi::NetWordResult::default();
                     let mut stream = 7;

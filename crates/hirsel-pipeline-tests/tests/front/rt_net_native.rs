@@ -45,7 +45,6 @@ fn reuseaddr(backend: Option<hirsel_native::Backend>) {
                 hirsel_native::BuildProfile::Debug,
                 backend,
                 None,
-                false,
                 hirsel_driver::session::Policy::default(),
                 hirsel_native::Validation::EveryStage,
             )

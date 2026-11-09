@@ -52,7 +52,7 @@ pub fn cpu_mapper_graph(
     table: &LayoutTable,
     target: &TargetSpec,
     root: ContentHash,
-    fuel: bool,
+
     helpers: ContentHash,
 ) -> Result<CpuMapperGraph, Refusal> {
     if !supported(target) {
@@ -159,7 +159,7 @@ pub fn cpu_mapper_graph(
             ScalarBody {
                 body: u.digest(),
                 calls,
-                fuel_points: crate::fuel::fuel_points(u),
+                checkpoint_points: crate::checkpoints::checkpoint_points(u),
             },
         );
         Ok(())
@@ -172,19 +172,16 @@ pub fn cpu_mapper_graph(
         &mut 0,
         &mut proposal,
     )?;
-    proposal.graph.identity = identity(&proposal, table, target, fuel);
+    proposal.graph.identity = identity(&proposal, table, target);
     Ok(proposal)
 }
 
-/// Check graph closure, all allocation/cleanup sites, custody and the complete
-/// identity. A producer cannot omit a body, allocation, loan or fuel point and
-/// obtain a certificate. This never calls `cpu_mapper_graph`.
 pub fn validate_cpu_mapper_graph(
     units: &[&ValidatedUnit<Ready>],
     table: &LayoutTable,
     target: &TargetSpec,
     proposal: &CpuMapperGraph,
-    fuel: bool,
+
     helpers: ContentHash,
 ) -> bool {
     let graph = &proposal.graph;
@@ -193,7 +190,7 @@ pub fn validate_cpu_mapper_graph(
         || graph.bodies.len() > MAX_UNITS
         || !graph.bodies.contains_key(&graph.root)
         || proposal.helpers != helpers
-        || identity(proposal, table, target, fuel) != graph.identity
+        || identity(proposal, table, target) != graph.identity
     {
         return false;
     }
@@ -218,7 +215,7 @@ pub fn validate_cpu_mapper_graph(
             .saturating_add(u.terminators.len());
         if instructions > MAX_INSTRUCTIONS
             || body.body != u.digest()
-            || body.fuel_points != crate::fuel::fuel_points(u)
+            || body.checkpoint_points != crate::checkpoints::checkpoint_points(u)
             || !body_custody(u, table)
         {
             return false;
@@ -311,19 +308,13 @@ fn supported(target: &TargetSpec) -> bool {
         && target.features.is_empty()
 }
 
-fn identity(
-    proposal: &CpuMapperGraph,
-    table: &LayoutTable,
-    target: &TargetSpec,
-    fuel: bool,
-) -> ContentHash {
+fn identity(proposal: &CpuMapperGraph, table: &LayoutTable, target: &TargetSpec) -> ContentHash {
     ContentHash::of_parts(
         "hirsel.ahead.cpu-mapper.v1",
         [
             table.digest().0.as_slice(),
             target.digest().0.as_slice(),
             proposal.helpers.0.as_slice(),
-            &[u8::from(fuel)],
             format!(
                 "{:?}{:?}{:?}{:?}{:?}{:?}{:?}",
                 proposal.graph.root,

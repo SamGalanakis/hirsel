@@ -2,7 +2,7 @@
 //! production Frontier through the model world at widths 1/2/4/8 with seeded
 //! scheduling jitter, then the real native runtime through the same seams.
 
-use crate::budget::stretch::{self, ENVELOPE_MAX, Event, PIECES_MAX, Settled, Stretch};
+use crate::budget::stretch::{self, Event, PIECES_MAX, RETAINED_MAX, Settled, Stretch};
 use crate::ordered::footprint::{Held, TaskId};
 use crate::ordered::runtime50_model::*;
 use crate::ordered::{Frontier, Next, Pause, Policy};
@@ -361,22 +361,8 @@ fn runtime50_ordered_call_and_early_wake() {
 
 #[test]
 fn runtime50_budget_first_stop_and_credit() {
-    let both = stretch::Budgets {
-        fuel: true,
-        memory: true,
-    };
-    // Memory-before-fuel and fuel-before-memory, settled 90/100 with one fuel
-    // point, in a younger sibling's speculative stretch behind a long head.
-    for (events, kind) in [
-        (
-            [Event::Alloc(20), Event::Fuel, Event::Fuel, Event::Free(20)],
-            BudgetKind::Memory,
-        ),
-        (
-            [Event::Fuel, Event::Fuel, Event::Alloc(20), Event::Free(20)],
-            BudgetKind::Fuel,
-        ),
-    ] {
+    let both = stretch::Budgets { memory: true };
+    for (events, kind) in [([Event::Alloc(20), Event::Free(20)], BudgetKind::Memory)] {
         let mut scenario = Scenario::new(vec![
             (0, vec![op(ends())]),
             (
@@ -404,7 +390,6 @@ fn runtime50_budget_first_stop_and_credit() {
         scenario.settled = Settled {
             level: 90,
             limit: 100,
-            fuel: 1,
         };
         scenario.budgets = both;
         let matrix = run_matrix(&scenario, SEEDS);
@@ -447,12 +432,8 @@ fn runtime50_budget_first_stop_and_credit() {
         scenario.settled = Settled {
             level: 90,
             limit: 100,
-            fuel: u64::MAX,
         };
-        scenario.budgets = stretch::Budgets {
-            fuel: false,
-            memory: true,
-        };
+        scenario.budgets = stretch::Budgets { memory: true };
         let matrix = run_matrix(&scenario, SEEDS);
         let serial = &matrix.serial.canonical;
         if credit == 80 {
@@ -470,29 +451,18 @@ fn runtime50_budget_first_stop_and_credit() {
 
     // Seeded charged corpus at tight budgets: the first stop, its kind, the
     // exact charge witness and the retired prefix match the serial meter.
-    let mut stops = [0usize; 3];
+    let mut stops = [0usize; 2];
     for seed in 0..40 {
         let mut scenario = generated(seed, true);
         scenario.budgets = match seed % 3 {
             0 => both,
-            1 => stretch::Budgets {
-                fuel: true,
-                memory: false,
-            },
-            _ => stretch::Budgets {
-                fuel: false,
-                memory: true,
-            },
+            1 => stretch::Budgets { memory: false },
+            _ => stretch::Budgets { memory: true },
         };
         scenario.settled = Settled {
             level: 0,
             limit: if scenario.budgets.memory {
                 40 + seed * 3
-            } else {
-                u64::MAX
-            },
-            fuel: if scenario.budgets.fuel {
-                4 + seed % 9
             } else {
                 u64::MAX
             },
@@ -506,29 +476,17 @@ fn runtime50_budget_first_stop_and_credit() {
         );
         stops[match serial.stop.map(|(_, _, kind)| kind) {
             None => 0,
-            Some(BudgetKind::Fuel) => 1,
-            Some(_) => 2,
+            Some(_) => 1,
         }] += 1;
     }
+
     assert!(
         stops.iter().all(|&count| count > 0),
-        "fuel, memory and no stop: {stops:?}"
+        "memory and no-stop vectors: {stops:?}"
     );
-
-    // 1024-entry envelopes and 64-piece stretches pause; the pause leaves
+    // 64-piece stretches pause; the pause leaves
     // the stretch unchanged, and settling the paused prefix then the head's
     // live remainder equals the reference over the whole stream.
-    let mut long = Stretch::new(both);
-    for _ in 0..ENVELOPE_MAX {
-        long.fuel();
-        assert!(!long.allocation_pauses(1));
-        long.alloc(1).unwrap();
-    }
-    long.fuel();
-    assert!(long.allocation_pauses(1));
-    let before = long.clone();
-    assert_eq!(long.alloc(1), Err(stretch::Pause::Envelope));
-    assert_eq!(long, before);
     let mut pieces = Stretch::new(both);
     for _ in 1..PIECES_MAX {
         pieces.credit(0).unwrap();
@@ -539,20 +497,16 @@ fn runtime50_budget_first_stop_and_credit() {
     let state = Settled {
         level: 0,
         limit: 2_000,
-        fuel: 1_500,
     };
-    let mut whole: Vec<Event> = (0..ENVELOPE_MAX + 8)
-        .flat_map(|_| [Event::Fuel, Event::Alloc(1)])
+    let mut whole: Vec<Event> = (0..RETAINED_MAX + 8)
+        .flat_map(|_| [Event::Alloc(1)])
         .collect();
     whole.push(Event::Alloc(990));
     let mut expected = state;
     let expected = (stretch::reference(&mut expected, &whole), expected);
-    let split = 2 * ENVELOPE_MAX;
+    let split = RETAINED_MAX;
     let prefix = stretch::summarise(both, &whole[..split]).unwrap();
-    assert_eq!(
-        stretch::summarise(both, &whole[..split + 2]).err(),
-        Some(stretch::Pause::Envelope)
-    );
+
     let mut settled = state;
     let mut result = settled.settle(&prefix);
     if result.is_ok() {
@@ -560,8 +514,6 @@ fn runtime50_budget_first_stop_and_credit() {
     }
     assert_eq!((result, settled), expected);
 
-    // The head checks live and never waits on the speculation allowance;
-    // a non-head reservation pauses for fuel or allowance without effect.
     let mut f: Frontier<Act, u64> = Frontier::new(
         0,
         Policy {
@@ -571,16 +523,14 @@ fn runtime50_budget_first_stop_and_credit() {
         Settled {
             level: 0,
             limit: 1024,
-            fuel: 10,
         },
     );
     f.held.insert(0, Held::empty());
     f.enqueue(1, Held::empty());
-    assert_eq!(f.reserve(0, 1 << 20, 1 << 20), Ok(()));
-    assert_eq!(f.reserve(1, 1, 11), Err(Pause::Fuel));
-    assert_eq!(f.reserve(1, 65, 0), Err(Pause::Allowance));
-    assert_eq!(f.reserve(1, 64, 10), Ok(()));
-    assert_eq!(f.reserve(1, 1, 0), Err(Pause::Allowance));
+    assert_eq!(f.reserve(0, 1 << 20), Ok(()));
+    assert_eq!(f.reserve(1, 65), Err(Pause::Allowance));
+    assert_eq!(f.reserve(1, 64), Ok(()));
+    assert_eq!(f.reserve(1, 1), Err(Pause::Allowance));
     native::budget_first_stop_and_credit();
 }
 
@@ -847,14 +797,12 @@ mod native {
     }
 
     pub(super) fn budget_first_stop_and_credit() {
-        // Younger fuel exhaustion, heap/region allowance pauses, speculative
-        // envelopes choosing memory or fuel first and envelope overflow.
-        engine::tests::younger_budget(&[1, 2, 3, 4, 5, 6, 7, 8, 9]);
+        engine::tests::younger_budget(&[3, 4, 5, 7, 9]);
         engine::tests::ordered_native_region_credits_and_first_stop_match_warm_and_cold_pools();
         terminal_tests::budget_terminal_trace_truncates_actual_younger_suffix_and_accumulates_live_head_charges_commit(
             Commit::Shared,
         );
-        terminal_tests::exact_charge_trace_preserves_fuel_before_and_after_a_free_across_head_settlements_commit(
+        terminal_tests::exact_charge_trace_preserves_memory_before_and_after_a_free_across_head_settlements_commit(
             Commit::Shared,
         );
     }
@@ -896,19 +844,9 @@ mod native {
     }
 
     pub(super) fn ahead_saved_custody() {
-        use ahead::tests::{Boundary, POINTS, checkpoint_case};
-        // Saved fuel adopted exactly once and matching width one, and head
-        // work waiting for the running private owner's save at every boundary.
-        for width in [1, 2, 4] {
-            checkpoint_case(width, 4, false, POINTS, Boundary::Exit);
-        }
-        for boundary in [
-            Boundary::Exit,
-            Boundary::Submit,
-            Boundary::Refill,
-            Boundary::Allocation,
-        ] {
-            checkpoint_case(2, 2, true, 1, boundary);
+        use ahead::tests::{Boundary, checkpoint_case};
+        for boundary in [Boundary::Exit, Boundary::Submit, Boundary::Allocation] {
+            checkpoint_case(2, boundary);
         }
         ahead::tests::a_second_real_frame_runs_before_its_spawn_is_admitted_and_is_adopted_once();
         // Custody restores once, adopts the actual moved record, refuses a

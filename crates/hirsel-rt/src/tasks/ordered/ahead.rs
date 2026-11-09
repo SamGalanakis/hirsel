@@ -7,14 +7,13 @@
 
 use super::super::registry::TaskKey;
 use super::super::{Logical, Scheduler, Task, handle};
+use crate::TaskCtx;
 use crate::continuation::{Custody, PrivateSave, SavedFiber, SavedPc};
-use crate::{TaskCtx, budget::stretch::Stretch};
 use std::cell::Cell;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 pub(crate) mod cpu_allocation;
 pub(crate) mod cpu_arena;
-pub(crate) mod cpu_fuel;
 pub mod cpu_handoff;
 pub(crate) mod cpu_restart;
 pub(crate) mod cpu_roots;
@@ -30,8 +29,6 @@ pub(crate) const MAX_RESERVATIONS: usize = 8;
 pub(crate) struct Local {
     pub(crate) admitted: AtomicBool,
     pub(crate) save_requested: AtomicBool,
-    grant: Cell<u64>,
-    fuel: Cell<u64>,
     custody: Cell<Custody>,
     pub(crate) native: Option<Box<native::Native>>,
     pub(crate) serial: Option<Box<std::cell::UnsafeCell<super::cpu::serial::State>>>,
@@ -43,8 +40,6 @@ impl Local {
         Self {
             admitted: AtomicBool::new(admitted),
             save_requested: AtomicBool::new(false),
-            grant: Cell::new(0),
-            fuel: Cell::new(0),
             custody: Cell::new(Custody::Logical),
             native: None,
             serial: None,
@@ -62,14 +57,11 @@ impl Local {
         self.custody.get()
     }
 
-    /// Adopt the acknowledged save once: the logical task resumes at exactly
-    /// this PC with this private fuel, never at its entry.
-    pub(crate) fn adopt(&mut self, generation: u32, pc: *mut u8, fuel: u64) -> PrivateSave {
+    pub(crate) fn adopt(&mut self, generation: u32, pc: *mut u8) -> PrivateSave {
         let mut custody = self.custody.get();
         let save = custody.adopt(PrivateSave {
             pc: SavedPc::Fiber(SavedFiber { sp: pc }),
             generation,
-            fuel,
             descriptor: None,
         });
         self.custody.set(custody);
@@ -167,7 +159,6 @@ pub(crate) fn restore_reserved_custody(scheduler: &mut Scheduler) {
     }
 }
 
-/// Request acknowledgement, without touching the running owner's fuel word.
 pub(crate) fn can_promote(s: &mut Scheduler, index: u32) -> bool {
     let row = reservation(s, index);
     if row.dispatch.as_ref().is_none_or(|frame| frame.is_saved()) {
@@ -192,19 +183,10 @@ pub(crate) fn take(s: &mut Scheduler, index: u32) -> Task {
         unreachable!()
     };
     let reserved = driver.reserved.remove(&index).expect("owned reservation");
-    let id = handle(index, reserved.task.generation);
     unsafe {
         let pc = (*reserved.task.ctx).task_sp;
         let local = (*reserved.task.ctx).ahead.as_mut().unwrap();
-        let fuel = local.fuel.replace(0);
-        if fuel != 0 {
-            driver
-                .stretches
-                .entry(id)
-                .or_insert_with(|| Stretch::new(driver.budgets))
-                .fuel_points(fuel);
-        }
-        local.adopt(reserved.task.generation, pc, fuel);
+        local.adopt(reserved.task.generation, pc);
         crate::ahead_trace::adopted(index, reserved.task.generation, pc);
         local.admitted.store(true, Ordering::Release);
     }
@@ -253,34 +235,6 @@ pub(crate) fn after_save(
     )
 }
 
-pub(crate) fn fuel_in(ctx: *mut TaskCtx) {
-    unsafe {
-        let local = (*ctx).ahead.as_ref().unwrap();
-        local.grant.set(crate::budget::FUEL_CHUNK);
-        (*ctx).view.private();
-        (*ctx).heap().set_fuel(crate::budget::FUEL_CHUNK as i64);
-        (*ctx)
-            .ordered_charge_trace
-            .grant(crate::budget::FUEL_CHUNK as i64);
-    }
-}
-
-pub(crate) fn fuel_out(ctx: *mut TaskCtx) {
-    unsafe {
-        let word = (*ctx).view.compiled.fuel;
-        (*ctx).ordered_charge_trace.capture(word);
-        let local = (*ctx).ahead.as_ref().unwrap();
-        let consumed = local
-            .grant
-            .get()
-            .saturating_sub(word.max(0) as u64)
-            .saturating_add(u64::from(word < 0));
-        local.fuel.set(local.fuel.get().saturating_add(consumed));
-        local.grant.set(0);
-        (*ctx).heap().set_fuel(0);
-    }
-}
-
 /// Before an R/E/H boundary, allocation or unknown work, a reservation waits
 /// without a logical yield. Its stack and context remain run-owned throughout.
 pub(crate) unsafe fn barrier(ctx: *mut TaskCtx) {
@@ -289,25 +243,6 @@ pub(crate) unsafe fn barrier(ctx: *mut TaskCtx) {
             super::super::role::enter(ctx);
             crate::pool::free::suspend_current(ctx, false);
         }
-    }
-}
-
-/// A physical refill adds neither a cancellation observation nor a logical
-/// point. The same compiled fuel points charge only when a budget is active.
-pub(crate) unsafe fn refill(ctx: *mut TaskCtx) {
-    fuel_out(ctx);
-    let pause = unsafe {
-        let local = (*ctx).ahead.as_ref().unwrap();
-        local.save_requested.load(Ordering::Acquire)
-            || local.fuel.get() > (*ctx).run_ref().fuel.remaining()
-    };
-    if pause {
-        unsafe { barrier(ctx) };
-    }
-    if private(ctx) {
-        fuel_in(ctx);
-    } else {
-        super::engine::fuel_in(ctx);
     }
 }
 
@@ -623,18 +558,12 @@ pub(super) mod tests {
         }
     }
 
-    struct FuelProbe {
+    struct CheckpointProbe {
         wide: bool,
-        points: u64,
-        hold_until_save: bool,
         second_computed: AtomicBool,
-        private_refills: AtomicU32,
-        remaining: std::sync::atomic::AtomicU64,
     }
 
-    pub(crate) const POINTS: u64 = crate::budget::FUEL_CHUNK + 4;
-
-    unsafe extern "C" fn fuel_child(
+    unsafe extern "C" fn checkpoint_child(
         ctx: *mut TaskCtx,
         environment: *mut crate::Header,
         _: u64,
@@ -642,22 +571,10 @@ pub(super) mod tests {
     ) -> u8 {
         let [address, ordinal] =
             unsafe { crate::alloc::payload(environment).cast::<[u64; 2]>().read() };
-        let probe = unsafe { &*(address as *const FuelProbe) };
+        let probe = unsafe { &*(address as *const CheckpointProbe) };
         if ordinal == 0 && probe.wide {
             while !probe.second_computed.load(Ordering::Acquire) {
                 std::thread::yield_now();
-            }
-        }
-        let points = probe.points;
-        for _ in 0..points {
-            unsafe {
-                (*ctx).view.compiled.fuel -= 1;
-                if (*ctx).view.compiled.fuel < 0 {
-                    if private(ctx) {
-                        probe.private_refills.fetch_add(1, Ordering::Release);
-                    }
-                    crate::budget::hirsel_rt_v2_fuel_refill(ctx);
-                }
             }
         }
         if ordinal == 1 {
@@ -665,13 +582,18 @@ pub(super) mod tests {
             // Force the legal interleaving in which this private owner is
             // still Running when its spawn becomes the parent's head op.
             // This reads only physical protocol state, never language state.
-            if probe.hold_until_save && private(ctx) {
+            if private(ctx) {
                 while private(ctx) {
                     unsafe {
-                        (*ctx).view.compiled.fuel -= 1;
-                        if (*ctx).view.compiled.fuel < 0 {
-                            probe.private_refills.fetch_add(1, Ordering::Release);
-                            crate::budget::hirsel_rt_v2_fuel_refill(ctx);
+                        if private(ctx)
+                            && (*ctx)
+                                .ahead
+                                .as_ref()
+                                .unwrap()
+                                .save_requested
+                                .load(Ordering::Acquire)
+                        {
+                            barrier(ctx);
                         }
                     }
                 }
@@ -681,54 +603,30 @@ pub(super) mod tests {
     }
 
     #[test]
-    fn private_checkpoint_fuel_is_adopted_once_and_matches_width_one() {
-        for width in [1, 2, 4] {
-            checkpoint_case(width, 4, false, POINTS, Boundary::Exit);
-        }
-    }
-
-    #[test]
     fn head_work_waits_for_running_reservation_save_before_scope_exit() {
-        checkpoint_case(1, 2, true, 1, Boundary::Exit);
+        checkpoint_case(1, Boundary::Exit);
         eprintln!("width-one two-child control completed successfully");
-        checkpoint_case(2, 2, true, 1, Boundary::Exit);
-    }
-
-    #[test]
-    fn head_work_waits_for_running_reservation_save_before_scope_exit_full_chunk() {
-        checkpoint_case(2, 2, true, POINTS, Boundary::Exit);
+        checkpoint_case(2, Boundary::Exit);
     }
 
     #[derive(Clone, Copy)]
     pub(crate) enum Boundary {
         Exit,
         Submit,
-        Refill,
         Allocation,
     }
 
     #[test]
     fn submit_waits_for_running_reservation_save_before_new_head_operation() {
-        checkpoint_case(2, 2, true, 1, Boundary::Submit);
-    }
-
-    #[test]
-    fn refill_waits_for_running_reservation_save_before_head_settlement() {
-        checkpoint_case(2, 2, true, 1, Boundary::Refill);
+        checkpoint_case(2, Boundary::Submit);
     }
 
     #[test]
     fn allocation_waits_for_running_reservation_save_before_head_settlement() {
-        checkpoint_case(2, 2, true, 1, Boundary::Allocation);
+        checkpoint_case(2, Boundary::Allocation);
     }
 
-    pub(crate) fn checkpoint_case(
-        width: u32,
-        jobs: u64,
-        hold_until_save: bool,
-        points: u64,
-        boundary: Boundary,
-    ) {
+    pub(crate) fn checkpoint_case(width: u32, boundary: Boundary) {
         let layout = crate::Layout {
             magic: crate::LAYOUT_MAGIC,
             version: crate::LAYOUT_VERSION,
@@ -746,24 +644,19 @@ pub(super) mod tests {
         };
         let layouts = [&layout as *const crate::Layout];
         {
-            let probe = Arc::new(FuelProbe {
+            let probe = Arc::new(CheckpointProbe {
                 wide: width != 1,
-                points,
-                hold_until_save,
                 second_computed: AtomicBool::new(false),
-                private_refills: AtomicU32::new(0),
-                remaining: std::sync::atomic::AtomicU64::new(u64::MAX),
             });
             let seen = probe.clone();
             let mut run = crate::host::BodyRun::new(width, true);
             run.config.layouts = layouts.as_ptr();
             run.config.layout_count = 1;
-            run.fuel = (!hold_until_save).then_some(1_000_000);
             unsafe { run.use_physical_dispatch() };
             let outcome = run.run(
                 |ctx| unsafe {
                     if matches!(boundary, Boundary::Allocation) {
-                        (*ctx).set_budgets(None, Some(1_000_000));
+                        (*ctx).set_budgets(Some(1_000_000));
                     }
                     super::super::engine::enable(
                         ctx,
@@ -776,7 +669,7 @@ pub(super) mod tests {
                         hirsel_rt_v2_task_scope_enter(ctx, std::ptr::null_mut(), &mut scope, &0),
                         crate::STATUS_OK
                     );
-                    for ordinal in 0..jobs {
+                    for ordinal in 0..2 {
                         let env = crate::alloc::hirsel_rt_v2_alloc(
                             ctx,
                             2,
@@ -795,10 +688,10 @@ pub(super) mod tests {
                                 ctx,
                                 &mut task,
                                 &scope,
-                                fuel_child,
+                                checkpoint_child,
                                 env,
                                 0,
-                                Some(fuel_child)
+                                Some(checkpoint_child)
                             ),
                             Ok(crate::STATUS_OK)
                         );
@@ -839,11 +732,7 @@ pub(super) mod tests {
                                 crate::STATUS_OK
                             );
                         }
-                        Boundary::Refill => {
-                            let _role = role::Guard::new(ctx);
-                            (*ctx).view.compiled.fuel -= 1;
-                            super::super::engine::fuel_refill(ctx).unwrap();
-                        }
+
                         Boundary::Allocation => {
                             let allocation = crate::alloc::hirsel_rt_v2_alloc(
                                 ctx,
@@ -872,30 +761,11 @@ pub(super) mod tests {
                     );
                     let _role = role::Guard::new(ctx);
                     super::super::engine::at_head(ctx).unwrap();
-                    seen.remaining.store(
-                        super::super::engine::driver(ctx)
-                            .frontier
-                            .as_ref()
-                            .unwrap()
-                            .settled
-                            .fuel,
-                        Ordering::Release,
-                    );
                     crate::STATUS_OK
                 },
             );
             assert_eq!(outcome.ended, Ok(crate::STATUS_OK));
             assert_eq!(outcome.pending, 0);
-            if !hold_until_save {
-                assert_eq!(
-                    probe.remaining.load(Ordering::Acquire),
-                    1_000_000 - jobs * POINTS,
-                    "width {width}"
-                );
-            }
-            if width != 1 {
-                assert!(probe.private_refills.load(Ordering::Acquire) > 0);
-            }
         }
     }
 
@@ -903,11 +773,8 @@ pub(super) mod tests {
         entered: [AtomicU32; 2],
         private_seen: AtomicBool,
         resumed: AtomicU32,
-        infinite: bool,
-        adopted: std::sync::Mutex<Option<(usize, u32, u64, Option<u32>, u64, usize, usize, u32)>>,
+        adopted: std::sync::Mutex<Option<(usize, u32, Option<u32>, usize, usize, u32)>>,
     }
-
-    /// Ordinal 1 starts privately and spends fuel until its spawn's head
     /// requests its save. After adoption it must continue in this same frame.
     unsafe extern "C" fn adopt_child(
         ctx: *mut TaskCtx,
@@ -925,39 +792,15 @@ pub(super) mod tests {
             while !probe.private_seen.load(Ordering::Acquire) {
                 std::thread::yield_now();
             }
-            if probe.infinite {
-                loop {
-                    unsafe {
-                        (*ctx).view.compiled.fuel -= 1;
-                        if (*ctx).view.compiled.fuel < 0 {
-                            crate::budget::hirsel_rt_v2_fuel_refill(ctx);
-                        }
-                    }
-                }
-            }
+
             return crate::STATUS_OK;
         }
         if !private(ctx) {
             return crate::STATUS_OK;
         }
         probe.private_seen.store(true, Ordering::Release);
-        let mut expected = 0;
         while private(ctx) {
-            unsafe {
-                (*ctx).view.compiled.fuel -= 1;
-                if (*ctx).view.compiled.fuel < 0 {
-                    let local = (*ctx).ahead.as_ref().unwrap();
-                    let word = (*ctx).view.compiled.fuel;
-                    expected = local.fuel.get().saturating_add(
-                        local
-                            .grant
-                            .get()
-                            .saturating_sub(word.max(0) as u64)
-                            .saturating_add(u64::from(word < 0)),
-                    );
-                    crate::budget::hirsel_rt_v2_fuel_refill(ctx);
-                }
-            }
+            unsafe { barrier(ctx) };
         }
         probe.resumed.fetch_add(1, Ordering::AcqRel);
         let Custody::Adopted(save) = (unsafe { (*ctx).ahead.as_ref().unwrap().custody() }) else {
@@ -972,9 +815,7 @@ pub(super) mod tests {
         *probe.adopted.lock().unwrap() = Some((
             save.pc.sp().expect("a stackful private save") as usize,
             save.generation,
-            save.fuel,
             save.descriptor,
-            expected,
             frame,
             ctx as usize,
             generation,
@@ -982,7 +823,7 @@ pub(super) mod tests {
         crate::STATUS_OK
     }
 
-    fn adopt_case(width: u32, infinite: bool) -> (Arc<AdoptProbe>, crate::host::BodyOutcome) {
+    fn adopt_case(width: u32) -> (Arc<AdoptProbe>, crate::host::BodyOutcome) {
         let layout = crate::Layout {
             magic: crate::LAYOUT_MAGIC,
             version: crate::LAYOUT_VERSION,
@@ -1003,14 +844,12 @@ pub(super) mod tests {
             entered: Default::default(),
             private_seen: AtomicBool::new(false),
             resumed: AtomicU32::new(0),
-            infinite,
             adopted: Default::default(),
         });
         let seen = probe.clone();
         let mut run = crate::host::BodyRun::new(width, true);
         run.config.layouts = layouts.as_ptr();
         run.config.layout_count = 1;
-        run.fuel = infinite.then_some(4 * crate::budget::FUEL_CHUNK);
         unsafe { run.use_physical_dispatch() };
         let outcome = run.run(
             |ctx| unsafe {
@@ -1061,9 +900,8 @@ pub(super) mod tests {
     #[test]
     fn runtime50_private_save_adopt_no_restart() {
         // Promotion: the requested save is adopted once, at the exact saved PC
-        // inside the child's own stack, with exactly the fuel spent privately.
         for width in [2, 4] {
-            let (probe, outcome) = adopt_case(width, false);
+            let (probe, outcome) = adopt_case(width);
             assert_eq!(outcome.ended, Ok(crate::STATUS_OK));
             assert_eq!(outcome.pending, 0);
             for entered in &probe.entered {
@@ -1074,14 +912,12 @@ pub(super) mod tests {
                 );
             }
             assert_eq!(probe.resumed.load(Ordering::Acquire), 1);
-            let (pc, saved_generation, fuel, descriptor, expected, frame, ctx, generation) = probe
+            let (pc, saved_generation, descriptor, frame, ctx, generation) = probe
                 .adopted
                 .lock()
                 .unwrap()
                 .take()
                 .expect("adoption record");
-            assert_eq!(fuel, expected, "private fuel adopted exactly");
-            assert_ne!(fuel, 0);
             assert_eq!(saved_generation, generation);
             assert_eq!(descriptor, None);
             // The context lies at the top of the task's own stack: the saved PC
@@ -1095,17 +931,6 @@ pub(super) mod tests {
                 "the adopted PC is not inside the resumed frame's callees"
             );
         }
-        // Stop while private: the reservation is withdrawn, never resumed or rerun.
-        let (probe, outcome) = adopt_case(2, true);
-        assert!(
-            matches!(outcome.ended, Err(crate::stop::Stop::BudgetExceeded(_))),
-            "{:?}",
-            outcome.ended
-        );
-        assert!(probe.private_seen.load(Ordering::Acquire));
-        assert_eq!(probe.entered[1].load(Ordering::Acquire), 1);
-        assert_eq!(probe.resumed.load(Ordering::Acquire), 0);
-        assert!(probe.adopted.lock().unwrap().is_none());
         // A host-return segment adopts its selected original descriptor once.
         super::host_return::tests::selected_descriptor_admission();
     }

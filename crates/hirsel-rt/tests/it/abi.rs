@@ -107,7 +107,6 @@ fn header_constants_match_the_runtime() {
         ("CTX_FREE_INLINE_OFFSET", CTX_FREE_INLINE_OFFSET as u64),
         ("CTX_IDLE_SLABS_OFFSET", CTX_IDLE_SLABS_OFFSET as u64),
         ("CTX_PAGES_OFFSET", CTX_PAGES_OFFSET as u64),
-        ("CTX_FUEL_OFFSET", hirsel_rt::CTX_FUEL_OFFSET as u64),
         ("CTX_HEAP_ID_OFFSET", hirsel_rt::CTX_HEAP_ID_OFFSET as u64),
         (
             "CTX_FOREGROUND_COUNT_OFFSET",

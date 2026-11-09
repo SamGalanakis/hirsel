@@ -248,8 +248,7 @@ pub struct NativeRequest {
     pub options: BuildOptions,
     /// The independently validated run bound against the selected source facts.
     pub run: Option<std::sync::Arc<hirsel_run_config::ValidatedRun>>,
-    /// Build-time fuel instrumentation is part of native/emission identity.
-    pub fuel: bool,
+
     /// Independently assessed source evidence; its selected discharge policy
     /// participates in native actions, never a launch-time fallback.
     pub evidence: Option<std::sync::Arc<hirsel_native::Evidence>>,
@@ -271,7 +270,6 @@ pub struct OwnershipRequest {
     pub target: TargetSpec,
     pub validation: Validation,
     pub launch: LaunchInputs,
-    pub fuel: bool,
 }
 
 /// The requested build artifact, independent of runtime launchability.

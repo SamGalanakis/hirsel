@@ -95,13 +95,7 @@ fn continuation_objects(
     // set, then emit alternates only for Resumable bodies.
     let units = program.units.iter().collect::<Vec<_>>();
     let mut ahead = crate::ahead::plan(program);
-    if !hirsel_lir::ahead::validate_cpu_workers(
-        &units,
-        &program.table,
-        &program.target,
-        &ahead,
-        program.fuel,
-    ) {
+    if !hirsel_lir::ahead::validate_cpu_workers(&units, &program.table, &program.target, &ahead) {
         return Err(NativeError::new(
             StageName::Emission,
             "invalid CPU ahead certificate",
@@ -129,7 +123,7 @@ fn continuation_objects(
         foreign: &program.foreign_dispatch,
         opt,
         measurement,
-        fuel: program.fuel,
+
         verify_backend: program.validation == crate::Validation::EveryStage,
     };
     let object = match backend {

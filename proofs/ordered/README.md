@@ -36,8 +36,7 @@ downloads it once to `~/.cache/tla/` (or uses `$TLA2TOOLS_JAR`). It needs Java 1
   a budget stop is internal.
 - **The other workers** (`AheadSucc`) can each step any queued non-head task at any time, so every
   width and interleaving is a behavior. Such a step does one of these:
-  - charges a budget piece, or pauses: past the speculation allowance, or with more fuel in its
-    stretch than remains;
+  - charges a memory piece, or pauses past the speculation allowance;
   - logs a D op (refinement 1);
   - commits an E op early when rules 1–3 hold (`Eligible`; a send's message is then pending,
     which is rule 4);
@@ -92,7 +91,7 @@ commits and logged ops.
 | thaw against a younger release | `ThawRelease` |
 | a mutex body reaching thaw | `MutexBodyThaw` |
 | review-2 finding 3, both counterexamples | `Budget2a`, `Budget2b` |
-| review-3 finding 3, both counterexamples (the first in its two orders) | `Budget3a`, `Budget3b`, `Budget3c` |
+| review-3 finding 3, memory high and credit counterexamples | `Budget3a`, `Budget3c` |
 | two siblings' mutex, atomic and send ops pass a long head | `PassMutexAtomic`, `PassSendLoad` |
 
 **Positive runs** use eager scheduling: non-head steps take priority and every allowed early
@@ -120,7 +119,6 @@ the first turn retires. This covers the passing ops in `DetachWhileEarlySend`, `
 | `earlysp` | `ReadinessCounts` | an early-committed yield polls, so readiness counts differ |
 | `headseesspec` | `Budget2a` | the head's live check counts a younger segment's speculative bytes and stops |
 | `netonly` | `Budget2b` | settling by net bytes misses the younger record high |
-| `peakonly` | `Budget3b` | memory is reported where fuel ran out first |
 | `mergepieces` | `Budget3c` | settling a turn's stretch before its close's credit stops the run |
 
 ## Precisions the model adds to the design

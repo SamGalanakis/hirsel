@@ -184,7 +184,6 @@ pub(super) unsafe fn admit(native: *mut native::Native) {
                 sp: (*native).physical.saved_sp,
             }),
             generation: 0,
-            fuel: 0,
             descriptor: None,
         });
         // Canonical admission retires this prefix, not the job's claim.

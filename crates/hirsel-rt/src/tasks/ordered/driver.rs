@@ -51,8 +51,7 @@ pub(crate) struct Driver {
     pub(super) next_host_token: u64,
     pub(super) bounded_reads: BTreeSet<TaskId>,
     pub(super) host_returns: BTreeMap<TaskId, super::host::CompletedRead>,
-    pub(super) fuel_initialized: bool,
-    fuel_grants: Vec<(TaskId, u64)>,
+    pub(super) meter_initialized: bool,
     pub(super) stretches: BTreeMap<TaskId, crate::budget::stretch::Stretch>,
     pub(super) cpu_allocation_leases: BTreeMap<TaskId, super::engine::AllocationLease>,
     pub(super) cpu_batch: Option<super::cpu::Batch>,
@@ -101,8 +100,7 @@ impl Driver {
             next_host_token: 1,
             host_returns: BTreeMap::new(),
             bounded_reads: BTreeSet::new(),
-            fuel_initialized: false,
-            fuel_grants: Vec::new(),
+            meter_initialized: false,
             stretches: BTreeMap::new(),
             cpu_allocation_leases: BTreeMap::new(),
             cpu_batch: None,
@@ -111,40 +109,12 @@ impl Driver {
             detaching: BTreeMap::new(),
             plain_layouts: super::drops::PlainLayouts::default(),
             memory: false,
-            budgets: crate::budget::stretch::Budgets {
-                fuel: false,
-                memory: false,
-            },
+            budgets: crate::budget::stretch::Budgets { memory: false },
             poll_after_save: None,
             return_after_save: None,
             moved: BTreeSet::new(),
             carriers: BTreeMap::new(),
         }
-    }
-
-    /// At most one outstanding chunk per physical owner. Removing a chunk
-    /// returns its slot to this run rather than allocating a tree node at
-    /// each save/resume. Full generation-qualified task keys remain intact.
-    pub(super) fn grant(&mut self, task: TaskId, value: u64) -> Option<u64> {
-        if let Some((_, old)) = self.fuel_grants.iter_mut().find(|(key, _)| *key == task) {
-            Some(std::mem::replace(old, value))
-        } else {
-            self.fuel_grants.push((task, value));
-            None
-        }
-    }
-
-    pub(super) fn saved_grant(&self, task: TaskId) -> Option<u64> {
-        self.fuel_grants
-            .iter()
-            .find_map(|(key, value)| (*key == task).then_some(*value))
-    }
-
-    pub(super) fn release_grant(&mut self, task: TaskId) -> Option<u64> {
-        self.fuel_grants
-            .iter()
-            .position(|(key, _)| *key == task)
-            .map(|index| self.fuel_grants.swap_remove(index).1)
     }
 
     /// A committed spawn joins both the logical queue and physical candidates.
@@ -472,7 +442,6 @@ mod tests {
             Settled {
                 level: 0,
                 limit: u64::MAX,
-                fuel: u64::MAX,
             },
             Registry::default(),
         );
@@ -494,10 +463,7 @@ mod tests {
         };
         assert_eq!(
             driver.frontier.as_mut().unwrap().apply_head(
-                Stretch::new(Budgets {
-                    fuel: false,
-                    memory: false
-                }),
+                Stretch::new(Budgets { memory: false }),
                 op,
                 &mut BackendStub(Next::Yield)
             ),
@@ -514,7 +480,6 @@ mod tests {
             Settled {
                 level: 0,
                 limit: u64::MAX,
-                fuel: u64::MAX,
             },
             Registry::default(),
         );
@@ -564,7 +529,6 @@ mod tests {
                     Settled {
                         level: 0,
                         limit: u64::MAX,
-                        fuel: u64::MAX,
                     },
                     Registry::default(),
                 );
@@ -638,10 +602,7 @@ mod tests {
                         Command::AtomicLoad { word: 0, bytes: 8 }.operation(Default::default());
                     assert_eq!(
                         driver.frontier.as_mut().unwrap().apply_head(
-                            Stretch::new(Budgets {
-                                fuel: false,
-                                memory: false
-                            }),
+                            Stretch::new(Budgets { memory: false }),
                             op,
                             &mut BackendStub(Next::Park),
                         ),
@@ -696,7 +657,6 @@ mod tests {
             let state = Settled {
                 level: 60,
                 limit: 100,
-                fuel: 20,
             };
             let mut d = Driver::new(
                 head,
@@ -818,7 +778,6 @@ mod tests {
             Settled {
                 level: 0,
                 limit: u64::MAX,
-                fuel: u64::MAX,
             },
             Registry::default(),
         );
@@ -836,10 +795,7 @@ mod tests {
             .insert(sibling, Execution::Saving { head_only: true });
         assert_eq!(
             driver.frontier.as_mut().unwrap().apply_head(
-                Stretch::new(Budgets {
-                    fuel: false,
-                    memory: false
-                }),
+                Stretch::new(Budgets { memory: false }),
                 Command::AtomicLoad { word: 0, bytes: 8 }.operation(Default::default()),
                 &mut BackendStub(Next::End),
             ),

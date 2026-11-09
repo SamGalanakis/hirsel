@@ -223,7 +223,6 @@ pub enum Offer {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Pause {
     Allowance,
-    Fuel,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -360,9 +359,6 @@ impl<P, R> Frontier<P, R> {
         row.state = State::Running(worker);
     }
 
-    /// A running task whose saved frame left its worker's stack is adopted by
-    /// another worker. Its turn, log, fuel and queue position are unchanged:
-    /// only the physical owner of its claim moves.
     pub fn moved(&mut self, task: TaskId, worker: u16) {
         let row = self.tasks.get_mut(&task).expect("a live task");
         assert!(
@@ -426,13 +422,11 @@ impl<P, R> Frontier<P, R> {
 
     /// Reserve physical storage before a non-head allocation. The head never
     /// waits on speculative allowance. A refused allocation has no effect.
-    pub fn reserve(&mut self, task: TaskId, bytes: u64, fuel: u64) -> Result<(), Pause> {
+    pub fn reserve(&mut self, task: TaskId, bytes: u64) -> Result<(), Pause> {
         if self.head == Some(task) {
             return Ok(());
         }
-        if fuel > self.settled.fuel {
-            return Err(Pause::Fuel);
-        }
+
         let room = self.policy.speculation_bytes.saturating_sub(self.physical);
         if bytes > room {
             return Err(Pause::Allowance);
@@ -467,13 +461,6 @@ impl<P, R> Frontier<P, R> {
         self.physical -= row.speculative_bytes;
         row.speculative_bytes = 0;
         row.open_speculative_bytes = 0;
-    }
-
-    /// Fuel already consumed in this task's logged future turns.
-    pub(crate) fn logged_fuel(&self, task: TaskId) -> u64 {
-        self.tasks[&task].log.iter().fold(0, |fuel, entry| {
-            fuel.saturating_add(entry.before.fuel_charges())
-        })
     }
 
     /// All four rules. Rule 4 is the Backend's pending/publish contract.

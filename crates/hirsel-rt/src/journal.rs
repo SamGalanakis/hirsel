@@ -342,7 +342,6 @@ pub fn render_outcome(outcome: &RunOutcome) -> String {
             hex(hirsel_run_schema::Wait::encode(waits).as_bytes())
         ),
         RunOutcome::Signaled(kind) => format!("signaled {}", kind.name()),
-        RunOutcome::BudgetExceeded(BudgetKind::Fuel) => "budget fuel".into(),
         RunOutcome::BudgetExceeded(BudgetKind::Memory) => "budget memory".into(),
         RunOutcome::Refused(why) => format!("refused {}", hex(why.as_bytes())),
         RunOutcome::Diverged(why) => format!("diverged {}", hex(why.as_bytes())),
@@ -424,7 +423,6 @@ pub fn parse_outcome(text: &str) -> Result<RunOutcome, String> {
             hirsel_run_schema::SignalKind::parse(next()?).ok_or("bad journal signal")?,
         ),
         "budget" => match next()? {
-            "fuel" => RunOutcome::BudgetExceeded(BudgetKind::Fuel),
             "memory" => RunOutcome::BudgetExceeded(BudgetKind::Memory),
             _ => return Err("bad journal budget".into()),
         },

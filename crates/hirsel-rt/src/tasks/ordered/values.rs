@@ -786,7 +786,7 @@ impl Program {
         &self,
         block: *const crate::Header,
         out: &mut Vec<u8>,
-        fuel: &mut usize,
+        remaining_work: &mut usize,
         resolve: &mut impl FnMut(Kind, u64) -> Option<ObjectId>,
     ) -> Result<(), Error> {
         let capacity = unsafe { self.owner_capacity(1, block) }?;
@@ -813,12 +813,12 @@ impl Program {
             out.extend_from_slice(&part.to_le_bytes());
         }
         out.extend_from_slice(&object.ordinal.to_le_bytes());
-        *fuel = fuel
+        *remaining_work = remaining_work
             .checked_sub(state.walk.pages.len())
             .ok_or(Error::Limit)?;
         out.extend_from_slice(&(state.walk.pages.len() as u64).to_le_bytes());
         for page in &state.walk.pages {
-            *fuel = fuel.checked_sub(page.len()).ok_or(Error::Limit)?;
+            *remaining_work = remaining_work.checked_sub(page.len()).ok_or(Error::Limit)?;
             out.extend_from_slice(&(page.len() as u64).to_le_bytes());
             for entry in page {
                 if entry.kind > 4 || (entry.kind == 4 && !entry.path.contains('\0')) {
@@ -847,12 +847,12 @@ impl Program {
         root: usize,
         at: *const u8,
         capacity: usize,
-        fuel: &mut usize,
+        remaining_work: &mut usize,
     ) -> Result<usize, Error> {
         let mut cursor = 0usize;
         let mut work = vec![root];
         while let Some(index) = work.pop() {
-            *fuel = fuel.checked_sub(1).ok_or(Error::Limit)?;
+            *remaining_work = remaining_work.checked_sub(1).ok_or(Error::Limit)?;
             let remaining = capacity.checked_sub(cursor).ok_or(Error::Value)?;
             let node = &self.nodes[index];
             if node.extent() > remaining {
@@ -935,7 +935,7 @@ impl Program {
         let mut work = vec![(self.root, value, None)];
         let mut out = Vec::new();
         let mut visited = 0;
-        let mut extent_fuel = WORK_MAX;
+        let mut extent_work = WORK_MAX;
         while let Some((index, at, capacity)) = work.pop() {
             visited += 1;
             if visited > WORK_MAX {
@@ -955,7 +955,7 @@ impl Program {
                                 node,
                                 at.add(cursor),
                                 capacity.checked_sub(cursor).ok_or(Error::Value)?,
-                                &mut extent_fuel,
+                                &mut extent_work,
                             )
                         }?;
                         children.push((node, unsafe { at.add(cursor) }, Some(extent)));
@@ -983,7 +983,7 @@ impl Program {
                         .ok_or(Error::Value)?;
                     if *framed {
                         let extent = unsafe {
-                            self.active_extent(*node, at.add(8), end - 8, &mut extent_fuel)
+                            self.active_extent(*node, at.add(8), end - 8, &mut extent_work)
                         }?;
                         if extent != end - 8 {
                             return Err(Error::Value);
@@ -1011,7 +1011,7 @@ impl Program {
                                     *node,
                                     at.add(cursor),
                                     end.checked_sub(cursor).ok_or(Error::Value)?,
-                                    &mut extent_fuel,
+                                    &mut extent_work,
                                 )
                             }?;
                             children.push((*node, unsafe { at.add(cursor) }, Some(extent)));
@@ -1032,7 +1032,7 @@ impl Program {
                 } => {
                     let capacity = capacity.or(*storage).ok_or(Error::Value)?;
                     let extent =
-                        unsafe { self.active_extent(index, at, capacity, &mut extent_fuel) }?;
+                        unsafe { self.active_extent(index, at, capacity, &mut extent_work) }?;
                     let ordinal = unsafe { at.cast::<u32>().read_unaligned() };
                     out.extend_from_slice(&ordinal.to_le_bytes());
                     let mut cursor = 4usize;
@@ -1041,7 +1041,7 @@ impl Program {
                         let offset = if *flat { cursor } else { f.offset };
                         let remaining = extent.checked_sub(offset).ok_or(Error::Value)?;
                         let size = unsafe {
-                            self.active_extent(f.node, at.add(offset), remaining, &mut extent_fuel)
+                            self.active_extent(f.node, at.add(offset), remaining, &mut extent_work)
                         }?;
                         children.push((f.node, unsafe { at.add(offset) }, Some(size)));
                         cursor = offset.checked_add(size).ok_or(Error::Value)?;
@@ -1071,7 +1071,7 @@ impl Program {
                                 *node,
                                 at.add(cursor),
                                 end.checked_sub(cursor).ok_or(Error::Value)?,
-                                &mut extent_fuel,
+                                &mut extent_work,
                             )
                         }?;
                         children.push((*node, unsafe { at.add(cursor) }, Some(extent)));
@@ -1211,7 +1211,7 @@ impl Program {
                         }
                         out.push(2); // Runtime-owned walk environment, not a compiler layout.
                         unsafe {
-                            self.walk_values(block, &mut out, &mut extent_fuel, &mut resolve)
+                            self.walk_values(block, &mut out, &mut extent_work, &mut resolve)
                         }?;
                         continue;
                     }

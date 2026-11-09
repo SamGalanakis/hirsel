@@ -272,7 +272,7 @@ An instruction or terminator charges one step; an operation implemented by the
 host completes within its call's charge. Source std functions execute ordinary
 TIR and receive no discount. Dispatch specialization and checked execution keep
 the same charges. Counts describe a particular lowered program, not a stable
-source-level complexity measure or the host `budgets.limits@2` fuel unit.
+source-level complexity measure.
 
 Application tests that need more work must declare a finite bound per fixture
 and pass it explicitly (Rust: `run_observed_snapshot_bounded` or

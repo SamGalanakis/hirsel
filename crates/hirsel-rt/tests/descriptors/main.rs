@@ -323,7 +323,6 @@ fn every_inline_effect_is_classified() {
 /// refill itself. Their semantic-entry and whole-Run safety checks stay separate.
 const PHYSICAL_BUDGET_SERVICES: &[&str] = &[
     "tasks::ordered::engine::reserve_allocation",
-    "tasks::ordered::engine::fuel_refill",
     "tasks::ordered::engine::at_head",
 ];
 
@@ -334,10 +333,6 @@ const PHYSICAL_AHEAD_SERVICES: &[&str] = &[
     "tasks::ordered::ahead::refill",
 ];
 
-// The idle-side counterparts of the budget services: the dispatcher settles a
-// claimed private-ahead segment at head before switching into it
-// (`tasks::ordered::ahead::native::run`). They retire the claimed task's
-// existing logs as `fuel_refill` does, and are checked as it is.
 const IDLE_BUDGET_SERVICES: &[&str] = &[
     "tasks::ordered::engine::ahead_refill",
     "tasks::ordered::engine::host_segment_barrier",
@@ -383,10 +378,7 @@ fn ordered_budget_services_are_guarded_and_do_not_create_semantic_operations() {
             "unguarded service: {caller}"
         );
     }
-    for caller in [
-        "budget::hirsel_rt_v2_fuel_refill",
-        "budget::charge_primitive",
-    ] {
+    for caller in ["budget::charge_primitive"] {
         assert!(
             graph.directly_calls(caller, "budget::refill"),
             "missing guarded refill path: {caller}"

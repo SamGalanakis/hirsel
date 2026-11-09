@@ -102,7 +102,6 @@ fn object(program: &Program, opt: OptLevel) -> Vec<u8> {
         tracking: false,
         opt,
         measurement: false,
-        fuel: false,
     };
     let artifact = emit_object(&program.units(), &inputs).unwrap();
     assert!(

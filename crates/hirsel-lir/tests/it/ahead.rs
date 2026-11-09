@@ -25,7 +25,7 @@ fn graph() -> ScalarGraph {
                 ScalarBody {
                     body: root,
                     calls: BTreeSet::from([leaf]),
-                    fuel_points: vec![true],
+                    checkpoint_points: vec![true],
                 },
             ),
             (
@@ -33,7 +33,7 @@ fn graph() -> ScalarGraph {
                 ScalarBody {
                     body: leaf,
                     calls: BTreeSet::new(),
-                    fuel_points: vec![true],
+                    checkpoint_points: vec![true],
                 },
             ),
         ]),

@@ -137,8 +137,7 @@ pub(crate) struct Frame {
     /// An `arena.bounded` callback's boundary (MEM-6).
     pub bounded: Option<crate::bounded::Boundary>,
     pub arena_scope: Option<u64>,
-    /// The next block start charges fuel: the frame was entered or jumped back.
-    pub fuel_due: bool,
+    pub sample_due: bool,
     /// This body's dispatch form in the run's `Codes`, resolved at its first step.
     pub code: Option<u32>,
     pub places: Option<std::rc::Rc<[crate::code::PlaceCode]>>,
@@ -169,7 +168,7 @@ impl Frame {
         self.slots = slots;
         self.goto(entry);
         // A self-tail call is a function entry, wherever its body begins.
-        self.fuel_due = true;
+        self.sample_due = true;
         Ok(())
     }
 
@@ -282,7 +281,7 @@ impl Frame {
             check: None,
             bounded: None,
             arena_scope: None,
-            fuel_due: true,
+            sample_due: true,
             code: None,
             places: None,
             steps: Default::default(),
@@ -1165,12 +1164,11 @@ impl Frame {
         Ok(())
     }
     pub fn goto(&mut self, block: BlockId) {
-        // A jump to this block or an earlier one may close a loop: it charges fuel.
-        self.fuel_due |= block.0 <= self.block.0;
+        self.sample_due |= block.0 <= self.block.0;
         self.block = block;
         self.instruction = 0;
     }
-    /// The logical bytes this frame holds (`budgets.limits@2`): its slots, values its
+    /// The logical bytes this frame holds (`budgets.limits@3`): its slots, values its
     /// loops carry, a suspended operation and its callbacks, and pending releases.
     pub fn logical_bytes(&self) -> u64 {
         use crate::resources::Work;

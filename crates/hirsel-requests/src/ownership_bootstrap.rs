@@ -54,7 +54,7 @@ pub(super) struct Source {
 pub(super) struct Plan {
     pub options: hirsel_native::Options,
     pub selection: hirsel_lir::ownership_trace::Selection,
-    pub fuel: bool,
+
     pub policy: ContentHash,
     pub verify_store: VerifyStore,
     pub admission: Admission,
@@ -359,7 +359,6 @@ impl OwnershipBootstrap {
                 link.foreign_dispatch(),
                 true,
                 false,
-                plan.fuel,
             ),
             self.weight,
             plan.admission.compilation,

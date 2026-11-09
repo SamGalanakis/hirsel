@@ -14,10 +14,6 @@ pub(crate) struct State {
     initial: Settled,
     settled: Settled,
     peak: u64,
-    peak_fuel: u64,
-    budgets: Budgets,
-    issued: u64,
-    spent: u64,
     image: Option<(Vec<u128>, usize, u32)>,
     disposed: bool,
     receipt: Option<crate::io::CpuSummary>,
@@ -35,84 +31,32 @@ pub(crate) fn on(ctx: *mut TaskCtx) -> bool {
 }
 
 impl State {
-    fn capture(&mut self, word: i64) -> Stopped<()> {
-        let spent = self
-            .issued
-            .saturating_sub(word.max(0) as u64)
-            .saturating_add(u64::from(word < 0));
-        self.issued = word.max(0) as u64;
-        self.spent = self.spent.saturating_add(spent.min(self.settled.fuel));
-        if spent > self.settled.fuel {
-            self.settled.fuel = 0;
-            return Err(Stop::BudgetExceeded(hirsel_run_schema::BudgetKind::Fuel));
-        }
-        if self.settled.fuel != u64::MAX {
-            self.settled.fuel -= spent;
-        }
-        Ok(())
-    }
-
     // All charges were checked at their serial execution positions. One
     // high-water mark is sufficient to certify this already accepted prefix;
     // replay executes and checks the same serial stream before comparing it.
     fn checked_prefix(&self) -> Stretch {
-        let fuel = self.spent;
-        let mut charges = Stretch::new(Budgets {
-            memory: true,
-            ..self.budgets
-        });
-        charges.fuel_points(self.peak_fuel);
+        let mut charges = Stretch::new(Budgets { memory: true });
         charges
             .alloc(self.peak)
             .expect("one serial high-water mark");
         let credit = self.initial.level + self.peak - self.settled.level;
         charges.free(credit);
-        charges.fuel_points(fuel - self.peak_fuel);
         charges
     }
 }
 
-pub(crate) fn refill(ctx: *mut TaskCtx) -> Stopped<()> {
-    let word = unsafe { (*ctx).view.compiled.fuel };
-    unsafe { (*ctx).ordered_charge_trace.capture(word) };
-    let state = unsafe { &mut *get(ctx).unwrap() };
-    state.capture(word)?;
-    let ordered = unsafe {
-        (*ctx)
-            .run_ref()
-            .ordered_mode
-            .load(std::sync::atomic::Ordering::Acquire)
-    };
-    let grant = if ordered {
-        state.settled.fuel.min(crate::budget::FUEL_CHUNK)
-    } else {
-        unsafe { (*ctx).run_ref().fuel.take() }
-            .checked_sub(1)
-            .ok_or(Stop::BudgetExceeded(hirsel_run_schema::BudgetKind::Fuel))?
-    };
-    state.issued = grant;
-    unsafe {
-        (*ctx).heap().set_fuel(grant as i64);
-        (*ctx).ordered_charge_trace.grant(grant as i64);
-    }
-    Ok(())
-}
-
 pub(crate) fn reserve(ctx: *mut TaskCtx, bytes: u64) -> Stopped<()> {
-    let word = unsafe { (*ctx).view.compiled.fuel };
     unsafe {
-        (*ctx).ordered_charge_trace.capture(word);
         (*ctx).ordered_charge_trace.allocation(bytes);
     }
     let state = unsafe { &mut *get(ctx).unwrap() };
-    state.allocate(word, bytes)?;
+    state.allocate(bytes)?;
     unsafe { (*ctx).ordered_allocation.set(bytes) };
     Ok(())
 }
 
 impl State {
-    fn allocate(&mut self, word: i64, bytes: u64) -> Stopped<()> {
-        self.capture(word)?;
+    fn allocate(&mut self, bytes: u64) -> Stopped<()> {
         if self.settled.level.saturating_add(bytes) > self.settled.limit {
             return Err(Stop::BudgetExceeded(hirsel_run_schema::BudgetKind::Memory));
         }
@@ -120,7 +64,6 @@ impl State {
         let high = self.settled.level.saturating_sub(self.initial.level);
         if high > self.peak {
             self.peak = high;
-            self.peak_fuel = self.spent;
         }
         Ok(())
     }
@@ -133,17 +76,8 @@ pub(crate) fn charged(ctx: *mut TaskCtx, bytes: u64) {
 }
 
 pub(crate) fn freed(ctx: *mut TaskCtx, bytes: u64) {
-    unsafe {
-        (*ctx)
-            .ordered_charge_trace
-            .free((*ctx).view.compiled.fuel, bytes)
-    };
+    unsafe { (*ctx).ordered_charge_trace.free(bytes) };
     let state = unsafe { &mut *get(ctx).unwrap() };
-    // A free cannot stop while its heap is borrowed. Its preceding fuel was
-    // checked at allocation/refill; capture at the next safe boundary.
-    state
-        .capture(unsafe { (*ctx).view.compiled.fuel })
-        .expect("a free cannot cross a compiled fuel boundary");
     state.settled.level = state
         .settled
         .level
@@ -168,12 +102,7 @@ pub(crate) unsafe fn publish(
     {
         return Ok(ahead::cpu_handoff::NOT_CERTIFIED);
     }
-    unsafe {
-        (*ctx)
-            .ordered_charge_trace
-            .capture((*ctx).view.compiled.fuel)
-    };
-    state.capture(unsafe { (*ctx).view.compiled.fuel })?;
+
     let program = unsafe { super::super::values::Program::linked(ctx, row.descriptor) }
         .map_err(|e| Stop::Refused(format!("CPU result recipe: {e:?}")))?;
     if program.extent() as u64 != row.value_bytes {
@@ -183,7 +112,7 @@ pub(crate) unsafe fn publish(
         .encode_with_host(row.value, |_, _| None, |_| None)
         .map_err(|e| Stop::Refused(format!("CPU result encoding: {e:?}")))?;
     state.receipt = Some(crate::io::CpuSummary {
-        version: 3,
+        version: 4,
         retirement: state.ordinal,
         ordinal: state.ordinal,
         value,
@@ -195,7 +124,6 @@ pub(crate) unsafe fn publish(
             pieces: crate::io::CpuSummary::pieces(&state.checked_prefix()),
             level: state.settled.level,
             limit: state.settled.limit,
-            fuel: state.settled.fuel,
         }),
     });
     row.phase = ahead::cpu_handoff::SUMMARY_RETIRED;
@@ -403,7 +331,7 @@ unsafe fn run_one(ctx: *mut TaskCtx, child: u32) -> Stopped<bool> {
         unsafe { (*ctx).switch_out() };
     }
     let child_key = role::with_role(ctx, |s| s.key(child).word());
-    let (initial, budgets, ordinal, limit) = if let Some(root) = root(ctx) {
+    let (initial, ordinal, limit) = if let Some(root) = root(ctx) {
         let initial = if ordered {
             engine::with_driver(ctx, |d| d.frontier.as_ref().unwrap().settled)
         } else {
@@ -414,7 +342,6 @@ unsafe fn run_one(ctx: *mut TaskCtx, child: u32) -> Stopped<bool> {
                         0 => u64::MAX,
                         n => n,
                     },
-                    fuel: (*ctx).run_ref().fuel.remaining(),
                 }
             }
         };
@@ -426,21 +353,12 @@ unsafe fn run_one(ctx: *mut TaskCtx, child: u32) -> Stopped<bool> {
                 .unwrap()
         };
         let limit = unsafe { (*ctx).run_ref().cpu_grant.as_ref().unwrap().max_batch_bytes };
-        (
-            initial,
-            Budgets {
-                fuel: initial.fuel != u64::MAX,
-                memory: true,
-            },
-            ordinal,
-            limit,
-        )
+        (initial, ordinal, limit)
     } else {
         engine::with_driver(ctx, |d| {
             let b = d.cpu_batch.as_ref().unwrap();
             (
                 d.frontier.as_ref().unwrap().settled,
-                d.budgets,
                 b.ordinal(child_key).unwrap(),
                 b.limit,
             )
@@ -470,10 +388,6 @@ unsafe fn run_one(ctx: *mut TaskCtx, child: u32) -> Stopped<bool> {
                 ..initial
             },
             peak: 0,
-            peak_fuel: 0,
-            budgets,
-            issued: initial.fuel.min(crate::budget::FUEL_CHUNK),
-            spent: 0,
             image: None,
             disposed: false,
             receipt: None,
@@ -495,16 +409,6 @@ unsafe fn run_one(ctx: *mut TaskCtx, child: u32) -> Stopped<bool> {
             TaskCtx::switch_in(target, (*ctx).worker_ptr());
         }
         crate::pool::cpu_scoped::probe::resume(target);
-        if ordered {
-            (*target)
-                .heap()
-                .set_fuel(initial.fuel.min(crate::budget::FUEL_CHUNK) as i64);
-        } else {
-            (*get(target).unwrap()).issued = (*target).view.compiled.fuel.max(0) as u64;
-        }
-        (*target)
-            .ordered_charge_trace
-            .grant((*target).view.compiled.fuel);
     }
     // Only plain values cross the ordinary generated callback. A Stop can
     // abandon this stack; the row owns all contexts, images and metadata.
@@ -520,12 +424,6 @@ unsafe fn restore(
 ) -> Stopped<bool> {
     unsafe {
         crate::pool::cpu_scoped::probe::boundary(target, 0);
-        (*target)
-            .ordered_charge_trace
-            .capture((*target).view.compiled.fuel);
-    }
-    let capture = unsafe { (&mut *get(target).unwrap()).capture((*target).view.compiled.fuel) };
-    unsafe {
         if (*ctx)
             .run_ref()
             .ordered_mode
@@ -539,10 +437,6 @@ unsafe fn restore(
             TaskCtx::switch_in(ctx, (*target).worker_ptr());
         }
         role::enter(ctx);
-    }
-    if let Err(stop) = capture {
-        record_stop(ctx, target, &stop)?;
-        return Err(stop);
     }
     let (mut charges, receipt, initial, settled) = unsafe {
         let state = &mut *get(target).unwrap();
@@ -570,7 +464,6 @@ unsafe fn restore(
         native.pieces = crate::io::CpuSummary::pieces(&charges);
         native.level = settled.level;
         native.limit = settled.limit;
-        native.fuel = settled.fuel;
         super::record_summary(ctx, &receipt)?;
     }
     role::with_role(ctx, |s| {
@@ -580,9 +473,6 @@ unsafe fn restore(
             row.failure = Some(unsafe { (*target).failure.take_chain(&row.path) });
         }
     });
-    if engine::on(ctx) {
-        engine::fuel_in(ctx);
-    }
     Ok(status != crate::STATUS_OK)
 }
 
@@ -748,7 +638,6 @@ pub(crate) unsafe fn drain(ctx: *mut TaskCtx, scope: u64, site: u64) -> Stopped<
 pub(crate) unsafe fn stop_context(ctx: *mut TaskCtx, stop: &mut Stop) -> *mut TaskCtx {
     let state = unsafe { &mut *get(ctx).unwrap() };
     let parent = state.parent;
-    let _ = state.capture(unsafe { (*ctx).view.compiled.fuel });
     let settled = state.settled;
     let failure = unsafe { (*ctx).failure.take_chain(&state.path) };
     let ordered = unsafe {
@@ -773,9 +662,7 @@ pub(crate) unsafe fn stop_context(ctx: *mut TaskCtx, stop: &mut Stop) -> *mut Ta
         engine::with_driver(parent, |d| {
             let frontier = &mut d.frontier.as_mut().unwrap().settled;
             frontier.level = settled.level;
-            frontier.fuel = settled.fuel;
         });
-        engine::fuel_in(parent);
     }
     unsafe { (*parent).heap_ref().meter.settled(settled.level) };
     if let Err(error) = record_stop(parent, ctx, stop) {
@@ -794,7 +681,7 @@ fn record_stop(parent: *mut TaskCtx, child: *mut TaskCtx, stop: &Stop) -> Stoppe
     let ordinal = state.ordinal;
     trace_prefix(parent, child, &mut charges, Err(*kind));
     let receipt = crate::io::CpuSummary {
-        version: 3,
+        version: 4,
         retirement: ordinal,
         ordinal,
         value: Vec::new(),
@@ -833,13 +720,6 @@ mod tests {
             initial,
             settled: initial,
             peak: 0,
-            peak_fuel: 0,
-            budgets: Budgets {
-                fuel: true,
-                memory: true,
-            },
-            issued: initial.fuel,
-            spent: 0,
             image: None,
             disposed: false,
             receipt: None,
@@ -848,79 +728,40 @@ mod tests {
     }
 
     #[test]
-    fn serial_live_checks_preserve_the_first_fuel_or_memory_stop() {
-        let events = [
-            Event::Fuel,
-            Event::Alloc(16),
-            Event::Fuel,
-            Event::Free(8),
-            Event::Fuel,
-            Event::Alloc(24),
-            Event::Fuel,
-        ];
-        for fuel in 0..=5 {
-            for limit in [0, 8, 16, 24, 32, 64] {
-                let initial = Settled {
-                    level: 0,
-                    limit,
-                    fuel,
-                };
-                let mut expected = initial;
-                let reference = reference(&mut expected, &events);
-                let mut actual = state(initial);
-                let mut word = fuel as i64;
-                let mut outcome = Ok(());
-                for event in events {
-                    outcome = match event {
-                        Event::Fuel => {
-                            word -= 1;
-                            actual.capture(word)
-                        }
-                        Event::Alloc(bytes) => actual.allocate(word, bytes),
-                        Event::Free(bytes) => {
-                            actual.settled.level -= bytes;
-                            Ok(())
-                        }
-                        Event::Credit(_) => unreachable!(),
-                    };
-                    if outcome.is_err() {
-                        break;
+    fn serial_live_checks_preserve_the_memory_stop() {
+        let events = [Event::Alloc(16), Event::Free(8), Event::Alloc(24)];
+
+        for limit in [0, 8, 16, 24, 32, 64] {
+            let initial = Settled { level: 0, limit };
+            let mut expected = initial;
+            let reference = reference(&mut expected, &events);
+            let mut actual = state(initial);
+            let mut outcome = Ok(());
+            for event in events {
+                outcome = match event {
+                    Event::Alloc(bytes) => actual.allocate(bytes),
+                    Event::Free(bytes) => {
+                        actual.settled.level -= bytes;
+                        Ok(())
                     }
-                }
-                assert_eq!(
-                    outcome,
-                    reference.map_err(Stop::BudgetExceeded),
-                    "fuel={fuel} limit={limit}"
-                );
-                assert_eq!(actual.settled, expected);
-                if outcome.is_ok() {
-                    let mut replayed = initial;
-                    assert_eq!(replayed.settle(&actual.checked_prefix()), Ok(()));
-                    assert_eq!(replayed, expected);
+                    Event::Credit(_) => unreachable!(),
+                };
+                if outcome.is_err() {
+                    break;
                 }
             }
+            assert_eq!(
+                outcome,
+                reference.map_err(Stop::BudgetExceeded),
+                "limit={limit}"
+            );
+            assert_eq!(actual.settled, expected);
+            if outcome.is_ok() {
+                let mut replayed = initial;
+                assert_eq!(replayed.settle(&actual.checked_prefix()), Ok(()));
+                assert_eq!(replayed, expected);
+            }
         }
-    }
-
-    #[test]
-    fn unlimited_receipts_retain_the_actual_source_fuel() {
-        let initial = Settled {
-            level: 0,
-            limit: 64,
-            fuel: u64::MAX,
-        };
-        let mut actual = state(initial);
-        actual.budgets.fuel = false;
-        actual.issued = 7;
-        actual.capture(3).unwrap();
-        let charges = actual.checked_prefix();
-        assert_eq!(charges.fuel_charges(), 4);
-        let mut replayed = initial;
-        replayed.settle(&charges).unwrap();
-        let mut expected = initial;
-        reference(&mut expected, &[Event::Fuel; 4]).unwrap();
-        assert_eq!(actual.settled, expected);
-        assert_eq!(replayed, expected);
     }
 
     #[test]
@@ -928,14 +769,12 @@ mod tests {
         let initial = Settled {
             level: 0,
             limit: 4096,
-            fuel: 4096,
         };
         let mut actual = state(initial);
         let mut events = Vec::new();
-        for index in 0..crate::budget::stretch::ENVELOPE_MAX + 1 {
-            let word = initial.fuel as i64 - index as i64 - 1;
-            actual.allocate(word, 1).unwrap();
-            events.extend([Event::Fuel, Event::Alloc(1)]);
+        for _ in 0..crate::budget::stretch::RETAINED_MAX + 1 {
+            actual.allocate(1).unwrap();
+            events.extend([Event::Alloc(1)]);
         }
         let mut expected = initial;
         reference(&mut expected, &events).unwrap();

@@ -123,7 +123,6 @@ fn probe(target: &TargetSpec) -> (Vec<u8>, String) {
         tracking: false,
         opt: OptLevel::None,
         measurement: false,
-        fuel: false,
     };
 
     let finalizers = BTreeMap::new();

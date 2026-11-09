@@ -114,8 +114,6 @@ pub fn main(rt: Io) -> Result[(), GrantError] {
                                 let _ = fs::write(&self.0, "0");
                             }
                         }
-                        // Keep the claimed mapper live across one refresh
-                        // interval without spending more fuel or CPU budget.
                         let thaw = Thaw(group.join("cgroup.freeze"));
                         fs::write(&thaw.0, "1").unwrap();
                         while !fs::read_to_string(group.join("cgroup.events"))

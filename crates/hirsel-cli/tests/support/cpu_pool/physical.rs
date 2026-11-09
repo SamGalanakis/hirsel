@@ -207,7 +207,7 @@ fn run_width_policy_backends_mode(
         let executable = root.join(backend);
         checked(
             cpu_compiler()
-                .args(["build", "--fuel", "--backend", backend])
+                .args(["build", "--backend", backend])
                 .arg(&manifest)
                 .arg("-o")
                 .arg(&executable)

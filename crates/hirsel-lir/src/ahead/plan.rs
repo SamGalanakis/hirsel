@@ -175,7 +175,7 @@ impl AheadPlan {
         table: &LayoutTable,
         target: &TargetSpec,
         envs: &BTreeMap<ContentHash, Option<LayoutId>>,
-        fuel: bool,
+
         helpers: ContentHash,
     ) -> Self {
         let mut plan = Self::default();
@@ -199,9 +199,7 @@ impl AheadPlan {
                         "unproved CPU worker ownership protocol".into(),
                     );
                 }
-                match super::cpu_worker::propose(
-                    units, table, target, validated, envs, fuel, helpers,
-                ) {
+                match super::cpu_worker::propose(units, table, target, validated, envs, helpers) {
                     Ok(root) => {
                         plan.bodies.extend(root.graph.bodies.clone());
                         plan.roots.insert(unit.header.instance, root);
@@ -217,7 +215,7 @@ impl AheadPlan {
             }
             let attempt = (|| {
                 let scalar = envelope(unit, table, envs, true).and_then(|(recipe, source)| {
-                    scalar_graph(units, table, target, source, fuel, helpers)
+                    scalar_graph(units, table, target, source, helpers)
                         .map(|graph| (recipe, graph, None))
                 });
                 let (recipe, mut graph, mut host) = match scalar {
@@ -225,9 +223,8 @@ impl AheadPlan {
                     Err(scalar_error) => {
                         let (recipe, source) =
                             envelope(unit, table, envs, false).map_err(|_| scalar_error)?;
-                        let host = super::host_return::propose(
-                            units, table, target, source, fuel, helpers,
-                        )?;
+                        let host =
+                            super::host_return::propose(units, table, target, source, helpers)?;
                         (recipe, host.graph.clone(), Some(host))
                     }
                 };
@@ -256,7 +253,7 @@ impl AheadPlan {
                     ScalarBody {
                         body: unit.digest(),
                         calls: BTreeSet::from([source]),
-                        fuel_points: crate::fuel::fuel_points(unit),
+                        checkpoint_points: crate::checkpoints::checkpoint_points(unit),
                     },
                 );
                 graph.root = unit.header.instance;
@@ -360,7 +357,6 @@ impl AheadPlan {
         bytes.extend_from_slice(&helpers.0);
         bytes.extend_from_slice(&target.digest().0);
         bytes.extend_from_slice(&table.digest().0);
-        bytes.push(u8::from(fuel));
         for (id, root) in &plan.roots {
             bytes.extend_from_slice(&id.0);
             bytes.extend_from_slice(&root.graph.identity.0);
@@ -613,7 +609,11 @@ fn envelope(
             })
             .count()
             != 1
-        || crate::fuel::fuel_points(u).iter().filter(|p| **p).count() != 1
+        || crate::checkpoints::checkpoint_points(u)
+            .iter()
+            .filter(|p| **p)
+            .count()
+            != 1
     {
         return Err(no("repeated or cyclic wrapper protocol"));
     }

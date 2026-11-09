@@ -131,7 +131,6 @@ fn command_help_12_options_and_examples_follow_the_parser() {
                 "--backend llvm|cranelift",
                 "-o <exe>",
                 "--target x86_64-linux|aarch64-linux",
-                "--fuel",
             ],
         ),
         (

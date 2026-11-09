@@ -42,8 +42,6 @@ impl Admission {
         }
         let _role = unsafe { crate::tasks::role::Guard::new(ctx) };
         let admission = unsafe { (*ctx).run().deferred_ordered.take().unwrap() };
-        // Return the root's unused fuel chunk before changing its budget owner.
-        // Ordered initializes from the same held memory and remaining fuel.
         let worker = unsafe { (*ctx).worker_ptr() };
         unsafe {
             (*ctx).switch_out();
@@ -174,7 +172,7 @@ mod tests {
         let outcome = run.run(
             |ctx| unsafe {
                 defer(ctx, false);
-                (*ctx).set_budgets(Some(12345), Some(1 << 20));
+                (*ctx).set_budgets(Some(1 << 20));
             },
             |ctx| unsafe {
                 let block =
@@ -184,7 +182,7 @@ mod tests {
                 crate::managed_cores::admit_capacity(ctx);
                 assert!(super::super::engine::on(ctx));
                 assert_eq!((*ctx).heap_ref().meter.held(), held);
-                assert_eq!((*ctx).run_ref().fuel.remaining(), 12345);
+
                 crate::release::hirsel_rt_v2_free(ctx, block);
                 crate::STATUS_OK
             },
@@ -260,8 +258,7 @@ mod tests {
         for limit in [None, Some(1), Some(15), Some(1600)] {
             let mut record = run("tasks.cooperative@1");
             record.budgets = limit.map(|memory_bytes| Budgets {
-                provider: "budgets.limits@2".into(),
-                fuel: None,
+                provider: "budgets.limits@3".into(),
                 memory_bytes: Some(memory_bytes),
             });
             let record = record.validated().unwrap();

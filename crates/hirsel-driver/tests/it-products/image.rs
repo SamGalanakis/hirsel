@@ -72,7 +72,6 @@ fn imaged_generic_comptime_materializes_selected_client_sizes() {
                     target: hirsel_native::TargetSpec::x86_64_unknown_linux_gnu(),
                     validation: hirsel_native::Validation::EveryStage,
                     launch: Default::default(),
-                    fuel: false,
                 }),
             )
             .unwrap();

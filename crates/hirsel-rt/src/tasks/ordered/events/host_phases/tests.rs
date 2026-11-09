@@ -2,10 +2,7 @@ use super::*;
 use crate::io::{Completion, WaitError};
 
 fn empty() -> Stretch {
-    Stretch::new(crate::budget::stretch::Budgets {
-        fuel: false,
-        memory: false,
-    })
+    Stretch::new(crate::budget::stretch::Budgets { memory: false })
 }
 fn pending(result: Result<Completion, AdapterError>) -> Log {
     let mut log = Log::default();

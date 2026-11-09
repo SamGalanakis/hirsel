@@ -444,19 +444,16 @@ impl RunConfig {
             provider("budgets.provider", &budgets.provider)?;
             match ProviderContract::parse(&budgets.provider) {
                 Some(ProviderContract::BudgetsNone) => {
-                    if budgets.fuel.is_some() || budgets.memory_bytes.is_some() {
+                    if budgets.memory_bytes.is_some() {
                         return Err(invalid("budgets", "budgets.none@1 takes no limits"));
                     }
                     record.budgets = None;
                 }
                 Some(ProviderContract::BudgetsLimits) => {
-                    if budgets.fuel.is_none() && budgets.memory_bytes.is_none() {
-                        return Err(invalid(
-                            "budgets",
-                            "budgets.limits@2 needs fuel or memory_bytes",
-                        ));
+                    if budgets.memory_bytes.is_none() {
+                        return Err(invalid("budgets", "budgets.limits@3 needs memory_bytes"));
                     }
-                    if budgets.fuel == Some(0) || budgets.memory_bytes == Some(0) {
+                    if budgets.memory_bytes == Some(0) {
                         return Err(invalid("budgets", "a zero limit"));
                     }
                 }
@@ -598,7 +595,7 @@ impl ValidatedRun {
     pub fn net_grant(&self) -> Option<&NetGrant> {
         self.data.record.io.as_ref()?.net.as_ref()
     }
-    /// The run's `budgets.limits@2` entry, or None under `budgets.none@1`.
+    /// The run's `budgets.limits@3` entry, or None under `budgets.none@1`.
     pub fn budgets(&self) -> Option<&Budgets> {
         self.data.record.budgets.as_ref()
     }
@@ -727,12 +724,7 @@ impl ValidatedRun {
         {
             return Err(RunRefusal::UnsafeCode { path: path.clone() });
         }
-        // Budget enforceability: code without fuel checks cannot enforce a fuel budget.
-        if self.budgets().is_some_and(|b| b.fuel.is_some()) && !facts.fueled {
-            return Err(RunRefusal::Unsupported {
-                field: "budgets.fuel".into(),
-            });
-        }
+
         Ok(BoundRun { run: self })
     }
     /// Historical accepted admission replay. No HostAuthority is available on this path.
@@ -800,9 +792,7 @@ impl ValidatedRun {
         Ok(())
     }
 }
-/// What binding needs to know about the compiled code a run would execute: its semantic
-/// program digest, entry, launch kind, the roots the entry declares, what the entry
-/// reaches (CAP-6) and whether the code charges fuel, so that it can enforce a fuel budget.
+/// Binding facts: semantic program identity, entry, launch, declared roots and code reach.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProgramFacts {
     pub program: [u8; 32],
@@ -810,11 +800,8 @@ pub struct ProgramFacts {
     pub launch: LaunchKind,
     pub roots: Vec<Root>,
     pub code: CodeReach,
-    pub fueled: bool,
 }
 impl ProgramFacts {
-    /// The facts of code an engine interprets or compiles for this run, which charges fuel
-    /// whenever the run has a fuel budget.
     pub fn of(
         revision: &ProgramRevision,
         launch: LaunchKind,
@@ -827,7 +814,6 @@ impl ProgramFacts {
             launch,
             roots,
             code,
-            fueled: true,
         }
     }
 }

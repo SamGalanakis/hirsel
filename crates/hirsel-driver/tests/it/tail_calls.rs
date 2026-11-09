@@ -423,12 +423,8 @@ fn primitive_completion_matches_scheduled_completion_with_steps_traces_and_budge
             for checked in [false, true] {
                 for budgets in [
                     RunBudgets::default(),
+                    RunBudgets { memory_bytes: None },
                     RunBudgets {
-                        fuel: Some(5),
-                        memory_bytes: None,
-                    },
-                    RunBudgets {
-                        fuel: None,
                         memory_bytes: Some(512),
                     },
                 ] {

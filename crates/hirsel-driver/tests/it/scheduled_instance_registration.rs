@@ -1129,7 +1129,6 @@ fn source_requests_install_nested_instance_views_for_check_run_and_native_owners
                     target: hirsel_native::TargetSpec::x86_64_unknown_linux_gnu(),
                     validation: hirsel_native::Validation::EveryStage,
                     launch: Default::default(),
-                    fuel: false,
                 }))
                 .unwrap();
             let CompileResult::Ownership(ownership) = &ownership_output.result else {

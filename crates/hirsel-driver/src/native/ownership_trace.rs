@@ -38,7 +38,7 @@ pub fn run_path_with_launch(
             ));
         }
         let selection = crate::launch_binding::LaunchSelection::read_for_compilation(launch)?;
-        let (inputs, fuel) = selection.compiler_inputs()?;
+        let inputs = selection.compiler_inputs()?;
         let definition = selection.entry().cloned();
         let compiler = policy.compiler().with_owned_engines();
         let config = compiler.configuration();
@@ -60,7 +60,6 @@ pub fn run_path_with_launch(
             target: target.clone(),
             validation: super::Validation::EveryStage,
             launch: inputs,
-            fuel,
         }))?;
         let CompileResult::Ownership(execution) = &output.result else {
             return Err(crate::ToolError::Runtime(

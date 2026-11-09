@@ -1,57 +1,29 @@
-//! Exact budget summaries of non-head turns (design §6 Budgets, ordered mode).
-//!
-//! A turn that runs while it is not the head cannot check the meter live: earlier turns have
-//! not settled. It records its charges as a [`Stretch`] instead, and retirement settles the
-//! stretch against the settled level and remaining fuel ([`Settled::settle`]), stopping the
-//! run with exactly the first stop and kind the serial (width-1) run has.
-//!
-//! - Credit events (logical deaths only a commit discovers: a deferred root release reaching
-//!   zero, a close dropping leftovers) split a stretch into **pieces**.
-//! - A piece keeps its fuel `f`, its net bytes `n`, and its **envelope**: the strict record
-//!   highs `(u, h)` of its running level, `h` relative to the piece's start and `u` the piece
-//!   fuel charged before that allocation. Entries with the same `u` keep only the largest `h`.
-//!   A memory-only budget keeps only the largest `h`, a fuel-only budget only `f`.
-//! - A piece keeps at most [`ENVELOPE_MAX`] entries and a stretch at most [`PIECES_MAX`]
-//!   pieces; an event that would exceed either is refused with [`Pause`], and the segment
-//!   pauses until its turn is head.
-//!
-//! Why settlement is exact: the serial run's first memory stop in a piece is at its first
-//! allocation whose level passes the limit, which is a strict record high, and that
-//! allocation is reached only if the `u` fuel charges before it succeed. Its first fuel stop
-//! is the charge numbered `φ + 1`. So the piece stops for memory when its first entry with
-//! `ℓ + h > limit` has `u ≤ φ`, otherwise for fuel when `f > φ`, and otherwise moves the level
-//! by `n` and the fuel by `f`.
-
 use hirsel_run_schema::BudgetKind;
 
-/// The most envelope entries one piece keeps.
-pub const ENVELOPE_MAX: usize = 1024;
+/// The most retained values a CPU publication keeps.
+pub const RETAINED_MAX: usize = 1024;
 /// The most pieces one stretch keeps.
 pub const PIECES_MAX: usize = 64;
 
 /// Which budgets a run has, so a summary keeps only what settlement reads.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Budgets {
-    pub fuel: bool,
     pub memory: bool,
 }
 
 /// An event a stretch cannot summarise within its bounds: the segment pauses until head.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Pause {
-    Envelope,
     Pieces,
 }
 
 /// One piece: the charges between two credit events.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct Piece {
-    /// Fuel charged.
-    pub fuel: u64,
     /// Net bytes: allocations less frees.
     pub net: i64,
-    /// Strict record highs `(u, h)` of the running level, `h > 0` increasing.
-    pub envelope: Vec<(u64, i64)>,
+    /// Maximum positive storage above the piece's starting level.
+    pub high: i64,
     /// The running level relative to the piece's start.
     pub(super) level: i64,
 }
@@ -81,56 +53,15 @@ impl Stretch {
             .last_mut()
             .map_or(&mut self.first, |(_, piece)| piece)
     }
-    /// One fuel charge.
-    pub fn fuel(&mut self) {
-        self.fuel_points(1);
-    }
-    /// Owner-local compiled chunks report their consumed points in one batch.
-    pub fn fuel_points(&mut self, points: u64) {
-        #[cfg(test)]
-        if points != 0 {
-            self.exact.push(super::stretch_trace::Charge::Fuel(points));
-        }
-        let piece = self.piece();
-        piece.fuel = piece.fuel.saturating_add(points);
-    }
-    pub fn fuel_charges(&self) -> u64 {
-        self.pieces
-            .iter()
-            .fold(self.first.fuel, |total, (_, piece)| {
-                total.saturating_add(piece.fuel)
-            })
-    }
-    /// Whether appending this allocation needs an envelope pause. Inspecting
-    /// the last piece avoids cloning a growing summary at every allocation.
-    pub fn allocation_pauses(&self, bytes: u64) -> bool {
-        let piece = self.pieces.last().map_or(&self.first, |(_, piece)| piece);
-        let level = piece.level.saturating_add(bytes as i64);
-        let high = piece.envelope.last().map_or(0, |&(_, high)| high);
-        let fuel = if self.budgets.fuel { piece.fuel } else { 0 };
-        self.budgets.memory
-            && level > high
-            && piece.envelope.len() == ENVELOPE_MAX
-            && piece.envelope.last().is_none_or(|&(u, _)| u != fuel)
-    }
     /// An allocation of `bytes`.
     pub fn alloc(&mut self, bytes: u64) -> Result<(), Pause> {
         let memory = self.budgets.memory;
-        let fuel = self.budgets.fuel;
         let piece = self.piece();
-        let level = piece.level.saturating_add(bytes as i64);
-        let high = piece.envelope.last().map_or(0, |&(_, h)| h);
-        if memory && level > high {
-            let u = if fuel { piece.fuel } else { 0 };
-            let full = piece.envelope.len() == ENVELOPE_MAX;
-            match piece.envelope.last_mut() {
-                Some(last) if last.0 == u => *last = (u, level),
-                _ if full => return Err(Pause::Envelope),
-                _ => piece.envelope.push((u, level)),
-            }
+        piece.level = piece.level.saturating_add(bytes as i64);
+        piece.net = piece.level;
+        if memory {
+            piece.high = piece.high.max(piece.level);
         }
-        piece.level = level;
-        piece.net = level;
         #[cfg(test)]
         self.exact.push(super::stretch_trace::Charge::Alloc(bytes));
         Ok(())
@@ -166,32 +97,17 @@ impl Stretch {
         if self.pieces.len() + next.pieces.len() + 1 > PIECES_MAX {
             return Err(Pause::Pieces);
         }
-        let mut joined = self.clone();
-        let left = joined.piece();
+        let memory = self.budgets.memory;
+        let left = self.piece();
         let right = &next.first;
-        for &(fuel, high) in &right.envelope {
-            let fuel = if self.budgets.fuel {
-                left.fuel.saturating_add(fuel)
-            } else {
-                0
-            };
-            let high = left.level.saturating_add(high);
-            if high > left.envelope.last().map_or(0, |&(_, h)| h) {
-                let full = left.envelope.len() == ENVELOPE_MAX;
-                match left.envelope.last_mut() {
-                    Some(last) if last.0 == fuel => *last = (fuel, high),
-                    _ if full => return Err(Pause::Envelope),
-                    _ => left.envelope.push((fuel, high)),
-                }
-            }
+        if memory {
+            left.high = left.high.max(left.level.saturating_add(right.high));
         }
-        left.fuel = left.fuel.saturating_add(right.fuel);
         left.level = left.level.saturating_add(right.net);
         left.net = left.level;
-        joined.pieces.extend_from_slice(&next.pieces);
+        self.pieces.extend_from_slice(&next.pieces);
         #[cfg(test)]
-        joined.exact.extend_from_slice(&next.exact);
-        *self = joined;
+        self.exact.extend_from_slice(&next.exact);
         Ok(())
     }
 }
@@ -203,8 +119,6 @@ pub struct Settled {
     pub level: u64,
     /// The memory budget, `u64::MAX` for none.
     pub limit: u64,
-    /// Fuel left, `u64::MAX` for none.
-    pub fuel: u64,
 }
 
 impl Settled {
@@ -213,19 +127,8 @@ impl Settled {
     pub fn settle(&mut self, stretch: &Stretch) -> Result<(), BudgetKind> {
         for (credit, piece) in stretch.pieces() {
             self.level = self.level.saturating_sub(credit);
-            let room = self.limit.saturating_sub(self.level);
-            // The first entry whose level passes the limit: h increases along the envelope.
-            let first = piece.envelope.partition_point(|&(_, h)| h as u64 <= room);
-            if let Some(&(u, _)) = piece.envelope.get(first)
-                && u <= self.fuel
-            {
+            if piece.high as u64 > self.limit.saturating_sub(self.level) {
                 return Err(BudgetKind::Memory);
-            }
-            if piece.fuel > self.fuel {
-                return Err(BudgetKind::Fuel);
-            }
-            if self.fuel != u64::MAX {
-                self.fuel -= piece.fuel;
             }
             self.level = self.level.saturating_add_signed(piece.net);
         }
@@ -298,10 +201,6 @@ impl Jobs {
             self.settled.limit == u64::MAX || charges.budgets.memory,
             "memory-limited jobs retain allocation envelopes"
         );
-        assert!(
-            self.settled.fuel == u64::MAX || charges.budgets.fuel,
-            "fuel-limited jobs retain allocation fuel offsets"
-        );
         let slot = self.pending.get_mut(job).expect("job belongs to batch");
         assert!(slot.is_none(), "a job publishes once");
         *slot = Some((charges, complete));
@@ -339,9 +238,6 @@ impl Jobs {
         Ok(())
     }
 
-    /// Withdraw only unpublished retirement work. The owning mapper receives
-    /// each prefix back and decides which of its retained blocks can be freed.
-    /// Neither the serial cut nor settled bytes/fuel move on withdrawal.
     pub fn withdraw_younger(&mut self, job: usize) -> Vec<(usize, Stretch, bool)> {
         assert!(
             job >= self.next && job < self.pending.len(),
@@ -381,7 +277,6 @@ impl Jobs {
         };
         let result = self.retire_one(job);
         frontier.level = self.settled.level;
-        frontier.fuel = self.settled.fuel;
         (charges, result)
     }
 
@@ -414,7 +309,6 @@ impl Jobs {
         self.submit(job, charges, complete);
         let result = self.retire_one(job);
         frontier.level = self.settled.level;
-        frontier.fuel = self.settled.fuel;
         result
     }
 }
@@ -422,7 +316,6 @@ impl Jobs {
 /// One event of a turn, in program order: the exact charge stream the summaries replace.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Event {
-    Fuel,
     Alloc(u64),
     Free(u64),
     Credit(u64),
@@ -432,14 +325,6 @@ pub enum Event {
 pub fn reference(state: &mut Settled, events: &[Event]) -> Result<(), BudgetKind> {
     for &event in events {
         match event {
-            Event::Fuel => {
-                if state.fuel == 0 {
-                    return Err(BudgetKind::Fuel);
-                }
-                if state.fuel != u64::MAX {
-                    state.fuel -= 1;
-                }
-            }
             Event::Alloc(bytes) => {
                 if state.level.saturating_add(bytes) > state.limit {
                     return Err(BudgetKind::Memory);
@@ -459,7 +344,6 @@ pub fn summarise(budgets: Budgets, events: &[Event]) -> Result<Stretch, Pause> {
     let mut stretch = Stretch::new(budgets);
     for &event in events {
         match event {
-            Event::Fuel => stretch.fuel(),
             Event::Alloc(bytes) => stretch.alloc(bytes)?,
             Event::Free(bytes) => stretch.free(bytes),
             Event::Credit(bytes) => stretch.credit(bytes)?,
@@ -473,35 +357,31 @@ mod tests {
     use super::*;
     use Event::*;
 
-    const BOTH: Budgets = Budgets {
-        fuel: true,
-        memory: true,
-    };
+    const MEMORY: Budgets = Budgets { memory: true };
 
     #[test]
     fn joining_physically_settled_prefixes_matches_the_unsplit_charge_stream() {
         let vectors = [
-            vec![Fuel, Alloc(16), Fuel, Alloc(32), Free(24), Fuel, Alloc(64)],
-            vec![Free(32), Fuel, Alloc(16), Alloc(32), Credit(8), Alloc(24)],
-            vec![Alloc(8), Credit(8), Fuel, Credit(0), Fuel, Alloc(16)],
+            vec![Alloc(16), Alloc(32), Free(24), Alloc(64)],
+            vec![Free(32), Alloc(16), Alloc(32), Credit(8), Alloc(24)],
+            vec![Alloc(8), Credit(8), Credit(0), Alloc(16)],
             vec![Alloc(16), Alloc(32), Free(48), Alloc(64), Alloc(16)],
         ];
-        for fuel in [false, true] {
-            for memory in [false, true] {
-                let budgets = Budgets { fuel, memory };
-                for events in &vectors {
-                    let expected = summarise(budgets, events).unwrap();
-                    for first in 0..=events.len() {
-                        for second in first..=events.len() {
-                            let mut joined = summarise(budgets, &events[..first]).unwrap();
-                            joined
-                                .append(&summarise(budgets, &events[first..second]).unwrap())
-                                .unwrap();
-                            joined
-                                .append(&summarise(budgets, &events[second..]).unwrap())
-                                .unwrap();
-                            assert_eq!(joined, expected, "{events:?}, {first}, {second}");
-                        }
+
+        for memory in [false, true] {
+            let budgets = Budgets { memory };
+            for events in &vectors {
+                let expected = summarise(budgets, events).unwrap();
+                for first in 0..=events.len() {
+                    for second in first..=events.len() {
+                        let mut joined = summarise(budgets, &events[..first]).unwrap();
+                        joined
+                            .append(&summarise(budgets, &events[first..second]).unwrap())
+                            .unwrap();
+                        joined
+                            .append(&summarise(budgets, &events[second..]).unwrap())
+                            .unwrap();
+                        assert_eq!(joined, expected, "{events:?}, {first}, {second}");
                     }
                 }
             }
@@ -509,22 +389,11 @@ mod tests {
     }
 
     #[test]
-    fn joined_prefixes_keep_the_original_envelope_and_piece_caps() {
-        let events: Vec<_> = (0..ENVELOPE_MAX).flat_map(|_| [Fuel, Alloc(1)]).collect();
-        let mut full = summarise(BOTH, &events).unwrap();
+    fn joined_prefixes_keep_the_original_piece_cap() {
+        let mut full = summarise(MEMORY, &vec![Credit(1); PIECES_MAX - 1]).unwrap();
         let before = full.clone();
         assert_eq!(
-            full.append(&summarise(BOTH, &[Fuel, Alloc(1)]).unwrap()),
-            Err(Pause::Envelope)
-        );
-        assert_eq!(full, before);
-        // Allocations at the same fuel offset replace a high even at the cap.
-        full.append(&summarise(BOTH, &[Alloc(1)]).unwrap()).unwrap();
-        assert_eq!(full.pieces().next().unwrap().1.envelope.len(), ENVELOPE_MAX);
-        let mut full = summarise(BOTH, &vec![Credit(1); PIECES_MAX - 1]).unwrap();
-        let before = full.clone();
-        assert_eq!(
-            full.append(&summarise(BOTH, &[Credit(1)]).unwrap()),
+            full.append(&summarise(MEMORY, &[Credit(1)]).unwrap()),
             Err(Pause::Pieces)
         );
         assert_eq!(full, before);
@@ -541,39 +410,6 @@ mod tests {
         (result, settled)
     }
 
-    /// Review-3 finding 3: settled 90, limit 100, one fuel point left.
-    #[test]
-    fn review_three_examples() {
-        let state = Settled {
-            level: 90,
-            limit: 100,
-            fuel: 1,
-        };
-        let memory_first = [Alloc(20), Fuel, Fuel, Free(20)];
-        let stretch = summarise(BOTH, &memory_first).unwrap();
-        assert_eq!(stretch.pieces().next().unwrap().1.envelope, [(0, 20)]);
-        assert_eq!(
-            settle(state, BOTH, &memory_first).0,
-            Err(BudgetKind::Memory)
-        );
-        let fuel_first = [Fuel, Fuel, Alloc(20), Free(20)];
-        let stretch = summarise(BOTH, &fuel_first).unwrap();
-        assert_eq!(stretch.pieces().next().unwrap().1.envelope, [(2, 20)]);
-        assert_eq!(settle(state, BOTH, &fuel_first).0, Err(BudgetKind::Fuel));
-        // A close freeing 80 before a 20-byte allocation is a credit event: 90 - 80 + 20 = 30.
-        let credited = [Credit(80), Alloc(20)];
-        let (result, after) = settle(state, BOTH, &credited);
-        assert_eq!(result, Ok(()));
-        assert_eq!(after.level, 30);
-        for events in [&memory_first[..], &fuel_first, &credited] {
-            let mut reference_state = state;
-            assert_eq!(
-                reference(&mut reference_state, events),
-                settle(state, BOTH, events).0
-            );
-        }
-    }
-
     /// Review-2's counterexample: a younger summary whose record high 20 stops the run at its
     /// turn when 90 + 20 > 100, although its net is 0.
     #[test]
@@ -581,12 +417,8 @@ mod tests {
         let state = Settled {
             level: 90,
             limit: 100,
-            fuel: u64::MAX,
         };
-        let memory = Budgets {
-            fuel: false,
-            memory: true,
-        };
+        let memory = Budgets { memory: true };
         assert_eq!(
             settle(state, memory, &[Alloc(20), Free(20)]).0,
             Err(BudgetKind::Memory)
@@ -601,22 +433,12 @@ mod tests {
         z ^ (z >> 31)
     }
 
-    /// Summaries settle to the exact reference over a generated corpus of turns: the same stop
-    /// and kind, or the same level and fuel after the turn, for every budget combination.
     #[test]
     fn summaries_equal_the_reference_charge_stream() {
         let mut seed = 20261020;
         for case in 0..20_000 {
-            let budgets = match case % 3 {
-                0 => BOTH,
-                1 => Budgets {
-                    fuel: true,
-                    memory: false,
-                },
-                _ => Budgets {
-                    fuel: false,
-                    memory: true,
-                },
+            let budgets = Budgets {
+                memory: case % 2 == 0,
             };
             let limit = if budgets.memory {
                 64 + next(&mut seed) % 256
@@ -628,17 +450,12 @@ mod tests {
             } else {
                 next(&mut seed) % 512
             };
-            let fuel = if budgets.fuel {
-                next(&mut seed) % 24
-            } else {
-                u64::MAX
-            };
-            let state = Settled { level, limit, fuel };
+            let state = Settled { level, limit };
             let len = next(&mut seed) % 40;
             let mut held = level;
             let events: Vec<Event> = (0..len)
                 .map(|_| match next(&mut seed) % 7 {
-                    0 | 1 => Fuel,
+                    0 | 1 => Free(0),
                     2 | 3 => {
                         let bytes = 1 + next(&mut seed) % 48;
                         held += bytes;
@@ -668,68 +485,10 @@ mod tests {
 
     /// A piece past its envelope bound and a stretch past its piece bound pause.
     #[test]
-    fn envelope_and_piece_overflow_pause() {
-        let mut events = Vec::new();
-        for _ in 0..ENVELOPE_MAX {
-            events.extend([Fuel, Alloc(1)]);
-        }
-        assert!(summarise(BOTH, &events).is_ok());
-        events.extend([Fuel, Alloc(1)]);
-        assert_eq!(summarise(BOTH, &events), Err(Pause::Envelope));
-        // Without fuel the envelope keeps one entry, so it never overflows.
-        let memory = Budgets {
-            fuel: false,
-            memory: true,
-        };
-        let stretch = summarise(memory, &events).unwrap();
-        assert_eq!(stretch.pieces().next().unwrap().1.envelope.len(), 1);
+    fn piece_overflow_pauses() {
         let credits = vec![Credit(0); PIECES_MAX];
-        assert_eq!(summarise(BOTH, &credits), Err(Pause::Pieces));
-        assert!(summarise(BOTH, &credits[1..]).is_ok());
-    }
-
-    #[test]
-    fn cpu_jobs_keep_cleanup_highs_and_fuel_memory_first_stop_order() {
-        for width in [4, 8, 16] {
-            for (cleanup, fuel, kind) in [
-                (vec![Alloc(20), Free(20), Fuel, Fuel], 1, BudgetKind::Memory),
-                (vec![Fuel, Fuel, Alloc(20), Free(20)], 1, BudgetKind::Fuel),
-                (vec![Fuel, Alloc(20), Free(20)], 1, BudgetKind::Memory),
-                // Root death opens a piece before the cleanup allocation.
-                (
-                    vec![Credit(30), Fuel, Alloc(50), Free(50)],
-                    1,
-                    BudgetKind::Memory,
-                ),
-            ] {
-                let state = Settled {
-                    level: 70,
-                    limit: 100,
-                    fuel,
-                };
-                let first = summarise(BOTH, &[Alloc(20)]).unwrap();
-                let second = summarise(BOTH, &cleanup).unwrap();
-                let younger = summarise(BOTH, &[Alloc(200)]).unwrap();
-                let mut expected = state;
-                assert_eq!(reference(&mut expected, &[Alloc(20)]), Ok(()));
-                assert_eq!(reference(&mut expected, &cleanup), Err(kind));
-                let mut live = Jobs::new(width, 3, state);
-                live.publish(2, younger.clone());
-                live.publish(1, second.clone());
-                assert_eq!(live.retire(), Ok(0));
-                live.publish(0, first.clone());
-                let stop = Err(JobStop { job: 1, kind });
-                assert_eq!(live.retire(), stop);
-                assert_eq!(live.retire(), stop);
-                let mut replay = Jobs::new(width, 3, state);
-                replay.publish(0, first);
-                assert_eq!(replay.retire(), Ok(1));
-                replay.publish(1, second);
-                assert_eq!(replay.retire(), stop);
-                replay.publish(2, younger);
-                assert_eq!(replay.retire(), stop);
-            }
-        }
+        assert_eq!(summarise(MEMORY, &credits), Err(Pause::Pieces));
+        assert!(summarise(MEMORY, &credits[1..]).is_ok());
     }
 
     #[test]
@@ -751,19 +510,10 @@ mod tests {
                 }),
             ),
         ] {
-            let mut jobs = Jobs::cpu(
-                &grant,
-                4,
-                2,
-                Settled {
-                    level: 60,
-                    limit,
-                    fuel: 7,
-                },
-            );
-            jobs.publish(1, summarise(BOTH, &[Credit(40), Alloc(70), Fuel]).unwrap());
+            let mut jobs = Jobs::cpu(&grant, 4, 2, Settled { level: 60, limit });
+            jobs.publish(1, summarise(MEMORY, &[Credit(40), Alloc(70)]).unwrap());
             assert_eq!(jobs.retire(), Ok(0));
-            jobs.publish(0, summarise(BOTH, &[Fuel]).unwrap());
+            jobs.publish(0, summarise(MEMORY, &[]).unwrap());
             assert_eq!(jobs.retire(), expected);
             if expected.is_ok() {
                 assert_eq!(
@@ -771,7 +521,6 @@ mod tests {
                     Settled {
                         level: 90,
                         limit: 100,
-                        fuel: 5
                     }
                 );
             }
@@ -786,29 +535,26 @@ mod tests {
             Settled {
                 level: 0,
                 limit: 100,
-                fuel: 8,
             },
         );
-        jobs.publish(1, summarise(BOTH, &[Alloc(100)]).unwrap());
-        jobs.pause(0, summarise(BOTH, &[Fuel, Alloc(80)]).unwrap());
+        jobs.publish(1, summarise(MEMORY, &[Alloc(100)]).unwrap());
+        jobs.pause(0, summarise(MEMORY, &[Alloc(80)]).unwrap());
         assert_eq!(jobs.retire(), Ok(0));
         assert_eq!(
             jobs.settled(),
             Settled {
                 level: 80,
                 limit: 100,
-                fuel: 7
             }
         );
         assert_eq!(jobs.retire(), Ok(0));
-        jobs.publish(0, summarise(BOTH, &[Credit(80), Fuel]).unwrap());
+        jobs.publish(0, summarise(MEMORY, &[Credit(80)]).unwrap());
         assert_eq!(jobs.retire(), Ok(2));
         assert_eq!(
             jobs.settled(),
             Settled {
                 level: 100,
                 limit: 100,
-                fuel: 6
             }
         );
     }
@@ -819,14 +565,13 @@ mod tests {
             let mut state = Settled {
                 level: 0,
                 limit: 100,
-                fuel: 20,
             };
             let mut jobs = Jobs::new(width, 2, state);
-            let younger = summarise(BOTH, &[Fuel, Alloc(60)]).unwrap();
+            let younger = summarise(MEMORY, &[Alloc(60)]).unwrap();
             jobs.pause(1, younger.clone());
             jobs.retire_prefix_at(
                 0,
-                summarise(BOTH, &[Fuel, Alloc(30)]).unwrap(),
+                summarise(MEMORY, &[Alloc(30)]).unwrap(),
                 false,
                 &mut state,
             )
@@ -836,23 +581,20 @@ mod tests {
                 Settled {
                     level: 30,
                     limit: 100,
-                    fuel: 19
                 }
             );
-            jobs.retire_prefix_at(0, summarise(BOTH, &[Free(30)]).unwrap(), true, &mut state)
+            jobs.retire_prefix_at(0, summarise(MEMORY, &[Free(30)]).unwrap(), true, &mut state)
                 .unwrap();
             assert_eq!(
                 state,
                 Settled {
                     level: 0,
                     limit: 100,
-                    fuel: 19
                 }
             );
             assert!(jobs.pending[1].is_some(), "job zero never retires job one");
             // Orchestration between mapper prefixes belongs to the run frontier.
             state.level = 10;
-            state.fuel -= 2;
             let (recorded, result) = jobs.retire_published_at(1, &mut state);
             assert_eq!(recorded, younger);
             assert_eq!(result, Ok(()));
@@ -861,17 +603,15 @@ mod tests {
                 Settled {
                     level: 70,
                     limit: 100,
-                    fuel: 16
                 }
             );
-            jobs.retire_prefix_at(1, summarise(BOTH, &[Free(60)]).unwrap(), true, &mut state)
+            jobs.retire_prefix_at(1, summarise(MEMORY, &[Free(60)]).unwrap(), true, &mut state)
                 .unwrap();
             assert_eq!(
                 state,
                 Settled {
                     level: 10,
                     limit: 100,
-                    fuel: 16
                 }
             );
             assert!(
@@ -890,10 +630,9 @@ mod tests {
             let mut state = Settled {
                 level: 0,
                 limit: 100,
-                fuel: 20,
             };
             let mut jobs = Jobs::new(width, 2, state);
-            let younger = summarise(BOTH, &[Fuel, Alloc(60), Free(20)]).unwrap();
+            let younger = summarise(MEMORY, &[Alloc(60), Free(20)]).unwrap();
             jobs.publish(1, younger.clone());
             let withdrawn = jobs.withdraw_younger(0);
             assert_eq!(withdrawn, vec![(1, younger.clone(), true)]);
@@ -904,7 +643,7 @@ mod tests {
             assert_eq!(jobs.settled(), state);
             jobs.retire_prefix_at(
                 0,
-                summarise(BOTH, &[Fuel, Alloc(30)]).unwrap(),
+                summarise(MEMORY, &[Alloc(30)]).unwrap(),
                 true,
                 &mut state,
             )
@@ -917,7 +656,6 @@ mod tests {
                 Settled {
                     level: 70,
                     limit: 100,
-                    fuel: 18
                 }
             );
         }

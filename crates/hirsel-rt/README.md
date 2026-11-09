@@ -20,7 +20,7 @@ Invariants and boundary:
 - A run, not the process, is the unit of failure (`program.rs`, `stop.rs`, runtime ABI 20). The
   generated `main` passes one `hirsel_rt_v2_program_descriptor` (entry, descriptor registry,
   failure table, semantic digest, entry name, roots, flags `UNREPLAYABLE`, `STANDALONE`,
-  `ESCAPES` and `FUELED`, and
+  `ESCAPES`, and
   a launched executable's bound run configuration) to `hirsel_rt_v2_main`, which loads it into
   a `Program`; a run's context reaches its own program's failure table, so runs of several
   programs share a process. A run's root task runs on a fiber, and Blocked, an adapter refusal,
@@ -671,7 +671,7 @@ is the context `hirsel_rt_v2_ctx_create` returns, a child's lies at the top of i
 The context splits three ways:
 
 - **`TaskCtx`, the task's own:** at offset 0 its view of the worker's compiled words (pages,
-  idle slabs, dup bound, fuel, heap id) with the heap and heap epoch the pages were copied at; its
+  idle slabs, dup bound, heap id) with the heap and heap epoch the pages were copied at; its
   failure chain with spawn paths and isolate scratch; its finalizer shield; its release
   worklist; its innermost region; its freeze/thaw stack; its foreign scope while switched out.
 - **`Worker`, one per thread that runs Hirsel code:** its heap (size classes, large blocks,
@@ -699,7 +699,7 @@ lookup searches the run's heaps. `proofs/heaps` model-checks the lists with loom
 measurement archive counts `remote_frees`, `remote_collected` and `heap_adoptions`.
 
 A switch moves the worker from one task to the next: switch-out folds the view's idle-slab and
-fuel counters back into the worker and saves the thread's foreign scope; switch-in copies the
+counters back into the worker and saves the thread's foreign scope; switch-in copies the
 worker's 512 bytes of pages into the view only when its stamp is stale (another worker, or a
 page change since), hands it the counters, and sets the thread's running context and foreign
 scope. A runtime slow path that changes a current page updates the worker's words and the
@@ -840,20 +840,14 @@ kinds and target ordinals, before abandoning their contexts. Observation version
 the blocking task/channel primitives; only the parked path stores the site.
 The caller (generated `main`, or a host running several programs) decides what
 to do with the outcome; no outcome exits the process.
-`src/budget.rs` enforces both budgets (`budgets.limits@2`). The memory meter (`budget::Meter`,
+`src/budget.rs` enforces the memory budget (`budgets.limits@3`). The memory meter (`budget::Meter`,
 shared by the run's heaps and region pools) charges logical storage only: a small block its size
 class, a large one its request rounded up to 4 KiB, and a region segment the size an empty pool
 would give it, so a stop never depends on what the pools held. A block is credited when it is
 freed, on the freeing task, and a segment when its region exits. Under a memory budget compiled
 code allocates and frees nothing inline (`Heap::set_metered`), and a region pool reuses only a
-segment of exactly the canonical size. Fuel is the running task's chunk, the context word at
-`HIRSEL_RT_V2_CTX_FUEL_OFFSET`. Code compiled with fuel checks decrements it at each fuel point
-and calls `hirsel_rt_v2_fuel_refill` when it goes negative, which stores the next chunk from the
-run's `FuelPool` and returns (runtime ABI 27): the whole budget at width 1, so exhaustion is
-exact, and 64 Ki points without a budget. A spent budget raises
-`Stop::BudgetExceeded` on the running context. The descriptor flag `FUELED` marks such code;
-an executable without it refuses a fuel budget when binding its run (`ProgramFacts::fueled`;
-`budgets.fuel`), and a memory budget needs no compiled checks. With `HIRSEL_RT_OBSERVATION` it
+segment of exactly the canonical size. Exceeding the memory budget raises
+`Stop::BudgetExceeded(Memory)` on the running context. With `HIRSEL_RT_OBSERVATION` it
 writes the observation record (`hirsel-observation 5`, the status, a default-action `signaled <kind>`, the result
 bytes or the failure chain as kind, rule and site codes, and the task-exit
 audit in a diagnostic or measurement archive, or `audit unavailable` in production;
@@ -989,7 +983,7 @@ is entered (waiting, a CONC-8 wait named `foreign.gate`, while another call chai
 nested calls from its owner re-enter by depth, and the outermost leave frees it and polls
 its waiters. Until lane W1, a run's code runs on one thread at a time: a thread hands the
 run to another by posting the task to resume and waiting on its own idle fiber, so the
-schedule stays the cooperative one wherever a call runs, and the run's fuel moves with the
+schedule stays the cooperative one wherever a call runs, and execution moves with the
 run. A pool thread has its own worker and heap; blocks a callback allocates there are freed
 remotely. A C callback thunk reads the current context back with
 `hirsel_rt_v2_callback_context`, which ends the process when the thread has none and takes a
@@ -1091,9 +1085,8 @@ reset/reuse retains the same allocation. The remaining rows are `KEY VALUE`:
 - `remote_frees`, `remote_collected`, `heap_adoptions`: frees of another worker's block, large
   block or segment, what this heap's collector took back, and orphaned heaps a new worker took
   over (design §5 headroom row "Root traffic; remote frees");
-- `meter_ops`, `metered_allocations`, `fuel_refills`: logical charges and credits and heap
-  allocations under a memory budget, and fuel chunks handed out (headroom row "Meter, permits";
-  zero without a budget or a fuel build); and
+- `meter_ops`, `metered_allocations`: logical charges, credits and heap allocations
+  under a memory budget; and
 - `arena_high_water_bytes unavailable`: native arenas are dependency-owned.
 
 The report snapshots before forced task-exit reclamation, so an unbalanced run
@@ -1225,8 +1218,7 @@ replay additionally compares every native field when replaying a native receipt;
 the interpreter validates its framing and checksum. A mapper rejected by budget
 settlement publishes no result. Its native run outcome records the budget stop.
 The interpreter records its own value-free CPU stop receipt after its completed
-prefix. Fuel counts and cuts are specific to the engine and compilation, so a
-native CPU tape stopped on fuel is refused by the interpreter.
+prefix.
 
 Certified allocating mappers retain pointer-free sequence backing in an
 ordinal-owned arena. A Dup of a registered owner keeps that custody and uses
@@ -1561,7 +1553,7 @@ journals the accepted bytes through its existing Print/PrintStderr events.
 
 An unobserved production run discovers host CPU capacity at its first scoped
 claim or ordinary child spawn. Its first Tasks projection or parkable host effect installs the Ordered
-objects while preserving the root's held memory and remaining fuel. Scalar
+objects while preserving the root's held memory. Scalar
 execution needs neither discovery nor Ordered objects. Replay uses its recorded
 logical contract without discovering the current host. Explicit placement
 sidecars and event traces retain their startup admission snapshots.

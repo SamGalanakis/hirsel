@@ -89,7 +89,6 @@ fn probe(target: &TargetSpec, malformed: u8, inventory: bool, shared: bool) -> V
         tracking: false,
         opt: OptLevel::None,
         measurement: false,
-        fuel: false,
     };
     let mut manifested = Manifested::default();
     let signature = Signature::runtime(&module, &abi, &unit.header.definition).unwrap();

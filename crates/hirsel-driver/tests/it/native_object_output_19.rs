@@ -65,7 +65,7 @@ fn object_requests_emit_generic_helpers_without_link_or_launch() {
                     }],
                     output: NativeOutput::Objects { roots: vec![first, second] },
                     run: None,
-                    fuel: false,
+
                     evidence: None,
                 }),
             };

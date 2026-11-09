@@ -56,7 +56,6 @@ fn internal_failure_replay_abandons_live_storage_and_normal_failed_root_keeps_ex
                     launch: LaunchKind::Main,
                     roots: vec![Root::Io, Root::Args],
                     code: CodeReach::Safe,
-                    fueled: false,
                 };
                 let mut run = RunConfig::empty(facts.program, facts.entry.clone(), facts.launch);
                 run.args = Some(vec![]);
@@ -364,7 +363,6 @@ fn projection_channel_preserves_exact_recording_and_outcome() {
                 launch: LaunchKind::Main,
                 roots: vec![Root::Io, Root::Args],
                 code: CodeReach::Safe,
-                fueled: false,
             };
             let mut run = RunConfig::empty(facts.program, facts.entry.clone(), facts.launch);
             run.args = Some(vec![]);

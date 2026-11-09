@@ -97,7 +97,7 @@ pub unsafe extern "C" fn hirsel_rt_v2_cpu_publish(ctx: *mut TaskCtx, summary: *m
         (*summary).version != VERSION
             || (*summary).phase != SUMMARY_PENDING
             || (*summary).value_bytes > 256
-            || (*summary).retained_count > crate::budget::stretch::ENVELOPE_MAX as u32
+            || (*summary).retained_count > crate::budget::stretch::RETAINED_MAX as u32
     } {
         return NOT_CERTIFIED;
     }
@@ -187,7 +187,7 @@ pub(super) unsafe fn serve(ctx: *mut TaskCtx, native: *mut Native) -> crate::sto
         let task = owner.map(|owner| owner.task);
         let valid = bytes <= 256
             && (bytes == 0 || !value.is_null())
-            && count <= crate::budget::stretch::ENVELOPE_MAX as u32
+            && count <= crate::budget::stretch::RETAINED_MAX as u32
             && (count == 0 || !retained.is_null())
             && descriptor < unsafe { (*ctx).heap_ref().layout_count() }
             && owner.is_some_and(|owner| owner.ordinal == ordinal);

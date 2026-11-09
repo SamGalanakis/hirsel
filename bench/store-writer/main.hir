@@ -1,0 +1,112 @@
+// Store adapter for the ledger workload. Each group is one transaction.
+pub type Error = Grant(GrantError) | Clock(ClockError) | Output(OutputError) | Input(InputError) | Store(store.StoreError) | Tx(store.TxFailure[ledger.Refusal]) | Usage
+
+type Request { first: u64, submitted: u64, reply: Sender[u64] }
+
+fn now(c: MonotonicClock) -> u64 { 
+  match clock.monotonic(c) { Ok(t) => instant.ticks(t), Error(_) => { failure.check(false, Arithmetic()) 0 } }
+}
+
+fn number(args: Args, index: u64) -> u64 {
+  match arg.text(args, index) { Ok(s) => match u64.parse(s) { Ok(n) => n, Error(_) => 0 }, Error(_) => 0 }
+}
+
+fn client(tasks: Tasks, c: MonotonicClock, take sender: Sender[Request], id: u64, clients: u64, count: u64, group: u64) {
+  let mut tx = take sender
+  let (reply, receiver): (Sender[u64], Receiver[u64]) = channel.open(tasks)
+  let mut rx = take receiver
+  let mut first = id * group
+  while first < count {
+    let response = sender.dup(tasks, reply)
+    let sent = channel.send(tasks, mut tx, Request(first: first, submitted: now(c), reply: take response))
+    failure.check(results.is_ok(sent), Arithmetic())
+    let received = channel.receive(tasks, mut rx)
+    failure.check(results.is_ok(received), Arithmetic())
+    first += clients * group
+  }
+}
+
+pub fn main(rt: Io, args: Args) -> Result[(), Error] {
+  let output = io.stdout(rt) ? Grant
+  let input = io.stdin(rt) ? Grant
+  let c = io.monotonic_clock(rt) ? Grant
+  let tasks = io.tasks(rt) ? Grant
+  let d = io.dir(rt, path.of("db")) ? Grant
+  let accounts = number(args, 0)
+  let initial = number(args, 1)
+  let count = number(args, 2)
+  let amount = number(args, 3)
+  let group = number(args, 4)
+  let clients = number(args, 5)
+  if accounts < 2 || group == 0 || clients == 0 || count == 0 || count % group != 0 || count % accounts != 0 { return Error(Usage()) }
+  let mut config = store.default_config()
+  config.group_limit = 1
+  let mut db = store.open(d, config) ? Store
+  for account in 0u64..accounts {
+    let _ = store.transact(mut db, fn(mut tx: store.Tx) -> Result[u64, ledger.Refusal] { ledger.open(mut tx, account, initial) }) ? Tx
+  }
+  // The host enables phase counters before releasing this input gate.
+  out.print(output, "READY\n") ? Output
+  let _ = input.read_line(input) ? Input
+  let (sender, receiver): (Sender[Request], Receiver[Request]) = channel.open(tasks)
+  let mut rx = take receiver
+  let mut latencies: List[u64] = []
+  let start = now(c)
+  let result = task.scope(tasks, fn(scope: Scope) -> Result[(), Error] {
+    let mut children: TaskSet[()] of scope = task.set(scope)
+    for id in 0u64..clients {
+      let outgoing = sender.dup(tasks, sender)
+      task.add(scope, mut children, task.async(scope, fn() { client(tasks, c, take outgoing, id, clients, count, group) }))
+    }
+    let mut completed: u64 = 0
+    while completed < count {
+      let req = match channel.receive(tasks, mut rx) { Ok(r) => take r, Error(_) => return Error(Usage()) }
+      let first = req.first
+      let _ = store.transact(mut db, fn(mut tx: store.Tx) -> Result[u64, ledger.Refusal] {
+        for offset in 0u64..group {
+          let op = workload.transfer(first + offset, accounts, amount)
+          let _ = ledger.transfer(mut tx, op.from, op.to, op.cents)?
+        }
+        Ok(group)
+      }) ? Tx
+      let finished = now(c)
+      list.push(mut latencies, finished - req.submitted)
+      let mut reply = take req.reply
+      failure.check(results.is_ok(channel.send(tasks, mut reply, finished)), Arithmetic())
+      completed += group
+    }
+    while let Some(index) = task.await_any(scope, children) { task.await_at(scope, mut children, index) }
+    task.cancel_all(scope, take children)
+    Ok(())
+  })
+  let elapsed = now(c) - start
+  out.print(output, "DONE\n") ? Output
+  let _ = input.read_line(input) ? Input
+  result?
+  store.close(take db) ? Store
+  let mut recovered = store.open(d, config) ? Store
+  // Independent conservation and exact balance oracle, outside the timed phase.
+  let _ = store.transact(mut recovered, fn(mut tx: store.Tx) -> Result[u64, ledger.Refusal] {
+    let balances: table.Table[u64, u64] = table.named("balances")
+    let mut total: u64 = 0
+    for account in 0u64..accounts {
+      let value = table.get(tx, balances, account) ? ledger.Table
+      let Some(balance) = value else { return Error(ledger.NoAccount(account)) }
+      let previous = (account + accounts - 1) % accounts
+      let mut expected = initial
+      let mut index = previous
+      while index < count { expected += amount * (1 + index % 3) index += accounts }
+      index = account
+      while index < count { expected -= amount * (1 + index % 3) index += accounts }
+      failure.check(balance == expected, Arithmetic())
+      total += balance
+    }
+    failure.check(total == accounts * initial, Arithmetic())
+    Ok(total)
+  }) ? Tx
+  store.close(take recovered) ? Store
+  out.print(output, f"elapsed {elapsed}\n") ? Output
+  for latency in latencies { out.print(output, f"latency {latency}\n") ? Output }
+  out.print(output, "verified\n") ? Output
+  Ok(())
+}

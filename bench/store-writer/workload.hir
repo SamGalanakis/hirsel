@@ -1,0 +1,7 @@
+// Logical transfers only. The runner supplies workload.json as arguments.
+pub type Transfer { from: u64, to: u64, cents: u64 }
+
+pub fn transfer(index: u64, accounts: u64, amount: u64) -> Transfer uses {} {
+  let from = index % accounts
+  Transfer(from: from, to: (from + 1) % accounts, cents: amount * (1 + index % 3))
+}

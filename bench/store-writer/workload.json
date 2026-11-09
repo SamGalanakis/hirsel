@@ -1,0 +1,16 @@
+{
+  "accounts": 8,
+  "initial_balance": 1000000,
+  "transfers": 512,
+  "amount": 1,
+  "groups": [
+    1,
+    8
+  ],
+  "submitters": [
+    1,
+    4
+  ],
+  "durability": "Durable",
+  "mix": "round_robin_to_next_amount_1_2_3"
+}

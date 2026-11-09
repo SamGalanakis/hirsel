@@ -1,0 +1,262 @@
+#!/usr/bin/env python3
+"""Build and measure one sample of each store-writer/metal workload on local disk."""
+import argparse
+import json
+import math
+import os
+from pathlib import Path
+import re
+import struct
+import subprocess
+import sys
+
+HERE = Path(__file__).resolve().parent
+ROOT = HERE.parents[1]
+BANNED = {12, 13, 14, 15, 28, 29, 30, 31}
+
+
+def run(command, **kwargs):
+    return subprocess.run(list(map(str, command)), check=True, **kwargs)
+
+
+def build(out):
+    run([sys.executable, ROOT / 'tools/buck2/prepare.py'])
+    targets = ['hirsel-toolchain', 'hirsel-rt-archives']
+    output = subprocess.check_output([str(ROOT / '.buck2/bin/buck2'), 'build',
+        '--target-platforms', '//tools/buck2:release', *['//:' + t for t in targets],
+        '//tools/buck2/native-toolchain:kit', '//tools/buck2/native-toolchain:glibc_floor',
+        '--show-full-output'], cwd=ROOT, text=True)
+    paths = {line.split()[0].rsplit(':', 1)[1]: line.split()[1]
+             for line in output.splitlines() if line.startswith('root//')}
+    compiler = Path(paths['hirsel-toolchain']) / 'hirsel'
+    environment = dict(os.environ, HIRSEL_RUNTIME_ARCHIVES=paths['hirsel-rt-archives'],
+        HIRSEL_LINK_KIT=paths['kit'], HIRSEL_GLIBC_FLOOR=paths['glibc_floor'],
+        LLVM_SYS_231_PREFIX=str(ROOT / 'tools/buck2/toolchains/llvm-files'))
+    run([ROOT / 'tools/capped', compiler, 'build', HERE / 'hirsel.json', '--release',
+         '-o', out / 'native'], env=environment)
+    return compiler
+
+
+def children(pid):
+    yield pid
+    path = Path(f'/proc/{pid}/task/{pid}/children')
+    if path.exists():
+        for child in path.read_text().split():
+            yield from children(int(child))
+
+
+def target_pid(parent, executable):
+    for pid in children(parent):
+        try:
+            if Path(f'/proc/{pid}/exe').resolve() == executable.resolve():
+                return pid
+        except OSError:
+            pass
+    raise RuntimeError('READY did not come from the expected child executable')
+
+
+def addresses(binary, wanted):
+    output = subprocess.check_output(['nm', '-anC', str(binary)], text=True)
+    result = {}
+    for line in output.splitlines():
+        parts = line.split(maxsplit=2)
+        if len(parts) == 3:
+            for key, suffix in wanted.items():
+                if parts[2].endswith(suffix):
+                    result[key] = int(parts[0], 16)
+    if result.keys() != wanted.keys():
+        raise RuntimeError(f'missing allocation probe symbols in {binary}: {wanted.keys() - result.keys()}')
+    return result
+
+
+def read_counters(pid, objects):
+    values = {}
+    maps = Path(f'/proc/{pid}/maps').read_text().splitlines()
+    with open(f'/proc/{pid}/mem', 'rb', buffering=0) as memory:
+        for binary, symbols in objects:
+            mapping = next(line.split() for line in maps
+                           if line.split()[-1] == str(binary.resolve()) and int(line.split()[2], 16) == 0)
+            base = int(mapping[0].split('-')[0], 16)
+            # Shared objects and Rust PIEs use relative symbol addresses.
+            elf_type = subprocess.check_output(['readelf', '-h', str(binary)], text=True)
+            if 'DYN (Position-Independent Executable file)' not in elf_type and 'DYN (Shared object file)' not in elf_type:
+                base = 0
+            for name, address in symbols.items():
+                memory.seek(base + address)
+                values[name] = struct.unpack('Q', memory.read(8))[0]
+    return values
+
+
+def disk_bytes(directory):
+    return sum(p.stat().st_size for p in directory.rglob('*') if p.is_file())
+
+
+def sample(kind, group, submitters, workload, out, compiler, profile=False):
+    suffix = f'{kind}-g{group}-c{submitters}' + ('-profile' if profile else '')
+    directory = out / suffix
+    directory.mkdir()  # Never reuse an old database or overwrite original evidence.
+    db = directory / 'db'
+    db.mkdir()
+    arguments = [workload[k] for k in ('accounts', 'initial_balance', 'transfers', 'amount')]
+    arguments += [group, submitters]
+    grants = directory / 'grants.json'
+    grants.write_text(json.dumps(dict(io=dict(stdout='stdout.bytes@1', stdin='stdin.bytes@1',
+        tasks='tasks.cooperative@1', monotonic_clock='clock.monotonic.ns@1',
+        dirs=[dict(path='db', host=str(db), access='read_write')]), args=list(map(str, arguments)))))
+    if kind == 'interp':
+        executable = compiler
+        command = [compiler, 'run', '--mem-usage', HERE / 'hirsel.json', '--grants', grants,
+                   '--max-steps', 'unbounded', '--cores', '2']
+    elif kind == 'native':
+        executable = out / 'native'
+        command = [executable, '--hirsel-grants', grants]
+    else:
+        executable = out / 'metal'
+        command = [executable, db / 'append.log', *arguments]
+        if kind == 'raw':
+            command += ['raw']
+    shim = out / 'alloc.so'
+    objects = [(shim, addresses(shim, dict(libc_allocations='store_bench_allocations',
+        fsyncs='store_bench_fsyncs', backend_puts='store_bench_puts')))]
+    if kind == 'interp':
+        objects.append((compiler, addresses(compiler, dict(allocations='allocator::ALLOCATIONS',
+            reallocations='allocator::REALLOCATIONS'))))
+    control_path, ack_path = directory / 'control.fifo', directory / 'ack.fifo'
+    os.mkfifo(control_path)
+    os.mkfifo(ack_path)
+    control_write = os.open(control_path, os.O_RDWR)
+    ack_read = os.open(ack_path, os.O_RDWR)
+    metric_file = directory / ('perf.data' if profile else 'perf.csv')
+    perf = ['perf', 'record', '-e', 'cpu-clock:u', '-F', '99', '-g', '--call-graph', 'dwarf',
+            '-o', metric_file] if profile else ['perf', 'stat', '-x', ';', '-e', 'instructions:u', '-o', metric_file]
+    perf += ['-D', '-1', f'--control=fifo:{control_path},{ack_path}', '--',
+             'env', f'LD_PRELOAD={shim}', *command]
+    def control(message):
+        os.write(control_write, (message + '\n').encode())
+        answer = os.read(ack_read, 128)
+        if not answer.startswith(b'ack'):
+            raise RuntimeError(f'perf control failed: {answer!r}')
+    with (directory / 'stderr.log').open('w') as errors:
+        process = subprocess.Popen(list(map(str, [ROOT / 'tools/capped', *perf])),
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=errors, text=True)
+        try:
+            lines = []
+            for line in process.stdout:
+                lines.append(line)
+                if line.strip() == 'READY':
+                    pid = target_pid(process.pid, executable)
+                    before = read_counters(pid, objects)
+                    bytes_before = disk_bytes(db)
+                    control('enable')
+                    process.stdin.write('go\n')
+                    process.stdin.flush()
+                elif line.strip() == 'DONE':
+                    control('disable')
+                    after = read_counters(pid, objects)
+                    bytes_after = disk_bytes(db)
+                    process.stdin.write('finish\n')
+                    process.stdin.flush()
+            status = process.wait()
+        except BaseException:
+            for owned in reversed(list(children(process.pid))):
+                try:
+                    os.kill(owned, 9)
+                except ProcessLookupError:
+                    pass
+            process.wait()
+            raise
+        finally:
+            os.close(control_write)
+            os.close(ack_read)
+            control_path.unlink()
+            ack_path.unlink()
+    (directory / 'stdout.log').write_text(''.join(lines))
+    if status or 'verified\n' not in lines:
+        raise RuntimeError(f'{suffix} failed: {directory / "stderr.log"}')
+    elapsed = next(int(line.split()[1]) for line in lines if line.startswith('elapsed '))
+    latencies = sorted(int(line.split()[1]) for line in lines if line.startswith('latency '))
+    commits = workload['transfers'] // group
+    if len(latencies) != commits:
+        raise RuntimeError('missing durable completion latency bodies')
+    delta = {key: after[key] - before[key] for key in before}
+    if delta['fsyncs'] < commits or bytes_after <= bytes_before:
+        raise RuntimeError('durability/body counters did not cover every commit')
+    if kind in ('native', 'interp') and delta['backend_puts'] != commits:
+        raise RuntimeError('unexpected backend requests: inspect the writer before accepting this sample')
+    if kind == 'interp':
+        allocations = delta['allocations'] + delta['reallocations']
+    elif kind in ('metal', 'raw'):
+        allocations = next(int(line.split()[1]) for line in lines if line.startswith('allocations '))
+    else:
+        allocations = delta['libc_allocations']
+    row = dict(engine=kind, group=group, submitters=submitters, transfers=workload['transfers'],
+        commits=commits, elapsed_ns=elapsed, transfers_s=workload['transfers'] * 1e9 / elapsed,
+        p50_us=latencies[math.ceil(len(latencies) * .50) - 1] / 1000,
+        p99_us=latencies[math.ceil(len(latencies) * .99) - 1] / 1000,
+        fsyncs_commit=delta['fsyncs'] / commits, bytes_commit=(bytes_after - bytes_before) / commits,
+        backend_requests_commit=delta['backend_puts'] / commits if kind in ('native', 'interp') else 1,
+        allocations_commit=allocations / commits, counters=delta)
+    if not profile:
+        instructions = next(float(line.split(';')[0].replace(',', ''))
+            for line in metric_file.read_text().splitlines() if ';instructions:u;' in line)
+        row['instructions_commit'] = instructions / commits
+    else:
+        with (directory / 'owners.txt').open('w') as owners:
+            run(['perf', 'report', '-i', metric_file, '--stdio', '--no-children', '--sort',
+                 'symbol,srcline', '--percent-limit', '1'], stdout=owners)
+        metric_file.unlink()  # Keep the readable attribution, not the raw dwarf stacks.
+    (directory / 'result.json').write_text(json.dumps(row, indent=2) + '\n')
+    print(json.dumps(row), flush=True)
+    return row
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--output', type=Path, required=True, help='fresh evidence directory on the disk to measure')
+    parser.add_argument('--compiler', type=Path, help='reuse this already built release toolchain')
+    parser.add_argument('--skip-build', action='store_true', help='reuse output/native and output/metal')
+    parser.add_argument('--resume', action='store_true', help='reuse completed samples in this evidence directory')
+    parser.add_argument('--profile', action='store_true', help='also collect one phase-gated writer profile per engine')
+    args = parser.parse_args()
+    allowed = sorted(os.sched_getaffinity(0) - BANNED)
+    if len(allowed) < 2:
+        parser.error('two allowed CPUs required')
+    os.sched_setaffinity(0, allowed[:2])
+    os.environ.update(HIRSEL_MEMORY_LIMIT='2G', HIRSEL_JOBS='2')
+    out = args.output.resolve()
+    out.mkdir(parents=True, exist_ok=True)
+    compiler = args.compiler.resolve() if args.compiler else build(out)
+    if not args.skip_build:
+        if args.compiler:
+            parser.error('--compiler requires --skip-build and an existing output/native')
+        run([ROOT / 'tools/buck2/toolchains/rust-files/bin/rustc', '--edition=2024', '-O', '-g',
+             HERE / 'metal.rs', '-o', out / 'metal'])
+        run(['cc', '-shared', '-fPIC', '-O2', HERE / 'alloc.c', '-o', out / 'alloc.so'])
+    workload = json.loads((HERE / 'workload.json').read_text())
+    if workload['mix'] != 'round_robin_to_next_amount_1_2_3' or workload['durability'] != 'Durable':
+        parser.error('unsupported workload mix or durability')
+    rows = []
+    for group in workload['groups']:
+        for clients in workload['submitters']:
+            for kind in ('metal', 'native', 'interp'):
+                saved = out / f'{kind}-g{group}-c{clients}' / 'result.json'
+                if args.resume and saved.exists():
+                    rows.append(json.loads(saved.read_text()))
+                else:
+                    rows.append(sample(kind, group, clients, workload, out, compiler))
+    raw_workload = dict(workload, groups=[1], submitters=[1])
+    raw_saved = out / 'raw-g1-c1/result.json'
+    rows.append(json.loads(raw_saved.read_text()) if args.resume and raw_saved.exists()
+                else sample('raw', 1, 1, raw_workload, out, compiler))
+    if args.profile:
+        for kind in ('native', 'interp'):
+            saved = out / f'{kind}-g1-c1-profile/result.json'
+            if not (args.resume and saved.exists()):
+                sample(kind, 1, 1, workload, out, compiler, profile=True)
+    summary = dict(source_sha=subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=ROOT, text=True).strip(),
+        workload=workload, cpus=allowed[:2], compiler=str(compiler), rows=rows)
+    (out / 'results.json').write_text(json.dumps(summary, indent=2) + '\n')
+
+
+if __name__ == '__main__':
+    main()

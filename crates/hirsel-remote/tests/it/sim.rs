@@ -485,57 +485,74 @@ impl World {
         let Some(disk) = &self.disk else {
             return;
         };
-        let mut decided = BTreeMap::new();
-        let mut acknowledged = 0;
-        for entry in disk.journal([0; 16]).unwrap().recover().unwrap() {
-            match entry {
-                Entry::Decided {
-                    position, key, end, ..
-                } => {
-                    let earlier = decided.insert(position, (key, end));
-                    assert!(earlier.is_none(), "position {position} decided twice");
-                }
-                Entry::Acknowledged { position, .. } => acknowledged = position,
-                _ => (),
-            }
-        }
-        let mut host = restart(disk, [0; 16], Limits::default());
-        host.connected(1, Some(caller()));
-        let open = Frame::Open {
-            stream: [3; 32],
-            instance: INSTANCE,
-            epoch: u64::MAX,
-        };
-        host.frame(1, open, &mut TestPlace, &TestDigests);
-        for (position, (key, end)) in &self.received {
-            // A compaction keeps no decision the caller acknowledged.
-            match decided.get(position) {
-                None => assert!(
-                    *position <= acknowledged,
-                    "position {position}: the caller received {end:?}, and it is lost"
-                ),
-                recovered => assert_eq!(
-                    recovered,
-                    Some(&(*key, end.clone())),
-                    "position {position}: the caller received {end:?}"
-                ),
-            }
-            let status = Frame::Status(hirsel_remote::frame::CallRef {
-                epoch: u64::MAX,
-                position: *position,
-                key: *key,
-            });
-            match &host.frame(1, status, &mut TestPlace, &TestDigests)[..] {
-                // The caller acknowledged it.
-                [] => (),
-                [Action::Send(1, Frame::Outcome(o))] => assert_eq!(&o.end, end),
-                other => panic!("position {position}: status after recovery is {other:?}"),
-            }
-        }
+        check_recovery(disk, Limits::default(), [3; 32], &self.received);
     }
 
     fn calls_denied(&self) -> BTreeSet<u64> {
         self.calls.keys().copied().filter(|t| t % 7 == 6).collect()
+    }
+}
+
+/// The same durable-outcome oracle for the client world and adversarial streams.
+fn check_recovery(
+    disk: &SimDisk,
+    limits: Limits,
+    stream: [u8; 32],
+    received: &BTreeMap<u64, ([u8; 32], CallOutcome)>,
+) {
+    let mut decided = BTreeMap::new();
+    let mut acknowledged = 0;
+    for entry in disk.journal([0; 16]).unwrap().recover().unwrap() {
+        match entry {
+            Entry::Decided {
+                stream: owner,
+                position,
+                key,
+                end,
+                ..
+            } if owner.stream == stream => {
+                let earlier = decided.insert(position, (key, end));
+                assert!(earlier.is_none(), "position {position} decided twice");
+            }
+            Entry::Acknowledged {
+                stream: owner,
+                position,
+            } if owner.stream == stream => acknowledged = position,
+            _ => (),
+        }
+    }
+    let mut host = restart(disk, [0; 16], limits);
+    host.connected(1, Some(caller()));
+    let open = Frame::Open {
+        stream,
+        instance: INSTANCE,
+        epoch: u64::MAX,
+    };
+    host.frame(1, open, &mut TestPlace, &TestDigests);
+    for (position, (key, end)) in received {
+        // A compaction keeps no decision the caller acknowledged.
+        match decided.get(position) {
+            None => assert!(
+                *position <= acknowledged,
+                "position {position}: the caller received {end:?}, and it is lost"
+            ),
+            recovered => assert_eq!(
+                recovered,
+                Some(&(*key, end.clone())),
+                "position {position}: the caller received {end:?}"
+            ),
+        }
+        let status = Frame::Status(hirsel_remote::frame::CallRef {
+            epoch: u64::MAX,
+            position: *position,
+            key: *key,
+        });
+        match &host.frame(1, status, &mut TestPlace, &TestDigests)[..] {
+            // The caller acknowledged it.
+            [] => (),
+            [Action::Send(1, Frame::Outcome(o))] => assert_eq!(&o.end, end),
+            other => panic!("position {position}: status after recovery is {other:?}"),
+        }
     }
 }
 
@@ -947,152 +964,352 @@ fn a_compacted_journal_keeps_the_applied_position_of_acknowledged_outcomes() {
     run_to_end(&mut host, 99, call(99, position + 1), 41);
 }
 
-/// A caller that sends whatever it likes: positions far past the next one, repeated and
-/// changed requests, random acknowledgements and more streams than it may hold. The host's
-/// memory and its work per frame stay within its limits, whatever arrives: a session keeps
-/// at most `runs + queue - 1` gap refusals, a caller at most `streams` streams, and one
-/// frame answers at most `runs + queue + 1` actions. No position runs twice, and a position
-/// refused before it was reached is decided with that refusal.
+/// Withholding acknowledgements, reordered gaps, changed requests, session refusal,
+/// acknowledgement and honest sequential calls share this law. Every history crosses
+/// compaction and recovery, preserving received outcomes and at-most-once execution.
 #[test]
 fn an_adversarial_caller_keeps_host_state_and_frame_work_within_its_limits() {
     let limits = Limits {
         runs: 1,
         queue: 2,
         streams: 4,
+        unacknowledged: 3,
     };
     let window = (limits.runs + limits.queue) as usize;
     let check = |seed: u64, host: &Host, actions: &[Action]| {
         assert!(actions.len() <= window + 1, "seed {seed}: {actions:?}");
         let held = host.retained();
         assert!(held.gaps < window, "seed {seed}: {held:?}");
-        // Only the main stream receives calls. The lane's requested unacknowledged
-        // bound is the window here; extra streams hold no decided positions.
+        // Only the main stream receives calls; its retention bound is the window.
         assert!(held.decided <= window, "seed {seed}: {held:?}");
+        assert!(held.decided as u64 <= 1 + seed % 3, "seed {seed}: {held:?}");
         assert!(
             held.streams <= limits.streams as usize,
             "seed {seed}: {held:?}"
         );
     };
-    for seed in 0..50 {
-        let mut rng = Rng(seed);
-        let mut host = Host::new(Box::new(NoJournal::new([1; 16])), limits).unwrap();
-        // Positions whose callee started.
-        let mut started: BTreeSet<u64> = BTreeSet::new();
-        let mut running: Vec<u64> = vec![];
-        let mut session = 0;
-        let mut epoch = 0;
-        let mut applied = 0;
-        let mut opened = 0;
-        // This session's refusals of positions not yet reached.
-        let mut refused: BTreeMap<u64, CallOutcome> = BTreeMap::new();
-        for step in 0..4_000u64 {
-            if step % 500 == 0 {
-                // The caller's main stream reopens, which ends its refusals.
-                session += 1;
-                epoch += 1;
-                host.connected(session, Some(caller()));
-                let open = Frame::Open {
-                    stream: [0; 32],
-                    instance: INSTANCE,
-                    epoch,
-                };
-                let actions = host.frame(session, open, &mut TestPlace, &TestDigests);
-                check(seed, &host, &actions);
-                let [.., Action::Send(_, Frame::Opened { applied: a, .. })] = actions[..] else {
-                    panic!("seed {seed}: {actions:?}")
-                };
-                applied = a;
-                refused.clear();
-                // Six more streams, of which the caller may hold four in all.
-                for _ in 0..6 {
-                    opened += 1;
-                    let other = 1_000 + opened;
-                    host.connected(other, Some(caller()));
-                    let open = Frame::Open {
-                        stream: [opened as u8; 32],
-                        instance: INSTANCE,
-                        epoch: 1,
-                    };
-                    let actions = host.frame(other, open, &mut TestPlace, &TestDigests);
-                    check(seed, &host, &actions);
-                    let expected = if opened < limits.streams {
-                        matches!(actions[..], [Action::Send(_, Frame::Opened { .. })])
-                    } else {
-                        actions
-                            == vec![Action::Send(other, Frame::Refused(3)), Action::Close(other)]
-                    };
-                    assert!(expected, "seed {seed}: stream {opened}: {actions:?}");
-                }
-            }
-            let mut actions = vec![];
-            let mut sent = None;
-            if !running.is_empty() && rng.chance(300_000) {
-                let run = running.remove(rng.below(running.len()));
-                actions = host.ended(run, CallOutcome::Ok(vec![1]), None);
-            } else {
-                let position = match rng.below(4) {
-                    0 => applied + 1,
-                    1 => applied + 1 + rng.below(window + 2) as u64,
-                    _ => applied + 1 + rng.below(200_000) as u64,
-                };
-                let ordinal = rng.below(64) as u64;
-                let call = Call {
-                    epoch,
-                    position,
-                    ordinal,
-                    key: call_key(&INSTANCE, ordinal),
-                    form: CallForm::Compute,
-                    path: "app@1/m.f".into(),
-                    fingerprint: [0; 32],
-                    code: [0; 32],
-                    grants: GrantSet::default(),
-                    definitions: None,
-                    argument: vec![rng.below(2) as u8],
-                    acknowledged: if rng.chance(100_000) { applied } else { 0 },
-                };
-                sent = Some(position);
-                actions.extend(host.frame(
-                    session,
-                    Frame::Call(Box::new(call)),
-                    &mut TestPlace,
-                    &TestDigests,
-                ));
-            }
-            check(seed, &host, &actions);
-            let mut outcomes: BTreeMap<u64, CallOutcome> = BTreeMap::new();
-            for action in &actions {
-                match action {
-                    Action::Start(start) => {
-                        assert!(
-                            started.insert(start.call.position),
-                            "seed {seed}: position {} ran twice",
-                            start.call.position
-                        );
-                        running.push(start.run);
-                    }
-                    Action::Send(_, Frame::Outcome(o)) => {
-                        outcomes.entry(o.position).or_insert(o.end.clone());
-                    }
-                    _ => (),
-                }
-            }
-            // The next position is decided, then every refused gap it reaches.
-            let mut next = sent.filter(|p| *p == applied + 1);
-            while let Some(position) = next {
-                let decided = outcomes.remove(&position);
-                if let Some(earlier) = refused.remove(&position) {
-                    assert_eq!(decided, Some(earlier), "seed {seed}: position {position}");
-                }
-                applied = position;
-                next = outcomes
-                    .contains_key(&(position + 1))
-                    .then_some(position + 1);
-            }
-            for (position, end) in outcomes {
-                if position > applied && matches!(end, CallOutcome::NotRun(_)) {
-                    refused.entry(position).or_insert(end);
-                }
+    let remember = |received: &mut BTreeMap<u64, ([u8; 32], CallOutcome)>,
+                    actions: &[Action],
+                    applied: u64| {
+        for action in actions {
+            if let Action::Send(_, Frame::Outcome(o)) = action
+                && o.position <= applied
+            {
+                let seen = (o.key, o.end.clone());
+                let old = received.insert(o.position, seen.clone());
+                assert!(
+                    old.as_ref().is_none_or(|o| *o == seen),
+                    "position {} received {old:?} then {seen:?}",
+                    o.position
+                );
             }
         }
+    };
+    let request = |epoch, position, ordinal, acknowledged, argument| Call {
+        epoch,
+        position,
+        ordinal,
+        key: call_key(&INSTANCE, ordinal),
+        form: CallForm::Compute,
+        path: "app@1/m.f".into(),
+        fingerprint: [0; 32],
+        code: [0; 32],
+        grants: GrantSet::default(),
+        definitions: None,
+        argument: vec![argument],
+        acknowledged,
+    };
+    let mut refusals = 0;
+    let mut resumed = 0;
+    let mut recovered_full = 0;
+    let mut gap_refusals = 0;
+    for honest in [false, true] {
+        for seed in 0..50 {
+            let limits = Limits {
+                unacknowledged: 1 + seed % 3,
+                ..limits
+            };
+            let disk = SimDisk::default();
+            disk.compact_after(2 + seed % 9);
+            let mut rng = Rng(seed);
+            let mut host = restart(&disk, [1; 16], limits);
+            let mut started = BTreeSet::new();
+            let mut running = vec![];
+            let mut received = BTreeMap::new();
+            let mut session = 0;
+            let mut epoch = 0;
+            let mut applied = 0;
+            let mut opened = 0;
+            let mut connected = false;
+            let mut compacted = false;
+            let mut refused: BTreeMap<u64, CallOutcome> = BTreeMap::new();
+            for step in 0..4_000u64 {
+                if !connected || step % 500 == 0 {
+                    session += 1;
+                    epoch += 1;
+                    host.connected(session, Some(caller()));
+                    let open = Frame::Open {
+                        stream: [0; 32],
+                        instance: INSTANCE,
+                        epoch,
+                    };
+                    let actions = host.frame(session, open, &mut TestPlace, &TestDigests);
+                    check(seed, &host, &actions);
+                    let [.., Action::Send(_, Frame::Opened { applied: a, .. })] = actions[..]
+                    else {
+                        panic!("seed {seed}: {actions:?}")
+                    };
+                    assert_eq!(a, applied, "seed {seed}: recovery moved applied");
+                    connected = true;
+                    refused.clear();
+                    // Recovery remains available even when no new position can fit.
+                    let full = host.retained().decided == limits.unacknowledged as usize;
+                    let records = disk.journal([0; 16]).unwrap().recover().unwrap();
+                    for entry in records {
+                        if let Entry::Decided {
+                            stream,
+                            position,
+                            key,
+                            ..
+                        } = entry
+                            && stream.stream == [0; 32]
+                        {
+                            let status = Frame::Status(hirsel_remote::frame::CallRef {
+                                epoch,
+                                position,
+                                key,
+                            });
+                            let actions = host.frame(session, status, &mut TestPlace, &TestDigests);
+                            check(seed, &host, &actions);
+                            remember(&mut received, &actions, applied);
+                            if full {
+                                // Even a mismatched duplicate gets its position-level
+                                // response, rather than a retention session refusal.
+                                let mut duplicate = request(epoch, position, position, 0, 0);
+                                duplicate.key = key;
+                                let actions = host.frame(
+                                    session,
+                                    Frame::Call(Box::new(duplicate)),
+                                    &mut TestPlace,
+                                    &TestDigests,
+                                );
+                                check(seed, &host, &actions);
+                                assert!(matches!(
+                                    &actions[..],
+                                    [Action::Send(_, Frame::Outcome(_))]
+                                ));
+                            }
+                            if full
+                                && actions
+                                    .iter()
+                                    .any(|a| matches!(a, Action::Send(_, Frame::Outcome(_))))
+                            {
+                                recovered_full += 1;
+                            }
+                        }
+                    }
+                    if step % 500 == 0 {
+                        // Six more streams, of which the caller may hold four in all.
+                        for _ in 0..6 {
+                            opened += 1;
+                            let other = 1_000_000 + opened;
+                            host.connected(other, Some(caller()));
+                            let open = Frame::Open {
+                                stream: [opened as u8; 32],
+                                instance: INSTANCE,
+                                epoch: 1,
+                            };
+                            let actions = host.frame(other, open, &mut TestPlace, &TestDigests);
+                            check(seed, &host, &actions);
+                            let expected = if opened < limits.streams {
+                                matches!(actions[..], [Action::Send(_, Frame::Opened { .. })])
+                            } else {
+                                actions
+                                    == vec![
+                                        Action::Send(other, Frame::Refused(3)),
+                                        Action::Close(other),
+                                    ]
+                            };
+                            assert!(expected, "seed {seed}: stream {opened}: {actions:?}");
+                        }
+                    }
+                }
+                let before = disk.appends();
+                let full = host.retained().decided == limits.unacknowledged as usize;
+                let mut unacknowledging = false;
+                let mut acknowledging = false;
+                let actions = if !running.is_empty() && (honest || rng.chance(300_000)) {
+                    let run = running.remove(rng.below(running.len()));
+                    host.ended(run, CallOutcome::Ok(vec![1]), None)
+                } else if rng.chance(20_000) {
+                    connected = false;
+                    host.frame(
+                        session,
+                        Frame::Close {
+                            epoch,
+                            acknowledged: applied,
+                        },
+                        &mut TestPlace,
+                        &TestDigests,
+                    )
+                } else {
+                    let position = if honest {
+                        applied + 1
+                    } else {
+                        match rng.below(4) {
+                            0 => applied + 1,
+                            1 => applied + 1 + rng.below(window + 2) as u64,
+                            _ => applied + 1 + rng.below(200_000) as u64,
+                        }
+                    };
+                    let ordinal = if honest {
+                        position
+                    } else {
+                        rng.below(64) as u64
+                    };
+                    let acknowledged = if honest || rng.chance(100_000) {
+                        applied
+                    } else {
+                        0
+                    };
+                    if honest && applied > 0 {
+                        assert!(
+                            received.contains_key(&applied),
+                            "honest caller acknowledges a received outcome"
+                        );
+                    }
+                    unacknowledging = acknowledged == 0;
+                    acknowledging = acknowledged == applied && position == applied + 1;
+                    let call = request(epoch, position, ordinal, acknowledged, rng.below(2) as u8);
+                    host.frame(
+                        session,
+                        Frame::Call(Box::new(call)),
+                        &mut TestPlace,
+                        &TestDigests,
+                    )
+                };
+                check(seed, &host, &actions);
+                let rejected_session = actions
+                    .iter()
+                    .any(|a| matches!(a, Action::Send(_, Frame::Refused(3))));
+                assert!(
+                    !honest || !rejected_session,
+                    "seed {seed}: honest caller refused: {actions:?}"
+                );
+                if full && unacknowledging {
+                    assert_eq!(
+                        actions,
+                        vec![
+                            Action::Send(session, Frame::Refused(3)),
+                            Action::Close(session)
+                        ]
+                    );
+                    assert_eq!(disk.appends(), before, "refusal must not journal anything");
+                    let late = Frame::Call(Box::new(request(
+                        epoch,
+                        applied + 1,
+                        applied + 1,
+                        applied,
+                        0,
+                    )));
+                    assert!(
+                        host.frame(session, late, &mut TestPlace, &TestDigests)
+                            .is_empty(),
+                        "closed session accepted a frame"
+                    );
+                    assert_eq!(disk.appends(), before);
+                }
+                let records = disk.journal([0; 16]).unwrap().recover().unwrap();
+                let mut after = 0;
+                let mut acknowledged = 0;
+                let mut recorded = BTreeSet::new();
+                for entry in records {
+                    match entry {
+                        Entry::Decided {
+                            stream, position, ..
+                        } if stream.stream == [0; 32] => {
+                            after = after.max(position);
+                            recorded.insert(position);
+                        }
+                        Entry::Admitted {
+                            stream, position, ..
+                        } if stream.stream == [0; 32] => after = after.max(position),
+                        Entry::Acknowledged { stream, position } if stream.stream == [0; 32] => {
+                            acknowledged = position;
+                            after = after.max(position);
+                        }
+                        _ => (),
+                    }
+                }
+                if full && unacknowledging {
+                    assert_eq!(after, applied, "refusal moved applied");
+                }
+                if full && acknowledging && after > applied {
+                    resumed += 1;
+                }
+                if rejected_session && !full && after > applied {
+                    gap_refusals += 1;
+                }
+                remember(&mut received, &actions, after);
+                compacted |= received
+                    .keys()
+                    .any(|p| *p <= acknowledged && !recorded.contains(p));
+                for action in &actions {
+                    match action {
+                        Action::Start(start) => {
+                            assert!(
+                                started.insert(start.call.position),
+                                "seed {seed}: position {} ran twice",
+                                start.call.position
+                            );
+                            running.push(start.run);
+                        }
+                        Action::Send(_, Frame::Outcome(o)) => {
+                            if o.position > applied && o.position <= after {
+                                if let Some(earlier) = refused.remove(&o.position) {
+                                    assert_eq!(
+                                        o.end, earlier,
+                                        "seed {seed}: position {} changed refusal",
+                                        o.position
+                                    );
+                                }
+                            } else if o.position > after && matches!(o.end, CallOutcome::NotRun(_))
+                            {
+                                refused.entry(o.position).or_insert(o.end.clone());
+                            }
+                        }
+                        _ => (),
+                    }
+                }
+                applied = after;
+                if rejected_session {
+                    refusals += 1;
+                    connected = false;
+                    let actions = host.disconnected(session);
+                    check(seed, &host, &actions);
+                    refused.clear();
+                }
+                if step % 137 == 136 {
+                    // A real crash ends running callees; recovery records Abandoned.
+                    drop(host);
+                    running.clear();
+                    check_recovery(&disk, limits, [0; 32], &received);
+                    host = restart(&disk, [2; 16], limits);
+                    check(seed, &host, &[]);
+                    connected = false;
+                    refused.clear();
+                }
+            }
+            drop(host);
+            check_recovery(&disk, limits, [0; 32], &received);
+            assert!(
+                compacted,
+                "seed {seed}, honest={honest}: no acknowledged decision left the checkpoint"
+            );
+        }
     }
+    assert!(
+        refusals > 0 && resumed > 0 && recovered_full > 0 && gap_refusals > 0,
+        "refusals={refusals}, resumed={resumed}, recovered_full={recovered_full}, gap_refusals={gap_refusals}"
+    );
 }

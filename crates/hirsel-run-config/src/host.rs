@@ -11,7 +11,7 @@
 //!               "grants": {"tasks": "tasks.cooperative@1"}, "definitions": null}],
 //!  "journal": {"provider": "journal.dir@1", "path": "/var/lib/hirsel/calls"},
 //!  "recording": "record", "tapes": "/var/lib/hirsel/tapes",
-//!  "runs": 1, "queue": 64, "streams": 65536}
+//!  "runs": 1, "queue": 64, "streams": 65536, "unacknowledged": 65}
 //! ```
 //!
 //! `clients` null serves clients without certificates, all of them the one caller whose
@@ -54,6 +54,9 @@ pub struct HostConfig {
     /// Call streams one caller holds (default 65536).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub streams: Option<u64>,
+    /// Decided positions retained per stream (default runs + queue).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unacknowledged: Option<u64>,
     /// The largest frame read, in bytes (default 64 MiB).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub frame_bytes: Option<u64>,
@@ -254,6 +257,13 @@ impl HostConfig {
                 _ => {}
             }
         }
+        match config.unacknowledged {
+            Some(0) => return Err(invalid("host.unacknowledged", "zero")),
+            Some(v) if v == config.runs().saturating_add(config.queue()) => {
+                config.unacknowledged = None;
+            }
+            _ => {}
+        }
         Ok(config)
     }
     pub fn runs(&self) -> u64 {
@@ -264,6 +274,10 @@ impl HostConfig {
     }
     pub fn streams(&self) -> u64 {
         self.streams.unwrap_or(DEFAULT_STREAMS)
+    }
+    pub fn unacknowledged(&self) -> u64 {
+        self.unacknowledged
+            .unwrap_or_else(|| self.runs().saturating_add(self.queue()))
     }
     pub fn frame_bytes(&self) -> u64 {
         self.frame_bytes.unwrap_or(DEFAULT_FRAME_BYTES)

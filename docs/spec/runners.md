@@ -698,6 +698,17 @@ reopens. A session so holds at most `runs + queue - 1` refused gaps. The host de
 the position before the code and authority checks, so a call those refuse still consumes
 its position.
 
+Each stream retains at most `unacknowledged` decided positions, including admitted calls
+whose callees have not ended. When the caller holds too many outcomes unacknowledged
+(`applied - acknowledged` reaches that bound), a request for a new position is refused
+with the session-level `Refused(Overloaded())` and the connection closes. The refusal is
+not recorded, decides no position and leaves `applied` unchanged. Acknowledgements are
+processed before this check, and duplicates, `Status`, `Cancel` and `Close` remain
+available at full retention. A caller can reopen, recover its outcomes, acknowledge them
+and resume. Deciding a previously refused gap also respects the bound; if it is full,
+the session closes with the same refusal before another gap is decided. Thus a stream
+keeps at most `unacknowledged` decided positions and `runs + queue - 1` session gaps.
+
 The caller's commit point is the `Call` frame written, and it never sends a call twice.
 After a lost connection it reconnects up to `reconnect` times; positions the host reports
 applied are resolved with `Status` (answered with the stored outcome, `Running` or
@@ -720,7 +731,8 @@ the program's own package defines:
  "admission": {"code": "admit.safe@1"},
  "journal": {"provider": "journal.dir@1", "path": "/var/lib/hirsel/calls"},
  "recording": "record", "tapes": "/var/lib/hirsel/tapes",
- "runs": 1, "queue": 64, "streams": 65536, "frame_bytes": 67108864}
+ "runs": 1, "queue": 64, "streams": 65536, "unacknowledged": 65,
+ "frame_bytes": 67108864}
 ```
 
 `listen` is an endpoint as in the runner entry. With `clients` trust anchors the host
@@ -779,6 +791,10 @@ holds: an `Open` of another is `Refused(Overloaded())` before its stream is reco
 Until the administrative purge ([STORE-12](storage.md#store-12-transactions-at-a-runner))
 exists a host keeps every stream it recorded, so the bound counts every caller run that
 has opened one.
+`unacknowledged` defaults to `runs + queue` and bounds the decided positions retained per
+stream until acknowledged; zero is refused as `host.unacknowledged`. A full stream
+refuses new positions with the session-level `Refused(Overloaded())` and closes without
+recording that refusal or advancing `applied`, as described above.
 
 **`db@1`** (Reserved) runs compute and transact callees inside the writer of a store
 ([STORE-12](storage.md#store-12-transactions-at-a-runner)).

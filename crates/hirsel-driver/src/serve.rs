@@ -186,6 +186,7 @@ pub fn serve(
             runs: config.runs(),
             queue: config.queue(),
             streams: config.streams(),
+            unacknowledged: config.unacknowledged(),
         },
     )
     .map_err(|e| host_error("the call journal", e))?;

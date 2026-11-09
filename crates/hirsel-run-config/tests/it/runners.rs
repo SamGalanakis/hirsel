@@ -421,6 +421,15 @@ fn a_host_configuration_validates_with_refused_twins() {
     let valid = |config: Value| host::HostConfig::validate(&serde_json::to_vec(&config).unwrap());
     let config = valid(host()).unwrap();
     assert_eq!((config.runs(), config.queue()), (1, 64));
+    assert_eq!(config.unacknowledged(), 65);
+    let larger = valid(with(host(), "runs", json!(7))).unwrap();
+    assert_eq!(larger.unacknowledged(), 71);
+    let explicit = valid(with(host(), "unacknowledged", json!(2))).unwrap();
+    assert_eq!(explicit.unacknowledged(), 2);
+    host_refused(
+        with(host(), "unacknowledged", json!(0)),
+        "host.unacknowledged",
+    );
     let tcp = json!({"tcp": {"address": "127.0.0.1", "service": "7443"}});
     valid(with(host(), "listen", tcp)).unwrap();
     host_refused(

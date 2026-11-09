@@ -21,6 +21,9 @@
 //!   each `Overloaded` when it is the next) until the session reopens, so a session keeps
 //!   at most `runs + queue - 1` gaps and one frame decides at most that many;
 //! - a position at or below the acknowledged one is stale and refused.
+//! - at `unacknowledged` retained positions a new position gets the session-level
+//!   `Refused(Overloaded())` and Close, without a decision or journal record. Acknowledging
+//!   finished outcomes and recovering existing decisions remain available.
 //!
 //! The stream position is decided before the code and authority checks of RUN-8 (whose
 //! order the spec gives for a single request), so every decision, refusals included, is
@@ -128,6 +131,8 @@ pub struct Limits {
     pub queue: u64,
     /// Streams one caller holds.
     pub streams: u64,
+    /// Decided positions one stream retains until acknowledged.
+    pub unacknowledged: u64,
 }
 impl Default for Limits {
     fn default() -> Self {
@@ -135,6 +140,7 @@ impl Default for Limits {
             runs: 1,
             queue: 64,
             streams: 65_536,
+            unacknowledged: 65,
         }
     }
 }
@@ -202,6 +208,8 @@ fn stream_of<'a>(streams: &'a mut BTreeMap<StreamKey, Stream>, key: &StreamKey) 
 struct Session {
     caller: Option<Caller>,
     stream: Option<StreamKey>,
+    /// A refusal was sent; discard further frames until the transport disconnects.
+    closing: bool,
 }
 struct Run {
     stream: StreamKey,
@@ -436,6 +444,7 @@ impl Host {
             Session {
                 caller,
                 stream: None,
+                closing: false,
             },
         );
     }
@@ -541,6 +550,9 @@ impl Host {
         let Some(current) = self.sessions.get(&session) else {
             return actions;
         };
+        if current.closing {
+            return actions;
+        }
         if self.failure.is_some() {
             self.sessions.remove(&session);
             actions.push(Action::Close(session));
@@ -791,6 +803,10 @@ impl Host {
             // A duplicate: its outcome now if it has one, else when its callee ends.
             return self.resend(session, key, call.reference(), actions);
         }
+        if self.retention_full(session, key, actions) {
+            return;
+        }
+        let stream = self.streams.get_mut(key).unwrap();
         // Past the window no capacity could admit the position: it is refused before
         // anything is stored, and so is every later one this session sends.
         let window = stream
@@ -922,11 +938,36 @@ impl Host {
         while self.failure.is_none() {
             let stream = self.streams.get_mut(key).unwrap();
             let next = stream.applied + 1;
+            if !stream.gaps.contains_key(&next) {
+                break;
+            }
+            if self.retention_full(session, key, actions) {
+                break;
+            }
+            let stream = self.streams.get_mut(key).unwrap();
             let Some((k, d)) = stream.gaps.remove(&next) else {
                 break;
             };
             self.decide_refused(key, next, k, d, REJECTED, vec![], session, actions);
         }
+    }
+
+    /// Refuse the session before another decision would exceed the stream's retention.
+    /// Keep its binding until disconnect so the normal lost-session cancellation runs.
+    fn retention_full(
+        &mut self,
+        session: SessionId,
+        key: &StreamKey,
+        actions: &mut Vec<Action>,
+    ) -> bool {
+        let stream = &self.streams[key];
+        if stream.applied - stream.acknowledged < self.limits.unacknowledged {
+            return false;
+        }
+        self.sessions.get_mut(&session).unwrap().closing = true;
+        actions.push(Action::Send(session, Frame::Refused(OVERLOADED)));
+        actions.push(Action::Close(session));
+        true
     }
 
     #[allow(clippy::too_many_arguments)]

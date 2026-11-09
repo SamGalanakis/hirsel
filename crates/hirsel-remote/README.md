@@ -26,7 +26,10 @@ refused and stays refused until the session reopens. A higher epoch fences the
 old session. `Status` answers a stored outcome, `Running` or `Unknown`;
 `Cancel` cancels a queued call at once and forwards to a running one. The
 position check runs before the RUN-8 code and authority checks, so a refused
-call still consumes its position and every position has a stored outcome.
+call still consumes its position and every decided position has a stored outcome.
+Each stream retains at most `unacknowledged` positions. At full retention a new position
+gets a session-level `Refused(Overloaded())` and close, without being decided or recorded;
+acknowledgement and recovery remain available.
 
 **Client** (`client.rs`). The caller's half: the commit point is the `Call`
 frame leaving; a call never resent. A lost connection reconnects up to the

@@ -18,8 +18,8 @@ implementation is converging on it:
 - **Planned (their names do not resolve yet):** everything else in this part.
 - **Open designs,** where this part states the contract and the declarations are still to
   be written: the serving primitive behind `db@1` (STORE-12); the declarations of the
-  authority seam and its grant (STORE-11); the wire format of the subscription feed and
-  the client ingress (STORE-16, STORE-17); and the declaration of narrowing (STORE-3).
+  authority seam and its grant (STORE-11); and the wire format of the subscription feed
+  and the client ingress (STORE-16, STORE-17).
 - Items marked **Reserved** have no implementation owner.
 
 A **store** is one strictly serializable, ordered key-value database: a **history** of
@@ -161,14 +161,153 @@ returns no authority, performs no effect outside the store and cannot open a nes
 transaction ([CAP-3](capabilities.md#cap-3-restriction)). That is what lets the store run
 a body again ([STORE-2](#store-2-transactions)).
 
+**Byte operations.** A body reads and writes byte keys through its `Tx`, with `RangeBound`
+and `ScanOrder` as [STORE-5](#store-5-tables) declares them:
+
+```text
+fn store.tx_get(tx: Tx, key: Bytes) -> Result[Option[Bytes], TxError]
+fn store.tx_range(tx: Tx, from: RangeBound[Bytes], to: RangeBound[Bytes], limit: u64, order: ScanOrder) -> Result[List[(Bytes, Bytes)], TxError]
+fn store.tx_put(mut tx: Tx, take key: Bytes, take value: Bytes) -> Result[(), TxError]
+fn store.tx_delete(mut tx: Tx, take key: Bytes) -> Result[(), TxError]
+```
+
+`tx_get`, `tx_put` and `tx_delete` require a key outside the reserved namespace `hirsel.`
+([FACT-1](contracts.md#fact-1-contracts)); `tx_range` passes over the keys in it as if they
+were absent. They check, in order: argument validity (`limit` of at least 1), else
+`InvalidInput()`; access, below; and the configured limits, else `Limit(..)`. `tx_range`
+returns at most `limit` entries between `from` and `to` in key order, as fresh copies. A
+failed operation changes nothing.
+
 **Narrowing.** A `Tx` can only be narrowed, as every capability can
-([CAP-1](capabilities.md#cap-1-authority)): to a set of key ranges, each of a
-named table or of raw keys, and to read-only access. A body passes the narrowed `Tx` to
-the code it calls. An access outside it changes nothing and returns `OutOfScope()`; the
-reads a library makes of its own reserved rows on behalf of an in-scope operation are
-within it. Code that holds only a narrowed `Tx` cannot reach its parent's rows, so an
-entry that narrows to its caller's tenant before calling anything else cannot leak
-another's.
+([CAP-1](capabilities.md#cap-1-authority)): to a **key scope**, a set of byte keys each
+with an access, read or read and write.
+
+```text
+Access   = Read() | ReadWrite()
+KeyScope   // opaque: copyable, data, inert, sendable; a set of byte keys, each with an Access
+fn store.keys(from: RangeBound[Bytes], to: RangeBound[Bytes], access: Access) -> KeyScope
+fn store.all(access: Access) -> KeyScope
+fn store.join(a: KeyScope, b: KeyScope) -> KeyScope
+fn store.narrow[R: inert](mut tx: Tx, scope: KeyScope, body: fn(mut sub: Tx) -> R uses {}) -> Result[R, TxError]
+fn store.narrow_read[R: inert](tx: Tx, scope: KeyScope, body: fn(sub: Tx) -> R uses {}) -> Result[R, TxError]
+```
+
+- `store.keys` is the keys between `from` and `to` outside the reserved namespace, each
+  with `access`; `store.all` is every key, the reserved namespace included. `store.join`
+  is the union, each key with the stronger of its two accesses. A key scope is data
+  without authority: it grants nothing until a `Tx` is narrowed to it. Two key scopes
+  are equal when they hold the same keys with the same accesses.
+- **Scope of a `Tx`.** The `Tx` a transaction or query entry receives has the scope
+  `store.all(ReadWrite())`. `store.narrow` and `store.narrow_read` run `body` once with a
+  `Tx` of the same transaction whose scope is exactly `scope`, and return `Ok` of its
+  result. They return `OutOfScope()` without running `body` unless `scope` is
+  **within** `tx`'s scope: every key it holds, `tx`'s scope holds with an access at
+  least as strong (`ReadWrite()` is stronger than `Read()`). So a narrowing of a
+  narrowing is within both, and the relation is reflexive and transitive.
+- **What the body holds.** `body` is `uses {}` and its result `inert`
+  ([CAP-3](capabilities.md#cap-3-restriction)), so it cannot capture the parent `Tx`
+  and cannot keep or return the narrowed one
+  ([MODE-6](ownership.md#mode-6-scoped-capabilities)): code that holds only the narrowed
+  `Tx` cannot reach its parent's rows. The narrowed `Tx` reads the same state and its
+  writes are the transaction's writes. `store.narrow_read` takes a borrowed `Tx`, as a
+  query entry holds, and gives `body` a borrowed one, which cannot write.
+- **Access.** Every operation checks each key before it reads or writes it, and a range
+  before it reads any of it: a key or range outside the scope returns `OutOfScope()`, and
+  a write to a key the scope holds only with `Read()` returns `ReadOnly()`. A range is
+  within the scope when every key in it between its bounds is held, except that a byte
+  range needs none of the reserved keys it passes over. The check reads nothing, so a
+  refused access neither depends on nor reveals a row outside the scope.
+- **Libraries.** The engine makes no exception for a library's own rows: a library
+  reads and writes them through the same check, and gives the keys an operation needs
+  in the scopes it builds. `std@1/table` builds two:
+
+```text
+fn table.scope[K: key + serializable, V: serializable](t: Table[K, V], access: Access) -> KeyScope
+fn table.scope_keys[K: key + serializable, V: serializable](tx: Tx, t: Table[K, V], from: RangeBound[K], to: RangeBound[K], access: Access) -> Result[KeyScope, TxError]
+```
+
+  `table.scope` holds the whole table with `access`: its rows and its **catalog entry**,
+  the one reserved row where the library keeps everything it reads about the table (its
+  schema history, its renames and any migration mark). It reads nothing, so it serves a
+  table that the body will create. `table.scope_keys` holds the rows whose keys lie
+  between `from` and `to` with `access`, and the catalog entry with `Read()`, so that
+  get, put, delete, range and history work on those rows and nothing can create, drop
+  or rename the table. It reads the catalog entry through `tx` to encode the bounds, and
+  fails as `table.get` does when that read fails; a table whose stored key schema orders
+  `K`'s fields differently from `K` has no key interval for a range of `K`, so it returns
+  `Schema(KeyMismatch())`. Neither holds any other table's catalog entry, so a narrowed
+  `Tx` learns nothing of a table outside its scope, not even whether it exists.
+
+A narrowing is computation inside one run of a body. It records nothing, and
+re-execution computes it again ([STORE-15](#store-15-evaluation-and-re-execution)).
+Accesses through a narrowed `Tx` enter the run's one access set
+([STORE-14](#store-14-tracked-access)); `table.scope_keys`'s catalog read is tracked like
+any other, and a refused access enters nothing. An entry that narrows to its caller's
+rows before calling anything else cannot leak another caller's:
+
+```hirsel
+fn balances() -> Table[u64, u64] {
+  table.named("balances")
+}
+
+fn owners() -> Table[u64, String] {
+  table.named("owners")
+}
+
+@serializable
+type Transfer { from: u64, to: u64, cents: u64 }
+
+@serializable
+type Refusal = NotYours(u64) | NoAccount(u64) | Insufficient(u64) | Db(TxError)
+
+// Checks the owner row through the full Tx, then hands the move only the two balances.
+pub fn transfer(mut tx: Tx, call: CallInfo, req: Transfer) -> Result[u64, Refusal] {
+  if table.get(tx, owners(), req.from) ? Db != Some(call_info.caller(call)) {
+    return Error(NotYours(req.from))
+  }
+  let mine = table.scope_keys(tx, balances(), Included(req.from), Included(req.from), ReadWrite()) ? Db
+  let theirs = table.scope_keys(tx, balances(), Included(req.to), Included(req.to), ReadWrite()) ? Db
+  store.narrow(mut tx, store.join(mine, theirs), fn(mut sub: Tx) -> Result[u64, Refusal] {
+    move_cents(mut sub, req)
+  }) ? Db
+}
+
+fn move_cents(mut tx: Tx, req: Transfer) -> Result[u64, Refusal] {
+  let Some(have) = table.get(tx, balances(), req.from) ? Db else { return Error(NoAccount(req.from)) }
+  let Some(other) = table.get(tx, balances(), req.to) ? Db else { return Error(NoAccount(req.to)) }
+  if have < req.cents { return Error(Insufficient(have)) }
+  table.put(mut tx, balances(), req.from, have - req.cents) ? Db
+  table.put(mut tx, balances(), req.to, other + req.cents) ? Db
+  Ok(req.cents)
+}
+
+// A query entry narrows its borrowed Tx to the caller's one balance, read only.
+pub fn balance(tx: Tx, call: CallInfo, account: u64) -> Result[u64, Refusal] {
+  if table.get(tx, owners(), account) ? Db != Some(call_info.caller(call)) {
+    return Error(NotYours(account))
+  }
+  let only = table.scope_keys(tx, balances(), Included(account), Included(account), Read()) ? Db
+  let read = store.narrow_read(tx, only, fn(sub: Tx) -> Result[Option[u64], TxError] {
+    table.get(sub, balances(), account)
+  }) ? Db
+  match read ? Db {
+    Some(cents) => Ok(cents),
+    None() => Error(NoAccount(account)),
+  }
+}
+```
+
+In `move_cents`, a `table.get` of any third account returns `OutOfScope()`, as does a
+`table.create(mut sub, balances())`, which needs `table.scope(balances(), ReadWrite())`.
+
+**Cost.** The `Tx` holds its scope as sorted, disjoint intervals, adjacent ones of equal
+access merged. Under `db.local@1` a key check on an unnarrowed `Tx` is one branch, and on
+a narrowed one a binary search over its intervals, comparing the key in place; a range
+check walks the intervals it overlaps. Neither allocates. `store.narrow` installs the
+scope in the parent `Tx` for the duration of `body` and restores it, copying no state, no
+write set and no access set; checking that `scope` is within the parent's is one merge
+pass over both interval lists. A key scope allocates its intervals once, when it is
+built.
 
 Every read and write a body makes goes through its `Tx` and is tracked
 ([STORE-14](#store-14-tracked-access)). Whether a read may wait on storage is the engine
@@ -242,10 +381,12 @@ fn table.history(tx: Tx, name: String) -> Result[List[SchemaEntry], TxError]
 - `history` returns the named table's schema history ([STORE-9](#store-9-schema-history-renames-and-migrations)).
 
 Each operation checks, in order: argument validity (a valid name; `limit` of at least 1),
-else `InvalidInput()`; access (a write through a read-only `Tx`, else `ReadOnly()`; an
-access outside a narrowed `Tx`, else `OutOfScope()`); the table exists (or, for `create`,
-does not), else `NoTable()` or `TableExists()`; the table's current key and value schemas match `K` and `V`
-([STORE-7](#store-7-rows-and-storage-identity)), else `Schema(..)`; a write to a table
+else `InvalidInput()`; access to the table's catalog entry, read for `get`, `put`,
+`delete`, `range` and `history` and written for `create`, `drop` and `rename`, else
+`OutOfScope()` or `ReadOnly()` ([STORE-3](#store-3-transaction-scope)); the table exists
+(or, for `create`, does not), else `NoTable()` or `TableExists()`; the table's current key and value schemas match `K` and `V`
+([STORE-7](#store-7-rows-and-storage-identity)), else `Schema(..)`; access to the row key or
+key range the operation names, else `OutOfScope()` or `ReadOnly()`; a write to a table
 under migration, else `Migrating()`; and the configured limits, else `Limit(..)`. A failed
 operation changes nothing, and the transaction continues; the body decides whether to
 abort. Tables carry no grants of their own: a body limits what the code it calls can
@@ -253,9 +394,8 @@ reach by narrowing its `Tx` ([STORE-3](#store-3-transaction-scope)).
 
 `std@1/table` is ordinary Hirsel code over the store's byte keys. It keeps its catalog and
 rows under keys beginning with `hirsel.`, the namespace of the engine and its libraries:
-the byte operations `store.tx_get`, `store.tx_put`, `store.tx_delete` and `store.tx_range`
-neither read nor write a key in it ([FACT-1](contracts.md#fact-1-contracts)), so no
-program observes how a library encodes its rows.
+the byte operations ([STORE-3](#store-3-transaction-scope)) neither read nor write a key
+in it, so no program observes how a library encodes its rows.
 
 ```hirsel
 @serializable

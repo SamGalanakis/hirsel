@@ -186,11 +186,14 @@ fn probe(d: Dir, p: Path) -> u64 {
 **Narrowing.** A narrowing operation mints a new capability of its argument's type whose
 authority is within its argument's, served by the same provider: `dir.narrow` to a
 subdirectory, `dir.read_only` to read-only access, `net.narrow` and `proc.narrow` to rules
-within their argument's, and `env.narrow` to a subset of names. A request outside the
-argument's authority mints nothing: it returns `NotGranted()`, or `FileFault` for a path
-that escapes a `Dir`. Each use checks the narrowed capability's own authority before any
-host effect, so code holding only it cannot reach its parent's. Narrowings are run inputs,
-recorded and replayed like the operations that use them.
+within their argument's, `env.narrow` to a subset of names, and `store.narrow` and
+`store.narrow_read` to a key scope within a `Tx`'s
+([STORE-3](storage.md#store-3-transaction-scope)). A request outside the argument's
+authority mints nothing: it returns `NotGranted()`, `FileFault` for a path that escapes a
+`Dir`, or `OutOfScope()` for a `Tx`. Each use checks the narrowed capability's own
+authority before any effect, so code holding only it cannot reach its parent's.
+Narrowings of host capabilities are run inputs, recorded and replayed like the operations
+that use them; narrowing a `Tx` is computation inside a body and records nothing.
 
 **Grant subset.** One run configuration's grants are *within* another's when they hold no
 authority the other lacks: `Unsafe` only if the other grants it; each Io projection (stdin,

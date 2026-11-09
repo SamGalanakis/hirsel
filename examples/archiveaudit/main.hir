@@ -145,7 +145,7 @@ fn admit(name: String, directory: bool, size: u64, mut seen: Set[String], total:
   Ok(())
 }
 
-fn scan_tar(take data: Bytes) -> Result[List[Entry], String] {
+fn scan_tar(take data: Bytes) -> Result[unique List[Entry], String] {
   let mut source = Source(data: take data, at: 0)
   let mut reader = bufio.new(CHUNK)
   let mut archive = tar.reader(None())
@@ -209,7 +209,7 @@ fn scan_tar(take data: Bytes) -> Result[List[Entry], String] {
   Ok(take entries)
 }
 
-fn scan_zip(data: Bytes) -> Result[List[Entry], String] {
+fn scan_zip(data: Bytes) -> Result[unique List[Entry], String] {
   let Ok(members) = zip.entries(data) else {
     return Error("zip_malformed")
   }
@@ -289,7 +289,7 @@ fn scan(data: Bytes, name: String) -> Result[List[Entry], String] {
   Ok(take entries)
 }
 
-fn field_text(fields: Map[String, json.Value], key: String) -> Result[String, String] {
+fn field_text(fields: Map[String, json.Value], key: String) -> Result[unique String, String] {
   match map.get(fields, key) {
     Some(Text(value)) => Ok(unique value),
     _ => Error("manifest_field"),

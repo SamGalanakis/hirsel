@@ -50,7 +50,7 @@ fn read(directory: Dir, name: Path) -> Result[Bytes, model.Problem] {
 }
 
 fn execute(directory: Dir, tasks: Tasks, options: Options) -> Result[
-  Bytes,
+  unique Bytes,
   model.Problem
 ] {
   let data = read(directory, options.file)?

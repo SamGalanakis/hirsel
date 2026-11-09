@@ -558,7 +558,7 @@ pub fn load_assets(dir: Dir) -> Result[unique Map[String, Asset], FileError] {
   Ok(take files)
 }
 
-fn etag_of(body: Bytes) -> String uses {} {
+fn etag_of(body: Bytes) -> unique String uses {} {
   let digest = match u64.format_radix(fnv.digest(body), 16) {
     Ok(hex) => take hex,
     Error(_) => "0",

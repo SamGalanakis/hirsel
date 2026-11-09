@@ -43,11 +43,11 @@ fn text_value(s: String) -> json.Value uses {} {
 // A todo's JSON object and its decoding are generated from Todo's shape (CT-5).
 fn todo_value(t: Todo) -> json.Value uses {} = comptime derive.json_value(shape(Todo))
 
-fn todo_from(value: json.Value) -> Result[Todo, String] uses {} = comptime derive.from_json(
+fn todo_from(value: json.Value) -> Result[unique Todo, String] uses {} = comptime derive.from_json(
   shape(Todo)
 )
 
-fn todo_json(t: Todo) -> String uses {} {
+fn todo_json(t: Todo) -> unique String uses {} {
   match json.stringify(todo_value(t)) {
     Ok(s) => take s,
     Error(_) => "{}",
@@ -62,7 +62,7 @@ fn list_value(todos: List[Todo]) -> json.Value uses {} {
   Array(take items)
 }
 
-fn store_json(st: Store) -> String uses {} {
+fn store_json(st: Store) -> unique String uses {} {
   let mut fields: Map[String, json.Value] = map.empty()
   map.insert(mut fields, "next_id", Number(u64.to_string(st.next_id)))
   map.insert(mut fields, "todos", list_value(st.todos))
@@ -72,7 +72,7 @@ fn store_json(st: Store) -> String uses {} {
   }
 }
 
-fn error_json(message: String) -> String uses {} {
+fn error_json(message: String) -> unique String uses {} {
   let mut fields: Map[String, json.Value] = map.empty()
   map.insert(mut fields, "error", text_value(message))
   match json.stringify(Object(take fields)) {
@@ -112,7 +112,7 @@ fn parse_object(body: Bytes) -> Option[Map[String, json.Value]] uses {} {
   }
 }
 
-fn parse_store(take text: String) -> Result[Store, ServerError] uses {} {
+fn parse_store(take text: String) -> Result[unique Store, ServerError] uses {} {
   let Ok(Object(fields)) = json.parse(take text) else {
     return Error(Corrupt("state is not a JSON object"))
   }
@@ -133,7 +133,7 @@ fn parse_store(take text: String) -> Result[Store, ServerError] uses {} {
 }
 
 // ---- persistence ----
-fn load(dir: Dir) -> Result[Store, ServerError] {
+fn load(dir: Dir) -> Result[unique Store, ServerError] {
   match file.read_bytes(dir, path.of(STATE)) {
     Ok(data) => {
       let Ok(text) = string.from_bytes(copy data) else {
@@ -174,7 +174,7 @@ fn write_loop(tasks: Tasks, dir: Dir, take receiver: Receiver[SaveJob]) -> () {
 }
 
 // ---- routing ----
-fn not_found() -> Reply uses {} {
+fn not_found() -> unique Reply uses {} {
   Reply(status: 404u16, body: error_json("not found"), allow: "", save: None())
 }
 
@@ -210,7 +210,7 @@ fn find(todos: List[Todo], id: u64) -> Option[u64] uses {} {
 }
 
 // The caller has already bumped the version; the snapshot goes to the writer task.
-fn snapshot_reply(st: Store, status: u16, take body: unique String) -> Reply uses {} {
+fn snapshot_reply(st: Store, status: u16, take body: unique String) -> unique Reply uses {} {
   Reply(
     status: status,
     body: take body,

@@ -24,12 +24,12 @@ pub type Config = Version1(V1) | Version2(V2)
 pub type ConfigError = TooLarge | InvalidJson | InvalidShape | UnknownVersion | EmptyName | RetryRange | UnsupportedTarget | Encode
 
 fn v1_decode(wire: json.Value, mut check: schema.CheckState) -> Result[
-  V1,
+  unique V1,
   schema.SchemaError
 ] uses {} = comptime derive.schema_decode(shape(V1), schema.strict_policy())
 
 fn v2_decode(wire: json.Value, mut check: schema.CheckState) -> Result[
-  V2,
+  unique V2,
   schema.SchemaError
 ] uses {} = comptime derive.schema_decode(shape(V2), schema.strict_policy())
 

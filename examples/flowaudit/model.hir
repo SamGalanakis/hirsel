@@ -48,19 +48,19 @@ pub type Topology {
   arcs: List[Edge],
 }
 
-fn arc_from_json(value: json.Value) -> Result[Arc, String] uses {} = comptime derive.from_json(
+fn arc_from_json(value: json.Value) -> Result[unique Arc, String] uses {} = comptime derive.from_json(
   shape(Arc)
 )
 
-fn override_from_json(value: json.Value) -> Result[Override, String] uses {} = comptime derive.from_json(
+fn override_from_json(value: json.Value) -> Result[unique Override, String] uses {} = comptime derive.from_json(
   shape(Override)
 )
 
-fn scenario_from_json(value: json.Value) -> Result[Scenario, String] uses {} = comptime derive.from_json(
+fn scenario_from_json(value: json.Value) -> Result[unique Scenario, String] uses {} = comptime derive.from_json(
   shape(Scenario)
 )
 
-fn manifest_from_json(value: json.Value) -> Result[Manifest, String] uses {} = comptime derive.from_json(
+fn manifest_from_json(value: json.Value) -> Result[unique Manifest, String] uses {} = comptime derive.from_json(
   shape(Manifest)
 )
 

@@ -1,6 +1,6 @@
 // Casbin default_effector.go:64-91, c35c93d (Apache-2.0): allow AND
 // no deny. We retain all matching IDs, deliberately avoiding its short circuit.
-fn fold(policy: model.Policy, query: model.Query) -> model.Decision uses {} {
+fn fold(policy: model.Policy, query: model.Query) -> unique model.Decision uses {} {
   let principal_test = matchers.principal(unique query.principal)
   let mut held: List[String] = []
   for principal in policy.principals {

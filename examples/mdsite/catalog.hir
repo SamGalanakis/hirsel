@@ -1,6 +1,7 @@
 // Go filepath.walkDir path.go:319-346, ebe2feef (BSD-3-Clause).
 // Sorted direct children, visit before descent, propagate the first error.
 // An explicit bounded stack replaces recursion; symlinks are rejected.
+@preserves_unique(out)
 fn discover(
   d: Dir,
   root: String,

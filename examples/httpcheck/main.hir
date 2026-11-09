@@ -14,7 +14,7 @@ type Step {
   pointers: List[(json_pointer.Pointer, json.Value)],
 }
 
-fn field_text(fields: Map[String, json.Value], key: String) -> Result[String, AppError] uses {} {
+fn field_text(fields: Map[String, json.Value], key: String) -> Result[unique String, AppError] uses {} {
   let Some(field) = map.get(fields, key) else {
     return Error(Scenario())
   }

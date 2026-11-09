@@ -861,6 +861,11 @@ Transact and query calls travel as `Call` frames of form `Transact()` or `Query(
 transact call's `epoch` and `position` are its call-stream request, and a query uses
 position 0, which no stream decides. The outcomes are those of the providers table.
 
+Its host also serves clients, who call the entries it exports to them over a WebSocket
+and hold rows at commit versions ([STORE-17](storage.md#store-17-clients)); a client call
+is a transact or query call by path on the client's own stream, delivered to the head's
+inbox like any other, and never selects code.
+
 ## Re-execution
 
 A recorded runner call is re-executed as

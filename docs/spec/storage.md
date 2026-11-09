@@ -17,9 +17,6 @@ implementation is converging on it:
   `Injected()`; `store.sequence`. The [standard library](std-library.md) lists the shipped
   operations until then. The history format (STORE-11) replaces that layout.
 - **Planned (their names do not resolve yet):** everything else in this part.
-- **Open designs,** where this part states the contract and the declarations are still to
-  be written: the wire format of the subscription feed and the client ingress (STORE-16,
-  STORE-17).
 - Items marked **Reserved** have no implementation owner.
 
 A **store** is one strictly serializable, ordered key-value database: a **history** of
@@ -1076,7 +1073,9 @@ closure, a code address or a name the caller chose. The head resolves it against
 `entries`, whose identities are those of the head run's own revision: a path it does not
 serve, or serves in the other form, is `NotRun(Denied())`; a path it serves whose
 fingerprint or code hash differs is `NotRun(VersionMismatch())`, reporting the head's
-hashes as missing. The head never loads code to serve a call. These are, for a place,
+hashes as missing. A client's call names only path and fingerprint
+([STORE-17](#store-17-clients)) and is resolved on those. The head never loads code to
+serve a call. These are, for a place,
 check 3 and the allowlist of check 4 of [RUN-8](runners.md#run-8-identity-and-arrival);
 the host makes the other checks before the call reaches the head.
 
@@ -1149,7 +1148,7 @@ below says. `Denied()` and `Rejected()` are the runner's `NotRun(Denied())` and
 - **Call streams.** Each caller sends its transact calls to a place on an ordered call
   stream, so the state a store keeps grows with the number of callers, not of calls. A
   stream belongs to one caller at one store: a caller run, with identity
-  `H("hirsel.stream.v1", caller name, run instance)`, or a client session
+  `H("hirsel.stream.v1", caller name, run instance)`, or a client instance
   ([STORE-17](#store-17-clients)); every stream identity is 32 bytes, and a request whose
   identity is not is `NotRun(Rejected())`. Under the reserved key `hirsel.streams/`
   followed by the identity, the store keeps the stream's **head row**: its `epoch`, its
@@ -1250,8 +1249,8 @@ such as fetching ahead of a run and placement statistics, may approximate it.
 ### STORE-15: Evaluation and re-execution
 
 **Evaluation** runs one call record against the state at one version and commits
-nothing. It yields the outcome bytes, the write set and the access set
-([STORE-14](#store-14-tracked-access)). It is the engine's one way to run a body: a
+nothing. It yields the outcome bytes, the write set, the access set
+([STORE-14](#store-14-tracked-access)) and the watch set ([STORE-16](#store-16-subscriptions)). It is the engine's one way to run a body: a
 commit is an evaluation at the head followed by an advance of the history, and a query is
 the evaluation of a query entry. Local, served, replicated and re-executed calls evaluate
 alike: the engine decodes the argument bytes ([STORE-2](#store-2-transactions)) and applies
@@ -1284,67 +1283,331 @@ differences between revisions.
 
 ### STORE-16: Subscriptions
 
-A **subscription** registers a set of keys and key ranges with a store: the read part of
-a query's access set ([STORE-14](#store-14-tracked-access)), or a range an entry granted.
-For each commit, the engine's **matcher** compares the commit's write set with the
-registered sets and notifies each subscription it touches, with one of two payloads:
+A **subscription** is a query entry ([STORE-2](#store-2-transactions)), with its caller and
+argument, kept current. Each evaluation of it ([STORE-15](#store-15-evaluation-and-re-execution))
+registers two sets with the store:
 
-- **stale**: the subscription's query must be evaluated again, at that commit's version;
-- **the matched writes**: the puts and deletes that fell inside the registered set.
+- its **read set**, the reads of its access set ([STORE-14](#store-14-tracked-access)). A
+  commit that writes into it makes the subscription **stale**: its query is evaluated again
+  at that commit's version, and its new outcome, read set and watch set replace the old.
+- its **watch set**, the key ranges the run watched. The writes of a commit that fall inside
+  it are the **matched writes**, delivered as rows without evaluating anything.
 
-One mechanism serves every live read. A maintained view is a library that writes derived
-tables, either in the transaction that changes their inputs or after it; subscribers
-watch a derived table as they watch any other.
+```text
+fn store.watch(tx: Tx, from: RangeBound[Bytes], to: RangeBound[Bytes]) -> Result[(), TxError]
+fn table.watch[K: key + serializable, V: serializable](tx: Tx, t: Table[K, V], from: RangeBound[K], to: RangeBound[K]) -> Result[(), TxError]
+```
 
-Delivery obeys one rule:
+`table.watch` adds to the run's watch set the rows of `t` whose keys lie between `from` and
+`to` in key order ([STORE-6](#store-6-key-encoding)); `store.watch` adds the byte keys in that
+range outside the reserved namespace. Each makes the checks of a read of the same range, in
+the order of [STORE-5](#store-5-tables), scope ([STORE-3](#store-3-transaction-scope))
+included, and fails as that read would. A watch reads no row: it adds nothing to the access
+set, so a write inside a watched range never makes its subscription stale. The catalog reads
+of `table.watch` are tracked like any table operation's, so dropping or migrating a watched
+table does. A watch set is a set: watching a range twice watches it once. A watch outside a
+subscription's evaluation, in a transaction or a plain query, has no effect after its checks.
 
-1. A session receives one batch per commit version, holding every notification that
-   commit caused it, so all of a session's subscriptions advance together.
-2. A batch is released by the output gate ([STORE-2](#store-2-transactions)), like any
-   outcome.
-3. There is no gap between the version a result was read at and the first commit its
-   subscription is matched against.
-4. A query whose new outcome bytes equal its last delivered ones delivers nothing.
-5. Only commits cause notifications. The passage of time never does; a query that
-   depends on time receives it as an argument.
+A run grants a range by watching it: what a session receives as rows is exactly what the
+exported entry's code watched, under the `Tx` it narrowed. One mechanism serves every live
+read: query results through the read set, row replicas through the watch set. A maintained
+view is a library that writes derived tables, in the transaction that changes their inputs
+or after it; subscribers watch a derived table as they watch any other.
+
+**The delivery rule.** A **session** is one subscriber's connection to a place
+([STORE-17](#store-17-clients)), holding any number of subscriptions. The place sends it
+**batches**, and what a session holds after applying one is observable to it as follows:
+
+1. **One version.** Every batch is at one commit version, never below the previous batch's.
+   After applying it the session holds, for every subscription, the outcome of its query at
+   that version and the rows of its watch set at that version, and no other rows: all of a
+   session's subscriptions advance together.
+2. **Complete.** A batch holds every change that the commits after the previous batch's
+   version, up to its own, caused the session. A version that changed nothing the session
+   holds sends nothing, and a lagging session receives one batch for several versions. A
+   batch at the version of the previous one carries only changes the session asked for: a
+   subscription added, ended or dropped, or an outcome of its own call.
+3. **Gated.** A batch at version `v` leaves the place only when `D(L) >= v` for the session's
+   level `L` ([STORE-2](#store-2-transactions)).
+4. **No gap.** A new subscription is evaluated at the session's frontier, the version up to
+   which the matcher has compared commits with the session, and is registered before the
+   next commit is compared, so no commit falls between the version its result was read at
+   and the first commit it is matched against.
+5. **Unchanged outcomes are suppressed.** A stale subscription whose new outcome bytes equal
+   its last delivered ones delivers no outcome; a change of its watch set is still
+   delivered.
+6. **Only commits.** The passage of time never causes a batch; a query that depends on time
+   receives it as an argument.
 
 The matcher runs after a commit is ordered and never while the head holds a key
 ([STORE-11](#store-11-engine-and-storage-seam)); any machine that follows the history can
-run it ([STORE-20](#store-20-one-history-many-machines)).
+run it ([STORE-20](#store-20-one-history-many-machines)). Its costs are part of the engine
+provider's contract, not of the rule:
+
+- Registrations of equal entry, caller and argument bytes share one registration and one
+  evaluation per version, since a query's call information depends only on its caller and
+  the version it reads. A session no commit touches costs nothing per commit.
+- Per commit, the matcher looks each written key up in an ordered index of registered keys
+  and ranges, at a cost logarithmic in the registrations plus the matches. A stale
+  registration costs one evaluation; a matched watch costs no evaluation and no decoding,
+  since its rows go out as the stored bytes.
 
 ### STORE-17: Clients
 
 A **client** is a program outside the place's trust: a browser or an application. It is an
-untrusted, partial follower of the store.
+untrusted, partial follower of the store: it calls the entries the place exports to
+clients, holds the rows its subscriptions cover at one commit version, and resumes from that
+version. A capability never reaches a client ([CAP-5](capabilities.md#cap-5-capability-sealing)).
+**Authorization** is the code of the exported entries: an entry narrows its `Tx` to what its
+caller may reach ([STORE-3](#store-3-transaction-scope)) before it calls anything else, and
+its reads are tracked, so a subscription that depended on a membership row is stale when
+that row changes and its watches are withdrawn in the batch that delivers the change. There
+is no rule language, and no row is readable except through an exported entry.
 
-- **Calls.** A client calls the entries the place exports to clients and nothing else. It
-  cannot name a key, a table or a query of its own.
-- **Identity.** The place verifies a client's token at ingress and derives its principal,
-  which every one of its calls carries as `call_info.caller`
-  ([STORE-4](#store-4-call-information)). A capability never reaches a client
-  ([CAP-5](capabilities.md#cap-5-capability-sealing)); what a client may do is decided by
-  rows the place checks.
-- **Authorization** is the code of the exported entries. Its reads are tracked like any
-  others, so a subscription that depended on a membership row is notified when that row
-  changes. An entry narrows its `Tx` to what its caller may reach
-  ([STORE-3](#store-3-transaction-scope)) before it calls anything else. There is no rule
-  language, and no row is readable except through an exported entry.
-- **State.** A client holds the rows its subscriptions cover, each batch at one commit
-  version ([STORE-16](#store-16-subscriptions)), together with what those rows cover, so
-  that it can tell an absent row from one it does not hold. A client that reconnects
-  resumes from its last version while the store retains it
-  ([STORE-8](#store-8-versions-snapshots-and-forks)) and otherwise starts again.
-- **Exactly once.** A client's transact calls travel on its own call stream
-  ([STORE-12](#store-12-transactions-at-a-runner)), so a call queued while disconnected
-  and sent again is decided once.
-- **Prediction.** A client may evaluate a transaction entry on the rows it holds
-  ([STORE-15](#store-15-evaluation-and-re-execution)) and show the result as provisional.
-  It sends the call, never its writes; the place's own run decides the outcome, and the
-  batch that carries it replaces the provisional result.
-- Nothing reaches a client before the output gate releases it.
+#### Ingress
 
-Typed client bindings are generated from the exported entries' signatures and schemas;
-they are tooling, not part of this contract.
+A place's host serves clients on a WebSocket ([RFC 6455](https://www.rfc-editor.org/rfc/rfc6455))
+over TLS. The upgrade request names the subprotocol `hirsel.feed.` followed by the 64
+lowercase hexadecimal digits of the SHA-256 of the concrete schema descriptor of `FeedFrame`
+([SER-2](serialization.md#concrete-schema-descriptor)); a host whose digest differs selects
+no subprotocol, which fails the handshake. A browser's `Origin` must be on the host's
+`origins` list when that list is nonempty. Every WebSocket message is one binary message
+holding one `FeedFrame` as its canonical codec payload, without an envelope: the
+subprotocol fixed the schema once for the connection. A text message, a frame that does not
+decode or one longer than `frame_bytes` closes the session with `Malformed()`.
+
+The client speaks first, with `Hello`; the place answers `Welcome` or `Closed(..)`. The
+ingress runs at the head or at any follower ([STORE-20](#store-20-one-history-many-machines)):
+a follower forwards calls to the head and serves batches at the versions it has applied.
+
+- **Token.** `token` is a JWS compact serialization of a JSON Web Token
+  ([RFC 7519](https://www.rfc-editor.org/rfc/rfc7519)), sent in the frame, never in the URL
+  or a cookie. It verifies under one configured issuer when its `alg` is on that issuer's
+  list (`EdDSA` with Ed25519, `ES256`, or `RS256` with a key of at least 2048 bits; never
+  `none`), its `kid` selects a key of that issuer's key set, its signature verifies, `iss`
+  equals the issuer's `issuer`, `aud` contains its `audience`, `sub` is nonempty UTF-8 of at
+  most 255 bytes, `exp` is present and in the future and `nbf`, when present, is not, each
+  with the issuer's `leeway_ns` against the host's clock. Otherwise the session closes
+  `Denied()`. A host with `anonymous: true` also admits an empty token.
+- **Principal.** A verified token's principal is `user:`, the issuer's configured `name`
+  (1 to 32 characters of `a`-`z`, `0`-`9` and `-`), `:`, and its `sub` verbatim; an empty
+  token's is `anon:` followed by the 32 lowercase hexadecimal digits of `instance`, which
+  authenticates nothing. The place passes the principal to the serving primitive as the
+  caller of every call and subscription of the session, and it reaches the body as
+  `call_info.caller` ([STORE-4](#store-4-call-information)). It is fixed for the session:
+  `Reauth(token)` before `exp` extends the session when the new token verifies to the same
+  principal and closes it `Denied()` otherwise; a session whose last token expires closes
+  `Expired()`.
+- **Surface.** The host's `entries` list the exported entries by full versioned path and its
+  `tables` the tables a client may hold rows of. `Hello.entries` names each entry the client
+  will use, with the signature fingerprint its binding was generated from
+  ([RUN-8](runners.md#run-8-identity-and-arrival)), and `Hello.tables` each table, with the
+  SHA-256 of the key and value storage descriptors ([STORE-7](#store-7-rows-and-storage-identity))
+  its binding decodes. `Welcome` answers each with whether it resolved: an entry on the
+  surface whose fingerprint equals the active revision's, a table on the surface whose
+  current descriptors match. Calls and subscriptions then name an entry by its index in
+  `Hello.entries`, and rows name a table by its index in `Hello.tables`. A client names a
+  definition only by path and never selects code: every call runs the revision the place
+  has active. A breaking change to an exported entry is a new entry
+  ([STORE-19](#store-19-activation)); a watched table whose schema changed no longer
+  resolves, and a subscription that watches it ends `Unavailable()`, never with rows the
+  binding would misdecode.
+- **Stream.** `instance` is 16 bytes the client draws once and keeps with its queue of
+  pending calls. The session's call stream ([STORE-12](#store-12-transactions-at-a-runner))
+  has identity `H("hirsel.client.stream.v1", principal, instance)`, so another principal
+  cannot use it. `epoch` is the client's epoch for the stream: a `Hello` with a higher one
+  closes the stream's earlier session `Superseded()`, and one below the stream's closes
+  `Superseded()` itself. `Welcome.applied` is the stream's `applied` position.
+
+`FeedFrame` and the types it reaches are declared by `std@1/store`, `serializable`, with
+variant ordinals in the order written:
+
+```text
+FeedFrame        = Hello(FeedHello) | Call(FeedCall) | Subscribe(FeedSubscribe) | Unsubscribe(u32)
+                 | Reauth(Bytes) | Welcome(FeedWelcome) | Batch(FeedBatch) | Closed(FeedClose)
+FeedHello        = { token: Bytes, instance: Inline[u8, 16], epoch: u64, acknowledged: u64,
+                     entries: List[EntryRef], tables: List[TableRef], resume: Option[FeedResume] }
+EntryRef         = { path: String, fingerprint: Bytes }
+TableRef         = { name: String, key: Inline[u8, 32], value: Inline[u8, 32] }
+FeedResume       = { at: Inline[u8, 16], held: List[HeldSubscription] }
+HeldSubscription = { id: u32, entry: u32, argument: Bytes, outcome: Inline[u8, 32], watches: List[FeedWatch] }
+FeedWatch        = { id: u32, source: WatchSource, from: RangeBound[Bytes], to: RangeBound[Bytes] }
+WatchSource      = Raw() | Table(u32)
+FeedCall         = { position: u64, entry: u32, argument: Bytes, acknowledged: u64 }
+FeedSubscribe    = { id: u32, entry: u32, argument: Bytes }
+FeedWelcome      = { principal: String, applied: u64, entries: List[bool], tables: List[bool] }
+FeedBatch        = { at: Inline[u8, 16], reset: bool, more: bool, items: List[BatchItem] }
+BatchItem        = Value(u32, Bytes) | Ended(u32, SubscriptionEnd) | Dropped(u32)
+                 | Covered(u32, FeedWatch, List[(Bytes, Bytes)]) | Uncovered(u32)
+                 | Rows(WatchSource, List[(Bytes, Bytes)], List[Bytes]) | Decided(u64, CallEnd)
+SubscriptionEnd  = Unavailable() | Rejected() | Overloaded() | Limit(TxLimit)
+CallEnd          = Ok(Bytes) | Aborted(Bytes) | Limit(TxLimit) | NotRun(NotRunReason)
+FeedClose        = Denied() | Expired() | Superseded() | Overloaded() | Malformed() | Stopped()
+```
+
+The first five arms travel from client to place, the last three from place to client; an arm
+in the wrong direction is `Malformed()`. Argument and outcome bytes are canonical codec
+payloads of the entry's parameter and result types. A row's key is the key encoding of the
+table's `K` ([STORE-6](#store-6-key-encoding)), or the raw key, and its value is the
+canonical payload of `V` without the stored schema epoch, or the raw value; bounds are in
+the same encoding, so a client compares keys and coverage bytewise. A client never sees a
+reserved key or how a library lays out its rows.
+
+#### Calls
+
+`Call` runs a transaction entry on the session's stream as
+[STORE-12](#store-12-transactions-at-a-runner) decides it, with request digest
+`H("hirsel.client.call.v1", entry path, argument)` and the client's `acknowledged`
+position. The place accepts positions up to `applied + window` and runs them in order, so a
+client needs no round trip per call; a position past that is `NotRun(Overloaded())`. An
+index that did not resolve is `NotRun(VersionMismatch())`, a query entry is
+`NotRun(Rejected())`, and an argument that does not decode is `NotRun(Rejected())`. Every
+decision reaches the client as `Decided(position, end)`: a decision that commits rides in
+the batch at its commit version, with every change that commit made to what the session
+holds, so a client sees its own write and its outcome together; a refusal or a recorded
+outcome returned again rides in the next batch. `Ok` and `Aborted` hold the payloads of `R`
+and `E`. A client queues calls while disconnected and sends them again after `Welcome`: a
+position at or below `applied` returns its recorded outcome, so a call is decided once
+([STORE-12](#store-12-transactions-at-a-runner)). There is no cancellation of a sent call.
+A place may purge a client stream idle for `stream_idle_ns` only when every decided position
+is acknowledged; a client whose `Welcome.applied` is below its own acknowledged position
+renumbers its pending calls from `applied + 1`, which is safe because none of them was
+decided. A store that closes, is fenced or cannot decide a commit closes every session
+`Stopped()`; the client reconnects, and its stream resolves every call it sent.
+
+#### Subscriptions and batches
+
+`Subscribe(id, entry, argument)` starts a subscription of a query entry, evaluated with the
+session's principal as caller ([STORE-16](#store-16-subscriptions)); its first batch carries
+its `Value` and a `Covered` for each watch, and until then the client shows it as loading.
+`Unsubscribe(id)` ends it at the next batch, which carries `Dropped(id)`; the client holds
+its state until then, and an `id` is not reused before its `Dropped`. A subscription ends
+with `Ended(id, reason)` when its entry did not resolve or is not a query entry, or it
+watches a table that did not resolve (`Unavailable()`); its argument does not decode
+(`Rejected()`); the session is at `subscriptions` or the place lacks capacity
+(`Overloaded()`); or an evaluation exceeds a store limit, the session's `watches`, or a
+cover's `cover_rows` (`Limit(..)`). A query whose body returns `Error(e)` is not ended: its
+`Value` holds the `Error` payload and it stays current.
+
+A batch's items, in any order, mean:
+
+- `Value(id, bytes)`: the subscription's new outcome, the payload of its `Result[R, E]`.
+- `Covered(id, watch, rows)`: the subscription now watches `watch`, and `rows` are every row
+  in its range at the batch's version, in key order; they replace what the client held in
+  that range. A cover too long for one frame continues in further `Covered` items of the
+  same watch in the same batch, whose rows together are the range. `watch.id` is the
+  place's, unique among the session's watches; a resumed session keeps the ids of the
+  watches it kept.
+- `Uncovered(watch)`: that watch ended.
+- `Rows(source, puts, deletes)`: matched writes of one table or of raw keys, each key at most
+  once, last write winning, only inside watches the session holds both before and after the
+  batch.
+- `Decided`, `Ended`, `Dropped` as above.
+
+A client applies a batch whole, then discards every row no remaining watch covers. A batch
+too long for one frame is sent as consecutive frames at the same `at`, every one but the
+last with `more` set; the client applies them together at the last. `reset` tells the
+client to drop everything it holds for the session before applying. A held row is therefore
+always the row at the version of the last batch, and a key inside a held watch with no row
+is absent at that version; a key outside every held watch is unknown, never absent.
+
+`at` names the batch's version to this place alone: it is the AES-128 encryption under the
+host's `resume_key` of the commit version as a little-endian `u64` followed by the first 8
+bytes of `H("hirsel.feed.at.v1", store identity)`, so it reveals no count of commits
+([STORE-8](#store-8-versions-snapshots-and-forks)) and a token from another store or key
+does not decrypt to this one.
+
+**Resume.** A client that reconnects sends `resume` with the `at` of its last applied batch
+and each subscription it still wants: its entry and argument, the SHA-256 of its held outcome
+bytes and its held watches. Subscriptions it unsubscribed it drops itself. The place
+evaluates each at a frontier `e` no lower than the resumed version, and answers with one
+batch at `e`:
+
+- a `Value` for each subscription whose outcome digest differs;
+- for each watch it now holds: when the client claimed the same range, either the matched
+  writes of the commits after the resumed version, read from the history, or a `Covered`
+  that replaces the range, whichever the place finds cheaper; otherwise a `Covered`;
+- an `Uncovered` for each claimed watch it no longer holds;
+- a `Decided` for every retained outcome of the stream above `Hello.acknowledged`.
+
+When `at` does not decrypt to a version of this store, or the history after it is not
+retained ([STORE-8](#store-8-versions-snapshots-and-forks)), the batch has `reset` set and
+covers everything again. The place keeps no state for a client between sessions beyond its
+stream row.
+
+**Prediction.** A client may evaluate a transaction entry on the rows it holds
+([STORE-15](#store-15-evaluation-and-re-execution)) and show the result as provisional. It
+sends the call, never its writes; the batch that carries the call's `Decided` also carries
+its effects and replaces the provisional result. A read the client's rows do not cover makes
+the prediction unavailable, never a guess. Nothing reaches a client before the output gate
+releases it, and nothing about a call is decided at the client.
+
+#### Bounds
+
+A session costs the place its registrations and at most `send_bytes` of encoded batches it
+has not yet written; the place never holds a client's rows. When the socket does not drain
+and the next batch would exceed `send_bytes`, the session **lags**: the place stops building
+batches for it and keeps only which subscriptions are stale and which watched keys were
+written, up to `dirty_keys` of them. When the socket drains, one batch at the session's
+frontier carries all of it, the rows read from the state at that version; past `dirty_keys`
+it covers every held watch again instead. The writer never waits for a client, and a slow
+client costs memory bounded by its registrations and these two settings.
+
+The host's `clients` configuration holds the ingress settings; the bounds shown are the
+defaults:
+
+```json
+{"listen": {"tcp": {"address": "0.0.0.0", "service": "443"}},
+ "identity": {"chain": "/etc/hirsel/host.pem", "key": "/etc/hirsel/host.key"},
+ "path": "/feed", "origins": ["https://app.example"],
+ "issuers": [{"name": "auth", "issuer": "https://auth.example/", "audience": "app",
+              "keys": {"jwks": "/etc/hirsel/auth-jwks.json"},
+              "algorithms": ["EdDSA", "ES256"], "leeway_ns": 60000000000}],
+ "anonymous": false,
+ "entries": ["chat@1/threads.list", "chat@1/threads.send"], "tables": ["msg", "thread"],
+ "level": null, "resume_key": "/etc/hirsel/feed.key",
+ "sessions": 65536, "sessions_per_principal": 16, "subscriptions": 256, "watches": 1024,
+ "cover_rows": 10000, "window": 16, "send_bytes": 4194304, "dirty_keys": 65536,
+ "frame_bytes": 2097152, "stream_idle_ns": 2592000000000000}
+```
+
+`level` names a level of the store's backend, `null` meaning the deployment floor; a level
+below the floor is refused. `resume_key` is a file of 16 bytes; replacing it makes every
+resume a reset. `frame_bytes` must exceed the store's `key_bytes` plus `value_bytes` plus
+64, so one row always fits a frame. A `Hello` past `sessions` or `sessions_per_principal`
+closes `Overloaded()`.
+
+#### Bindings
+
+The bindings generator reads a program and its host's `clients` surface and emits one
+TypeScript module. It contains:
+
+- for each entry on the surface: its path and signature fingerprint, whether it is a
+  transaction or a query, the types of `A`, `R` and `E`, an encoder of `A` and a decoder of
+  `Result[R, E]`; a transaction entry is a function returning the call's `CallEnd`, a query
+  entry a subscription delivering `Value`s;
+- for each table on the surface: its name, the two descriptor digests, the types of `K` and
+  `V`, an encoder and a decoder of `K` in the key encoding, and a decoder of `V`;
+- the `FeedFrame` codec and the subprotocol name.
+
+Types map structurally: `bool` to `boolean`; integers of at most 32 bits, `f32` and `f64`
+to `number`; 64- and 128-bit integers to `bigint`, never `number`; `String` and `char` to
+`string`; `Bytes` to `Uint8Array`; records to readonly object types with their field names;
+tuples to readonly tuples; `List` and `Array` to readonly arrays; `Map` to a readonly array
+of key and value pairs in its order; `Set` to a readonly array in canonical order; and every
+variant, `Option` and `Result` included, to a union of objects tagged by `tag` with the arm
+name, positional fields named `_0`, `_1` and so on; unit to `null`; `Inline` and `Simd` to
+readonly arrays; and `box T`, `Packed[T]` and transparent nominal and distinct types to
+their payload's type. Encoders and decoders are generated
+straight-line code, not interpreters of descriptors, and decoders make every check of
+[SER-2](serialization.md#validation) and [STORE-6](#store-6-key-encoding); a frame that
+fails one closes the session from the client's side.
+
+One runtime package serves every binding: the session with its reconnects, resume and
+`Reauth`; the pending call queue, kept durably with `instance`, epoch and positions; and the
+row cache, which keeps each table's rows ordered by their key bytes, so a range read in key
+order needs no comparator, and answers a lookup as a row, absent or not held. It applies
+each batch whole and notifies once per batch.
 
 ### STORE-18: Runs at a place
 

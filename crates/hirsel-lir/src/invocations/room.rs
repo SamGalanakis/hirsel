@@ -42,7 +42,7 @@ pub fn depth_leaf<S: Stage>(unit: &LirUnit<S>, layouts: &LayoutTable) -> bool {
                 .calls
                 .get(call.index())
                 .and_then(|call| match call.callee {
-                    Callee::Direct(symbol) => unit
+                    Callee::Direct(symbol) | Callee::Bound { code: symbol, .. } => unit
                         .tables
                         .symbols
                         .get(symbol.index())
@@ -52,7 +52,7 @@ pub fn depth_leaf<S: Stage>(unit: &LirUnit<S>, layouts: &LayoutTable) -> bool {
                         .operations
                         .get(operation.index())
                         .map(|o| &o.definition),
-                    Callee::Indirect(_) | Callee::Bound { .. } => None,
+                    Callee::Indirect(_) => None,
                 })
                 .is_some_and(|callee| !adds_activation(callee)),
             Terminator::RejectTransfer
@@ -136,7 +136,7 @@ fn in_place(inst: &Inst) -> bool {
 
 /// The admissions a native emitter lowers to room checks, by index into
 /// `LirUnit::instructions`: each `FrameEnter` whose only invocation is a direct
-/// call of a depth-leaf unit and that covers nothing else but in-place
+/// or bound call of a depth-leaf unit and that covers nothing else but in-place
 /// instructions, and every `FrameLeave` retiring one. An admission that stays live
 /// across other work (a finalizer's, through its value's field drops) is counted
 /// by that work, so it keeps its entry and retirement.
@@ -225,7 +225,9 @@ impl RoomChecks {
             if let (Terminator::Call { call, .. }, Some(enter)) = (terminator, active) {
                 let call = unit.tables.calls.get(call.index())?;
                 let covered = match call.callee {
-                    Callee::Direct(symbol) => {
+                    // A bound call names its instance like a direct one; only
+                    // the environment comes from the closure value.
+                    Callee::Direct(symbol) | Callee::Bound { code: symbol, .. } => {
                         let symbol = unit.tables.symbols.get(symbol.index())?;
                         leaf.contains(&(symbol.definition.clone(), symbol.instance))
                     }
@@ -287,7 +289,7 @@ pub fn depth_leaf_units<'a, S: Stage + 'a>(
         .collect()
 }
 
-/// Direct compiled callees need only the logical counter, unless their own
+/// Direct and bound compiled callees need only the logical counter, unless their own
 /// body invokes runtime-only checked callbacks. Such a callback inherits the
 /// immediately invoking decode/extern scope's full site entry. Calls made by a
 /// counter-only callee establish their own scopes in the ordinary way.

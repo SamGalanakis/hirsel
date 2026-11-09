@@ -636,6 +636,7 @@ fn lower<T>(
             .then(|| crate::context::DebugInfo::new(&module, inputs.opt != OptLevel::None));
         let mut plan = crate::debug::DebugPlan::default();
         let mut functions = Vec::new();
+        let mut always_inline = BTreeSet::new();
         for unit in units {
             // An ahead object carries both alternates; a resume object only states.
             if resume.is_some() && !inputs.alternate {
@@ -779,10 +780,17 @@ fn lower<T>(
             };
             // Keep small, loop-free source helpers in their callers. Their checked
             // call boundary otherwise outweighs operations such as a parser peek.
+            // Size counts the instructions that lower to machine code; lifetime
+            // events only state facts for the validators.
             let small_source = !inputs.alternate
                 && inputs.opt != OptLevel::None
                 && unit.header.origin == UnitOrigin::Source
-                && unit.instructions.len() <= 64;
+                && unit
+                    .instructions
+                    .iter()
+                    .filter(|inst| !inst.is_lifetime_event())
+                    .count()
+                    <= 64;
             let aggregate_copy = copy
                 && !template
                 && abi
@@ -805,6 +813,7 @@ fn lower<T>(
             };
             if small_source && loop_free {
                 module.add_attribute(function, AttributeSlot::Function, Attribute::AlwaysInline);
+                always_inline.insert(unit.header.instance);
             }
             // A small source unit another object implements and exports: here only an
             // inlinable body. Calls the optimizer keeps stay imports of that export.
@@ -979,6 +988,14 @@ fn lower<T>(
                 )?;
                 module.make_private(function);
                 module.add_attribute(function, AttributeSlot::Function, Attribute::InlineHint);
+                // A helper kept in its callers stays there on the foreground path.
+                if always_inline.contains(&unit.header.instance) {
+                    module.add_attribute(
+                        function,
+                        AttributeSlot::Function,
+                        Attribute::AlwaysInline,
+                    );
+                }
                 foreground_functions.insert(name, function);
                 specialized.push((*unit, function, signature.clone(), true));
             }

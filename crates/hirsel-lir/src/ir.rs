@@ -2081,6 +2081,22 @@ impl MaskRef {
 }
 
 impl Inst {
+    /// A static lifetime event: it states a scope, loan or origin fact for the
+    /// validators and lowers to no machine code.
+    pub fn is_lifetime_event(&self) -> bool {
+        matches!(
+            self,
+            Inst::StorageLive { .. }
+                | Inst::StorageDead { .. }
+                | Inst::EndScope { .. }
+                | Inst::BeginLoan { .. }
+                | Inst::EndLoan { .. }
+                | Inst::BindOrigin { .. }
+                | Inst::BindFields { .. }
+                | Inst::EndOrigin { .. }
+        )
+    }
+
     /// Values defined by this instruction, in field order.
     pub fn defs(&self) -> Vec<ValueId> {
         match *self {

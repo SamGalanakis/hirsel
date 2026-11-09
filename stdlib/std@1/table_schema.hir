@@ -652,7 +652,7 @@ fn project_fields(
 }
 
 fn decode[T: serializable](stored: Bytes, data: Bytes, renames: List[(String, String)]) -> Result[
-  unique T,
+  T,
   DecodeError
 ] uses {} {
   let none: Option[T] = None()

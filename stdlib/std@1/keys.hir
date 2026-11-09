@@ -439,7 +439,7 @@ pub fn encode[K: serializable](key: K) -> unique Bytes uses {} {
 // escape or sequence marker, an out-of-range arm and trailing bytes are
 // `Truncated`, `Scalar`, `Tag` and `Trailing`; a scalar the codec refuses
 // (a `bool` byte, `char`, NaN or UTF-8) is the codec's error.
-pub fn decode[K: serializable](data: Bytes) -> Result[unique K, DecodeError] uses {} {
+pub fn decode[K: serializable](data: Bytes) -> Result[K, DecodeError] uses {} {
   let none: Option[K] = None
   let schema = core@1/codec.encode(none)
   let parsed = envelope(schema)

@@ -3543,7 +3543,7 @@ encode(b)` bytewise exactly when `a` precedes `b` in key order.
 ```text
 @preserves_unique(out) fn keys.encode_into[K: serializable](key: K, mut out: List[u8]) -> () uses {}
 fn keys.encode[K: serializable](key: K) -> unique Bytes uses {}
-fn keys.decode[K: serializable](data: Bytes) -> Result[unique K, DecodeError] uses {}
+fn keys.decode[K: serializable](data: Bytes) -> Result[K, DecodeError] uses {}
 fn keys.prefix_end(prefix: Bytes) -> Option[unique Bytes] uses {}
 ```
 

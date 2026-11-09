@@ -221,6 +221,7 @@ FULL_GATE_SKIPS = {
 EMPTY_UNIT_HARNESSES = {
     "hirsel-analysis-canary-unittest",
     "hirsel-code-store-unittest",
+    "hirsel-front-phases-unittest",
     "hirsel-heaps-loom-unittest",
     "hirsel-native-build-bin-hirsel-native-build-unittest",
     "hirsel-remote-unittest",

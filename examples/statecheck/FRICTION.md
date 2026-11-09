@@ -65,7 +65,7 @@ source/response/tape retained. No compiler/runtime patch. Owner: application.
 Physical capacity: coordinator explicitly confirmed exact CPU deployment is
 unavailable (kiln PR86, build-infra PR94, Hirsel client draft PR1). Each combination
 of LLVM/Cranelift × success/domain/cancel × requested width 1/2/4 is individually
-INCOMPLETE, unstarted, owned by exact-CPU deploy (@agentlang-24):
+INCOMPLETE, unstarted, owned by exact-CPU deploy (@hirsellang-24):
 
 | Backend | Outcome | W1 | W2 | W4 |
 |---|---|---|---|---|

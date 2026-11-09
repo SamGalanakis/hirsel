@@ -68,7 +68,7 @@ receipts. The outer source/evaluated-build/config/tool captures for unions
 also have paired captures. Earlier partial inventories remain partial.
 External evidence retains all attempts, exact inputs, observations, tapes and
 compiler witnesses. The two original source/V mismatches below remain OPEN
-with Sam / @agentlang-24; the app workarounds do not resolve those originals.
+with Sam / @hirsellang-24; the app workarounds do not resolve those originals.
 
 ## Retained authoring and proof attempts
 

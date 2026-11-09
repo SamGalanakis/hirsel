@@ -84,7 +84,7 @@ control, not a full-app report or a substitute for original cap inputs.
 The host evidence directory is not visible on hermetic pool workers. Runtime
 qualification requires returned action artifacts (or an explicitly approved
 transport) before sandbox cleanup. No runtime cell may silently use an
-unretrievable temporary directory. Owner: agentlang-24 for returned-artifact
+unretrievable temporary directory. Owner: hirsellang-24 for returned-artifact
 route, spectral-audit-35 for test adoption. No shared runner redesign is owned
 by this lane.
 
@@ -125,7 +125,7 @@ imaginary=(j*7)%11-5), no mean removal, top8, band[0,32). Reference and checked 
 stop exactly Steps1000000 at std@1/decimal_seq.hir:1557:3. LLVM full main and
 both native replays completed; its reference replay stops at that same budget.
 Original full source, complete input, stop receipts and immutable tape are
-retained in workflows-1's returned archive. Routed to agentlang-24 in 657424;
+retained in workflows-1's returned archive. Routed to hirsellang-24 in 657424;
 no std repair, cap raise or smaller replacement. Runtime cost: no comparable
 interpreter result, not a numerical failure or source/V disagreement.
 

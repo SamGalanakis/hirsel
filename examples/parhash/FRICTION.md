@@ -43,7 +43,7 @@ The direct task.await twin exports; this TaskSet/await_at witness fails.
 `Result[unique String, unique String]` in both set and callback, with
 `Ok(unique "a")`, exports successfully. The app uses that payload-qualified
 workaround. Complete minimal programs, exact errors and successful twin are
-external `tir-mode-task-witness/`; owner routing is message637104 to agentlang-24,
+external `tir-mode-task-witness/`; owner routing is message637104 to hirsellang-24,
 for the existing uniqueness/task-result owner. No shared compiler repair.
 
 Required explicit copies: JSON text into each manifest path; path into each

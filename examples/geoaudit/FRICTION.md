@@ -22,7 +22,7 @@ the coordinator; native fixture faults belong to native-file-faults-33.
 | First original geo-square reference execution produced `{"version":1,"results":...}`; frozen exact bytes require `{"results":...,"version":1}` (simulation-03.log). | The app promises sorted report fields; std JSON preserves insertion order. | Reorder Document's declared fields and constructor. No custom codec or std patch; zero runtime/copy cost. Original semantic failure retained, no accepted cell repeated. | 2 | Fixed application report order / application |
 
 The 18 exact Ordered cells (two backends x widths1/2/4 x success/domain/cancel)
-are individually INCOMPLETE, owner @agentlang-24. Coordinator confirmed in
+are individually INCOMPLETE, owner @hirsellang-24. Coordinator confirmed in
 message654085 that kiln PR86 and build-infra PR94 await Sam's deploy decision;
 Hirsel client PR1 is draft. `ordered-cells.json` and `ordered-reruns.md` in the
 external archive enumerate every command. The ignored
@@ -52,7 +52,7 @@ to write_bytes. These cases add coverage; they do not replace original caps.
 Raw-only recovery completed all 43 selected stderr obligations with fresh tapes
 under the owner repair, without executing their already-completed replays.
 Original native01 tapes and exact failures remain immutable and visible.
-| Missing01 tries only the unfinished old pending-cancel LLVM/checked-H replay and receives `replay refused: {"kind":"binding","field":"program"}` before entry. | Historical recording identity includes its tool/std-image generation. A new recording cannot complete that exact old obligation. | Keep the original recording/digests untouched, retain the refusal, and route message655329 to @agentlang-24. Reconciliation proves identical six app sources and effective Args/files/mounts/Pending/Signals, but different std-image and linked program digests after the owner repair. No semantic app execution occurred for this cell. | 2 | Open historical exact tape / coordinator |
+| Missing01 tries only the unfinished old pending-cancel LLVM/checked-H replay and receives `replay refused: {"kind":"binding","field":"program"}` before entry. | Historical recording identity includes its tool/std-image generation. A new recording cannot complete that exact old obligation. | Keep the original recording/digests untouched, retain the refusal, and route message655329 to @hirsellang-24. Reconciliation proves identical six app sources and effective Args/files/mounts/Pending/Signals, but different std-image and linked program digests after the owner repair. No semantic app execution occurred for this cell. | 2 | Open historical exact tape / coordinator |
 | Independent external Cargo/geo confirmation tool-byte capture was late. | Late seals cannot become pre-build evidence retroactively. | Retain Cargo.lock, registry sources, binaries and tool bytes under geo-oracle-inputs with an explicit LATE capture label. Do not repeat the unchanged accepted oracle checks for better capture. All app acceptance consumers have their separate pre-consumer source/generated/config/tool seals. | 2 | Capture limitation / application |
 
 ## Final qualification dispositions
@@ -81,7 +81,7 @@ The final planned matrix is690 cells: 672 full-main live/replay identities and
   historical pending-cancel LLVM/checked-H replay refuses program binding before
   entry, as recorded above; it remains distinct from a semantic failure.
 - All18 physical Ordered width1/2/4 x two backends x success/domain/cancel
-  identities are unrun and owned by exact-CPU deploy (@agentlang-24).
+  identities are unrun and owned by exact-CPU deploy (@hirsellang-24).
 
 There are155 retained live recording identities, including43 superseded faulty
 raw-stderr recordings; none is rewritten. The four binding/request/missing/extra

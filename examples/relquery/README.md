@@ -71,7 +71,7 @@ preimplementation vectors and six supplemental cases live in its named support
 directory. Original interpreter cells completed102 workflows at jobs1/2/4;
 eight cap cells stopped at the unchanged Steps1000000 limit. Those remain
 incomplete. Physical Ordered widths1/2/4 are individually incomplete pending
-exact-CPU deployment owned by @agentlang-24; jobs arguments prove no capacity.
+exact-CPU deployment owned by @hirsellang-24; jobs arguments prove no capacity.
 Native-only cap results are compared to independently frozen expected results,
 not called four-engine agreement. See FRICTION.md for witnesses and costs.
 

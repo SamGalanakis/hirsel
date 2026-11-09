@@ -60,7 +60,7 @@ under `hirsel-briefs/batchrun-27/`. No language/std/runtime repair is included.
    monotonic clock, sample it, run an empty `task.scope_until`, then print.
    Ordinary recording succeeds; adding `--hirsel-trace-events` aborts.
    One/two-print traced controls succeed. Owner: `e1-trace-record-27`, assigned
-   by @agentlang-24 after the earlier Ordered owner had settled. Application
+   by @hirsellang-24 after the earlier Ordered owner had settled. Application
    tests use ordinary recordings; the failed traced cells remain failed until
    an owner repair is independently qualified. No second repair is included.
 9. **Deadline versus fixture startup (expected host ordering; about 5

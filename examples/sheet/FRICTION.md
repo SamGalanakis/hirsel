@@ -174,7 +174,7 @@ checks. All twelve public reference/checked host replays still refused with
 `interpretation is not implemented yet` on the matching repaired runtime. These
 fresh full-app residual cells are INCOMPLETE, distinct from historical binding
 incompatibility. The exact fresh source/std/compiler/image/libs/tapes and errors
-were routed to @agentlang-24 after the original owner step had settled. No
+were routed to @hirsellang-24 after the original owner step had settled. No
 parallel central repair or semantic acceptance of that refusal is made.
 The fresh host adapter selection uses SHEET_EVAL_31_FRESH_CANCEL=1, expects
 exactly6tapes×2engines, and keeps the historical18tape checked selection separate.

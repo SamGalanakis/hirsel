@@ -684,7 +684,7 @@ fn native_fixture(kind: &str) -> Fixture {
 }
 
 #[test]
-#[ignore = "original four-file reference reaches Steps1M before native launch; escalation @agentlang-24"]
+#[ignore = "original four-file reference reaches Steps1M before native launch; escalation @hirsellang-24"]
 fn merge_audit_37_native_full_main_replay() {
     native_workflows(false)
 }
@@ -1588,7 +1588,7 @@ macro_rules! cap_test {
     };
 }
 #[test]
-#[ignore = "original reference reaches Steps1M in mergeaudit.model; cumulative cost follow-up @agentlang-24"]
+#[ignore = "original reference reaches Steps1M in mergeaudit.model; cumulative cost follow-up @hirsellang-24"]
 fn merge_audit_37_cap_source_exact() {
     cap_case("source-exact")
 }
@@ -1600,30 +1600,30 @@ fn merge_audit_37_cap_lines_exact() {
 cap_test!(merge_audit_37_cap_lines_over, "lines-over");
 cap_test!(merge_audit_37_cap_unicode_over, "unicode-byte-over");
 #[test]
-#[ignore = "original reference reaches Steps1M in mergeaudit.model; cumulative cost follow-up @agentlang-24"]
+#[ignore = "original reference reaches Steps1M in mergeaudit.model; cumulative cost follow-up @hirsellang-24"]
 fn merge_audit_37_cap_total_exact() {
     cap_case("total-exact")
 }
 #[test]
-#[ignore = "original reference reaches Steps1M in mergeaudit.model; cumulative cost follow-up @agentlang-24"]
+#[ignore = "original reference reaches Steps1M in mergeaudit.model; cumulative cost follow-up @hirsellang-24"]
 fn merge_audit_37_cap_total_over() {
     cap_case("total-over")
 }
 cap_test!(merge_audit_37_cap_files_over, "files-over");
 #[test]
-#[ignore = "original reference reaches Steps1M in JSON; escalation @agentlang-24"]
+#[ignore = "original reference reaches Steps1M in JSON; escalation @hirsellang-24"]
 fn merge_audit_37_cap_decisions_exact() {
     cap_case("decisions-exact")
 }
 cap_test!(merge_audit_37_cap_decisions_over, "decisions-over");
 #[test]
-#[ignore = "original reference reaches Steps1M in std.diff; cumulative cost follow-up @agentlang-24"]
+#[ignore = "original reference reaches Steps1M in std.diff; cumulative cost follow-up @hirsellang-24"]
 fn merge_audit_37_cap_conflicts_exact() {
     cap_case("conflicts-exact")
 }
 
 #[test]
-#[ignore = "original reference reaches Steps1M in std.diff; cumulative cost follow-up @agentlang-24"]
+#[ignore = "original reference reaches Steps1M in std.diff; cumulative cost follow-up @hirsellang-24"]
 fn merge_audit_37_cap_conflicts_over() {
     cap_case("conflicts-over")
 }
@@ -1778,12 +1778,12 @@ fn width_running(m: &Value, width: u64) -> bool {
 }
 
 #[test]
-#[ignore = "original reference reaches Steps1M in std.diff; cumulative cost follow-up @agentlang-24"]
+#[ignore = "original reference reaches Steps1M in std.diff; cumulative cost follow-up @hirsellang-24"]
 fn merge_audit_37_cap_report_exact() {
     cap_case("report-exact")
 }
 #[test]
-#[ignore = "original reference reaches Steps1M in std.diff; cumulative cost follow-up @agentlang-24"]
+#[ignore = "original reference reaches Steps1M in std.diff; cumulative cost follow-up @hirsellang-24"]
 fn merge_audit_37_cap_report_over() {
     cap_case("report-over")
 }

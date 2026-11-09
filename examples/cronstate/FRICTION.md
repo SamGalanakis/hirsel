@@ -27,7 +27,7 @@ Further exact dispositions:
 - Full actual entry/module reference/checked matrix05:98/100 completed semantic
   passes. capacity-16/reference and checked-H both consumed the unchanged10M
   bound in std/json.hir:403:18. No observation; INCOMPLETE. No optimizer, bound
-  increase or smaller replacement. Routed to @agentlang-24, message642983.
+  increase or smaller replacement. Routed to @hirsellang-24, message642983.
 - Missing-only matrix08: pending config read actually parked, then canceled and
   returned run_until; uncertain-future persisted success for the future minute;
   exact24h coalesced1440 misses to1 with skipped1439. Both engines agree (six
@@ -122,7 +122,7 @@ write/sync faults and Pending (three identities per backend) are unrun. The late
 past-Pending native twins are likewise unrun. These eight cells and full-entry
 native fixed-clock sequence/cross-width orchestration obligations remain INCOMPLETE.
 The public current Fixture witness above executes the actual main and returns
-usage2 because its Args/mount/file projections are absent. Owner:@agentlang-24,
+usage2 because its Args/mount/file projections are absent. Owner:@hirsellang-24,
 message643764. No new runtime adapter or helper surrogate is provided.
 
 All24 real-child production cells retained an application-ready socket handshake,

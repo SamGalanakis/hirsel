@@ -34,7 +34,7 @@ oracles, failed drafts and runtime receipts live externally under
    never starts. Public SimulationConfig faults inject Canceled but cannot
    script a pending regular-file read. FIFO substitutes violate the app policy.
    This exact acceptance cell and native cancellation/cleanup at widths1/2/4
-   remain INCOMPLETE; owner packtree acceptance / shared E1 owner via agentlang-24.
+   remain INCOMPLETE; owner packtree acceptance / shared E1 owner via hirsellang-24.
    Injected canceled declaration reads are mapping tests, not worker cleanup.
 6. Checked-H host-tape replay has no public adapter; UNSUPPORTED/INCOMPLETE.
    Checked H must execute the complete small scripted matrix separately.

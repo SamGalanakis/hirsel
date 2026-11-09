@@ -69,7 +69,7 @@ separate from later application changes and missing-cell continuations.
    pending-native-witness.log, while actual main Pending sibling cancellation
    and signal cancellation run in both simulated engines. No Test helper or
    injected Canceled result substitutes for the required native Pending cells.
-   Owner native-harness-gaps-30 via agentlang-24; no adapter added.
+   Owner native-harness-gaps-30 via hirsellang-24; no adapter added.
 
 11. Final input review bounded CLI UTF8 arguments before the explicit unique
     copy (previous draft copied an overlong argument before path validation).
@@ -103,7 +103,7 @@ separate from later application changes and missing-cell continuations.
     run_observed host adapters returned only `replay produced no semantic
     observation`; cause is NOT established by that generic string. The
     separate resident-compiler CLI stop is a tooling result too. Owner
-    native-harness-gaps-30 via agentlang-24; exact source/tape/tool hashes are
+    native-harness-gaps-30 via hirsellang-24; exact source/tape/tool hashes are
     retained. Four additional final-source verify replay cells have the same
     generic refusal at their unchanged1M policy. No bound was raised.
 

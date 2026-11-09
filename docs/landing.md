@@ -29,7 +29,7 @@ allowed. At enqueue, the ticket captures HEAD once. The queue head creates a
 detached, land-owned checkout at `<common-git-dir>/land-checkouts/<ticket>`
 from that commit. Rebases, batches and every check run there. Exiting stops
 that checkout's Buck2 daemon and removes the owned checkout. The existing
-`agentlang-land-slots` directory contains only the old slot lock files and is
+`hirsellang-land-slots` directory contains only the old slot lock files and is
 unused by the FIFO train.
 
 The source checkout and its branch stay under the lane's control, on success

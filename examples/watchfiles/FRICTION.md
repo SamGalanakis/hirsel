@@ -43,7 +43,7 @@ external report. Source checks alone are never runtime passes.
   passed `check` but failed TIR validation `InvalidOrigin` before execution.
   Minimal source and a control are external in `origin-witness/`; indexed
   baseline initialization avoids the failing item projection. Reported to
-  @agentlang-24 for the existing origin-validation owner (message 636703).
+  @hirsellang-24 for the existing origin-validation owner (message 636703).
   Open compiler defect; about ten minutes; no added content copies. Both
   initial Rust tests failed at preparation, so no workflow was a runtime pass.
 
@@ -54,7 +54,7 @@ external report. Source checks alone are never runtime passes.
 - The scripted interpreter then failed `release of a dead Mutex root`. A
   minimized `invoke(take f: sendable fn() -> ()) { let g = unique copy f;
   g() }` with a captured Mutex makes a later mutex access fail `expired mutex`.
-  External `dead-mutex/main.hir`; routed as message 636764 to @agentlang-24.
+  External `dead-mutex/main.hir`; routed as message 636764 to @hirsellang-24.
   The application now accepts a scoped factory that constructs each owned
   task closure afresh, eliminating copied provider environments. This
   supersedes the earlier copy workaround; per-operation environments and
@@ -66,7 +66,7 @@ external report. Source checks alone are never runtime passes.
   minutes. No extra payload copy.
 
 The scoped-loop defect is owned by `scope-closure-origin-27`, assigned by
-@agentlang-24 in reply to message 636703. Indexed initialization remains until
+@hirsellang-24 in reply to message 636703. Indexed initialization remains until
 the owner lands its producer repair. No validation rule is weakened here.
 
 - Factory return experiments are retained externally. Returning a qualified
@@ -87,7 +87,7 @@ unique record: a Mutex root may be shared safely. Requiring unique on a job
 capturing that root caused MODE-2/OWN-5 (`script-check-06/07`); removing that
 unneeded promise keeps sendability and avoids copying a noncopyable once
 function. This supersedes the experimental unique job return above. The
-copied-closure defect is owned by `closure-copy-resource-27` per @agentlang-24.
+copied-closure defect is owned by `closure-copy-resource-27` per @hirsellang-24.
 
 - First real executable launch supplied arguments only in the grants template.
   Standalone launch snapshots its trailing argv and replaces template args,

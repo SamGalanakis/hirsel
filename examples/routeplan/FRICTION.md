@@ -56,7 +56,7 @@ its atomic report publication is not a write_bytes release.
 Ordinary native fixtures use Ordered width1 by default; no physical-capacity
 qualification is inferred from those semantics. All18 capacity cells, LLVM and
 Cranelift x success/domain/Pending-cancel x requested widths1/2/4, remain
-INCOMPLETE. Owner: exact-CPU deploy (@agentlang-24), confirmed in messages650047
+INCOMPLETE. Owner: exact-CPU deploy (@hirsellang-24), confirmed in messages650047
 and650050: kiln PR86 and build-infra PR94 await deployment; Hirsel client PR1 is
 draft. No topology override, fake control reply, Free mode or CPU reservation is
 used. Each deferred command is listed in the retained `ordered-reruns.md`; the

@@ -86,7 +86,7 @@ At base main, `replay_observations`/`replay_observations_checked` discard the
 returned host RunOutcome and report only `Runtime("replay produced no semantic
 observation")` on tooling stop (`hirsel-driver/src/lib.rs:684–715`). This cannot
 prove Steps rather than another tooling outcome. Routed with original full-app
-witnesses to agentlang-24 (message643137); no runtime adapter or parallel repair.
+witnesses to hirsellang-24 (message643137); no runtime adapter or parallel repair.
 Known Steps reference replays use the public ordinary host launcher to assert
 exact `ToolingLimit {kind:"Steps", limit:original_bound}`. Checked-host exact
 classification remains INCOMPLETE until an outcome-preserving public seam exists;

@@ -119,7 +119,7 @@ timer after landing. The hourly timer samples the latest published main release
 at most once for each commit and contract. Its EnvironmentFile,
 `~/.config/hirsel/cost-trend.env`, contains `HIRSEL_COST_TOOLCHAIN` and
 `HIRSEL_COST_COMMIT`. The existing release publisher must update these to the
-already-built main bundle and its commit, and keep `/workspace/code/agentlang`
+already-built main bundle and its commit, and keep `/workspace/code/hirsellang`
 at that clean commit with origin/main fetched. The service refuses a stale
 bundle/checkout instead of building or labeling an older compiler as main.
 Commits superseded between hourly samples are not backfilled.

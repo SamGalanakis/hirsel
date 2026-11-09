@@ -17,7 +17,7 @@ source/tool/config seals, tapes and raw receipts live externally in
 | task `Result[unique Loaded, Problem[String]]` | MODE-4 error Fault.Version(String) not proved sendable | Both Result slots preserve unique payload contracts; task owns filename/size descriptor | ~2 min; intended; draft05/check-05.log |
 | `for item in owned.dependencies`, followed by sort | Compiler bug: the borrowed field loop was copied instead of lent (SEM-4 / MODE-2) | Direct borrowed validation loop, then in-place sort; no extra list copy | ~2 min; bug, fixed by e5e974f27a4c; draft03/check-04.log |
 | report code/detail helpers return plain String | MODE-2 report's unique fields not proved unique | Private helper case fixed by private summaries (b552ff23d839 / f71ba1242e00); current exported code/detail retain their declared rows | ~1 min; draft03/check-04.log |
-| `let mut values: unique List[String] = unique []` inside generic recursive flatten | MODE-2 at empty initializer: `unique []` not proved unique | Ordinary builder and `unique values` at return. Copies bounded flattened path strings/list once more per recursive level; no relaxation. Original form remains rejected on starting toolchain | ~5 min; open, owned by unique-empty-builder-29 per @agentlang-24; unique-list-witness.hir/.log and draft05/check-05.log |
+| `let mut values: unique List[String] = unique []` inside generic recursive flatten | MODE-2 at empty initializer: `unique []` not proved unique | Ordinary builder and `unique values` at return. Copies bounded flattened path strings/list once more per recursive level; no relaxation. Original form remains rejected on starting toolchain | ~5 min; open, owned by unique-empty-builder-29 per @hirsellang-24; unique-list-witness.hir/.log and draft05/check-05.log |
 | per-file typed catalogs then global graph bounds | Review found typed record allocations could precede global node/edge refusal | Preload raw bounded bytes/digests concurrently, then parent admits DOM identities/names/edges with run-wide Admission before typed decode | ~5 min; application correction; depsolve-29; draft07 and amendment-11.md |
 | Admission names set mutated by helper without promise | MODE-2 empty set no longer proved unique at Admission return | Fixed by private summaries (b552ff23d839 / f71ba1242e00); private helper body proves mutable handback | ~1 min; check-10.log |
 | removed decode match left partial arms | LANG-1 expected statement separator/top-level definition | Remove editing remnant; formatter/source check then continued | ~1 min; caller editing error; check-09.log |
@@ -27,7 +27,7 @@ source/tool/config seals, tapes and raw receipts live externally in
 | Buck `--env` before executor separator | Buck usage exit3; no tests ran | `buck2 test ... -- --env NAME=value ...` as current help documents | ~1 min; setup only; test-08.log |
 | native grants with args but no trailing app argv | llvm-empty-w1 returned exact usage report/status2 | Pass app argv immediately after grants operand; reuse both source-matched native builds | ~2 min; harness launch mistake; test-11.log, native generation syCNYh |
 | short run's metrics file empty | periodic writer has not reached one-second sample | Inotify socket-creation subscription, then supported control metrics request; no sleeps or app-only probe mode | ~3 min; intended diagnostic timing; child.py, native admission.json |
-| requested4/effective3/pending4 admission reply | Native output/status and normalized full tape already agreed; topology assertion failed | Retain physical cell INCOMPLETE. App semantics, replay, requested/effective admission and physical participation are separate claims | ~2 min; host/runtime disposition, @agentlang-24; topology-disposition.md, test-12.log, llvm-cross-w4/admission.json |
+| requested4/effective3/pending4 admission reply | Native output/status and normalized full tape already agreed; topology assertion failed | Retain physical cell INCOMPLETE. App semantics, replay, requested/effective admission and physical participation are separate claims | ~2 min; host/runtime disposition, @hirsellang-24; topology-disposition.md, test-12.log, llvm-cross-w4/admission.json |
 | full scripted workflows at default 1M steps | ToolingLimit(Steps,1000000) in std SHA-256/JSON/hex, no observation | Original exact inputs unchanged; no raised budgets. Full audits explicitly ignored/INCOMPLETE in permanent harness; small complete workflows still run via actual package/entry and public adapters | ~3 min; tooling; depsolve-29; test-07.log, test-11.log, full per-engine receipts |
 
 The pure model never replaces application execution. The graph borrows catalog
@@ -97,7 +97,7 @@ Updated support retains all bounded control samples and only qualifies a reply
 with phase running, exact requested/effective width, pending0. Older-runtime
 receipts cannot meet that stronger contract; no completed semantic campaign was
 repeated for this diagnostic change. Ownership: e1-effective-width-29, coordinated
-through @agentlang-24. These receipts do not claim physical parallel work.
+through @hirsellang-24. These receipts do not claim physical parallel work.
 
 **Other INCOMPLETE obligations:** full checked/reference scripted heavy cells at
 unchanged 1M steps; native scripted filesystem/fault-provider adapter unavailable;

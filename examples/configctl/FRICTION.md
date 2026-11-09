@@ -12,8 +12,8 @@ Evidence and failed drafts: `/workspace/code/hirsel-briefs/config-migrate-29/`.
 | Borrowed fields stored in global Map/List/Set: MODE-1; task reports lacked nested uniqueness: MODE-2 | Explicit unique copies at container and task transfer boundaries; consuming generic transition carries each next record | bounded deep copies of reports/schema; 10 min | intended; app; drafts-2/3, check-2/3.log |
 | Local `version`, `endpoint`, `row` shadow module functions: LANG-4 | Rename locals/helpers; declaration order cannot permit shadowing | no runtime cost; 2 min | intended; app; draft-2, check-2.log |
 | Unannotated `Result` branches: LANG-2 | Write complete prefix type for admitted size | no runtime cost; 1 min | intended; app; draft-2, check-2.log |
-| Native file-fault/cancellation injection has no public scripted host file provider | Reference and checked H use SimulationConfig faults; native exercises real confined files. Do not add an adapter in this lane | no workaround claimed; 5 min inspection | unsupported / INCOMPLETE; runtime owner @agentlang-24; tests/support/config_migrate_29/cases.json |
-| Checked-H host-tape replay has no supported public adapter | Full checked-H scripted workflows remain required; host-tape replay is explicitly unsupported | no workaround claimed; 3 min inspection | unsupported / INCOMPLETE; runtime owner @agentlang-24 |
+| Native file-fault/cancellation injection has no public scripted host file provider | Reference and checked H use SimulationConfig faults; native exercises real confined files. Do not add an adapter in this lane | no workaround claimed; 5 min inspection | unsupported / INCOMPLETE; runtime owner @hirsellang-24; tests/support/config_migrate_29/cases.json |
+| Checked-H host-tape replay has no supported public adapter | Full checked-H scripted workflows remain required; host-tape replay is explicitly unsupported | no workaround claimed; 3 min inspection | unsupported / INCOMPLETE; runtime owner @hirsellang-24 |
 
 Formatting is std's precise contract: existing scalar `set` replaces its value
 span, retaining key spelling and inline comment. New nested keys use std's table
@@ -52,7 +52,7 @@ The seven default-budget identities, in each of reference and checked H, are
 `reference-seal.json`, `test-reference.log`, `test-reference-remaining.log`,
 `test-checked.log`, `test-model-final.log` and `test-bounds.log`. The tiny direct
 fixture reaches the limit while serializing its full report. Owner:
-`interp-step-budget-29` / `@agentlang-24`; this lane never raises the budget or
+`interp-step-budget-29` / `@hirsellang-24`; this lane never raises the budget or
 claims a pure/helper execution as the app result.
 
 Additional harness friction:

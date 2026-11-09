@@ -54,7 +54,7 @@ or replay completion is claimed before those obligations finish.
   step-limit results do not establish this replay refusal's cause. Exact
   originals: suite-runner-29-native-Wdpt8r/evidence/*-{cases-32,argv-4096,
   input-262144}.tape and replay-reference.stderr. Native replays and native live
-  acceptance retain separate PASS credit. Owner routing: @agentlang-24.
+  acceptance retain separate PASS credit. Owner routing: @hirsellang-24.
 - Short socket path (harness setup, ~5 min): the external evidence directory
   made AF_UNIX control paths exceed Linux's limit. Python reported
   `OSError('AF_UNIX path too long')`; harness termination produced empty JSON,

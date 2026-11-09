@@ -23,7 +23,7 @@ actual execution. No source check alone qualifies execution or V.
 | Invalid(String) as task error; MODE-4 output.compute cannot cross under its contract | Error must satisfy task.map_all's sendable bound | Finite Reason enum instead of error strings; lower allocation cost, exhaustive diagnostic mapping | 3 | fixed local API / lane |
 | f-string List[u64]; SEM-3 has no text formatting | Only admitted scalars format implicitly | Explicit bounded index-list formatter; linear bytes | 2 | intended / lane |
 | 4096 pairs and output65536/output65537/input65536; both engines exact ToolingLimit Steps1000000 | Do not raise budgets or shrink original inputs | Preserve original8 incomplete identities and native independent-oracle cells; no passing companion replaces them | 6 | open acceptance / relation-query-33 |
-| ExactCPU API undeployed, settled operator handoff confirmed by shepherd and agentlang-24 | No inferred physical capacity from jobs arguments | All18 Ordered backend/width/scenario cells individually incomplete; no topology override, no Free | 2 | open deploy / agentlang-24 |
+| ExactCPU API undeployed, settled operator handoff confirmed by shepherd and hirsellang-24 | No inferred physical capacity from jobs arguments | All18 Ordered backend/width/scenario cells individually incomplete; no topology override, no Free | 2 | open deploy / hirsellang-24 |
 | First setup/compile seal omitted actual external tools until a later closure snapshot | Seal actual union before readers | Retain partial/late seal identities; Rust/LLVM byte snapshots and explicit host evidence directory added before native consumers | 4 | partial initial evidence / lane |
 
 The original29 cases remain byte-identical to their preimplementation freeze.

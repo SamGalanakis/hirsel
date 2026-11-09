@@ -41,7 +41,7 @@ windows and an owned <=4096-byte chunk replace Go's Reader/append buffer.
    Preserve exact fixture/source/tools and original failure under scripted-hNeHHp
    and script03.log externally. No mutable marker or injected cancellation is
    substituted. This required release cell is INCOMPLETE, provider scope routed
-   to agentlang-24; ~5 minutes. The checked-H and both native counterparts also remain Blocked. Pending read cancellation did actually park, join and close.
+   to hirsellang-24; ~5 minutes. The checked-H and both native counterparts also remain Blocked. Pending read cancellation did actually park, join and close.
 
 4. Native01 compiled both backends and linked real Args fixtures, but its
    first tiny LLVM launch never entered: tools/capped's /usr/bin/env python3
@@ -158,7 +158,7 @@ The two retained Blocked tapes each fail both host replay adapters with literal
 attempts refuse Io MissingInput(35), exit3. These are adapter errors, not Steps,
 and replaying Blocked would still not qualify the required successful release.
 Exact source, Args/grants/tapes/tool hashes are in external scripted-hNeHHp,
-scripted-HH3Nds, native-AOeQHc and blocked-replay; routed to agentlang-24.
+scripted-HH3Nds, native-AOeQHc and blocked-replay; routed to hirsellang-24.
 
 Production delivered-cancel LLVM width1 and width2 tapes each return
 "interpretation is not implemented yet" in both host adapters (four cells),
@@ -166,7 +166,7 @@ while LLVM width4 and Cranelift widths1/2/4 replay in both (eight passes).
 All12 native replay adapters of these six delivered-cancel tapes pass. The
 52 production Steps are36 original tapes,12 cancel02, and4 publication-fault
 host cells. These four adapter errors are distinct from Steps and from the
-four blocked-tape host errors; all are retained and routed to agentlang-24.
+four blocked-tape host errors; all are retained and routed to hirsellang-24.
 
 The typed Pending audit checks a real FileRead Blocked event, Close of that exact
 handle, no Open of queued c, no PutNew, and zero native leak audit. The18 retained

@@ -30,7 +30,7 @@ Owners: `e1-live-hang-29` for live timeouts; `reference-replay-29` for reference
 third-spawn mismatches; `interp-step-budget-29` for accumulated file.read
 snapshots and the original1MiB reference memory failure. Native replay of
 child-created artifacts refuses at `file.size` (first30,input33); routed to
-@agentlang-24 for ownership, distinct from reference tooling stops. Exact raw
+@hirsellang-24 for ownership, distinct from reference tooling stops. Exact raw
 source/argv/grants/tape/tool hashes remain external. No failed cell was rerun
 unchanged, no cap was raised, no smaller smoke replaced an incomplete vector.
 
@@ -61,8 +61,8 @@ rule, compiler, std API or runtime ABI was changed.
 | Reference empty replay exits0, exact stdout, compiler EAGAIN warning | Host compiler worker creation failure, outside tape | Compiler HIRSEL_JOBS1 inside fixed4CPU wrapper; preserve raw diagnostic and recovered semantic disposition | 3 min; tooling; native-08.log and retained host-NWp8Qz |
 | Clean dependency releases earlier-declared ready vertex | Initial for-loop could admit a later vertex first | Scan declaration order again after every clean release | 5 min; fixed application logic; attempt-09/execute.hir, clean-ready-tie vector |
 | Larger full-app reference/checked workflows | ToolingLimit Steps1000000 in std SHA256 | Preserve exact vectors and incomplete cells; no raised cap/optimizer/smaller substitute | 5 min; OPEN tooling; test-06.log and reference-checked-06-receipts.json |
-| Native chain reference replay | ReplayMismatch(31), third process_spawn | Preserve exact tape/source/binary/grants and continue independent native adapters | 5 min; OPEN reference-replay-29; host-LRY8OW, native-09.log; routed @agentlang-24 |
-| LLVM diamond Ordered width4 | Capped60 timeout; no stdout, empty safely invalidated state | No repeat/cap change; preserve incomplete live/tape cell | 5 min; OPEN e1-live-hang-29; host-6KC7kP/evidence/llvm-diamond-first-w4, native-10.log; routed @agentlang-24 |
+| Native chain reference replay | ReplayMismatch(31), third process_spawn | Preserve exact tape/source/binary/grants and continue independent native adapters | 5 min; OPEN reference-replay-29; host-LRY8OW, native-09.log; routed @hirsellang-24 |
+| LLVM diamond Ordered width4 | Capped60 timeout; no stdout, empty safely invalidated state | No repeat/cap change; preserve incomplete live/tape cell | 5 min; OPEN e1-live-hang-29; host-6KC7kP/evidence/llvm-diamond-first-w4, native-10.log; routed @hirsellang-24 |
 
 Initial tracked/source/generated-input stamps were sealed before consumers.
 Exact runtime archives/std image/native helper files were additionally hashed

@@ -54,20 +54,20 @@ the original `merge_audit_37_refusals_and_independent_files` aggregate. Ignored
 originals retain every fixture byte, expected result, and Steps1M assertion.
 Run them explicitly with the named filter and `--ignored` after an owner repair.
 No ignored result is counted as a pass. Prior SHA/JSON repair lanes are settled;
-remaining work is escalated to **@agentlang-24** for assignment, with the exact
+remaining work is escalated to **@hirsellang-24** for assignment, with the exact
 external source/input/tool/image/cap receipts and historical owners retained.
 
 | Original identity | Remaining predicate / original witness | Follow-on |
 |---|---|---|
-| `refusals_and_independent_files` | Final four-files plan: four identical independent\n source triples, reference Steps1M at SHA435:5; checked H unrun. Fourteen preceding refusal cases separately passed both interpreters | @agentlang-24 (prior SHA owner app-budget-reds-35) |
-| `native_full_main_replay` | Four anchor/old/left/right triples, full plan, published-plan-fed resolve, domain, denial, Pending cancel and commit; reference plan stops Steps1M at diff38:17 after SHA repair, before any native launch. Compiled objects are setup evidence only for this original aggregate | @agentlang-24 (diff/cumulative workflow budget) |
-| `cap_source_exact` | Original32768-byte source, reference Steps1M SHA355:5; checked H unrun | @agentlang-24 |
-| `cap_lines_exact` | Original256-line source, reference Steps1M SHA361:73; checked H unrun | @agentlang-24 |
-| `cap_total_exact`, `cap_total_over` | Original131072/131073 total-byte worlds, reference Steps1M SHA318:16; checked H unrun | @agentlang-24 |
-| `cap_conflicts_exact`, `cap_conflicts_over` | Original128/129 conflict worlds, reference Steps1M SHA354:9 /371:9; checked H unrun | @agentlang-24 |
-| `cap_decisions_exact` | Original16384-byte decisions, reference Steps1M JSON28:15; checked H unrun | @agentlang-24 (prior JSON owner app-steps-37) |
-| `cap_report_exact`, `cap_report_over` | Original262144/262145-byte reports from14553-byte NUL-bearing sources; reference Steps1M SHA355:73 /364:5; checked H unrun. Separate native boundary action passes all four backend/cap cells and eight cross-native replays | @agentlang-24 |
-| Host replay and adversarial controls on four-file plan/resolve/commit | Native-to-reference/checked-H replay and binding/request/missing/extra host controls remain gated in the original aggregate. Native-only recovery is independently named and cannot recover those predicates | @agentlang-24 |
+| `refusals_and_independent_files` | Final four-files plan: four identical independent\n source triples, reference Steps1M at SHA435:5; checked H unrun. Fourteen preceding refusal cases separately passed both interpreters | @hirsellang-24 (prior SHA owner app-budget-reds-35) |
+| `native_full_main_replay` | Four anchor/old/left/right triples, full plan, published-plan-fed resolve, domain, denial, Pending cancel and commit; reference plan stops Steps1M at diff38:17 after SHA repair, before any native launch. Compiled objects are setup evidence only for this original aggregate | @hirsellang-24 (diff/cumulative workflow budget) |
+| `cap_source_exact` | Original32768-byte source, reference Steps1M SHA355:5; checked H unrun | @hirsellang-24 |
+| `cap_lines_exact` | Original256-line source, reference Steps1M SHA361:73; checked H unrun | @hirsellang-24 |
+| `cap_total_exact`, `cap_total_over` | Original131072/131073 total-byte worlds, reference Steps1M SHA318:16; checked H unrun | @hirsellang-24 |
+| `cap_conflicts_exact`, `cap_conflicts_over` | Original128/129 conflict worlds, reference Steps1M SHA354:9 /371:9; checked H unrun | @hirsellang-24 |
+| `cap_decisions_exact` | Original16384-byte decisions, reference Steps1M JSON28:15; checked H unrun | @hirsellang-24 (prior JSON owner app-steps-37) |
+| `cap_report_exact`, `cap_report_over` | Original262144/262145-byte reports from14553-byte NUL-bearing sources; reference Steps1M SHA355:73 /364:5; checked H unrun. Separate native boundary action passes all four backend/cap cells and eight cross-native replays | @hirsellang-24 |
+| Host replay and adversarial controls on four-file plan/resolve/commit | Native-to-reference/checked-H replay and binding/request/missing/extra host controls remain gated in the original aggregate. Native-only recovery is independently named and cannot recover those predicates | @hirsellang-24 |
 
 Adaptations preserve std Myers alignment rather than upstream LCS tie choice,
 LF/CRLF bytes rather than whitespace tokenization, bounded indexed ownership

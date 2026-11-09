@@ -100,6 +100,9 @@ pub(crate) fn no_candidates() -> ContentHash {
 /// A failed signature product's identity: its own text and its deterministic
 /// diagnostic result. Its dependencies are validated by the failed product
 /// itself; a caller binds only what it consumed, the failure.
+///
+/// Anchors are engine-local handles, so the result is hashed in its portable
+/// form: every span keeps its anchor-relative offsets and drops the handle.
 pub(crate) fn failed_signature_identity<T>(
     text: ContentHash,
     value: &Result<T, hirsel_types::QueryError>,
@@ -107,7 +110,27 @@ pub(crate) fn failed_signature_identity<T>(
     let Err(hirsel_types::QueryError::Diagnostics(diagnostics)) = value else {
         return None;
     };
-    let diagnostics = bincode::serialize(diagnostics).ok()?;
+    let mut portable = diagnostics.clone();
+    for diagnostic in &mut portable {
+        let unanchor = |span: &mut hirsel_span::Span| span.anchor = hirsel_span::Anchor::default();
+        unanchor(&mut diagnostic.primary);
+        for label in &mut diagnostic.secondary {
+            unanchor(&mut label.span);
+        }
+        if let Some(fix) = &mut diagnostic.fix {
+            unanchor(&mut fix.span);
+        }
+        for obligation in &mut diagnostic.obligations {
+            match obligation {
+                hirsel_diag::Obligation::GenericBound { arguments } => {
+                    arguments.iter_mut().for_each(unanchor)
+                }
+                hirsel_diag::Obligation::ParameterMode { argument } => unanchor(argument),
+                hirsel_diag::Obligation::Multiplicity | hirsel_diag::Obligation::CopyProof => (),
+            }
+        }
+    }
+    let diagnostics = bincode::serialize(&portable).ok()?;
     Some(ContentHash::of_parts(
         "hirsel.failed-signature.v2",
         [text.0.as_slice(), diagnostics.as_slice()],

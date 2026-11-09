@@ -449,11 +449,15 @@ read fails too, durability cannot be decided, the waiting transaction returns `U
 and the store closes.
 
 **Recovery.** Opening reads the newest manifest whose checksum verifies, loads its
-snapshot, and applies the log objects after it in id order. A last log object that fails
-its checksum is a torn tail that was never acknowledged: it is ignored, and the next claim
-writes past it. A corrupt object before the tail refuses the open with
-`Storage(Corrupt())`, and when no intact state exists the open refuses rather than guess.
-Recovery never re-executes a body.
+snapshot, and applies the log objects after it in id order. A `Durable()` object cannot be
+torn: `put_new` creates it whole or not at all at its final name (a synced file linked into
+place, an atomic simulated insert, an atomic S3 PUT), so a `Durable()` log object that fails
+its checksum or the layout's rules, the last one included, is corruption after its
+acknowledgement. It refuses the open with `Storage(Corrupt())` and recovery removes
+nothing. In a `Volatile()` store a crash may lose or tear any suffix of the log, so the
+first bad log object ends the recovered log there and it and every later one are removed.
+When no intact state exists the open refuses rather than guess. Recovery never re-executes
+a body.
 
 **Compaction.** `store.compact` writes a snapshot object of the durable state, then the
 next manifest naming it, and only after that manifest is durable removes the objects no

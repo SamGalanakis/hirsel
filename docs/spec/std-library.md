@@ -4289,11 +4289,12 @@ integers little-endian, so a misdirected or torn object fails its check.
 
 **Open, recovery and fencing.** `open` creates the three directories when absent, reads
 the newest manifest, loads its snapshot and replays the log objects from its first log id
-in id order, applying each commit after the snapshot's. A bad last log object is a torn
-tail, never acknowledged: it is removed. A bad or missing log object before the last, a
-bad manifest or snapshot, or a commit sequence or writer epoch out of order refuses the
-open with `Corrupt(name)`; in a `Volatile()` store the first bad or missing log object
-ends the log instead, and the objects after it are removed. The opener then claims the
+in id order, applying each commit after the snapshot's. A `Durable()` create is whole or
+nothing at its final name, so a bad log object, the last one included, a missing log
+object before the last, a bad manifest or snapshot, or a commit sequence or writer epoch
+out of order refuses the open with `Corrupt(name)` and removes nothing; in a `Volatile()`
+store the first bad or missing log object ends the log instead, and it and the objects
+after it are removed. The opener then claims the
 store: it creates an empty fence log at the next log id and then the next manifest with
 the next epoch. A writer that finds the id of its next object taken has been fenced by
 another writer and returns `Fenced()`. `Storage`, `Corrupt`, `Fenced` and `Injected`

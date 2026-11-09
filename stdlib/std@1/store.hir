@@ -102,8 +102,8 @@ pub type StoreLimits {
 pub type StoreFaults = NoFaults | StopAfterWrites(u64)
 
 /// Why a store operation failed. `Storage` is the Dir's own error; `Corrupt`
-/// names an object that fails its checksum or the layout's rules before the
-/// log's tail; `Fenced` means another writer claimed the store; `Conflict` means
+/// names an object that fails its checksum or the layout's rules (in a
+/// `Volatile()` store, a bad log instead ends the recovered log); `Fenced` means another writer claimed the store; `Conflict` means
 /// a commit after the transaction began wrote a key it conflicts on; `Injected` is a
 /// `StopAfterWrites` stop. After `Storage`, `Corrupt`, `Fenced` or `Injected`
 /// the store is closed and every later call returns `Closed`.
@@ -1143,15 +1143,17 @@ fn recover[S](mut s: Store[S]) -> Result[(), StoreError] {
       Error(())
     }
     let Ok(batch) = decoded else {
-      // A gap or a bad object. Only the last log may be torn: it was never
-      // acknowledged. Volatile logs lose any suffix, so the first bad one
-      // truncates the log there.
-      if id == logs[list.len(logs) - 1] && id == s.next_log || !durable_mode {
-        remove(mut s, take name)?
-        tail = true
-        continue
+      // A gap or a bad object. A Durable create is whole or nothing at its
+      // final name, so a bad Durable log, the last one included, is
+      // corruption after its acknowledgement: refuse and remove nothing.
+      // Volatile logs lose any suffix, so the first bad one truncates the
+      // log there.
+      if durable_mode {
+        return Error(stop(mut s, Corrupt(name)))
       }
-      return Error(stop(mut s, Corrupt(name)))
+      remove(mut s, take name)?
+      tail = true
+      continue
     }
     // Epochs never decrease along the log: a stale writer's object cannot
     // follow a newer writer's fence.

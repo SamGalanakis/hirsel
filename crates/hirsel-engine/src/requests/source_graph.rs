@@ -943,25 +943,28 @@ pub fn install(
             Ok::<_, ToolError>((recipes, graph))
         })
         .transpose()?;
-    Ok((InstalledSource {
-        operation,
-        definitions,
-        plan,
-        front,
-        lower,
-        growth,
-        storage,
-        request,
-        run,
-        native_transport,
-        run_inputs,
-        run_error,
-        catalogue,
-        source,
-        source_index,
-        sources,
-        errors,
-    }, runtime))
+    Ok((
+        InstalledSource {
+            operation,
+            definitions,
+            plan,
+            front,
+            lower,
+            growth,
+            storage,
+            request,
+            run,
+            native_transport,
+            run_inputs,
+            run_error,
+            catalogue,
+            source,
+            source_index,
+            sources,
+            errors,
+        },
+        runtime,
+    ))
 }
 
 impl InstalledSource {

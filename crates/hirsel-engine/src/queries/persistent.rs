@@ -4968,7 +4968,6 @@ mod malformed_tests {
         }
     }
 
-
     #[test]
     fn invalid_signature_records_miss_before_adoption_or_verification() {
         for verify in [

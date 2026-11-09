@@ -6721,7 +6721,8 @@ impl Checker<'_, '_> {
                 self.set_current_unique(
                     state,
                     destination,
-                    protocol_receipt && (promised
+                    protocol_receipt
+                        && (promised
                         || parametric
                         || awaited_unique
                         // An owning core cursor transfers parts of its

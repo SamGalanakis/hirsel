@@ -33,8 +33,8 @@ use hirsel_types::{
     ProtocolAssociation, Reach, RegionId, Relation, RelationPlace, ScalarDomain, SchemaConstraint,
     Sendability, SendabilityRequirement, SerializableCheck, SharedPath, SharedSlice, Signature,
     SignatureDependency, SignatureKind, SignatureMetadata, Size, SizeParamId, StatePromise, Type,
-    TypeDefinition, TypeId, TypeInterner, TypeKind, TypeParamId,
-    Uniqueness, UseKind, Uses, Variant, VariantId, WrapperKind,
+    TypeDefinition, TypeId, TypeInterner, TypeKind, TypeParamId, Uniqueness, UseKind, Uses,
+    Variant, VariantId, WrapperKind,
 };
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::rc::Rc;
@@ -1260,4 +1260,3 @@ mod tests {
         assert_eq!(runs[0], tables(), "salted runs agree with the unsalted one");
     }
 }
-

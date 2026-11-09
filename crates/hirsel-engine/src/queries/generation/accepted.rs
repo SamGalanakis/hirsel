@@ -658,23 +658,22 @@ impl QueryEngine {
                 self.frozen_declarations(),
             ))
         })();
-        let (original, current, schema_origins, snapshot, declarations) =
-            match captured {
-                Ok(inputs) => inputs,
-                Err(error) => {
-                    return Err(FrontRegistrationFailure {
-                        span: self
-                            .declarations
-                            .sites(&definition)
-                            .first()
-                            .map(|site| site.name_span),
-                        definition: DefId::intern(&definition),
-                        error,
-                        sources: self.sources.clone(),
-                        _allowance: Arc::new(request.empty()),
-                    });
-                }
-            };
+        let (original, current, schema_origins, snapshot, declarations) = match captured {
+            Ok(inputs) => inputs,
+            Err(error) => {
+                return Err(FrontRegistrationFailure {
+                    span: self
+                        .declarations
+                        .sites(&definition)
+                        .first()
+                        .map(|site| site.name_span),
+                    definition: DefId::intern(&definition),
+                    error,
+                    sources: self.sources.clone(),
+                    _allowance: Arc::new(request.empty()),
+                });
+            }
+        };
         let citations = crate::snapshot::OwnedSourceContext {
             sources: self.sources.clone(),
             items: self.items.observations(),

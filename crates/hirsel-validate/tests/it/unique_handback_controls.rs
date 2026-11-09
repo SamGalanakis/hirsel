@@ -1668,9 +1668,6 @@ fn a_callback_tuple_of_unique_parts_is_a_unique_result() {
     );
 }
 
-
-
-
 fn awaited_result(unique: bool, core: bool) -> Fixture {
     let mut f = Fixture::result_call(TypeKind::Primitive(Primitive::String), true);
     let result = f.body().result;

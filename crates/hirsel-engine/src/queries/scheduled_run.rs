@@ -1435,8 +1435,7 @@ impl QueryEngine {
             .result_store
             .as_ref()
             .is_some_and(|store| store.installation_output().is_some())
-        {
-        }
+        {}
         let definitions = self.source_paths();
         let namespace = self.capture_namespace(&definitions, &[], limit)?;
         self.front_run_inputs_in(namespace, limit)

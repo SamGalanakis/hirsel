@@ -466,10 +466,10 @@ impl HeaderProducts {
             versions.retain(|row| row.strong_count() != 0);
             if let Some(existing) = versions.iter().filter_map(Weak::upgrade).find(|existing| {
                 existing
-                        .entry
-                        .as_ref()
-                        .zip(product.entry.as_ref())
-                        .is_some_and(|(old, new)| Arc::ptr_eq(old, new))
+                    .entry
+                    .as_ref()
+                    .zip(product.entry.as_ref())
+                    .is_some_and(|(old, new)| Arc::ptr_eq(old, new))
             }) {
                 existing
             } else {
@@ -1578,9 +1578,7 @@ impl QueryEngine {
         });
         // The scalar memo cache is optional. It must not pin an admitted
         // reader's payload after that reader finishes.
-        if product.charge.evictable()
-            && (self.header_products.is_none()
-                || product.result.is_ok())
+        if product.charge.evictable() && (self.header_products.is_none() || product.result.is_ok())
         {
             if same {
                 self.signatures.remove(&id);
@@ -1640,10 +1638,7 @@ fn owned_entry(
 }
 
 impl operation_inputs::OperationOwner {
-    fn header(
-        &self,
-        entry: &Arc<Entry<hirsel_types::SignatureRef>>,
-    ) -> Option<Arc<HeaderProduct>> {
+    fn header(&self, entry: &Arc<Entry<hirsel_types::SignatureRef>>) -> Option<Arc<HeaderProduct>> {
         self.headers
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -1652,9 +1647,9 @@ impl operation_inputs::OperationOwner {
             .filter_map(Weak::upgrade)
             .find(|product| {
                 product
-                        .entry
-                        .as_ref()
-                        .is_some_and(|old| Arc::ptr_eq(old, entry))
+                    .entry
+                    .as_ref()
+                    .is_some_and(|old| Arc::ptr_eq(old, entry))
             })
     }
     pub(super) fn header_entry(
@@ -2145,7 +2140,7 @@ mod retention_tests {
                     entry: Some(entry),
                     recomputes: 0,
                     graph_work: 0,
-                        charge,
+                    charge,
                     _row_charge: row_charge,
                     origin: Weak::new(),
                     recent: AtomicBool::new(true),
@@ -2219,7 +2214,7 @@ mod retention_tests {
                     entry: Some(entry.clone()),
                     recomputes: 0,
                     graph_work: 0,
-                        charge,
+                    charge,
                     _row_charge: row_charge,
                     origin: Weak::new(),
                     recent: AtomicBool::new(true),

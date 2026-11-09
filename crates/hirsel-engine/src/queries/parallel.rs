@@ -471,7 +471,7 @@ impl Worker<'_> {
                 &signature.value,
                 &mut products,
                 &mut provider,
-                            ),
+            ),
             None => Err(QueryError::NotImplemented),
         };
         window.close();
@@ -495,11 +495,7 @@ struct WorkerRecorder<'a> {
     unavailable: &'a mut Option<QueryKind>,
 }
 impl<'a> WorkerRecorder<'a> {
-    fn new<T>(
-        worker: &'a Worker<'_>,
-        owner: DefId,
-        stage: &'a mut Stage<T>,
-    ) -> Self {
+    fn new<T>(worker: &'a Worker<'_>, owner: DefId, stage: &'a mut Stage<T>) -> Self {
         Self {
             provider: FrozenProvider::for_definition(
                 worker.snapshot,

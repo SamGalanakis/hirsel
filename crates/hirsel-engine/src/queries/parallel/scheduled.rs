@@ -1092,7 +1092,6 @@ impl FrontBodyQueries {
         self._allowance.request.reserved()
     }
 
-
     /// Whether `definition`'s settled header row is retained in the admitted cache.
     pub fn header_resident(&self, definition: &DefPath) -> bool {
         self.namespace

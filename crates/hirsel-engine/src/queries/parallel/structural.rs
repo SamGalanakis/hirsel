@@ -221,9 +221,8 @@ impl Worker<'_> {
                 text[3] ^ header[3],
             ])
         };
-        let census = || {
-            counted::census_production(signature.definition.session_index(), census_input)
-        };
+        let census =
+            || counted::census_production(signature.definition.session_index(), census_input);
         let binding = counted::scope(Owner::ReceiptBinding);
         let mut actual = BTreeMap::from([(signature.definition, signature.fingerprint)]);
         // Resolver signature receipts are metadata, not part of the checked

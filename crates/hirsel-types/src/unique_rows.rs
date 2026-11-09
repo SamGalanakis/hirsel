@@ -62,4 +62,3 @@ pub fn result_rows(
     }
     rows
 }
-

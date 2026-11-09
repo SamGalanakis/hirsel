@@ -1773,7 +1773,7 @@ impl QueryEngine {
                     &signature.value,
                     &mut products,
                     &mut recorder,
-                                    );
+                );
                 recorder.observed.products = Arc::new(products);
                 let observed = recorder.observed;
                 let reads = recorder.reads;

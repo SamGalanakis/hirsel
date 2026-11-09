@@ -830,7 +830,6 @@ impl QueryEngine {
         self.settle_signatures();
     }
 
-
     fn signature_value_changes(&mut self, paths: &[DefPath]) -> Changes {
         let mut changes = Changes::default();
         for path in paths {

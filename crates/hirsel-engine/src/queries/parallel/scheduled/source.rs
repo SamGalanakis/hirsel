@@ -204,7 +204,9 @@ impl QueryEngine {
             .ok_or_else(refused)?
             .checked_add(owner_bytes)
             .ok_or_else(refused)?
-            .checked_add(header_products::HeaderProducts::source_fact_index_bytes(self))
+            .checked_add(header_products::HeaderProducts::source_fact_index_bytes(
+                self,
+            ))
             .ok_or_else(refused)?;
         Ok(FrontInputFootprint {
             source_headers,

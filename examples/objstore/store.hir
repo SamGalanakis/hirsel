@@ -39,7 +39,7 @@ pub fn inspect(d: Dir, name: String) -> Result[Metadata, object.Problem] {
     prefix = if i == 0 {
       copy parts[i]
     } else {
-      string.join([prefix, parts[i]], "/")
+      string.join([prefix, copy parts[i]], "/")
     }
     let info = match file.metadata(d, path.of(prefix)) {
       Ok(value) => take value,

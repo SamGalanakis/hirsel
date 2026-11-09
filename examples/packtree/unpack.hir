@@ -111,7 +111,7 @@ fn parents(d: Dir, name: String, directory: bool) -> Result[(), manifest.Problem
     prefix = if i == 0 {
       copy parts[i]
     } else {
-      string.join([prefix, parts[i]], "/")
+      string.join([prefix, copy parts[i]], "/")
     }
     match file.metadata(d, path.of(prefix)) {
       Ok(info) => {

@@ -30,7 +30,7 @@ fn collect(mut out: List[u8], span: Bytes) -> Result[(), u8] uses {} {
 fn vector(t: Test, data: Bytes, newlines: u64) -> Result[(), ScanError[u8, u8]] {
   let capacities: List[u64] = [1, 2, 7, 4096]
   for capacity in capacities {
-    let mut source = Script(data: data, at: 0, calls: 0, short: 3)
+    let mut source = Script(data: copy data, at: 0, calls: 0, short: 3)
     let mut output: List[u8] = []
     let counts = scan(mut source, scripted_refill, mut output, collect, capacity)?
     test.check(t, bytes.from_list(take output) == data)

@@ -51,7 +51,7 @@ pub fn invalid(kind: Kind, source: String, line: u64) -> InputError uses {} {
 // Parsed structural equality: object key order is irrelevant, array order matters,
 // and Number(String) compares the validated token spelling, without normalization.
 pub fn equal(a: json.Value, b: json.Value) -> bool uses {} {
-  match (a, b) {
+  match (copy a, copy b) {
     (Null(), Null()) => true,
     (Bool(x), Bool(y)) => x == y,
     (Number(x), Number(y)) => x == y,

@@ -1643,11 +1643,11 @@ pub(super) fn build(
                             env,
                         }),
                         StmtKind::Let {
+                            mutable,
                             pattern,
                             value,
                             ty,
                             otherwise,
-                            ..
                         } => {
                             let bind = bind(
                                 &mut nodes,
@@ -1681,8 +1681,17 @@ pub(super) fn build(
                                 entry,
                                 expression: *value,
                                 // A let-else reads its scrutinee as match does.
+                                // MODE-7 (R1): a part or element initializer
+                                // binds a borrowed view; a share is written.
                                 context: if otherwise.is_some() {
                                     Context::Read
+                                } else if !mutable
+                                    && matches!(
+                                        tree.expressions[value.0 as usize].kind,
+                                        ExprKind::Field { .. } | ExprKind::Index { .. }
+                                    )
+                                {
+                                    Context::View
                                 } else {
                                     Context::Own
                                 },

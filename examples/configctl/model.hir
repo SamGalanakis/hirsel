@@ -64,13 +64,13 @@ pub fn validate(config: Config) -> Result[(), ConfigError] uses {} {
       if v.version != 1 {
         return Error(UnknownVersion())
       }
-      (v.name, v.retries)
+      (copy v.name, v.retries)
     },
     Version2(v) => {
       if v.version != 2 {
         return Error(UnknownVersion())
       }
-      (v.service.name, v.retry.attempts)
+      (copy v.service.name, v.retry.attempts)
     },
   }
   if name == "" {

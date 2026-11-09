@@ -450,7 +450,7 @@ fn dfa_scalar_step(re: VmProgram, subject: Subject, cursor: u64, reverse: bool,
 
 fn dfa_search_end(re: Regex, program: VmProgram, subject: Subject, start: u64, haystack: Bytes, mut cache: DfaCache) -> DfaEndResult uses {} {
   if cache.disabled { return DfaEndQuit() }
-  let bytes = subject.bytes
+  let bytes = copy subject.bytes
   let size = core@1/bytes.len(bytes)
   // A valid String boundary's preceding byte is ASCII exactly when its
   // preceding scalar is ASCII. UTF-8 continuation bytes need no decoding
@@ -554,7 +554,7 @@ fn dfa_search(re: Regex, subject: Subject, start: u64, haystack: Bytes, mut cach
     DfaEndMiss() => return DfaMiss(),
     DfaEndQuit() => return DfaQuit(),
   }
-  let bytes = subject.bytes
+  let bytes = copy subject.bytes
   let mut scalar = scalar_mode
   let mut state = 0u64
   let mut seeds = 1u64

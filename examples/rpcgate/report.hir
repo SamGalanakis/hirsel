@@ -24,7 +24,7 @@ pub resource type Credit {
   upstream: bool,
 }
 drop(token) {
-  let state = token.state
+  let state = copy token.state
   let upstream = token.upstream
   mutex.with(
     state.tasks,
@@ -68,7 +68,7 @@ pub fn reserve(state: State, upstream: bool) -> Option[Credit] {
     }
   )
   if accepted {
-    Some(Credit(state: state, upstream: upstream))
+    Some(Credit(state: copy state, upstream: upstream))
   } else {
     None()
   }
@@ -137,7 +137,7 @@ pub fn shutdown(state: State, output: Stdout, clients: u64, expired: bool) -> Re
     let status = if row.status == "running" {
       "canceled"
     } else {
-      row.status
+      copy row.status
     }
     let mut bytes: List[u8] = []
     text.append(

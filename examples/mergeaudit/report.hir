@@ -45,7 +45,7 @@ fn content_size(value: String) -> Result[u64, model.Problem] uses {} {
   if string.byte_len(value) > model.SOURCE_BYTES {
     return Error(model.invalid("output_bytes_limit"))
   }
-  let Ok(quoted) = json.stringify(Text(value)) else {
+  let Ok(quoted) = json.stringify(Text(copy value)) else {
     return Error(model.invalid("json"))
   }
   let count = string.byte_len(quoted)

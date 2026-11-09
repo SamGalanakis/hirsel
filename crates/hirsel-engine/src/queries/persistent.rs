@@ -3262,7 +3262,7 @@ impl QueryEngine {
         if !report.violations.is_empty() {
             return Err(QueryError::Operational(hirsel_types::OperationalFailure {
                 operation: "TIR validation".into(),
-                message: format!("{:?}", report.violations),
+                message: format!("{:?}: {:?}", definition.path, report.violations),
             }));
         }
         if let Some(entry) = entry

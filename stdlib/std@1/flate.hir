@@ -426,7 +426,7 @@ fn decode_symbols(data: Bytes, mut z: Inflate, limit: u64, mut out: List[u8]) ->
   if z.copy_length > 0 && !copy_match(mut z, limit, mut out) {
     return Ok(Full())
   }
-  let codes = z.codes
+  let codes = copy z.codes
   while true {
     z.mark = z.s
     z.decoded += 1

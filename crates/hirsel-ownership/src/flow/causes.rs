@@ -1306,6 +1306,33 @@ impl Checker<'_, '_> {
             .required(required)
             .into()
     }
+    /// MODE-7 (R1): this use needs an owned value but liveness gives a
+    /// borrow, so the share must be written. The fix writes `copy` at the use.
+    pub(super) fn share_wanted(&mut self, expression: ExprId) {
+        let site = self.span_of(expression);
+        self.report(
+            const { RuleId::of("MODE-7") },
+            site,
+            "this use needs an owned value; write `copy` to share it",
+            |c| {
+                let spelled = c.spelled(expression).unwrap_or_else(|| "the value".into());
+                Explanation {
+                    repairs: vec![hirsel_modes::explain::Repair::Share(spelled)],
+                    fix: Some(hirsel_diag::Fix {
+                        span: Span {
+                            end: site.start,
+                            ..site
+                        },
+                        replacement: "copy ".into(),
+                        message: "share the value by a count".into(),
+                    }),
+                    ..Explanation::default()
+                }
+                .required(Fact::new(Requirement::Owned, site, &[]))
+                .into()
+            },
+        );
+    }
     /// Record a diagnostic and its explanation, rendered after the trace.
     pub(super) fn report(
         &mut self,

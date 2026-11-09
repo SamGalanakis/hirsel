@@ -507,7 +507,7 @@ fn decimal(number: String, mut work: u64) -> unique Result[Decimal, ErrorKind] u
 
 fn equivalent(a: json.Value, b: json.Value, mut work: u64) -> unique Result[bool, ErrorKind] uses {} {
   spend(mut work, 8)?
-  match (a, b) {
+  match (copy a, copy b) {
     (Null, Null) => Ok(true),
     (Bool(x), Bool(y)) => Ok(x == y),
     (Text(x), Text(y)) => {
@@ -695,9 +695,9 @@ pub fn apply(document: Option[json.Value], patch: Patch, limits: Limits) -> Resu
     }
     if let Error(kind) = checked {
       let location = match op {
-        Move(_, source) => source.text,
-        Copy(_, source) => source.text,
-        _ => p.text,
+        Move(_, source) => copy source.text,
+        Copy(_, source) => copy source.text,
+        _ => copy p.text,
       }
       return Error(patch_error(index_at, location, kind))
     }
@@ -718,16 +718,16 @@ pub fn apply(document: Option[json.Value], patch: Patch, limits: Limits) -> Resu
       Error(kind) => {
         let location = match op {
           Move(_, source) => if kind == MissingSource() {
-            source.text
+            copy source.text
           } else {
-            p.text
+            copy p.text
           },
           Copy(_, source) => if kind == MissingSource() {
-            source.text
+            copy source.text
           } else {
-            p.text
+            copy p.text
           },
-          _ => p.text,
+          _ => copy p.text,
         }
         return Error(patch_error(index_at, location, kind))
       },

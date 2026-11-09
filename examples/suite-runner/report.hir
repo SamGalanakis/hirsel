@@ -97,7 +97,7 @@ pub fn aggregate(source: manifest.Manifest, run_value: run.Run) -> Summary uses 
     } else if value == "incomplete" {
       "global_timeout"
     } else {
-      state.reason
+      copy state.reason
     }
     list.push(
       mut rows,

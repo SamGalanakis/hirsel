@@ -292,7 +292,7 @@ fn check_label_limits(config: MetricConfig, labels: List[telemetry.Attribute]) -
 }
 
 fn apply(mut r: Registry, m: CheckedMeasurement) -> Result[(), MetricError] uses {} {
-  let data = m.data
+  let data = copy m.data
   check_label_limits(r.config, data.labels)?
   let mut i: u64 = 0
   while i < core@1/list.len(r.state.instruments) {
@@ -544,7 +544,7 @@ pub fn restore_data(data: CheckpointData, evidence: EvidenceId) -> Result[
   let mut i: u64 = 0
   while i < core@1/list.len(data.state.instruments) {
     let instrument = data.state.instruments[i]
-    let d = instrument.descriptor
+    let d = copy instrument.descriptor
     if d != r.state.instruments[i].descriptor || core@1/list.len(instrument.series) > data.config.max_series {
       return Error(InvalidCheckpoint())
     }

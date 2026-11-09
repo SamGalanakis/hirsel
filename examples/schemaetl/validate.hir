@@ -53,7 +53,7 @@ pub fn scalar(kind: plan.Kind, take site: String) -> schema.Boundary[Cell, json.
       schema.SchemaError
     ] uses {} {
       schema.charge_check(mut check)?
-      match (kind, value) {
+      match (kind, copy value) {
         (StringField(), Text(s)) => Ok(TextCell(unique s)),
         (BoolField(), Bool(b)) => Ok(BoolCell(b)),
         (IntegerField(), Number(s)) => match i64.parse(s) {
@@ -112,9 +112,9 @@ fn decode_record(
     let mut known = false
     for field in fields {
       let name = if output {
-        field.output
+        copy field.output
       } else {
-        field.name
+        copy field.name
       }
       if name == key {
         known = true
@@ -127,9 +127,9 @@ fn decode_record(
   let mut cells: List[Cell] = []
   for field in fields {
     let name = if output {
-      field.output
+      copy field.output
     } else {
-      field.name
+      copy field.name
     }
     let present = map.get(items, name)
     let value = match present {
@@ -184,9 +184,9 @@ pub fn make_boundary(fields: List[plan.Field], output: bool) -> schema.Boundary[
       let mut items: Map[String, json.Value] = map.empty()
       for i in 0u64..list.len(owned) {
         let key = if output {
-          owned[i].output
+          copy owned[i].output
         } else {
-          owned[i].name
+          copy owned[i].name
         }
         let value = wire(record.cells[i])
         if value != Null() && !plan.matches(owned[i].kind, value) {

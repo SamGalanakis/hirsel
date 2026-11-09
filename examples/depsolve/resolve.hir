@@ -44,8 +44,8 @@ pub fn build(root: model.Root, graph: model.Graph) -> Result[
   }
   let mut at = 0u64
   while at < list.len(work) {
-    let trace = work[at]
-    let edge = trace.value
+    let trace = copy work[at]
+    let edge = copy trace.value
     let id = model.identity(edge)
     let Some(node) = map.get(graph.nodes, id) else {
       return Error(explain.issue(Missing(unique id), trace))

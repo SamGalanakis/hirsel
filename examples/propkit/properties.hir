@@ -177,7 +177,7 @@ fn sorting(value: Sample) -> runner.Outcome uses {} {
 fn roundtrip(value: Sample) -> runner.Outcome uses {} {
   let encoded = codec.encode(value)
   let decoded: Result[Sample, DecodeError] = codec.decode(encoded)
-  if decoded != Ok(value) {
+  if decoded != Ok(copy value) {
     return Fail(30)
   }
   let node: json.Value = Text(unique value.text)

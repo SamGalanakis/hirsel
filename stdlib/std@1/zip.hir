@@ -1034,7 +1034,7 @@ pub fn write(mut w: Writer, data: Bytes, mut out: List[u8]) -> Result[(), WriteE
     return Error(Directory())
   }
   let last = core@1/list.len(w.directory) - 1
-  let e = w.directory[last]
+  let e = copy w.directory[last]
   if w.raw {
     for byte in data {
       core@1/list.push(mut out, byte)

@@ -28,7 +28,7 @@ fn serve(tasks: Tasks, n: Net, mut listener: Listener of n) -> Result[
     string.as_bytes(reply),
     true
   ) ?
-  Ok(incoming.target)
+  Ok(copy incoming.target)
 }
 
 pub fn main(rt: Io, args: Args) -> Result[(), ExchangeError] {

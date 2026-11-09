@@ -76,7 +76,7 @@ pub fn finite(value: f64, pos: u64) -> Result[json.Value, binary.DecodeError] us
 // Validate the public Number lexeme before conversion. Integer lexemes never
 // fall back to a float on overflow; decimal/exponent lexemes use binary64.
 pub fn numeric(spelling: String) -> Result[Numeric, binary.DecodeError] uses {} {
-  if let Error(_) = json.stringify(Number(spelling)) {
+  if let Error(_) = json.stringify(Number(copy spelling)) {
     return Error(InvalidNumber())
   }
   let data = core@1/string.as_bytes(spelling)

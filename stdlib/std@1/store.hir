@@ -780,7 +780,7 @@ fn settle[S](mut s: Store[S], take t: Txn) -> Result[(), Unreleased] {
 fn unsettled(take e: StoreError) -> Unreleased uses {} {
   match e {
     Storage(f) => Unknown(Storage(f)),
-    other => Storage(other),
+    other => Storage(copy other),
   }
 }
 
@@ -790,8 +790,8 @@ type Unreleased = Storage(StoreError) | Unknown(StoreError)
 
 fn released[E](take u: Unreleased) -> TxFailure[E] uses {} {
   match u {
-    Storage(e) => Storage(e),
-    Unknown(e) => Unknown(e),
+    Storage(e) => Storage(copy e),
+    Unknown(e) => Unknown(copy e),
   }
 }
 

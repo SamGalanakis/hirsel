@@ -284,7 +284,7 @@ fn json_content(request: http.ServerRequest) -> bool uses {} {
 fn route(request: http.ServerRequest) -> Result[Action, Reply] uses {} {
   let target = match string.split_once(request.target, "?") {
     Some((target_path, _)) => target_path,
-    None() => request.target,
+    None() => copy request.target,
   }
   let parts = string.split(unique target, "/")
   if list.len(parts) < 2 || parts[0] != "" || parts[1] != "todos" || list.len(parts) > 3 {

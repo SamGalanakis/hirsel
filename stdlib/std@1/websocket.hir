@@ -746,12 +746,12 @@ pub fn send_text(mut c: Conn, message: String) -> Result[(), WsError] {
 
 /// Sends `data` as one binary frame.
 pub fn send_binary(mut c: Conn, data: Bytes) -> Result[(), WsError] {
-  send_frame(mut c, Frame(fin: true, opcode: Binary(), payload: data))
+  send_frame(mut c, Frame(fin: true, opcode: Binary(), payload: copy data))
 }
 
 /// Sends a ping carrying at most 125 bytes; the peer's pong is consumed by `receive`.
 pub fn ping(mut c: Conn, data: Bytes) -> Result[(), WsError] {
-  send_frame(mut c, Frame(fin: true, opcode: Ping(), payload: data))
+  send_frame(mut c, Frame(fin: true, opcode: Ping(), payload: copy data))
 }
 
 /// Receives the next data message, reassembling fragments. It answers each ping
@@ -787,7 +787,7 @@ pub fn receive(mut c: Conn) -> Result[Option[Message], WsError] {
     match frame.opcode {
       Ping() => {
         if c.state == 0 {
-          write(mut c, Frame(fin: true, opcode: Pong(), payload: frame.payload))?
+          write(mut c, Frame(fin: true, opcode: Pong(), payload: copy frame.payload))?
         }
       },
       Pong() => (),

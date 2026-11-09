@@ -79,9 +79,9 @@ pub fn sweep(source: model.Triple, take changes: unique List[edits.Hunk]) -> Res
   for h in hunks {
     let _ = edits.check_span(source.base.lines, h.base)?
     let lines = if h.side == 0 {
-      source.left.lines
+      copy source.left.lines
     } else {
-      source.right.lines
+      copy source.right.lines
     }
     let _ = edits.check_span(lines, h.replacement)?
     if h.side > 1 || h.base.length == 0 && h.replacement.length == 0 {

@@ -9,7 +9,7 @@ fn serve(
   socket: Path,
   output: Stdout
 ) -> Result[u8, AppError] {
-  let state = context.state
+  let state = copy context.state
   let clock = context.clock
   let until = time.deadline(
     clock,

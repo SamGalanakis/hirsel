@@ -256,7 +256,7 @@ independent of topology ([PROG-5](programs.md#prog-5-topology)).
   A call at those arguments runs the instance. Instances are cached by the spellings of
   their arguments, so every call at the same arguments shares one, and the arguments'
   own modes do not distinguish instances: an instance's header takes the closed types'
-  defaults ([MODE-7](ownership.md#mode-7-inference)). Unselected instances are never generated, and a call
+  defaults ([MODE-7](ownership.md#mode-7-modes-inside-a-body)). Unselected instances are never generated, and a call
   evaluated at compile time selects its instance when it runs. An instance's diagnostics
   are in its text, on the declaration's lines, with a secondary label at the call that
   selected it. One declaration selects at most 256 instances; selecting another is CT-1

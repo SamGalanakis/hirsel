@@ -149,7 +149,7 @@ pub fn inputs(value: json.Value) -> Result[List[Input], String] uses {} {
 }
 
 pub fn matches(kind: Kind, value: json.Value) -> bool uses {} {
-  match (kind, value) {
+  match (kind, copy value) {
     (StringField(), Text(_)) => true,
     (IntegerField(), Number(n)) => match i64.parse(n) {
       Ok(_) => true,

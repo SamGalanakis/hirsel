@@ -1924,7 +1924,7 @@ fn document_end(mut p: unique Parser, data: Bytes, tokens: List[Token]) -> Resul
 // saphyr Parser::resolve_tag: `!!` names the core prefix unless %TAG overrides it;
 // a named handle must have been declared.
 fn resolve_tag(p: Parser, data: Bytes, t: Token) -> unique Result[String, YamlError] uses {} {
-  let handle = t.text
+  let handle = copy t.text
   if let Some(prefix) = core@1/map.get(p.tags, handle) {
     return Ok(string.concat(prefix, t.suffix))
   }
@@ -2161,13 +2161,13 @@ fn flow_sequence_entry(
   if first {
     p.at += 1
   }
-  let mut t = tokens[p.at]
+  let mut t = copy tokens[p.at]
   if t.kind != T_FLOW_SEQUENCE_END && !first {
     if t.kind != T_FLOW_ENTRY {
       return Error(syntax(data, t.start))
     }
     p.at += 1
-    t = tokens[p.at]
+    t = copy tokens[p.at]
   }
   if t.kind == T_FLOW_SEQUENCE_END {
     pop_state(mut p)
@@ -2573,7 +2573,7 @@ fn core_tag(tag: String) -> bool uses {} {
 // string, and a core tag must match its content; another tag makes Tagged text. An
 // integer outside i64 is Syntax; an empty verbatim tag is Tag.
 fn resolve_scalar(data: Bytes, e: Event) -> Result[Value, YamlError] uses {} {
-  let s = e.text
+  let s = copy e.text
   if !e.tagged {
     if e.style != PLAIN {
       return Ok(Text(unique s))
@@ -2583,7 +2583,7 @@ fn resolve_scalar(data: Bytes, e: Event) -> Result[Value, YamlError] uses {} {
       None() => Error(syntax(data, e.start)),
     }
   }
-  let tag = e.tag
+  let tag = copy e.tag
   if !core_tag(tag) && tag != "" {
     return Ok(Tagged(tag: unique tag, value: box Text(unique s)))
   }
@@ -3678,7 +3678,7 @@ fn untagged(value: Value) -> Value uses {} {
 fn value_at(value: Value, path: List[Segment]) -> Option[Value] uses {} {
   let mut current = unique value
   for segment in path {
-    let next: Value = match (untagged(current), segment) {
+    let next: Value = match (untagged(current), copy segment) {
       (Object(entries), Key(k)) => match core@1/map.get(entries, k) {
         Some(found) => unique found,
         None() => return None(),
@@ -3702,7 +3702,7 @@ pub fn get(doc: Document, path: List[Segment]) -> Option[Value] uses {} {
 
 // Equality with NaN equal to NaN.
 fn same(a: Value, b: Value) -> bool uses {} {
-  match (a, b) {
+  match (copy a, copy b) {
     (Float(x), Float(y)) => x == y || x != x && y != y,
     (Array(xs), Array(ys)) => {
       if core@1/list.len(xs) != core@1/list.len(ys) {
@@ -4206,7 +4206,7 @@ fn commit(
   let Ok(fresh) = document_with(take edited, doc.config) else {
     return Error(InvalidValue())
   }
-  let landed = match (get(fresh, path), expected) {
+  let landed = match (get(fresh, path), copy expected) {
     (Some(actual), Some(wanted)) => same(actual, wanted),
     (None(), None()) => true,
     _ => false,
@@ -4244,7 +4244,7 @@ fn set_in(current: Value, path: List[Segment], from: u64, value: Value) -> Resul
   if from == n {
     return Ok(unique value)
   }
-  match (current, path[from]) {
+  match (copy current, copy path[from]) {
     (Tagged(tag: tag, value: inner), _) => {
       let changed = set_in(unboxed(inner), path, from, value)?
       Ok(Tagged(tag: unique tag, value: box take changed))

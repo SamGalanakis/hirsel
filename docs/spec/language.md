@@ -261,7 +261,7 @@ is the one separate program-level check.
 
 - an omitted result is `()`;
 - allocation is permitted unless `@noalloc` is written;
-- modes follow [MODE-7](ownership.md#mode-7-inference): borrowed and `mut` parameters are
+- modes follow [MODE-7](ownership.md#mode-7-modes-inside-a-body): borrowed and `mut` parameters are
   local to themselves, taken parameters and results are global, values are aliased,
   closures are many;
 - relations, brands and contracts are absent unless written;

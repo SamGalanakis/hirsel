@@ -702,13 +702,13 @@ fn merge_pax(mut h: Header, take records: Map[String, String], at: u64) -> Resul
       continue
     }
     if key == "path" {
-      h.name = value
+      h.name = copy value
     } else if key == "linkpath" {
-      h.linkname = value
+      h.linkname = copy value
     } else if key == "uname" {
-      h.uname = value
+      h.uname = copy value
     } else if key == "gname" {
-      h.gname = value
+      h.gname = copy value
     } else if key == "uid" {
       h.uid = match decimal(value) {
         Ok(n) => n,
@@ -881,10 +881,10 @@ pub fn next[S, E](
       }
       merge_pax(mut h, take records, at)?
       if let Some(name) = long_name {
-        h.name = name
+        h.name = copy name
       }
       if let Some(link) = long_link {
-        h.linkname = link
+        h.linkname = copy link
       }
       t.left = if header_only(h.kind) {
         0
@@ -1336,13 +1336,13 @@ pub fn write_header(mut w: Writer, h: Header, mut out: List[u8]) -> Result[
       continue
     }
     let stated: Option[String] = if key == "path" {
-      Some(h.name)
+      Some(copy h.name)
     } else if key == "linkpath" {
-      Some(h.linkname)
+      Some(copy h.linkname)
     } else if key == "uname" {
-      Some(h.uname)
+      Some(copy h.uname)
     } else if key == "gname" {
-      Some(h.gname)
+      Some(copy h.gname)
     } else if key == "uid" {
       Some(u64.to_string(h.uid))
     } else if key == "gid" {
@@ -1419,7 +1419,7 @@ pub fn write_header(mut w: Writer, h: Header, mut out: List[u8]) -> Result[
       let name = if h.name == "" {
         "GlobalHead.0.0"
       } else {
-        h.name
+        copy h.name
       }
       raw_file(mut out, name, data, 103)
       return Ok(())
@@ -1565,17 +1565,17 @@ pub fn extract[S, E](
     match h.kind {
       Global() => continue,
       Directory() | Regular() => (),
-      _ => return Error(Unsupported(h.name)),
+      _ => return Error(Unsupported(copy h.name)),
     }
     let parts = match local_parts(h.name) {
       Some(parts) => parts,
-      None() => return Error(Insecure(h.name)),
+      None() => return Error(Insecure(copy h.name)),
     }
     let count = core@1/list.len(parts)
     match h.kind {
       Directory() => match directories(into, parts, count) {
         Ok(()) => (),
-        Error(None()) => return Error(Insecure(h.name)),
+        Error(None()) => return Error(Insecure(copy h.name)),
         Error(Some(error)) => return Error(File(error)),
       },
       _ => {
@@ -1584,13 +1584,13 @@ pub fn extract[S, E](
         }
         match directories(into, parts, count - 1) {
           Ok(()) => (),
-          Error(None()) => return Error(Insecure(h.name)),
+          Error(None()) => return Error(Insecure(copy h.name)),
           Error(Some(error)) => return Error(File(error)),
         }
         let p = core@1/path.of(joined(parts, count))
         match core@1/file.metadata(into, p) {
           Ok(meta) => match meta.kind {
-            Symlink() => return Error(Insecure(h.name)),
+            Symlink() => return Error(Insecure(copy h.name)),
             _ => (),
           },
           Error(NotFound()) => (),

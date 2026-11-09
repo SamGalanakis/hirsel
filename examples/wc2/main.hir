@@ -40,7 +40,7 @@ fn sorted_unique(take lines: unique List[unique String]) -> String {
   let mut output_lines: List[String] = []
   let mut previous: Option[String] = None()
   for line in sorted {
-    if previous != Some(line) {
+    if previous != Some(copy line) {
       list.push(mut output_lines, f"{line}\n")
       previous = Some(unique line)
     }

@@ -754,7 +754,7 @@ impl FrontBodyQueries {
         );
         weight.bytes()
     }
-    fn admit_input_slot(&self, definition: DefId) -> Option<()> {
+    fn admit_input_slot(&self, cx: &mut dyn QueryContext, definition: DefId) -> Option<()> {
         let key = self.inputs.key_for(definition)?;
         loop {
             let mut ledger = self.input_slots.lock().unwrap_or_else(|e| e.into_inner());
@@ -774,7 +774,7 @@ impl FrontBodyQueries {
             drop(slots);
             drop(ledger);
             let admitted = if bytes != 0 {
-                Some(self.owner_grant(bytes, "Front demand slots")?)
+                Some(self.owner_grant(cx, bytes, "Front demand slots")?)
             } else {
                 None
             };
@@ -872,6 +872,7 @@ impl FrontBodyQueries {
     }
     fn retain(
         &self,
+        cx: &mut dyn QueryContext,
         outcome: &ModeResult,
         checked: &CheckedProduct,
         table_keys: Option<&Arc<crate::table_keys::TableKeyUse>>,
@@ -895,7 +896,7 @@ impl FrontBodyQueries {
                 0
             })?
             .checked_add(dead_arms.map_or(0, LintFacts::capture_bytes))?;
-        let (allowance, backing) = self.owner_grant(charge, "compact facts")?;
+        let (allowance, backing) = self.owner_grant(cx, charge, "compact facts")?;
         // The complete payload and its lease are one owner. No later failure
         // can consume a debit without retaining the corresponding reservation.
         backing.add(allowance)?;
@@ -960,6 +961,7 @@ impl FrontBodyQueries {
     }
     fn owner_grant(
         &self,
+        cx: &mut dyn QueryContext,
         value_bytes: u64,
         owner: &'static str,
     ) -> Option<(
@@ -970,6 +972,9 @@ impl FrontBodyQueries {
             LiveSourceBacking,
         >::uninit());
         let charge = value_bytes.checked_add(backing_bytes)?;
+        // Evict idle bodies first; a full footprint refuses only when nothing
+        // idle remains to reclaim.
+        let _ = self.make_room(cx, charge);
         let request = &self._allowance.request;
         let mut allowance = match request.reserve(charge) {
             Ok(allowance) => allowance,
@@ -992,6 +997,7 @@ impl FrontBodyQueries {
     }
     fn admit_summary(
         &self,
+        cx: &mut dyn QueryContext,
         address: hirsel_artifact_store::Address,
         action: hirsel_artifact_store::Action,
         summary: Arc<PublishedSummary>,
@@ -1002,6 +1008,7 @@ impl FrontBodyQueries {
             Arc<LiveSourceBacking>,
         )>::uninit());
         let (mut allowance, backing) = self.owner_grant(
+            cx,
             LiveSummaryProduct::shared_owner_bytes().checked_add(tuple_bytes)?,
             "Summary publication",
         )?;
@@ -1030,6 +1037,7 @@ impl FrontBodyQueries {
     ) -> Option<FrontOutcome> {
         self.pool_completion_reads(cx, &mut outcome, &mut checked, &mut memos)?;
         let backing = self.retain(
+            cx,
             &outcome,
             &checked,
             table_keys.as_ref(),
@@ -1051,6 +1059,7 @@ impl FrontBodyQueries {
             Err(error) => Some(FrontOutcome::failed(reference?, error, facts)),
             Ok(output) => {
                 let publication = self.admit_summary(
+                    cx,
                     hirsel_artifact_store::Address(key),
                     action,
                     outcome.summary?,
@@ -1068,12 +1077,14 @@ impl FrontBodyQueries {
     }
     fn admit_body(
         &self,
+        cx: &mut dyn QueryContext,
         address: hirsel_artifact_store::Address,
         action: hirsel_artifact_store::Action,
         outcome: ModeResult,
         summary: LiveSummaryProduct,
     ) -> Option<ProductRef> {
         let (mut allowance, backing) = self.owner_grant(
+            cx,
             LiveAnalyzedProduct::shared_required_bytes(&outcome)?,
             "analyzed body",
         )?;
@@ -1845,7 +1856,7 @@ impl QueryTask for BodyTask {
         }
         let definition = self.queries.inputs[&self.input].definition;
         if !self.slot_admitted {
-            if self.queries.admit_input_slot(definition).is_none() {
+            if self.queries.admit_input_slot(cx, definition).is_none() {
                 return Err(self.queries.resource_refusal());
             }
             self.slot_admitted = true;
@@ -2048,6 +2059,7 @@ impl BodyTask {
     }
     fn publish_body(
         &self,
+        cx: &mut dyn QueryContext,
         mut outcome: ModeResult,
         bytes: Option<&[u8]>,
     ) -> Result<ProductRef, Reference> {
@@ -2114,7 +2126,7 @@ impl BodyTask {
         }
         let action = hirsel_engine_store::query_action(&input.key, input.key.1);
         let product = queries
-            .admit_body(self.query.address, action, outcome, summary)
+            .admit_body(cx, self.query.address, action, outcome, summary)
             .ok_or_else(|| queries.resource_refusal())?;
         let body = product
             .live_value::<crate::products::LiveAnalyzedProduct>()
@@ -2191,7 +2203,7 @@ impl BodyTask {
             reads,
             signature.as_deref(),
         )?;
-        Some(self.publish_body(restored.outcome, None))
+        Some(self.publish_body(cx, restored.outcome, None))
     }
 
     fn load(&self, cx: &mut dyn QueryContext) -> Option<Result<ProductRef, Reference>> {
@@ -2531,7 +2543,7 @@ impl BodyTask {
         }
         if self.materialize {
             return self
-                .publish_body(outcome, bytes.as_deref())
+                .publish_body(cx, outcome, bytes.as_deref())
                 .map_err(Into::into);
         }
         if let Some((reads, expected)) = expected {
@@ -2638,6 +2650,7 @@ impl BodyTask {
             } = &mut cached.state
             && let Some(summary) = publication.live_value::<crate::products::LiveSummaryProduct>()
             && let Some(product) = queries.admit_body(
+                cx,
                 queries
                     .body_query(input.definition.path())
                     .ok_or_else(|| queries.protocol_refusal())?

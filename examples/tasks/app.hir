@@ -167,7 +167,7 @@ fn home_query(request: http.ServerRequest) -> model.Query uses {} {
 
 /// Which handler a request goes to.
 pub fn route(request: http.ServerRequest) -> Route uses {} {
-  let method = request.method
+  let method = copy request.method
   let parts = segments(httpd.route_path(request))
   let count = list.len(parts)
   if count == 0 {
@@ -514,7 +514,7 @@ pub fn asset(svc: Services, name: String, request: http.ServerRequest) -> httpd.
     http.Header(name: "ETag", value: unique served.etag),
     http.Header(name: "Cache-Control", value: "no-cache")
   ]
-  if http.header(request.headers, "if-none-match") == Some(served.etag) {
+  if http.header(request.headers, "if-none-match") == Some(copy served.etag) {
     return httpd.Reply(status: 304, headers: take headers, body: b"")
   }
   httpd.Reply(status: 200, headers: take headers, body: unique served.body)

@@ -248,8 +248,8 @@ fn valid_headers(fields: List[hpack.Field], role: Role, trailers: bool) -> bool 
   let mut authority: Bytes = b""
   let mut status: Bytes = b""
   for field in fields {
-    let name = field.name
-    let value = field.value
+    let name = copy field.name
+    let value = copy field.value
     if core@1/bytes.len(name) == 0 {
       return false
     }

@@ -653,7 +653,7 @@ fn slice_record(mut r: SliceReader) -> Result[bool, CsvError] uses {} {
   let data = core@1/string.as_bytes(r.text)
   let length = core@1/bytes.len(data)
   let delimiter = r.config.delimiter
-  let special = r.special
+  let special = copy r.special
   let mut mode: u8 = 0
   let mut record_bytes: u64 = 0
   let mut start = r.pos

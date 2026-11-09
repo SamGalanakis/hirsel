@@ -97,7 +97,7 @@ pub fn parent(name: String) -> unique String {
     prefix = if i == 0 {
       copy parts[i]
     } else {
-      string.join([prefix, parts[i]], "/")
+      string.join([prefix, copy parts[i]], "/")
     }
   }
   unique prefix
@@ -127,7 +127,7 @@ fn directories(rows: List[ingest.Row]) -> Result[List[Directory], object.Problem
       prefix = if i == 0 {
         copy parts[i]
       } else {
-        string.join([prefix, parts[i]], "/")
+        string.join([prefix, copy parts[i]], "/")
       }
       let mut found = false
       for node in nodes {

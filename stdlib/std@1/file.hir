@@ -23,7 +23,7 @@ pub fn mkdir_all(d: Dir, p: Path) -> Result[(), FileError] {
     prefix = if prefix == "" {
       copy part
     } else {
-      string.join([prefix, part], "/")
+      string.join([prefix, copy part], "/")
     }
     let current = core@1/path.of(prefix)
     match core@1/file.mkdir(d, current) {

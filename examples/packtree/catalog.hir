@@ -148,7 +148,7 @@ pub fn decode(take data: Bytes) -> Result[unique List[manifest.Entry], manifest.
       prefix = if i == 0 {
         copy parts[i]
       } else {
-        string.join([prefix, parts[i]], "/")
+        string.join([prefix, copy parts[i]], "/")
       }
       let mut found = false
       for parent in entries {
@@ -173,7 +173,7 @@ pub fn inspect(d: Dir, entry: manifest.Entry) -> Result[(), manifest.Problem] {
     prefix = if i == 0 {
       copy parts[i]
     } else {
-      string.join([prefix, parts[i]], "/")
+      string.join([prefix, copy parts[i]], "/")
     }
     let Ok(info) = file.metadata(d, path.of(prefix)) else {
       return Error(manifest.problem("metadata", entry.path))

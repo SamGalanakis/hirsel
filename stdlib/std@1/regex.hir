@@ -425,7 +425,7 @@ fn decimal(mut cursor: Input) -> Result[u64, CompileError] uses {} {
 // leading zeroes) leaves the opening brace literal; a complete oversized
 // count still reaches decimal's checked conversion and the instruction limit.
 fn repeat_form(cursor: Input) -> bool uses {} {
-  let mut look = Input(scalars: cursor.scalars, offsets: [], at: cursor.at)
+  let mut look = Input(scalars: copy cursor.scalars, offsets: [], at: cursor.at)
   let mut field: u8 = 0
   while field < 2 {
     let start = look.at

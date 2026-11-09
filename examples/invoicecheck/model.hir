@@ -185,7 +185,7 @@ pub fn reconcile(source: String) -> Result[Report, InvalidInput] uses {} {
           invoice_id: unique line.invoice_id,
           lines: 1,
           total: total,
-          expected: line.expected_total
+          expected: copy line.expected_total
         )
       )
     }

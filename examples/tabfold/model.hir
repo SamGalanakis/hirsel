@@ -147,7 +147,7 @@ fn record(data: Bytes, first: u64, end: u64, mut totals: Map[String, Stats]) -> 
 }
 
 pub fn reduce(work: Work) -> Result[Partial, InputError] uses {} {
-  let data = work.data
+  let data = copy work.data
   if bytes.len(data) > 65536 {
     return Error(InputError(ordinal: work.ordinal, line: 0, reason: BodyLimit()))
   }
@@ -191,7 +191,7 @@ pub fn render(totals: Map[String, Stats]) -> Result[unique Bytes, csv.CsvError] 
     if let Some(value) = map.get(totals, key) {
       csv.write_record(
         [
-          key,
+          copy key,
           u64.to_string(value.count),
           i64.to_string(value.sum),
           i64.to_string(value.min),
@@ -233,7 +233,7 @@ fn strict_records(t: Test) {
     b"a\t1\n\n"
   ]
   for data in invalid {
-    test.check(t, results.is_error(reduce(Work(ordinal: 7, data: data))))
+    test.check(t, results.is_error(reduce(Work(ordinal: 7, data: copy data))))
   }
   test.check(
     t,

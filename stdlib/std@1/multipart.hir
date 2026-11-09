@@ -733,7 +733,7 @@ pub fn encode(boundary: String, fields: List[Field]) -> Result[
       list.push(mut out, b'"')
     }
     text.append(mut out, "\r\n")
-    let media: Option[String] = match (field.content_type, field.filename) {
+    let media: Option[String] = match (copy field.content_type, copy field.filename) {
       (Some(t), _) => Some(unique t),
       (None(), Some(_)) => Some("application/octet-stream"),
       (None(), None()) => None(),

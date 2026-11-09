@@ -122,7 +122,7 @@ pub fn qualified(source_table: Table) -> List[Column] uses {} {
 
 @noalloc
 pub fn compare(a: Scalar, b: Scalar) -> i32 uses {} {
-  match (a, b) {
+  match (copy a, copy b) {
     (Integer(x), Integer(y)) => if x < y {
       -1
     } else if x > y {

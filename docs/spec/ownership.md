@@ -532,14 +532,29 @@ cannot hold scoped capabilities or scoped content. A local capability is non-pla
 always bounded by its creating invocation and every scope its contents reach; a
 declaration cannot remove those bounds.
 
-### MODE-7: Inference
+### MODE-7: Modes inside a body
 
-Modes inside bodies are inferred. Every mode a caller relies on is declared in the
-signature, for private and public definitions alike; nothing is inferred across a
-definition boundary ([MODE-2](#mode-2-uniqueness),
-[LANG-6](language.md#lang-6-signatures)). Defaults: borrowed and `mut` parameters are
-local to themselves, taken parameters and results are global (no relation), everything is
-aliased, and closures are many.
+Inside a body, a binding's mode comes from its type and last-use liveness alone; no flow
+analysis chooses a mode. On each path the last use of a binding moves it, and every other
+use borrows it: read-only, or exclusively where the use is written `mut`. A counted share is
+written `copy x` ([OWN-4](#own-4-copyable)), and uniqueness is written `unique`, in a type
+(`unique T`) or as `unique x` ([MODE-2](#mode-2-uniqueness)). Where V cannot prove that the
+operand of `unique x` is already unique, the operation is a deep copy: an allocation site,
+never a rejection.
+
+A use that needs a different mode than liveness gives is rejected at that use; for
+example, a share of a part, an element or a binding that is used again later. The
+diagnostic carries a repair that writes `copy` or `unique` there and states when the
+repair applies. Two reads stay implicit: a `plain` value copies by reading it
+([OWN-4](#own-4-copyable)), and a returned result that selects borrowed storage is read as
+[OWN-1](#own-1-borrow) states. An explainer may run a richer analysis on a rejected body
+to word its diagnostic; it never changes acceptance.
+
+Every mode a caller relies on is declared in the signature, for private and public
+definitions alike; nothing crosses a definition boundary except declared contracts
+([MODE-2](#mode-2-uniqueness), [LANG-6](language.md#lang-6-signatures)). Defaults:
+borrowed and `mut` parameters are local to themselves, taken parameters and results are
+global (no relation), everything is aliased, and closures are many.
 
 ## Passing modes
 
@@ -674,8 +689,10 @@ selected part, and whole destructuring with `take` of a uniquely owned box moves
 payload's parts. Writes through a box obey the same replacement and copy-on-write detach
 rules as other part writes.
 
-Reading a field or element as an owned value shares that part (a count increment, or a
-copy if plain) whatever the owner's mode, and needs it to be copyable. A borrow-only use of
+Reading a field or element as an owned value is written `copy` ([MODE-7](#mode-7-modes-inside-a-body)),
+except a `plain` part and a returned result read under [OWN-1](#own-1-borrow). It shares that
+part (a count increment, or a copy if plain) whatever the owner's mode, and needs it to be
+copyable. A borrow-only use of
 a part of any type (passed to a borrowed parameter, compared, read through or iterated
 without taking) is a view: it holds a read loan on the part's place, acquires no count and
 does not end uniqueness. Its locality follows the owner and current content, keeping all

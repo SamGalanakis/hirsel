@@ -97,7 +97,7 @@ pub fn reserve(tasks: Tasks, log: Mutex[Ledger], key: u64, cap: u64) -> Option[
     }
   )
   if accepted {
-    Some(Credit(tasks: tasks, ledger: log, key: key, delivery: false, completed: false))
+    Some(Credit(tasks: tasks, ledger: copy log, key: key, delivery: false, completed: false))
   } else {
     None()
   }

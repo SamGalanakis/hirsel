@@ -1131,7 +1131,7 @@ pub fn decode_with_dictionary(
   max_output: u64,
   max_window: u64
 ) -> Result[unique Bytes, ZstdError] uses {} {
-  decode_frames(data, Some(dict), max_output, max_window)
+  decode_frames(data, Some(copy dict), max_output, max_window)
 }
 
 fn decode_frames(
@@ -1205,7 +1205,7 @@ fn decode_frames(
         if id != 0 && id != d.id {
           return Error(DictionaryMismatch())
         }
-        (d.tables, d.content)
+        (copy d.tables, copy d.content)
       },
     }
     let mut tables = take initial_tables

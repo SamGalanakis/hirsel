@@ -289,7 +289,7 @@ fn assertions(step: Step, response: http.Response) -> Result[List[String], AppEr
       return Error(Transport())
     }
     for (pointer, expected) in step.pointers {
-      if json_pointer.get(value, pointer) != Some(expected) {
+      if json_pointer.get(value, pointer) != Some(copy expected) {
         list.push(mut failures, "json")
       }
     }

@@ -4868,18 +4868,22 @@ impl Checker<'_, '_> {
                     state.values.insert(*expression, value);
                     return;
                 }
+                // MODE-7 (R1): a counted share is written `copy`. A use that
+                // needs an owned value from borrowed storage, a part or an
+                // element is rejected here with that repair, never shared
+                // implicitly.
+                let mut share_wanted = false;
                 let usage = match context {
                     Context::Address | Context::Mut => UseKind::Mut,
                     Context::Copy => UseKind::Copy,
                     Context::Take => UseKind::Take,
-                    // An owning environment can lend a global field to this
-                    // invocation without making a returned copy local.
                     Context::Own
                         if !property.plain
                             && property.copyable
                             && value.aliased().is_some()
                             && self.owns_capture(place.binding) =>
                     {
+                        share_wanted = true;
                         UseKind::Copy
                     }
                     Context::Store | Context::ResultShare
@@ -4889,6 +4893,9 @@ impl Checker<'_, '_> {
                                 || value.element_place.is_some()) =>
                     {
                         if property.copyable {
+                            // OWN-1 (ownership.md:565): returning borrowed
+                            // storage reads the selected result implicitly.
+                            share_wanted = *context == Context::Store;
                             UseKind::Copy
                         } else {
                             UseKind::Take
@@ -4896,6 +4903,7 @@ impl Checker<'_, '_> {
                     }
                     Context::Own if value.element_place.is_some() && !property.plain => {
                         if property.copyable {
+                            share_wanted = true;
                             UseKind::Copy
                         } else {
                             UseKind::Take
@@ -4936,11 +4944,17 @@ impl Checker<'_, '_> {
                     {
                         UseKind::Borrow
                     }
-                    _ if property.plain || !place.projections.is_empty() && property.copyable => {
+                    _ if property.plain => UseKind::Copy,
+                    Context::Own if !place.projections.is_empty() && property.copyable => {
+                        share_wanted = true;
                         UseKind::Copy
                     }
+                    _ if !place.projections.is_empty() && property.copyable => UseKind::Copy,
                     _ => UseKind::Borrow,
                 };
+                if share_wanted {
+                    self.share_wanted(*expression);
+                }
                 if matches!(usage, UseKind::Mut | UseKind::Take)
                     && self.argument_conflict(state, place, operation_site)
                 {
@@ -5735,6 +5749,12 @@ impl Checker<'_, '_> {
                             context,
                             Context::Own | Context::Store | Context::ResultShare | Context::Copy
                         );
+                    if copy_projection
+                        && !property.plain
+                        && matches!(context, Context::Own | Context::Store)
+                    {
+                        self.share_wanted(*expression);
+                    }
                     value.usage = if property.plain || copy_projection {
                         UseKind::Copy
                     } else if borrowed_projection {

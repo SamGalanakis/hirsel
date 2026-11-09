@@ -287,7 +287,7 @@ fn http_decoded(take response: Response, limit: u64) -> Result[Response, HttpErr
       status: response.status,
       headers: take kept,
       body: take body,
-      url: response.url
+      url: copy response.url
     )
   )
 }
@@ -484,7 +484,7 @@ pub fn request(
   headers: List[Header]
 ) -> Result[Request, HttpError] {
   validate_headers(headers)?
-  validate_headers([Header(name: "user-agent", value: config.user_agent)])?
+  validate_headers([Header(name: "user-agent", value: copy config.user_agent)])?
   let parsed_uri = uri.parse(url)?
   let target = uri.component_encoded(parsed_uri.path, Path())
   http_validate_target(target)?
@@ -593,7 +593,7 @@ pub fn send_bodiless(mut r: Request) -> Result[(), HttpError] {
 
 pub fn send_body(mut r: Request, body: Bytes) -> Result[(), HttpError] {
   if http_is_h2(r.transport) {
-    return http_h2_send(mut r, Some(body), true)
+    return http_h2_send(mut r, Some(copy body), true)
   }
   if r.state != 0 {
     return Error(OutOfOrder())
@@ -1517,7 +1517,7 @@ pub fn client_send(
     mut prepared,
     Header(name: "Content-Type", value: unique body.content_type)
   )
-  client_fetch(mut c, method, url, prepared, Some(body.bytes))
+  client_fetch(mut c, method, url, prepared, Some(copy body.bytes))
 }
 
 // A sequential server connection owns its stream and unread bytes. A response

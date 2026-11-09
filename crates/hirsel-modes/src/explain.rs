@@ -772,6 +772,8 @@ pub enum Repair {
     TakeAtLastUse(String),
     /// A counted part copied out of storage that is about to end.
     CopyPart(String),
+    /// MODE-7: a borrowed use where an owned value is needed.
+    Share(String),
     /// A callback result whose counted parts cross when unique.
     UniqueResult {
         ty: String,
@@ -883,6 +885,9 @@ impl Repair {
             Repair::CopyPart(x) => {
                 format!("`copy {x}` (no deep copy: the copy shares the part by a count)")
             }
+            Repair::Share(x) => format!(
+                "write `copy {x}` here (no deep copy: it shares `{x}` by a count; needed because `{x}` is borrowed at this use: it is a part, an element, borrowed storage, or used again later)"
+            ),
         }
     }
 }
@@ -1058,6 +1063,7 @@ impl Repair {
             | Repair::PassBorrowed(_)
             | Repair::TakeAtLastUse(_)
             | Repair::CopyPart(_)
+            | Repair::Share(_)
             | Repair::CaptureSnapshot {
                 deep_copy: false, ..
             } => 0,

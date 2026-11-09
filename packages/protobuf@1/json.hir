@@ -585,7 +585,7 @@ pub fn json_f32(x: f32) -> json.Value uses {} {
     bits == 0xff800000
   )
   match special {
-    Some(s) => Text(s),
+    Some(s) => Text(copy s),
     None() => Number(f32.to_string(x)),
   }
 }
@@ -599,7 +599,7 @@ pub fn json_f64(x: f64) -> json.Value uses {} {
     bits == 0xfff0000000000000
   )
   match special {
-    Some(s) => Text(s),
+    Some(s) => Text(copy s),
     None() => Number(f64.to_string(x)),
   }
 }

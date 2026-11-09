@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Build and measure one sample of each store-writer/metal workload on local disk."""
 import argparse
+from contextlib import contextmanager
 import json
 import math
 import os
@@ -93,8 +94,55 @@ def disk_bytes(directory):
     return sum(p.stat().st_size for p in directory.rglob('*') if p.is_file())
 
 
-def sample(kind, group, submitters, workload, out, compiler, profile=False):
-    suffix = f'{kind}-g{group}-c{submitters}' + ('-profile' if profile else '')
+@contextmanager
+def native_allocation_probes(binary):
+    group = f'storebench_{os.getpid()}'
+    events = []
+    try:
+        for name in ('malloc', 'calloc', 'realloc'):
+            event = f'{group}:{group}_{name}'
+            run(['sudo', '-n', 'perf', 'probe', '-x', binary, '--add', f'{event}={name}'],
+                stdout=subprocess.DEVNULL)
+            events.append(event)
+        yield events
+    finally:
+        for event in events:
+            run(['sudo', '-n', 'perf', 'probe', '--del', event], stdout=subprocess.DEVNULL)
+
+
+def perf_values(path):
+    values = {}
+    for line in path.read_text().splitlines():
+        fields = line.split(';')
+        if len(fields) >= 3:
+            try:
+                values[fields[2]] = float(fields[0].replace(',', ''))
+            except ValueError:
+                pass
+    return values
+
+
+def sync_trace(path):
+    active = False
+    syncs = []
+    puts = 0
+    for line in path.read_text().splitlines():
+        if r'"READY\n"' in line:
+            active = True
+        elif r'"DONE\n"' in line:
+            active = False
+        elif active:
+            if re.search(r'(?:fsync|fdatasync)\(', line):
+                match = re.search(r'= 0 <([0-9.]+)>', line)
+                if match:
+                    syncs.append(float(match[1]))
+            elif 'linkat(' in line and '= 0 ' in line:
+                puts += 1
+    return syncs, puts
+
+
+def sample(kind, group, submitters, workload, out, compiler, profile=False, allocation_events=()):
+    suffix = f'{kind}-g{group}-c{submitters}' + ('-profile' if profile else '-allocations' if allocation_events else '')
     directory = out / suffix
     directory.mkdir()  # Never reuse an old database or overwrite original evidence.
     db = directory / 'db'
@@ -108,21 +156,23 @@ def sample(kind, group, submitters, workload, out, compiler, profile=False):
     if kind == 'interp':
         executable = compiler
         command = [compiler, 'run', '--mem-usage', HERE / 'hirsel.json', '--grants', grants,
-                   '--max-steps', 'unbounded', '--cores', '2']
+                   '--max-steps', 'unbounded', '--cores', '2', '--', *arguments]
     elif kind == 'native':
         executable = out / 'native'
-        command = [executable, '--hirsel-grants', grants]
+        command = [executable, '--hirsel-grants', grants, *arguments]
     else:
         executable = out / 'metal'
         command = [executable, db / 'append.log', *arguments]
         if kind == 'raw':
             command += ['raw']
     if profile:
-        command = ['strace', '-f', '-T', '-e', 'trace=fsync,fdatasync,write',
+        command = ['strace', '-f', '-T', '-e', 'trace=fsync,fdatasync,linkat,write',
                    '-o', directory / 'sync.trace', *command]
     shim = out / 'alloc.so'
     objects = [(shim, addresses(shim, dict(libc_allocations='store_bench_allocations',
         fsyncs='store_bench_fsyncs', backend_puts='store_bench_puts')))]
+    if kind == 'native':
+        objects = []  # The shipping executable is statically linked.
     if kind == 'interp':
         objects.append((compiler, addresses(compiler, dict(allocations='allocator::ALLOCATIONS',
             reallocations='allocator::REALLOCATIONS'))))
@@ -132,8 +182,11 @@ def sample(kind, group, submitters, workload, out, compiler, profile=False):
     control_write = os.open(control_path, os.O_RDWR)
     ack_read = os.open(ack_path, os.O_RDWR)
     metric_file = directory / ('perf.data' if profile else 'perf.csv')
+    events = 'instructions:u,task-clock,syscalls:sys_enter_fsync,syscalls:sys_enter_fdatasync,syscalls:sys_enter_linkat'
+    if allocation_events:
+        events += ',' + ','.join(allocation_events)
     perf = ['perf', 'record', '-e', 'cpu-clock:u', '-F', '999', '-g', '--call-graph', 'dwarf',
-            '-o', metric_file] if profile else ['perf', 'stat', '-x', ';', '-e', 'instructions:u,task-clock', '-o', metric_file]
+            '-o', metric_file] if profile else ['perf', 'stat', '-x', ';', '-e', events, '-o', metric_file]
     perf += ['-D', '-1', f'--control=fifo:{control_path},{ack_path}', '--',
              'env', f'LD_PRELOAD={shim}', *command]
     def control(message):
@@ -184,6 +237,12 @@ def sample(kind, group, submitters, workload, out, compiler, profile=False):
     if len(latencies) != commits:
         raise RuntimeError('missing durable completion latency bodies')
     delta = {key: after[key] - before[key] for key in before}
+    metrics = {} if profile else perf_values(metric_file)
+    trace_syncs, trace_puts = sync_trace(directory / 'sync.trace') if profile else ([], 0)
+    if kind == 'native':
+        delta['fsyncs'] = (len(trace_syncs) if profile else
+            metrics['syscalls:sys_enter_fsync'] + metrics['syscalls:sys_enter_fdatasync'])
+        delta['backend_puts'] = trace_puts if profile else metrics['syscalls:sys_enter_linkat']
     if delta['fsyncs'] < commits or bytes_after <= bytes_before:
         raise RuntimeError('durability/body counters did not cover every commit')
     if kind in ('native', 'interp') and delta['backend_puts'] != commits:
@@ -193,40 +252,26 @@ def sample(kind, group, submitters, workload, out, compiler, profile=False):
     elif kind in ('metal', 'raw'):
         allocations = next(int(line.split()[1]) for line in lines if line.startswith('allocations '))
     else:
-        allocations = delta['libc_allocations']
+        allocations = sum(metrics[event] for event in allocation_events) if allocation_events else None
     row = dict(engine=kind, group=group, submitters=submitters, transfers=workload['transfers'],
         commits=commits, elapsed_ns=elapsed, transfers_s=workload['transfers'] * 1e9 / elapsed,
         p50_us=latencies[math.ceil(len(latencies) * .50) - 1] / 1000,
         p99_us=latencies[math.ceil(len(latencies) * .99) - 1] / 1000,
         fsyncs_commit=delta['fsyncs'] / commits, bytes_commit=(bytes_after - bytes_before) / commits,
         backend_requests_commit=delta['backend_puts'] / commits if kind in ('native', 'interp') else 1,
-        allocations_commit=allocations / commits, counters=delta)
+        allocations_commit=allocations / commits if allocations is not None else None, counters=delta)
     if not profile:
-        instructions = next(float(line.split(';')[0].replace(',', ''))
-            for line in metric_file.read_text().splitlines() if ';instructions:u;' in line)
-        row['instructions_commit'] = instructions / commits
-        clocks = [float(line.split(';')[0].replace(',', ''))
-                  for line in metric_file.read_text().splitlines() if ';task-clock;' in line]
-        if clocks:
-            row['cpu_us_commit'] = clocks[0] * 1000 / commits
+        row['instructions_commit'] = metrics['instructions:u'] / commits
+        if 'task-clock' in metrics:
+            row['cpu_us_commit'] = metrics['task-clock'] * 1000 / commits
     else:
         with (directory / 'owners.txt').open('w') as owners:
-            run(['perf', 'report', '-i', metric_file, '--stdio', '--no-children', '--sort',
-                 'symbol,srcline', '--percent-limit', '1', '--pid', str(pid)], stdout=owners)
-        syncing = False
-        sync_seconds = []
-        for line in (directory / 'sync.trace').read_text().splitlines():
-            if r'"READY\n"' in line:
-                syncing = True
-            elif r'"DONE\n"' in line:
-                syncing = False
-            elif syncing and re.search(r'(?:fsync|fdatasync)\(', line):
-                match = re.search(r'= 0 <([0-9.]+)>', line)
-                if match:
-                    sync_seconds.append(float(match[1]))
-        row['sync_trace_calls'] = len(sync_seconds)
-        row['sync_us_commit'] = sum(sync_seconds) * 1e6 / commits
-        metric_file.unlink()  # Keep the readable attribution, not the raw dwarf stacks.
+            run([ROOT / 'tools/capped', 'perf', 'report', '-i', metric_file, '--stdio',
+                 '--no-children', '--call-graph', 'none', '--sort', 'symbol',
+                 '--percent-limit', '1', '--pid', str(pid)], stdout=owners)
+        row['sync_trace_calls'] = len(trace_syncs)
+        row['sync_us_commit'] = sum(trace_syncs) * 1e6 / commits
+        metric_file.unlink()  # Keep readable attribution, not raw dwarf stacks.
     (directory / 'result.json').write_text(json.dumps(row, indent=2) + '\n')
     print(json.dumps(row), flush=True)
     return row
@@ -260,24 +305,31 @@ def main():
     workload = json.loads((HERE / 'workload.json').read_text())
     if workload['mix'] != 'round_robin_to_next_amount_1_2_3' or workload['durability'] != 'Durable':
         parser.error('unsupported workload mix or durability')
-    rows = []
-    for group in workload['groups']:
-        for clients in workload['submitters']:
-            for kind in ('metal', 'native', 'interp'):
-                saved = out / f'{kind}-g{group}-c{clients}' / 'result.json'
-                if args.resume and saved.exists():
-                    rows.append(json.loads(saved.read_text()))
-                else:
-                    rows.append(sample(kind, group, clients, workload, out, compiler))
-    raw_workload = dict(workload, groups=[1], submitters=[1])
-    raw_saved = out / 'raw-g1-c1/result.json'
-    rows.append(json.loads(raw_saved.read_text()) if args.resume and raw_saved.exists()
-                else sample('raw', 1, 1, raw_workload, out, compiler))
-    if args.profile:
-        for kind in ('native', 'interp'):
-            saved = out / f'{kind}-g1-c1-profile/result.json'
-            if not (args.resume and saved.exists()):
-                sample(kind, 1, 1, workload, out, compiler, profile=True)
+    with native_allocation_probes(out / 'native') as events:
+        rows = []
+        for group in workload['groups']:
+            for clients in workload['submitters']:
+                for kind in ('metal', 'native', 'interp'):
+                    saved = out / f'{kind}-g{group}-c{clients}' / 'result.json'
+                    if args.resume and saved.exists():
+                        rows.append(json.loads(saved.read_text()))
+                    else:
+                        rows.append(sample(kind, group, clients, workload, out, compiler))
+                    if kind == 'native' and rows[-1].get('allocations_commit') is None:
+                        alloc_saved = out / f'native-g{group}-c{clients}-allocations/result.json'
+                        diagnostic = (json.loads(alloc_saved.read_text()) if args.resume and alloc_saved.exists()
+                            else sample(kind, group, clients, workload, out, compiler, allocation_events=events))
+                        rows[-1]['allocations_commit'] = diagnostic['allocations_commit']
+                        saved.write_text(json.dumps(rows[-1], indent=2) + '\n')
+        raw_workload = dict(workload, groups=[1], submitters=[1])
+        raw_saved = out / 'raw-g1-c1/result.json'
+        rows.append(json.loads(raw_saved.read_text()) if args.resume and raw_saved.exists()
+                    else sample('raw', 1, 1, raw_workload, out, compiler))
+        if args.profile:
+            for kind in ('native', 'interp'):
+                saved = out / f'{kind}-g1-c1-profile/result.json'
+                if not (args.resume and saved.exists()):
+                    sample(kind, 1, 1, workload, out, compiler, profile=True)
     summary = dict(source_sha=subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=ROOT, text=True).strip(),
         workload=workload, cpus=allowed[:2], compiler=str(compiler), rows=rows)
     (out / 'results.json').write_text(json.dumps(summary, indent=2) + '\n')

@@ -14,7 +14,7 @@ implementation is converging on it:
   layout of numbered manifest, log and snapshot objects with fence objects, under which
   no object is ever removed; `StoreConfig.durability`; the `StopAfterWrites` seam and
   `Injected()`; `store.sequence`. The [standard library](std-library.md) lists the shipped
-  operations until then.
+  operations until then. The history format (STORE-11) replaces that layout.
 - **Planned (their names do not resolve yet):** everything else in this part.
 - **Open designs,** where this part states the contract and the declarations are still to
   be written: the serving primitive behind `db@1` (STORE-12); the declarations of the
@@ -392,11 +392,13 @@ never merged back. What the origin's history had promised to send or to wake (ou
 calls and triggers, [STORE-18](#store-18-runs-at-a-place)) stays inert in the fork until
 its head is granted the runners to act on it, so a fork never acts as its origin.
 
-**Retention.** Which versions a store retains is store state, recorded in its history: a
-floor version and a set of **pins**. A retained version keeps what reading it, forking it
-and re-executing from it need: its state, the commits after it and the code their call
-records name. Reclamation frees nothing a retained version needs
-([STORE-11](#store-11-engine-and-storage-seam)).
+**Retention.** Which versions a store retains is store state, recorded in its history by
+Retain commits ([STORE-11](#store-11-engine-and-storage-seam)): a floor version, a set of
+named **pins**, and the checkpoints the retained versions rely on. A retained version
+keeps what reading it, forking it and re-executing from it need: a checkpoint at or
+below it, the groups from that checkpoint on and the code their call records name.
+Reclamation frees only groups and nodes that no retained version and no fork reaches, and
+only after the Retain commit that released them is durable.
 
 ### STORE-9: Schema history, renames and migrations
 
@@ -457,8 +459,8 @@ change schema together, their final publications are part of one activation
 ### STORE-10: Recording
 
 **Call records.** Every commit records its ordered write set of puts and deletes on byte
-keys and values, the SHA-256 of that write set, and the call record of the transaction
-that made it ([STORE-2](#store-2-transactions)), with its call stream and position when
+keys and values, whose SHA-256 is its write-set digest, and the call record of the
+transaction that made it, with the outcome it returned ([STORE-2](#store-2-transactions)), with its call stream and position when
 it arrived on one ([STORE-12](#store-12-transactions-at-a-runner)). A commit the engine
 makes on its own behalf records which engine operation made it. The history therefore
 states, for every change, what changed and which call, under which code, changed it.
@@ -481,9 +483,9 @@ never changes what a transaction does.
 At the `durable` level ([RUN-14](runners.md#run-14-recording-levels)) a commit's
 durability point is the advance of the history that carries it, journaled like any
 request. A crash between that request's `Prepared` and `Completed` records leaves it in
-doubt, and recovery settles it by reading the history: every advance carries its
-writer's identity, so the history either holds that advance or holds another in its
-place. That is a provider recovery procedure
+doubt, and recovery settles it by reading the history: an advance is one group whose
+digest the writer computed before it sent it, so the history either holds that group or
+holds another in its place. That is a provider recovery procedure
 [recording and resuming](determinism.md#recording-and-resuming) allows.
 
 ### STORE-11: Engine and storage seam
@@ -520,8 +522,9 @@ history holds it.
 it. Every other object (a checkpoint of the state at a version, an index part) is
 **derived**: its bytes are a function of the history alone, in one canonical encoding,
 with no writer identity. Any machine that reads the history may put a derived object,
-and two that derive the same object write equal bytes. The history records the engine
-format version and the runtime contract revision in force, like any code hash.
+and two that derive the same object write equal bytes. The history records the runtime
+contract revision in force beside every code hash it names. Their bytes are declared
+under **History format** below.
 
 **Levels.** A backend that keeps nothing across a crash declares a single level that
 survives nothing. A local log declares a level that survives a process crash and not the
@@ -536,17 +539,9 @@ the configuration is reached, never on a timer. **The head never holds a key acr
 backend request:** ordering and running a transaction wait on no advance, no object read
 and no other machine, so a contended key is served at memory speed whatever the backend.
 
-**Recovery.** Opening reads the newest checkpoint the history names and applies the
-commits after it, in order. A commit a level reported durable cannot be torn; one that
-fails its checksum or the format's rules is corruption after its acknowledgement, which
-refuses the open with `Storage(Corrupt())` and removes nothing. A crash may lose or tear
-a suffix that no level had reported durable, and recovery ends the history before it.
-When no intact state exists the open refuses rather than guess. Recovery never runs a
-body.
-
 **Limits.** `key_bytes` 4096, `value_bytes` 1048576, `transaction_bytes` 16777216 and
-`range_rows` 10000 by default. They are store state, fixed when the store is created and
-bounded by what its backend can hold in one advance. A refused limit has no effect and is
+`range_rows` 10000 by default. They are store state, recorded by the Genesis commit and
+bounded by what its backend can hold in one advance (**Bounds** below). A refused limit has no effect and is
 definite, never `Unknown(..)`. A deterministic bound on the work one body may do, equal
 on every engine, is **Reserved**.
 
@@ -565,8 +560,155 @@ demand, so that a store may exceed memory, changes cost and no outcome.
 fn store.compact(mut s: Store) -> Result[(), StoreError]
 ```
 
-`store.compact` puts a checkpoint of the durable state and records it in the history, so
-recovery applies only the commits after it.
+`store.compact` puts the nodes of a checkpoint at the durable version's group end that are
+not already present, and records its descriptor by a Checkpoint commit, so recovery
+applies only the commits after it. A follower may put the same nodes; only the head
+records the commit.
+
+#### History format
+
+Every integer is fixed-width little-endian. `H(x)` is SHA-256. A **byte string** is a
+`u32` length followed by that many bytes. There is one format version, named by the
+magic at the start of every record; a reader that meets another magic refuses the open
+with `Storage(Corrupt(..))` naming the magic and the object, removes nothing and writes
+nothing. A format change is a new magic and a cutover, never a second reader.
+
+**Groups.** The history is a chain of **groups**, each the commits of one advance:
+
+```text
+group  = "HSHIST01" prev:[32] first:u64 epoch:u64 defs:u32 count:u32 def* commit*
+def    = path:bytes code:[32] revision:bytes
+commit = kind:u8 body writes
+writes = n:u32 { op:u8 key:bytes [value:bytes if op = 1] }*
+```
+
+`prev` is the **digest** `H(group)` of the previous group, all zeros for the first;
+`first` is the commit version of its first commit (versions start at 1); `epoch` is the
+writer epoch of the head that wrote it. The definition table names each distinct entry
+the group's commits ran (definition path, code hash, runtime contract revision,
+[RUN-8](runners.md#run-8-identity-and-arrival)) once, and commits refer to it by index.
+A write is a put (`op` 1) or a delete (`op` 2); keys strictly ascend, so a key occurs
+once. The SHA-256 of a commit's `writes` bytes is its write-set digest; it is derived,
+never stored. A group is valid only if every field decodes, nothing follows its last
+commit, `first` is one above the previous group's last version, `epoch` is at least the
+previous group's, and every index and op is in range. The digest chain is the history's
+integrity: a reader that trusts a digest trusts every group before it.
+
+Commit kinds:
+
+| Kind | Body after `kind` | Records |
+|---|---|---|
+| 1 Transaction | `def:u32 at:i64 seed:u64 caller:bytes stream:u8 [identity:[32] position:u64 if stream = 1] args:bytes outcome:bytes` | The call record ([STORE-2](#store-2-transactions)): the entry, the call information ([STORE-4](#store-4-call-information)), the call stream and position it arrived on ([STORE-12](#store-12-transactions-at-a-runner)), the argument bytes and the canonical bytes of the `Result[R, TxFailure[E]]` it returned. |
+| 2 Engine | `op:u8 payload:bytes` | A commit the engine makes on its own behalf, one of the operations below. An unknown `op` is corruption. |
+| 3 Run | `run:[16] n:u32 { kind:u8 payload:bytes }*` | The journal records of a run at the place ([STORE-18](#store-18-runs-at-a-place)), with the kinds and payloads of the [durable journal](determinism.md#durable-journal). |
+
+Every kind ends with its `writes`. Engine operations and their payloads:
+
+| Op | Payload |
+|---|---|
+| 1 Genesis | `identity:[32]`, the limits `key_bytes value_bytes transaction_bytes range_rows` and the checkpoint node bounds `node_min node_mean node_max`, each `u32`. It is commit 1 and nowhere else. |
+| 2 Claim | `epoch:u64 attempt:[16]`: a claim, one above the previous epoch, with the claimant's random attempt identity. It is the last commit of its group, and that group and every later one carry its epoch until the next claim. |
+| 3 Checkpoint | A checkpoint descriptor (below). |
+| 4 Retain | The whole retention state ([STORE-8](#store-8-versions-snapshots-and-forks)): `floor:u64`, `n:u32` pins `{ name:bytes version:u64 }` sorted by name, at most 1024 with names of at most 255 bytes, then `m:u32` checkpoint descriptors that retained versions rely on. |
+| 5 Fork | `identity:[32] origin:[32] at:u64`: the first commit of a fork, at version `at + 1`. Its group's `prev` is the digest of the origin's group that holds `at`, and that group's commits above `at` are not the fork's. |
+| 6 Stream | `op:u8 identity:[32]`: a fence (1) or purge (2) of a call stream ([STORE-12](#store-12-transactions-at-a-runner)). |
+| 7 Library | `name:bytes payload:bytes`: a step a library records as its own, a migration's above all ([STORE-9](#store-9-schema-history-renames-and-migrations)). |
+
+**Checkpoints.** A checkpoint is the state at a group's last version as a tree of
+derived **nodes**, each named by the SHA-256 of its bytes:
+
+```text
+node  = "HSNODE01" level:u8 count:u32 entry*
+leaf  = key:bytes value:bytes                         // level 0
+index = first:bytes child:[32] entries:u64            // level > 0
+```
+
+Entries of a node strictly ascend by key (an index entry by its child's first key), and
+an empty state is one empty leaf. Leaves are cut by content: after entry `e`, once the
+node holds at least `node_min` bytes, when `u32le(H(key)[0..4]) * node_mean <
+size(e) * 2^32`, and always before an entry that would take it past `node_max`; index
+levels are cut the same way over their own entries until one root remains. Equal state
+gives equal nodes on every machine, a node shared by two versions or two forks is one
+object, and a change rewrites only the nodes whose range it touched and their ancestors.
+The defaults are 256 KiB, 1 MiB and 4 MiB; `node_max` is at least the largest entry the
+limits allow and at most the backend's object cap. A **descriptor** is
+`version:u64 digest:[32] root:[32] height:u8 entries:u64 bytes:u64`: the checkpoint's
+version (always a group's last), the digest of that group, the root node and the tree's
+shape. A checkpoint counts only once a Checkpoint commit after its version records its
+descriptor, so the chain authenticates it; its nodes are put before that commit.
+Validating one reads its nodes from the root, checks each against the digest its parent
+named, the keys' order and the descriptor's counts, and requires that the first group
+read after it has `prev` equal to the descriptor's digest.
+
+**The head record.** Each backend keeps one mutable record naming the history's end:
+
+```text
+head = "HSHEAD01" identity:[32] epoch:u64 attempt:[16] end:u64 digest:[32]
+       checkpoint:descriptor locator:bytes retain:bytes origin:u8 [identity:[32] at:u64] sum:[32]
+```
+
+`sum` is the SHA-256 of everything before it. `end` and `digest` name the last group's
+version and digest, `checkpoint` the newest recorded checkpoint, `retain` the payload of
+the newest Retain commit, and `locator` where the group after the checkpoint starts. On
+object storage the head record is the object every advance replaces conditionally, so
+its `end` is the history's end. A local log rewrites it atomically (write, sync, rename,
+sync the directory) at a claim, a checkpoint, a Retain commit and a segment change; its
+`end` is then a lower bound that the log must reach, which detects the loss of a synced
+suffix up to it. Until a store's first checkpoint the descriptor is all zeros, and
+recovery starts from the first group.
+
+**Local log.** Groups are appended to segment files in the
+framed-file envelope of the [durable journal](determinism.md#durable-journal): magic `hirsel-history 1\n`,
+identity the store's identity, generation the version of the segment's first commit,
+one frame of kind 1 per group with sequences from 0, whose body digest is the group's
+digest, so a group is hashed once. A segment starts at the first group after a
+checkpoint, so earlier segments are reclaimed whole. One advance is one append and one
+`fdatasync`.
+
+**Object storage.** A group is the object `h/` followed by its first version as 20
+decimal digits, `-` and its digest in lowercase hexadecimal, put only if free; then the
+head record is replaced conditionally on the one it read. A node is `n/` followed by its
+hexadecimal digest. A group object no head record's chain reaches, left by a writer
+fenced or undecided before its head replace, is not history and is reclaimed. A listing
+only finds candidates: every object is checked against the digest that names it.
+
+**Bounds.** `transaction_bytes` bounds one encoded commit, its call record and outcome
+included, so whether a transaction fits depends only on its run. Opening refuses a store
+whose `transaction_bytes` plus 8 KiB of group and definition overhead exceeds the
+largest advance its backend accepts, and a group is cut before it would exceed that, so
+every commit the limits admit fits in one advance. The frame's `u32` length bounds a
+local group at 4 GiB.
+
+**Recovery.** Opening reads, in order:
+
+1. the head record, and refuses unless its sum, magic and identity hold;
+2. the checkpoint it names, nodes level by level, every leaf in parallel, validated as
+   above;
+3. the groups after the checkpoint: on a local log from the locator by sequential reads;
+   on object storage by listing `h/` from the checkpoint's version and reading every
+   candidate in parallel, then following `prev` back from the group whose digest the head
+   record names to the checkpoint's digest; other candidates are orphans;
+4. each group in order, checking its chain fields and applying its write sets.
+
+Only the last frame of the last local segment can be **torn**: an incomplete final
+frame, which recovery cuts. Anything else that fails is **corruption**: a bad digest,
+sum, chain field or decoding, a missing referenced object, or a log that ends below the
+head record's `end`. Corruption refuses the open with
+`Storage(Corrupt(..))` naming the object, and removes nothing. A crash may tear or lose a
+suffix no level had reported durable, and recovery ends the history before it. When no
+intact state exists the open refuses rather than guess. Recovery never runs a body. The
+claim of the new head follows recovery.
+
+**Costs.** A local advance copies each commit's bytes once into a reusable group buffer,
+hashes the group once, and makes one write and one `fdatasync`; framing adds 141 bytes
+per group. A commit adds about 40 bytes plus its caller, argument, outcome and, per
+write, 9 bytes plus the key and value. On object storage an advance is one put and one
+conditional replace. Groups are written once and never rewritten; a checkpoint writes
+only the nodes it does not share with the previous one, and the head record is the only
+object rewritten. Recovery reads the head record, the checkpoint's nodes and the groups
+after it: for `N` commits since the checkpoint, their bytes once, in about one group per
+advance. `db.local@1` records a checkpoint when the history since the last one exceeds
+the state's size and at least 64 MiB, so recovery reads at most about twice the state.
 
 ### STORE-12: Transactions at a runner
 

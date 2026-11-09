@@ -508,7 +508,8 @@ An ordinary tape's magic is `hirsel-io-tape 13` followed by NUL; a durable
 journal's is `hirsel-journal 5` followed by newline. Both are framed files (below) whose
 identity is the 32-byte run identity and whose generation is 0; the header record's run
 identity must equal the file's. The remote call journal (`journal.dir@1`,
-[runners](runners.md)) is the third framed file. Every framed file uses one envelope
+[runners](runners.md)) is the third framed file, and the segments of a store's local
+history ([STORE-11](storage.md#store-11-engine-and-storage-seam)) the fourth. Every framed file uses one envelope
 and one recovery classifier, in `hirsel-run-schema`'s `frame` module. Bodies are encoded
 in place after a reserved header, without a second payload encoding or copy. Writes use
 reusable buffers and preserve every existing flush and synchronization point. Older

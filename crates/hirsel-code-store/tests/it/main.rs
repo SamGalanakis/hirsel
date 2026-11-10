@@ -31,6 +31,11 @@ fn code_entries_open_their_provider_and_refuse_what_they_do_not_define() {
         Ok(("code.object@1", Signatures::None))
     );
     assert_eq!(
+        opened(serde_json::json!({"provider": "code.object@1",
+            "objects": {"provider": "objects.dir@1", "path": path}})),
+        Ok(("code.object@1", Signatures::None))
+    );
+    assert_eq!(
         opened(serde_json::json!({"provider": "code.sim@1", "seed": 3, "fail_one_in": 5})),
         Ok(("code.sim@1", Signatures::None))
     );
@@ -64,7 +69,11 @@ fn code_entries_open_their_provider_and_refuse_what_they_do_not_define() {
         ),
         (
             serde_json::json!({"provider": "code.object@1", "objects": {"provider": "objects.s3@1"}}),
-            "unsupported object storage provider objects.s3@1",
+            "objects.s3@1 needs endpoint",
+        ),
+        (
+            serde_json::json!({"provider": "code.object@1", "objects": {"provider": "objects.s3@2"}}),
+            "unsupported object storage provider objects.s3@2",
         ),
     ] {
         assert_eq!(opened(entry).err().as_deref(), Some(error));

@@ -110,6 +110,7 @@ pub mod measurement;
 mod memcheck;
 pub mod multicore_policy;
 pub mod ordered;
+mod recorders;
 pub mod region;
 pub mod release;
 mod remote;

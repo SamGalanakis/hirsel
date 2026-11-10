@@ -30,10 +30,9 @@ fn bump(mut s: store.Store[Dir], req: store.CallRequest, fail: bool) -> Result[
     mut s,
     req,
     fn(mut tx: store.Tx) -> Result[u64, Short] {
-      let n: u64 = match store.tx_get(mut tx, b"counter") {
-        Ok(Some(b)) => int.widen(b[0]),
-        Ok(None()) => 0,
-        Error(e) => return Error(Db(unique e)),
+      let n: u64 = match store.tx_get(tx, b"counter") ? Db {
+        Some(b) => int.widen(b[0]),
+        None() => 0,
       }
       store.tx_put(mut tx, b"counter", bytes.from_list([int.truncate(n + 1)])) ? Db
       if fail {

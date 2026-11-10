@@ -29,6 +29,7 @@ pub mod mapped;
 pub mod net;
 pub mod owners;
 mod packed_list_9;
+pub mod recorders;
 pub mod runners;
 pub mod sealed_region;
 pub mod shared;
@@ -174,6 +175,9 @@ pub const BODIES: &[&LibraryBody] = &[
     &channels::RECEIVE,
     &sync::MUTEX_CREATE,
     &sync::MUTEX_WITH,
+    &recorders::NEW,
+    &recorders::APPEND,
+    &recorders::FINISH,
     &sync::ATOMIC_CREATE,
     &sync::ATOMIC_LOAD,
     &sync::ATOMIC_STORE,

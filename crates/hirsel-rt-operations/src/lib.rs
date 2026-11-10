@@ -118,6 +118,9 @@ pub fn classify(mut row: OperationRow) -> Result<OperationRow, String> {
             | "atomic.load"
             | "atomic.store"
             | "task.isolate"
+            | "recorder.new"
+            | "recorder.append"
+            | "recorder.finish"
             | "task.check_canceled"
             | "mapped.with"
             | "runner.compute"
@@ -349,6 +352,10 @@ pub fn classify(mut row: OperationRow) -> Result<OperationRow, String> {
         "$intrinsic.AtomicStore" => Some("hirsel_rt_v2_atomic_store".into()),
         // `shared.thaw`'s compiled body asks the runtime whether its root is the last.
         "$intrinsic.SharedThawTurn" => Some("hirsel_rt_v2_thaw_turn".into()),
+        "$intrinsic.RecorderOpen" => Some("hirsel_rt_v2_recorder_open".into()),
+        "$intrinsic.RecorderAppend" => Some("hirsel_rt_v2_recorder_append".into()),
+        "$intrinsic.RecorderCount" => Some("hirsel_rt_v2_recorder_count".into()),
+        "$intrinsic.RecorderTake" => Some("hirsel_rt_v2_recorder_take".into()),
         // `task.isolate`'s and `runner.apply`'s compiled bodies read their caught chain
         // through these (`isolate.rs`).
         "$intrinsic.IsolateBegin" => Some("hirsel_rt_v2_isolate_begin".into()),
@@ -981,6 +988,34 @@ pub const HIRSEL_ABI_EXPORTS: &[AbiExport] = &[
         destination: false,
         result: Some((4, 4)),
         parameters: &[Physical::Pointer],
+    },
+    AbiExport {
+        caller_site: false,
+        symbol: "hirsel_rt_v2_recorder_open",
+        destination: true,
+        result: Some((8, 8)),
+        parameters: &[Physical::Pointer, Physical::I32],
+    },
+    AbiExport {
+        caller_site: false,
+        symbol: "hirsel_rt_v2_recorder_append",
+        destination: false,
+        result: None,
+        parameters: &[Physical::Pointer, Physical::Pointer],
+    },
+    AbiExport {
+        caller_site: false,
+        symbol: "hirsel_rt_v2_recorder_count",
+        destination: false,
+        result: Some((8, 8)),
+        parameters: &[Physical::Pointer],
+    },
+    AbiExport {
+        caller_site: false,
+        symbol: "hirsel_rt_v2_recorder_take",
+        destination: false,
+        result: None,
+        parameters: &[Physical::Pointer, Physical::Pointer],
     },
     AbiExport {
         caller_site: false,
@@ -2815,6 +2850,10 @@ pub const NATIVE_PATHS: &[&str] = &[
     "$intrinsic.TaskCanceled",
     "$intrinsic.MappedView",
     "$intrinsic.MappedCheck",
+    "$intrinsic.RecorderOpen",
+    "$intrinsic.RecorderAppend",
+    "$intrinsic.RecorderCount",
+    "$intrinsic.RecorderTake",
     "$intrinsic.IsolateBegin",
     "$intrinsic.ApplyBegin",
     "$intrinsic.IsolateEnd",
@@ -3075,6 +3114,9 @@ pub const NATIVE_PATHS: &[&str] = &[
     "task.detach",
     "task.detach_all",
     "task.isolate",
+    "recorder.new",
+    "recorder.append",
+    "recorder.finish",
     "task.scope",
     "task.scope_until",
     "task.set",

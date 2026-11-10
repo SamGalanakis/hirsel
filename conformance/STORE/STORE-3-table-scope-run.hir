@@ -30,19 +30,19 @@ fn fill(mut tx: store.Tx, t: table.Table[u64, u64]) -> Result[(), store.TxError]
 fn ranged(mut sub: store.Tx) -> bool {
   let a = rows()
   // The rows in [3, 7) read and write; the ones beside them do not.
-  let inside = table.get(mut sub, a, 3) == Ok(Some(30)) && table.get(mut sub, a, 6) == Ok(
+  let inside = table.get(sub, a, 3) == Ok(Some(30)) && table.get(sub, a, 6) == Ok(
     Some(60)
   )
-  let outside = table.get(mut sub, a, 2) == Error(OutOfScope()) && table.get(
-    mut sub,
+  let outside = table.get(sub, a, 2) == Error(OutOfScope()) && table.get(
+    sub,
     a,
     7
   ) == Error(OutOfScope())
   let wrote = table.put(mut sub, a, 5, 1) == Ok(()) && table.put(mut sub, a, 7, 1) == Error(
     OutOfScope()
   )
-  let scanned = table.range(mut sub, a, Included(3), Excluded(7), 8, Ascending())
-  let all_rows = table.range(mut sub, a, Unbounded(), Unbounded(), 8, Ascending())
+  let scanned = table.range(sub, a, Included(3), Excluded(7), 8, Ascending())
+  let all_rows = table.range(sub, a, Unbounded(), Unbounded(), 8, Ascending())
   let ranges = scanned == Ok([(3, 30), (4, 40), (5, 1), (6, 60)]) && all_rows == Error(
     OutOfScope()
   )
@@ -54,8 +54,8 @@ fn ranged(mut sub: store.Tx) -> bool {
     "y"
   ) == Error(ReadOnly())
   // An existing table and a missing one outside the scope look the same.
-  let leak = table.get(mut sub, neighbour(), 1) == Error(OutOfScope()) && table.get(
-    mut sub,
+  let leak = table.get(sub, neighbour(), 1) == Error(OutOfScope()) && table.get(
+    sub,
     absent(),
     1
   ) == Error(OutOfScope()) && table.create(mut sub, absent()) == Error(OutOfScope())
@@ -64,8 +64,8 @@ fn ranged(mut sub: store.Tx) -> bool {
 
 fn created_whole(mut sub: store.Tx) -> bool {
   let created = fill(mut sub, absent()) == Ok(())
-  let read = table.get(mut sub, absent(), 4) == Ok(Some(40))
-  let other = table.get(mut sub, rows(), 4) == Error(OutOfScope())
+  let read = table.get(sub, absent(), 4) == Ok(Some(40))
+  let other = table.get(sub, rows(), 4) == Error(OutOfScope())
   created && read && other
 }
 
@@ -83,7 +83,7 @@ pub fn main(t: Test) -> Result[(), store.StoreError] {
   let checked: Result[bool, store.TxFailure[store.TxError]] = store.transact(
     mut s,
     fn(mut tx: store.Tx) -> Result[bool, store.TxError] {
-      let keys = table.scope_keys(mut tx, rows(), Included(3), Excluded(7), ReadWrite())?
+      let keys = table.scope_keys(tx, rows(), Included(3), Excluded(7), ReadWrite())?
       let narrowed = store.narrow(
         mut tx,
         keys,

@@ -48,6 +48,7 @@ mod channels;
 mod clock;
 mod holders;
 mod isolate;
+mod recorders;
 mod sync;
 mod tasks;
 mod vector;
@@ -356,6 +357,8 @@ pub(crate) struct Machine<'p, S> {
     open_elements: BTreeMap<AllocId, u32>,
     /// The structured-task scheduler, from the first scope on (CONC-1).
     tasks: Option<Box<tasks::Tasks>>,
+    /// The task-local recorders (MODE-6).
+    recorders: recorders::Recorders,
 }
 
 /// What a resolved address names.
@@ -485,6 +488,7 @@ impl<'p, S: Stage> Machine<'p, S> {
             open_holes: Default::default(),
             open_elements: BTreeMap::new(),
             tasks: None,
+            recorders: Default::default(),
             choices: 0,
             signaled: None,
             full_recount_due: false,
@@ -8639,6 +8643,9 @@ impl<'p, S: Stage> Machine<'p, S> {
         if views::is_view_operation(&id) {
             return self.view_operation(f, site, op, returning(normal)?, failure);
         }
+        if let Some(name) = recorders::operation(&id) {
+            return self.recorder_operation(f, site, name, normal);
+        }
         if let Some(name) = tasks::operation(&id) {
             return self.task_operation(f, site, name, normal, failure);
         }
@@ -10680,6 +10687,9 @@ impl<'p, S: Stage> Machine<'p, S> {
                                 self.close_endpoint(h, &mut d.work)?;
                             } else if h & sync::MUTEX != 0 {
                                 self.close_mutex(h, &mut d.work)?;
+                            } else if h & recorders::RECORDER != 0 {
+                                // A recorder drops the events it still holds (MODE-6).
+                                self.close_recorder(h, &mut d.work)?;
                             } else if let Some(rule) = self
                                 .ops
                                 .close_handle(h, &mut self.output)

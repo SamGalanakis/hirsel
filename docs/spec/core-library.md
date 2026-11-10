@@ -287,6 +287,15 @@ N fn list.swap[T](mut xs: unique List[T], a: u64, b: u64) -> ()
 fn iter.from[S, T](take state: S, take next: fn(mut S) -> Option[T]) -> Iter[T] uses {state, next}
 fn iter.next[T](mut it: Iter[T]) -> Option[T]
 
+// MODE-6
+// A Recorder is a local capability bound to the invocation that creates it. Append
+// borrows it and consumes one independently owned global inert event, recording it
+// or failing the run. Nothing reads, counts, clears or replaces its events; finish
+// consumes the recorder once no borrow of it remains and returns them in order.
+fn recorder.new[E: inert]() -> Recorder[E]
+fn recorder.append[E: inert](r: Recorder[E], take event: E) -> () uses {}
+fn recorder.finish[E: inert](take r: Recorder[E]) -> List[E] uses {}
+
 // SEM-1/2/3/5, GEN-2, MEM-8/9
 N fn int.widen[I, J](value: I) -> J
 N fn int.try_narrow[I, J](value: I) -> Option[J]

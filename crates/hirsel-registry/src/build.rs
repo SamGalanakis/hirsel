@@ -603,6 +603,29 @@ pub(crate) fn registry(types: &Arc<TypeInterner>) -> BTreeMap<DefId, SignatureRe
             &mut out,
         );
     }
+    // MODE-6: an invocation-bound append-only buffer of independently owned inert
+    // events. A local capability (never sendable, copyable or stored past its
+    // creating invocation) and an affine resource whose drop destroys its events.
+    {
+        let b = Builder::new(types, "E: inert").with_declarations(&out);
+        let mut t = type_definition(b.generics.clone(), None);
+        t.capability = Some(CapabilityKind::Scoped);
+        t.resource = true;
+        t.bounds = vec![Bound::NoallocDrop];
+        t.destructor_allocation = Allocation::NoAlloc;
+        t.authority = AuthoritySummary::Known(
+            vec![AuthorityTerm::Capability(hirsel_syntax::DefPath::core(
+                "Recorder",
+            ))]
+            .into(),
+        );
+        t.drop = Some(hirsel_syntax::DefPath::core("Recorder"));
+        publish(
+            types,
+            b.signature("Recorder", SignatureKind::Type(Box::new(t)), true),
+            &mut out,
+        );
+    }
     for (name, generic) in [
         ("Array", "T"),
         ("List", "T"),
@@ -977,6 +1000,34 @@ pub(crate) fn registry(types: &Arc<TypeInterner>) -> BTreeMap<DefId, SignatureRe
         ),
         ("T", "$intrinsic.MutexKill", "m: Mutex[T]", "()"),
         ("T", "$intrinsic.MutexCause", "m: Mutex[T]", "()"),
+        // A recorder's events are `Option[E]` images in a task-local queue (MODE-6):
+        // the open gives the runtime the `None` image an append leaves and the
+        // descriptor that drops events the recorder still holds when it closes; a
+        // take moves the oldest event out.
+        (
+            "E: inert",
+            "$intrinsic.RecorderOpen",
+            "none: Option[E], descriptor: u32",
+            "Recorder[E]",
+        ),
+        (
+            "E: inert",
+            "$intrinsic.RecorderAppend",
+            "r: Recorder[E], mut event: Option[E]",
+            "()",
+        ),
+        (
+            "E: inert",
+            "$intrinsic.RecorderCount",
+            "r: Recorder[E]",
+            "u64",
+        ),
+        (
+            "E: inert",
+            "$intrinsic.RecorderTake",
+            "r: Recorder[E], mut event: Option[E]",
+            "()",
+        ),
         (
             "A",
             "$intrinsic.AtomicCreate",

@@ -21,6 +21,7 @@ pub struct Library {
     pub(super) tasks: super::tasks::Tasks,
     pub(super) channels: super::channels::Channels,
     pub(super) synchronizers: super::synchronization::Synchronizers,
+    pub(super) recorders: super::recorders::Recorders,
     pub(super) network_waits: std::collections::BTreeMap<u64, super::net::NetworkWait>,
     pub(super) file_waits: std::collections::BTreeMap<u64, Vec<Value>>,
     /// Parked `watcher.next` calls: watcher, Dir and recorded input.
@@ -111,6 +112,7 @@ impl Library {
             tasks,
             channels: Default::default(),
             synchronizers: Default::default(),
+            recorders: Default::default(),
             network_waits: Default::default(),
             file_waits: Default::default(),
             watch_waits: Default::default(),
@@ -1469,6 +1471,7 @@ impl Operations for Library {
         self.tasks
             .retained_bytes()
             .saturating_add(self.channels.retained_bytes())
+            .saturating_add(self.recorders.retained_bytes())
             .saturating_add(
                 self.cpu_waits
                     .values()
@@ -1849,6 +1852,10 @@ impl Operations for Library {
             self.drop_claim(id);
             return Ok(());
         }
+        if kind == "Recorder" {
+            self.drop_recorder(id);
+            return Ok(());
+        }
         if matches!(kind, "ReadHalf" | "WriteHalf") {
             if !matches!(
                 self.simulation.grants.get(&id),
@@ -2156,6 +2163,9 @@ primary_operations! { library, call, context, name, a, value;
         if result.is_err() && let Some(saved) = saved { library.simulation = saved; }
         return result.map(Some);
     },
+    Primitive: "recorder.new" | "recorder.append" | "recorder.finish" => {
+        return library.recorder_call(name, call.arguments).map(Some);
+    },
     Primitive: "slots.empty" | "slots.insert" | "slots.get" | "slots.remove" => {
         return super::slots::call(name, a).map(Some);
     },
@@ -2195,7 +2205,7 @@ primary_operations! { library, call, context, name, a, value;
     Capability: "io.process" | "proc.narrow" | "proc.run" | "proc.pipeline" | "test.process" | "proc.spawn" | "child.write" | "child.close_stdin" | "child.read_stdout" | "child.read_stderr" | "child.wait" | "child.kill" | "proc.spawn_pipeline" | "group.write" | "group.close_stdin" | "group.read_stdout" | "proc.wait_group" | "group.kill" => {
         return library.network_call(name, &call, context).map(Some);
     },
-    Unavailable: "$intrinsic.CpuMapScoped" | "$intrinsic.TaskScopeEnter" | "$intrinsic.TaskScopeExit" | "$intrinsic.TaskSetHas" | "$intrinsic.TaskSetTake" | "$intrinsic.TaskScopeEnterUntil" | "$intrinsic.TaskScopeExitUntil" | "$intrinsic.TaskSpawn" | "$intrinsic.TaskFinish" | "$intrinsic.TaskJoin" | "$intrinsic.ChannelOpen" | "$intrinsic.ChannelSend" | "$intrinsic.ChannelReceive" | "$intrinsic.MutexCreate" | "$intrinsic.MutexTake" | "$intrinsic.MutexPut" | "$intrinsic.MutexKill" | "$intrinsic.MutexCause" | "$intrinsic.AtomicCreate" | "$intrinsic.AtomicLoad" | "$intrinsic.AtomicStore" | "$intrinsic.SharedThawTurn" | "$intrinsic.TaskCanceled" | "$intrinsic.IsolateBegin" | "$intrinsic.ApplyBegin" | "$intrinsic.IsolateEnd" | "$intrinsic.IsolateCount" | "$intrinsic.IsolateKind" | "$intrinsic.IsolateRule" | "$intrinsic.IsolateDefinition" | "$intrinsic.IsolateLine" | "$intrinsic.IsolateColumn" | "$intrinsic.IsolateSpawn" | "$intrinsic.RunnerSend" | "$intrinsic.RunnerWait" | "$intrinsic.RunnerTake" | "$intrinsic.RunnerEntry" | "$intrinsic.RunnerArgument" | "$intrinsic.RunnerIo" | "$intrinsic.RunnerReply" | "$intrinsic.RunnerGrants" => { return Err(Error::Unavailable(format!("{name} is an entry of the native task runtime's compiled bodies; the reference executes the task operations"))); },
+    Unavailable: "$intrinsic.CpuMapScoped" | "$intrinsic.TaskScopeEnter" | "$intrinsic.TaskScopeExit" | "$intrinsic.TaskSetHas" | "$intrinsic.TaskSetTake" | "$intrinsic.TaskScopeEnterUntil" | "$intrinsic.TaskScopeExitUntil" | "$intrinsic.TaskSpawn" | "$intrinsic.TaskFinish" | "$intrinsic.TaskJoin" | "$intrinsic.ChannelOpen" | "$intrinsic.ChannelSend" | "$intrinsic.ChannelReceive" | "$intrinsic.MutexCreate" | "$intrinsic.MutexTake" | "$intrinsic.MutexPut" | "$intrinsic.MutexKill" | "$intrinsic.MutexCause" | "$intrinsic.RecorderOpen" | "$intrinsic.RecorderAppend" | "$intrinsic.RecorderCount" | "$intrinsic.RecorderTake" | "$intrinsic.AtomicCreate" | "$intrinsic.AtomicLoad" | "$intrinsic.AtomicStore" | "$intrinsic.SharedThawTurn" | "$intrinsic.TaskCanceled" | "$intrinsic.IsolateBegin" | "$intrinsic.ApplyBegin" | "$intrinsic.IsolateEnd" | "$intrinsic.IsolateCount" | "$intrinsic.IsolateKind" | "$intrinsic.IsolateRule" | "$intrinsic.IsolateDefinition" | "$intrinsic.IsolateLine" | "$intrinsic.IsolateColumn" | "$intrinsic.IsolateSpawn" | "$intrinsic.RunnerSend" | "$intrinsic.RunnerWait" | "$intrinsic.RunnerTake" | "$intrinsic.RunnerEntry" | "$intrinsic.RunnerArgument" | "$intrinsic.RunnerIo" | "$intrinsic.RunnerReply" | "$intrinsic.RunnerGrants" => { return Err(Error::Unavailable(format!("{name} is an entry of the native task runtime's compiled bodies; the reference executes the task operations"))); },
     Capability: "io.telemetry" | "capture.begin" | "capture.context" | "capture.event" | "capture.finish" | "capture.log" | "capture.measure" => {
         // A rejected replay never publishes effects or delivers identities.
         let saved = (!context.configuration.inputs.is_empty()).then(|| library.simulation.clone());
@@ -2807,7 +2817,7 @@ fn arg_mut(a: &mut [Value], i: usize) -> Result<&mut Value, Error> {
         .ok_or_else(|| invalid("missing builtin argument"))
 }
 /// A taken argument the completion transfers.
-fn take_arg(a: &mut [Value], i: usize) -> Result<Value, Error> {
+pub(super) fn take_arg(a: &mut [Value], i: usize) -> Result<Value, Error> {
     Ok(std::mem::replace(arg_mut(a, i)?, Value::Unit))
 }
 pub(super) fn text(v: &Value) -> Result<&str, Error> {

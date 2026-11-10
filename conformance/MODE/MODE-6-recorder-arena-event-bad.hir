@@ -1,0 +1,12 @@
+// rule: MODE-6
+// expect: reject PROV-4 at line 9
+// twin: MODE/MODE-6-recorder-run.hir
+// "Append borrows it and consumes one independently owned global inert event."
+fn example(r: Recorder[Bytes]) -> () {
+  arena.with(
+    fn(a: Arena) {
+      let k: Bytes in a = b"k"
+      recorder.append(r, take k)
+    }
+  )
+}

@@ -1,16 +1,10 @@
 // rule: STORE-3
 // expect: accept
-// A Tx cannot leave its transaction: a closure that keeps it is called
-// inside the body's helper instead.
+// A Tx cannot leave its transaction: a closure that reads through it is
+// called inside the body's helper instead.
 fn reader(tx: store.Tx) -> bool {
   let read = fn() {
-    open(tx)
+    store.tx_get(tx, b"k") == Ok(None())
   }
   read()
-}
-
-// Any use of the Tx; reads take `mut tx` and a closure cannot write a capture.
-fn open(tx: store.Tx) -> bool uses {} {
-  let _ = tx
-  true
 }

@@ -202,6 +202,7 @@ pub fn owners(types: &TypeInterner, signatures: &BTreeMap<DefPath, SignatureRef>
         ("ChildGroup", true),
         ("TaskSet", true),
         ("Claim", true),
+        ("Recorder", true),
     ] {
         if let Some(signature) = signatures.get(&hirsel_syntax::DefPath::core(name)) {
             out.insert(

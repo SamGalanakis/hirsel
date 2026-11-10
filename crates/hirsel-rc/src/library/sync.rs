@@ -55,7 +55,7 @@ fn entries(cx: &mut Cx<'_>, names: &[&str]) -> R<(LayoutId, u64, Vec<Intrinsic>)
 }
 
 /// Call `entry` and continue in a new body block; its result.
-fn call(
+pub(super) fn call(
     b: &mut Body<'_, '_>,
     entry: &Intrinsic,
     arguments: Vec<CallArgument>,
@@ -126,7 +126,7 @@ fn put(
 }
 
 /// Move `Some(value)` through the mutex entry, leaving `None` in the local.
-fn put_image(
+pub(super) fn put_image(
     b: &mut Body<'_, '_>,
     entry: &Intrinsic,
     handle: Option<ValueId>,
@@ -225,7 +225,7 @@ fn kills(b: &Body<'_, '_>, mut target: BlockId, killing: &[BlockId]) -> bool {
 
 /// Move the payload out of the `Some` an entry wrote into the local `slot`, whose
 /// storage then ends.
-fn take_some(
+pub(super) fn take_some(
     b: &mut Body<'_, '_>,
     slot: SlotId,
     address: AddressId,
@@ -280,7 +280,7 @@ fn take_some(
 }
 
 /// A `None` local for an entry to write a payload into.
-fn none_local(b: &mut Body<'_, '_>, option_layout: LayoutId) -> R<(SlotId, AddressId)> {
+pub(super) fn none_local(b: &mut Body<'_, '_>, option_layout: LayoutId) -> R<(SlotId, AddressId)> {
     let none = option(b, option_layout, 0, &[]);
     local(b, none)
 }

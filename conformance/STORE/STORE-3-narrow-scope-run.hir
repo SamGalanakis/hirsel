@@ -160,7 +160,7 @@ fn probe(mut sub: store.Tx, parts: List[Part], at: List[Bytes]) -> bool {
       continue
     }
     let held = access(parts, k)
-    let read_ok = store.tx_get(mut sub, unique k) != Error(OutOfScope())
+    let read_ok = store.tx_get(sub, unique k) != Error(OutOfScope())
     if read_ok != (held > 0) {
       return false
     }
@@ -184,7 +184,7 @@ fn probe(mut sub: store.Tx, parts: List[Part], at: List[Bytes]) -> bool {
           }
         }
         let scanned = store.tx_range(
-          mut sub,
+          sub,
           Included(unique k),
           Excluded(unique h),
           8,
@@ -210,7 +210,7 @@ fn named_cases(mut tx: store.Tx) -> bool {
     mut tx,
     ab,
     fn(mut sub: store.Tx) -> bool {
-      store.tx_get(mut sub, b"c") == Error(OutOfScope()) && store.tx_get(mut sub, b"a") == Ok(
+      store.tx_get(sub, b"c") == Error(OutOfScope()) && store.tx_get(sub, b"a") == Ok(
         None()
       )
     }
@@ -226,7 +226,7 @@ fn named_cases(mut tx: store.Tx) -> bool {
       store.tx_put(mut sub, b"a", b"x") == Error(ReadOnly())
     }
   )
-  if read_only != Ok(true) || store.tx_get(mut tx, b"a") != Ok(None()) {
+  if read_only != Ok(true) || store.tx_get(tx, b"a") != Ok(None()) {
     return false
   }
   // Exact containment: the same keys spelled differently narrow; one more key,
@@ -284,7 +284,7 @@ fn named_cases(mut tx: store.Tx) -> bool {
               true
             }
           )
-          back == Error(OutOfScope()) && store.tx_get(mut a_only, b"b") == Error(
+          back == Error(OutOfScope()) && store.tx_get(a_only, b"b") == Error(
             OutOfScope()
           )
         }
@@ -308,7 +308,7 @@ fn named_cases(mut tx: store.Tx) -> bool {
           true
         }
       )
-      let scanned = store.tx_range(mut sub, Unbounded(), Unbounded(), 8, Ascending())
+      let scanned = store.tx_range(sub, Unbounded(), Unbounded(), 8, Ascending())
       all == Error(OutOfScope()) && scanned == Ok([])
     }
   )

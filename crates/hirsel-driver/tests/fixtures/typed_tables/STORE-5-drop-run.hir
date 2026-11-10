@@ -40,7 +40,7 @@ pub fn main(t: Test) -> Result[(), store.StoreError] {
       if table.drop(mut tx, items) != Error(Limit(TransactionBytes())) {
         return Ok(false)
       }
-      Ok(table.get(mut tx, items, 3)? == Some("dropped"))
+      Ok(table.get(tx, items, 3)? == Some("dropped"))
     }
   )
   test.check(t, refused == Ok(true))
@@ -68,8 +68,8 @@ pub fn main(t: Test) -> Result[(), store.StoreError] {
         return Ok(false)
       }
       table.drop(mut tx, items)?
-      if table.get(mut tx, items, 1) != Error(NoTable()) || table.history(
-        mut tx,
+      if table.get(tx, items, 1) != Error(NoTable()) || table.history(
+        tx,
         "items"
       ) != Error(NoTable()) {
         return Ok(false)
@@ -79,8 +79,8 @@ pub fn main(t: Test) -> Result[(), store.StoreError] {
       }
       // A table of the same name starts empty with a fresh history.
       table.create(mut tx, wrong)?
-      let fresh = table.range(mut tx, wrong, Unbounded(), Unbounded(), 10, Ascending())?
-      Ok(list.len(fresh) == 0 && list.len(table.history(mut tx, "items")?) == 1)
+      let fresh = table.range(tx, wrong, Unbounded(), Unbounded(), 10, Ascending())?
+      Ok(list.len(fresh) == 0 && list.len(table.history(tx, "items")?) == 1)
     }
   )
   test.check(t, dropped == Ok(true))

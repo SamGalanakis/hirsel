@@ -192,6 +192,7 @@ mod receive_endpoint_diagnostic_19;
 mod receiving;
 mod receiving_lifetimes;
 mod receiving_loans;
+mod recorder_v_686;
 mod recursive_groups;
 mod recursive_tail_agreement_44;
 mod region_seal_107;

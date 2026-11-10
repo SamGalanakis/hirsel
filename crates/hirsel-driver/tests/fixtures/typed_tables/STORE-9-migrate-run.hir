@@ -91,11 +91,11 @@ fn unchanged[S](mut s: store.Store[S]) -> bool {
   let read = store.transact(
     mut s,
     fn(mut tx: store.Tx) -> Result[bool, store.TxError] {
-      let rows = table.range(mut tx, items(), Unbounded(), Unbounded(), 10, Ascending())?
+      let rows = table.range(tx, items(), Unbounded(), Unbounded(), 10, Ascending())?
       if list.len(rows) != 5 || rows[2] != (3, Item(label: "item 3", count: 3)) {
         return Ok(false)
       }
-      if list.len(table.history(mut tx, "items")?) != 1 {
+      if list.len(table.history(tx, "items")?) != 1 {
         return Ok(false)
       }
       table.put(mut tx, items(), 6, Item(label: "item 6", count: 6))?
@@ -197,12 +197,12 @@ fn scenario(t: Test, sc: Scope) -> Result[(), store.StoreError] {
   let migrated = store.transact(
     mut s,
     fn(mut tx: store.Tx) -> Result[bool, store.TxError] {
-      match table.get(mut tx, items(), 1) {
+      match table.get(tx, items(), 1) {
         Error(Schema(_)) => (),
         _ => return Ok(false),
       }
       let rows = table.range(
-        mut tx,
+        tx,
         priced(),
         Unbounded(),
         Unbounded(),
@@ -218,7 +218,7 @@ fn scenario(t: Test, sc: Scope) -> Result[(), store.StoreError] {
       ] {
         return Ok(false)
       }
-      let history = table.history(mut tx, "items")?
+      let history = table.history(tx, "items")?
       let priced_by: Entry[fn(c: (), key: u32, old: Item) -> Result[(u32, Priced), Rejected]] = price
       if list.len(history) != 2 || history[1].epoch != 1 || history[1].change != Migrated(
         runner.entry_id(priced_by)
@@ -227,7 +227,7 @@ fn scenario(t: Test, sc: Scope) -> Result[(), store.StoreError] {
       }
       // The new schema takes writes at its own epoch.
       table.put(mut tx, priced(), 6, Priced(label: "item 6", cents: 1))?
-      Ok(table.get(mut tx, priced(), 6)? == Some(Priced(label: "item 6", cents: 1)))
+      Ok(table.get(tx, priced(), 6)? == Some(Priced(label: "item 6", cents: 1)))
     }
   )
   test.check(t, migrated == Ok(true))
@@ -259,7 +259,7 @@ fn scenario(t: Test, sc: Scope) -> Result[(), store.StoreError] {
     mut reopened,
     fn(mut tx: store.Tx) -> Result[bool, store.TxError] {
       let rows = table.range(
-        mut tx,
+        tx,
         keyed_reversed,
         Unbounded(),
         Included(997),
@@ -273,7 +273,7 @@ fn scenario(t: Test, sc: Scope) -> Result[(), store.StoreError] {
         return Ok(false)
       }
       Ok(
-        table.get(mut tx, keyed_reversed, 999)? == Some(Item(label: "item 1", count: 1))
+        table.get(tx, keyed_reversed, 999)? == Some(Item(label: "item 1", count: 1))
       )
     }
   )

@@ -519,7 +519,7 @@ environment-local result specializes to global ([CLO-1](closures.md#clo-1-scoped
 ### MODE-6: Scoped capabilities
 
 A capability is either global (`Dir`, `MonotonicClock`, `WallClock`, `Net`, `Stdout`, `Telemetry`,
-`Tasks`, `Runner`) or scoped (`Tx`, `Scope`, `Arena`, `Test`; always local). Its declaration says
+`Tasks`, `Runner`) or scoped (`Tx`, `Scope`, `Arena`, `Test`, `Recorder`; always local). Its declaration says
 which. A scoped capability received by a closure cannot be returned, stored or captured by
 an escaping closure, so it cannot leave the call that created it.
 
@@ -531,6 +531,26 @@ exported structural bound from its representation. A global capability's represe
 cannot hold scoped capabilities or scoped content. A local capability is non-plain and is
 always bounded by its creating invocation and every scope its contents reach; a
 declaration cannot remove those bounds.
+
+`Recorder[E: inert]` is the core local capability for append-only recording. `recorder.new`
+creates one bound to the calling invocation; `recorder.append(r, take event)` borrows it and
+consumes one event; `recorder.finish(take r)` consumes it and returns the events in append
+order. Nothing reads, counts, clears or replaces a recorder's events, and dropping one
+destroys them. Wrappers that hold a recorder, and borrowed facets of them, are local
+capabilities too: they inherit its scope and non-sendability and are invariant in `E`.
+
+This is sound for these reasons:
+- Append writes through a shared borrow, but no operation observes the buffer before
+  `finish`, so two borrows of one recorder cannot see each other's appends. Appends within one
+  invocation happen in program order because the recorder is never sendable.
+- `event` is taken, so it is global (MEM-8) and inert. The buffer therefore holds no
+  reference into a borrow, an arena or a capability. Ending the scope a key was built in
+  leaves the recorded bytes intact, and reusing the arena's storage cannot change them.
+- `finish` takes the recorder, so it cannot run while any borrow or facet of it is live. No
+  append can follow it or race with it.
+- The recorder cannot leave its invocation (return, store, escaping capture, send) under the
+  scoped-capability rule above. The only way events leave is through `finish`, as an
+  ordinary owned `List[E]`.
 
 ### MODE-7: Modes inside a body
 

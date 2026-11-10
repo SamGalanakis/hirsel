@@ -21,11 +21,11 @@ pub fn main(t: Test) -> Result[(), store.StoreError] {
         Error(Limit(_)) => (),
         _ => return Ok(false),
       }
-      if table.get(mut tx, rows, 1)? != None() {
+      if table.get(tx, rows, 1)? != None() {
         return Ok(false)
       }
       table.put(mut tx, rows, 2, b"ok")?
-      match table.range(mut tx, rows, Unbounded(), Unbounded(), 3, Ascending()) {
+      match table.range(tx, rows, Unbounded(), Unbounded(), 3, Ascending()) {
         Error(Limit(_)) => (),
         _ => return Ok(false),
       }
@@ -36,10 +36,10 @@ pub fn main(t: Test) -> Result[(), store.StoreError] {
       if table.rename(mut tx, "rows", "missing", "other") != Error(InvalidInput()) {
         return Ok(false)
       }
-      if list.len(table.history(mut tx, "rows")?) != 1 {
+      if list.len(table.history(tx, "rows")?) != 1 {
         return Ok(false)
       }
-      Ok(table.get(mut tx, rows, 2)? == Some(b"ok"))
+      Ok(table.get(tx, rows, 2)? == Some(b"ok"))
     }
   )
   test.check(t, changed == Ok(true))

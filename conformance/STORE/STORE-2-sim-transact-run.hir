@@ -9,11 +9,10 @@
 // are cut to the cap, and compaction splits a snapshot larger than the cap.
 type Short = TooFew(u64) | Db(store.TxError)
 
-fn count(mut tx: store.Tx) -> Result[u64, Short] {
-  match store.tx_get(mut tx, b"count") {
-    Ok(Some(b)) => Ok(int.widen(b[0])),
-    Ok(None()) => Ok(0),
-    Error(e) => Error(Db(unique e)),
+fn count(tx: store.Tx) -> Result[u64, Short] {
+  match store.tx_get(tx, b"count") ? Db {
+    Some(b) => Ok(int.widen(b[0])),
+    None() => Ok(0),
   }
 }
 
@@ -114,7 +113,7 @@ pub fn main(t: Test) -> Result[(), store.StoreError] {
     fn(mut tx: store.Tx) -> Result[u64, Short] {
       set_count(mut tx, 5)?
       store.tx_put(mut tx, b"name", b"ada") ? Db
-      Ok(count(mut tx)?)
+      Ok(count(tx)?)
     }
   )
   test.check(t, first == Ok(5))
@@ -124,7 +123,7 @@ pub fn main(t: Test) -> Result[(), store.StoreError] {
     fn(mut tx: store.Tx) -> Result[u64, Short] {
       set_count(mut tx, 9)?
       store.tx_delete(mut tx, b"name") ? Db
-      let n = count(mut tx)?
+      let n = count(tx)?
       if n < 10 {
         return Error(TooFew(n))
       }

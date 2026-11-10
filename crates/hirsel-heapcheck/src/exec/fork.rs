@@ -50,6 +50,7 @@ impl<'p, S: Stage> Machine<'p, S> {
             open_holes: self.open_holes.clone(),
             open_elements: self.open_elements.clone(),
             tasks: self.tasks.clone(),
+            recorders: self.recorders.clone(),
             full_recount_due: self.full_recount_due,
         }
     }

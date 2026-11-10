@@ -17,6 +17,7 @@ LANG/LANG-15-cursor-diagnostics-16-invalid.hir
 LANG/LANG-15-cursor-diagnostics-16-run.hir
 MODE/MODE-1-csv-owned-table-37-bad.hir
 MODE/MODE-1-csv-owned-table-37-ok.hir
+MODE/MODE-1-recorder-early-finish-bad.hir
 MODE/MODE-1-replace-local-content-33-borrowed-callable-run.hir
 MODE/MODE-1-replace-local-content-33-callable-run.hir
 MODE/MODE-1-replace-local-content-33-concrete-relation-run.hir
@@ -30,6 +31,12 @@ MODE/MODE-2-loop-place-52-field-run.hir
 MODE/MODE-2-loop-place-52-index-field-run.hir
 MODE/MODE-2-loop-place-52-paths-run.hir
 MODE/MODE-2-loop-place-52-write-bad.hir
+MODE/MODE-6-recorder-arena-event-bad.hir
+MODE/MODE-6-recorder-arena-key-run.hir
+MODE/MODE-6-recorder-capture-bad.hir
+MODE/MODE-6-recorder-return-bad.hir
+MODE/MODE-6-recorder-run.hir
+MODE/MODE-6-recorder-store-bad.hir
 MODE/MODE-6-stream-bound-38-scope-bad.hir
 MODE/MODE-6-stream-bound-38-scope-ok.hir
 OWN/OWN-2-csv-owned-table-37-bad.hir

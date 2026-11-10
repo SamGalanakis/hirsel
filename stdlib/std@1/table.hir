@@ -110,13 +110,13 @@ fn concat(prefix: Bytes, suffix: Bytes) -> Bytes uses {} {
   bytes.from_list(take out)
 }
 
-fn load_catalog(mut tx: store.Tx, name: String) -> Result[Catalog, store.TxError] {
+fn load_catalog(tx: store.Tx, name: String) -> Result[Catalog, store.TxError] {
   if !valid(name) {
     return Error(InvalidInput())
   }
   let key = metadata_key(name)
   store.admit_read(tx, key)?
-  let raw = match store.table_read(mut tx, take key) {
+  let raw = match store.table_read(tx, take key) {
     Some(raw) => raw,
     None() => return Error(NoTable()),
   }
@@ -153,10 +153,10 @@ fn generation(c: Catalog) -> u64 uses {} {
 }
 
 // A write to a table under migration returns `Migrating()`.
-fn writable(mut tx: store.Tx, name: String) -> Result[(), store.TxError] {
+fn writable(tx: store.Tx, name: String) -> Result[(), store.TxError] {
   let mark = mark_key(name)
   store.admit_read(tx, mark)?
-  if let Some(_) = store.table_read(mut tx, take mark) {
+  if let Some(_) = store.table_read(tx, take mark) {
     return Error(Migrating())
   }
   Ok(())
@@ -185,11 +185,11 @@ fn schemas[K: key + serializable, V: serializable](c: Catalog, t: Table[K, V]) -
   Ok(())
 }
 
-fn checked[K: key + serializable, V: serializable](mut tx: store.Tx, t: Table[K, V]) -> Result[
+fn checked[K: key + serializable, V: serializable](tx: store.Tx, t: Table[K, V]) -> Result[
   Catalog,
   store.TxError
 ] {
-  let c = load_catalog(mut tx, table_name(t))?
+  let c = load_catalog(tx, table_name(t))?
   schemas(c, t)?
   Ok(take c)
 }
@@ -208,7 +208,7 @@ pub fn create[K: key + serializable, V: serializable](mut tx: store.Tx, t: Table
   }
   let catalog = metadata_key(table_name(t))
   store.admit_write(tx, catalog)?
-  if let Some(_) = store.table_read(mut tx, take catalog) {
+  if let Some(_) = store.table_read(tx, take catalog) {
     return Error(TableExists())
   }
   let k: Option[K] = None()
@@ -292,14 +292,14 @@ fn decode_value[V: serializable](c: Catalog, data: Bytes) -> Result[V, store.TxE
 }
 
 /// Returns a fresh value, or None when this transaction sees no row.
-pub fn get[K: key + serializable, V: serializable](mut tx: store.Tx, t: Table[K, V], key: K) -> Result[
+pub fn get[K: key + serializable, V: serializable](tx: store.Tx, t: Table[K, V], key: K) -> Result[
   Option[V],
   store.TxError
 ] {
-  let c = checked(mut tx, t)?
+  let c = checked(tx, t)?
   let encoded = row_key(t, c, key)?
   store.admit_read(tx, encoded)?
-  match store.table_read(mut tx, copy encoded) {
+  match store.table_read(tx, copy encoded) {
     Some(data) => {
       let value: V = decode_value(c, data)?
       Ok(Some(take value))
@@ -315,8 +315,8 @@ pub fn put[K: key + serializable, V: serializable](
   key: K,
   value: V
 ) -> Result[(), store.TxError] {
-  let c = checked(mut tx, t)?
-  writable(mut tx, table_name(t))?
+  let c = checked(tx, t)?
+  writable(tx, table_name(t))?
   let physical_key = row_key(t, c, key)?
   let encoded_value = row_value(c, value)?
   store.table_put(mut tx, take physical_key, take encoded_value)
@@ -328,11 +328,11 @@ pub fn delete[K: key + serializable, V: serializable](
   t: Table[K, V],
   key: K
 ) -> Result[bool, store.TxError] {
-  let c = checked(mut tx, t)?
-  writable(mut tx, table_name(t))?
+  let c = checked(tx, t)?
+  writable(tx, table_name(t))?
   let encoded = row_key(t, c, key)?
   store.admit_write(tx, encoded)?
-  let exists = match store.table_read(mut tx, copy encoded) {
+  let exists = match store.table_read(tx, copy encoded) {
     Some(_) => true,
     None() => false,
   }
@@ -376,7 +376,7 @@ fn successor(k: Bytes) -> Bytes uses {} {
 
 /// Scans in key value order with inclusive/exclusive bounds and a positive limit.
 pub fn range[K: key + serializable, V: serializable](
-  mut tx: store.Tx,
+  tx: store.Tx,
   t: Table[K, V],
   from: store.RangeBound[K],
   to: store.RangeBound[K],
@@ -386,12 +386,12 @@ pub fn range[K: key + serializable, V: serializable](
   if limit == 0 {
     return Error(InvalidInput())
   }
-  let c = checked(mut tx, t)?
+  let c = checked(tx, t)?
   let prefix = row_prefix(table_name(t))
   let schema = c.epochs[generation(c)].key
   let low = lower(schema, prefix, c.renames, from)?
   let high = upper(schema, prefix, c.renames, to)?
-  let rows = store.table_range(mut tx, take low, take high, limit, order)?
+  let rows = store.table_range(tx, take low, take high, limit, order)?
   let mut out: List[(K, V)] = []
   for (key, value) in rows {
     if bytes.len(key) < bytes.len(prefix) || bytes.slice(key, 0, bytes.len(prefix)) != prefix {
@@ -442,13 +442,13 @@ pub fn scope[K: key + serializable, V: serializable](t: Table[K, V], access: sto
 /// history on those rows, and not to create, drop or rename the table. It reads
 /// the catalog through `tx` to encode the bounds and fails as `get` does.
 pub fn scope_keys[K: key + serializable, V: serializable](
-  mut tx: store.Tx,
+  tx: store.Tx,
   t: Table[K, V],
   from: store.RangeBound[K],
   to: store.RangeBound[K],
   access: store.Access
 ) -> Result[store.KeyScope, store.TxError] {
-  let c = checked(mut tx, t)?
+  let c = checked(tx, t)?
   let name = table_name(t)
   let prefix = row_prefix(name)
   let schema = c.epochs[generation(c)].key
@@ -468,8 +468,8 @@ pub fn scope_keys[K: key + serializable, V: serializable](
 }
 
 /// Returns the immutable schema history; hashes exclude package version text.
-pub fn history(mut tx: store.Tx, name: String) -> Result[List[SchemaEntry], store.TxError] {
-  let c = load_catalog(mut tx, name)?
+pub fn history(tx: store.Tx, name: String) -> Result[List[SchemaEntry], store.TxError] {
+  let c = load_catalog(tx, name)?
   let mut out: List[SchemaEntry] = []
   let mut n: u64 = 0
   for epoch in c.epochs {
@@ -499,8 +499,8 @@ pub fn rename(mut tx: store.Tx, name: String, from: String, to: String) -> Resul
     return Error(InvalidInput())
   }
   store.admit_write(tx, metadata_key(name))?
-  let mut c = load_catalog(mut tx, name)?
-  writable(mut tx, name)?
+  let mut c = load_catalog(tx, name)?
+  writable(tx, name)?
   let latest = current(c)
   let key = internal.table_schema.rename_schema(latest.key, from, to)
   let value = internal.table_schema.rename_schema(latest.value, from, to)
@@ -540,14 +540,14 @@ pub fn drop[K: key + serializable, V: serializable](mut tx: store.Tx, t: Table[K
   (),
   store.TxError
 ] {
-  let _ = checked(mut tx, t)?
+  let _ = checked(tx, t)?
   let name = table_name(t)
   let catalog = metadata_key(name)
   store.admit_write(tx, catalog)?
-  writable(mut tx, name)?
+  writable(tx, name)?
   let prefix = row_prefix(name)
   let mut doomed: List[Bytes] = []
-  for (key, _) in store.table_all(mut tx, copy prefix, keys.prefix_end(prefix), true)? {
+  for (key, _) in store.table_all(tx, copy prefix, keys.prefix_end(prefix), true)? {
     list.push(mut doomed, unique key)
   }
   list.push(mut doomed, take catalog)
@@ -586,7 +586,7 @@ fn start[
   E: serializable
 ](mut tx: store.Tx, from: Table[J, A], to: Table[K, B]) -> Result[Start, MigrateError[E]] {
   let name = table_name(from)
-  let c = load_catalog(mut tx, name) ? Table
+  let c = load_catalog(tx, name) ? Table
   if let Ok(()) = schemas(c, to) {
     return Ok(Current())
   }
@@ -628,7 +628,7 @@ fn advance[
     Some(last) => successor(last),
     None() => copy prefix,
   }
-  let rows = store.table_range(mut tx, take low, keys.prefix_end(prefix), batch, Ascending()) ? Table
+  let rows = store.table_range(tx, take low, keys.prefix_end(prefix), batch, Ascending()) ? Table
   let stored = catalog.epochs[generation(catalog)].key
   let shadow = shadow_prefix(name)
   let epoch = list.len(catalog.epochs)
@@ -661,7 +661,7 @@ fn advance[
       Error(failure) => return Error(Faulted(take failure)),
     }
     let target = concat(shadow, encoded_key(target_key, new_key, []) ? Table)
-    if let Some(_) = store.table_read(mut tx, copy target) {
+    if let Some(_) = store.table_read(tx, copy target) {
       return Error(Collision())
     }
     let mut out: List[u8] = []
@@ -688,11 +688,11 @@ fn install[K: key + serializable, B: serializable, E](
 ) -> Result[(), MigrateError[E]] {
   let name = table_name(to)
   let prefix = row_prefix(name)
-  for (key, _) in store.table_all(mut tx, copy prefix, keys.prefix_end(prefix), true) ? Table {
+  for (key, _) in store.table_all(tx, copy prefix, keys.prefix_end(prefix), true) ? Table {
     store.table_delete(mut tx, unique key) ? Table
   }
   let shadow = shadow_prefix(name)
-  for (key, value) in store.table_all(mut tx, copy shadow, keys.prefix_end(shadow), true) ? Table {
+  for (key, value) in store.table_all(tx, copy shadow, keys.prefix_end(shadow), true) ? Table {
     let live = concat(prefix, bytes.slice(key, bytes.len(shadow), bytes.len(key)))
     store.table_delete(mut tx, unique key) ? Table
     store.table_put(mut tx, take live, unique value) ? Table

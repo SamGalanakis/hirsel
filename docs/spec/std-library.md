@@ -4198,15 +4198,15 @@ CallFailure[E] = Tx(TxFailure[E]) | Denied | Rejected
 fn store.default_config() -> store.StoreConfig uses {}
 fn store.transact[S, R: inert, E: inert](mut s: store.Store[S], body: fn(mut tx: store.Tx) -> Result[R, E] uses {}) -> Result[R, store.TxFailure[E]] uses {s}
 fn store.call[S, R: inert + serializable, E: inert + serializable](mut s: store.Store[S], req: store.CallRequest, body: fn(mut tx: store.Tx) -> Result[R, E] uses {}) -> Result[R, store.CallFailure[E]] uses {s}
-fn store.tx_get(mut tx: store.Tx, take key: Bytes) -> Result[Option[Bytes], store.TxError] in tx requires !store.reserved(key)
+fn store.tx_get(tx: store.Tx, key: Bytes) -> Result[Option[Bytes], store.TxError] requires !store.reserved(key)
 fn store.tx_put(mut tx: store.Tx, take key: Bytes, take value: Bytes) -> Result[(), store.TxError] requires !store.reserved(key)
 fn store.tx_delete(mut tx: store.Tx, take key: Bytes) -> Result[(), store.TxError] requires !store.reserved(key)
-fn store.tx_range(mut tx: store.Tx, from: store.RangeBound[Bytes], to: store.RangeBound[Bytes], limit: u64, order: store.ScanOrder) -> Result[List[(Bytes, Bytes)], store.TxError]
+fn store.tx_range(tx: store.Tx, from: store.RangeBound[Bytes], to: store.RangeBound[Bytes], limit: u64, order: store.ScanOrder) -> Result[List[(Bytes, Bytes)], store.TxError]
 fn store.keys(from: store.RangeBound[Bytes], to: store.RangeBound[Bytes], access: store.Access) -> store.KeyScope uses {}
 fn store.all(access: store.Access) -> store.KeyScope uses {}
 fn store.join(a: store.KeyScope, b: store.KeyScope) -> store.KeyScope uses {}
 fn store.narrow[R: inert](mut tx: store.Tx, scope: store.KeyScope, body: fn(mut sub: store.Tx) -> R uses {}) -> Result[R, store.TxError]
-fn store.narrow_read[R: inert](mut tx: store.Tx, scope: store.KeyScope, body: fn(mut sub: store.Tx) -> R uses {}) -> Result[R, store.TxError]
+fn store.narrow_read[R: inert](tx: store.Tx, scope: store.KeyScope, body: fn(sub: store.Tx) -> R uses {}) -> Result[R, store.TxError]
 fn store.reserved(key: Bytes) -> bool uses {}
 fn store.open(d: Dir, config: store.StoreConfig) -> Result[store.Store[Dir], store.StoreError] uses {d}
 fn store.snapshot[S](mut s: store.Store[S]) -> store.Snapshot uses {}
@@ -5799,15 +5799,15 @@ refused with STORE-6, including nested and inactive-arm occurrences.
 fn table.named[K: key + serializable, V: serializable](name: String) -> table.Table[K, V]
 fn table.create[K: key + serializable, V: serializable](mut tx: store.Tx, t: table.Table[K, V]) -> Result[(), store.TxError]
 fn table.drop[K: key + serializable, V: serializable](mut tx: store.Tx, t: table.Table[K, V]) -> Result[(), store.TxError]
-fn table.get[K: key + serializable, V: serializable](mut tx: store.Tx, t: table.Table[K, V], key: K) -> Result[Option[V], store.TxError]
+fn table.get[K: key + serializable, V: serializable](tx: store.Tx, t: table.Table[K, V], key: K) -> Result[Option[V], store.TxError]
 fn table.put[K: key + serializable, V: serializable](mut tx: store.Tx, t: table.Table[K, V], key: K, value: V) -> Result[(), store.TxError]
 fn table.delete[K: key + serializable, V: serializable](mut tx: store.Tx, t: table.Table[K, V], key: K) -> Result[bool, store.TxError]
-fn table.range[K: key + serializable, V: serializable](mut tx: store.Tx, t: table.Table[K, V], from: store.RangeBound[K], to: store.RangeBound[K], limit: u64, order: store.ScanOrder) -> Result[List[(K, V)], store.TxError]
-fn table.history(mut tx: store.Tx, name: String) -> Result[List[table.SchemaEntry], store.TxError]
+fn table.range[K: key + serializable, V: serializable](tx: store.Tx, t: table.Table[K, V], from: store.RangeBound[K], to: store.RangeBound[K], limit: u64, order: store.ScanOrder) -> Result[List[(K, V)], store.TxError]
+fn table.history(tx: store.Tx, name: String) -> Result[List[table.SchemaEntry], store.TxError]
 fn table.rename(mut tx: store.Tx, name: String, from: String, to: String) -> Result[(), store.TxError]
 fn table.migrate[J: key + serializable, A: serializable, K: key + serializable, B: serializable, E: serializable, S](within: Scope, mut s: store.Store[S], from: table.Table[J, A], to: table.Table[K, B], f: Entry[fn(c: (), key: J, old: A) -> Result[(K, B), E]], batch: u64) -> Result[u64, table.MigrateError[E]]
 fn table.scope[K: key + serializable, V: serializable](t: table.Table[K, V], access: store.Access) -> store.KeyScope
-fn table.scope_keys[K: key + serializable, V: serializable](mut tx: store.Tx, t: table.Table[K, V], from: store.RangeBound[K], to: store.RangeBound[K], access: store.Access) -> Result[store.KeyScope, store.TxError]
+fn table.scope_keys[K: key + serializable, V: serializable](tx: store.Tx, t: table.Table[K, V], from: store.RangeBound[K], to: store.RangeBound[K], access: store.Access) -> Result[store.KeyScope, store.TxError]
 ```
 
 Creation is explicit. `drop` removes the table, its rows and its schema

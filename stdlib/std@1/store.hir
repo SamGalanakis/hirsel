@@ -260,10 +260,16 @@ pub opaque type Txn: copyable uses {} {
 /// transaction began at plus its own writes. It cannot leave the body, and it
 /// reaches only the keys of its scope.
 @capability(local)
-pub opaque type Tx: () uses {} {
+pub opaque type Tx: () uses {Recorder} {
   txn: Txn,
   limits: StoreLimits,
   scope: KeyScope,
+  // The run's access set (STORE-14), recorded through borrowed reads: every
+  // key read and every interval a scan consumed, as independently owned
+  // bytes. A narrowed facet records into its own and hands its events to its
+  // parent's when its body returns.
+  points: Recorder[Bytes],
+  spans: Recorder[Span],
 }
 
 /// One end of a key range: no limit, the key itself included, or excluded.
@@ -381,11 +387,11 @@ pub fn default_config() -> StoreConfig uses {} {
 /// Whether `key` lies in `hirsel.`, the key space the store keeps for its own
 /// rows; a transaction body writes no key there.
 pub fn reserved(key: Bytes) -> bool uses {} {
+  // The first byte settles nearly every key: the namespace begins with `h`.
   let prefix = b"hirsel."
-  if bytes.len(key) < bytes.len(prefix) {
-    return false
-  }
-  bytes.slice(key, 0, bytes.len(prefix)) == prefix
+  bytes.len(key) >= bytes.len(prefix) && key[0] == prefix[0] && bytes.slice(key, 0, bytes.len(
+    prefix
+  )) == prefix
 }
 
 /// The commit order position of a ticket: the n-th commit since the store
@@ -628,10 +634,7 @@ fn read_point(mut a: AccessSet, take key: Bytes) -> () uses {} {
   list.push(mut a.points, take key)
 }
 
-// Records the interval a scan from `from` to `to` in `direction`, limited to
-// `limit` entries, consumed when it returned `rows`: up to the last row when
-// it returned `limit` of them, the whole range otherwise. A scan limited to
-// none examined nothing.
+// Records the interval a scan consumed (see `consumed`).
 fn read_span(
   mut a: AccessSet,
   take from: ordered_map.Bound[Bytes],
@@ -640,22 +643,38 @@ fn read_span(
   limit: u64,
   take rows: List[(Bytes, Bytes)]
 ) -> List[(Bytes, Bytes)] uses {} {
+  if let Some(span) = consumed(take from, take to, direction, limit, rows) {
+    list.push(mut a.spans, take span)
+  }
+  take rows
+}
+
+// The interval a scan from `from` to `to` in `direction`, limited to `limit`
+// entries, consumed when it returned `rows`: up to the last row when it
+// returned `limit` of them, the whole range otherwise. A scan limited to none
+// examined nothing.
+fn consumed(
+  take from: ordered_map.Bound[Bytes],
+  take to: ordered_map.Bound[Bytes],
+  direction: ordered_map.Direction,
+  limit: u64,
+  rows: List[(Bytes, Bytes)]
+) -> Option[Span] uses {} {
   if limit == 0 {
-    return take rows
+    return None()
   }
   let n = list.len(rows)
   if n < limit {
-    list.push(mut a.spans, Span(from: take from, to: take to, direction: direction))
-    return take rows
+    return Some(Span(from: take from, to: take to, direction: direction))
   }
   let (last, _) = rows[n - 1]
-  let cut = copy last
-  let span = match direction {
-    Ascending() => Span(from: take from, to: Included(take cut), direction: direction),
-    Descending() => Span(from: Included(take cut), to: take to, direction: direction),
-  }
-  list.push(mut a.spans, take span)
-  take rows
+  let cut = copy_to(heap, last)
+  Some(
+    match direction {
+      Ascending() => Span(from: take from, to: Included(take cut), direction: direction),
+      Descending() => Span(from: Included(take cut), to: take to, direction: direction),
+    }
+  )
 }
 
 // Whether a write to `key` can change what `a` read.
@@ -830,9 +849,22 @@ pub fn transact[S, R: inert, E: inert](
   if s.closed {
     return Error(Storage(Closed()))
   }
-  let mut tx = Tx(txn: serial(mut s), limits: s.config.limits, scope: everything())
+  let mut tx = Tx(
+    txn: serial(mut s),
+    limits: s.config.limits,
+    scope: everything(),
+    points: recorder.new(),
+    spans: recorder.new()
+  )
   let returned = body(mut tx)
-  let Tx(txn: t, limits: _, scope: _) = take tx
+  // The transaction the body ran; its access set is what the body's reads
+  // recorded.
+  let Tx(txn: ran, limits: _, scope: _, points: read_points, spans: read_spans) = take tx
+  let mut t = take ran
+  t.access = AccessSet(
+    points: recorder.finish(take read_points),
+    spans: recorder.finish(take read_spans)
+  )
   match take returned {
     Ok(v) => {
       settle(mut s, take t) ? released
@@ -865,8 +897,7 @@ pub fn call[S, R: inert + serializable, E: inert + serializable](
     return Error(Tx(Storage(Closed())))
   }
   let key = stream_key(req.stream)
-  let mut t = serial(mut s)
-  read_point(mut t.access, copy key)
+  let t = serial(mut s)
   let base = t.base
   let mut row = match ordered_map.get(t.state, key) {
     None() => StreamRow(epoch: 0, applied: 0, acknowledged: 0, retained: []),
@@ -913,9 +944,24 @@ pub fn call[S, R: inert + serializable, E: inert + serializable](
       Error(f) => Error(Tx(take f)),
     }
   }
-  let mut tx = Tx(txn: take t, limits: s.config.limits, scope: everything())
+  let mut tx = Tx(
+    txn: take t,
+    limits: s.config.limits,
+    scope: everything(),
+    points: recorder.new(),
+    spans: recorder.new()
+  )
+  // The row read decides the request, so the run read it.
+  recorder.append(tx.points, copy key)
   let returned = body(mut tx)
-  let Tx(txn: done, limits: _, scope: _) = take tx
+  // The transaction the body ran; its access set is what the body's reads
+  // recorded.
+  let Tx(txn: ran, limits: _, scope: _, points: read_points, spans: read_spans) = take tx
+  let mut done = take ran
+  done.access = AccessSet(
+    points: recorder.finish(take read_points),
+    spans: recorder.finish(take read_spans)
+  )
   let mut outcome: Result[R, TxFailure[E]] = match take returned {
     Ok(v) => Ok(take v),
     Error(e) => Error(Aborted(take e)),
@@ -967,7 +1013,7 @@ const RESERVED_HI: Bytes = b"hirsel/"
 
 /// The value under `key` as the transaction sees it. The read enters the
 /// run's access set, whether or not `key` holds a value.
-pub fn tx_get(mut tx: Tx, take key: Bytes) -> Result[Option[Bytes], TxError] in tx
+pub fn tx_get(tx: Tx, key: Bytes) -> Result[Option[Bytes], TxError]
   requires !reserved(key) {
   // Inline, passing no Tx to a callee: unnarrowed, the scope costs one branch.
   if !tx.scope.whole {
@@ -976,9 +1022,11 @@ pub fn tx_get(mut tx: Tx, take key: Bytes) -> Result[Option[Bytes], TxError] in 
   if bytes.len(key) > tx.limits.key_bytes {
     return Error(Limit(KeyBytes()))
   }
-  read_point(mut tx.txn.access, take key)
-  let points = tx.txn.access.points
-  Ok(ordered_map.get(tx.txn.state, points[list.len(points) - 1]))
+  recorder.append(tx.points, copy_to(heap, key))
+  match ordered_map.get(tx.txn.state, key) {
+    Some(v) => Ok(Some(copy_to(heap, v))),
+    None() => Ok(None()),
+  }
 }
 
 /// Stores `value` under `key` when the transaction commits. The commit
@@ -1005,7 +1053,7 @@ pub fn tx_delete(mut tx: Tx, take key: Bytes) -> Result[(), TxError]
 /// up to the last entry returned when it returned `limit` of them, the whole
 /// part otherwise.
 pub fn tx_range(
-  mut tx: Tx,
+  tx: Tx,
   from: RangeBound[Bytes],
   to: RangeBound[Bytes],
   limit: u64,
@@ -1052,10 +1100,10 @@ pub fn tx_range(
   } else {
     (take above, take below)
   }
-  let mut out = scan(mut tx, take first, ascending, limit)
+  let mut out = scan(tx, take first, ascending, limit)
   let got = list.len(out)
   if got < limit {
-    for (k, v) in scan(mut tx, take second, ascending, limit - got) {
+    for (k, v) in scan(tx, take second, ascending, limit - got) {
       list.push(mut out, (unique k, unique v))
     }
   }
@@ -1064,7 +1112,7 @@ pub fn tx_range(
 
 // The entries of the part [lo, hi) of a range, at most `limit` of them,
 // recording the interval the scan consumed.
-fn scan(mut tx: Tx, take part: Option[(Bytes, Option[Bytes])], ascending: bool, limit: u64) -> List[
+fn scan(tx: Tx, take part: Option[(Bytes, Option[Bytes])], ascending: bool, limit: u64) -> List[
   (Bytes, Bytes)
 ] {
   let Some((lo, hi)) = take part else {
@@ -1084,7 +1132,10 @@ fn scan(mut tx: Tx, take part: Option[(Bytes, Option[Bytes])], ascending: bool, 
     Descending()
   }
   let rows = entries_in(tx.txn.state, low, high, direction, limit)
-  read_span(mut tx.txn.access, take low, take high, direction, limit, take rows)
+  if let Some(span) = consumed(take low, take high, direction, limit, rows) {
+    recorder.append(tx.spans, take span)
+  }
+  take rows
 }
 
 // The least key a lower bound admits.
@@ -1234,10 +1285,10 @@ fn admit_read(tx: Tx, key: Bytes) -> Result[(), TxError] {
 
 // The value of `key` in this transaction, after `admit_read`. The read
 // enters the run's access set.
-fn table_read(mut tx: Tx, take key: Bytes) -> Option[Bytes] in tx {
-  read_point(mut tx.txn.access, take key)
-  let points = tx.txn.access.points
-  ordered_map.get(tx.txn.state, points[list.len(points) - 1])
+fn table_read(tx: Tx, take key: Bytes) -> Option[Bytes] in tx {
+  let found = ordered_map.get(tx.txn.state, key)
+  recorder.append(tx.points, take key)
+  found
 }
 
 // Writes one key after checking write access and the limits, so a refusal
@@ -1264,7 +1315,7 @@ fn table_delete(mut tx: Tx, take key: Bytes) -> Result[(), TxError] {
 // Reads at most `limit` entries of [lo, hi) after checking read access to all
 // of it, reserved keys included, and the row limit.
 fn table_range(
-  mut tx: Tx,
+  tx: Tx,
   take lo: Bytes,
   take hi: Option[Bytes],
   limit: u64,
@@ -1280,7 +1331,7 @@ fn table_range(
     Ascending() => true,
     Descending() => false,
   }
-  Ok(scan(mut tx, Some((take lo, take hi)), ascending, limit))
+  Ok(scan(tx, Some((take lo, take hi)), ascending, limit))
 }
 
 // Checks write access to one key without touching it: an operation that
@@ -1351,14 +1402,37 @@ pub fn narrow[R: inert](mut tx: Tx, scope: KeyScope, body: fn(mut sub: Tx) -> R 
   Ok(take returned)
 }
 
-/// `narrow` to `scope` with every key Read: `body` reads through the same
-/// transaction, so its reads enter the run's access set, and the scope refuses
-/// its writes with `ReadOnly()`.
-pub fn narrow_read[R: inert](mut tx: Tx, scope: KeyScope, body: fn(mut sub: Tx) -> R uses {}) -> Result[
+/// `narrow` to `scope` with every key Read, through a borrowed `Tx`: `body`
+/// borrows a facet of the same transaction whose scope is `scope`, read only,
+/// so it cannot write. Its reads enter the run's access set.
+pub fn narrow_read[R: inert](tx: Tx, scope: KeyScope, body: fn(sub: Tx) -> R uses {}) -> Result[
   R,
   TxError
 ] {
-  narrow(mut tx, read_only(scope), body)
+  let inner = read_only(scope)
+  if !scope_within(inner, tx.scope) {
+    return Error(OutOfScope())
+  }
+  // The facet sees the same state; its recorders hand what its body read to
+  // the parent's when it ends.
+  let facet = Tx(
+    txn: unique tx.txn,
+    limits: unique tx.limits,
+    scope: take inner,
+    points: recorder.new(),
+    spans: recorder.new()
+  )
+  let returned = body(facet)
+  let Tx(txn: _, limits: _, scope: _, points: points, spans: spans) = take facet
+  let point_keys: List[Bytes] = recorder.finish(take points)
+  for key in take point_keys {
+    recorder.append(tx.points, take key)
+  }
+  let span_reads: List[Span] = recorder.finish(take spans)
+  for span in take span_reads {
+    recorder.append(tx.spans, take span)
+  }
+  Ok(take returned)
 }
 
 // `scope` with every key Read.
@@ -2329,14 +2403,14 @@ fn check_delete_all(tx: Tx, doomed: List[Bytes]) -> Option[TxLimit] uses {} {
 // with `write`, write) access to all of it: for a library operation over a
 // whole namespace of its own, such as dropping a table. `range_rows` does not
 // bound it; the commit's limits do.
-fn table_all(mut tx: Tx, take lo: Bytes, take hi: Option[Bytes], write: bool) -> Result[
+fn table_all(tx: Tx, take lo: Bytes, take hi: Option[Bytes], write: bool) -> Result[
   List[(Bytes, Bytes)],
   TxError
 ] {
   if !tx.scope.whole {
     check(spans_hold(tx.scope.spans, lo, hi, write), write)?
   }
-  Ok(scan(mut tx, Some((take lo, take hi)), true, 18446744073709551615))
+  Ok(scan(tx, Some((take lo, take hi)), true, 18446744073709551615))
 }
 
 // Deletes the keys starting with `prefix` in key order within the

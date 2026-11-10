@@ -28,6 +28,7 @@ pub use cpu::{CpuControl, CpuRetirement};
 mod cpu_trace;
 pub use cpu_trace::{CpuBoundary, CpuPhase};
 pub mod race;
+mod recorders;
 mod root_trace;
 mod sealed;
 mod shared;

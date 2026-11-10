@@ -90,6 +90,12 @@ pub(crate) unsafe fn run_close(
     // or adapter. shielded retains cancellation scope and lends the role only
     // while the chosen cleanup runs; every branch shares this outer guard.
     let _role = unsafe { crate::tasks::role::Guard::new(ctx) };
+    if crate::recorders::is_recorder(handle) {
+        // SAFETY: the dropped value owned this recorder; its events are task-local.
+        return shielded(ctx, |ctx| unsafe {
+            crate::recorders::close(&mut *ctx, handle, anchor, operation_site)
+        });
+    }
     if handle & crate::sync::MUTEX != 0 && handle & crate::channels::ENDPOINT == 0 {
         // SAFETY: the wrapper owns the cell; detach before invoking user code.
         return shielded(ctx, |ctx| unsafe {

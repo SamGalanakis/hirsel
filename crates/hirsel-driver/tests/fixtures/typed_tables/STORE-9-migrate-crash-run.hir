@@ -91,7 +91,7 @@ fn scenario(t: Test, sc: Scope) -> Result[(), store.StoreError] {
           mut reopened,
           fn(mut tx: store.Tx) -> Result[bool, store.TxError] {
             let rows = table.range(
-              mut tx,
+              tx,
               items(),
               Unbounded(),
               Unbounded(),
@@ -113,7 +113,7 @@ fn scenario(t: Test, sc: Scope) -> Result[(), store.StoreError] {
   let migrated = store.transact(
     mut last,
     fn(mut tx: store.Tx) -> Result[bool, store.TxError] {
-      Ok(table.get(mut tx, priced(), 3)? == Some(Priced(label: "item 3", cents: 300)))
+      Ok(table.get(tx, priced(), 3)? == Some(Priced(label: "item 3", cents: 300)))
     }
   )
   test.check(t, migrated == Ok(true) && leftovers(mut last) == 0)

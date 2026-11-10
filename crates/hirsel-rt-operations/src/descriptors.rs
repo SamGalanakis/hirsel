@@ -813,6 +813,11 @@ pub const ENTRIES: &[Entry] = &[
     ops("hirsel_rt_v2_file_rename", HOST),
     ops("hirsel_rt_v2_file_metadata", HOST),
     ops("hirsel_rt_v2_file_read_dir", HOST),
+    // recorders.rs: a recorder's queue is its task's alone (MODE-6).
+    entry("hirsel_rt_v2_recorder_open", Local),
+    entry("hirsel_rt_v2_recorder_append", Local),
+    entry("hirsel_rt_v2_recorder_count", Local),
+    entry("hirsel_rt_v2_recorder_take", Local),
     // isolate.rs
     ops("hirsel_rt_v2_isolate_begin", &["task.isolate"]),
     // `runner.apply`'s begin: no scheduling point, task-local scope bookkeeping only.

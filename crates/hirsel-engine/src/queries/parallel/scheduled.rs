@@ -1344,11 +1344,7 @@ impl FrontBodyQueries {
         engine: &mut QueryEngine,
         path: &DefPath,
     ) -> Result<Option<FrontCheckedOutput>, QueryError> {
-        let Some(input) = self
-            .inputs
-            .values()
-            .find(|input| input.definition.path() == path)
-        else {
+        let Some(input) = DefId::get(path).and_then(|id| self.inputs.definition(id)) else {
             return Ok(None);
         };
         self.query(path).ok_or(QueryError::NotImplemented)?;
@@ -2889,12 +2885,6 @@ impl QueryEngine {
         }
         let available = request.free();
         namespace.require_environment(self)?;
-        let registrations = namespace
-            .registrations
-            .values()
-            .cloned()
-            .collect::<Vec<_>>();
-        let registrations = registrations.as_slice();
         let refusal = |reason: &str| {
             QueryError::Operational(hirsel_types::OperationalFailure {
                 operation: "front query admission".into(),
@@ -2967,12 +2957,11 @@ impl QueryEngine {
         }
         let mut selected = Vec::new();
         for definition in definitions {
-            let registration = registrations
-                .iter()
-                .find(|accepted| accepted.definition() == definition);
+            let id = DefId::intern(definition);
+            let registration = namespace.registrations.get(&id);
             let input = namespace
                 .bodies
-                .get(&DefId::intern(definition))
+                .get(&id)
                 .ok_or_else(|| refusal("definition outside accepted capture"))?;
             let implementation = registration.map_or(input.implementation, |registration| {
                 registration.syntax.text_hash
@@ -2980,7 +2969,7 @@ impl QueryEngine {
             let text = input.implementation;
             let key = namespace
                 .bodies
-                .get(&DefId::intern(definition))
+                .get(&id)
                 .and_then(|input| input.queries.as_ref())
                 .ok_or_else(|| refusal("definition outside accepted capture"))?
                 .modes

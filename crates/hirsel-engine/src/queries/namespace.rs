@@ -901,6 +901,13 @@ impl QueryEngine {
             std::iter::once(self.environment_value().0.as_slice())
                 .chain(base.iter().map(|hash| hash.0.as_slice())),
         );
+        // The first registration for each definition, as a scan would find.
+        let mut registered = hirsel_syntax::DefMap::default();
+        for accepted in registrations {
+            registered
+                .entry(DefId::intern(accepted.definition()))
+                .or_insert(accepted);
+        }
         for path in definitions {
             let facts = self
                 .source_facts(path)
@@ -916,9 +923,7 @@ impl QueryEngine {
                 .or_else(|| self.catalog.site(path))
                 .or_else(|| self.captured_text(path).map(|text| text.site))
                 .ok_or_else(|| refused(&format!("missing declaration site for {path}")))?;
-            let registration = registrations
-                .iter()
-                .find(|accepted| accepted.definition() == path);
+            let registration = DefId::get(path).and_then(|id| registered.get(&id).copied());
             let generated = facts.generator && !facts.instance_bodied;
             if generated {
                 private_sources.insert(

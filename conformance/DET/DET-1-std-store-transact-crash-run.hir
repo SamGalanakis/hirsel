@@ -8,6 +8,7 @@
 // returned a storage failure left nothing. A Volatile store's commit is torn
 // by the crash at a seeded byte: the reopened store holds the transaction
 // whole or not at all, and never loses the durable one before it.
+@serializable
 type Unused = Unused | Db(store.TxError)
 
 fn value(n: u8) -> Bytes {
@@ -29,27 +30,25 @@ fn read_state(mut s: store.Store[Dir]) -> List[u8] {
   out
 }
 
+fn put_first(mut tx: store.Tx, info: store.CallInfo, a: ()) -> Result[(), Unused] {
+  store.tx_put(mut tx, b"a", value(1)) ? Db
+  store.tx_put(mut tx, b"b", value(1)) ? Db
+  Ok(())
+}
+
 fn first(mut s: store.Store[Dir]) -> Result[(), store.TxFailure[Unused]] {
-  store.transact(
-    mut s,
-    fn(mut tx: store.Tx) -> Result[(), Unused] {
-      store.tx_put(mut tx, b"a", value(1)) ? Db
-      store.tx_put(mut tx, b"b", value(1)) ? Db
-      Ok(())
-    }
-  )
+  store.transact(mut s, put_first, ())
+}
+
+fn put_second(mut tx: store.Tx, info: store.CallInfo, a: ()) -> Result[(), Unused] {
+  store.tx_put(mut tx, b"a", value(2)) ? Db
+  store.tx_delete(mut tx, b"b") ? Db
+  store.tx_put(mut tx, b"c", value(2)) ? Db
+  Ok(())
 }
 
 fn second(mut s: store.Store[Dir]) -> Result[(), store.TxFailure[Unused]] {
-  store.transact(
-    mut s,
-    fn(mut tx: store.Tx) -> Result[(), Unused] {
-      store.tx_put(mut tx, b"a", value(2)) ? Db
-      store.tx_delete(mut tx, b"b") ? Db
-      store.tx_put(mut tx, b"c", value(2)) ? Db
-      Ok(())
-    }
-  )
+  store.transact(mut s, put_second, ())
 }
 
 // A store in a fresh directory holding the first transaction durably.

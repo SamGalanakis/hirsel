@@ -523,13 +523,18 @@ fn run(text: String) -> Result[u64, AppError] {
 Two arms carrying one type are two roles, so plain `?` names neither:
 
 ```hirsel
-type DbError = Open(store.StoreError) | Commit(store.StoreError)
+type DbError = Open(store.StoreError) | Close(store.StoreError) | Save(
+  store.TxFailure[store.TxError]
+)
 
-fn save(dir: Dir, take data: Bytes) -> Result[(), DbError] {
+fn put_blob(mut tx: store.Tx, info: store.CallInfo, data: Bytes) -> Result[(), store.TxError] {
+  store.tx_put(mut tx, b"blob", unique data)
+}
+
+fn save(dir: Dir, data: Bytes) -> Result[(), DbError] {
   let mut s = store.open(dir, store.default_config()) ? Open   // plain ? is LANG-8 here
-  let mut t = store.begin(mut s)
-  txn.put(mut t, b"blob", take data)
-  store.commit(mut s, take t) ? Commit
+  store.transact(mut s, put_blob, data) ? Save
+  store.close(take s) ? Close
   Ok(())
 }
 ```

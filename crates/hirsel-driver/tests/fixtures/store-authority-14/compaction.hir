@@ -1,18 +1,30 @@
 // Bounded vectors from DET-1-std-store-crash-{boundaries,compaction}-run:
 // two acknowledged commits leave b=2,c=3; stop 8 interrupts compaction's manifest.
+fn apply_writes(
+  mut tx: store.Tx,
+  info: store.CallInfo,
+  writes: List[(Bytes, Option[Bytes])]
+) -> Result[(), store.TxError] {
+  for (k, v) in writes {
+    match v {
+      Some(value) => store.tx_put(mut tx, unique k, unique value)?,
+      None() => store.tx_delete(mut tx, unique k)?,
+    }
+  }
+  Ok(())
+}
+
+// The store's error, whether or not the commit may have become durable.
 fn commit(mut s: store.Store[Dir], writes: List[(Bytes, Option[Bytes])]) -> Result[
   (),
   store.StoreError
 ] {
-  let mut x = store.begin(mut s)
-  for (k, v) in writes {
-    match v {
-      Some(value) => txn.put(mut x, unique k, unique value),
-      None() => txn.delete(mut x, unique k),
-    }
+  match store.transact(mut s, apply_writes, writes) {
+    Ok(()) => Ok(()),
+    Error(Storage(e)) => Error(e),
+    Error(Unknown(e)) => Error(e),
+    Error(_) => Error(Corrupt("commit")),
   }
-  let ticket = store.commit(mut s, take x)?
-  store.durable(mut s, ticket)
 }
 
 fn workload(d: Dir, stop: Option[u64]) -> Result[(), store.StoreError] uses {d} {

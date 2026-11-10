@@ -1,9 +1,8 @@
 // Measures std@1/store's in-memory index and compaction cost: loads `n` keys
 // of 16 bytes with 100-byte values through store.transact, 100 keys per
-// commit, then by `mode`: "load" stops there, "compact" compacts once,
-// "recompact" compacts, commits one more key and compacts again, and "begin"
-// keeps one serializable transaction open through the load (the conflict
-// tracker's retention). Prints the snapshot object's bytes.
+// commit, then by `mode`: "load" stops there, "compact" compacts once
+// and "recompact" compacts, commits one more key and compacts again. Prints the
+// snapshot object's bytes.
 fn key(i: u64) -> unique Bytes uses {} {
   let mut out: List[u8] = []
   for b in b"key/" {
@@ -25,6 +24,21 @@ fn value(i: u64) -> unique Bytes uses {} {
   bytes.from_list(take out)
 }
 
+@serializable
+type Keys {
+  first: u64,
+  end: u64,
+}
+
+fn puts(mut tx: store.Tx, info: store.CallInfo, span: Keys) -> Result[(), ()] {
+  for k in span.first..span.end {
+    if store.tx_put(mut tx, key(k), value(k)) != Ok(()) {
+      return Error(())
+    }
+  }
+  Ok(())
+}
+
 fn load(mut s: store.Store[Dir], from: u64, to: u64) -> Result[(), ()] {
   let mut i = from
   while i < to {
@@ -33,17 +47,10 @@ fn load(mut s: store.Store[Dir], from: u64, to: u64) -> Result[(), ()] {
     } else {
       to
     }
-    let first = i
     let done: Result[(), store.TxFailure[()]] = store.transact(
       mut s,
-      fn(mut tx: store.Tx) -> Result[(), ()] {
-        for k in first..end {
-          if store.tx_put(mut tx, key(k), value(k)) != Ok(()) {
-            return Error(())
-          }
-        }
-        Ok(())
-      }
+      puts,
+      Keys(first: i, end: end)
     )
     if done != Ok(()) {
       return Error(())
@@ -88,11 +95,6 @@ pub fn main(rt: Io, args: Args) -> Result[(), ()] {
     return Error(())
   }
   let mut s = take opened
-  let held: Option[store.Txn] = if mode == "begin" {
-    Some(store.begin(mut s))
-  } else {
-    None()
-  }
   load(mut s, 0, n)?
   if mode == "compact" || mode == "recompact" {
     if store.compact(mut s) != Ok(()) {
@@ -104,9 +106,6 @@ pub fn main(rt: Io, args: Args) -> Result[(), ()] {
     if store.compact(mut s) != Ok(()) {
       return Error(())
     }
-  }
-  if let Some(t) = take held {
-    store.rollback(mut s, take t)
   }
   if store.close(take s) != Ok(()) {
     return Error(())

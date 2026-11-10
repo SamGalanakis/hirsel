@@ -8,9 +8,12 @@ implementation is converging on it:
   and migrations (STORE-5, STORE-7, STORE-9); the output gate over one durable version (STORE-2); the
   call-stream decisions as `store.call` (STORE-12); and recording of a store's backend
   requests (STORE-10). `packages/s3@1` implements object-storage requests and grants.
-- **Shipped, removed by this part, and deleted at the cutover:** closure bodies for
-  `store.transact` and `store.call`; `store.begin`, `store.begin_with`, `store.commit`,
-  `store.rollback`, `Txn`, `Isolation` and `Conflict()`; the `Backend[S]` record,
+- **Shipped:** transactions as entries: `store.transact`, `store.query` and `store.call`
+  run an `Entry` through `runner.apply_mut` on decoded argument bytes, with `CallInfo`
+  minted before the run and a failure in the run ending as `Faulted` (STORE-2, STORE-4,
+  STORE-12, STORE-13). A query entry borrows its `Tx`, and reads record through the
+  borrow.
+- **Shipped, removed by this part, and deleted at the cutover:** the `Backend[S]` record,
   `local_backend` and `PutError`, and their layout of numbered manifest, log and snapshot
   objects with fence objects, under which no object is ever removed;
   `StoreConfig.durability` and `StoreConfig.faults`; the `StopAfterWrites` seam and

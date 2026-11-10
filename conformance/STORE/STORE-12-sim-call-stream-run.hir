@@ -10,8 +10,8 @@
 @serializable
 type Short = Empty | Db(store.TxError)
 
-fn request(position: u64, digest: Bytes, epoch: u64, acknowledged: u64) -> store.CallRequest {
-  store.CallRequest(
+fn request(position: u64, digest: Bytes, epoch: u64, acknowledged: u64) -> CallRequest {
+  CallRequest(
     stream: b"caller-1",
     epoch: epoch,
     position: position,
@@ -20,27 +20,26 @@ fn request(position: u64, digest: Bytes, epoch: u64, acknowledged: u64) -> store
   )
 }
 
+fn counted(mut tx: store.Tx, info: store.CallInfo, fail: bool) -> Result[u64, Short] {
+  let n: u64 = match store.tx_get(tx, b"counter") {
+    Ok(Some(b)) => int.widen(b[0]),
+    Ok(None()) => 0,
+    Error(e) => return Error(Db(unique e)),
+  }
+  store.tx_put(mut tx, b"counter", bytes.from_list([int.truncate(n + 1)])) ? Db
+  if fail {
+    return Error(Empty())
+  }
+  Ok(n + 1)
+}
+
 // Adds one to the counter and returns its new value; Empty when asked to
 // fail.
-fn bump(mut s: store.Store[s3.Sim], req: store.CallRequest, fail: bool) -> Result[
+fn bump(mut s: store.Store[s3.Sim], req: CallRequest, fail: bool) -> Result[
   u64,
   store.CallFailure[Short]
 ] {
-  store.call(
-    mut s,
-    req,
-    fn(mut tx: store.Tx) -> Result[u64, Short] {
-      let n: u64 = match store.tx_get(tx, b"counter") ? Db {
-        Some(b) => int.widen(b[0]),
-        None() => 0,
-      }
-      store.tx_put(mut tx, b"counter", bytes.from_list([int.truncate(n + 1)])) ? Db
-      if fail {
-        return Error(Empty())
-      }
-      Ok(n + 1)
-    }
-  )
+  store.call(mut s, req, counted, fail)
 }
 
 fn counter(mut s: store.Store[s3.Sim]) -> Option[Bytes] {

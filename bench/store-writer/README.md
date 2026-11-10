@@ -12,7 +12,7 @@ sample per workload in each engine and Rust. It restricts affinity to two allowe
 CPUs, uses `tools/capped` with 2 GiB, and measures only one process at a time.
 The checked-in `workload.json` is the workload contract. `workload.hir` computes
 transfer data; `main.hir` adapts it to today's store API and imports the original
-ledger-service's table operations. It uses `store.transact`; runner transport and
+ledger-service's table operations. Each group is one `store.transact` entry run; runner transport and
 `store.call` stream replay handling are excluded. Port that adapter when the store API changes.
 
 Eight accounts start with 1,000,000 units each. Transfer i moves 1 + i mod 3 units

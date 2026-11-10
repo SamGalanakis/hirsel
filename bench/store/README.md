@@ -30,15 +30,14 @@ HIRSEL_JOBS=1 HIRSEL_MEMORY_LIMIT=2G tools/capped \
 ```
 
 For a source/runtime smoke check, build with `--debug --backend cranelift`
-and use the same four modes. Keep these results separate from production LLVM
+and use the same three modes. Keep these results separate from production LLVM
 cost comparisons.
 
 Select an ordinary CPU allowed by the host. Start with 100 keys; every process
 stays within 60 CPU seconds and 2 GiB. The program writes 16-byte keys and
 100-byte values in transactions of at most 100 keys. Modes are `load`,
-`compact` (one compaction after loading), `recompact` (compact, commit one more
-key, compact again), and `begin` (hold a transaction across loading, then roll
-it back). All modes close the store before printing total snapshot bytes.
+`compact` (one compaction after loading) and `recompact` (compact, commit one
+more key, compact again). All modes close the store before printing total snapshot bytes.
 A zero byte total is expected when no snapshot exists; this is not a work
 counter. A nonzero exit refuses the sample.
 

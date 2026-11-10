@@ -3,11 +3,11 @@
 // steps: 3000000
 // each of four rounds runs six transactions, a crash and two opens of the store
 // std@1/store against a reference model: rounds of random transactions over
-// eight keys, random group limits, durable() calls and compactions, each round
-// stopped before a random storage write and crashed. After each reopen the
-// store equals the model after some commit no earlier than the last one
-// durable() acknowledged and no later than the last one committed: never part
-// of a transaction, never a lost acknowledged commit.
+// eight keys and compactions, each round stopped before a random storage write
+// and crashed. After each reopen the store equals the model after some commit
+// no earlier than the last one transact acknowledged and no later than the last
+// one that may have happened: never part of a transaction, never a lost
+// acknowledged commit.
 const KEYS: u64 = 8
 
 fn key(i: u64) -> Bytes {
@@ -30,8 +30,25 @@ fn read_state(mut s: store.Store[s3.Sim]) -> List[u64] {
   state
 }
 
-// One round on an open store. Returns the models after each commit (the
-// first is the starting model) and the index of the last acknowledged one.
+fn apply_writes(mut tx: store.Tx, info: store.CallInfo, writes: List[(u64, u64)]) -> Result[
+  (),
+  store.TxError
+] {
+  for (i, value) in writes {
+    if value == 0 {
+      store.tx_delete(mut tx, key(i))?
+    } else {
+      let mut v: List[u8] = []
+      list.push(mut v, int.truncate(value))
+      store.tx_put(mut tx, key(i), bytes.from_list(take v))?
+    }
+  }
+  Ok(())
+}
+
+// One round on an open store. Returns the models after each commit that may
+// have happened (the first is the starting model) and the index of the last
+// acknowledged one.
 fn round(
   mut s: store.Store[s3.Sim],
   mut g: prng.Generator,
@@ -42,40 +59,36 @@ fn round(
   let mut history: List[List[u64]] = [copy start]
   let mut acked: u64 = 0
   let mut model = copy start
-  let mut pending: List[store.Ticket] = []
   for _ in 0u64..6 {
-    let mut x = store.begin(mut s)
-    let writes = 1u64 + prng.u64(mut g) % 3
-    for _ in 0u64..writes {
+    let mut writes: List[(u64, u64)] = []
+    let count = 1u64 + prng.u64(mut g) % 3
+    for _ in 0u64..count {
       let i = prng.u64(mut g) % KEYS
       if prng.u64(mut g) % 3 == 0 {
-        txn.delete(mut x, key(i))
+        list.push(mut writes, (i, 0u64))
         model[i] = 0
       } else {
         let value = next_value % 250 + 1
         next_value += 1
-        let mut v: List[u8] = []
-        list.push(mut v, int.truncate(value))
-        txn.put(mut x, key(i), bytes.from_list(take v))
+        list.push(mut writes, (i, value))
         model[i] = value
       }
     }
-    let Ok(ticket) = store.commit(mut s, take x) else {
-      return (take history, acked)
-    }
-    list.push(mut history, copy model)
-    list.push(mut pending, ticket)
-    let choice = prng.u64(mut g) % 6
-    if choice < 3 {
-      if let Error(_) = store.durable(mut s, ticket) {
+    match store.transact(mut s, apply_writes, writes) {
+      Ok(()) => {
+        list.push(mut history, copy model)
+        acked = list.len(history) - 1
+      },
+      Error(Unknown(_)) => {
+        list.push(mut history, copy model)
         return (take history, acked)
-      }
-      acked = list.len(history) - 1
-    } else if choice == 3 {
+      },
+      Error(_) => return (take history, acked),
+    }
+    if prng.u64(mut g) % 6 == 3 {
       if let Error(_) = store.compact(mut s) {
         return (take history, acked)
       }
-      acked = list.len(history) - 1
     }
   }
   (take history, acked)
@@ -88,7 +101,6 @@ pub fn main(t: Test) -> Result[(), store.StoreError] {
   let mut next_value: u64 = 1
   for r in 0u64..4 {
     let mut config = store.default_config()
-    config.group_limit = 1u64 + prng.u64(mut g) % 3
     config.faults = StopAfterWrites(prng.u64(mut g) % 14)
     let (history, acked) = match store.open_backend(
       s3.simulated(d, 0, 0, 0, 0),

@@ -114,13 +114,7 @@ pub fn main(t: Test) -> Result[(), DecodeError] {
   )
   let request = round(
     t,
-    store.CallRequest(
-      stream: b"s1",
-      epoch: 2,
-      position: 7,
-      digest: b"d",
-      acknowledged: 6
-    )
+    CallRequest(stream: b"s1", epoch: 2, position: 7, digest: b"d", acknowledged: 6)
   )?
   test.check(t, request.stream == b"s1")
   test.check(t, request.epoch == 2)

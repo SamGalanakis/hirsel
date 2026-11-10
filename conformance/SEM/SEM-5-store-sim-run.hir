@@ -2,15 +2,35 @@
 // expect: run
 // std@1/store over a test Dir: a transaction reads its own writes, a commit is
 // visible to later snapshots at once, a snapshot never changes, ranges walk
-// either way with paging and prefix bounds, a transaction conflicts with a
-// commit after it began only on a key both write, and a reopened store holds
-// every durable commit.
+// either way with paging and prefix bounds, and a reopened store holds every
+// commit.
 fn keys(entries: List[(Bytes, Bytes)]) -> List[Bytes] {
   let mut out: List[Bytes] = []
   for (k, _) in entries {
     list.push(mut out, unique k)
   }
   out
+}
+
+// Writes the users and reports whether the run reads its own writes.
+fn first(mut tx: store.Tx, info: store.CallInfo, a: ()) -> Result[bool, store.TxError] {
+  store.tx_put(mut tx, b"user/ada", b"1815")?
+  store.tx_put(mut tx, b"user/alan", b"1912")?
+  store.tx_put(mut tx, b"user/grace", b"1906")?
+  store.tx_put(mut tx, b"zone", b"z")?
+  store.tx_delete(mut tx, b"zone")?
+  let ada = store.tx_get(tx, b"user/ada") == Ok(Some(b"1815"))
+  let zone = store.tx_get(tx, b"zone") == Ok(None())
+  Ok(ada && zone)
+}
+
+fn second(mut tx: store.Tx, info: store.CallInfo, a: ()) -> Result[(), store.TxError] {
+  store.tx_delete(mut tx, b"user/alan")?
+  store.tx_put(mut tx, b"user/ada", b"1815-12-10")
+}
+
+fn third(mut tx: store.Tx, info: store.CallInfo, a: ()) -> Result[(), store.TxError] {
+  store.tx_put(mut tx, b"user/x", b"x")
 }
 
 pub fn main(t: Test) -> Result[(), store.StoreError] {
@@ -20,20 +40,10 @@ pub fn main(t: Test) -> Result[(), store.StoreError] {
     s3.simulated_backend(),
     store.default_config()
   )?
-  let mut first = store.begin(mut s)
-  txn.put(mut first, b"user/ada", b"1815")
-  txn.put(mut first, b"user/alan", b"1912")
-  txn.put(mut first, b"user/grace", b"1906")
-  txn.put(mut first, b"zone", b"z")
-  txn.delete(mut first, b"zone")
-  test.check(
-    t,
-    txn.get(mut first, b"user/ada") == Some(b"1815") && txn.get(mut first, b"zone") == None()
-  )
   let earlier = store.snapshot(mut s)
-  let ticket = store.commit(mut s, take first)?
-  test.check(t, store.sequence(ticket) == 1)
+  test.check(t, store.transact(mut s, first, ()) == Ok(true))
   let after = store.snapshot(mut s)
+  test.check(t, store.snapshot_sequence(after) == 1)
   test.check(
     t,
     store.get(earlier, b"user/ada") == None() && store.get(after, b"user/ada") == Some(
@@ -70,19 +80,9 @@ pub fn main(t: Test) -> Result[(), store.StoreError] {
     t,
     store.range(after, ff_low, ff_high, up, 10) == [] && ff_high == Unbounded()
   )
-  // A transaction conflicts with a commit after it began only on a key it
-  // writes: a disjoint one commits, an overlapping one does not.
-  let mut early = store.begin(mut s)
-  let mut overlapping = store.begin(mut s)
-  let mut late = store.begin(mut s)
-  txn.delete(mut late, b"user/alan")
-  txn.put(mut late, b"user/ada", b"1815-12-10")
-  let second = store.commit(mut s, take late)?
-  txn.put(mut overlapping, b"user/ada", b"1815")
-  test.check(t, store.commit(mut s, take overlapping) == Error(Conflict()))
-  txn.put(mut early, b"user/x", b"x")
-  let third = store.commit(mut s, take early)?
-  test.check(t, store.sequence(third) == 3)
+  test.check(t, store.transact(mut s, second, ()) == Ok(()))
+  test.check(t, store.transact(mut s, third, ()) == Ok(()))
+  test.check(t, store.snapshot_sequence(store.snapshot(mut s)) == 3)
   test.check(
     t,
     keys(store.range(after, all, Unbounded(), up, 10)) == [
@@ -91,7 +91,6 @@ pub fn main(t: Test) -> Result[(), store.StoreError] {
       b"user/grace"
     ]
   )
-  store.durable(mut s, second)?
   store.close(take s)?
   let mut again = store.open_backend(
     s3.simulated(d, 0, 0, 0, 0),

@@ -1,43 +1,44 @@
-pub type E2EError = Object(s3.S3Error) | Store(store.StoreError) | Grant(GrantError) | Clock(
-  ClockError
-) | Output(OutputError)
+pub type E2EError = Object(s3.S3Error) | Store(store.StoreError) | Tx(
+  store.TxFailure[store.TxError]
+) | Grant(GrantError) | Clock(ClockError) | Output(OutputError)
+
+fn put(mut tx: store.Tx, info: store.CallInfo, a: ()) -> Result[(), store.TxError] {
+  store.tx_put(mut tx, b"e2e/key", b"value")
+}
 
 pub fn main(io: Io, env: Env) -> Result[(), E2EError] {
-  let out = io.stdout(io) ?
-  let clock = io.wall_clock(io) ?
-  let c = s3.from_grants(io, env, "data") ?
-  let state = s3.object_state(take c) ?
+  let out = io.stdout(io)?
+  let clock = io.wall_clock(io)?
+  let c = s3.from_grants(io, env, "data")?
+  let state = s3.object_state(take c)?
   let mut s = store.open_backend(
     take state,
     s3.object_backend(),
     store.default_config()
-  ) ?
-  let start = clock.wall(clock) ?
-  let mut tx = store.begin(mut s)
-  txn.put(mut tx, b"e2e/key", b"value")
-  let ticket = store.commit(mut s, take tx) ?
-  store.durable(mut s, ticket) ?
-  let finished = clock.wall(clock) ?
+  )?
+  let start = clock.wall(clock)?
+  store.transact(mut s, put, ())?
+  let finished = clock.wall(clock)?
   let elapsed = finished - start
   let message = string.concat(
     string.concat("one acknowledged commit group: ", i64.to_string(elapsed)),
     " ns\n"
   )
-  out.print(out, message) ?
+  out.print(out, message)?
   let snap = store.snapshot(mut s)
   if store.get(snap, b"e2e/key") != Some(b"value") {
     return Error(Store(Corrupt("e2e read")))
   }
-  store.compact(mut s) ?
-  let reopened_state = store.into_state(take s) ?
+  store.compact(mut s)?
+  let reopened_state = store.into_state(take s)?
   let mut again = store.open_backend(
     take reopened_state,
     s3.object_backend(),
     store.default_config()
-  ) ?
+  )?
   if store.get(store.snapshot(mut again), b"e2e/key") != Some(b"value") {
     return Error(Store(Corrupt("e2e recovery")))
   }
-  store.close(take again) ?
+  store.close(take again)?
   Ok(())
 }

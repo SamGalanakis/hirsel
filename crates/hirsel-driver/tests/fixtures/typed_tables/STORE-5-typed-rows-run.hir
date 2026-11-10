@@ -2,67 +2,65 @@
 // expect: run
 // redb integration_tests.rs range_query/range_query_reversed, with explicit
 // creation and Hirsel transaction aborts, missing rows and half-open paging.
+fn create_rows(mut tx: store.Tx, info: store.CallInfo, a: ()) -> Result[
+  (),
+  store.TxError
+] {
+  let rows: table.Table[i64, String] = table.named("rows")
+  table.create(mut tx, rows)?
+  table.put(mut tx, rows, 256, "large")?
+  table.put(mut tx, rows, -2, "negative")?
+  table.put(mut tx, rows, 1, "one")?
+  table.put(mut tx, rows, 0, "zero")?
+  table.put(mut tx, rows, 1, "replaced")?
+  Ok(())
+}
+
+fn read_rows(mut tx: store.Tx, info: store.CallInfo, a: ()) -> Result[(), store.TxError] {
+  let rows: table.Table[i64, String] = table.named("rows")
+  let ordered = table.range(tx, rows, Unbounded(), Unbounded(), 10, Ascending())?
+  if ordered != [(-2, "negative"), (0, "zero"), (1, "replaced"), (256, "large")] {
+    return Error(InvalidInput())
+  }
+  let reversed = table.range(tx, rows, Included(0), Excluded(256), 10, Descending())?
+  if reversed != [(1, "replaced"), (0, "zero")] {
+    return Error(InvalidInput())
+  }
+  if table.get(tx, rows, 3)? != None() {
+    return Error(InvalidInput())
+  }
+  if !table.delete(mut tx, rows, 0)? || table.delete(mut tx, rows, 0)? {
+    return Error(InvalidInput())
+  }
+  if table.get(tx, rows, 0)? != None() {
+    return Error(InvalidInput())
+  }
+  if table.range(tx, rows, Unbounded(), Unbounded(), 0, Ascending()) != Error(
+    InvalidInput()
+  ) {
+    return Error(InvalidInput())
+  }
+  Ok(())
+}
+
+fn read_large(mut tx: store.Tx, info: store.CallInfo, a: ()) -> Result[
+  Option[String],
+  store.TxError
+] {
+  let rows: table.Table[i64, String] = table.named("rows")
+  table.get(tx, rows, 256)
+}
+
 pub fn main(t: Test) -> Result[(), store.StoreError] {
   let d = test.dir(t, [])
   let mut s = store.open(d, store.default_config())?
-  let rows: table.Table[i64, String] = table.named("rows")
-  let created = store.transact(
-    mut s,
-    fn(mut tx: store.Tx) -> Result[(), store.TxError] {
-      table.create(mut tx, rows)?
-      table.put(mut tx, rows, 256, "large")?
-      table.put(mut tx, rows, -2, "negative")?
-      table.put(mut tx, rows, 1, "one")?
-      table.put(mut tx, rows, 0, "zero")?
-      table.put(mut tx, rows, 1, "replaced")?
-      Ok(())
-    }
-  )
+  let created = store.transact(mut s, create_rows, ())
   test.check(t, created == Ok(()))
-  let read = store.transact(
-    mut s,
-    fn(mut tx: store.Tx) -> Result[(), store.TxError] {
-      let ordered = table.range(tx, rows, Unbounded(), Unbounded(), 10, Ascending())?
-      if ordered != [(-2, "negative"), (0, "zero"), (1, "replaced"), (256, "large")] {
-        return Error(InvalidInput())
-      }
-      let reversed = table.range(
-        tx,
-        rows,
-        Included(0),
-        Excluded(256),
-        10,
-        Descending()
-      )?
-      if reversed != [(1, "replaced"), (0, "zero")] {
-        return Error(InvalidInput())
-      }
-      if table.get(tx, rows, 3)? != None() {
-        return Error(InvalidInput())
-      }
-      if !table.delete(mut tx, rows, 0)? || table.delete(mut tx, rows, 0)? {
-        return Error(InvalidInput())
-      }
-      if table.get(tx, rows, 0)? != None() {
-        return Error(InvalidInput())
-      }
-      if table.range(tx, rows, Unbounded(), Unbounded(), 0, Ascending()) != Error(
-        InvalidInput()
-      ) {
-        return Error(InvalidInput())
-      }
-      Ok(())
-    }
-  )
+  let read = store.transact(mut s, read_rows, ())
   test.check(t, read == Ok(()))
   store.close(take s)?
   let mut reopened = store.open(d, store.default_config())?
-  let read_again = store.transact(
-    mut reopened,
-    fn(mut tx: store.Tx) -> Result[Option[String], store.TxError] {
-      table.get(tx, rows, 256)
-    }
-  )
+  let read_again = store.transact(mut reopened, read_large, ())
   test.check(t, read_again == Ok(Some("large")))
   Ok(())
 }

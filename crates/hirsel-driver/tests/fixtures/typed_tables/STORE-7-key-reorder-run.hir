@@ -1,45 +1,50 @@
 // rule: STORE-7
 // expect: run
+fn write_keys(mut tx: store.Tx, info: store.CallInfo, none: ()) -> Result[
+  (),
+  store.TxError
+] {
+  let a: table.Table[table_models@1/model.Row, u32] = table.named("keys")
+  let b: table.Table[table_models@2/model.Row, u32] = table.named("keys")
+  table.create(mut tx, a)?
+  table.put(mut tx, a, table_models@1/model.Row(label: "a", count: 9), 1)?
+  table.put(mut tx, a, table_models@1/model.Row(label: "b", count: 1), 2)?
+  Ok(())
+}
+
+fn read_reordered(mut tx: store.Tx, info: store.CallInfo, none: ()) -> Result[
+  bool,
+  store.TxError
+] {
+  let a: table.Table[table_models@1/model.Row, u32] = table.named("keys")
+  let b: table.Table[table_models@2/model.Row, u32] = table.named("keys")
+  if table.get(tx, b, table_models@2/model.Row(count: 9, label: "a")) != Error(
+    Schema(KeyMismatch())
+  ) {
+    return Ok(false)
+  }
+  if table.range(tx, b, Unbounded(), Unbounded(), 2, Ascending()) != Error(
+    Schema(KeyMismatch())
+  ) {
+    return Ok(false)
+  }
+  if table.put(mut tx, b, table_models@2/model.Row(count: 1, label: "c"), 3) != Error(
+    Schema(KeyMismatch())
+  ) {
+    return Ok(false)
+  }
+  Ok(table.get(tx, a, table_models@1/model.Row(label: "a", count: 9))? == Some(1))
+}
+
 pub fn main(t: Test) -> Result[(), store.StoreError] {
   let d = test.dir(t, [])
   let mut s = store.open(d, store.default_config())?
   let a: table.Table[table_models@1/model.Row, u32] = table.named("keys")
-  let b: table.Table[table_models@2/model.Row, u32] = table.named("keys")
-  let wrote = store.transact(
-    mut s,
-    fn(mut tx: store.Tx) -> Result[(), store.TxError] {
-      table.create(mut tx, a)?
-      table.put(mut tx, a, table_models@1/model.Row(label: "a", count: 9), 1)?
-      table.put(mut tx, a, table_models@1/model.Row(label: "b", count: 1), 2)?
-      Ok(())
-    }
-  )
+  let wrote = store.transact(mut s, write_keys, ())
   test.check(t, wrote == Ok(()))
   // A table has one key order, its byte order: a reordered key record is a
   // key change, refused on every access until a migration.
-  let read = store.transact(
-    mut s,
-    fn(mut tx: store.Tx) -> Result[bool, store.TxError] {
-      if table.get(tx, b, table_models@2/model.Row(count: 9, label: "a")) != Error(
-        Schema(KeyMismatch())
-      ) {
-        return Ok(false)
-      }
-      if table.range(tx, b, Unbounded(), Unbounded(), 2, Ascending()) != Error(
-        Schema(KeyMismatch())
-      ) {
-        return Ok(false)
-      }
-      if table.put(mut tx, b, table_models@2/model.Row(count: 1, label: "c"), 3) != Error(
-        Schema(KeyMismatch())
-      ) {
-        return Ok(false)
-      }
-      Ok(
-        table.get(tx, a, table_models@1/model.Row(label: "a", count: 9))? == Some(1)
-      )
-    }
-  )
+  let read = store.transact(mut s, read_reordered, ())
   test.check(t, read == Ok(true))
   Ok(())
 }

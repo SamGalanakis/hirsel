@@ -33,11 +33,9 @@ fn ranged(mut sub: store.Tx) -> bool {
   let inside = table.get(sub, a, 3) == Ok(Some(30)) && table.get(sub, a, 6) == Ok(
     Some(60)
   )
-  let outside = table.get(sub, a, 2) == Error(OutOfScope()) && table.get(
-    sub,
-    a,
-    7
-  ) == Error(OutOfScope())
+  let outside = table.get(sub, a, 2) == Error(OutOfScope()) && table.get(sub, a, 7) == Error(
+    OutOfScope()
+  )
   let wrote = table.put(mut sub, a, 5, 1) == Ok(()) && table.put(mut sub, a, 7, 1) == Error(
     OutOfScope()
   )
@@ -69,65 +67,74 @@ fn created_whole(mut sub: store.Tx) -> bool {
   created && read && other
 }
 
+fn fill_rows(mut tx: store.Tx, info: store.CallInfo, a: ()) -> Result[(), store.TxError] {
+  fill(mut tx, rows())?
+  fill(mut tx, neighbour())
+}
+
+fn check_rows(mut tx: store.Tx, info: store.CallInfo, a: ()) -> Result[
+  bool,
+  store.TxError
+] {
+  let keys = table.scope_keys(mut tx, rows(), Included(3), Excluded(7), ReadWrite())?
+  let narrowed = store.narrow(
+    mut tx,
+    keys,
+    fn(mut sub: store.Tx) -> bool {
+      ranged(mut sub)
+    }
+  )?
+  // A key range is within its whole table, and not the reverse.
+  let nested = store.narrow(
+    mut tx,
+    table.scope(rows(), ReadWrite()),
+    fn(mut sub: store.Tx) -> bool {
+      let inner = store.narrow(
+        mut sub,
+        keys,
+        fn(mut x: store.Tx) -> bool {
+          true
+        }
+      )
+      let outer = store.narrow(
+        mut sub,
+        keys,
+        fn(mut x: store.Tx) -> bool {
+          store.narrow(
+            mut x,
+            table.scope(rows(), Read()),
+            fn(mut y: store.Tx) -> bool {
+              true
+            }
+          ) == Error(OutOfScope())
+        }
+      )
+      inner == Ok(true) && outer == Ok(true)
+    }
+  )?
+  let created = store.narrow(
+    mut tx,
+    table.scope(absent(), ReadWrite()),
+    fn(mut sub: store.Tx) -> bool {
+      created_whole(mut sub)
+    }
+  )?
+  Ok(narrowed && nested && created)
+}
+
 pub fn main(t: Test) -> Result[(), store.StoreError] {
   let d = test.dir(t, [])
   let mut s = store.open(d, store.default_config())?
   let setup: Result[(), store.TxFailure[store.TxError]] = store.transact(
     mut s,
-    fn(mut tx: store.Tx) -> Result[(), store.TxError] {
-      fill(mut tx, rows())?
-      fill(mut tx, neighbour())
-    }
+    fill_rows,
+    ()
   )
   test.check(t, setup == Ok(()))
   let checked: Result[bool, store.TxFailure[store.TxError]] = store.transact(
     mut s,
-    fn(mut tx: store.Tx) -> Result[bool, store.TxError] {
-      let keys = table.scope_keys(tx, rows(), Included(3), Excluded(7), ReadWrite())?
-      let narrowed = store.narrow(
-        mut tx,
-        keys,
-        fn(mut sub: store.Tx) -> bool {
-          ranged(mut sub)
-        }
-      )?
-      // A key range is within its whole table, and not the reverse.
-      let nested = store.narrow(
-        mut tx,
-        table.scope(rows(), ReadWrite()),
-        fn(mut sub: store.Tx) -> bool {
-          let inner = store.narrow(
-            mut sub,
-            keys,
-            fn(mut x: store.Tx) -> bool {
-              true
-            }
-          )
-          let outer = store.narrow(
-            mut sub,
-            keys,
-            fn(mut x: store.Tx) -> bool {
-              store.narrow(
-                mut x,
-                table.scope(rows(), Read()),
-                fn(mut y: store.Tx) -> bool {
-                  true
-                }
-              ) == Error(OutOfScope())
-            }
-          )
-          inner == Ok(true) && outer == Ok(true)
-        }
-      )?
-      let created = store.narrow(
-        mut tx,
-        table.scope(absent(), ReadWrite()),
-        fn(mut sub: store.Tx) -> bool {
-          created_whole(mut sub)
-        }
-      )?
-      Ok(narrowed && nested && created)
-    }
+    check_rows,
+    ()
   )
   test.check(t, checked == Ok(true))
   Ok(())

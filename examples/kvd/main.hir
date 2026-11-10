@@ -1,6 +1,21 @@
 pub type AppError = Files(FileError) | Grant(GrantError) | Net(NetError) | Read(
   bufio.ReadError[NetError]
-) | Store(store.StoreError) | Signal(SignalError) | Output(OutputError)
+) | Store(store.StoreError) | Tx(store.TxFailure[store.TxError]) | Signal(SignalError) | Output(
+  OutputError
+)
+
+@serializable
+type Change = Set(Bytes, Bytes) | Del(Bytes)
+
+fn change(mut tx: store.Tx, info: store.CallInfo, c: Change) -> Result[
+  (),
+  store.TxError
+] {
+  match c {
+    Set(key, value) => store.tx_put(mut tx, unique key, unique value),
+    Del(key) => store.tx_delete(mut tx, unique key),
+  }
+}
 
 // Redis string.tcl:2-10 and keyspace.tcl:2-7 supply SET/GET/DEL vectors.
 // A line protocol: SET key value, GET key, DEL key. Values may contain spaces.
@@ -22,25 +37,23 @@ fn command(mut db: store.Store[Dir], line: String) -> Result[String, AppError] {
       }
     )
   }
-  let mut tx = store.begin(mut db)
-  if verb == "SET" {
+  let c: Change = if verb == "SET" {
     let Some((key, value)) = string.split_once(rest, " ") else {
       return Ok("ERR value\n")
     }
     if key == "" || store.reserved(string.as_bytes(key)) {
       return Ok("ERR key\n")
     }
-    txn.put(mut tx, unique string.as_bytes(key), unique string.as_bytes(value))
+    Set(unique string.as_bytes(key), unique string.as_bytes(value))
   } else if verb == "DEL" {
     if rest == "" || store.reserved(string.as_bytes(rest)) {
       return Ok("ERR key\n")
     }
-    txn.delete(mut tx, unique string.as_bytes(rest))
+    Del(unique string.as_bytes(rest))
   } else {
     return Ok("ERR command\n")
   }
-  let ticket = store.commit(mut db, take tx)?
-  store.durable(mut db, ticket)?
+  store.transact(mut db, change, c) ? Tx
   Ok("OK\n")
 }
 

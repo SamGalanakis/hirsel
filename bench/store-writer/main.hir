@@ -3,6 +3,77 @@ pub type Error = File(FileError) | Grant(GrantError) | Clock(ClockError) | Outpu
   OutputError
 ) | Input(InputError) | Store(store.StoreError) | Tx(store.TxFailure[ledger.Refusal]) | Usage
 
+@serializable
+type Opening {
+  account: u64,
+  initial: u64,
+}
+
+@serializable
+type Group {
+  first: u64,
+  size: u64,
+  accounts: u64,
+  amount: u64,
+}
+
+@serializable
+type Expected {
+  accounts: u64,
+  initial: u64,
+  count: u64,
+  amount: u64,
+}
+
+fn open_account(mut tx: store.Tx, info: store.CallInfo, a: Opening) -> Result[
+  u64,
+  ledger.Refusal
+] {
+  ledger.open(mut tx, a.account, a.initial)
+}
+
+fn transfers(mut tx: store.Tx, info: store.CallInfo, g: Group) -> Result[
+  u64,
+  ledger.Refusal
+] {
+  for offset in 0u64..g.size {
+    let op = workload.transfer(g.first + offset, g.accounts, g.amount)
+    let _ = ledger.transfer(mut tx, op.from, op.to, op.cents)?
+  }
+  Ok(g.size)
+}
+
+// Independent conservation and exact balance oracle.
+fn verify(mut tx: store.Tx, info: store.CallInfo, e: Expected) -> Result[
+  u64,
+  ledger.Refusal
+] {
+  let balances: table.Table[u64, u64] = table.named("balances")
+  let mut total: u64 = 0
+  for account in 0u64..e.accounts {
+    let value = table.get(tx, balances, account) ? Table
+    let Some(balance) = value else {
+      return Error(NoAccount(account))
+    }
+    let previous = (account + e.accounts - 1) % e.accounts
+    let mut expected = e.initial
+    let mut index = previous
+    while index < e.count {
+      expected += e.amount * (1 + index % 3)
+      index += e.accounts
+    }
+    index = account
+    while index < e.count {
+      expected -= e.amount * (1 + index % 3)
+      index += e.accounts
+    }
+    failure.check(balance == expected, Arithmetic())
+    total += balance
+  }
+  failure.check(total == e.accounts * e.initial, Arithmetic())
+  Ok(total)
+}
+
 type Request {
   first: u64,
   submitted: u64,
@@ -78,9 +149,8 @@ fn run(rt: Io, args: Args) -> Result[(), Error] {
   for account in 0u64..accounts {
     let _ = store.transact(
       mut db,
-      fn(mut tx: store.Tx) -> Result[u64, ledger.Refusal] {
-        ledger.open(mut tx, account, initial)
-      }
+      open_account,
+      Opening(account: account, initial: initial)
     ) ? Tx
   }
   // The host enables phase counters before releasing this input gate.
@@ -120,13 +190,8 @@ fn run(rt: Io, args: Args) -> Result[(), Error] {
         let Request(first: first, submitted: submitted, reply: response) = take req
         let committed = store.transact(
           mut writer,
-          fn(mut tx: store.Tx) -> Result[u64, ledger.Refusal] {
-            for offset in 0u64..group {
-              let op = workload.transfer(first + offset, accounts, amount)
-              let _ = ledger.transfer(mut tx, op.from, op.to, op.cents)?
-            }
-            Ok(group)
-          }
+          transfers,
+          Group(first: first, size: group, accounts: accounts, amount: amount)
         )
         if let Error(e) = take committed {
           task.cancel_all(scope, take children)
@@ -154,35 +219,11 @@ fn run(rt: Io, args: Args) -> Result[(), Error] {
   let (committed_store, latencies) = take outcome?
   store.close(take committed_store) ? Store
   let mut recovered = store.open(d, config) ? Store
-  // Independent conservation and exact balance oracle, outside the timed phase.
+  // The oracle runs outside the timed phase.
   let _ = store.transact(
     mut recovered,
-    fn(mut tx: store.Tx) -> Result[u64, ledger.Refusal] {
-      let balances: table.Table[u64, u64] = table.named("balances")
-      let mut total: u64 = 0
-      for account in 0u64..accounts {
-        let value = table.get(tx, balances, account) ? Table
-        let Some(balance) = value else {
-          return Error(NoAccount(account))
-        }
-        let previous = (account + accounts - 1) % accounts
-        let mut expected = initial
-        let mut index = previous
-        while index < count {
-          expected += amount * (1 + index % 3)
-          index += accounts
-        }
-        index = account
-        while index < count {
-          expected -= amount * (1 + index % 3)
-          index += accounts
-        }
-        failure.check(balance == expected, Arithmetic())
-        total += balance
-      }
-      failure.check(total == accounts * initial, Arithmetic())
-      Ok(total)
-    }
+    verify,
+    Expected(accounts: accounts, initial: initial, count: count, amount: amount)
   ) ? Tx
   store.close(take recovered) ? Store
   out.print(output, f"elapsed {elapsed}\n") ? Output

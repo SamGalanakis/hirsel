@@ -4184,8 +4184,8 @@ entries, and all subsequent lookups retain the existing Dir confinement.
 StoreConfig { durability: Durability, group_limit: u64, faults: StoreFaults, limits: StoreLimits }
 StoreLimits { key_bytes: u64, value_bytes: u64, transaction_bytes: u64, range_rows: u64 }
 StoreFaults = NoFaults | StopAfterWrites(u64)
-StoreError = Storage(FileError) | Refused(FileError) | Corrupt(String) | Fenced | Conflict | Limit(TxLimit) | Injected | Closed
-TxFailure[E] = Aborted(E) | Canceled(CancelCause) | Storage(StoreError) | Limit(TxLimit) | Unknown(StoreError)
+StoreError = Storage(FileError) | Refused(FileError) | Corrupt(String) | Fenced | Limit(TxLimit) | Injected | Closed
+TxFailure[E] = Aborted(E) | Canceled(CancelCause) | Faulted(Failure) | Storage(StoreError) | Limit(TxLimit) | Unknown(StoreError)
 TxLimit = KeyBytes | ValueBytes | TransactionBytes | RangeRows
 RangeBound[K] = Unbounded | Included(K) | Excluded(K)
 ScanOrder = Ascending | Descending
@@ -4193,11 +4193,15 @@ Access = Read | ReadWrite
 SchemaError = KeyMismatch | ValueMismatch | Renamed(String, String)
 TxError = NoTable | TableExists | Schema(SchemaError) | Migrating | ReadOnly | OutOfScope | InvalidInput | Limit(TxLimit) | Storage(StoreError)
 KeyScope   // opaque: copyable, data, inert
-CallRequest { stream: Bytes, epoch: u64, position: u64, digest: Bytes, acknowledged: u64 }
+CallInfo   // opaque: copyable, data, inert
 CallFailure[E] = Tx(TxFailure[E]) | Denied | Rejected
 fn store.default_config() -> store.StoreConfig uses {}
-fn store.transact[S, R: inert, E: inert](mut s: store.Store[S], body: fn(mut tx: store.Tx) -> Result[R, E] uses {}) -> Result[R, store.TxFailure[E]] uses {s}
-fn store.call[S, R: inert + serializable, E: inert + serializable](mut s: store.Store[S], req: store.CallRequest, body: fn(mut tx: store.Tx) -> Result[R, E] uses {}) -> Result[R, store.CallFailure[E]] uses {s}
+fn store.transact[S, A: serializable, R: serializable, E: serializable](mut s: store.Store[S], f: Entry[fn(mut tx: store.Tx, info: store.CallInfo, a: A) -> Result[R, E]], a: A) -> Result[R, store.TxFailure[E]] uses {s}
+fn store.query[A: serializable, R: serializable, E: serializable](take snap: store.Snapshot, f: Entry[fn(tx: store.Tx, info: store.CallInfo, a: A) -> Result[R, E]], a: A) -> Result[R, store.TxFailure[E]] uses {}
+fn store.call[S, A: serializable, R: serializable, E: serializable](mut s: store.Store[S], req: CallRequest, f: Entry[fn(mut tx: store.Tx, info: store.CallInfo, a: A) -> Result[R, E]], a: A) -> Result[R, store.CallFailure[E]] uses {s}
+fn call_info.caller(c: store.CallInfo) -> String uses {}
+fn call_info.at(c: store.CallInfo) -> i64 uses {}
+fn call_info.seed(c: store.CallInfo) -> u64 uses {}
 fn store.tx_get(tx: store.Tx, key: Bytes) -> Result[Option[Bytes], store.TxError] requires !store.reserved(key)
 fn store.tx_put(mut tx: store.Tx, take key: Bytes, take value: Bytes) -> Result[(), store.TxError] requires !store.reserved(key)
 fn store.tx_delete(mut tx: store.Tx, take key: Bytes) -> Result[(), store.TxError] requires !store.reserved(key)
@@ -4215,20 +4219,9 @@ fn store.get(snap: store.Snapshot, key: Bytes) -> Option[Bytes] in snap uses {}
 fn store.range(snap: store.Snapshot, from: ordered_map.Bound[Bytes], to: ordered_map.Bound[Bytes], direction: ordered_map.Direction, limit: u64) -> List[(Bytes, Bytes)] uses {}
 fn store.prefix_bounds(prefix: Bytes) -> (ordered_map.Bound[Bytes], ordered_map.Bound[Bytes]) uses {}
 fn store.compare_keys(a: Bytes, b: Bytes) -> i32 uses {}
-type store.Isolation = SnapshotIsolation | SerializableSnapshot
 type store.AccessSet { points: List[Bytes], spans: List[store.Span] }
 type store.Span { from: ordered_map.Bound[Bytes], to: ordered_map.Bound[Bytes], direction: ordered_map.Direction }
-fn store.begin[S](mut s: store.Store[S]) -> store.Txn uses {}
-fn store.begin_with[S](mut s: store.Store[S], isolation: store.Isolation) -> store.Txn uses {}
-fn store.rollback[S](mut s: store.Store[S], take t: store.Txn) -> () uses {}
-fn txn.put(mut t: store.Txn, take key: Bytes, take value: Bytes) -> () uses {}
-fn txn.delete(mut t: store.Txn, take key: Bytes) -> () uses {}
-fn txn.get(mut t: store.Txn, key: Bytes) -> Option[Bytes] in t uses {}
-fn txn.range(mut t: store.Txn, from: ordered_map.Bound[Bytes], to: ordered_map.Bound[Bytes], direction: ordered_map.Direction, limit: u64) -> List[(Bytes, Bytes)] uses {}
-fn txn.mark_read(mut t: store.Txn, take key: Bytes) -> () uses {}
-fn store.commit[S](mut s: store.Store[S], take t: store.Txn) -> Result[store.Ticket, store.StoreError] uses {s}
 fn store.sequence(t: store.Ticket) -> u64 uses {}
-fn store.durable[S](mut s: store.Store[S], t: store.Ticket) -> Result[(), store.StoreError] uses {s}
 fn store.compact[S](mut s: store.Store[S]) -> Result[(), store.StoreError] uses {s}
 fn store.close[S](take store: store.Store[S]) -> Result[(), store.StoreError] uses {store}
 ```
@@ -4251,44 +4244,38 @@ cutover replaces `Backend[S]`, `StoreFaults` and `Injected` with the authority s
 `open(d, config)` selects the local Dir backend; real files, Test dirs and recordings
 work unchanged. Keys and values are `Bytes`, ordered
 byte-lexicographically (`compare_keys`). An affine `Store[S]` is the single writer of its backend;
-`Snapshot` and `Txn` are copyable values that hold no authority.
+a `Snapshot` is a copyable value that holds no authority.
 
-**Transactions.** `begin` starts a serializable `Txn` at the latest commit, and
-`begin_with` one at either `Isolation`. `txn.get` and `txn.range` see that commit's state
-with the transaction's own earlier `put`s and `delete`s applied; nothing is visible
-elsewhere until `commit`. Dropping a `Txn` aborts it; `rollback` aborts it and frees its
-conflict tracking at once. `commit` makes the writes the next commit, numbered by
-consecutive sequences from 1, visible at once to later `snapshot`s and `begin`s, and
-returns its `Ticket`. Conflicts are per key, after SlateDB's transaction manager
-(`std@1/txn_manager`): `commit` returns `Conflict()` with no effect when a commit made
-after the transaction began wrote a key it writes or marked with `txn.mark_read`
-(`SnapshotIsolation`), or also a key in its access set (`SerializableSnapshot`, the
-default, so write skew conflicts too). The access set (`AccessSet`,
-[STORE-14](storage.md#store-14-tracked-access)) holds every key `txn.get` read, present
-or absent, and every interval a `txn.range` consumed as a `Span` in key order: up to the
-last entry it returned when it returned `limit` of them, the whole range otherwise, so a
-scan cut short by its limit conflicts with no write past the cut.
-The store retains the write sets of at most 4096 recent commits or 1 MiB of their keys
-while a transaction is open; a transaction older than what it retains conflicts whenever
-it writes or read anything. `range` and `txn.range`
-return at most `limit` entries between the bounds in `direction` order as fresh copies;
-`prefix_bounds(p)` gives the bounds of exactly the keys starting with `p`. A `Snapshot`
-reflects every commit up to `snapshot_sequence`, durable or not, and later commits never
-change it: holding one never holds up the writer.
+**Transactions.** A transaction is an entry ([STORE-2](storage.md#store-2-transactions)):
+a top-level function `fn(mut tx: Tx, info: CallInfo, a: A) -> Result[R, E]` named by
+`Entry`, run with its argument decoded afresh from `a`'s canonical bytes. `transact` holds
+the store from the run to its commit, so transactions run one at a time in commit order
+and never conflict. Commits are numbered by consecutive sequences from 1 and visible at
+once to later `snapshot`s and transactions. Every read through a `Tx` enters its access set
+(`AccessSet`, [STORE-14](storage.md#store-14-tracked-access)): every key `tx_get` read,
+present or absent, and every interval a `tx_range` consumed as a `Span` in key order, up to
+the last entry it returned when it returned `limit` of them and the whole range otherwise.
+`range` and `tx_range` return at most `limit` entries between the bounds in order as fresh
+copies; `prefix_bounds(p)` gives the bounds of exactly the keys starting with `p`. A
+`Snapshot` reflects every commit up to `snapshot_sequence`, and later commits never change
+it: holding one never holds up the writer.
 
-**Transactions with a body.** `transact` runs `body` once with a fresh `Tx`, the scoped
-capability ([MODE-6](ownership.md#mode-6-scoped-capabilities)) of a transaction begun at
-the latest commit; `tx_get`, `tx_put`, `tx_delete` and `tx_range` read and write through it
-as the `txn` operations do, and every read enters the transaction's access set under
-either isolation; the reads take `mut tx` to record it. `Ok(v)` commits the writes as one commit (none when the body
-wrote nothing) and returns `v`; `Error(e)` discards them and returns `Aborted(e)`; a
-failure in the body discards them and propagates. Every outcome is released only once
-every commit the body could see, and its own, is durable: `transact` calls `durable`
-itself. A commit with a key over `limits.key_bytes`, a value over `limits.value_bytes`, or
+**Running an entry.** `transact` mints the run's `CallInfo`
+([STORE-4](storage.md#store-4-call-information)), with no caller or time and a seed from
+the commit's place in the order, then runs `f` once through `runner.apply_mut`, a failure
+boundary ([FAIL-2](failure.md#fail-2-isolation)), with a fresh `Tx`, the scoped capability
+([MODE-6](ownership.md#mode-6-scoped-capabilities)) of a transaction at the latest commit;
+`tx_get`, `tx_put`, `tx_delete` and `tx_range` read and write through it; the reads
+borrow it and record their access in its recorders. `Ok(v)` commits the writes as one commit (none when
+the entry wrote nothing) and returns `v`; `Error(e)` discards them and returns
+`Aborted(e)`; a failure in the run discards them and returns `Faulted(f)`, records
+nothing, and leaves the store usable. Every outcome is released only once every commit the
+run could see, and its own, is durable. `query` runs `f` the same way through `runner.apply` on a `Snapshot`, with
+a borrowed `Tx`, through which no write can be made, and a `CallInfo` with no time or seed (a
+query is not ordered). `call_info.caller`, `at` and `seed` read a `CallInfo`. A commit with a key over `limits.key_bytes`, a value over `limits.value_bytes`, or
 an encoded size over `limits.transaction_bytes` returns `Limit(..)` with no effect; the
 encoded size is that of the log object holding the commit alone, 50 bytes plus 17 and the
-key and value per put and 9 and the key per delete. `store.commit` applies the same check
-and returns `Limit(..)`, leaving the store open. `open` refuses with
+key and value per put and 9 and the key per delete. `open` refuses with
 `Limit(TransactionBytes())` a `transaction_bytes` over the backend's `max_object_bytes`. A failed storage write before the commit is `Storage(e)`; a create that failed
 with a file error leaves the commit's durability to the next `open` and is `Unknown(e)`.
 `transact` checks no cancellation; `Canceled` is the runner form's. Keys beginning with
@@ -4308,28 +4295,26 @@ over the spans otherwise, with no allocation. `tx_get` checks `limits.key_bytes`
 `tx_range` `limits.range_rows` (a `limit` above it is `Limit(RangeRows)`, a zero `limit`
 `InvalidInput`); the write limits are checked at commit.
 
-**Call streams.** `call` is `transact` as one exactly-once request on an ordered call
-stream ([STORE-12](storage.md#store-12-transactions-at-a-runner)). The stream's row, under
+**Call streams.** `call` is `transact` as one exactly-once request, a core `CallRequest`,
+on an ordered call stream ([STORE-12](storage.md#store-12-transactions-at-a-runner)). The stream's row, under
 `hirsel.streams/` and the stream bytes, holds its executor epoch, the last applied and
 acknowledged positions, and the digest and encoded outcome of each position between them.
 An epoch below the row's is `Denied()`. A position at or below the acknowledged one, past
 the next one, retained under another digest, or with `acknowledged` not below it is
 `Rejected()`. A retained position with an equal digest returns its recorded outcome
-without running `body`. The next position runs `body`; the same commit stores the outcome,
+without running `f`. The next position runs `f`; the same commit stores the outcome,
 sets `applied`, raises `acknowledged` and drops the outcomes at or below it, and an
 outcome that writes nothing (`Aborted`, `Limit`) is recorded by a commit of the row alone.
 A request with a higher epoch raises the row's, a duplicate's included. A storage failure
-records nothing, so the caller resends the same position.
+or a failure in the run (`Tx(Faulted(f))`) records nothing, so the caller resends the same
+position.
 
-**Output gate and group commit.** Commits queue in memory until `durable` is awaited or
-`group_limit` of them are pending, or until the next commit would carry the group's log
-object past the backend's `max_object_bytes`; the group is then written as one log object,
-the commit point of every commit in it. `durable(t)` returns once `t`'s commit and every
-earlier one are in a written log object, writing the pending group when `t` is in it;
-for a ticket already written it writes nothing. With `durability` `Durable()` (the
-default) a log object is created with `file.put_new(.., Durable())` and so is synced
-before `durable` returns; with `Volatile()` it is created unsynced, and a crash may lose
-any suffix of the commits, never part of one. Groups are deterministic: no timers.
+**Output gate.** Each transaction's commit is written as one log object before its
+outcome is released. With `durability` `Durable()` (the default) a log object is created
+with `file.put_new(.., Durable())` and so is synced first; with `Volatile()` it is created
+unsynced, and a crash may lose any suffix of the commits, never part of one.
+`group_limit` is the most commits one log object may hold, for the serving form that
+batches them.
 
 **Layout.** Under the `Dir`, every object is immutable and created only by `put_new`,
 named by a kind directory and a 20-digit decimal id: `manifest/N` names the writer epoch,

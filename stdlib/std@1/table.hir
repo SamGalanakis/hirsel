@@ -550,7 +550,7 @@ pub fn drop[K: key + serializable, V: serializable, S](mut s: store.Store[S], t:
   (),
   store.TxFailure[store.TxError]
 ] {
-  store.transact(
+  store.transact_body(
     mut s,
     fn(mut tx: store.Tx) -> Result[(), store.TxError] {
       let c = checked(tx, t)?
@@ -576,6 +576,7 @@ fn settled[R, E](take r: Result[R, store.TxFailure[MigrateError[E]]]) -> Result[
     Error(Unknown(e)) => Error(Table(Storage(take e))),
     Error(Limit(l)) => Error(Table(Limit(l))),
     Error(Canceled(cause)) => Error(Canceled(cause)),
+    Error(Faulted(failure)) => Error(Faulted(take failure)),
   }
 }
 
@@ -777,7 +778,7 @@ pub fn migrate[
   if !valid(name) || table_name(to) != name || batch == 0 || batch > s.config.limits.range_rows {
     return Error(Table(InvalidInput()))
   }
-  let begun = store.transact(
+  let begun = store.transact_body(
     mut s,
     fn(mut tx: store.Tx) -> Result[Start, MigrateError[E]] {
       start(mut tx, from, to)
@@ -795,7 +796,7 @@ pub fn migrate[
       return abandon(mut s, take canceled)
     }
     let held = take progress
-    let stepped = store.transact(
+    let stepped = store.transact_body(
       mut s,
       fn(mut tx: store.Tx) -> Result[(Progress, bool), MigrateError[E]] {
         advance(mut tx, name, c, f, held, batch)
@@ -818,7 +819,7 @@ pub fn migrate[
     }
   }
   let entry = core@1/runner.entry_id(f)
-  let installed = store.transact(
+  let installed = store.transact_body(
     mut s,
     fn(mut tx: store.Tx) -> Result[(), MigrateError[E]] {
       install(mut tx, to, c, entry)

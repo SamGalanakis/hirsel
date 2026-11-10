@@ -111,6 +111,7 @@ uint8_t hirsel_rt_v2_bytes_sha512(hirsel_rt_v2_ctx*, uint8_t*, hirsel_rt_v2_head
 uint8_t hirsel_rt_v2_bytes_sha512_256(hirsel_rt_v2_ctx*, uint8_t*, hirsel_rt_v2_header*, uint64_t, uint64_t);
 uint8_t hirsel_rt_v2_bytes_base64_encode(hirsel_rt_v2_ctx*, void*, hirsel_rt_v2_slice*, hirsel_rt_v2_header*, uint64_t, uint64_t, const uint32_t*, const uint32_t*);
 uint8_t hirsel_rt_v2_bytes_base64_decode(hirsel_rt_v2_ctx*, void*, hirsel_rt_v2_slice*, hirsel_rt_v2_header*, uint64_t, uint64_t, const uint32_t*, const uint32_t*);
+uint8_t hirsel_rt_v2_bytes_dfa_run(hirsel_rt_v2_ctx*, uint64_t*, hirsel_rt_v2_header*, uint64_t, uint64_t, hirsel_rt_v2_header*, uint64_t, uint64_t, uint64_t);
 uint8_t hirsel_rt_v2_string_view_bytes(hirsel_rt_v2_ctx*, void*, hirsel_rt_v2_slice*, hirsel_rt_v2_header*, uint64_t, uint64_t);
 uint8_t hirsel_rt_v2_string_from_bytes(hirsel_rt_v2_ctx*, void*, hirsel_rt_v2_string_result*, hirsel_rt_v2_header*, uint64_t, uint64_t);
 uint8_t hirsel_rt_v2_string_slice(hirsel_rt_v2_ctx*, void*, hirsel_rt_v2_slice*, hirsel_rt_v2_header*, uint64_t, uint64_t, const uint64_t*, const uint64_t*);

@@ -9,8 +9,8 @@
 @serializable
 type Short = Empty | Db(store.TxError)
 
-fn request(position: u64, digest: Bytes, acknowledged: u64) -> store.CallRequest {
-  store.CallRequest(
+fn request(position: u64, digest: Bytes, acknowledged: u64) -> CallRequest {
+  CallRequest(
     stream: b"caller-1",
     epoch: 1,
     position: position,
@@ -29,23 +29,22 @@ fn filled(n: u64) -> Bytes {
   bytes.from_list(take out)
 }
 
+fn counted(mut tx: store.Tx, info: store.CallInfo, n: u64) -> Result[Bytes, Short] {
+  let c: u64 = match store.tx_get(tx, b"counter") {
+    Ok(Some(b)) => int.widen(b[0]),
+    Ok(None()) => 0,
+    Error(e) => return Error(Db(unique e)),
+  }
+  store.tx_put(mut tx, b"counter", bytes.from_list([int.truncate(c + 1)])) ? Db
+  Ok(filled(n))
+}
+
 // Adds one to the counter and returns `n` bytes.
-fn bump(mut s: store.Store[Dir], req: store.CallRequest, n: u64) -> Result[
+fn bump(mut s: store.Store[Dir], req: CallRequest, n: u64) -> Result[
   Bytes,
   store.CallFailure[Short]
 ] {
-  store.call(
-    mut s,
-    req,
-    fn(mut tx: store.Tx) -> Result[Bytes, Short] {
-      let c: u64 = match store.tx_get(tx, b"counter") ? Db {
-        Some(b) => int.widen(b[0]),
-        None() => 0,
-      }
-      store.tx_put(mut tx, b"counter", bytes.from_list([int.truncate(c + 1)])) ? Db
-      Ok(filled(n))
-    }
-  )
+  store.call(mut s, req, counted, n)
 }
 
 fn counter(mut s: store.Store[Dir]) -> Option[Bytes] {

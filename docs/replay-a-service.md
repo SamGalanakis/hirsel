@@ -17,19 +17,20 @@ over a typed table `balances: Table[u64, u64]`. They hold only a `Tx` and data, 
 store can run them again. `main.hir` has two entries that run at the ledger's place,
 `open_account(rt: Io, req: Opening)` and `transfer(rt: Io, req: Transfer)`. Each opens
 the store over the place's `ledger` directory and runs one `store.call` on the client's
-call stream:
+call stream, with a transaction entry and the request as its argument:
 
 ```hirsel
+fn moves(mut tx: store.Tx, info: store.CallInfo, req: Transfer) -> Result[
+  ledger.Receipt,
+  ledger.Refusal
+] {
+  ledger.transfer(mut tx, req.from, req.to, req.cents)
+}
+
 fn transfer(rt: Io, req: Transfer) -> Result[ledger.Receipt, LedgerError] {
   let d = io.dir(rt, path.of("ledger")) ? Grant
   let mut s = store.open(d, store.default_config()) ? Store
-  let outcome = store.call(
-    mut s,
-    req.call,
-    fn(mut tx: store.Tx) -> Result[ledger.Receipt, ledger.Refusal] {
-      ledger.transfer(mut tx, req.from, req.to, req.cents)
-    }
-  )
+  let outcome = store.call(mut s, req.call, moves, req)
   store.close(take s) ? Store
   Ok(outcome ? Call)
 }

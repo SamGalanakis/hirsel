@@ -978,9 +978,9 @@
       ]
     },
     {
-      "path": "txn.hir",
+      "path": "call_info.hir",
       "module": [
-        "txn"
+        "call_info"
       ]
     },
     {
@@ -1060,12 +1060,6 @@
       "path": "stream_bytes.hir",
       "module": [
         "stream"
-      ]
-    },
-    {
-      "path": "txn_manager.hir",
-      "module": [
-        "txn_manager"
       ]
     },
     {

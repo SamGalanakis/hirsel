@@ -8,40 +8,36 @@ use std::process::{Command, Output};
 /// call it already made in an earlier run.
 const PROGRAM: &str = r#"pub type AppError = Grant(GrantError) | Files(FileError) | Store(store.StoreError) | Output(OutputError)
 
-fn runs(tx: store.Tx) -> u64 {
+fn runs(mut tx: store.Tx) -> u64 {
   match store.tx_get(tx, b"runs") {
     Ok(Some(b)) => int.widen(b[0]),
     _ => 0,
   }
 }
 
+fn count(mut tx: store.Tx, info: store.CallInfo, a: ()) -> Result[u64, String] {
+  let n = runs(mut tx) + 1
+  let _ = store.tx_put(mut tx, b"runs", bytes.from_list([int.truncate(n)]))
+  Ok(n)
+}
+
+fn abort(mut tx: store.Tx, info: store.CallInfo, a: ()) -> Result[u64, String] {
+  let _ = store.tx_put(mut tx, b"runs", b"\x00")
+  Error("abort")
+}
+
+fn tenfold(mut tx: store.Tx, info: store.CallInfo, a: ()) -> Result[u64, String] {
+  Ok(runs(mut tx) * 10)
+}
+
 pub fn main(rt: Io) -> Result[(), AppError] {
   let output = io.stdout(rt) ? Grant
   let d = io.dir(rt, path.of("data")) ? Files
   let mut s = store.open(d, store.default_config()) ? Store
-  let counted: Result[u64, store.TxFailure[String]] = store.transact(
-    mut s,
-    fn(mut tx: store.Tx) -> Result[u64, String] {
-      let n = runs(tx) + 1
-      let _ = store.tx_put(mut tx, b"runs", bytes.from_list([int.truncate(n)]))
-      Ok(n)
-    }
-  )
-  let aborted: Result[u64, store.TxFailure[String]] = store.transact(
-    mut s,
-    fn(mut tx: store.Tx) -> Result[u64, String] {
-      let _ = store.tx_put(mut tx, b"runs", b"\x00")
-      Error("abort")
-    }
-  )
-  let first = store.CallRequest(stream: b"s", epoch: 1, position: 1, digest: b"d", acknowledged: 0)
-  let called: Result[u64, store.CallFailure[String]] = store.call(
-    mut s,
-    first,
-    fn(mut tx: store.Tx) -> Result[u64, String] {
-      Ok(runs(tx) * 10)
-    }
-  )
+  let counted: Result[u64, store.TxFailure[String]] = store.transact(mut s, count, ())
+  let aborted: Result[u64, store.TxFailure[String]] = store.transact(mut s, abort, ())
+  let first = CallRequest(stream: b"s", epoch: 1, position: 1, digest: b"d", acknowledged: 0)
+  let called: Result[u64, store.CallFailure[String]] = store.call(mut s, first, tenfold, ())
   store.close(take s) ? Store
   match (counted, aborted, called) {
     (Ok(n), Error(Aborted(_)), Ok(c)) => {

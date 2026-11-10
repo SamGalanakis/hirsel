@@ -2,14 +2,13 @@
 // expect: accept
 // A transaction body is `uses {}`: it holds its Tx and data, and writing the
 // file after the transaction, outside the body, is allowed.
+fn put(mut tx: store.Tx, info: store.CallInfo, a: ()) -> Result[(), FileError] {
+  let _ = store.tx_put(mut tx, b"k", b"v")
+  Ok(())
+}
+
 pub fn note(mut s: store.Store[Dir], d: Dir) -> Result[(), store.TxFailure[FileError]] {
-  store.transact(
-    mut s,
-    fn(mut tx: store.Tx) -> Result[(), FileError] {
-      let _ = store.tx_put(mut tx, b"k", b"v")
-      Ok(())
-    }
-  )?
+  store.transact(mut s, put, ())?
   file.write_bytes(d, path.of("side"), b"effect") ? Aborted
   Ok(())
 }

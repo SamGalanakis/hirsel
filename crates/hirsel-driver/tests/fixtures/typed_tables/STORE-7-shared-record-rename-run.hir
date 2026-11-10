@@ -2,39 +2,43 @@
 // expect: run
 // SER-2 merges equal record representations. Renaming A.value must split
 // that shared descriptor node while keeping B.value unchanged.
+fn rename_left(mut tx: store.Tx, info: store.CallInfo, none: ()) -> Result[
+  (),
+  store.TxError
+] {
+  let a: table.Table[u32, table_models@1/model.Pair] = table.named("pairs")
+  table.create(mut tx, a)?
+  table.put(
+    mut tx,
+    a,
+    1,
+    table_models@1/model.Pair(
+      left: table_models@1/model.A(value: 7),
+      right: table_models@1/model.B(value: 8)
+    )
+  )?
+  table.rename(
+    mut tx,
+    "pairs",
+    "table_models/model/A.value",
+    "table_models/model/A.count"
+  )?
+  Ok(())
+}
+
+fn read_pair(mut tx: store.Tx, info: store.CallInfo, none: ()) -> Result[
+  Option[table_models@2/model.Pair],
+  store.TxError
+] {
+  let b: table.Table[u32, table_models@2/model.Pair] = table.named("pairs")
+  table.get(tx, b, 1)
+}
+
 pub fn main(t: Test) -> Result[(), store.StoreError] {
   let mut s = store.open(test.dir(t, []), store.default_config())?
-  let a: table.Table[u32, table_models@1/model.Pair] = table.named("pairs")
-  let b: table.Table[u32, table_models@2/model.Pair] = table.named("pairs")
-  let setup = store.transact(
-    mut s,
-    fn(mut tx: store.Tx) -> Result[(), store.TxError] {
-      table.create(mut tx, a)?
-      table.put(
-        mut tx,
-        a,
-        1,
-        table_models@1/model.Pair(
-          left: table_models@1/model.A(value: 7),
-          right: table_models@1/model.B(value: 8)
-        )
-      )?
-      table.rename(
-        mut tx,
-        "pairs",
-        "table_models/model/A.value",
-        "table_models/model/A.count"
-      )?
-      Ok(())
-    }
-  )
+  let setup = store.transact(mut s, rename_left, ())
   test.check(t, setup == Ok(()))
-  let read = store.transact(
-    mut s,
-    fn(mut tx: store.Tx) -> Result[Option[table_models@2/model.Pair], store.TxError] {
-      table.get(tx, b, 1)
-    }
-  )
+  let read = store.transact(mut s, read_pair, ())
   test.check(
     t,
     read == Ok(

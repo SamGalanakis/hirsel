@@ -346,6 +346,12 @@ pub(crate) fn registry(types: &Arc<TypeInterner>) -> BTreeMap<DefId, SignatureRe
         // RUN-3: an entry's identity: its definition's full path, signature fingerprint and
         // code hash.
         ("EntryId", "", "path: String,fingerprint: Bytes,code: Bytes"),
+        // STORE-12: one request on a call stream.
+        (
+            "CallRequest",
+            "",
+            "stream: Bytes,epoch: u64,position: u64,digest: Bytes,acknowledged: u64",
+        ),
         (
             "GrantSet",
             "",
@@ -1324,6 +1330,7 @@ fn serializable_core(name: &str, t: &mut TypeDefinition) {
             | "GrantAccess"
             | "DirGrant"
             | "EntryId"
+            | "CallRequest"
             | "GrantSet"
             | "NotRunReason"
             | "InDoubtReason"

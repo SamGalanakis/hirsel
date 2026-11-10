@@ -156,8 +156,10 @@ fn isolate(cx: &mut Cx<'_>) -> R<LirUnit<Value>> {
 
 /// `runner.apply[_mut](f, c, call, a)` (RUN-3, FAIL-2): call the entry `f` on this task with
 /// the other parameters as they arrived, inside a catch that is no scheduling point. The
-/// no-failure path is `ApplyBegin`, the indirect call, a status check and `IsolateEnd`; a
-/// failure has run `f`'s cleanup (FAIL-3) when the `Isolate` terminator catches it here.
+/// no-failure path is `ApplyBegin`'s read of the failure count and the call, direct once
+/// `closure_calls` specializes the known entry; a failure has run `f`'s cleanup (FAIL-3)
+/// when the `Isolate` terminator catches it here, and only that path records and ends an
+/// invocation.
 fn apply(cx: &mut Cx<'_>) -> R<LirUnit<Value>> {
     let entry = parameter(cx.types, cx.callable, 0)?;
     let f = super::runners::entry_callable(cx.types, entry)?;
@@ -233,11 +235,14 @@ fn apply(cx: &mut Cx<'_>) -> R<LirUnit<Value>> {
         BlockKind::Body,
     )
     .ok_or_else(|| PassError::Malformed("an applied entry returns its Result".into()))?;
+    // `ApplyBegin` recorded no invocation: the catch records it, so only the caught path
+    // ends one.
     let value = variant(&mut b, returned, "Result", RESULT_OK, &[value]);
-    returning(&mut b, &entries, value)?;
+    b.ret(Some(value));
 
     b.at(caught);
     b.restore_held(&held);
+    self::caught(&mut b, &entries);
     let failure = chain(&mut b, &entries, &shape)?;
     let value = variant(&mut b, returned, "Result", RESULT_ERROR, &[failure]);
     returning(&mut b, &entries, value)?;
@@ -274,9 +279,25 @@ pub(super) fn shape(b: &Body<'_, '_>, failure: LayoutId) -> R<Shape> {
 }
 
 /// `IsolateBegin(tasks)` or `ApplyBegin()`: the running task's failure record count, the
-/// start of a catch.
+/// start of a catch. `ApplyBegin` records no invocation, so a stop propagating past it has
+/// none to end until its catch records one ([`caught`]); `IsolateBegin`'s is ended on the
+/// way out from here.
 pub(super) fn begin(b: &mut Body<'_, '_>, entries: &Entries, tasks: Option<ValueId>) -> R<ValueId> {
     let mark = read(b, &entries.begin, tasks)?;
+    if tasks.is_some() {
+        ending(b, entries);
+    }
+    Ok(mark)
+}
+
+/// At the resumption of `ApplyBegin`'s catch, which recorded its invocation: a stop
+/// propagating from here ends it.
+pub(super) fn caught(b: &mut Body<'_, '_>, entries: &Entries) {
+    ending(b, entries);
+}
+
+/// Route propagation from here through End.
+fn ending(b: &mut Body<'_, '_>, entries: &Entries) {
     let at = b.current();
     let held = b.held_state();
     let ending = b.block(BlockKind::FailureCleanup, &[]);
@@ -287,7 +308,6 @@ pub(super) fn begin(b: &mut Body<'_, '_>, entries: &Entries, tasks: Option<Value
     b.at(at);
     b.restore_held(&held);
     b.propagation(Some(ending));
-    Ok(mark)
 }
 
 fn returning(b: &mut Body<'_, '_>, entries: &Entries, value: ValueId) -> R<()> {

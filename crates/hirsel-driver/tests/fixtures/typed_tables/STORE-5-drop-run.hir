@@ -18,40 +18,62 @@ fn settled(mut s: store.Store[Dir]) -> bool {
   list.len(store.range(snap, low, high, Ascending(), 10)) == 0
 }
 
+fn seed(mut tx: store.Tx, info: store.CallInfo, n: u32) -> Result[(), store.TxError] {
+  let item: table.Table[u32, String] = table.named("item")
+  let items: table.Table[u32, String] = table.named("items")
+  table.create(mut tx, item)?
+  table.create(mut tx, items)?
+  for k in 1u32..6u32 {
+    table.put(mut tx, item, k, "kept")?
+  }
+  for k in 1u32..n {
+    table.put(mut tx, items, k, "dropped")?
+  }
+  Ok(())
+}
+
+fn delete_all(mut tx: store.Tx, info: store.CallInfo, n: u32) -> Result[
+  (),
+  store.TxError
+] {
+  let items: table.Table[u32, String] = table.named("items")
+  for k in 1u32..n {
+    let _ = table.delete(mut tx, items, k)?
+  }
+  Ok(())
+}
+
+// The dropped table is gone, and one of the same name starts empty with a
+// fresh history.
+fn recreate(mut tx: store.Tx, info: store.CallInfo, a: ()) -> Result[
+  bool,
+  store.TxError
+] {
+  let items: table.Table[u32, String] = table.named("items")
+  let wrong: table.Table[u32, u64] = table.named("items")
+  if table.get(tx, items, 1) != Error(NoTable()) || table.history(tx, "items") != Error(
+    NoTable()
+  ) {
+    return Ok(false)
+  }
+  table.create(mut tx, wrong)?
+  let fresh = table.range(tx, wrong, Unbounded(), Unbounded(), 10, Ascending())?
+  Ok(list.len(fresh) == 0 && list.len(table.history(tx, "items")?) == 1)
+}
+
 pub fn main(t: Test) -> Result[(), store.StoreError] {
   let d = test.dir(t, [])
   let mut s = store.open(d, store.default_config())?
   let item: table.Table[u32, String] = table.named("item")
   let items: table.Table[u32, String] = table.named("items")
-  let seeded = store.transact(
-    mut s,
-    fn(mut tx: store.Tx) -> Result[(), store.TxError] {
-      table.create(mut tx, item)?
-      table.create(mut tx, items)?
-      for k in 1u32..6u32 {
-        table.put(mut tx, item, k, "kept")?
-      }
-      for k in 1u32..101u32 {
-        table.put(mut tx, items, k, "dropped")?
-      }
-      Ok(())
-    }
-  )
+  let seeded = store.transact(mut s, seed, 101u32)
   test.check(t, seeded == Ok(()))
   store.close(take s)?
   // Under these limits no one commit deletes every row of `items`.
   let mut tight = store.default_config()
   tight.limits.transaction_bytes = 1500
   let mut small = store.open(d, tight)?
-  let too_large = store.transact(
-    mut small,
-    fn(mut tx: store.Tx) -> Result[(), store.TxError] {
-      for k in 1u32..101u32 {
-        let _ = table.delete(mut tx, items, k)?
-      }
-      Ok(())
-    }
-  )
+  let too_large = store.transact(mut small, delete_all, 101u32)
   test.check(t, too_large == Error(Aborted(Limit(TransactionBytes()))))
   let wrong: table.Table[u32, u64] = table.named("items")
   let invalid: table.Table[u32, String] = table.named("hirsel.items")
@@ -62,22 +84,11 @@ pub fn main(t: Test) -> Result[(), store.StoreError] {
   test.check(t, rows(mut small, "items") == 100)
   test.check(t, table.drop(mut small, items) == Ok(()))
   test.check(t, table.drop(mut small, items) == Error(Aborted(NoTable())))
-  test.check(t, rows(mut small, "items") == 0 && rows(mut small, "item") == 5 && settled(mut small))
-  let gone = store.transact(
-    mut small,
-    fn(mut tx: store.Tx) -> Result[bool, store.TxError] {
-      if table.get(tx, items, 1) != Error(NoTable()) || table.history(
-        tx,
-        "items"
-      ) != Error(NoTable()) {
-        return Ok(false)
-      }
-      // A table of the same name starts empty with a fresh history.
-      table.create(mut tx, wrong)?
-      let fresh = table.range(tx, wrong, Unbounded(), Unbounded(), 10, Ascending())?
-      Ok(list.len(fresh) == 0 && list.len(table.history(tx, "items")?) == 1)
-    }
+  test.check(
+    t,
+    rows(mut small, "items") == 0 && rows(mut small, "item") == 5 && settled(mut small)
   )
+  let gone = store.transact(mut small, recreate, ())
   test.check(t, gone == Ok(true))
   Ok(())
 }

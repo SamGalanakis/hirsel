@@ -1,15 +1,19 @@
 // rule: STORE-2
 // expect: run
-// store.transact commits a body's writes as one commit when it returns Ok,
-// discards them and returns Aborted when it returns Error, refuses a commit
-// over a limit with no effect, and a reopened store holds exactly the
-// committed transactions.
+// store.transact runs a transaction entry: it commits the entry's writes as
+// one commit when it returns Ok, discards them and returns Aborted when it
+// returns Error, refuses a commit over a limit with no effect, and ends a run
+// that fails as Faulted with nothing committed and the store still usable; a
+// reopened store holds exactly the committed transactions.
+// store.query runs its entry on its snapshot, not the latest commit.
+@serializable
 type Short = TooFew(u64) | Db(store.TxError)
 
 fn count(tx: store.Tx) -> Result[u64, Short] {
-  match store.tx_get(tx, b"count") ? Db {
-    Some(b) => Ok(int.widen(b[0])),
-    None() => Ok(0),
+  match store.tx_get(tx, b"count") {
+    Ok(Some(b)) => Ok(int.widen(b[0])),
+    Ok(None()) => Ok(0),
+    Error(e) => Error(Db(unique e)),
   }
 }
 
@@ -20,44 +24,63 @@ fn set_count(mut tx: store.Tx, n: u64) -> Result[(), Short] {
   Ok(())
 }
 
+fn first(mut tx: store.Tx, call: store.CallInfo, n: u64) -> Result[u64, Short] {
+  set_count(mut tx, n)?
+  store.tx_put(mut tx, b"name", b"ada") ? Db
+  Ok(count(tx)?)
+}
+
+// An abort leaves nothing behind, though the body wrote and read its write.
+fn short(mut tx: store.Tx, call: store.CallInfo, n: u64) -> Result[u64, Short] {
+  set_count(mut tx, n)?
+  store.tx_delete(mut tx, b"name") ? Db
+  let seen = count(tx)?
+  if seen < 10 {
+    return Error(TooFew(seen))
+  }
+  Ok(0)
+}
+
+// A value over the configured limit refuses the whole commit.
+fn big(mut tx: store.Tx, call: store.CallInfo, n: u64) -> Result[(), Short] {
+  set_count(mut tx, n)?
+  store.tx_put(mut tx, b"big", b"too long") ? Db
+  Ok(())
+}
+
+// A run that fails after writing: its writes are discarded with it.
+fn overflows(mut tx: store.Tx, call: store.CallInfo, n: u8) -> Result[(), Short] {
+  set_count(mut tx, 7)?
+  let broken = n + 255
+  Ok(())
+}
+
+// Reads the count.
+fn peek(tx: store.Tx, call: store.CallInfo, n: u64) -> Result[u64, Short] {
+  count(tx)
+}
+
 pub fn main(t: Test) -> Result[(), store.StoreError] {
   let d = test.dir(t, [])
   let mut config = store.default_config()
   config.limits.value_bytes = 4
   let mut s = store.open(d, config)?
-  let first: Result[u64, store.TxFailure[Short]] = store.transact(
-    mut s,
-    fn(mut tx: store.Tx) -> Result[u64, Short] {
-      set_count(mut tx, 5)?
-      store.tx_put(mut tx, b"name", b"ada") ? Db
-      Ok(count(tx)?)
-    }
-  )
-  test.check(t, first == Ok(5))
-  // An abort leaves nothing behind, though the body wrote and read its write.
-  let second: Result[u64, store.TxFailure[Short]] = store.transact(
-    mut s,
-    fn(mut tx: store.Tx) -> Result[u64, Short] {
-      set_count(mut tx, 9)?
-      store.tx_delete(mut tx, b"name") ? Db
-      let n = count(tx)?
-      if n < 10 {
-        return Error(TooFew(n))
-      }
-      Ok(0)
-    }
-  )
-  test.check(t, second == Error(Aborted(TooFew(9))))
-  // A value over the configured limit refuses the whole commit.
-  let third: Result[(), store.TxFailure[Short]] = store.transact(
-    mut s,
-    fn(mut tx: store.Tx) -> Result[(), Short] {
-      set_count(mut tx, 1)?
-      store.tx_put(mut tx, b"big", b"too long") ? Db
-      Ok(())
-    }
-  )
-  test.check(t, third == Error(Limit(ValueBytes())))
+  let empty = store.snapshot(mut s)
+  let one: Result[u64, store.TxFailure[Short]] = store.transact(mut s, first, 5u64)
+  test.check(t, one == Ok(5))
+  let two: Result[u64, store.TxFailure[Short]] = store.transact(mut s, short, 9u64)
+  test.check(t, two == Error(Aborted(TooFew(9))))
+  let three: Result[(), store.TxFailure[Short]] = store.transact(mut s, big, 1u64)
+  test.check(t, three == Error(Limit(ValueBytes())))
+  let four: Result[(), store.TxFailure[Short]] = store.transact(mut s, overflows, 1u8)
+  let faulted = match four {
+    Error(Faulted(f)) => f.rule == "SEM-1",
+    _ => false,
+  }
+  test.check(t, faulted)
+  // The store is usable after the fault, and the fault committed nothing.
+  let five: Result[u64, store.TxFailure[Short]] = store.transact(mut s, first, 5u64)
+  test.check(t, five == Ok(5))
   let snap = store.snapshot(mut s)
   test.check(
     t,
@@ -65,7 +88,9 @@ pub fn main(t: Test) -> Result[(), store.StoreError] {
       b"ada"
     ) && store.get(snap, b"big") == None()
   )
-  test.check(t, store.snapshot_sequence(snap) == 1)
+  test.check(t, store.snapshot_sequence(snap) == 2)
+  test.check(t, store.query(copy snap, peek, 0u64) == Ok(5))
+  test.check(t, store.query(take empty, peek, 0u64) == Ok(0))
   store.close(take s)?
   let mut again = store.open(d, store.default_config())?
   let reopened = store.snapshot(mut again)

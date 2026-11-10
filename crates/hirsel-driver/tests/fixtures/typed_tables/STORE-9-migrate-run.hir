@@ -62,18 +62,19 @@ fn reversed() -> table.Table[u64, Item] {
 }
 
 fn seed[S](mut s: store.Store[S], name: String) -> bool {
+  store.transact(mut s, seed_rows, name) == Ok(())
+}
+
+fn seed_rows(mut tx: store.Tx, info: store.CallInfo, name: String) -> Result[
+  (),
+  store.TxError
+] {
   let t: table.Table[u32, Item] = table.named(name)
-  let written = store.transact(
-    mut s,
-    fn(mut tx: store.Tx) -> Result[(), store.TxError] {
-      table.create(mut tx, t)?
-      for k in 1u32..6u32 {
-        table.put(mut tx, t, k, Item(label: f"item {k}", count: k))?
-      }
-      Ok(())
-    }
-  )
-  written == Ok(())
+  table.create(mut tx, t)?
+  for k in 1u32..6u32 {
+    table.put(mut tx, t, k, Item(label: f"item {k}", count: k))?
+  }
+  Ok(())
 }
 
 // Nothing of a discarded migration remains: no generation waits to be
@@ -92,21 +93,19 @@ fn no_leftovers[S](mut s: store.Store[S]) -> bool {
 
 // The five seeded rows are intact and the table accepts writes again.
 fn unchanged[S](mut s: store.Store[S]) -> bool {
-  let read = store.transact(
-    mut s,
-    fn(mut tx: store.Tx) -> Result[bool, store.TxError] {
-      let rows = table.range(tx, items(), Unbounded(), Unbounded(), 10, Ascending())?
-      if list.len(rows) != 5 || rows[2] != (3, Item(label: "item 3", count: 3)) {
-        return Ok(false)
-      }
-      if list.len(table.history(tx, "items")?) != 1 {
-        return Ok(false)
-      }
-      table.put(mut tx, items(), 6, Item(label: "item 6", count: 6))?
-      Ok(table.delete(mut tx, items(), 6)?)
-    }
-  )
-  read == Ok(true)
+  store.transact(mut s, intact, ()) == Ok(true)
+}
+
+fn intact(mut tx: store.Tx, info: store.CallInfo, a: ()) -> Result[bool, store.TxError] {
+  let rows = table.range(tx, items(), Unbounded(), Unbounded(), 10, Ascending())?
+  if list.len(rows) != 5 || rows[2] != (3, Item(label: "item 3", count: 3)) {
+    return Ok(false)
+  }
+  if list.len(table.history(tx, "items")?) != 1 {
+    return Ok(false)
+  }
+  table.put(mut tx, items(), 6, Item(label: "item 6", count: 6))?
+  Ok(table.delete(mut tx, items(), 6)?)
 }
 
 pub fn main(t: Test) -> Result[(), store.StoreError] {
@@ -125,21 +124,14 @@ fn scenario(t: Test, sc: Scope) -> Result[(), store.StoreError] {
   // A row function's error and a key collision discard the migration.
   test.check(
     t,
-    table.migrate(
-      sc,
-      mut s,
-      items(),
-      priced(),
-      refuse_third,
-      2
-    ) == Error(Failed(Unpriced(3)))
+    table.migrate(sc, mut s, items(), priced(), refuse_third, 2) == Error(
+      Failed(Unpriced(3))
+    )
   )
   test.check(t, no_leftovers(mut s) && unchanged(mut s))
   test.check(
     t,
-    table.migrate(sc, mut s, items(), priced(), collapse, 2) == Error(
-      Collision()
-    )
+    table.migrate(sc, mut s, items(), priced(), collapse, 2) == Error(Collision())
   )
   test.check(t, no_leftovers(mut s) && unchanged(mut s))
   // A failure in the row function is caught and discards the migration too.
@@ -154,9 +146,7 @@ fn scenario(t: Test, sc: Scope) -> Result[(), store.StoreError] {
   let other: table.Table[u32, Priced] = table.named("other")
   test.check(
     t,
-    table.migrate(sc, mut s, items(), other, price, 2) == Error(
-      Table(InvalidInput())
-    )
+    table.migrate(sc, mut s, items(), other, price, 2) == Error(Table(InvalidInput()))
   )
   test.check(
     t,
@@ -181,106 +171,25 @@ fn scenario(t: Test, sc: Scope) -> Result[(), store.StoreError] {
   // `from` must match the current schema.
   test.check(
     t,
-    table.migrate(
-      sc,
-      mut s,
-      reversed(),
-      priced(),
-      price_reversed,
-      2
-    ) == Error(Table(Schema(KeyMismatch())))
+    table.migrate(sc, mut s, reversed(), priced(), price_reversed, 2) == Error(
+      Table(Schema(KeyMismatch()))
+    )
   )
   // A value migration over three batches.
-  test.check(
-    t,
-    table.migrate(sc, mut s, items(), priced(), price, 2) == Ok(
-      5
-    )
-  )
+  test.check(t, table.migrate(sc, mut s, items(), priced(), price, 2) == Ok(5))
   test.check(t, no_leftovers(mut s))
-  let migrated = store.transact(
-    mut s,
-    fn(mut tx: store.Tx) -> Result[bool, store.TxError] {
-      match table.get(tx, items(), 1) {
-        Error(Schema(_)) => (),
-        _ => return Ok(false),
-      }
-      let rows = table.range(
-        tx,
-        priced(),
-        Unbounded(),
-        Unbounded(),
-        10,
-        Ascending()
-      )?
-      if rows != [
-        (1, Priced(label: "item 1", cents: 100)),
-        (2, Priced(label: "item 2", cents: 200)),
-        (3, Priced(label: "item 3", cents: 300)),
-        (4, Priced(label: "item 4", cents: 400)),
-        (5, Priced(label: "item 5", cents: 500))
-      ] {
-        return Ok(false)
-      }
-      let history = table.history(tx, "items")?
-      let priced_by: Entry[fn(c: (), key: u32, old: Item) -> Result[(u32, Priced), Rejected]] = price
-      if list.len(history) != 2 || history[1].epoch != 1 || history[1].change != Migrated(
-        runner.entry_id(priced_by)
-      ) || history[1].key_schema != history[0].key_schema || history[1].value_schema == history[0].value_schema {
-        return Ok(false)
-      }
-      // The new schema takes writes at its own epoch.
-      table.put(mut tx, priced(), 6, Priced(label: "item 6", cents: 1))?
-      Ok(table.get(tx, priced(), 6)? == Some(Priced(label: "item 6", cents: 1)))
-    }
-  )
+  let migrated = store.transact(mut s, check_priced, ())
   test.check(t, migrated == Ok(true))
   // Already at the target schema: nothing to do.
-  test.check(
-    t,
-    table.migrate(sc, mut s, items(), priced(), price, 2) == Ok(
-      0
-    )
-  )
+  test.check(t, table.migrate(sc, mut s, items(), priced(), price, 2) == Ok(0))
   // A key migration reverses the stored order and survives reopening.
   test.check(t, seed(mut s, "keyed"))
   let keyed: table.Table[u32, Item] = table.named("keyed")
   let keyed_reversed: table.Table[u64, Item] = table.named("keyed")
-  test.check(
-    t,
-    table.migrate(
-      sc,
-      mut s,
-      keyed,
-      keyed_reversed,
-      reverse,
-      3
-    ) == Ok(5)
-  )
+  test.check(t, table.migrate(sc, mut s, keyed, keyed_reversed, reverse, 3) == Ok(5))
   store.close(take s)?
   let mut reopened = store.open(d, store.default_config())?
-  let ordered = store.transact(
-    mut reopened,
-    fn(mut tx: store.Tx) -> Result[bool, store.TxError] {
-      let rows = table.range(
-        tx,
-        keyed_reversed,
-        Unbounded(),
-        Included(997),
-        2,
-        Ascending()
-      )?
-      if rows != [
-        (995, Item(label: "item 5", count: 5)),
-        (996, Item(label: "item 4", count: 4))
-      ] {
-        return Ok(false)
-      }
-      Ok(
-        table.get(tx, keyed_reversed, 999)? == Some(Item(label: "item 1", count: 1))
-      )
-    }
-  )
+  let ordered = store.transact(mut reopened, check_reversed, ())
   test.check(t, ordered == Ok(true))
   Ok(())
 }
@@ -392,14 +301,7 @@ fn canceled_before_first_batch(t: Test) -> bool {
               if !seed(mut held, "items") {
                 return false
               }
-              let outcome = table.migrate(
-                inner,
-                mut held,
-                items(),
-                priced(),
-                price,
-                2
-              )
+              let outcome = table.migrate(inner, mut held, items(), priced(), price, 2)
               let canceled = match outcome {
                 Error(Canceled(_)) => true,
                 _ => false,
@@ -415,4 +317,51 @@ fn canceled_before_first_batch(t: Test) -> bool {
       outcome
     }
   )
+}
+
+fn check_priced(mut tx: store.Tx, info: store.CallInfo, a: ()) -> Result[
+  bool,
+  store.TxError
+] {
+  match table.get(tx, items(), 1) {
+    Error(Schema(_)) => (),
+    _ => return Ok(false),
+  }
+  let rows = table.range(tx, priced(), Unbounded(), Unbounded(), 10, Ascending())?
+  if rows != [
+    (1, Priced(label: "item 1", cents: 100)),
+    (2, Priced(label: "item 2", cents: 200)),
+    (3, Priced(label: "item 3", cents: 300)),
+    (4, Priced(label: "item 4", cents: 400)),
+    (5, Priced(label: "item 5", cents: 500))
+  ] {
+    return Ok(false)
+  }
+  let history = table.history(tx, "items")?
+  let priced_by: Entry[
+    fn(c: (), key: u32, old: Item) -> Result[(u32, Priced), Rejected]
+  ] = price
+  if list.len(history) != 2 || history[1].epoch != 1 || history[1].change != Migrated(
+    runner.entry_id(priced_by)
+  ) || history[1].key_schema != history[0].key_schema || history[1].value_schema == history[0].value_schema {
+    return Ok(false)
+  }
+  // The new schema takes writes at its own epoch.
+  table.put(mut tx, priced(), 6, Priced(label: "item 6", cents: 1))?
+  Ok(table.get(tx, priced(), 6)? == Some(Priced(label: "item 6", cents: 1)))
+}
+
+fn check_reversed(mut tx: store.Tx, info: store.CallInfo, a: ()) -> Result[
+  bool,
+  store.TxError
+] {
+  let keyed_reversed: table.Table[u64, Item] = table.named("keyed")
+  let rows = table.range(tx, keyed_reversed, Unbounded(), Included(997), 2, Ascending())?
+  if rows != [
+    (995, Item(label: "item 5", count: 5)),
+    (996, Item(label: "item 4", count: 4))
+  ] {
+    return Ok(false)
+  }
+  Ok(table.get(tx, keyed_reversed, 999)? == Some(Item(label: "item 1", count: 1)))
 }

@@ -2226,6 +2226,7 @@ conformance/LANG/LANG-7-range-coverage-bad.hir
 conformance/LANG/LANG-7-range-coverage-ok.hir
 conformance/LANG/LANG-7-recursive-alias-argument-bad.hir
 conformance/LANG/LANG-7-recursive-alias-direct-bad.hir
+conformance/LANG/LANG-7-recursive-alias-growing-bad.hir
 conformance/LANG/LANG-7-recursive-alias-mutual-bad.hir
 conformance/LANG/LANG-7-recursive-box-ok.hir
 conformance/LANG/LANG-7-recursive-constructor-ok.hir
@@ -7314,10 +7315,8 @@ conformance/SEM/SEM-5-std-set-tombstone-drain-run.hir
 conformance/SEM/SEM-5-std-sorted-map-access-run.hir
 conformance/SEM/SEM-5-std-sorted-map-owned-cycle-run.hir
 conformance/SEM/SEM-5-std-sorted-map-string-get-run.hir
-conformance/SEM/SEM-5-std-store-group-commit-run.hir
 conformance/SEM/SEM-5-std-store-run.hir
 conformance/SEM/SEM-5-store-object-faults-run.hir
-conformance/SEM/SEM-5-store-sim-group-commit-run.hir
 conformance/SEM/SEM-5-store-sim-run.hir
 conformance/SEM/SEM-5-tour-04-collections-run.hir
 conformance/SEM/SEM-5-wave2-map-same-entries-counted-run.hir
@@ -7432,12 +7431,8 @@ conformance/STORE/STORE-11-authority-seam-run.hir
 conformance/STORE/STORE-12-call-row-limit-run.hir
 conformance/STORE/STORE-12-call-stream-run.hir
 conformance/STORE/STORE-12-sim-call-stream-run.hir
-conformance/STORE/STORE-14-access-run.hir
 conformance/STORE/STORE-2-sim-transact-run.hir
 conformance/STORE/STORE-2-transact-run.hir
-conformance/STORE/STORE-2-txn-conflicts-run.hir
-conformance/STORE/STORE-2-txn-isolation-run.hir
-conformance/STORE/STORE-2-txn-manager-run.hir
 conformance/STORE/STORE-3-body-capture-bad.hir
 conformance/STORE/STORE-3-body-capture-ok.hir
 conformance/STORE/STORE-3-narrow-scope-run.hir
@@ -7456,4 +7451,3 @@ conformance/STORE/STORE-6-set-key-bad.hir
 conformance/STORE/STORE-6-set-key-ok.hir
 conformance/STORE/STORE-6-simd-key-bad.hir
 conformance/STORE/STORE-6-simd-key-ok.hir
-conformance/LANG/LANG-7-recursive-alias-growing-bad.hir

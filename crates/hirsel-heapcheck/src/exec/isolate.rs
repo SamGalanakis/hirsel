@@ -5,6 +5,9 @@
 //! line and column come from the operations model, which holds the sources.
 use super::*;
 
+/// The runtime's `hirsel_rt::isolate::LAZY_START`: the start bit of a lazy invocation.
+const LAZY_START: u64 = 1 << 63;
+
 #[derive(Clone)]
 pub(super) struct Invocation {
     pub(super) mark: usize,
@@ -20,7 +23,10 @@ impl<S: Stage> Machine<'_, S> {
         let Val::Bits { bits, .. } = self.read_use(f, start)? else {
             return fail(V::TypeConfusion, "an isolation start that is not a count");
         };
-        let start = bits as usize;
+        // `runner.apply`'s begin recorded no invocation; its catch records it (the runtime's
+        // `LAZY_START`).
+        let lazy = bits & u128::from(LAZY_START) != 0;
+        let start = (bits & !u128::from(LAZY_START)) as usize;
         if start >= self.failures.len() {
             return fail(V::Malformed, "an isolation that caught no failure");
         }
@@ -28,6 +34,12 @@ impl<S: Stage> Machine<'_, S> {
         self.unanchored_failures.retain(|&i| i < start);
         let s = self.scheduler();
         let current = s.current;
+        if lazy {
+            s.task(current)?.isolations.push(Invocation {
+                mark: start,
+                caught: None,
+            });
+        }
         let own = s.task(current)?.path.clone();
         let spawns = s.task_spawns();
         spawns.resize(start + failures.len(), None);
@@ -75,8 +87,11 @@ impl<S: Stage> Machine<'_, S> {
             bits: u128::from(bits),
         };
         let val = match name {
-            // `task.isolate`'s begin is a scheduling point; `runner.apply`'s is not.
-            "$intrinsic.IsolateBegin" | "$intrinsic.ApplyBegin" => {
+            // `runner.apply`'s begin records nothing and is no scheduling point.
+            "$intrinsic.ApplyBegin" => {
+                bits(ScalarKind::U64, self.failures.len() as u64 | LAZY_START)
+            }
+            "$intrinsic.IsolateBegin" => {
                 let count = self.failures.len() as u64;
                 let s = self.scheduler();
                 let current = s.current;
@@ -84,9 +99,7 @@ impl<S: Stage> Machine<'_, S> {
                     mark: count as usize,
                     caught: None,
                 });
-                if name == "$intrinsic.IsolateBegin" {
-                    self.task_yield()?;
-                }
+                self.task_yield()?;
                 bits(ScalarKind::U64, count)
             }
             "$intrinsic.IsolateCount" => bits(ScalarKind::U64, self.isolate_caught()?.len() as u64),

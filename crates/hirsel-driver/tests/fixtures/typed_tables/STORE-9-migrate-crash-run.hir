@@ -70,60 +70,27 @@ fn leftovers(mut s: store.Store[Dir]) -> u64 {
   list.len(store.range(snap, low, high, Ascending(), 10))
 }
 
-fn seed(mut s: store.Store[Dir], t: table.Table[String, Item]) -> bool {
-  let seeded = store.transact(
-    mut s,
-    fn(mut tx: store.Tx) -> Result[(), store.TxError] {
-      table.create(mut tx, t)?
-      for k in 1u32..7u32 {
-        table.put(mut tx, t, row_key(k), Item(label: label(k), count: k))?
-      }
-      Ok(())
-    }
-  )
-  seeded == Ok(())
+fn seed(mut s: store.Store[Dir], name: String) -> bool {
+  store.transact(mut s, seed_rows, name) == Ok(())
+}
+
+fn seed_rows(mut tx: store.Tx, info: store.CallInfo, name: String) -> Result[
+  (),
+  store.TxError
+] {
+  let t: table.Table[String, Item] = table.named(name)
+  table.create(mut tx, t)?
+  for k in 1u32..7u32 {
+    table.put(mut tx, t, row_key(k), Item(label: label(k), count: k))?
+  }
+  Ok(())
 }
 
 // 1 for the old table, every row intact and writable; 2 for the migrated one,
 // every row priced; 0 for anything else. The table's keys are exactly its
 // 6 rows either way, and nothing waits to be deleted.
 fn old_or_new(mut s: store.Store[Dir]) -> u8 {
-  let read = store.transact(
-    mut s,
-    fn(mut tx: store.Tx) -> Result[u8, store.TxError] {
-      match table.range(tx, items(), Unbounded(), Unbounded(), 200, Ascending()) {
-        Ok(rows) => {
-          let mut k: u32 = 0
-          for row in rows {
-            k += 1
-            if row != (row_key(k), Item(label: label(k), count: k)) {
-              return Ok(0)
-            }
-          }
-          table.put(mut tx, items(), "written", Item(label: "written", count: 99))?
-          if k == 6 && table.delete(mut tx, items(), "written")? {
-            return Ok(1)
-          }
-          Ok(0)
-        },
-        Error(Schema(_)) => {
-          let rows = table.range(tx, priced(), Unbounded(), Unbounded(), 200, Ascending())?
-          let mut k: u32 = 0
-          for row in rows {
-            k += 1
-            if row != (row_key(k), Priced(label: label(k), cents: int.widen(k) * 100)) {
-              return Ok(0)
-            }
-          }
-          if k == 6 {
-            return Ok(2)
-          }
-          Ok(0)
-        },
-        Error(e) => Error(e),
-      }
-    }
-  )
+  let read = store.transact(mut s, which_table, ())
   if stored(mut s, "items") != 6 || leftovers(mut s) != 0 {
     return 0
   }
@@ -135,16 +102,7 @@ fn old_or_new(mut s: store.Store[Dir]) -> u8 {
 
 // 1 for the table whole, 2 for nothing of it, 0 for anything else.
 fn whole_or_none(mut s: store.Store[Dir]) -> u8 {
-  let read = store.transact(
-    mut s,
-    fn(mut tx: store.Tx) -> Result[u64, store.TxError] {
-      match table.range(tx, gone(), Unbounded(), Unbounded(), 200, Ascending()) {
-        Ok(rows) => Ok(list.len(rows)),
-        Error(NoTable()) => Ok(99),
-        Error(e) => Error(e),
-      }
-    }
-  )
+  let read = store.transact(mut s, gone_rows, ())
   let n = stored(mut s, "gone")
   if leftovers(mut s) != 0 {
     return 0
@@ -159,10 +117,10 @@ fn whole_or_none(mut s: store.Store[Dir]) -> u8 {
 }
 
 // A store holding `t` seeded, in a fresh directory.
-fn fresh(t: Test, table: table.Table[String, Item]) -> Result[Dir, store.StoreError] {
+fn fresh(t: Test, name: String) -> Result[Dir, store.StoreError] {
   let d = test.dir(t, [])
   let mut s = store.open(d, store.default_config())?
-  let ok = seed(mut s, table)
+  let ok = seed(mut s, name)
   store.close(take s)?
   if !ok {
     return Error(Corrupt("seed"))
@@ -267,17 +225,9 @@ pub fn main(t: Test) -> Result[(), store.StoreError] {
 
 fn scenario(t: Test, sc: Scope) -> Result[(), store.StoreError] {
   // No one commit rewrites or deletes every row of the table.
-  let d = fresh(t, items())?
+  let d = fresh(t, "items")?
   let mut small = store.open(d, tight())?
-  let too_large = store.transact(
-    mut small,
-    fn(mut tx: store.Tx) -> Result[(), store.TxError] {
-      for k in 1u32..7u32 {
-        let _ = table.delete(mut tx, items(), row_key(k))?
-      }
-      Ok(())
-    }
-  )
+  let too_large = store.transact(mut small, delete_rows, 7u32)
   test.check(t, too_large == Error(Aborted(Limit(TransactionBytes()))))
   store.close(take small)?
   // Crashes before the install leave the old table, crashes after it the new.
@@ -289,22 +239,83 @@ fn scenario(t: Test, sc: Scope) -> Result[(), store.StoreError] {
     let found = migrate_crashing(at, sc, n)?
     seen[int.widen(found)] = true
     if found != 1 {
-      at = fresh(t, items())?
+      at = fresh(t, "items")?
     }
     n += 1
   }
   test.check(t, !seen[0] && seen[1] && seen[2] && seen[3])
   let mut dropped: List[bool] = [false, false, false, false]
   n = 0
-  at = fresh(t, gone())?
+  at = fresh(t, "gone")?
   while !dropped[3] && n < 200 {
     let found = drop_crashing(at, n)?
     dropped[int.widen(found)] = true
     if found != 1 {
-      at = fresh(t, gone())?
+      at = fresh(t, "gone")?
     }
     n += 1
   }
   test.check(t, !dropped[0] && dropped[1] && dropped[2] && dropped[3])
+  Ok(())
+}
+
+// 1 for the old table, every row intact and writable; 2 for the migrated
+// one, every row priced; 0 for anything else.
+fn which_table(mut tx: store.Tx, info: store.CallInfo, a: ()) -> Result[
+  u8,
+  store.TxError
+] {
+  match table.range(tx, items(), Unbounded(), Unbounded(), 200, Ascending()) {
+    Ok(rows) => {
+      let mut k: u32 = 0
+      for row in rows {
+        k += 1
+        if row != (row_key(k), Item(label: label(k), count: k)) {
+          return Ok(0)
+        }
+      }
+      table.put(mut tx, items(), "written", Item(label: "written", count: 99))?
+      if k == 6 && table.delete(mut tx, items(), "written")? {
+        return Ok(1)
+      }
+      Ok(0)
+    },
+    Error(Schema(_)) => {
+      let rows = table.range(tx, priced(), Unbounded(), Unbounded(), 200, Ascending())?
+      let mut k: u32 = 0
+      for row in rows {
+        k += 1
+        if row != (row_key(k), Priced(label: label(k), cents: int.widen(k) * 100)) {
+          return Ok(0)
+        }
+      }
+      if k == 6 {
+        return Ok(2)
+      }
+      Ok(0)
+    },
+    Error(e) => Error(e),
+  }
+}
+
+// The rows of `gone`, or 99 when it does not exist.
+fn gone_rows(mut tx: store.Tx, info: store.CallInfo, a: ()) -> Result[
+  u64,
+  store.TxError
+] {
+  match table.range(tx, gone(), Unbounded(), Unbounded(), 200, Ascending()) {
+    Ok(rows) => Ok(list.len(rows)),
+    Error(NoTable()) => Ok(99),
+    Error(e) => Error(e),
+  }
+}
+
+fn delete_rows(mut tx: store.Tx, info: store.CallInfo, n: u32) -> Result[
+  (),
+  store.TxError
+] {
+  for k in 1u32..n {
+    let _ = table.delete(mut tx, items(), row_key(k))?
+  }
   Ok(())
 }

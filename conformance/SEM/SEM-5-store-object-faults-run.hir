@@ -5,11 +5,17 @@
 // definite Refused(); and a create whose durability barrier failed after it
 // became visible is acknowledged only once the store has redone the barrier,
 // so the commit survives a crash.
+fn puts(mut tx: store.Tx, info: store.CallInfo, a: ()) -> Result[(), store.TxError] {
+  store.tx_put(mut tx, b"key", b"value")
+}
+
 fn write_one(mut s: store.Store[s3.Sim]) -> Result[(), store.StoreError] {
-  let mut tx = store.begin(mut s)
-  txn.put(mut tx, b"key", b"value")
-  let ticket = store.commit(mut s, take tx)?
-  store.durable(mut s, ticket)
+  match store.transact(mut s, puts, ()) {
+    Ok(()) => Ok(()),
+    Error(Storage(e)) => Error(e),
+    Error(Unknown(e)) => Error(e),
+    Error(_) => Error(Corrupt("write_one")),
+  }
 }
 
 pub fn main(t: Test) -> Result[(), store.StoreError] {

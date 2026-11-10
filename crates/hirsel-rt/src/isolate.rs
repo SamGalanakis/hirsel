@@ -287,20 +287,20 @@ pub unsafe extern "C" fn hirsel_rt_v2_isolate_begin(
     STATUS_OK
 }
 
-/// `$intrinsic.ApplyBegin()`: `runner.apply`'s in-task boundary (FAIL-2). It opens the same
-/// invocation as [`hirsel_rt_v2_isolate_begin`] but is no scheduling point: the entry runs on
-/// the current task at once, so the no-failure path is this push, the call and End.
+/// The bit of an isolation start that marks `runner.apply`'s lazy invocation.
+pub const LAZY_START: u64 = 1 << 63;
+
+/// `$intrinsic.ApplyBegin()`: `runner.apply`'s in-task boundary (FAIL-2). It is no scheduling
+/// point and records nothing: the entry runs on the current task at once and cannot suspend,
+/// so its invocation is recorded only when [`hirsel_rt_v2_isolate_catch`] catches, and the
+/// no-failure path is this read, the call and no End.
 ///
 /// # Safety
 /// `ctx` is live and `out` writable.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hirsel_rt_v2_apply_begin(ctx: *mut TaskCtx, out: *mut u64) -> u8 {
-    // SAFETY: caller contract; the task owns its invocations.
-    unsafe {
-        let mark = (*ctx).failure.count();
-        (*ctx).isolations.begin(mark);
-        out.write(mark as u64);
-    }
+    // SAFETY: caller contract.
+    unsafe { out.write((*ctx).failure.count() as u64 | LAZY_START) };
     STATUS_OK
 }
 
@@ -314,7 +314,13 @@ pub unsafe extern "C" fn hirsel_rt_v2_isolate_catch(ctx: *mut TaskCtx, start: u6
     // SAFETY: this semantic entry owns its task until it suspends or returns.
     let _role = unsafe { crate::tasks::role::Guard::new(ctx) };
     let path = crate::tasks::current_path(ctx);
-    let start = usize::try_from(start).unwrap_or_else(|_| fault("an isolation start overflows"));
+    let lazy = start & LAZY_START != 0;
+    let start = usize::try_from(start & !LAZY_START)
+        .unwrap_or_else(|_| fault("an isolation start overflows"));
+    if lazy {
+        // SAFETY: the task owns its invocations; `runner.apply` records its own here.
+        unsafe { (*ctx).isolations.begin(start) };
+    }
     // SAFETY: the task owns its current invocation.
     let invocation = unsafe { (*ctx).isolations.active() };
     if invocation.mark != start || invocation.caught.is_some() {

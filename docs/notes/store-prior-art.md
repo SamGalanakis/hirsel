@@ -2,78 +2,13 @@
 
 Reference: slatedb/slatedb `a5c4fd22b36c836a89d8c4f27bf0b7b045e62e32` (Apache-2.0).
 
-## Per-key conflict detection
+## Transactions
 
-`std@1/txn_manager` ports SlateDB's `TransactionManager`
-(`slatedb/src/transaction_manager.rs`):
-
-| Hirsel | SlateDB |
-|---|---|
-| `Isolation = SnapshotIsolation \| SerializableSnapshot` | `IsolationLevel` (`:13`) |
-| `begin`, `begin_at` | `new_transaction` (`:112`), `new_txn_with_id` (`:130`) |
-| `end` | `drop_txn` (`:151`) |
-| `has_conflict` | `check_has_conflict`, `has_write_write_conflict`, `has_read_write_conflict` (`:190`, `:324`, `:350`) |
-| `track_committed`, `track_batch` | `track_recent_committed_txn` (`:219`), `track_recent_committed_write_batch` (`:241`) |
-| `min_active`, `recycle` | `min_active_seq` (`:259`), `recycle_recent_committed_txns` (`:296`) |
-| `txn.get` / `txn.range` record a key / the asked range under `SerializableSnapshot` | `DbTransaction::get_key_value_with_options` (`db_transaction.rs:150`), `scan_inner` (`:299`) |
-| `txn.mark_read` | `DbTransaction::mark_read` (`:410`) |
-| `store.rollback` | `DbTransaction::rollback` (`:625`) |
-
-`store.commit` checks the transaction's write keys, read keys and read ranges
-against the write sets of commits made after it began, as `commit_with_options`
-(`db_transaction.rs:572`) and the batch writer do; disjoint transactions now
-both commit. `store.transact` and `store.call` hold the store from begin to
-commit, so nothing can land in between: they skip the check, and when no
-transaction is open the store keeps and builds no write sets.
-
-### Deviations
-
-- **`store.begin` is serializable.** SlateDB's default is `Snapshot`. Before
-  this change every commit since `begin` conflicted, which is serializable;
-  defaulting to snapshot isolation would have silently admitted write skew.
-  `begin_with(SnapshotIsolation())` gives SlateDB's default.
-- **Bounded retention and a horizon.** SlateDB frees an active transaction's
-  state when it is dropped. A `Txn` is a copyable value with no drop hook, so
-  an abandoned one never ends. The manager keeps at most 4096 write sets or
-  1 MiB of their keys (`Limits`); past a limit it drops the older half, raises
-  the horizon past them and forgets the transactions that began before it,
-  and such a transaction conflicts whenever it writes or read anything. A copy
-  of a committed transaction shares its id; the store therefore records every
-  commit as a batch after ending the id, so a diverged copy's write set is
-  never lost.
-- **Key sets travel with the transaction.** `has_conflict` and
-  `track_committed` take ascending key lists from the `Txn` instead of
-  accumulating them in the manager (`track_write_keys`, `track_read_keys`).
-  So `merges_conflict_keys` has no counterpart, and the committed record
-  keeps only its sequence and keys (no `started_seq`).
-- **Recycling drops a prefix.** Sequences are tracked in ascending order, so
-  `recycle` drops the leading write sets older than the oldest active
-  transaction (SlateDB filters with `retain`); the kept boundary matches
-  (`committed_seq >= min`). `committed_seq: None` cannot be represented, so
-  `test_recycle_recent_committed_txns_handles_none_committed_seq` is not
-  carried.
-- **Not carried:** `unmark_write` and merge operators (Hirsel has no merge
-  writes), TTLs, `commit_returns_before_durable` (the output gate is
-  `store.durable`, tested by SEM-5 group commit), the proptest invariants
-  beyond what the table cases and flows pin, and SlateDB's empty-batch commit
-  returning no handle (a Hirsel commit without writes still takes a sequence).
-
-### Vectors
-
-- `conformance/STORE/STORE-2-txn-manager-run.hir`: the 8 conflict-table
-  cases, the 3 `min_active_seq` cases, `new_transaction`, the 3 `drop_txn`
-  tests, 3 of the 4 `track_recent_committed_txn` cases, 4 recycle tests, the
-  lifecycle, concurrent and GC-timing flows, the SSI phantom range test, and
-  the retention limits.
-- `conformance/STORE/STORE-2-txn-isolation-run.hir`: all 20
-  `test_txn_table_driven` cases, run through the store with plain writes as
-  `store.transact` commits (about 1.9 million steps, so the case raises its
-  budget to 3 million).
-- `conformance/STORE/STORE-2-txn-conflicts-run.hir`: the 9 conflict tests from
-  `test_txn_si_commit_conflict` to
-  `test_txn_ssi_scan_prefix_subrange_tracks_composed_range`, and Hirsel's own:
-  serializable `begin` refuses write skew, disjoint transactions commit in any
-  order, rollback.
+An earlier `std@1/txn_manager` ported SlateDB's `TransactionManager` for
+per-key conflict detection between transactions open at once. Transactions
+are now entries that hold the store from their run to their commit
+(STORE-2), so none can conflict, and the port, its conflict cases and
+`Isolation` were deleted.
 
 ## Fencing (`fence.rs`)
 

@@ -6,14 +6,14 @@
 // lost returns its recorded outcome.
 @serializable
 type Opening {
-  call: store.CallRequest,
+  call: CallRequest,
   account: u64,
   cents: u64,
 }
 
 @serializable
 type Transfer {
-  call: store.CallRequest,
+  call: CallRequest,
   from: u64,
   to: u64,
   cents: u64,
@@ -24,17 +24,25 @@ type LedgerError = Grant(FileError) | Store(store.StoreError) | Call(
   store.CallFailure[ledger.Refusal]
 )
 
+fn opens(mut tx: store.Tx, info: store.CallInfo, req: Opening) -> Result[
+  u64,
+  ledger.Refusal
+] {
+  ledger.open(mut tx, req.account, req.cents)
+}
+
+fn moves(mut tx: store.Tx, info: store.CallInfo, req: Transfer) -> Result[
+  ledger.Receipt,
+  ledger.Refusal
+] {
+  ledger.transfer(mut tx, req.from, req.to, req.cents)
+}
+
 /// Opens an account with a starting balance, once per call position.
 fn open_account(rt: Io, req: Opening) -> Result[u64, LedgerError] {
   let d = io.dir(rt, path.of("ledger")) ? Grant
   let mut s = store.open(d, store.default_config()) ? Store
-  let outcome = store.call(
-    mut s,
-    req.call,
-    fn(mut tx: store.Tx) -> Result[u64, ledger.Refusal] {
-      ledger.open(mut tx, req.account, req.cents)
-    }
-  )
+  let outcome = store.call(mut s, req.call, opens, req)
   store.close(take s) ? Store
   Ok(outcome ? Call)
 }
@@ -43,13 +51,7 @@ fn open_account(rt: Io, req: Opening) -> Result[u64, LedgerError] {
 fn transfer(rt: Io, req: Transfer) -> Result[ledger.Receipt, LedgerError] {
   let d = io.dir(rt, path.of("ledger")) ? Grant
   let mut s = store.open(d, store.default_config()) ? Store
-  let outcome = store.call(
-    mut s,
-    req.call,
-    fn(mut tx: store.Tx) -> Result[ledger.Receipt, ledger.Refusal] {
-      ledger.transfer(mut tx, req.from, req.to, req.cents)
-    }
-  )
+  let outcome = store.call(mut s, req.call, moves, req)
   store.close(take s) ? Store
   Ok(outcome ? Call)
 }
@@ -60,12 +62,12 @@ type Op = Open(u64, u64) | Move(u64, u64, u64)
 
 /// The request for stream position `position`. Its digest names the operation,
 /// so the store refuses a different request at a position it already ran.
-fn request(position: u64, op: Op) -> store.CallRequest {
+fn request(position: u64, op: Op) -> CallRequest {
   let text = match op {
     Open(account, cents) => f"open {account} {cents}",
     Move(from, to, cents) => f"move {from} {to} {cents}",
   }
-  store.CallRequest(
+  CallRequest(
     stream: b"client-1",
     epoch: 1,
     position: position,
@@ -80,7 +82,6 @@ fn store_error(e: store.StoreError) -> String {
     Refused(_) => "refused",
     Corrupt(name) => f"corrupt {name}",
     Fenced() => "fenced",
-    Conflict() => "conflict",
     Limit(_) => "limit",
     Injected() => "injected",
     Closed() => "closed",
@@ -96,6 +97,7 @@ fn shown(e: RunError[LedgerError]) -> String {
     Failed(Call(Tx(Aborted(Table(_))))) => "table error",
     Failed(Call(Tx(Storage(s)))) => f"commit failed: {store_error(s)}",
     Failed(Call(Tx(Unknown(s)))) => f"commit unknown: {store_error(s)}",
+    Failed(Call(Tx(Faulted(f)))) => f"transaction faulted: {f.rule}",
     Failed(Call(Tx(_))) => "not committed",
     Failed(Call(Denied())) => "stream fenced",
     Failed(Call(Rejected())) => "position rejected",

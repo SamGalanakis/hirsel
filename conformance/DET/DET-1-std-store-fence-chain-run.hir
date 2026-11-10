@@ -6,11 +6,25 @@
 // fenced in turn by a third; and their checks that the newest log object is
 // the empty fence log, that log ids are contiguous and that a reopen holds
 // every acknowledged commit and no stale one.
+@serializable
+type Pair {
+  key: Bytes,
+  value: Bytes,
+}
+
+fn puts(mut tx: store.Tx, info: store.CallInfo, p: Pair) -> Result[(), store.TxError] {
+  store.tx_put(mut tx, unique p.key, unique p.value)
+}
+
+// The store's error, whether or not the commit may have become durable.
 fn put(mut s: store.Store[Dir], k: Bytes, v: Bytes) -> Result[(), store.StoreError] {
-  let mut x = store.begin(mut s)
-  txn.put(mut x, unique k, unique v)
-  let ticket = store.commit(mut s, take x)?
-  store.durable(mut s, ticket)
+  match store.transact(mut s, puts, Pair(key: unique k, value: unique v)) {
+    Ok(()) => Ok(()),
+    Error(Storage(e)) => Error(e),
+    Error(Unknown(e)) => Error(e),
+    Error(Limit(l)) => Error(Limit(l)),
+    Error(_) => Error(Corrupt("put")),
+  }
 }
 
 // The log ids, which must be contiguous, and the size of the newest log.

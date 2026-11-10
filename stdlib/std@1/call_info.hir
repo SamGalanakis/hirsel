@@ -1,0 +1,17 @@
+// Reading a transaction's call information (STORE-4), which only std@1/store
+// mints.
+/// The principal the place admitted, empty for a local call.
+pub fn caller(c: store.CallInfo) -> String uses {} {
+  unique c.caller
+}
+
+/// The commit-order time, signed Unix nanoseconds from the head's clock; 0
+/// when the head has no clock and for a query.
+pub fn at(c: store.CallInfo) -> i64 uses {} {
+  c.at
+}
+
+/// Eight bytes the head fixed when it ordered the transaction; 0 for a query.
+pub fn seed(c: store.CallInfo) -> u64 uses {} {
+  c.seed
+}

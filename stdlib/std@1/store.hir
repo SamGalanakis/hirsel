@@ -18,11 +18,10 @@
 // a freed name would let a superseded writer's create succeed. Compaction
 // only lets recovery skip what the newest manifest no longer reaches.
 //
-// Transactions begun with `begin` detect conflicts per key at commit through
-// std@1/txn_manager, after SlateDB's transaction_manager.rs: a commit
-// conflicts only with commits made after it began that wrote a key it writes
-// or, under serializable snapshot isolation, a key in its access set: a key
-// it read or a key inside an interval a scan of it consumed.
+// A transaction is an entry (STORE-2): `transact`, `query` and `call` run
+// it through `runner.apply` on argument bytes decoded afresh, with call
+// information minted before the run. The store holds itself from the run to
+// the commit, so no commit lands in between and there is no conflict.
 /// The storage seam: immutable whole-object reads, conditional creation,
 /// ordered prefix discovery, deletion and directory setup. `put_new` returns
 /// `Ok` only once an object with exactly these bytes holds the name, durably
@@ -139,44 +138,32 @@ pub type StoreFaults = NoFaults | StopAfterWrites(u64)
 /// a create's outcome may be undecided; `Refused` is a create the backend
 /// refused before it had any effect; `Corrupt`
 /// names an object that fails its checksum or the layout's rules (in a
-/// `Volatile()` store, a bad log instead ends the recovered log); `Fenced` means another writer claimed the store; `Conflict` means
-/// a commit after the transaction began wrote a key it conflicts on; `Limit`
+/// `Volatile()` store, a bad log instead ends the recovered log); `Fenced` means another writer claimed the store; `Limit`
 /// is a commit over the configured limits, or at `open` a `transaction_bytes`
 /// the backend's objects cannot hold; `Injected` is a `StopAfterWrites` stop.
 /// After `Storage`, `Refused`, `Corrupt`, `Fenced` or `Injected` the store is
 /// closed and every later call returns `Closed`.
 @serializable
-pub type StoreError = Storage(FileError) | Refused(FileError) | Corrupt(String) | Fenced | Conflict | Limit(
+pub type StoreError = Storage(FileError) | Refused(FileError) | Corrupt(String) | Fenced | Limit(
   TxLimit
 ) | Injected | Closed
 
 /// How a transaction ended without its outcome: `Aborted(e)` when the body
 /// returned `Error(e)` and its writes were discarded; `Canceled(cause)` before
-/// the body started (only the call-stream form is canceled); `Storage(e)` and
+/// the body started (only the call-stream form is canceled); `Faulted(f)` when
+/// the body failed with `f` (FAIL-2), its writes discarded, nothing recorded
+/// and the store usable; `Storage(e)` and
 /// `Limit(..)` when nothing was committed; `Unknown(e)` when the commit was
 /// attempted and the store could not tell whether it became durable, which the
 /// next `open` decides.
 @serializable
-pub type TxFailure[E] = Aborted(E) | Canceled(CancelCause) | Storage(StoreError) | Limit(
-  TxLimit
-) | Unknown(StoreError)
+pub type TxFailure[E] = Aborted(E) | Canceled(CancelCause) | Faulted(Failure) | Storage(
+  StoreError
+) | Limit(TxLimit) | Unknown(StoreError)
 
 /// Which of the configured limits a commit exceeded.
 @serializable
 pub type TxLimit = KeyBytes | ValueBytes | TransactionBytes | RangeRows
-
-/// One call on an ordered call stream: the caller's stream identity and
-/// executor epoch, the call's position (consecutive from 1), the digest of
-/// the request, and the highest position whose outcome the caller has made
-/// durable, which the store may then forget.
-@serializable
-pub type CallRequest {
-  stream: Bytes,
-  epoch: u64,
-  position: u64,
-  digest: Bytes,
-  acknowledged: u64,
-}
 
 /// Why a call returned no outcome of its own: `Tx(f)` as for `transact`;
 /// `Denied()` when a later executor epoch holds the stream; `Rejected()` for a
@@ -216,11 +203,16 @@ pub opaque type Snapshot: copyable uses {} {
   index: ordered_map.OrderedMap[Bytes, Bytes],
 }
 
-/// How a transaction's commit detects conflicts, after SlateDB's
-/// IsolationLevel (transaction_manager.rs:13). `SnapshotIsolation` conflicts
-/// with a later commit that wrote a key it writes or marked read;
-/// `SerializableSnapshot` also with one that wrote a key in its access set.
-pub type Isolation = SnapshotIsolation | SerializableSnapshot
+/// What a store's head states about one transaction (STORE-4), the same for
+/// every run of it: the caller's principal (empty for a local call), the
+/// commit-order time (0: this head has no clock) and a seed fixed when the
+/// transaction is ordered. A query is not ordered: its time and seed are 0.
+/// Only the store mints one; `call_info` reads it.
+pub opaque type CallInfo: copyable + data + inert uses {} {
+  caller: String,
+  at: i64,
+  seed: u64,
+}
 
 /// What one run of a body read (STORE-14), over byte keys. `points` holds
 /// every key it read, whether or not the key held a value, in the order read
@@ -242,26 +234,21 @@ pub type Span {
   direction: ordered_map.Direction,
 }
 
-/// A transaction: reads see the snapshot it began at plus its own writes.
-/// Dropping it aborts it; `rollback` also frees its conflict tracking at once.
-pub opaque type Txn: copyable uses {} {
+// One run of a transaction body: the commit it reads at, that state with its
+// own writes applied, its writes and its access set.
+type Run {
   base: u64,
-  // The id its store's transaction manager knows it by, 0 for none.
-  id: u64,
-  isolation: Isolation,
   state: ordered_map.OrderedMap[Bytes, Bytes],
   writes: ordered_map.OrderedMap[Bytes, Option[Bytes]],
-  // Under `SerializableSnapshot` and in every `Tx`, every read; marked reads
-  // under either isolation.
   access: AccessSet,
 }
 
-/// The scoped capability a `transact` body holds: reads see the commit the
-/// transaction began at plus its own writes. It cannot leave the body, and it
+/// The scoped capability a transaction entry holds: reads see the commit the
+/// transaction began at plus its own writes. It cannot leave the entry, and it
 /// reaches only the keys of its scope.
 @capability(local)
 pub opaque type Tx: () uses {Recorder} {
-  txn: Txn,
+  txn: Run,
   limits: StoreLimits,
   scope: KeyScope,
   // The run's access set (STORE-14), recorded through borrowed reads: every
@@ -319,7 +306,6 @@ pub opaque type Store[S]: () uses {S} {
   config: StoreConfig,
   epoch: u64,
   index: ordered_map.OrderedMap[Bytes, Bytes],
-  txns: txn_manager.Manager,
   // An empty access set whose lists keep the capacity an earlier run grew,
   // so a run records its reads without allocating once the store is warm.
   spare: AccessSet,
@@ -389,9 +375,11 @@ pub fn default_config() -> StoreConfig uses {} {
 pub fn reserved(key: Bytes) -> bool uses {} {
   // The first byte settles nearly every key: the namespace begins with `h`.
   let prefix = b"hirsel."
-  bytes.len(key) >= bytes.len(prefix) && key[0] == prefix[0] && bytes.slice(key, 0, bytes.len(
-    prefix
-  )) == prefix
+  bytes.len(key) >= bytes.len(prefix) && key[0] == prefix[0] && bytes.slice(
+    key,
+    0,
+    bytes.len(prefix)
+  ) == prefix
 }
 
 /// The commit order position of a ticket: the n-th commit since the store
@@ -456,7 +444,6 @@ pub fn open_backend[S](take state: S, take backend: Backend[S], config: StoreCon
     config: config,
     epoch: 0,
     index: ordered_map.empty(compare_keys),
-    txns: txn_manager.new(0, txn_manager.default_limits()),
     spare: AccessSet(points: [], spans: []),
     visible: 0,
     durable: 0,
@@ -479,7 +466,6 @@ pub fn open_backend[S](take state: S, take backend: Backend[S], config: StoreCon
   }
   match recover(mut s) {
     Ok(()) => {
-      s.txns = txn_manager.new(s.visible, txn_manager.default_limits())
       collect(mut s)?
       Ok(take s)
     },
@@ -532,7 +518,7 @@ fn collect[S](mut s: Store[S]) -> Result[(), StoreError] {
     let skip = bytes.len(b"hirsel.garbage/")
     let (from, to) = prefix_bounds(bytes.slice(entry, skip, bytes.len(entry)))
     if delete_within(mut t, s.config.limits, from, to) && ordered_map.len(t.writes) == 0 {
-      txn.delete(mut t, unique entry)
+      run_delete(mut t, unique entry)
       if bytes.len(value) >= 4 {
         let mut n: u64 = 0
         let mut i: u64 = 0
@@ -545,7 +531,7 @@ fn collect[S](mut s: Store[S]) -> Result[(), StoreError] {
           discard(mut s, take t)
           return Error(Corrupt("garbage entry"))
         }
-        txn.put(
+        run_put(
           mut t,
           bytes.slice(value, 4, 4 + n),
           bytes.slice(value, 4 + n, bytes.len(value))
@@ -566,7 +552,7 @@ fn collect[S](mut s: Store[S]) -> Result[(), StoreError] {
 // writes nothing else, stays within `limits`; true when none remain. The
 // whole span is in `t`'s reads.
 fn delete_within(
-  mut t: Txn,
+  mut t: Run,
   limits: StoreLimits,
   low: ordered_map.Bound[Bytes],
   high: ordered_map.Bound[Bytes]
@@ -585,7 +571,7 @@ fn delete_within(
     if total > limits.transaction_bytes {
       return false
     }
-    txn.delete(mut t, unique key)
+    run_delete(mut t, unique key)
   }
   list.len(entries_in(t.state, low, high, Ascending(), 1)) == 0
 }
@@ -620,30 +606,11 @@ pub fn range(
   entries_in(snap.index, from, to, direction, limit)
 }
 
-/// Starts a serializable transaction at the latest commit.
-pub fn begin[S](mut s: Store[S]) -> Txn uses {} {
-  begin_with(mut s, SerializableSnapshot())
-}
-
-/// Starts a transaction at the latest commit under `isolation`, registered
-/// with the store's transaction manager (DbTransaction::begin).
-pub fn begin_with[S](mut s: Store[S], isolation: Isolation) -> Txn uses {} {
-  let (id, base) = txn_manager.begin(mut s.txns)
-  fresh(mut s, base, id, isolation)
-}
-
-// A transaction no manager tracks, for a body that holds the store from
-// begin to commit, so no commit lands in between.
-fn serial[S](mut s: Store[S]) -> Txn uses {} {
-  let base = s.visible
-  fresh(mut s, base, 0, SnapshotIsolation())
-}
-
-fn fresh[S](mut s: Store[S], base: u64, id: u64, isolation: Isolation) -> Txn uses {} {
-  Txn(
-    base: base,
-    id: id,
-    isolation: isolation,
+// A run at the latest commit, for a call that holds the store from the run to
+// its commit, so no commit lands in between.
+fn serial[S](mut s: Store[S]) -> Run uses {} {
+  Run(
+    base: s.visible,
     state: current(mut s),
     writes: ordered_map.empty(compare_keys),
     access: replace(mut s.spare, AccessSet(points: [], spans: []))
@@ -658,17 +625,22 @@ fn reuse[S](mut s: Store[S], take a: AccessSet) -> () uses {} {
   s.spare = take kept
 }
 
-/// Ends `t` without committing it, as dropping it does, and frees what the
-/// store tracks for its conflicts (DbTransaction::rollback).
-pub fn rollback[S](mut s: Store[S], take t: Txn) -> () uses {} {
-  txn_manager.end(mut s.txns, t.id)
-  discard(mut s, take t)
+// Drops a run's writes, keeping its access set's capacity.
+fn discard[S](mut s: Store[S], take t: Run) -> () uses {} {
+  let Run(access: access, ..) = take t
+  reuse(mut s, take access)
 }
 
-// Drops a transaction no manager tracks, keeping its access set's capacity.
-fn discard[S](mut s: Store[S], take t: Txn) -> () uses {} {
-  let Txn(access: access, ..) = take t
-  reuse(mut s, take access)
+// Stores `value` under `key` when the run commits.
+fn run_put(mut t: Run, take key: Bytes, take value: Bytes) -> () uses {} {
+  ordered_map.insert(mut t.state, copy key, copy value)
+  ordered_map.insert(mut t.writes, take key, Some(take value))
+}
+
+// Removes `key` when the run commits.
+fn run_delete(mut t: Run, take key: Bytes) -> () uses {} {
+  let _ = ordered_map.remove(mut t.state, key)
+  ordered_map.insert(mut t.writes, take key, None())
 }
 
 // Records that the run read `key`, whether or not it holds a value.
@@ -719,35 +691,6 @@ fn consumed(
   )
 }
 
-// Whether a write to `key` can change what `a` read.
-fn touches(a: AccessSet, key: Bytes) -> bool uses {} {
-  for p in a.points {
-    if p == key {
-      return true
-    }
-  }
-  for span in a.spans {
-    if within(span, key) {
-      return true
-    }
-  }
-  false
-}
-
-fn within(span: Span, key: Bytes) -> bool uses {} {
-  let above = match span.from {
-    Unbounded() => true,
-    Included(low) => !(key < low),
-    Excluded(low) => low < key,
-  }
-  let below = match span.to {
-    Unbounded() => true,
-    Included(high) => !(high < key),
-    Excluded(high) => key < high,
-  }
-  above && below
-}
-
 // A share of the index that outlives this call: the index moves out of the
 // store, which only holds owned values, so a copy of it is owned too.
 fn current[S](mut s: Store[S]) -> ordered_map.OrderedMap[Bytes, Bytes] uses {} {
@@ -757,41 +700,20 @@ fn current[S](mut s: Store[S]) -> ordered_map.OrderedMap[Bytes, Bytes] uses {} {
   share
 }
 
-/// Commits `t`'s writes as the next commit, visible at once to later
-/// snapshots and transactions, and returns its ticket. `Conflict()` when a
-/// commit after `t` began wrote a key `t` conflicts on (see `Isolation`); a
-/// transaction older than the store's conflict retention conflicts whenever
-/// it writes or read anything. `Limit(..)` when `t`'s writes exceed the
-/// configured limits; the commit has no effect and the store stays open. A
-/// commit that fills its group, by count or by the backend's object cap,
-/// writes the group's log object; await its durability with `durable`.
-pub fn commit[S](mut s: Store[S], take t: Txn) -> Result[Ticket, StoreError] uses {s} {
+// Commits run `t`'s writes as the next commit, visible at once to later
+// snapshots and runs, and returns its ticket. `Limit(..)` when they exceed the
+// configured limits; the commit has no effect and the store stays open. A
+// commit that fills its group, by count or by the backend's object cap, writes
+// the group's log object; `durable` awaits it. The store was held from the
+// run's start, so its state is the index plus its writes.
+fn commit[S](mut s: Store[S], take t: Run) -> Result[Ticket, StoreError] uses {s} {
   if s.closed {
     return Error(Closed())
   }
-  let Txn(
-    base: base,
-    id: id,
-    isolation: _,
-    state: state,
-    writes: writes,
-    access: access
-  ) = take t
+  let Run(base: _, state: state, writes: writes, access: access) = take t
   if let Some(l) = over_limit(s.config.limits, writes) {
-    txn_manager.end(mut s.txns, id)
     reuse(mut s, take access)
     return Error(Limit(l))
-  }
-  // Nothing committed since `t` began, the common case and every
-  // `transact`: nothing to check, and `t`'s state is the index plus its writes.
-  let latest = base == s.visible
-  if !latest {
-    let written = write_keys(writes)
-    if txn_manager.has_conflict(s.txns, base, written, access) {
-      txn_manager.end(mut s.txns, id)
-      reuse(mut s, take access)
-      return Error(Conflict())
-    }
   }
   reuse(mut s, take access)
   let set = write_set(writes)
@@ -799,27 +721,10 @@ pub fn commit[S](mut s: Store[S], take t: Txn) -> Result[Ticket, StoreError] use
   // the cap is written first. The commit alone fits, as `open` checked.
   let size = commit_bytes(set)
   if list.len(s.pending) > 0 && LOG_FRAME + s.pending_bytes + size > s.object_bytes {
-    if let Error(e) = flush(mut s) {
-      txn_manager.end(mut s.txns, id)
-      return Error(e)
-    }
+    flush(mut s)?
   }
-  if latest {
-    s.index = take state
-  } else {
-    apply(mut s.index, set)
-  }
+  s.index = take state
   s.visible += 1
-  // Ending first and then recording the write set as a batch records it even
-  // for a copy of a transaction whose id another copy already ended. With
-  // nothing active the manager keeps no write set, so none is built.
-  txn_manager.end(mut s.txns, id)
-  let retained: List[Bytes] = if txn_manager.active(s.txns) > 0 {
-    write_keys(writes)
-  } else {
-    []
-  }
-  txn_manager.track_batch(mut s.txns, s.visible, take retained)
   list.push(mut s.pending, take set)
   s.pending_bytes += size
   if list.len(s.pending) >= s.config.group_limit {
@@ -828,10 +733,10 @@ pub fn commit[S](mut s: Store[S], take t: Txn) -> Result[Ticket, StoreError] use
   Ok(Ticket(seq: s.visible))
 }
 
-/// The output gate: returns once the commit `t` names is in a written log
-/// object, synced when the store is `Durable()`, together with every earlier
-/// commit. Writes the pending group if `t` is in it.
-pub fn durable[S](mut s: Store[S], t: Ticket) -> Result[(), StoreError] uses {s} {
+// The output gate: returns once the commit `t` names is in a written log
+// object, synced when the store is `Durable()`, together with every earlier
+// commit. Writes the pending group if `t` is in it.
+fn durable[S](mut s: Store[S], t: Ticket) -> Result[(), StoreError] uses {s} {
   if s.closed {
     return Error(Closed())
   }
@@ -879,12 +784,66 @@ pub fn close[S](take store: Store[S]) -> Result[(), StoreError] uses {store} {
   flush(mut s)
 }
 
-/// Runs `body` once with a fresh `Tx` at the latest commit and commits its
-/// writes as one commit when it returns `Ok`. The outcome, of any kind, is
-/// returned only once every commit the body could see, and its own, is
-/// durable: the output gate. `Error(e)` discards the writes and returns
-/// `Aborted(e)`; a failure in the body discards them and propagates.
-pub fn transact[S, R: inert, E: inert](
+/// Runs the transaction entry `f` once, with a fresh `Tx` at the latest
+/// commit, call information minted before the run and `a` decoded afresh from
+/// its argument bytes (STORE-2), and commits its writes as one commit when it
+/// returns `Ok`. `Error(e)` discards them and is `Aborted(e)`; a failure in
+/// the run discards them and is `Faulted(f)` (FAIL-2), and the store stays
+/// usable; writes over the limits are `Limit(..)`. The outcome, of any kind,
+/// is returned only once every commit the run could see, and its own, is
+/// durable: the output gate.
+pub fn transact[S, A: serializable, R: serializable, E: serializable](
+  mut s: Store[S],
+  f: Entry[fn(mut tx: Tx, info: CallInfo, a: A) -> Result[R, E]],
+  a: A
+) -> Result[R, TxFailure[E]] uses {s} {
+  if s.closed {
+    return Error(Storage(Closed()))
+  }
+  let Ok(argument) = fresh_argument(a) else {
+    return Error(Storage(Corrupt("hirsel.argument")))
+  }
+  let info = ordered(s)
+  let mut tx = Tx(
+    txn: serial(mut s),
+    limits: s.config.limits,
+    scope: everything(),
+    points: recorder.new(),
+    spans: recorder.new()
+  )
+  let returned = runner.apply_mut(f, mut tx, info, argument)
+  // The run `tx` ran; its access set is what the entry's reads recorded.
+  let Tx(txn: ran, limits: _, scope: _, points: read_points, spans: read_spans) = take tx
+  let mut t = take ran
+  t.access = AccessSet(
+    points: recorder.finish(take read_points),
+    spans: recorder.finish(take read_spans)
+  )
+  match take returned {
+    Ok(Ok(v)) => {
+      settle(mut s, take t) ? released
+      Ok(take v)
+    },
+    Ok(Error(e)) => {
+      let base = t.base
+      discard(mut s, take t)
+      gate(mut s, base) ? released
+      Error(Aborted(take e))
+    },
+    Error(failure) => {
+      let base = t.base
+      discard(mut s, take t)
+      gate(mut s, base) ? released
+      Error(Faulted(take failure))
+    },
+  }
+}
+
+// One of std's own transactions, run by calling `body` directly: a body
+// generic over its caller's types, as each of `table.migrate`'s steps is,
+// cannot be an entry. Outcomes are `transact`'s, but a failure in `body`
+// propagates.
+fn transact_body[S, R: inert, E: inert](
   mut s: Store[S],
   body: fn(mut tx: Tx) -> Result[R, E] uses {}
 ) -> Result[R, TxFailure[E]] uses {s} {
@@ -899,8 +858,7 @@ pub fn transact[S, R: inert, E: inert](
     spans: recorder.new()
   )
   let returned = body(mut tx)
-  // The transaction the body ran; its access set is what the body's reads
-  // recorded.
+  // The run `tx` ran; its access set is what the entry's reads recorded.
   let Tx(txn: ran, limits: _, scope: _, points: read_points, spans: read_spans) = take tx
   let mut t = take ran
   t.access = AccessSet(
@@ -921,19 +879,85 @@ pub fn transact[S, R: inert, E: inert](
   }
 }
 
-/// `transact` as one call on an ordered call stream, exactly once per
+/// Runs the query entry `f` once on `snap`, with a borrowed `Tx` that reads
+/// the snapshot and through which no write can be made, call information
+/// with no time or seed (a query is not ordered, STORE-4) and `a` decoded
+/// afresh. `Error(e)` is `Aborted(e)` and a failure in the run `Faulted(f)`.
+pub fn query[A: serializable, R: serializable, E: serializable](
+  take snap: Snapshot,
+  f: Entry[fn(tx: Tx, info: CallInfo, a: A) -> Result[R, E]],
+  a: A
+) -> Result[R, TxFailure[E]] uses {} {
+  let Ok(argument) = fresh_argument(a) else {
+    return Error(Storage(Corrupt("hirsel.argument")))
+  }
+  let tx = Tx(
+    txn: reading(take snap),
+    limits: default_config().limits,
+    scope: all(Read()),
+    points: recorder.new(),
+    spans: recorder.new()
+  )
+  let info = CallInfo(caller: "", at: 0, seed: 0)
+  let returned = runner.apply(f, tx, info, argument)
+  let Tx(txn: _, limits: _, scope: _, points: read_points, spans: read_spans) = take tx
+  let _: List[Bytes] = recorder.finish(take read_points)
+  let _: List[Span] = recorder.finish(take read_spans)
+  match take returned {
+    Ok(Ok(v)) => Ok(take v),
+    Ok(Error(e)) => Error(Aborted(take e)),
+    Error(failure) => Error(Faulted(take failure)),
+  }
+}
+
+// A run over `snap`'s state.
+fn reading(take snap: Snapshot) -> Run uses {} {
+  let Snapshot(seq: seq, index: index) = take snap
+  Run(
+    base: seq,
+    state: take index,
+    writes: ordered_map.empty(compare_keys),
+    access: AccessSet(points: [], spans: [])
+  )
+}
+
+// Fresh owned data decoded from the canonical encoding of `a` (STORE-2): a
+// round trip canonicalizes NaNs and `Set` order, as a recorded call's
+// re-execution sees them. A just-encoded value always decodes.
+fn fresh_argument[A: serializable](a: A) -> Result[A, DecodeError] uses {} {
+  let bytes = codec.encode(a)
+  codec.decode(bytes)
+}
+
+// The call information of the next transaction `s` orders (STORE-4): no
+// caller for a local call, no clock, and a seed from its place in the order.
+fn ordered[S](s: Store[S]) -> CallInfo uses {} {
+  CallInfo(caller: "", at: 0, seed: order_seed(s.visible + 1))
+}
+
+// splitmix64's finalizer: distinct versions give well-spread seeds.
+fn order_seed(version: u64) -> u64 uses {} {
+  let mut z = core@1/int.wrapping_mul(version, 0x9e3779b97f4a7c15u64)
+  z = core@1/int.wrapping_mul(z ^ z >> 30, 0xbf58476d1ce4e5b9u64)
+  z = core@1/int.wrapping_mul(z ^ z >> 27, 0x94d049bb133111ebu64)
+  z ^ z >> 31
+}
+
+/// `transact` as one request on an ordered call stream, exactly once per
 /// position. The stream's row decides the request in the transaction that
 /// would run it: an epoch below the row's is `Denied()`; a position at or
 /// below the acknowledged one, above the next one, or retained with another
 /// digest is `Rejected()`; a retained position with an equal digest returns
-/// its recorded outcome without running `body`; the next position runs
-/// `body`, and the same commit records the outcome in the row, so an outcome
-/// is recorded exactly when its writes commit. An outcome that writes
-/// nothing (an abort, a limit) is recorded by a commit of the row alone.
-pub fn call[S, R: inert + serializable, E: inert + serializable](
+/// its recorded outcome without running `f`; the next position runs `f`, and
+/// the same commit records the outcome in the row, so an outcome is recorded
+/// exactly when its writes commit. An outcome that writes nothing (an abort, a
+/// limit) is recorded by a commit of the row alone. A failure in the run is
+/// `Tx(Faulted(f))`, recorded nowhere: the position stays the next one.
+pub fn call[S, A: serializable, R: serializable, E: serializable](
   mut s: Store[S],
   req: CallRequest,
-  body: fn(mut tx: Tx) -> Result[R, E] uses {}
+  f: Entry[fn(mut tx: Tx, info: CallInfo, a: A) -> Result[R, E]],
+  a: A
 ) -> Result[R, CallFailure[E]] uses {s} {
   if s.closed {
     return Error(Tx(Storage(Closed())))
@@ -976,16 +1000,20 @@ pub fn call[S, R: inert + serializable, E: inert + serializable](
     if req.epoch > row.epoch {
       row.epoch = req.epoch
       let mut fence = serial(mut s)
-      txn.put(mut fence, copy key, codec.encode(row))
+      run_put(mut fence, copy key, codec.encode(row))
       settle(mut s, take fence) ? released_call
     } else {
       gate(mut s, base) ? released_call
     }
     return match take outcome {
       Ok(v) => Ok(take v),
-      Error(f) => Error(Tx(take f)),
+      Error(failed) => Error(Tx(take failed)),
     }
   }
+  let Ok(argument) = fresh_argument(a) else {
+    return Error(Tx(Storage(Corrupt("hirsel.argument"))))
+  }
+  let info = ordered(s)
   let mut tx = Tx(
     txn: take t,
     limits: s.config.limits,
@@ -995,9 +1023,8 @@ pub fn call[S, R: inert + serializable, E: inert + serializable](
   )
   // The row read decides the request, so the run read it.
   recorder.append(tx.points, copy key)
-  let returned = body(mut tx)
-  // The transaction the body ran; its access set is what the body's reads
-  // recorded.
+  let returned = runner.apply_mut(f, mut tx, info, argument)
+  // The run `tx` ran; its access set is what the entry's reads recorded.
   let Tx(txn: ran, limits: _, scope: _, points: read_points, spans: read_spans) = take tx
   let mut done = take ran
   done.access = AccessSet(
@@ -1005,8 +1032,13 @@ pub fn call[S, R: inert + serializable, E: inert + serializable](
     spans: recorder.finish(take read_spans)
   )
   let mut outcome: Result[R, TxFailure[E]] = match take returned {
-    Ok(v) => Ok(take v),
-    Error(e) => Error(Aborted(take e)),
+    Ok(Ok(v)) => Ok(take v),
+    Ok(Error(e)) => Error(Aborted(take e)),
+    Error(failure) => {
+      discard(mut s, take done)
+      gate(mut s, base) ? released_call
+      return Error(Tx(Faulted(take failure)))
+    },
   }
   row.epoch = req.epoch
   row.applied = req.position
@@ -1043,7 +1075,7 @@ pub fn call[S, R: inert + serializable, E: inert + serializable](
   settle(mut s, take commit_set) ? released_call
   match take outcome {
     Ok(v) => Ok(take v),
-    Error(f) => Error(Tx(take f)),
+    Error(failed) => Error(Tx(take failed)),
   }
 }
 
@@ -1076,7 +1108,7 @@ pub fn tx_get(tx: Tx, key: Bytes) -> Result[Option[Bytes], TxError]
 pub fn tx_put(mut tx: Tx, take key: Bytes, take value: Bytes) -> Result[(), TxError]
   requires !reserved(key) {
   admit(tx.scope, key, true)?
-  txn.put(mut tx.txn, take key, take value)
+  run_put(mut tx.txn, take key, take value)
   Ok(())
 }
 
@@ -1084,7 +1116,7 @@ pub fn tx_put(mut tx: Tx, take key: Bytes, take value: Bytes) -> Result[(), TxEr
 pub fn tx_delete(mut tx: Tx, take key: Bytes) -> Result[(), TxError]
   requires !reserved(key) {
   admit(tx.scope, key, true)?
-  txn.delete(mut tx.txn, take key)
+  run_delete(mut tx.txn, take key)
   Ok(())
 }
 
@@ -1315,7 +1347,6 @@ fn spans_hold(spans: List[ScopeSpan], lo: Bytes, hi: Option[Bytes], write: bool)
 // requirement, for libraries that keep their own rows under `hirsel.`. They
 // check scope as the byte operations do; the engine makes no exception for
 // a library's rows.
-
 // Reads one key after checking read access and the key limit.
 fn admit_read(tx: Tx, key: Bytes) -> Result[(), TxError] {
   admit(tx.scope, key, false)?
@@ -1340,7 +1371,7 @@ fn table_put(mut tx: Tx, take key: Bytes, take value: Bytes) -> Result[(), TxErr
   if let Some(limit) = check_put(tx, key, value) {
     return Error(Limit(limit))
   }
-  txn.put(mut tx.txn, take key, take value)
+  run_put(mut tx.txn, take key, take value)
   Ok(())
 }
 
@@ -1350,7 +1381,7 @@ fn table_delete(mut tx: Tx, take key: Bytes) -> Result[(), TxError] {
   if let Some(limit) = check_delete(tx, key) {
     return Error(Limit(limit))
   }
-  txn.delete(mut tx.txn, take key)
+  run_delete(mut tx.txn, take key)
   Ok(())
 }
 
@@ -1390,7 +1421,10 @@ pub fn keys(from: RangeBound[Bytes], to: RangeBound[Bytes], access: Access) -> K
   let write = writable(access)
   let mut parts: List[ScopeSpan] = []
   if lo < RESERVED_LO {
-    list.push(mut parts, ScopeSpan(lo: copy lo, hi: Some(min_end(hi, RESERVED_LO)), write: write))
+    list.push(
+      mut parts,
+      ScopeSpan(lo: copy lo, hi: Some(min_end(hi, RESERVED_LO)), write: write)
+    )
   }
   if before_end(RESERVED_HI, hi) {
     let start = if lo < RESERVED_HI {
@@ -1481,7 +1515,10 @@ pub fn narrow_read[R: inert](tx: Tx, scope: KeyScope, body: fn(sub: Tx) -> R use
 fn read_only(scope: KeyScope) -> KeyScope uses {} {
   let mut parts: List[ScopeSpan] = []
   for span in scope.spans {
-    list.push(mut parts, ScopeSpan(lo: unique span.lo, hi: unique span.hi, write: false))
+    list.push(
+      mut parts,
+      ScopeSpan(lo: unique span.lo, hi: unique span.hi, write: false)
+    )
   }
   normal(parts)
 }
@@ -1494,7 +1531,7 @@ fn scope_within(inner: KeyScope, outer: KeyScope) -> bool uses {} {
   }
   for span in inner.spans {
     let held = spans_hold(outer.spans, span.lo, span.hi, span.write)
-    if held == 0 || (span.write && held == 1) {
+    if held == 0 || span.write && held == 1 {
       return false
     }
   }
@@ -1612,8 +1649,8 @@ fn stream_key(stream: Bytes) -> Bytes uses {} {
 
 // Puts into `set` the stream row `row`, its retained outcomes followed by
 // `outcome` at `req`'s position.
-fn put_row[R: inert + serializable, E: inert + serializable](
-  mut set: Txn,
+fn put_row[R: serializable, E: serializable](
+  mut set: Run,
   take key: Bytes,
   take row: StreamRow,
   req: CallRequest,
@@ -1628,7 +1665,7 @@ fn put_row[R: inert + serializable, E: inert + serializable](
       outcome: codec.encode(outcome)
     )
   )
-  txn.put(mut set, take key, codec.encode(recorded))
+  run_put(mut set, take key, codec.encode(recorded))
 }
 
 // Releases a refusal once every commit the request could see is durable.
@@ -1709,7 +1746,7 @@ fn gate[S](mut s: Store[S], version: u64) -> Result[(), Unreleased] {
 
 // Commits `t` when it writes anything and waits until it is durable; a
 // transaction without writes waits for the commit it began at.
-fn settle[S](mut s: Store[S], take t: Txn) -> Result[(), Unreleased] {
+fn settle[S](mut s: Store[S], take t: Run) -> Result[(), Unreleased] {
   if ordered_map.len(t.writes) == 0 {
     let base = t.base
     discard(mut s, take t)
@@ -1783,23 +1820,6 @@ fn write_set(writes: ordered_map.OrderedMap[Bytes, Option[Bytes]]) -> List[Write
         Some(value) => list.push(mut out, Put(key: unique k, value: unique value)),
         None() => list.push(mut out, Delete(key: unique k)),
       }
-      (take out, true)
-    }
-  )
-}
-
-// The keys a transaction writes, ascending.
-fn write_keys(writes: ordered_map.OrderedMap[Bytes, Option[Bytes]]) -> List[Bytes] uses {} {
-  let first: List[Bytes] = []
-  ordered_map.fold_range(
-    writes,
-    Unbounded(),
-    Unbounded(),
-    Ascending(),
-    take first,
-    fn(take acc: List[Bytes], k: Bytes, _v: Option[Bytes]) -> (List[Bytes], bool) {
-      let mut out = take acc
-      list.push(mut out, unique k)
       (take out, true)
     }
   )
@@ -2422,13 +2442,13 @@ fn decode_entries(data: Bytes) -> Result[ordered_map.OrderedMap[Bytes, Bytes], (
 // the live Tx, so a limit refusal changes nothing and the body can continue.
 fn check_put(tx: Tx, key: Bytes, value: Bytes) -> Option[TxLimit] uses {} {
   let mut trial = copy tx.txn
-  txn.put(mut trial, unique key, unique value)
+  run_put(mut trial, unique key, unique value)
   over_limit(tx.limits, trial.writes)
 }
 
 fn check_delete(tx: Tx, key: Bytes) -> Option[TxLimit] uses {} {
   let mut trial = copy tx.txn
-  txn.delete(mut trial, unique key)
+  run_delete(mut trial, unique key)
   over_limit(tx.limits, trial.writes)
 }
 
@@ -2436,7 +2456,7 @@ fn check_delete(tx: Tx, key: Bytes) -> Option[TxLimit] uses {} {
 fn check_delete_all(tx: Tx, doomed: List[Bytes]) -> Option[TxLimit] uses {} {
   let mut trial = copy tx.txn
   for key in doomed {
-    txn.delete(mut trial, unique key)
+    run_delete(mut trial, unique key)
   }
   over_limit(tx.limits, trial.writes)
 }

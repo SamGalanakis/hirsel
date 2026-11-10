@@ -275,7 +275,7 @@ impl AcceptedFrontRegistration {
         let syntax = engine.snapshot(self.definition())?;
         let original = Some((syntax.anchor, syntax.occurrence, syntax.text_hash));
         let snapshot = engine.signature_inputs();
-        let anchors = crate::NativeRecordContext::capture(engine);
+        let anchors = engine.source_records();
         self.validate_exact(
             original,
             engine.verify,
@@ -696,7 +696,7 @@ impl QueryEngine {
             items: self.items.observations(),
             declarations: self.declarations.observations(),
             catalog: self.catalog.clone(),
-            owners: Arc::new(crate::NativeRecordContext::capture(self)),
+            owners: Arc::new(self.source_records()),
             cited: BTreeMap::new().into(),
             arm_fixes: BTreeMap::new().into(),
         };

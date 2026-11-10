@@ -293,6 +293,19 @@ class NativePoolRouting(unittest.TestCase):
                            '--case-part', f'{shard}/2', '--config-part', f'{part}/3']
                           for part in [1, 2, 3] for shard in [1, 2]])
 
+        # Every case/configuration/fault partition is required exactly once.
+        scope['read_root_config'] = lambda section, key, default: {
+            'native_paths': real, 'native_paths_split': '2', 'native_paths_parts': '3',
+            'native_paths_heap_parts': '4', 'native_paths_configs': 'x86_64/heap+inject'}.get(key, default)
+        before = len(calls)
+        for index in range(1, 26):
+            scope['hirsel_command_test'](f'gate-native-selected-shard-{index}', '//:binary',
+                                         ['--full'], [], '.', selected=('native_paths', '--filter', index))
+        self.assertEqual([call['args'] for call in calls[before:]],
+                         [['--full', '--filter', real, '--config', 'x86_64/heap+inject',
+                           '--case-part', f'{shard}/2', '--config-part', f'{part}/3', '--heap-part', f'{heap}/4']
+                          for heap in [1, 2, 3, 4] for part in [1, 2, 3] for shard in [1, 2]])
+
     def test_generated_tests_have_no_host_partition(self):
         buck = (sync.ROOT / 'BUCK').read_text()
         self.assertNotIn('host_cases =', buck)

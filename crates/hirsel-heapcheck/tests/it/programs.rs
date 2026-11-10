@@ -281,6 +281,51 @@ fn a_failure_cleanup_that_skips_a_release_is_found_at_its_site() {
     assert_eq!(violation.kind, ViolationKind::LeakedCredit);
 }
 
+/// A missing pool part would omit the planted cleanup leak at site 1.
+#[test]
+fn disjoint_campaign_parts_preserve_every_run_and_the_cleanup_witness() {
+    for leaky in [false, true] {
+        let p = campaign_program(leaky);
+        for reexecute_campaign in [false, true] {
+            let config = Config {
+                reexecute_campaign,
+                compare_campaigns: true,
+                ..Config::default()
+            };
+            let full = fault_campaign(&p, &path("main"), &[], &mut printer, &config);
+            let mut union = Vec::new();
+            for index in 1..=4 {
+                let part = fault_campaign(
+                    &p,
+                    &path("main"),
+                    &[],
+                    &mut printer,
+                    &Config {
+                        campaign_partition: Some(
+                            hirsel_heapcheck::CampaignPartition::new(index, 4).unwrap(),
+                        ),
+                        ..config.clone()
+                    },
+                );
+                assert_eq!(part.clean, full.clean);
+                assert!(part.injected.iter().all(|(site, _)| site % 4 == index - 1));
+                union.extend(part.injected);
+            }
+            union.sort_by_key(|(site, _)| *site);
+            assert_eq!(union, full.injected);
+            if leaky {
+                assert!(union.iter().any(|(site, run)| {
+                    *site == 1
+                        && run
+                            .result
+                            .as_ref()
+                            .is_err_and(|v| v.kind == ViolationKind::LeakedCredit)
+                }));
+            }
+        }
+    }
+}
+
 /// Large native consumers need every audit, but not every successful report's
 /// retained trace. Broken cleanup must keep the same first witness and still
 /// visit later sites; terminal finalizers belong to the same domain.

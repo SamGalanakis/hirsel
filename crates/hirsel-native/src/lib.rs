@@ -214,3 +214,6 @@ pub mod execution_objects;
 pub mod execution_plan;
 pub mod native_metadata;
 pub mod query_model;
+
+/// Pool partition of the independent heap oracle's campaign.
+pub use hirsel_heapcheck::CampaignPartition as HeapCampaignPartition;

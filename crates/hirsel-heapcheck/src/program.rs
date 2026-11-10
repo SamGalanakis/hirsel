@@ -509,6 +509,29 @@ impl Operations for NoOperations {
     }
 }
 
+/// One disjoint part of the complete injection and timer-choice domains.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CampaignPartition {
+    index: u64,
+    count: u64,
+}
+
+impl CampaignPartition {
+    /// Parts are one-based; no invalid or empty modulus can be constructed.
+    pub fn new(index: u64, count: u64) -> Option<Self> {
+        (count > 0 && index > 0 && index <= count).then_some(Self { index, count })
+    }
+    pub fn index(self) -> u64 {
+        self.index
+    }
+    pub fn count(self) -> u64 {
+        self.count
+    }
+    pub(crate) fn contains(self, site: u64) -> bool {
+        site % self.count == self.index - 1
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Config {
     /// Logical CPU grant. Physical placement is outside H's model.
@@ -538,6 +561,8 @@ pub struct Config {
     pub reexecute_campaign: bool,
     /// Compare complete fork and replay campaigns (test/measurement control).
     pub compare_campaigns: bool,
+    /// The clean execution is complete in every part; perturbations partition by index.
+    pub campaign_partition: Option<CampaignPartition>,
     /// Harness-owned context handles, open for the whole run.
     pub context_handles: Vec<(u64, String)>,
     /// Fire the earliest pending deadline at the timer choice point with this execution index.
@@ -568,6 +593,7 @@ impl Default for Config {
                 .is_some_and(|v| v == "1"),
             compare_campaigns: std::env::var_os("HIRSEL_HEAPCHECK_COMPARE_CAMPAIGNS")
                 .is_some_and(|v| v == "1"),
+            campaign_partition: None,
             context_handles: Vec::new(),
             fire: None,
         }
@@ -603,5 +629,12 @@ mod receipt_layout_tests {
         record.drop = vec![DropStep::ReleaseReceipt { offset: 0 }];
         record.copy = CopyRecipe::NotCopyable;
         program.check().unwrap();
+    }
+}
+
+impl Config {
+    pub(crate) fn campaign_contains(&self, site: u64) -> bool {
+        self.campaign_partition
+            .is_none_or(|part| part.contains(site))
     }
 }

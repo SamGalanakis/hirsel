@@ -261,6 +261,26 @@ fn check(kind: Race) {
             &mut || Box::new(Clocked { now: 0 }),
             &Config::default(),
         );
+        let mut fired = Vec::new();
+        for index in 1..=3 {
+            let part = fault_campaign(
+                &program,
+                &path("main"),
+                &[],
+                &mut || Box::new(Clocked { now: 0 }),
+                &Config {
+                    campaign_partition: Some(
+                        hirsel_heapcheck::CampaignPartition::new(index, 3).unwrap(),
+                    ),
+                    ..Config::default()
+                },
+            );
+            assert_eq!(part.clean, collected.clean);
+            assert!(part.fired.iter().all(|(choice, _)| choice % 3 == index - 1));
+            fired.extend(part.fired);
+        }
+        fired.sort_by_key(|(choice, _)| *choice);
+        assert_eq!(fired, collected.fired);
         assert_eq!(streamed.clean, collected.clean);
         assert_eq!(streamed.injected, collected.injected.len() as u64);
         assert_eq!(streamed.fired, collected.fired.len() as u64);

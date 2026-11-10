@@ -131,7 +131,7 @@ impl<'p, S: Stage> Machine<'p, S> {
         while !self.stack.is_empty() || self.in_child() {
             let site = self.sites;
             let checkpoint = self.checkpoint_site();
-            if checkpoint {
+            if checkpoint && self.config.campaign_contains(site) {
                 // A fork inherits a proof of the complete prefix, including
                 // changes since the last geometric check. Refresh it once in
                 // the base, rather than once per injected suffix.

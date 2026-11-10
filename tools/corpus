@@ -4,6 +4,7 @@
     tools/corpus conformance/STORE conformance/MODE/MODE-3-   # directories, files or prefixes
     tools/corpus --slices 12 conformance/SEM
     tools/corpus --native conformance/STORE/STORE-3-       # the per-push smoke configurations
+    tools/corpus --native --heap-parts 32 --config x86_64/regions/elide/reuse/flat-walk/heap+inject conformance/STORE/STORE-3-
     tools/corpus --native --full-matrix conformance/OWN/OWN-4-   # every configuration the full gate runs
     tools/corpus --native --config x86_64/regions/elide/reuse/flat-walk/llvm-O3/whole/default conformance/OWN/OWN-5-
 
@@ -15,6 +16,10 @@ path-hash partition of the same `--path` selection (`hirsel.conformance_paths_sp
 defs.bzl selected_paths), with about CONFORMANCE_SLICE_PROGRAMS cases per slice.
 Prints the summed counts and every failing case; exits non-zero when any slice
 fails or none executed a case.
+
+`--heap-parts N` distributes the entire fault domain of explicitly selected
+heap+inject configurations. Every part checks the clean run; aggregation requires
+all parts, including matching partition metadata.
 
 `--native` runs the same selection through gate-native-full (`--full --filter`,
 the full gate's seed and request) as `//:gate-native-selected-shard-<i>`: even
@@ -62,18 +67,23 @@ def main():
     parser.add_argument('--slices', type=int, help=f'pool actions (1-{SELECTED_SLICES}; default by case count)')
     parser.add_argument('--native', action='store_true', help="through the native gate's configurations")
     parser.add_argument('--parts', type=int, help='--native: configuration parts per case (default fills the slices)')
+    parser.add_argument('--heap-parts', type=int, default=1, help='--native: disjoint heap+inject fault partitions; all parts are required')
     parser.add_argument('--config', action='append', default=[], metavar='NAME',
                         help='--native: run only this configuration (repeatable; default smoke)')
     parser.add_argument('--full-matrix', action='store_true',
                         help="--native: every configuration of each case's full-gate cover")
     parser.add_argument('prefixes', nargs='+', metavar='PREFIX')
     args = parser.parse_args()
-    if (args.parts or args.config or args.full_matrix) and not args.native:
+    if (args.parts or args.config or args.full_matrix or args.heap_parts != 1) and not args.native:
         parser.error('--parts, --config and --full-matrix need --native')
     if args.config and args.full_matrix:
         parser.error('--config and --full-matrix exclude each other')
     if args.native and not (args.config or args.full_matrix):
         args.config = ['smoke']
+    if args.heap_parts < 1 or args.heap_parts > NATIVE_SELECTED_SLICES:
+        parser.error(f'--heap-parts must be 1..{NATIVE_SELECTED_SLICES}')
+    if args.heap_parts > 1 and (args.full_matrix or not args.config or any(not c.endswith('/heap+inject') for c in args.config)):
+        parser.error('--heap-parts requires explicit heap+inject configurations only')
     prefixes = [p.rstrip('/') + '/' if (ROOT / p).is_dir() else p for p in args.prefixes]
     corpus = cases(ROOT)
     unmatched = [p for p in prefixes if not any(c.startswith(p) for c in corpus)]
@@ -116,18 +126,19 @@ def main():
 
 def native(prefixes, selected, args):
     """The selection through gate-native-full's matrix, over path shards times configuration parts."""
-    shards = max(1, min(args.slices or selected, NATIVE_SELECTED_SLICES, selected))
+    shards = max(1, min(args.slices or selected, NATIVE_SELECTED_SLICES // args.heap_parts, selected))
     # A named set gives each case at most that many configurations (smoke: three).
     named = sum(3 if name == 'smoke' else 1 for name in args.config) or NATIVE_SELECTED_SLICES
-    parts = max(1, min(args.parts or named, named, NATIVE_SELECTED_SLICES // shards))
-    slices = shards * parts
-    print(f'corpus: {selected} files in {shards} case parts x {parts} configuration parts', file=sys.stderr,
+    parts = max(1, min(args.parts or named, named, NATIVE_SELECTED_SLICES // (shards * args.heap_parts)))
+    slices = shards * parts * args.heap_parts
+    print(f'corpus: {selected} files in {shards} case parts x {parts} configuration parts x {args.heap_parts} heap fault parts', file=sys.stderr,
           flush=True)
     subprocess.run([sys.executable, str(ROOT / 'tools/buck2/sync.py'), '--if-stale'], cwd=ROOT, check=True)
     targets = [f'//:gate-native-selected-shard-{i}' for i in range(1, slices + 1)]
     config = ['-c', 'hirsel.full=true', '-c', 'hirsel.native_paths=' + '|'.join(prefixes),
               '-c', f'hirsel.native_paths_split={shards}', '-c', f'hirsel.native_paths_parts={parts}',
-              '-c', 'hirsel.native_paths_configs=' + '|'.join(args.config)]
+              '-c', 'hirsel.native_paths_configs=' + '|'.join(args.config),
+              '-c', f'hirsel.native_paths_heap_parts={args.heap_parts}']
     with event_logs.recorded('corpus-native') as event_log:
         status = subprocess.call([str(conformance.BUCK2), 'test', *conformance.CONFIG, *config,
                                   '--event-log', str(event_log), *targets], cwd=ROOT)
@@ -146,6 +157,10 @@ def native(prefixes, selected, args):
             for line in output.splitlines()[-20:]:
                 print(f'{slice_name}: {line}')
             continue
+        if args.heap_parts > 1:
+            expected = {'index': (int(slice_name) - 1) // (shards * parts) + 1, 'count': args.heap_parts}
+            if report.get('heap_partition') != expected:
+                problems.append(f'{slice_name}: missing or incorrect heap partition: expected {expected}')
         attempts += report['configuration_attempts']
         if (int(slice_name) - 1) // shards == 0:
             cases += report['baseline_executable']

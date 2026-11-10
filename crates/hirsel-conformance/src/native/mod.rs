@@ -64,6 +64,28 @@ impl Case {
         )
     }
 
+    /// Run one complete clean execution and a disjoint fault-campaign partition.
+    pub fn run_heap_partition(
+        &self,
+        matrix: &[Configuration],
+        toolchain: &Toolchain,
+        dir: &Path,
+        partition: Option<hirsel_native::HeapCampaignPartition>,
+    ) -> CaseResult {
+        run_source_path(
+            &self.id,
+            &self.source,
+            self.path.as_deref(),
+            matrix,
+            toolchain,
+            dir,
+            Probe {
+                heap_partition: partition,
+                ..Probe::default()
+            },
+        )
+    }
+
     /// `--trace-roots` (S-14): run this case under `matrix` with every engine tracing its
     /// `Shared` roots, so a configuration agrees only when its trace equals the
     /// interpreter's line for line.
@@ -114,6 +136,7 @@ impl Case {
 /// What a differential run probes beyond the observation.
 #[derive(Clone, Copy, Debug, Default)]
 struct Probe {
+    heap_partition: Option<hirsel_native::HeapCampaignPartition>,
     /// Every engine traces its `Shared` roots (`--trace-roots`).
     trace_roots: bool,
     /// Native executables migrate every suspension (`--migrate`).
@@ -536,6 +559,7 @@ fn run_source_path(
                 toolchain,
                 dir,
                 &hirsel_native::Fixture {
+                    heap_campaign_partition: probe.heap_partition,
                     trace_roots: probe.trace_roots,
                     migrate: probe.migrate,
                     callees,
@@ -591,6 +615,7 @@ fn run_test_suite(
                 toolchain,
                 test_dir,
                 &hirsel_native::Fixture {
+                    heap_campaign_partition: probe.heap_partition,
                     trace_roots: probe.trace_roots,
                     migrate: probe.migrate,
                     ..Default::default()

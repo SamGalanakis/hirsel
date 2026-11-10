@@ -24,8 +24,8 @@ pub use exec::{FlatStorage, rc_trace, rc_trace_with_config, run_with_flat_storag
 pub use ledger::{Counters, Event, Exemption, History, Trace};
 pub use observe::{Observation, Observed};
 pub use program::{
-    Arg, Config, INJECTED_RULE, NoOperations, OpOutcome, OpValue, OperationDomain, Operations,
-    Program, SignalDelivery,
+    Arg, CampaignPartition, Config, INJECTED_RULE, NoOperations, OpOutcome, OpValue,
+    OperationDomain, Operations, Program, SignalDelivery,
 };
 pub use violation::{Violation, ViolationKind};
 
@@ -322,7 +322,7 @@ fn visit_campaign<S: Stage>(
         clean
     } else {
         let clean = run(program, entry, args, &mut *model, config);
-        for site in 0..clean.sites {
+        for site in (0..clean.sites).filter(|site| config.campaign_contains(*site)) {
             let report = run(
                 program,
                 entry,
@@ -337,7 +337,7 @@ fn visit_campaign<S: Stage>(
         }
         clean
     };
-    for choice in 0..clean.choices {
+    for choice in (0..clean.choices).filter(|choice| config.campaign_contains(*choice)) {
         let report = run(
             program,
             entry,

@@ -287,6 +287,7 @@ impl Operations for Io {
         }
         let module = path.modules.first().map(String::as_str);
         let value = match (module, path.name.as_str(), args) {
+            (Some("runner"), "send", _) => return self.runner_canceled(args, cause),
             // A zero-byte read is invalid before it is a cancellation point.
             (Some("stdin"), "read", [_, _, OpValue::Bits { bits: 0, .. }]) => return None,
             (Some("stdin"), "read", _) => OpValue::Variant {
@@ -2406,6 +2407,7 @@ fn config(
             .cloned()
             .collect(),
         inject,
+        campaign_partition: world.campaign_partition,
         step_limit,
         context_handles: match kind {
             hirsel_native::link::LaunchKind::Zero => vec![],
@@ -2519,6 +2521,7 @@ fn observation(
 /// What a launch grants H's model beyond its entry's handles.
 #[derive(Clone, Debug)]
 pub struct HeapWorld {
+    pub campaign_partition: Option<hirsel_heapcheck::CampaignPartition>,
     pub instance: [u8; 16],
     pub runners: Vec<hirsel_run_schema::RunnerEntry>,
     pub callees: BTreeMap<String, hirsel_run_schema::CalleeFacts>,
@@ -2554,6 +2557,7 @@ pub struct HeapWorld {
 impl Default for HeapWorld {
     fn default() -> Self {
         Self {
+            campaign_partition: None,
             instance: [0; 16],
             runners: Default::default(),
             callees: Default::default(),

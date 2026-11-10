@@ -59,6 +59,17 @@ fn fresh(value: &OpValue) -> OpValue {
         other => other.clone(),
     }
 }
+fn admitted(runner: &RunnerEntry, tag: u32, path: &DefPath) -> bool {
+    runner.provider == "sim@1"
+        && runner.models.as_deref() == Some("db@1")
+        && matches!(tag, 2 | 3)
+        && runner
+            .definitions
+            .as_ref()
+            .is_none_or(|ds| ds.contains(&path.to_string()))
+        && runner.head.is_some()
+}
+
 fn entry_id(path: &str, facts: &BTreeMap<String, CalleeFacts>) -> Option<OpValue> {
     let f = facts.get(path)?;
     Some(OpValue::Aggregate(vec![
@@ -69,6 +80,30 @@ fn entry_id(path: &str, facts: &BTreeMap<String, CalleeFacts>) -> Option<OpValue
 }
 
 impl Io {
+    pub(super) fn runner_canceled(&mut self, args: &[OpValue], cause: u32) -> Option<OpOutcome> {
+        let [
+            OpValue::Handle(handle),
+            OpValue::Variant { tag, .. },
+            OpValue::Function(symbol),
+            OpValue::Bytes(_),
+        ] = args
+        else {
+            return None;
+        };
+        let Some(IoGrant::Runner { index }) = self.grants.get(handle) else {
+            return Some(OpOutcome::Fail("CAP-2".into()));
+        };
+        let runner = self.runners.entries.get(*index)?;
+        self.yielded = true;
+        Some(OpOutcome::Value(
+            if admitted(runner, *tag, &symbol.definition) {
+                v(5, v(cause, OpValue::Unit))
+            } else {
+                v(3, v(0, OpValue::Unit))
+            },
+        ))
+    }
+
     pub(super) fn runner(
         &mut self,
         module: Option<&str>,
@@ -174,15 +209,7 @@ impl Io {
         argument: &[u8],
     ) -> OpOutcome {
         let full_path = path.to_string();
-        if runner.provider != "sim@1"
-            || runner.models.as_deref() != Some("db@1")
-            || !matches!(tag, 2 | 3)
-            || runner
-                .definitions
-                .as_ref()
-                .is_some_and(|ds| !ds.contains(&full_path))
-            || runner.head.is_none()
-        {
+        if !admitted(runner, tag, path) {
             return OpOutcome::Value(v(3, v(0, OpValue::Unit)));
         }
         let grants = runner.grants.clone().unwrap_or_default();
@@ -276,6 +303,8 @@ impl Io {
         };
         let mut config = (**configuration).clone();
         config.inject = None;
+        // Every admitted root request must audit the entire nested head campaign.
+        config.campaign_partition = None;
         config.fire = None;
         config.context_handles = vec![(hirsel_rt::launch::IO_HANDLE, "Io".into())];
         let args = [Arg::Handle(hirsel_rt::launch::IO_HANDLE), Arg::Unit];
@@ -313,5 +342,52 @@ impl Io {
                 .insert(runner.name.clone(), applied + 1);
         }
         OpOutcome::Value(end)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use hirsel_core_contract::OperationId;
+    use hirsel_heapcheck::Operations;
+    use hirsel_lir::ir::{Symbol, SymbolKind};
+
+    #[test]
+    fn canceled_send_checks_admission_without_executing_the_head() {
+        let mut io = Io::new();
+        io.runners.entries.push(
+            serde_json::from_value(serde_json::json!({
+                "name": "main", "provider": "sim@1", "models": "db@1", "head": "app@1/head"
+            }))
+            .unwrap(),
+        );
+        let handle = io.grant(IoGrant::Runner { index: 0 });
+        let mut args = vec![
+            OpValue::Handle(handle),
+            v(2, OpValue::Unit),
+            OpValue::Function(Symbol {
+                kind: SymbolKind::Function,
+                definition: DefPath::from_full("app@1/entry").unwrap(),
+                instance: None,
+            }),
+            OpValue::Bytes(b"request".to_vec()),
+        ];
+        let op = OperationId {
+            definition: DefPath::core("runner.send"),
+            declaration_digest: Default::default(),
+        };
+        let Some(OpOutcome::Value(answer)) = io.canceled(&op, &args, 1, &mut vec![]) else {
+            panic!("canceled send must complete");
+        };
+        assert_eq!(answer, v(5, v(1, OpValue::Unit)));
+        // Unserved forms are denied before checking cancellation, as in places.rs.
+        args[1] = v(0, OpValue::Unit);
+        let Some(OpOutcome::Value(answer)) = io.canceled(&op, &args, 1, &mut vec![]) else {
+            panic!("unserved send must be denied");
+        };
+        assert_eq!(answer, v(3, v(0, OpValue::Unit)));
+        assert!(io.runners.places.is_empty());
+        assert!(io.runners.applied.is_empty());
+        assert!(io.head.is_none());
     }
 }

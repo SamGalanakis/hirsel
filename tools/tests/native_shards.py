@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
 """Native selections share the gate's cost TSVs and dynamically declared shards."""
+import contextlib
+import io
+import json
+import runpy
+from types import SimpleNamespace
 import tempfile
 from pathlib import Path
 import sys
@@ -13,6 +18,28 @@ import event_logs
 
 
 class NativeShards(unittest.TestCase):
+    def test_corpus_requires_every_fault_partition_and_its_metadata(self):
+        corpus = runpy.run_path(str(Path(__file__).resolve().parents[1] / 'corpus'))
+        args = SimpleNamespace(slices=2, parts=1, config=['x86_64/heap+inject'], heap_parts=3)
+        outputs = {f'gate-native-selected-shard-{i}': json.dumps(dict(
+            configuration_attempts=1, baseline_executable=1,
+            baseline_minus_native_unlisted=[], stale_exclusions=[],
+            heap_partition=dict(index=(i-1)//2+1, count=3)), indent=2) for i in range(1, 7)}
+        with patch.object(corpus['event_logs'], 'recorded', return_value=contextlib.nullcontext(Path('/tmp/event'))), \
+             patch.object(corpus['subprocess'], 'run'), patch.object(corpus['subprocess'], 'call', return_value=0), \
+             patch.object(corpus['conformance'], 'shard_outputs', return_value=outputs), \
+             contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(corpus['native'](['conformance/STORE'], 2, args), 0)
+            last = outputs.pop('gate-native-selected-shard-6')
+            self.assertEqual(corpus['native'](['conformance/STORE'], 2, args), 1)
+            report = json.loads(last)
+            report['heap_partition']['index'] = 2
+            outputs['gate-native-selected-shard-6'] = json.dumps(report, indent=2)
+            self.assertEqual(corpus['native'](['conformance/STORE'], 2, args), 1)
+            del report['heap_partition']
+            outputs['gate-native-selected-shard-6'] = json.dumps(report, indent=2)
+            self.assertEqual(corpus['native'](['conformance/STORE'], 2, args), 1)
+
     def test_unknown_fifty_are_bounded_and_keep_both_backends(self):
         programs = {f'generated/success-{i}' for i in range(50)}
         self.assertEqual(len(native.targets(programs)), 100)

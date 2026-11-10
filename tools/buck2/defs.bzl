@@ -498,22 +498,24 @@ def selected_paths(key, index):
     `_parts=K`, which multiplies the slices by K, slice `index` taking
     `--case-part (index-1) % N + 1/N` (not the hash shard) and `--config-part (index-1) // N + 1/K` of each case's
     configurations, and `_configs=<name>|<name>`, run only those
-    configurations. None past the last slice."""
+    configurations. `_heap_parts=H` adds disjoint fault partitions, with each
+    --heap-part checking the complete clean run. None past the last slice."""
     slices = [part for part in read_root_config("hirsel", key, "").split(";") if part]
     split = int(read_root_config("hirsel", key + "_split", "1"))
     parts = int(read_root_config("hirsel", key + "_parts", "1"))
+    heap_parts = int(read_root_config("hirsel", key + "_heap_parts", "1"))
     configs = [name for name in read_root_config("hirsel", key + "_configs", "").split("|") if name]
-    if (parts > 1 or configs) and key != "native_paths":
+    if (parts > 1 or configs or heap_parts > 1) and key != "native_paths":
         fail("only hirsel.native_paths takes _parts and _configs")
     extra = [arg for name in configs for arg in ["--config", name]]
-    if split > 1 or parts > 1:
+    if split > 1 or parts > 1 or heap_parts > 1:
         if key not in ["conformance_paths", "native_paths"]:
             fail("only hirsel.conformance_paths and hirsel.native_paths take a _split")
         if len(slices) != 1:
             fail("hirsel.{}_split and _parts need exactly one slice in hirsel.{}".format(key, key))
-        if index > split * parts:
+        if index > split * parts * heap_parts:
             return None
-        shard, part = (index - 1) % split + 1, (index - 1) // split + 1
+        shard, part = (index - 1) % split + 1, (index - 1) // split % parts + 1
         if split > 1:
             # Native slices split the selected cases by ID, evenly; corpus
             # slices by the runner's path hash.
@@ -521,6 +523,8 @@ def selected_paths(key, index):
             extra = extra + [flag, "{}/{}".format(shard, split)]
         if parts > 1:
             extra = extra + ["--config-part", "{}/{}".format(part, parts)]
+        if heap_parts > 1:
+            extra = extra + ["--heap-part", "{}/{}".format((index - 1) // (split * parts) + 1, heap_parts)]
         return slices[0].split("|"), extra
     if index > len(slices):
         return None

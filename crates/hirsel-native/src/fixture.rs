@@ -1,6 +1,8 @@
 /// Deterministic providers selected explicitly by a semantic fixture, never a host grant.
 #[derive(Clone, Debug)]
 pub struct Fixture {
+    /// A disjoint part of H's fault campaign; every part still checks the full clean run.
+    pub heap_campaign_partition: Option<hirsel_heapcheck::CampaignPartition>,
     /// Closed CPU batches use the same explicit grant in every engine.
     pub cpu: Option<hirsel_run_schema::CpuGrant>,
     pub tasks_free: bool,
@@ -63,6 +65,7 @@ impl Fixture {
 impl Default for Fixture {
     fn default() -> Self {
         Self {
+            heap_campaign_partition: None,
             cpu: None,
             tasks_free: false,
             args: vec![],

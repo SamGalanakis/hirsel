@@ -41,15 +41,14 @@ markers, so account setup, compilation, recovery checks and output serialization
 are excluded. `perf stat -e instructions:u` counts the entire process tree during
 this phase, including all submitter tasks/threads. The small perf-control handoff
 and marker overhead is included in instructions, not in the application's clock.
-Sync/publication tracepoints are enabled during native timing. Other engines use
-the forwarding fsync probe. Timing includes this observation overhead and the
+Syscall tracepoints for pwrite64, fdatasync and fsync are enabled during native
+and interpreter timing. Rust uses the forwarding fsync probe. Timing includes this observation overhead and the
 interpreter's existing allocation meter overhead.
 
-`alloc.c` forwards glibc malloc/calloc/realloc, fsync/fdatasync and linkat unchanged
+`alloc.c` forwards glibc malloc/calloc/realloc and fsync/fdatasync unchanged
 in dynamic executables. Its counter deltas are read through
 `/proc/<owned-child>/mem` while the process is at the gates. The shipping native
-executable is static. Its baseline sync/publication counts use kernel syscall
-tracepoints. Its allocator calls are counted in a separate diagnostic for each
+executable is static. Its allocator calls are counted in a separate diagnostic for each
 workload using scoped uprobes on the binary's malloc/calloc/realloc symbols.
 The runner registers uniquely named events with `sudo -n perf probe` and removes
 only those events in a finally block. Diagnostic latency and throughput are
@@ -62,10 +61,12 @@ allocator requests, not a common logical-object metric; compare each engine with
 its later runs. Aligned allocation APIs are not counted by the libc probes.
 
 Bytes are the phase's increase in regular-file sizes, meaning encoded log bytes,
-not block-device bytes or filesystem write amplification. Backend requests count
-conditional log-object publication attempts via linkat; today's steady writer
-issues only `Backend.put_new`. References count one append per group. File and directory sync calls are counted separately; successful transaction
-completion checks the barrier outcomes. No I/O tracing
+not block-device bytes or filesystem write amplification. The store's authority is `authority.log@1` with floor `host`, and `group_commits` is 1,
+so each commit group must be exactly one log append, one `pwrite64` of its frame, followed
+by one `fdatasync` before it is acknowledged. The runner refuses a native or interpreter
+sample whose phase makes any other number of pwrite64, fdatasync or fsync calls
+(kernel tracepoint counts), and under `--profile` one where a barrier does not follow its own append in the
+trace. A commit acknowledged without its barrier fails the sample. References count one append per group. No I/O tracing
 is used in latency samples. Percentiles use nearest rank over 512 or 64 durable
 groups; each transfer in a group shares its completion latency. These are one
 sample's empirical percentiles, not confidence intervals or stable tail estimates.

@@ -123,22 +123,41 @@ def perf_values(path):
 
 
 def sync_trace(path):
+    """The phase's successful barrier durations and its log calls in order:
+    'w' for a pwrite64, 'd' for an fdatasync and 's' for an fsync."""
     active = False
     syncs = []
-    puts = 0
+    calls = []
     for line in path.read_text().splitlines():
         if r'"READY\n"' in line:
             active = True
         elif r'"DONE\n"' in line:
             active = False
         elif active:
-            if re.search(r'(?:fsync|fdatasync)\(', line):
-                match = re.search(r'= 0 <([0-9.]+)>', line)
-                if match:
-                    syncs.append(float(match[1]))
-            elif 'linkat(' in line and '= 0 ' in line:
-                puts += 1
-    return syncs, puts
+            # A call another thread interrupted ends on a later 'resumed' line.
+            call = re.search(r'\b(pwrite64|fdatasync|fsync)(?:\(| resumed>).*= ([0-9]+) <([0-9.]+)>$', line)
+            if call:
+                name, result, seconds = call[1], int(call[2]), float(call[3])
+                if name == 'pwrite64':
+                    calls.append('w')
+                elif result == 0:
+                    syncs.append(seconds)
+                    calls.append('d' if name == 'fdatasync' else 's')
+    return syncs, calls
+
+
+def check_log_barriers(commits, appends, datasyncs, fsyncs, order=None):
+    """What authority.log@1 must do for a store whose floor is `host`, with
+    group_commits 1 and one writer: each commit group is one advance, which
+    appends its frame with one pwrite and then issues one fdatasync before
+    the group is acknowledged. Nothing else writes or syncs in the phase (a
+    segment is 256 MiB, so no segment starts). `order`, from a trace, also
+    requires each barrier to follow its own append."""
+    if (appends, datasyncs, fsyncs) != (commits, commits, 0):
+        raise RuntimeError(f'log barriers: {appends} pwrite64, {datasyncs} fdatasync and {fsyncs} fsync '
+                           f'for {commits} commit groups; expected one pwrite64 then one fdatasync each')
+    if order is not None and order != ['w', 'd'] * commits:
+        raise RuntimeError('log barriers: a commit group\'s fdatasync did not follow its own pwrite64')
 
 
 def source_revision():
@@ -189,11 +208,11 @@ def sample(kind, group, submitters, workload, out, compiler, source_sha, profile
         if kind == 'raw':
             command += ['raw']
     if profile:
-        command = ['strace', '-f', '-T', '-e', 'trace=fsync,fdatasync,linkat,write',
+        command = ['strace', '-f', '-T', '-e', 'trace=fsync,fdatasync,pwrite64,write',
                    '-o', directory / 'sync.trace', *command]
     shim = out / 'alloc.so'
     objects = [(shim, addresses(shim, dict(libc_allocations='store_bench_allocations',
-        fsyncs='store_bench_fsyncs', backend_puts='store_bench_puts')))]
+        fsyncs='store_bench_fsyncs')))]
     if kind == 'native':
         objects = []  # The shipping executable is statically linked.
     if kind == 'interp':
@@ -205,7 +224,7 @@ def sample(kind, group, submitters, workload, out, compiler, source_sha, profile
     control_write = os.open(control_path, os.O_RDWR)
     ack_read = os.open(ack_path, os.O_RDWR)
     metric_file = directory / ('perf.data' if profile else 'perf.csv')
-    events = 'instructions:u,task-clock,syscalls:sys_enter_fsync,syscalls:sys_enter_fdatasync,syscalls:sys_enter_linkat'
+    events = 'instructions:u,task-clock,syscalls:sys_enter_fsync,syscalls:sys_enter_fdatasync,syscalls:sys_enter_pwrite64'
     if allocation_events:
         events += ',' + ','.join(allocation_events)
     perf = ['perf', 'record', '-e', 'cpu-clock:u', '-F', '999', '-g', '--call-graph', 'dwarf',
@@ -261,15 +280,18 @@ def sample(kind, group, submitters, workload, out, compiler, source_sha, profile
         raise RuntimeError('missing durable completion latency bodies')
     delta = {key: after[key] - before[key] for key in before}
     metrics = {} if profile else perf_values(metric_file)
-    trace_syncs, trace_puts = sync_trace(directory / 'sync.trace') if profile else ([], 0)
-    if kind == 'native':
-        delta['fsyncs'] = (len(trace_syncs) if profile else
-            metrics['syscalls:sys_enter_fsync'] + metrics['syscalls:sys_enter_fdatasync'])
-        delta['backend_puts'] = trace_puts if profile else metrics['syscalls:sys_enter_linkat']
+    trace_syncs, trace_calls = sync_trace(directory / 'sync.trace') if profile else ([], None)
+    if kind in ('native', 'interp'):
+        # The kernel's count, whatever library or static runtime made the call.
+        if profile:
+            appends, datasyncs, fsyncs = (trace_calls.count(c) for c in 'wds')
+        else:
+            appends, datasyncs, fsyncs = (int(metrics[f'syscalls:sys_enter_{c}'])
+                                          for c in ('pwrite64', 'fdatasync', 'fsync'))
+        check_log_barriers(commits, appends, datasyncs, fsyncs, trace_calls)
+        delta.update(fsyncs=datasyncs + fsyncs, log_appends=appends)
     if delta['fsyncs'] < commits or bytes_after <= bytes_before:
         raise RuntimeError('durability/body counters did not cover every commit')
-    if kind in ('native', 'interp') and delta['backend_puts'] != commits:
-        raise RuntimeError('unexpected backend requests: inspect the writer before accepting this sample')
     if kind == 'interp':
         allocations = delta['allocations'] + delta['reallocations']
     elif kind in ('metal', 'raw'):
@@ -282,7 +304,7 @@ def sample(kind, group, submitters, workload, out, compiler, source_sha, profile
         p50_us=latencies[math.ceil(len(latencies) * .50) - 1] / 1000,
         p99_us=latencies[math.ceil(len(latencies) * .99) - 1] / 1000,
         fsyncs_commit=delta['fsyncs'] / commits, bytes_commit=(bytes_after - bytes_before) / commits,
-        backend_requests_commit=delta['backend_puts'] / commits if kind in ('native', 'interp') else 1,
+        log_appends_commit=delta['log_appends'] / commits if kind in ('native', 'interp') else 1,
         allocations_commit=allocations / commits if allocations is not None else None, counters=delta)
     if not profile:
         row['instructions_commit'] = metrics['instructions:u'] / commits

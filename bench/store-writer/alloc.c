@@ -38,10 +38,3 @@ int fdatasync(int fd) {
     if (!result) atomic_fetch_add_explicit(&store_bench_fsyncs, 1, memory_order_relaxed);
     return result;
 }
-#include <fcntl.h>
-_Atomic uint64_t store_bench_puts;
-int linkat(int olddir, const char *old, int newdir, const char *name, int flags) {
-    int result = (int)syscall(SYS_linkat, olddir, old, newdir, name, flags);
-    if (!result) atomic_fetch_add_explicit(&store_bench_puts, 1, memory_order_relaxed);
-    return result;
-}

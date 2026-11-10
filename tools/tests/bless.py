@@ -44,7 +44,7 @@ class CurrentTargets(unittest.TestCase):
             return result, [json.loads(line) for line in calls.read_text().splitlines()] if calls.exists() else []
 
     def test_native_inventory_follows_sharding_changes(self):
-        base = 'hirsel-pipeline-tests-test-front'
+        base = 'hirsel-registry-test-native_inventory'
         for targets in ([base], [base + '-shard-1', base + '-shard-2']):
             with self.subTest(targets=targets):
                 result, calls = self.run_bless('native-inventory', targets)
@@ -52,12 +52,12 @@ class CurrentTargets(unittest.TestCase):
                 self.assertEqual(len(calls), 2)
                 for call in calls:
                     self.assertIn('root//:' + targets[0], call)
-                    self.assertIn('--test-arg=rt_operations::declaration_digests_match_the_reviewed_native_inventory', call)
+                    self.assertIn('--test-arg=declaration_digests_match_the_reviewed_native_inventory', call)
                 self.assertIn('HIRSEL_BLESS=1', calls[0])
                 self.assertNotIn('HIRSEL_BLESS=1', calls[1])
 
     def test_missing_or_ambiguous_targets_fail_before_blessing(self):
-        base = 'hirsel-pipeline-tests-test-front'
+        base = 'hirsel-registry-test-native_inventory'
         for targets in ([], [base, base + '-shard-1']):
             with self.subTest(targets=targets):
                 result, calls = self.run_bless('native-inventory', targets)

@@ -1,4 +1,5 @@
-//! hirsel-rt-operations' native operation dispositions checked against the driver's registry inventory.
+//! Native operation dispositions checked against the registry without native archives.
+hirsel_guard::install!();
 use hirsel_core_contract::*;
 use hirsel_registry::BuiltinRegistry;
 use hirsel_types::{DropAllocation, PassingMode};
@@ -320,7 +321,7 @@ fn declaration_digests_match_the_reviewed_native_inventory() {
     }
     assert_eq!(
         encoded,
-        include_str!("../../../../native-tests/library/operations.tsv")
+        include_str!("../../../native-tests/library/operations.tsv")
     );
 }
 

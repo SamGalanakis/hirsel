@@ -30,8 +30,7 @@ impl Checker<'_, '_> {
             Err(e) => Err(e),
         }
     }
-    /// A declared row read from a signature. Rows are session rows, so this
-    /// only records the signature reads its nominals need.
+    /// A declared row read from a signature, resolved in this body's view.
     pub(super) fn import(&mut self, root: TypeId) -> Result<TypeId, QueryError> {
         self.imported(root)
     }
@@ -63,7 +62,18 @@ impl Checker<'_, '_> {
                 Err(e) => return Err(e),
             }
         }
-        Ok(ty)
+        canonical_plain_type_in(
+            self.types,
+            ty,
+            &self.body.resolution.generic_declarations,
+            &mut |definition| {
+                Ok(if definition == own {
+                    Some(std::sync::Arc::new(self.input.signature.clone()))
+                } else {
+                    self.snapshots.get(&definition).cloned().flatten()
+                })
+            },
+        )
     }
     pub(super) fn import_function(&mut self, f: &FunctionType) -> Result<FunctionType, QueryError> {
         let root = self.types.intern(Type {

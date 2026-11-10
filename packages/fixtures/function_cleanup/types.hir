@@ -1,0 +1,21 @@
+pub opaque type Info: copyable + data + inert uses {} {
+  value: u64,
+}
+
+pub fn make_info() -> Info uses {} {
+  Info(value: 7u64)
+}
+
+pub fn read_info(info: Info) -> u64 uses {} {
+  info.value
+}
+
+pub resource type Allocating {}
+drop(value) {
+  let allocated = [1u64, 2u64]
+}
+
+pub type Handler {
+  call: fn(info: Info) -> u64 uses {},
+  allocating: fn(take value: Allocating) -> u64 uses {},
+}

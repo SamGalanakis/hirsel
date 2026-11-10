@@ -775,6 +775,7 @@ impl Type {
 /// Shared handles have one inert, aliased spelling of root uniqueness.
 /// A nested generic function owns its generic bounds. Function and Iter capture
 /// summaries remain producer facts; nominal/aggregate facts come from declarations.
+/// Nominal cleanup is resolved in the same declaration view.
 pub fn normalize_type_properties(
     store: &TypeInterner,
     root: TypeId,
@@ -790,8 +791,9 @@ pub fn normalize_type_properties(
     )
 }
 
-/// Canonical inert qualifiers, for a graph whose derived summaries are
-/// already final or whose generic scope the caller cannot name.
+/// Canonical inert qualifiers and nominal cleanup under the selected declaration
+/// view, without assumptions about generic bounds. Nominals resolve cleanup
+/// in that view; callable and iterator capture evidence remains producer-owned.
 pub fn canonical_plain_type(
     store: &TypeInterner,
     root: TypeId,
@@ -970,6 +972,21 @@ fn normalize_graph_cached(
             active.remove(&id);
             memo.insert((id, binders.to_vec()), current);
             return Ok(current);
+        }
+        if let TypeKind::Named {
+            definition,
+            arguments,
+        } = &row.kind
+            && let Some(signature) = lookup(*definition)?
+            && let SignatureKind::Type(declaration) = &signature.kind
+        {
+            let cleanup = declared_cleanup(declaration, store, arguments, |ty| {
+                store.row(ty).drop_allocation.clone()
+            });
+            if row.drop_allocation != cleanup {
+                row.drop_allocation = cleanup;
+                current = store.intern(row.clone());
+            }
         }
         // A type parameter's plainness is a bound of its declaring binder,
         // which every reference names: the proof reads

@@ -958,7 +958,12 @@ impl Checker<'_> {
     /// before invariant comparison, as V does for owned receipts. Traverse the
     /// whole contract here so nested callable binders retain their own bounds.
     fn cleanup_contract(&mut self, root: TypeId) -> TypeId {
-        instantiate_cleanup_bounds(self.t, root, &self.declarations())
+        let types = self.t;
+        let declarations = self.declarations();
+        let root =
+            canonical_plain_type_in(types, root, &declarations, &mut |path| Ok(self.read(path)))
+                .unwrap_or_else(|error| self.proof_failure(error, root));
+        instantiate_cleanup_bounds(types, root, &declarations)
             .unwrap_or_else(|error| self.proof_failure(error, root))
     }
     /// Whether an erased state's captures (CLO-2) or a cleanup summary

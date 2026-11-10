@@ -1,0 +1,15 @@
+// rule: DROP-2
+// expect: run
+pub fn main(t: Test) -> Result[(), ()] {
+  let handler = application@1/types.Handler(
+    call: fn(info: application@1/types.Info) -> u64 uses {} {
+      application@1/types.read_info(info)
+    },
+    allocating: fn(take value: application@1/types.Allocating) -> u64 uses {} {
+      11u64
+    }
+  )
+  test.check(t, handler.call(application@1/types.make_info()) == 7u64)
+  test.check(t, handler.allocating(application@1/types.Allocating()) == 11u64)
+  Ok(())
+}

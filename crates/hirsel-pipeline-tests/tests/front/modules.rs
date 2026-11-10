@@ -43,7 +43,6 @@ mod rt_mounts;
 mod rt_net;
 mod rt_net_native;
 mod rt_network_replay;
-mod rt_operations;
 mod rt_process_native;
 mod rt_replay;
 mod rt_text_native;

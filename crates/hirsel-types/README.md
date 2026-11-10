@@ -548,3 +548,8 @@ their ordered maps and sets; no indexed storage experiment is compiled into
 the compiler. Dense operations follow rustc a7c37f9f,
 `compiler/rustc_index/src/bit_set.rs:150-178,320-323`; inline words, lazy
 allocation, shared snapshots and sparse promotion adapt its eager dense words.
+
+Declaration normalization resolves nominal cleanup from the selected signature
+view, including callable parameters and results. Public opaque declarations keep
+their exported cleanup promises; owner views use their defining representation.
+Resources retain the finalizer allocation promise in either view.

@@ -410,6 +410,7 @@ files it writes. Review the diff it prints before committing.
 ```sh
 tools/bless.sh heap                # native-tests/heap goldens
 tools/bless.sh layout rc-import    # several at once
+tools/bless.sh native-inventory    # registry-derived native declarations, including new ops
 tools/bless.sh all                 # every in-test bless
 ```
 
@@ -420,6 +421,11 @@ the checkout through its relative `CARGO_MANIFEST_DIR`. It fails unless a
 case ran, then runs the same cases again without the bless, on the pool, which
 fails unless the rewritten files now pass. `exclusions` runs
 `native --full --bless` through `gate-native-full` with explicit host execution.
+
+`native-inventory` generates the table from the registry in the registry inventory
+test, which builds without runtime archives or std products. New operations and
+changed declaration digests can therefore be blessed before a native build.
+Ordinary native builds still reject missing or unreviewed declaration identities.
 
 A pool action reads a copy of the checkout that is discarded afterwards, so a
 bless there writes nothing that lasts: a read-only input fails with a bare

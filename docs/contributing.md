@@ -96,8 +96,10 @@ one item per line, sorted by identity, with no trailing total. Generate derived
 inventories with the owning tool and verify them with `--check` or an exact drift
 test; regenerate them after a merge instead of hand-merging their contents.
 `tools/bless.sh core-review native-inventory` regenerates the core review and
-native operation tables; the registry and native coverage tests check their
-identities and contracts. Only main's runs write `docs/api.md`; the full gate's
+native operation tables; native inventory generation reads the registry without
+building runtime archives, so the command also handles new or changed operations.
+The registry and native coverage tests check their identities and contracts;
+ordinary native builds still refuse unreviewed operations. Only main's runs write `docs/api.md`; the full gate's
 drift tests compare it with every public core and std export on main. Sorted
 lists such as these merge without conflicts when contributors add or remove different
 entries (the `hirsel` merge driver, `tools/buck2/merging.py`). The conformance gate checks

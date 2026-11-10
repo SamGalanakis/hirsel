@@ -1,0 +1,33 @@
+{
+  "schema": 1,
+  "package": {
+    "name": "application",
+    "version": "1"
+  },
+  "entry": {
+    "module": [],
+    "name": "main"
+  },
+  "sources": [
+    {
+      "path": "DROP-2-function-field-nominal-cleanup-run.hir",
+      "module": []
+    },
+    {
+      "path": "../../packages/fixtures/function_cleanup/types.hir",
+      "module": [
+        "types"
+      ]
+    }
+  ],
+  "dependencies": [
+    {
+      "manifest": "../../stdlib/std@1/hirsel.json",
+      "package": {
+        "name": "std",
+        "version": "1"
+      },
+      "expose": []
+    }
+  ]
+}

@@ -1157,7 +1157,8 @@ impl<'a, 'input> Checker<'a, 'input> {
             return known.clone();
         }
         // A tooling-limit failure is reported at each site, so only proofs are kept.
-        match instantiate_cleanup_bounds(self.t, ty, self.generic_declarations()) {
+        let declared = self.canonical_plain(self.t, ty);
+        match instantiate_cleanup_bounds(self.t, declared, self.generic_declarations()) {
             Ok(resolved) => {
                 let allocation = self.t.get(resolved).unwrap().drop_allocation.clone();
                 cleanups.borrow_mut().insert(ty, allocation.clone());

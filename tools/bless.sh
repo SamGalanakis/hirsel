@@ -49,7 +49,7 @@ cases() {
     signatures) echo "//:hirsel-signature-unittest tests::golden_vectors" ;;
     package-docs) echo "//:hirsel-driver-test-it-shard-1 api_index::package_public_api_matches_readable_golden" ;;
     core-review) echo "//:hirsel-registry-unittest tests::every_declared_signature_matches_the_review_table_and_canonical_hash" ;;
-    native-inventory) echo "//:hirsel-pipeline-tests-test-front rt_operations::declaration_digests_match_the_reviewed_native_inventory" ;;
+    native-inventory) echo "//:hirsel-registry-test-native_inventory declaration_digests_match_the_reviewed_native_inventory" ;;
     ownership-passing) echo "//:hirsel-ownership-unittest tests::corpus::source_corpus_ratchets_rule_and_primary_line" ;;
     authority-corpus) echo "//:hirsel-authority-unittest corpus::real_phase_corpus_ratchet" ;;
     snapshots)

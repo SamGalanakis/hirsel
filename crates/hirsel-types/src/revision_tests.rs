@@ -2101,3 +2101,78 @@ fn appended_resolution_reads_share_prior_lookup_payloads_and_keep_ordered_bytes(
         serde_json::to_vec(&expected).unwrap()
     );
 }
+
+#[test]
+fn callable_nominal_cleanup_resolves_in_the_selected_declaration_view() {
+    let types = TypeInterner::new(None);
+    let (path, mut signature) = plain_record(&types);
+    let definition = DefId::intern(&path);
+    let signature_mut = std::sync::Arc::make_mut(&mut signature);
+    signature_mut.metadata.visibility = hirsel_syntax::Visibility::PublicOpaque;
+    let SignatureKind::Type(declaration) = &mut signature_mut.kind else {
+        unreachable!()
+    };
+    declaration.bounds = vec![Bound::Copyable, Bound::Data, Bound::Inert];
+    let private = signature.clone();
+    let public = std::sync::Arc::new(encoding::sealed(&signature));
+    let mut allocating = (*signature).clone();
+    let SignatureKind::Type(declaration) = &mut allocating.kind else {
+        unreachable!()
+    };
+    declaration.bounds.clear();
+    declaration.resource = true;
+    declaration.destructor_allocation = Allocation::MayAllocate;
+    let allocating = std::sync::Arc::new(allocating);
+    let generics = GenericDeclarations::default();
+    for (view, expected) in [
+        (public, DropAllocation::MayAllocate),
+        (private, DropAllocation::NoAlloc),
+        (allocating, DropAllocation::MayAllocate),
+    ] {
+        // Declaration rows may have been built with either the public or owner view.
+        for previous in [DropAllocation::MayAllocate, DropAllocation::NoAlloc] {
+            let nominal = types.intern(Type {
+                drop_allocation: previous,
+                ..Type::with_kind(TypeKind::Named {
+                    definition,
+                    arguments: vec![].into(),
+                })
+            });
+            let resolved = canonical_plain_type_in(&types, nominal, &generics, &mut |_| {
+                Ok(Some(view.clone()))
+            })
+            .unwrap();
+            assert_eq!(types.row(resolved).drop_allocation, expected);
+            let resolved = normalize_type_properties(&types, nominal, &generics, &mut |_| {
+                Ok(Some(view.clone()))
+            })
+            .unwrap();
+            assert_eq!(types.row(resolved).drop_allocation, expected);
+            let resolved =
+                canonical_current_type(&types, nominal, &generics, &mut |_| Ok(Some(view.clone())))
+                    .unwrap();
+            assert_eq!(types.row(resolved).drop_allocation, expected);
+            let mut callable = function(types.intern(scalar()), vec![]);
+            let TypeKind::Function(f) = &mut callable.kind else {
+                unreachable!()
+            };
+            f.parameters = vec![Parameter {
+                name: Some("info".into()),
+                label: None,
+                passing: PassingMode::Borrow,
+                ty: nominal,
+            }]
+            .into();
+            let callable = types.intern(callable);
+            let resolved = canonical_plain_type_in(&types, callable, &generics, &mut |id| {
+                assert_eq!(id, definition);
+                Ok(Some(view.clone()))
+            })
+            .unwrap();
+            let TypeKind::Function(f) = &types.row(resolved).kind else {
+                unreachable!()
+            };
+            assert_eq!(types.row(f.parameters[0].ty).drop_allocation, expected);
+        }
+    }
+}

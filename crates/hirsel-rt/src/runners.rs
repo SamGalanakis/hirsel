@@ -580,6 +580,17 @@ unsafe fn take_calls(ctx: *mut TaskCtx, me: usize) -> Stopped<()> {
             .clone()
             .unwrap_or_else(|| crate::host::Sink::new(crate::launch::RawStdout));
         let mut io = RealIo::from_pinned_mounts([], stdout).expect("an empty mount set");
+        // Its store authorities are exactly the runner's; claims draw from the callee's
+        // instance, as the interpreter's callee world does.
+        io.set_authorities(
+            &grants.authorities,
+            Some(hirsel_run_schema::callee_instance(&key)),
+        )
+        .map_err(|e| {
+            Stop::refusal(AdapterError::Unsupported(format!(
+                "a runner's authorities: {e:?}"
+            )))
+        })?;
         io.set_projections(projections(&grants));
         io.set_cooperative(readiness.tagged(tag));
         io.clock_grants(

@@ -186,8 +186,10 @@ pub struct ReadyProgram {
     /// The definitions some unit names as a C callback (PROG-4).
     pub callbacks: BTreeSet<DefPath>,
     /// The definitions some unit makes an Entry value of (RUN-3): each one's
-    /// function-reference thunk and full path, which the program descriptor lists.
-    pub entries: BTreeMap<String, String>,
+    /// function-reference thunk and full path, which the program descriptor lists. A
+    /// thunk may carry several paths: place heads of one signature share their runner
+    /// main, one row per head.
+    pub entries: BTreeSet<(String, String)>,
     /// Checked source facts, supplied through the engine's public admission API.
     pub callee_facts: Option<hirsel_rt::program::CalleeMetadata>,
     /// Per resource layout, the instance digest of its drop body's unit.
@@ -395,7 +397,7 @@ impl ReadyProgram {
         metadata: hirsel_rt::program::CalleeMetadata,
     ) -> Result<(), NativeError> {
         for path in metadata.facts.keys() {
-            if !self.entries.values().any(|entry| entry == path) {
+            if !self.entries.iter().any(|(_, entry)| entry == path) {
                 return Err(NativeError::new(
                     StageName::Launch,
                     format!("callee facts outside native Entry table: {path}"),
@@ -906,7 +908,7 @@ pub fn callbacks<S>(unit: &hirsel_lir::ir::LirUnit<S>) -> impl Iterator<Item = D
 /// Program entries retained in portable unit summaries, including object-store hits.
 pub fn summary_entries(
     summaries: &[hirsel_lir::fragment::UnitSummary],
-) -> BTreeMap<String, String> {
+) -> BTreeSet<(String, String)> {
     summaries
         .iter()
         .flat_map(|s| s.glue.entries.iter())

@@ -561,10 +561,10 @@ impl NativeLinkSource {
                 .find(|unit| unit.definition == *entry && unit.instance == instance)
                 .ok_or_else(|| failed("native call has no admitted source unit"))?;
             unit.glue.entries.insert((entry.clone(), Some(instance)));
-            program.entries.insert(
+            program.entries.insert((
                 hirsel_lir::emission::function_thunk_name(entry, Some(&instance)),
                 entry.to_string(),
-            );
+            ));
         }
         for (head, decoder) in &self.heads {
             let instance = *program
@@ -577,10 +577,10 @@ impl NativeLinkSource {
                 .find(|unit| unit.definition == *head && unit.instance == instance)
                 .ok_or_else(|| failed("a place head has no admitted source unit"))?;
             unit.glue.entries.insert((head.clone(), Some(instance)));
-            program.entries.insert(
+            program.entries.insert((
                 hirsel_lir::emission::function_thunk_name(head, Some(&instance)),
                 head.to_string(),
-            );
+            ));
             let main = program
                 .summaries
                 .iter_mut()
@@ -592,10 +592,10 @@ impl NativeLinkSource {
             main.glue
                 .entries
                 .insert((main.definition.clone(), Some(main.instance)));
-            program.entries.insert(
+            program.entries.insert((
                 hirsel_lir::emission::function_thunk_name(&main.definition, Some(&main.instance)),
                 hirsel_run_schema::place_main_path(&head.to_string()),
-            );
+            ));
         }
         program.bind_source(&self.view())?;
         if let Some(callees) = &self.callees {

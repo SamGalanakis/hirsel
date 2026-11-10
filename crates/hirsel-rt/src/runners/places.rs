@@ -233,6 +233,14 @@ pub(super) unsafe fn take_heads(ctx: *mut TaskCtx, me: usize) -> Stopped<()> {
         let mut io = RealIo::fixture(BTreeMap::new(), mounts, vec![], stdout).map_err(|e| {
             Stop::refusal(AdapterError::Unsupported(format!("a place's dirs: {e:?}")))
         })?;
+        // Its store authorities are exactly the granted ones; claims draw from the place
+        // instance, as the interpreter's place world does.
+        io.set_authorities(&grants.authorities, Some(instance))
+            .map_err(|e| {
+                Stop::refusal(AdapterError::Unsupported(format!(
+                    "a place's authorities: {e:?}"
+                )))
+            })?;
         io.set_projections(super::projections(grants));
         io.set_cooperative(readiness.tagged(tag));
         io.clock_grants(

@@ -1801,7 +1801,7 @@ done:
             program
                 .callee_facts
                 .as_ref()
-                .is_some_and(|facts| facts.facts.contains_key(*path))
+                .is_some_and(|facts| facts.facts.contains_key(path))
         })
         .map(|(thunk, path)| (thunk.clone(), path.as_bytes().to_vec()))
         .collect();
@@ -1884,16 +1884,20 @@ done:
                 .join(", ")
         };
         let text: String = table.iter().map(|b| format!("\\{b:02X}")).collect();
-        // Each Entry row: its function-reference thunk and its definition's full path.
+        // Each Entry row: its function-reference thunk and its definition's full path. Rows
+        // sharing a thunk (one runner main for several place heads) declare it once.
         let mut entry_ir = String::new();
         let mut rows = Vec::new();
+        let mut declared = std::collections::BTreeSet::new();
         for (index, (thunk, path)) in program.entries.iter().enumerate() {
             entry_ir.push_str(&format!(
-                "@hirsel.entry.path.{index} = private constant [{} x i8] [{}]\n\
-                 declare void @\"{thunk}\"()\n",
+                "@hirsel.entry.path.{index} = private constant [{} x i8] [{}]\n",
                 path.len(),
                 bytes(path.as_bytes())
             ));
+            if declared.insert(thunk) {
+                entry_ir.push_str(&format!("declare void @\"{thunk}\"()\n"));
+            }
             rows.push(format!(
                 "{{ ptr, ptr, i64 }} {{ ptr @\"{thunk}\", ptr @hirsel.entry.path.{index}, i64 {} }}",
                 path.len()
@@ -1941,7 +1945,7 @@ done:
             "null"
         };
         let callee_rows: Vec<_> = program.entries.iter().enumerate().filter(|(_, (_, path))|
-            program.callee_facts.as_ref().is_some_and(|facts| facts.facts.contains_key(*path)))
+            program.callee_facts.as_ref().is_some_and(|facts| facts.facts.contains_key(path)))
             .map(|(index, (thunk, path))| format!(
                 "{{ ptr, ptr, i64 }} {{ ptr @\"{thunk}\", ptr @hirsel.entry.path.{index}, i64 {} }}", path.len()))
             .collect();

@@ -4,7 +4,7 @@ Generated from manifest-selected public declarations. Do not edit by hand.
 Signatures retain modes, brands, attributes, relations and `uses` clauses.
 Opaque representations stay hidden; bodies are not checked or evaluated.
 
-2302 exported definitions; 1014 variants.
+2303 exported definitions; 1019 variants.
 
 ## Types and roots
 
@@ -10601,7 +10601,7 @@ References: [`core@1/Result`](#def-core_401_2fResult), [`core@1/String`](#def-co
 
 <a id="def-std_401_2fkeys_2fdecode"></a>
 
-- `pub fn keys.decode[K: serializable](data: Bytes) -> Result[unique K, DecodeError] uses {}`
+- `pub fn keys.decode[K: serializable](data: Bytes) -> Result[K, DecodeError] uses {}`
 
 References: [`core@1/Bytes`](#def-core_401_2fBytes), [`core@1/DecodeError`](#def-core_401_2fDecodeError), [`core@1/Result`](#def-core_401_2fResult)
 
@@ -15652,14 +15652,17 @@ References: [`core@1/String`](#def-core_401_2fString), [`std@1/sse/Parser`](#def
 
 <a id="def-std_401_2fstore_2fBackend"></a>
 
-- `pub type store.Backend[S] { read: fn(mut state: S, String) -> Result[Bytes, FileError] uses {state}, put_new: fn(mut state: S, String, Bytes, Durability) -> Result[(), FileError] uses {state}, list: fn(mut state: S, String) -> Result[List[String], FileError] uses {state}, remove: fn(mut state: S, String) -> Result[(), FileError] uses {state}, mkdir: fn(mut state: S, String) -> Result[(), FileError] uses {state}, }`
+- `pub type store.Backend[S] { read: fn(mut state: S, String) -> Result[Bytes, FileError] uses {state}, put_new: fn(mut state: S, String, Bytes, Durability) -> Result[(), PutError] uses {state}, list: fn(mut state: S, String) -> Result[List[String], FileError] uses {state}, remove: fn(mut state: S, String) -> Result[(), FileError] uses {state}, mkdir: fn(mut state: S, String) -> Result[(), FileError] uses {state}, max_object_bytes: fn(mut state: S) -> u64 uses {state}, }`
 
 The storage seam: immutable whole-object reads, conditional creation,
-ordered prefix discovery, deletion and directory setup. A successful durable
-create acknowledges the exact bytes; an uncertain create must be read back.
-Implementations may issue range GETs and cache immutable data behind `read`.
+ordered prefix discovery, deletion and directory setup. `put_new` returns
+`Ok` only once an object with exactly these bytes holds the name, durably
+under `Durable()`: for an existing object with equal bytes it first redoes
+its durability barrier. Its errors say whether the create may have happened
+(`PutError`). Implementations may issue range GETs and cache immutable data
+behind `read`.
 
-References: [`core@1/Bytes`](#def-core_401_2fBytes), [`core@1/Durability`](#def-core_401_2fDurability), [`core@1/FileError`](#def-core_401_2fFileError), [`core@1/List`](#def-core_401_2fList), [`core@1/Result`](#def-core_401_2fResult), [`core@1/String`](#def-core_401_2fString)
+References: [`core@1/Bytes`](#def-core_401_2fBytes), [`core@1/Durability`](#def-core_401_2fDurability), [`core@1/FileError`](#def-core_401_2fFileError), [`core@1/List`](#def-core_401_2fList), [`core@1/Result`](#def-core_401_2fResult), [`core@1/String`](#def-core_401_2fString), [`core@1/u64`](#def-core_401_2fu64), [`std@1/store/PutError`](#def-std_401_2fstore_2fPutError)
 
 <a id="def-std_401_2fstore_2fCallFailure"></a>
 
@@ -15724,6 +15727,42 @@ Variant of store.Isolation.
 
 Variant of store.Isolation.
 
+<a id="def-std_401_2fstore_2fPutError"></a>
+
+- `@serializable pub type store.PutError = Taken | Refused(FileError) | Undecided(FileError)`
+
+How a backend's `put_new` failed. `Taken()`: an object with other bytes
+holds the name. `Refused(e)`: the request was refused before it had any
+effect, so no object was created. `Undecided(e)`: the object may hold the
+name, with or without its durability barrier: a lost response, or a barrier
+that failed after the object became visible. The store settles an undecided
+create by issuing the same create again, which succeeds only with its
+barrier; reading the object back would prove existence, not durability.
+
+References: [`core@1/FileError`](#def-core_401_2fFileError)
+
+<a id="def-std_401_2fstore_2fPutError_23Refused"></a>
+
+- `Refused(FileError) -> store.PutError`
+
+Variant of store.PutError.
+
+References: [`core@1/FileError`](#def-core_401_2fFileError)
+
+<a id="def-std_401_2fstore_2fPutError_23Taken"></a>
+
+- `Taken -> store.PutError`
+
+Variant of store.PutError.
+
+<a id="def-std_401_2fstore_2fPutError_23Undecided"></a>
+
+- `Undecided(FileError) -> store.PutError`
+
+Variant of store.PutError.
+
+References: [`core@1/FileError`](#def-core_401_2fFileError)
+
 <a id="def-std_401_2fstore_2fSnapshot"></a>
 
 - `pub opaque type store.Snapshot: copyable uses {}`
@@ -15752,16 +15791,20 @@ References: [`core@1/Durability`](#def-core_401_2fDurability), [`core@1/u64`](#d
 
 <a id="def-std_401_2fstore_2fStoreError"></a>
 
-- `@serializable pub type store.StoreError = Storage(FileError) | Corrupt(String) | Fenced | Conflict | Injected | Closed`
+- `@serializable pub type store.StoreError = Storage(FileError) | Refused(FileError) | Corrupt(String) | Fenced | Conflict | Limit( TxLimit ) | Injected | Closed`
 
-Why a store operation failed. `Storage` is the Dir's own error; `Corrupt`
-names an object that fails its checksum or the layout's rules before the
-log's tail; `Fenced` means another writer claimed the store; `Conflict` means
-a commit after the transaction began wrote a key it conflicts on; `Injected` is a
-`StopAfterWrites` stop. After `Storage`, `Corrupt`, `Fenced` or `Injected`
-the store is closed and every later call returns `Closed`.
+Why a store operation failed. `Storage` is the Dir's own error, after which
+a create's outcome may be undecided; `Refused` is a create the backend
+refused before it had any effect; `Corrupt`
+names an object that fails its checksum or the layout's rules (in a
+`Volatile()` store, a bad log instead ends the recovered log); `Fenced` means another writer claimed the store; `Conflict` means
+a commit after the transaction began wrote a key it conflicts on; `Limit`
+is a commit over the configured limits, or at `open` a `transaction_bytes`
+the backend's objects cannot hold; `Injected` is a `StopAfterWrites` stop.
+After `Storage`, `Refused`, `Corrupt`, `Fenced` or `Injected` the store is
+closed and every later call returns `Closed`.
 
-References: [`core@1/FileError`](#def-core_401_2fFileError), [`core@1/String`](#def-core_401_2fString)
+References: [`core@1/FileError`](#def-core_401_2fFileError), [`core@1/String`](#def-core_401_2fString), [`std@1/store/TxLimit`](#def-std_401_2fstore_2fTxLimit)
 
 <a id="def-std_401_2fstore_2fStoreError_23Closed"></a>
 
@@ -15794,6 +15837,22 @@ Variant of store.StoreError.
 - `Injected -> store.StoreError`
 
 Variant of store.StoreError.
+
+<a id="def-std_401_2fstore_2fStoreError_23Limit"></a>
+
+- `Limit( TxLimit ) -> store.StoreError`
+
+Variant of store.StoreError.
+
+References: [`std@1/store/TxLimit`](#def-std_401_2fstore_2fTxLimit)
+
+<a id="def-std_401_2fstore_2fStoreError_23Refused"></a>
+
+- `Refused(FileError) -> store.StoreError`
+
+Variant of store.StoreError.
+
+References: [`core@1/FileError`](#def-core_401_2fFileError)
 
 <a id="def-std_401_2fstore_2fStoreError_23Storage"></a>
 
@@ -15831,9 +15890,13 @@ References: [`core@1/u64`](#def-core_401_2fu64)
 
 - `pub type store.StoreLimits { key_bytes: u64, value_bytes: u64, transaction_bytes: u64, range_rows: u64, }`
 
-The most a `transact` commit may write: any key over `key_bytes`, any value
-over `value_bytes`, or keys and values together over `transaction_bytes`
-refuse the commit with `Limit(..)` and no effect.
+The most a commit may write: any key over `key_bytes`, any value over
+`value_bytes`, or an encoded commit over `transaction_bytes` refuses the
+commit with `Limit(..)` and no effect. A commit's encoded size is that of
+the log object holding it alone: its keys and values, 17 bytes per put, 9
+per delete and 50 of object framing. `open` refuses a `transaction_bytes`
+over the backend's `max_object_bytes`, so every admitted commit can be
+written.
 
 References: [`core@1/u64`](#def-core_401_2fu64)
 
@@ -15987,8 +16050,10 @@ Commits `t`'s writes as the next commit, visible at once to later
 snapshots and transactions, and returns its ticket. `Conflict()` when a
 commit after `t` began wrote a key `t` conflicts on (see `Isolation`); a
 transaction older than the store's conflict retention conflicts whenever
-it writes or read anything. A commit that fills its group writes the
-group's log object; await its durability with `durable`.
+it writes or read anything. `Limit(..)` when `t`'s writes exceed the
+configured limits; the commit has no effect and the store stays open. A
+commit that fills its group, by count or by the backend's object cap,
+writes the group's log object; await its durability with `durable`.
 
 References: [`core@1/Result`](#def-core_401_2fResult), [`std@1/store/Store`](#def-std_401_2fstore_2fStore), [`std@1/store/StoreError`](#def-std_401_2fstore_2fStoreError), [`std@1/store/Ticket`](#def-std_401_2fstore_2fTicket), [`std@1/store/Txn`](#def-std_401_2fstore_2fTxn)
 
@@ -15996,10 +16061,12 @@ References: [`core@1/Result`](#def-core_401_2fResult), [`std@1/store/Store`](#de
 
 - `pub fn store.compact[S](mut s: Store[S]) -> Result[(), StoreError] uses {s}`
 
-Writes every commit into a new snapshot object, publishes it with a new
-manifest and removes the objects it supersedes. A crash at any point
-recovers: until the manifest exists the old state is current, and after it
-the superseded objects are garbage that the next open removes.
+Writes every commit into a new snapshot, as many objects as the backend's
+object cap requires, and publishes it with a new manifest, so recovery
+replays only the logs after it. It removes nothing:
+every created name stays taken, which is what fences a superseded writer.
+A crash at any point recovers: until the manifest exists the old state is
+current, and after it the older objects are never read again.
 
 References: [`core@1/Result`](#def-core_401_2fResult), [`std@1/store/Store`](#def-std_401_2fstore_2fStore), [`std@1/store/StoreError`](#def-std_401_2fstore_2fStoreError)
 

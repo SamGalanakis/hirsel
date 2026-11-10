@@ -189,3 +189,139 @@ fn the_hosts_checks_refuse_before_the_head_and_a_closed_place_is_unreachable() {
     let refused = host.frame(1, served(1, 3, "app.pay"), &mut Head, &Digest);
     assert_eq!(ends(&refused), [(1, 3, CallOutcome::NotRun(UNREACHABLE))]);
 }
+
+/// The law from the caller's side: a caller's provider keeps the served positions (the
+/// host keeps none), one transact in flight; when a served end is lost with its
+/// connection, the provider sends the call again at its position and the store answers
+/// it from its stream rows, so every transact runs once and ends `Ok` once, at positions
+/// 1, 2, ... in submission order.
+#[test]
+fn a_lost_served_end_is_resolved_by_sending_the_call_again_at_its_position() {
+    use hirsel_remote::client::{Client, ClientAction, Settings};
+    use hirsel_run_schema::RunnerCompletion;
+    use std::collections::BTreeMap;
+    /// The place's store: each position runs once, and a repeated position is answered
+    /// from its recorded row.
+    #[derive(Default)]
+    struct Store {
+        rows: BTreeMap<u64, CallOutcome>,
+        runs: Vec<u64>,
+    }
+    impl Store {
+        fn end(&mut self, arrival: &Arrival) -> CallOutcome {
+            let position = arrival.call.position;
+            self.rows
+                .entry(position)
+                .or_insert_with(|| {
+                    self.runs.push(position);
+                    CallOutcome::Ok(arrival.call.argument.clone())
+                })
+                .clone()
+        }
+    }
+    let call = |ordinal: u64| Call {
+        epoch: 0,
+        position: 0,
+        ordinal,
+        key: call_key(&INSTANCE, ordinal),
+        form: CallForm::Transact,
+        path: "app.pay".into(),
+        fingerprint: [0; 32],
+        code: [0; 32],
+        grants: GrantSet::default(),
+        definitions: None,
+        argument: vec![10 + ordinal as u8],
+        acknowledged: 0,
+        level: None,
+    };
+    let mut host = host();
+    let mut store = Store::default();
+    let mut client = Client::new(
+        STREAM,
+        INSTANCE,
+        Settings {
+            reconnect: 1,
+            ..Settings::default()
+        },
+    );
+    let mut completed = vec![];
+    let mut session = 0;
+    // Carry the provider's actions to the host and back until both are quiet; the head
+    // ends each arrival at once. With `lose`, the first served end is lost with the
+    // connection that carried it.
+    let mut exchange = |client: &mut Client,
+                        host: &mut Host,
+                        store: &mut Store,
+                        session: &mut u64,
+                        mut from_client: Vec<ClientAction>,
+                        mut lose: bool| {
+        while !from_client.is_empty() {
+            let mut to_client = vec![];
+            for action in from_client.drain(..) {
+                match action {
+                    ClientAction::Connect => {
+                        *session += 1;
+                        host.connected(
+                            *session,
+                            Some(Caller {
+                                name: "app".into(),
+                                grants: IoGrants::default(),
+                                definitions: None,
+                            }),
+                        );
+                        to_client.extend(client.connected());
+                    }
+                    ClientAction::Send(frame) => {
+                        let mut actions = vec![];
+                        for action in host.frame(*session, frame, &mut Head, &Digest) {
+                            match action {
+                                Action::Arrive(arrival) => actions
+                                    .extend(host.arrival_ended(arrival.id, store.end(&arrival))),
+                                action => actions.push(action),
+                            }
+                        }
+                        for action in actions {
+                            match action {
+                                Action::Send(_, Frame::Outcome(_)) if lose => {
+                                    lose = false;
+                                    host.disconnected(*session);
+                                    to_client.extend(client.lost());
+                                }
+                                Action::Send(_, frame) => to_client.extend(client.frame(frame)),
+                                _ => (),
+                            }
+                        }
+                    }
+                    ClientAction::Disconnect => {
+                        host.disconnected(*session);
+                    }
+                    ClientAction::Complete(token, RunnerCompletion { outcome, .. }) => {
+                        completed.push((token, outcome))
+                    }
+                }
+            }
+            from_client = to_client;
+        }
+    };
+    let first = client.submit(1, call(1), [1; 32]);
+    // The second transact waits for the first: one request in flight per stream.
+    let second = client.submit(2, call(2), [2; 32]);
+    assert!(second.is_empty(), "{second:?}");
+    exchange(
+        &mut client,
+        &mut host,
+        &mut store,
+        &mut session,
+        first,
+        true,
+    );
+    assert_eq!(
+        completed,
+        [
+            (1, CallOutcome::Ok(vec![11])),
+            (2, CallOutcome::Ok(vec![12]))
+        ]
+    );
+    assert_eq!(store.runs, [1, 2]);
+    assert_eq!(session, 2, "the lost end needed a second session");
+}

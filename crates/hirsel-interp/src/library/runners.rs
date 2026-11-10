@@ -76,14 +76,17 @@ pub struct RemoteRequest {
     pub code: [u8; 32],
     pub grants: GrantSet,
     pub definitions: Option<Vec<String>>,
+    /// A served call's level (runners.md `db@1`): the runner entry's.
+    pub level: Option<String>,
 }
 struct Pending {
     /// The waiting task: the caller's own, or `runner.spawn`'s child.
     task: u64,
     child: bool,
-    schemas: CallSchemas,
-    /// The program's distinct nominals, which decoding the outcome reads.
-    nominals: crate::aggregate::RuntimeTypes,
+    /// How the outcome reaches the caller: decoded by the call's schemas, with the
+    /// program's distinct nominals the decoding reads; None for a served call
+    /// (`runner.send`), whose caller takes the `CallEnd` as it is.
+    reply: Option<(CallSchemas, crate::aggregate::RuntimeTypes)>,
     place: String,
     key: [u8; 32],
     /// The callee run's instance.
@@ -518,19 +521,21 @@ impl Library {
                     Pending {
                         task,
                         child: scope.is_some(),
-                        schemas,
-                        nominals: crate::aggregate::RuntimeTypes {
-                            nominals: call
-                                .runtime
-                                .nominals
-                                .iter()
-                                .filter(|n| n.distinct)
-                                .cloned()
-                                .collect(),
-                            // A demanded catalog answers the rest per row.
-                            serialization: call.runtime.serialization.clone(),
-                            ..crate::aggregate::RuntimeTypes::new(call.runtime.types.clone())
-                        },
+                        reply: Some((
+                            schemas,
+                            crate::aggregate::RuntimeTypes {
+                                nominals: call
+                                    .runtime
+                                    .nominals
+                                    .iter()
+                                    .filter(|n| n.distinct)
+                                    .cloned()
+                                    .collect(),
+                                // A demanded catalog answers the rest per row.
+                                serialization: call.runtime.serialization.clone(),
+                                ..crate::aggregate::RuntimeTypes::new(call.runtime.types.clone())
+                            },
+                        )),
                         place: runner.entry.name.clone(),
                         key,
                         callee: hirsel_run_schema::callee_instance(&key),
@@ -550,6 +555,7 @@ impl Library {
                         code,
                         grants: GrantSet::of(&runner.grants),
                         definitions: runner.definitions.clone(),
+                        level: None,
                     }),
                 };
                 self.runners.sends.push(RunnerSend {
@@ -575,6 +581,92 @@ impl Library {
                 })
             }
         }
+    }
+
+    /// `runner.send` of a served call to another host's place (`remote.tls@1`): a runner
+    /// call on the caller's tape like any other, which the host provider sends with the
+    /// runner's level; its completion is the caller's `CallEnd`. The provider keeps the
+    /// served positions (`hirsel_remote::client`).
+    pub(super) fn remote_send(
+        &mut self,
+        runner: &RunnerGrant,
+        form: CallForm,
+        path: String,
+        argument: Vec<u8>,
+        call: &OperationCall<'_>,
+        context: &mut OperationContext<'_>,
+    ) -> Result<OperationResult, Error> {
+        let ordinal = self.runners.requests;
+        self.runners.requests += 1;
+        let key = hirsel_run_schema::call_key(&self.simulation.config.instance, ordinal);
+        let (fingerprint, code) = self
+            .simulation
+            .config
+            .callees
+            .get(&path)
+            .map_or(([0; 32], [0; 32]), |f| (f.fingerprint, f.code));
+        let (grants, definitions) =
+            request_bytes(call.runtime, &runner.grants, runner.definitions.as_deref())?;
+        let request = RunnerRequest {
+            runner: runner.entry.name.clone(),
+            form,
+            digest: hirsel_run_schema::request_digest(
+                form,
+                &path,
+                &fingerprint,
+                &code,
+                &grants,
+                &definitions,
+                &argument,
+            ),
+            path,
+            grants,
+            definitions,
+            key,
+            argument,
+        };
+        let token = self.next_callback;
+        self.next_callback += 1;
+        let task = self.tasks.current;
+        self.runners.pending.insert(
+            token,
+            Pending {
+                task,
+                child: false,
+                reply: None,
+                place: runner.entry.name.clone(),
+                key,
+                callee: hirsel_run_schema::callee_instance(&key),
+                lose_reply: false,
+                forwarded: None,
+                completion: None,
+            },
+        );
+        self.runners.sends.push(RunnerSend {
+            request,
+            sent: Ok(token),
+            child: false,
+            remote: Some(RemoteRequest {
+                ordinal,
+                fingerprint,
+                code,
+                grants: GrantSet::of(&runner.grants),
+                definitions: runner.definitions.clone(),
+                level: runner.entry.level.clone(),
+            }),
+        });
+        Ok(OperationResult::Park {
+            token,
+            wait: BlockedWait {
+                spawn_path: self.tasks.path(),
+                anchor: context
+                    .anchor()
+                    .cloned()
+                    .ok_or_else(|| invalid("runner.send without an anchor"))?,
+                kind: "runner.call".into(),
+                targets: vec![],
+            },
+        })
     }
 
     /// The place's contract: capacity, `sim@1`'s faults and re-sends, then the callee's
@@ -676,7 +768,11 @@ impl Library {
                 callee,
             });
         }
-        let outcome = match (&end, callee_outcome(&end, &pending.schemas, context)?) {
+        let (schemas, _) = pending
+            .reply
+            .as_ref()
+            .ok_or_else(|| invalid("a served call ended as a callee run"))?;
+        let outcome = match (&end, callee_outcome(&end, schemas, context)?) {
             (_, Some(CalleeOutcome::Ok(bytes))) => CallOutcome::Ok(bytes),
             (_, Some(CalleeOutcome::Err(bytes))) => CallOutcome::Failed(bytes),
             (_, Some(CalleeOutcome::Failed(bytes))) => CallOutcome::Faulted(bytes),
@@ -698,14 +794,15 @@ impl Library {
     /// The value a call's completion gives its caller: fresh storage decoded from the
     /// completion's bytes.
     fn completion_value(pending: &Pending, completion: &RunnerCompletion) -> Result<Value, Error> {
-        let decode = |schema, bytes: &[u8]| super::codec::decode(schema, bytes, &pending.nominals);
+        let Some((schemas, nominals)) = &pending.reply else {
+            return Ok(super::places::call_end(&completion.outcome));
+        };
+        let decode = |schema, bytes: &[u8]| super::codec::decode(schema, bytes, nominals);
         Ok(match &completion.outcome {
-            CallOutcome::Ok(bytes) => ok(decode(&pending.schemas.result, bytes)?),
-            CallOutcome::Failed(bytes) => {
-                error(variant(2, vec![decode(&pending.schemas.error, bytes)?]))
-            }
+            CallOutcome::Ok(bytes) => ok(decode(&schemas.result, bytes)?),
+            CallOutcome::Failed(bytes) => error(variant(2, vec![decode(&schemas.error, bytes)?])),
             CallOutcome::Faulted(bytes) => {
-                error(variant(3, vec![decode(&pending.schemas.failure, bytes)?]))
+                error(variant(3, vec![decode(&schemas.failure, bytes)?]))
             }
             _ => refused_value(completion),
         })

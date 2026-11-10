@@ -24,13 +24,22 @@
 //! or that never reached it, is re-sent at a new position while the runner's `retry`
 //! attempts last (RUN-7); every other ending is final.
 //!
+//! **Served calls** (transact and query, at a `db@1` place) are not on the host's decided
+//! positions: their stream position is the store's (STORE-12), as a `sim@1` place's caller
+//! keeps it. Transact calls go one in flight at `applied + 1`, where `applied` counts the
+//! served ends that are recorded or may have committed (`Ok`, `Failed`, `InDoubt`); the
+//! next waits for it. A query takes position 0. The host keeps nothing of a served call, so
+//! after a lost connection each sent served call is sent again in the new session at its
+//! own position and key: the store answers a position it already recorded from its stream
+//! rows and runs one it never saw.
+//!
 //! **Timeouts and cancellation.** With `timeout_ns`, a sent call with no outcome that long
 //! after its commit point is `InDoubt(TimedOut())`. A cancelled sent call forwards
 //! `Cancel` and keeps waiting for its outcome: `Canceled` when the host proves the callee
 //! never started, else the callee's own outcome (RUN-9).
 use crate::frame::{Call, CallRef, Frame};
-use hirsel_run_schema::{CallOutcome, RunnerCompletion};
-use std::collections::BTreeMap;
+use hirsel_run_schema::{CallForm, CallOutcome, RunnerCompletion};
+use std::collections::{BTreeMap, VecDeque};
 
 const UNREACHABLE: u32 = 2;
 const OVERLOADED: u32 = 3;
@@ -99,6 +108,16 @@ pub struct Client {
     /// Submission order of the calls not yet sent.
     unsent: Vec<u64>,
     now: u64,
+    served: ServedStream,
+}
+
+/// The served transact stream (module docs): the last position with a definite end, the
+/// transact call in flight and those waiting for it.
+#[derive(Default)]
+struct ServedStream {
+    applied: u64,
+    in_flight: Option<u64>,
+    waiting: VecDeque<u64>,
 }
 
 impl Client {
@@ -117,6 +136,7 @@ impl Client {
             pending: BTreeMap::new(),
             unsent: vec![],
             now: 0,
+            served: ServedStream::default(),
         }
     }
 
@@ -139,9 +159,22 @@ impl Client {
                 retries: self.settings.retry,
             },
         );
+        match self.pending[&token].call.form {
+            CallForm::Transact if self.served.in_flight.is_some() => {
+                self.served.waiting.push_back(token);
+                return actions;
+            }
+            CallForm::Transact => self.served.in_flight = Some(token),
+            _ => (),
+        }
         self.unsent.push(token);
         self.pump(&mut actions);
         actions
+    }
+
+    /// Whether `token`'s call is served (module docs).
+    fn served(&self, token: u64) -> bool {
+        self.pending[&token].call.form.served()
     }
 
     /// Start a connection when one is needed, or send what waits on an open one.
@@ -153,12 +186,18 @@ impl Client {
             }
             Conn::Open => {
                 for token in std::mem::take(&mut self.unsent) {
-                    let position = self.next;
-                    self.next += 1;
+                    let (position, acknowledged) = match self.pending[&token].call.form {
+                        CallForm::Transact => (self.served.applied + 1, self.served.applied),
+                        CallForm::Query => (0, self.served.applied),
+                        CallForm::Call | CallForm::Compute => {
+                            self.next += 1;
+                            (self.next - 1, self.acknowledged)
+                        }
+                    };
                     let pending = self.pending.get_mut(&token).unwrap();
                     pending.call.epoch = self.epoch;
                     pending.call.position = position;
-                    pending.call.acknowledged = self.acknowledged;
+                    pending.call.acknowledged = acknowledged;
                     // The commit point.
                     pending.sent = Some(self.now);
                     actions.push(ClientAction::Send(Frame::Call(Box::new(
@@ -181,13 +220,32 @@ impl Client {
             return;
         };
         self.unsent.retain(|t| *t != token);
-        if pending.sent.is_some() {
+        if pending.call.form == CallForm::Transact {
+            self.served.waiting.retain(|t| *t != token);
+            if self.served.in_flight == Some(token) {
+                // A recorded end, or one that may have committed, consumes its position.
+                if matches!(
+                    outcome,
+                    CallOutcome::Ok(_) | CallOutcome::Failed(_) | CallOutcome::InDoubt(_)
+                ) {
+                    self.served.applied += 1;
+                }
+                self.served.in_flight = self.served.waiting.pop_front();
+                if let Some(next) = self.served.in_flight {
+                    self.unsent.push(next);
+                }
+            }
+        } else if pending.sent.is_some() && !pending.call.form.served() {
             self.hold(pending.call.position);
         }
         actions.push(ClientAction::Complete(
             token,
             RunnerCompletion { outcome, callee },
         ));
+        // The next served transact goes once a session is open.
+        if self.conn == Conn::Open {
+            self.pump(actions);
+        }
     }
 
     fn hold(&mut self, position: u64) {
@@ -207,7 +265,7 @@ impl Client {
         if retry {
             let pending = self.pending.get_mut(&token).unwrap();
             pending.retries -= 1;
-            if pending.sent.take().is_some() {
+            if pending.sent.take().is_some() && !pending.call.form.served() {
                 let position = pending.call.position;
                 self.hold(position);
             }
@@ -449,7 +507,11 @@ impl Client {
             .filter_map(|(t, p)| p.sent.map(|_| (*t, p.call.position)))
             .collect();
         for (token, position) in sent {
-            if !known {
+            if self.served(token) {
+                // The store, not the host, holds a served call's end: send it again.
+                self.pending.get_mut(&token).unwrap().sent = None;
+                self.unsent.push(token);
+            } else if !known {
                 self.pending.get_mut(&token).unwrap().sent = None;
                 self.complete(token, CallOutcome::InDoubt(LOST), None, actions);
             } else if position > applied {

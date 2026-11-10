@@ -295,7 +295,7 @@ pub fn call(
         definitions: remote.definitions,
         argument: request.argument.clone(),
         acknowledged: 0,
-        level: None,
+        level: remote.level,
     }
 }
 

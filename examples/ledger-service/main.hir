@@ -79,6 +79,8 @@ fn store_error(e: store.StoreError) -> String {
 
 fn shown(e: RunError[store.TxFailure[ledger.Refusal]]) -> String {
   match e {
+    NotRun(Denied()) => "not run: denied",
+    NotRun(VersionMismatch()) => "not run: version mismatch",
     NotRun(_) => "not run",
     InDoubt(_) => "in doubt",
     Failed(Aborted(NoAccount(account))) => f"no account {account}",

@@ -164,6 +164,11 @@ impl Library {
         self.simulation.config.place = true;
     }
 
+    /// `token` is the head's parked `inbox.take(i, true)`.
+    pub fn waits_on_inbox(&self, token: u64) -> bool {
+        self.places.inbox_waits_on(token)
+    }
+
     pub(super) fn place_call(
         &mut self,
         name: &str,
@@ -172,7 +177,7 @@ impl Library {
     ) -> Result<OperationResult, Error> {
         let a = &*call.arguments;
         let value = match name {
-            "runner.send" => return self.place_send(a, context),
+            "runner.send" => return self.place_send(call, context),
             "io.inbox" => {
                 self.simulation.id(arg(a, 0)?, "Io")?;
                 if self.simulation.config.place && self.places.inbox.is_none() {
@@ -276,9 +281,10 @@ impl Library {
     /// stream to the place.
     fn place_send(
         &mut self,
-        a: &[Value],
+        call: &OperationCall<'_>,
         context: &mut OperationContext<'_>,
     ) -> Result<OperationResult, Error> {
+        let a = &*call.arguments;
         self.tasks.yield_now = true;
         let runner = self.runner(arg(a, 0)?)?.clone();
         let Value::Variant { variant: form, .. } = arg(a, 1)? else {
@@ -301,6 +307,21 @@ impl Library {
             .definitions
             .as_ref()
             .is_none_or(|allowed| allowed.contains(&path));
+        // Another host's place: its provider sends the call, and the host and its head
+        // make the place's checks (RUN-8).
+        if entry_model.provider == "remote.tls@1" {
+            if !form.served() || !listed {
+                return Ok(OperationResult::returned(call_end(&CallOutcome::NotRun(
+                    DENIED,
+                ))));
+            }
+            if let Some(cause) = self.tasks.canceled_task(self.tasks.current) {
+                return Ok(OperationResult::returned(call_end(&CallOutcome::Canceled(
+                    cause,
+                ))));
+            }
+            return self.remote_send(&runner, form, path, argument, call, context);
+        }
         let head = entry_model
             .head
             .as_deref()

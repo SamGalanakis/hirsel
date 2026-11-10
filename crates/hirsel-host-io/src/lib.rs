@@ -2695,7 +2695,7 @@ fn host_route(name: &str) -> HostRoute {
         "random.bytes" => HostRoute::Random,
         "signal.wait" => HostRoute::Signal,
         "io.telemetry" => HostRoute::Telemetry,
-        "runner.compute" | "runner.call" | "runner.spawn" => HostRoute::Runner,
+        "runner.compute" | "runner.call" | "runner.spawn" | "runner.send" => HostRoute::Runner,
         "clock.sleep_until" => HostRoute::Sleep,
         "io.dir" | "io.monotonic_clock" | "io.wall_clock" => HostRoute::Projection,
         "watcher.next" => HostRoute::Watch,
@@ -3041,7 +3041,7 @@ impl hirsel_interp::OperationsAdapter for HostLibrary {
     fn parked(&mut self, token: u64) {
         if self.waits.contains_key(&token) || self.waits_on_runner(token) {
             self.io.adapter().parked(token);
-        } else {
+        } else if !self.park_inbox(token) {
             self.library.parked(token);
         }
     }
@@ -3069,7 +3069,11 @@ impl hirsel_interp::OperationsAdapter for HostLibrary {
             if let Some(request) = self.library.cpu_pending_request(token)? {
                 self.cpu_receipt(request)?;
             }
-            return self.library.poll(token, cx);
+            let result = self.library.poll(token, cx)?;
+            if result.is_some() {
+                self.inbox_taken(token);
+            }
+            return Ok(result);
         };
         let canceled = self.library.cancellation().is_some() && self.io.cancellable(token);
         if !canceled && !self.ready.contains(token) {

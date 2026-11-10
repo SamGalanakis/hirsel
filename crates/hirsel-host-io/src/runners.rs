@@ -43,6 +43,8 @@ pub struct HostRunners {
     external: Option<super::remote::ExternalCancel>,
     /// A runner host's `db@1` inbox, when this run is the place's head.
     place: Option<super::remote::PlaceFeed>,
+    /// The head's parked take, a delivery its feed's descriptor announces.
+    place_wait: Option<u64>,
     /// A live `sim@1` callee whose place crashes: it stops before this request.
     pub(super) crash: Option<u64>,
     /// The requests this run has issued.
@@ -201,17 +203,18 @@ impl HostLibrary {
         }
         Ok(issued)
     }
-    /// A runner host serves this run: a callee's cancellation, or a head's arrivals, wake
-    /// the run's idle wait. A head's `io.inbox` grants its inbox, which the feed fills.
+    /// A runner host serves this run. A callee's cancellation wakes the run's idle wait
+    /// without being a source of its own. A head's `io.inbox` grants its inbox, which the
+    /// feed fills; the feed's descriptor is a source only while a take waits on it
+    /// ([`park_inbox`](Self::park_inbox)), so it is not also a wake-only descriptor, which
+    /// would leave that take Blocked.
     pub fn set_hosted(&mut self, hosted: super::remote::Hosted) -> Result<(), String> {
-        let fd = match &hosted {
-            super::remote::Hosted::Callee(cancel) => cancel.wake_fd(),
-            super::remote::Hosted::Head(feed) => feed.wake_fd(),
-        };
-        if let HostIo::Live(io) = &self.io
+        if let (super::remote::Hosted::Callee(cancel), HostIo::Live(io)) = (&hosted, &self.io)
             && let Some(readiness) = io.readiness()
         {
-            readiness.wake_on(fd).map_err(|e| format!("{e:?}"))?;
+            readiness
+                .wake_on(cancel.wake_fd())
+                .map_err(|e| format!("{e:?}"))?;
         }
         match hosted {
             super::remote::Hosted::Callee(cancel) => self.runners.external = Some(cancel),
@@ -270,6 +273,35 @@ impl HostLibrary {
         for (token, completion) in remote.take() {
             self.runners.remote_calls.remove(&token);
             io.deliver(token, completion);
+        }
+    }
+    /// The head parked its `inbox.take(i, true)` at `token`: it waits for a delivery the
+    /// feed's descriptor announces, so a head with no other source is not Blocked while
+    /// the host may still send it calls. False when `token` is no such take.
+    pub(super) fn park_inbox(&mut self, token: u64) -> bool {
+        let (Some(place), HostIo::Live(io)) = (&self.runners.place, &self.io) else {
+            return false;
+        };
+        if !self.library.waits_on_inbox(token) {
+            return false;
+        }
+        if let Some(readiness) = io.readiness() {
+            readiness.enter(token);
+            readiness.await_descriptor(place.wake_fd());
+            readiness.parked(token);
+            self.runners.place_wait = Some(token);
+        }
+        true
+    }
+    /// The head's take at `token` returned: it no longer waits on the feed.
+    pub(super) fn inbox_taken(&mut self, token: u64) {
+        if self.runners.place_wait == Some(token) {
+            self.runners.place_wait = None;
+            if let HostIo::Live(io) = &self.io
+                && let Some(readiness) = io.readiness()
+            {
+                readiness.finish(token);
+            }
         }
     }
     pub(super) fn runner_waits(&self) -> bool {

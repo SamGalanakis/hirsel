@@ -180,6 +180,14 @@ impl Tasks {
             })
             .or(if task == 0 { self.root_canceled } else { None })
     }
+    /// Cancel the running task, as `task.cancel` would (cause `Requested`); the root
+    /// task's is its root scope's.
+    pub(super) fn cancel_current(&mut self) {
+        match self.current {
+            0 => self.cancel_root(0),
+            task => self.cancel(task, 0),
+        }
+    }
     /// Cancel the run's root scope with `cause`: its root task and every task under it.
     pub fn cancel_root(&mut self, cause: u32) {
         self.cancellations += 1;

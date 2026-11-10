@@ -63,7 +63,7 @@ N fn io.net(rt: Io) -> Result[Net, GrantError]
 N fn io.random(rt: Io) -> Result[Random, GrantError]
 N fn io.signals(rt: Io) -> Result[Signals, GrantError]
 N fn io.authority(rt: Io, name: String) -> Result[Authority, GrantError]
-fn authority.levels(a: Authority) -> List[String]
+fn authority.levels(a: Authority) -> List[Level of a]
 fn authority.level(a: Authority, name: String) -> Option[Level of a]
 fn authority.floor(a: Authority) -> Level of a
 fn level.name(l: Level) -> String

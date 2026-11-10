@@ -30,6 +30,8 @@ pub(super) struct Authorities {
     claims: BTreeMap<u64, Claimed>,
     /// Claims made so far, which number each attempt's identity draw.
     attempts: u64,
+    /// Seam calls that reached a provider, for `SimulationDebug::cancel_at_seam`.
+    pub(super) seam_calls: u64,
 }
 
 /// A claim the program holds: its authority, its end and, outside replay, the provider's
@@ -288,8 +290,12 @@ impl Library {
                 }
             }
             "authority.levels" => {
-                let (_, levels, _) = self.levels(&self.authority_name(arg(a, 0)?)?)?;
-                list(levels.into_iter().map(Value::String).collect())
+                let (index, levels, _) = self.levels(&self.authority_name(arg(a, 0)?)?)?;
+                list(
+                    (0..levels.len())
+                        .map(|l| Self::level_value(index, l as u8))
+                        .collect(),
+                )
             }
             "authority.level" => {
                 let (index, levels, _) = self.levels(&self.authority_name(arg(a, 0)?)?)?;

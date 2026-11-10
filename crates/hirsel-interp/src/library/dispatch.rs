@@ -2233,6 +2233,11 @@ primary_operations! { library, call, context, name, a, value;
         let saved = (!context.configuration.inputs.is_empty()).then(|| (library.simulation.clone(), library.authorities.clone()));
         let result = library.authority_call(name, &call, context);
         if result.is_err() && let Some((simulation, authorities)) = saved { library.simulation = simulation; library.authorities = authorities; }
+        // No seam call is a cancellation point; a cancel delivered at one is observed later.
+        if result.is_ok() && matches!(name, "authority.claim" | "authority.advance" | "authority.durable" | "authority.read" | "authority.get" | "authority.put" | "authority.reclaim") {
+            library.authorities.seam_calls += 1;
+            if library.simulation.config.debug.cancel_at_seam == Some(library.authorities.seam_calls) { library.tasks.cancel_current(); }
+        }
         return result.map(Some);
     },
     Capability: "signal.wait" => {

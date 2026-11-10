@@ -43,7 +43,7 @@ pub fn main(rt: Io, args: Args) -> Result[(), Failed] {
   }
   let mut names = ""
   for l in authority.levels(b) {
-    names = f"{names} {l}"
+    names = f"{names} {level.name(l)}"
   }
   say(stdout, f"other levels:{names}, floor {level.name(authority.floor(b))}")?
   match authority.level(a, "disk") {

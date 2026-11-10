@@ -165,7 +165,7 @@ stronger level's is never ahead of a weaker one's.
 ```text
 Level  // core opaque: copyable, sendable; not data, no equality or order; `Level of a`
 Ticket // opaque: copyable, data, inert, sendable
-fn authority.levels(a: Authority) -> List[String]
+fn authority.levels(a: Authority) -> List[Level of a]
 fn authority.level(a: Authority, name: String) -> Option[Level of a]
 fn authority.floor(a: Authority) -> Level of a
 fn level.name(l: Level) -> String
@@ -190,7 +190,7 @@ An authority declares an ordered list of levels, weakest first, each a name and 
 failures it survives; a later level survives every failure an earlier one survives, and
 "stronger" and "below" mean later and earlier in that list. There is no level vocabulary
 shared by every authority ([RUN-13](runners.md#run-13-provider-seams)). A `Level of a` is
-one of the levels `a` declares: `authority.levels` lists their names, weakest first,
+one of the levels `a` declares: `authority.levels` lists them, weakest first,
 `authority.level` resolves a name to one, and `authority.floor` is the deployment's floor. A level belongs to its authority: the
 checker refuses a level of one authority where another's is required
 ([PROV-1](brands.md#prov-1-brands)), and levels have no equality or order, so no
@@ -838,7 +838,7 @@ holds it.
 durable at `at`, issuing at most one barrier for every entry since the last.
 `authority.read(a, from, at, max)` returns up to `max` entries after position `from`
 that are durable at `at`. It needs no claim: followers and `store.at` read this way.
-`authority.levels` lists the names of the levels the provider declares, weakest first
+`authority.levels` lists the levels the provider declares, weakest first
 ([STORE-2](#store-2-transactions)); `authority.floor` is the deployment's floor for the
 place, the declared level the grant names; `authority.max_entry` bounds the bytes of one
 entry.

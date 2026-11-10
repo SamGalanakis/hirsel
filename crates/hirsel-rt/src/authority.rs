@@ -67,7 +67,8 @@ pub enum SeamRequest {
 /// A seam completion.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SeamCompletion {
-    Names(Vec<String>),
+    /// The Level words of an authority's declared levels, weakest first.
+    Words(Vec<u64>),
     Name(String),
     Word(u64),
     /// An optional Level word or Claim handle.
@@ -191,7 +192,10 @@ impl State {
             }
             SeamRequest::Levels { authority } => {
                 let index = self.authority(*authority)?;
-                done(S::Names(self.authorities[index].levels.clone()))
+                let count = self.authorities[index].levels.len();
+                done(S::Words(
+                    (0..count).map(|l| level_word(index, l as u8)).collect(),
+                ))
             }
             SeamRequest::Level { authority, name } => {
                 let index = self.authority(*authority)?;
@@ -602,7 +606,7 @@ pub unsafe extern "C" fn hirsel_rt_v2_io_authority(
     crate::STATUS_OK
 }
 
-/// `authority.levels(a) -> List[String]`.
+/// `authority.levels(a) -> List[Level of a]`.
 /// # Safety
 /// Context bound; Authority borrowed; out writable.
 #[unsafe(no_mangle)]
@@ -615,11 +619,17 @@ pub unsafe extern "C" fn hirsel_rt_v2_authority_levels(
     let authority = unsafe { a.read() };
     match unsafe {
         seam_call(ctx, SeamRequest::Levels { authority }, |c| {
-            let SeamCompletion::Names(names) = c else {
+            let SeamCompletion::Words(levels) = c else {
                 crate::fault("seam completion mismatch")
             };
-            let names: Vec<Vec<u8>> = names.iter().map(|n| n.as_bytes().to_vec()).collect();
-            crate::text::allocate_bytes_list(ctx, &names) as u64
+            // The context is live; a Level is one plain word.
+            let block = crate::alloc::allocate_sequence(ctx, 0, levels.len() as u64, 8, 8);
+            let first = crate::alloc::payload(block)
+                .add(crate::alloc::sequence_elements_offset(8) as usize);
+            for (i, level) in levels.iter().enumerate() {
+                first.add(i * 8).cast::<u64>().write_unaligned(*level);
+            }
+            block as u64
         })
     } {
         Some(list) => {
@@ -1101,11 +1111,11 @@ impl SeamCompletion {
             None => w.push(0),
         };
         match self {
-            SeamCompletion::Names(names) => {
+            SeamCompletion::Words(levels) => {
                 w.push(0);
-                word(&mut w, names.len() as u64);
-                for n in names {
-                    text(&mut w, n);
+                word(&mut w, levels.len() as u64);
+                for l in levels {
+                    word(&mut w, *l);
                 }
             }
             SeamCompletion::Name(n) => {
@@ -1139,11 +1149,11 @@ impl SeamCompletion {
         let c = match r.u8()? {
             0 => {
                 let n = r.u64()?;
-                let mut names = Vec::new();
+                let mut levels = Vec::new();
                 for _ in 0..n {
-                    names.push(r.text()?);
+                    levels.push(r.u64()?);
                 }
-                SeamCompletion::Names(names)
+                SeamCompletion::Words(levels)
             }
             1 => SeamCompletion::Name(r.text()?),
             2 => SeamCompletion::Word(r.u64()?),

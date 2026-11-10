@@ -364,8 +364,8 @@ fn seam_completions(n: u64, text: &str, bytes: &[u8]) -> Vec<Completion> {
         .clone();
     let claim = (n % 2 == 0).then_some(!n);
     [
-        S::Names(vec![]),
-        S::Names(vec![text.to_owned(), String::new()]),
+        S::Words(vec![]),
+        S::Words(vec![n, !n]),
         S::Name(text.to_owned()),
         S::Word(n),
         S::Optional(None),

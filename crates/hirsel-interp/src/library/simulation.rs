@@ -54,6 +54,10 @@ pub struct SimulationDebug {
     pub races: bool,
     pub root_releases: bool,
     pub atomic_stores: bool,
+    /// Cancel the calling task, as `task.cancel` would, just after the run's k-th seam
+    /// call that reaches a provider (claim, advance, durable, read, get, put, reclaim):
+    /// the cancellation sweep over a commit's Io points (STORE-3, STORE-11).
+    pub cancel_at_seam: Option<u64>,
 }
 impl SimulationDebug {
     /// Comma-separated point names used by the test CLI and simulation JSON.

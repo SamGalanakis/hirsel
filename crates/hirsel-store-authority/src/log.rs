@@ -15,6 +15,11 @@
 //! append left, appends the frame with one `pwrite`, releases the lock and, at
 //! `host`, issues one `fdatasync`. A different length means another claim
 //! appended: `Fenced`, with no effect. It never reads.
+//!
+//! Whatever starts a new segment, an advance or a claim, first syncs the full
+//! one, and a segment's first frame is written only once a directory sync has
+//! named it, so a host failure never cuts the history short in front of an
+//! entry it keeps.
 
 use crate::group::{self, Tip};
 use crate::{
@@ -36,6 +41,72 @@ const HOST: Level = Level(1);
 const FRAME: u64 = 8;
 /// A segment this long or longer takes no more entries.
 pub const SEGMENT_MAX: u64 = 256 << 20;
+
+/// The file-system calls that change the history's files. The log harness
+/// injects its faults here and models what a host failure keeps.
+mod disk {
+    use std::fs::{File, OpenOptions};
+    use std::io;
+    use std::os::unix::fs::FileExt;
+    use std::path::Path;
+
+    pub(super) fn write_at(f: &File, bytes: &[u8], at: u64) -> io::Result<usize> {
+        #[cfg(test)]
+        if let Some(r) = crate::harness_log::write_at(f, bytes, at) {
+            return r;
+        }
+        f.write_at(bytes, at)
+    }
+
+    pub(super) fn write_all_at(f: &File, mut bytes: &[u8], mut at: u64) -> io::Result<()> {
+        while !bytes.is_empty() {
+            match write_at(f, bytes, at)? {
+                0 => return Err(io::ErrorKind::WriteZero.into()),
+                n => {
+                    bytes = &bytes[n..];
+                    at += n as u64;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub(super) fn sync_data(f: &File) -> io::Result<()> {
+        #[cfg(test)]
+        if let Some(r) = crate::harness_log::sync_data(f) {
+            return r;
+        }
+        f.sync_data()
+    }
+
+    pub(super) fn set_len(f: &File, len: u64) -> io::Result<()> {
+        #[cfg(test)]
+        if let Some(r) = crate::harness_log::set_len(f, len) {
+            return r;
+        }
+        f.set_len(len)
+    }
+
+    pub(super) fn create_new(path: &Path) -> io::Result<File> {
+        #[cfg(test)]
+        if let Some(r) = crate::harness_log::create_new(path) {
+            return r;
+        }
+        OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(path)
+    }
+
+    pub(super) fn sync_dir(dir: &Path) -> io::Result<()> {
+        #[cfg(test)]
+        if let Some(r) = crate::harness_log::sync_dir(dir) {
+            return r;
+        }
+        File::open(dir).and_then(|d| d.sync_all())
+    }
+}
 
 fn check(len: u32, position: u64) -> [u8; 4] {
     let mut h = Sha256::new();
@@ -91,6 +162,8 @@ pub struct Log {
     followed: u64,
     /// The writer's segment, opened for writing.
     active: Option<(u64, File)>,
+    /// A segment this long or longer takes no more entries.
+    pub(crate) segment_max: u64,
 }
 
 impl Log {
@@ -112,6 +185,7 @@ impl Log {
             tip: Tip::origin(),
             followed: 0,
             active: None,
+            segment_max: SEGMENT_MAX,
         })
     }
 
@@ -206,16 +280,11 @@ impl Log {
     }
 
     fn sync_dir(&self) -> Result<(), AuthorityError> {
-        File::open(&self.dir).and_then(|d| d.sync_all()).map_err(io)
+        disk::sync_dir(&self.dir).map_err(io)
     }
 
     fn create_segment(&self, first: u64) -> Result<File, AuthorityError> {
-        let f = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create_new(true)
-            .open(self.segment_path(first))
-            .map_err(io)?;
+        let f = disk::create_new(&self.segment_path(first)).map_err(io)?;
         self.sync_dir()?;
         Ok(f)
     }
@@ -239,7 +308,7 @@ impl Log {
             return Ok(false);
         }
         // A claim starts a new segment only after a full one.
-        Ok(c.length < SEGMENT_MAX || !self.segment_path(c.end + 1).exists())
+        Ok(c.length < self.segment_max || !self.segment_path(c.end + 1).exists())
     }
 }
 
@@ -272,8 +341,8 @@ impl Authority for Log {
                 .write(true)
                 .open(self.segment_path(first))
                 .map_err(|e| Error::Storage(io(e)))?;
-            f.set_len(torn)
-                .and_then(|_| f.sync_data())
+            disk::set_len(&f, torn)
+                .and_then(|_| disk::sync_data(&f))
                 .map_err(|e| Error::Storage(io(e)))?;
             self.index.torn = None;
         }
@@ -287,8 +356,23 @@ impl Authority for Log {
         let entry = group::claim_group(&self.tip, attempt, fresh);
         let position = end + 1;
         let (segment, length) = match last {
-            Some((first, len)) if len < SEGMENT_MAX => (first, len),
+            Some((first, len)) if len < self.segment_max => {
+                // A segment holding no frame may be one whose creator's
+                // directory sync failed: name it durably before its first frame.
+                if len == 0 {
+                    self.sync_dir().map_err(Error::Storage)?;
+                }
+                (first, len)
+            }
             _ => {
+                // The full segment's tail is synced before the next one starts,
+                // as an advance does: a host failure could otherwise cut it
+                // short under the claim, which is durable at `host`.
+                if let Some((first, _)) = last {
+                    self.writer(first)
+                        .and_then(|f| disk::sync_data(f).map_err(io))
+                        .map_err(Error::Storage)?;
+                }
                 let f = self.create_segment(position).map_err(Error::Storage)?;
                 self.active = Some((position, f));
                 self.index.segments.push((position, 0));
@@ -297,8 +381,8 @@ impl Authority for Log {
         };
         let bytes = frame(position, &entry);
         let f = self.writer(segment).map_err(Error::Storage)?;
-        f.write_all_at(&bytes, length)
-            .and_then(|_| f.sync_data())
+        disk::write_all_at(f, &bytes, length)
+            .and_then(|_| disk::sync_data(f))
             .map_err(|e| Error::Storage(io(e)))?;
         self.tip = group::follow(&self.tip, &entry).expect("a claim group follows its tip");
         self.followed = position;
@@ -348,13 +432,13 @@ impl Authority for Log {
                 }
                 Err(e) => return Advanced::Refused(e),
             }
-            if c.length >= SEGMENT_MAX {
+            if c.length >= self.segment_max {
                 // Everything in the full segment becomes durable at `host`
                 // before the next one starts, so `durable` syncs one file.
                 if c.durable[HOST.0 as usize] < c.end {
                     let synced = self
                         .writer(c.segment)
-                        .and_then(|f| f.sync_data().map_err(io));
+                        .and_then(|f| disk::sync_data(f).map_err(io));
                     if let Err(e) = synced {
                         c.dead = true;
                         return Advanced::Undecided(e);
@@ -376,7 +460,7 @@ impl Authority for Log {
                 Ok(f) => f,
                 Err(e) => return Advanced::Refused(e),
             };
-            match f.write_at(&bytes, c.length) {
+            match disk::write_at(f, &bytes, c.length) {
                 Ok(n) if n == bytes.len() => {}
                 result => {
                     // Settle by the file's length: unchanged means no effect.
@@ -399,7 +483,7 @@ impl Authority for Log {
         if at >= HOST {
             let synced = self
                 .writer(c.segment)
-                .and_then(|f| f.sync_data().map_err(io));
+                .and_then(|f| disk::sync_data(f).map_err(io));
             if let Err(e) = synced {
                 c.dead = true;
                 return Advanced::Undecided(e);
@@ -424,7 +508,7 @@ impl Authority for Log {
         if at >= HOST && c.durable[i] < c.end {
             if let Err(e) = self
                 .writer(c.segment)
-                .and_then(|f| f.sync_data().map_err(io))
+                .and_then(|f| disk::sync_data(f).map_err(io))
             {
                 c.dead = true;
                 return Err(Error::Storage(e));
@@ -451,7 +535,7 @@ impl Authority for Log {
                 let s = self.index.spots[p as usize - 1].segment;
                 if !synced.contains(&s) {
                     File::open(self.segment_path(s))
-                        .and_then(|f| f.sync_data())
+                        .and_then(|f| disk::sync_data(&f))
                         .map_err(|e| Error::Storage(io(e)))?;
                     synced.push(s);
                 }

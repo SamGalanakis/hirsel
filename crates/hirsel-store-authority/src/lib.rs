@@ -21,6 +21,8 @@ pub mod group;
 #[cfg(test)]
 mod harness;
 #[cfg(test)]
+mod harness_log;
+#[cfg(test)]
 mod harness_objects;
 pub mod log;
 pub mod memory;

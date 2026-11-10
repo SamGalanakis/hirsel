@@ -1,11 +1,13 @@
-//! `authority.log@1` on real files: fencing between handles, and the line
-//! between a torn tail (settled) and corruption (refused, nothing removed).
+//! `authority.log@1` on real files: fencing between handles, first claims
+//! racing on threads, and the line between a torn tail (settled) and
+//! corruption (refused, nothing removed).
 
 hirsel_guard::install!();
 use hirsel_store_authority::group::{self, Tip};
 use hirsel_store_authority::log::Log;
 use hirsel_store_authority::{Advanced, Authority, Error, Level};
 use std::fs;
+use std::sync::Barrier;
 
 const HOST: Level = Level(1);
 
@@ -84,4 +86,37 @@ fn a_cut_short_tail_is_settled_and_a_damaged_one_refused() {
     let mut c = Log::open(dir.path(), HOST).unwrap();
     assert!(matches!(c.claim([3; 16], [7; 32]), Err(Error::Corrupt(_))));
     assert_eq!(fs::read(segment(dir.path())).unwrap(), damaged);
+}
+
+/// Handles on racing threads make the first claims on an empty directory at
+/// once: each claim is acknowledged at its own position, holding its own
+/// attempt, and the history they leave follows.
+#[test]
+fn racing_first_claims_each_take_their_own_position() {
+    const N: usize = 8;
+    for _ in 0..40 {
+        let dir = tempfile::tempdir().unwrap();
+        let start = Barrier::new(N);
+        let ends: Vec<(u64, [u8; 16])> = std::thread::scope(|s| {
+            let racers: Vec<_> = (0..N)
+                .map(|i| {
+                    let (dir, start) = (dir.path(), &start);
+                    s.spawn(move || {
+                        let mut log = Log::open(dir, HOST).unwrap();
+                        let attempt = [i as u8 + 1; 16];
+                        start.wait();
+                        (log.claim(attempt, [i as u8; 32]).unwrap().end, attempt)
+                    })
+                })
+                .collect();
+            racers.into_iter().map(|r| r.join().unwrap()).collect()
+        });
+        let mut log = Log::open(dir.path(), HOST).unwrap();
+        let all = log.read(0, HOST, u64::MAX).unwrap();
+        assert_eq!(all.len(), N);
+        for (end, attempt) in &ends {
+            assert!(group::claims(&all[*end as usize - 1], attempt));
+        }
+        tip_of(&mut log);
+    }
 }

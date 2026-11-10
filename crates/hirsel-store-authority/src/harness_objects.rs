@@ -1,7 +1,8 @@
 //! The object-storage law, run against `authority.objects@1` over the simulated
 //! bucket (the place-authority-674 model's search, on the real provider).
 //!
-//! Racing writers, each on its own handle and thread, claim, advance, reclaim,
+//! Racing writers, each on its own handle and thread, claim with fresh
+//! identities, advance groups of one to four commits, reclaim,
 //! check durability and read; exactly one runs at a time, and before every
 //! request the turn passes to a writer chosen by the seed, so one writer's
 //! advance can be cut between its group put and its head replace by another's
@@ -15,7 +16,8 @@
 //! 3. after the race, a fresh handle recovers the history, whatever the
 //!    listings omit, and every acknowledged entry is in it with its object;
 //! 4. no claim, read or recovery refuses the history as corrupt: nothing here
-//!    damages it.
+//!    damages it;
+//! 5. a claim that died (`Fenced`, `Undecided`) is `Fenced` when used again.
 //!
 //! Each planted defect must break a law.
 //!
@@ -229,7 +231,7 @@ fn writer(
     let mut n = 0u64;
     for _ in 0..steps {
         match rng.below(10) {
-            0 | 1 => match h.claim((rng.next() as u128).to_le_bytes(), [7; 32]) {
+            0 | 1 => match h.claim((rng.next() as u128).to_le_bytes(), [rng.next() as u8; 32]) {
                 Ok(c) => {
                     let all = read_all(&mut h)?;
                     let mut tip = Tip::origin();
@@ -249,7 +251,7 @@ fn writer(
                     continue;
                 };
                 n += 1;
-                let e = entry(tip, (me as u64) << 32 | n);
+                let e = entry(tip, (me as u64) << 32 | n, 1 + rng.below(4) as u32);
                 let from = c.end();
                 match h.advance(c, from, e.clone(), Level(0)) {
                     Advanced::Advanced(p) => {
@@ -264,7 +266,16 @@ fn writer(
                         *tip = group::follow(tip, &e).unwrap();
                     }
                     Advanced::Refused(_) => {}
-                    Advanced::Fenced | Advanced::Undecided(_) => held = None,
+                    Advanced::Fenced | Advanced::Undecided(_) => {
+                        // A dead claim stays dead: used again, it is fenced.
+                        let from = c.end();
+                        if h.advance(c, from, e, Level(0)) != Advanced::Fenced
+                            || h.durable(c, Level(0)) != Err(Error::Fenced)
+                        {
+                            return Err("a dead claim was used again".into());
+                        }
+                        held = None;
+                    }
                 }
             }
             7 => {
@@ -407,7 +418,7 @@ fn over_s3_an_advance_is_two_requests_and_recovery_gets_each_group_once() {
     let mut c = h.claim([1; 16], [7; 32]).unwrap().claim;
     let mut tip = group::follow(&Tip::origin(), &read_all(&mut h).unwrap()[0]).unwrap();
     for tag in 0..1000 {
-        let e = entry(&tip, tag);
+        let e = entry(&tip, tag, 1);
         let before = fake.requests();
         let from = c.end();
         assert_eq!(
@@ -437,7 +448,7 @@ fn an_advance_is_two_requests_and_recovery_gets_each_group_once() {
     let mut c = h.claim([1; 16], [7; 32]).unwrap().claim;
     let mut tip = group::follow(&Tip::origin(), &read_all(&mut h).unwrap()[0]).unwrap();
     for tag in 0..20 {
-        let e = entry(&tip, tag);
+        let e = entry(&tip, tag, 1);
         let before = bucket.requests();
         let from = c.end();
         assert_eq!(

@@ -1,6 +1,7 @@
 //! The crash and level law, run against the simulated authority.
 //!
-//! Racing writers claim, advance at random levels and wait for durability;
+//! Racing writers claim with fresh identities, advance groups of one to four
+//! commits at random levels and wait for durability;
 //! readers read at random levels; failures at random levels strike between
 //! steps, with every fault the simulation injects. The oracle is a ledger of
 //! what was acknowledged, kept apart from the authority:
@@ -12,7 +13,8 @@
 //! 3. no position is acknowledged with two different entries while the first
 //!    is still owed (so a fenced writer never acknowledges);
 //! 4. a read returns at each position the bytes acknowledged there, if any;
-//! 5. recovery refuses a history only at a position no writer was acknowledged at.
+//! 5. recovery refuses a history only at a position no writer was acknowledged at;
+//! 6. a claim that died (`Fenced`, `Undecided`) is `Fenced` when used again.
 //!
 //! Damage the failures leave (a torn tail, garbage) may only make recovery
 //! refuse; it may never change or drop what the ledger owes. Each planted
@@ -23,20 +25,23 @@ use crate::sim::{Bug, Config, Sim};
 use crate::{Advanced, Authority, Claim, Error, Level};
 use std::collections::BTreeMap;
 
-/// A non-claim group following `tip`, unique by `tag`.
-pub(crate) fn entry(tip: &Tip, tag: u64) -> Vec<u8> {
+/// A non-claim group of `commits` engine Library commits following `tip`,
+/// unique by `tag`.
+pub(crate) fn entry(tip: &Tip, tag: u64, commits: u32) -> Vec<u8> {
     let mut out = Vec::new();
     out.extend_from_slice(b"HSHIST01");
     out.extend_from_slice(&tip.digest);
     out.extend_from_slice(&(tip.last + 1).to_le_bytes());
     out.extend_from_slice(&tip.epoch.to_le_bytes());
-    out.extend_from_slice(&1u32.to_le_bytes());
-    out.extend_from_slice(&[2, 7]); // an engine Library commit
-    out.extend_from_slice(&12u32.to_le_bytes());
-    out.extend_from_slice(&0u32.to_le_bytes());
-    out.extend_from_slice(&tag.to_le_bytes());
-    out.extend_from_slice(&0u32.to_le_bytes());
-    out.extend_from_slice(&0u32.to_le_bytes());
+    out.extend_from_slice(&commits.to_le_bytes());
+    for _ in 0..commits {
+        out.extend_from_slice(&[2, 7]); // an engine Library commit
+        out.extend_from_slice(&12u32.to_le_bytes());
+        out.extend_from_slice(&0u32.to_le_bytes());
+        out.extend_from_slice(&tag.to_le_bytes());
+        out.extend_from_slice(&0u32.to_le_bytes()); // writes
+    }
+    out.extend_from_slice(&0u32.to_le_bytes()); // definitions
     out
 }
 
@@ -126,7 +131,8 @@ fn schedule(seed: u64, steps: u32, levels: u8, bug: Option<Bug>) -> Result<(), S
         match rng.below(10) {
             0 | 1 => {
                 let attempt = (rng.next() as u128).to_le_bytes();
-                let fresh = [7u8; 32];
+                let mut fresh = [0u8; 32];
+                fresh[..8].copy_from_slice(&rng.next().to_le_bytes());
                 let wr = &mut writers[w];
                 match wr.sim.claim(attempt, fresh) {
                     Ok(c) => {
@@ -166,7 +172,7 @@ fn schedule(seed: u64, steps: u32, levels: u8, bug: Option<Bug>) -> Result<(), S
                     continue;
                 };
                 tag += 1;
-                let e = entry(tip, tag);
+                let e = entry(tip, tag, 1 + rng.below(4) as u32);
                 let from = c.end();
                 match wr.sim.advance(c, from, e.clone(), at) {
                     Advanced::Advanced(p) => {
@@ -177,7 +183,16 @@ fn schedule(seed: u64, steps: u32, levels: u8, bug: Option<Bug>) -> Result<(), S
                         *tip = group::follow(tip, &e).unwrap();
                     }
                     Advanced::Refused(_) => {}
-                    Advanced::Fenced | Advanced::Undecided(_) => wr.claim = None,
+                    Advanced::Fenced | Advanced::Undecided(_) => {
+                        // A dead claim stays dead: used again, it is fenced.
+                        let from = c.end();
+                        if wr.sim.advance(c, from, e, at) != Advanced::Fenced
+                            || wr.sim.durable(c, at) != Err(Error::Fenced)
+                        {
+                            return Err("a dead claim was used again".into());
+                        }
+                        wr.claim = None;
+                    }
                 }
             }
             7 => {

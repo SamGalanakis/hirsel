@@ -530,11 +530,23 @@ targets, so compiled Hirsel programs still link one self-contained runtime
 archive. `bundle_archive.py` preserves duplicate member names without extracting
 them into a shared directory.
 
+Each archive is also a named view, `//:hirsel-rt-archives[<arch>-<variant>]`
+(for example `x86_64-diagnostic+measurement`, `aarch64-default`), holding that
+archive, its `startup.order` and the triple's builtins. A test links only the
+views it declares: `RUNTIME_ARCHIVE_VIEWS` in `sync.py` lists them per test
+binary and gate, and generation fails when a native test binary has no entry or
+an entry names no binary. A view outside a test's list is absent from its
+`HIRSEL_RUNTIME_ARCHIVES` and fails as "no runtime archive <path>", so building
+one consumer never builds the other archives. The aggregate target still holds
+all of them for the workspace build and the toolchain bundles.
+
 Runtime packages also contain a generated `startup.order` for each target and
-feature set. `startup_order.py` builds the serial and scoped-pool fixtures against
-the unprofiled archives, then ranks code and read-only symbols by first access in
-Lackey instruction/memory traces. It resolves host Rust names against each target
-archive and leaves section garbage collection unchanged. The selected Link
+feature set. `startup_order.py train` builds the serial and scoped-pool fixtures
+against the unprofiled x86_64 default archive, then ranks code and read-only
+symbols by first access in Lackey instruction/memory traces; `startup_order.py
+translate` resolves those host Rust names against each target archive in its own
+action, so one archive's order does not wait on the others. Section garbage
+collection is unchanged. The selected Link
 captures this file with its runtime inputs and hashes its contents into the build
 ID. Profile generation requests four CPUs and 2 GiB: the pool fixture admits four
 workers, though Valgrind serializes them onto about one core; no profile is checked in.

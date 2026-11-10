@@ -227,12 +227,25 @@ def _test_crate_flags(crate_root):
         return []
     return select({"root//tools/buck2:profile_checked": ["-Copt-level=0"], "DEFAULT": []})
 
-def hirsel_test(name, crate, crate_root, srcs, features, deps, manifest_dir, package_name, version, edition, build_script = None, bin_exes = {}, data = [], runtime_archives = None, products = None, shards = 1, case_shards = {}, costs = None, seeded = False, skips = [], consumer_cases = {}):
+# One runtime archive view: path under HIRSEL_RUNTIME_ARCHIVES -> artifact.
+RuntimeArchivesInfo = provider(fields = {"entries": provider_field(dict[str, Artifact])})
+
+def _merged_archives(ctx, views):
+    """One HIRSEL_RUNTIME_ARCHIVES directory of exactly the declared views:
+    a consumer never builds an archive it does not link."""
+    return ctx.actions.symlinked_dir("runtime-archives", {
+        key: artifact
+        for view in views
+        for key, artifact in view[RuntimeArchivesInfo].entries.items()
+    })
+
+def hirsel_test(name, crate, crate_root, srcs, features, deps, manifest_dir, package_name, version, edition, build_script = None, bin_exes = {}, data = [], runtime_archives = [], products = None, shards = 1, case_shards = {}, costs = None, seeded = False, skips = [], consumer_cases = {}):
     """A libtest harness (`rustc --test`) and the test that runs it.
 
     `bin_exes` are the package's binaries, as Cargo's CARGO_BIN_EXE_<name>.
     `data` are the files the test reads at run time; `runtime_archives` the
-    native runtime archives it links programs with; `products` the ordinary
+    runtime archive views it links programs with (`//:hirsel-rt-archives[<arch>-<variant>]`,
+    declared per binary in sync.py RUNTIME_ARCHIVE_VIEWS); `products` the ordinary
     std query products its programs load. `shards` splits
     the cases over that many test targets `<name>-shard-<i>`, run in parallel,
     balanced by the measured seconds per case in the `costs` table.
@@ -244,7 +257,7 @@ def hirsel_test(name, crate, crate_root, srcs, features, deps, manifest_dir, pac
     run skips except the full gate's (`-c hirsel.full=true`).
     """
     if name in ["hirsel-cli-test-cpu_pool_8"] and read_root_config("hirsel", "native_tsan", "false") == "true":
-        runtime_archives = ":hirsel-rt-tsan-archives"
+        runtime_archives = [":hirsel-rt-tsan-archives[x86_64-default]"]
     if package_name == "hirsel-rt" and read_root_config("hirsel", "ownership_trace", "false") == "true":
         features = features + ["ownership-trace"]
     harness = name + "-harness"
@@ -403,7 +416,7 @@ def _rust_test_impl(ctx):
     if ctx.attrs.seed:
         env["PROPTEST_RNG_SEED"] = ctx.attrs.seed
     if ctx.attrs.runtime_archives:
-        archives = ctx.attrs.runtime_archives[DefaultInfo].default_outputs[0]
+        archives = _merged_archives(ctx, ctx.attrs.runtime_archives)
         inputs.append(archives)
         env["HIRSEL_RUNTIME_ARCHIVES"] = cmd_args(archives)
     if ctx.attrs.products:
@@ -473,7 +486,7 @@ _rust_test = rule(
         "relocate": attrs.bool(default = False),
         # A pool run's `[cpu, memory_kb, cpu_class]`, for its executor (platforms.bzl).
         "request": attrs.list(attrs.string(), default = []),
-        "runtime_archives": attrs.option(attrs.dep(), default = None),
+        "runtime_archives": attrs.list(attrs.dep(providers = [RuntimeArchivesInfo]), default = []),
         "products": attrs.option(attrs.dep(), default = None),
         "product_definitions": attrs.string(default = ""),
         "seed": attrs.string(default = ""),
@@ -540,7 +553,7 @@ def selected_paths(key, index):
         return None
     return slices[index - 1].split("|"), extra
 
-def hirsel_command_test(name, binary, args, data, cwd, runtime_archives = None, products = None, full = False, native_selection = None, changed_native = False, selected = None, measured_as = None):
+def hirsel_command_test(name, binary, args, data, cwd, runtime_archives = [], products = None, full = False, native_selection = None, changed_native = False, selected = None, measured_as = None):
     """A gate stage as a test: `binary args...` run from its package directory `cwd`.
 
     On the pool its result is cached by its inputs, so an unchanged corpus and
@@ -630,7 +643,7 @@ _test_suite = rule(impl = _test_suite_impl, attrs = {
     "labels": attrs.list(attrs.string(), default = []),
 })
 
-def hirsel_script_test(name, script, data, runtime_archives = None, full = True, args = [], bin_exes = {}, products = None, production = False, files_env = {}, sanitizer = None, host = False, shards = 1):
+def hirsel_script_test(name, script, data, runtime_archives = [], full = True, args = [], bin_exes = {}, products = None, production = False, files_env = {}, sanitizer = None, host = False, shards = 1):
     """A script harness with the same hermetic inputs as native Rust tests.
     `files_env` names further input files as environment variables. `host`
     runs it on the invoking host, never the pool: for a tool built there.
@@ -670,6 +683,7 @@ def _link_hosts_local_impl(ctx):
     digests = ctx.actions.declare_output("digests.txt")
     tree = lambda dep: dep[DefaultInfo].default_outputs[0]
     tools = {name: tree(dep) for name, dep in ctx.attrs.tools.items()}
+    tools["archives"] = _merged_archives(ctx, ctx.attrs.runtime_archives)
     command = cmd_args(
         "python3", ctx.attrs.script, "build", "--hirsel", tree(ctx.attrs.hirsel),
         "--list", ctx.attrs.listing, "--output", digests.as_output(),
@@ -694,9 +708,10 @@ _link_hosts_local = rule(impl = _link_hosts_local_impl, attrs = {
     "listing": attrs.source(),
     "data": attrs.list(attrs.source(), default = []),
     "tools": attrs.dict(attrs.string(), attrs.dep()),
+    "runtime_archives": attrs.list(attrs.dep(providers = [RuntimeArchivesInfo])),
 })
 
-def hirsel_link_hosts_test(name, listing, data):
+def hirsel_link_hosts_test(name, listing, data, runtime_archives):
     """The two-host link gate (tools/buck2/link_hosts.py): `<name>-local` builds
     `listing`'s programs on this host, and the test builds them on a pool worker,
     under different checkout, cache and scratch roots, and compares the bytes."""
@@ -709,9 +724,9 @@ def hirsel_link_hosts_test(name, listing, data):
             "kit": "root//tools/buck2/native-toolchain:kit",
             "qemu": "root//tools/buck2/native-toolchain:qemu",
             "arm": "root//tools/buck2/native-toolchain:arm",
-            "archives": "//:hirsel-rt-archives",
             "products": "//:hirsel-std-products",
         },
+        runtime_archives = runtime_archives,
         exec_compatible_with = ["root//tools/buck2:host"], visibility = ["PUBLIC"],
     )
     binary = name + "-script"
@@ -725,7 +740,7 @@ def hirsel_link_hosts_test(name, listing, data):
         bin_exe_dir = "{}/{}".format(BIN_EXE_DIR, harness),
         data = data + [listing], cwd = ".",
         llvm = "root//tools/buck2/native-toolchain:llvm",
-        native_tools = native_tool_inputs(), runtime_archives = "//:hirsel-rt-archives",
+        native_tools = native_tool_inputs(), runtime_archives = runtime_archives,
         products = "//:hirsel-std-products", labels = ["gate"],
         exec_compatible_with = _test_platform(name), pool = not TESTS_ON_HOST,
         request = _request(name),
@@ -950,7 +965,7 @@ def hirsel_native_pool_tsan(name, width, data, products):
         bin_exe_dir = BIN_EXE_DIR + "/" + binary + "-harness",
         files_env = {"HIRSEL_NATIVE_CPU_HARNESS": ":" + binary + "-harness"},
         llvm = "root//tools/buck2/native-toolchain:llvm", native_tools = native_tool_inputs(),
-        runtime_archives = ":hirsel-rt-tsan-archives", labels = ["gate"],
+        runtime_archives = [":hirsel-rt-tsan-archives[x86_64-default]"], labels = ["gate"],
         exec_compatible_with = _test_platform(binary), pool = not TESTS_ON_HOST,
         request = _request(binary), visibility = ["PUBLIC"],
     )
@@ -1022,19 +1037,25 @@ def _runtime_archives_impl(ctx):
         entries[path + "/libhirsel_rt.a"] = stripped
         entries[path + "/debug/libhirsel_rt.a"] = archive
     if not ctx.attrs.sanitizer_archive:
-        # Training links use the same archives without profiles. The compiler
-        # and ordinary std products depend on Rust libraries, never on this
-        # runtime package, so the profile action introduces no build cycle.
-        unprofiled = ctx.actions.symlinked_dir("unprofiled", entries)
-        orders = ctx.actions.declare_output("startup-orders", dir = True)
+        # Training links the x86-64 default archive without a profile; each
+        # archive's order then comes from its own symbols, so a view never
+        # waits on another target or variant. The compiler and ordinary std
+        # products depend on Rust libraries, never on this runtime package,
+        # so the profile action introduces no build cycle.
+        host = "x86_64-unknown-linux-gnu/"
+        unprofiled = ctx.actions.symlinked_dir("unprofiled", {
+            key: artifact for key, artifact in entries.items()
+            if key.startswith(host + "default/") or key == host + "libhirsel_builtins.a"
+        })
+        ranks = ctx.actions.declare_output("startup-ranks.tsv")
         sources = ctx.actions.symlinked_dir("startup-fixtures", ctx.attrs._startup_sources)
         command = cmd_args(
-            "python3", ctx.attrs._startup_order,
+            "python3", ctx.attrs._startup_order, "train",
             "--hirsel", ctx.attrs._startup_compiler[RunInfo],
             "--products", ctx.attrs._startup_products[DefaultInfo].default_outputs[0],
             "--archives", unprofiled,
             "--source", sources,
-            "--output", orders.as_output(),
+            "--output", ranks.as_output(),
             "--llvm", ctx.attrs._profile_llvm[DefaultInfo].default_outputs[0],
             "--capped", ctx.attrs.capped,
             "--private-native-inputs", ctx.attrs._private_native_inputs,
@@ -1043,16 +1064,26 @@ def _runtime_archives_impl(ctx):
             command.add("--" + name.replace("_", "-"), dep[DefaultInfo].default_outputs[0])
         ctx.actions.run(command, category = "startup_order", local_only = True)
         for path in ctx.attrs.archives:
-            entries[path + "/startup.order"] = orders.project(path + "/startup.order")
-    # Qualification consumers can request one target/variant without building
-    # unrelated archives. Each view also carries that target's compiler builtins.
+            order = ctx.actions.declare_output(path + "/startup.order")
+            ctx.actions.run(cmd_args(
+                "python3", ctx.attrs._startup_order, "translate",
+                "--llvm", ctx.attrs._profile_llvm[DefaultInfo].default_outputs[0],
+                "--ranks", ranks,
+                "--archive", entries[path + "/libhirsel_rt.a"],
+                "--output", order.as_output(),
+            ), category = "startup_order_translate", identifier = path.replace("/", "-"))
+            entries[path + "/startup.order"] = order
+    # Each consumer declares the target/variant views it links (sync.py
+    # RUNTIME_ARCHIVE_VIEWS); a view carries that archive, its startup order and
+    # its target's compiler builtins, and builds nothing else.
     views = {}
     for path in ctx.attrs.archives:
         triple, variant = path.split("/")
         selected = {key: artifact for key, artifact in entries.items()
                     if key.startswith(path + "/") or key == triple + "/libhirsel_builtins.a"}
         view = triple.split("-")[0] + "-" + variant
-        views[view] = [DefaultInfo(default_output = ctx.actions.symlinked_dir(view, selected))]
+        views[view] = [DefaultInfo(default_output = ctx.actions.symlinked_dir(view, selected)),
+                       RuntimeArchivesInfo(entries = selected)]
     return [DefaultInfo(default_output = ctx.actions.symlinked_dir(ctx.label.name, entries), sub_targets = views)]
 
 _runtime_archives = rule(

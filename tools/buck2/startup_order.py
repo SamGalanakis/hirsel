@@ -76,14 +76,9 @@ def trace_symbols(trace, rows):
                 yield from sorted(names)
 
 
-def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    tools = ["hirsel", "products", "llvm", "kit", "linker", "glibc-floor",
-             "runtime-auditor", "valgrind", "capped", "private-native-inputs",
-             "archives", "source", "output"]
-    for name in tools:
-        parser.add_argument("--" + name, required=True, type=lambda p: Path(p).resolve())
-    args = parser.parse_args()
+def train(args):
+    """Trace the startup fixtures linked on the x86-64 default archive; write
+    each first-used symbol, in rank order, as `<raw>\t<demangled>`."""
     capped = runpy.run_path(str(args.capped))
     jobs = int(capped["granted_cpus"](int(os.environ.get("HIRSEL_JOBS") or capped["DEFAULT_JOBS"])))
     if jobs < 1:
@@ -147,27 +142,47 @@ def main():
                 raise RuntimeError(f"{shape} startup fixture returned {output!r}")
             for name in trace_symbols(trace, rows):
                 selected.setdefault(name, len(selected))
-
-        # Resolve host Rust names in every target/feature archive. CRT and
-        # anonymous constant names also keep their exact matches. A link can
-        # omit any traced function; ordering never creates a GC root.
         human = demangle(args.llvm, selected, environment)
-        ranks = {name: rank for rank, name in enumerate(human)}
-        for archive in sorted(args.archives.glob("*/*/libhirsel_rt.a")):
-            names = [row[0] for row in symbols(args.llvm, archive, environment, directory,
-                                              "--defined-only")]
-            human = demangle(args.llvm, names, environment)
-            translated = {}
-            for name, readable in zip(names, human):
-                if readable in ranks:
-                    translated[name] = ranks[readable]
-            for name, rank in selected.items():
-                translated.setdefault(name, rank)
-            destination = args.output / archive.relative_to(args.archives).parent / "startup.order"
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            destination.write_text("\n".join(
-                name for name, rank in sorted(translated.items(), key=lambda row: (row[1], row[0]))
-            ) + "\n")
+    args.output.write_text("".join(f"{name}\t{readable}\n" for name, readable in zip(selected, human)))
+
+
+def translate(args):
+    """Order one archive's symbols by the trained ranks. Host Rust names
+    resolve through their demangled form, so every target/feature archive
+    gets them; CRT and anonymous constant names keep their exact matches. A
+    link can omit any traced function; ordering never creates a GC root."""
+    environment = dict(os.environ, LD_LIBRARY_PATH=str(args.llvm / "lib"))
+    rows = [line.split("\t") for line in args.ranks.read_text().splitlines()]
+    selected = {name: rank for rank, (name, _) in enumerate(rows)}
+    ranks = {readable: rank for rank, (_, readable) in enumerate(rows)}
+    with tempfile.TemporaryDirectory(prefix="hirsel-startup-order-") as directory:
+        names = [row[0] for row in symbols(args.llvm, args.archive, environment, directory,
+                                          "--defined-only")]
+    translated = {}
+    for name, readable in zip(names, demangle(args.llvm, names, environment)):
+        if readable in ranks:
+            translated[name] = ranks[readable]
+    for name, rank in selected.items():
+        translated.setdefault(name, rank)
+    args.output.write_text("\n".join(
+        name for name, rank in sorted(translated.items(), key=lambda row: (row[1], row[0]))
+    ) + "\n")
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    commands = parser.add_subparsers(dest="command", required=True)
+    path = lambda p: Path(p).resolve()
+    training = commands.add_parser("train")
+    for name in ["hirsel", "products", "llvm", "kit", "linker", "glibc-floor",
+                 "runtime-auditor", "valgrind", "capped", "private-native-inputs",
+                 "archives", "source", "output"]:
+        training.add_argument("--" + name, required=True, type=path)
+    translating = commands.add_parser("translate")
+    for name in ["llvm", "ranks", "archive", "output"]:
+        translating.add_argument("--" + name, required=True, type=path)
+    args = parser.parse_args()
+    (train if args.command == "train" else translate)(args)
 
 
 if __name__ == "__main__":

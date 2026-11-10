@@ -120,7 +120,7 @@ class Capped(unittest.TestCase):
         spec = importlib.util.spec_from_file_location('startup_order', ROOT / 'tools/buck2/startup_order.py')
         startup = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(startup)
-        arguments = ['startup_order.py', '--capped', str(CAPPED)]
+        arguments = ['startup_order.py', 'train', '--capped', str(CAPPED)]
         for name in ('hirsel', 'products', 'llvm', 'kit', 'linker', 'glibc-floor',
                      'runtime-auditor', 'valgrind', 'private-native-inputs', 'archives', 'source', 'output'):
             arguments += ['--' + name, str(self.root / name)]

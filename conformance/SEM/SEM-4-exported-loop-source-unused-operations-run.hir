@@ -1,0 +1,7 @@
+// rule: SEM-4
+// expect: run
+// A published loop source keeps its private operation contracts before iteration.
+pub fn main() -> Result[(), ()] {
+  let view = std@1/unicode.graphemes("abc")
+  Ok(())
+}

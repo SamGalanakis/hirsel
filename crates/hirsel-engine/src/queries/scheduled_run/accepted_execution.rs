@@ -531,6 +531,29 @@ impl FrontRunQueries {
             let (public, private) = snapshot.execution_declaration(&path)?;
             let mut type_roots = hirsel_types::signature_types(&types, &public);
             type_roots.extend(hirsel_types::signature_types(&types, &private));
+            // V checks declaration protocols even when their operations have
+            // no executable caller. Retain those signatures with the type.
+            for signature in [&public, &private] {
+                if let SignatureKind::Type(declaration) = &signature.kind {
+                    if let Some(association) = &declaration.loop_source {
+                        paths.extend([
+                            association.open.clone(),
+                            association.next.clone(),
+                            association.option.clone(),
+                        ]);
+                    }
+                    paths.extend(
+                        declaration
+                            .format
+                            .iter()
+                            .chain(declaration.drop.iter())
+                            .cloned(),
+                    );
+                    if let Some(check) = &declaration.serializable_check {
+                        paths.insert(check.function.clone());
+                    }
+                }
+            }
             let private = (!Arc::ptr_eq(&public, &private)).then_some(private);
             let materialized = constants.contains(&path)
                 || (output.semantic.definitions().contains(&path)

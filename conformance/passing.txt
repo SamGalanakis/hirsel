@@ -7121,6 +7121,7 @@ conformance/SEM/SEM-4-contract6-source-grapheme-run.hir
 conformance/SEM/SEM-4-contract6-take-bad.hir
 conformance/SEM/SEM-4-counted-cursor-sources.hir
 conformance/SEM/SEM-4-empty-closure-before-set-run.hir
+conformance/SEM/SEM-4-exported-loop-source-unused-operations-run.hir
 conformance/SEM/SEM-4-fresh-iteration-name.hir
 conformance/SEM/SEM-4-grapheme-parameter-source.hir
 conformance/SEM/SEM-4-index-counter-types.hir

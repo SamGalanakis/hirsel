@@ -12,11 +12,33 @@ fn fixed_add(a: u64, b: u64) -> u64 uses {} {
   }
 }
 
-fn fixed_width(node: Node) -> u64 uses {} {
-  if node.kind == 0 || node.kind == 3 || node.kind == 4 || node.kind == 5 || node.kind == 6 || node.kind == 15 || node.kind == 16 {
-    return 1
+// The existing 128-group admission bound also bounds this immutable template.
+// Truncating a counted copy avoids rebuilding identical whole-span tags.
+fn fixed_whole_tags() -> List[u64] uses {} {
+  let mut tags: List[u64] = [0u64, 0u64]
+  for group in 1u64..128u64 {
+    core@1/list.push(mut tags, 1u64)
+    core@1/list.push(mut tags, 2u64)
   }
-  if node.kind != 1 || node.negated || core@1/list.len(node.ranges) == 0 {
+  take tags
+}
+
+const WHOLE_CAPTURE_TAGS: List[u64] = comptime fixed_whole_tags()
+
+fn fixed_empty(node: Node) -> bool uses {} {
+  match node.kind {
+    0 | 3 | 4 | 5 | 6 | 15 | 16 => true,
+    _ => false,
+  }
+}
+
+fn fixed_width(node: Node) -> u64 uses {} {
+  match node.kind {
+    0 | 3 | 4 | 5 | 6 | 15 | 16 => return 1,
+    1 => (),
+    _ => return 0,
+  }
+  if node.negated || core@1/list.len(node.ranges) == 0 {
     return 0
   }
   let mut width = 0u64
@@ -54,31 +76,91 @@ fn fixed_capture_plan(tree: Tree, root: u64) -> List[u64] uses {} {
     return []
   }
   let slots = groups * 2
+  // Captures wrapped around the entire match need no width propagation.
+  // Peel only zero-width assertions outside their shared boundary chain.
+  let mut whole_at = root
+  let mut whole_groups = 0u64
+  while true {
+    let node = tree.nodes[whole_at]
+    match node.kind {
+      17 => {
+        if node.left >= whole_at {
+          return []
+        }
+        if node.right != whole_groups + 1 {
+          break
+        }
+        whole_groups += 1
+        whole_at = node.left
+      },
+      7 => {
+        if node.left >= whole_at || node.right >= whole_at {
+          return []
+        }
+        if fixed_empty(tree.nodes[node.left]) {
+          whole_at = node.right
+        } else if fixed_empty(tree.nodes[node.right]) {
+          whole_at = node.left
+        } else {
+          break
+        }
+      },
+      _ => break,
+    }
+  }
+  if whole_groups + 1 == groups {
+    // Retain the complete malformed/cyclic dependency check, even for
+    // nodes outside the boundary chain.
+    for index in 0u64..tally {
+      let node = tree.nodes[index]
+      match node.kind {
+        7 | 8 => {
+          if node.left >= index || node.right >= index {
+            return []
+          }
+        },
+        9 | 17 => {
+          if node.left >= index {
+            return []
+          }
+        },
+        _ => (),
+      }
+    }
+    let mut whole_plan = copy WHOLE_CAPTURE_TAGS
+    core@1/list.truncate(mut whole_plan, slots)
+    return take whole_plan
+  }
   let mut widths: List[u64] = []
   for index in 0u64..tally {
     let node = tree.nodes[index]
-    let mut width = fixed_width(node)
-    if node.kind == 7 || node.kind == 8 || node.kind == 9 || node.kind == 17 {
-      // Parser trees are postorder. Refuse malformed/cyclic dependencies.
-      if node.left >= index || (node.kind == 7 || node.kind == 8) && node.right >= index {
-        return []
-      }
-      width = widths[node.left]
-      if node.kind == 7 {
-        width = fixed_add(width, widths[node.right])
-      } else if node.kind == 8 {
-        if width != widths[node.right] {
-          width = 0
+    let mut width = 0u64
+    match node.kind {
+      7 | 8 | 9 | 17 => {
+        // Parser trees are postorder. Refuse malformed/cyclic dependencies.
+        if node.left >= index || (node.kind == 7 || node.kind == 8) && node.right >= index {
+          return []
         }
-      } else if node.kind == 9 {
-        if node.unbounded || node.min != node.max || width == 0 || node.max > 1048576 {
-          width = 0
-        } else if width > 1 && node.max > 1048576 / (width - 1) {
-          width = 0
-        } else {
-          width = (width - 1) * node.max + 1
+        width = widths[node.left]
+        if node.kind == 7 {
+          width = fixed_add(width, widths[node.right])
+        } else if node.kind == 8 {
+          if width != widths[node.right] {
+            width = 0
+          }
+        } else if node.kind == 9 {
+          if node.unbounded || node.min != node.max || width == 0 || node.max > 1048576 {
+            width = 0
+          } else if width > 1 && node.max > 1048576 / (width - 1) {
+            width = 0
+          } else {
+            width = (width - 1) * node.max + 1
+          }
         }
-      }
+      },
+      _ => {
+        width = fixed_width(node)
+      },
     }
     core@1/list.push(mut widths, width)
   }
@@ -89,42 +171,53 @@ fn fixed_capture_plan(tree: Tree, root: u64) -> List[u64] uses {} {
   // from_start/from_end are independent forward/backward distances, encoded +1.
   let mut stack: List[(u64, u64, u64, bool)] = [(root, 1u64, 1u64, true)]
   while let Some((index, from_start, from_end, mandatory)) = core@1/list.pop(mut stack) {
-    let node = tree.nodes[index]
-    if node.kind == 7 {
-      core@1/list.push(
-        mut stack,
-        (node.left, from_start, fixed_add(from_end, widths[node.right]), mandatory)
-      )
-      core@1/list.push(
-        mut stack,
-        (node.right, fixed_add(from_start, widths[node.left]), from_end, mandatory)
-      )
-    } else if node.kind == 8 || node.kind == 9 {
-      // Do not infer participation or last writes from a fixed length alone.
-      core@1/list.push(mut stack, (node.left, 0u64, 0u64, false))
-      if node.kind == 8 {
-        core@1/list.push(mut stack, (node.right, 0u64, 0u64, false))
-      }
-    } else if node.kind == 17 {
+    // Nested capture wrappers keep the same distances. Walk their chain
+    // directly instead of pushing and popping an identical traversal frame.
+    let mut at = index
+    while tree.nodes[at].kind == 17 {
+      let node = tree.nodes[at]
       if !mandatory {
         return []
       }
-      let start_end = fixed_add(from_end, widths[node.left])
-      let end_start = fixed_add(from_start, widths[node.left])
+      let slot = node.right * 2
       // Odd = start + distance, even = end - distance; zero = unproved.
-      plan[node.right * 2] = if from_start != 0 {
+      plan[slot] = if from_start != 0 {
         from_start * 2 - 1
       } else {
-        start_end * 2
+        fixed_add(from_end, widths[node.left]) * 2
       }
-      plan[node.right * 2 + 1] = if from_end != 0 {
+      plan[slot + 1] = if from_end != 0 {
         from_end * 2
-      } else if end_start != 0 {
-        end_start * 2 - 1
       } else {
-        0u64
+        let end_start = fixed_add(from_start, widths[node.left])
+        if end_start != 0 {
+          end_start * 2 - 1
+        } else {
+          0u64
+        }
       }
-      core@1/list.push(mut stack, (node.left, from_start, from_end, mandatory))
+      at = node.left
+    }
+    let node = tree.nodes[at]
+    match node.kind {
+      7 => {
+        core@1/list.push(
+          mut stack,
+          (node.left, from_start, fixed_add(from_end, widths[node.right]), mandatory)
+        )
+        core@1/list.push(
+          mut stack,
+          (node.right, fixed_add(from_start, widths[node.left]), from_end, mandatory)
+        )
+      },
+      8 | 9 => {
+        // Do not infer participation or last writes from a fixed length alone.
+        core@1/list.push(mut stack, (node.left, 0u64, 0u64, false))
+        if node.kind == 8 {
+          core@1/list.push(mut stack, (node.right, 0u64, 0u64, false))
+        }
+      },
+      _ => (),
     }
   }
   for slot in 2u64..slots {

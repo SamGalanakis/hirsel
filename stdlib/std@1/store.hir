@@ -204,7 +204,7 @@ pub type SchemaError = KeyMismatch | ValueMismatch | Renamed(String, String)
 /// The outcome of one failed operation inside a transaction body. A failed
 /// operation changes nothing, and the body continues.
 @serializable
-pub type TxError = NoTable | TableExists | Schema(SchemaError) | Migrating | ReadOnly | OutOfScope | InvalidInput | Limit(
+pub type TxError = NoTable | TableExists | Schema(SchemaError) | ReadOnly | OutOfScope | InvalidInput | Limit(
   TxLimit
 ) | Storage(StoreError)
 
@@ -634,27 +634,11 @@ fn seam(take e: SeamError) -> StoreError uses {} {
 // Deletions a library has committed to, such as the typed-table library's
 // dropped tables and the generations a migration replaces or abandons
 // (STORE-5, STORE-9): one key per key prefix to delete, `hirsel.garbage/`
-// followed by the prefix. Its value is empty, or `restoring`'s: a key to put
-// back once no key under the prefix remains, in the commit that removes the
-// entry. `collect` runs at every open, so a crash leaves no deletion half done.
+// followed by the prefix, with an empty value. `collect` runs at every open, so a crash leaves no deletion half done.
 fn garbage(prefix: Bytes) -> Bytes uses {} {
   let mut out: List[u8] = []
   bytes.append(mut out, b"hirsel.garbage/")
   bytes.append(mut out, prefix)
-  bytes.from_list(take out)
-}
-
-// A garbage entry's value that puts `value` under `key` once its prefix is empty.
-fn restoring(key: Bytes, value: Bytes) -> Bytes uses {} {
-  let mut out: List[u8] = []
-  let n = bytes.len(key)
-  let mut i: u64 = 0
-  while i < 4 {
-    list.push(mut out, int.truncate((n >> (i * 8)) & 255))
-    i += 1
-  }
-  bytes.append(mut out, key)
-  bytes.append(mut out, value)
   bytes.from_list(take out)
 }
 
@@ -663,8 +647,7 @@ const COLLECT_STEP: Bytes = b"std@1/store.collect"
 
 // Carries out every garbage entry in key order: deletes the keys under its
 // prefix in commits within the store's limits, then, in one more commit,
-// removes the entry and puts back the key it restores. A crash between these
-// commits leaves the rest to the next call. A failure closes the store, so no
+// removes the entry. A crash between these commits leaves the rest to the next call. A failure closes the store, so no
 // transaction runs while garbage remains that its deleter left: a generation
 // number is reused only once its garbage is gone (STORE-9).
 fn collect(mut s: Store) -> Result[(), StoreError] {
@@ -684,29 +667,11 @@ fn collect_all(mut s: Store) -> Result[(), StoreError] {
       discard(mut s, take t)
       return Ok(())
     }
-    let (entry, value) = unique found[0]
+    let (entry, _) = unique found[0]
     let skip = bytes.len(b"hirsel.garbage/")
     let (from, to) = prefix_bounds(bytes.slice(entry, skip, bytes.len(entry)))
     if delete_within(mut t, s.limits, from, to) && ordered_map.len(t.writes) == 0 {
       run_delete(mut t, unique entry)
-      if bytes.len(value) >= 4 {
-        let mut n: u64 = 0
-        let mut i: u64 = 0
-        while i < 4 {
-          let byte: u64 = int.widen(value[i])
-          n = n | (byte << (i * 8))
-          i += 1
-        }
-        if 4 + n > bytes.len(value) {
-          discard(mut s, take t)
-          return Error(stop(mut s, Corrupt("hirsel.garbage")))
-        }
-        run_put(
-          mut t,
-          bytes.slice(value, 4, 4 + n),
-          bytes.slice(value, 4 + n, bytes.len(value))
-        )
-      }
     } else if ordered_map.len(t.writes) == 0 {
       // No single delete fits the commit limit.
       discard(mut s, take t)

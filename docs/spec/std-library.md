@@ -4191,7 +4191,7 @@ RangeBound[K] = Unbounded | Included(K) | Excluded(K)
 ScanOrder = Ascending | Descending
 Access = Read | ReadWrite
 SchemaError = KeyMismatch | ValueMismatch | Renamed(String, String)
-TxError = NoTable | TableExists | Schema(SchemaError) | Migrating | ReadOnly | OutOfScope | InvalidInput | Limit(TxLimit) | Storage(StoreError)
+TxError = NoTable | TableExists | Schema(SchemaError) | ReadOnly | OutOfScope | InvalidInput | Limit(TxLimit) | Storage(StoreError)
 CallFailure[E] = Tx(TxFailure[E]) | Denied | Rejected
 Store      // opaque, affine: the store's only writer; keeps its authority and claim
 Ticket     // opaque: copyable, data, inert
@@ -5764,8 +5764,7 @@ fn table.scope_keys[K: key + serializable, V: serializable](tx: store.Tx, t: tab
 Creation is explicit. `drop` takes the store: one transaction removes the
 table's catalog entry, and with it the schema history, and the rows are then
 deleted in commits within the store limits, so a table of any size can be
-dropped. A refusal is `Aborted(e)`, a table under migration `Aborted(Migrating())`,
-and changes nothing; a later `create` starts a new history at epoch 0.
+dropped. A refusal is `Aborted(e)` and changes nothing; a later `create` starts a new history at epoch 0.
 `get` returns fresh owned data; `delete` reports whether a row existed. `RangeBound` is `Unbounded | Included(K) | Excluded(K)` and
 `ScanOrder` is `Ascending | Descending`; scans return at most a positive `limit`
 rows, with `Excluded(last key)` for paging. Names are 1–255 UTF-8 bytes with no
@@ -5798,8 +5797,8 @@ The replaced generation is then deleted in commits within the store limits, so
 a migration is bounded by no commit limit. `MigrateError` is `Failed(E) |
 Faulted(Failure) | Collision | Table(store.TxError) | Canceled(CancelCause)`;
 on any of them the migration is discarded, its generation deleted the same
-way, and the table is unchanged. While a migration runs, writes to the table
-return `Migrating()`. Opening a store finishes the deletion of any generation a
+way, and the table is unchanged. A migration holds the store, so nothing else
+writes the table while it runs. Opening a store finishes the deletion of any generation a
 crash left unnamed by a catalog entry, so a crash leaves the old table or the
 migrated one.
 

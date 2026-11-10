@@ -159,7 +159,7 @@ fn scenario(a: Authority, side: Authority, tasks: Tasks, sc: Scope) -> Result[
     _ => false,
   }
   check(faulted && no_leftovers(a, mut s) && unchanged(mut s))?
-  // A scope cancelled before the first batch discards the mark it finds.
+  // A scope cancelled before the first batch discards the migration.
   check(canceled_before_first_batch(side, tasks))?
   // Invalid arguments.
   let other: table.Table[u32, Priced] = table.named("other")
@@ -214,7 +214,7 @@ fn price_reversed(c: (), key: u64, old: Item) -> Result[(u32, Priced), Rejected]
 }
 
 // Migrates in a child task cancelled before its first batch: the call
-// returns `Canceled` and leaves no mark, no shadow and the table as it was.
+// returns `Canceled` and leaves no next generation and the table as it was.
 // The child's store is over the memory authority `side`.
 fn canceled_before_first_batch(side: Authority, tasks: Tasks) -> bool {
   task.scope(

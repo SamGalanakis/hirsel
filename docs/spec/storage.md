@@ -294,12 +294,13 @@ fn table.scope_keys[K: key + serializable, V: serializable](tx: Tx, t: Table[K, 
 ```
 
   `table.scope` holds the whole table with `access`: its rows, its **catalog entry**,
-  the one reserved row where the library keeps everything a row operation reads about the
-  table (the schemas its rows were written under, its renames, its current generation and
-  any migration mark), and its **history rows**, one reserved row per schema history entry,
-  which only `create`, `history`, `rename` and a migration's install touch, and, read
-  only, the store's **pending deletions** of its rows and history rows, which `create`
-  checks so a generation is reused only once its earlier rows are gone. It reads
+  the one reserved row a row operation reads about the table (the digests of its current
+  storage descriptors, its current generation and which history entries its rows may
+  name), its **history rows**, one reserved row per schema history entry, written only
+  by `create`, `rename` and a migration's install, and read by `history` and by an
+  operation whose types are not the table's current ones, and, read only, the store's
+  **pending deletions** of its rows and history rows, which `create` checks so a
+  generation is reused only once its earlier rows are gone. It reads
   nothing, so it serves a table that the body will create, and holds the rows under any
   generation; the operations reach only the current one
   ([STORE-7](#store-7-rows-and-storage-identity)). `table.scope_keys` holds the rows of
@@ -472,8 +473,8 @@ else `InvalidInput()`; access to the table's catalog entry, read for `get`, `put
 `OutOfScope()` or `ReadOnly()` ([STORE-3](#store-3-transaction-scope)); the table exists
 (or, for `create`, does not), else `NoTable()` or `TableExists()`; the table's current key and value schemas match `K` and `V`
 ([STORE-7](#store-7-rows-and-storage-identity)), else `Schema(..)`; access to the row key or
-key range the operation names, else `OutOfScope()` or `ReadOnly()`; a write to a table
-under migration, else `Migrating()`; and the configured limits, else `Limit(..)`. A failed
+key range the operation names, else `OutOfScope()` or `ReadOnly()`; and the configured
+limits, else `Limit(..)`. A failed
 operation changes nothing, and the transaction continues; the body decides whether to
 abort. Tables carry no grants of their own: a body limits what the code it calls can
 reach by narrowing its `Tx` ([STORE-3](#store-3-transaction-scope)).
@@ -695,10 +696,12 @@ store's `range_rows` limit, else `Table(InvalidInput())`. Then:
 
 1. A table whose current schema already matches `K` and `B` returns `Ok(0)`. Otherwise its
    current schema must match `J` and `A`, else `Table(Schema(..))`.
-2. One transaction marks the table as migrating and records its next generation
-   ([STORE-7](#store-7-rows-and-storage-identity)) as garbage. Until the migration ends,
-   writes to the table return `Migrating()`; reads through `from` continue, and see only
-   the current generation.
+2. One transaction records the table's next generation
+   ([STORE-7](#store-7-rows-and-storage-identity)) as garbage. That record is the
+   migration's only recovery state: until the install, the catalog entry names the current
+   generation, so a migration that stops deletes the next one and leaves the table as it
+   was. The migration holds the store (`mut s`), so no other transaction runs until it
+   returns.
 3. Successive transactions each read up to `batch` rows after the last one migrated, in
    key order, apply `f` to each in order through `runner.apply(f, (), key, old)`
    ([RUN-3](runners.md#run-3-entries)), and write the results into the next generation
@@ -706,8 +709,8 @@ store's `range_rows` limit, else `Table(InvalidInput())`. Then:
 4. One transaction installs the migration whatever the table's size: it points the
    catalog entry at the next generation, appends the new schema entry
    `Migrated(runner.entry_id(f))`, the identity of `f` (its path, signature fingerprint
-   and code hash, [RUN-8](runners.md#run-8-identity-and-arrival)), clears the mark, and
-   records the replaced generation as garbage. The replaced rows are then deleted, and the
+   and code hash, [RUN-8](runners.md#run-8-identity-and-arrival)), removes the next
+   generation's garbage record, and records the replaced generation as garbage. The replaced rows are then deleted, and the
    call returns `Ok(n)` with the number of rows migrated.
 
 No commit of a migration holds more than one batch of rows, so a migration is bounded by
@@ -716,8 +719,8 @@ no commit limit. If `f` returns `Error(e)`, fails (`runner.apply` returns
 commit exceeds the store's limits, the migration is discarded and the call returns
 `Failed(e)`, `Faulted(failure)`, `Collision()`, `Canceled(cause)` or `Table(Limit(..))`;
 the table is unchanged. A discard deletes the next generation, in transactions that each
-fit the store's limits, and its last transaction clears the mark, so the table never
-accepts writes while rows of the discarded generation remain. A crash leaves the table
+fit the store's limits, and its last transaction removes the garbage record, so the
+generation is reused only once its rows are gone. A crash leaves the table
 either as it was or migrated: before the install commits, opening the store discards the
 migration; after, it deletes the replaced generation. Key migrations are allowed,
 since `f` maps the key too. Tooling may propose migrations for additive changes; the store
@@ -1321,8 +1324,8 @@ order across streams, and the wait is for another commit, never for a backend re
 ```text
 TxFailure[E] = Aborted(E) | Canceled(CancelCause) | Faulted(Failure) | Storage(StoreError)
              | Limit(TxLimit) | Unknown(StoreError)
-TxError      = NoTable() | TableExists() | Schema(SchemaError) | Migrating() | ReadOnly()
-             | OutOfScope() | InvalidInput() | Limit(TxLimit) | Storage(StoreError)
+TxError      = NoTable() | TableExists() | Schema(SchemaError) | ReadOnly() | OutOfScope()
+             | InvalidInput() | Limit(TxLimit) | Storage(StoreError)
 SchemaError  = KeyMismatch() | ValueMismatch() | Renamed(stored: String, expected: String)
 StoreError   = Storage(AuthorityError) | Refused(AuthorityError) | Corrupt(String) | Fenced()
              | Closed() | Unsupported(Unsupported) | NoLevel() | Foreign() | InvalidInput()

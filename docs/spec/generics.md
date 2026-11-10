@@ -38,8 +38,11 @@ copy is a count on the root or run-owned cell and never copies the contents.
   Floats do not. A nominal record, variant or distinct type qualifies only by declaring
   `: ordered`, and the compiler derives its order from its representation, which must
   qualify; `Option` and `Result` declare it. An opaque type exports the bound in its
-  signature, checked against its representation in the owner's view; a core token whose
-  order requires an owner domain declares `ordered of` (`Instant`, `Level`). No user
+  signature, checked against its representation in the owner's view; a token whose
+  order requires an owner domain declares `ordered of` (`Instant`, `Level`, a store's
+  `Version`, or an opaque token of the declaring package, whose constructions take their
+  brand from a declared destination, [PROV-2](brands.md#prov-2-checking)) and cannot also
+  declare `data` or `key`, whose equality would hold without a domain. No user
   comparator or lossy projection can discharge the bound.
 
   `[T: ordered]` permits canonical comparison of `T`. Substitution for it carries

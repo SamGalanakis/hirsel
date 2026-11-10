@@ -2709,6 +2709,11 @@ impl Checker<'_> {
                 self.set_ty(e, root);
             }
         }
+        let produced = self.produced_brand(e, root);
+        if produced != root {
+            root = produced;
+            self.set_ty(e, root);
+        }
         self.construction_destination(e);
         let Some(mut fields) = self.constructor_fields(e, root) else {
             return false;

@@ -610,20 +610,24 @@ fails either check is `Storage(Corrupt())`.
 ### STORE-8: Versions, snapshots and forks
 
 ```text
-Version    // opaque: copyable, data, key, inert, sendable; ordered
+Version    // opaque: copyable, plain, inert, sendable; ordered of its store's authority
 Snapshot   // opaque: copyable, inert, sendable; holds no authority
-fn store.snapshot(a: Authority, mut s: Store, at: Level of a) -> Result[Snapshot, StoreError]
-fn store.version(snap: Snapshot) -> Version
-fn store.at(a: Authority, v: Version) -> Result[Snapshot, StoreError]
-fn store.fork(from: Authority, v: Version, to: Authority) -> Result[(), StoreError]
-fn store.retain(mut s: Store, floor: Version) -> Result[(), StoreError]
-fn store.pin(mut s: Store, name: String, v: Version) -> Result[(), StoreError]
+fn store.snapshot(a: Authority, mut s: Store, at: Level of a) -> Result[Snapshot of a, StoreError]
+fn store.version(a: Authority, snap: Snapshot of a) -> Version of a
+fn store.at(a: Authority, v: Version of a) -> Result[Snapshot of a, StoreError]
+fn store.fork(from: Authority, v: Version of from, to: Authority) -> Result[(), StoreError]
+fn store.retain(a: Authority, mut s: Store, floor: Version of a) -> Result[(), StoreError]
+fn store.pin(a: Authority, mut s: Store, name: String, v: Version of a) -> Result[(), StoreError]
 fn store.unpin(mut s: Store, name: String) -> Result[(), StoreError]
 ```
 
-A **version** names one commit version of one store. It is an opaque ordered token:
-versions of one store compare, and nothing else about them is observable; in particular
-no program learns how many commits a store has made.
+A **version** names one commit version of one store. It is an opaque ordered token,
+`Version of a` for the store's authority `a` ([PROV-2](brands.md#prov-2-checking)):
+versions of one store compare in commit order with `==` and `<`, and nothing else about
+them is observable; in particular no program learns how many commits a store has made.
+A store's comparison domain is its authority, so versions taken under one authority
+compare across a close and reopen, and comparing versions of two authorities is PROV-2.
+A version is neither `data` nor `key` and is never serialized or hashed.
 
 A **snapshot** is the immutable state of a store at one version, together with the store
 identity and the level it was taken at. `store.snapshot` takes one at `D(at)`
@@ -635,7 +639,8 @@ snapshot never advances. The head keeps the state at `V` and at each declared le
 `D(L)`, sharing equal states, so the snapshots it can take cost O(levels) retained states.
 `store.snapshot` takes the store `mut` because it shares a state the head holds,
 which it moves out and back, though it changes nothing observable.
-`store.version` names a snapshot's version. `store.at` opens the state at a retained version from the store's authority without
+`store.version` names a snapshot's version; it takes `a` by plain shared borrow to name
+the comparison domain and exercises no authority. `store.at` opens the state at a retained version from the store's authority without
 claiming it: a read "as of" that version, available to any holder of the authority, on
 any machine. A query runs against a snapshot on any task, in parallel with the store's
 transactions. Under `db.local@1` taking a snapshot of the head's state costs O(1).

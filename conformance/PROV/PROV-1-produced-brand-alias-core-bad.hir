@@ -1,0 +1,11 @@
+// rule: PROV-1
+// expect: reject PROV-1 at line 10
+// twin: PROV/PROV-2-produced-brand-run.hir
+// Only an owned opaque type's own constructions take a brand from their
+// destination; an alias of a core token is not owned, and returning one
+// clock's instant as another's is refused.
+type Alias = Instant
+
+fn bad(a: MonotonicClock, b: MonotonicClock, x: Alias of a) -> Alias of b {
+  x
+}

@@ -116,7 +116,7 @@ pub fn main(rt: Io, args: Args) -> Result[(), Failed] {
   check(faulted)?
   // Neither the abort, the limit nor the fault committed anything.
   let settled = store.snapshot(a, mut s, at) ? Store
-  check(store.version(settled) == store.version(after_one))?
+  check(store.version(a, settled) == store.version(a, after_one))?
   // The store is usable after the fault.
   let five: Result[u64, store.TxFailure[Short]] = store.transact(mut s, first, 5u64)
   check(five == Ok(5))?
@@ -126,7 +126,7 @@ pub fn main(rt: Io, args: Args) -> Result[(), Failed] {
       b"ada"
     ) && store.get(snap, b"big") == None()
   )?
-  check(store.version(after_one) < store.version(snap))?
+  check(store.version(a, after_one) < store.version(a, snap))?
   check(store.query(copy snap, peek, 0u64) == Ok(5))?
   check(store.query(take empty, peek, 0u64) == Ok(0))?
   store.close(take s) ? Store

@@ -4195,7 +4195,7 @@ TxError = NoTable | TableExists | Schema(SchemaError) | ReadOnly | OutOfScope | 
 CallFailure[E] = Tx(TxFailure[E]) | Denied | Rejected
 Store      // opaque, affine: the store's only writer; keeps its authority and claim
 Ticket     // opaque: copyable, data, inert
-Version    // opaque: copyable, plain, data, key, inert; ordered
+Version    // opaque: copyable, plain, inert; ordered of the store's authority
 Snapshot   // opaque: copyable; holds no authority
 KeyScope   // opaque: copyable, data, inert
 CallInfo   // opaque: copyable, data, inert
@@ -4204,8 +4204,8 @@ fn store.open(a: Authority, config: store.StoreConfig) -> Result[store.Store, st
 fn store.close(take store: store.Store) -> Result[(), store.StoreError]
 fn store.ticket(s: store.Store) -> store.Ticket uses {}
 fn store.durable(a: Authority, mut s: store.Store, t: store.Ticket, at: Level of a) -> Result[(), store.StoreError]
-fn store.snapshot(a: Authority, mut s: store.Store, at: Level of a) -> Result[store.Snapshot, store.StoreError]
-fn store.version(snap: store.Snapshot) -> store.Version uses {}
+fn store.snapshot(a: Authority, mut s: store.Store, at: Level of a) -> Result[store.Snapshot of a, store.StoreError]
+fn store.version(a: Authority, snap: store.Snapshot of a) -> store.Version of a uses {}
 fn store.compact(mut s: store.Store) -> Result[(), store.StoreError]
 fn store.transact[A: serializable, R: serializable, E: serializable](mut s: store.Store, f: Entry[fn(mut tx: store.Tx, info: store.CallInfo, a: A) -> Result[R, E]], a: A) -> Result[R, store.TxFailure[E]]
 fn store.query[A: serializable, R: serializable, E: serializable](take snap: store.Snapshot, f: Entry[fn(tx: store.Tx, info: store.CallInfo, a: A) -> Result[R, E]], a: A) -> Result[R, store.TxFailure[E]] uses {}
@@ -4230,6 +4230,11 @@ fn store.compare_keys(a: Bytes, b: Bytes) -> i32 uses {}
 type store.AccessSet { points: List[Bytes], spans: List[store.Span] }
 type store.Span { from: ordered_map.Bound[Bytes], to: ordered_map.Bound[Bytes], direction: ordered_map.Direction }
 ```
+
+A store's comparison domain is its authority: `store.version(a, snap)` names a
+snapshot's version as `Version of a`, taking `a` by plain shared borrow without exercising
+it, and versions under one authority compare in commit order across a reopen
+([STORE-8](storage.md#store-8-versions-snapshots-and-forks)).
 
 **History format.** `std@1/history` is the codec of the
 [history format](storage.md#history-format) the store writes: `encode_group` and the

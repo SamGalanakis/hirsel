@@ -340,7 +340,7 @@ impl<'a> Validator<'a> {
                     },
                 ] = r.scan.as_slice()
                 {
-                    let typed = *kind != HandleKind::Unknown;
+                    let typed = kind.typed();
                     let has_payload = matches!(
                         kind,
                         HandleKind::Receiver

@@ -5684,6 +5684,7 @@ impl Checker<'_, '_> {
                                 constructor,
                                 fields,
                                 &origins,
+                                &state.origins,
                             );
                         }
                     }

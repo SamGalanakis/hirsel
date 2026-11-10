@@ -242,7 +242,10 @@ impl<'a> Builder<'a> {
         Ok(match shape {
             Shape::Leaf => (
                 match r.kind {
-                    // SEM-5: an opaque ordered token's word is read as a u64.
+                    // A handle leaf is read as its u64 word: an `ordered of`
+                    // token's ticks or ordinal (SEM-5), or a boundary capability's
+                    // ID in transport. Comparing or hashing one is gated by the
+                    // validator (`Layouts::comparable`), not here.
                     K::Scalar(_) | K::Handle => N::Scalar(l),
                     K::Path => N::Path(l),
                     K::Flat => N::FlatText {

@@ -6,8 +6,7 @@
 //! Unsupported borrowed/variable-flat representations explicitly yield unknown.
 
 use crate::layout_types::{
-    HandleKind, LayoutId, LayoutKind, LayoutRecord, ScalarKind, ScanStep, SizeSpec, SizeTerm,
-    TagForm,
+    LayoutId, LayoutKind, LayoutRecord, ScalarKind, ScanStep, SizeSpec, SizeTerm, TagForm,
 };
 
 pub use hirsel_core_contract::handle_scan::*;
@@ -367,7 +366,7 @@ impl Program {
                         offset: 0, kind, ..
                     },
                 ] = record.scan.as_slice()
-                    && *kind != HandleKind::Unknown
+                    && kind.typed()
                 {
                     self.words[at + 1] = VALUE_HANDLE;
                     self.words[at + 3] = kind.code();
@@ -417,7 +416,7 @@ impl Program {
                     obtains,
                 } => {
                     if let (kind, Some(ty)) = (kind, ty)
-                        && *kind != HandleKind::Unknown
+                        && kind.typed()
                     {
                         let at = self.instruction(TYPED_HANDLE, *offset);
                         self.words[at + 2] = kind.code();

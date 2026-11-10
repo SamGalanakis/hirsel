@@ -53,20 +53,26 @@ pub fn main(rt: Io, args: Args) -> Result[(), Failed] {
   let earlier = store.snapshot(a, mut s, at) ? Store
   check(store.transact(mut s, first, ()) == Ok(true))?
   let after = store.snapshot(a, mut s, at) ? Store
-  check(store.version(earlier) < store.version(after))?
-  check(store.get(earlier, b"user/ada") == None() && store.get(after, b"user/ada") == Some(
+  check(store.version(a, earlier) < store.version(a, after))?
+  check(
+    store.get(earlier, b"user/ada") == None() && store.get(after, b"user/ada") == Some(
       b"1815"
-    ))?
+    )
+  )?
   // Ranges: ascending, descending, paging and prefixes.
   let up: ordered_map.Direction = Ascending()
   let down: ordered_map.Direction = Descending()
   let all: ordered_map.Bound[Bytes] = Unbounded()
-  check(keys(store.range(after, all, Unbounded(), up, 10)) == [
+  check(
+    keys(store.range(after, all, Unbounded(), up, 10)) == [
       b"user/ada",
       b"user/alan",
       b"user/grace"
-    ])?
-  check(keys(store.range(after, all, Unbounded(), down, 2)) == [b"user/grace", b"user/alan"])?
+    ]
+  )?
+  check(
+    keys(store.range(after, all, Unbounded(), down, 2)) == [b"user/grace", b"user/alan"]
+  )?
   let page = store.range(after, all, Unbounded(), up, 1)
   let (last, _) = page[0]
   let next: ordered_map.Bound[Bytes] = Excluded(unique last)
@@ -78,19 +84,23 @@ pub fn main(rt: Io, args: Args) -> Result[(), Failed] {
   check(store.transact(mut s, second, ()) == Ok(()))?
   check(store.transact(mut s, third, ()) == Ok(()))?
   let latest = store.snapshot(a, mut s, at) ? Store
-  check(keys(store.range(after, all, Unbounded(), up, 10)) == [
+  check(
+    keys(store.range(after, all, Unbounded(), up, 10)) == [
       b"user/ada",
       b"user/alan",
       b"user/grace"
-    ])?
+    ]
+  )?
   store.close(take s) ? Store
   let mut again = store.open(a, store.default_config()) ? Store
   let now = store.snapshot(a, mut again, at) ? Store
-  check(store.version(now) == store.version(latest))?
-  check(store.get(now, b"user/ada") == Some(b"1815-12-10") && store.get(now, b"user/alan") == None() && store.get(
+  check(store.version(a, now) == store.version(a, latest))?
+  check(
+    store.get(now, b"user/ada") == Some(b"1815-12-10") && store.get(now, b"user/alan") == None() && store.get(
       now,
       b"user/x"
-    ) == Some(b"x"))?
+    ) == Some(b"x")
+  )?
   store.close(take again) ? Store
   Ok(())
 }

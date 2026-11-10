@@ -149,6 +149,8 @@ pub(super) fn valid(t: &TypeInterner, s: &Signature, signatures: &Reader<'_>) ->
             Bound::Flat => structural_flat(t, root, &declarations, &mut lookup).unwrap_or(false),
             Bound::Plain if d.layout.flat => false,
             Bound::Sendable if d.layout.flat => true,
+            // SEM-5: `ordered of` tokens have no domain-free equality.
+            Bound::Data | Bound::Key if d.bounds.contains(&Bound::OrderedOf) => false,
             Bound::Data | Bound::Key => {
                 structural_equality(t, root, *bound, &declarations, &mut lookup).unwrap_or(false)
             }

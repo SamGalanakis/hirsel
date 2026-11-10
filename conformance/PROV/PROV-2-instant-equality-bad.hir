@@ -1,7 +1,10 @@
 // rule: PROV-2
-// expect: reject GEN-1 at line 6
+// expect: reject PROV-2 at line 9
 // twin: PROV/PROV-2-instant-same-clock-ok.hir
-fn example(c: MonotonicClock) -> Result[bool, ClockError] {
+// Instants are equal only within one clock's domain (SEM-5); two clocks'
+// instants have no `==`.
+fn example(c: MonotonicClock, d: MonotonicClock) -> Result[bool, ClockError] {
   let start = clock.monotonic(c)?
-  Ok(start == start)
+  let other = clock.monotonic(d)?
+  Ok(start == other)
 }

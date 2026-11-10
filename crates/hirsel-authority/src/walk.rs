@@ -201,6 +201,10 @@ pub(super) struct Checker<'a> {
     /// The initializer of an unannotated `let`: its expected row is H's
     /// inference of the value itself, which states no brand of its own.
     inferred_initializer: Option<ExprId>,
+    /// PROV-2: expressions at a declared destination of this item (its written
+    /// result type or an annotated binding), through block tails, branches,
+    /// tuple parts and `Some`/`Ok` payloads, with the declared row there.
+    declared: HashMap<ExprId, TypeId>,
     clauses: Vec<(ExprId, TypeId)>,
     in_clause: bool,
 }
@@ -450,6 +454,7 @@ impl<'a> Checker<'a> {
             cursor_loops: BTreeMap::new(),
             direct_callee: None,
             inferred_initializer: None,
+            declared: HashMap::default(),
             clauses: vec![],
             in_clause: false,
         }
@@ -554,6 +559,9 @@ impl<'a> Checker<'a> {
             self.out.result_types.push((NameSite::Item, result));
         }
         if let Some(body) = body {
+            if let Some(result) = result {
+                self.declare(body, result);
+            }
             self.parameter_tasks();
             let temporaries = self.temporaries.len();
             self.expr(
@@ -1976,6 +1984,13 @@ impl<'a> Checker<'a> {
             ExprKind::Return(value) => {
                 if let Some(value) = value {
                     let expected = self.frames.last().and_then(|f| f.result);
+                    if let Some(result) = expected.filter(|_| {
+                        self.frames
+                            .last()
+                            .is_some_and(|f| f.owner == NameSite::Item)
+                    }) {
+                        self.declare(value, result);
+                    }
                     self.expr(
                         value,
                         Some((
@@ -2278,6 +2293,9 @@ impl<'a> Checker<'a> {
                         const { RuleId::of("CAP-3") },
                     ))
                 };
+                if let Some(goal) = expected.filter(|_| ty.is_some()) {
+                    self.declare(value, goal);
+                }
                 let outer = std::mem::replace(
                     &mut self.inferred_initializer,
                     ty.is_none().then_some(value),

@@ -1,0 +1,11 @@
+// rule: PROV-2
+// expect: reject PROV-2 at line 10
+// twin: PROV/PROV-2-produced-brand-run.hir
+// A brand comes from the construction's own declared destination, never
+// from the parameter of the function it is passed to.
+pub opaque type Tok: copyable + plain + inert + ordered of uses {} { n: u64 }
+fn same(a: Authority, x: Tok of a, y: Tok of a) -> bool { x == y }
+fn mint(a: Authority) -> Tok of a { Tok(n: 1) }
+fn caller(a: Authority) -> bool {
+  same(a, mint(a), Tok(n: 1))
+}

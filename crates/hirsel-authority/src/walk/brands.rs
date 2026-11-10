@@ -361,6 +361,118 @@ impl Checker<'_> {
             self.expression_partitions.insert(e, partition);
         }
     }
+    /// Marks `e` as a declared destination of row `goal`, and the positions that
+    /// yield its value with the part of `goal` they fill.
+    pub(super) fn declare(&mut self, e: ExprId, goal: TypeId) {
+        if self.declared.insert(e, goal).is_some() {
+            return;
+        }
+        match self.tree.expressions[e.0 as usize].kind.clone() {
+            ExprKind::Block {
+                label: None,
+                tail: Some(tail),
+                ..
+            } => self.declare(tail, goal),
+            ExprKind::If {
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                self.declare(then_branch, goal);
+                if let Some(otherwise) = else_branch {
+                    self.declare(otherwise, goal);
+                }
+            }
+            ExprKind::Match { arms, .. } => {
+                for arm in arms {
+                    self.declare(arm.body, goal);
+                }
+            }
+            ExprKind::Tuple(parts) => {
+                let TypeKind::Tuple(goals) = self.t.get(goal).unwrap().kind.clone() else {
+                    return;
+                };
+                if goals.len() == parts.len() {
+                    for (part, goal) in parts.into_iter().zip(goals.iter()) {
+                        self.declare(part, *goal);
+                    }
+                }
+            }
+            ExprKind::Call { arguments, .. } => {
+                if let ([argument], Some(payload)) =
+                    (arguments.as_slice(), self.transported_payload(e, goal))
+                {
+                    self.declare(argument.value, payload);
+                }
+            }
+            _ => {}
+        }
+    }
+    /// `Some(x)` or `Ok(x)` at a declared `Option[T]` or `Result[T, E]`: the
+    /// declared `T` its payload fills.
+    fn transported_payload(&mut self, e: ExprId, goal: TypeId) -> Option<TypeId> {
+        let Some(CallTarget::Constructor(ContextualName::Variant { owner, variant })) =
+            self.call_row(e).map(|call| call.target.clone())
+        else {
+            return None;
+        };
+        let payload = if owner == hirsel_syntax::DefPath::core("Option") {
+            "Some"
+        } else if owner == hirsel_syntax::DefPath::core("Result") {
+            "Ok"
+        } else {
+            return None;
+        };
+        let TypeKind::Named {
+            definition,
+            arguments,
+        } = self.t.get(goal).unwrap().kind.clone()
+        else {
+            return None;
+        };
+        if definition.path() != &owner {
+            return None;
+        }
+        let SignatureKind::Type(declaration) = &self.read(DefId::intern(&owner))?.kind else {
+            return None;
+        };
+        let representation = declaration.representation?;
+        let named = matches!(&self.t.get(representation).map(|row| row.kind.clone()),
+            Some(TypeKind::Variant(variants))
+                if variants.get(variant.0 as usize).is_some_and(|v| v.name.as_str() == payload));
+        match arguments.first() {
+            Some(GenericArgument::Type(payload)) if named => Some(*payload),
+            _ => None,
+        }
+    }
+    /// PROV-2: a construction of an opaque nominal type, inside the package that
+    /// declares it, introduces the single brand its declared destination states.
+    /// The declaring package is the type's brand producer, as core is for its
+    /// primitive tokens; the destination's owner is already a PROV-1 owner here.
+    pub(super) fn produced_brand(&mut self, e: ExprId, root: TypeId) -> TypeId {
+        let Some(goal) = self.declared.get(&e).copied() else {
+            return root;
+        };
+        let wanted = self.t.get(goal).unwrap().brand.clone();
+        let row = self.t.get(root).unwrap().clone();
+        if wanted.alternatives.len() != 1 || !row.brand.alternatives.is_empty() {
+            return root;
+        }
+        let TypeKind::Named { definition, .. } = row.kind else {
+            return root;
+        };
+        let opaque_here = definition.path().0.package == self.signature.definition.path().0.package
+            && self.read(definition).is_some_and(|signature| {
+                matches!(signature.kind, SignatureKind::Type(_))
+                    && signature.metadata.visibility == hirsel_syntax::Visibility::PublicOpaque
+            });
+        if !opaque_here {
+            return root;
+        }
+        let mut row = row;
+        row.brand = wanted;
+        self.intern(row)
+    }
     // Only the selected variant's fields carry value provenance. Generic
     // arguments describing absent fields are contracts, not fabricated values.
     pub(super) fn brandless_variant(

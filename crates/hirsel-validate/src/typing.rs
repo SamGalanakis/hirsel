@@ -2981,8 +2981,9 @@ impl<'a, 'input> Checker<'a, 'input> {
                 | Rvalue::Construct { .. }
                 | Rvalue::Closure { .. }
         ) || matches!(r, Rvalue::Unary { op, .. } if *op != U::Unique);
-        // SortedMap derives its brand from the dictionary; flow independently
-        // replays that identity in constructor_origin_types.
+        // SortedMap derives its brand from the dictionary, and an owned opaque
+        // construction introduces its root brand at a live owner: flow
+        // independently replays both in constructor_origin_types.
         if computed
             && !matches!(
                 r,
@@ -2991,6 +2992,7 @@ impl<'a, 'input> Checker<'a, 'input> {
                     ..
                 }
             )
+            && !matches!(r, Rvalue::Construct { constructor, .. } if self.produced_root(ty, constructor))
             && !self.t.get(ty).unwrap().brand.alternatives.is_empty()
         {
             self.error(ViolationKind::InvalidOrigin(destination));
@@ -4415,12 +4417,38 @@ impl<'a, 'input> Checker<'a, 'input> {
                 .collect(),
         )
     }
+    /// PROV-2: the declaring package is an opaque nominal's brand producer. A
+    /// construction of the exact nominal, in that package, may carry one root
+    /// brand; fields and type arguments are checked as for any construction.
+    pub(super) fn produced_root(&self, ty: TypeId, constructor: &Constructor) -> bool {
+        let (Constructor::Record(path)
+        | Constructor::Variant {
+            definition: path, ..
+        }) = constructor
+        else {
+            return false;
+        };
+        let Some(row) = self.t.get(ty) else {
+            return false;
+        };
+        let TypeKind::Named { definition, .. } = &row.kind else {
+            return false;
+        };
+        row.brand.alternatives.len() == 1
+            && definition.path() == path
+            && path.0.package == self.definition.path.path().0.package
+            && self.signatures.get(*definition).is_some_and(|s| {
+                matches!(s.kind, SignatureKind::Type(_))
+                    && s.metadata.visibility == hirsel_syntax::Visibility::PublicOpaque
+            })
+    }
     pub(super) fn constructor_origin_types(
         &mut self,
         destination: PlaceId,
         constructor: &Constructor,
         fields: &[ConstructField],
         origins: &super::flow_origins::CallOriginProof,
+        state: &super::flow_origins::OriginState,
     ) {
         let witness;
         let fields = if let Constructor::SortedMap { by } = constructor {
@@ -4462,6 +4490,28 @@ impl<'a, 'input> Checker<'a, 'input> {
                 .arguments
                 .get(&ParameterRef::bound(hirsel_types::ParamId(0)));
             if !brand.is_some_and(|brand| by.is_some_and(|by| by.identity == brand)) {
+                self.error(ViolationKind::InvalidConstructor);
+            }
+        }
+        // The produced root names one owner that is live here.
+        if self.produced_root(self.place_type(destination), constructor) {
+            let owner = &store
+                .get(self.place_type(destination))
+                .unwrap()
+                .brand
+                .alternatives[0];
+            // A taken or replaced owner's identity is expired even while its
+            // name stays bound.
+            let live = matches!(owner.root, OriginRoot::Definition(_))
+                || super::flow_origins::OriginProof::get(&origins.names, &owner.root).is_some_and(
+                    |identities| {
+                        identities.len() == 1
+                            && state
+                                .expired_by(&identities.iter().chain([owner]).cloned().collect())
+                                .is_empty()
+                    },
+                );
+            if !live {
                 self.error(ViolationKind::InvalidConstructor);
             }
         }

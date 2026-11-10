@@ -449,6 +449,11 @@ pub enum HandleKind {
     TaskSet,
     Scope,
     Capability,
+    /// An `ordered of` token (SEM-5): an Instant's ticks or a Level's ordinal
+    /// carried in the handle word, with no run-context identity. The only
+    /// handle whose word structural and scalar comparison may read; untyped,
+    /// so native holder scans treat it as `Unknown`.
+    Word,
 }
 
 impl HandleKind {
@@ -464,7 +469,13 @@ impl HandleKind {
             Self::TaskSet => 6,
             Self::Scope => 7,
             Self::Capability => 8,
+            Self::Word => 9,
         }
+    }
+    /// Whether this kind names a typed run-context handle the native holder
+    /// scan reports (`Unknown` and `Word` are untyped).
+    pub const fn typed(self) -> bool {
+        !matches!(self, Self::Unknown | Self::Word)
     }
 }
 
@@ -866,7 +877,8 @@ snapshot_enum!(HandleKind {
     Task,
     TaskSet,
     Scope,
-    Capability
+    Capability,
+    Word
 });
 snapshot_enum!(ScanStep {
     Counted { offset },

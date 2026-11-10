@@ -1064,6 +1064,20 @@ impl<'a> Layouts<'a> {
             _ => false,
         }
     }
+    /// Whether `id` is an `ordered of` token's word handle (SEM-5), the only
+    /// handle layout a comparison may read.
+    pub fn word_token(&self, id: LayoutId) -> bool {
+        self.get(id).is_some_and(|l| {
+            l.kind == LayoutKind::Handle
+                && matches!(
+                    l.scan.as_slice(),
+                    [crate::layout_types::ScanStep::Handle {
+                        kind: crate::layout_types::HandleKind::Word,
+                        ..
+                    }]
+                )
+        })
+    }
     /// Whether structural comparison is defined on every part of this layout:
     /// no callable, iterator, handle, resource, header or raw pointer, the values
     /// `hirsel_interp::structural::compare` rejects. A recursive layout is
@@ -1110,8 +1124,9 @@ impl<'a> Layouts<'a> {
             // Map, Set and SortedMap compare by their library order.
             LayoutKind::Opaque { .. } => true,
             // An `ordered of` token compares by its unsigned word (SEM-5, LIR schema
-            // revision 64); the checker owns which handles are ordered.
-            LayoutKind::Handle => true,
+            // revision 65: `HandleKind::Word`); every other handle is a capability
+            // with no equality.
+            LayoutKind::Handle => self.word_token(id),
             // Shared roots have no equality (GEN-1); a frozen payload is never a value.
             LayoutKind::Shared { .. }
             | LayoutKind::SealedRegion { .. }

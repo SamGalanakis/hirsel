@@ -116,12 +116,11 @@ pub opaque type Ticket: copyable + data + inert uses {} {
   version: u64,
 }
 
-/// One commit version of one store (STORE-8): versions of one store compare
-/// in commit order, and nothing else about them is observable.
+/// One commit version of one store (STORE-8), `Version of a` for the store's
+/// authority `a`: versions of one store compare in commit order, and nothing
+/// else about them is observable.
 // One word, the commit version V: its position in the store's commit order.
-// The store brand (`Version of s`) and the ordering bound are type-level and
-// leave this representation unchanged (lane ordered-697).
-pub opaque type Version: copyable + plain + data + key + inert uses {} {
+pub opaque type Version: copyable + plain + inert + ordered of uses {} {
   version: u64,
 }
 
@@ -742,13 +741,21 @@ pub fn durable(a: Authority, mut s: Store, t: Ticket, at: Level of a) -> Result[
 /// The state at `D(at)` (STORE-8): every commit durable at `at`, no later
 /// one. It waits for nothing and costs O(1); reading one's own write takes
 /// `durable` on its ticket first. `NoLevel()` when `s` does not keep `a`.
-pub fn snapshot(a: Authority, mut s: Store, at: Level of a) -> Result[Snapshot, StoreError] {
+pub fn snapshot(a: Authority, mut s: Store, at: Level of a) -> Result[Snapshot of a, StoreError] {
   if s.closed {
     return Error(Closed())
   }
   let Some(i) = level_index(s, at) else {
     return Error(NoLevel())
   }
+  let Some((wanted, share)) = durable_state(mut s, i) else {
+    return Error(Corrupt("snapshot"))
+  }
+  Ok(Snapshot(version: wanted, index: take share, limits: s.limits))
+}
+
+// The version durable at the `i`th declared level and a share of its state.
+fn durable_state(mut s: Store, i: u64) -> Option[(u64, ordered_map.OrderedMap[Bytes, Bytes])] {
   let wanted = s.durable[i]
   for k in 0u64..list.len(s.held) {
     if s.held[k].version == wanted {
@@ -756,14 +763,15 @@ pub fn snapshot(a: Authority, mut s: Store, at: Level of a) -> Result[Snapshot, 
       let state = replace(mut s.held[k].state, ordered_map.empty(compare_keys))
       let share = copy state
       s.held[k].state = take state
-      return Ok(Snapshot(version: wanted, index: take share, limits: s.limits))
+      return Some((wanted, take share))
     }
   }
-  Error(Corrupt("snapshot"))
+  None()
 }
 
-/// The version a snapshot reflects: every commit up to it, no later one.
-pub fn version(snap: Snapshot) -> Version uses {} {
+/// The version a snapshot reflects: every commit up to it, no later one. `a`
+/// names the comparison domain and exercises no authority.
+pub fn version(a: Authority, snap: Snapshot of a) -> Version of a uses {} {
   Version(version: snap.version)
 }
 
@@ -1572,12 +1580,17 @@ fn serve_one(mut s: Store, entries: List[Served], take request: Arrived) -> Call
       if let Error(_) = gate(mut s, head) {
         return InDoubt(Abandoned())
       }
-      let a = s.authority
-      let Ok(snap) = snapshot(a, mut s, authority.floor(a)) else {
+      if s.closed {
+        return InDoubt(Abandoned())
+      }
+      let Some(i) = level_index(s, authority.floor(s.authority)) else {
+        return InDoubt(Abandoned())
+      }
+      let Some((floor_version, index)) = durable_state(mut s, i) else {
         return InDoubt(Abandoned())
       }
       let tx = Tx(
-        txn: reading(take snap),
+        txn: reading(take Snapshot(version: floor_version, index: take index, limits: s.limits)),
         limits: s.limits,
         scope: all(Read()),
         points: recorder.new(),

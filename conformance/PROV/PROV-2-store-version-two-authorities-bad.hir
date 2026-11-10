@@ -1,0 +1,7 @@
+// rule: PROV-2
+// expect: reject PROV-2 at line 6
+// twin: SEM/SEM-5-std-store-run.hir
+// A store's comparison domain is its authority: versions of two stores never compare.
+fn mixed(a: Authority, b: Authority, x: store.Snapshot of a, y: store.Snapshot of b) -> bool {
+  store.version(a, x) < store.version(b, y)
+}

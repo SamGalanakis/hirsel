@@ -1,0 +1,6 @@
+// rule: GEN-1
+// expect: reject GEN-1 at line 6
+// twin: PROV/PROV-2-produced-brand-run.hir
+// A token ordered within its owner's domain has no domain-free equality, so it
+// cannot also declare `data` (whose `==` would launder through `[T: data]`).
+pub opaque type D: copyable + plain + inert + data + ordered of uses {} { n: u64 }

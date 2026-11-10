@@ -1346,10 +1346,11 @@ impl<S: Stage> Checker<'_, '_, S> {
             } => {
                 use crate::ir::BinaryOp as B;
                 let comparison = matches!(op, B::Eq | B::Ne | B::Lt | B::Le | B::Gt | B::Ge);
-                // SEM-5 (LIR schema revision 64): a run-context handle compares
-                // by its unsigned word. Only `ordered of` tokens reach this; the checker
-                // owns which handles are ordered.
-                let handle = comparison && self.ty(left).repr == ValueRepr::Handle;
+                // SEM-5 (LIR schema revision 65): an `ordered of` token's word
+                // handle compares by its unsigned word; a capability handle never does.
+                let handle = comparison
+                    && self.ty(left).repr == ValueRepr::Handle
+                    && self.cx.layouts.word_token(self.layout_of(left));
                 let kind = if handle {
                     Some(ScalarKind::U64)
                 } else {

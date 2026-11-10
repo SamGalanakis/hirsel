@@ -1,0 +1,7 @@
+// rule: PROG-2
+// expect: reject PROG-2 at line 6
+// twin: PROV/PROV-2-produced-brand-run.hir
+// A client cannot construct a library's opaque token, so it cannot brand one.
+fn forged(a: Authority) -> store.Version of a {
+  store.Version(version: 7)
+}

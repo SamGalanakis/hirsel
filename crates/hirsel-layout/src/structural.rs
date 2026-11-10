@@ -182,9 +182,17 @@ fn derive_typed_impl<'a>(
                     Shape::Leaf
                 } else if declaration.representation.is_none()
                     && declaration.bounds.contains(&Bound::OrderedOf)
+                    && !owners.is_some_and(|o| {
+                        matches!(
+                            o.nominals.get(definition),
+                            Some(crate::layout::OwnerRepresentation::Defined(_))
+                        )
+                    })
                 {
-                    // SEM-5: an opaque `ordered of` token (an Instant's ticks, a
+                    // SEM-5: a primitive `ordered of` token (an Instant's ticks, a
                     // Level's ordinal) is one word compared as an unsigned scalar.
+                    // A source-defined token (std's store Version) keeps its
+                    // private record, hidden from the client but not from layout.
                     Shape::Leaf
                 } else {
                     let representation = declaration.representation.or_else(|| {

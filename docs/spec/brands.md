@@ -66,7 +66,25 @@ orders against a borrowed one. `copy` and `take` transport existing evidence; a 
 computed owner has a fresh identity. A sampled opaque value's brand (such as an `Instant`
 of a clock) is introduced only by its declared primitive producer and preserved by
 ordinary substitution and payload transport; a written expected brand or a decoder cannot
-create it.
+create it, with one exception, the owning package's own construction.
+
+**Produced brands.** At an eligible declared destination, a fresh representation
+construction of a nominal type `N` may introduce only `N`'s root brand, naming one legal
+live owner ([PROV-1](#prov-1-owners)), if and only if `N` (after alias resolution) is
+opaque and the current package is `N`'s exact defining package. All fields, generic
+arguments and nested brands are checked independently: owning a wrapper never relabels
+its payload, and `Some(x)` or `Ok(x)` transports `x`'s own brand. Existing values, core
+tokens and non-opaque types gain no brand, and an expired owner is never revived. The
+eligible destinations are the function's declared result, at `return` and at its tail,
+through ordinary nested blocks and `if`/`match` arms and under `Some`, `Ok` and tuple
+positions; and the initializer of a `let` with a written type. Nothing else is one: not
+call arguments, comparison peers, assignment targets, inferred `let`s, explicit generic
+actuals, a generic `-> T` result, decoder expectations, `?`, closure results, record
+fields with sibling owners or a labelled block's `break`; a construction there names an
+annotated binding instead. The brand states an association the owning package asserts;
+the language checks who may assert it and how it travels, not that the package tells the
+truth. A type declared `ordered of` cannot also declare `data` or `key`
+([GEN-1](generics.md#gen-1-bounds)), whose equality would hold without a domain.
 
 ### PROV-3: Uses
 

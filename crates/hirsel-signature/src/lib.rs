@@ -558,6 +558,10 @@ fn normalize_inner(
                         && matches!(bound, Bound::Plain | Bound::Copyable | Bound::Sendable))
                     || (matches!(bound, Bound::Data | Bound::Key)
                         && (*flavor == ast::TypeFlavor::Resource || attrs.capability.is_some()))
+                    // SEM-5: a token ordered within its owner's domain has no
+                    // domain-free equality; `data` and `key` would supply one.
+                    || (matches!(bound, Bound::Data | Bound::Key)
+                        && bounds.iter().flatten().any(|b| *b == Bound::OrderedOf))
                     || ((!opaque || repr.is_some()) && !inferred.contains(bound))
                 {
                     return Err(diagnostic(

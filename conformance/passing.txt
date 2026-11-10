@@ -1433,6 +1433,7 @@ conformance/GEN/GEN-1-opaque-resource-equality-bad.hir
 conformance/GEN/GEN-1-opaque-resource-equality-ok.hir
 conformance/GEN/GEN-1-ordered-data-launder-bad.hir
 conformance/GEN/GEN-1-ordered-float-bad.hir
+conformance/GEN/GEN-1-ordered-of-data-bad.hir
 conformance/GEN/GEN-1-ordered-record-opt-in-bad.hir
 conformance/GEN/GEN-1-packed-local-resource-bad.hir
 conformance/GEN/GEN-1-packed-local-resource-ok.hir
@@ -4580,6 +4581,7 @@ conformance/PROG/PROG-2-opaque-package-run.hir
 conformance/PROG/PROG-2-parameter-bad.hir
 conformance/PROG/PROG-2-parameter-ok.hir
 conformance/PROG/PROG-2-private-signature.hir
+conformance/PROG/PROG-2-produced-brand-client-bad.hir
 conformance/PROG/PROG-2-public-record-field-bad.hir
 conformance/PROG/PROG-2-public-record-field-ok.hir
 conformance/PROG/PROG-2-result-bad.hir
@@ -4853,6 +4855,9 @@ conformance/PROV/PROV-1-owned-replacement-other-bad.hir
 conformance/PROV/PROV-1-owned-replacement-self-bad.hir
 conformance/PROV/PROV-1-owner-leaves-scope-bad.hir
 conformance/PROV/PROV-1-owner-leaves-scope-ok.hir
+conformance/PROV/PROV-1-produced-brand-alias-core-bad.hir
+conformance/PROV/PROV-1-produced-brand-ended-owner-bad.hir
+conformance/PROV/PROV-1-produced-brand-payload-relabel-bad.hir
 conformance/PROV/PROV-1-reassign-ends-brand-bad.hir
 conformance/PROV/PROV-1-reassign-ends-brand-ok.hir
 conformance/PROV/PROV-1-record-held-owner-take-bad.hir
@@ -4964,10 +4969,15 @@ conformance/PROV/PROV-2-ordered-generic-launder-bad.hir
 conformance/PROV/PROV-2-ordered-levels-two-authorities-bad.hir
 conformance/PROV/PROV-2-ordered-list-erased-bad.hir
 conformance/PROV/PROV-2-ordered-tuple-two-clocks-bad.hir
+conformance/PROV/PROV-2-produced-brand-from-caller-bad.hir
+conformance/PROV/PROV-2-produced-brand-join-under-some-bad.hir
+conformance/PROV/PROV-2-produced-brand-public-type-bad.hir
+conformance/PROV/PROV-2-produced-brand-run.hir
 conformance/PROV/PROV-2-record-callable-two-relays-ok.hir
 conformance/PROV/PROV-2-runtime-handle-narrow.hir
 conformance/PROV/PROV-2-sleep-until-same-clock-ok.hir
 conformance/PROV/PROV-2-sleep-until-wrong-clock-bad.hir
+conformance/PROV/PROV-2-store-version-two-authorities-bad.hir
 conformance/PROV/PROV-2-unary-annotation-bad.hir
 conformance/PROV/PROV-2-unary-annotation-ok.hir
 conformance/PROV/PROV-2-unary-assignment-bad.hir

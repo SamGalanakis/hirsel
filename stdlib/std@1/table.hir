@@ -76,9 +76,9 @@ type Schemas {
 // live epochs: `count` of them from `base`, the creation or migration that
 // wrote the current generation, and the renames declared since. Rows name
 // only live epochs. The descriptors and renames are in the history rows.
+// `Catalog` is the record after its digests, which an operation compares in
+// place and never keeps.
 type Catalog {
-  key: Bytes,
-  value: Bytes,
   generation: u8,
   base: u64,
   count: u64,
@@ -87,10 +87,10 @@ type Catalog {
 const DIGEST: u64 = 32
 const RECORD: u64 = 73
 
-fn encode_catalog(c: Catalog) -> Bytes uses {} {
+fn encode_catalog(key: Bytes, value: Bytes, c: Catalog) -> Bytes uses {} {
   let mut out: List[u8] = []
-  bytes.append(mut out, c.key)
-  bytes.append(mut out, c.value)
+  bytes.append(mut out, key)
+  bytes.append(mut out, value)
   list.push(mut out, c.generation)
   internal.table_schema.little(mut out, c.base, 4)
   internal.table_schema.little(mut out, c.count, 4)
@@ -144,8 +144,10 @@ fn none_value[K: key + serializable, V: serializable](t: Table[K, V]) -> Bytes u
 // catalog's digests are the caller's: a rename changes names, never a
 // payload. Otherwise `key` is the stored key descriptor (the base epoch's),
 // `epochs` the live epochs' descriptors and `renames` those declared since,
-// read from the history rows.
+// read from the history rows. `rows` is the key prefix of the generation's
+// rows.
 type Open {
+  rows: Bytes,
   generation: u8,
   base: u64,
   count: u64,
@@ -174,7 +176,12 @@ fn valid(name: String) -> bool uses {} {
 }
 
 fn metadata_key(name: String) -> Bytes uses {} {
-  concat(b"hirsel.tables/", keys.encode(name))
+  catalog_key(keys.encode(name))
+}
+
+// The catalog key of the table whose name has the key encoding `encoded`.
+fn catalog_key(encoded: Bytes) -> Bytes uses {} {
+  concat(b"hirsel.tables/", encoded)
 }
 
 // The table's history rows, one per epoch under the catalog key, a zero byte
@@ -217,9 +224,13 @@ fn table_rows(name: String) -> Bytes uses {} {
 // the replaced or abandoned one is deleted before the operation returns, or by
 // the next open, so no table holds rows under more than two.
 fn rows_of(name: String, generation: u8) -> Bytes uses {} {
+  generation_rows(keys.encode(name), generation)
+}
+
+fn generation_rows(encoded: Bytes, generation: u8) -> Bytes uses {} {
   let mut out: List[u8] = []
   bytes.append(mut out, b"hirsel.rows/")
-  bytes.append(mut out, keys.encode(name))
+  bytes.append(mut out, encoded)
   list.push(mut out, generation)
   bytes.from_list(take out)
 }
@@ -234,6 +245,7 @@ fn next_generation(g: u8) -> u8 uses {} {
 
 fn concat(prefix: Bytes, suffix: Bytes) -> Bytes uses {} {
   let mut out: List[u8] = []
+  list.reserve(mut out, bytes.len(prefix) + bytes.len(suffix))
   bytes.append(mut out, prefix)
   bytes.append(mut out, suffix)
   bytes.from_list(take out)
@@ -243,7 +255,16 @@ fn load_catalog(tx: store.Tx, name: String) -> Result[Catalog, store.TxError] {
   if !valid(name) {
     return Error(InvalidInput())
   }
-  let key = metadata_key(name)
+  let (c, _) = read_catalog(tx, metadata_key(name), b"", b"")?
+  Ok(c)
+}
+
+// The catalog record under `key`, and whether its digests are `key_digest`
+// and `value_digest`, compared in the read view.
+fn read_catalog(tx: store.Tx, take key: Bytes, key_digest: Bytes, value_digest: Bytes) -> Result[
+  (Catalog, bool),
+  store.TxError
+] {
   store.admit_read(tx, key)?
   let raw = match store.table_read(tx, take key) {
     Some(raw) => raw,
@@ -256,15 +277,9 @@ fn load_catalog(tx: store.Tx, name: String) -> Result[Catalog, store.TxError] {
   if count == 0 {
     return Error(corrupt())
   }
-  Ok(
-    Catalog(
-      key: unique bytes.slice(raw, 0, DIGEST),
-      value: unique bytes.slice(raw, DIGEST, 2 * DIGEST),
-      generation: raw[2 * DIGEST],
-      base: read_u32(raw, 2 * DIGEST + 1),
-      count: count
-    )
-  )
+  let current = bytes.slice(raw, 0, DIGEST) == key_digest && bytes.slice(raw, DIGEST, 2 * DIGEST) == value_digest
+  let c = Catalog(generation: raw[2 * DIGEST], base: read_u32(raw, 2 * DIGEST + 1), count: count)
+  Ok((take c, current))
 }
 
 // The epoch the next schema change appends.
@@ -334,10 +349,16 @@ fn opened[K: key + serializable, V: serializable](tx: store.Tx, t: Table[K, V]) 
   store.TxError
 ] {
   let name = table_name(t)
-  let c = load_catalog(tx, name)?
+  if !valid(name) {
+    return Error(InvalidInput())
+  }
+  let encoded = keys.encode(name)
   let (key, value) = digests(t)
-  if c.key == key && c.value == value {
+  let (c, current) = read_catalog(tx, catalog_key(encoded), key, value)?
+  let rows = generation_rows(encoded, c.generation)
+  if current {
     let o = Open(
+      rows: take rows,
       generation: c.generation,
       base: c.base,
       count: c.count,
@@ -351,6 +372,7 @@ fn opened[K: key + serializable, V: serializable](tx: store.Tx, t: Table[K, V]) 
   let (epochs, renames) = live(tx, name, c)?
   admits(unique epochs[list.len(epochs) - 1], descriptors(t))?
   let o = Open(
+    rows: take rows,
     generation: c.generation,
     base: c.base,
     count: c.count,
@@ -385,8 +407,11 @@ fn reused() -> store.TxError uses {} {
   Storage(take error)
 }
 
-fn save(mut tx: store.Tx, name: String, c: Catalog) -> Result[(), store.TxError] {
-  store.table_put(mut tx, metadata_key(name), encode_catalog(c))
+fn save(mut tx: store.Tx, name: String, key: Bytes, value: Bytes, c: Catalog) -> Result[
+  (),
+  store.TxError
+] {
+  store.table_put(mut tx, metadata_key(name), encode_catalog(key, value, c))
 }
 
 /// Creates an empty table with one schema entry; creation is explicit.
@@ -408,7 +433,7 @@ pub fn create[K: key + serializable, V: serializable](mut tx: store.Tx, t: Table
   let d = descriptors(t)
   record(mut tx, name, 0, Epoch(key: unique d.key, value: unique d.value, change: Created()))?
   let (key, value) = digests(t)
-  save(mut tx, name, Catalog(key: take key, value: take value, generation: 0, base: 0, count: 1))
+  save(mut tx, name, key, value, Catalog(generation: 0, base: 0, count: 1))
 }
 
 // `key`'s encoding under the stored key schema `schema`, the codec's own when
@@ -429,13 +454,18 @@ fn encoded_key[K: key + serializable](
   Ok(keys.encode_payload(schema, data))
 }
 
-fn row_key[K: key + serializable, V: serializable](t: Table[K, V], o: Open, key: K) -> Result[
-  Bytes,
-  store.TxError
-] uses {} {
+fn row_key[K: key + serializable](o: Open, key: K) -> Result[Bytes, store.TxError] uses {} {
   // Metadata renames do not rewrite keys, so the physical key schema stays at
   // the generation's epoch until a migration atomically installs a new one.
-  Ok(concat(rows_of(table_name(t), o.generation), encoded_key(o.key, key, o.renames, o.plain)?))
+  let mut out: List[u8] = []
+  list.reserve(mut out, bytes.len(o.rows) + 16)
+  bytes.append(mut out, o.rows)
+  if o.plain {
+    keys.encode_into(key, mut out)
+  } else {
+    bytes.append(mut out, encoded_key(o.key, key, o.renames, false)?)
+  }
+  Ok(bytes.from_list(take out))
 }
 
 // A row's stored value: the epoch `n`, then `value`'s payload under the
@@ -460,8 +490,10 @@ fn row_value[V: serializable](n: u64, schema: Bytes, value: V, plain: bool) -> R
 
 // The value of `payload` under `none`, the `None()` envelope of `Option[T]`.
 fn from_payload[T: serializable](none: Bytes, payload: Bytes) -> Result[T, DecodeError] uses {} {
+  let head = internal.table_schema.head(none)
   let mut whole: List[u8] = []
-  bytes.append(mut whole, bytes.slice(none, 0, 16 + bytes.len(internal.table_schema.descriptor(none))))
+  list.reserve(mut whole, head + 12 + bytes.len(payload))
+  bytes.append(mut whole, bytes.slice(none, 0, head))
   internal.table_schema.little(mut whole, 4 + bytes.len(payload), 8)
   internal.table_schema.little(mut whole, 1, 4)
   bytes.append(mut whole, payload)
@@ -499,7 +531,7 @@ pub fn get[K: key + serializable, V: serializable](tx: store.Tx, t: Table[K, V],
   store.TxError
 ] {
   let (_, o) = opened(tx, t)?
-  let encoded = row_key(t, o, key)?
+  let encoded = row_key(o, key)?
   store.admit_read(tx, encoded)?
   match store.table_read(tx, copy encoded) {
     Some(data) => {
@@ -523,7 +555,7 @@ pub fn put[K: key + serializable, V: serializable](
   } else {
     unique o.epochs[o.count - 1].value
   }
-  let physical_key = row_key(t, o, key)?
+  let physical_key = row_key(o, key)?
   let encoded_value = row_value(next_epoch(c) - 1, latest, value, o.plain)?
   store.table_put(mut tx, take physical_key, take encoded_value)
 }
@@ -535,7 +567,7 @@ pub fn delete[K: key + serializable, V: serializable](
   key: K
 ) -> Result[bool, store.TxError] {
   let (_, o) = opened(tx, t)?
-  let encoded = row_key(t, o, key)?
+  let encoded = row_key(o, key)?
   store.admit_write(tx, encoded)?
   let exists = match store.table_read(tx, copy encoded) {
     Some(_) => true,
@@ -632,7 +664,7 @@ pub fn range[K: key + serializable, V: serializable](
   }
   let l = layout(t)
   let (_, o) = opened(tx, t)?
-  let prefix = rows_of(table_name(t), o.generation)
+  let prefix = unique o.rows
   let low = lower(o.key, prefix, o.renames, o.plain, from)?
   let high = upper(o.key, prefix, o.renames, o.plain, to)?
   let rows = store.table_range(tx, take low, take high, limit, order)?
@@ -683,7 +715,7 @@ pub fn scope_keys[K: key + serializable, V: serializable](
 ) -> Result[store.KeyScope, store.TxError] {
   let (_, o) = opened(tx, t)?
   let name = table_name(t)
-  let prefix = rows_of(name, o.generation)
+  let prefix = unique o.rows
   let low = lower(o.key, prefix, o.renames, o.plain, from)?
   let high = upper(o.key, prefix, o.renames, o.plain, to)?
   Ok(store.join(store.interval(low, high, access), catalog_span(name, Read())))
@@ -759,16 +791,12 @@ pub fn rename(mut tx: store.Tx, name: String, from: String, to: String) -> Resul
   if !changed {
     return Error(InvalidInput())
   }
-  let next = Catalog(
-    key: digest_bytes(next_key),
-    value: digest_bytes(next_value),
-    generation: c.generation,
-    base: c.base,
-    count: c.count + 1
-  )
+  let next = Catalog(generation: c.generation, base: c.base, count: c.count + 1)
+  let key_digest = digest_bytes(next_key)
+  let value_digest = digest_bytes(next_value)
   let epoch = Epoch(key: take next_key, value: take next_value, change: Renamed(unique from, unique to))
   record(mut tx, name, next_epoch(c), epoch)?
-  save(mut tx, name, next)
+  save(mut tx, name, key_digest, value_digest, next)
 }
 
 /// Removes the table, its rows and its schema history: one transaction removes
@@ -910,8 +938,8 @@ fn install[K: key + serializable, B: serializable, E](
   let epoch = Epoch(key: unique d.key, value: unique d.value, change: Migrated(unique entry))
   record(mut tx, name, next_epoch(c), epoch) ? Table
   let (key, value) = digests(to)
-  let next = Catalog(key: take key, value: take value, generation: generation, base: next_epoch(c), count: 1)
-  save(mut tx, name, next) ? Table
+  let next = Catalog(generation: generation, base: next_epoch(c), count: 1)
+  save(mut tx, name, key, value, next) ? Table
   store.table_delete(mut tx, store.garbage(rows_of(name, generation))) ? Table
   store.table_put(mut tx, store.garbage(rows_of(name, c.generation)), b"") ? Table
   Ok(())

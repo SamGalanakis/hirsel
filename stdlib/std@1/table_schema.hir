@@ -218,21 +218,19 @@ fn parse(data: Bytes) -> Result[List[Node], DecodeError] uses {} {
   Ok(take nodes)
 }
 
+// The length of a codec envelope's head, the bytes before its payload length:
+// the 16-byte header, whose second word is the descriptor's length, then the
+// descriptor. `codec.encode` produced `envelope`, so it is well formed.
+fn head(envelope: Bytes) -> u64 uses {} {
+  16 + keys.u64_at(envelope, 8)
+}
+
 fn descriptor(envelope: Bytes) -> Bytes uses {} {
-  let mut c = Cursor(data: unique envelope, at: 8)
-  let n = match number(mut c, 8) {
-    Ok(n) => n,
-    Error(_) => 0,
-  }
-  unique bytes.slice(envelope, 16, 16 + n)
+  unique bytes.slice(envelope, 16, head(envelope))
 }
 
 fn payload(envelope: Bytes) -> Bytes uses {} {
-  unique bytes.slice(
-    envelope,
-    24 + bytes.len(descriptor(envelope)),
-    bytes.len(envelope)
-  )
+  unique bytes.slice(envelope, head(envelope) + 8, bytes.len(envelope))
 }
 
 fn root(nodes: List[Node]) -> Result[u64, DecodeError] uses {} {

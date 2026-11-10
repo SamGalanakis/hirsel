@@ -1161,13 +1161,21 @@ impl FrontLowerQueries {
             }
             if !self.inputs.contains_key(path.path())
                 || self.namespace.instances.declarations.contains(&path)
+                || !self
+                    .namespace
+                    .bodies
+                    .get(&path)
+                    .is_some_and(|body| body.executable)
             {
                 continue;
             }
             let product = checked(path.path())?.ok_or_else(|| {
-                self.front
-                    .completed_error(path.path())
-                    .unwrap_or_else(refused)
+                self.front.completed_error(path.path()).unwrap_or_else(|| {
+                    QueryError::Operational(hirsel_types::OperationalFailure {
+                        operation: "Run instance selection".into(),
+                        message: format!("{} has no settled summary", path.path()),
+                    })
+                })
             })?;
             let summary = &product.summary.summary;
             if bindings.is_empty() && summary.frames[0].generic {

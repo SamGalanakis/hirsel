@@ -185,9 +185,13 @@ pub fn add_owner(
     };
     let owner = match record {
         Some(record) => OwnerRepresentation::Defined(record.clone()),
-        // Primitive capabilities are logical run-context handles. Instant uses
-        // the same opaque one-word layout for ticks, with no handle allocation.
-        None if t.capability.is_some() || *path == hirsel_syntax::DefPath::core("Instant") => {
+        // Primitive capabilities are logical run-context handles. Instant and Level
+        // use the same opaque one-word layout for ticks and a level word, with no
+        // handle allocation.
+        None if t.capability.is_some()
+            || *path == hirsel_syntax::DefPath::core("Instant")
+            || *path == hirsel_syntax::DefPath::core("Level") =>
+        {
             OwnerRepresentation::Handle {
                 revision: signature.fingerprint,
                 resource: t.resource,

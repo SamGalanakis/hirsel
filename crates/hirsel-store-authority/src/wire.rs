@@ -2,8 +2,176 @@
 //! authority are capability requests). A tape carries each outcome a program observed,
 //! so replay rebuilds it without the provider. Integers are little-endian; a string or
 //! byte string is a u64 length and its bytes.
+//!
+//! A [`Request`] is what a program asked of one authority's provider, without the
+//! authority and claim it named; [`serve`] performs it and [`Request::admits`] is the
+//! check every engine applies to an outcome, live or recorded.
 
-use crate::{Advanced, AuthorityError, Error};
+use crate::{Advanced, Authority, AuthorityError, Claim, Error, Level};
+
+/// A provider request. A level is its index among the authority's declared levels.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum Request {
+    Claim,
+    Advance { from: u64, at: u8, entry: Vec<u8> },
+    Durable { at: u8 },
+    Reclaim,
+    Read { from: u64, at: u8, max: u64 },
+    Get { name: String },
+    Put { name: String, data: Vec<u8> },
+}
+
+impl Request {
+    /// The core operation's name.
+    pub fn operation(&self) -> &'static str {
+        match self {
+            Request::Claim => "authority.claim",
+            Request::Advance { .. } => "authority.advance",
+            Request::Durable { .. } => "authority.durable",
+            Request::Reclaim => "authority.reclaim",
+            Request::Read { .. } => "authority.read",
+            Request::Get { .. } => "authority.get",
+            Request::Put { .. } => "authority.put",
+        }
+    }
+
+    /// Whether the request is made with a claim.
+    pub fn claimed(&self) -> bool {
+        matches!(
+            self,
+            Request::Advance { .. } | Request::Durable { .. } | Request::Reclaim
+        )
+    }
+
+    /// The level the request names, if any.
+    pub fn level(&self) -> Option<u8> {
+        match self {
+            Request::Advance { at, .. } | Request::Durable { at } | Request::Read { at, .. } => {
+                Some(*at)
+            }
+            _ => None,
+        }
+    }
+
+    /// Whether `o` can answer this request: its kind, an advance by exactly one entry and
+    /// a read within its bound. A tape or provider that breaks this is refused.
+    pub fn admits(&self, o: &Outcome) -> bool {
+        match (self, o) {
+            (Request::Claim | Request::Durable { .. }, Outcome::Position(_)) => true,
+            (Request::Advance { from, .. }, Outcome::Advanced(a)) => match a {
+                Advanced::Advanced(p) => from.checked_add(1) == Some(*p),
+                _ => true,
+            },
+            (Request::Read { max, .. }, Outcome::Read(r)) => {
+                r.as_ref().map_or(true, |all| all.len() as u64 <= *max)
+            }
+            (Request::Get { .. }, Outcome::Get(_)) => true,
+            (Request::Reclaim | Request::Put { .. }, Outcome::Unit(_)) => true,
+            _ => false,
+        }
+    }
+
+    pub fn encode(&self) -> Vec<u8> {
+        let mut w = Vec::new();
+        match self {
+            Request::Claim => w.push(0),
+            Request::Advance { from, at, entry } => {
+                w.push(1);
+                u64(&mut w, *from);
+                w.push(*at);
+                bytes(&mut w, entry);
+            }
+            Request::Durable { at } => w.extend_from_slice(&[2, *at]),
+            Request::Reclaim => w.push(3),
+            Request::Read { from, at, max } => {
+                w.push(4);
+                u64(&mut w, *from);
+                w.push(*at);
+                u64(&mut w, *max);
+            }
+            Request::Get { name } => {
+                w.push(5);
+                bytes(&mut w, name.as_bytes());
+            }
+            Request::Put { name, data } => {
+                w.push(6);
+                bytes(&mut w, name.as_bytes());
+                bytes(&mut w, data);
+            }
+        }
+        w
+    }
+
+    pub fn decode(b: &[u8]) -> Option<Request> {
+        let mut r = Reader(b);
+        let q = match r.u8()? {
+            0 => Request::Claim,
+            1 => Request::Advance {
+                from: r.u64()?,
+                at: r.u8()?,
+                entry: r.bytes()?.to_vec(),
+            },
+            2 => Request::Durable { at: r.u8()? },
+            3 => Request::Reclaim,
+            4 => Request::Read {
+                from: r.u64()?,
+                at: r.u8()?,
+                max: r.u64()?,
+            },
+            5 => Request::Get { name: r.text()? },
+            6 => Request::Put {
+                name: r.text()?,
+                data: r.bytes()?.to_vec(),
+            },
+            _ => return None,
+        };
+        r.0.is_empty().then_some(q)
+    }
+}
+
+/// The `n`th claim's attempt identity and the identity it mints for a new store, drawn
+/// from `seed`: a simulated run's instance, so a world and its replay agree.
+pub fn draw(seed: &[u8], n: u64) -> ([u8; 16], [u8; 32]) {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(b"hirsel.authority.claim");
+    h.update(seed);
+    h.update(n.to_le_bytes());
+    let attempt = h.clone().finalize();
+    h.update(b"store");
+    (attempt[..16].try_into().unwrap(), h.finalize().into())
+}
+
+/// Perform `r` on provider `p`. `c` is the claim a claimed request names; `draw` gives a
+/// claim's attempt identity and the store identity it mints. A claim's outcome comes with
+/// the provider's new claim.
+pub fn serve(
+    p: &mut dyn Authority,
+    c: Option<&mut Claim>,
+    r: Request,
+    draw: impl FnOnce() -> ([u8; 16], [u8; 32]),
+) -> Result<(Outcome, Option<Claim>), &'static str> {
+    let mut held = None;
+    let claim = || c.ok_or("a claimed request without its claim");
+    let o = match r {
+        Request::Claim => {
+            let (attempt, fresh) = draw();
+            Outcome::Position(p.claim(attempt, fresh).map(|c| {
+                held = Some(c.claim);
+                c.end
+            }))
+        }
+        Request::Advance { from, at, entry } => {
+            Outcome::Advanced(p.advance(claim()?, from, entry, Level(at)))
+        }
+        Request::Durable { at } => Outcome::Position(p.durable(claim()?, Level(at))),
+        Request::Reclaim => Outcome::Unit(p.reclaim(claim()?)),
+        Request::Read { from, at, max } => Outcome::Read(p.read(from, Level(at), max)),
+        Request::Get { name } => Outcome::Get(p.get(&name)),
+        Request::Put { name, data } => Outcome::Unit(p.put(&name, data)),
+    };
+    Ok((o, held))
+}
 
 /// What one seam operation returned.
 #[derive(Clone, Debug, Eq, PartialEq)]

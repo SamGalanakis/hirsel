@@ -2254,6 +2254,10 @@ pub(crate) unsafe fn execute(
                                     .map(|mount| (mount.path.clone(), mount.access)),
                             )
                             .map_err(|e| e.to_string())?;
+                            if let Some(io_grant) = &run.record().io {
+                                io.set_authorities(&io_grant.authorities)
+                                    .map_err(|e| format!("{e:?}"))?;
+                            }
                         }
                         if std::env::var_os("HIRSEL_RT_DENY_OUTPUT").is_some() {
                             io.deny_output();
@@ -2385,6 +2389,17 @@ pub(crate) unsafe fn execute(
                             if let Err(error) = io.set_signal_grant(grant) {
                                 return Err(format!("the signals grant: {error:?}"));
                             }
+                        }
+                        // A fixture's claim attempts draw from the fixture instance, as the
+                        // reference's do.
+                        if let Some(grants) = fixture_run
+                            .as_ref()
+                            .and_then(|run| run.record().io.as_ref())
+                            .map(|io| &io.authorities)
+                            .filter(|grants| !grants.is_empty())
+                            && let Err(error) = io.set_authorities(grants, Some([0; 16]))
+                        {
+                            return Err(format!("the authorities grant: {error:?}"));
                         }
                         if let Some((peers, listeners)) = net_script.clone()
                             && let Err(error) = io.set_net_script(peers, listeners)

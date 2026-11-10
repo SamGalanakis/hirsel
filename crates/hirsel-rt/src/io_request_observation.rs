@@ -246,6 +246,34 @@ pub(crate) fn project<A>(
         | R::ProcessSettle { .. } => {
             return Err("request needs a dedicated scheduling projection");
         }
+        R::Seam(seam) => {
+            use crate::authority::SeamRequest as S;
+            match seam {
+                S::Project { io, .. } => on(io)?,
+                S::Levels { authority }
+                | S::Level { authority, .. }
+                | S::Floor { authority }
+                | S::LevelNarrow { authority, .. }
+                | S::MaxEntry { authority }
+                | S::Provider {
+                    authority,
+                    claim: None,
+                    ..
+                } => on(authority)?,
+                S::ClaimEnd { claim } => on(claim)?,
+                S::ClaimNarrow { authority, claim }
+                | S::Provider {
+                    authority,
+                    claim: Some(claim),
+                    ..
+                } => {
+                    on(authority)?;
+                    on(claim)?
+                }
+                // A Level is a value word, not a handle.
+                S::LevelName { .. } => {}
+            }
+        }
     }
     let mut payload = Vec::new();
     request.encode(&mut payload);

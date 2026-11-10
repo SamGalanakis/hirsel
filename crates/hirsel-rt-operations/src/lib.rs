@@ -301,6 +301,10 @@ pub fn classify(mut row: OperationRow) -> Result<OperationRow, String> {
         | "tls.peer"
         | "tls.negotiated_protocol"
         | "tls.close" => Some(format!("hirsel_rt_v2_{}", name.replace('.', "_"))),
+        // The store authority seam (`authority.rs`).
+        name if AUTHORITY_EXPORTS.contains(&name) => {
+            Some(format!("hirsel_rt_v2_{}", name.replace('.', "_")))
+        }
         // `net.read_into`'s compiled body calls this with its buffer's size.
         "$intrinsic.NetReadInto" => Some("hirsel_rt_v2_net_read_into".into()),
         // A half's operations are its stream's entries on the half's handle.
@@ -462,6 +466,7 @@ pub fn classify(mut row: OperationRow) -> Result<OperationRow, String> {
             | "watcher.next"
             | "test.dir_event"
     ) || NET_EXPORTS.contains(&name.as_str())
+        || AUTHORITY_EXPORTS.contains(&name.as_str())
         || HALF_EXPORTS.iter().any(|(n, _)| *n == name)
         || name == "$intrinsic.NetReadInto"
     {
@@ -543,6 +548,26 @@ pub const NET_EXPORTS: &[&str] = &[
     "tls.peer",
     "tls.negotiated_protocol",
     "tls.close",
+];
+
+/// The store authority seam's operations, each with its runtime entry (`authority.rs`).
+pub const AUTHORITY_EXPORTS: &[&str] = &[
+    "io.authority",
+    "authority.levels",
+    "authority.level",
+    "authority.floor",
+    "level.name",
+    "level.narrow",
+    "authority.max_entry",
+    "authority.claim",
+    "claim.end",
+    "claim.narrow",
+    "authority.advance",
+    "authority.durable",
+    "authority.read",
+    "authority.get",
+    "authority.put",
+    "authority.reclaim",
 ];
 
 /// The `net.split` halves' operations and their entries: each is its stream operation's
@@ -2335,6 +2360,154 @@ pub const HIRSEL_ABI_EXPORTS: &[AbiExport] = &[
     },
     AbiExport {
         caller_site: false,
+        symbol: "hirsel_rt_v2_io_authority",
+        destination: true,
+        result: Some((16, 8)),
+        parameters: &[
+            Physical::Pointer,
+            Physical::Pointer,
+            Physical::I64,
+            Physical::I64,
+        ],
+    },
+    AbiExport {
+        caller_site: false,
+        symbol: "hirsel_rt_v2_authority_levels",
+        destination: true,
+        result: Some((8, 8)),
+        parameters: &[Physical::Pointer],
+    },
+    AbiExport {
+        caller_site: false,
+        symbol: "hirsel_rt_v2_authority_level",
+        destination: true,
+        result: Some((16, 8)),
+        parameters: &[
+            Physical::Pointer,
+            Physical::Pointer,
+            Physical::I64,
+            Physical::I64,
+        ],
+    },
+    AbiExport {
+        caller_site: false,
+        symbol: "hirsel_rt_v2_authority_floor",
+        destination: true,
+        result: Some((8, 8)),
+        parameters: &[Physical::Pointer],
+    },
+    AbiExport {
+        caller_site: false,
+        symbol: "hirsel_rt_v2_authority_max_entry",
+        destination: true,
+        result: Some((8, 8)),
+        parameters: &[Physical::Pointer],
+    },
+    AbiExport {
+        caller_site: false,
+        symbol: "hirsel_rt_v2_level_name",
+        destination: true,
+        result: Some((24, 8)),
+        parameters: &[Physical::Pointer],
+    },
+    AbiExport {
+        caller_site: false,
+        symbol: "hirsel_rt_v2_level_narrow",
+        destination: true,
+        result: Some((16, 8)),
+        parameters: &[Physical::Pointer, Physical::Pointer],
+    },
+    AbiExport {
+        caller_site: false,
+        symbol: "hirsel_rt_v2_claim_end",
+        destination: true,
+        result: Some((8, 8)),
+        parameters: &[Physical::Pointer],
+    },
+    AbiExport {
+        caller_site: false,
+        symbol: "hirsel_rt_v2_claim_narrow",
+        destination: true,
+        result: Some((16, 8)),
+        parameters: &[Physical::Pointer, Physical::Pointer],
+    },
+    AbiExport {
+        caller_site: false,
+        symbol: "hirsel_rt_v2_authority_claim",
+        destination: true,
+        result: Some((64, 8)),
+        parameters: &[Physical::Pointer],
+    },
+    AbiExport {
+        caller_site: false,
+        symbol: "hirsel_rt_v2_authority_advance",
+        destination: true,
+        result: Some((24, 8)),
+        parameters: &[
+            Physical::Pointer,
+            Physical::Pointer,
+            Physical::I64,
+            Physical::Pointer,
+            Physical::I64,
+            Physical::I64,
+            Physical::Pointer,
+        ],
+    },
+    AbiExport {
+        caller_site: false,
+        symbol: "hirsel_rt_v2_authority_durable",
+        destination: true,
+        result: Some((64, 8)),
+        parameters: &[Physical::Pointer, Physical::Pointer, Physical::Pointer],
+    },
+    AbiExport {
+        caller_site: false,
+        symbol: "hirsel_rt_v2_authority_read",
+        destination: true,
+        result: Some((64, 8)),
+        parameters: &[
+            Physical::Pointer,
+            Physical::I64,
+            Physical::Pointer,
+            Physical::I64,
+        ],
+    },
+    AbiExport {
+        caller_site: false,
+        symbol: "hirsel_rt_v2_authority_get",
+        destination: true,
+        result: Some((64, 8)),
+        parameters: &[
+            Physical::Pointer,
+            Physical::Pointer,
+            Physical::I64,
+            Physical::I64,
+        ],
+    },
+    AbiExport {
+        caller_site: false,
+        symbol: "hirsel_rt_v2_authority_put",
+        destination: true,
+        result: Some((64, 8)),
+        parameters: &[
+            Physical::Pointer,
+            Physical::Pointer,
+            Physical::I64,
+            Physical::I64,
+            Physical::Pointer,
+            Physical::I64,
+            Physical::I64,
+        ],
+    },
+    AbiExport {
+        caller_site: false,
+        symbol: "hirsel_rt_v2_authority_reclaim",
+        destination: true,
+        result: Some((64, 8)),
+        parameters: &[Physical::Pointer, Physical::Pointer],
+    },
+    AbiExport {
+        caller_site: false,
         symbol: "hirsel_rt_v2_io_signals",
         destination: true,
         result: Some((16, 8)),
@@ -2932,7 +3105,7 @@ pub const NATIVE_PATHS: &[&str] = &[
     "runner.call",
     "runner.spawn",
     "test.runner",
-    // The store authority seam: interpreter-only until its runtime entries land.
+    // The store authority seam (`hirsel-rt/src/authority.rs`).
     "io.authority",
     "authority.levels",
     "authority.level",

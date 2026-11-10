@@ -137,6 +137,8 @@ fn every_request_has_an_explicit_cancellation_classification() {
             Request::Stopped => false,
             Request::Ready { .. } => false,
             Request::Schedule { .. } | Request::CpuControl { .. } | Request::CpuSummary(_) => false,
+            // A seam request is atomic at the authority: cancelling it would leave its effect undecided.
+            Request::Seam(_) => false,
         };
         assert_eq!(
             hirsel_rt::io_checks::cancel(&mut Classification, &request, 3).unwrap(),

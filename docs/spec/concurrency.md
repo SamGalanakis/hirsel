@@ -127,7 +127,9 @@ its request is sent; after that its scope's cancellation is forwarded to the pla
 call waits for the acknowledgement ([RUN-9](runners.md#run-9-cancellation)). A store
 transaction checks no cancellation itself: its caller checks before starting it, and the
 call-stream form returns `Canceled` only from a runner; a body, once started, is not
-cancellable ([STORE-3](storage.md#store-3-transaction-scope)). Pure code is not
+cancellable ([STORE-3](storage.md#store-3-transaction-scope)), nor is its commit: the store
+authority seam's operations are never cancellation points, under every provider
+([STORE-11](storage.md#store-11-engine-and-storage-seam)). Pure code is not
 cancellable; `task.check_canceled(s)?` marks long loops. The consuming
 [`stream.csv_fold_scoped`](std-library.md#scoped-csv-stream-consumption) driver places
 checks inside rejecting-record and bounded-refill loops; a check outside an

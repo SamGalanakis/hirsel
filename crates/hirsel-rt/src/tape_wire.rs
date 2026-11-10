@@ -431,7 +431,8 @@ wire_enum!(crate::io::Request {
     117 => ProcessTime{ from, to },
     118 => ProcessSettle{ canceled },
     119 => CpuControl{ width, action, count, outcome },
-    120 => CpuSummary(v0)
+    120 => CpuSummary(v0),
+    121 => Seam(v0)
 } retired { 60 => "retired eager read_dir recording; re-record with streaming file.read_dir", 59 => "retired Request::Walk recording; re-record with streaming file.walk" });
 
 wire_enum!(crate::io::ClockError {
@@ -499,8 +500,27 @@ wire_enum!(crate::io::Completion {
     41 => Watch(v0),
     42 => Span{ handle, trace, span },
     43 => FileInput(v0),
-    44 => Held
+    44 => Held,
+    45 => Seam(v0)
 });
+
+impl Wire for crate::authority::SeamRequest {
+    fn encode(&self, out: &mut Vec<u8>) {
+        self.to_bytes().encode(out);
+    }
+    fn decode(input: &mut Decode<'_>) -> Result<Self, String> {
+        Self::from_bytes(&Vec::<u8>::decode(input)?).ok_or_else(|| "bad seam request".into())
+    }
+}
+
+impl Wire for crate::authority::SeamCompletion {
+    fn encode(&self, out: &mut Vec<u8>) {
+        self.to_bytes().encode(out);
+    }
+    fn decode(input: &mut Decode<'_>) -> Result<Self, String> {
+        Self::from_bytes(&Vec::<u8>::decode(input)?).ok_or_else(|| "bad seam completion".into())
+    }
+}
 
 wire_struct!(crate::io::Fault { error, partial });
 

@@ -1668,6 +1668,7 @@ dependencies = [
  "hirsel-rt-operations",
  "hirsel-run-config",
  "hirsel-run-schema",
+ "hirsel-store-authority",
  "hirsel-syntax",
  "hirsel-tir",
  "hirsel-types",

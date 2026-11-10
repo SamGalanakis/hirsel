@@ -1,5 +1,5 @@
 //! Additional typed tape forms for host streams, exact environment reads, processes,
-//! random draws and timer waits.
+//! random draws, timer waits and store authority operations.
 use crate::io::{
     ClockError, Completion, EnvError, InputError, RandomError, Request, SignalError, WaitError,
 };
@@ -91,6 +91,7 @@ pub(crate) fn render_request(request: &Request) -> Option<String> {
         }
         Request::Process { io } => format!("process {io}"),
         Request::Signals { io } => format!("signals {io}"),
+        Request::Seam(seam) => format!("seam {}", hex(&seam.to_bytes())),
         // The kinds are their bits (`SignalKind::bit`).
         Request::SignalWait { signals, kinds } => format!("signal_wait {signals} {kinds}"),
         Request::Ready { wait, points } => format!("ready {wait} {points}"),
@@ -317,6 +318,7 @@ pub(crate) fn render_completion(completion: &Completion) -> Option<String> {
             "wait out_of_range".into()
         }
         Completion::Wait(Err(WaitError::Canceled(cause))) => format!("wait canceled {cause}"),
+        Completion::Seam(seam) => format!("seam {}", hex(&seam.to_bytes())),
         Completion::Signal(Ok(kind)) => format!("signal {}", kind.name()),
         Completion::Signal(Err(SignalError::Canceled(cause))) => {
             format!("signal canceled {cause}")
@@ -493,6 +495,10 @@ pub(crate) fn parse_request(words: &[&str]) -> Result<Option<Request>, String> {
         ["stdin", io] => Request::Stdin { io: number(io)? },
         ["stderr", io] => Request::Stderr { io: number(io)? },
         ["signals", io] => Request::Signals { io: number(io)? },
+        ["seam", bytes] => Request::Seam(
+            crate::authority::SeamRequest::from_bytes(&self::bytes(bytes)?)
+                .ok_or("bad seam request")?,
+        ),
         ["signal_wait", signals, kinds] => Request::SignalWait {
             signals: number(signals)?,
             kinds: number(kinds)?,
@@ -805,6 +811,10 @@ pub(crate) fn parse_completion(words: &[&str]) -> Result<Option<Completion>, Str
         ["wait", "unavailable"] => Completion::Wait(Err(WaitError::Clock(ClockError::Unavailable))),
         ["wait", "out_of_range"] => Completion::Wait(Err(WaitError::Clock(ClockError::OutOfRange))),
         ["wait", "canceled", cause] => Completion::Wait(Err(WaitError::Canceled(number(cause)?))),
+        ["seam", bytes] => Completion::Seam(
+            crate::authority::SeamCompletion::from_bytes(&self::bytes(bytes)?)
+                .ok_or("bad seam completion")?,
+        ),
         ["signal", "canceled", cause] => {
             Completion::Signal(Err(SignalError::Canceled(number(cause)?)))
         }

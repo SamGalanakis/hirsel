@@ -133,7 +133,7 @@ pub(super) fn requests(n: u64) -> Vec<Request> {
         2 => vec![String::new()],
         _ => vec!["h2".to_owned(), text.clone() + "#alpn", String::new()],
     };
-    requests! {
+    let mut values = requests! {
         ProcessTime { from: n, to: n.saturating_add(5) },
         ProcessSettle { canceled: vec![n] },
         Stdin { io: n.wrapping_add(12) },
@@ -268,8 +268,160 @@ pub(super) fn requests(n: u64) -> Vec<Request> {
             digest: std::array::from_fn(|i| digest[31 - i]),
             argument: bytes.clone(),
         })),
-        CallReturn([CalleeOutcome::Ok(bytes.clone()), CalleeOutcome::Err(vec![]), CalleeOutcome::Failed(bytes.clone())][n as usize % 3].clone())
-    }
+        CallReturn([CalleeOutcome::Ok(bytes.clone()), CalleeOutcome::Err(vec![]), CalleeOutcome::Failed(bytes.clone())][n as usize % 3].clone()),
+        Seam(seam_requests(n, &text, &bytes).remove(0))
+    };
+    values.extend(
+        seam_requests(n, &text, &bytes)
+            .into_iter()
+            .map(Request::Seam),
+    );
+    values
+}
+
+fn seam_requests(n: u64, text: &str, bytes: &[u8]) -> Vec<hirsel_rt::authority::SeamRequest> {
+    use hirsel_rt::authority::SeamRequest as S;
+    use hirsel_store_authority::wire::Request as W;
+    let level = (n % 4) as u8;
+    let provider = |claim: Option<u64>, request| S::Provider {
+        authority: n,
+        claim,
+        request,
+    };
+    [
+        S::Project {
+            io: n,
+            name: text.to_owned(),
+        },
+        S::Levels { authority: n },
+        S::Level {
+            authority: n,
+            name: text.to_owned(),
+        },
+        S::Floor { authority: n },
+        S::LevelName { level: n },
+        S::LevelNarrow {
+            authority: n,
+            level: n.rotate_left(8),
+        },
+        S::MaxEntry { authority: n },
+        S::ClaimEnd { claim: n },
+        S::ClaimNarrow {
+            authority: n,
+            claim: !n,
+        },
+        provider(None, W::Claim),
+        provider(
+            Some(!n),
+            W::Advance {
+                from: n,
+                at: level,
+                entry: bytes.to_vec(),
+            },
+        ),
+        provider(Some(!n), W::Durable { at: level }),
+        provider(Some(!n), W::Reclaim),
+        provider(
+            None,
+            W::Read {
+                from: n,
+                at: level,
+                max: !n,
+            },
+        ),
+        provider(
+            None,
+            W::Get {
+                name: text.to_owned(),
+            },
+        ),
+        provider(
+            None,
+            W::Put {
+                name: text.to_owned(),
+                data: bytes.to_vec(),
+            },
+        ),
+    ]
+    .into()
+}
+
+fn seam_completions(n: u64, text: &str, bytes: &[u8]) -> Vec<Completion> {
+    use hirsel_rt::authority::SeamCompletion as S;
+    use hirsel_store_authority::wire::Outcome as O;
+    use hirsel_store_authority::{Advanced, AuthorityError as M, Error as E};
+    let medium = [M::Io(0), M::Io(9), M::Status(n as u16), M::Unreachable][n as usize % 4].clone();
+    let error = [
+        E::Storage(medium.clone()),
+        E::Refused(medium.clone()),
+        E::Corrupt(text.to_owned()),
+        E::Fenced,
+        E::Format {
+            found: n.to_le_bytes(),
+            object: text.to_owned(),
+        },
+    ][n as usize % 5]
+        .clone();
+    let claim = (n % 2 == 0).then_some(!n);
+    [
+        S::Names(vec![]),
+        S::Names(vec![text.to_owned(), String::new()]),
+        S::Name(text.to_owned()),
+        S::Word(n),
+        S::Optional(None),
+        S::Optional(Some(n)),
+        S::Outcome {
+            outcome: O::Position(Ok(n)),
+            claim,
+        },
+        S::Outcome {
+            outcome: O::Position(Err(error.clone())),
+            claim: None,
+        },
+        S::Outcome {
+            outcome: O::Advanced(Advanced::Advanced(n)),
+            claim: None,
+        },
+        S::Outcome {
+            outcome: O::Advanced(Advanced::Fenced),
+            claim: None,
+        },
+        S::Outcome {
+            outcome: O::Advanced(Advanced::Refused(medium.clone())),
+            claim: None,
+        },
+        S::Outcome {
+            outcome: O::Advanced(Advanced::Undecided(medium)),
+            claim: None,
+        },
+        S::Outcome {
+            outcome: O::Read(Ok(vec![bytes.to_vec(), vec![]])),
+            claim: None,
+        },
+        S::Outcome {
+            outcome: O::Read(Err(error.clone())),
+            claim: None,
+        },
+        S::Outcome {
+            outcome: O::Get(Ok(None)),
+            claim: None,
+        },
+        S::Outcome {
+            outcome: O::Get(Ok(Some(bytes.to_vec()))),
+            claim: None,
+        },
+        S::Outcome {
+            outcome: O::Unit(Ok(())),
+            claim: None,
+        },
+        S::Outcome {
+            outcome: O::Unit(Err(error)),
+            claim: None,
+        },
+    ]
+    .into_iter()
+    .map(Completion::Seam)
+    .collect()
 }
 
 fn completions(n: u64) -> Vec<Completion> {
@@ -299,7 +451,7 @@ fn completions(n: u64) -> Vec<Completion> {
             if n % 2 == 0 { Ok($ok) } else { Err($error) }
         };
     }
-    let values = vec![
+    let mut values = vec![
         Completion::Input(result!(bytes.clone(), InputError::Fault(n as u32))),
         Completion::Env(result!(Some(text.clone()), EnvError::NotGranted)),
         Completion::ClockGrant(result!(n, ())),
@@ -420,10 +572,12 @@ fn completions(n: u64) -> Vec<Completion> {
         Completion::FileInput(FileInput::Size(n)),
         Completion::FileInput(FileInput::Bytes(bytes.clone())),
     ];
+    values.extend(seam_completions(n, &text, &bytes));
     // Adding a completion variant must add a specimen, just like requests.
     for completion in &values {
         match completion {
             Completion::FileInput(_) => (),
+            Completion::Seam(_) => (),
             Completion::Input(_) => (),
             Completion::Env(_) => (),
             Completion::ClockGrant(_) => (),

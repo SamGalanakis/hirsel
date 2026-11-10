@@ -326,6 +326,9 @@ impl Registry {
             | R::Process { .. }
             | R::Signals { .. }
             | R::Telemetry { .. } => keys.push((ROOT, S)),
+            // Provider calls order against each other through the authority's history;
+            // the whole seam is serialized, since authorities share no finer key yet.
+            R::Seam(_) => keys.push((ROOT, X)),
             R::EnvGet { .. }
             | R::EnvNarrow { .. }
             | R::Ready { .. }

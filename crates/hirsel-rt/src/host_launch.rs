@@ -290,6 +290,9 @@ pub(crate) fn configure_replay(io: &mut SimIo, run: &ValidatedRun) -> Result<(),
     if let Some(grant) = run.signals_grant() {
         io.set_signal_kinds(grant.bits());
     }
+    if let Some(grant) = &run.record().io {
+        io.set_authorities(&grant.authorities)?;
+    }
     Ok(())
 }
 
@@ -555,6 +558,11 @@ impl HostAuthority for HostGrants {
         }
         if let Some(grant) = run.signals_grant() {
             io.set_signal_grant(grant)?;
+        }
+        // A fixture's claim attempts draw from the fixture instance, as the reference's
+        // do; a live run's from the host's secure generator.
+        if let Some(grant) = record.io.as_ref().filter(|io| !io.authorities.is_empty()) {
+            io.set_authorities(&grant.authorities, is_snapshot.then_some([0; 16]))?;
         }
         if self.process_streams && !is_snapshot {
             crate::host::Sinks::process().preserve_send_streams(&mut io);

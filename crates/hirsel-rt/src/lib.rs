@@ -15,6 +15,7 @@
 #[cfg(all(test, not(feature = "tsan")))]
 hirsel_guard::install!(crate::io_real::borrowed_net_tests::Count: crate::io_real::borrowed_net_tests::Count);
 
+pub mod authority;
 mod base64;
 mod continuation;
 mod deadlines;

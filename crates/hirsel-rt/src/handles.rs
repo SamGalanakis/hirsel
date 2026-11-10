@@ -12,6 +12,15 @@ pub enum Grant {
     Stderr,
     Stdout,
     Signals,
+    /// A projection of the run's authority `index`, in grant-name order.
+    Authority {
+        index: usize,
+    },
+    /// A claim on authority `index`: the end of the history as its writer knows it.
+    Claim {
+        index: usize,
+        end: u64,
+    },
     MonotonicClock,
     WallClock,
     Random,

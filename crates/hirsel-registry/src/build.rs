@@ -1169,6 +1169,7 @@ fn variant(
                 | "ShapeBody"
                 | "CallEnd"
                 | "RunFrame"
+                | "SeamError"
         )
     {
         t.bounds = vec![
@@ -1183,6 +1184,15 @@ fn variant(
     }
     if name == "ShapeBody" {
         t.bounds = shape_data_bounds();
+    }
+    if name == "SeamError" {
+        // Corrupt and Format own a String and Bytes: copyable by count, never plain.
+        t.bounds = vec![
+            Bound::Copyable,
+            Bound::Data,
+            Bound::Inert,
+            Bound::NoallocDrop,
+        ];
     }
     serializable_core(name, &mut t);
     publish(

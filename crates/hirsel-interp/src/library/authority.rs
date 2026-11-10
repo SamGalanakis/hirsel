@@ -192,22 +192,59 @@ impl Library {
         Ok((*id, claimed.clone()))
     }
 
-    /// A provider request: the recorded outcome in replay, else the provider's, recorded.
+    /// A provider request of the authority `name`, with the claim `held` for a claimed
+    /// one: the recorded outcome in replay, else the provider's, recorded. The recorded
+    /// input is the grant name, a zero byte and the request's wire form.
     fn request(
         &mut self,
-        operation: &str,
-        input: Vec<u8>,
+        name: &str,
+        held: Option<&Claimed>,
+        r: wire::Request,
         context: &mut OperationContext<'_>,
-        live: impl FnOnce(&mut Self) -> Result<Outcome, Error>,
-    ) -> Result<Outcome, Error> {
+    ) -> Result<(Outcome, Option<Claim>), Error> {
+        let operation = r.operation();
+        let mut input = name.as_bytes().to_vec();
+        input.push(0);
+        input.extend_from_slice(&r.encode());
+        let mut minted = None;
         let outcome = match self
             .simulation
             .replay_output("Authority", operation, &input)?
         {
             Some(recorded) => wire::decode(recorded)
                 .ok_or_else(|| invalid("invalid authority tape completion"))?,
-            None => live(self)?,
+            None => {
+                let p = self.provider(name)?;
+                let claim = match held {
+                    Some(h) => Some(
+                        h.claim
+                            .clone()
+                            .ok_or_else(|| invalid("a replayed claim outside replay"))?,
+                    ),
+                    None => None,
+                };
+                let mut guard = claim.as_ref().map(|c| c.lock().unwrap());
+                let n = self.authorities.attempts;
+                let instance = self.simulation.config.instance;
+                let (o, c) = wire::serve(
+                    &mut **p.lock().unwrap(),
+                    guard.as_deref_mut(),
+                    r.clone(),
+                    || wire::draw(&instance, n),
+                )
+                .map_err(invalid)?;
+                minted = c;
+                o
+            }
         };
+        if !r.admits(&outcome) {
+            return Err(invalid(
+                "authority tape completion does not answer its request",
+            ));
+        }
+        if matches!(r, wire::Request::Claim) {
+            self.authorities.attempts += 1;
+        }
         self.simulation.record(
             "Authority",
             operation,
@@ -215,7 +252,7 @@ impl Library {
             wire::encode(&outcome),
             context,
         )?;
-        Ok(outcome)
+        Ok((outcome, minted))
     }
 
     pub(super) fn authority_call(
@@ -323,25 +360,9 @@ impl Library {
             }
             "authority.claim" => {
                 let name = self.authority_name(arg(a, 0)?)?;
-                let n = self.authorities.attempts;
-                self.authorities.attempts += 1;
-                let mut held = None;
-                let outcome = self.request(
-                    "authority.claim",
-                    name.as_bytes().to_vec(),
-                    context,
-                    |lib| {
-                        let p = lib.provider(&name)?;
-                        let (attempt, fresh) = lib.draw(n);
-                        let r = p.lock().unwrap().claim(attempt, fresh);
-                        Ok(Outcome::Position(r.map(|c| {
-                            held = Some(c.claim);
-                            c.end
-                        })))
-                    },
-                )?;
+                let (outcome, held) = self.request(&name, None, wire::Request::Claim, context)?;
                 let Outcome::Position(r) = outcome else {
-                    return Err(invalid("authority tape completion of another operation"));
+                    unreachable!("admitted")
                 };
                 match r {
                     Ok(end) => {
@@ -366,35 +387,13 @@ impl Library {
                 let from = u64_arg(arg(a, 2)?, "from")?;
                 let entry = bytes(arg(a, 3)?)?.to_vec();
                 let at = self.level_of(&name, arg(a, 4)?)?;
-                let mut input = name.as_bytes().to_vec();
-                input.push(0);
-                input.extend_from_slice(&u64::to_le_bytes(from));
-                input.push(at);
-                input.extend_from_slice(&entry);
-                let outcome = self.request("authority.advance", input, context, |lib| {
-                    let p = lib.provider(&name)?;
-                    let c = held
-                        .claim
-                        .as_ref()
-                        .ok_or_else(|| invalid("a replayed claim outside replay"))?;
-                    let r = p.lock().unwrap().advance(
-                        &mut c.lock().unwrap(),
-                        from,
-                        entry,
-                        hirsel_store_authority::Level(at),
-                    );
-                    Ok(Outcome::Advanced(r))
-                })?;
+                let r = wire::Request::Advance { from, at, entry };
+                let (outcome, _) = self.request(&name, Some(&held), r, context)?;
                 let Outcome::Advanced(r) = outcome else {
-                    return Err(invalid("authority tape completion of another operation"));
+                    unreachable!("admitted")
                 };
                 match r {
                     Advanced::Advanced(end) => {
-                        if end != from + 1 {
-                            return Err(invalid(
-                                "authority tape completion advances past one entry",
-                            ));
-                        }
                         self.authorities.claims.get_mut(&id).unwrap().end = end;
                         variant(0, vec![u64_value(end)])
                     }
@@ -406,33 +405,17 @@ impl Library {
             "authority.durable" | "authority.reclaim" => {
                 let name = self.authority_name(arg(a, 0)?)?;
                 let (_, held) = self.claim_arg(&name, arg(a, 1)?)?;
-                let at = if op == "authority.durable" {
-                    Some(self.level_of(&name, arg(a, 2)?)?)
+                let r = if op == "authority.durable" {
+                    wire::Request::Durable {
+                        at: self.level_of(&name, arg(a, 2)?)?,
+                    }
                 } else {
-                    None
+                    wire::Request::Reclaim
                 };
-                let mut input = name.as_bytes().to_vec();
-                input.extend(at.map(|l| [0, l]).into_iter().flatten());
-                let outcome = self.request(op, input, context, |lib| {
-                    let p = lib.provider(&name)?;
-                    let c = held
-                        .claim
-                        .as_ref()
-                        .ok_or_else(|| invalid("a replayed claim outside replay"))?;
-                    let mut c = c.lock().unwrap();
-                    Ok(match at {
-                        Some(l) => Outcome::Position(
-                            p.lock()
-                                .unwrap()
-                                .durable(&mut c, hirsel_store_authority::Level(l)),
-                        ),
-                        None => Outcome::Unit(p.lock().unwrap().reclaim(&mut c)),
-                    })
-                })?;
-                match outcome {
-                    Outcome::Position(r) if at.is_some() => result(&r, |p| u64_value(*p)),
-                    Outcome::Unit(r) if at.is_none() => result(&r, |()| Value::Unit),
-                    _ => return Err(invalid("authority tape completion of another operation")),
+                match self.request(&name, Some(&held), r, context)?.0 {
+                    Outcome::Position(r) => result(&r, |p| u64_value(*p)),
+                    Outcome::Unit(r) => result(&r, |()| Value::Unit),
+                    _ => unreachable!("admitted"),
                 }
             }
             "authority.read" => {
@@ -440,25 +423,10 @@ impl Library {
                 let from: u64 = u64_arg(arg(a, 1)?, "from")?;
                 let at = self.level_of(&name, arg(a, 2)?)?;
                 let max: u64 = u64_arg(arg(a, 3)?, "max")?;
-                let mut input = name.as_bytes().to_vec();
-                input.push(0);
-                input.extend_from_slice(&from.to_le_bytes());
-                input.push(at);
-                input.extend_from_slice(&max.to_le_bytes());
-                let outcome = self.request(op, input, context, |lib| {
-                    let p = lib.provider(&name)?;
-                    let r = p
-                        .lock()
-                        .unwrap()
-                        .read(from, hirsel_store_authority::Level(at), max);
-                    Ok(Outcome::Read(r))
-                })?;
-                let Outcome::Read(r) = outcome else {
-                    return Err(invalid("authority tape completion of another operation"));
+                let r = wire::Request::Read { from, at, max };
+                let Outcome::Read(r) = self.request(&name, None, r, context)?.0 else {
+                    unreachable!("admitted")
                 };
-                if r.as_ref().is_ok_and(|all| all.len() as u64 > max) {
-                    return Err(invalid("authority tape completion reads past its bound"));
-                }
                 result(&r, |all| {
                     list(all.iter().map(|e| Value::Bytes(e.clone())).collect())
                 })
@@ -466,51 +434,26 @@ impl Library {
             "authority.get" | "authority.put" => {
                 let name = self.authority_name(arg(a, 0)?)?;
                 let object = text(arg(a, 1)?)?.to_string();
-                let data = if op == "authority.put" {
-                    Some(bytes(arg(a, 2)?)?.to_vec())
+                let r = if op == "authority.put" {
+                    wire::Request::Put {
+                        name: object,
+                        data: bytes(arg(a, 2)?)?.to_vec(),
+                    }
                 } else {
-                    None
+                    wire::Request::Get { name: object }
                 };
-                let mut input = name.as_bytes().to_vec();
-                input.push(0);
-                input.extend_from_slice(object.as_bytes());
-                if let Some(d) = &data {
-                    input.push(0);
-                    input.extend_from_slice(d);
-                }
-                let outcome = self.request(op, input, context, |lib| {
-                    let p = lib.provider(&name)?;
-                    let mut p = p.lock().unwrap();
-                    Ok(match data {
-                        Some(d) => Outcome::Unit(p.put(&object, d)),
-                        None => Outcome::Get(p.get(&object)),
-                    })
-                })?;
-                match outcome {
-                    Outcome::Get(r) if op == "authority.get" => result(&r, |v| {
+                match self.request(&name, None, r, context)?.0 {
+                    Outcome::Get(r) => result(&r, |v| {
                         v.as_ref()
                             .map_or_else(none, |b| some(Value::Bytes(b.clone())))
                     }),
-                    Outcome::Unit(r) if op == "authority.put" => result(&r, |()| Value::Unit),
-                    _ => return Err(invalid("authority tape completion of another operation")),
+                    Outcome::Unit(r) => result(&r, |()| Value::Unit),
+                    _ => unreachable!("admitted"),
                 }
             }
             _ => return Err(invalid(format!("unknown authority operation {op}"))),
         };
         Ok(OperationResult::returned(value))
-    }
-
-    /// The `n`th claim's attempt identity and the identity it mints for a new store:
-    /// draws from the run's instance, so a world and its replay agree.
-    fn draw(&self, n: u64) -> ([u8; 16], [u8; 32]) {
-        use sha2::{Digest, Sha256};
-        let mut h = Sha256::new();
-        h.update(b"hirsel.authority.claim");
-        h.update(self.simulation.config.instance);
-        h.update(n.to_le_bytes());
-        let attempt = h.clone().finalize();
-        h.update(b"store");
-        (attempt[..16].try_into().unwrap(), h.finalize().into())
     }
 
     /// A dropped claim ends.

@@ -112,5 +112,7 @@ pub fn host_capability_kind(name: &str) -> bool {
             | "UdpSocket"
             | "Child"
             | "ChildGroup"
+            | "Authority"
+            | "Claim"
     )
 }

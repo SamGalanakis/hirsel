@@ -553,3 +553,80 @@ fn embedded_registry_matches_declaration_builder() {
         );
     }
 }
+
+/// A Plain bound promises bits with no ownership. A core type declared Plain
+/// whose representation holds a String, Bytes, a container, a box or a
+/// non-Plain named type lets the front end copy and forget owned content: the
+/// native ownership validator then refuses the program (SeamError, declared
+/// Plain while it carried `Corrupt(String)`). Generic named types are Plain
+/// exactly when their arguments are.
+#[test]
+fn a_plain_core_type_holds_only_plain_parts() {
+    let registry = BuiltinRegistry::new();
+    let declared = |definition: &DefId| {
+        registry.get(definition.path()).and_then(|s| match &s.kind {
+            SignatureKind::Type(t) => Some((**t).clone()),
+            _ => None,
+        })
+    };
+    fn plain(
+        types: &TypeInterner,
+        id: TypeId,
+        declared: &dyn Fn(&DefId) -> Option<TypeDefinition>,
+    ) -> Result<(), String> {
+        let row = types.row(id);
+        let all = |ids: &mut dyn Iterator<Item = TypeId>| {
+            ids.map(|id| plain(types, id, declared))
+                .collect::<Result<(), _>>()
+        };
+        let arguments = |arguments: &[GenericArgument]| {
+            arguments.iter().try_for_each(|a| match a {
+                GenericArgument::Type(id) => plain(types, *id, declared),
+                GenericArgument::Size(_) => Ok(()),
+            })
+        };
+        match &row.kind {
+            TypeKind::Primitive(Primitive::String | Primitive::Bytes) => {
+                Err(describe_type(types, id))
+            }
+            TypeKind::Primitive(_) | TypeKind::Parameter(_) => Ok(()),
+            TypeKind::Tuple(items) => all(&mut items.iter().copied()),
+            TypeKind::Record(fields) => all(&mut fields.iter().map(|f| f.ty)),
+            TypeKind::Variant(variants) => {
+                all(&mut variants.iter().flat_map(|v| v.fields.iter().map(|f| f.1)))
+            }
+            TypeKind::Named {
+                definition,
+                arguments: args,
+            } => match declared(definition) {
+                Some(t) if t.bounds.contains(&Bound::Plain) => Ok(()),
+                Some(t) if !t.generics.is_empty() => arguments(args),
+                _ => Err(describe_type(types, id)),
+            },
+            TypeKind::Builtin {
+                kind,
+                arguments: args,
+            } => match kind {
+                BuiltinType::Array | BuiltinType::Inline | BuiltinType::Simd => arguments(args),
+                _ => Err(describe_type(types, id)),
+            },
+            TypeKind::Box(_) | TypeKind::Function(_) | TypeKind::Error => {
+                Err(describe_type(types, id))
+            }
+        }
+    }
+    let mut wrong = vec![];
+    for s in registry.signatures() {
+        if let SignatureKind::Type(t) = &s.kind
+            && t.bounds.contains(&Bound::Plain)
+            && let Some(repr) = t.representation
+            && let Err(part) = plain(types(), repr, &declared)
+        {
+            wrong.push(format!("{} holds {part}", s.definition.path().0.name));
+        }
+    }
+    assert!(
+        wrong.is_empty(),
+        "Plain core types with owned parts: {wrong:?}"
+    );
+}

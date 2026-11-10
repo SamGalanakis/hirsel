@@ -243,5 +243,6 @@ pub(crate) fn request_kind(request: &crate::io::Request) -> &'static str {
         Request::CpuSummary(_) => "CpuSummary",
         Request::ProcessTime { .. } => "ProcessTime",
         Request::ProcessSettle { .. } => "ProcessSettle",
+        Request::Seam(_) => "Seam",
     }
 }

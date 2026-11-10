@@ -1360,6 +1360,7 @@ pub fn fixture_run_record(
         ),
         signals: fixture.signals.clone(),
         runners: fixture.runners.clone(),
+        authorities: fixture.authorities.clone(),
         telemetry: Some(hirsel_run_schema::TelemetryGrant {
             provider: P::TelemetryNull.name().into(),
             seed: Some(0),

@@ -651,6 +651,8 @@ pub enum Request {
     },
     /// A settled native CPU prefix, recorded only at its serial retirement.
     CpuSummary(CpuSummary),
+    /// A store authority operation (STORE-11).
+    Seam(crate::authority::SeamRequest),
     /// Scoped CPU admission/drain receipt, not a capability request.
     CpuControl {
         width: u32,
@@ -787,6 +789,8 @@ pub enum Completion {
     GroupExit(Result<hirsel_run_schema::GroupOutput, hirsel_run_schema::ProcessFailure>),
     /// A durable journal barrier parked the request before provider issue.
     Held,
+    /// A store authority operation's answer.
+    Seam(crate::authority::SeamCompletion),
     /// The issued request would block and its task parked; `committed` when it already made part
     /// of its effect, so cancellation no longer completes it.
     Blocked {
@@ -1118,6 +1122,8 @@ pub(crate) struct State {
     pub(crate) random: RandomSource,
     /// The kinds the run's Signals observes, as bits; zero without the grant.
     pub(crate) signal_kinds: u8,
+    /// The run's granted store authorities, in name order.
+    pub(crate) authorities: Vec<crate::authority::Granted>,
     pub stdout: Vec<u8>,
     pub stderr: Vec<u8>,
     pub env: BTreeMap<String, Option<String>>,
@@ -1177,6 +1183,7 @@ impl Default for State {
             test_clocks: Default::default(),
             random: RandomSource::SplitMix64(0),
             signal_kinds: 0,
+            authorities: Vec::new(),
             stdout: vec![],
             stderr: Vec::new(),
             env: BTreeMap::new(),
@@ -1466,6 +1473,21 @@ impl State {
                 .ok_or(AdapterError::InvalidCompletion)?
                 .execute)(self, request);
         }
+        // The seam's grant answers are the state's; a provider's are sampled inputs.
+        if let Request::Seam(seam) = request {
+            if fault.is_some() {
+                return Err(AdapterError::InvalidCompletion);
+            }
+            return self.execute_seam(seam);
+        }
+        if let Request::Close { handle } = request
+            && self.is_claim(*handle)
+        {
+            if fault.is_some() {
+                return Err(AdapterError::InvalidCompletion);
+            }
+            return self.close_claim(*handle);
+        }
         // Process outcomes are provider inputs too; only a host adapter can spawn.
         if self.is_process(request) {
             if fault.is_some() {
@@ -1611,6 +1633,9 @@ impl State {
             self.expect(*stdin, Grant::Stdin)?;
         }
         match (request, &input) {
+            (Request::Seam(seam), Completion::Seam(value)) => {
+                return self.sample_seam(seam, value);
+            }
             (Request::SignalWait { signals, kinds }, Completion::Signal(value)) => {
                 self.expect(*signals, Grant::Signals)?;
                 let check = self.signal_check(*kinds);
@@ -3379,7 +3404,7 @@ unsafe fn native_bytes<'a>(data: *const u8, len: u64) -> &'a [u8] {
         unsafe { std::slice::from_raw_parts(data, n) }
     }
 }
-unsafe fn native_text<'a>(data: *const u8, len: u64) -> &'a str {
+pub(crate) unsafe fn native_text<'a>(data: *const u8, len: u64) -> &'a str {
     std::str::from_utf8(unsafe { native_bytes(data, len) })
         .unwrap_or_else(|_| crate::fault("String operand is not UTF-8"))
 }

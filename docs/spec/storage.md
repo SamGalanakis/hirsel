@@ -138,7 +138,10 @@ is the snapshot's.
 
 `store.transact` performs no cancellation check
 ([CONC-3](concurrency.md#conc-3-cancellation)): a transaction started from a cancellable
-scope is checked by its caller. Only the served form returns `Canceled(cause)`, before
+scope is checked by its caller. Cancellation is observed only before a transaction starts
+and between transactions; once started, neither its body nor its commit's history `Io`
+observes it, so a cancelled task's commit completes with its outcome and the store stays
+open ([STORE-11](#store-11-engine-and-storage-seam)). Only the served form returns `Canceled(cause)`, before
 any run and with no effect. A commit that exceeds a limit returns `Limit(..)` with no
 effect. A commit whose durability cannot be decided
 ([STORE-11](#store-11-engine-and-storage-seam)) returns `Unknown(..)`: the store closes,
@@ -756,6 +759,14 @@ not `a`'s.
 The engine, `std@1/store`, is the caller these operations serve. Holding an `Authority`
 grants what holding the store's files grants: an entry written outside the engine is read
 by recovery like any other and refused if it breaks the format.
+
+**Cancellation.** No seam operation is a cancellation point
+([CONC-3](concurrency.md#conc-3-cancellation)), under any provider: a task's `claim`,
+`advance`, `durable`, `read`, `get`, `put` and `reclaim` run to their outcome whatever its
+scope's cancellation, as a shielded drop's `Io` does, and no provider sees a cancellation.
+A commit the engine has started therefore either completes or, when the scope was
+cancelled before it started, never began; it is never cut between its entry and its
+durability, and a cancellation never closes the store.
 
 **Positions.** The history is a sequence of **entries** at positions 1, 2, and so on; its
 **end** is the position of the last one, 0 for none. An entry is bytes to the authority.

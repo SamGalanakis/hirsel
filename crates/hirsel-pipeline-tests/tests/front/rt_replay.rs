@@ -198,6 +198,9 @@ pub fn replay_interpreter_with_fixture(
                 Request::Signals { .. } | Request::SignalWait { .. } => {
                     panic!("signal tapes replay through tests/it/signals.rs")
                 }
+                Request::Seam(_) => {
+                    panic!("authority seam tapes replay through the STORE-11 conformance cases")
+                }
                 Request::RandomBytes { .. } | Request::SleepUntil { .. } => {
                     panic!("random and wait tapes replay through tests/it/waits.rs")
                 }
@@ -573,6 +576,10 @@ pub fn replay_interpreter_with_fixture(
                             telemetry: *telemetry,
                         },
                         hirsel_rt::handles::Grant::Signals => ObservedGrant::Root("Signals".into()),
+                        hirsel_rt::handles::Grant::Authority { .. }
+                        | hirsel_rt::handles::Grant::Claim { .. } => {
+                            panic!("these fixtures grant no store authority")
+                        }
                         hirsel_rt::handles::Grant::Net { rules, world } => ObservedGrant::Net {
                             world: match world {
                                 hirsel_rt::net::NetWorld::Host => 0,

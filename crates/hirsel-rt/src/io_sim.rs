@@ -320,6 +320,15 @@ impl SimIo {
         self.state.signal_kinds = kinds;
         self.state.projections.insert("signals".into());
     }
+    /// The admitted `io.authorities` grant: replay derives the grant's answers again and
+    /// admits each recorded provider outcome; it makes no provider.
+    pub fn set_authorities(
+        &mut self,
+        grants: &std::collections::BTreeMap<String, hirsel_run_schema::AuthorityGrant>,
+    ) -> Result<(), hirsel_run_schema::RunRefusal> {
+        self.state.authorities = crate::authority::granted(grants)?;
+        Ok(())
+    }
     /// Replay uses the admitted projection set, independently of tape completions.
     pub fn set_projections(&mut self, projections: std::collections::BTreeSet<String>) {
         self.state.projections = projections;
@@ -1066,6 +1075,7 @@ impl Adapter for SimIo {
                 | Request::TelemetryBegin { .. }
                 | Request::SleepUntil { .. }
                 | Request::SignalWait { .. }
+                | Request::Seam(crate::authority::SeamRequest::Provider { .. })
         ) {
             if event.fault.is_some() {
                 return Err(AdapterError::InvalidCompletion);

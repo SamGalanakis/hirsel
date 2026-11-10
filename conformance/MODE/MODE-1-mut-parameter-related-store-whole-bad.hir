@@ -1,0 +1,11 @@
+// rule: MODE-1
+// expect: reject MODE-1 at line 10
+// twin: MODE/MODE-1-mut-parameter-own-place-ok.hir
+// Keep: a body may not store a value related to `xs` into `mut out: T in xs`
+// (spec MODE-1, "Borrowed and `mut` parameters"). No call checks yet that the
+// caller's storage covers `xs`: a caller may pass global storage, or storage
+// related to something else. This body refusal is what keeps that sound; do
+// not relax it without adding the call-side check.
+fn f(xs: Bytes, mut out: Bytes in xs) -> () uses {} {
+  out = copy xs
+}

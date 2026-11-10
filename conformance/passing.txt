@@ -3256,6 +3256,12 @@ conformance/MODE/MODE-1-mut-content-wrapper-bad.hir
 conformance/MODE/MODE-1-mut-content-wrapper-ok.hir
 conformance/MODE/MODE-1-mut-global-annotation-bad.hir
 conformance/MODE/MODE-1-mut-global-annotation-ok.hir
+conformance/MODE/MODE-1-mut-parameter-own-place-ok.hir
+conformance/MODE/MODE-1-mut-parameter-own-place-unrelated-bad.hir
+conformance/MODE/MODE-1-mut-parameter-related-store-element-bad.hir
+conformance/MODE/MODE-1-mut-parameter-related-store-list-bad.hir
+conformance/MODE/MODE-1-mut-parameter-related-store-option-bad.hir
+conformance/MODE/MODE-1-mut-parameter-related-store-whole-bad.hir
 conformance/MODE/MODE-1-mut-result-bad.hir
 conformance/MODE/MODE-1-mut-result-ok.hir
 conformance/MODE/MODE-1-mut-storage-counted-copy-bad.hir
@@ -4429,6 +4435,8 @@ conformance/OWN/OWN-3-mut-block-copy-run.hir
 conformance/OWN/OWN-3-mut-block-ok.hir
 conformance/OWN/OWN-3-mut-borrowed-part-bad.hir
 conformance/OWN/OWN-3-mut-borrowed-part-ok.hir
+conformance/OWN/OWN-3-mut-parameter-own-place-self-feed-bad.hir
+conformance/OWN/OWN-3-mut-parameter-own-place-source-field-bad.hir
 conformance/OWN/OWN-3-mut-variant-match-run.hir
 conformance/OWN/OWN-3-nested-joined-loop-run.hir
 conformance/OWN/OWN-3-noalias-captures-run.hir

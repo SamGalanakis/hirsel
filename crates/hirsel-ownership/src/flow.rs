@@ -3117,6 +3117,9 @@ impl Checker<'_, '_> {
                 whole.retain(|loan| !matches!(loan.on, On::Binding(b) if Some(b) == storage));
                 content.content = Content { whole, parts: None };
                 content
+                    .loans
+                    .retain(|loan| !matches!(loan.on, On::Binding(b) if Some(b) == storage));
+                content
             })
             .collect();
         let bounded = |this: &Self, target: &mut Value, from: &[usize]| {

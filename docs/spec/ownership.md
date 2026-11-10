@@ -161,6 +161,10 @@ caller's argument must be within `S`, apart from the read loan the call takes on
 place; with no relation, any argument is accepted. For `mut x: T in S`, `S` is also the
 fixed receiving contract of the caller's storage: everything stored into `x` or its parts
 must be within `S`, so a `mut` parameter without a relation receives only global values.
+Until a call checks that the caller's storage covers `S`, which it does not yet, a body
+stores into such an `x` only global or arena-placed values, never a value related to `S`
+itself; that body restriction is what keeps the missing call-side check sound, and neither
+may be relaxed without the other.
 
 **`mut` content at the caller.** A body treats the content of a `mut` parameter without a
 relation as global, and it may move that content from one such parameter into another or

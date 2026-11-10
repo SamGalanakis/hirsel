@@ -32,7 +32,11 @@ each run whether or not the case's rotating cover holds it. `--config NAME`
 runs those instead, for a bisect. `--full-matrix` runs each case's own pairwise
 cover, chosen over the whole matrix before slicing, so every (case,
 configuration) verdict is the full gate's; on 2026-11-10 that cost OWN-4's 15
-cases 42,139 pool seconds. Prints every unlisted or stale exclusion row.
+cases 42,139 pool seconds. Slices are sized so the heaviest one's estimated
+warm time stays under sync.py's NATIVE_SLICE_SECONDS (a full-matrix cover in
+up to NATIVE_COVER_PARTS parts, up to NATIVE_SELECTED_SLICES slices); a
+selection that cannot fit is refused before anything runs. Prints every
+unlisted or stale exclusion row.
 """
 import json
 import argparse
@@ -47,7 +51,9 @@ sys.path.insert(0, str(ROOT / 'tools/buck2'))
 import conformance  # noqa: E402
 import event_logs  # noqa: E402
 from run_failures import first_error_line  # noqa: E402
-from sync import CONFORMANCE_SLICE_PROGRAMS, NATIVE_SELECTED_SLICES, SELECTED_SLICES  # noqa: E402
+from sync import (CONFORMANCE_SLICE_PROGRAMS, NATIVE_CONFIG_SECONDS, NATIVE_COVER_PART_SECONDS,  # noqa: E402
+                  NATIVE_COVER_PARTS, NATIVE_HEAP_PART_SECONDS, NATIVE_SELECTED_SLICES, NATIVE_SLICE_SECONDS,
+                  SELECTED_SLICES)
 
 
 def cases(root):
@@ -190,10 +196,19 @@ def main():
 def native(prefixes, selected, args):
     """The selection through gate-native-full's matrix, over path shards times configuration parts."""
     shards = max(1, min(args.slices or selected, NATIVE_SELECTED_SLICES // args.heap_parts, selected))
-    # A named set gives each case at most that many configurations (smoke: three).
-    named = sum(3 if name == 'smoke' else 1 for name in args.config) or NATIVE_SELECTED_SLICES
+    # A named set gives each case at most that many configurations (smoke:
+    # three); a full-matrix cover is cut into at most NATIVE_COVER_PARTS parts.
+    named = sum(3 if name == 'smoke' else 1 for name in args.config) or NATIVE_COVER_PARTS
     parts = max(1, min(args.parts or named, named, NATIVE_SELECTED_SLICES // (shards * args.heap_parts)))
     slices = shards * parts * args.heap_parts
+    # Estimated warm seconds of the heaviest slice (sync.py NATIVE_SLICE_SECONDS).
+    unit = (NATIVE_HEAP_PART_SECONDS if args.heap_parts > 1 else NATIVE_CONFIG_SECONDS if args.config
+            else NATIVE_COVER_PART_SECONDS)
+    estimate = math.ceil(selected / shards) * math.ceil(named / parts) * unit
+    if estimate > NATIVE_SLICE_SECONDS:
+        print(f'corpus: {selected} cases in {slices} slices would run about {estimate} s per slice, over '
+              f'{NATIVE_SLICE_SECONDS} s; narrow the selection or name fewer configurations', file=sys.stderr)
+        return 2
     print(f'corpus: {selected} files in {shards} case parts x {parts} configuration parts x {args.heap_parts} heap fault parts', file=sys.stderr,
           flush=True)
     subprocess.run([sys.executable, str(ROOT / 'tools/buck2/sync.py'), '--if-stale'], cwd=ROOT, check=True)

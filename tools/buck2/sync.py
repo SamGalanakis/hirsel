@@ -528,8 +528,23 @@ AGREE_NATIVE_FULL_SHARDS = 16
 # to NATIVE_SELECTED_SLICES pool actions as even parts of the cases times parts
 # of each case's own configurations (defs.bzl selected_paths). A case's pairwise
 # cover runs its configurations one after another, each a whole compile and
-# launch, so a slice holds about one case's share of them.
-NATIVE_SELECTED_SLICES = 128
+# launch, so a slice holds about one case's share of them. tools/corpus sizes
+# the parts so each slice's estimated warm time stays under
+# NATIVE_SLICE_SECONDS (the 15-minute rule applies to slices too) and refuses
+# a selection it cannot fit. Measured on 2026-11-10 (41 lane runs): a smoke or
+# named (case, configuration) costs up to NATIVE_CONFIG_SECONDS in the heaviest
+# slices (STORE+SEM smoke, 47 per slice at 128 slices: 770 s), a sixteenth of
+# a case's full-matrix cover up to NATIVE_COVER_PART_SECONDS (OWN-4, a third of
+# the cover per slice: 1231 s), and one (case, configuration) is about 10 s.
+# A heap fault part runs the case's complete clean run plus its share of the
+# faults: up to NATIVE_HEAP_PART_SECONDS per case (STORE-3, one case and one
+# of 16 heap parts per slice: 447 s; SEM-1, two cases per slice: 652 s).
+NATIVE_SELECTED_SLICES = 512
+NATIVE_SLICE_SECONDS = 600
+NATIVE_CONFIG_SECONDS = 16
+NATIVE_COVER_PARTS = 16
+NATIVE_COVER_PART_SECONDS = 231
+NATIVE_HEAP_PART_SECONDS = 450
 # The full native matrix (tools/main-runs) runs as shards of the baseline by
 # path hash, each case under its rotating pairwise cover, so each shard stays well
 # under its Buck2 timeout; gate-native-full stays whole for --bless and for a

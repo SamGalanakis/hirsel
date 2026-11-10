@@ -20,7 +20,7 @@ import event_logs
 class NativeShards(unittest.TestCase):
     def test_corpus_requires_every_fault_partition_and_its_metadata(self):
         corpus = runpy.run_path(str(Path(__file__).resolve().parents[1] / 'corpus'))
-        args = SimpleNamespace(slices=2, parts=1, config=['x86_64/heap+inject'], heap_parts=3)
+        args = SimpleNamespace(slices=2, parts=1, config=['x86_64/heap+inject'], heap_parts=3, report_json=None)
         outputs = {f'gate-native-selected-shard-{i}': json.dumps(dict(
             configuration_attempts=1, baseline_executable=1,
             baseline_minus_native_unlisted=[], stale_exclusions=[],
@@ -39,6 +39,17 @@ class NativeShards(unittest.TestCase):
             del report['heap_partition']
             outputs['gate-native-selected-shard-6'] = json.dumps(report, indent=2)
             self.assertEqual(corpus['native'](['conformance/STORE'], 2, args), 1)
+
+    def test_corpus_refuses_a_selection_whose_slices_outrun_the_budget(self):
+        # 100 cases under their full-matrix covers fit 512 slices only as five
+        # parts per case: four cover sixteenths (about 924 s) per slice.
+        corpus = runpy.run_path(str(Path(__file__).resolve().parents[1] / 'corpus'))
+        args = SimpleNamespace(slices=None, parts=None, config=[], heap_parts=1)
+        with patch.object(corpus['subprocess'], 'run') as run, patch.object(corpus['subprocess'], 'call') as call, \
+             contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(corpus['native'](['conformance/OWN'], 100, args), 2)
+        run.assert_not_called()
+        call.assert_not_called()
 
     def test_unknown_fifty_are_bounded_and_keep_both_backends(self):
         programs = {f'generated/success-{i}' for i in range(50)}

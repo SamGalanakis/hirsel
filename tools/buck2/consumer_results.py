@@ -89,6 +89,28 @@ def evidence(details):
     return executed, failed | running, diagnostics, running
 
 
+# The corpus runner's own receipts (hirsel-conformance and native --full, as
+# tools/corpus slices print them): a count of executed cases, and one line per
+# failing case naming it. Each case is a body.
+CORPUS_COUNTS = re.compile(r'^whole corpus: (\d+) validated / \d+ passing / (\d+) failing / \d+ not implemented$', re.M)
+NATIVE_ATTEMPTS = re.compile(r'^\s*"configuration_attempts": (\d+),?$', re.M)
+CORPUS_FAILURE = re.compile(r'^(?:native: )?(conformance/[^\s:]+\.hir)(?::| under) (.+)$', re.M)
+
+
+def corpus_evidence(details):
+    """Executed and failing corpus cases from the runner's receipts, or None
+    when the output carries none."""
+    counts = CORPUS_COUNTS.findall(details)
+    attempts = NATIVE_ATTEMPTS.findall(details)
+    if not counts and not attempts:
+        return None
+    executed = int(counts[-1][0]) if counts else int(attempts[-1])
+    diagnostics = {}
+    for case, message in CORPUS_FAILURE.findall(details):
+        diagnostics.setdefault(case, case + ': ' + message.strip())
+    return executed, diagnostics
+
+
 def classify(target, result, rows):
     """Return known/new/uncertain, or pass only with positive body evidence."""
     target = target.removeprefix('root//:').removeprefix('//:')
@@ -104,9 +126,22 @@ def classify(target, result, rows):
         skipped = re.search(r'\bskipped=(\d+)', python_ok[1] or '')
         count = int(python_summary[1]) - (int(skipped[1]) if skipped else 0)
         return ('pass', f'{count} executed bodies') if count > 0 else ('uncertain', 'zero executed bodies')
-    executed, active, diagnostics, running = evidence(details)
-    if not executed:
-        return 'uncertain', 'zero executed bodies'
+    corpus = corpus_evidence(details)
+    if corpus:
+        count, diagnostics = corpus
+        if not count:
+            return 'uncertain', 'zero executed corpus cases'
+        if result.get('status') == event_logs.PASS:
+            if diagnostics:
+                return 'uncertain', 'passing result names failing corpus cases'
+            return 'pass', f'{count} executed corpus cases'
+        if not diagnostics:
+            return 'uncertain', 'failure names no corpus case'
+        active, running = set(diagnostics), set()
+    else:
+        executed, active, diagnostics, running = evidence(details)
+        if not executed:
+            return 'uncertain', 'zero executed bodies'
     if result.get('status') == event_logs.PASS:
         summaries = re.findall(r'^test result: (ok|FAILED)\. (\d+) passed; (\d+) failed;', details, re.M)
         summary = summaries[-1] if summaries else None
@@ -115,13 +150,17 @@ def classify(target, result, rows):
                 or int(summary[2]) != 0 or int(summary[1]) != len(set(successful))):
             return 'uncertain', 'missing complete passing body result'
         return 'pass', f'{len(executed)} executed bodies'
-    if not active:
+    # A corpus failure names its cases outright; a libtest failure must be
+    # localized to the bodies active when it stopped.
+    if corpus:
+        pass
+    elif not active:
         return 'uncertain', 'failure has no localized active body'
-    if '<launcher setup, discovery, or child teardown>' in details:
+    elif ('<launcher setup, discovery, or child teardown>' in details
+          or (result.get('status') == event_logs.TIMED_OUT or 'HIRSEL_TEST_INNER_DEADLINE ' in details)
+          and not running):
         return 'uncertain', 'deadline has no localized active body'
-    if (result.get('status') == event_logs.TIMED_OUT or 'HIRSEL_TEST_INNER_DEADLINE ' in details) and not running:
-        return 'uncertain', 'deadline has no localized active body'
-    if executed - active - set(re.findall(r'^test (\S+)(?: - should panic)? \.\.\. (?:ok|ignored)\b', details, re.M)):
+    elif executed - active - set(re.findall(r'^test (\S+)(?: - should panic)? \.\.\. (?:ok|ignored)\b', details, re.M)):
         return 'uncertain', 'unknown active body at failure'
     binary = re.sub(r'(?:-cpus-\d+)?-shard-\d+$', '', target)
     verdicts = []
@@ -156,12 +195,14 @@ def classify(target, result, rows):
                        + (', '.join(f'{kind}={value:g}s' for kind, value in sorted(observed_caps)) or 'unknown'))
         references = '; '.join(f'{key}: {row.reference}' for key, row in recorded)
         deadline_caps = {kind for kind, _ in observed_caps}
-        if not diagnostic or not observed_caps or body in running and not {'inner', 'action'} <= deadline_caps:
+        # A corpus case's failure is its expectation, not a deadline: it has no
+        # caps to match, and its row must name none.
+        if not diagnostic or not (observed_caps or corpus) or body in running and not {'inner', 'action'} <= deadline_caps:
             verdicts.append(('uncertain', f'{body}: diagnostic or cap evidence missing; '
                              f'{observation}; evidence={references}'))
             continue
         matched = next(((key, row) for key, row, reason in candidates
-                        if re.search(r'(?<![\w:])' + re.escape(body) + r'(?![\w:])', reason)
+                        if re.search(r'(?<![\w:])' + re.escape(body) + (r'(?!\w)' if corpus else r'(?![\w:])'), reason)
                         and normalized(diagnostic) in normalized(reason)
                         and observed_caps == caps(reason)), None)
         if matched:

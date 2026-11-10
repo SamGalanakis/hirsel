@@ -76,7 +76,8 @@ def test_graph(root, seeds):
                            '--output-attribute', '^test_binary$', '--output-attribute', '^shard',
                            '--output-attribute', '^costs$', '--output-attribute', '^extra_env$',
                            '--output-attribute', '^args$', '--output-attribute', '^exact_cpus$',
-                           '--output-attribute', '^script$', '--output-attribute', '^harness$'))
+                           '--output-attribute', '^script$', '--output-attribute', '^harness$',
+                           '--output-attribute', r'^buck\.deps$'))
     # A test's data edge can be affected while its executable is independent.
     # Resolve that executable explicitly; rdeps need not contain its node.
     missing = sorted({attrs['harness'] for attrs in graph.values()
@@ -324,7 +325,29 @@ def direct_owners(root, paths):
     return direct
 
 
-def select(root, paths, graph, inventories, owners=None, reasons=None):
+def distances(graph, owners):
+    """Each target's dependency distance from the nearest changed-source owner
+    (Buck's declared edges within the reverse graph); absent when unreached."""
+    users = {}
+    for target, attrs in graph.items():
+        for dependency in attrs.get('buck.deps', []):
+            users.setdefault(dependency, []).append(target)
+    distance = {owner: 0 for owner in owners}
+    frontier = list(owners)
+    while frontier:
+        following = []
+        for node in frontier:
+            for user in users.get(node, []):
+                if user not in distance:
+                    distance[user] = distance[node] + 1
+                    following.append(user)
+        frontier = following
+    return distance
+
+
+def select(root, paths, graph, inventories, owners=None, reasons=None, limit=LIMIT, cut=None):
+    """Affected targets, nearest owner first; the first `limit` (0: all) are kept.
+    `cut` receives the targets past the limit."""
     sys.path.insert(0, str(root / 'tools/buck2'))
     from sync import CONFORMANCE_SHARDS, CONSUMER_CASES
     mapped = assignments(root, graph, inventories)
@@ -403,8 +426,18 @@ def select(root, paths, graph, inventories, owners=None, reasons=None):
             owner = target if target in owners else harness
             direct[target] = (owners[owner] if isinstance(owners, dict) else
                               'direct test owner' if test_paths else 'direct source owner')
-    if len(mandatory) > LIMIT:
-        raise ValueError(f'{len(mandatory)} mandatory targets exceed the {LIMIT}-target ceiling')
+    limit = limit or len(graph) + len(ordinary | shards | mandatory | direct.keys())
+    if len(mandatory) > limit:
+        raise ValueError(f'{len(mandatory)} mandatory targets exceed the {limit}-target ceiling')
+    distance = distances(graph, owners or {})
+
+    # Harnesses declare their crate dependencies flat, so most tests sit two
+    # edges from a changed library: the changed crate's own tests come first.
+    own = tuple(owner + '-' for owner in owners or {})
+
+    def near(target):
+        steps = distance.get(target, distance.get(graph.get(target, {}).get('harness'), len(graph)))
+        return steps - 1 if target.startswith(own) and steps < len(graph) else steps
     # Reserve the mandatory set before spending the remaining bound. Direct
     # owners precede broad shards; each transitive binary still gets a turn.
     # Give each affected binary a turn before spending the bound on a large
@@ -416,20 +449,27 @@ def select(root, paths, graph, inventories, owners=None, reasons=None):
             groups.setdefault(family, []).append(target)
     for targets in groups.values():
         targets.sort(key=lambda target: re.sub(r'\d+', lambda m: m[0].zfill(8), target))
-    selected = sorted(direct) + sorted(mandatory - direct.keys())
+    # Nearest owner first: direct owners by distance, then each round of the
+    # families, the family nearest the change first.
+    owned = sorted(direct, key=lambda target: (near(target), target))
+    selected = owned + sorted(mandatory - direct.keys())
+    order = sorted(groups, key=lambda family: (min(map(near, groups[family])), family))
     while any(groups.values()):
-        for family in sorted(groups):
+        for family in order:
             if groups[family]:
                 selected.append(groups[family].pop(0))
     # Keep the mandatory reservation even when direct ownership itself is broad.
-    retained = set(sorted(direct.keys() - mandatory)[:LIMIT - len(mandatory)]) | mandatory
+    retained = set([target for target in owned if target not in mandatory][:limit - len(mandatory)]) | mandatory
     for target in selected:
-        if len(retained) < LIMIT:
+        if len(retained) < limit:
             retained.add(target)
     if reasons is not None:
         reasons.update({target: direct.get(target, 'mandatory set' if target in mandatory else 'transitive shard')
+                        + (f' (distance {near(target)})' if near(target) < len(graph) else '')
                         for target in selected})
-    return [target for target in selected if target in retained] + [target for target in selected if target not in retained]
+    if cut is not None:
+        cut.extend(target for target in selected if target not in retained)
+    return [target for target in selected if target in retained]
 
 
 def main():
@@ -438,6 +478,8 @@ def main():
     parser.add_argument('--reasons', action='store_true', help='print target/reason columns on stdout')
     parser.add_argument('--classify', metavar='LOG', nargs='+', help='classify completed Buck event logs')
     parser.add_argument('--known-failures', type=Path, default=ROOT / 'tools/known-failures.tsv')
+    parser.add_argument('--limit', type=int, default=LIMIT,
+                        help=f'keep the nearest N affected targets (default {LIMIT}; 0 keeps all)')
     args = parser.parse_args()
     try:
         if args.classify:
@@ -474,19 +516,30 @@ def main():
         generated.require(ROOT)
         graph = test_graph(ROOT, sorted(seeds))
         inventories = listings(ROOT, graph)
-        reasons = {}
-        selected = select(ROOT, paths, graph, inventories, direct_owners(ROOT, paths), reasons)
+        reasons, cut = {}, []
+        selected = select(ROOT, paths, graph, inventories, direct_owners(ROOT, paths), reasons, args.limit, cut)
         if not selected:
             raise ValueError('no consumers found for ' + ', '.join(paths))
-        for target in selected[:LIMIT]:
+        for target in selected:
             label = target.removeprefix('root')
             if args.reasons:
                 print(f'{label}\t{reasons[target]}')
             else:
                 print(label)
                 print(f'{label}\t{reasons[target]}', file=sys.stderr)
-        if len(selected) > LIMIT:
-            print(f'consumers: truncated {len(selected)} affected targets to {LIMIT}; mandatory launches retained; remaining shards omitted', file=sys.stderr)
+        if cut:
+            # Name what the cap dropped: every cut owner, and each cut family.
+            print(f'consumers: CAPPED: kept the nearest {len(selected)} of {len(selected) + len(cut)} affected '
+                  f'targets (--limit {args.limit}; --limit 0 keeps all); cut:', file=sys.stderr)
+            families = {}
+            for target in cut:
+                if 'owner' in reasons[target]:
+                    print(f'consumers:   cut {target.removeprefix("root")}\t{reasons[target]}', file=sys.stderr)
+                else:
+                    family = re.sub(r'(?:-cpus-\d+)?-shard-\d+$', '', target.removeprefix('root'))
+                    families.setdefault(family, []).append(reasons[target])
+            for family, why in families.items():
+                print(f'consumers:   cut {len(why)} of {family}\t{why[0]}', file=sys.stderr)
         return 0
     except (ValueError, OSError, KeyError) as error:
         print(f'consumers: {error}', file=sys.stderr)

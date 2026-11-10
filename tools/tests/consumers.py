@@ -87,6 +87,19 @@ class Consumers(unittest.TestCase):
         self.assertTrue(mandatory)
         self.assertLessEqual(mandatory, set(selected[:consumers.LIMIT]))
 
+    def test_the_cap_keeps_the_nearest_owner_and_reports_the_cut(self):
+        # place-store-681: 100 of 4,261 kept by name, with no word on what was cut.
+        graph = {'root//:lib': {}, 'root//:mid': {'buck.deps': ['root//:lib']},
+                 'root//:z-near-harness': {'buck.deps': ['root//:lib']},
+                 'root//:a-far-harness': {'buck.deps': ['root//:mid']}}
+        for name in ('z-near', 'a-far'):
+            graph[f'root//:{name}'] = dict(test_binary=name, harness=f'root//:{name}-harness',
+                                           **{'buck.deps': [f'root//:{name}-harness']})
+        cut = []
+        selected = consumers.select(ROOT, ['crates/hirsel-check/src/lib.rs'], graph, {},
+                                    {'root//:lib': 'direct source owner'}, {}, 1, cut)
+        self.assertEqual((selected, cut), (['root//:z-near'], ['root//:a-far']))
+
     def test_cpu_pool_change_selects_native_launches_and_replay_before_other_shards(self):
         inventories = {binary: set(cases) for binary, cases in consumers.MUST.items()}
         inventories['hirsel-cli-test-free'] = {
@@ -285,6 +298,26 @@ HIRSEL_TEST_RUNNING laws::receipt elapsed=570.001s
                         'test result: ok. 0 passed; 0 failed; 1 ignored;'):
             for status in (1, 2):
                 self.assertEqual(self.classify(details, {'fixture-shard-1': details}, status), 'uncertain')
+
+    def test_corpus_slices_are_judged_by_the_runners_receipts(self):
+        # testsmash-apply-703: 670 executed cases in 32 tools/corpus slices read
+        # as 32 "zero executed bodies".
+        counts = 'whole corpus: {} validated / {} passing / {} failing / 0 not implemented\n'
+        failing = ('conformance/LANG/LANG-4-std-duplicate-bad.hir: expected Reject { rule: RuleId("LANG-4"), '
+                   'line: 1 }; got accept')
+        red = failing + '\n--path requires every selected test to pass\n' + counts.format(20, 19, 1)
+        self.assertEqual(self.classify(counts.format(21, 21, 0), {}, 1), 'pass')
+        self.assertEqual(self.classify(counts.format(0, 0, 0), {}, 1), 'uncertain')
+        self.assertEqual(self.classify(red, {}), 'new')
+        self.assertEqual(self.classify(red, {'fixture::conformance/LANG/LANG-4-std-duplicate-bad.hir': failing}),
+                         'known')
+        self.assertEqual(self.classify(red.replace('got accept', 'got LANG-9'),
+                                       {'fixture::conformance/LANG/LANG-4-std-duplicate-bad.hir': failing}),
+                         'uncertain')
+        native = ('native: conformance/STORE/STORE-12-serve-run.hir under x86_64/regions/elide/reuse/flat-walk/heap: '
+                  'ready: no native layout for Inbox (native-unavailable)\n{\n  "configuration_attempts": 2,\n}\n')
+        self.assertEqual(self.classify(native, {}), 'new')
+        self.assertEqual(self.classify(native.split('\n', 1)[1], {}, 1), 'pass')
 
     def test_known_body_does_not_hide_new_failure_in_same_target(self):
         details = self.panic + '\nHIRSEL_TEST_STARTED laws::new\ntest laws::new ... FAILED\n'

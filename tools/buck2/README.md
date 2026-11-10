@@ -290,8 +290,11 @@ Buck reverse dependencies, real harness case listings, source helpers and loaded
 corpus files. Run them with `tools/consumers <path>... | xargs .buck2/bin/buck2 test`.
 The selection includes native HTTP/HTTPS/gRPC launches, replay and cpu_pool_*
 when startup, scheduler, pool or Ordered code changes. Native HTTP targets run
-the existing full-gate bodies explicitly. Output stops at 100 targets and names
-truncation on stderr; a truncated list is partial consumer coverage. Discovery
+the existing full-gate bodies explicitly. Output keeps the 100 targets nearest
+the changed owners (fewest reverse-dependency steps, the changed crate's own tests
+first; `--limit N` changes the cap, `--limit 0` keeps all) and prints `consumers:
+CAPPED` on stderr with each cut target or `cut <n> of <family>`; a capped list is
+partial consumer coverage. Discovery
 runs no bodies. A libtest selector that matches no bodies fails before dispatch.
 A Rust target that completes no test bodies fails at result classification and
 names the target, including empty binaries and ignored-only runs. Intentional

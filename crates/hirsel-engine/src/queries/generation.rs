@@ -164,6 +164,26 @@ fn diagnostic(rule: &'static str, span: Span, message: impl Into<String>) -> Que
     )])
 }
 
+pub(in crate::queries) fn locate_failure(
+    mut error: QueryError,
+    sources: &SourceMap,
+    site: Span,
+) -> QueryError {
+    if let QueryError::Operational(failure) = &mut error
+        && let Some(location) = sources.location(site)
+        && let Some(file) = sources.file(sources.resolve(site).file)
+    {
+        failure.message = format!(
+            "{}:{}:{}: {}",
+            file.logical_path().display(),
+            location.line,
+            location.column,
+            failure.message
+        );
+    }
+    error
+}
+
 /// Every primary site in generated text also marks the declaration that generated it.
 fn label(
     mut error: QueryError,

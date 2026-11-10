@@ -309,7 +309,7 @@ impl FrontBodyQueries {
     pub(crate) fn runtime_error(&self, reference: Reference) -> Option<QueryError> {
         let message = if reference == self.errors.resource {
             format!(
-                "Front producer exceeded its admitted resources; retained {} of {} bytes; refusal {:?}",
+                "Front producer exceeded its admitted resources; request reserved {} of {} bytes; refusal {:?}",
                 self.retained_bytes(),
                 self.admitted_bytes(),
                 self.memory_refusal(),
@@ -1097,8 +1097,8 @@ impl FrontBodyQueries {
         )?;
         product.publish(self.store.as_ref()).ok()
     }
-    /// Captured rows and actual settled metadata owned by this producer view.
-    /// Provider content bytes and active decode scratch have separate owners.
+    /// Reservations across the shared request, including unallocated working
+    /// allowances. This is neither this producer's retained heap nor its RSS.
     pub fn retained_bytes(&self) -> u64 {
         self._allowance.request.reserved()
     }
@@ -1886,6 +1886,7 @@ impl QueryTask for BodyTask {
                         }),
                         Arc::new(Reads::empty()),
                         None,
+                        Some(QueryKind::Generate),
                     );
                     self.terminal = Some(result.clone());
                     return result;
@@ -1990,7 +1991,13 @@ impl BodyTask {
         cx: &mut dyn QueryContext,
         failure: generation::demand::DemandFailure,
     ) -> Result<ProductRef, Reference> {
-        self.publish_generation_failure(cx, failure.error, failure.reads, Some(failure.sources))
+        self.publish_generation_failure(
+            cx,
+            failure.error,
+            failure.reads,
+            Some(failure.sources),
+            Some(QueryKind::Generate),
+        )
     }
     fn publish_generation_failure(
         &self,
@@ -1998,10 +2005,10 @@ impl BodyTask {
         error: QueryError,
         reads: Arc<Reads>,
         diagnostic_sources: Option<Arc<namespace::DiagnosticSources>>,
+        phase: Option<QueryKind>,
     ) -> Result<ProductRef, Reference> {
         let queries = &self.queries;
         let input = &queries.inputs[&self.input];
-        let phase = Some(QueryKind::Generate);
         let outcome = ModeResult {
             definition: input.definition.path().clone(),
             result: Err(error.clone()),
@@ -2416,6 +2423,7 @@ impl BodyTask {
             }
             queries.resource_refusal()
         })?;
+        let site = syntax.item.name_span;
         let mut done = worker.run(Task {
             index: 0,
             definition: input.definition.path().clone(),
@@ -2427,17 +2435,26 @@ impl BodyTask {
             resolution: None,
             checked: None,
         });
-        // A body computed under a refused citation read is a resource
-        // refusal: no failure record is published for it, and the next
-        // demand computes it again.
+        // Operational phase failures remain failures, with their actual cause.
+        // They never publish a successful body or a reusable query entry.
         if let Some(refusal) = done.refused() {
-            if std::env::var_os("HIRSEL_OPERATION_OWNER_TRACE").is_some() {
-                crate::queries::operation_owner_trace(format_args!(
-                    "OWNER RESOURCE Front phase {}: {refusal:?}",
-                    input.definition.path()
-                ));
-            }
-            return Err(queries.resource_refusal().into());
+            let mut source = FrozenReadSource {
+                declarations: &queries.declarations,
+                citations: &queries.citations,
+                candidates: queries.candidates.get(&input.definition).copied(),
+                environment: queries.environment,
+            };
+            let reads = done.complete_reads(&mut source).map_err(|_| {
+                queries.protocol_failure(self.query, "operational phase reads disagree")
+            })?;
+            let error = generation::locate_failure(
+                QueryError::Operational(refusal.clone()),
+                &queries.citations.sources,
+                site,
+            );
+            return self
+                .publish_generation_failure(cx, error, Arc::new(reads), None, Some(done.phase))
+                .map_err(Into::into);
         }
         if let Some(registration) = &input.registration {
             registration.explain(&mut done.result, &queries.citations.sources);

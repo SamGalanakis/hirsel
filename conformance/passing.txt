@@ -8,6 +8,10 @@ CLO/CLO-4-carrier-uses-direct-run.hir
 CLO/CLO-4-carrier-uses-ordinary-run.hir
 CLO/CLO-4-carrier-uses-private-run.hir
 CLO/CLO-4-carrier-uses-single-run.hir
+CT/CT-5-generated-block-binding-bad.hir
+CT/CT-5-generated-client-private-bad.hir
+CT/CT-5-generated-local-shape-bad.hir
+CT/CT-5-generated-opaque-shape-bad.hir
 DROP/DROP-2-function-field-nominal-cleanup-run.hir
 FAIL/FAIL-3-regex-fixed-tags-37-cleanup-run.hir
 GEN/GEN-6-package-cycle-bad.hir

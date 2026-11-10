@@ -58,7 +58,7 @@ struct DemandView {
 struct InstanceSelection {
     declaration: DefId,
     key: hirsel_types::GeneratedActualKey,
-    site: Option<Span>,
+    site: Span,
 }
 #[derive(Clone)]
 enum CurrentView {
@@ -294,15 +294,10 @@ impl DemandProducer {
             (3 * (size_of::<InstanceSelection>()
                 + size_of::<hirsel_engine_admission::MemoryReservation>())) as u64,
         )?;
-        let fresh = !capture
-            .instances
-            .instances
-            .get(&id)
-            .is_some_and(|rows| rows.contains_key(&key));
         state.selected.push(InstanceSelection {
             declaration: id,
             key,
-            site: fresh.then_some(site),
+            site,
         });
         state.charges.push(charge);
         Ok(())
@@ -312,6 +307,7 @@ impl DemandProducer {
         declaration: &DefPath,
         key: Option<hirsel_types::GeneratedActualKey>,
         mut error: QueryError,
+        sources: &SourceMap,
     ) -> QueryError {
         let site = key.and_then(|key| {
             self.state
@@ -322,8 +318,11 @@ impl DemandProducer {
                 .find(|selection| {
                     selection.declaration.path() == declaration && selection.key == key
                 })
-                .and_then(|selection| selection.site.map(|site| (key, site)))
+                .map(|selection| (key, selection.site))
         });
+        if let Some((_, site)) = site {
+            error = locate_failure(error, sources, site);
+        }
         if let Some((key, site)) = site
             && let QueryError::Diagnostics(diagnostics) = &mut error
         {
@@ -332,6 +331,20 @@ impl DemandProducer {
                 message: format!("selects instance {}", key.instance_name(declaration)),
             };
             for diagnostic in diagnostics {
+                let at = sources.resolve(diagnostic.primary);
+                diagnostic.notes.push(format!(
+                    "generated instance span {}..{}: {:?}",
+                    at.start,
+                    at.end,
+                    sources.slice(diagnostic.primary).unwrap_or("")
+                ));
+                if sources.file(at.file).is_none_or(|file| {
+                    file.logical_path()
+                        .to_string_lossy()
+                        .starts_with("<generated:")
+                }) {
+                    diagnostic.primary = site;
+                }
                 if !diagnostic.secondary.contains(&label) {
                     diagnostic.secondary.push(label.clone());
                 }
@@ -1406,7 +1419,18 @@ impl DemandProducer {
                     };
                     let syntax = engine
                         .register_front_instance(&request, &self.request)
-                        .map_err(|failure| failure.error)?;
+                        .map_err(|mut failure| {
+                            failure.error = self.label_selection(
+                                declaration,
+                                actual_key,
+                                failure.error,
+                                &failure.sources,
+                            );
+                            let error = failure.error.clone();
+                            *self.failure.lock().unwrap_or_else(|e| e.into_inner()) =
+                                Some(FrontRegistrationBootstrapError::Acceptance(failure));
+                            error
+                        })?;
                     syntax.definition().clone()
                 } else {
                     if !arguments.is_empty() {
@@ -1455,13 +1479,17 @@ impl DemandProducer {
                     .unwrap_or_else(|e| e.into_inner())
                     .commit(&lower);
 
-                let text = engine.front_registration_queries(
-                    std::slice::from_ref(&selected),
-                    lower,
-                    self.weight,
-                    &self.request,
-                    self.errors,
-                )?;
+                let text = engine
+                    .front_registration_queries(
+                        std::slice::from_ref(&selected),
+                        lower,
+                        self.weight,
+                        &self.request,
+                        self.errors,
+                    )
+                    .map_err(|error| {
+                        self.label_selection(declaration, actual_key, error, &engine.sources)
+                    })?;
                 let definition = DefId::intern(&selected);
                 {
                     let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
@@ -1495,7 +1523,12 @@ impl DemandProducer {
                         if let Some(output) = &output
                             && let Err(error) = output.text()
                         {
-                            let error = self.label_selection(declaration, actual_key, error);
+                            let error = self.label_selection(
+                                declaration,
+                                actual_key,
+                                error,
+                                output.sources(),
+                            );
                             *self.failure.lock().unwrap_or_else(|e| e.into_inner()) =
                                 Some(FrontRegistrationBootstrapError::Runtime {
                                     reference,
@@ -1540,8 +1573,12 @@ impl DemandProducer {
                 let accepted = match engine.accept_front_registration(output, &self.request) {
                     Ok(accepted) => accepted,
                     Err(mut failure) => {
-                        failure.error =
-                            self.label_selection(declaration, actual_key, failure.error);
+                        failure.error = self.label_selection(
+                            declaration,
+                            actual_key,
+                            failure.error,
+                            &failure.sources,
+                        );
                         let error = failure.error.clone();
                         *self.failure.lock().unwrap_or_else(|e| e.into_inner()) =
                             Some(FrontRegistrationBootstrapError::Acceptance(failure));

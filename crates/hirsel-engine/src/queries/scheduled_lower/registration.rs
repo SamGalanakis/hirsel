@@ -231,7 +231,15 @@ impl FrontRegistrationQueries {
             } else {
                 self.compute(input, &mut source, &mut dependencies)
                     .map_err(|error| {
-                        lower_input_error(input.definition.path(), "executing a generator", error)
+                        generation::locate_failure(
+                            lower_input_error(
+                                input.definition.path(),
+                                "executing a generator",
+                                error,
+                            ),
+                            &source.capture().sources,
+                            input.site,
+                        )
                     })
             };
             let restart = source.restart.borrow_mut().take();

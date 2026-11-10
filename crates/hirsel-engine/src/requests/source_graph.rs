@@ -1305,7 +1305,7 @@ fn instance_bootstrap_error(
                     operation: "instance bootstrap".into(),
                     message: if reference == errors.resource {
                         format!(
-                            "a front task exceeded its admitted resources; Front retained {} of {} bytes; refusal {:?}",
+                            "a front task exceeded its admitted resources; Front request reserved {} of {} bytes; refusal {:?}",
                             owner.retained_bytes(),
                             owner.admitted_bytes(),
                             owner.memory_refusal()

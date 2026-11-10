@@ -1,0 +1,7 @@
+fn body[T](s: TypeShape[T]) -> Result[Body[fn(T) -> u64 uses {}], String] uses {} {
+  let name = type_shape.info(s).name
+  Ok(codegen.body(f"fn(_v: {name}) -> u64 uses {{}} {{ 7 }}"))
+}
+
+/// A library's generated declaration, instantiated at a client's type.
+pub fn width[T](v: T) -> u64 uses {} = comptime body(shape(T))

@@ -1089,13 +1089,13 @@ impl FrontLowerQueries {
         };
         let mut pending: Vec<_> = roots
             .into_iter()
-            .map(|p| (DefId::intern(&p), BTreeMap::new()))
+            .map(|p| (DefId::intern(&p), BTreeMap::new(), DefId::intern(&p)))
             .collect();
         let mut seen = BTreeSet::new();
         let mut selected = BTreeSet::new();
         let mut work = hirsel_query_products::retained::MetadataWeight::default();
         work.flat_vec(&pending);
-        while let Some((path, bindings)) = pending.pop() {
+        while let Some((path, bindings, root)) = pending.pop() {
             let key: Vec<_> = bindings
                 .iter()
                 .map(
@@ -1171,7 +1171,11 @@ impl FrontLowerQueries {
                             call.callee,
                             self.namespace.snapshot.types(),
                             &actuals.arguments,
-                        )?
+                        )
+                        .map_err(|error| {
+                            self.front.require_discovery(root.path());
+                            error
+                        })?
                         .ok_or_else(refused)?;
                     if !selected.contains(instance.path()) {
                         work.tree::<DefPath, ()>(0);
@@ -1191,7 +1195,7 @@ impl FrontLowerQueries {
                 };
                 // Bound all visited and queued cursor allocations cumulatively;
                 // released cursors never grant extra space to this walk.
-                work.add(size_of_val(&next) + 16 * size_of::<usize>());
+                work.add(size_of_val(&next) + size_of::<DefId>() + 16 * size_of::<usize>());
                 work.tree::<hirsel_types::SiteRef, hirsel_types::Actuals>(next.1.len());
                 for actuals in next.1.values() {
                     work.flat_vec(&actuals.arguments);
@@ -1199,7 +1203,7 @@ impl FrontLowerQueries {
                 if work.bytes() > limit {
                     return Err(refused());
                 }
-                pending.push(next);
+                pending.push((next.0, next.1, root));
             }
         }
         Ok(selected)

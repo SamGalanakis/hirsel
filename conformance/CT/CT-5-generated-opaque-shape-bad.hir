@@ -1,0 +1,23 @@
+// rule: CT-5
+// expect: reject PROG-2 at line 15
+// twin: CT/CT-5-generic-instance-run.hir
+// CT-5 + MEM-5: a generated body whose parameter is another package's generic
+// opaque type, spelled by its shape.
+fn width_body[K: key + serializable, V: serializable](s: TypeShape[table.Table[K, V]]) -> Result[
+  Body[fn(table.Table[K, V]) -> u64 uses {}],
+  String
+] uses {} {
+  let name = type_shape.info(s).name
+  Ok(codegen.body(f"fn(_t: {name}) -> u64 uses {{}} {{ 7 }}"))
+}
+
+fn width[K: key + serializable, V: serializable](t: table.Table[K, V]) -> u64 uses {} = comptime width_body(
+  shape(table.Table[K, V])
+)
+
+pub fn main(rt: Io) -> Result[(), GrantError] {
+  let out = io.stdout(rt)?
+  let t: table.Table[u64, u64] = table.named("t")
+  let _ = out.print(out, f"{width(t)}\n")
+  Ok(())
+}

@@ -877,6 +877,32 @@ fn callee_world(
 }
 
 /// `Faulted(f)`'s failure: the callee's primary failure with its causes (RUN-6).
+impl Library {
+    /// `runner.entry_id(e)` (RUN-3): the full path, signature fingerprint and code hash of
+    /// the definition `e` names, as the launcher found them (RUN-8).
+    pub(super) fn entry_id(&self, entry: &Value) -> Result<Value, Error> {
+        let Value::FunctionReference(entry) = entry else {
+            return Err(invalid("runner.entry_id expects an Entry"));
+        };
+        let path = entry.definition.to_string();
+        let facts = self
+            .simulation
+            .config
+            .callees
+            .get(&path)
+            .ok_or_else(|| invalid("an Entry whose identity the program does not carry"))?;
+        let (fingerprint, code) = (facts.fingerprint.to_vec(), facts.code.to_vec());
+        Ok(record(
+            "EntryId",
+            vec![
+                Value::String(path),
+                Value::Bytes(fingerprint),
+                Value::Bytes(code),
+            ],
+        ))
+    }
+}
+
 fn faulted(chain: &[FailureRecord], context: &OperationContext<'_>) -> Result<Value, Error> {
     super::tasks::failure_value(chain, context)
 }

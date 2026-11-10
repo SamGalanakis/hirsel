@@ -24,8 +24,9 @@ from the call key (RUN-10), and its arguments are decoded fresh from the request
 the outcome crosses back the same way. The host adapter reuses the same state: it takes the
 sends (`take_runner_sends`), starts each callee as its own admitted run, and completes the
 caller's wait with `runner_completed`; `callee_outcome` encodes a callee's end as the bytes its
-tape records. `runner.entry_path` spells a FunctionReference's
-definition.
+tape records. `runner.entry_id` spells a FunctionReference's definition with the
+fingerprint and code hash its callee facts carry; `runner.apply` calls an entry on the
+current task as a failure boundary.
 
 `launch` validates a pub monomorphic complete root-capability function returning
 the nominal core Result[(),E], validates every grant before entry, and returns

@@ -124,6 +124,8 @@ pub fn classify(mut row: OperationRow) -> Result<OperationRow, String> {
             | "runner.call"
             | "runner.spawn"
             | "runner.grants"
+            | "runner.apply"
+            | "runner.apply_mut"
     ) || MAP_BODIES.contains(&name.as_str())
     {
         row.dispositions.native = Disposition::Body;
@@ -343,8 +345,10 @@ pub fn classify(mut row: OperationRow) -> Result<OperationRow, String> {
         "$intrinsic.AtomicStore" => Some("hirsel_rt_v2_atomic_store".into()),
         // `shared.thaw`'s compiled body asks the runtime whether its root is the last.
         "$intrinsic.SharedThawTurn" => Some("hirsel_rt_v2_thaw_turn".into()),
-        // `task.isolate`'s compiled body reads its caught chain through these (`isolate.rs`).
+        // `task.isolate`'s and `runner.apply`'s compiled bodies read their caught chain
+        // through these (`isolate.rs`).
         "$intrinsic.IsolateBegin" => Some("hirsel_rt_v2_isolate_begin".into()),
+        "$intrinsic.ApplyBegin" => Some("hirsel_rt_v2_apply_begin".into()),
         "$intrinsic.IsolateEnd" => Some("hirsel_rt_v2_isolate_end".into()),
         "$intrinsic.IsolateCount" => Some("hirsel_rt_v2_isolate_count".into()),
         "$intrinsic.IsolateKind" => Some("hirsel_rt_v2_isolate_kind".into()),
@@ -355,7 +359,7 @@ pub fn classify(mut row: OperationRow) -> Result<OperationRow, String> {
         "$intrinsic.IsolateSpawn" => Some("hirsel_rt_v2_isolate_spawn".into()),
         // Runners (RUN-1..4, `runners.rs`): the grants and narrowings are runtime entries;
         // the calls' compiled bodies send, wait and reply through the intrinsics.
-        "io.runner" | "test.runner" | "runner.narrow" | "runner.only" | "runner.entry_path" => {
+        "io.runner" | "test.runner" | "runner.narrow" | "runner.only" | "runner.entry_id" => {
             Some(format!("hirsel_rt_v2_{}", name.replace('.', "_")))
         }
         "$intrinsic.RunnerSend" => Some("hirsel_rt_v2_runner_send".into()),
@@ -364,7 +368,6 @@ pub fn classify(mut row: OperationRow) -> Result<OperationRow, String> {
         "$intrinsic.RunnerEntry" => Some("hirsel_rt_v2_runner_entry".into()),
         "$intrinsic.RunnerArgument" => Some("hirsel_rt_v2_runner_argument".into()),
         "$intrinsic.RunnerIo" => Some("hirsel_rt_v2_runner_io".into()),
-        "$intrinsic.RunnerTasks" => Some("hirsel_rt_v2_runner_tasks".into()),
         "$intrinsic.RunnerReply" => Some("hirsel_rt_v2_runner_reply".into()),
         "$intrinsic.RunnerGrants" => Some("hirsel_rt_v2_runner_grants".into()),
         "$intrinsic.UnicodeScalars_open" => Some("hirsel_rt_v2_unicode_scalars_open".into()),
@@ -963,59 +966,66 @@ pub const HIRSEL_ABI_EXPORTS: &[AbiExport] = &[
     },
     AbiExport {
         caller_site: false,
+        symbol: "hirsel_rt_v2_apply_begin",
+        destination: false,
+        result: Some((8, 8)),
+        parameters: &[],
+    },
+    AbiExport {
+        caller_site: false,
         symbol: "hirsel_rt_v2_isolate_end",
         destination: false,
         result: None,
-        parameters: &[Physical::Pointer],
+        parameters: &[],
     },
     AbiExport {
         caller_site: false,
         symbol: "hirsel_rt_v2_isolate_count",
         destination: false,
         result: Some((8, 8)),
-        parameters: &[Physical::Pointer],
+        parameters: &[],
     },
     AbiExport {
         caller_site: false,
         symbol: "hirsel_rt_v2_isolate_kind",
         destination: false,
         result: Some((4, 4)),
-        parameters: &[Physical::Pointer, Physical::I64],
+        parameters: &[Physical::I64],
     },
     AbiExport {
         caller_site: false,
         symbol: "hirsel_rt_v2_isolate_rule",
         destination: true,
         result: Some((24, 8)),
-        parameters: &[Physical::Pointer, Physical::I64],
+        parameters: &[Physical::I64],
     },
     AbiExport {
         caller_site: false,
         symbol: "hirsel_rt_v2_isolate_definition",
         destination: true,
         result: Some((24, 8)),
-        parameters: &[Physical::Pointer, Physical::I64],
+        parameters: &[Physical::I64],
     },
     AbiExport {
         caller_site: false,
         symbol: "hirsel_rt_v2_isolate_line",
         destination: false,
         result: Some((8, 8)),
-        parameters: &[Physical::Pointer, Physical::I64],
+        parameters: &[Physical::I64],
     },
     AbiExport {
         caller_site: false,
         symbol: "hirsel_rt_v2_isolate_column",
         destination: false,
         result: Some((8, 8)),
-        parameters: &[Physical::Pointer, Physical::I64],
+        parameters: &[Physical::I64],
     },
     AbiExport {
         caller_site: false,
         symbol: "hirsel_rt_v2_isolate_spawn",
         destination: true,
         result: Some((8, 8)),
-        parameters: &[Physical::Pointer, Physical::I64],
+        parameters: &[Physical::I64],
     },
     AbiExport {
         caller_site: false,
@@ -1052,9 +1062,9 @@ pub const HIRSEL_ABI_EXPORTS: &[AbiExport] = &[
     },
     AbiExport {
         caller_site: false,
-        symbol: "hirsel_rt_v2_runner_entry_path",
+        symbol: "hirsel_rt_v2_runner_entry_id",
         destination: true,
-        result: Some((24, 8)),
+        result: Some((72, 8)),
         parameters: &[Physical::Pointer],
     },
     AbiExport {
@@ -1104,13 +1114,6 @@ pub const HIRSEL_ABI_EXPORTS: &[AbiExport] = &[
     AbiExport {
         caller_site: false,
         symbol: "hirsel_rt_v2_runner_io",
-        destination: true,
-        result: Some((8, 8)),
-        parameters: &[],
-    },
-    AbiExport {
-        caller_site: false,
-        symbol: "hirsel_rt_v2_runner_tasks",
         destination: true,
         result: Some((8, 8)),
         parameters: &[],
@@ -2640,6 +2643,7 @@ pub const NATIVE_PATHS: &[&str] = &[
     "$intrinsic.MappedView",
     "$intrinsic.MappedCheck",
     "$intrinsic.IsolateBegin",
+    "$intrinsic.ApplyBegin",
     "$intrinsic.IsolateEnd",
     "$intrinsic.IsolateCount",
     "$intrinsic.IsolateKind",
@@ -2654,7 +2658,6 @@ pub const NATIVE_PATHS: &[&str] = &[
     "$intrinsic.RunnerEntry",
     "$intrinsic.RunnerArgument",
     "$intrinsic.RunnerIo",
-    "$intrinsic.RunnerTasks",
     "$intrinsic.RunnerReply",
     "$intrinsic.RunnerGrants",
     "$intrinsic.OrderCompare_i128",
@@ -2922,7 +2925,9 @@ pub const NATIVE_PATHS: &[&str] = &[
     "runner.grants",
     "runner.narrow",
     "runner.only",
-    "runner.entry_path",
+    "runner.entry_id",
+    "runner.apply",
+    "runner.apply_mut",
     "runner.compute",
     "runner.call",
     "runner.spawn",

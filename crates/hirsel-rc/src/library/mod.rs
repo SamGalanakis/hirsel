@@ -160,6 +160,8 @@ pub const BODIES: &[&LibraryBody] = &[
     // mapped (fs-watch-mmap): mapped.with over its view and check entries.
     &mapped::WITH,
     &isolate::ISOLATE,
+    &isolate::APPLY,
+    &isolate::APPLY_MUT,
     // runners (native-runner-entry): runner calls over the runtime's runner entries.
     &runners::COMPUTE,
     &runners::CALL,

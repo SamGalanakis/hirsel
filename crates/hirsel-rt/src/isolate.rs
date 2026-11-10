@@ -287,6 +287,23 @@ pub unsafe extern "C" fn hirsel_rt_v2_isolate_begin(
     STATUS_OK
 }
 
+/// `$intrinsic.ApplyBegin()`: `runner.apply`'s in-task boundary (FAIL-2). It opens the same
+/// invocation as [`hirsel_rt_v2_isolate_begin`] but is no scheduling point: the entry runs on
+/// the current task at once, so the no-failure path is this push, the call and End.
+///
+/// # Safety
+/// `ctx` is live and `out` writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_rt_v2_apply_begin(ctx: *mut TaskCtx, out: *mut u64) -> u8 {
+    // SAFETY: caller contract; the task owns its invocations.
+    unsafe {
+        let mark = (*ctx).failure.count();
+        (*ctx).isolations.begin(mark);
+        out.write(mark as u64);
+    }
+    STATUS_OK
+}
+
 /// The `Isolate` terminator: the records since `start` become the caught chain, the running
 /// task's own attributed to its spawn path, and are forgotten.
 ///
@@ -316,28 +333,24 @@ pub unsafe extern "C" fn hirsel_rt_v2_isolate_catch(ctx: *mut TaskCtx, start: u6
 /// # Safety
 /// `ctx` owns an active invocation and all its caught-chain readers have finished.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn hirsel_rt_v2_isolate_end(ctx: *mut TaskCtx, _tasks: *const u64) -> u8 {
+pub unsafe extern "C" fn hirsel_rt_v2_isolate_end(ctx: *mut TaskCtx) -> u8 {
     // SAFETY: caller contract; End never yields or runs language cleanup.
     unsafe { (*ctx).isolations.end() };
     STATUS_OK
 }
 
-/// `$intrinsic.IsolateCount(tasks)`: the caught chain's length.
+/// `$intrinsic.IsolateCount()`: the caught chain's length.
 ///
 /// # Safety
 /// `ctx` is live and `out` writable.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn hirsel_rt_v2_isolate_count(
-    ctx: *mut TaskCtx,
-    out: *mut u64,
-    _tasks: *const u64,
-) -> u8 {
+pub unsafe extern "C" fn hirsel_rt_v2_isolate_count(ctx: *mut TaskCtx, out: *mut u64) -> u8 {
     // SAFETY: caller contract.
     unsafe { out.write(caught(ctx).len() as u64) };
     STATUS_OK
 }
 
-/// `$intrinsic.IsolateKind(tasks, index)`: the `FailureKind` ordinal of caught record `index`.
+/// `$intrinsic.IsolateKind(index)`: the `FailureKind` ordinal of caught record `index`.
 ///
 /// # Safety
 /// `ctx` is live and `out` writable.
@@ -345,7 +358,6 @@ pub unsafe extern "C" fn hirsel_rt_v2_isolate_count(
 pub unsafe extern "C" fn hirsel_rt_v2_isolate_kind(
     ctx: *mut TaskCtx,
     out: *mut u32,
-    _tasks: *const u64,
     index: u64,
 ) -> u8 {
     let kind = hirsel_core_contract::failure_kind(rule(ctx, record(ctx, index).0.rule));
@@ -354,7 +366,7 @@ pub unsafe extern "C" fn hirsel_rt_v2_isolate_kind(
     STATUS_OK
 }
 
-/// `$intrinsic.IsolateRule(tasks, index)`: the rule ID of caught record `index`.
+/// `$intrinsic.IsolateRule(index)`: the rule ID of caught record `index`.
 ///
 /// # Safety
 /// `ctx` is live and `out` writable.
@@ -363,7 +375,6 @@ pub unsafe extern "C" fn hirsel_rt_v2_isolate_rule(
     ctx: *mut TaskCtx,
     _destination: *mut u8,
     out: *mut Slice,
-    _tasks: *const u64,
     index: u64,
 ) -> u8 {
     let rule = rule(ctx, record(ctx, index).0.rule);
@@ -372,7 +383,7 @@ pub unsafe extern "C" fn hirsel_rt_v2_isolate_rule(
     STATUS_OK
 }
 
-/// `$intrinsic.IsolateDefinition(tasks, index)`: the definition path of caught record
+/// `$intrinsic.IsolateDefinition(index)`: the definition path of caught record
 /// `index`'s site.
 ///
 /// # Safety
@@ -382,7 +393,6 @@ pub unsafe extern "C" fn hirsel_rt_v2_isolate_definition(
     ctx: *mut TaskCtx,
     _destination: *mut u8,
     out: *mut Slice,
-    _tasks: *const u64,
     index: u64,
 ) -> u8 {
     let site = site(ctx, record(ctx, index).0.site);
@@ -391,7 +401,7 @@ pub unsafe extern "C" fn hirsel_rt_v2_isolate_definition(
     STATUS_OK
 }
 
-/// `$intrinsic.IsolateLine(tasks, index)`: the one-based line of caught record `index`'s site.
+/// `$intrinsic.IsolateLine(index)`: the one-based line of caught record `index`'s site.
 ///
 /// # Safety
 /// `ctx` is live and `out` writable.
@@ -399,7 +409,6 @@ pub unsafe extern "C" fn hirsel_rt_v2_isolate_definition(
 pub unsafe extern "C" fn hirsel_rt_v2_isolate_line(
     ctx: *mut TaskCtx,
     out: *mut u64,
-    _tasks: *const u64,
     index: u64,
 ) -> u8 {
     // SAFETY: caller contract.
@@ -407,7 +416,7 @@ pub unsafe extern "C" fn hirsel_rt_v2_isolate_line(
     STATUS_OK
 }
 
-/// `$intrinsic.IsolateColumn(tasks, index)`: the one-based column of caught record `index`'s
+/// `$intrinsic.IsolateColumn(index)`: the one-based column of caught record `index`'s
 /// site.
 ///
 /// # Safety
@@ -416,7 +425,6 @@ pub unsafe extern "C" fn hirsel_rt_v2_isolate_line(
 pub unsafe extern "C" fn hirsel_rt_v2_isolate_column(
     ctx: *mut TaskCtx,
     out: *mut u64,
-    _tasks: *const u64,
     index: u64,
 ) -> u8 {
     // SAFETY: caller contract.
@@ -424,7 +432,7 @@ pub unsafe extern "C" fn hirsel_rt_v2_isolate_column(
     STATUS_OK
 }
 
-/// `$intrinsic.IsolateSpawn(tasks, index)`: a fresh `List[u64]` of caught record `index`'s
+/// `$intrinsic.IsolateSpawn(index)`: a fresh `List[u64]` of caught record `index`'s
 /// spawn path, in the runtime's pointer-free sequence storage.
 ///
 /// # Safety
@@ -434,7 +442,6 @@ pub unsafe extern "C" fn hirsel_rt_v2_isolate_spawn(
     ctx: *mut TaskCtx,
     _destination: *mut u8,
     out: *mut *mut crate::Header,
-    _tasks: *const u64,
     index: u64,
 ) -> u8 {
     let path = &record(ctx, index).1;

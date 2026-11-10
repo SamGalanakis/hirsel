@@ -1,12 +1,13 @@
 //! Engine facts for production entry selection and admission.
 use crate::DefinitionQueries;
-use hirsel_engine_admission::callee_roots;
+use hirsel_engine_admission::{callee_roots, identified_entry};
 use hirsel_run_schema::{CalleeFacts, CodeReach};
 use std::collections::BTreeMap;
 
-/// What a runner call carries for each callee entry `entry`'s closure names (RUN-8,
-/// RUN-11): every function reference to a definition a callee run can enter, with its
-/// own program revision, definition hash, signature fingerprint and reach (CAP-6).
+/// What a runner call carries for each entry `entry`'s closure names (RUN-3, RUN-8,
+/// RUN-11): every function reference to a definition with an entry's identity, with its
+/// own program revision, definition hash, signature fingerprint and reach (CAP-6). The
+/// hash and fingerprint are also what `runner.entry_id` reads.
 pub fn callee_facts(
     engine: &mut crate::QueryEngine,
     entry: &hirsel_syntax::DefPath,
@@ -21,7 +22,7 @@ pub fn callee_facts(
             continue;
         }
         let signature = engine.item_signature(&site.callee)?.value;
-        if callee_roots(engine.types(), &signature).is_err() {
+        if !identified_entry(engine.types(), &signature) {
             continue;
         }
         let program = engine.semantic_program_revision(&site.callee)?.digest();

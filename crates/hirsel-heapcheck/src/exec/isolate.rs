@@ -1,4 +1,4 @@
-//! `task.isolate` (FAIL-2): the runtime's `isolate.rs`. The `Isolate`
+//! `task.isolate` and `runner.apply` (FAIL-2): the runtime's `isolate.rs`. The `Isolate`
 //! terminator moves the running task's failures since the body's record count
 //! into the caught chain, its own attributed to its spawn path; the body reads
 //! each record's fields through the `$intrinsic.Isolate*` entries. A site's
@@ -75,7 +75,8 @@ impl<S: Stage> Machine<'_, S> {
             bits: u128::from(bits),
         };
         let val = match name {
-            "$intrinsic.IsolateBegin" => {
+            // `task.isolate`'s begin is a scheduling point; `runner.apply`'s is not.
+            "$intrinsic.IsolateBegin" | "$intrinsic.ApplyBegin" => {
                 let count = self.failures.len() as u64;
                 let s = self.scheduler();
                 let current = s.current;
@@ -83,12 +84,14 @@ impl<S: Stage> Machine<'_, S> {
                     mark: count as usize,
                     caught: None,
                 });
-                self.task_yield()?;
+                if name == "$intrinsic.IsolateBegin" {
+                    self.task_yield()?;
+                }
                 bits(ScalarKind::U64, count)
             }
             "$intrinsic.IsolateCount" => bits(ScalarKind::U64, self.isolate_caught()?.len() as u64),
             _ => {
-                let index = self.task_word(f, &Self::task_argument(arguments, 1)?)?;
+                let index = self.task_word(f, &Self::task_argument(arguments, 0)?)?;
                 let (failure, spawn) = usize::try_from(index)
                     .ok()
                     .and_then(|i| self.isolate_caught().ok()?.get(i).cloned())

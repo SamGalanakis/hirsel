@@ -58,7 +58,7 @@ pub fn main(rt: Io, args: Args) -> Result[(), AppError] {
   failure.check(!widened, Arithmetic())
   failure.check(runner.compute(r, hidden, 2u64) == Ok(2u64), Arithmetic())
   let shown_entry: Entry[fn(root: Io, a: u64) -> Result[bool, String]] = shown
-  let allowed = runner.only(r, [runner.entry_path(shown_entry)]) ? Grant
+  let allowed = runner.only(r, [runner.entry_id(shown_entry).path]) ? Grant
   failure.check(
     runner.compute(allowed, hidden, 2u64) == Error(NotRun(Denied())),
     Arithmetic()
@@ -68,7 +68,7 @@ pub fn main(rt: Io, args: Args) -> Result[(), AppError] {
     Error(_) => false,
   }
   failure.check(!readded, Arithmetic())
-  out.print(io.stdout(rt) ? Grant, runner.entry_path(shown_entry)) ? Output
+  out.print(io.stdout(rt) ? Grant, runner.entry_id(shown_entry).path) ? Output
   out.print(io.stdout(rt) ? Grant, "\n") ? Output
   Ok(())
 }

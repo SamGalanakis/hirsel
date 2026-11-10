@@ -258,17 +258,18 @@ uint8_t hirsel_rt_v2_atomic_store(hirsel_rt_v2_ctx*, const uint64_t*, const uint
 uint8_t hirsel_rt_v2_thaw_turn(hirsel_rt_v2_ctx*, uint8_t*, hirsel_rt_v2_header*);
 /* task.check_canceled (CONC-3): 0, or 1 + the CancelCause ordinal. */
 uint8_t hirsel_rt_v2_task_canceled(hirsel_rt_v2_ctx*, uint32_t*, const uint64_t*);
-/* task.isolate (FAIL-2): the caught chain, record by record; the program descriptor carries
-   the failure table of site positions and rule IDs. */
+/* task.isolate and runner.apply (FAIL-2): the caught chain, record by record; the program
+   descriptor carries the failure table of site positions and rule IDs. */
 uint8_t hirsel_rt_v2_isolate_begin(hirsel_rt_v2_ctx*, uint64_t*, const uint64_t*);
-uint8_t hirsel_rt_v2_isolate_end(hirsel_rt_v2_ctx*, const uint64_t*);
-uint8_t hirsel_rt_v2_isolate_count(hirsel_rt_v2_ctx*, uint64_t*, const uint64_t*);
-uint8_t hirsel_rt_v2_isolate_kind(hirsel_rt_v2_ctx*, uint32_t*, const uint64_t*, uint64_t);
-uint8_t hirsel_rt_v2_isolate_rule(hirsel_rt_v2_ctx*, void*, hirsel_rt_v2_slice*, const uint64_t*, uint64_t);
-uint8_t hirsel_rt_v2_isolate_definition(hirsel_rt_v2_ctx*, void*, hirsel_rt_v2_slice*, const uint64_t*, uint64_t);
-uint8_t hirsel_rt_v2_isolate_line(hirsel_rt_v2_ctx*, uint64_t*, const uint64_t*, uint64_t);
-uint8_t hirsel_rt_v2_isolate_column(hirsel_rt_v2_ctx*, uint64_t*, const uint64_t*, uint64_t);
-uint8_t hirsel_rt_v2_isolate_spawn(hirsel_rt_v2_ctx*, void*, hirsel_rt_v2_header**, const uint64_t*, uint64_t);
+uint8_t hirsel_rt_v2_apply_begin(hirsel_rt_v2_ctx*, uint64_t*);
+uint8_t hirsel_rt_v2_isolate_end(hirsel_rt_v2_ctx*);
+uint8_t hirsel_rt_v2_isolate_count(hirsel_rt_v2_ctx*, uint64_t*);
+uint8_t hirsel_rt_v2_isolate_kind(hirsel_rt_v2_ctx*, uint32_t*, uint64_t);
+uint8_t hirsel_rt_v2_isolate_rule(hirsel_rt_v2_ctx*, void*, hirsel_rt_v2_slice*, uint64_t);
+uint8_t hirsel_rt_v2_isolate_definition(hirsel_rt_v2_ctx*, void*, hirsel_rt_v2_slice*, uint64_t);
+uint8_t hirsel_rt_v2_isolate_line(hirsel_rt_v2_ctx*, uint64_t*, uint64_t);
+uint8_t hirsel_rt_v2_isolate_column(hirsel_rt_v2_ctx*, uint64_t*, uint64_t);
+uint8_t hirsel_rt_v2_isolate_spawn(hirsel_rt_v2_ctx*, void*, hirsel_rt_v2_header**, uint64_t);
 /* Runners (RUN-1..12): runner handles, the places' contracts and the callee runs of sent
    calls; an entry is its definition's code word and the static empty environment. */
 uint8_t hirsel_rt_v2_io_runner(hirsel_rt_v2_ctx*, void*, void*, const uint64_t*, hirsel_rt_v2_header*, uint64_t, uint64_t);
@@ -276,14 +277,14 @@ uint8_t hirsel_rt_v2_test_runner(hirsel_rt_v2_ctx*, void*, uint64_t*, const uint
 uint8_t hirsel_rt_v2_runner_grants(hirsel_rt_v2_ctx*, uint64_t*, const uint64_t*);
 uint8_t hirsel_rt_v2_runner_narrow(hirsel_rt_v2_ctx*, void*, void*, const uint64_t*, const uint8_t*);
 uint8_t hirsel_rt_v2_runner_only(hirsel_rt_v2_ctx*, void*, void*, const uint64_t*, hirsel_rt_v2_header*);
-uint8_t hirsel_rt_v2_runner_entry_path(hirsel_rt_v2_ctx*, void*, hirsel_rt_v2_slice*, const uintptr_t*);
+/* EntryId: path, fingerprint and code, three slices. */
+uint8_t hirsel_rt_v2_runner_entry_id(hirsel_rt_v2_ctx*, void*, hirsel_rt_v2_slice*, const uintptr_t*);
 uint8_t hirsel_rt_v2_runner_send(hirsel_rt_v2_ctx*, uint64_t*, const uint64_t*, const uintptr_t*, hirsel_rt_v2_header*, uint64_t, uint64_t, const void*, const void*, uint64_t);
 uint8_t hirsel_rt_v2_runner_wait(hirsel_rt_v2_ctx*, uint64_t*, uint64_t);
 uint8_t hirsel_rt_v2_runner_take(hirsel_rt_v2_ctx*, void*, hirsel_rt_v2_slice*, uint64_t);
 uint8_t hirsel_rt_v2_runner_entry(hirsel_rt_v2_ctx*, void*, uintptr_t*);
 uint8_t hirsel_rt_v2_runner_argument(hirsel_rt_v2_ctx*, void*, hirsel_rt_v2_slice*);
 uint8_t hirsel_rt_v2_runner_io(hirsel_rt_v2_ctx*, void*, uint64_t*);
-uint8_t hirsel_rt_v2_runner_tasks(hirsel_rt_v2_ctx*, void*, uint64_t*);
 uint8_t hirsel_rt_v2_runner_reply(hirsel_rt_v2_ctx*, uint64_t, hirsel_rt_v2_header*, uint64_t, uint64_t);
 #ifdef __cplusplus
 }

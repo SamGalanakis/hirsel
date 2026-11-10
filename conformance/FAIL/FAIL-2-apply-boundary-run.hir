@@ -1,0 +1,120 @@
+// rule: FAIL-2
+// expect: run
+// stdout: ok 10
+// stdout: held
+// stdout: caught SEM-1 at 35 cause SEM-1 at 21
+// stdout: after
+// stdout: held
+// stdout: inner SEM-1 at 35
+// stdout: outer ok 1
+// stdout: counter 13
+// "runner.apply ... call f in the current run, on the current task, as a failure
+// boundary: a failure in f unwinds to the call and is returned as Error(failure), its
+// cleanup having run". The body's resources drop once, a drop failing while it unwinds
+// is caught as the cause, applies nest, and apply_mut writes c back.
+resource type Held {
+  stdout: Stdout,
+}
+drop(x) {
+  let _ = out.print(x.stdout, "held\n")
+  let n: u8 = 255
+  let broken = n + 1
+}
+
+type Counter {
+  n: u64,
+}
+
+fn adds(stdout: Stdout, call: u64, a: u64) -> Result[u64, String] {
+  Ok(call + a)
+}
+
+fn overflows(stdout: Stdout, call: u64, a: u64) -> Result[u64, String] {
+  let held = Held(stdout: stdout)
+  let n: u8 = 255
+  let broken = n + 1
+  Ok(call)
+}
+
+fn nested(stdout: Stdout, call: u64, a: u64) -> Result[u64, String] {
+  match runner.apply(overflows, stdout, call, a) {
+    Ok(value) => Error("not caught"),
+    Error(caught) => {
+      let _ = out.print(stdout, "inner ")
+      let _ = out.print(stdout, caught.rule)
+      let _ = out.print(stdout, " at ")
+      let _ = out.print(stdout, u64.to_string(caught.site.line))
+      let _ = out.print(stdout, "\n")
+      Ok(1u64)
+    },
+  }
+}
+
+fn bumps(mut c: Counter, call: u64, a: u64) -> Result[u64, String] {
+  c.n = c.n + call + a
+  Ok(c.n)
+}
+
+fn site(stdout: Stdout, caught: Failure) -> () {
+  let _ = out.print(stdout, caught.rule)
+  let _ = out.print(stdout, " at ")
+  let _ = out.print(stdout, u64.to_string(caught.site.line))
+}
+
+pub fn main(rt: Io, args: Args) -> Result[(), GrantError] {
+  let stdout = io.stdout(rt)?
+  match runner.apply(adds, stdout, 3u64, 7u64) {
+    Ok(Ok(sum)) => {
+      let _ = out.print(stdout, "ok ")
+      let _ = out.print(stdout, u64.to_string(sum))
+      let _ = out.print(stdout, "\n")
+    },
+    Ok(Error(text)) => {
+      let _ = out.print(stdout, "error\n")
+    },
+    Error(failure) => {
+      let _ = out.print(stdout, "failed\n")
+    },
+  }
+  match runner.apply(overflows, stdout, 0u64, 0u64) {
+    Ok(value) => {
+      let _ = out.print(stdout, "not caught\n")
+    },
+    Error(caught) => {
+      let _ = out.print(stdout, "caught ")
+      site(stdout, caught)
+      match caught.cause {
+        Some(cause) => {
+          let _ = out.print(stdout, " cause ")
+          let _ = out.print(stdout, cause.rule)
+          let _ = out.print(stdout, " at ")
+          let _ = out.print(stdout, u64.to_string(cause.site.line))
+        },
+        None => {
+          let _ = out.print(stdout, " no cause")
+        },
+      }
+      let _ = out.print(stdout, "\n")
+    },
+  }
+  let _ = out.print(stdout, "after\n")
+  match runner.apply(nested, stdout, 0u64, 0u64) {
+    Ok(Ok(value)) => {
+      let _ = out.print(stdout, "outer ok ")
+      let _ = out.print(stdout, u64.to_string(value))
+      let _ = out.print(stdout, "\n")
+    },
+    Ok(Error(text)) => {
+      let _ = out.print(stdout, text)
+    },
+    Error(failure) => {
+      let _ = out.print(stdout, "outer failed\n")
+    },
+  }
+  let mut counter = Counter(n: 1u64)
+  let _ = runner.apply_mut(bumps, mut counter, 5u64, 7u64)
+  let _ = out.print(stdout, "counter ")
+  let _ = out.print(stdout, u64.to_string(counter.n))
+  let _ = out.print(stdout, "\n")
+  Ok(())
+}

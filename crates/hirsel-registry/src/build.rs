@@ -319,6 +319,9 @@ pub(crate) fn registry(types: &Arc<TypeInterner>) -> BTreeMap<DefId, SignatureRe
         ),
         ("ProcessRule", "", "program: String,env: List[String]"),
         ("DirGrant", "", "path: String,access: GrantAccess"),
+        // RUN-3: an entry's identity: its definition's full path, signature fingerprint and
+        // code hash.
+        ("EntryId", "", "path: String,fingerprint: Bytes,code: Bytes"),
         (
             "GrantSet",
             "",
@@ -973,46 +976,20 @@ pub(crate) fn registry(types: &Arc<TypeInterner>) -> BTreeMap<DefId, SignatureRe
         // `shared.thaw`'s compiled body asks whether its root is the last; in free mode the
         // answer is an op's, recorded live and replayed.
         ("T", "$intrinsic.SharedThawTurn", "root: Shared[T]", "bool"),
-        // `task.isolate`'s caught chain, read record by record to build its `Failure` (FAIL-2).
+        // A catch's begin (FAIL-2): `task.isolate`'s yields, as the task operation it is;
+        // `runner.apply`'s, which is no task operation, does not. The caught chain is read
+        // record by record to build its `Failure`; End retires the catch. They read only the
+        // running task's own failure state.
         ("", "$intrinsic.IsolateBegin", "tasks: Tasks", "u64"),
-        ("", "$intrinsic.IsolateEnd", "tasks: Tasks", "()"),
-        ("", "$intrinsic.IsolateCount", "tasks: Tasks", "u64"),
-        (
-            "",
-            "$intrinsic.IsolateKind",
-            "tasks: Tasks, index: u64",
-            "u32",
-        ),
-        (
-            "",
-            "$intrinsic.IsolateRule",
-            "tasks: Tasks, index: u64",
-            "String",
-        ),
-        (
-            "",
-            "$intrinsic.IsolateDefinition",
-            "tasks: Tasks, index: u64",
-            "String",
-        ),
-        (
-            "",
-            "$intrinsic.IsolateLine",
-            "tasks: Tasks, index: u64",
-            "u64",
-        ),
-        (
-            "",
-            "$intrinsic.IsolateColumn",
-            "tasks: Tasks, index: u64",
-            "u64",
-        ),
-        (
-            "",
-            "$intrinsic.IsolateSpawn",
-            "tasks: Tasks, index: u64",
-            "List[u64]",
-        ),
+        ("", "$intrinsic.ApplyBegin", "", "u64"),
+        ("", "$intrinsic.IsolateEnd", "", "()"),
+        ("", "$intrinsic.IsolateCount", "", "u64"),
+        ("", "$intrinsic.IsolateKind", "index: u64", "u32"),
+        ("", "$intrinsic.IsolateRule", "index: u64", "String"),
+        ("", "$intrinsic.IsolateDefinition", "index: u64", "String"),
+        ("", "$intrinsic.IsolateLine", "index: u64", "u64"),
+        ("", "$intrinsic.IsolateColumn", "index: u64", "u64"),
+        ("", "$intrinsic.IsolateSpawn", "index: u64", "List[u64]"),
         // Runner calls (RUN-4) behind the compiled bodies of `runner.compute`, `runner.call`
         // and `runner.spawn`: the caller sends `f`'s call with its argument's codec bytes and
         // the callee's `main`, a static `fn() -> ()` that runs in the callee run, then waits
@@ -1029,8 +1006,6 @@ pub(crate) fn registry(types: &Arc<TypeInterner>) -> BTreeMap<DefId, SignatureRe
         ("F", "$intrinsic.RunnerEntry", "", "F"),
         ("", "$intrinsic.RunnerArgument", "", "Bytes"),
         ("", "$intrinsic.RunnerIo", "", "Io"),
-        // The `Tasks` word the callee's `main` passes the isolation entries, which read none.
-        ("", "$intrinsic.RunnerTasks", "", "Tasks"),
         ("", "$intrinsic.RunnerReply", "tag: u64, reply: Bytes", "()"),
         // `runner.grants`' compiled body: the grant set's flags, one bit per field in order.
         ("", "$intrinsic.RunnerGrants", "r: Runner", "u64"),
@@ -1240,6 +1215,7 @@ fn serializable_core(name: &str, t: &mut TypeDefinition) {
             | "ProcessRule"
             | "GrantAccess"
             | "DirGrant"
+            | "EntryId"
             | "GrantSet"
             | "NotRunReason"
             | "InDoubtReason"

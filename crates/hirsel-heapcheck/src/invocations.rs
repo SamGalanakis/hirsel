@@ -271,6 +271,8 @@ pub(crate) fn audit_library<S: Stage>(
         "task.isolate",
         "$native.task_main",
         "$native.runner_main",
+        "runner.apply",
+        "runner.apply_mut",
         "$native.iter_from_step",
         "map.update_with",
         "map.update_value_with",

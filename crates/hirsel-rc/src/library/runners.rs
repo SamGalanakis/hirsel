@@ -97,7 +97,7 @@ fn named(store: &TypeInterner, name: &str, arguments: Vec<GenericArgument>) -> T
 }
 
 /// The callable `F` of an `Entry[F]` row.
-fn entry_callable(store: &TypeInterner, entry: TypeId) -> R<TypeId> {
+pub(super) fn entry_callable(store: &TypeInterner, entry: TypeId) -> R<TypeId> {
     match store.get(entry).map(|t| &t.kind) {
         Some(TypeKind::Named { arguments, .. }) => match arguments.first() {
             Some(GenericArgument::Type(f)) => Ok(*f),
@@ -741,9 +741,8 @@ fn main(cx: &mut Cx<'_>) -> R<LirUnit<Value>> {
     let entry = intrinsic(cx, "RunnerEntry", vec![GenericArgument::Type(f)])?;
     let argument_entry = intrinsic(cx, "RunnerArgument", Vec::new())?;
     let io_entry = intrinsic(cx, "RunnerIo", Vec::new())?;
-    let tasks_entry = intrinsic(cx, "RunnerTasks", Vec::new())?;
     let reply_entry = intrinsic(cx, "RunnerReply", Vec::new())?;
-    let isolation = super::isolate::entries(cx)?;
+    let isolation = super::isolate::entries(cx, "ApplyBegin")?;
     let failure_ty = named(cx.types, "Failure", Vec::new());
     let failure_layout = cx.layout(failure_ty)?;
     let result_layout = cx.layout(function.result)?;
@@ -766,14 +765,8 @@ fn main(cx: &mut Cx<'_>) -> R<LirUnit<Value>> {
     } else {
         None
     };
-    let tasks = call(&mut b, &tasks_entry, Vec::new(), &[]);
-    let tasks = produced("RunnerTasks", tasks)?;
-    if b.owns(b.layout_of(tasks)) {
-        return Err(PassError::Malformed(
-            "a Tasks word that owns storage".into(),
-        ));
-    }
-    let start = super::isolate::begin(&mut b, &isolation, tasks)?;
+    // The entry runs in this root task, as `runner.apply` runs one: no scheduling point.
+    let start = super::isolate::begin(&mut b, &isolation, None)?;
     let held = b.held_state();
     // A failed entry has unwound; the catch resumes ordinary code.
     let normal = b.current();
@@ -853,14 +846,12 @@ fn main(cx: &mut Cx<'_>) -> R<LirUnit<Value>> {
     b.at(replied);
     b.restore_held(&returned_held);
     drop_local(&mut b, result_slot, result_address);
-    finish(
-        &mut b, a_slot, a_address, io, f_slot, f_address, &isolation, tasks,
-    );
+    finish(&mut b, a_slot, a_address, io, f_slot, f_address, &isolation);
 
     // The caught chain as one `Failure`.
     b.at(caught);
     b.restore_held(&held);
-    let failure = super::isolate::chain(&mut b, &isolation, &failure_shape, tasks)?;
+    let failure = super::isolate::chain(&mut b, &isolation, &failure_shape)?;
     let (failure_slot, failure_address) = local(&mut b, failure)?;
     reply(
         &mut b,
@@ -870,14 +861,11 @@ fn main(cx: &mut Cx<'_>) -> R<LirUnit<Value>> {
         failure_address,
     )?;
     drop_local(&mut b, failure_slot, failure_address);
-    finish(
-        &mut b, a_slot, a_address, io, f_slot, f_address, &isolation, tasks,
-    );
+    finish(&mut b, a_slot, a_address, io, f_slot, f_address, &isolation);
     Ok(b.finish())
 }
 
 /// Drop the callee's argument, root Io and entry, and return.
-#[allow(clippy::too_many_arguments)]
 fn finish(
     b: &mut Body<'_, '_>,
     a_slot: SlotId,
@@ -886,14 +874,13 @@ fn finish(
     f_slot: SlotId,
     f_address: AddressId,
     isolation: &super::isolate::Entries,
-    tasks: ValueId,
 ) {
     drop_local(b, a_slot, a_address);
     if let Some((slot, address)) = io {
         drop_local(b, slot, address);
     }
     drop_local(b, f_slot, f_address);
-    super::isolate::end(b, isolation, tasks);
+    super::isolate::end(b, isolation);
     let unit =
         b.cx.fn_abi()
             .result

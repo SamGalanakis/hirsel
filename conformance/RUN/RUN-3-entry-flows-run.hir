@@ -21,7 +21,7 @@ pub fn main(rt: Io, args: Args) -> Result[(), AppError] {
   let r = io.runner(rt, "pool") ? Grant
   let f: Entry[fn(a: u64) -> Result[u64, String]] = double
   failure.check(twice(r, f, 3u64) == Ok(12u64), Arithmetic())
-  out.print(io.stdout(rt) ? Grant, runner.entry_path(f)) ? Output
+  out.print(io.stdout(rt) ? Grant, runner.entry_id(f).path) ? Output
   out.print(io.stdout(rt) ? Grant, "\n") ? Output
   Ok(())
 }

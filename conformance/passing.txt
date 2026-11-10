@@ -1239,6 +1239,8 @@ conformance/FAIL/FAIL-1-track-caller-unmarked-leaf-fail.hir
 conformance/FAIL/FAIL-1-track-caller-unmarked-leaf-run.hir
 conformance/FAIL/FAIL-1-track-caller-value-fail.hir
 conformance/FAIL/FAIL-1-track-caller-value-run.hir
+conformance/FAIL/FAIL-2-apply-boundary-run.hir
+conformance/FAIL/FAIL-2-apply-caller-fail.hir
 conformance/FAIL/FAIL-2-await-later-reports-first.hir
 conformance/FAIL/FAIL-2-child-propagates.hir
 conformance/FAIL/FAIL-2-first-spawn-failure.hir

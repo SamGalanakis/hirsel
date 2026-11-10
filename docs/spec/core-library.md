@@ -374,7 +374,9 @@ N fn io.runner(rt: Io, name: String) -> Result[Runner, GrantError]
 fn runner.grants(r: Runner) -> GrantSet
 fn runner.narrow(r: Runner, keep: GrantSet) -> Result[Runner, GrantError]
 fn runner.only(r: Runner, definitions: List[String]) -> Result[Runner, GrantError]
-fn runner.entry_path[F](f: Entry[F]) -> String
+fn runner.entry_id[F](f: Entry[F]) -> EntryId
+fn runner.apply[C, I, A: serializable, R: serializable, E: serializable](f: Entry[fn(c: C, call: I, a: A) -> Result[R, E]], c: C, call: I, a: A) -> Result[Result[R, E], Failure]
+fn runner.apply_mut[C, I, A: serializable, R: serializable, E: serializable](f: Entry[fn(mut c: C, call: I, a: A) -> Result[R, E]], mut c: C, call: I, a: A) -> Result[Result[R, E], Failure]
 fn runner.compute[A: serializable, R: serializable, E: serializable](r: Runner, f: Entry[fn(a: A) -> Result[R, E]], a: A) -> unique Result[R, RunError[E]]
 fn runner.call[A: serializable, R: serializable, E: serializable](r: Runner, f: Entry[fn(rt: Io, a: A) -> Result[R, E]], a: A) -> unique Result[R, RunError[E]]
 fn runner.spawn[A: serializable, R: serializable, E: serializable](s: Scope, r: Runner, f: Entry[fn(rt: Io, a: A) -> Result[R, E]], a: A) -> Task[Result[R, RunError[E]]] of s

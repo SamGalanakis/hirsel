@@ -34,7 +34,7 @@ transactions over byte keys, tracks every access and matches commits to subscrip
 Everything else is a library over the engine: typed tables (`std@1/table`), indexes,
 query languages, maintained views, workflows, migrations, verification and trial tools.
 The engine knows no table. The authority is a host provider seam like a directory's; no
-TIR or LIR construct is added for stores: `Tx` is the scoped capability of
+TIR or LIR construct and no store-specific core operation is added: `Tx` is the scoped capability of
 [MODE-6](ownership.md#mode-6-scoped-capabilities). Beside the authority seam, the engine
 is std code over three core additions, which concern entries and places rather than
 stores: `runner.apply` and `runner.apply_mut` run a named entry in the current run as a

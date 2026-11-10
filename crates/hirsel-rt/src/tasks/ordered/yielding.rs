@@ -150,7 +150,7 @@ mod tests {
                     before + 1
                 );
                 assert_eq!(
-                    crate::isolate::hirsel_rt_v2_isolate_end(ctx, &0),
+                    crate::isolate::hirsel_rt_v2_isolate_end(ctx),
                     crate::STATUS_OK
                 );
                 let mut value = [0u64; 2];

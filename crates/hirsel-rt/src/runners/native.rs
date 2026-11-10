@@ -548,9 +548,6 @@ mod tests {
             hirsel_rt_v2_runner_entry(ctx, std::ptr::null_mut(), entry.as_mut_ptr());
             let tag = entry[0] as u64;
             assert_eq!(entry[1], 0);
-            let mut tasks = u64::MAX;
-            hirsel_rt_v2_runner_tasks(ctx, std::ptr::null_mut(), &mut tasks);
-            assert_eq!(tasks, 0);
             let mut argument = std::mem::MaybeUninit::uninit();
             hirsel_rt_v2_runner_argument(ctx, std::ptr::null_mut(), argument.as_mut_ptr());
             let argument = argument.assume_init();
@@ -566,7 +563,7 @@ mod tests {
             ));
             if tag == REPLY_FAILED {
                 let mut mark = 0;
-                crate::isolate::hirsel_rt_v2_isolate_begin(ctx, &mut mark, &tasks);
+                crate::isolate::hirsel_rt_v2_isolate_begin(ctx, &mut mark, &0);
                 (*ctx).failure.record(crate::failure::FailureRecord {
                     kind: 1,
                     rule: 2,
@@ -586,7 +583,7 @@ mod tests {
             }
             hirsel_rt_v2_runner_reply(ctx, tag, argument.owner, argument.start, argument.length);
             if tag == REPLY_FAILED {
-                crate::isolate::hirsel_rt_v2_isolate_end(ctx, &tasks);
+                crate::isolate::hirsel_rt_v2_isolate_end(ctx);
             }
             crate::release::release_block(&mut *ctx, argument.owner, std::ptr::null(), 0, 0);
             STATUS_OK

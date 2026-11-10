@@ -1381,15 +1381,24 @@ pub unsafe extern "C" fn hirsel_rt_v2_runner_only(
     STATUS_OK
 }
 
-/// `runner.entry_path(e) -> String` (RUN-3): the full path of the definition `e` names.
+/// `EntryId` as compiled code lays it out: three owned byte views.
+#[repr(C)]
+pub struct EntryIdAbi {
+    pub path: Slice,
+    pub fingerprint: Slice,
+    pub code: Slice,
+}
+
+/// `runner.entry_id(e) -> EntryId` (RUN-3): the full path, signature fingerprint and code
+/// hash of the definition `e` names, as the launcher found them (RUN-8).
 ///
 /// # Safety
 /// The context is live, `entry` a borrowed Entry and `out` writable.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn hirsel_rt_v2_runner_entry_path(
+pub unsafe extern "C" fn hirsel_rt_v2_runner_entry_id(
     ctx: *mut TaskCtx,
     _destination: *mut u8,
-    out: *mut Slice,
+    out: *mut EntryIdAbi,
     entry: *const usize,
 ) -> u8 {
     // SAFETY: this semantic entry owns its task until it suspends or returns.
@@ -1398,7 +1407,19 @@ pub unsafe extern "C" fn hirsel_rt_v2_runner_entry_path(
         unsafe { crate::tasks::pin_home(ctx) };
     }
     let path = entry_path(ctx, unsafe { entry.read() });
-    unsafe { out.write(allocate_owned_bytes(ctx, path.into_bytes())) };
+    let (fingerprint, code) = execution(ctx)
+        .config
+        .callees
+        .get(&path)
+        .map(|facts| (facts.fingerprint, facts.code))
+        .unwrap_or_else(|| fault("an Entry whose identity the program does not carry"));
+    unsafe {
+        out.write(EntryIdAbi {
+            path: allocate_owned_bytes(ctx, path.into_bytes()),
+            fingerprint: allocate_owned_bytes(ctx, fingerprint.to_vec()),
+            code: allocate_owned_bytes(ctx, code.to_vec()),
+        })
+    };
     if unsafe { (*ctx).run_ref().free_production } {
         unsafe { crate::tasks::leave_home(ctx) };
     }
@@ -1601,26 +1622,6 @@ pub unsafe extern "C" fn hirsel_rt_v2_runner_io(
         fault("RunnerIo in a compute callee");
     }
     unsafe { out.write(crate::launch::IO_HANDLE) };
-    STATUS_OK
-}
-
-/// `$intrinsic.RunnerTasks() -> Tasks`: the word the callee's catch begins with; the isolate
-/// entries read no Tasks state.
-///
-/// # Safety
-/// The context is live and `out` writable.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn hirsel_rt_v2_runner_tasks(
-    ctx: *mut TaskCtx,
-    _destination: *mut u8,
-    out: *mut u64,
-) -> u8 {
-    // SAFETY: this semantic entry owns its task until it suspends or returns.
-    let _role = unsafe { crate::tasks::role::Guard::new(ctx) };
-    if native::call(ctx).is_none() {
-        callee(ctx);
-    }
-    unsafe { out.write(0) };
     STATUS_OK
 }
 

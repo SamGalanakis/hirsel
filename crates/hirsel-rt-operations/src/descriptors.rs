@@ -815,6 +815,8 @@ pub const ENTRIES: &[Entry] = &[
     ops("hirsel_rt_v2_file_read_dir", HOST),
     // isolate.rs
     ops("hirsel_rt_v2_isolate_begin", &["task.isolate"]),
+    // `runner.apply`'s begin: no scheduling point, task-local scope bookkeeping only.
+    entry("hirsel_rt_v2_apply_begin", Local),
     entry("hirsel_rt_v2_isolate_end", Local),
     ops("hirsel_rt_v2_isolate_catch", &["task.isolate"]),
     entry("hirsel_rt_v2_isolate_count", Local),
@@ -831,14 +833,13 @@ pub const ENTRIES: &[Entry] = &[
     ops("hirsel_rt_v2_runner_narrow", HOST),
     ops("hirsel_rt_v2_runner_only", HOST),
     ops("hirsel_rt_v2_runner_grants", HOST),
-    ops("hirsel_rt_v2_runner_entry_path", HOST),
+    ops("hirsel_rt_v2_runner_entry_id", HOST),
     ops("hirsel_rt_v2_runner_send", HOST),
     ops("hirsel_rt_v2_runner_wait", HOST),
     ops("hirsel_rt_v2_runner_take", HOST),
     ops("hirsel_rt_v2_runner_entry", HOST),
     ops("hirsel_rt_v2_runner_argument", HOST),
     ops("hirsel_rt_v2_runner_io", HOST),
-    ops("hirsel_rt_v2_runner_tasks", HOST),
     ops("hirsel_rt_v2_runner_reply", HOST),
     // launch.rs
     entry("hirsel_rt_v2_launch_zero", Admission),

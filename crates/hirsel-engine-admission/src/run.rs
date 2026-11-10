@@ -85,6 +85,25 @@ pub fn entry_roots(
     Ok(roots)
 }
 
+/// Whether a definition has an entry's identity (RUN-3, RUN-8): a complete, non-generic,
+/// non-foreign function returning `Result`, the shape of every runner callee and of every
+/// entry `runner.apply` runs. Its references are what `runner.entry_id` names.
+pub fn identified_entry(t: &TypeInterner, signature: &Signature) -> bool {
+    let SignatureKind::Function(function) = &signature.kind else {
+        return false;
+    };
+    function.generics.is_empty()
+        && !function.incomplete
+        && function.foreign.is_none()
+        && matches!(
+            t.get(function.result).map(|t| &t.kind),
+            Some(TypeKind::Named { definition, .. })
+                if definition.path().package_is("core", "1")
+                    && definition.path().0.modules.is_empty()
+                    && definition.path().0.name == "Result"
+        )
+}
+
 /// The roots of a callee run's entry (RUN-3, RUN-10): a complete, monomorphic Hirsel
 /// function of any visibility taking its argument, after the place's `Io` for the call
 /// form, and returning a `Result`.

@@ -2284,6 +2284,7 @@ pub(super) fn isolate_frame(
             if let Callee::Operation(op) = call.callee {
                 let definition = &u.tables.operations[op.index()].definition;
                 if [
+                    "$intrinsic.ApplyBegin",
                     "$intrinsic.IsolateEnd",
                     "$intrinsic.IsolateCount",
                     "$intrinsic.IsolateKind",

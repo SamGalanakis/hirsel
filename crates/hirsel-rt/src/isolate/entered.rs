@@ -197,7 +197,7 @@ mod tests {
             assert_eq!(scopes.len(), 1, "the entered begin restarted");
             assert_eq!(scopes[0].generation, 1, "the original generation changed");
             assert!(scopes[0].entered.is_none());
-            unsafe { crate::isolate::hirsel_rt_v2_isolate_end(ctx, &0) };
+            unsafe { crate::isolate::hirsel_rt_v2_isolate_end(ctx) };
             assert!(unsafe { (*ctx).isolations.scopes.is_empty() });
             observed.lock().unwrap().completed += 1;
             unsafe {

@@ -129,6 +129,16 @@ fn bulk_native_abi_conversions_keep_completed_payloads_owned_at_allocation_cuts(
                         ctx,
                         crate::runners::Config {
                             entries: vec![(42, "entry".repeat(2048))],
+                            callees: [(
+                                "entry".repeat(2048),
+                                hirsel_run_schema::CalleeFacts {
+                                    program: [0; 32],
+                                    code: [1; 32],
+                                    fingerprint: [2; 32],
+                                    reach: hirsel_run_schema::CodeReach::Safe,
+                                },
+                            )]
+                            .into(),
                             ..Default::default()
                         },
                     );
@@ -254,7 +264,7 @@ fn bulk_native_abi_conversions_keep_completed_payloads_owned_at_allocation_cuts(
                         }
                         Case::RunnerEntry => {
                             let mut out = std::mem::MaybeUninit::uninit();
-                            crate::runners::hirsel_rt_v2_runner_entry_path(
+                            crate::runners::hirsel_rt_v2_runner_entry_id(
                                 ctx,
                                 std::ptr::null_mut(),
                                 out.as_mut_ptr(),

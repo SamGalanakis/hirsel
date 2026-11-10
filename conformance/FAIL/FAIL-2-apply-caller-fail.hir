@@ -1,0 +1,20 @@
+// rule: FAIL-2
+// expect: fail SEM-1 at line 18
+// "runner.apply ... as a failure boundary": the failure it caught is done with, and a
+// failure in its caller afterwards is the run's own, at the caller's site.
+fn overflows(c: u8, call: u64, a: u64) -> Result[u64, String] {
+  let n: u8 = 255
+  let broken = n + c
+  Ok(call)
+}
+
+pub fn main() -> Result[(), ()] {
+  let caught = match runner.apply(overflows, 1u8, 0u64, 0u64) {
+    Ok(value) => 0u8,
+    Error(failure) => 255u8,
+  }
+  // The run fails here, not at line 7.
+  let one: u8 = 1
+  let broken = caught + one
+  Ok(())
+}

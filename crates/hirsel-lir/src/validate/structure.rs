@@ -3182,8 +3182,8 @@ impl<S: Stage> Checker<'_, '_, S> {
                         );
                     }
                 }
-                // FAIL-2: only `task.isolate`'s library body catches, from the
-                // record count (a u64) it read before its callback ran.
+                // FAIL-2: only the library bodies of `task.isolate` and `runner.apply`
+                // catch, from the record count (a u64) they read before the callee ran.
                 Terminator::Isolate { start, .. } => {
                     self.library_only(site, Opcode::Isolate);
                     if self.scalar(start) != Some(ScalarKind::U64) {
@@ -3299,9 +3299,7 @@ impl<S: Stage> Checker<'_, '_, S> {
         };
         normal == edge
             && call.result == Some(start)
-            && unit.tables.operations[operation.index()]
-                .definition
-                .is_core("$intrinsic.IsolateBegin")
+            && opens_isolation(&unit.tables.operations[operation.index()].definition)
     }
 
     /// Check scope transitions independently of the library builder and physical
@@ -3376,8 +3374,7 @@ impl<S: Stage> Checker<'_, '_, S> {
                         }
                         _ => None,
                     };
-                    let begin =
-                        operation.is_some_and(|path| path.is_core("$intrinsic.IsolateBegin"));
+                    let begin = operation.is_some_and(opens_isolation);
                     let end = operation.is_some_and(|path| path.is_core("$intrinsic.IsolateEnd"));
                     if end {
                         if state.scope.take().is_none() {
@@ -5414,4 +5411,10 @@ fn early_unique_collection_cursor<S>(cx: &Cx<'_, S>, queried: ValueId, answer: V
         }
     }
     false
+}
+
+/// The intrinsics that open an isolation invocation: `task.isolate`'s scheduling begin and
+/// `runner.apply`'s in-task begin (FAIL-2).
+fn opens_isolation(path: &hirsel_syntax::DefPath) -> bool {
+    path.is_core("$intrinsic.IsolateBegin") || path.is_core("$intrinsic.ApplyBegin")
 }

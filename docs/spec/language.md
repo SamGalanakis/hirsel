@@ -357,6 +357,8 @@ single variants `type A = Only()`, records, variants, tuples (`(x,)` for one ele
 expression`; guards are pure and do not establish exhaustiveness. Bounds join with `+`;
 opaque bounds and authority are written explicitly.
 
+An alias cycle with no intervening constructor or indirection is LANG-7 at the alias's right-hand-side type, including a cycle exposed by substituting generic arguments.
+
 `char` is a Unicode scalar value: an integer in 0 to 0x10FFFF other than a surrogate
 (0xD800 to 0xDFFF), stored in 4 bytes, and plain, sendable and a key like the integers.
 It is not an integer. `==` and `!=` compare chars, and `<`, `<=`, `>` and `>=` order them

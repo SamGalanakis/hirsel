@@ -1,0 +1,6 @@
+// rule: LANG-7
+// expect: reject LANG-7 at line 6
+// twin: LANG/LANG-7-recursive-list-ok.hir
+type Identity[T] = T
+
+type A = Identity[A]

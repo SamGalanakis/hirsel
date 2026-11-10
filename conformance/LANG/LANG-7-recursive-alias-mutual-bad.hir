@@ -1,0 +1,6 @@
+// rule: LANG-7
+// expect: reject LANG-7 at line 4
+// twin: LANG/LANG-7-recursive-constructor-ok.hir
+type A = B
+
+type B = A

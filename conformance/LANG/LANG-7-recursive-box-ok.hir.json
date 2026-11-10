@@ -1,0 +1,18 @@
+{
+  "schema": 1,
+  "package": {
+    "name": "recursive_types",
+    "version": "1"
+  },
+  "sources": [
+    {
+      "module": [],
+      "path": "LANG-7-recursive-box-ok.hir"
+    }
+  ],
+  "dependencies": [],
+  "entry": {
+    "module": [],
+    "name": "main"
+  }
+}

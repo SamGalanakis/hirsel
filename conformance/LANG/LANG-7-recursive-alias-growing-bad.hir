@@ -1,0 +1,4 @@
+// rule: LANG-7
+// expect: reject LANG-7 at line 4
+// twin: LANG/LANG-7-recursive-list-ok.hir
+type A[T] = A[List[T]]

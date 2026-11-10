@@ -1,0 +1,6 @@
+// rule: LANG-7
+// expect: accept
+// boundary: A constructor defines a type; a bare self-name only aliases it.
+type Failed = Failed()
+
+type Tree = Leaf | Branch(List[Tree])

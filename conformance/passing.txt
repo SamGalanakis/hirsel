@@ -2224,6 +2224,12 @@ conformance/LANG/LANG-7-prose-header-bad.hir
 conformance/LANG/LANG-7-prose-header-ok.hir
 conformance/LANG/LANG-7-range-coverage-bad.hir
 conformance/LANG/LANG-7-range-coverage-ok.hir
+conformance/LANG/LANG-7-recursive-alias-argument-bad.hir
+conformance/LANG/LANG-7-recursive-alias-direct-bad.hir
+conformance/LANG/LANG-7-recursive-alias-mutual-bad.hir
+conformance/LANG/LANG-7-recursive-box-ok.hir
+conformance/LANG/LANG-7-recursive-constructor-ok.hir
+conformance/LANG/LANG-7-recursive-list-ok.hir
 conformance/LANG/LANG-7-recursive-product-match-bad.hir
 conformance/LANG/LANG-7-recursive-product-match-run.hir
 conformance/LANG/LANG-7-repeat-kind-bad.hir
@@ -7450,3 +7456,4 @@ conformance/STORE/STORE-6-set-key-bad.hir
 conformance/STORE/STORE-6-set-key-ok.hir
 conformance/STORE/STORE-6-simd-key-bad.hir
 conformance/STORE/STORE-6-simd-key-ok.hir
+conformance/LANG/LANG-7-recursive-alias-growing-bad.hir

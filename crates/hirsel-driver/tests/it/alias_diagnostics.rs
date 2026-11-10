@@ -18,22 +18,10 @@ fn mutual_alias_cycles_are_language_failures_in_either_declaration_order() {
             let output = source_check_request(&mut engine, file, &default_context()).unwrap();
             assert_eq!(output.completion, CheckCompletion::Complete, "{source}");
             let diagnostic = output.diagnostics.first().unwrap();
-            assert_eq!(
-                diagnostic.rule.as_str(),
-                if source == "type A = A" {
-                    "MEM-7"
-                } else {
-                    "LANG-7"
-                },
-                "{source}"
-            );
+            assert_eq!(diagnostic.rule.as_str(), "LANG-7", "{source}");
             assert_eq!(
                 diagnostic.primary.end - diagnostic.primary.start,
-                if source == "type A = A" {
-                    source.len() as u32
-                } else {
-                    1
-                },
+                1,
                 "{source}"
             );
         }

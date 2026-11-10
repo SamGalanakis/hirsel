@@ -335,6 +335,21 @@ fn normalize_inner(
             n.load_group_nominals()?;
             let public_deps = n.dependencies.clone();
             let repr = n.type_body(body)?;
+            // Other transparent aliases have already been substituted by ty().
+            // A bare reference back to this declaration therefore has no
+            // constructor to define it, even through generic arguments.
+            if let ast::TypeBody::Alias(target) = body
+                && repr.is_some_and(|root| {
+                    matches!(&n.types.row(root).kind, TypeKind::Named { definition, .. }
+                        if definition.path() == &item.definition)
+                })
+            {
+                return Err(diagnostic(
+                    const { RuleId::of("LANG-7") },
+                    input.syntax.tree.types[target.0 as usize].origin.span,
+                    "cyclic type aliases have no representation; use a constructor such as A()",
+                ));
+            }
             n.own_representation = repr;
             if input.stage == Some(GroupStage::Representation) {
                 return Ok(provisional(&n, item, &attrs, *flavor, repr));

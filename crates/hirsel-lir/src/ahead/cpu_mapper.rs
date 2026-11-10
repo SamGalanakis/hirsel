@@ -525,6 +525,9 @@ fn instruction(u: &LirUnit<Ready>, table: &LayoutTable, inst: &Inst) -> Option<A
         | Inst::Unary { .. }
         | Inst::Binary { .. }
         | Inst::IntArith { .. }
+        // One exact scalar of the operand's kind (core list growth's
+        // leading_zeros): no storage, owner or failure edge.
+        | Inst::ScalarUnary { .. }
         | Inst::Check { .. }
         | Inst::StorageLive { .. }
         | Inst::StorageDead { .. }

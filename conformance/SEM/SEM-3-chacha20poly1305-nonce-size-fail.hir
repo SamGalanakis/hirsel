@@ -1,5 +1,5 @@
 // rule: SEM-3
-// expect: fail SEM-3 at line 403
+// expect: fail SEM-3 at line 408
 // An 8-byte ChaCha20-Poly1305 nonce is refused before any encryption.
 pub fn main() -> Result[(), ()] {
   let sealed = std@1/chacha20poly1305.seal(

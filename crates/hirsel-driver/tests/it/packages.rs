@@ -174,3 +174,116 @@ fn short_and_qualified_std_calls_keep_the_same_definition_dependencies() {
         assert_eq!(dependencies[0], dependencies[1]);
     });
 }
+
+#[cfg(unix)]
+#[test]
+fn dependency_directory_aliases_share_identity_without_merging_revisions() {
+    with_compiler_stack(|| {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        for (name, value) in [("first", 11), ("second", 29)] {
+            let dependency = root.join(name);
+            std::fs::create_dir(&dependency).unwrap();
+            std::fs::write(
+                dependency.join("value.hir"),
+                format!("pub fn value() -> u64 {{ {value}u64 }}\n"),
+            )
+            .unwrap();
+            std::fs::write(
+                dependency.join("hirsel.json"),
+                serde_json::json!({
+                    "schema": 1, "package": {"name": "dep", "version": "1"},
+                    "sources": [{"path": "value.hir", "module": []}], "dependencies": [],
+                })
+                .to_string(),
+            )
+            .unwrap();
+        }
+        std::os::unix::fs::symlink("first", root.join("alias")).unwrap();
+        std::fs::write(
+            root.join("main.hir"),
+            "pub fn main() -> u64 { dep@1/value() }\n",
+        )
+        .unwrap();
+        let manifest = root.join("hirsel.json");
+        let write = |paths: &[&str], schema: u64| {
+            let mut value = serde_json::json!({
+                "schema": 1, "package": {"name": "app", "version": "1"},
+                "sources": [{"path": "main.hir", "module": []}],
+                "entry": {"module": [], "name": "main"},
+                "dependencies": paths.iter().map(|path| serde_json::json!({
+                    "manifest": format!("{path}/hirsel.json"),
+                    "package": {"name": "dep", "version": "1"}, "expose": [],
+                })).collect::<Vec<_>>(),
+            });
+            if schema == 2 {
+                value["schema"] = 2.into();
+                value["parameters"] = serde_json::json!({});
+                value["dependency_catalog"] = paths
+                    .iter()
+                    .enumerate()
+                    .map(|(i, _)| (format!("dep{i}"), value["dependencies"][i].clone()))
+                    .map(|(id, mut descriptor)| {
+                        descriptor.as_object_mut().unwrap().remove("expose");
+                        (id, descriptor)
+                    })
+                    .collect::<serde_json::Map<_, _>>()
+                    .into();
+                value["dependencies"] = paths.iter().enumerate().map(|(i, _)| {
+                    serde_json::json!({"use": format!("dep{i}"), "bindings": {}, "expose": []})
+                }).collect::<Vec<_>>().into();
+            }
+            std::fs::write(&manifest, value.to_string()).unwrap();
+        };
+        for schema in [1, 2] {
+            let mut identities = Vec::new();
+            for path in ["first", "alias", "second"] {
+                write(&[path], schema);
+                let program = load_program(&manifest).unwrap();
+                identities.push(program.engine.environment.package_manifest_hash);
+            }
+            assert_eq!(identities[0], identities[1], "one canonical dependency");
+            assert_ne!(
+                identities[0], identities[2],
+                "distinct implementation revisions"
+            );
+            write(&["first", "alias"], schema);
+            let program = load_program(&manifest).unwrap();
+            assert_eq!(program.package_kinds.len(), 2);
+            write(&["first", "second"], schema);
+            let Err(ToolError::Runtime(message)) = load_program(&manifest) else {
+                panic!("distinct manifests selected one package version");
+            };
+            assert!(
+                message.contains("two implementation revisions selected for one package"),
+                "{message}"
+            );
+        }
+        let std = hirsel_engine::toolchain_std_manifest().unwrap();
+        std::os::unix::fs::symlink(std.parent().unwrap(), root.join("std-alias")).unwrap();
+        let mut identities = Vec::new();
+        for path in [std, root.join("std-alias/hirsel.json")] {
+            write(&["first"], 1);
+            let mut value: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&manifest).unwrap()).unwrap();
+            value["dependencies"]
+                .as_array_mut()
+                .unwrap()
+                .push(serde_json::json!({
+                    "manifest": path, "package": {"name": "std", "version": "1"}, "expose": [],
+                }));
+            std::fs::write(&manifest, value.to_string()).unwrap();
+            identities.push(
+                load_program(&manifest)
+                    .unwrap()
+                    .engine
+                    .environment
+                    .package_manifest_hash,
+            );
+        }
+        assert_eq!(
+            identities[0], identities[1],
+            "one selected std installation"
+        );
+    });
+}

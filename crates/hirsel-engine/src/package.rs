@@ -574,8 +574,13 @@ pub(crate) fn load_program_inputs_with_source_index(
             "sidecar must assign its source to the root package",
         ));
     }
-    // A package's effective slot map is chosen by its selecting frames, so it
-    // keys the package's own products; a package without slots keys as before.
+    // A package's selecting frames choose its effective slot map, so that map
+    // and its resolved manifest both key the package's own products.
+    let manifest_identities: BTreeMap<_, _> = graph
+        .packages
+        .keys()
+        .map(|id| Ok((id.clone(), graph.manifest_identity(id)?)))
+        .collect::<Result<_, ToolError>>()?;
     let selection = |id: &PackageId| {
         let slots = graph
             .slots
@@ -585,7 +590,7 @@ pub(crate) fn load_program_inputs_with_source_index(
         let mut parts = vec![
             id.name.as_bytes(),
             id.version.as_bytes(),
-            graph.packages[id].manifest.as_slice(),
+            manifest_identities[id].0.as_slice(),
         ];
         if !slots.is_empty() {
             parts.push(&slots);
@@ -1079,13 +1084,61 @@ impl<'a> Graph<'a> {
         }
         result
     }
+    fn manifest_identity(&self, id: &PackageId) -> Result<ContentHash, ToolError> {
+        // Discovery has already resolved these descriptors and rejected two
+        // canonical manifests selecting one package version. Hash that selected
+        // identity, not the path spelling used to reach it. Keep the original
+        // manifest bytes for bundling and installed-product publication.
+        let mut value = decode_unique_json(&self.packages[id].manifest)
+            .map_err(|error| invalid(&format!("invalid selected manifest: {error}")))?;
+        let normalize = |descriptor: &mut Value| -> Result<(), ToolError> {
+            let expected = package_value(&descriptor["package"])?;
+            if let Some(selected) = self.packages.get(&expected) {
+                descriptor["manifest"] = if selected.products.is_some() {
+                    // Installed selection does not consult the descriptor's
+                    // source path, which may not exist on this host.
+                    serde_json::json!({"installed": true})
+                } else {
+                    serde_json::json!({"canonical": selected.path.as_os_str().as_encoded_bytes()})
+                };
+            }
+            Ok(())
+        };
+        match value["schema"].as_u64() {
+            Some(2) => {
+                let catalog = value
+                    .get_mut("dependency_catalog")
+                    .and_then(Value::as_object_mut)
+                    .ok_or_else(|| {
+                        invalid("selected manifest dependency_catalog must be an object")
+                    })?;
+                for descriptor in catalog.values_mut() {
+                    normalize(descriptor)?;
+                }
+            }
+            Some(1) => {
+                let dependencies = value
+                    .get_mut("dependencies")
+                    .and_then(Value::as_array_mut)
+                    .ok_or_else(|| invalid("selected manifest dependencies must be an array"))?;
+                for descriptor in dependencies {
+                    normalize(descriptor)?;
+                }
+            }
+            _ => return Err(invalid("selected manifest schema must be 1 or 2")),
+        }
+        Ok(ContentHash::of_parts(
+            "hirsel.package.manifest.v1",
+            [serde_json::to_vec(&value).unwrap().as_slice()],
+        ))
+    }
     fn revision(
         &self,
         id: &PackageId,
         environment: &QueryEnvironment,
         files: &[(PathBuf, FileContext)],
         texts: &[String],
-    ) -> ContentHash {
+    ) -> Result<ContentHash, ToolError> {
         let mut parts = vec![
             environment.interface_version.to_le_bytes().to_vec(),
             environment.compiler_version.as_bytes().to_vec(),
@@ -1097,7 +1150,7 @@ impl<'a> Graph<'a> {
             parts.extend([
                 id.name.as_bytes().to_vec(),
                 id.version.as_bytes().to_vec(),
-                ContentHash::of_bytes(&package.manifest).0.to_vec(),
+                self.manifest_identity(&id)?.0.to_vec(),
             ]);
             for (source, context) in &package.sources {
                 let index = files
@@ -1107,7 +1160,10 @@ impl<'a> Graph<'a> {
                 parts.push(ContentHash::of_bytes(texts[index].as_bytes()).0.to_vec());
             }
         }
-        ContentHash::of_parts("hirsel.checked-package.v1", parts.iter().map(Vec::as_slice))
+        Ok(ContentHash::of_parts(
+            "hirsel.checked-package.v1",
+            parts.iter().map(Vec::as_slice),
+        ))
     }
     /// Select a root manifest and its dependencies.
     fn visit(&mut self, path: &Path, expected: Option<&PackageId>) -> Result<PackageId, ToolError> {

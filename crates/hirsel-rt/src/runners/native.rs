@@ -7,9 +7,11 @@ use std::sync::{Arc, Mutex};
 mod adapter;
 mod callee_io;
 mod home;
+pub(crate) mod place;
 mod transport;
 pub(crate) use adapter::wrap;
 pub(crate) use home::{Home, Slot, service};
+pub(in crate::runners) use transport::Work;
 use transport::{Spec, Transport};
 
 /// Sending records only owned handoff. Generated synchronous or spawned
@@ -20,9 +22,7 @@ pub(super) unsafe fn send(
     request: RunnerRequest,
     grant: RunnerGrant,
     ordinal: u64,
-    placed: Result<(Option<u32>, bool), CallOutcome>,
-    start: Start,
-    _spawn: bool,
+    work: Result<Work, CallOutcome>,
 ) -> Stopped<u64> {
     let key = request.key;
     let caller = state(ctx).instance;
@@ -40,9 +40,8 @@ pub(super) unsafe fn send(
         callee: None,
         completion: None,
     };
-    match placed {
+    match work {
         Err(outcome) => {
-            drop(start);
             let completion = RunnerCompletion {
                 outcome,
                 callee: None,
@@ -52,19 +51,19 @@ pub(super) unsafe fn send(
             }
             call.completion = Some(completion);
         }
-        Ok((crash_after, lose_reply)) => {
-            call.place = Some(call.grant.entry.name.clone());
+        Ok(work) => {
+            if matches!(work, Work::Callee { .. }) {
+                call.place = Some(call.grant.entry.name.clone());
+            }
             if let Some(slot) = slot {
                 slot.transport.prepare(
                     key,
                     Spec {
                         request: request.clone(),
                         caller,
-                        start,
                         grant: call.grant.clone(),
                         ordinal,
-                        lose_reply,
-                        crash_after,
+                        work,
                     },
                 );
             }
@@ -161,8 +160,13 @@ pub(super) unsafe fn wait(ctx: *mut TaskCtx, ticket: u64) -> Stopped<u64> {
     }
 }
 
+/// Whether home may still complete a call of `run` or hand its head an arrival: either is an
+/// event source (CONC-8).
 pub(crate) unsafe fn pending(run: *mut RunShared) -> bool {
     unsafe { (*run).runner_home.as_ref() }.is_some_and(|slot| slot.transport.pending())
+        || unsafe { (*run).runner_call.as_ref() }
+            .and_then(|call| call.place.as_ref())
+            .is_some_and(|place| place.open())
 }
 
 /// Installed once before any child worker starts. No parent execution pointer,
@@ -172,6 +176,8 @@ pub(crate) struct CallState {
     pub(super) form: CallForm,
     pub(super) argument: Mutex<Option<Vec<u8>>>,
     pub(super) reply: Mutex<Option<Reply>>,
+    /// A place's head: the place it serves.
+    pub(crate) place: Option<Arc<place::Place>>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -234,6 +240,7 @@ pub(crate) fn replay_state(
         form: record.form(),
         argument: Mutex::new(Some(argument)),
         reply: Mutex::new(None),
+        place: None,
     };
     Ok(Arc::new(call))
 }
@@ -287,15 +294,18 @@ impl CalleeRun {
     pub(super) unsafe fn start(
         runtime: crate::context::Config,
         table: Option<crate::isolate::FailureTable>,
+        metadata: &super::Config,
         start: Start,
         mut binding: Box<Binding>,
         driver: crate::readiness::Readiness,
+        place: Option<Arc<place::Place>>,
     ) -> Self {
         let call = Arc::new(CallState {
             entry: start.entry,
             form: start.form,
             argument: Mutex::new(Some(start.argument)),
             reply: Mutex::new(None),
+            place,
         });
         let (code, environment) = start.main;
         unsafe {
@@ -304,6 +314,9 @@ impl CalleeRun {
                 fault("a native callee context could not be created");
             }
             (*root).run().runner_call = Some(call.clone());
+            // The program's entries and callee facts, which `runner.entry_id` reads (a
+            // place head's `store.serve` names its served entries by them).
+            super::install_metadata(root, metadata);
             binding.bind(&mut *root);
             if let Some(table) = table {
                 crate::isolate::attach(&mut *root, table);
@@ -480,6 +493,7 @@ mod tests {
                 CalleeRun::start(
                     crate::Config::new(),
                     None,
+                    &Default::default(),
                     Start {
                         main: (stopped_main as *const () as usize, usize::from(bridge)),
                         entry: (0, 0),
@@ -492,6 +506,7 @@ mod tests {
                         drops: drops.clone(),
                     })),
                     crate::readiness::Readiness::default(),
+                    None,
                 )
             };
             let state = Arc::downgrade(&run.call);
@@ -613,6 +628,7 @@ mod tests {
                 CalleeRun::start(
                     crate::Config::new(),
                     None,
+                    &Default::default(),
                     Start {
                         main: (main as *const () as usize, 0),
                         entry: (tag, 0),
@@ -625,6 +641,7 @@ mod tests {
                         drops: drops.clone(),
                     })),
                     driver.clone(),
+                    None,
                 )
             })
             .map(Some)

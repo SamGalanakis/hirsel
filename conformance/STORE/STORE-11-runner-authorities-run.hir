@@ -1,10 +1,11 @@
 // rule: STORE-11
 // expect: run
 // runners: [{"name":"bare","provider":"sim@1","node":"vault","models":"db@1","head":"application@1/bare_head","grants":{"dirs":[]},"definitions":null},{"name":"clerk","provider":"local.threads@1","grants":{"tasks":"tasks.cooperative@1","dirs":[]},"definitions":["application@1/probe"]},{"name":"ledger","provider":"sim@1","node":"bank","models":"db@1","head":"application@1/head","grants":{"dirs":[],"authorities":{"place":{"provider":"authority.memory@1","floor":"memory"}}},"definitions":null},{"name":"teller","provider":"local.threads@1","grants":{"tasks":"tasks.cooperative@1","dirs":[],"authorities":{"cash":{"provider":"authority.memory@1","floor":"memory"}}},"definitions":["application@1/bank","application@1/probe"]}]
+// tasks: free
 // A runner's callees and a place's head reach exactly the authorities their
 // runner grants: a callee opens a store over its grant and commits, a run whose
 // runner grants no authority gets NotGranted, and no run reaches another
-// runner's authority by name.
+// runner's authority by name. A head reaches no directory its runner does not grant.
 @serializable
 type Short = Db(store.TxError)
 
@@ -61,11 +62,17 @@ fn probe(rt: Io, name: String) -> Result[bool, String] {
   }
 }
 
-// The ledger's head serves only if it cannot reach the teller's authority.
+// The ledger's head serves only if it cannot reach the teller's authority, nor
+// the root's directory: its runner grants it none.
 pub fn head(rt: Io, a: ()) -> Result[(), store.StoreError] {
   match io.authority(rt, "cash") {
     Error(NotGranted()) => (),
     _ => return Error(Corrupt("cash")),
+  }
+  let root = io.dir(rt, path.of(""))
+  match take root {
+    Ok(_) => return Error(Corrupt("dir")),
+    Error(_) => (),
   }
   let Ok(place) = io.authority(rt, "place") else {
     return Error(Corrupt("place"))

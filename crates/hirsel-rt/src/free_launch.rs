@@ -69,21 +69,31 @@ impl Session {
             }
             (_, Some(path)) => {
                 let (file, header, _) = crate::host_launch::header(io, admitted, path, outputs)?;
-                let namespace_coupled = io.namespace_coupled();
-                let mut binding = b"F1B4".to_vec();
-                crate::ABI_VERSION.encode(&mut binding);
-                header.encode(&mut binding);
-                namespace_coupled.encode(&mut binding);
-                record::Recording::open(file, &binding, level == RecordingLevel::Durable, observe)
-                    .map(|recorder| Self::Recording {
-                        recorder,
-                        namespace_coupled,
-                    })
-                    .map(Some)
-                    .map_err(|e| format!("Free recording: {e}"))
+                Self::open(io, file, &header, level == RecordingLevel::Durable, observe).map(Some)
             }
             _ => unreachable!("validated recording destination"),
         }
+    }
+
+    /// Record to `file` under `header`, which binds the run (its `binding` is set).
+    pub(crate) fn open(
+        io: &crate::io_real::RealIo,
+        file: std::fs::File,
+        header: &Recording,
+        durable: bool,
+        observe: bool,
+    ) -> Result<Self, String> {
+        let namespace_coupled = io.namespace_coupled();
+        let mut binding = b"F1B4".to_vec();
+        crate::ABI_VERSION.encode(&mut binding);
+        header.encode(&mut binding);
+        namespace_coupled.encode(&mut binding);
+        record::Recording::open(file, &binding, durable, observe)
+            .map(|recorder| Self::Recording {
+                recorder,
+                namespace_coupled,
+            })
+            .map_err(|e| format!("Free recording: {e}"))
     }
 
     /// Admit a replay of `bytes`; only an `observe`d one keeps the events of the

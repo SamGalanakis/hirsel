@@ -1,7 +1,9 @@
 //! The callee service has one owner: the launcher on its admitting thread.
 //! Worker-visible Slot holds only transport state and an opaque home location.
+use super::place::{Owed, Place};
 use super::*;
 use crate::io::Adapter;
+use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicPtr, Ordering};
 
 pub(crate) struct Slot {
@@ -24,6 +26,14 @@ unsafe fn poll_home(home: *mut Home, run: *mut RunShared) -> Stopped<bool> {
     unsafe { (*home).poll(run) }
 }
 
+/// A sent call that starts a callee run.
+struct Called {
+    request: RunnerRequest,
+    caller: [u8; 16],
+    grant: RunnerGrant,
+    ordinal: u64,
+}
+
 struct Child {
     run: CalleeRun,
     key: [u8; 32],
@@ -33,10 +43,32 @@ struct Child {
     recording: bool,
 }
 
+/// A `db@1` place home serves, by place key (its runner's node, else its name).
+struct Head {
+    place: Arc<Place>,
+    /// The head's run, until it ends.
+    run: Option<CalleeRun>,
+    _io: Option<Rc<RefCell<RealIo>>>,
+}
+
+/// A caller's transact stream at one place: the last position with a definite end, the
+/// request in flight, and the transact calls waiting for it to end.
+#[derive(Default)]
+struct Stream {
+    applied: u64,
+    in_flight: Option<[u8; 32]>,
+    waiting: VecDeque<(String, Owed)>,
+}
+
 pub(crate) struct Home {
     slot: Arc<Slot>,
     config: Config,
     children: Vec<Child>,
+    heads: BTreeMap<String, Head>,
+    /// Each caller's transact stream, by (caller instance, runner name).
+    streams: BTreeMap<([u8; 16], String), Stream>,
+    /// The stream of each transact call routed to a place and not yet ended.
+    served: BTreeMap<[u8; 32], ([u8; 16], String)>,
     tag: u64,
     driver_installed: bool,
 }
@@ -49,6 +81,9 @@ impl Home {
             slot,
             config,
             children: Vec::new(),
+            heads: BTreeMap::new(),
+            streams: BTreeMap::new(),
+            served: BTreeMap::new(),
             tag: 0,
             driver_installed: false,
         });
@@ -57,7 +92,14 @@ impl Home {
         home
     }
 
-    fn start_callee(&mut self, _token: u64, key: [u8; 32], spec: Spec) -> Stopped<()> {
+    fn start_callee(
+        &mut self,
+        key: [u8; 32],
+        spec: Called,
+        start: Start,
+        lose_reply: bool,
+        crash_after: Option<u32>,
+    ) -> Stopped<()> {
         let seed = |name: &str| hirsel_run_schema::callee_seed(&key, name);
         let grants = spec.grant.grants;
         self.tag += 1;
@@ -149,7 +191,7 @@ impl Home {
         })?;
         io.discard_history();
         let io = Rc::new(RefCell::new(io));
-        let binding = match spec.crash_after {
+        let binding = match crash_after {
             Some(point) => Binding::new(super::callee_io::CalleeIo::new(io.clone(), point)),
             None => Binding::new(crate::launch::Shared(io.clone())),
         };
@@ -160,21 +202,219 @@ impl Home {
             CalleeRun::start(
                 runtime,
                 self.config.failure_table,
-                spec.start,
+                &self.config,
+                start,
                 binding,
                 self.slot.transport.driver.clone(),
+                None,
             )
         };
         unsafe { run.notify_on(self.slot.transport.signal.clone()) };
         self.children.push(Child {
             run,
             key,
-            lose_reply: spec.lose_reply,
-            crashing: spec.crash_after.is_some(),
+            lose_reply,
+            crashing: crash_after.is_some(),
             io,
             recording: tape.is_some(),
         });
         Ok(())
+    }
+
+    /// Route the served call `key` to its place on its caller's stream: a transact call goes
+    /// at the position after the last definite end, one in flight per stream; a query at 0.
+    fn serve(
+        &mut self,
+        key: [u8; 32],
+        caller: [u8; 16],
+        grant: &RunnerGrant,
+        call: place::Arrived,
+    ) -> Stopped<()> {
+        let entry = &grant.entry;
+        let place = entry.node.clone().unwrap_or_else(|| entry.name.clone());
+        self.head(&place, grant)?;
+        let stream_key = (caller, entry.name.clone());
+        let stream = self.streams.entry(stream_key.clone()).or_default();
+        let mut owed = Owed { key, call };
+        owed.call.acknowledged = stream.applied;
+        if owed.call.form == CallForm::Transact {
+            self.served.insert(key, stream_key);
+            if stream.in_flight.is_some() {
+                stream.waiting.push_back((place, owed));
+                return Ok(());
+            }
+            owed.call.position = stream.applied + 1;
+            stream.in_flight = Some(key);
+        } else {
+            owed.call.position = 0;
+        }
+        self.arrive(&place, owed);
+        Ok(())
+    }
+
+    /// `owed` arrives at `place`, whose parked take wakes.
+    fn arrive(&mut self, place: &str, owed: Owed) {
+        let head = &self.heads[place];
+        if let Some(waiter) = head.place.arrive(owed)
+            && let Some(run) = &head.run
+        {
+            unsafe { crate::tasks::free::home::runner_wakes((*run.root).run_ptr(), &[waiter]) };
+        }
+    }
+
+    /// Start `place`'s head at its first call: a run of `$native.runner_main[head]` under the
+    /// runner's grants, its dirs in memory (the simulated world of `sim@1`), its store
+    /// authorities exactly the granted ones, with claims and seeds from the place instance.
+    fn head(&mut self, place: &str, grant: &RunnerGrant) -> Stopped<()> {
+        if self.heads.contains_key(place) {
+            return Ok(());
+        }
+        let refused = |what: &str, e: hirsel_run_schema::RunRefusal| {
+            Stop::refusal(AdapterError::Unsupported(format!(
+                "a place's {what}: {e:?}"
+            )))
+        };
+        let path = grant
+            .entry
+            .head
+            .clone()
+            .ok_or_else(|| Stop::Refused("a db@1 place without a head".into()))?;
+        let lookup = |path: &str| {
+            self.config
+                .entries
+                .iter()
+                .find(|(_, p)| p == path)
+                .map(|(code, _)| *code)
+                .ok_or_else(|| Stop::Refused(format!("place head {path} is not built")))
+        };
+        let environment = empty_environment();
+        let start = Start {
+            main: (
+                lookup(&hirsel_run_schema::place_main_path(&path))?,
+                environment,
+            ),
+            entry: (lookup(&path)?, environment),
+            argument: super::super::places::UNIT_ARGUMENT.to_vec(),
+            form: CallForm::Call,
+        };
+        let digest = hirsel_run_schema::hash_parts("hirsel.place.v1", [place.as_bytes()]);
+        let mut instance = [0; 16];
+        instance.copy_from_slice(&digest[..16]);
+        let seed = |part: &str| {
+            let h = hirsel_run_schema::hash_parts(
+                "hirsel.place.v1",
+                [place.as_bytes(), part.as_bytes()],
+            );
+            u64::from_le_bytes(h[..8].try_into().unwrap())
+        };
+        let grants = &grant.grants;
+        let stdout = self
+            .config
+            .stdout
+            .clone()
+            .unwrap_or_else(|| crate::host::Sink::new(crate::launch::RawStdout));
+        let mounts = grants
+            .dirs
+            .iter()
+            .map(|dir| (dir.path.clone(), dir.access))
+            .collect();
+        let mut io = RealIo::fixture(BTreeMap::new(), mounts, vec![], stdout)
+            .map_err(|e| refused("dirs", e))?;
+        io.set_authorities(&grants.authorities, Some(instance))
+            .map_err(|e| refused("authorities", e))?;
+        io.set_projections(super::super::projections(grants));
+        self.tag += 1;
+        io.set_cooperative(self.slot.transport.driver.tagged(self.tag));
+        io.clock_grants(
+            grants.monotonic_clock.is_some(),
+            grants.wall_clock.is_some(),
+        );
+        io.set_random(
+            hirsel_run_schema::ProviderContract::RandomSplitMix64,
+            seed("random"),
+        );
+        io.discard_history();
+        let io = Rc::new(RefCell::new(io));
+        let binding = Box::new(Binding::new(crate::launch::Shared(io.clone())));
+        let mut runtime = self.config.runtime;
+        runtime.hash_seed = seed("hash");
+        let place_rows = Place::new(self.slot.transport.signal.clone());
+        let run = unsafe {
+            CalleeRun::start(
+                runtime,
+                self.config.failure_table,
+                &self.config,
+                start,
+                binding,
+                self.slot.transport.driver.clone(),
+                Some(place_rows.clone()),
+            )
+        };
+        unsafe { run.notify_on(self.slot.transport.signal.clone()) };
+        self.heads.insert(
+            place.to_owned(),
+            Head {
+                place: place_rows,
+                run: Some(run),
+                _io: Some(io),
+            },
+        );
+        Ok(())
+    }
+
+    /// Run the heads and give their ends to the callers. An ended head closes its place.
+    fn poll_heads(&mut self, waiters: &mut Vec<(u32, u32)>) -> Stopped<bool> {
+        let mut changed = false;
+        let mut ends = Vec::new();
+        for head in self.heads.values_mut() {
+            if let Some(run) = &mut head.run {
+                changed |= run.service();
+                if run.poll().is_some() {
+                    // However the head ended, its place serves nothing more.
+                    head.run = None;
+                    head.place.head_ended();
+                    changed = true;
+                }
+            }
+            ends.extend(head.place.ends());
+        }
+        for (key, outcome) in ends {
+            changed = true;
+            self.end(key, outcome, waiters);
+        }
+        Ok(changed)
+    }
+
+    /// The served call `key` ended: its caller's call completes, and its stream's next
+    /// waiting transact call goes at the position after it.
+    fn end(&mut self, key: [u8; 32], outcome: CallOutcome, waiters: &mut Vec<(u32, u32)>) {
+        let advanced = matches!(
+            outcome,
+            CallOutcome::Ok(_) | CallOutcome::Failed(_) | CallOutcome::InDoubt(_)
+        );
+        if let Some(waiter) = self.slot.transport.complete(
+            key,
+            RunnerCompletion {
+                outcome,
+                callee: None,
+            },
+        ) {
+            waiters.push(waiter);
+        }
+        let Some(stream_key) = self.served.remove(&key) else {
+            return;
+        };
+        let stream = self.streams.get_mut(&stream_key).unwrap();
+        if advanced {
+            stream.applied += 1;
+        }
+        stream.in_flight = None;
+        if let Some((place, mut owed)) = stream.waiting.pop_front() {
+            owed.call.position = stream.applied + 1;
+            owed.call.acknowledged = stream.applied;
+            stream.in_flight = Some(owed.key);
+            self.arrive(&place, owed);
+        }
     }
 
     fn poll(&mut self, root: *mut RunShared) -> Stopped<bool> {
@@ -184,8 +424,30 @@ impl Home {
         }
         self.slot.transport.signal.drain();
         let mut changed = false;
-        for (token, key, spec) in self.slot.transport.take() {
-            self.start_callee(token, key, spec)?;
+        for (_token, key, spec) in self.slot.transport.take() {
+            let Spec {
+                request,
+                caller,
+                grant,
+                ordinal,
+                work,
+            } = spec;
+            match work {
+                Work::Callee {
+                    start,
+                    lose_reply,
+                    crash_after,
+                } => {
+                    let called = Called {
+                        request,
+                        caller,
+                        grant,
+                        ordinal,
+                    };
+                    self.start_callee(key, called, start, lose_reply, crash_after)?
+                }
+                Work::Served(call) => self.serve(key, caller, &grant, call)?,
+            }
             changed = true;
         }
         for key in self.slot.transport.cancels() {
@@ -297,6 +559,7 @@ impl Home {
             }
             changed = true;
         }
+        changed |= self.poll_heads(&mut waiters)?;
         unsafe { crate::tasks::free::home::runner_wakes(root, &waiters) };
         if !changed && self.slot.transport.pending() && !unsafe { crate::pool::home_posts(root) } {
             crate::readiness::Readiness::wait_many(&[
@@ -317,6 +580,7 @@ impl Drop for Home {
         // Children are destroyed before config/Sink on this home thread;
         // CalleeRun closes its bridge before its Rc adapter is dropped.
         self.children.clear();
+        self.heads.clear();
     }
 }
 

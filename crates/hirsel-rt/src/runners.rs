@@ -174,8 +174,6 @@ pub(crate) struct Execution {
     /// The root's cooperative readiness, which callee runs share under their own tags.
     readiness: Option<crate::readiness::Readiness>,
     tags: u64,
-    /// The `db@1` places this execution's calls reached.
-    places: places::Places,
 }
 
 /// One run.
@@ -208,8 +206,6 @@ struct Callee {
     binding: Box<Binding>,
     /// Its tape, when it records one.
     recording: bool,
-    /// The place this run is the head of: it answers no call, and its end closes the place.
-    head: Option<String>,
 }
 
 /// What a callee run starts from: its main, its entry and its argument.
@@ -283,7 +279,6 @@ impl Execution {
             driving: false,
             readiness: None,
             tags: 0,
-            places: places::Places::default(),
         }
     }
     fn ready(&mut self, index: usize) {
@@ -352,6 +347,19 @@ fn execution(ctx: *mut TaskCtx) -> &'static mut Execution {
     }
 }
 
+/// # Safety
+/// `root` is a callee run's fresh root context, before its code runs.
+unsafe fn install_metadata(root: *mut TaskCtx, config: &Config) {
+    let config = Config {
+        callees: config.callees.clone(),
+        request_schemas: config.request_schemas.clone(),
+        entries: config.entries.clone(),
+        ..Default::default()
+    };
+    // SAFETY: nothing else reaches the fresh run's execution yet.
+    unsafe { *(*(*root).run_ptr()).runners.get() = Some(Box::new(Execution::new(config, root))) };
+}
+
 fn state(ctx: *mut TaskCtx) -> &'static mut Runners {
     let e = execution(ctx);
     let active = e.active;
@@ -390,7 +398,6 @@ unsafe fn drive_idle(ctx: *mut TaskCtx) -> Stopped<()> {
     // SAFETY: the context is live.
     unsafe {
         take_calls(ctx, me)?;
-        places::take_heads(ctx, me)?;
         take_cancels(ctx, me)?;
     }
     if let Some(callee) = &mut execution(ctx).runs[me].callee {
@@ -406,8 +413,6 @@ unsafe fn drive_idle(ctx: *mut TaskCtx) -> Stopped<()> {
         // SAFETY: the context is live and nothing is borrowed across the switch.
         unsafe { switch(ctx, next) };
     }
-    // SAFETY: this run is active again.
-    unsafe { places::resumed(ctx, me) };
     Ok(())
 }
 
@@ -675,7 +680,6 @@ unsafe fn take_calls(ctx: *mut TaskCtx, me: usize) -> Stopped<()> {
                 io,
                 binding,
                 recording: tape.is_some(),
-                head: None,
             }),
         });
         e.ready.push_back(index);
@@ -744,10 +748,6 @@ unsafe fn finish(index: usize, end: &End) -> Stopped<()> {
         .callee
         .as_mut()
         .unwrap_or_else(|| fault("the root ended as a callee"));
-    if callee.head.is_some() {
-        // A head answers no call and keeps no tape of its own.
-        return Ok(());
-    }
     let outcome = match end {
         End::Replied(tag, bytes) => Some(match *tag {
             REPLY_OK => CalleeOutcome::Ok(bytes.clone()),
@@ -848,10 +848,7 @@ unsafe fn retire(ctx: *mut TaskCtx, me: usize, end: End) -> ! {
         e.runs[me].ended = true;
         e.ready.retain(|&r| r != me);
         let callee = e.runs[me].callee.as_ref().unwrap();
-        match &callee.head {
-            Some(key) => places::head_ended(&key.clone()),
-            None => ended(callee.caller, callee.token, end),
-        }
+        ended(callee.caller, callee.token, end);
         // A stop here ends the execution.
         let next = crate::stop::check(ctx, next_run());
         depart(ctx, next)
@@ -1020,22 +1017,17 @@ unsafe fn send(
     };
     if unsafe { (*ctx).run_ref().free_production } {
         drop(path);
-        return unsafe {
-            native::send(
-                ctx,
-                request,
-                grant,
-                ordinal,
-                placed,
-                Start {
-                    main,
-                    entry,
-                    argument,
-                    form,
-                },
-                spawn,
-            )
-        };
+        let work = placed.map(|(crash_after, lose_reply)| native::Work::Callee {
+            start: Start {
+                main,
+                entry,
+                argument,
+                form,
+            },
+            lose_reply,
+            crash_after,
+        });
+        return unsafe { native::send(ctx, request, grant, ordinal, work) };
     }
     // SAFETY: the context is live and its binding bound.
     let readiness = unsafe { Binding::get(ctx) }.adapter.runner_readiness();

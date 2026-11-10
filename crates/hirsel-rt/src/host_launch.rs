@@ -303,7 +303,10 @@ pub fn read_recording(path: &Path) -> Result<Recording, RunRefusal> {
         detail,
     };
     let bytes = std::fs::read(path).map_err(|e| invalid(format!("{}: {e}", path.display())))?;
-    if crate::journal::is_journal(&bytes) {
+    if crate::launch::is_free_tape(&bytes) {
+        // A Free phase tape's header is its binding's recording.
+        crate::free_launch::header(&bytes).map_err(invalid)
+    } else if crate::journal::is_journal(&bytes) {
         // A durable journal replays only when complete; otherwise recovery names what is in doubt.
         let recovered = crate::journal::recover(&bytes).map_err(|e| invalid(e.to_string()))?;
         if !recovered.complete() {

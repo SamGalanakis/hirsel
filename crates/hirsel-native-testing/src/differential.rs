@@ -683,12 +683,16 @@ pub fn runner_oracle_ready<P: ReadyExecution>(
                     },
                 )?;
                 let mut recorded = observe(&recorded, program, &sites)?;
-                // A run with runners replays without its callees, printing only its own.
-                if !fixture.runners.is_empty() {
-                    recorded.output = recorded_prints(&tape_events(&tape)?);
-                }
                 let replayed = launch(&paths[replayer], hirsel_native::link::Tape::Replay(&tape))?;
                 let replayed = observe(&replayed, program, &sites)?;
+                // A run with runners replays without its callees, printing only its own: an
+                // ordered tape's prints, or a Free phase tape's, which its replay checks.
+                if !fixture.runners.is_empty() {
+                    recorded.output = match tape_events(&tape)? {
+                        Some(events) => recorded_prints(&events),
+                        None => replayed.output.clone(),
+                    };
+                }
                 if replayed != recorded {
                     return Err(NativeError::new(
                         StageName::Launch,
@@ -717,13 +721,18 @@ pub fn runner_oracle_ready<P: ReadyExecution>(
     out
 }
 
-/// The events of the Io tape at `tape`.
-fn tape_events(tape: &Path) -> Result<Vec<hirsel_rt::io::Event>, NativeError> {
-    let text = hirsel_rt::launch::read_recording_text(tape)
-        .map_err(|e| NativeError::new(StageName::Launch, format!("the Io tape: {e}")))?;
+/// The events of the Io tape at `tape`; none for a Free phase tape, whose events are its
+/// tasks' logs.
+fn tape_events(tape: &Path) -> Result<Option<Vec<hirsel_rt::io::Event>>, NativeError> {
+    let io = |e: String| NativeError::new(StageName::Launch, format!("the Io tape: {e}"));
+    let bytes = std::fs::read(tape).map_err(|e| io(e.to_string()))?;
+    if hirsel_rt::launch::is_free_tape(&bytes) {
+        return Ok(None);
+    }
+    let text = hirsel_rt::launch::read_recording_text(tape).map_err(|e| io(e.to_string()))?;
     hirsel_rt::launch::parse_recording(&text)
-        .map(|record| record.events)
-        .map_err(|e| NativeError::new(StageName::Launch, format!("the Io tape: {e}")))
+        .map(|record| Some(record.events))
+        .map_err(io)
 }
 
 /// What a tape's run printed, in order.
@@ -841,6 +850,37 @@ pub fn real_io_replay_ready<P: ReadyExecution>(
         let real = observe(&recorded, program, sites)?;
         if real != *reference {
             return Ok(real);
+        }
+        // A tasks.free@1 run's Free phase tape: its replay checks each print against the
+        // task log that recorded it, so the replay's prints are the tape's.
+        let bytes = std::fs::read(&tape)
+            .map_err(|e| NativeError::new(StageName::Launch, format!("the Io tape: {e}")))?;
+        if hirsel_rt::launch::is_free_tape(&bytes) {
+            if reference.signaled.is_some() {
+                return Err(NativeError::new(
+                    StageName::Launch,
+                    "a signaled tasks.free@1 fixture has no replay check",
+                ));
+            }
+            let replayed = hirsel_native::link::launch_fixture(
+                &runnable,
+                &target,
+                toolchain,
+                dir,
+                true,
+                hirsel_native::link::Tape::Replay(&tape),
+                fixture,
+            )?;
+            let replayed = observe(&replayed, program, sites)?;
+            // A run with runners replays without its callees (RUN-11), printing only its own.
+            if !fixture.runners.is_empty() {
+                let expected = Observation {
+                    output: replayed.output.clone(),
+                    ..real.clone()
+                };
+                return Ok(if replayed == expected { real } else { replayed });
+            }
+            return Ok(replayed);
         }
         let text = hirsel_rt::launch::read_recording_text(&tape)
             .map_err(|e| NativeError::new(StageName::Launch, format!("the Io tape: {e}")))?;

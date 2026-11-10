@@ -1,6 +1,7 @@
 // rule: STORE-12
 // expect: run
 // runners: [{"name":"ledger","provider":"sim@1","node":"bank","models":"db@1","head":"application@1/head","grants":{"dirs":[],"authorities":{"place":{"provider":"authority.memory@1","floor":"memory"}}},"definitions":null},{"name":"synced","provider":"sim@1","node":"bank","models":"db@1","head":"application@1/head","level":"synced","grants":{"dirs":[],"authorities":{"place":{"provider":"authority.memory@1","floor":"memory"}}},"definitions":null}]
+// tasks: free
 // A db@1 place's head serves its entries with store.serve. Transact calls run
 // once each on the caller's stream and commit at the place, and a query reads
 // its latest commit. A call to an entry the head does not serve is Denied, and

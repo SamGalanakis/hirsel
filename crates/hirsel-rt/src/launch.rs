@@ -1224,6 +1224,11 @@ pub fn render_recording(record: &Recording) -> Result<String, String> {
     Ok(text)
 }
 /// Read either a binary v9 tape or the legacy inspection syntax.
+/// Whether `bytes` are a Free phase tape (a `tasks.free@1` run's), whose prints are its
+/// tasks' logs' rather than one ordered event list.
+pub fn is_free_tape(bytes: &[u8]) -> bool {
+    bytes.starts_with(hirsel_free::tape::MAGIC)
+}
 pub fn parse_recording_bytes(bytes: &[u8]) -> Result<Recording, String> {
     crate::tape_binary::parse(bytes)
 }
@@ -1908,11 +1913,17 @@ pub(crate) unsafe fn execute(
         crate::tasks::ordered::admission::Admission::prepare(placement_run)?
     };
     let ordered_enabled = ordered.is_some();
-    let production_free = requested
+    let free_tasks = |run: &hirsel_run_config::ValidatedRun| {
+        run.record().io.as_ref().and_then(|io| io.tasks.as_deref()) == Some("tasks.free@1")
+    };
+    // A fixture run under tasks.free@1 (a CPU fixture aside, which keeps its own Free
+    // phases) is admitted as a requested one is: Free tasks, home serving its runners and
+    // places, and a Free phase tape.
+    let free_run = requested
         .as_ref()
-        .and_then(|run| run.record().io.as_ref())
-        .and_then(|io| io.tasks.as_deref())
-        == Some("tasks.free@1");
+        .or_else(|| fixture_run.as_ref().filter(|_| cpu_fixture.is_none()))
+        .filter(|run| free_tasks(run));
+    let production_free = free_run.is_some();
     let mut free_session = None;
     let trace_destination = options
         .trace_events
@@ -2085,10 +2096,10 @@ pub(crate) unsafe fn execute(
             return Err("runners run natively only under the harness launcher".into());
         }
     }
-    let runners = if production_free {
-        requested
+    let runners = if let Some(run) = free_run {
+        run.record()
+            .io
             .as_ref()
-            .and_then(|run| run.record().io.as_ref())
             .map(|io| io.runners.clone())
             .unwrap_or_default()
     } else {
@@ -2124,10 +2135,11 @@ pub(crate) unsafe fn execute(
             entry.name
         ));
     }
-    if let Some(entry) = runners.iter().find(|e| place(e)) {
-        if production_free {
+    for entry in runners.iter().filter(|e| place(e)) {
+        // Home serves places, and only a tasks.free@1 run has a home.
+        if !production_free {
             return Err(format!(
-                "runner {} is a db@1 place, which native code serves only under the harness",
+                "runner {} is a db@1 place, which native code serves only under tasks.free@1",
                 entry.name
             ));
         }
@@ -2142,11 +2154,8 @@ pub(crate) unsafe fn execute(
             }
         }
     }
-    let fault_seed = if production_free {
-        requested
-            .as_ref()
-            .and_then(|run| run.record().inputs.fault_seed)
-            .unwrap_or(0)
+    let fault_seed = if let Some(run) = free_run {
+        run.record().inputs.fault_seed.unwrap_or(0)
     } else {
         match harness_text("HIRSEL_RT_FAULT_SEED")? {
             Some(text) => text
@@ -2155,7 +2164,8 @@ pub(crate) unsafe fn execute(
             None => 0,
         }
     };
-    let callees = if production_free && !runners.is_empty() {
+    // A fixture's callee facts are the reference's, which the harness passes.
+    let callees = if production_free && requested.is_some() && !runners.is_empty() {
         program.runner_callees()?.clone()
     } else {
         match harness_text("HIRSEL_RT_CALLEES")? {
@@ -2239,6 +2249,29 @@ pub(crate) unsafe fn execute(
     } else {
         fixture_adapter(|| {
             Ok(match std::env::var_os("HIRSEL_RT_REPLAY") {
+                // A Free fixture's Free phase tape replays as an admitted run's does.
+                Some(path) if free_run.is_some() => {
+                    let (mut io, run) = crate::host_launch::replay(std::path::Path::new(&path))
+                        .map_err(|e| format!("the replayed tape: {e}"))?;
+                    if run.identity() != launch_config.run_identity {
+                        return Err("recording configuration mismatch".into());
+                    }
+                    let bytes = io
+                        .free_tape
+                        .take()
+                        .ok_or("tasks.free@1 requires a Free phase tape")?;
+                    free_session = Some(crate::free_launch::Session::replay(
+                        &bytes,
+                        trace_destination.is_some(),
+                    )?);
+                    arguments = run.record().args.clone().unwrap_or_default();
+                    if entry.is_test() {
+                        io.test_context(seed);
+                    }
+                    let io = Rc::new(RefCell::new(io));
+                    replay = Some(io.clone());
+                    Box::new(Shared(io))
+                }
                 Some(path) => {
                     let (tape, binary) = match std::fs::read(&path)
                         .map_err(|e| e.to_string())
@@ -2457,7 +2490,36 @@ pub(crate) unsafe fn execute(
                                 }
                             };
                         }
-                        if let Some(file) = tape {
+                        if let (Some(file), Some(run)) = (&tape, free_run) {
+                            // A Free fixture records a Free phase tape, bound to its run
+                            // record as an admitted run's is.
+                            let header = Recording {
+                                arguments: arguments.clone(),
+                                run_identity: launch_config.run_identity,
+                                hash_seed: launch_config.hash_seed,
+                                random_seed: launch_config.random_seed,
+                                test_seed: launch_config.test_seed,
+                                binding: Some(RecordedRun {
+                                    canonical: run.canonical().to_vec(),
+                                    placement: Some(
+                                        run.record().placement.clone().unwrap_or_default().into(),
+                                    ),
+                                    admitted_at: 0,
+                                    revocation: None,
+                                    instance: runner_instance,
+                                }),
+                                tree: initial_tree.clone(),
+                                events: vec![],
+                            };
+                            let file = file.try_clone().map_err(|e| format!("the Io tape: {e}"))?;
+                            free_session = Some(crate::free_launch::Session::open(
+                                &io,
+                                file,
+                                &header,
+                                false,
+                                trace_destination.is_some(),
+                            )?);
+                        } else if let Some(file) = tape {
                             let record = Recording {
                                 arguments: arguments.clone(),
                                 run_identity: launch_config.run_identity,
@@ -2492,6 +2554,10 @@ pub(crate) unsafe fn execute(
             })
         })?
     };
+    // A live fixture's tape, beside which home records its callees' tapes.
+    let fixture_tape = std::env::var_os("HIRSEL_RT_TAPE")
+        .filter(|_| requested.is_none() && real.is_some())
+        .map(std::path::PathBuf::from);
     // A sole root needs no physical capacity or Ordered objects. Explicit
     // observers retain their admission snapshot before they can accept requests.
     let deferred_placement = placement_run
@@ -2723,12 +2789,7 @@ pub(crate) unsafe fn execute(
         unsafe { &mut *ctx }.run().schedule =
             hirsel_kernels::schedule::Schedule::new(algorithm, scheduler.seed);
     }
-    unsafe { &mut *ctx }.run().free_mode = requested
-        .as_ref()
-        .or(cpu_fixture)
-        .and_then(|run| run.record().io.as_ref())
-        .and_then(|io| io.tasks.as_deref())
-        == Some("tasks.free@1");
+    unsafe { &mut *ctx }.run().free_mode = free_run.or(cpu_fixture).is_some_and(free_tasks);
     unsafe { &mut *ctx }.run().cpu_grant = requested
         .as_ref()
         .or(cpu_fixture)
@@ -2791,11 +2852,7 @@ pub(crate) unsafe fn execute(
                 .as_ref()
                 .and_then(|m| m.request_schemas.clone()),
             entries: program.entries.clone(),
-            tape: runner_tape.or_else(|| {
-                std::env::var_os("HIRSEL_RT_TAPE")
-                    .filter(|_| requested.is_none() && real.is_some())
-                    .map(std::path::PathBuf::from)
-            }),
+            tape: runner_tape.or_else(|| fixture_tape.clone()),
             stdout: Some(sinks.stdout.clone()),
             runtime: config,
             failure_table: program.failure_table,

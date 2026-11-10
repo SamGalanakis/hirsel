@@ -5,11 +5,21 @@ use std::collections::BTreeSet;
 pub(super) struct Spec {
     pub request: RunnerRequest,
     pub caller: [u8; 16],
-    pub start: Start,
     pub grant: RunnerGrant,
     pub ordinal: u64,
-    pub lose_reply: bool,
-    pub crash_after: Option<u32>,
+    pub work: Work,
+}
+
+/// What home does with a sent call.
+pub(in crate::runners) enum Work {
+    /// Start a callee run of the entry.
+    Callee {
+        start: Start,
+        lose_reply: bool,
+        crash_after: Option<u32>,
+    },
+    /// Route a served call to the `db@1` place its runner's node names.
+    Served(super::place::Arrived),
 }
 
 #[derive(Default)]

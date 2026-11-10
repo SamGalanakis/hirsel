@@ -1,321 +1,45 @@
-//! `db@1` places in this execution (STORE-12, runners.md `db@1`), decision for decision as the
-//! interpreter's `library/places.rs` makes them. A caller's `runner.send` of a transact or
-//! query call to a `sim@1` runner modeling `db@1` becomes an arrival at the place its node
-//! names. The place's head is a run of this execution that starts at the first call: its
-//! root runs `$native.runner_main[head]`, which the compiler roots for each place head the
-//! build names (`hirsel_run_schema::place_main_path`). The head takes arrivals from its
-//! `Inbox` and ends each once; the end goes back to the caller's call as its completion.
+//! `db@1` places (STORE-12, runners.md `db@1`), decision for decision as the interpreter's
+//! `library/places.rs` makes them. A caller's `runner.send` of a transact or query call to a
+//! `sim@1` runner modeling `db@1` goes to home like any sent runner call; home routes it on the
+//! caller's stream to the place its node names ([`super::native::place`]). The place's head
+//! is a run home starts at the first call: its root runs `$native.runner_main[head]`, which the
+//! compiler roots for each place head the build names (`hirsel_run_schema::place_main_path`).
+//! The head takes arrivals from its `Inbox` and ends each once; home gives the end to the
+//! caller's call as its completion.
 //!
-//! A caller's transact calls run on one call stream per runner, one request in flight; a
-//! query takes position 0. A sent call is a `RunnerCall` on the caller's tape like any other
-//! runner call, so replay starts no head: the recorded completion stands in for it, and the
-//! stream advances from the completions the caller takes, live or replayed.
+//! A sent call is a `RunnerCall` on the caller's tape like any other runner call, so replay
+//! starts no head: the recorded completion stands in for it.
 //!
 //! The place is reachable while its head runs and its inbox is held. Once the head ends,
 //! every call it never took is `NotRun(Unreachable())` and every call it took and did not end
 //! is `InDoubt(Abandoned())`; dropping the inbox ends the untaken ones the same way, and
 //! dropping an arrival ends it `InDoubt(Abandoned())`.
-use std::collections::{BTreeMap, VecDeque};
+use std::sync::Arc;
 
-use hirsel_run_schema::{CallForm, CallOutcome, RunnerCompletion, RunnerRequest};
+use hirsel_run_schema::{CallForm, CallOutcome, RunnerRequest};
 
+use super::native::place::{Arrived, Place, Take};
 use super::{
-    ABANDONED, Callee, DENIED, EntryIdAbi, Run, Runners, Start, allocate_owned_bytes, entry_path,
-    execution, root_run, runner, state,
+    DENIED, EntryIdAbi, allocate_owned_bytes, entry_path, execution, native, runner, state,
 };
-use crate::fiber::Stack;
-use crate::io::{AdapterError, Binding, Completion, GrantResult, Request};
-use crate::io_real::RealIo;
-use crate::stop::{Stop, Stopped};
+use crate::io::GrantResult;
+use crate::stop::Stopped;
 use crate::views::Slice;
 use crate::{Header, STATUS_OK, TaskCtx, fault};
 
 /// The tag bit of an `Inbox` or `Arrival` handle word: the inbox is `PLACE`, arrival `n` is
 /// `PLACE | n` (n ≥ 1), both of the running head's place.
 pub(crate) const PLACE: u64 = 1 << 59;
-/// `NotRunReason::Unreachable`.
-const UNREACHABLE: u32 = 2;
-
-/// The execution's places, by place key (the runner's node, else its name), and its callers'
-/// call streams.
-#[derive(Default)]
-pub(super) struct Places {
-    places: BTreeMap<String, Place>,
-    /// Each caller run's transact stream, by (run, runner name).
-    streams: BTreeMap<(usize, String), Stream>,
-    /// Places whose head starts at the sending run's next idle point.
-    starts: Vec<String>,
-}
-
-struct Place {
-    /// The head's run, once started.
-    run: Option<usize>,
-    head: HeadStart,
-    /// `io.inbox` granted the inbox.
-    granted: bool,
-    /// The inbox was dropped or the head ended: nothing more arrives.
-    closed: bool,
-    queued: VecDeque<Owed>,
-    taken: BTreeMap<u64, Owed>,
-    arrivals: u64,
-    /// The head task parked in `inbox.take(i, true)`.
-    waiter: Option<u32>,
-}
-
-/// What the head run starts from.
-struct HeadStart {
-    path: String,
-    node: String,
-    grants: hirsel_run_schema::IoGrants,
-}
-
-/// An arrival the place owes an end: the caller's run and wait token, and the call.
-struct Owed {
-    caller: usize,
-    token: u64,
-    call: Arrived,
-}
-
-/// A served call as `arrival.request` states it.
-struct Arrived {
-    form: CallForm,
-    path: String,
-    fingerprint: [u8; 32],
-    code: [u8; 32],
-    caller: String,
-    stream: [u8; 32],
-    epoch: u64,
-    position: u64,
-    digest: [u8; 32],
-    acknowledged: u64,
-    level: Option<String>,
-    argument: Vec<u8>,
-}
-
-/// A caller's transact stream at one place: the last position with a definite end, the
-/// request in flight, and the transact calls waiting for it to end.
-#[derive(Default)]
-struct Stream {
-    applied: u64,
-    in_flight: Option<u64>,
-    waiting: VecDeque<(String, Owed)>,
-}
 
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-fn place_seed(node: &str, part: &str) -> u64 {
-    let h = hirsel_run_schema::hash_parts("hirsel.place.v1", [node.as_bytes(), part.as_bytes()]);
-    u64::from_le_bytes(h[..8].try_into().unwrap())
-}
-
-/// The running head's place key.
-fn my_place(ctx: *mut TaskCtx) -> String {
-    let e = execution(ctx);
-    e.runs[e.active]
-        .callee
-        .as_ref()
-        .and_then(|c| c.head.clone())
+/// The place the running head serves.
+fn place(ctx: *mut TaskCtx) -> &'static Arc<Place> {
+    native::call(ctx)
+        .and_then(|call| call.place.as_ref())
         .unwrap_or_else(|| fault("a place operation outside a place's head"))
-}
-
-fn place_of(key: &str) -> &'static mut Place {
-    execution(crate::stop::running())
-        .places
-        .places
-        .get_mut(key)
-        .unwrap_or_else(|| fault("a head without its place"))
-}
-
-/// End `owed` with `outcome`: its caller's call completes, and the caller runs again.
-fn end(owed: Owed, outcome: CallOutcome) {
-    let e = execution(crate::stop::running());
-    // SAFETY: the caller's root context is live and its binding bound.
-    unsafe { Binding::get(e.runs[owed.caller].root) }
-        .adapter
-        .deliver(
-            owed.token,
-            RunnerCompletion {
-                outcome,
-                callee: None,
-            },
-        );
-    e.ready(owed.caller);
-}
-
-/// `owed` arrives at place `key`: queued for its head, which runs again; a closed place
-/// never runs it.
-fn arrive(key: &str, owed: Owed) {
-    let e = execution(crate::stop::running());
-    let place = e.places.places.get_mut(key).unwrap();
-    if place.closed {
-        end(owed, CallOutcome::NotRun(UNREACHABLE));
-        return;
-    }
-    place.queued.push_back(owed);
-    if let Some(run) = place.run {
-        e.ready(run);
-    }
-}
-
-/// The head of run `me` resumed: wake its parked take when something arrived or the place
-/// closed.
-///
-/// # Safety
-/// `ctx` is the running task of run `me`.
-pub(super) unsafe fn resumed(ctx: *mut TaskCtx, me: usize) {
-    let e = execution(ctx);
-    let Some(key) = e.runs[me].callee.as_ref().and_then(|c| c.head.clone()) else {
-        return;
-    };
-    let place = place_of(&key);
-    if (!place.queued.is_empty() || place.closed)
-        && let Some(task) = place.waiter.take()
-    {
-        crate::tasks::wake_all(ctx, &[task]);
-    }
-}
-
-/// Start the heads run `me`'s calls reached, each as a new run at the back of the ready
-/// queue. Replay starts none.
-///
-/// # Safety
-/// `ctx` is live.
-pub(super) unsafe fn take_heads(ctx: *mut TaskCtx, me: usize) -> Stopped<()> {
-    let starts = std::mem::take(&mut execution(ctx).places.starts);
-    for key in starts {
-        let e = execution(ctx);
-        let Some(readiness) = e.readiness.clone() else {
-            continue;
-        };
-        let index = e.runs.len();
-        let place = e.places.places.get_mut(&key).unwrap();
-        place.run = Some(index);
-        let HeadStart { path, node, grants } = &place.head;
-        let seed = |part: &str| place_seed(node, part);
-        let lookup = |path: &str| {
-            e.config
-                .entries
-                .iter()
-                .find(|(_, p)| p == path)
-                .map(|(code, _)| *code)
-                .unwrap_or_else(|| fault("a place head this program does not compile"))
-        };
-        let environment = super::native::empty_environment();
-        let start = Start {
-            main: (
-                lookup(&hirsel_run_schema::place_main_path(path)),
-                environment,
-            ),
-            entry: (lookup(path), environment),
-            argument: UNIT_ARGUMENT.to_vec(),
-            form: CallForm::Call,
-        };
-        let mut instance = [0; 16];
-        instance.copy_from_slice(
-            &hirsel_run_schema::hash_parts("hirsel.place.v1", [node.as_bytes()])[..16],
-        );
-        e.tags += 1;
-        let tag = e.tags;
-        let stdout = e
-            .config
-            .stdout
-            .clone()
-            .unwrap_or_else(|| crate::host::Sink::new(crate::launch::RawStdout));
-        // A `sim@1` place's dirs are in memory (the interpreter's simulated world): exactly
-        // the granted ones, at their granted access.
-        let mounts = grants
-            .dirs
-            .iter()
-            .map(|dir| (dir.path.clone(), dir.access))
-            .collect();
-        let mut io = RealIo::fixture(BTreeMap::new(), mounts, vec![], stdout).map_err(|e| {
-            Stop::refusal(AdapterError::Unsupported(format!("a place's dirs: {e:?}")))
-        })?;
-        // Its store authorities are exactly the granted ones; claims draw from the place
-        // instance, as the interpreter's place world does.
-        io.set_authorities(&grants.authorities, Some(instance))
-            .map_err(|e| {
-                Stop::refusal(AdapterError::Unsupported(format!(
-                    "a place's authorities: {e:?}"
-                )))
-            })?;
-        io.set_projections(super::projections(grants));
-        io.set_cooperative(readiness.tagged(tag));
-        io.clock_grants(
-            grants.monotonic_clock.is_some(),
-            grants.wall_clock.is_some(),
-        );
-        io.set_random(
-            hirsel_run_schema::ProviderContract::RandomSplitMix64,
-            seed("random"),
-        );
-        io.discard_history();
-        let io = std::rc::Rc::new(std::cell::RefCell::new(io));
-        let mut binding = Box::new(Binding::from_box(Box::new(crate::launch::Shared(
-            io.clone(),
-        ))));
-        let mut config = e.config.runtime;
-        config.hash_seed = seed("hash");
-        let mut head = std::ptr::null_mut();
-        // SAFETY: the configuration is the root's, which created a context already.
-        if unsafe { crate::context::hirsel_rt_v2_ctx_create(&config, &mut head) } != 0 {
-            fault("a place head's context could not be created");
-        }
-        // SAFETY: the head context was just created and runs nothing yet.
-        unsafe {
-            (*head).run().root = root_run(ctx);
-            binding.bind(&mut *head);
-            if let Some(table) = e.config.failure_table {
-                crate::isolate::attach(&mut *head, table);
-            }
-        }
-        let stack = Stack::new();
-        let sp = stack.prepare(super::callee_entry, head.cast(), std::ptr::null_mut());
-        e.runs.push(Run {
-            root: head,
-            resume: head,
-            sp,
-            ended: false,
-            state: Runners {
-                instance,
-                ..Runners::default()
-            },
-            callee: Some(Callee {
-                caller: me,
-                token: 0,
-                started: false,
-                suspensions: 0,
-                crash_after: None,
-                start,
-                reply: None,
-                chain: Vec::new(),
-                stack: Some(stack),
-                io,
-                binding,
-                recording: false,
-                head: Some(key),
-            }),
-        });
-        e.ready.push_back(index);
-    }
-    Ok(())
-}
-
-/// The head of place `key` ended: the calls it never took never ran; those it took are in
-/// doubt; later calls are unreachable.
-pub(super) fn head_ended(key: &str) {
-    let place = place_of(key);
-    place.closed = true;
-    let queued = std::mem::take(&mut place.queued);
-    let taken = std::mem::take(&mut place.taken);
-    for owed in queued {
-        end(owed, CallOutcome::NotRun(UNREACHABLE));
-    }
-    for owed in taken.into_values() {
-        end(owed, CallOutcome::InDoubt(ABANDONED));
-    }
 }
 
 /// Drop the running head's `Inbox` or `Arrival` handle.
@@ -323,29 +47,18 @@ pub(super) fn head_ended(key: &str) {
 /// # Safety
 /// `ctx` is the running task of a place's head, which owned `handle`.
 pub(crate) unsafe fn close(ctx: *mut TaskCtx, handle: u64) -> u8 {
-    let place = place_of(&my_place(ctx));
-    let id = handle & !PLACE;
-    if id == 0 {
-        place.closed = true;
-        for owed in std::mem::take(&mut place.queued) {
-            end(owed, CallOutcome::NotRun(UNREACHABLE));
-        }
-    } else if let Some(owed) = place.taken.remove(&id) {
-        end(owed, CallOutcome::InDoubt(ABANDONED));
-    }
+    place(ctx).close(handle & !PLACE);
     STATUS_OK
 }
 
 /// `()` in SER-2 (`hirsel_types::wire`): the argument a head's `runner_main` decodes for its
 /// `fn(rt: Io, a: ())`.
-const UNIT_ARGUMENT: &[u8] = &[
+pub(super) const UNIT_ARGUMENT: &[u8] = &[
     b'H', b'S', b'C', b'1', 1, 0, 0, 0, // magic, version 1
     17, 0, 0, 0, 0, 0, 0, 0, // descriptor length
     1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 0, // descriptor: one empty tuple
     0, 0, 0, 0, 0, 0, 0, 0, // payload length
 ];
-
-// ----- The caller's served call -------------------------------------------------------------
 
 /// `CallEnd` as compiled code lays it out: the u32 tag, then the variant's `Bytes` or reason.
 #[repr(C)]
@@ -400,8 +113,8 @@ unsafe fn read_end(end: *const CallEndAbi) -> CallOutcome {
     }
 }
 
-/// `runner.send(r, form, f, argument)`: RUN-8's caller checks, then the call on its stream
-/// to the place; the place's end.
+/// `runner.send(r, form, f, argument)`: RUN-8's caller checks, then the call to home, which
+/// routes it to the place; the place's end.
 ///
 /// # Safety
 /// `ctx` is live and the caller holds nothing a stop must drop.
@@ -420,19 +133,10 @@ unsafe fn send(
         .definitions
         .as_ref()
         .is_none_or(|allowed| allowed.contains(&path));
-    let head = model
-        .head
-        .clone()
-        .filter(|_| place && form.served() && listed);
+    let served = place && form.served() && listed && model.head.is_some();
     // SAFETY: the context is live.
     let canceled = unsafe { crate::tasks::canceled(ctx) };
-    let refused = match (&head, canceled) {
-        (None, _) => Some(CallOutcome::NotRun(DENIED)),
-        (Some(_), Some(cause)) => Some(CallOutcome::Canceled(cause)),
-        (Some(_), None) => None,
-    };
     let name = model.name.clone();
-    let key = model.node.clone().unwrap_or_else(|| name.clone());
     let level = model.level.clone();
     let (fingerprint, code) = execution(ctx)
         .config
@@ -445,6 +149,7 @@ unsafe fn send(
     let instance = run.instance;
     let ordinal = run.requests;
     run.requests += 1;
+    let key = hirsel_run_schema::call_key(&instance, ordinal);
     let request = RunnerRequest {
         runner: name.clone(),
         form,
@@ -452,70 +157,15 @@ unsafe fn send(
         digest,
         grants: Vec::new(),
         definitions: Vec::new(),
-        key: hirsel_run_schema::call_key(&instance, ordinal),
+        key,
         argument: argument.clone(),
     };
-    // SAFETY: the context is live and its binding bound.
-    let readiness = unsafe { Binding::get(ctx) }.adapter.runner_readiness();
-    let e = execution(ctx);
-    e.driving = true;
-    if e.active == 0 && e.readiness.is_none() {
-        e.readiness = readiness;
-    }
-    if let Some(outcome) = refused {
-        // The caller's checks decide at once; replay checks the recorded completion against
-        // this decision.
-        let completion = RunnerCompletion {
-            outcome,
-            callee: None,
-        };
-        // SAFETY: as above.
-        let token = unsafe { crate::host_waits::next_token(ctx) };
-        unsafe { Binding::get(ctx) }
-            .adapter
-            .deliver(token, completion.clone());
-        match unsafe { crate::host_waits::send(ctx, Request::RunnerCall(Box::new(request))) }? {
-            Ok(Completion::Runner(recorded)) if recorded == completion => {}
-            _ => return Err(Stop::refusal(AdapterError::InvalidCompletion)),
-        }
-        // SAFETY: the context is live.
-        unsafe { crate::tasks::try_yield(&mut *ctx) }?;
-        return Ok(completion.outcome);
-    }
-    let head = head.unwrap();
-    let me = e.active;
-    let live = e.readiness.is_some();
-    let place = e.places.places.entry(key.clone()).or_insert_with(|| Place {
-        run: None,
-        head: HeadStart {
-            path: head,
-            node: key.clone(),
-            grants: grant.grants.clone(),
-        },
-        granted: false,
-        closed: false,
-        queued: VecDeque::new(),
-        taken: BTreeMap::new(),
-        arrivals: 0,
-        waiter: None,
-    });
-    if live && place.run.is_none() && !e.places.starts.contains(&key) {
-        e.places.starts.push(key.clone());
-    }
-    // A closed place's call is sent too: it ends `NotRun(Unreachable())` as it arrives, and
-    // replay takes that end from the tape, never having run the head.
-    // SAFETY: as above.
-    let token =
-        match unsafe { crate::host_waits::send(ctx, Request::RunnerCall(Box::new(request))) }? {
-            Err(token) => token,
-            _ => return Err(Stop::refusal(AdapterError::InvalidCompletion)),
-        };
-    let e = execution(ctx);
-    let stream = e.places.streams.entry((me, name.clone())).or_default();
-    let owed = Owed {
-        caller: me,
-        token,
-        call: Arrived {
+    // The caller's checks decide at once; replay checks the recorded completion against
+    // this decision. Home assigns the stream position as the call arrives.
+    let work = match (served, canceled) {
+        (false, _) => Err(CallOutcome::NotRun(DENIED)),
+        (true, Some(cause)) => Err(CallOutcome::Canceled(cause)),
+        (true, None) => Ok(native::Work::Served(Arrived {
             form,
             path,
             fingerprint,
@@ -526,57 +176,24 @@ unsafe fn send(
                 [name.as_bytes(), &instance[..]],
             ),
             epoch: 1,
-            position: if form == CallForm::Transact {
-                stream.applied + 1
-            } else {
-                0
-            },
+            position: 0,
             digest,
-            acknowledged: stream.applied,
+            acknowledged: 0,
             level,
             argument,
-        },
+        })),
     };
-    let transact = form == CallForm::Transact;
-    if transact && stream.in_flight.is_some() {
-        // One request in flight per stream: this one waits for its position.
-        stream.waiting.push_back((key, owed));
-    } else {
-        if transact {
-            stream.in_flight = Some(token);
-        }
-        // Replay routes nothing: the recorded completion stands in for the place.
-        if live {
-            arrive(&key, owed);
-        }
-    }
     // SAFETY: caller contract.
-    let completion = match unsafe { crate::host_waits::await_sent(ctx, token) }? {
-        Completion::Runner(completion) => completion,
-        _ => return Err(Stop::refusal(AdapterError::InvalidCompletion)),
-    };
-    if transact {
-        // A definite end, or one that may have committed, consumes its position; the next
-        // waiting transact call goes at the position after it.
-        let e = execution(ctx);
-        let stream = e.places.streams.get_mut(&(me, name)).unwrap();
-        if matches!(
-            completion.outcome,
-            CallOutcome::Ok(_) | CallOutcome::Failed(_) | CallOutcome::InDoubt(_)
-        ) {
-            stream.applied += 1;
-        }
-        stream.in_flight = None;
-        if let Some((key, mut owed)) = stream.waiting.pop_front() {
-            owed.call.position = stream.applied + 1;
-            owed.call.acknowledged = stream.applied;
-            stream.in_flight = Some(owed.token);
-            if e.readiness.is_some() {
-                arrive(&key, owed);
-            }
-        }
-    }
-    Ok(completion.outcome)
+    let ticket = unsafe { native::send(ctx, request, grant, ordinal, work) }?;
+    unsafe { native::wait(ctx, ticket) }?;
+    let call = state(ctx)
+        .calls
+        .remove(&ticket)
+        .unwrap_or_else(|| fault("a served call without its ticket"));
+    Ok(call
+        .completion
+        .unwrap_or_else(|| fault("a served call ended without its completion"))
+        .outcome)
 }
 
 // ----- The Hirsel-ABI entries ---------------------------------------------------------------
@@ -602,8 +219,8 @@ pub unsafe extern "C" fn hirsel_rt_v2_place_send(
 ) -> u8 {
     // SAFETY: this semantic entry owns its task until it suspends or returns.
     let _role = unsafe { crate::tasks::role::Guard::new(ctx) };
-    if unsafe { (*ctx).run_ref().free_production } {
-        fault("db@1 places run natively only in the harness execution");
+    if !unsafe { (*ctx).run_ref().free_production } {
+        fault("db@1 places run natively only under tasks.free@1");
     }
     let form = match unsafe { form.read() } {
         0 => CallForm::Compute,
@@ -634,16 +251,9 @@ pub unsafe extern "C" fn hirsel_rt_v2_io_inbox(
 ) -> u8 {
     // SAFETY: this semantic entry owns its task until it suspends or returns.
     let _role = unsafe { crate::tasks::role::Guard::new(ctx) };
-    let e = execution(ctx);
-    let head = e.runs[e.active]
-        .callee
-        .as_ref()
-        .and_then(|c| c.head.clone());
-    let result = match head.map(|key| place_of(&key)) {
-        Some(place) if !place.granted => {
-            place.granted = true;
-            Ok(PLACE)
-        }
+    let head = native::call(ctx).and_then(|call| call.place.as_ref());
+    let result = match head {
+        Some(place) if place.grant() => Ok(PLACE),
         _ => Err(crate::io::IoError::NotGranted),
     };
     unsafe {
@@ -668,23 +278,16 @@ pub unsafe extern "C" fn hirsel_rt_v2_inbox_take(
 ) -> u8 {
     // SAFETY: this semantic entry owns its task until it suspends or returns.
     let _role = unsafe { crate::tasks::role::Guard::new(ctx) };
-    let key = my_place(ctx);
-    loop {
-        let place = place_of(&key);
-        if !place.queued.is_empty() || place.closed || wait == 0 {
-            break;
+    let place = place(ctx);
+    let ids = loop {
+        let waiter = crate::tasks::free::home::runner_waiter(ctx);
+        match place.take(wait != 0, waiter) {
+            Take::Arrivals(ids) => break ids,
+            // Home wakes the take when a call arrives or the place closes.
+            Take::Park => crate::tasks::park_retry(ctx, false),
         }
-        place.waiter = Some(crate::tasks::current_task(ctx));
-        crate::tasks::park_retry(ctx, false);
-    }
-    let place = place_of(&key);
-    let queued = std::mem::take(&mut place.queued);
-    let mut words = Vec::with_capacity(queued.len());
-    for owed in queued {
-        place.arrivals += 1;
-        place.taken.insert(place.arrivals, owed);
-        words.push(PLACE | place.arrivals);
-    }
+    };
+    let words: Vec<u64> = ids.into_iter().map(|id| PLACE | id).collect();
     // SAFETY: the context is live; the list holds the arrivals the take hands over.
     unsafe {
         let block = crate::alloc::allocate_sequence(
@@ -734,23 +337,30 @@ pub unsafe extern "C" fn hirsel_rt_v2_arrival_request(
 ) -> u8 {
     // SAFETY: this semantic entry owns its task until it suspends or returns.
     let _role = unsafe { crate::tasks::role::Guard::new(ctx) };
-    let place = place_of(&my_place(ctx));
     let id = unsafe { arrival.read() } & !PLACE;
-    let call = &place
-        .taken
-        .get(&id)
-        .unwrap_or_else(|| fault("an Arrival already ended"))
-        .call;
+    let call = place(ctx)
+        .request(id)
+        .unwrap_or_else(|| fault("an Arrival already ended"));
     let form = match call.form {
         CallForm::Compute => 0,
         CallForm::Call => 1,
         CallForm::Transact => 2,
         CallForm::Query => 3,
     };
-    let (path, fingerprint, code) = (call.path.clone(), call.fingerprint, call.code);
-    let (caller, stream, digest) = (call.caller.clone(), call.stream, call.digest);
-    let (epoch, position, acknowledged) = (call.epoch, call.position, call.acknowledged);
-    let (level, argument) = (call.level.clone(), call.argument.clone());
+    let Arrived {
+        path,
+        fingerprint,
+        code,
+        caller,
+        stream,
+        epoch,
+        position,
+        digest,
+        acknowledged,
+        level,
+        argument,
+        ..
+    } = call;
     unsafe {
         let bytes = |b: Vec<u8>| allocate_owned_bytes(ctx, b);
         out.write(ArrivedAbi {
@@ -794,13 +404,10 @@ pub unsafe extern "C" fn hirsel_rt_v2_arrival_end(
 ) -> u8 {
     // SAFETY: this semantic entry owns its task until it suspends or returns.
     let _role = unsafe { crate::tasks::role::Guard::new(ctx) };
-    let place = place_of(&my_place(ctx));
     let id = unsafe { arrival.read() } & !PLACE;
-    let owed = place
-        .taken
-        .remove(&id)
-        .unwrap_or_else(|| fault("an Arrival ended twice"));
-    end(owed, unsafe { read_end(call_end) });
+    if !place(ctx).end(id, unsafe { read_end(call_end) }) {
+        fault("an Arrival ended twice");
+    }
     unsafe { crate::tasks::yield_now(&mut *ctx) };
     STATUS_OK
 }

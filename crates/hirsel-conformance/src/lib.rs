@@ -218,7 +218,7 @@ pub struct Header {
 }
 
 /// Header directive names; other colon-bearing comments are prose.
-const DIRECTIVES: [&str; 18] = [
+const DIRECTIVES: [&str; 19] = [
     "rule",
     "expect",
     "stdout",
@@ -236,6 +236,7 @@ const DIRECTIVES: [&str; 18] = [
     "fault_seed",
     "signals",
     "authorities",
+    "tasks",
     "twin",
 ];
 
@@ -374,6 +375,16 @@ pub fn fixture(source: &str) -> Result<hirsel_native::Fixture, String> {
                     return Err("a runners directive names a runner".into());
                 }
             }
+            // Every engine runs the program's tasks under tasks.free@1 (determinism.md).
+            "tasks" => {
+                if fixture.tasks_free {
+                    return Err("duplicate tasks directive".into());
+                }
+                if value.trim() != "free" {
+                    return Err("tasks must be free".into());
+                }
+                fixture.tasks_free = true;
+            }
             "fault_seed" => {
                 if fixture.fault_seed.is_some() {
                     return Err("duplicate fault_seed directive".into());
@@ -401,6 +412,7 @@ pub(crate) fn simulation(source: &str) -> Result<hirsel_engine::SimulationConfig
         env: fixture.env.unwrap_or_default(),
         runners: fixture.runners,
         fault_seed: fixture.fault_seed.unwrap_or(0),
+        tasks_free: fixture.tasks_free,
         ..Default::default()
     };
     if fixture.deny_output {
@@ -562,7 +574,8 @@ pub fn parse_header(path: &Path, source: &str, rules: &Rules) -> Result<Header, 
                             .map_err(|_| "exit must be an integer")?,
                     );
                 }
-                "grant" | "env" | "net" | "process" | "runners" | "fault_seed" | "signals" | "authorities" => {}
+                "grant" | "env" | "net" | "process" | "runners" | "fault_seed" | "signals"
+                | "authorities" | "tasks" => {}
                 "twin" => {
                     if twin.is_some() {
                         return Err("duplicate twin directive".into());

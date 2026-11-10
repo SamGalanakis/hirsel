@@ -496,16 +496,17 @@ enum Action {
     Cleanup,
 }
 
+/// This classifier's verdict on one instruction, for `super::classifier_verdicts`.
+pub(super) fn classifies(u: &LirUnit<Ready>, table: &LayoutTable, inst: &Inst) -> bool {
+    instruction(u, table, inst).is_some()
+}
+
 fn instruction(u: &LirUnit<Ready>, table: &LayoutTable, inst: &Inst) -> Option<Action> {
+    // Value and slot custody are checked for the whole body (`body_custody`).
+    if super::pure_scalar(u, inst, |_| true) {
+        return Some(Action::Private);
+    }
     Some(match inst {
-        Inst::Const { constant, .. }
-            if matches!(
-                u.tables.constants[constant.index()].value,
-                ConstantValue::Unit | ConstantValue::Bool(_) | ConstantValue::Integer(_)
-            ) =>
-        {
-            Action::Private
-        }
         Inst::ReadStatic { result, symbol }
             if matches!(
                 u.tables
@@ -522,13 +523,6 @@ fn instruction(u: &LirUnit<Ready>, table: &LayoutTable, inst: &Inst) -> Option<A
         }
         Inst::FrameEnter { .. }
         | Inst::FrameLeave
-        | Inst::Unary { .. }
-        | Inst::Binary { .. }
-        | Inst::IntArith { .. }
-        // One exact scalar of the operand's kind (core list growth's
-        // leading_zeros): no storage, owner or failure edge.
-        | Inst::ScalarUnary { .. }
-        | Inst::Check { .. }
         | Inst::StorageLive { .. }
         | Inst::StorageDead { .. }
         | Inst::EndScope { .. }
@@ -547,10 +541,6 @@ fn instruction(u: &LirUnit<Ready>, table: &LayoutTable, inst: &Inst) -> Option<A
         | Inst::SeqCapacity { .. }
         | Inst::IsUnique { .. }
         | Inst::IsWritable { .. } => Action::Private,
-        Inst::Convert {
-            mode: ConvertMode::Widen | ConvertMode::Truncate | ConvertMode::TryNarrow,
-            ..
-        } => Action::Private,
         Inst::SeqReserve { address, .. } | Inst::ArenaPush { address, .. } => {
             let capacity = match inst {
                 Inst::SeqReserve { capacity, .. } => Some(*capacity),

@@ -1443,3 +1443,83 @@ fn value() -> u64 {
     let built = build(&source);
     assert_eq!(heap(&source, &built, true), 3);
 }
+
+/// The three ahead classifiers (task_main scalar graphs, host returns and
+/// allocating CPU mappers) share one definition of a pure scalar
+/// instruction. Every instruction a core helper emits whose operands are
+/// only plain machine scalars, scalar constants and failure edges must be
+/// admitted by all three: a helper that starts emitting a new scalar
+/// instruction (list growth's `leading_zeros`, 9f4e7bf1) otherwise refuses
+/// every allocating mapper that pushes, with no test going red. A helper that
+/// starts emitting an unqualified float op (`float.sqrt`, `MulAdd`) also goes
+/// red here: qualify it against a float bit oracle before a helper uses it.
+#[test]
+fn every_scalar_instruction_core_helpers_emit_is_admitted_by_each_ahead_classifier() {
+    use hirsel_lir::ir::{ConstantValue, Holding, Ref};
+    use hirsel_lir::layout_types::{LayoutKind, ScalarKind};
+    let b = build(&source(
+        "fn value() -> u64 {
+  let mut xs: List[u64] = []
+  list.reserve(mut xs, 3)
+  let mut i: u64 = 0
+  while i < 40 {
+    list.push(mut xs, i * 3)
+    i = i + 1
+  }
+  list.truncate(mut xs, 30)
+  let mut m: Map[u64, u64] = map.empty()
+  map.insert(mut m, 1, 2)
+  sum(xs) + map.len(m)
+}
+",
+    ));
+    // Independent of the classifiers: a plain value whose layout is unit or
+    // a machine scalar of at most 64 bits.
+    let machine = |u: &LirUnit<Ready>, v: hirsel_lir::ir::ValueId| {
+        let info = &u.values[v.index()];
+        let ty = &u.types[info.ty.index()];
+        info.holding == Holding::Plain
+            && b.table.layout(ty.layout).is_some_and(|l| match &l.kind {
+                LayoutKind::Unit => true,
+                LayoutKind::Scalar(k) => {
+                    !matches!(k, ScalarKind::U128 | ScalarKind::I128 | ScalarKind::Pointer)
+                }
+                _ => false,
+            })
+    };
+    let mut seen = std::collections::BTreeSet::new();
+    for u in library_units(&b) {
+        for inst in &u.instructions {
+            let mut pure = true;
+            inst.visit(&mut |r| {
+                pure &= match r {
+                    Ref::Value(v) => machine(u, v),
+                    Ref::Failure(_) => true,
+                    Ref::Constant(c) => matches!(
+                        u.tables.constants[c.index()].value,
+                        ConstantValue::Unit
+                            | ConstantValue::Bool(_)
+                            | ConstantValue::Integer(_)
+                            | ConstantValue::F32(_)
+                            | ConstantValue::F64(_)
+                    ),
+                    _ => false,
+                }
+            });
+            if !pure {
+                continue;
+            }
+            seen.insert(format!("{:?}", inst.opcode()));
+            assert_eq!(
+                hirsel_lir::ahead::classifier_verdicts(u, &b.table, inst),
+                [true; 3],
+                "[scalar_graph, host_return, cpu_mapper] refuse a pure scalar instruction in {:?}: {inst:?}",
+                u.header.definition,
+            );
+        }
+    }
+    assert!(
+        seen.contains("ScalarUnary"),
+        "list growth no longer emits ScalarUnary; extend the program so the law still sees it: {seen:?}"
+    );
+}

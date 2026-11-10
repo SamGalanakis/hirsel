@@ -36,6 +36,107 @@ pub const MAX_INSTRUCTIONS: usize = 4096;
 pub const MAX_IMAGE_BYTES: u64 = 256;
 pub const MAX_STACK_BYTES: u64 = 65536;
 
+/// A pure scalar instruction: it reads only scalar SSA values and defines only
+/// scalar SSA values, names no slot, address, storage, owner, call, region or
+/// layout, and at most takes its own source failure edge (SEM-1, MEM-14).
+/// `scalar` is the caller's admission of one value's type. Every ahead
+/// classifier (scalar graphs, host-return graphs and allocating CPU mapper
+/// graphs) admits these through this one definition, so a scalar instruction a
+/// core helper starts emitting is admitted or refused by all of them together.
+/// The float `ScalarUnary` ops and `MulAdd` stay refused: IEEE float images,
+/// constants and conversions are certified against independent bit oracles
+/// (bffadf03), these are not, so a mapper using them must refuse before
+/// preparation rather than claim the interpreter's bits.
+pub(crate) fn pure_scalar(
+    u: &LirUnit<Ready>,
+    inst: &Inst,
+    scalar: impl Fn(ValueId) -> bool,
+) -> bool {
+    match *inst {
+        Inst::Const { result, constant } => {
+            matches!(
+                u.tables.constants[constant.index()].value,
+                ConstantValue::Unit
+                    | ConstantValue::Bool(_)
+                    | ConstantValue::Integer(_)
+                    | ConstantValue::F32(_)
+                    | ConstantValue::F64(_)
+            ) && scalar(result)
+        }
+        Inst::Unary {
+            result, operand, ..
+        } => scalar(operand) && scalar(result),
+        Inst::ScalarUnary {
+            result,
+            op,
+            operand,
+        } => !op.is_float() && scalar(operand) && scalar(result),
+        Inst::Convert {
+            result,
+            flag,
+            operand,
+            ..
+        } => scalar(operand) && scalar(result) && flag.is_none_or(&scalar),
+        Inst::Binary {
+            result,
+            left,
+            right,
+            ..
+        } => scalar(left) && scalar(right) && scalar(result),
+        Inst::IntArith {
+            result,
+            flag,
+            left,
+            right,
+            ..
+        } => scalar(left) && scalar(right) && scalar(result) && flag.is_none_or(&scalar),
+        Inst::Check { condition, .. } => scalar(condition),
+        _ => false,
+    }
+}
+
+/// The scalar-graph classifier of one instruction. Value and slot types are
+/// checked for the whole body before this runs.
+fn scalar_instruction(table: &LayoutTable, unit: &LirUnit<Ready>, inst: &Inst) -> bool {
+    pure_scalar(unit, inst, |_| true)
+        || match inst {
+            // Exact native depth leaves are bound by the machine helper
+            // identity and extent; they never publish a failure themselves.
+            Inst::FrameEnter { .. }
+            | Inst::FrameLeave
+            | Inst::StorageLive { .. }
+            | Inst::StorageDead { .. }
+            | Inst::EndScope { .. }
+            | Inst::Address { .. }
+            | Inst::Read { .. }
+            | Inst::CopyValue { .. }
+            | Inst::Store { .. }
+            | Inst::Replace { .. }
+            | Inst::UpdateMask { .. }
+            | Inst::BeginLoan { .. }
+            | Inst::EndLoan { .. }
+            | Inst::BindOrigin { .. }
+            | Inst::BindFields { .. }
+            | Inst::EndOrigin { .. } => true,
+            Inst::Construct { construct, .. } => {
+                scalar_image(table, unit.tables.constructs[construct.index()].layout)
+            }
+            _ => false,
+        }
+}
+
+/// Each ahead classifier's verdict on one instruction of `u`: scalar graph,
+/// host-return graph and allocating CPU mapper graph. Only for the law that a
+/// pure scalar instruction any core helper emits is admitted by all three.
+#[doc(hidden)]
+pub fn classifier_verdicts(u: &LirUnit<Ready>, table: &LayoutTable, inst: &Inst) -> [bool; 3] {
+    [
+        scalar_instruction(table, u, inst),
+        host_return::classifies(u, table, inst),
+        cpu_mapper::classifies(u, table, inst),
+    ]
+}
+
 /// Identity includes the full dependency body, not merely its instance name.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ScalarBody {
@@ -267,53 +368,7 @@ impl Walker<'_> {
             {
                 return Err(refused(id, "mutable scalar captures"));
             }
-            let safe = match inst {
-                Inst::Const { constant, .. } => matches!(
-                    unit.tables.constants[constant.index()].value,
-                    ConstantValue::Unit
-                        | ConstantValue::Bool(_)
-                        | ConstantValue::Integer(_)
-                        | ConstantValue::F32(_)
-                        | ConstantValue::F64(_)
-                ),
-                // Exact native depth leaves are bound by the machine helper
-                // identity and extent; they never publish a failure themselves.
-                Inst::FrameEnter { .. }
-                | Inst::FrameLeave { .. }
-                | Inst::Unary { .. }
-                | Inst::Binary { .. }
-                | Inst::IntArith { .. }
-                | Inst::Check { .. }
-                | Inst::StorageLive { .. }
-                | Inst::StorageDead { .. }
-                | Inst::EndScope { .. }
-                | Inst::Address { .. }
-                | Inst::Read { .. }
-                | Inst::CopyValue { .. }
-                | Inst::Store { .. }
-                | Inst::Replace { .. }
-                | Inst::UpdateMask { .. }
-                | Inst::BeginLoan { .. }
-                | Inst::EndLoan { .. }
-                | Inst::BindOrigin { .. }
-                | Inst::BindFields { .. }
-                | Inst::EndOrigin { .. } => true,
-                Inst::Convert { mode, .. } => matches!(
-                    mode,
-                    ConvertMode::Widen
-                        | ConvertMode::Truncate
-                        | ConvertMode::TryNarrow
-                        | ConvertMode::Reinterpret
-                        | ConvertMode::FloatResize
-                        | ConvertMode::IntToFloat
-                        | ConvertMode::FloatToI32
-                ),
-                Inst::Construct { construct, .. } => {
-                    scalar_image(self.table, unit.tables.constructs[construct.index()].layout)
-                }
-                _ => false,
-            };
-            if !safe {
+            if !scalar_instruction(self.table, unit, inst) {
                 return Err(refused(
                     id,
                     format!("unclassified scalar instruction {:?}", inst.opcode()),

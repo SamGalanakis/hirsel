@@ -473,6 +473,12 @@ pub(super) fn propose(
     })
 }
 
+/// This classifier's verdict on one instruction outside any read buffer or
+/// owner set, for `super::classifier_verdicts`.
+pub(super) fn classifies(u: &LirUnit<Ready>, table: &LayoutTable, inst: &Inst) -> bool {
+    safe_instruction(u, table, inst, SlotId(u32::MAX), &BTreeSet::new())
+}
+
 fn safe_instruction(
     u: &LirUnit<Ready>,
     table: &LayoutTable,
@@ -518,11 +524,10 @@ fn safe_instruction(
                 .iter()
                 .all(|p| matches!(p, ProjectionStep::Payload | ProjectionStep::Index(_)))
     };
+    if super::pure_scalar(u, inst, &scalar) {
+        return true;
+    }
     match *inst {
-        Inst::Const { constant, .. } => matches!(
-            u.tables.constants[constant.index()].value,
-            ConstantValue::Unit | ConstantValue::Bool(_) | ConstantValue::Integer(_)
-        ),
         Inst::Read {
             result,
             address,
@@ -544,30 +549,11 @@ fn safe_instruction(
                     )
                 })
         }
-        Inst::Unary {
-            operand, result, ..
-        }
-        | Inst::Convert {
-            operand, result, ..
-        } => scalar(operand) && scalar(result),
-        Inst::Binary {
-            left,
-            right,
-            result,
-            ..
-        }
-        | Inst::IntArith {
-            left,
-            right,
-            result,
-            ..
-        } => scalar(left) && scalar(right) && scalar(result),
         Inst::SeqLen { value, .. } => owners.contains(&value),
         Inst::Construct { construct, .. } => {
             scalar_image(table, u.tables.constructs[construct.index()].layout)
         }
         Inst::Release { layout, .. } => scalar_image(table, layout),
-        Inst::Check { condition, .. } => scalar(condition),
         // These exact task-local leaves have the published eight-byte call
         // extent in the helper/frame proof and publish no failure themselves.
         Inst::FrameEnter { .. }

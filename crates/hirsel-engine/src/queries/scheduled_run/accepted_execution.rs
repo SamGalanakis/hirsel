@@ -514,6 +514,9 @@ impl FrontRunQueries {
         let builtins: BTreeSet<_> = snapshot.execution_declarations().into_iter().collect();
         let mut paths = builtins.clone();
         paths.extend(output.semantic.definitions().iter().cloned());
+        if let Some(headers) = snapshot.header_products() {
+            paths.extend(headers.staged_constants().keys().cloned());
+        }
         let constants = self.lower.settled_constants();
         paths.extend(constants.iter().cloned());
         let mut rows = Vec::new();
@@ -528,7 +531,10 @@ impl FrontRunQueries {
             if !published.insert(path.clone()) {
                 continue;
             }
-            let (public, private) = snapshot.execution_declaration(&path)?;
+            let (public, private) = match self.lower.staged_instance_signature(&path)? {
+                Some(signature) => (signature.clone(), signature),
+                None => snapshot.execution_declaration(&path)?,
+            };
             let mut type_roots = hirsel_types::signature_types(&types, &public);
             type_roots.extend(hirsel_types::signature_types(&types, &private));
             // V checks declaration protocols even when their operations have

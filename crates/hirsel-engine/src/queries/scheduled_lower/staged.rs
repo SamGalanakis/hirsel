@@ -102,6 +102,67 @@ impl Staged {
     }
 }
 impl FrontLowerQueries {
+    pub(crate) fn staged_instance_signature(
+        &self,
+        path: &DefPath,
+    ) -> Result<Option<hirsel_types::SignatureRef>, QueryError> {
+        let invalid = |message: &str| {
+            QueryError::Operational(hirsel_types::OperationalFailure {
+                operation: "staged constant signature".into(),
+                message: format!("{path}: {message}"),
+            })
+        };
+        let Some(query) = self.staged.selected(path) else {
+            return Ok(None);
+        };
+        let selection = self
+            .staged
+            .selection(query)
+            .ok_or_else(|| invalid("staged constant selection disappeared"))?;
+        let declaration = self
+            .staged
+            .declarations
+            .get(&selection.declaration)
+            .ok_or_else(|| invalid("staged constant declaration disappeared"))?;
+        let hirsel_types::SignatureKind::Const { ty, generics } = &declaration.signature.kind
+        else {
+            return Err(invalid("staged declaration is not a constant"));
+        };
+        if selection.arguments.len() != generics.len()
+            || generics
+                .iter()
+                .any(|generic| !matches!(generic, hirsel_types::GenericParameter::Size { .. }))
+        {
+            return Err(invalid("staged constant signature arity"));
+        }
+        let arguments = selection
+            .arguments
+            .iter()
+            .map(|value| hirsel_types::GenericArgument::Size(hirsel_types::Size::Constant(*value)))
+            .collect::<Vec<_>>();
+        let types = self.namespace.snapshot.types();
+        let ty = hirsel_types::substitute(
+            types,
+            &self.memo,
+            *ty,
+            &hirsel_types::Substitution {
+                binder: Some(hirsel_types::GenericBinder::Bound(0)),
+                arguments: &arguments,
+                ..Default::default()
+            },
+        )
+        .map_err(|error| invalid(&format!("substitution: {error:?}")))?;
+        let mut signature = (*declaration.signature).clone();
+        signature.definition = selection.instance;
+        signature.kind = hirsel_types::SignatureKind::Const {
+            ty,
+            generics: Default::default(),
+        };
+        signature.fingerprint = hirsel_types::encoding::fingerprint(types, &signature, &[])
+            .map_err(|error| invalid(&format!("encoding: {error:?}")))?;
+        Ok(Some(Arc::new(signature)))
+    }
+
     /// Select a declared staged constant under its exact closed size actuals.
     /// This only interns its admitted Evaluate address. The caller requests
     /// the query on the ordinary runtime before reading a settled value.

@@ -86,6 +86,7 @@ impl Codec {
             nodes.push(t);
         }
         Ok(Self {
+            minimum: minimum(&nodes),
             nodes,
             root: schema.root.0 as usize,
             descriptor: descriptor(schema, true)?,

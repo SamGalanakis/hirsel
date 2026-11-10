@@ -404,7 +404,11 @@ impl CodecPlan {
             return Err(format!(
                 "a {:?} codec whose descriptor is {}",
                 self.form,
-                if self.descriptor.is_empty() { "empty" } else { "present" }
+                if self.descriptor.is_empty() {
+                    "empty"
+                } else {
+                    "present"
+                }
             ));
         }
         for id in [Some(self.root), Some(self.bytes), self.result]

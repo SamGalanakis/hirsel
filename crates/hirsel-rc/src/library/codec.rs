@@ -144,8 +144,12 @@ fn decode(cx: &mut ImportCx<'_>, call: &CallShape<'_>, form: CodecForm) -> R<boo
             .ok_or_else(|| PassError::Malformed("a decode result arm without its field".into()))
     };
     let (root, error) = (arm(0)?, arm(1)?);
-    let plan =
-        Plan::new(table, &schema, Some(checks)).build(form, root, bytes, Some((result_layout, error)))?;
+    let plan = Plan::new(table, &schema, Some(checks)).build(
+        form,
+        root,
+        bytes,
+        Some((result_layout, error)),
+    )?;
     let value = cx.operand(&argument.value)?;
     let codec = cx.codec(plan);
     let result = cx.fresh(result_layout);

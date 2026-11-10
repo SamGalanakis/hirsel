@@ -288,6 +288,18 @@ impl<'a> Arms<'a> {
         }
         Some(self.split(rest).0)
     }
+    /// Every arm's node ids, in order.
+    fn nodes(self) -> impl Iterator<Item = impl Iterator<Item = usize> + 'a> {
+        let width = self.width;
+        let mut rest = self.words;
+        (0..self.count).map(move |_| {
+            let (fields, after) = self.split(rest);
+            rest = after;
+            fields
+                .chunks_exact(width)
+                .map(move |c| c[width - 1] as usize)
+        })
+    }
     /// Arm `ordinal`'s Packed extent.
     fn extent(self, ordinal: u32) -> Option<u64> {
         if u64::from(ordinal) >= self.count {
@@ -709,6 +721,82 @@ fn budget() -> Stop {
     Stop::Environmental(hirsel_run_schema::Environmental::CodecLimit)
 }
 
+/// Each node's fewest wire bytes for one program (`u64::MAX` for a node with no finite
+/// value), as `hirsel_types::wire` computes them: the least fixpoint from "no finite
+/// value", so a recursive schema gets its shortest finite encoding. Computed the first
+/// time a decode of the program reads a count, and kept for the next decode of it.
+#[derive(Default)]
+struct Minimum {
+    program: usize,
+    sizes: Vec<u64>,
+}
+
+impl Minimum {
+    fn of(&mut self, program: Program<'_>) -> &[u64] {
+        let key = program.words.as_ptr() as usize;
+        if self.program != key || self.sizes.len() != program.count {
+            self.program = key;
+            fixpoint(program, &mut self.sizes);
+        }
+        &self.sizes
+    }
+}
+
+fn fixpoint(program: Program<'_>, min: &mut Vec<u64>) {
+    min.clear();
+    min.resize(program.count, u64::MAX);
+    let sum = |min: &[u64], nodes: &mut dyn Iterator<Item = usize>| {
+        nodes.fold(0u64, |total, node| total.saturating_add(min[node]))
+    };
+    let arms = |min: &[u64], arms: Arms<'_>| {
+        arms.nodes()
+            .map(|mut arm| sum(min, &mut arm))
+            .min()
+            .map_or(u64::MAX, |arm| arm.saturating_add(4))
+    };
+    loop {
+        let mut changed = false;
+        for id in 0..program.count {
+            let size = match program.node(id) {
+                Node::Scalar(scalar) => scalar.width() as u64,
+                Node::Text(_) | Node::FlatText { .. } | Node::Path => 8,
+                Node::Fields(fields) => sum(min, &mut pairs(fields).map(|(_, f)| f)),
+                Node::FlatFields(fields) => sum(min, &mut ids(fields)),
+                Node::Variant { arms: a, .. } | Node::FlatVariant(a) => arms(min, a),
+                Node::Box { payload: child, .. }
+                | Node::Framed(child)
+                | Node::Checked { value: child, .. } => min[child],
+                Node::Repeat { count, element, .. } => match count {
+                    0 => 0,
+                    count => count.saturating_mul(min[element]),
+                },
+                Node::Sequence { .. }
+                | Node::FlatSequence { .. }
+                | Node::Sequential { .. }
+                | Node::Columns { .. }
+                | Node::Container(_) => 8,
+            };
+            if size < min[id] {
+                min[id] = size;
+                changed = true;
+            }
+        }
+        if !changed {
+            return;
+        }
+    }
+}
+
+/// A count of `n` elements of at least `each` wire bytes that the bytes left cannot hold
+/// is truncated input, decided before any element is visited or budgeted.
+fn satisfiable(input: &Input<'_>, n: u64, each: u64) -> Result<(), DecodeError> {
+    let left = (input.bytes.len() - input.at) as u128;
+    if n > 0 && u128::from(n).saturating_mul(u128::from(each)) > left {
+        return Err(DecodeError::Truncated);
+    }
+    Ok(())
+}
+
 /// Why a payload does not decode: its first `DecodeError`, or the operational budget.
 enum Invalid {
     Decode(DecodeError),
@@ -747,6 +835,8 @@ struct Scratch {
     flat_jobs: Vec<Job>,
     content: Vec<u8>,
     inline: Vec<(usize, usize)>,
+    /// The last decoded program's per-node minimum wire sizes, kept across calls.
+    minimum: Minimum,
 }
 
 /// Scratch storage past this many bytes is released rather than kept for the next call.
@@ -1576,7 +1666,12 @@ struct Collection<'a> {
 }
 
 /// Validate a whole payload against the program, in the reference's reading order.
-fn validate(program: Program<'_>, bytes: &[u8], work: &mut Vec<Check>) -> Result<(), Invalid> {
+fn validate(
+    program: Program<'_>,
+    bytes: &[u8],
+    work: &mut Vec<Check>,
+    minimum: &mut Minimum,
+) -> Result<(), Invalid> {
     let mut input = Input { bytes, at: 0 };
     work.clear();
     work.push(Check::Visit(program.root));
@@ -1715,6 +1810,7 @@ fn validate(program: Program<'_>, bytes: &[u8], work: &mut Vec<Check>) -> Result
                     | Node::Sequential { element, .. }
                     | Node::Columns { element, .. } => {
                         let count = input.length()?;
+                        satisfiable(&input, count, minimum.of(program)[element])?;
                         reserve(values, count)?;
                         work.push(Check::Elements {
                             node: element,
@@ -1732,6 +1828,12 @@ fn validate(program: Program<'_>, bytes: &[u8], work: &mut Vec<Check>) -> Result
                     }
                     Node::Container(container) => {
                         let count = input.length()?;
+                        let sizes = minimum.of(program);
+                        let each = container
+                            .value
+                            .map_or(0, |value| sizes[value])
+                            .saturating_add(sizes[container.key]);
+                        satisfiable(&input, count, each)?;
                         reserve(
                             values,
                             count.saturating_mul(if container.set { 1 } else { 2 }),
@@ -2090,7 +2192,9 @@ unsafe fn decode(
             Form::Payload => Ok(input),
         };
         let checked = match payload.map_err(Invalid::Decode) {
-            Ok(payload) => validate(program, payload, &mut s.check).map(|()| payload),
+            Ok(payload) => {
+                validate(program, payload, &mut s.check, &mut s.minimum).map(|()| payload)
+            }
             Err(invalid) => Err(invalid),
         };
         let checked = match checked {

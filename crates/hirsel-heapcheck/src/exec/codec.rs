@@ -604,6 +604,56 @@ impl<S: Stage> Machine<'_, S> {
         Ok((block, start, stride))
     }
 
+    /// Each plan node's fewest wire bytes (`u64::MAX` for a node with no finite value), as
+    /// the reference computes them over its schema: the least fixpoint from "no finite
+    /// value", so a recursive schema gets its shortest finite encoding.
+    fn codec_minimum(&self, plan: &CodecPlan) -> Checked<Vec<u64>> {
+        let mut min = vec![u64::MAX; plan.nodes.len()];
+        let at = |min: &[u64], id: CodecNodeId| min[id.0 as usize];
+        let sum = |min: &[u64], ids: &[CodecNodeId]| {
+            ids.iter()
+                .fold(0u64, |total, id| total.saturating_add(at(min, *id)))
+        };
+        loop {
+            let mut changed = false;
+            for (id, node) in plan.nodes.iter().enumerate() {
+                let size = match node {
+                    CodecNode::Scalar(layout) | CodecNode::Char(layout) => self.size(*layout)?,
+                    CodecNode::Text { .. } | CodecNode::FlatText { .. } | CodecNode::Path(_) => 8,
+                    CodecNode::Fields { fields, .. } => sum(&min, fields),
+                    CodecNode::Variant { arms, .. } => arms
+                        .iter()
+                        .map(|arm| sum(&min, arm))
+                        .min()
+                        .map_or(u64::MAX, |arm| arm.saturating_add(4)),
+                    CodecNode::Framed { value, .. } | CodecNode::Checked { value, .. } => {
+                        at(&min, *value)
+                    }
+                    CodecNode::Box { payload, .. } => at(&min, *payload),
+                    CodecNode::Repeat { layout, element } => {
+                        let count = match self.record(*layout)?.kind {
+                            LayoutKind::Inline { count, .. } => count,
+                            LayoutKind::Simd { lanes, .. } => u64::from(lanes),
+                            _ => return fail(V::TypeConfusion, "a codec repeat off its layout"),
+                        };
+                        match count {
+                            0 => 0,
+                            count => count.saturating_mul(at(&min, *element)),
+                        }
+                    }
+                    CodecNode::Sequence { .. } | CodecNode::Map { .. } | CodecNode::Set { .. } => 8,
+                };
+                if size < min[id] {
+                    min[id] = size;
+                    changed = true;
+                }
+            }
+            if !changed {
+                return Ok(min);
+            }
+        }
+    }
+
     /// The reference's validation of complete input in the plan's form, in its reading order.
     fn codec_validate<'b>(
         &self,
@@ -653,6 +703,17 @@ impl<S: Stage> Machine<'_, S> {
         let mut input = Input {
             bytes: payload,
             at: 0,
+        };
+        let minimum = self.codec_minimum(plan)?;
+        let min = |id: &CodecNodeId| minimum[id.0 as usize];
+        // A count the bytes left cannot hold is truncated input, decided before any
+        // element is visited or budgeted.
+        let satisfiable = |input: &Input<'_>, n: u64, each: u64| {
+            let left = (input.bytes.len() - input.at) as u128;
+            if n > 0 && u128::from(n).saturating_mul(u128::from(each)) > left {
+                return Err(Malformed::Truncated);
+            }
+            Ok(())
         };
         let mut work = vec![Job::Visit(plan.root)];
         let mut open: Vec<(BTreeSet<&[u8]>, Option<&[u8]>)> = vec![];
@@ -786,6 +847,7 @@ impl<S: Stage> Machine<'_, S> {
                 CodecNode::Box { payload, .. } => work.push(Job::Visit(*payload)),
                 CodecNode::Sequence { element, .. } => {
                     let count = check!(input.number(8)) as u64;
+                    check!(satisfiable(&input, count, min(element)));
                     budget(values, count)?;
                     work.push(Job::Elements {
                         node: *element,
@@ -808,6 +870,11 @@ impl<S: Stage> Machine<'_, S> {
                 }
                 CodecNode::Map { key, value, .. } => {
                     let count = check!(input.number(8)) as u64;
+                    check!(satisfiable(
+                        &input,
+                        count,
+                        min(key).saturating_add(min(value))
+                    ));
                     budget(values, count.saturating_mul(2))?;
                     work.push(Job::Close);
                     work.push(Job::Entries {
@@ -819,6 +886,7 @@ impl<S: Stage> Machine<'_, S> {
                 }
                 CodecNode::Set { element, .. } => {
                     let count = check!(input.number(8)) as u64;
+                    check!(satisfiable(&input, count, min(element)));
                     budget(values, count)?;
                     work.push(Job::Close);
                     work.push(Job::Elements {

@@ -5,7 +5,8 @@
 // those bytes, and otherwise it returns a `DecodeError` rather than fail. The bytes are
 // single-byte mutations, truncations and extensions of a hand-written payload that
 // reaches every validation of the schema (bool, char, NaN, UTF-8, tag, length, set order
-// and duplicates, a checked type), plus short random strings decoded as Option[char].
+// and duplicates, a checked type, counts no bytes can satisfy), plus short random
+// strings decoded as Option[char].
 @serializable
 type Choice = Empty | Item(String)
 
@@ -46,6 +47,15 @@ fn step(state: u64) -> u64 {
 }
 
 // `data` decodes as a `T` only to a value that encodes back to `data`.
+// `data`, whose count no remaining bytes can satisfy, is Truncated.
+fn truncated[T: serializable](t: Test, none: Option[T], data: Bytes) {
+  let decoded: Result[T, DecodeError] = codec.decode_payload(none, data)
+  match take decoded {
+    Error(Truncated()) => test.check(t, true),
+    _ => test.check(t, false),
+  }
+}
+
 fn law[T: serializable](t: Test, none: Option[T], data: Bytes, mut tally: Tally) {
   let decoded: Result[T, DecodeError] = codec.decode_payload(none, data)
   match take decoded {
@@ -70,30 +80,40 @@ pub fn main(t: Test) -> Result[(), DecodeError] {
   let n = bytes.len(seed)
   let mut state: u64 = 691
   let mut round: u64 = 0
+  let mut oversized: u64 = 0
   while round < 300 {
     state = step(state)
     let r = state >> 32
-    // The high six bytes of the tags and nums counts (offsets 27-32 and 51-56) are left
-    // alone: a count past the run's value budget is an operational refusal, separate
-    // from DecodeError, not malformed data.
-    let mut at = r % n
-    if at >= 27 && at <= 32 || at >= 51 && at <= 56 {
-      at -= 6
-    }
+    let at = r % n
     let mut out: List[u8] = []
     bytes.append(mut out, seed)
-    let op = (r >> 8) % 4
+    let op = (r >> 8) % 5
     if op == 0 {
       out[at] = int.narrow(r >> 16 & 255)
     } else if op == 1 {
       list.truncate(mut out, at)
     } else if op == 2 {
       list.push(mut out, int.narrow(r >> 16 & 255))
-    } else {
+    } else if op == 3 {
       let near: List[u8] = [0, 1, 2, 127, 128, 255]
       out[at] = near[(r >> 16) % 6]
+    } else {
+      // An oversized count: a nonzero byte in the high six bytes of the tags count
+      // (offsets 27-32) or the nums count (offsets 51-56), far past both the bytes
+      // left and the run's value budget, is Truncated input, never the end of the run.
+      let high = 27u64 + (r >> 16) % 6 + if (r >> 24) % 2 == 0 {
+        0u64
+      } else {
+        24u64
+      }
+      out[high] = int.narrow(1u64 + (r & 255) % 255)
+      oversized += 1
     }
-    law(t, sample_none, bytes.from_list(take out), mut tally)
+    let data = bytes.from_list(take out)
+    if op == 4 {
+      truncated(t, sample_none, data)
+    }
+    law(t, sample_none, data, mut tally)
     round += 1
   }
   let char_none: Option[Option[char]] = None()
@@ -124,6 +144,6 @@ pub fn main(t: Test) -> Result[(), DecodeError] {
     round += 1
   }
   // Both outcomes occur, so the law is not vacuous.
-  test.check(t, tally.accepted > 15 && tally.refused > 100)
+  test.check(t, tally.accepted > 15 && tally.refused > 100 && oversized > 20)
   Ok(())
 }

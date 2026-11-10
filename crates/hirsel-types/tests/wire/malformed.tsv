@@ -11,7 +11,9 @@ variant-payload-short	variant	01000000	Truncated
 set-duplicate	set-byte-order	020000000000000001000100	Duplicate
 set-reversed	set-byte-order	020000000000000001000001	Order
 map-duplicate	map-insertion-order	020000000000000002010200	Duplicate
-list-huge-count	array	ffffffffffffffff	Limit
+list-huge-count	array	ffffffffffffffff	Truncated
+set-huge-count	set-byte-order	00000000000100000100	Truncated
+map-count-past-bytes	map-insertion-order	0200000000000000020701	Truncated
 inline-short	inline	0100	Truncated
 scalar-trailing	u8	ff00	Trailing
 unit-trailing	unit	00	Trailing

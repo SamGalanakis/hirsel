@@ -87,9 +87,69 @@ enum Node {
 /// source opt-in: the caller obtains that proof through serializable_schema.
 pub struct Codec {
     nodes: Vec<Node>,
+    /// Each node's fewest payload bytes (`u64::MAX` if it has no finite value).
+    minimum: Vec<u64>,
     root: usize,
     descriptor: Vec<u8>,
     fixed_flat: Option<usize>,
+}
+
+/// Each node's fewest payload bytes: the least fixpoint from "no finite value", so a
+/// recursive schema gets its shortest finite encoding and an uninhabited one keeps
+/// `u64::MAX`. A count is satisfiable only if count times its element's minimum fits in
+/// the bytes left, which bounds every count by the input before any element is visited.
+fn minimum(nodes: &[Node]) -> Vec<u64> {
+    let mut min = vec![u64::MAX; nodes.len()];
+    let sum = |min: &[u64], fields: &[usize]| {
+        fields
+            .iter()
+            .fold(0u64, |total, f| total.saturating_add(min[*f]))
+    };
+    loop {
+        let mut changed = false;
+        for (id, node) in nodes.iter().enumerate() {
+            let size = match node {
+                Node::Scalar(p) => match p {
+                    Primitive::Bool => 1,
+                    Primitive::Char | Primitive::F32 => 4,
+                    Primitive::F64 | Primitive::String | Primitive::Bytes => 8,
+                    Primitive::Never => u64::MAX,
+                    p => integer(*p).map_or(u64::MAX, |(width, _)| width as u64),
+                },
+                Node::Fields(fields) => sum(&min, fields),
+                Node::Variant(arms) => arms
+                    .iter()
+                    .map(|arm| sum(&min, arm))
+                    .min()
+                    .map_or(u64::MAX, |arm| arm.saturating_add(4)),
+                Node::Wrapper(child) => min[*child],
+                Node::Sequence {
+                    element,
+                    count: Some(n),
+                } => match (*n, min[*element]) {
+                    (0, _) => 0,
+                    (n, m) => n.saturating_mul(m),
+                },
+                Node::Sequence { count: None, .. } | Node::Map { .. } | Node::Set(_) => 8,
+            };
+            if size < min[id] {
+                min[id] = size;
+                changed = true;
+            }
+        }
+        if !changed {
+            return min;
+        }
+    }
+}
+
+/// Refuse a count of `n` elements of at least `each` bytes when fewer bytes remain.
+fn satisfiable(input: &Input<'_>, n: usize, each: u64) -> Result<(), Error> {
+    let left = (input.bytes.len() - input.at) as u128;
+    if n > 0 && (n as u128).saturating_mul(u128::from(each)) > left {
+        return Err(Error::Truncated);
+    }
+    Ok(())
 }
 
 struct Budget {
@@ -483,7 +543,11 @@ impl Codec {
                         Node::Sequence { element, count } => {
                             let n = match count {
                                 Some(n) => usize::try_from(*n).map_err(|_| Error::Length)?,
-                                None => input.length()?,
+                                None => {
+                                    let n = input.length()?;
+                                    satisfiable(&input, n, self.minimum[*element])?;
+                                    n
+                                }
                             };
                             if n > budget.limits.values.saturating_sub(budget.values) {
                                 return Err(Error::Limit);
@@ -493,6 +557,11 @@ impl Codec {
                         }
                         Node::Map { key, value } => {
                             let n = input.length()?;
+                            satisfiable(
+                                &input,
+                                n,
+                                self.minimum[*key].saturating_add(self.minimum[*value]),
+                            )?;
                             if n > budget.limits.values.saturating_sub(budget.values) / 2 {
                                 return Err(Error::Limit);
                             }
@@ -509,6 +578,7 @@ impl Codec {
                         }
                         Node::Set(element) => {
                             let n = input.length()?;
+                            satisfiable(&input, n, self.minimum[*element])?;
                             if n > budget.limits.values.saturating_sub(budget.values) {
                                 return Err(Error::Limit);
                             }

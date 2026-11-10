@@ -7435,6 +7435,7 @@ conformance/SER/SER-2-char-run.hir
 conformance/SER/SER-2-checked-run.hir
 conformance/SER/SER-2-core-error-vectors-run.hir
 conformance/SER/SER-2-core-errors-run.hir
+conformance/SER/SER-2-count-bound-run.hir
 conformance/SER/SER-2-document-codec-payload-run.hir
 conformance/SER/SER-2-duplicate-map-run.hir
 conformance/SER/SER-2-duplicate-set-run.hir

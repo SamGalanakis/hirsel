@@ -6,6 +6,7 @@ from input. The oracle is an executable byte specification, not a source opt-in
 checker. Its finite host budgets are operational refusal.
 """
 import json
+import math
 from pathlib import Path
 
 
@@ -133,8 +134,36 @@ def parse_descriptor(data):
     return root, nodes
 
 
+def fewest(nodes):
+    """Each node's fewest payload bytes (infinite with no finite value): the least
+    fixpoint from infinity, so a recursive schema gets its shortest finite encoding."""
+    widths = [1, 1, 2, 4, 8, 16, 1, 2, 4, 8, 16, 4, 8, 8, 8]
+    size = [math.inf] * len(nodes)
+    while True:
+        changed = False
+        for t, node in enumerate(nodes):
+            kind = node[0]
+            if kind == "scalar":
+                n = widths[node[1]]
+            elif kind == "fields":
+                n = sum(size[c] for c in node[1])
+            elif kind == "variant":
+                n = 4 + min((sum(size[c] for c in arm) for arm in node[1]), default=math.inf)
+            elif kind == "wrap":
+                n = size[node[1]]
+            elif kind == "seq" and node[2] is not None:
+                n = 0 if node[2] == 0 else node[2] * size[node[1]]
+            else:
+                n = 8
+            if n < size[t]:
+                size[t], changed = n, True
+        if not changed:
+            return size
+
+
 def decode_payload(descriptor, data):
     root, nodes = parse_descriptor(descriptor)
+    size = fewest(nodes)
     r, remaining = Reader(data), [1000000]
 
     def read(t, depth=0):
@@ -174,7 +203,12 @@ def decode_payload(descriptor, data):
             return ["variant", ordinal, [read(t, depth+1) for t in node[1][ordinal]]]
         if kind == "wrap":
             return ["wrap", read(node[1], depth+1)]
-        n = node[2] if kind == "seq" and node[2] is not None else r.uint(8)
+        fixed = kind == "seq" and node[2] is not None
+        n = node[2] if fixed else r.uint(8)
+        each = size[node[1]] + (size[node[2]] if kind == "map" else 0)
+        # A count the bytes left cannot hold is truncated input, before any budget.
+        if not fixed and n > 0 and n * each > len(r.data) - r.pos:
+            raise DecodeError("Truncated")
         if n > remaining[0] // (2 if kind == "map" else 1):
             raise DecodeError("Limit")
         result, keys, previous = [], set(), None

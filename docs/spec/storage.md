@@ -193,9 +193,11 @@ shared by every authority ([RUN-13](runners.md#run-13-provider-seams)). A `Level
 one of the levels `a` declares: `authority.levels` lists them, weakest first,
 `authority.level` resolves a name to one, and `authority.floor` is the deployment's floor. A level belongs to its authority: the
 checker refuses a level of one authority where another's is required
-([PROV-1](brands.md#prov-1-brands)), and levels have no equality or order, so no
-comparison of levels, of one store or two, type-checks; their order is only the declared
-list's. A level kept where its brand cannot be written (a field, a list) is recovered
+([PROV-1](brands.md#prov-1-brands)). `Level` is `ordered of` its authority
+([SEM-5](semantics.md#sem-5-order-and-maps)): levels of one authority compare by the
+declared list, weaker before stronger, so `a < b` holds exactly when `b` is stronger, and a
+comparison of levels whose authorities differ or are unknown is
+[PROV-2](brands.md#prov-2-checking). A level kept where its brand cannot be written (a field, a list) is recovered
 with `level.narrow`, which is `None()` for a level of another authority. A level travels
 between places and hosts only as its name (`level.name`), which the receiving head
 resolves with `authority.level`; a name the authority does not declare is `None()`, and
@@ -539,7 +541,7 @@ concatenation of its fields'. **Key order** is defined by the same structure: in
 `char` numerically; floats in IEEE total order, so `-0` precedes `+0` and the canonical NaN
 follows every other value; `false` before `true`; `String` and `Bytes`
 byte-lexicographically with a proper prefix first (the order of the
-[SEM-5](semantics.md#sem-5-maps) operators); tuples and records lexicographically by field;
+[SEM-5](semantics.md#sem-5-order-and-maps) operators); tuples and records lexicographically by field;
 variants by arm ordinal and then payload (so `None` precedes every `Some`); and sequences
 lexicographically with a proper prefix first. For all values `a` and `b` of one schema, `a`
 precedes `b` in key order exactly when the encoding of `a` precedes the encoding of `b`

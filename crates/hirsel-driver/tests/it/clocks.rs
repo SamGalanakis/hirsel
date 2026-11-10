@@ -19,7 +19,13 @@ pub fn span(c: MonotonicClock, first: Instant of c, last: Instant of c) -> i128 
   std@1/time.between(c, first, last).nanoseconds
 }
 pub fn order(c: MonotonicClock, first: Instant of c, last: Instant of c) -> i32 {
-  std@1/time.compare(c, first, last)
+  if first < last {
+    -1i32
+  } else if first > last {
+    1i32
+  } else {
+    0i32
+  }
 }
 pub fn main(rt: Io, args: Args) -> Result[(), ClockError] {
   match io.monotonic_clock(rt) {

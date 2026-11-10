@@ -1,0 +1,6 @@
+// rule: PROV-2
+// expect: reject PROV-2 at line 5
+// twin: SEM/SEM-5-ordered-tokens-run.hir
+fn erased(a: Instant, b: Instant) -> bool {
+  a < b
+}

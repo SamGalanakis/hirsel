@@ -2845,6 +2845,10 @@ impl<'a, 'input> Checker<'a, 'input> {
     fn data(&self, root: TypeId) -> bool {
         self.bound(self.t, root, Bound::Data, &self.generic_declarations())
     }
+    /// SEM-5 `ordered`, domains included.
+    fn ordered(&self, root: TypeId) -> bool {
+        self.bound(self.t, root, Bound::Ordered, &self.generic_declarations())
+    }
     /// A row's own destination: the arena or region its relation names, else
     /// unknown. Sources shared with the caller place nothing for a row.
     pub(super) fn row_destination(&self, ty: TypeId) -> Destination {
@@ -3216,6 +3220,21 @@ impl<'a, 'input> Checker<'a, 'input> {
                 let rt = self.place_type(right.place);
                 let comparison = matches!(op, B::Eq | B::Ne | B::Lt | B::Le | B::Gt | B::Ge);
                 if comparison {
+                    // SEM-5, PROV-2: the operands carry one comparison domain. Brands are
+                    // identity evidence, so this reads the rows before `comparison_type`
+                    // erases them.
+                    let mut lookup = |d: DefId| {
+                        Ok::<_, hirsel_types::QueryError>(
+                            self.signatures.get(d).cloned().map(std::sync::Arc::new),
+                        )
+                    };
+                    if hirsel_types::comparison_domain_conflict(self.t, lt, rt, &mut lookup)
+                        .unwrap_or(true)
+                    {
+                        self.error(ViolationKind::TypeMismatch {
+                            entity: "comparison domain",
+                        });
+                    }
                     self.comparison_type(lt, rt);
                 } else {
                     self.arithmetic_type(lt, rt, ty);
@@ -3231,7 +3250,8 @@ impl<'a, 'input> Checker<'a, 'input> {
                     (B::Eq | B::Ne | B::Lt | B::Le | B::Gt | B::Ge, TypeKind::Primitive(p)) => {
                         *p != Primitive::Never
                     }
-                    (B::Eq | B::Ne, _) => self.data(lt),
+                    (B::Eq | B::Ne, _) => self.data(lt) || self.ordered(lt),
+                    (B::Lt | B::Le | B::Gt | B::Ge, _) => self.ordered(lt),
                     _ => false,
                 };
                 if !valid {

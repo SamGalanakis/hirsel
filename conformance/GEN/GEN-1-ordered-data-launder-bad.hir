@@ -1,0 +1,10 @@
+// rule: GEN-1
+// expect: reject GEN-1 at line 9
+// twin: SEM/SEM-5-ordered-tokens-run.hir
+fn same[T: data](a: T, b: T) -> bool {
+  a == b
+}
+
+fn launder(c: MonotonicClock, a: Instant of c, b: Instant of c) -> bool {
+  same(a, b)
+}

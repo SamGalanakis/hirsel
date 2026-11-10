@@ -642,6 +642,9 @@ impl Checker<'_, '_> {
                 | ast::BinaryOp::Gt
                 | ast::BinaryOp::Ge
         ) {
+            // SEM-5: the right operand keeps its own brands, so a comparison checks
+            // the domains it actually carries, never ones certified by the left side.
+            let t = hirsel_types::erase_brands(self.types, t).unwrap_or(t);
             hirsel_types::erase_uniqueness(self.types, t).unwrap_or(t)
         } else {
             t

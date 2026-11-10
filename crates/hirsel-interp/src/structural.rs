@@ -109,6 +109,20 @@ fn compare_at(
                 if depth > MAX_DEPTH {
                     return Err(StructuralError::Depth);
                 }
+                // SEM-5: an `ordered of` token (an Instant's ticks, a Level's
+                // `authority * 256 + ordinal` word) orders by its unsigned word. The
+                // checker established one domain, so no identity check happens here.
+                if let (Value::Handle { kind: ka, id: x }, Value::Handle { kind: kb, id: y }) =
+                    (a, b)
+                {
+                    if ka != kb || !matches!(&**ka, "Instant" | "Level") {
+                        return Err(StructuralError::InvalidValue);
+                    }
+                    if x != y {
+                        return Ok(Some(x.cmp(y)));
+                    }
+                    continue;
+                }
                 if matches!(
                     a,
                     Value::Resource { .. }

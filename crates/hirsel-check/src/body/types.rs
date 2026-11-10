@@ -2035,8 +2035,41 @@ impl Checker<'_, '_> {
         }
         Ok(authority)
     }
+    /// GEN-1 `ordered`, derived from representation; domains are checked separately.
+    pub(super) fn ordered(&mut self, root: TypeId) -> Result<bool, QueryError> {
+        let declarations = self.body.resolution.generic_declarations.clone();
+        structural_ordered(
+            self.types,
+            root,
+            Domains::Carried,
+            &declarations,
+            &mut |path| match self.snapshot(path) {
+                Ok(s) => Ok(Some(s)),
+                Err(QueryError::Diagnostics(_)) => Ok(None),
+                Err(e) => Err(e),
+            },
+        )
+    }
+    /// SEM-5/PROV-2: one known comparison domain at every compared payload depth.
+    pub(super) fn domains(&mut self, left: TypeId, right: TypeId) -> Result<bool, QueryError> {
+        comparison_domains(
+            self.types,
+            left,
+            right,
+            &mut |path| match self.snapshot(path) {
+                Ok(s) => Ok(Some(s)),
+                Err(QueryError::Diagnostics(_)) => Ok(None),
+                Err(e) => Err(e),
+            },
+        )
+    }
     pub(super) fn bound(&mut self, root: TypeId, bound: ast::Bound) -> Result<bool, QueryError> {
         let declarations = self.body.resolution.generic_declarations.clone();
+        if matches!(bound, ast::Bound::Ordered | ast::Bound::OrderedOf) {
+            // A `[T: ordered]` substitution carries its comparison domains: every
+            // `ordered of` token in it has one known brand (GEN-2).
+            return Ok(self.ordered(root)? && self.domains(root, root)?);
+        }
         if bound == ast::Bound::Serializable {
             return structural_serializable(
                 self.types,
@@ -2199,27 +2232,33 @@ impl Checker<'_, '_> {
         }
         match op {
             Eq | Ne => {
+                // SEM-5: an ordered type's equality agrees with its order.
                 if !self.bound(a, ast::Bound::Data)? {
-                    self.report(
-                        const { RuleId::of("GEN-1") },
-                        self.span(id),
-                        "equality requires data operands",
-                    );
-                    return Ok(self.error());
+                    if !self.ordered(a)? {
+                        self.report(
+                            const { RuleId::of("GEN-1") },
+                            self.span(id),
+                            "equality requires data or ordered operands",
+                        );
+                        return Ok(self.error());
+                    }
                 }
                 Ok(self.primitive(Primitive::Bool))
             }
             Lt | Le | Gt | Ge => {
-                if !self.numeric(a)
-                    && !matches!(
-                        self.kind(a),
-                        TypeKind::Primitive(Primitive::Char | Primitive::String | Primitive::Bytes)
-                    )
-                {
+                // SEM-5: floats keep IEEE comparison; everything else is canonical order.
+                let float = matches!(
+                    self.kind(a),
+                    TypeKind::Primitive(Primitive::F32 | Primitive::F64)
+                );
+                if !float && !self.ordered(a)? {
                     self.report(
-                        const { RuleId::of("LANG-7") },
+                        const { RuleId::of("GEN-1") },
                         self.span(id),
-                        "ordering requires scalars or byte strings",
+                        &format!(
+                            "ordering requires `ordered` operands, and `{}` is not ordered",
+                            self.type_spelling(a)
+                        ),
                     );
                     return Ok(self.error());
                 }

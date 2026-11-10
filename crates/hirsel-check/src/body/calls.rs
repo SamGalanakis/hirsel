@@ -975,8 +975,21 @@ impl Checker<'_, '_> {
                                     ast::Bound::Copyable => "copyable",
                                     ast::Bound::NoallocDrop => "noalloc_drop",
                                     ast::Bound::Serializable => "serializable",
+                                    ast::Bound::Ordered | ast::Bound::OrderedOf => "ordered",
                                 };
                                 let provided = self.type_spelling(actual);
+                                if matches!(b, ast::Bound::Ordered | ast::Bound::OrderedOf)
+                                    && self.ordered(actual)?
+                                {
+                                    // GEN-2: the substitution must carry its comparison domains.
+                                    self.report(
+                                        const { RuleId::of("PROV-2") },
+                                        self.span(id),
+                                        &format!("type `{provided}` for generic parameter `{name}: ordered` has no single known comparison domain"),
+                                    );
+                                    bad = true;
+                                    continue;
+                                }
                                 self.report(
                                     if *b == ast::Bound::Serializable {
                                         const { RuleId::of("SER-1") }

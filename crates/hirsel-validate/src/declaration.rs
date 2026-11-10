@@ -152,6 +152,10 @@ pub(super) fn valid(t: &TypeInterner, s: &Signature, signatures: &Reader<'_>) ->
             Bound::Data | Bound::Key => {
                 structural_equality(t, root, *bound, &declarations, &mut lookup).unwrap_or(false)
             }
+            Bound::Ordered | Bound::OrderedOf => {
+                ordered_declaration(t, s.definition, &d.generics, root, &mut lookup)
+                    .unwrap_or(false)
+            }
             Bound::NoallocDrop => {
                 (!d.resource || d.destructor_allocation == Allocation::NoAlloc)
                     && cleanup(t, root, &declarations, signatures, &mut HashSet::default())

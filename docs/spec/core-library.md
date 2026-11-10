@@ -807,8 +807,9 @@ other name. The `authority.*`, `level.*` and `claim.*` operations are the store 
 seam, specified with their outcomes in
 [STORE-11](storage.md#store-11-engine-and-storage-seam) and, for levels,
 [STORE-2](storage.md#store-2-transactions). A `Level of a` is one of the levels `a`
-declares; it is plain, copyable and sendable but not data, so levels have no equality or
-order. A `Claim` is an affine resource; dropping one ends it. Each provider decision an
+declares; it is plain, copyable and sendable but not data. It is `ordered of` its authority
+([SEM-5](semantics.md#sem-5-order-and-maps)): levels of one authority compare by the
+declared weakest-first list, and only those. A `Claim` is an affine resource; dropping one ends it. Each provider decision an
 operation observes (an outcome, a claim's attempt identity, the bytes read) is a
 recorded capability input, so a run replays from its tape without the provider.
 

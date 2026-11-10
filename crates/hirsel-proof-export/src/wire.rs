@@ -548,7 +548,9 @@ snapshot_enum!(Bound {
     Inert,
     Copyable,
     NoallocDrop,
-    Serializable
+    Serializable,
+    Ordered,
+    OrderedOf
 } in Cx);
 snapshot_enum!(ContractKind { Requires, Ensures } in Cx);
 snapshot_enum!(PassingMode { Borrow, Take, Mut } in Cx);

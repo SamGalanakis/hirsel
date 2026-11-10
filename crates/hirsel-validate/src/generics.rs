@@ -103,6 +103,9 @@ impl Checker<'_, '_> {
         } {
             return self.proven(source, root, query, generics);
         }
+        if matches!(bound, Bound::Ordered | Bound::OrderedOf) {
+            return self.proven(source, root, super::proofs::Proof::Ordered, generics);
+        }
         if bound == Bound::Flat {
             return self.proven(source, root, super::proofs::Proof::Flat, generics);
         }

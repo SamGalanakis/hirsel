@@ -32,7 +32,8 @@ hand-back is PROV-1. Temporary identities end with their statement unless held, 
 block-local identities with their scope. `take` consumes an identity before later
 arguments. Unbranded borrowed and taken parameters may forget the brands of data graphs;
 `mut` and non-data parameters cannot forget nested brands
-([PROV-2](#prov-2-checking)). Mutating a subplace ends the brands of the containing owners
+([PROV-2](#prov-2-checking)). A value whose comparison domain was forgotten can no longer
+be compared ([SEM-5](semantics.md#sem-5-order-and-maps)). Mutating a subplace ends the brands of the containing owners
 and of descendants, not of unrelated siblings; an indexed mutation renews the container,
 not an element's identity. A whole owned replacement gives a fresh identity. Joins on a
 continuing path exclude exiting arms, each loop iteration introduces a fresh incarnation,
@@ -53,7 +54,11 @@ or aggregate part written with the brand its value carries keeps it, whether the
 spelled directly, through a transparent alias or with a module-qualified definition path
 (`of u32.order`). A comparison sets aside
 root brands, locality and uniqueness while preserving nested types and placement, and
-returns an unbranded `bool`. A comparison only borrows, so an operand of every comparison
+returns an unbranded `bool`, except for a declared comparison domain: every `ordered of`
+part of the two operands, at any payload depth, must carry the same single, live owner,
+and an absent, forgotten, union or different owner is PROV-2
+([SEM-5](semantics.md#sem-5-order-and-maps)). Each operand keeps its own brands; a
+comparison operand never inherits the other side's. A comparison only borrows, so an operand of every comparison
 operator (`==`, `!=`, `<`, `<=`, `>`, `>=`) is checked against the type it inherits from the
 other side with every `unique` qualifier, nested ones included, removed:
 `base64.decode(x) == Ok(data)` accepts a borrowed `data: Bytes`, and a `unique String`

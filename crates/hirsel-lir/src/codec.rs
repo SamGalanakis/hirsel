@@ -726,8 +726,12 @@ impl CodecPlan {
             let mut body = vec![];
             match node {
                 CodecNode::Scalar(_) => {
-                    let LayoutKind::Scalar(kind) = r.kind else {
-                        return Err("a scalar node off its layout".into());
+                    let kind = match r.kind {
+                        LayoutKind::Scalar(kind) => kind,
+                        // Only a structural access plan reaches a handle leaf (an
+                        // ordered token's word); `check` keeps it out of codecs.
+                        LayoutKind::Handle if access => ScalarKind::U64,
+                        _ => return Err("a scalar node off its layout".into()),
                     };
                     body.extend([NODE_SCALAR, scalar_code(kind)?]);
                 }

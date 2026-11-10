@@ -229,6 +229,11 @@ impl<'m> Generator<'m, '_> {
                 self.decide(code);
             }
             LayoutKind::Unit => {}
+            // SEM-5: an `ordered of` token orders by its unsigned word.
+            LayoutKind::Handle => {
+                let code = self.scalar(ScalarKind::U64, left, right)?;
+                self.decide(code);
+            }
             LayoutKind::Scalar(kind) => {
                 let code = self.scalar(*kind, left, right)?;
                 self.decide(code);
@@ -357,7 +362,6 @@ impl<'m> Generator<'m, '_> {
                 )));
             }
             LayoutKind::Environment { .. }
-            | LayoutKind::Handle
             | LayoutKind::HostCapability { .. }
             | LayoutKind::PayloadReceipt { .. }
             | LayoutKind::Shared { .. }

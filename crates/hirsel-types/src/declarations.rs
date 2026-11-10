@@ -117,6 +117,293 @@ pub fn structural_equality(
     Ok(true)
 }
 
+/// Whether bounds supply canonical order (GEN-1): `ordered`, or `ordered of`, which also
+/// requires a comparison domain at every use (SEM-5).
+pub fn bounds_order(bounds: &[Bound]) -> bool {
+    bounds
+        .iter()
+        .any(|b| matches!(b, Bound::Ordered | Bound::OrderedOf))
+}
+
+/// What an `ordered` proof admits for comparison-domain tokens (SEM-5).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Domains {
+    /// A use: `ordered of` tokens qualify; `comparison_domains` checks their brands.
+    Carried,
+    /// A declaration's representation, where no field can name one domain for
+    /// every value: an `ordered of` token disqualifies it. The caller's declarations
+    /// treat its own parameters as ordered, since every use supplies ordered arguments,
+    /// and the declaration itself (named here) as ordered where it recurs.
+    Declaration(Option<DefId>),
+}
+
+/// GEN-1 `ordered`: canonical order derived from representation. Integers, bool, char,
+/// String, Bytes and unit qualify; tuples, boxes, Array, List, Inline and Packed when their
+/// components do; a nominal only by its explicit `ordered` or `ordered of` bound, with every
+/// type argument ordered. Floats, functions, Map, Set, Simd, handles without the bound and
+/// capabilities never qualify. Missing declarations and recovery prove nothing.
+pub fn structural_ordered(
+    source: &TypeInterner,
+    root: TypeId,
+    domains: Domains,
+    declarations: &GenericDeclarations,
+    lookup: &mut impl FnMut(DefId) -> Result<Option<SignatureRef>, QueryError>,
+) -> Result<bool, QueryError> {
+    let mut pending = vec![root];
+    let mut seen = IdSet::default();
+    while let Some(id) = pending.pop() {
+        if !seen.insert(id) {
+            continue;
+        }
+        let Some(row) = source.get(id).cloned() else {
+            return Ok(false);
+        };
+        match row.kind {
+            TypeKind::Error
+            | TypeKind::Function(_)
+            | TypeKind::Primitive(Primitive::Never | Primitive::F32 | Primitive::F64) => {
+                return Ok(false);
+            }
+            TypeKind::Primitive(_) => (),
+            TypeKind::Parameter(p) => {
+                if !bounds_order(declarations.bounds(p)) {
+                    return Ok(false);
+                }
+            }
+            TypeKind::Named {
+                definition,
+                arguments,
+            } if domains == Domains::Declaration(Some(definition)) => {
+                pending.extend(arguments.iter().filter_map(|a| match a {
+                    GenericArgument::Type(t) => Some(*t),
+                    GenericArgument::Size(_) => None,
+                }));
+            }
+            TypeKind::Named {
+                definition,
+                arguments,
+            } => {
+                let Some(signature) = lookup(definition)? else {
+                    return Ok(false);
+                };
+                let SignatureKind::Type(declaration) = &signature.kind else {
+                    return Ok(false);
+                };
+                if declaration.resource
+                    || declaration.capability.is_some()
+                    || !bounds_order(&declaration.bounds)
+                    || (matches!(domains, Domains::Declaration(_))
+                        && declaration.bounds.contains(&Bound::OrderedOf))
+                {
+                    return Ok(false);
+                }
+                pending.extend(arguments.iter().filter_map(|a| match a {
+                    GenericArgument::Type(t) => Some(*t),
+                    GenericArgument::Size(_) => None,
+                }));
+            }
+            TypeKind::Builtin { kind, arguments } => {
+                if !matches!(
+                    kind,
+                    BuiltinType::Array
+                        | BuiltinType::List
+                        | BuiltinType::Inline
+                        | BuiltinType::Packed
+                ) {
+                    return Ok(false);
+                }
+                pending.extend(arguments.iter().filter_map(|a| match a {
+                    GenericArgument::Type(t) => Some(*t),
+                    GenericArgument::Size(_) => None,
+                }));
+            }
+            TypeKind::Tuple(ts) => pending.extend(ts.iter().copied()),
+            TypeKind::Record(fs) => pending.extend(fs.iter().map(|f| f.ty)),
+            TypeKind::Variant(vs) => {
+                pending.extend(vs.iter().flat_map(|v| v.fields.iter().map(|f| f.1)))
+            }
+            TypeKind::Box(t) => pending.push(t),
+        }
+    }
+    Ok(true)
+}
+
+/// GEN-1: a nominal's explicit `ordered` or `ordered of` bound holds when its
+/// representation is ordered with no `ordered of` part, its own parameters ordered (every
+/// use supplies ordered arguments). The compiler derives the order from that
+/// representation; no comparator or projection can discharge it.
+pub fn ordered_declaration(
+    source: &TypeInterner,
+    this: DefId,
+    generics: &[GenericParameter],
+    representation: TypeId,
+    lookup: &mut impl FnMut(DefId) -> Result<Option<SignatureRef>, QueryError>,
+) -> Result<bool, QueryError> {
+    let own: Vec<_> = generics
+        .iter()
+        .map(|g| match g {
+            GenericParameter::Type { name, bounds } => GenericParameter::Type {
+                name: name.clone(),
+                bounds: bounds
+                    .iter()
+                    .copied()
+                    .chain([Bound::Ordered])
+                    .collect::<Vec<_>>()
+                    .into(),
+            },
+            size => size.clone(),
+        })
+        .collect();
+    structural_ordered(
+        source,
+        representation,
+        Domains::Declaration(Some(this)),
+        &GenericDeclarations::signature(&own),
+        lookup,
+    )
+}
+
+/// SEM-5/PROV-2: two compared types establish one comparison domain at every payload
+/// depth. Each `ordered of` occurrence on either side has exactly one brand, the same as
+/// its counterpart's; an absent (forgotten or never known) or union brand fails. Comparing
+/// a type with itself checks that every domain it carries is known, as a `[T: ordered]`
+/// substitution requires. Structurally different operands are not this check's concern
+/// and fail it.
+pub fn comparison_domains(
+    source: &TypeInterner,
+    left: TypeId,
+    right: TypeId,
+    lookup: &mut impl FnMut(DefId) -> Result<Option<SignatureRef>, QueryError>,
+) -> Result<bool, QueryError> {
+    domain_walk(source, left, right, true, lookup)
+}
+
+/// PROV-2 once callee results carry the caller's origins: whether some `ordered of`
+/// part known on both sides carries a union brand or two different owners. Unlike
+/// `comparison_domains`, it skips a part that is unbranded or structurally unpaired,
+/// which the per-operand check owns.
+pub fn comparison_domain_conflict(
+    source: &TypeInterner,
+    left: TypeId,
+    right: TypeId,
+    lookup: &mut impl FnMut(DefId) -> Result<Option<SignatureRef>, QueryError>,
+) -> Result<bool, QueryError> {
+    domain_walk(source, left, right, false, lookup).map(|agree| !agree)
+}
+
+fn domain_walk(
+    source: &TypeInterner,
+    left: TypeId,
+    right: TypeId,
+    strict: bool,
+    lookup: &mut impl FnMut(DefId) -> Result<Option<SignatureRef>, QueryError>,
+) -> Result<bool, QueryError> {
+    let mut pending = vec![(left, right)];
+    let mut seen = std::collections::HashSet::new();
+    while let Some((a, b)) = pending.pop() {
+        if !seen.insert((a, b)) {
+            continue;
+        }
+        let (Some(ra), Some(rb)) = (source.get(a).cloned(), source.get(b).cloned()) else {
+            if strict {
+                return Ok(false);
+            }
+            continue;
+        };
+        let pair =
+            |x: &[GenericArgument], y: &[GenericArgument]| -> Option<Vec<(TypeId, TypeId)>> {
+                (x.len() == y.len()).then(|| {
+                    x.iter()
+                        .zip(y)
+                        .filter_map(|p| match p {
+                            (GenericArgument::Type(x), GenericArgument::Type(y)) => Some((*x, *y)),
+                            _ => None,
+                        })
+                        .collect()
+                })
+            };
+        match (&ra.kind, &rb.kind) {
+            (
+                TypeKind::Named {
+                    definition: da,
+                    arguments: xa,
+                },
+                TypeKind::Named {
+                    definition: db,
+                    arguments: xb,
+                },
+            ) if da == db => {
+                let domain = match lookup(*da)? {
+                    Some(signature) => matches!(&signature.kind,
+                        SignatureKind::Type(d) if d.bounds.contains(&Bound::OrderedOf)),
+                    None if strict => return Ok(false),
+                    None => false,
+                };
+                if domain {
+                    let [one, other] = [&ra.brand, &rb.brand].map(|b| &b.alternatives);
+                    let known = !one.is_empty() && !other.is_empty();
+                    if (strict || known) && (one.len() != 1 || one != other) {
+                        return Ok(false);
+                    }
+                }
+                let Some(parts) = pair(xa, xb) else {
+                    if strict {
+                        return Ok(false);
+                    }
+                    continue;
+                };
+                pending.extend(parts);
+            }
+            (
+                TypeKind::Builtin {
+                    kind: ka,
+                    arguments: xa,
+                },
+                TypeKind::Builtin {
+                    kind: kb,
+                    arguments: xb,
+                },
+            ) if ka == kb => {
+                let Some(parts) = pair(xa, xb) else {
+                    if strict {
+                        return Ok(false);
+                    }
+                    continue;
+                };
+                pending.extend(parts);
+            }
+            (TypeKind::Tuple(xa), TypeKind::Tuple(xb)) if xa.len() == xb.len() => {
+                pending.extend(xa.iter().copied().zip(xb.iter().copied()))
+            }
+            (TypeKind::Record(xa), TypeKind::Record(xb)) if xa.len() == xb.len() => {
+                pending.extend(xa.iter().map(|f| f.ty).zip(xb.iter().map(|f| f.ty)))
+            }
+            (TypeKind::Variant(xa), TypeKind::Variant(xb)) if xa.len() == xb.len() => {
+                for (va, vb) in xa.iter().zip(xb.iter()) {
+                    if va.fields.len() != vb.fields.len() {
+                        if strict {
+                            return Ok(false);
+                        }
+                        continue;
+                    }
+                    pending.extend(
+                        va.fields
+                            .iter()
+                            .map(|f| f.1)
+                            .zip(vb.fields.iter().map(|f| f.1)),
+                    );
+                }
+            }
+            (TypeKind::Box(x), TypeKind::Box(y)) => pending.push((*x, *y)),
+            (TypeKind::Primitive(x), TypeKind::Primitive(y)) if x == y => (),
+            (TypeKind::Parameter(x), TypeKind::Parameter(y)) if x == y => (),
+            _ if !strict => (),
+            _ => return Ok(false),
+        }
+    }
+    Ok(true)
+}
+
 /// These bounds exclude held authority, independently of copy/sendable modes.
 pub fn bounds_imply_inert(bounds: &[Bound]) -> bool {
     bounds.iter().any(|b| {

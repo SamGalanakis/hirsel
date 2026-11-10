@@ -180,6 +180,12 @@ fn derive_typed_impl<'a>(
                     Shape::Leaf
                 } else if definition.path().is_core("Path") {
                     Shape::Leaf
+                } else if declaration.representation.is_none()
+                    && declaration.bounds.contains(&Bound::OrderedOf)
+                {
+                    // SEM-5: an opaque `ordered of` token (an Instant's ticks, a
+                    // Level's ordinal) is one word compared as an unsigned scalar.
+                    Shape::Leaf
                 } else {
                     let representation = declaration.representation.or_else(|| {
                         let crate::layout::OwnerRepresentation::Defined(record) =

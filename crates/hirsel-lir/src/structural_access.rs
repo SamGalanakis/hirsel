@@ -242,7 +242,8 @@ impl<'a> Builder<'a> {
         Ok(match shape {
             Shape::Leaf => (
                 match r.kind {
-                    K::Scalar(_) => N::Scalar(l),
+                    // SEM-5: an opaque ordered token's word is read as a u64.
+                    K::Scalar(_) | K::Handle => N::Scalar(l),
                     K::Path => N::Path(l),
                     K::Flat => N::FlatText {
                         layout: l,

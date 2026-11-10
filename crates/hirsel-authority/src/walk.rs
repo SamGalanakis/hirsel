@@ -1899,13 +1899,22 @@ impl<'a> Checker<'a> {
                 self.expr(right, None);
                 if matches!(
                     op,
-                    hirsel_syntax::BinaryOp::Eq | hirsel_syntax::BinaryOp::Ne
+                    hirsel_syntax::BinaryOp::Eq
+                        | hirsel_syntax::BinaryOp::Ne
+                        | hirsel_syntax::BinaryOp::Lt
+                        | hirsel_syntax::BinaryOp::Le
+                        | hirsel_syntax::BinaryOp::Gt
+                        | hirsel_syntax::BinaryOp::Ge
                 ) {
+                    // A payload-free variant holds no part, so it takes its peer's.
                     if let Some(peer) = self.ty(left) {
                         self.comparison_variant(right, peer);
                     }
                     if let Some(peer) = self.ty(right) {
                         self.comparison_variant(left, peer);
+                    }
+                    if let (Some(a), Some(b)) = (self.ty(left), self.ty(right)) {
+                        self.comparison_domain(e, a, b);
                     }
                 }
                 used = self.used(left).join(self.used(right));
@@ -2664,6 +2673,29 @@ impl<'a> Checker<'a> {
                     .map(|c| c.authority.clone())
                     .unwrap_or(AuthoritySummary::Unknown)
             }
+        }
+    }
+    /// SEM-5/PROV-2: with callee results substituted into this body's origins and
+    /// literal parts typed by their operands, each operand knows one owner for every
+    /// `ordered of` part, and the two operands name the same one.
+    fn comparison_domain(&mut self, e: ExprId, left: TypeId, right: TypeId) {
+        let t = self.t;
+        let mut lookup = |d| Ok::<_, QueryError>(self.read(d));
+        let known = [left, right].into_iter().try_fold(true, |known, side| {
+            Ok::<_, QueryError>(
+                known && hirsel_types::comparison_domains(t, side, side, &mut lookup)?,
+            )
+        });
+        let agree = known.and_then(|known| {
+            Ok(known && !hirsel_types::comparison_domain_conflict(t, left, right, &mut lookup)?)
+        });
+        if !agree.unwrap_or(false) {
+            self.explained(
+                const { RuleId::of("PROV-2") },
+                self.span(e),
+                "comparison cannot establish one comparison domain: both operands must carry the same single owner for every `ordered of` part",
+                Explanation::default(),
+            );
         }
     }
     /// H's comparison context can be a callee result template. Once J has

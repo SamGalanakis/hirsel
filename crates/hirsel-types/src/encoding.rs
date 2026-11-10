@@ -443,6 +443,8 @@ impl Encoder {
                 Bound::Copyable => "copyable",
                 Bound::NoallocDrop => "noalloc_drop",
                 Bound::Serializable => "serializable",
+                Bound::Ordered => "ordered",
+                Bound::OrderedOf => "ordered_of",
             });
         }
     }

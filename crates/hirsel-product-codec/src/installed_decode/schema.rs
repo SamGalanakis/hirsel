@@ -93,7 +93,9 @@ variants!(ast::Bound {
     Inert,
     Copyable,
     NoallocDrop,
-    Serializable
+    Serializable,
+    Ordered,
+    OrderedOf
 });
 structure!(ast::Sharing {
     member,

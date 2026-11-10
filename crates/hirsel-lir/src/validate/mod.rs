@@ -1109,11 +1109,13 @@ impl<'a> Layouts<'a> {
             }
             // Map, Set and SortedMap compare by their library order.
             LayoutKind::Opaque { .. } => true,
+            // An `ordered of` token compares by its unsigned word (SEM-5, LIR schema
+            // revision 64); the checker owns which handles are ordered.
+            LayoutKind::Handle => true,
             // Shared roots have no equality (GEN-1); a frozen payload is never a value.
             LayoutKind::Shared { .. }
             | LayoutKind::SealedRegion { .. }
             | LayoutKind::Frozen { .. }
-            | LayoutKind::Handle
             | LayoutKind::HostCapability { .. }
             | LayoutKind::Arena
             | LayoutKind::Callable { .. }

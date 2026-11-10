@@ -409,6 +409,10 @@ fn specialize(
                         Bound::Data | Bound::Key => {
                             structural_equality(t, *ty, *bound, &declarations, lookup)?
                         }
+                        Bound::Ordered | Bound::OrderedOf => {
+                            structural_ordered(t, *ty, Domains::Carried, &declarations, lookup)?
+                                && comparison_domains(t, *ty, *ty, lookup)?
+                        }
                         Bound::Inert => {
                             structural_authority(
                                 t,

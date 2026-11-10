@@ -1,7 +1,8 @@
 # Generics
 
 Generic parameters are written `[T]`, `[T: bounds]` or `[n: size]`. Bounds follow
-[GEN-1](#gen-1-bounds); behaviour such as ordering or hashing uses explicit
+[GEN-1](#gen-1-bounds); a type's canonical order is the `ordered` bound, and other
+behaviour, such as a custom or reverse order or hashing, uses explicit
 [dictionaries](#gen-2-dictionaries).
 
 ```hirsel
@@ -30,6 +31,23 @@ copy is a count on the root or run-owned cell and never copies the contents.
   pointers; structural `==`, IEEE on floats) and `key` (`data` without floats; hashable).
 - Crossing: `sendable` ([MODE-4](ownership.md#mode-4-sendable)); for `sendable`, "type"
   includes the actual modes.
+- Order: `ordered` supplies canonical comparison
+  ([SEM-5](semantics.md#sem-5-order-and-maps)), not `data`, `key`, serialization,
+  copying or authority. Integers, `bool`, `char`, `String`, `Bytes` and unit qualify;
+  tuples, boxes, `Array`, `List`, `Inline` and `Packed` qualify when their components do.
+  Floats do not. A nominal record, variant or distinct type qualifies only by declaring
+  `: ordered`, and the compiler derives its order from its representation, which must
+  qualify; `Option` and `Result` declare it. An opaque type exports the bound in its
+  signature, checked against its representation in the owner's view; a core token whose
+  order requires an owner domain declares `ordered of` (`Instant`, `Level`). No user
+  comparator or lossy projection can discharge the bound.
+
+  `[T: ordered]` permits canonical comparison of `T`. Substitution for it carries
+  comparison domains in its evidence at every payload depth: a type with an `ordered of`
+  part satisfies it only with one known owner per part, so `List[Instant]` with a forgotten
+  clock does not. Compared occurrences of `T` require one common domain; calls and callable
+  conversions preserve that obligation and never infer an unbranded common `T` to evade
+  it ([PROV-2](brands.md#prov-2-checking)).
 
 Inside a function with an implementation binder `H`, a type member `H.T` has exactly the
 bounds its signature declares, and generic code may rely on no others. An actual whose
@@ -50,7 +68,7 @@ authority abstraction only, not structural-bound proof. There is no universal `=
 `Shared`, `Slots`, `TypeShape`, `SortedMap` and the planned `Entry`
 ([RUN-3](runners.md#run-3-entries)) satisfy neither `data` nor `key`, including
 inside aggregates; `Map` and `Set` have their specified structural equality
-([SEM-5](semantics.md#sem-5-maps)). Finite or regular nominal type graphs have no semantic
+([SEM-5](semantics.md#sem-5-order-and-maps)). Finite or regular nominal type graphs have no semantic
 depth or width cutoff for proving bounds; only strictly growing polymorphic expansion may
 stop, as an operational tooling limit, never as false evidence.
 
@@ -164,7 +182,9 @@ fn example() -> u64 {
 ### GEN-2: Dictionaries
 
 Behaviour is explicit values: `Order[T]`, `Hasher[T]`, `Eq[T]` and user records of
-functions. `Order` is never derived. Dictionaries are pure. A container whose invariant
+functions. `Order` is never derived: a type's canonical order is its `ordered` bound
+([GEN-1](#gen-1-bounds)), and `Order[T]` values serve custom and reverse orders only. They
+cannot redefine the operators. Dictionaries are pure. A container whose invariant
 depends on a dictionary is `of` it; a top-level dictionary such as `u32.order` is one
 identity everywhere. An implementation ([GEN-6](#implementation-contracts)) is not a
 dictionary: it is a static map chosen at each call and is never a value, so it has no

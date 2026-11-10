@@ -1346,7 +1346,15 @@ impl<S: Stage> Checker<'_, '_, S> {
             } => {
                 use crate::ir::BinaryOp as B;
                 let comparison = matches!(op, B::Eq | B::Ne | B::Lt | B::Le | B::Gt | B::Ge);
-                let kind = self.scalar(left);
+                // SEM-5 (LIR schema revision 64): a run-context handle compares
+                // by its unsigned word. Only `ordered of` tokens reach this; the checker
+                // owns which handles are ordered.
+                let handle = comparison && self.ty(left).repr == ValueRepr::Handle;
+                let kind = if handle {
+                    Some(ScalarKind::U64)
+                } else {
+                    self.scalar(left)
+                };
                 let float = matches!(kind, Some(ScalarKind::F32 | ScalarKind::F64));
                 // The named library operations (LIR schema revision 6) hold
                 // only in their own domain.

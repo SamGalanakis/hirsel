@@ -87,7 +87,9 @@ pub(crate) fn registry(types: &Arc<TypeInterner>) -> BTreeMap<DefId, SignatureRe
             t.bounds.extend([Bound::Data, Bound::Key, Bound::Sendable]);
         }
         if matches!(name, "Instant" | "Level") {
-            t.bounds.push(Bound::Sendable);
+            // SEM-5: ticks and declared weakest-first ordinals order only within one
+            // clock or authority, the value's brand.
+            t.bounds.extend([Bound::Sendable, Bound::OrderedOf]);
         }
         serializable_core(name, &mut t);
         if let Some(protocol) = match name {
@@ -732,7 +734,7 @@ pub(crate) fn registry(types: &Arc<TypeInterner>) -> BTreeMap<DefId, SignatureRe
             t.bounds.extend([Bound::Plain, Bound::Sendable]);
         }
         if !matches!(name, "f32" | "f64") {
-            t.bounds.push(Bound::Key);
+            t.bounds.extend([Bound::Key, Bound::Ordered]);
         }
         let mut s = b.signature(name, SignatureKind::Type(Box::new(t)), false);
         s.metadata.alias = true;
@@ -1266,6 +1268,10 @@ fn variant(
             Bound::NoallocDrop,
         ];
     }
+    if matches!(name, "Option" | "Result") {
+        // SEM-5: declaration ordinal, then payload, when every argument is ordered.
+        t.bounds.push(Bound::Ordered);
+    }
     serializable_core(name, &mut t);
     publish(
         types,
@@ -1425,6 +1431,7 @@ impl Builder {
                                 "data" => Bound::Data,
                                 "key" => Bound::Key,
                                 "serializable" => Bound::Serializable,
+                                "ordered" => Bound::Ordered,
                                 _ => panic!("unknown bound {b}"),
                             })
                             .collect(),

@@ -3992,18 +3992,26 @@ impl<'p, S: Stage> Machine<'p, S> {
                 right,
                 failure,
             } => {
-                let (
-                    Val::Bits {
-                        scalar: lk,
-                        bits: l,
-                    },
-                    Val::Bits {
-                        scalar: rk,
-                        bits: r,
-                    },
-                ) = (self.read_use(f, left)?, self.read_use(f, right)?)
-                else {
-                    return fail(V::TypeConfusion, "binary operand is not a scalar");
+                let (lk, l, rk, r) = match (self.read_use(f, left)?, self.read_use(f, right)?) {
+                    (
+                        Val::Bits {
+                            scalar: lk,
+                            bits: l,
+                        },
+                        Val::Bits {
+                            scalar: rk,
+                            bits: r,
+                        },
+                    ) => (lk, l, rk, r),
+                    // SEM-5: an `ordered of` token orders by its unsigned word.
+                    // The comparison is the owning operands' last use: it spends their
+                    // credits, whose word may coincide with an open handle's.
+                    (Val::Handle(l), Val::Handle(r)) if comparison(op) => {
+                        self.take_value(f, left)?;
+                        self.take_value(f, right)?;
+                        (ScalarKind::U64, l.into(), ScalarKind::U64, r.into())
+                    }
+                    _ => return fail(V::TypeConfusion, "binary operand is not a scalar"),
                 };
                 if scalar::binary_may_fail(op, lk) && self.injection_site() {
                     return self.fail_at(f, failure, true);
@@ -11160,3 +11168,11 @@ mod sealed_seal_tests;
 
 #[cfg(test)]
 mod sealed_graph_tests;
+
+/// An operator of the scalar order (`Inst::Binary`'s comparisons).
+fn comparison(op: BinaryOp) -> bool {
+    matches!(
+        op,
+        BinaryOp::Eq | BinaryOp::Ne | BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge
+    )
+}

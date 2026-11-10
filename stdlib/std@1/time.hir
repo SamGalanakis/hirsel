@@ -20,19 +20,6 @@ pub fn elapsed(clock: MonotonicClock, start: Instant of clock) -> Result[
   Ok(between(clock, start, end))
 }
 
-@noalloc
-pub fn compare(clock: MonotonicClock, a: Instant of clock, b: Instant of clock) -> i32 {
-  let first = core@1/instant.ticks(a)
-  let second = core@1/instant.ticks(b)
-  if first < second {
-    -1
-  } else if first > second {
-    1
-  } else {
-    0
-  }
-}
-
 @serializable
 pub type Timestamp {
   unix_nanoseconds: i128,

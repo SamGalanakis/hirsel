@@ -53,6 +53,8 @@ impl<S: Stage> Machine<'_, S> {
                 LayoutKind::Path,
             ) => return Ok(Ok(Some(self.path_order(*a as u64, *b as u64)?))),
             (Val::Unit, Val::Unit, LayoutKind::Unit) => return Ok(Ok(Some(Ordering::Equal))),
+            // SEM-5: an `ordered of` token orders by its unsigned word.
+            (Val::Handle(a), Val::Handle(b), LayoutKind::Handle) => return Ok(Ok(Some(a.cmp(b)))),
             (
                 Val::Ptr(pa),
                 Val::Ptr(pb),
@@ -120,6 +122,12 @@ impl<S: Stage> Machine<'_, S> {
                     }
                 }
                 LayoutKind::Unit => {}
+                LayoutKind::Handle => {
+                    let order = self.bits_at(x, 8)?.cmp(&self.bits_at(y, 8)?);
+                    if order != Ordering::Equal {
+                        return Ok(Ok(Some(order)));
+                    }
+                }
                 LayoutKind::Scalar(kind) => {
                     let size = self.size(layout)?;
                     let (l, r) = (self.bits_at(x, size)?, self.bits_at(y, size)?);
@@ -305,7 +313,6 @@ impl<S: Stage> Machine<'_, S> {
                     );
                 }
                 LayoutKind::Environment { .. }
-                | LayoutKind::Handle
                 | LayoutKind::HostCapability { .. }
                 | LayoutKind::SealedRegion { .. }
                 | LayoutKind::PayloadReceipt { .. }

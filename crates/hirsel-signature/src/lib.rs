@@ -540,6 +540,17 @@ fn normalize_inner(
             if serializable && check.is_none() {
                 inferred.push(Bound::Serializable);
             }
+            // GEN-1: `ordered` is an explicit opt-in; the order derives from the
+            // representation and is never inferred.
+            for bound in bounds.iter().flatten() {
+                if matches!(bound, Bound::Ordered | Bound::OrderedOf)
+                    && *flavor != ast::TypeFlavor::Resource
+                    && attrs.capability.is_none()
+                    && repr.is_some_and(|root| n.ordered_declaration(&item.definition, root))
+                {
+                    inferred.push(*bound);
+                }
+            }
             for bound in bounds.iter().flatten() {
                 if (matches!(bound, Bound::Inert | Bound::Flat | Bound::Serializable)
                     && attrs.capability.is_some())
@@ -3119,7 +3130,34 @@ impl Normalizer<'_, '_> {
         seen.remove(&id);
         result
     }
+    /// GEN-1: a declared `ordered` bound holds for this representation.
+    fn ordered_declaration(&self, definition: &hirsel_syntax::DefPath, root: TypeId) -> bool {
+        ordered_declaration(
+            self.types,
+            DefId::intern(definition),
+            &self.generics,
+            root,
+            &mut |definition: DefId| {
+                Ok::<_, hirsel_types::QueryError>(self.snapshots.get(&definition).cloned())
+            },
+        )
+        .unwrap_or_else(|error| self.proof_failure(error, false))
+    }
     fn satisfies(&self, t: TypeId, b: Bound) -> bool {
+        if matches!(b, Bound::Ordered | Bound::OrderedOf) {
+            let lookup = &mut |definition: DefId| {
+                Ok::<_, hirsel_types::QueryError>(self.snapshots.get(&definition).cloned())
+            };
+            return structural_ordered(
+                self.types,
+                t,
+                Domains::Carried,
+                &self.declarations(),
+                lookup,
+            )
+            .and_then(|ordered| Ok(ordered && comparison_domains(self.types, t, t, lookup)?))
+            .unwrap_or_else(|error| self.proof_failure(error, false));
+        }
         if b == Bound::Serializable {
             return self
                 .serializable(t)

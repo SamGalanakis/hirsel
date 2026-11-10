@@ -894,6 +894,11 @@ pub enum Bound {
     NoallocDrop,
     /// Explicit canonical data-schema qualification (SER-1); not a value mode.
     Serializable,
+    /// One canonical total order (GEN-1, SEM-5); `<` and `==` follow it.
+    Ordered,
+    /// `ordered of`, a declaration-only bound: canonical order that holds only within one
+    /// owner domain, the value's single brand (SEM-5, PROV-2). It implies `ordered`.
+    OrderedOf,
 }
 /// Generic parameter kind with equality-only sizes (LANG-7, GEN-1).
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Eq, PartialEq)]

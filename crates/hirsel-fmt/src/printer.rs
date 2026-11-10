@@ -290,6 +290,7 @@ impl<'a> Printer<'a> {
                 token(match b {
                     Bound::NoallocDrop => "noalloc_drop".into(),
                     Bound::Serializable => "serializable".into(),
+                    Bound::OrderedOf => "ordered of".into(),
                     _ => format!("{b:?}").to_lowercase(),
                 })
             }),

@@ -73,7 +73,7 @@ fn connected(mut ch: ClientConn) -> Result[(), Status] {
 
 fn now_past(d: Deadline) -> bool {
   match clock.monotonic(d.clock) {
-    Ok(now) => time.compare(d.clock, now, d.at) >= 0,
+    Ok(now) => now >= d.at,
     Error(_) => false,
   }
 }

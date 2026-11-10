@@ -177,6 +177,7 @@ impl Importer<'_> {
         right: &tir::Operand,
         ty: LirTypeId,
     ) -> R<ValueId> {
+        let source = op;
         let op = match op {
             BinaryOp::Eq => CompareOp::Eq,
             BinaryOp::Ne => CompareOp::Ne,
@@ -196,9 +197,26 @@ impl Importer<'_> {
         self.failure.before.splice(0..0, prepared.iter().cloned());
         let r = self.compared(right, &mut loans, &mut taken)?;
         self.failure.before.drain(0..prepared.len());
+        let result = self.fresh(ty);
+        if self.out.types[self.value_type(l).index()].repr == ValueRepr::Handle {
+            // SEM-5: a word-backed `ordered of` token (Instant, Level) orders as one
+            // unsigned scalar of its word; the checker established one domain.
+            return self
+                .reading(loans, taken, |this| {
+                    let failure = this.fail(None)?;
+                    this.push(Inst::Binary {
+                        result,
+                        op: source,
+                        left: l,
+                        right: r,
+                        failure,
+                    });
+                    Ok(())
+                })
+                .map(|()| result);
+        }
         let layout = self.layout_of(self.value_type(l));
         self.structural_access(self.body.places[left.place.0 as usize].ty, layout)?;
-        let result = self.fresh(ty);
         self.reading(loans, taken, |this| {
             let failure = this.fail(Some("MEM-3".to_string()))?;
             this.push(Inst::Compare {

@@ -5,21 +5,22 @@
 // tuple-layer nested-tuple tests (bindings/python/tests/tuple_tests.py):
 // variants order by arm and then payload, so `None` precedes every `Some`,
 // records and tuples by field, and sequences with a proper prefix first.
-// Each encoding decodes back.
+// Each encoding decodes back, and the SEM-5 operators of these `ordered` types agree with
+// the same order.
 @serializable
-type Row {
+type Row: ordered {
   name: String,
   id: i32,
 }
 
 @serializable
-type Shade = Dim | Lit(u8)
+type Shade: ordered = Dim | Lit(u8)
 
 @serializable
-type Tree = Leaf(u8) | Branch(List[Tree])
+type Tree: ordered = Leaf(u8) | Branch(List[Tree])
 
 @serializable
-type Chain = End | Link(u8, box Chain)
+type Chain: ordered = End | Link(u8, box Chain)
 
 type Case {
   which: u64,
@@ -254,9 +255,22 @@ fn codes_order(a: List[u64], b: List[u64]) -> i32 uses {} {
   count_order(list.len(a), list.len(b))
 }
 
-fn agrees[K: serializable](a: K, b: K, expected: i32, trip: bool) -> bool uses {} {
+// SEM-5: the canonical order the operators derive from the representation.
+fn operators[K: ordered](a: K, b: K) -> i32 uses {} {
+  if a < b && a <= b && b > a && b >= a && a != b {
+    -1
+  } else if b < a && b <= a && a > b && a >= b && a != b {
+    1
+  } else if a == b && a <= b && a >= b {
+    0
+  } else {
+    2
+  }
+}
+
+fn agrees[K: serializable + ordered](a: K, b: K, expected: i32, trip: bool) -> bool uses {} {
   let ea = std@1/keys.encode(a)
-  if bytes_order(ea, std@1/keys.encode(b)) != expected {
+  if bytes_order(ea, std@1/keys.encode(b)) != expected || operators(a, b) != expected {
     return false
   }
   if !trip {

@@ -367,6 +367,17 @@ impl<'m, 'a> FnEmitter<'m, 'a> {
                 right,
                 failure,
             } => {
+                if self.value_type(left)?.repr == ValueRepr::Handle {
+                    // SEM-5: an `ordered of` token orders by its unsigned word, the one
+                    // `i64` of the handle's `[1 x i64]` bytes.
+                    let l = self.builder.extract(self.get(left)?, 0);
+                    let r = self.builder.extract(self.get(right)?, 0);
+                    let mut guard = self.guard_for(failure)?;
+                    let value =
+                        scalar::binary(&self.builder, op, ScalarKind::U64, l, r, &mut guard)
+                            .or_else(|what| self.invalid(what))?;
+                    return self.define(result, value);
+                }
                 let kind = self.scalar_kind(left)?;
                 if self.scalar_kind(right)? != kind {
                     return self.invalid("binary operands of different types");

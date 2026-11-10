@@ -390,6 +390,7 @@ impl Parser<'_> {
             ("copyable", Bound::Copyable),
             ("noalloc_drop", Bound::NoallocDrop),
             ("serializable", Bound::Serializable),
+            ("ordered", Bound::Ordered),
         ];
         let mut bounds = vec![];
         loop {
@@ -422,7 +423,12 @@ impl Parser<'_> {
                 return Err(());
             };
             self.pos += 1;
-            bounds.push(*bound);
+            // `ordered of`: canonical order within the value's owner domain (SEM-5).
+            bounds.push(if *bound == Bound::Ordered && self.eat("of") {
+                Bound::OrderedOf
+            } else {
+                *bound
+            });
             if !self.eat("+") {
                 break;
             }
@@ -783,7 +789,9 @@ impl Parser<'_> {
         let name_span = self.span();
         let name = self.name()?;
         let generics = self.generics()?;
-        let bounds = if flavor != TypeFlavor::Distinct && self.eat(":") {
+        // A distinct type's bounds are computed from its field; a clause states the
+        // explicit opt-ins (`ordered`, GEN-1) and is checked against them.
+        let bounds = if self.eat(":") {
             Some(if self.eat("(") {
                 self.expect(")", const { RuleId::of("GEN-1") })?;
                 vec![]

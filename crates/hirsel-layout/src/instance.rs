@@ -617,6 +617,8 @@ impl KeyEncoder<'_> {
                                     Bd::Copyable => "copyable",
                                     Bd::NoallocDrop => "noalloc_drop",
                                     Bd::Serializable => "serializable",
+                                    Bd::Ordered => "ordered",
+                                    Bd::OrderedOf => "ordered_of",
                                 })
                                 .collect();
                             bounds.sort();

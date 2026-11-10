@@ -372,7 +372,7 @@ specified event-capable provider whose events are recorded and obey cancellation
 no-effect rule. Resuming into real `Io` is a new admission that validates live host grants
 again; a recording is never authority to reconnect ([PROG-6](programs.md#prog-6-grant-admission)).
 
-**Seeds.** The hash placement seed affects only placement ([SEM-5](semantics.md#sem-5-maps)).
+**Seeds.** The hash placement seed affects only placement ([SEM-5](semantics.md#sem-5-order-and-maps)).
 The Random and Test seeds are separate even when a user chooses equal numbers, and so is
 `inputs.fault_seed`, which drives `sim@1` runners' fault-site enablement, firing and crash
 points ([providers](runners.md#providers)). When present, it contributes to run identity

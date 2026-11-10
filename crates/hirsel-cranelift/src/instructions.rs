@@ -16,6 +16,20 @@ use crate::function::{FnEmitter, Place, Shape, V};
 use crate::module::{Emitted, PTR};
 
 impl FnEmitter<'_, '_, '_> {
+    /// The word of a run-context handle value: one load from its bytes.
+    fn handle_word(&mut self, value: ValueId) -> Emitted<Value> {
+        match self.get(value)? {
+            V::Mem { addr, .. } => {
+                Ok(self
+                    .b
+                    .ins()
+                    .load(types::I64, crate::function::flags(), addr, 0))
+            }
+            V::One(word) => Ok(word),
+            _ => self.invalid(format!("handle value {} is not one word", value.0)),
+        }
+    }
+
     pub(crate) fn instruction(&mut self, inst: &Inst) -> Emitted {
         self.root_facts_before(inst)?;
         if self.host_instruction(inst)? {
@@ -103,6 +117,12 @@ impl FnEmitter<'_, '_, '_> {
                 right,
                 failure,
             } => {
+                if self.value_type(left)?.repr == ValueRepr::Handle {
+                    // SEM-5: an `ordered of` token orders by its unsigned word.
+                    let (l, r) = (self.handle_word(left)?, self.handle_word(right)?);
+                    let value = self.binary(op, ScalarKind::U64, l, r, failure)?;
+                    return self.define1(result, value);
+                }
                 let kind = self.scalar_kind(left)?;
                 if self.scalar_kind(right)? != kind {
                     return self.invalid("binary operands of different types");

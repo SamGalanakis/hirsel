@@ -27,6 +27,8 @@ pub(super) enum Proof {
     Flat,
     Detaches,
     Equality(hirsel_types::Bound),
+    /// `ordered` (SEM-5): one canonical total order with one comparison domain.
+    Ordered,
     Sendability,
     Content,
     AfterSharing,
@@ -135,6 +137,15 @@ impl Checker<'_, '_> {
                 hirsel_types::structural_equality(store, root, bound, generics, &mut lookup)
                     .map(verdict)
             }
+            Proof::Ordered => Ok(verdict(
+                hirsel_types::structural_ordered(
+                    store,
+                    root,
+                    hirsel_types::Domains::Carried,
+                    generics,
+                    &mut lookup,
+                )? && hirsel_types::comparison_domains(store, root, root, &mut lookup)?,
+            )),
             Proof::Sendability => {
                 hirsel_types::structural_sendability(store, root, generics, &mut lookup)
             }

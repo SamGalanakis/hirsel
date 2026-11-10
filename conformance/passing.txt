@@ -1438,6 +1438,9 @@ conformance/GEN/GEN-1-opaque-plain-flat-bad.hir
 conformance/GEN/GEN-1-opaque-plain-flat-ok.hir
 conformance/GEN/GEN-1-opaque-resource-equality-bad.hir
 conformance/GEN/GEN-1-opaque-resource-equality-ok.hir
+conformance/GEN/GEN-1-ordered-data-launder-bad.hir
+conformance/GEN/GEN-1-ordered-float-bad.hir
+conformance/GEN/GEN-1-ordered-record-opt-in-bad.hir
 conformance/GEN/GEN-1-packed-local-resource-bad.hir
 conformance/GEN/GEN-1-packed-local-resource-ok.hir
 conformance/GEN/GEN-1-packed-local-string-bad.hir
@@ -4845,6 +4848,7 @@ conformance/PROV/PROV-1-nested-loop-owner-ok.hir
 conformance/PROV/PROV-1-net-stream-other-net-bad.hir
 conformance/PROV/PROV-1-net-stream-other-net-ok.hir
 conformance/PROV/PROV-1-open-moved-result.hir
+conformance/PROV/PROV-1-ordered-generic-two-clocks-bad.hir
 conformance/PROV/PROV-1-owned-replacement-other-bad.hir
 conformance/PROV/PROV-1-owned-replacement-self-bad.hir
 conformance/PROV/PROV-1-owner-leaves-scope-bad.hir
@@ -4954,6 +4958,12 @@ conformance/PROV/PROV-2-narrow-current-test-run.hir
 conformance/PROV/PROV-2-narrow-current-unlink-run.hir
 conformance/PROV/PROV-2-nested-brand-unbranded-parameter-bad.hir
 conformance/PROV/PROV-2-nested-brand-unbranded-parameter-ok.hir
+conformance/PROV/PROV-2-ordered-erased-equality-bad.hir
+conformance/PROV/PROV-2-ordered-erased-instant-bad.hir
+conformance/PROV/PROV-2-ordered-generic-launder-bad.hir
+conformance/PROV/PROV-2-ordered-levels-two-authorities-bad.hir
+conformance/PROV/PROV-2-ordered-list-erased-bad.hir
+conformance/PROV/PROV-2-ordered-tuple-two-clocks-bad.hir
 conformance/PROV/PROV-2-record-callable-two-relays-ok.hir
 conformance/PROV/PROV-2-runtime-handle-narrow.hir
 conformance/PROV/PROV-2-sleep-until-same-clock-ok.hir
@@ -7270,6 +7280,8 @@ conformance/SEM/SEM-5-map-tombstones-nested-borrow-run.hir
 conformance/SEM/SEM-5-map-update-value-17-run.hir
 conformance/SEM/SEM-5-map-upsert-update-run.hir
 conformance/SEM/SEM-5-mut-map-value-ok.hir
+conformance/SEM/SEM-5-ordered-levels-run.hir
+conformance/SEM/SEM-5-ordered-tokens-run.hir
 conformance/SEM/SEM-5-pqcombined-example-run.hir
 conformance/SEM/SEM-5-pqcombined-root-updates-run.hir
 conformance/SEM/SEM-5-pqcombined-topk-run.hir

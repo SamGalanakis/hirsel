@@ -92,8 +92,8 @@ contributes those newlines to the termination rule. Doc comments attach document
 otherwise behave as comments. An unterminated comment is one invalid token and a LANG-1
 diagnostic.
 
-`plain data key sendable inert copyable noalloc_drop serializable size` are contextual
-names in bounds; `sendable` is also a contextual type modifier when a type follows it,
+`plain data key sendable inert copyable noalloc_drop serializable ordered size` are
+contextual names in bounds; `sendable` is also a contextual type modifier when a type follows it,
 and `env` is a contextual place name inside a relation. Attribute names (`noalloc`,
 `layout`, `packed`, `align`, `soa`, `blocking`, `incomplete`, `capability`,
 `serializable`, `loop_source`, `format`, `advance_only`, `preserves_captures`, `preserves_unique`,
@@ -308,13 +308,14 @@ binder       = "implementation", type-path,
 sharing      = name, ".", name, "=", name, ".", name ;   (* GEN-6 *)
 bounds       = bound, { "+", bound } ;                   (* GEN-1 *)
 bound        = "plain" | "flat" | "data" | "key" | "sendable" | "inert" | "copyable"
-             | "noalloc_drop" | "serializable" ;         (* GEN-1, MEM-5, SER-1 *)
+             | "noalloc_drop" | "serializable" | "ordered", [ "of" ] ; (* GEN-1, MEM-5, SER-1, SEM-5 *)
 uses         = "uses", "{", list(value-path), "}" ;      (* CAP-2/3, CLO-2/4 *)
 contract     = ( "requires" | "ensures" ), expression ;  (* FACT-1 *)
 type-def     = [ "flat" | "resource" ], "type", name, [ generics ],
                [ ":", type-bounds ], [ uses ],
                ( record-fields | "=", type-rhs | opaque-end ), [ drop-def ]
-             | "distinct", "type", name, [ generics ], "(", { analysis }, name, ":", part-type, ")",
+             | "distinct", "type", name, [ generics ], [ ":", type-bounds ],
+               "(", { analysis }, name, ":", part-type, ")",
                [ "where", expression ] ;  (* LANG-7, GEN-1, CAP-5, SER-1, MEM-12, DROP-2, FACT-2 *)
 type-bounds  = bounds | "(", ")" ;                       (* LANG-6, GEN-1, PROG-2 *)
 record-fields= "{", [ { analysis }, field, { entry-sep, { analysis }, field }, [ entry-sep ] ], "}" ; (* LANG-7/12, PS-17 *)

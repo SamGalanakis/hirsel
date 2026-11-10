@@ -209,18 +209,51 @@ means `open`, `next`, construction and every relevant cleanup are proved noalloc
 `take` loop markers need a separately declared protocol; a borrowed association admits
 neither.
 
-### SEM-5: Maps
+### SEM-5: Order and maps
 
-The operators `<`, `<=`, `>` and `>=` compare `String` and `Bytes`
-byte-lexicographically; a proper prefix sorts before the longer value.
+`<`, `<=`, `>` and `>=` borrow two operands of the same type. They accept `ordered`
+operands ([GEN-1](generics.md#gen-1-bounds)), or concrete `f32`/`f64` operands with their
+IEEE semantics ([SEM-2](#sem-2-floats)). An ordered type has one canonical total order;
+`==` and `!=` also accept ordered operands and agree with that order. Where `data`
+equality also exists, it is the same equality. Comparison returns an unbranded `bool` and
+grants neither arithmetic nor construction or representation access.
+
+A type may declare that its canonical order requires an owner domain (`ordered of`). Comparing
+such values requires the same live, singleton owner identity, including within compared
+aggregates. An absent, expired, union or different domain is
+[PROV-2](brands.md#prov-2-checking). Forgetting a brand does not remove this
+requirement. Locality and uniqueness remain irrelevant to comparison. This rule overrides
+PROV-2's root-brand exemption only for declared comparison domains; incidental brands on
+ordinary scalars keep their existing behaviour.
+
+```hirsel
+fn earlier[T: ordered](a: T, b: T) -> bool { a < b }
+fn bad(c: MonotonicClock, d: MonotonicClock, a: Instant of c, b: Instant of d) -> bool {
+  earlier(a, b) // PROV-1: `b` belongs to `d`, not `c`
+}
+fn erased(a: Instant, b: Instant) -> bool { a < b } // PROV-2: the domain is unknown
+```
+
+Canonical order is numeric for integers and `char`, false before true for `bool`, and
+byte-lexicographic for `String` and `Bytes`, a proper prefix before the longer value. Unit
+has one value. Tuples and opted-in records compare fields lexicographically in declaration
+order; opted-in variants compare declaration ordinal, then payload fields. Sequences
+(`Array`, `List`, `Inline`, `Packed`) compare lexicographically, proper prefix first.
+Boxes use payload order. Every component must itself qualify. Floats keep IEEE comparisons
+and are not `ordered`; functions, capabilities, resources, `Map`, `Set` and `Simd` acquire
+no canonical order. The core tokens order by a private word: `Instant of clock` by its
+ticks, and `Level of a` by its declared weakest-first ordinal
+([STORE-3](storage.md#store-2-transactions)). Comparison never samples a clock,
+consults authority state, allocates or serializes a token, and performs no domain check at
+run time: the domain is established statically.
 
 `Map[K: key, V]` iterates in insertion order; the hash seed affects placement only. Map
 `==` is order-sensitive, and `map.same_entries` compares as sets. `Set` equality
 ignores order. Structural comparison of `Set` values sorts each set's elements by
 structural order on their element type, then compares the sorted sequences
 lexicographically, the shorter first on a common prefix; nested sets use the same rule.
-This internal order keeps equality as mutual containment and hashing commutative; source
-ordering operators stay limited to scalar and byte operands.
+This internal order keeps equality as mutual containment and hashing commutative; `Map` and
+`Set` are not `ordered`, so source ordering operators never reach it.
 
 The keyed reads `map.get` and `set.contains` use the same hash and key equality as
 insertion and change neither the container nor its order; `map.get` returns the value

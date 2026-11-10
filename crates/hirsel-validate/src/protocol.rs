@@ -239,6 +239,10 @@ fn instantiate(
                         Bound::Data | Bound::Key => {
                             structural_equality(t, *ty, *bound, &context, lookup).ok()?
                         }
+                        Bound::Ordered | Bound::OrderedOf => {
+                            structural_ordered(t, *ty, Domains::Carried, &context, lookup).ok()?
+                                && comparison_domains(t, *ty, *ty, lookup).ok()?
+                        }
                         Bound::Inert => {
                             structural_authority(
                                 t,

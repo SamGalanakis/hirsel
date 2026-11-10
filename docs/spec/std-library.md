@@ -251,7 +251,6 @@ N fn time.parse(text: String) -> Result[time.Timestamp, scalar.ParseError] uses 
 fn time.to_string(value: time.Timestamp) -> Result[unique String, time.TimeError] uses {}
 N fn time.elapsed(clock: MonotonicClock, start: Instant of clock) -> Result[time.Duration, ClockError]
 N fn time.between(clock: MonotonicClock, start: Instant of clock, end: Instant of clock) -> time.Duration
-N fn time.compare(clock: MonotonicClock, a: Instant of clock, b: Instant of clock) -> i32
 N fn time.deadline(clock: MonotonicClock, interval: time.Duration) -> Result[Instant of clock, time.SleepError]
 N fn time.sleep(clock: MonotonicClock, interval: time.Duration) -> Result[(), time.SleepError]
 fn bytes.replace(src: Bytes, old: Bytes, new: Bytes) -> unique Bytes in src
@@ -551,9 +550,10 @@ second 60, a missing offset and trailing data are invalid. Numeric offsets norma
 fractional zeros, or `TimeError.OutOfRange` outside years 0000–9999. These are ordinary
 algorithms with no clock authority, locale or time-zone database.
 
-`time.Duration` is the only duration type. `time.elapsed`, `time.between` and
-`time.compare` work on `Instant`s of one `MonotonicClock`; their brand ties both instants
-to that clock, and `time.between` subtracts nanosecond ticks.
+`time.Duration` is the only duration type. `time.elapsed` and `time.between` work on
+`Instant`s of one `MonotonicClock`; their brand ties both instants to that clock, and
+`time.between` subtracts nanosecond ticks. Instants of one clock compare with the ordinary
+operators (`Instant` is `ordered of` its clock, SEM-5).
 
 `time.deadline(clock, d)` returns the instant `d` after a fresh sample of `clock`, and
 `time.sleep(clock, d)` waits until that instant with `clock.sleep_until`. A negative `d` is
@@ -3353,7 +3353,7 @@ keys, so equal sets hash alike. Floats are not `key` ([GEN-1](generics.md#gen-1-
 and have no hash form. `siphash.hash_one(value, item_hash, k0, k1)` returns the
 hash. For a shape Rust can spell, it equals Rust's under `SipHasher13` with
 those keys, and keys 0 and 0 give `DefaultHasher::new()`'s. The keys are always the
-caller's, never the run's hidden placement seed ([SEM-5](semantics.md#sem-5-maps)),
+caller's, never the run's hidden placement seed ([SEM-5](semantics.md#sem-5-order-and-maps)),
 so a hash is the same in every run. `json_bool`, `json_text`, `json_number`,
 `json_float`, `json_float_text`, `parsed`, `json_unexpected`,
 `json_invalid_type`, `unknown_variant` and `json_length` are the helpers

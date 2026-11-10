@@ -430,3 +430,75 @@ fn result_paths_689_entry_contract_is_checked() {
         );
     });
 }
+
+/// MODE-1, CLO-1: a result part `in env` (a closure literal the body makes)
+/// holds only what the body's inputs and captures reach, as a whole `in env`
+/// result does. Forged so that the part's closure borrows a frame local of
+/// the body that returns it, which the front end refuses as CLO-1, V must
+/// refuse the result on its own.
+#[test]
+fn result_paths_689_env_part_frame_local_is_refused() {
+    with_compiler_stack(|| {
+        let (engine, input) = prepared(
+            "fn made() -> (fn() -> () uses {}, u64) {\n\
+               let p: (fn() -> () uses {}, u64) = fn() {\n\
+                 let items: Bytes = b\"abc\"\n\
+                 let n = bytes.len(items)\n\
+                 (fn() { () }, n)\n\
+               }()\n\
+               p\n\
+             }\npub fn main(){}",
+        );
+        let definition = named(&input, "made");
+        let mut forged = definition.as_ref().clone();
+        let outer = forged.bodies[0]
+            .rvalues
+            .iter()
+            .find_map(|value| match value {
+                Rvalue::Closure { body, .. } => Some(body.0 as usize),
+                _ => None,
+            })
+            .unwrap();
+        let body = &mut forged.bodies[outer];
+        let types = engine.types();
+        let local = body
+            .places
+            .iter()
+            .position(|place| {
+                place.projection.is_empty()
+                    && body.locals[place.root.0 as usize].storage == hirsel_tir::Storage::Local
+                    && matches!(
+                        types.get(place.ty).unwrap().kind,
+                        hirsel_types::TypeKind::Primitive(hirsel_types::Primitive::Bytes)
+                    )
+            })
+            .expect("a place of the frame local `items`");
+        let mut slot = body.locals[body.places[local].root.0 as usize].clone();
+        slot.storage = hirsel_tir::Storage::Capture;
+        let mut inner = vec![];
+        for value in &mut body.rvalues {
+            if let Rvalue::Closure { captures, body, .. } = value {
+                captures.push(hirsel_tir::Operand {
+                    place: hirsel_tir::PlaceId(local as u32),
+                    usage: hirsel_types::UseKind::Borrow,
+                });
+                inner.push(body.0 as usize);
+            }
+        }
+        assert_eq!(inner.len(), 1);
+        // The part's closure gets the capture slot the forged capture fills.
+        forged.bodies[inner[0]].locals.push(slot);
+        let found = violations(&engine, &input, &definition, &mut forged);
+        // The capture is also refused where the closure is made; the return
+        // itself must be refused too, since storage that holds the part need
+        // not be checked where it is built.
+        assert!(
+            found.iter().any(|v| v.instruction.is_none()
+                && matches!(
+                    v.kind,
+                    hirsel_validate::ViolationKind::InvalidResultSource(_)
+                )),
+            "V accepted an `in env` result part borrowing a frame local: {found:?}"
+        );
+    });
+}

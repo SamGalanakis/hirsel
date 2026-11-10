@@ -7165,6 +7165,16 @@ impl Checker<'_, '_> {
                 // MODE-1: a result whose parts select their own relations.
                 // Each selected part holds only what its own parameters
                 // reach; every other part, like a global result, nothing.
+                let environment_roots: BTreeSet<usize> = self
+                    .body
+                    .locals
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, local)| {
+                        matches!(local.storage, Storage::Parameter | Storage::Capture)
+                    })
+                    .map(|(root, _)| root)
+                    .collect();
                 let mut part_roots = BTreeSet::new();
                 let mut part_dependencies = vec![];
                 for leaf in self.result_cover(self.body.result) {
@@ -7175,7 +7185,14 @@ impl Checker<'_, '_> {
                         .held();
                     let sources = self.part_sources(model, state, value, &leaf.path);
                     let relation = leaf.relation.map(|r| self.lifetime(&r));
-                    let allowed = relation.as_ref().map(parameter_roots).unwrap_or_default();
+                    // An `in env` part, like an `in env` result, holds what
+                    // the inputs and the environment's storage reach.
+                    let environment = relation.as_ref().is_some_and(|r| r.has_environment());
+                    let allowed = if environment {
+                        environment_roots.clone()
+                    } else {
+                        relation.as_ref().map(parameter_roots).unwrap_or_default()
+                    };
                     if relation.as_ref().is_none_or(|r| r.is_global()) {
                         if !held.is_empty() || !sources.is_empty() {
                             self.flow_error(
@@ -7187,7 +7204,7 @@ impl Checker<'_, '_> {
                     }
                     if relation
                         .as_ref()
-                        .is_some_and(|r| r.named_parameters().is_none())
+                        .is_some_and(|r| !environment && r.named_parameters().is_none())
                         || !sources.is_subset(&allowed)
                     {
                         self.flow_error(report, ViolationKind::InvalidResultSource(value.place));

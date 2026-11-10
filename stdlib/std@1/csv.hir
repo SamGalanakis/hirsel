@@ -592,7 +592,7 @@ pub fn slice_reader(text: String, config: Config) -> Result[SliceReader, CsvErro
   }
   // csv-core reader.rs:1220-1237: classify the alphabet once per reader.
   // Delimiters remain ordinary while inside a quoted field.
-  let mut special: List[u8] = std@1/list.filled(256, 0u8)
+  let mut special: List[u8] = copy EMPTY_CLASSES
   special[core@1/int.widen(config.delimiter)] = 2
   special[10] = 1
   special[13] = 1
@@ -909,3 +909,6 @@ pub fn get_field_bytes(r: SliceReader, index: u64) -> Option[Bytes] in r uses {}
     Some(core@1/bytes.slice(data, span.start, span.end))
   }
 }
+
+// Reuse the invariant alphabet initialization; each reader detaches before writing.
+const EMPTY_CLASSES: List[u8] = comptime std@1/list.filled(256, 0u8)

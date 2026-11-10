@@ -265,8 +265,7 @@ fn read_catalog(tx: store.Tx, take key: Bytes, key_digest: Bytes, value_digest: 
   (Catalog, bool),
   store.TxError
 ] {
-  store.admit_read(tx, key)?
-  let raw = match store.table_read(tx, take key) {
+  let raw = match store.table_read(tx, take key)? {
     Some(raw) => raw,
     None() => return Error(NoTable()),
   }
@@ -309,8 +308,7 @@ fn live(tx: store.Tx, name: String, c: Catalog) -> Result[
   let mut n = c.base
   while n < next_epoch(c) {
     let key = history_key(name, n)
-    store.admit_read(tx, key)?
-    let raw = match store.table_read(tx, take key) {
+    let raw = match store.table_read(tx, take key)? {
       Some(raw) => raw,
       None() => return Error(corrupt()),
     }
@@ -391,8 +389,7 @@ fn opened[K: key + serializable, V: serializable](tx: store.Tx, t: Table[K, V]) 
 // so no write lands among stale rows.
 fn unused(tx: store.Tx, take rows: Bytes) -> Result[(), store.TxError] {
   let pending = store.garbage(copy rows)
-  store.admit_read(tx, pending)?
-  if let Some(_) = store.table_read(tx, take pending) {
+  if let Some(_) = store.table_read(tx, take pending)? {
     return Error(reused())
   }
   let left = store.table_range(tx, copy rows, keys.prefix_end(rows), 1, Ascending())?
@@ -424,7 +421,7 @@ pub fn create[K: key + serializable, V: serializable](mut tx: store.Tx, t: Table
   }
   let catalog = metadata_key(table_name(t))
   store.admit_write(tx, catalog)?
-  if let Some(_) = store.table_read(tx, take catalog) {
+  if let Some(_) = store.table_read(tx, take catalog)? {
     return Error(TableExists())
   }
   let name = table_name(t)
@@ -532,8 +529,7 @@ pub fn get[K: key + serializable, V: serializable](tx: store.Tx, t: Table[K, V],
 ] {
   let (_, o) = opened(tx, t)?
   let encoded = row_key(o, key)?
-  store.admit_read(tx, encoded)?
-  match store.table_read(tx, copy encoded) {
+  match store.table_read(tx, take encoded)? {
     Some(data) => {
       let value: V = decode_value(o, none_value(t), data)?
       Ok(Some(take value))
@@ -569,7 +565,7 @@ pub fn delete[K: key + serializable, V: serializable](
   let (_, o) = opened(tx, t)?
   let encoded = row_key(o, key)?
   store.admit_write(tx, encoded)?
-  let exists = match store.table_read(tx, copy encoded) {
+  let exists = match store.table_read(tx, copy encoded)? {
     Some(_) => true,
     None() => false,
   }
@@ -912,7 +908,7 @@ fn advance[
     }
     // The target rows are the codec's own encodings of K and B.
     let row = concat(next, encoded_key(b"", new_key, [], true) ? Table)
-    if let Some(_) = store.table_read(tx, copy row) {
+    if let Some(_) = store.table_read(tx, copy row) ? Table {
       return Error(Collision())
     }
     let data = row_value(epoch, b"", new_value, true) ? Table

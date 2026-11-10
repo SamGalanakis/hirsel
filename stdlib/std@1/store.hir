@@ -1966,21 +1966,16 @@ fn spans_hold(spans: List[ScopeSpan], lo: Bytes, hi: Option[Bytes], write: bool)
 // requirement, for libraries that keep their own rows under `hirsel.`. They
 // check scope as the byte operations do; the engine makes no exception for
 // a library's rows.
-// Reads one key after checking read access and the key limit.
-fn admit_read(tx: Tx, key: Bytes) -> Result[(), TxError] {
+// The value of `key` in this transaction, after checking read access and
+// the key limit. The read enters the run's access set.
+fn table_read(tx: Tx, take key: Bytes) -> Result[Option[Bytes] in tx, TxError] {
   admit(tx.scope, key, false)?
   if bytes.len(key) > tx.limits.key_bytes {
     return Error(Limit(KeyBytes()))
   }
-  Ok(())
-}
-
-// The value of `key` in this transaction, after `admit_read`. The read
-// enters the run's access set.
-fn table_read(tx: Tx, take key: Bytes) -> Option[Bytes] in tx {
   let found = ordered_map.get(tx.txn.state, key)
   recorder.append(tx.points, take key)
-  found
+  Ok(found)
 }
 
 // Writes one key after checking write access and the limits, so a refusal

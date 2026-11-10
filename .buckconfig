@@ -20,7 +20,7 @@ prelude = disabled
 [buildfile]
 name = BUCK,BUCK.unsynced
 [parser]
-target_platform_detector_spec = target:root//...->root//tools/buck2:dev target:toolchains//...->prelude//platforms:default
+target_platform_detector_spec = target:root//...->root//tools/buck2:checked target:toolchains//...->prelude//platforms:default
 [build]
 execution_platforms = root//tools/buck2:platforms
 # Many lanes share one host: cap each daemon's local parallelism.

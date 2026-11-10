@@ -51,7 +51,8 @@ platform(
     visibility = ["PUBLIC"],
 )
 
-# Compiler tools and harnesses share one optimized, checked configuration.
+# The default target platform: every first-party target, its tests and the
+# tools they launch share one optimized, checked configuration.
 platform(
     name = "checked",
     constraint_values = [
@@ -81,17 +82,6 @@ host_transition(
     panic = ":panic",
     profile = ":profile_release",
     cpu = "prelude//cpu/constraints:x86_64",
-    visibility = ["PUBLIC"],
-)
-
-# The default target platform: Cargo's dev profile.
-platform(
-    name = "dev",
-    constraint_values = [
-        "prelude//os/constraints:linux",
-        "prelude//cpu/constraints:x86_64",
-        ":profile_dev",
-    ],
     visibility = ["PUBLIC"],
 )
 

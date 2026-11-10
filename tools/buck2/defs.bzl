@@ -125,11 +125,8 @@ def _codegen_flags(name):
         "DEFAULT": _dev_codegen(name),
     })
 
-def _flags(manifest_dir, extra = [], host_code = False, target = None, opt_level = None):
-    # A member's `[profile.dev.package.<name>] opt-level`; the release flags
-    # that follow override it, as Cargo applies the entry to dev only.
-    dev = ["-Copt-level={}".format(opt_level)] if opt_level != None else []
-    return ["-Zunstable-options", _env_set("CARGO_MANIFEST_DIR", _from_package(manifest_dir, manifest_dir))] + dev + extra + workspace_profile_flags(host_code) + (_codegen_flags(target) if target else []) + runtime_profile_flags(manifest_dir.split("/")[-1].replace("-", "_"))
+def _flags(manifest_dir, extra = [], host_code = False, target = None):
+    return ["-Zunstable-options", _env_set("CARGO_MANIFEST_DIR", _from_package(manifest_dir, manifest_dir))] + extra + workspace_profile_flags(host_code) + (_codegen_flags(target) if target else []) + runtime_profile_flags(manifest_dir.split("/")[-1].replace("-", "_"))
 
 def _compile_env(package_name, crate, version, build_script):
     env = _cargo_env(package_name, crate, version)
@@ -172,7 +169,7 @@ def _rust(rule, name, **attrs):
         twin.pop("labels", None)
         rule(name = name + "-clippy", **twin)
 
-def hirsel_library(name, crate, crate_root, srcs, features, deps, manifest_dir, package_name, version, edition, build_script = None, staticlib = False, doctests = False, opt_level = None):
+def hirsel_library(name, crate, crate_root, srcs, features, deps, manifest_dir, package_name, version, edition, build_script = None, staticlib = False, doctests = False):
     """A workspace library. With `doctests` it is also the test of its
     documentation examples, as `cargo test` runs them (label `doctest`)."""
     _rust(
@@ -185,7 +182,7 @@ def hirsel_library(name, crate, crate_root, srcs, features, deps, manifest_dir, 
         deps = deps,
         edition = edition,
         env = _compile_env(package_name, crate, version, build_script),
-        rustc_flags = _flags(manifest_dir, target = name, opt_level = opt_level),
+        rustc_flags = _flags(manifest_dir, target = name),
         exec_compatible_with = _compile_constraints(name),
         doctests = doctests,
         doc_remote_execution = doctest_properties() if doctests else None,
@@ -193,7 +190,7 @@ def hirsel_library(name, crate, crate_root, srcs, features, deps, manifest_dir, 
         visibility = ["PUBLIC"],
     )
 
-def hirsel_binary(name, bin_name, crate, crate_root, srcs, features, deps, manifest_dir, package_name, version, edition, build_script = None, opt_level = None):
+def hirsel_binary(name, bin_name, crate, crate_root, srcs, features, deps, manifest_dir, package_name, version, edition, build_script = None):
     env = _compile_env(package_name, crate, version, build_script)
     env["CARGO_BIN_NAME"] = bin_name
     env["HIRSEL_SANITIZER"] = select({"root//tools/buck2:sanitizer_thread": "thread", "DEFAULT": ""})
@@ -207,7 +204,7 @@ def hirsel_binary(name, bin_name, crate, crate_root, srcs, features, deps, manif
         deps = deps,
         edition = edition,
         env = env,
-        rustc_flags = _flags(manifest_dir, EXECUTABLE_LINK_FLAGS, target = name, opt_level = opt_level),
+        rustc_flags = _flags(manifest_dir, EXECUTABLE_LINK_FLAGS, target = name),
         exec_compatible_with = _compile_constraints(name),
         visibility = ["PUBLIC"],
     )
@@ -230,7 +227,7 @@ def _test_crate_flags(crate_root):
         return []
     return select({"root//tools/buck2:profile_checked": ["-Copt-level=0"], "DEFAULT": []})
 
-def hirsel_test(name, crate, crate_root, srcs, features, deps, manifest_dir, package_name, version, edition, build_script = None, bin_exes = {}, data = [], runtime_archives = None, products = None, shards = 1, case_shards = {}, costs = None, opt_level = None, seeded = False, skips = [], consumer_cases = {}):
+def hirsel_test(name, crate, crate_root, srcs, features, deps, manifest_dir, package_name, version, edition, build_script = None, bin_exes = {}, data = [], runtime_archives = None, products = None, shards = 1, case_shards = {}, costs = None, seeded = False, skips = [], consumer_cases = {}):
     """A libtest harness (`rustc --test`) and the test that runs it.
 
     `bin_exes` are the package's binaries, as Cargo's CARGO_BIN_EXE_<name>.
@@ -264,7 +261,7 @@ def hirsel_test(name, crate, crate_root, srcs, features, deps, manifest_dir, pac
         deps = deps,
         edition = edition,
         env = _compile_env(package_name, crate, version, build_script),
-        rustc_flags = _flags(manifest_dir, ["--test", _env_set("CARGO_TARGET_TMPDIR", _from_package(manifest_dir, TEST_TMPDIR))] + exes + EXECUTABLE_LINK_FLAGS, target = harness, opt_level = opt_level) + _test_crate_flags(crate_root),
+        rustc_flags = _flags(manifest_dir, ["--test", _env_set("CARGO_TARGET_TMPDIR", _from_package(manifest_dir, TEST_TMPDIR))] + exes + EXECUTABLE_LINK_FLAGS, target = harness) + _test_crate_flags(crate_root),
         exec_compatible_with = _compile_constraints(harness),
         visibility = ["PUBLIC"],
     )

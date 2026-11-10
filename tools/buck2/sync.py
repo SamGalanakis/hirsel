@@ -384,10 +384,6 @@ def check_cost_coverage() -> list[str]:
     return cost_coverage(inventory(result.stdout.splitlines()))
 
 
-def dev_opt_levels() -> dict[str, int]:
-    """Members' `[profile.dev.package.<name>] opt-level` entries in the root Cargo.toml."""
-    packages = tomllib.loads(READS.text(ROOT / "Cargo.toml"))["profile"]["dev"].get("package", {})
-    return {name: entry["opt-level"] for name, entry in packages.items() if name != "*" and "opt-level" in entry}
 
 # The corpus campaigns as tests over the whole corpus, so
 # an unchanged corpus and compiler are a cache hit on the pool.
@@ -932,7 +928,6 @@ def first_party(meta: dict) -> str:
     nodes = {n["id"]: n for n in meta["resolve"]["nodes"]}
     members = set(meta["workspace_members"])
     BUILD_SCRIPT_INPUTS["hirsel-compiler-identity"] = compiler_identity_inputs(meta)
-    opt_levels = dev_opt_levels()
     unguarded = []
     out = [
         HEADER,
@@ -975,7 +970,6 @@ def first_party(meta: dict) -> str:
             for kind in dep["dep_kinds"]:
                 deps[kind["kind"] or "normal"].add(label(dep["pkg"]))
         common = {"manifest_dir": manifest_dir, "package_name": name, "version": package["version"], "edition": package["edition"]}
-        profile = {"opt_level": opt_levels[name]} if name in opt_levels else {}
         runtime_archives = RUNTIME_ARCHIVES if name in NATIVE_TESTS else None
 
         def test_attrs(binary: str, src: pathlib.Path) -> dict:
@@ -1022,7 +1016,7 @@ def first_party(meta: dict) -> str:
                 build_script=build_script and ":" + build_script,
                 **common,
             )
-            out.append("\n" + call("hirsel_library", **profile, name=name, deps=normal, doctests=has_doctests(package_dir) or None,
+            out.append("\n" + call("hirsel_library", name=name, deps=normal, doctests=has_doctests(package_dir) or None,
                                     **attrs))
             if "staticlib" in lib["crate_types"]:
                 out.append("\n" + call(
@@ -1035,7 +1029,7 @@ def first_party(meta: dict) -> str:
             if lib.get("test", True) and f"{name}-unittest" not in EMPTY_UNIT_HARNESSES:
                 binary = f"{name}-unittest"
                 count, costs, case_shards = shards(binary)
-                out.append("\n" + call("hirsel_test", **profile, name=binary, deps=test_deps,
+                out.append("\n" + call("hirsel_test", name=binary, deps=test_deps,
                                         shards=count if count > 1 or case_shards else None, case_shards=case_shards or None, costs=costs,
                                         **test_attrs(binary, src), **attrs))
         own = [f"//:{name}"] if lib else []
@@ -1056,12 +1050,12 @@ def first_party(meta: dict) -> str:
                 **common,
             )
             if kind == "bin":
-                out.append("\n" + call("hirsel_binary", **profile, name=f"{name}-bin-{target['name']}", bin_name=target["name"], deps=own + normal, **attrs))
+                out.append("\n" + call("hirsel_binary", name=f"{name}-bin-{target['name']}", bin_name=target["name"], deps=own + normal, **attrs))
                 if target.get("test", True) and f"{name}-bin-{target['name']}-unittest" not in EMPTY_UNIT_HARNESSES:
-                    out.append("\n" + call("hirsel_test", **profile, name=f"{name}-bin-{target['name']}-unittest", deps=own + test_deps,
+                    out.append("\n" + call("hirsel_test", name=f"{name}-bin-{target['name']}-unittest", deps=own + test_deps,
                                              **test_attrs(f"{name}-bin-{target['name']}-unittest", src), **attrs))
             elif kind == "example":
-                out.append("\n" + call("hirsel_binary", **profile, name=f"{name}-example-{target['name']}", bin_name=target["name"], deps=own + test_deps, **attrs))
+                out.append("\n" + call("hirsel_binary", name=f"{name}-example-{target['name']}", bin_name=target["name"], deps=own + test_deps, **attrs))
             else:
                 binaries = {
                     t["name"]: f"//:{name}-bin-{t['name']}"
@@ -1071,7 +1065,7 @@ def first_party(meta: dict) -> str:
                     # O4 invokes the actual CLI cache-verification switch.
                     binaries["hirsel"] = "//:hirsel-cli-bin-hirsel"
                 count, costs, case_shards = shards(f"{name}-test-{target['name']}")
-                out.append("\n" + call("hirsel_test", **profile, name=f"{name}-test-{target['name']}", deps=own + test_deps, bin_exes=binaries,
+                out.append("\n" + call("hirsel_test", name=f"{name}-test-{target['name']}", deps=own + test_deps, bin_exes=binaries,
                                          shards=count if count > 1 or case_shards else None, case_shards=case_shards or None, costs=costs,
                                          **test_attrs(f"{name}-test-{target['name']}", src), **attrs))
     out.append("\n" + call("hirsel_deadline_replay_matrix", name="deadline-select-replay",

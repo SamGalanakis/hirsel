@@ -179,14 +179,14 @@ class GeneratedParts(unittest.TestCase):
         self.assertEqual(self.sync('--if-stale'), [])
 
     def test_a_manifest_edit_regenerates_both_parts_and_rewrites_only_what_changed(self):
+        # Cargo's dev profile reaches no Buck configuration: both parts are
+        # regenerated from the edited manifest, and neither output changes.
         manifest = (self.root / 'Cargo.toml').read_text()
         old = '[profile.dev.package.hirsel-span]\nopt-level = 1\n'
         self.assertIn(old, manifest)
-        self.assertIn('    opt_level = 1,\n    name = "hirsel-span",\n', self.buck())
         self.edit('Cargo.toml', manifest.replace(old, '[profile.dev.package.hirsel-span]\nopt-level = 2\n'))
         self.assertEqual(self.sync('--if-stale'), list(sync.generated.PARTS))
-        self.assertIn('    opt_level = 2,\n    name = "hirsel-span",\n', self.buck())
-        self.assertEqual(self.rewritten(), ['BUCK'])
+        self.assertEqual(self.rewritten(), [])
 
     def test_an_added_test_file_adds_its_target_without_rerunning_reindeer(self):
         self.edit('crates/hirsel-span/tests/added.rs', 'hirsel_guard::install!();\n\n#[test]\nfn added() {}\n')

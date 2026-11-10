@@ -568,21 +568,23 @@ link replay after the original profile has been removed.
   platforms also include the invoking host for an explicit
   `-c hirsel.tests=host` opt-in. Native tools are pinned action inputs in
   either mode; no test needs those tools installed on the worker image.
-- Profiles (`profile.bzl`): the default target platform `//tools/buck2:dev` is
-  Cargo's dev profile (third-party crates at opt-level 1, and the members a
-  root `[profile.dev.package.<name>] opt-level` names at that level);
-  `//tools/buck2:release` is `[profile.release]`;
-  `//tools/buck2:checked` is `[profile.checked]` (release with assertions and overflow checks).
-  Test harnesses and the executables they launch use `//tools/buck2:checked`,
-  an optimized profile with debug assertions and overflow checks enabled. This
-  includes `CARGO_BIN_EXE` subprocesses, conformance, agreement and native
-  compiler runners. Their runtime archives retain the production release
-  profile. Proc macros and build scripts retain their canonical dev profile.
-  The std image pins its exec dependency to this same checked configuration:
-  an ordinary `exec_dep` inherits the execution platform's configuration, which
-  has no Rust profile, and would fall back to dev even under a release caller.
-  Checked compiles use the dev compile requests and codegen policy, preserving
-  their memory headroom and parallelism while enabling O3.
+- Profiles (`profile.bzl`): the default target platform is
+  `//tools/buck2:checked`, `[profile.checked]`: release O3 with debug
+  assertions and overflow checks. Every first-party library and binary, test
+  harnesses and the executables they launch (`CARGO_BIN_EXE` subprocesses,
+  conformance, agreement and native compiler runners) build once in it, so
+  the land's workspace build and the tests share every action. Integration
+  test crates (`tests/`) compile their own code at opt-level 0 over O3
+  libraries (`_test_crate_flags` in defs.bzl); unit test crates are the
+  library and keep O3. `//tools/buck2:release` is `[profile.release]`. There
+  is no Buck dev configuration: Cargo's `[profile.dev]` serves Cargo builds
+  only. Runtime archives keep the production runtime profile. Proc macros and
+  build scripts keep the host configuration (`host_transition`,
+  `profile_dev`). The std image pins its exec dependency to this same checked
+  configuration: an ordinary `exec_dep` inherits the execution platform's
+  configuration, which has no Rust profile. Checked compiles use the dev
+  compile requests and codegen policy, preserving their memory headroom and
+  parallelism while enabling O3.
   Canonicalizing test harnesses on entry also keeps the workspace build and
   tests from compiling the same harness under different reservations.
 

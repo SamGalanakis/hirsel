@@ -807,6 +807,16 @@ products, including declaration heads, canonical type records, summaries, lowere
 TIR, audits and compile-time values. It refuses diagnostics. Every reader validates
 the recorded dependencies and establishes its own verifier authority.
 
+Although the products are keyed per definition, a precompute reuses no earlier
+run. Its output store replaces the results store, and that output root grants no
+verifier authority while it records the installation. So seeding the output with
+earlier products, or naming a warm `HIRSEL_RESULTS` store, changes nothing. On
+2026-11-10 an edited std took 98 s seeded and 100 s cold, and an identical rerun
+took 91 s. Buck2 runs it as one `//:hirsel-std-products` action over all of std,
+so any std edit redoes the whole of std (about 70 s on one CPU). `hirsel check`
+over a warm results store does reuse per definition: after a 28.2 s cold check,
+an edit to `store.hir` checked in 8.8 s.
+
 Build and install the release toolchain with Buck2 from the repository root:
 
 ```sh

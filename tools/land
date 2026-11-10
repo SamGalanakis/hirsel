@@ -25,7 +25,8 @@ refuses the push and prints its first error.
 
 Land checks every package and example manifest before pushing. The lane runs
 the other tests its change can break, and
-tools/main-runs runs the full suite on main every hour. Each push is appended
+tools/main-runs runs a chosen suite or selection on current main when requested
+by hand; it has no automatic schedule. Each push is appended
 to `hirsel-landings.jsonl` in the common git directory, from which main-runs
 names the lane of a commit.
 """

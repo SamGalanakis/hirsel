@@ -1,49 +1,44 @@
 #!/usr/bin/env python3
-"""Main's test runs on origin/main, each red reported with its likely owner.
+"""Run a chosen main-run profile or selection on current origin/main by hand.
 
-    tools/main-runs --tick [--tier fast|full] [--dry-run]
+    tools/main-runs --now --tier fast
+    tools/main-runs --now --tier ownership-trace
+    tools/main-runs --now --select conformance/MODE/MODE-1-unique-local-taken-stays-local-bad.hir
+    tools/main-runs --now --tier conformance --select conformance/MODE
+    tools/main-runs --now --tier fast --select 'workspace tests' --dry-run
 
-The fast tier (the default) is the build, Clippy, fmt, the workspace and tool
-tests, the full interpreter corpus in at most 48 slices, the existing native
-smoke cases and the registered ownership-trace configuration tests,
-the GenMC models and a fresh std compiler
-instruction budget; hirsel-main-runs.timer (a systemd user unit, host config) ticks it
-every 6 h at pool priority 40 (Nice 10). The full tier is every stage below:
-the release gate, run only by hand before milestones. A fast tick skips while
-any run is going; a full tick waits for it. A tick skips when origin/main has
-not moved since the last run that covered its tier (a full run covers fast);
-otherwise it checks main out in the runner's worktree and runs that copy
-(--run), so a fix to the runner holds from the next run. --dry-run lists the
-tier's stages instead. A run executes its tier's stages except those
-tools/main-runs-skip.tsv lists. A red is a failed test, or a failed stage with
-none, that tools/known-failures.tsv does not explain. The report
-($HIRSEL_MAIN_RUNS/reports/, latest.md) lists unrecorded failures before known
-owner counts per stage. An explicit green in the previous completed run of
-that stage marks a failure NEW and names the commit range for a bisect,
-without guessing a culprit. Wrongly accepted -bad corpus cases appear first.
-The existing attribution sections name each other red's likely culprit: of
-the commits since the last run of its stage, the one that changed most under the red's
-crate or its failing corpus cases, with its lane from hirsel-landings.jsonl.
-During execution, $HIRSEL_MAIN_RUNS/RUNNING.md publishes completed targets and
-commands, including exact SHA/inputs, known action timing and worker identity.
-It marks active commands over 30 minutes SLOW without replacing latest.md.
-Only completed targets with identical SHA, target and command inputs can be reused.
-RUNNING.md is removed after final publication.
-New code reds appear in the report's Owners section with their lane and culprit,
-or as unowned when no lane is known.
-Infrastructure reds have no culprit or lane; each run reports them separately
-for the orchestrator. Only code reds enter lane-blame history. Then
-docs/api.md is regenerated and, after a full run, the instruction budgets
-ratchet down to what gate-perf-counts measured, each pushed straight to main
-when it changed. Both exception tables require four nonempty fields, unique
-identities and YYYY-MM-DD dates. Invalid tables stop execution with a
-configuration error. Reports and runs.jsonl include exception_status v1:
-observations before suppression, stage selection, table digests and execution
-provenance. Fresh complete exact passes are recovery candidates; absence,
-cache reuse and partial target populations are not recovery proof.
+There is no automatic schedule. --now fetches origin/main, checks it out in
+$HIRSEL_MAIN_RUNS/worktrees/main-runs and runs that copy. It reruns an unchanged
+SHA when asked and refuses a concurrent run. --dry-run only lists the local
+plan: it neither fetches nor consumes pool work. Stage selectors are name
+prefixes within the chosen tier; corpus selectors are repository-relative
+directories, cases or prefixes. Selections always prepare the pinned tools.
+
+Fast retains the build, Clippy, fmt, workspace/tool tests, GenMC and fresh std
+budget. The explicit conformance profile runs every interpreter directory in
+at most 32 slices each; ownership-trace selects the registered diagnostic
+runtime tests; native-smoke selects the existing conformance smoke list.
+Full includes these profiles and the expensive release/native campaigns.
+None is added to the land gate. Exception tables can skip named stages.
+
+Reports in $HIRSEL_MAIN_RUNS/reports/ and latest.md list unrecorded failures
+before known-owner counts per stage. An explicit green in the previous
+completed run of that stage marks a failure NEW, with the full commit range
+for a bisect. A first observation without a previous green stays unowned.
+Wrongly accepted -bad cases appear first, including known failures. Existing
+owner, code, infrastructure and exception-observation sections remain.
+RUNNING.md publishes completed targets and command identities during a run;
+only completed matching inputs can be reused. It is removed on completion.
+
+The manual run also regenerates docs/api.md and can ratchet measured budgets;
+these updates are pushed on main when changed. Invalid exception tables stop
+execution. Reports and runs.jsonl retain exception_status v1 and execution
+provenance. Only fresh complete exact passes are recovery candidates; cached,
+partial, skipped and unobserved results are not recovery proof.
 """
 
 from datetime import date
+import argparse
 import fcntl
 import hashlib
 import json
@@ -85,6 +80,10 @@ class TableError(ValueError):
     """Exception configuration is unusable; no stages may run."""
 
 
+class SelectionError(ValueError):
+    """A requested manual selection matches no work."""
+
+
 def table(path, columns=4):
     """Strict exception rows, following conformance's reasoned, unique pending entries.
 
@@ -120,6 +119,38 @@ def stage_plan(tier):
     planned = {}
     stages(lambda name, command, **_: planned.update({name: command}), tier, planning=True)
     return planned
+
+
+def selection_plan(tier, selections=()):
+    if not selections:
+        return stage_plan(tier), tier, None
+    selections = sorted(set(value.rstrip('/') for value in selections))
+    if any(not value for value in selections):
+        raise SelectionError('an empty selection is not allowed')
+    paths = [value for value in selections if value == 'conformance' or value.startswith('conformance/')]
+    preparation = 'Buck2 toolchains and pool configuration'
+    if paths:
+        if len(paths) != len(selections):
+            raise SelectionError('choose corpus paths or stage names in one invocation')
+        all_cases = [path.relative_to(TREE).as_posix() for path in (TREE / 'conformance').rglob('*.hir')
+                     if 'reports' not in path.relative_to(TREE / 'conformance').parts]
+        prefixes = [value + '/' if (TREE / value).is_dir() else value for value in paths]
+        if missing := [value for value in prefixes if not any(case.startswith(value) for case in all_cases)]:
+            raise SelectionError('no corpus cases match: ' + ', '.join(missing))
+        name = 'interpreter selection: ' + ', '.join(paths)
+        command = ['tools/corpus', '--slices', '32', '--report-json', '{report}', *paths]
+        inventory = sorted(case for case in all_cases if any(case.startswith(value) for value in prefixes))
+        plan = {preparation: [PY, 'tools/buck2/prepare.py'], name: command}
+        return plan, 'conformance', (name, command, inventory)
+    catalog = stage_plan(tier)
+    selected = set()
+    for value in selections:
+        matches = {name for name in catalog if name == value or name.startswith(value)}
+        if not matches:
+            raise SelectionError(f'no stages match {value!r} in tier {tier}')
+        selected.update(matches)
+    selected.add(preparation)
+    return {name: command for name, command in catalog.items() if name in selected}, tier, None
 
 
 def exception_tables():
@@ -171,20 +202,54 @@ def covers(row, tier):
     return row.get('configuration_error') is None and (tier == 'fast' or row.get('tier', 'full') == 'full')
 
 
-def tick(tier):
+def tick(tier, selections=(), *, force=False):
     RUNS.mkdir(parents=True, exist_ok=True)
     handle = open(RUNS / 'main-runs.lock', 'a+')
     try:
-        fcntl.flock(handle, fcntl.LOCK_EX | (fcntl.LOCK_NB if tier == 'fast' else 0))
+        fcntl.flock(handle, fcntl.LOCK_EX | (fcntl.LOCK_NB if force or tier == 'fast' else 0))
     except BlockingIOError:
-        return say('skip: a run is still going') or 0
+        return say('busy: a run is still going') or (1 if force else 0)
     git('fetch', '-q', 'origin', 'main')
     sha = git('rev-parse', 'refs/remotes/origin/main')
-    if (covered := [r for r in rows() if covers(r, tier)]) and covered[-1]['sha'] == sha:
+    if not force and (covered := [r for r in rows() if covers(r, tier)]) and covered[-1]['sha'] == sha:
         return say(f'skip: the last {tier} run checked origin/main {sha[:12]}') or 0
     checkout(RUN_TREE, sha)
     os.set_inheritable(handle.fileno(), True)  # the lock stays held through the run
-    os.execv(PY, [PY, str(RUN_TREE / 'tools/main-runs'), '--run', sha, tier])
+    os.execv(PY, [PY, str(RUN_TREE / 'tools/main-runs'), '--run', sha, '--tier', tier,
+                 *[arg for selection in selections for arg in ('--select', selection)]])
+
+
+def manual_stages(stage, tier, config):
+    """Explicit corpus and tracing profiles, also available in the full tier."""
+    buck2 = [PY, 'tools/buck2/event_logs.py']
+    if tier in ('conformance', 'full'):
+        corpus_root = TREE / 'conformance'
+        corpus_paths = [path.relative_to(TREE).as_posix() for path in corpus_root.rglob('*.hir')
+                        if 'reports' not in path.relative_to(corpus_root).parts]
+        for directory in sorted({path.split('/')[1] for path in corpus_paths}):
+            prefix = f'conformance/{directory}'
+            stage(f'interpreter conformance: {prefix}',
+                  ['tools/corpus', '--slices', '32', '--report-json', '{report}', prefix], corpus=True,
+                  corpus_inventory=sorted(path for path in corpus_paths if path.split('/')[1] == directory))
+    if tier in ('native-smoke', 'full'):
+        smoke_file = TREE / 'native-tests/regressions/smoke.txt'
+        smoke = [line.strip() for line in (smoke_file.read_text().splitlines() if smoke_file.exists() else [])
+                 if line.strip() and not line.startswith('#') and line.startswith('conformance/')]
+        if smoke:
+            stage('native conformance smoke', ['tools/corpus', '--native', '--slices', '48', '--parts', '1', '--report-json', '{report}', *smoke], corpus=True)
+    if tier in ('ownership-trace', 'full'):
+        # These exact registry entries require the diagnostic runtime. Positive
+        # libtest filters select them on shard 1, independent of measured sharding.
+        registry = json.loads((TREE / 'tools/ignored-tests.json').read_text()) if (TREE / 'tools/ignored-tests.json').exists() else {}
+        traced = {}
+        for identity, home in registry.items():
+            if 'hirsel.ownership_trace=true' in home.get('config', []) and not home['inputs']:
+                key = home.get('target', '//:hirsel-cli-test-cli-shard-1'), identity.split('::')[0]
+                traced.setdefault(key, []).append(identity)
+        for (target, module), identities in sorted(traced.items()):
+            stage(f'ownership trace: {target.split(":")[-1]}/{module}',
+                  [*buck2, 'test', *config, '-c', 'hirsel.tests=focus', '-c', 'hirsel.ownership_trace=true', target,
+                   '--', '--test-arg=--ignored', '--test-arg=--exact', *[f'--test-arg={identity}' for identity in identities]])
 
 
 def stages(stage, tier, *, planning=False):
@@ -196,6 +261,9 @@ def stages(stage, tier, *, planning=False):
     buck2 = [PY, 'tools/buck2/event_logs.py']
     release = ['--target-platforms', '//tools/buck2:release']
     stage('Buck2 toolchains and pool configuration', [PY, 'tools/buck2/prepare.py'])
+    if tier not in ('fast', 'full'):
+        manual_stages(stage, tier, config)
+        return
     stage('Buck2 build files and test-cost coverage', [PY, 'tools/buck2/sync.py', '--check'])
     for test in sorted((TREE / 'tools/tests').glob('*.py')):
         stage(f'tool tests: tools/tests/{test.name}', [PY, str(test)], isolated=True)
@@ -228,36 +296,12 @@ def stages(stage, tier, *, planning=False):
     stage('workspace clippy', [PY, 'tools/buck2/clippy.py'])
     stage('formatting', [PY, 'tools/buck2/fmt.py', '--check'])
     stage('workspace tests', test(*tests), target_inventory=tests)
-    corpus_root = TREE / 'conformance'
-    corpus_paths = [path.relative_to(TREE).as_posix() for path in corpus_root.rglob('*.hir')
-                    if 'reports' not in path.relative_to(corpus_root).parts]
-    for directory in sorted({path.split('/')[1] for path in corpus_paths}):
-        prefix = f'conformance/{directory}'
-        stage(f'interpreter conformance: {prefix}',
-              ['tools/corpus', '--slices', '48', '--report-json', '{report}', prefix], corpus=True,
-              corpus_inventory=sorted(path for path in corpus_paths if path.split('/')[1] == directory))
-    smoke_file = TREE / 'native-tests/regressions/smoke.txt'
-    smoke = [line.strip() for line in (smoke_file.read_text().splitlines() if smoke_file.exists() else [])
-             if line.strip() and not line.startswith('#') and line.startswith('conformance/')]
-    if smoke:
-        stage('native conformance smoke', ['tools/corpus', '--native', '--slices', '48', '--parts', '1', '--report-json', '{report}', *smoke], corpus=True)
-    # These exact registry entries require the diagnostic runtime. Positive
-    # libtest filters select them on shard 1, independent of measured sharding.
-    registry = json.loads((TREE / 'tools/ignored-tests.json').read_text()) if (TREE / 'tools/ignored-tests.json').exists() else {}
-    traced = {}
-    for identity, home in registry.items():
-        if 'hirsel.ownership_trace=true' in home.get('config', []) and not home['inputs']:
-            key = home.get('target', '//:hirsel-cli-test-cli-shard-1'), identity.split('::')[0]
-            traced.setdefault(key, []).append(identity)
-    for (target, module), identities in sorted(traced.items()):
-        stage(f'ownership trace: {target.split(":")[-1]}/{module}',
-              [*buck2, 'test', *config, '-c', 'hirsel.tests=focus', '-c', 'hirsel.ownership_trace=true', target,
-               '--', '--test-arg=--ignored', '--test-arg=--exact', *[f'--test-arg={identity}' for identity in identities]])
     # The Loom models are workspace crates (proofs/free/loom, proofs/heaps/loom), so in the stage above.
     stage('free-mode GenMC models', test('//:gate-free-genmc'))
     stage('fresh std instruction budget', [PY, 'tools/perf-counts', '--fresh-std'])
     if tier == 'fast':
         return
+    manual_stages(stage, tier, config)
     stage('free-mode CLI tests', test(*free), target_inventory=free)
     stage('full gate crate tests', full_crate_tests(*libtests))
     stage('conformance validation and ratchet', [PY, 'tools/buck2/conformance.py'])
@@ -545,14 +589,16 @@ class RunningReport:
         temporary.replace(self.path)
 
 
-def run_stages(directory, log, tier, running=None):
+def run_stages(directory, log, tier, running=None, selectors=()):
     """Stage verdicts, skips, perf measurement and versioned exception observations."""
     skip, known, revisions = exception_tables()
     reds, ran, skipped, perf = {}, [], [], []
     observations, selections = [], []
-    planned = stage_plan(tier)
+    planned, execution_tier, extra = selection_plan(tier, selectors)
 
     def stage(name, command, isolated=False, target_inventory=None, corpus=False, corpus_inventory=None):
+        if selectors and name not in planned:
+            return
         if name in skip:
             return skipped.append(skip[name])
         ran.append(name)
@@ -725,7 +771,10 @@ def run_stages(directory, log, tier, running=None):
             observations.extend(corpus_observations(name, dict(reports=[], selected_cases=sorted(set(corpus_inventory or []) - seen))))
         if status and (not failed or reason and not infra) and (reason or stage_id not in known):
             reds[stage_id] = dict(stage=name, target=None, ids=[], kind='infra' if reason else 'code', reason=reason)
-    stages(stage, tier)
+    stages(stage, execution_tier)
+    if extra:
+        name, command, inventory = extra
+        stage(name, command, corpus=True, corpus_inventory=inventory)
     status = lifecycle(known, observations, selections, revisions)
     status.update(skipped=skipped, planned_stages=list(planned), unselected_stages=sorted(set(stage_plan('full')) - set(planned)))
     return reds, ran, skipped, perf[0] if len(perf) == 1 else None, status
@@ -941,15 +990,24 @@ def ratchet(measured, perf_checks):
     return update
 
 
-def run(sha, tier):
+def run(sha, tier, selections=()):
+    if selections:
+        selection_plan(tier, selections)  # Reject typos before creating a run or launching work.
     start = time.time()
     directory = RUNS / 'runs' / f'{time.strftime("%Y%m%dT%H%M%SZ", time.gmtime(start))}-{sha[:12]}'
-    directory.mkdir(parents=True)
+    try:
+        directory.mkdir(parents=True)
+    except FileExistsError:
+        directory = directory.with_name(directory.name + f'-{time.time_ns()}')
+        directory.mkdir()
     with RunningReport(sha, tier, directory, start) as running:
         with open(directory / 'run.log', 'w') as log:
             configuration_error = None
             try:
-                reds, ran, skipped, perf, status = run_stages(directory, log, tier, running)
+                if selections:
+                    reds, ran, skipped, perf, status = run_stages(directory, log, tier, running, selections)
+                else:
+                    reds, ran, skipped, perf, status = run_stages(directory, log, tier, running)
             except TableError as error:
                 configuration_error = str(error)
                 log.write(configuration_error + '\n')
@@ -1050,15 +1108,35 @@ def append_row(sha, tier, ran, start, minutes, reds, report, perf_checks, status
         out.write('\n')
 
 
+def main(arguments=None):
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    action = parser.add_mutually_exclusive_group(required=True)
+    action.add_argument('--now', action='store_true', help='fetch current origin/main and run it, even if already tested')
+    action.add_argument('--tick', action='store_true', help=argparse.SUPPRESS)
+    action.add_argument('--run', metavar='SHA', help=argparse.SUPPRESS)
+    tiers = ('fast', 'full', 'conformance', 'ownership-trace', 'native-smoke')
+    parser.add_argument('--tier', choices=tiers)
+    parser.add_argument('--select', action='append', default=[], metavar='STAGE_OR_CORPUS_PATH',
+                        help='repeat for stage-name prefixes, or corpus directories, cases and prefixes')
+    parser.add_argument('--dry-run', action='store_true', help='list the local plan without fetching or running it')
+    parser.add_argument('legacy_tier', nargs='?', choices=tiers, help=argparse.SUPPRESS)
+    args = parser.parse_args(arguments)
+    corpus = args.select and all(value == 'conformance' or value.startswith('conformance/') for value in args.select)
+    tier = args.tier or args.legacy_tier or ('conformance' if corpus else 'fast')
+    if corpus and tier not in ('conformance', 'full'):
+        parser.error('corpus path selections require the conformance tier')
+    try:
+        if args.dry_run:
+            for name in selection_plan(tier, args.select)[0]:
+                print(name)
+            return 0
+        if args.run:
+            return run(args.run, tier, args.select)
+        return tick(tier, args.select, force=args.now)
+    except SelectionError as error:
+        print(f'main-runs: {error}', file=sys.stderr)
+        return 2
+
+
 if __name__ == '__main__':
-    arguments, tier = sys.argv[1:], 'fast'
-    if arguments[1:3] in (['--tier', 'fast'], ['--tier', 'full']):
-        tier = arguments[2]
-        del arguments[1:3]
-    if arguments == ['--tick', '--dry-run']:
-        sys.exit(stages(lambda name, *_, **__: print(name), tier))
-    if arguments == ['--tick']:
-        sys.exit(tick(tier))
-    if arguments[:1] == ['--run'] and arguments[2:] in ([], ['fast'], ['full']) and len(arguments) > 1:
-        sys.exit(run(arguments[1], (arguments[2:] or ['fast'])[0]))  # a tick before tiers passes no tier
-    sys.exit(print(__doc__, file=sys.stderr) or 2)
+    sys.exit(main())

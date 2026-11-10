@@ -87,8 +87,25 @@ first by the seconds in `tools/tests/package_manifests.tsv`; a manifest without 
 row costs the mean, so each is checked by exactly one shard.
 It requires the named rejection for the two intentional negative package
 fixtures and generates the ignored JSON-kit hooks as its guide requires.
-Main's scheduled run owns the API index; the generated-file and
-independent-line-list rules still apply.
+Manual main runs own the API index; the generated-file and independent-line-list
+rules still apply. They have no automatic schedule and are not part of the land
+gate. From an updated checkout, run a chosen profile on current `origin/main`:
+
+```sh
+tools/main-runs --now --tier fast
+tools/main-runs --now --tier ownership-trace
+tools/main-runs --now --select conformance/MODE/MODE-1-unique-local-taken-stays-local-bad.hir
+```
+
+Profiles are `fast`, `full`, `conformance`, `ownership-trace` and `native-smoke`.
+Use `--select` repeatedly for stage-name prefixes within a profile, or for corpus
+directories, cases and prefixes. For example, `--tier fast --select 'workspace tests'`
+runs that stage and tool preparation. Add `--dry-run` to inspect the local selection
+without fetching or executing it. The manual command fetches current main into
+its own runner checkout, always runs when asked even at an unchanged SHA, and
+refuses overlapping runs. Reports retain NEW failures with their last completed
+same-stage commit range, a WRONGLY ACCEPTED section, and known-owner counts.
+The disabled timer is not re-enabled by this command.
 
 Before publishing a ticket, land finds and probes Cargo and rustc locally;
 an unavailable toolchain refuses submission with one line. Checks and

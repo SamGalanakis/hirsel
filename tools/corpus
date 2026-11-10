@@ -167,7 +167,7 @@ def main():
             for label, key in [('whole corpus', 'summary'), ('in-gate corpus', 'in_gate')]])
             + f'\ncorpus formatting: {len(report["format_exemptions"])} intentional syntax rejections exempt\n'
             + '\n'.join(f'{test["path"]}: {test["reason"]}' for test in report['tests'] if test['status'] == 'fail')
-            for name, report in zip(names, reports)}
+            for name, report in zip(names, records)}
         for problem in problems:
             print(f'corpus: {problem}', file=sys.stderr)
     for name, output in sorted(outputs.items()):

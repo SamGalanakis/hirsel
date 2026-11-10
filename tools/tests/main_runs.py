@@ -474,7 +474,6 @@ class Tiers(unittest.TestCase):
         fast = [n for n in named['fast'] if not n.startswith(('tool tests: ', 'interpreter conformance: ', 'ownership trace: '))]
         self.assertEqual(fast, ['Buck2 toolchains and pool configuration', 'Buck2 build files and test-cost coverage',
                                 'workspace build', 'workspace clippy', 'formatting', 'workspace tests',
-                                'native conformance smoke',
                                 'free-mode GenMC models',
                                 'fresh std instruction budget'])
         self.assertEqual(named['full'][:len(named['fast'])], named['fast'])
@@ -483,6 +482,62 @@ class Tiers(unittest.TestCase):
         covers = tool['covers']
         self.assertTrue(covers({}, 'fast') and covers({'tier': 'full'}, 'fast') and covers({}, 'full'))
         self.assertFalse(covers({'tier': 'fast'}, 'full'))
+
+
+class ManualRuns(unittest.TestCase):
+    def setUp(self):
+        self.tool = runpy.run_path(str(ROOT / 'tools/main-runs'))
+
+    def test_now_fetches_current_main_and_honors_an_explicit_repeat_and_selection(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            calls = []
+            def git(*arguments):
+                calls.append(arguments)
+                return 'current-main' if arguments[0] == 'rev-parse' else ''
+            with patch.dict(self.tool['tick'].__globals__, RUNS=root, RUN_TREE=root / 'checkout', git=git,
+                            rows=lambda: [dict(sha='current-main', tier='full')], checkout=Mock()) as namespace, \
+                    patch.object(os, 'execv') as execute:
+                self.tool['tick']('conformance', ['conformance/MODE'], force=True)
+                namespace['checkout'].assert_called_once_with(root / 'checkout', 'current-main')
+            self.assertIn(('fetch', '-q', 'origin', 'main'), calls)
+            self.assertEqual(execute.call_args.args[1][-6:],
+                             ['--run', 'current-main', '--tier', 'conformance', '--select', 'conformance/MODE'])
+
+    def test_dry_selection_has_no_fetch_build_or_execution(self):
+        with patch.dict(self.tool['main'].__globals__, tick=lambda *args, **kwargs: self.fail('must not launch')), \
+                patch('subprocess.run', side_effect=AssertionError('must not query or build')), \
+                contextlib.redirect_stdout(io.StringIO()) as output:
+            self.assertEqual(self.tool['main'](['--now', '--tier', 'ownership-trace', '--dry-run']), 0)
+        self.assertIn('ownership trace:', output.getvalue())
+        self.assertNotIn('workspace tests', output.getvalue())
+
+    def test_case_selection_is_one_bounded_job_not_the_whole_directory(self):
+        case = 'conformance/MODE/MODE-1-unique-local-taken-stays-local-bad.hir'
+        plan, tier, extra = self.tool['selection_plan']('conformance', [case])
+        self.assertEqual(tier, 'conformance')
+        self.assertEqual(len(plan), 2)  # Preparation and the chosen case.
+        self.assertEqual(extra[2], [case])
+        self.assertEqual(extra[1][-1], case)
+        self.assertEqual(extra[1][extra[1].index('--slices') + 1], '32')
+        with self.assertRaises(self.tool['SelectionError']):
+            self.tool['selection_plan']('conformance', ['conformance/no-such-case'])
+
+    def test_stage_selection_does_not_execute_other_stage_bodies(self):
+        commands = {'selected': [sys.executable, '-c', 'print("selected body")'],
+                    'other': [sys.executable, '-c', 'print("unwanted body")']}
+        def stages(stage, tier):
+            for name, command in commands.items():stage(name, command)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with patch.dict(self.tool['run_stages'].__globals__, stages=stages, stage_plan=lambda _: commands,
+                            exception_tables=lambda: ({}, {}, {})):
+                with (root / 'run.log').open('w') as log:
+                    _, ran, _, _, status = self.tool['run_stages'](root, log, 'fast', selectors=['selected'])
+            self.assertEqual(ran, ['selected'])
+            self.assertEqual(status['planned_stages'], ['selected'])
+            self.assertIn('selected body', (root / 'run.log').read_text())
+            self.assertNotIn('unwanted body', (root / 'run.log').read_text())
 
 
 class BoundedTests(unittest.TestCase):
@@ -794,8 +849,8 @@ class RegressionReports(unittest.TestCase):
         self.assertLess(report.index('binary::unlisted'), report.index('Known reds by owner: lane: 1'))
         self.assertNotIn('- binary::known', report)
 
-    def test_fast_selects_all_registered_diagnostic_cases_and_caps_corpus_slices(self):
-        commands = self.tool['stage_plan']('fast')
+    def test_manual_profiles_select_registered_cases_and_preserve_pool_slices(self):
+        commands = self.tool['stage_plan']('full')
         registry = json.loads((ROOT / 'tools/ignored-tests.json').read_text())
         expected = {case for case, home in registry.items() if 'hirsel.ownership_trace=true' in home.get('config', [])}
         selected = {arg.removeprefix('--test-arg=') for name, command in commands.items() if name.startswith('ownership trace:')
@@ -806,9 +861,11 @@ class RegressionReports(unittest.TestCase):
         cases = corpus['cases'](ROOT)
         selected = [case for name in interpreter for case in cases if case.startswith(commands[name][-1] + '/')]
         self.assertCountEqual(selected, cases)
-        for name in [*interpreter, 'native conformance smoke']:
-            self.assertIn('--slices', commands[name])
-            self.assertEqual(commands[name][commands[name].index('--slices') + 1], '48')
+        for name in interpreter:
+            self.assertEqual(commands[name][commands[name].index('--slices') + 1], '32')
+        self.assertEqual(commands['native conformance smoke'][commands['native conformance smoke'].index('--slices') + 1], '48')
+        fast = self.tool['stage_plan']('fast')
+        self.assertFalse(any(name.startswith(('interpreter conformance:', 'ownership trace:')) or name == 'native conformance smoke' for name in fast))
 
     def test_corpus_structured_output_keeps_all_verdicts_and_rejects_missing_reports(self):
         corpus = runpy.run_path(str(ROOT / 'tools/corpus'))
@@ -831,8 +888,10 @@ class RegressionReports(unittest.TestCase):
     def test_corpus_json_option_uses_existing_compiler_json_and_keeps_cli_counts(self):
         corpus = runpy.run_path(str(ROOT / 'tools/corpus'))
         counts = dict(validated=1, passing=0, failing=1, not_implemented=0)
+        query_error = 'tool error: Query { error: NotImplemented, phase: None, sources: SourceMap { files: ["all of std"] } }'
+        diagnostic = 'tool error: Query { error: NotImplemented, phase: None }'
         report = dict(summary=counts, in_gate=counts, format_exemptions={},
-                      tests=[dict(path='conformance/MODE/wrong-bad.hir', status='fail', actual='accept', reason='expected Reject; got accept')])
+                      tests=[dict(path='conformance/MODE/wrong-bad.hir', status='fail', actual=query_error, reason=query_error)])
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             (root / 'conformance').mkdir()
@@ -848,8 +907,12 @@ class RegressionReports(unittest.TestCase):
                     contextlib.redirect_stdout(io.StringIO()) as output, contextlib.redirect_stderr(io.StringIO()):
                 self.assertEqual(corpus['main'](), 1)
             self.assertEqual(invoke.call_args.args[0][-2:], ['--', '--test-arg=--json'])
-            self.assertEqual(json.loads(artifact.read_text())['reports'], [report])
+            saved = json.loads(artifact.read_text())['reports'][0]['tests'][0]
+            self.assertEqual(saved['reason'], diagnostic)
+            self.assertIsNone(saved['actual'])
             self.assertIn('whole corpus: 1 validated / 0 passing / 1 failing', output.getvalue())
+            self.assertIn(f'conformance/MODE/wrong-bad.hir: {diagnostic}', output.getvalue())
+            self.assertNotIn('SourceMap', output.getvalue())
 
     def test_corpus_keeps_other_slices_when_one_dies_and_reports_validation_errors(self):
         corpus = runpy.run_path(str(ROOT / 'tools/corpus'))

@@ -77,6 +77,8 @@ pub(crate) enum Val {
         env: Option<Ptr>,
     },
     Handle(u64),
+    /// A non-closing opaque word, classified by its layout rather than its bits.
+    Word(u64),
     /// An allocator token: None is the counted heap, Some names a ledger region.
     Arena(Option<usize>),
     Token(Option<TokenId>),
@@ -726,6 +728,14 @@ impl<'p, S: Stage> Machine<'p, S> {
             .get(v.index())
             .and_then(Option::as_ref)
             .ok_or_else(|| err(V::Malformed, format!("use of undefined value {v:?}")))
+    }
+
+    fn handle_value(&self, word: u64, layout: LayoutId) -> Checked<Val> {
+        Ok(if self.record(layout)?.drop.is_empty() {
+            Val::Word(word)
+        } else {
+            Val::Handle(word)
+        })
     }
 
     /// Whether a value still owns something that must be released.
@@ -2114,6 +2124,19 @@ impl<'p, S: Stage> Machine<'p, S> {
             LayoutKind::Aggregate | LayoutKind::Opaque { .. } => {
                 OpValue::Aggregate(fields(&record.fields)?)
             }
+            LayoutKind::Callable { .. } if record.scan.is_empty() => {
+                let Some(Cell::Code(Some(code))) = image.cells.get(&offset) else {
+                    return fail(V::ForgedPointer, "static operation callable code");
+                };
+                if image.cells.contains_key(&(offset + self.word)) {
+                    return fail(V::Unsupported, "operation callable has an environment");
+                }
+                OpValue::Function(Symbol {
+                    kind: SymbolKind::Function,
+                    definition: self.unit(*code).header.definition.clone(),
+                    instance: Some(self.unit(*code).header.instance),
+                })
+            }
             LayoutKind::Inline { element, count } => {
                 let stride = self.size(element)?;
                 OpValue::Sequence(
@@ -2458,7 +2481,11 @@ impl<'p, S: Stage> Machine<'p, S> {
                 }
                 let mut bytes = [0u8; 8];
                 bytes.copy_from_slice(e.read_bytes(0, 8));
-                Ok((Val::Handle(u64::from_le_bytes(bytes)), None, true))
+                Ok((
+                    self.handle_value(u64::from_le_bytes(bytes), layout)?,
+                    None,
+                    true,
+                ))
             }
             ValueRepr::Token | ValueRepr::RegionMark | ValueRepr::InitMask { .. } => {
                 fail(V::TypeConfusion, format!("{repr:?} is not storable"))
@@ -2713,7 +2740,7 @@ impl<'p, S: Stage> Machine<'p, S> {
                         .write_bytes(at.offset + env_offset, &0u64.to_le_bytes()[..word as usize]);
                 }
             }
-            Val::Handle(h) => {
+            Val::Handle(h) | Val::Word(h) => {
                 self.ledger
                     .get_mut(at.alloc)
                     .extent
@@ -4004,11 +4031,7 @@ impl<'p, S: Stage> Machine<'p, S> {
                         },
                     ) => (lk, l, rk, r),
                     // SEM-5: an `ordered of` token orders by its unsigned word.
-                    // The comparison is the owning operands' last use: it spends their
-                    // credits, whose word may coincide with an open handle's.
-                    (Val::Handle(l), Val::Handle(r)) if comparison(op) => {
-                        self.take_value(f, left)?;
-                        self.take_value(f, right)?;
+                    (Val::Word(l), Val::Word(r)) if comparison(op) => {
                         (ScalarKind::U64, l.into(), ScalarKind::U64, r.into())
                     }
                     _ => return fail(V::TypeConfusion, "binary operand is not a scalar"),
@@ -7940,6 +7963,7 @@ impl<'p, S: Stage> Machine<'p, S> {
             Val::Unit
             | Val::Bits { .. }
             | Val::Handle(_)
+            | Val::Word(_)
             | Val::Arena(_)
             | Val::Callable { env: None, .. } => return Ok(val),
             _ => return fail(V::Unsupported, "unique copy of a non-block value"),
@@ -8728,7 +8752,15 @@ impl<'p, S: Stage> Machine<'p, S> {
             args.push(match value {
                 Val::Unit => OpValue::Unit,
                 Val::Bits { scalar, bits } => OpValue::Bits { scalar, bits },
-                Val::Handle(h) => OpValue::Handle(h),
+                Val::Handle(h) | Val::Word(h) => OpValue::Handle(h),
+                Val::Callable {
+                    code: Some(code),
+                    env: None,
+                } => OpValue::Function(Symbol {
+                    kind: SymbolKind::Function,
+                    definition: self.unit(code).header.definition.clone(),
+                    instance: Some(self.unit(code).header.instance),
+                }),
                 image @ Val::Image(_)
                     if matches!(self.record(layout)?.kind, LayoutKind::Slice { .. }) =>
                 {
@@ -8955,10 +8987,20 @@ impl<'p, S: Stage> Machine<'p, S> {
                                 bits: u128::from(h),
                             }
                         } else {
-                            Val::Handle(h)
+                            self.handle_value(
+                                h,
+                                self.value_type(
+                                    f.unit,
+                                    site.result.ok_or_else(|| {
+                                        err(V::Malformed, "handle result without output")
+                                    })?,
+                                )?
+                                .layout,
+                            )?
                         }
                     }
-                    OpValue::ViewCursor { .. }
+                    OpValue::Function(_)
+                    | OpValue::ViewCursor { .. }
                     | OpValue::SomeSlice { .. }
                     | OpValue::Bytes(_)
                     | OpValue::Elements { .. } => {
@@ -9007,6 +9049,7 @@ impl<'p, S: Stage> Machine<'p, S> {
             OpOutcome::Unsupported => {
                 return fail(V::Unsupported, format!("operation {:?}", id.definition));
             }
+            OpOutcome::Refused(reason) => return fail(V::Unsupported, reason),
         }
         Ok(Control::Continue)
     }
@@ -9549,32 +9592,30 @@ impl<'p, S: Stage> Machine<'p, S> {
                     .iter()
                     .find(|v| v.ordinal == ordinal)
                     .ok_or_else(|| err(V::TypeConfusion, "variant result has an invalid tag"))?;
-                if variant.fields.len() > 1 {
-                    return fail(V::Malformed, "operation variant payload arity");
-                }
-                let part = match variant.fields.first() {
-                    Some(field) => Some((
-                        field.offset,
-                        self.operation_image(f, field.layout, *value, arguments, transferred)?,
-                    )),
-                    None => {
-                        if !matches!(*value, OpValue::Unit) {
-                            return fail(V::Malformed, "dataful value for nullary variant");
-                        }
-                        None
-                    }
+                let values = match variant.fields.len() {
+                    0 if matches!(*value, OpValue::Unit) => Vec::new(),
+                    0 => return fail(V::Malformed, "dataful value for nullary variant"),
+                    1 => vec![*value],
+                    n => match *value {
+                        OpValue::Aggregate(fields) if fields.len() == n => fields,
+                        _ => return fail(V::Malformed, "operation variant payload arity"),
+                    },
                 };
                 let mut image = Extent::new(self.size(layout)?);
                 image.write_bytes(0, &vec![0; self.size(layout)? as usize]);
                 if tag.form == TagForm::Ordinal {
                     image.write_bytes(tag.offset, &ordinal.to_le_bytes());
                 }
-                if let Some((offset, part)) = part {
+                let mut fields: Vec<_> = variant.fields.iter().collect();
+                fields.sort_by_key(|field| field.ordinal);
+                for (field, value) in fields.into_iter().zip(values) {
+                    let part =
+                        self.operation_image(f, field.layout, value, arguments, transferred)?;
                     image.place_at(
-                        offset,
+                        field.offset,
                         &[ProjectionStep::VariantField {
                             variant: ordinal,
-                            field: variant.fields[0].ordinal,
+                            field: field.ordinal,
                         }],
                         part,
                     );
@@ -11020,7 +11061,7 @@ impl<'p, S: Stage> Machine<'p, S> {
                 bits: *bits,
             }),
             Val::Callable { .. } => Ok(Observed::NonComparableFunction),
-            Val::Handle(h) => Ok(Observed::Handle(*h)),
+            Val::Handle(h) | Val::Word(h) => Ok(Observed::Handle(*h)),
             Val::Ptr(p) if matches!(repr, ValueRepr::Block | ValueRepr::Uncounted) => {
                 let payload = match self.record(layout)?.kind {
                     LayoutKind::Block { payload } | LayoutKind::Box { payload } => payload,

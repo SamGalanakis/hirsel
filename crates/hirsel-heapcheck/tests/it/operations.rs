@@ -379,6 +379,77 @@ fn atomic_cells_do_not_alias_a_closed_host_handle() {
     assert!(run.result.is_ok(), "{run:?}");
 }
 
+#[test]
+fn opaque_token_words_do_not_alias_live_or_closed_handles() {
+    for close_first in [false, true] {
+        let mut layouts = Layouts::new(TargetSpec::x86_64_unknown_linux_gnu());
+        let c = fixtures::common(&mut layouts);
+        let token = layouts.scalar(ScalarKind::U64);
+        layouts.get_mut(token).kind = LayoutKind::Handle;
+        let host_layout = layouts.scalar(ScalarKind::U64);
+        let host = layouts.get_mut(host_layout);
+        host.kind = LayoutKind::Handle;
+        host.drop = vec![DropStep::CloseHandle { offset: 0 }];
+        host.copy = CopyRecipe::NotCopyable;
+        let (target, table) = layouts.finish();
+        let mut f = fixtures::F::<Ready>::new("main", c);
+        let open = operation(&mut f.b, "open");
+        let host = f.b.owned(ValueRepr::Handle, host_layout);
+        f.call(open, &[], Some(host));
+        let snapshot = operation(&mut f.b, "snapshot");
+        let token_value = f.b.owned(ValueRepr::Handle, token);
+        f.call(snapshot, &[], Some(token_value));
+        let reader = f.b.direct(path("read_token"));
+        let consume = operation(&mut f.b, "consume");
+        if close_first {
+            f.call(
+                consume.clone(),
+                &[(Passing::Take, ArgumentValue::Value(host))],
+                None,
+            );
+        }
+        f.call(
+            reader,
+            &[(Passing::Borrow, ArgumentValue::Value(token_value))],
+            None,
+        );
+        if !close_first {
+            f.call(
+                consume,
+                &[(Passing::Take, ArgumentValue::Value(host))],
+                None,
+            );
+        }
+        f.ret(None);
+        let mut reader = fixtures::F::<Ready>::new("read_token", c);
+        let value = reader.b.owned(ValueRepr::Handle, token);
+        reader.b.parameter(value);
+        let snapshot = operation(&mut reader.b, "snapshot");
+        let local = reader.b.owned(ValueRepr::Handle, token);
+        reader.call(snapshot, &[], Some(local));
+        let borrow = operation(&mut reader.b, "borrow");
+        reader.call(
+            borrow,
+            &[(Passing::Borrow, ArgumentValue::Value(value))],
+            None,
+        );
+        reader.ret(None);
+        let p = fixtures::program(
+            target,
+            table.clone(),
+            vec![f.finish(&table), reader.finish(&table)],
+        );
+        let run = run(
+            &p,
+            &path("main"),
+            &[],
+            &mut HandlesModel,
+            &Config::default(),
+        );
+        assert!(run.result.is_ok(), "close_first={close_first}: {run:?}");
+    }
+}
+
 fn handle_control(kind: HandleControl) -> Program<Ready> {
     let mut layouts = Layouts::new(TargetSpec::x86_64_unknown_linux_gnu());
     let handle = layouts.scalar(ScalarKind::U64);

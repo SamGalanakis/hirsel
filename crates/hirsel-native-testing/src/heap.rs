@@ -16,6 +16,7 @@ use hirsel_run_schema::Access;
 use hirsel_syntax::DefPath;
 use std::collections::{BTreeMap, BTreeSet};
 
+mod authority;
 mod durability;
 mod env;
 mod file_faults;
@@ -24,12 +25,17 @@ mod input;
 mod net;
 mod numeric;
 mod process;
+mod runners;
 mod signals;
 
 /// The Io operations with a native entry (`hirsel_rt_operations`), over
 /// logical handles numbered as the runtime's adapter numbers them.
 #[derive(Clone)]
 struct Io {
+    instance: [u8; 16],
+    authorities: authority::Authorities,
+    runners: runners::Runners,
+    head: Option<runners::Head>,
     stdin: std::io::Cursor<Vec<u8>>,
     args: Vec<String>,
     file_reads: hirsel_run_schema::FileReadiness,
@@ -106,6 +112,10 @@ impl Io {
         hirsel_run_schema::validate_file_faults(&world.file_faults)
             .map_err(|e| NativeError::new(StageName::Heap, e))?;
         let mut io = Self::new();
+        io.instance = world.instance;
+        io.authorities = authority::Authorities::new(&world.authorities, world.instance);
+        io.runners.entries = world.runners.clone();
+        io.runners.facts = std::sync::Arc::new(world.callees.clone());
         io.args = world.args.clone();
         io.stdin = std::io::Cursor::new(world.stdin.clone());
         io.mounts = world.mounts.clone();
@@ -149,6 +159,10 @@ impl Io {
     }
     fn new() -> Self {
         Self {
+            instance: [0; 16],
+            authorities: Default::default(),
+            runners: Default::default(),
+            head: None,
             stdin: std::io::Cursor::new(vec![]),
             args: vec![],
             file_reads: Default::default(),
@@ -218,6 +232,8 @@ impl Operations for Io {
             };
         }
         match self.grants.remove(&handle) {
+            Some(IoGrant::Inbox | IoGrant::Arrival) => Ok(None),
+            Some(IoGrant::Claim) => self.authorities.close(handle).map(|()| None),
             Some(
                 IoGrant::File { .. }
                 | IoGrant::Mapped { .. }
@@ -373,6 +389,26 @@ impl Operations for Io {
         if let Some(value) = instant(module, &path.name, args) {
             return OpOutcome::Value(value);
         }
+        if self.head.is_some()
+            && module == Some("io")
+            && matches!(
+                path.name.as_str(),
+                "stdin"
+                    | "stderr"
+                    | "stdout"
+                    | "tasks"
+                    | "monotonic_clock"
+                    | "wall_clock"
+                    | "random"
+                    | "dir"
+                    | "net"
+                    | "process"
+                    | "signals"
+                    | "telemetry"
+            )
+        {
+            return OpOutcome::Value(grant_not_granted());
+        }
         if module == Some("capture") || (module == Some("io") && path.name == "telemetry") {
             return self.telemetry(&path.name, args);
         }
@@ -393,6 +429,12 @@ impl Operations for Io {
             return outcome;
         }
         if let Some(outcome) = self.filesystem(module, &path.name, args) {
+            return outcome;
+        }
+        if let Some(outcome) = self.runner(module, &path.name, args) {
+            return outcome;
+        }
+        if let Some(outcome) = self.authority(module, &path.name, args) {
             return outcome;
         }
         if let Some(outcome) = self.io(module, &path.name, args) {
@@ -491,6 +533,15 @@ impl Operations for Io {
 
 #[derive(Clone)]
 enum IoGrant {
+    Runner {
+        index: usize,
+    },
+    Inbox,
+    Arrival,
+    Authority {
+        index: usize,
+    },
+    Claim,
     Telemetry,
     /// A live span of Telemetry `telemetry` and its context.
     Span {
@@ -2468,6 +2519,10 @@ fn observation(
 /// What a launch grants H's model beyond its entry's handles.
 #[derive(Clone, Debug)]
 pub struct HeapWorld {
+    pub instance: [u8; 16],
+    pub runners: Vec<hirsel_run_schema::RunnerEntry>,
+    pub callees: BTreeMap<String, hirsel_run_schema::CalleeFacts>,
+    pub authorities: BTreeMap<String, hirsel_run_schema::AuthorityGrant>,
     /// Logical admission only. H never reserves host workers.
     pub cpu: Option<hirsel_run_schema::CpuGrant>,
     pub tasks_free: bool,
@@ -2499,6 +2554,10 @@ pub struct HeapWorld {
 impl Default for HeapWorld {
     fn default() -> Self {
         Self {
+            instance: [0; 16],
+            runners: Default::default(),
+            callees: Default::default(),
+            authorities: Default::default(),
             cpu: None,
             tasks_free: false,
             stdin: vec![],
@@ -2566,6 +2625,10 @@ pub fn run_heap_in(
         world,
     )?;
     io.positions = positions(program, sites);
+    if !world.runners.is_empty() {
+        io.runners.program = Some(std::sync::Arc::new(heap.clone()));
+        io.runners.config = Some(std::sync::Arc::new(config(program, None, kind, world)?));
+    }
     let run = hirsel_heapcheck::run_ready(
         &heap,
         entry,
@@ -2643,6 +2706,10 @@ pub fn heap_campaign_in(
         world,
     )?;
     io.positions = positions(program, sites);
+    if !world.runners.is_empty() {
+        io.runners.program = Some(std::sync::Arc::new(heap.clone()));
+        io.runners.config = Some(std::sync::Arc::new(config(program, None, kind, world)?));
+    }
     let campaign = hirsel_heapcheck::audit_campaign_ready(
         &heap,
         entry,

@@ -452,6 +452,10 @@ pub fn differential_ready<P: ReadyExecution>(
     fixture: &Fixture,
 ) -> Vec<(String, Outcome)> {
     let world = crate::HeapWorld {
+        instance: [0; 16],
+        runners: fixture.runners.clone(),
+        callees: fixture.callees.clone(),
+        authorities: fixture.authorities.clone(),
         cpu: fixture.cpu.clone(),
         tasks_free: fixture.tasks_free,
         stdin: fixture.stdin.clone(),

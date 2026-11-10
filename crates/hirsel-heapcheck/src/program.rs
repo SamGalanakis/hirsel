@@ -284,6 +284,8 @@ pub enum Arg {
 /// A plain operand or result of a registry operation.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum OpValue {
+    /// A checked static callable identity, without an environment or heap pointer.
+    Function(Symbol),
     /// A runtime-built iterator of pointer-free semantic items. H owns its environment.
     Iterator(Vec<OpValue>),
     /// Model-owned plain cursor state, advanced only when the program pulls.
@@ -382,6 +384,8 @@ pub enum OpOutcome {
     },
     /// The model has no implementation: the run is an `Unsupported` violation.
     Unsupported,
+    /// A model refusal with the contract it cannot audit.
+    Refused(String),
 }
 
 /// What an idle point's signal delivery did ([`Operations::deliver_signal`]).

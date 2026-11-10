@@ -54,7 +54,7 @@ impl<S: Stage> Machine<'_, S> {
             ) => return Ok(Ok(Some(self.path_order(*a as u64, *b as u64)?))),
             (Val::Unit, Val::Unit, LayoutKind::Unit) => return Ok(Ok(Some(Ordering::Equal))),
             // SEM-5: an `ordered of` token orders by its unsigned word.
-            (Val::Handle(a), Val::Handle(b), LayoutKind::Handle) => return Ok(Ok(Some(a.cmp(b)))),
+            (Val::Word(a), Val::Word(b), LayoutKind::Handle) => return Ok(Ok(Some(a.cmp(b)))),
             (
                 Val::Ptr(pa),
                 Val::Ptr(pb),

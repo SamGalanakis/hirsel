@@ -102,11 +102,15 @@ fn modes_and_prefix_contexts() {
         "type List[T] { value:T }\nfn probe() { let xs = [1u64, 2]; let n:u64=xs[1] }",
         "fn probe(take x: unique Bytes) { let xs = [take x]; let ys: List[Bytes] = take xs }",
         "fn probe(take x: List[unique Bytes]) { let xs = [take x]; let ys: List[List[unique Bytes]] = take xs }",
-        "fn probe(x: String) { let xs = [x]; let n = string.byte_len(xs[0]) }",
+        "fn probe(x: String) { let xs = [copy x]; let n = string.byte_len(xs[0]) }",
     ] {
         check(source, None);
     }
     for (source, rule) in [
+        (
+            "fn probe(x: String) { let xs = [x]; let n = string.byte_len(xs[0]) }",
+            "MODE-7",
+        ),
         (
             "type List[T] { value:T }\nfn probe() { let xs: List[u64] = [1u64, 2] }",
             "LANG-2",

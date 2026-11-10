@@ -28,7 +28,7 @@ fn tuple_compare_incompatible_nested_rows_are_still_rejected_by_v() {
         default_environment(),
         hirsel_front_phases::compiler_adapters(),
     );
-    let file = engine.sources.add("tuple-compare.hir", "fn visible(p:(u64,List[u64]),take expected:List[(u64,List[u64])])->bool { let(k,v)=p; (k,v)==expected[0] }".into()).unwrap();
+    let file = engine.sources.add("tuple-compare.hir", "fn visible(p:(u64,List[u64]),take expected:List[(u64,List[u64])])->bool { let(k,v)=p; (k,copy v)==expected[0] }".into()).unwrap();
     assert!(
         check_snapshot(&mut engine, file, &default_context())
             .unwrap()

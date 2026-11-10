@@ -53,7 +53,13 @@ impl Inputs {
         Some(key)
     }
     fn lookup(&self, key: &Key, body: bool) -> Option<&Input> {
-        {
+        if self.addresses.fillable() {
+            self.addresses.complete(self.rows.values().map(|input| {
+                let front = self.key(input, false);
+                (front, Self::body_key(front), input.definition)
+            }));
+        }
+        let complete = {
             let index = self
                 .addresses
                 .rows
@@ -71,6 +77,12 @@ impl Inputs {
                     return Some(input);
                 }
             }
+            index.complete
+        };
+        // A complete index holds every row's prefix, so a prefix miss is a
+        // definite miss. Without one, the immutable rows give the exact answer.
+        if complete {
+            return None;
         }
         let input = self
             .rows
@@ -147,6 +159,10 @@ struct AddressRows {
     front: Vec<(u32, DefId)>,
     body: Vec<(u32, DefId)>,
     charge: Option<hirsel_engine_admission::MemoryReservation>,
+    /// Every captured row's front and body prefixes are present.
+    complete: bool,
+    /// The admission refused a complete index; lookups keep the exact scan.
+    refused: bool,
 }
 struct AddressAdmission {
     _metadata: hirsel_engine_admission::MemoryReservation,
@@ -163,6 +179,45 @@ impl Addresses {
             hirsel_engine_admission::retained_arc_bytes(self)
         }
     }
+    fn fillable(&self) -> bool {
+        let rows = self.rows.lock().unwrap_or_else(|e| e.into_inner());
+        !rows.complete && !rows.refused && self.admission.get().is_some()
+    }
+    /// Index every row once, charged as one growth. Without admission or room,
+    /// the index stays partial and lookups keep the exact scan.
+    fn complete(&self, rows: impl Iterator<Item = (Key, Key, DefId)>) {
+        let Some(admission) = self.admission.get() else {
+            return;
+        };
+        let (mut front, mut body): (Vec<_>, Vec<_>) = rows
+            .map(|(key, body_key, id)| ((Self::prefix(key), id), (Self::prefix(body_key), id)))
+            .unzip();
+        front.sort_unstable();
+        front.dedup();
+        front.shrink_to_fit();
+        body.sort_unstable();
+        body.dedup();
+        body.shrink_to_fit();
+        let Some(bytes) = (front.capacity() + body.capacity())
+            .checked_mul(size_of::<(u32, DefId)>())
+            .and_then(|bytes| bytes.checked_add(4 * size_of::<usize>()))
+            .and_then(|bytes| u64::try_from(bytes).ok())
+        else {
+            return;
+        };
+        let Ok(charge) = admission.request.reserve(bytes) else {
+            self.rows.lock().unwrap_or_else(|e| e.into_inner()).refused = true;
+            return;
+        };
+        let mut index = self.rows.lock().unwrap_or_else(|e| e.into_inner());
+        if index.complete {
+            return;
+        }
+        index.front = front;
+        index.body = body;
+        index.charge = Some(charge);
+        index.complete = true;
+    }
     fn remember(&self, key: Key, id: DefId, body: bool) {
         let Some(admission) = self.admission.get() else {
             return;
@@ -172,7 +227,12 @@ impl Addresses {
             front,
             body: bodies,
             charge,
+            complete,
+            ..
         } = &mut *index;
+        if *complete {
+            return;
+        }
         let rows = if body { bodies } else { front };
         let row = (Self::prefix(key), id);
         let Err(at) = rows.binary_search(&row) else {
@@ -212,6 +272,8 @@ impl Addresses {
         let mut rows = self.rows.lock().unwrap_or_else(|e| e.into_inner());
         rows.front = Vec::new();
         rows.body = Vec::new();
+        rows.complete = false;
+        rows.refused = false;
         rows.charge.take().is_some()
     }
 }

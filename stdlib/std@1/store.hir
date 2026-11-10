@@ -7,8 +7,10 @@
 // `open` claims the authority, which appends a claim group naming the next
 // writer epoch, then reads the history back: every group's digest, fields and
 // chain, the newest checkpoint's nodes, and the commits after it, applied in
-// order. A claim that was the history's first is followed by the Genesis
-// commit, which records the limits and the checkpoint node bounds.
+// order. The first commit after the claims a history begins with is the
+// Genesis, which records the limits and the checkpoint node bounds; a history
+// holding only claims is a creation that never completed, so it is no store,
+// and the open that finds it creates one.
 //
 // A commit applies to the head's state at once, raising the visible version
 // V, and joins the pending group; the group advances the history as one entry
@@ -344,8 +346,10 @@ pub fn prefix_bounds(prefix: Bytes) -> (
 /// Opens or creates the store `a` keeps and claims it as its writer (STORE-1):
 /// the claim appends a claim entry with the next writer epoch, fencing every
 /// earlier head; the store then recovers the newest state the history holds.
-/// A claim that was the history's first is followed by the Genesis commit,
-/// which records `config.limits`; an existing store keeps its own. Limits no
+/// A history holding nothing but claims, the first open's included when a
+/// failure cut it before its Genesis, is no store: the open writes the
+/// Genesis commit, which records `config.limits`; an existing store keeps its
+/// own. Limits no
 /// group could frame within the authority's entries are refused, with
 /// `Unsupported(Size(..))`, before the claim, whether or not the store exists,
 /// so the refusal has no effect.
@@ -405,8 +409,9 @@ pub fn open(a: Authority, config: StoreConfig) -> Result[Store, StoreError] {
 
 // Reads the history to the claim's entry at `end`: checks each group's digest,
 // fields and chain, applies the commits after the newest checkpoint onto its
-// state, and adopts the recorded limits. True when the history held nothing
-// but this claim, so the store is new.
+// state, and adopts the recorded limits. True when the history holds nothing
+// but claims, so the store is new: `history.follow` admits no other commit
+// before the Genesis.
 fn recover(a: Authority, mut s: Store, end: u64) -> Result[bool, StoreError] {
   let floor = authority.floor(a)
   let mut tip = history.origin_tip()
@@ -516,12 +521,7 @@ fn recover(a: Authority, mut s: Store, end: u64) -> Result[bool, StoreError] {
       s.bounds = take bounds
       Ok(false)
     },
-    // Only a claim precedes the Genesis commit.
-    None() => if tip.last == 1 {
-      Ok(true)
-    } else {
-      Error(stop(mut s, Corrupt(entry_name(end))))
-    },
+    None() => Ok(true),
   }
 }
 
@@ -580,8 +580,8 @@ fn creatable(limits: StoreLimits, max_entry: u64) -> Result[(), StoreError] uses
   Ok(())
 }
 
-// Records a new store's limits and checkpoint bounds as commit 2, durable at
-// every level before `open` returns.
+// Records a new store's limits and checkpoint bounds as the commit after the
+// history's claims, durable at every level before `open` returns.
 fn genesis(a: Authority, mut s: Store, limits: StoreLimits) -> Result[(), StoreError] {
   let k: u32 = int.narrow(limits.key_bytes)
   let v: u32 = int.narrow(limits.value_bytes)

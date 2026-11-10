@@ -975,8 +975,12 @@ recorded by its Genesis commit. A creation whose largest group the format could 
 within `authority.max_entry` (**Bounds** below) refuses with `Unsupported(Size(..))`, so
 no commit within the limits is undecidable for size. A refused limit has no effect and is
 definite, never `Unknown(..)`: `store.open` checks the limits it is passed before it
-claims, whether or not the store exists, because a claim is an effect and a first claim
-not followed by its Genesis leaves a history no open accepts. A deterministic bound on the work one body may do, equal
+claims, whether or not the store exists, because a claim is an effect. **An incomplete
+creation is no store:** a history holding nothing but claim entries, as a failure between
+the first claim and its durable Genesis leaves it, has acknowledged nothing, and the next
+open creates the store on it, writing the Genesis after its own claim with the limits it
+is passed. Only a history whose every entry is an intact claim is read so; damage to any
+entry, the Genesis of an established store's included, is corruption. A deterministic bound on the work one body may do, equal
 on every engine, is **Reserved**. It must charge every core operation by its operands, as
 the [long pure primitives](determinism.md#run-configuration) are charged, because an
 operation the host implements costs one step whatever its size; and its charges belong to
@@ -1031,8 +1035,9 @@ A write is a put (`op` 1) or a delete (`op` 2); keys strictly ascend, so a key o
 once. The SHA-256 of a commit's `writes` bytes is its write-set digest; it is derived,
 never stored. A group is valid only if every field decodes, nothing follows its
 definition table, it holds at least one commit, every index and op is in range, version
-1 is a Claim and version 2 the Genesis, and no Transaction or Run commit and no other
-engine operation is at version 1 or 2. It **follows** the previous group when `prev` is
+1 is a Claim, and a claim is alone in its group. Across groups, the first commit that is not
+a claim is the Genesis, which occurs once: a history begins with one or more claim
+groups, then the Genesis. It **follows** the previous group when `prev` is
 that group's digest, `first` is one above its last version, and either it is a claim
 group whose `epoch` is one above the previous group's and whose claim names the
 history's identity (the first claim mints it), or it is not a claim group and has the
@@ -1051,7 +1056,7 @@ Every kind ends with its `writes`. Engine operations and their payloads:
 
 | Op | Payload |
 |---|---|
-| 1 Genesis | The limits `key_bytes value_bytes transaction_bytes range_rows` and the checkpoint node bounds `node_min node_mean node_max`, each `u32`; the bounds must hold the limits (**Checkpoints** below). It is commit 2, after the first claim, and nowhere else. |
+| 1 Genesis | The limits `key_bytes value_bytes transaction_bytes range_rows` and the checkpoint node bounds `node_min node_mean node_max`, each `u32`; the bounds must hold the limits (**Checkpoints** below). It is the first commit after the claims the history begins with (commit 2 unless a creation was cut before its Genesis), and nowhere else. |
 | 2 Claim | `epoch:u64 attempt:[16] identity:[32]`: a claim, one above the previous epoch, with the claimant's random attempt identity and the history's identity. It is alone in its group, whose `epoch` is its own, and every later group carries that epoch until the next claim. Commit 1 is the first claim, which mints the identity; every later claim repeats it. |
 | 3 Checkpoint | A checkpoint descriptor (below). |
 | 4 Retain | The whole retention state ([STORE-8](#store-8-versions-snapshots-and-forks)): `floor:u64`, `n:u32` pins `{ name:bytes version:u64 }` sorted by name, at most 1024 with names of at most 255 bytes, then `m:u32` checkpoint descriptors that retained versions rely on. |

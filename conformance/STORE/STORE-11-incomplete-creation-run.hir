@@ -1,0 +1,215 @@
+// rule: STORE-11
+// expect: run
+// authorities: {"claims":{"provider":"authority.memory@1","floor":"memory"},"orphan":{"provider":"authority.memory@1","floor":"memory"},"damaged":{"provider":"authority.memory@1","floor":"memory"},"claimsobjects":{"provider":"authority.objects@1","floor":"disk","level":"disk","objects":{"provider":"objects.sim@1","seed":1}},"orphanobjects":{"provider":"authority.objects@1","floor":"disk","level":"disk","objects":{"provider":"objects.sim@1","seed":1}},"damagedobjects":{"provider":"authority.objects@1","floor":"disk","level":"disk","objects":{"provider":"objects.sim@1","seed":1}}}
+// stdout: claims: created, kept 1, limits kept
+// stdout: orphan: corrupt history/2
+// stdout: damaged: corrupt history/2
+// stdout: claimsobjects: created, kept 1, limits kept
+// stdout: orphanobjects: corrupt history/2
+// stdout: damagedobjects: corrupt history/2
+// An incomplete creation is no store, and nothing else is read as one. Each history is
+// built through the seam, then opened as a store, once over a local history
+// (memory) and once over object storage (objects.sim@1), where one refused or lost
+// request during a creation leaves the same history:
+// - claims: two claims and no Genesis, as two creations cut before their Genesis leave
+//   it. The open creates the store with the limits it is passed (its Genesis is commit
+//   4), and a commit survives a reopen that passes other limits.
+// - orphan: a claim, then a group holding a commit that is not the Genesis. Nothing
+//   proves a creation that never happened; it is corruption at entry 2.
+// - damaged: a claim, a Genesis group cut short by a byte, a later claim and a committed
+//   group: an established store whose Genesis is damaged. Corruption at entry 2, never
+//   a new store.
+pub type Failed = Failed(String)
+
+fn say(stdout: Stdout, line: String) -> Result[(), Failed] {
+  match out.print(stdout, f"{line}\n") {
+    Ok(_) => Ok(()),
+    Error(_) => Error(Failed("print")),
+  }
+}
+
+// Puts the key of `n` bytes `k`.
+fn put(mut tx: store.Tx, info: store.CallInfo, n: u64) -> Result[(), store.TxError] {
+  let mut key: List[u8] = []
+  for _ in 0u64..n {
+    list.push(mut key, 107)
+  }
+  store.tx_put(mut tx, bytes.from_list(take key), b"v")?
+  Ok(())
+}
+
+// Limits under the defaults: an 8-byte key is the largest.
+fn tight() -> store.StoreConfig {
+  let mut c = store.default_config()
+  c.limits.key_bytes = 8
+  c
+}
+
+// The tip after the history's entries, read through the seam.
+fn tip(a: Authority) -> Result[history.Tip, Failed] {
+  let Ok(entries) = authority.read(a, 0, authority.floor(a), 100) else {
+    return Error(Failed("read"))
+  }
+  let mut t = history.origin_tip()
+  for e in entries {
+    let Ok((g, d)) = history.decode_entry(e) else {
+      return Error(Failed("decode"))
+    }
+    let Ok(next) = history.follow(t, g, d) else {
+      return Error(Failed("follow"))
+    }
+    t = take next
+  }
+  Ok(take t)
+}
+
+// A group after `t` holding one engine commit.
+fn group(t: history.Tip, body: history.Engine) -> (Bytes, Bytes) {
+  history.encode_group(
+    history.Group(
+      prev: copy t.digest,
+      first: t.last + 1,
+      epoch: t.epoch,
+      commits: [history.Commit(body: Engine(copy body), writes: [])],
+      defs: []
+    )
+  )
+}
+
+fn genesis_body() -> history.Engine {
+  let l = store.default_config().limits
+  Genesis(
+    key_bytes: int.narrow(l.key_bytes),
+    value_bytes: int.narrow(l.value_bytes),
+    transaction_bytes: int.narrow(l.transaction_bytes),
+    range_rows: int.narrow(l.range_rows),
+    bounds: history.default_bounds()
+  )
+}
+
+fn opened(r: Result[store.Store, store.StoreError]) -> String {
+  match r {
+    Ok(_) => "opened",
+    Error(Corrupt(name)) => f"corrupt {name}",
+    Error(_) => "refused",
+  }
+}
+
+fn claims_only(rt: Io, stdout: Stdout, name: String) -> Result[(), Failed] {
+  let Ok(a) = io.authority(rt, name) else {
+    return Error(Failed("authority"))
+  }
+  let Ok(_) = authority.claim(a) else {
+    return Error(Failed("claim"))
+  }
+  let Ok(_) = authority.claim(a) else {
+    return Error(Failed("claim"))
+  }
+  let Ok(made) = store.open(a, tight()) else {
+    return say(stdout, f"{name}: refused")
+  }
+  let mut s = take made
+  let r: Result[(), store.TxFailure[store.TxError]] = store.transact(mut s, put, 1u64)
+  let Ok(()) = r else {
+    return Error(Failed("commit"))
+  }
+  let Ok(()) = store.close(take s) else {
+    return Error(Failed("close"))
+  }
+  let Ok(again) = store.open(a, store.default_config()) else {
+    return say(stdout, f"{name}: reopen refused")
+  }
+  let mut s2 = take again
+  let Ok(snap) = store.snapshot(a, mut s2, authority.floor(a)) else {
+    return Error(Failed("snapshot"))
+  }
+  let kept: u64 = match store.get(snap, b"k") {
+    Some(_) => 1,
+    None() => 0,
+  }
+  // The creation's 8-byte key limit holds: a 9-byte key is refused.
+  let long: Result[(), store.TxFailure[store.TxError]] = store.transact(
+    mut s2,
+    put,
+    9u64
+  )
+  let limits = match long {
+    Ok(()) => "limits lost",
+    Error(_) => "limits kept",
+  }
+  say(stdout, f"{name}: created, kept {kept}, {limits}")
+}
+
+fn orphan(rt: Io, stdout: Stdout, name: String) -> Result[(), Failed] {
+  let Ok(a) = io.authority(rt, name) else {
+    return Error(Failed("authority"))
+  }
+  let Ok(made) = authority.claim(a) else {
+    return Error(Failed("claim"))
+  }
+  let mut c = take made
+  let t = tip(a)?
+  let (entry, _) = group(t, StreamFence(sha256_name(b"orphan")))
+  match authority.advance(a, mut c, 1, take entry, authority.floor(a)) {
+    Advanced(_) => {},
+    _ => return Error(Failed("advance")),
+  }
+  say(stdout, f"{name}: {opened(store.open(a, store.default_config()))}")
+}
+
+fn damaged(rt: Io, stdout: Stdout, name: String) -> Result[(), Failed] {
+  let Ok(a) = io.authority(rt, name) else {
+    return Error(Failed("authority"))
+  }
+  let Ok(made) = authority.claim(a) else {
+    return Error(Failed("claim"))
+  }
+  let mut c = take made
+  let t = tip(a)?
+  let (whole, _) = group(t, genesis_body())
+  let cut = bytes.slice(whole, 0, bytes.len(whole) - 1)
+  match authority.advance(a, mut c, 1, take cut, authority.floor(a)) {
+    Advanced(_) => {},
+    _ => return Error(Failed("advance")),
+  }
+  let Ok(later) = authority.claim(a) else {
+    return Error(Failed("later claim"))
+  }
+  let mut c2 = take later
+  // The later claim's group, as the authority wrote it: its digest is the next prev.
+  let Ok(entries) = authority.read(a, 2, authority.floor(a), 1) else {
+    return Error(Failed("read"))
+  }
+  let Ok((g3, d3)) = history.decode_entry(entries[0]) else {
+    return Error(Failed("decode"))
+  }
+  let t3 = history.Tip(
+    digest: d3,
+    last: 3,
+    epoch: g3.epoch,
+    identity: b"",
+    created: true
+  )
+  let (entry, _) = group(t3, StreamFence(sha256_name(b"damaged")))
+  match authority.advance(a, mut c2, 3, take entry, authority.floor(a)) {
+    Advanced(_) => {},
+    _ => return Error(Failed("advance")),
+  }
+  say(stdout, f"{name}: {opened(store.open(a, store.default_config()))}")
+}
+
+fn sha256_name(name: Bytes) -> Bytes {
+  bytes.from_inline(sha256.digest(name))
+}
+
+pub fn main(rt: Io, args: Args) -> Result[(), Failed] {
+  let Ok(stdout) = io.stdout(rt) else {
+    return Error(Failed("stdout"))
+  }
+  for suffix in ["", "objects"] {
+    claims_only(rt, stdout, f"claims{suffix}")?
+    orphan(rt, stdout, f"orphan{suffix}")?
+    damaged(rt, stdout, f"damaged{suffix}")?
+  }
+  Ok(())
+}

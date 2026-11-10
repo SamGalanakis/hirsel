@@ -4256,11 +4256,12 @@ hold the largest key and value, with `InvalidInput()`, and limits whose largest 
 the store exists, so a refused open has no effect. It then claims the authority, which
 appends a claim group with the next writer epoch and fences every earlier head, and reads
 the history back: each group against its digest and the chain rules, the newest
-checkpoint's nodes, and the commits after it in order. When the claim was the history's
-first, the store commits its Genesis, which records `config.limits` and the node bounds;
-an existing store keeps the limits its Genesis recorded. A history whose first group is a
-claim not followed by a Genesis, or any group, node or chain that fails a check, is
-`Corrupt(name)`; a record of another format version is `Unsupported(Format(..))`.
+checkpoint's nodes, and the commits after it in order. When the history holds nothing but
+claims (a new authority, or a creation a failure cut before its Genesis), the store
+commits its Genesis, which records `config.limits` and the node bounds; an existing store
+keeps the limits its Genesis recorded. A commit other than the Genesis after only claims,
+or any group, node or chain that fails a check, is `Corrupt(name)`; a record of another
+format version is `Unsupported(Format(..))`.
 Stores written by the earlier numbered-object layout are not opened.
 
 **Transactions.** A transaction is an entry ([STORE-2](storage.md#store-2-transactions)):

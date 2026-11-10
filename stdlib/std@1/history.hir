@@ -107,12 +107,14 @@ pub type Group {
 }
 
 /// What a reader trusts after the groups it has checked: the last group's
-/// digest and version, the writer epoch, and the store identity.
+/// digest and version, the writer epoch, the store identity, and whether the
+/// Genesis commit was among them.
 pub type Tip {
   digest: Bytes,
   last: u64,
   epoch: u64,
   identity: Bytes,
+  created: bool,
 }
 
 /// The mutable record naming the history's end on one backend.
@@ -197,7 +199,7 @@ fn zeros(n: u64) -> List[u8] uses {} {
 
 /// The reader's state before a history's first group.
 pub fn origin_tip() -> Tip uses {} {
-  Tip(digest: zero_digest(), last: 0, epoch: 0, identity: b"")
+  Tip(digest: zero_digest(), last: 0, epoch: 0, identity: b"", created: false)
 }
 
 // ---------------------------------------------------------------- encoding
@@ -621,16 +623,11 @@ fn group_fields(data: Bytes) -> Result[Group, ()] uses {} {
   for i in 0u64..count {
     let version = first + i
     let body = get_body(data, mut c)?
-    // Version 1 is the first claim and version 2 the genesis; a claim is
-    // alone in its group.
+    // Version 1 is the first claim, and a claim is alone in its group. Where
+    // the Genesis falls is `follow`'s: after the claims a history begins with.
     match body {
       Engine(Claim(epoch: e, ..)) => {
         if count != 1 || e != epoch {
-          return Error(())
-        }
-      },
-      Engine(Genesis(..)) => {
-        if version != 2 {
           return Error(())
         }
       },
@@ -639,23 +636,11 @@ fn group_fields(data: Bytes) -> Result[Group, ()] uses {} {
         if call.def >= uses_def {
           uses_def = call.def + 1
         }
-        if version <= 2 {
-          return Error(())
-        }
       },
-      _ => {
-        if version <= 2 {
-          return Error(())
-        }
-      },
+      _ => {},
     }
     if version == 1 {
       let Engine(Claim(..)) = body else {
-        return Error(())
-      }
-    }
-    if version == 2 {
-      let Engine(Genesis(..)) = body else {
         return Error(())
       }
     }
@@ -856,19 +841,35 @@ fn decode_engine(op: u8, data: Bytes) -> Result[Engine, ()] uses {} {
 /// Checks that `g`, whose digest is `d`, follows `tip`, and returns the tip
 /// after it: `prev` is the tip's digest, `first` is one above its last
 /// version, a claim group raises the epoch by one, every other group keeps
-/// it, nothing precedes the first claim, and every claim names the store
-/// identity, which the first claim and a fork set.
+/// it, nothing precedes the first claim, every claim names the store
+/// identity, which the first claim and a fork set, and the history's first
+/// commit that is not a claim is its one Genesis.
 pub fn follow(tip: Tip, g: Group, d: Bytes) -> Result[Tip, ()] uses {} {
   if g.prev != tip.digest || g.first != tip.last + 1 {
     return Error(())
   }
   let mut identity = unique tip.identity
+  let mut created = tip.created
   for x in g.commits {
     match x.body {
       Engine(Fork(identity: id, ..)) => {
+        if !created {
+          return Error(())
+        }
         identity = unique id
       },
-      _ => {},
+      Engine(Genesis(..)) => {
+        if created {
+          return Error(())
+        }
+        created = true
+      },
+      Engine(Claim(..)) => {},
+      _ => {
+        if !created {
+          return Error(())
+        }
+      },
     }
   }
   match g.commits[0].body {
@@ -893,7 +894,8 @@ pub fn follow(tip: Tip, g: Group, d: Bytes) -> Result[Tip, ()] uses {} {
       digest: unique d,
       last: g.first + list.len(g.commits) - 1,
       epoch: g.epoch,
-      identity: take identity
+      identity: take identity,
+      created: created
     )
   )
 }

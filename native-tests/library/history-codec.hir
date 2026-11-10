@@ -558,6 +558,49 @@ pub fn main(rt: Io, args: Args) -> Result[(), GrantError] {
   // Nothing but a claim precedes the first claim: a genesis at version 2
   // after no claim does not follow the origin.
   chain = chain && is_error(history.follow(history.origin_tip(), gen, genesis_digest))
+  // A history begins with claims and then its one Genesis. A creation cut before
+  // its Genesis leaves a claim that a second claim and then the Genesis follow;
+  // a commit other than the Genesis after only claims does not follow, nor does
+  // a second Genesis.
+  let (cbdata, cbdigest) = history.claim_group(tip1, fixed(mut g, 16), identity)
+  let Ok(cb) = history.decode_group(cbdata, cbdigest) else {
+    report(stdout, "chain rules", false)
+    return Ok(())
+  }
+  let Ok(tipc) = history.follow(tip1, cb, cbdigest) else {
+    report(stdout, "chain rules", false)
+    return Ok(())
+  }
+  let mut late = copy gen
+  late.prev = copy tipc.digest
+  late.first = 3
+  late.epoch = 2
+  let (lgen, lgend) = history.encode_group(late)
+  chain = chain && match history.decode_group(lgen, lgend) {
+    Ok(lg3) => match history.follow(tipc, lg3, lgend) {
+      Ok(t) => t.last == 3 && t.epoch == 2,
+      Error(()) => false,
+    },
+    Error(_) => false,
+  }
+  let mut orphan = copy later
+  orphan.prev = copy tipc.digest
+  orphan.epoch = 2
+  let (od, odd) = history.encode_group(orphan)
+  let Ok(og) = history.decode_group(od, odd) else {
+    report(stdout, "chain rules", false)
+    return Ok(())
+  }
+  chain = chain && is_error(history.follow(tipc, og, odd))
+  let mut again = copy gen
+  again.prev = copy tip2.digest
+  again.first = 3
+  let (ad, add) = history.encode_group(again)
+  let Ok(ag) = history.decode_group(ad, add) else {
+    report(stdout, "chain rules", false)
+    return Ok(())
+  }
+  chain = chain && is_error(history.follow(tip2, ag, add))
   report(stdout, "chain rules", chain)
   Ok(())
 }

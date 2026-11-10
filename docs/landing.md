@@ -98,6 +98,12 @@ toolchain under `RUSTUP_HOME` (default `~/.rustup`), then `CARGO_HOME/bin`
 subprocess receives that explicit PATH, including nested preparation and
 build-file generation, so the batch head needs no shell Rust setup.
 
+A batch runs its head's tools/land, so every other ticket in it is checked
+by the tool already on main. Before publishing a ticket, land therefore
+queries this tree for each target literal in main's tools/land and refuses
+submission naming any that is missing: a change that renames such a target
+keeps the old name working (an alias or a test suite) in the same commit.
+
 When every new main commit touches only `tools/known-failures.tsv`, a
 previously passed batch rebases and pushes without running any check again,
 including the fast screen. The checked tickets with unchanged submitted heads

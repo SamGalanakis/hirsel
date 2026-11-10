@@ -74,6 +74,9 @@ CLIPPY_TWINS = 'attrregexfilter(name, "-clippy$", kind("^rust_(library|binary)$"
 # The manifests check: one test, or its shards `-shard-<i>` (tools/buck2/sync.py),
 # never their suite `test-package-manifests`, which the tool before this one runs.
 MANIFESTS = 'kind("_rust_test", attrregexfilter(name, "^test-package-manifests(-shard-[0-9]+)?$", root//:))'
+# A target literal in a tools/land: the tool on main checks every batch this
+# tree joins, so each one it names must exist in the tree submitted.
+NAMED = re.compile(r'''['"](?:root)?//:([A-Za-z0-9_.+-]+)['"]''')
 REJECTED = ('[rejected]', 'fetch first', 'non-fast-forward', 'failed to update ref', 'cannot lock ref')
 LANDINGS = 'hirsel-landings.jsonl'
 # Tickets per batch, the head's own included (bors-ng's max_batch_size).
@@ -465,6 +468,29 @@ def check(name, command):
     error = first_error(done.stderr + done.stdout)
     print(error, flush=True)
     return [f'FAIL  {name}', *error.splitlines()]
+
+
+def previous_tool_refusal():
+    """Why main's tools/land could not check this tree, or None.
+
+    A batch runs its head's tools/land, so every other change in it is checked
+    by the tool already on main: a change that renames or removes a target
+    that tool asks for would break the whole batch, and must keep the old name
+    working in the same commit."""
+    if (fetched := git('fetch', '-q', 'origin', 'main')).returncode:
+        return 'git fetch failed\n' + fetched.stderr
+    shown = git('show', 'origin/main:tools/land')
+    names = sorted(set(NAMED.findall(shown.stdout))) if shown.returncode == 0 else []
+    if not names:
+        return None
+    if (synced := run([PY, 'tools/buck2/sync.py', '--if-stale'])).returncode:
+        return 'cannot generate build files\n' + first_error(synced.stderr + synced.stdout)
+    missing = [name for name in names if run([BUCK2, 'uquery', *CONFIG, '//:' + name]).returncode]
+    if missing:
+        return ('main\'s tools/land checks this change in a batch and asks for '
+                + ', '.join('//:' + name for name in missing) + ', which this tree lacks; keep the old name '
+                'working (an alias or a suite) in the same change')
+    return None
 
 
 def move(tree):
@@ -928,6 +954,9 @@ def main():
         say(str(error))
         return 1
     merging.install(ROOT)
+    if not os.environ.get('HIRSEL_LAND_TICKET') and (refusal := previous_tool_refusal()):
+        say(refusal)
+        return 1
     branch = os.environ.get('HIRSEL_LAND_BRANCH') or git('branch', '--show-current').stdout.strip()
     previous_signal = signal.signal(signal.SIGTERM, withdraw_signal)
     try:

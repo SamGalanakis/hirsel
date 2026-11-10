@@ -322,6 +322,24 @@ Path(os.environ['FAKE_PREPARED']).write_text(found)
                 self.assertIn('Rust toolchain unavailable' if installed else 'no Rust toolchain found', landed.stdout)
                 self.assertFalse((self.lane / '.git/land-queue').exists())
 
+    def test_a_tree_without_a_target_mains_tool_asks_for_is_refused_before_queueing(self):
+        # Ticket 3505: a tree that renamed `//:test-package-manifests` joined a
+        # batch whose head ran main's tools/land, which asked for the old name.
+        other = self.top / 'other'
+        self.git(self.top, 'clone', '-q', str(self.origin), str(other))
+        with (other / 'tools/land').open('a') as tool:
+            tool.write("\nOLD_CHECK = '//:test-old-name'\n")
+        self.git(other, 'commit', '-qam', 'main asks for an old name')
+        self.git(other, 'push', '-q', 'origin', 'main')
+        buck2 = self.lane / '.buck2/bin/buck2'
+        buck2.write_text('#!/bin/sh\ncase "$*" in *test-old-name*) echo "Unknown target" >&2; exit 1;; esac\n'
+                         'echo root//:a\n')
+        refused = self.land()
+        self.assertEqual(refused.returncode, 1, refused.stdout + refused.stderr)
+        self.assertIn('//:test-old-name', refused.stdout)
+        self.assertFalse((self.lane / '.git/land-queue').exists())
+        self.assertEqual(self.main_log(), ['main asks for an old name', 'base'])
+
     def test_a_push_rejected_because_main_moved_rebases_rebuilds_and_lands(self):
         landed = self.land(FAKE_OTHER_LANE=str(self.top / 'other'))
         self.assertEqual(landed.returncode, 0, landed.stdout + landed.stderr)

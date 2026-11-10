@@ -1,0 +1,125 @@
+// rule: SEM-3
+// expect: run
+// The key encodings of a sweep of keys of every schema constructor, pinned by
+// the SHA-256 digest of their length-framed concatenation. The digest is the
+// one `std@1/keys` produced before key encoding moved below std, so any change
+// to an encoding's bytes fails it; the other SEM-3 key cases pin each rule by
+// hand.
+@serializable
+type Point {
+  x: i32,
+  y: String,
+}
+
+@serializable
+type Shape = Dot | Line(u8) | Area(u16, u16)
+
+@serializable
+type Chain = End | Link(u8, box Chain)
+
+fn frame[K: serializable](mut out: List[u8], value: K) -> () {
+  let encoded = std@1/keys.encode(value)
+  let n = bytes.len(encoded)
+  list.push(mut out, int.truncate(n >> 8 & 255))
+  list.push(mut out, int.truncate(n & 255))
+  bytes.append(mut out, encoded)
+}
+
+pub fn main(t: Test) -> Result[(), ()] {
+  let mut framed: List[u8] = []
+  for x in [0u8, 1u8, 127u8, 128u8, 255u8] {
+    frame(mut framed, x)
+  }
+  for x in [0u16, 255u16, 256u16, 65535u16] {
+    frame(mut framed, x)
+  }
+  for x in [0u32, 1u32, 16777216u32, 4294967295u32] {
+    frame(mut framed, x)
+  }
+  for x in [0u64, 72057594037927936u64, 18446744073709551615u64] {
+    frame(mut framed, x)
+  }
+  frame(mut framed, 340282366920938463463374607431768211455u128)
+  for x in [-128i8, -1i8, 0i8, 1i8, 127i8] {
+    frame(mut framed, x)
+  }
+  for x in [-32768i16, -256i16, 0i16, 32767i16] {
+    frame(mut framed, x)
+  }
+  for x in [-2147483648i32, -1i32, 0i32, 2147483647i32] {
+    frame(mut framed, x)
+  }
+  for x in [-9223372036854775808i64, -1i64, 0i64, 9223372036854775807i64] {
+    frame(mut framed, x)
+  }
+  frame(mut framed, -170141183460469231731687303715884105728i128)
+  frame(mut framed, 170141183460469231731687303715884105727i128)
+  for bits in [
+    0u32,
+    1u32,
+    2139095040u32,
+    2143289344u32,
+    2147483648u32,
+    2147483649u32,
+    4286578688u32
+  ] {
+    frame(mut framed, f32.from_bits(bits))
+  }
+  for bits in [
+    0u64,
+    1u64,
+    4503599627370496u64,
+    9218868437227405312u64,
+    9221120237041090560u64,
+    9223372036854775808u64,
+    18442240474082181120u64
+  ] {
+    frame(mut framed, f64.from_bits(bits))
+  }
+  frame(mut framed, false)
+  frame(mut framed, true)
+  for c in ['\u{0}', 'a', '\u{ff}', '\u{10ffff}'] {
+    frame(mut framed, c)
+  }
+  for s in ["", "\u{0}", "\u{0}\u{0}", "a\u{0}b", "\u{7f}\u{ff}\u{10ffff}", "abc"] {
+    frame(mut framed, s)
+  }
+  for b in [b"", b"\x00", b"\xff", b"\x00\xff\x00\x01", b"\x01\x00"] {
+    frame(mut framed, b)
+  }
+  frame(mut framed, ())
+  frame(mut framed, (1u8, "a", -1i16))
+  frame(mut framed, Point(x: -7, y: "p\u{0}q"))
+  let shapes: List[Shape] = [Dot, Line(9u8), Area(1u16, 65535u16)]
+  for s in shapes {
+    frame(mut framed, s)
+  }
+  let end: Chain = End
+  let chain: Chain = Link(1u8, box Link(2u8, box end))
+  frame(mut framed, chain)
+  let none: Option[String] = None
+  frame(mut framed, none)
+  let some: Option[String] = Some("x")
+  frame(mut framed, some)
+  let nested: Option[Option[u8]] = Some(None)
+  frame(mut framed, nested)
+  let ok: Result[u8, String] = Ok(3)
+  frame(mut framed, ok)
+  let error: Result[u8, String] = Error("e\u{0}")
+  frame(mut framed, error)
+  let empty: List[u16] = []
+  frame(mut framed, empty)
+  frame(mut framed, [1u16, 0u16, 65535u16])
+  frame(mut framed, ["", "a\u{0}", "b"])
+  let lists: List[List[u8]] = [[], [0u8], [0u8, 0u8]]
+  frame(mut framed, lists)
+  let inline: Inline[i8, 3] = [-1i8, 0i8, 1i8]
+  frame(mut framed, inline)
+  let pairs: List[(u8, Option[i64])] = [(1u8, Some(-1i64)), (2u8, None)]
+  frame(mut framed, pairs)
+  test.check(
+    t,
+    sha256.digest_hex(bytes.from_list(take framed)) == "23cd8302c3ace05f154c7f3c11d94bdf7ff0b306ec2e1cac87fcca6e7eb0dcac"
+  )
+  Ok(())
+}

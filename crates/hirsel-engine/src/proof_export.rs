@@ -45,6 +45,9 @@ pub(crate) fn signature_references(
         .map(|d| d.definition.path().clone())
         .collect();
     for signature in std::iter::once(&section.public).chain(section.owner_view.as_ref()) {
+        if let Some(heap) = &signature.metadata.roles.heap {
+            references.extend([heap.arena.clone(), heap.operation.clone()]);
+        }
         references.extend(hirsel_proof_export::references(
             types,
             &hirsel_proof_export::DefinitionContent::Body {

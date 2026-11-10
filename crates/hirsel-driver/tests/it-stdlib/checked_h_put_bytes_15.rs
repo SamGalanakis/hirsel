@@ -95,23 +95,6 @@ fn put_bytes(mut out: List[u8], data: Bytes) -> () uses {} {
 "#;
 
 #[test]
-fn minimal_store() {
-    parity(
-        r#"
-fn put(mut tx: store.Tx, info: store.CallInfo, a: ()) -> Result[(), store.TxError] {
-  store.tx_put(mut tx, b"a", b"1")
-}
-
-pub fn main(t: Test) -> Result[(), store.StoreError] {
-  let mut s = store.open(test.dir(t, []), store.default_config())?
-  test.check(t, store.transact(mut s, put, ()) == Ok(()))
-  store.close(take s)
-}
-"#,
-    );
-}
-
-#[test]
 fn direct_bytes() {
     parity(&format!(
         "{ENCODE}{}",

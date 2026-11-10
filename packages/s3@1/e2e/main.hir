@@ -1,44 +1,28 @@
-pub type E2EError = Object(s3.S3Error) | Store(store.StoreError) | Tx(
-  store.TxFailure[store.TxError]
-) | Grant(GrantError) | Clock(ClockError) | Output(OutputError)
+pub type E2EError = Object(s3.S3Error) | Grant(GrantError) | Clock(ClockError) | Output(
+  OutputError
+) | Mismatch
 
-fn put(mut tx: store.Tx, info: store.CallInfo, a: ()) -> Result[(), store.TxError] {
-  store.tx_put(mut tx, b"e2e/key", b"value")
-}
-
+// One conditional create, read back and deleted against the granted bucket.
 pub fn main(io: Io, env: Env) -> Result[(), E2EError] {
   let out = io.stdout(io)?
   let clock = io.wall_clock(io)?
-  let c = s3.from_grants(io, env, "data")?
-  let state = s3.object_state(take c)?
-  let mut s = store.open_backend(
-    take state,
-    s3.object_backend(),
-    store.default_config()
-  )?
+  let mut c = s3.from_grants(io, env, "data")?
   let start = clock.wall(clock)?
-  store.transact(mut s, put, ())?
+  s3.put(mut c, "e2e/key", b"value", Create())?
   let finished = clock.wall(clock)?
   let elapsed = finished - start
   let message = string.concat(
-    string.concat("one acknowledged commit group: ", i64.to_string(elapsed)),
+    string.concat("one conditional create: ", i64.to_string(elapsed)),
     " ns\n"
   )
   out.print(out, message)?
-  let snap = store.snapshot(mut s)
-  if store.get(snap, b"e2e/key") != Some(b"value") {
-    return Error(Store(Corrupt("e2e read")))
+  if s3.get(mut c, "e2e/key")? != b"value" {
+    return Error(Mismatch())
   }
-  store.compact(mut s)?
-  let reopened_state = store.into_state(take s)?
-  let mut again = store.open_backend(
-    take reopened_state,
-    s3.object_backend(),
-    store.default_config()
-  )?
-  if store.get(store.snapshot(mut again), b"e2e/key") != Some(b"value") {
-    return Error(Store(Corrupt("e2e recovery")))
+  match s3.put(mut c, "e2e/key", b"other", Create()) {
+    Error(Exists()) => {},
+    _ => return Error(Mismatch()),
   }
-  store.close(take again)?
+  s3.delete(mut c, "e2e/key")?
   Ok(())
 }

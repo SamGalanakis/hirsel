@@ -1,127 +1,44 @@
-// An embedded, transactional, ordered key-value store over Backend[S]: a
-// log-structured engine whose objects are immutable and conditionally created,
-// after SlateDB's object-storage protocol (manifest, write-ahead objects and
-// writer fencing by create-if-absent). The local backend uses an explicit Dir;
-// object backends supply the same operations through their owned state.
+// An embedded, transactional, ordered key-value store kept by an authority
+// (docs/spec/storage.md STORE-1, STORE-11): the engine holds every key and
+// value in memory, runs one transaction at a time, and extends the store's
+// history, a chain of commit groups in the history format (`std@1/history`),
+// through the authority seam. Nothing else is stored, and nothing else fences.
 //
-// Layout under the Dir, every name a 20-digit decimal id:
-//   manifest/N  the writer epoch, the current snapshot and the first log id
-//               to replay; written when a writer claims the store and at
-//               compaction, never replaced (the newest valid one is current)
-//   log/N       one commit group: the write sets of consecutive commits; the
-//               commit point of every commit in it
-//   snap/N      every entry as of one commit, written by compaction
-// A writer claims the store by creating a fence log at the next log id and
-// then the next manifest with the next epoch. A stale writer's next create
-// finds its id taken and the store reports Fenced(). Fencing rests on every
-// created name staying taken, so the store never removes a durable object:
-// a freed name would let a superseded writer's create succeed. Compaction
-// only lets recovery skip what the newest manifest no longer reaches.
+// `open` claims the authority, which appends a claim group naming the next
+// writer epoch, then reads the history back: every group's digest, fields and
+// chain, the newest checkpoint's nodes, and the commits after it, applied in
+// order. A claim that was the history's first is followed by the Genesis
+// commit, which records the limits and the checkpoint node bounds.
+//
+// A commit applies to the head's state at once, raising the visible version
+// V, and joins the pending group; the group advances the history as one entry
+// when an outcome awaits its durability or a group bound is reached, never on
+// a timer. For each declared level L the store keeps D(L), the highest version
+// durable at L, and the state at it, so a snapshot at a level costs nothing.
 //
 // A transaction is an entry (STORE-2): `transact`, `query` and `call` run
 // it through `runner.apply` on argument bytes decoded afresh, with call
-// information minted before the run. The store holds itself from the run to
-// the commit, so no commit lands in between and there is no conflict.
-/// The storage seam: immutable whole-object reads, conditional creation,
-/// ordered prefix discovery, deletion and directory setup. `put_new` returns
-/// `Ok` only once an object with exactly these bytes holds the name, durably
-/// under `Durable()`: for an existing object with equal bytes it first redoes
-/// its durability barrier. Its errors say whether the create may have happened
-/// (`PutError`). Implementations may issue range GETs and cache immutable data
-/// behind `read`.
-pub type Backend[S] {
-  read: fn(mut state: S, String) -> Result[Bytes, FileError] uses {state},
-  put_new: fn(mut state: S, String, Bytes, Durability) -> Result[(), PutError] uses {state},
-  list: fn(mut state: S, String) -> Result[List[String], FileError] uses {state},
-  remove: fn(mut state: S, String) -> Result[(), FileError] uses {state},
-  mkdir: fn(mut state: S, String) -> Result[(), FileError] uses {state},
-  // The largest object `put_new` accepts; a larger one is `Refused`.
-  max_object_bytes: fn(mut state: S) -> u64 uses {state},
-}
+// information minted before the run, and its commit records the call: the
+// entry's identity, the call information, the argument bytes and the bytes of
+// the outcome. The store holds itself from the run to the commit, so no
+// commit lands in between and there is no conflict.
 
-/// How a backend's `put_new` failed. `Taken()`: an object with other bytes
-/// holds the name. `Refused(e)`: the request was refused before it had any
-/// effect, so no object was created. `Undecided(e)`: the object may hold the
-/// name, with or without its durability barrier: a lost response, or a barrier
-/// that failed after the object became visible. The store settles an undecided
-/// create by issuing the same create again, which succeeds only with its
-/// barrier; reading the object back would prove existence, not durability.
-@serializable
-pub type PutError = Taken | Refused(FileError) | Undecided(FileError)
-
-/// The default backend: an explicitly granted local or simulated Dir.
-pub fn local_backend() -> Backend[Dir] uses {} {
-  Backend(
-    read: local_read,
-    put_new: local_put,
-    list: local_list,
-    remove: local_remove,
-    mkdir: local_mkdir,
-    max_object_bytes: local_max_object_bytes
-  )
-}
-
-// A Dir object is bounded only by the runtime's largest byte extent.
-fn local_max_object_bytes(mut d: Dir) -> u64 uses {} {
-  4611686018427387839
-}
-
-fn local_read(mut d: Dir, name: String) -> Result[Bytes, FileError] uses {d} {
-  file.read_bytes(d, path.of(name))
-}
-
-// `file.put_new` reports a failed directory barrier after the link as a fault
-// like any other, so only `AlreadyExists` (other bytes) is decided.
-fn local_put(mut d: Dir, name: String, data: Bytes, mode: Durability) -> Result[
-  (),
-  PutError
-] uses {d} {
-  match file.put_new(d, path.of(name), unique data, mode) {
-    Ok(()) => Ok(()),
-    Error(AlreadyExists()) => Error(Taken()),
-    Error(e) => Error(Undecided(e)),
-  }
-}
-
-fn local_list(mut d: Dir, name: String) -> Result[List[String], FileError] uses {d} {
-  let entries = file.read_dir(d, path.of(name))?
-  let mut names: List[String] = []
-  for item in take entries {
-    let entry = item?
-    list.push(mut names, path.text(entry.path))
-  }
-  Ok(take names)
-}
-
-fn local_remove(mut d: Dir, name: String) -> Result[(), FileError] uses {d} {
-  file.remove(d, path.of(name))
-}
-
-fn local_mkdir(mut d: Dir, name: String) -> Result[(), FileError] uses {d} {
-  file.mkdir(d, path.of(name))
-}
-
-/// How the store makes commits survive a crash, and where it may stop for a
-/// test. `durability` is the mode of every log object: `Durable()` returns a
-/// commit's ticket from `durable` only once its group is synced, `Volatile()`
-/// writes groups without syncing, so a crash may lose any suffix of commits
-/// (never part of one). `group_limit` commits share one log object: a commit
-/// that fills the group writes it, and `durable` writes a partial group; 1
-/// writes every commit on its own. `faults` injects a stop for crash tests.
+/// The engine's settings (STORE-1). A group advances once it holds
+/// `group_commits` commits or `group_bytes` encoded bytes, or when an outcome
+/// awaits it. The limits are recorded by the store's Genesis commit when it is
+/// created; the limits an opener of an existing store passes are ignored.
 pub type StoreConfig {
-  durability: Durability,
-  group_limit: u64,
-  faults: StoreFaults,
+  group_commits: u64,
+  group_bytes: u64,
   limits: StoreLimits,
 }
 
 /// The most a commit may write: any key over `key_bytes`, any value over
-/// `value_bytes`, or an encoded commit over `transaction_bytes` refuses the
-/// commit with `Limit(..)` and no effect. A commit's encoded size is that of
-/// the log object holding it alone: its keys and values, 17 bytes per put, 9
-/// per delete and 50 of object framing. `open` refuses a `transaction_bytes`
-/// over the backend's `max_object_bytes`, so every admitted commit can be
-/// written.
+/// `value_bytes`, or an encoded commit (its call record and outcome included)
+/// over `transaction_bytes` refuses the commit with `Limit(..)` and no effect;
+/// a range of more than `range_rows` rows is refused too. Each is at most
+/// 4294967295, and creating a store whose `transaction_bytes` plus 8 KiB
+/// exceeds the authority's `max_entry` is `Unsupported(Size(..))`.
 pub type StoreLimits {
   key_bytes: u64,
   value_bytes: u64,
@@ -129,27 +46,24 @@ pub type StoreLimits {
   range_rows: u64,
 }
 
-/// A test seam: `StopAfterWrites(n)` refuses the store's storage mutation after
-/// its first `n` (creates, removals and directory creations, from `open` on),
-/// with no effect, as a crash at that point would; the store then closes.
-pub type StoreFaults = NoFaults | StopAfterWrites(u64)
-
-/// Why a store operation failed. `Storage` is the Dir's own error, after which
-/// a create's outcome may be undecided; `Refused` is a create the backend
-/// refused before it had any effect; `Corrupt`
-/// names an object that fails its checksum or the layout's rules (in a
-/// `Volatile()` store, a bad log instead ends the recovered log); `Fenced` means another writer claimed the store; `Limit`
-/// is a commit over the configured limits, or at `open` a `transaction_bytes`
-/// the backend's objects cannot hold; `Injected` is a `StopAfterWrites` stop.
-/// After `Storage`, `Refused`, `Corrupt`, `Fenced` or `Injected` the store is
-/// closed and every later call returns `Closed`. `NoLevel` is a durability
-/// level this store does not declare and `InvalidInput` an argument the
-/// operation refuses; both are definite, have no effect and leave the store
-/// open.
+/// Why a store operation failed (STORE-13). `Storage(e)` is an error from the
+/// authority; `Refused(e)` a request it refused before any effect;
+/// `Corrupt(name)` a part of the history or an object that failed a check or
+/// is missing; `Fenced()` a later writer's claim; `Closed()` a store closed
+/// earlier. Each of these closes the store. `Unsupported(..)`, `NoLevel()`,
+/// `Foreign()` and `InvalidInput()` are definite, have no effect and leave the
+/// store open.
 @serializable
-pub type StoreError = Storage(FileError) | Refused(FileError) | Corrupt(String) | Fenced | Limit(
-  TxLimit
-) | Injected | Closed | NoLevel | InvalidInput
+pub type StoreError = Storage(AuthorityError) | Refused(AuthorityError) | Corrupt(String) | Fenced | Closed | Unsupported(
+  Unsupported
+) | NoLevel | Foreign | InvalidInput
+
+/// What a store cannot do: open a record of another history format version
+/// (`Format`, carrying the magic found and the record's name), create a store
+/// whose groups would exceed the authority's largest entry (`Size`), or use
+/// an object store that does not honour conditional writes (`Conditional`).
+@serializable
+pub type Unsupported = Format(found: Bytes, object: String) | Size(needed: u64, max_entry: u64) | Conditional
 
 /// How a transaction ended without its outcome: `Aborted(e)` when the body
 /// returned `Error(e)` and its writes were discarded; `Canceled(cause)` before
@@ -170,7 +84,8 @@ pub type TxLimit = KeyBytes | ValueBytes | TransactionBytes | RangeRows
 
 /// Why a call returned no outcome of its own: `Tx(f)` as for `transact`;
 /// `Denied()` when a later executor epoch holds the stream; `Rejected()` for a
-/// position the stream cannot take, or a retained position with another digest.
+/// position the stream cannot take, a retained position with another digest,
+/// or a stream identity or request digest that is not 32 bytes.
 @serializable
 pub type CallFailure[E] = Tx(TxFailure[E]) | Denied | Rejected
 
@@ -192,18 +107,28 @@ type Retained {
   outcome: Bytes,
 }
 
-// One write of a commit's write set.
-type Write = Put(key: Bytes, value: Bytes) | Delete(key: Bytes)
-
-/// A commit's place in the store's commit order, awaited with `durable`.
-pub opaque type Ticket: copyable + plain + data uses {} {
-  seq: u64,
+/// The store's visible version in its history, awaited with `durable`. It
+/// carries the store identity, so it never names a version of another store.
+pub opaque type Ticket: copyable + data + inert uses {} {
+  identity: Bytes,
+  version: u64,
 }
 
-/// A stable view of the store as of one commit: later commits never change it.
+/// One commit version of one store (STORE-8): versions of one store compare
+/// in commit order, and nothing else about them is observable.
+// One word, the commit version V: its position in the store's commit order.
+// The store brand (`Version of s`) and the ordering bound are type-level and
+// leave this representation unchanged (lane ordered-697).
+pub opaque type Version: copyable + plain + data + key + inert uses {} {
+  version: u64,
+}
+
+/// The immutable state of a store at one version: later commits never change
+/// it. It holds no authority; queries read it on any task.
 pub opaque type Snapshot: copyable uses {} {
-  seq: u64,
+  version: u64,
   index: ordered_map.OrderedMap[Bytes, Bytes],
+  limits: StoreLimits,
 }
 
 /// What a store's head states about one transaction (STORE-4), the same for
@@ -301,74 +226,68 @@ pub opaque type KeyScope: copyable + data + inert uses {} {
   whole: bool,
 }
 
-/// The writer of one store directory.
-@captures(backend)
-pub opaque type Store[S]: () uses {S} {
-  state: S,
-  backend: Backend[S],
+// A group the history holds that is not yet known durable at every level:
+// its position, its last version and the state at that version.
+type Held {
+  position: u64,
+  version: u64,
+  state: ordered_map.OrderedMap[Bytes, Bytes],
+}
+
+/// The head of one store: its only writer (STORE-1). It keeps the store's
+/// authority and claim; a later claim of the authority fences it.
+pub opaque type Store: () uses {Authority} {
+  authority: Authority,
+  // The claim, unbranded in a field: `claim.narrow` recovers it for the
+  // authority at each use. None once the store is closed.
+  claim: Option[Claim],
+  // The authority's declared level names, weakest first, and the floor's index.
+  levels: List[String],
+  floor: u64,
+  max_entry: u64,
   config: StoreConfig,
+  // As the Genesis commit recorded them.
+  limits: StoreLimits,
+  bounds: history.Bounds,
+  identity: Bytes,
   epoch: u64,
+  // The state at V, the visible version.
   index: ordered_map.OrderedMap[Bytes, Bytes],
+  visible: u64,
   // An empty access set whose lists keep the capacity an earlier run grew,
   // so a run records its reads without allocating once the store is warm.
   spare: AccessSet,
-  // The last commit applied (V) and the last one in a written log object (D).
-  visible: u64,
-  durable: u64,
-  pending: List[List[Write]],
-  // The encoded size of the pending commits and the backend's object cap.
-  pending_bytes: u64,
-  object_bytes: u64,
-  next_log: u64,
-  next_manifest: u64,
-  next_snap: u64,
-  // The current snapshot, if any, and the first log id recovery replays.
-  snap: Option[SnapRef],
-  log_start: u64,
-  writes: u64,
+  // The history's end: the position and digest of the last group advanced.
+  end: u64,
+  digest: Bytes,
+  // The group being filled, the entries its commits ran, and their encoded size.
+  pending: Option[history.GroupWriter],
+  defs: List[history.Def],
+  defs_bytes: u64,
+  // D(L) for each declared level, and the groups whose states some D(L) needs.
+  durable: List[u64],
+  held: List[Held],
   closed: bool,
 }
 
-const MAGIC: u32 = 0x52545348
+// The overhead the format allows a group beyond its largest commit: header,
+// definition table and framing (STORE-11 "Bounds").
+const GROUP_OVERHEAD: u64 = 8192
 
-const VERSION: u8 = 2
+// Entries read from the authority per request.
+const READ_BATCH: u64 = 1024
 
-const KIND_LOG: u8 = 1
-
-const KIND_SNAP: u8 = 2
-
-const KIND_MANIFEST: u8 = 3
-
-const OP_PUT: u8 = 1
-
-const OP_DELETE: u8 = 2
-
-// A log object's bytes besides its commits: header, first sequence, commit
-// count and checksum; and a commit's own write count.
-const LOG_FRAME: u64 = 42
-
-const COMMIT_FRAME: u64 = 8
-
-// A snapshot part's bytes besides its share of the entry stream: header,
-// sequence, part index, part count and checksum.
-const SNAP_FRAME: u64 = 50
-
-// A manifest with a snapshot: header, flag, snapshot id, sequence and part
-// count, first log id and checksum.
-const MANIFEST_BYTES: u64 = 59
-
-/// Durable log objects, 64 commits per group, no injected faults, and limits
-/// of 4096-byte keys, 1 MiB values and 16 MiB per transaction.
+/// Groups of up to 64 commits or 4 MiB, and limits of 4096-byte keys, 1 MiB
+/// values, 16 MiB per transaction and 10000 rows per range.
 pub fn default_config() -> StoreConfig uses {} {
   StoreConfig(
-    durability: Durable(),
-    group_limit: 64,
-    faults: NoFaults(),
+    group_commits: 64,
+    group_bytes: 4194304,
     limits: StoreLimits(
       key_bytes: 4096,
       value_bytes: 1048576,
       transaction_bytes: 16777216,
-      range_rows: 4096
+      range_rows: 10000
     )
   )
 }
@@ -383,13 +302,6 @@ pub fn reserved(key: Bytes) -> bool uses {} {
     0,
     bytes.len(prefix)
   ) == prefix
-}
-
-/// The commit order position of a ticket: the n-th commit since the store
-/// was created has sequence n.
-@noalloc
-pub fn sequence(t: Ticket) -> u64 uses {} {
-  t.seq
 }
 
 /// Byte-lexicographic order, a proper prefix first: the order of every key.
@@ -429,50 +341,293 @@ pub fn prefix_bounds(prefix: Bytes) -> (
   (take low, Unbounded())
 }
 
-/// Opens the store in `d`, creating its layout when `d` is empty, recovers the
-/// newest valid state and claims the store as its writer at the next epoch.
-pub fn open(d: Dir, config: StoreConfig) -> Result[Store[Dir], StoreError] uses {d} {
-  open_backend(d, local_backend(), config)
-}
-
-/// Opens the same engine over a host-selected storage implementation. The state
-/// is owned by the store; all effects go through this explicit function dictionary.
-pub fn open_backend[S](take state: S, take backend: Backend[S], config: StoreConfig) -> Result[
-  Store[S],
-  StoreError
-] uses {state, backend} {
-  let mut s: Store[S] = Store(
-    state: take state,
-    backend: take backend,
+/// Opens or creates the store `a` keeps and claims it as its writer (STORE-1):
+/// the claim appends a claim entry with the next writer epoch, fencing every
+/// earlier head; the store then recovers the newest state the history holds.
+/// A claim that was the history's first is followed by the Genesis commit,
+/// which records `config.limits`; an existing store keeps its own. Limits no
+/// group could frame within the authority's entries are refused, with
+/// `Unsupported(Size(..))`, before the claim, whether or not the store exists,
+/// so the refusal has no effect.
+pub fn open(a: Authority, config: StoreConfig) -> Result[Store, StoreError] {
+  creatable(config.limits, authority.max_entry(a))?
+  let made = match authority.claim(a) {
+    Ok(c) => c,
+    Error(e) => return Error(seam(take e)),
+  }
+  let c: Claim = take made
+  let end = claim.end(c)
+  let mut names: List[String] = []
+  for l in authority.levels(a) {
+    list.push(mut names, level.name(l))
+  }
+  let floor_name = level.name(authority.floor(a))
+  let mut floor: u64 = 0
+  for i in 0u64..list.len(names) {
+    if names[i] == floor_name {
+      floor = i
+    }
+  }
+  let mut reached: List[u64] = []
+  for _ in names {
+    list.push(mut reached, 0)
+  }
+  let mut s = Store(
+    authority: a,
+    claim: Some(take c),
+    levels: take names,
+    floor: floor,
+    max_entry: authority.max_entry(a),
     config: config,
+    limits: config.limits,
+    bounds: history.default_bounds(),
+    identity: b"",
     epoch: 0,
     index: ordered_map.empty(compare_keys),
-    spare: AccessSet(points: [], spans: []),
     visible: 0,
-    durable: 0,
-    pending: [],
-    pending_bytes: 0,
-    object_bytes: 0,
-    next_log: 0,
-    next_manifest: 0,
-    next_snap: 0,
-    snap: None(),
-    log_start: 0,
-    writes: 0,
+    spare: AccessSet(points: [], spans: []),
+    end: 0,
+    digest: history.zero_digest(),
+    pending: None(),
+    defs: [],
+    defs_bytes: 0,
+    durable: take reached,
+    held: [],
     closed: false
   )
-  s.object_bytes = s.backend.max_object_bytes(mut s.state)
-  // Every admitted commit must fit one log object, and a snapshot part must
-  // carry some of its stream.
-  if config.limits.transaction_bytes > s.object_bytes || s.object_bytes <= SNAP_FRAME || s.object_bytes < MANIFEST_BYTES {
-    return Error(Limit(TransactionBytes()))
+  let created = recover(a, mut s, end)?
+  if created {
+    genesis(a, mut s, config.limits)?
   }
-  match recover(mut s) {
-    Ok(()) => {
-      collect(mut s)?
-      Ok(take s)
+  collect(mut s)?
+  Ok(take s)
+}
+
+// Reads the history to the claim's entry at `end`: checks each group's digest,
+// fields and chain, applies the commits after the newest checkpoint onto its
+// state, and adopts the recorded limits. True when the history held nothing
+// but this claim, so the store is new.
+fn recover(a: Authority, mut s: Store, end: u64) -> Result[bool, StoreError] {
+  let floor = authority.floor(a)
+  let mut tip = history.origin_tip()
+  // The groups after the newest checkpoint, with their digests.
+  let mut since: List[(history.Group, Bytes)] = []
+  let mut checkpoint: Option[history.Descriptor] = None()
+  let mut recorded: Option[(StoreLimits, history.Bounds)] = None()
+  let mut at: u64 = 0
+  while at < end {
+    let entries = match authority.read(a, at, floor, READ_BATCH) {
+      Ok(x) => x,
+      Error(e) => return Error(stop(mut s, seam(take e))),
+    }
+    if list.len(entries) == 0 {
+      return Error(stop(mut s, Corrupt(entry_name(at + 1))))
+    }
+    for e in entries {
+      if at == end {
+        break
+      }
+      at += 1
+      let (g, d) = match history.decode_entry(e) {
+        Ok(x) => x,
+        Error(Unsupported(found: found)) => return Error(
+          stop(mut s, Unsupported(Format(found: unique found, object: entry_name(at))))
+        ),
+        Error(Corrupt()) => return Error(stop(mut s, Corrupt(entry_name(at)))),
+      }
+      let Ok(next) = history.follow(tip, g, d) else {
+        return Error(stop(mut s, Corrupt(entry_name(at))))
+      }
+      tip = take next
+      for x in g.commits {
+        match x.body {
+          Engine(Genesis(
+            key_bytes: k,
+            value_bytes: v,
+            transaction_bytes: t,
+            range_rows: r,
+            bounds: b
+          )) => {
+            recorded = Some(
+              (
+                StoreLimits(
+                  key_bytes: int.widen(k),
+                  value_bytes: int.widen(v),
+                  transaction_bytes: int.widen(t),
+                  range_rows: int.widen(r)
+                ),
+                copy b
+              )
+            )
+          },
+          Engine(Checkpoint(desc)) => {
+            // Its version is a group's last, and that group is before it.
+            let mut kept: List[(history.Group, Bytes)] = []
+            let mut found = false
+            for (h, hd) in since {
+              let last = h.first + list.len(h.commits) - 1
+              if last == desc.version {
+                found = hd == desc.digest
+              }
+              if last > desc.version {
+                list.push(mut kept, (copy h, copy hd))
+              }
+            }
+            if !found {
+              return Error(stop(mut s, Corrupt(entry_name(at))))
+            }
+            since = take kept
+            checkpoint = Some(copy desc)
+          },
+          _ => {},
+        }
+      }
+      list.push(mut since, (take g, take d))
+    }
+  }
+  let mut state: ordered_map.OrderedMap[Bytes, Bytes] = ordered_map.empty(compare_keys)
+  let mut from: u64 = 0
+  if let Some(desc) = checkpoint {
+    state = load_checkpoint(a, mut s, desc)?
+    from = desc.version
+  }
+  for (g, _) in since {
+    let mut at_version = g.first
+    for x in g.commits {
+      if at_version > from {
+        apply(mut state, x.writes)
+      }
+      at_version += 1
+    }
+  }
+  s.index = take state
+  s.visible = tip.last
+  s.epoch = tip.epoch
+  s.identity = unique tip.identity
+  s.end = end
+  s.digest = unique tip.digest
+  for i in 0u64..list.len(s.durable) {
+    s.durable[i] = tip.last
+  }
+  s.held = [Held(position: end, version: tip.last, state: current(mut s))]
+  match take recorded {
+    Some((limits, bounds)) => {
+      s.limits = limits
+      s.bounds = take bounds
+      Ok(false)
     },
-    Error(e) => Error(e),
+    // Only a claim precedes the Genesis commit.
+    None() => if tip.last == 1 {
+      Ok(true)
+    } else {
+      Error(stop(mut s, Corrupt(entry_name(end))))
+    },
+  }
+}
+
+// The state a checkpoint records, read level by level from its root, each
+// node checked against the digest its parent names.
+fn load_checkpoint(a: Authority, mut s: Store, desc: history.Descriptor) -> Result[
+  ordered_map.OrderedMap[Bytes, Bytes],
+  StoreError
+] {
+  let mut expects = [history.root_expect(desc)]
+  while true {
+    let mut blobs: List[Bytes] = []
+    for x in expects {
+      let name = node_name(x.digest)
+      match authority.get(a, copy name) {
+        Ok(Some(b)) => list.push(mut blobs, take b),
+        Ok(None()) => return Error(stop(mut s, Corrupt(take name))),
+        Error(e) => return Error(stop(mut s, seam(take e))),
+      }
+    }
+    match history.check_level(expects, blobs) {
+      Ok(Next(more)) => {
+        expects = take more
+      },
+      Ok(Leaves(entries)) => {
+        let mut state: ordered_map.OrderedMap[Bytes, Bytes] = ordered_map.empty(compare_keys)
+        for (k, v) in entries {
+          ordered_map.insert(mut state, unique k, unique v)
+        }
+        return Ok(take state)
+      },
+      Error(Unsupported(found: found)) => return Error(
+        stop(mut s, Unsupported(Format(found: unique found, object: node_name(desc.root))))
+      ),
+      Error(Corrupt()) => return Error(stop(mut s, Corrupt(node_name(desc.root)))),
+    }
+  }
+  Ok(ordered_map.empty(compare_keys))
+}
+
+// Whether a store with these limits could be created over an authority whose
+// entries hold at most `max_entry` bytes. It is checked before the claim, so
+// a refused creation has no effect.
+fn creatable(limits: StoreLimits, max_entry: u64) -> Result[(), StoreError] uses {} {
+  let most: u64 = 4294967295
+  if limits.key_bytes > most || limits.value_bytes > most || limits.transaction_bytes > most || limits.range_rows > most {
+    return Error(InvalidInput())
+  }
+  if !history.bounds_fit(int.narrow(limits.key_bytes), int.narrow(limits.value_bytes), history.default_bounds()) {
+    return Error(InvalidInput())
+  }
+  let needed = limits.transaction_bytes + GROUP_OVERHEAD
+  if needed > max_entry {
+    return Error(Unsupported(Size(needed: needed, max_entry: max_entry)))
+  }
+  Ok(())
+}
+
+// Records a new store's limits and checkpoint bounds as commit 2, durable at
+// every level before `open` returns.
+fn genesis(a: Authority, mut s: Store, limits: StoreLimits) -> Result[(), StoreError] {
+  let k: u32 = int.narrow(limits.key_bytes)
+  let v: u32 = int.narrow(limits.value_bytes)
+  let bounds = history.default_bounds()
+  s.limits = limits
+  s.bounds = copy bounds
+  let body: history.Body = Engine(
+    Genesis(
+      key_bytes: k,
+      value_bytes: v,
+      transaction_bytes: int.narrow(limits.transaction_bytes),
+      range_rows: int.narrow(limits.range_rows),
+      bounds: take bounds
+    )
+  )
+  let t = serial(mut s)
+  let _ = commit(mut s, take t, take body, None()) ? unreleased
+  strongest(a, mut s) ? unreleased
+  Ok(())
+}
+
+// A history position as the name a refusal carries.
+fn entry_name(position: u64) -> String uses {} {
+  f"history/{position}"
+}
+
+// A checkpoint node's object name: `n/` and its digest in lowercase hex.
+fn node_name(digest: Bytes) -> String uses {} {
+  let mut out: List[u8] = []
+  bytes.append(mut out, b"n/")
+  let digits = b"0123456789abcdef"
+  for b in digest {
+    list.push(mut out, digits[int.widen(b >> 4)])
+    list.push(mut out, digits[int.widen(b & 15)])
+  }
+  text.finish_valid(take out)
+}
+
+// The store error a seam error is (STORE-11).
+fn seam(take e: SeamError) -> StoreError uses {} {
+  match e {
+    Storage(x) => Storage(copy x),
+    Refused(x) => Refused(copy x),
+    Corrupt(name) => Corrupt(copy name),
+    Fenced() => Fenced(),
+    Format(found, object) => Unsupported(Format(found: copy found, object: copy object)),
   }
 }
 
@@ -503,20 +658,23 @@ fn restoring(key: Bytes, value: Bytes) -> Bytes uses {} {
   bytes.from_list(take out)
 }
 
+// The step a deletion's commits record as the store's own (STORE-11 Library).
+const COLLECT_STEP: Bytes = b"std@1/store.collect"
+
 // Carries out every garbage entry in key order: deletes the keys under its
 // prefix in commits within the store's limits, then, in one more commit,
 // removes the entry and puts back the key it restores. A crash between these
 // commits leaves the rest to the next call. A failure closes the store, so no
 // transaction runs while garbage remains that its deleter left: a generation
 // number is reused only once its garbage is gone (STORE-9).
-fn collect[S](mut s: Store[S]) -> Result[(), StoreError] {
+fn collect(mut s: Store) -> Result[(), StoreError] {
   match collect_all(mut s) {
     Ok(()) => Ok(()),
     Error(e) => Error(stop(mut s, take e)),
   }
 }
 
-fn collect_all[S](mut s: Store[S]) -> Result[(), StoreError] {
+fn collect_all(mut s: Store) -> Result[(), StoreError] {
   let (low, high) = prefix_bounds(b"hirsel.garbage/")
   while true {
     let mut t = serial(mut s)
@@ -529,7 +687,7 @@ fn collect_all[S](mut s: Store[S]) -> Result[(), StoreError] {
     let (entry, value) = unique found[0]
     let skip = bytes.len(b"hirsel.garbage/")
     let (from, to) = prefix_bounds(bytes.slice(entry, skip, bytes.len(entry)))
-    if delete_within(mut t, s.config.limits, from, to) && ordered_map.len(t.writes) == 0 {
+    if delete_within(mut t, s.limits, from, to) && ordered_map.len(t.writes) == 0 {
       run_delete(mut t, unique entry)
       if bytes.len(value) >= 4 {
         let mut n: u64 = 0
@@ -541,7 +699,7 @@ fn collect_all[S](mut s: Store[S]) -> Result[(), StoreError] {
         }
         if 4 + n > bytes.len(value) {
           discard(mut s, take t)
-          return Error(Corrupt("garbage entry"))
+          return Error(stop(mut s, Corrupt("hirsel.garbage")))
         }
         run_put(
           mut t,
@@ -552,10 +710,10 @@ fn collect_all[S](mut s: Store[S]) -> Result[(), StoreError] {
     } else if ordered_map.len(t.writes) == 0 {
       // No single delete fits the commit limit.
       discard(mut s, take t)
-      return Error(Limit(TransactionBytes()))
+      return Error(stop(mut s, Corrupt("hirsel.garbage")))
     }
-    let ticket = commit(mut s, take t)?
-    durable(mut s, ticket)?
+    let body: history.Body = Engine(Library(name: COLLECT_STEP, payload: b""))
+    settle(mut s, take t, take body, None()) ? unreleased
   }
   Ok(())
 }
@@ -570,16 +728,17 @@ fn delete_within(
   high: ordered_map.Bound[Bytes]
 ) -> bool uses {} {
   let _ = read_span(mut t.access, unique low, unique high, Ascending(), 1, [])
-  let mut total = LOG_FRAME + COMMIT_FRAME
-  // Every delete costs at least ten bytes, so no more keys than this fit.
+  // A Library commit's own bytes and the step's name, then per delete an op
+  // and a length; every delete costs at least six bytes.
+  let mut total: u64 = 64
   for (key, _) in entries_in(
     t.state,
     low,
     high,
     Ascending(),
-    limits.transaction_bytes / 10 + 1
+    limits.transaction_bytes / 6 + 1
   ) {
-    total += 9 + bytes.len(key)
+    total += 5 + bytes.len(key)
     if total > limits.transaction_bytes {
       return false
     }
@@ -588,16 +747,59 @@ fn delete_within(
   list.len(entries_in(t.state, low, high, Ascending(), 1)) == 0
 }
 
-/// A stable view of every commit so far, durable or not. Later commits never
-/// change it, and holding it never holds up the writer.
-pub fn snapshot[S](mut s: Store[S]) -> Snapshot uses {} {
-  Snapshot(seq: s.visible, index: current(mut s))
+/// The store's visible version V: a transaction's own commit when taken right
+/// after it (STORE-2).
+pub fn ticket(s: Store) -> Ticket uses {} {
+  Ticket(identity: copy_to(heap, s.identity), version: s.visible)
 }
 
-/// The commit a snapshot reflects: every commit up to it, no later one.
-@noalloc
-pub fn snapshot_sequence(snap: Snapshot) -> u64 uses {} {
-  snap.seq
+/// Returns once every commit up to `t` is durable at `at` (STORE-2),
+/// advancing the pending group if needed. `NoLevel()` when `s` does not keep
+/// `a`, and `Foreign()` for a ticket of another store; neither changes the
+/// store. Any other error closes it and never claims the commit is lost.
+pub fn durable(a: Authority, mut s: Store, t: Ticket, at: Level of a) -> Result[(), StoreError] {
+  if s.closed {
+    return Error(Closed())
+  }
+  let Some(i) = level_index(s, at) else {
+    return Error(NoLevel())
+  }
+  if t.identity != s.identity {
+    return Error(Foreign())
+  }
+  if t.version <= s.durable[i] {
+    return Ok(())
+  }
+  wait(a, mut s, at, i) ? unreleased
+  Ok(())
+}
+
+/// The state at `D(at)` (STORE-8): every commit durable at `at`, no later
+/// one. It waits for nothing and costs O(1); reading one's own write takes
+/// `durable` on its ticket first. `NoLevel()` when `s` does not keep `a`.
+pub fn snapshot(a: Authority, mut s: Store, at: Level of a) -> Result[Snapshot, StoreError] {
+  if s.closed {
+    return Error(Closed())
+  }
+  let Some(i) = level_index(s, at) else {
+    return Error(NoLevel())
+  }
+  let wanted = s.durable[i]
+  for k in 0u64..list.len(s.held) {
+    if s.held[k].version == wanted {
+      // Moved out, shared and put back: a share of an owned map is owned.
+      let state = replace(mut s.held[k].state, ordered_map.empty(compare_keys))
+      let share = copy state
+      s.held[k].state = take state
+      return Ok(Snapshot(version: wanted, index: take share, limits: s.limits))
+    }
+  }
+  Error(Corrupt("snapshot"))
+}
+
+/// The version a snapshot reflects: every commit up to it, no later one.
+pub fn version(snap: Snapshot) -> Version uses {} {
+  Version(version: snap.version)
 }
 
 /// The value stored under `key` in the snapshot.
@@ -618,9 +820,24 @@ pub fn range(
   entries_in(snap.index, from, to, direction, limit)
 }
 
+// The index of the level `at` among the store's levels, None when `at` is not
+// a level of the store's authority.
+fn level_index(s: Store, at: Level) -> Option[u64] {
+  let Some(_) = level.narrow(s.authority, at) else {
+    return None()
+  }
+  let name = level.name(at)
+  for i in 0u64..list.len(s.levels) {
+    if s.levels[i] == name {
+      return Some(i)
+    }
+  }
+  None()
+}
+
 // A run at the latest commit, for a call that holds the store from the run to
 // its commit, so no commit lands in between.
-fn serial[S](mut s: Store[S]) -> Run uses {} {
+fn serial(mut s: Store) -> Run uses {} {
   Run(
     base: s.visible,
     state: current(mut s),
@@ -630,7 +847,7 @@ fn serial[S](mut s: Store[S]) -> Run uses {} {
 }
 
 // Keeps `a`'s list capacity for the next run, emptied.
-fn reuse[S](mut s: Store[S], take a: AccessSet) -> () uses {} {
+fn reuse(mut s: Store, take a: AccessSet) -> () uses {} {
   let mut kept = take a
   core@1/list.truncate(mut kept.points, 0)
   core@1/list.truncate(mut kept.spans, 0)
@@ -638,7 +855,7 @@ fn reuse[S](mut s: Store[S], take a: AccessSet) -> () uses {} {
 }
 
 // Drops a run's writes, keeping its access set's capacity.
-fn discard[S](mut s: Store[S], take t: Run) -> () uses {} {
+fn discard(mut s: Store, take t: Run) -> () uses {} {
   let Run(access: access, ..) = take t
   reuse(mut s, take access)
 }
@@ -705,120 +922,76 @@ fn consumed(
 
 // A share of the index that outlives this call: the index moves out of the
 // store, which only holds owned values, so a copy of it is owned too.
-fn current[S](mut s: Store[S]) -> ordered_map.OrderedMap[Bytes, Bytes] uses {} {
+fn current(mut s: Store) -> ordered_map.OrderedMap[Bytes, Bytes] uses {} {
   let index = replace(mut s.index, ordered_map.empty(compare_keys))
   let share = copy index
   s.index = take index
   share
 }
 
-// Commits run `t`'s writes as the next commit, visible at once to later
-// snapshots and runs, and returns its ticket. `Limit(..)` when they exceed the
-// configured limits; the commit has no effect and the store stays open. A
-// commit that fills its group, by count or by the backend's object cap, writes
-// the group's log object; `durable` awaits it. The store was held from the
-// run's start, so its state is the index plus its writes.
-fn commit[S](mut s: Store[S], take t: Run) -> Result[Ticket, StoreError] uses {s} {
+/// Puts the nodes of a checkpoint of the state at V that are not already
+/// present and records its descriptor by a Checkpoint commit, so recovery
+/// applies only the commits after it (STORE-11). Every commit is first made
+/// durable at the strongest declared level.
+pub fn compact(mut s: Store) -> Result[(), StoreError] {
   if s.closed {
     return Error(Closed())
   }
-  let Run(base: _, state: state, writes: writes, access: access) = take t
-  if let Some(l) = over_limit(s.config.limits, writes) {
-    reuse(mut s, take access)
-    return Error(Limit(l))
+  let a = s.authority
+  strongest(a, mut s) ? unreleased
+  let tree = history.checkpoint_tree(copy s.bounds, s.index)
+  for (d, node) in tree.nodes {
+    if let Error(e) = authority.put(a, node_name(d), copy node) {
+      return Error(stop(mut s, seam(take e)))
+    }
   }
-  reuse(mut s, take access)
-  let set = write_set(writes)
-  // A group never outgrows one object: one that this commit would push past
-  // the cap is written first. The commit alone fits, as `open` checked.
-  let size = commit_bytes(set)
-  if list.len(s.pending) > 0 && LOG_FRAME + s.pending_bytes + size > s.object_bytes {
-    flush(mut s)?
-  }
-  s.index = take state
-  s.visible += 1
-  list.push(mut s.pending, take set)
-  s.pending_bytes += size
-  if list.len(s.pending) >= s.config.group_limit {
-    flush(mut s)?
-  }
-  Ok(Ticket(seq: s.visible))
+  let desc = history.descriptor(tree, s.visible, s.digest)
+  let body: history.Body = Engine(Checkpoint(take desc))
+  let t = serial(mut s)
+  let _ = commit(mut s, take t, take body, None()) ? unreleased
+  strongest(a, mut s) ? unreleased
+  Ok(())
 }
 
-// The output gate: returns once the commit `t` names is in a written log
-// object, synced when the store is `Durable()`, together with every earlier
-// commit. Writes the pending group if `t` is in it.
-fn durable[S](mut s: Store[S], t: Ticket) -> Result[(), StoreError] uses {s} {
-  if s.closed {
-    return Error(Closed())
-  }
-  if t.seq <= s.durable {
-    return Ok(())
-  }
-  flush(mut s)
-}
-
-/// Writes every commit into a new snapshot, as many objects as the backend's
-/// object cap requires, and publishes it with a new manifest, so recovery
-/// replays only the logs after it. It removes nothing:
-/// every created name stays taken, which is what fences a superseded writer.
-/// A crash at any point recovers: until the manifest exists the old state is
-/// current, and after it the older objects are never read again.
-pub fn compact[S](mut s: Store[S]) -> Result[(), StoreError] uses {s} {
-  if s.closed {
-    return Error(Closed())
-  }
-  flush(mut s)?
-  let first = s.next_snap
-  let parts = encode_snapshot(
-    first,
-    s.epoch,
-    s.durable,
-    s.index,
-    s.object_bytes - SNAP_FRAME
-  )
-  let count = list.len(parts)
-  for part in parts {
-    create(mut s, snap_name(s.next_snap), copy part, Durable())?
-    s.next_snap += 1
-  }
-  s.snap = Some(SnapRef(first: first, seq: s.durable, parts: count))
-  s.log_start = s.next_log
-  publish_manifest(mut s)
-}
-
-/// Writes any pending commits and closes the store.
-pub fn close[S](take store: Store[S]) -> Result[(), StoreError] uses {store} {
+/// Waits until every commit is durable at the strongest level the authority
+/// declares, then releases the store and its claim (STORE-1).
+pub fn close(take store: Store) -> Result[(), StoreError] {
   let mut s = take store
   if s.closed {
     return Error(Closed())
   }
-  flush(mut s)
+  let a = s.authority
+  strongest(a, mut s) ? unreleased
+  let _ = stop(mut s, Closed())
+  Ok(())
 }
 
 /// Runs the transaction entry `f` once, with a fresh `Tx` at the latest
 /// commit, call information minted before the run and `a` decoded afresh from
 /// its argument bytes (STORE-2), and commits its writes as one commit when it
-/// returns `Ok`. `Error(e)` discards them and is `Aborted(e)`; a failure in
-/// the run discards them and is `Faulted(f)` (FAIL-2), and the store stays
-/// usable; writes over the limits are `Limit(..)`. The outcome, of any kind,
-/// is returned only once every commit the run could see, and its own, is
-/// durable: the output gate.
-pub fn transact[S, A: serializable, R: serializable, E: serializable](
-  mut s: Store[S],
+/// returns `Ok`, recording the call. `Error(e)` discards them and is
+/// `Aborted(e)`; a failure in the run discards them and is `Faulted(f)`
+/// (FAIL-2), and the store stays usable; writes over the limits are
+/// `Limit(..)`. The outcome, of any kind, is returned only once every commit
+/// the run could see, and its own, is durable at the authority's floor: the
+/// output gate.
+pub fn transact[A: serializable, R: serializable, E: serializable](
+  mut s: Store,
   f: Entry[fn(mut tx: Tx, info: CallInfo, a: A) -> Result[R, E]],
   a: A
-) -> Result[R, TxFailure[E]] uses {s} {
+) -> Result[R, TxFailure[E]] {
   if s.closed {
     return Error(Storage(Closed()))
   }
-  let Ok(argument) = fresh_argument(a) else {
+  let args = codec.encode(a)
+  let decoded: Result[A, DecodeError] = codec.decode(args)
+  let Ok(argument) = take decoded else {
     return Error(Storage(Corrupt("hirsel.argument")))
   }
   let info = ordered(s)
   let mut tx = Tx(
     txn: serial(mut s),
-    limits: s.config.limits,
+    limits: s.limits,
     scope: everything(),
     points: recorder.new(),
     spans: recorder.new()
@@ -833,8 +1006,10 @@ pub fn transact[S, A: serializable, R: serializable, E: serializable](
   )
   match take returned {
     Ok(Ok(v)) => {
-      settle(mut s, take t) ? released
-      Ok(take v)
+      let outcome: Result[R, TxFailure[E]] = Ok(take v)
+      let (body, def) = called(f, info, None(), take args, codec.encode(outcome))
+      settle(mut s, take t, take body, Some(take def)) ? released
+      take outcome
     },
     Ok(Error(e)) => {
       let base = t.base
@@ -851,20 +1026,65 @@ pub fn transact[S, A: serializable, R: serializable, E: serializable](
   }
 }
 
+// A transaction commit's record (STORE-11 kind 1): the entry's identity as a
+// definition, and the call with the index the group assigns it.
+fn called[F](
+  f: Entry[F],
+  info: CallInfo,
+  take arrival: Option[history.Arrival],
+  take args: Bytes,
+  take outcome: Bytes
+) -> (history.Body, history.Def) uses {} {
+  (call_body(info, take arrival, take args, take outcome), entry_def(core@1/runner.entry_id(f)))
+}
+
+// An entry's identity as a group definition.
+fn entry_def(id: EntryId) -> history.Def uses {} {
+  history.Def(
+    path: copy_to(heap, string.as_bytes(id.path)),
+    fingerprint: copy_to(heap, id.fingerprint),
+    code: copy_to(heap, id.code),
+    revision: b""
+  )
+}
+
+// A call's record; `commit` sets its definition index.
+fn call_body(
+  info: CallInfo,
+  take arrival: Option[history.Arrival],
+  take args: Bytes,
+  take outcome: Bytes
+) -> history.Body uses {} {
+  Transaction(
+    history.Call(
+      def: 0,
+      at: info.at,
+      seed: info.seed,
+      caller: copy_to(heap, string.as_bytes(info.caller)),
+      arrival: take arrival,
+      args: take args,
+      outcome: take outcome
+    )
+  )
+}
+
+// The step std's own transactions record (STORE-11 Library).
+const LIBRARY_STEP: Bytes = b"std@1/table"
+
 // One of std's own transactions, run by calling `body` directly: a body
 // generic over its caller's types, as each of `table.migrate`'s steps is,
-// cannot be an entry. Outcomes are `transact`'s, but a failure in `body`
-// propagates.
-fn transact_body[S, R: inert, E: inert](
-  mut s: Store[S],
-  body: fn(mut tx: Tx) -> Result[R, E] uses {}
-) -> Result[R, TxFailure[E]] uses {s} {
+// cannot be an entry. Its commit is a Library commit. Outcomes are
+// `transact`'s, but a failure in `body` propagates.
+fn transact_body[R: inert, E: inert](mut s: Store, body: fn(mut tx: Tx) -> Result[R, E] uses {}) -> Result[
+  R,
+  TxFailure[E]
+] {
   if s.closed {
     return Error(Storage(Closed()))
   }
   let mut tx = Tx(
     txn: serial(mut s),
-    limits: s.config.limits,
+    limits: s.limits,
     scope: everything(),
     points: recorder.new(),
     spans: recorder.new()
@@ -879,7 +1099,8 @@ fn transact_body[S, R: inert, E: inert](
   )
   match take returned {
     Ok(v) => {
-      settle(mut s, take t) ? released
+      let step: history.Body = Engine(Library(name: LIBRARY_STEP, payload: b""))
+      settle(mut s, take t, take step, None()) ? released
       Ok(take v)
     },
     Error(e) => {
@@ -903,9 +1124,10 @@ pub fn query[A: serializable, R: serializable, E: serializable](
   let Ok(argument) = fresh_argument(a) else {
     return Error(Storage(Corrupt("hirsel.argument")))
   }
+  let limits = snap.limits
   let tx = Tx(
     txn: reading(take snap),
-    limits: default_config().limits,
+    limits: limits,
     scope: all(Read()),
     points: recorder.new(),
     spans: recorder.new()
@@ -924,9 +1146,9 @@ pub fn query[A: serializable, R: serializable, E: serializable](
 
 // A run over `snap`'s state.
 fn reading(take snap: Snapshot) -> Run uses {} {
-  let Snapshot(seq: seq, index: index) = take snap
+  let Snapshot(version: at, index: index, ..) = take snap
   Run(
-    base: seq,
+    base: at,
     state: take index,
     writes: ordered_map.empty(compare_keys),
     access: AccessSet(points: [], spans: [])
@@ -943,13 +1165,13 @@ fn fresh_argument[A: serializable](a: A) -> Result[A, DecodeError] uses {} {
 
 // The call information of the next transaction `s` orders (STORE-4): no
 // caller for a local call, no clock, and a seed from its place in the order.
-fn ordered[S](s: Store[S]) -> CallInfo uses {} {
+fn ordered(s: Store) -> CallInfo uses {} {
   CallInfo(caller: "", at: 0, seed: order_seed(s.visible + 1))
 }
 
 // splitmix64's finalizer: distinct versions give well-spread seeds.
-fn order_seed(version: u64) -> u64 uses {} {
-  let mut z = core@1/int.wrapping_mul(version, 0x9e3779b97f4a7c15u64)
+fn order_seed(n: u64) -> u64 uses {} {
+  let mut z = core@1/int.wrapping_mul(n, 0x9e3779b97f4a7c15u64)
   z = core@1/int.wrapping_mul(z ^ z >> 30, 0xbf58476d1ce4e5b9u64)
   z = core@1/int.wrapping_mul(z ^ z >> 27, 0x94d049bb133111ebu64)
   z ^ z >> 31
@@ -959,18 +1181,20 @@ fn order_seed(version: u64) -> u64 uses {} {
 /// position. The stream's row decides the request in the transaction that
 /// would run it: an epoch below the row's is `Denied()`; a position at or
 /// below the acknowledged one, above the next one, or retained with another
-/// digest is `Rejected()`; a retained position with an equal digest returns
+/// digest is `Rejected()`, as is a stream identity or request digest that is
+/// not 32 bytes; a retained position with an equal digest returns
 /// its recorded outcome without running `f`; the next position runs `f`, and
 /// the same commit records the outcome in the row, so an outcome is recorded
 /// exactly when its writes commit. An outcome that writes nothing (an abort, a
 /// limit) is recorded by a commit of the row alone. A failure in the run is
-/// `Tx(Faulted(f))`, recorded nowhere: the position stays the next one.
-pub fn call[S, A: serializable, R: serializable, E: serializable](
-  mut s: Store[S],
+/// `Tx(Faulted(f))`, recorded nowhere: the position stays the next one. Each
+/// commit records the call with the stream, position and digest it arrived on.
+pub fn call[A: serializable, R: serializable, E: serializable](
+  mut s: Store,
   req: CallRequest,
   f: Entry[fn(mut tx: Tx, info: CallInfo, a: A) -> Result[R, E]],
   a: A
-) -> Result[R, CallFailure[E]] uses {s} {
+) -> Result[R, CallFailure[E]] {
   if s.closed {
     return Error(Tx(Storage(Closed())))
   }
@@ -1004,14 +1228,16 @@ pub fn call[S, A: serializable, R: serializable, E: serializable](
     },
     Ok(Next(row)) => take row,
   }
-  let Ok(argument) = fresh_argument(a) else {
+  let args = codec.encode(a)
+  let decoded: Result[A, DecodeError] = codec.decode(args)
+  let Ok(argument) = take decoded else {
     discard(mut s, take t)
     return Error(Tx(Storage(Corrupt("hirsel.argument"))))
   }
   let info = ordered(s)
   let mut tx = Tx(
     txn: take t,
-    limits: s.config.limits,
+    limits: s.limits,
     scope: everything(),
     points: recorder.new(),
     spans: recorder.new()
@@ -1044,7 +1270,8 @@ pub fn call[S, A: serializable, R: serializable, E: serializable](
     let o: Result[R, TxFailure[E]] = Error(Limit(l))
     codec.encode(o)
   }
-  match record(mut s, take done, ok, key, take row, req, take recorded, limited) {
+  let def = entry_def(runner.entry_id(f))
+  match record(mut s, take done, ok, key, take row, req, def, info, take args, take recorded, limited) {
     AsRun() => match take outcome {
       Ok(v) => Ok(take v),
       Error(failed) => Error(Tx(take failed)),
@@ -1061,10 +1288,13 @@ type Decision = Deny | Reject | Recorded(StreamRow, Bytes) | Next(StreamRow)
 
 // Decides `req` on the stream row under `key` as the run `t` reads it. A row
 // that does not decode closes the store.
-fn decide[S](mut s: Store[S], t: Run, key: Bytes, req: CallRequest) -> Result[
+fn decide(mut s: Store, t: Run, key: Bytes, req: CallRequest) -> Result[
   Decision,
   StoreError
 ] uses {} {
+  if bytes.len(req.stream) != 32 || bytes.len(req.digest) != 32 {
+    return Ok(Reject())
+  }
   let row = match ordered_map.get(t.state, key) {
     None() => StreamRow(epoch: 0, applied: 0, acknowledged: 0, retained: []),
     Some(data) => {
@@ -1099,7 +1329,7 @@ fn decide[S](mut s: Store[S], t: Run, key: Bytes, req: CallRequest) -> Result[
 
 // Releases a recorded end: a later executor's duplicate fences the earlier
 // ones, in a commit of the row alone.
-fn replayed[S](mut s: Store[S], take row: StreamRow, key: Bytes, req: CallRequest, base: u64) -> Result[
+fn replayed(mut s: Store, take row: StreamRow, key: Bytes, req: CallRequest, base: u64) -> Result[
   (),
   Unreleased
 ] {
@@ -1110,7 +1340,8 @@ fn replayed[S](mut s: Store[S], take row: StreamRow, key: Bytes, req: CallReques
   fenced.epoch = req.epoch
   let mut fence = serial(mut s)
   run_put(mut fence, unique key, codec.encode(fenced))
-  settle(mut s, take fence)
+  let body: history.Body = Engine(StreamFence(copy_to(heap, req.stream)))
+  settle(mut s, take fence, take body, None())
 }
 
 // How the commit recording a run's end went: as the run ended; as the limit
@@ -1118,23 +1349,25 @@ fn replayed[S](mut s: Store[S], take row: StreamRow, key: Bytes, req: CallReques
 // all, the position staying the next one.
 type Recording = AsRun | Limited(TxLimit) | Unrecorded(Unreleased)
 
-// Records the run `done`'s end, `recorded`, at `req`'s position and commits:
-// with the run's writes when `ok`, else in a commit of the row alone. The row
-// counts against the limits like the body's writes: when they exceed them,
-// the end is `limited(l)`, recorded by a commit of the row alone; when not
-// even that fits (its caller holds too many ends unacknowledged), nothing is
-// recorded.
-fn record[S](
-  mut s: Store[S],
+// Records the run `done`'s end, `recorded`, at `req`'s position and commits
+// it as a call of `def` with `info` and `args`: with the run's writes when
+// `ok`, else in a commit of the row alone. The row counts against the limits
+// like the body's writes: when they exceed them, the end is `limited(l)`,
+// recorded by a commit of the row alone; when not even that fits (its caller
+// holds too many ends unacknowledged), nothing is recorded.
+fn record(
+  mut s: Store,
   take done: Run,
   ok: bool,
   key: Bytes,
   take row: StreamRow,
   req: CallRequest,
+  def: history.Def,
+  info: CallInfo,
+  take args: Bytes,
   take recorded: Bytes,
   limited: fn(l: TxLimit) -> Bytes uses {}
-) -> Recording uses {s} {
-  let base = done.base
+) -> Recording {
   let mut next = take row
   next.epoch = req.epoch
   next.applied = req.position
@@ -1154,25 +1387,25 @@ fn record[S](
     discard(mut s, take done)
     serial(mut s)
   }
-  put_row(mut commit_set, unique key, copy next, req, take recorded)
-  if let Some(l) = over_limit(s.config.limits, commit_set.writes) {
-    discard(mut s, take commit_set)
-    let mut alone = serial(mut s)
-    put_row(mut alone, unique key, take next, req, limited(l))
-    if let Some(full) = over_limit(s.config.limits, alone.writes) {
-      discard(mut s, take alone)
-      return match gate(mut s, base) {
-        Ok(()) => Unrecorded(Limit(full)),
-        Error(u) => Unrecorded(take u),
-      }
-    }
-    return match settle(mut s, take alone) {
-      Ok(()) => Limited(l),
-      Error(u) => Unrecorded(take u),
-    }
+  put_row(mut commit_set, unique key, copy next, req, copy recorded)
+  let arrival = history.Arrival(
+    identity: copy_to(heap, req.stream),
+    position: req.position,
+    digest: copy_to(heap, req.digest)
+  )
+  let body = call_body(info, Some(copy arrival), copy args, take recorded)
+  let l = match settle(mut s, take commit_set, take body, Some(unique def)) {
+    Ok(()) => return AsRun(),
+    Error(Limit(over)) => over,
+    Error(u) => return Unrecorded(take u),
   }
-  match settle(mut s, take commit_set) {
-    Ok(()) => AsRun(),
+  let ended = limited(l)
+  let mut alone = serial(mut s)
+  put_row(mut alone, unique key, take next, req, copy ended)
+  let row_alone = call_body(info, Some(take arrival), take args, take ended)
+  // A limit here leaves the position the next one.
+  match settle(mut s, take alone, take row_alone, Some(unique def)) {
+    Ok(()) => Limited(l),
     Error(u) => Unrecorded(take u),
   }
 }
@@ -1297,10 +1530,10 @@ pub fn served_query[A: serializable, R: serializable, E: serializable](
 /// output gate releases it. A store that closes, a fenced one included, ends
 /// the arrivals it holds `InDoubt(Abandoned())`; the calls still in the inbox
 /// never ran. `entries` naming one path twice is `InvalidInput()`.
-pub fn serve[S](mut s: Store[S], take inbox: Inbox, entries: List[Served]) -> Result[
+pub fn serve(mut s: Store, take inbox: Inbox, entries: List[Served]) -> Result[
   (),
   StoreError
-] uses {s, inbox} {
+] uses {inbox} {
   let mut i: u64 = 0
   while i < list.len(entries) {
     let mut j = i + 1
@@ -1340,7 +1573,7 @@ pub fn serve[S](mut s: Store[S], take inbox: Inbox, entries: List[Served]) -> Re
 }
 
 // The end of one arrival, resolved against `entries`.
-fn serve_one[S](mut s: Store[S], entries: List[Served], take request: Arrived) -> CallEnd uses {s} {
+fn serve_one(mut s: Store, entries: List[Served], take request: Arrived) -> CallEnd {
   let mut found: Option[u64] = None()
   let mut k: u64 = 0
   while k < list.len(entries) {
@@ -1369,11 +1602,18 @@ fn serve_one[S](mut s: Store[S], entries: List[Served], take request: Arrived) -
   }
   match served.body {
     Querying(body) => {
-      let snap = snapshot(mut s)
-      let seq = snap.seq
+      // The latest commit, read once it is released.
+      let head = s.visible
+      if let Error(_) = gate(mut s, head) {
+        return InDoubt(Abandoned())
+      }
+      let a = s.authority
+      let Ok(snap) = snapshot(a, mut s, authority.floor(a)) else {
+        return InDoubt(Abandoned())
+      }
       let tx = Tx(
         txn: reading(take snap),
-        limits: s.config.limits,
+        limits: s.limits,
         scope: all(Read()),
         points: recorder.new(),
         spans: recorder.new()
@@ -1382,9 +1622,6 @@ fn serve_one[S](mut s: Store[S], entries: List[Served], take request: Arrived) -
       let Tx(txn: _, limits: _, scope: _, points: read_points, spans: read_spans) = take tx
       let _: List[Bytes] = recorder.finish(take read_points)
       let _: List[Span] = recorder.finish(take read_spans)
-      if let Error(_) = gate(mut s, seq) {
-        return InDoubt(Abandoned())
-      }
       match take evaluated {
         Undecoded() => NotRun(Rejected()),
         Faulting(failure) => Faulted(codec.encode(failure)),
@@ -1396,14 +1633,14 @@ fn serve_one[S](mut s: Store[S], entries: List[Served], take request: Arrived) -
 }
 
 // A served transact call, decided on its stream as `call` decides it.
-fn serve_transact[S](
-  mut s: Store[S],
+fn serve_transact(
+  mut s: Store,
   served: Served,
   body: fn(mut tx: Tx, info: CallInfo, argument: Bytes) -> Evaluated uses {},
   req: CallRequest,
   caller: String,
   argument: Bytes
-) -> CallEnd uses {s} {
+) -> CallEnd {
   if bytes.len(req.stream) != 32 {
     return NotRun(Rejected())
   }
@@ -1439,7 +1676,7 @@ fn serve_transact[S](
   let seed = order_seed(s.visible + 1)
   let mut tx = Tx(
     txn: take t,
-    limits: s.config.limits,
+    limits: s.limits,
     scope: everything(),
     points: recorder.new(),
     spans: recorder.new()
@@ -1468,7 +1705,9 @@ fn serve_transact[S](
     let (outcome, _) = served.limited(l)
     outcome
   }
-  match record(mut s, take done, ok, key, take row, req, take recorded, limited) {
+  let def = entry_def(served.entry)
+  let info = CallInfo(caller: copy caller, at: 0, seed: seed)
+  match record(mut s, take done, ok, key, take row, req, def, info, unique argument, take recorded, limited) {
     AsRun() => take end,
     Limited(l) => {
       let (_, failed) = served.limited(l)
@@ -1489,7 +1728,7 @@ fn serve_transact[S](
 }
 
 // `end` once every commit the request could see is durable.
-fn released_end[S](mut s: Store[S], base: u64, take end: CallEnd) -> CallEnd uses {s} {
+fn released_end(mut s: Store, base: u64, take end: CallEnd) -> CallEnd {
   match gate(mut s, base) {
     Ok(()) => take end,
     Error(_) => InDoubt(Abandoned()),
@@ -2080,20 +2319,19 @@ fn put_row(
 }
 
 // Releases a refusal once every commit the request could see is durable.
-fn refuse[S, R, E](mut s: Store[S], base: u64, take f: CallFailure[E]) -> Result[
-  R,
-  CallFailure[E]
-] {
+fn refuse[R, E](mut s: Store, base: u64, take f: CallFailure[E]) -> Result[R, CallFailure[E]] {
   gate(mut s, base) ? released_call
   Error(f)
 }
 
-// The limit a transaction's writes exceed, if any. The total is the encoded
-// size of the log object holding this commit alone.
+// The limit a transaction's writes exceed, if any, as a body's operation
+// checks it before writing: a key or value over its limit, or writes whose
+// encoding alone exceeds the transaction limit. The commit checks the whole
+// encoded commit, its call record included.
 fn over_limit(limits: StoreLimits, writes: ordered_map.OrderedMap[Bytes, Option[Bytes]]) -> Option[
   TxLimit
 ] uses {} {
-  let start: (u64, Option[TxLimit]) = (LOG_FRAME + COMMIT_FRAME, None())
+  let start: (u64, Option[TxLimit]) = (WRITES_FRAME, None())
   let (total, found) = ordered_map.fold_range(
     writes,
     Unbounded(),
@@ -2113,9 +2351,9 @@ fn over_limit(limits: StoreLimits, writes: ordered_map.OrderedMap[Bytes, Option[
           if bytes.len(value) > limits.value_bytes {
             return ((sum, Some(ValueBytes())), false)
           }
-          17 + bytes.len(k) + bytes.len(value)
+          9 + bytes.len(k) + bytes.len(value)
         },
-        None() => 9 + bytes.len(k),
+        None() => 5 + bytes.len(k),
       }
       ((sum + encoded, None()), true)
     }
@@ -2130,61 +2368,304 @@ fn over_limit(limits: StoreLimits, writes: ordered_map.OrderedMap[Bytes, Option[
   }
 }
 
-// A commit's encoded size inside a log object.
-fn commit_bytes(set: List[Write]) -> u64 uses {} {
-  let mut total = COMMIT_FRAME
-  for w in set {
-    total += match w {
-      Put(key: k, value: v) => 17 + bytes.len(k) + bytes.len(v),
-      Delete(key: k) => 9 + bytes.len(k),
-    }
-  }
-  total
-}
+// A commit's write count and the least body it can have (an engine commit's
+// kind, op and empty payload): what any commit costs beyond its writes.
+const WRITES_FRAME: u64 = 11
 
-// The output gate at `version`: writes the pending group when a commit at or
-// below it is not yet durable. Nothing was attempted for this outcome, so a
-// failure is `Storage`.
-fn gate[S](mut s: Store[S], version: u64) -> Result[(), Unreleased] {
-  if version <= s.durable {
+// The output gate at `version`: advances the pending group at the floor when
+// a commit at or below it is not yet durable there.
+fn gate(mut s: Store, upto: u64) -> Result[(), Unreleased] {
+  if upto <= s.durable[s.floor] {
     return Ok(())
   }
-  match flush(mut s) {
-    Ok(()) => Ok(()),
-    Error(e) => Error(Storage(e)),
-  }
+  let a = s.authority
+  let at = authority.floor(a)
+  let i = s.floor
+  wait(a, mut s, at, i)
 }
 
-// Commits `t` when it writes anything and waits until it is durable; a
-// transaction without writes waits for the commit it began at.
-fn settle[S](mut s: Store[S], take t: Run) -> Result[(), Unreleased] {
-  if ordered_map.len(t.writes) == 0 {
-    let base = t.base
+// Commits `t` with `body`, the call it records, and releases it at the floor.
+// A Library step that writes nothing has nothing to record: it only waits for
+// the commit it began at.
+fn settle(mut s: Store, take t: Run, take body: history.Body, take def: Option[history.Def]) -> Result[
+  (),
+  Unreleased
+] {
+  let base = t.base
+  let recorded = match body {
+    Transaction(_) => true,
+    _ => ordered_map.len(t.writes) > 0,
+  }
+  if !recorded {
     discard(mut s, take t)
     return gate(mut s, base)
   }
-  let base = t.base
-  let ticket = match commit(mut s, take t) {
-    Ok(k) => k,
+  match commit(mut s, take t, take body, take def) {
+    Ok(made) => gate(mut s, made),
     Error(Limit(l)) => {
       gate(mut s, base)?
-      return Error(Limit(l))
+      Error(Limit(l))
     },
-    Error(e) => return Error(unsettled(take e)),
-  }
-  match durable(mut s, ticket) {
-    Ok(()) => Ok(()),
-    Error(e) => Error(unsettled(take e)),
+    Error(e) => Error(e),
   }
 }
 
-// A storage error from a create that may have happened leaves the commit's
-// durability undecided; the store's other errors, `Refused` included, prove it
-// did not happen.
-fn unsettled(take e: StoreError) -> Unreleased uses {} {
-  match e {
-    Storage(f) => Unknown(Storage(f)),
-    other => Storage(copy other),
+// Applies `t` to the head as the next commit, version V + 1, and adds it,
+// with `body`, to the pending group; returns its version. Writes or an
+// encoded commit over the limits change nothing and are `Limit(..)`. A
+// group that would outgrow the authority's largest entry or `group_bytes`
+// advances first; one that reaches a bound advances after.
+fn commit(mut s: Store, take t: Run, take body: history.Body, take def: Option[history.Def]) -> Result[
+  u64,
+  Unreleased
+] {
+  if s.closed {
+    discard(mut s, take t)
+    return Error(Storage(Closed()))
+  }
+  if let Some(l) = over_limit(s.limits, t.writes) {
+    discard(mut s, take t)
+    return Error(Limit(l))
+  }
+  // The call's entry, by its index in the group's definitions.
+  let mut fresh: Option[history.Def] = None()
+  let mut index: u64 = list.len(s.defs)
+  if let Some(d) = def {
+    let mut found = false
+    for i in 0u64..list.len(s.defs) {
+      if !found && s.defs[i] == d {
+        index = i
+        found = true
+      }
+    }
+    if !found {
+      fresh = Some(copy d)
+    }
+  }
+  let recorded = match take body {
+    Transaction(made) => {
+      let mut x = take made
+      x.def = int.narrow(index)
+      Transaction(take x)
+    },
+    other => take other,
+  }
+  let c = history.Commit(body: take recorded, writes: write_set(t.writes))
+  let mut size = add(mut s, c)
+  if size > s.limits.transaction_bytes {
+    unadd(mut s, size)
+    discard(mut s, take t)
+    return Error(Limit(TransactionBytes()))
+  }
+  let def_bytes = match fresh {
+    Some(d) => def_size(d),
+    None() => 0,
+  }
+  if group_size(s) + def_bytes > s.max_entry || (
+    group_size(s) + def_bytes > s.config.group_bytes && pending_count(s) > 1
+  ) {
+    // The group without this commit advances, and it starts the next.
+    unadd(mut s, size)
+    if let Error(e) = flush(mut s) {
+      discard(mut s, take t)
+      return Error(e)
+    }
+    // A new group holds no definitions: the call's entry is its first.
+    if let Some(d) = def {
+      fresh = Some(copy d)
+    }
+    size = add(mut s, c)
+  }
+  if let Some(d) = take fresh {
+    s.defs_bytes += def_size(d)
+    list.push(mut s.defs, take d)
+  }
+  let Run(state: state, access: access, ..) = take t
+  s.index = take state
+  reuse(mut s, take access)
+  s.visible += 1
+  let made = s.visible
+  if pending_count(s) >= s.config.group_commits || group_size(s) >= s.config.group_bytes {
+    flush(mut s)?
+  }
+  Ok(made)
+}
+
+// Advances the pending group at the floor.
+fn flush(mut s: Store) -> Result[(), Unreleased] {
+  let a = s.authority
+  let at = authority.floor(a)
+  let i = s.floor
+  advance(a, mut s, at, i)
+}
+
+// Adds `c` to the pending group, opening one after the history's end when
+// none is pending; returns the commit's encoded size.
+fn add(mut s: Store, c: history.Commit) -> u64 uses {} {
+  let mut w = match replace(mut s.pending, None()) {
+    Some(w) => take w,
+    None() => history.group_writer(s.digest, s.visible + 1, s.epoch),
+  }
+  let start = history.writer_bytes(w)
+  history.add_commit(mut w, c)
+  let size = history.writer_bytes(w) - start
+  s.pending = Some(take w)
+  size
+}
+
+// Removes the commit `add` added last, of `size` bytes.
+fn unadd(mut s: Store, size: u64) -> () uses {} {
+  let Some(w) = replace(mut s.pending, None()) else {
+    return ()
+  }
+  let mut kept = take w
+  history.drop_last(mut kept, history.writer_bytes(kept) - size)
+  if history.writer_count(kept) > 0 {
+    s.pending = Some(take kept)
+  }
+}
+
+// The pending group's encoded size, its definition table included.
+fn group_size(s: Store) -> u64 uses {} {
+  match s.pending {
+    Some(w) => history.writer_bytes(w) + 4 + s.defs_bytes,
+    None() => 0,
+  }
+}
+
+fn pending_count(s: Store) -> u64 uses {} {
+  match s.pending {
+    Some(w) => int.widen(history.writer_count(w)),
+    None() => 0,
+  }
+}
+
+// A definition's encoded size in a group's table.
+fn def_size(d: history.Def) -> u64 uses {} {
+  12 + bytes.len(d.path) + bytes.len(d.fingerprint) + bytes.len(d.code) + bytes.len(d.revision)
+}
+
+// Extends the history with the pending group, durable at `at`, the level at
+// index `i`: every commit up to V is then durable at `at` and each weaker
+// level. A refusal or a later claim leaves the group out of the history, and
+// an undecided advance leaves it unknown; each closes the store.
+fn advance(a: Authority, mut s: Store, at: Level of a, i: u64) -> Result[(), Unreleased] {
+  let Some(w) = replace(mut s.pending, None()) else {
+    return Ok(())
+  }
+  let defs = replace(mut s.defs, [])
+  s.defs_bytes = 0
+  let (entry, d) = history.finish_group(take w, defs)
+  let Some(held) = replace(mut s.claim, None()) else {
+    return Error(Storage(stop(mut s, Closed())))
+  }
+  let Some(narrowed) = claim.narrow(a, take held) else {
+    return Error(Storage(stop(mut s, Closed())))
+  }
+  let mut c = take narrowed
+  let outcome = authority.advance(a, mut c, s.end, take entry, at)
+  // The annotation forgets the brand: the store holds its claim unbranded.
+  let back: Claim = take c
+  s.claim = Some(take back)
+  match outcome {
+    Advanced(end) => {
+      if end != s.end + 1 {
+        return Error(Unknown(stop(mut s, Corrupt(entry_name(end)))))
+      }
+      s.end = end
+      s.digest = take d
+      let state = current(mut s)
+      list.push(mut s.held, Held(position: end, version: s.visible, state: take state))
+      let v = s.visible
+      raise_durable(mut s, v, i)
+      Ok(())
+    },
+    Fenced() => Error(Storage(stop(mut s, Fenced()))),
+    Refused(e) => Error(Storage(stop(mut s, Refused(copy e)))),
+    Undecided(e) => Error(Unknown(stop(mut s, Storage(copy e)))),
+  }
+}
+
+// Waits until every commit is durable at `at`, the level at index `i`:
+// advances the pending group there, or asks the authority how far the
+// advanced history is durable at `at`. An authority that cannot tell leaves
+// the commits' durability unknown and closes the store.
+fn wait(a: Authority, mut s: Store, at: Level of a, i: u64) -> Result[(), Unreleased] {
+  if s.closed {
+    return Error(Storage(Closed()))
+  }
+  if let Some(_) = s.pending {
+    return advance(a, mut s, at, i)
+  }
+  let Some(held) = replace(mut s.claim, None()) else {
+    return Error(Storage(stop(mut s, Closed())))
+  }
+  let Some(narrowed) = claim.narrow(a, take held) else {
+    return Error(Storage(stop(mut s, Closed())))
+  }
+  let mut c = take narrowed
+  let outcome = authority.durable(a, mut c, at)
+  // The annotation forgets the brand: the store holds its claim unbranded.
+  let back: Claim = take c
+  s.claim = Some(take back)
+  let position = match take outcome {
+    Ok(p) => p,
+    Error(e) => return Error(Unknown(stop(mut s, seam(take e)))),
+  }
+  let mut upto: u64 = 0
+  for h in s.held {
+    if h.position <= position {
+      upto = h.version
+    }
+  }
+  raise_durable(mut s, upto, i)
+  Ok(())
+}
+
+// Raises D(L) to `version` for the level at index `i` and each weaker one,
+// then forgets the states no D(L) and not V needs.
+fn raise_durable(mut s: Store, upto: u64, i: u64) -> () uses {} {
+  for j in 0u64..i + 1 {
+    if s.durable[j] < upto {
+      s.durable[j] = upto
+    }
+  }
+  let held = replace(mut s.held, [])
+  let mut kept: List[Held] = []
+  let n = list.len(held)
+  for k in 0u64..n {
+    let mut needed = k + 1 == n
+    for d in s.durable {
+      if d == held[k].version {
+        needed = true
+      }
+    }
+    if needed {
+      list.push(mut kept, copy held[k])
+    }
+  }
+  s.held = take kept
+}
+
+// Makes every commit durable at the strongest level the authority declares.
+fn strongest(a: Authority, mut s: Store) -> Result[(), Unreleased] {
+  let mut top = authority.floor(a)
+  for l in authority.levels(a) {
+    top = l
+  }
+  let i = list.len(s.levels) - 1
+  if s.durable[i] >= s.visible && pending_count(s) == 0 {
+    return Ok(())
+  }
+  wait(a, mut s, top, i)
+}
+
+// A store error for a lifecycle call: an unreleased outcome's cause.
+fn unreleased(take u: Unreleased) -> StoreError uses {} {
+  match u {
+    Storage(e) => copy e,
+    Unknown(e) => copy e,
+    Limit(_) => InvalidInput(),
   }
 }
 
@@ -2204,28 +2685,16 @@ fn released_call[E](take u: Unreleased) -> CallFailure[E] uses {} {
   Tx(released(take u))
 }
 
-/// Flushes the pending group and returns the backend state, for explicit
-/// lifecycle management, simulation observations or reopening the same medium.
-pub fn into_state[S](take store: Store[S]) -> Result[S, StoreError] uses {store} {
-  let mut s = take store
-  if s.closed {
-    return Error(Closed())
-  }
-  flush(mut s)?
-  let Store(state: state, ..) = take s
-  Ok(take state)
-}
-
 // A commit's write set, in key order.
-fn write_set(writes: ordered_map.OrderedMap[Bytes, Option[Bytes]]) -> List[Write] uses {} {
-  let first: List[Write] = []
+fn write_set(writes: ordered_map.OrderedMap[Bytes, Option[Bytes]]) -> List[history.Write] uses {} {
+  let first: List[history.Write] = []
   ordered_map.fold_range(
     writes,
     Unbounded(),
     Unbounded(),
     Ascending(),
     take first,
-    fn(take acc: List[Write], k: Bytes, v: Option[Bytes]) -> (List[Write], bool) {
+    fn(take acc: List[history.Write], k: Bytes, v: Option[Bytes]) -> (List[history.Write], bool) {
       let mut out = take acc
       match v {
         Some(value) => list.push(mut out, Put(key: unique k, value: unique value)),
@@ -2266,261 +2735,15 @@ fn entries_in(
   )
 }
 
-// Closes the store on an error that ends it. Every storage mutation goes
-// through `create`, `remove` or `make_dir`, which count it for the fault seam.
-fn stop[S](mut s: Store[S], take e: StoreError) -> StoreError uses {} {
+// Closes the store on an error that ends it, ending its claim.
+fn stop(mut s: Store, take e: StoreError) -> StoreError uses {} {
   s.closed = true
+  s.claim = None()
+  s.pending = None()
   e
 }
 
-// Counts one storage mutation, refusing it when the fault seam says so.
-fn mutation[S](mut s: Store[S]) -> Result[(), StoreError] uses {} {
-  if let StopAfterWrites(n) = s.config.faults {
-    if s.writes >= n {
-      return Error(stop(mut s, Injected()))
-    }
-  }
-  s.writes += 1
-  Ok(())
-}
-
-fn create[S](mut s: Store[S], name: String, take data: Bytes, mode: Durability) -> Result[
-  (),
-  StoreError
-] {
-  mutation(mut s)?
-  match s.backend.put_new(mut s.state, name, data, mode) {
-    Ok(()) => Ok(()),
-    Error(Taken()) => Error(stop(mut s, Fenced())),
-    Error(Refused(e)) => Error(stop(mut s, Refused(e))),
-    Error(Undecided(_)) => {
-      // A lost response or a barrier that failed after the object became
-      // visible. The same create again succeeds on equal bytes only once they
-      // are durable, and finds other bytes taken; anything else leaves the
-      // outcome undecided.
-      match s.backend.put_new(mut s.state, name, data, mode) {
-        Ok(()) => Ok(()),
-        Error(Taken()) => Error(stop(mut s, Fenced())),
-        Error(Refused(e)) | Error(Undecided(e)) => Error(stop(mut s, Storage(e))),
-      }
-    },
-  }
-}
-
-fn remove[S](mut s: Store[S], name: String) -> Result[(), StoreError] {
-  mutation(mut s)?
-  match s.backend.remove(mut s.state, name) {
-    Ok(()) | Error(NotFound()) => Ok(()),
-    Error(e) => Error(stop(mut s, Storage(e))),
-  }
-}
-
-fn make_dir[S](mut s: Store[S], name: String) -> Result[(), StoreError] {
-  mutation(mut s)?
-  match s.backend.mkdir(mut s.state, name) {
-    Ok(()) | Error(AlreadyExists()) => Ok(()),
-    Error(e) => Error(stop(mut s, Storage(e))),
-  }
-}
-
-fn read[S](mut s: Store[S], name: String) -> Result[Bytes, StoreError] {
-  match s.backend.read(mut s.state, name) {
-    Ok(data) => Ok(unique data),
-    Error(e) => Error(stop(mut s, Storage(e))),
-  }
-}
-
-// The ids of the objects under `kind`, ascending; other names (a crashed
-// put_new's temporary) are ignored.
-fn list_ids[S](mut s: Store[S], kind: String) -> Result[List[u64], StoreError] {
-  let entries = match s.backend.list(mut s.state, kind) {
-    Ok(entries) => entries,
-    Error(e) => return Error(stop(mut s, Storage(e))),
-  }
-  let prefix_len = string.byte_len(kind) + 1
-  let mut ids: List[u64] = []
-  for entry in entries {
-    let name = string.as_bytes(entry)
-    if bytes.len(name) != prefix_len + 20 {
-      continue
-    }
-    let mut id: u64 = 0
-    let mut digits = true
-    for i in prefix_len..bytes.len(name) {
-      let c = name[i]
-      if c < b'0' || c > b'9' {
-        digits = false
-        break
-      }
-      let digit: u64 = int.widen(c - b'0')
-      let Some(next) = int.checked_add(id * 10, digit) else {
-        digits = false
-        break
-      }
-      id = next
-    }
-    if digits {
-      list.push(mut ids, id)
-    }
-  }
-  Ok(ids)
-}
-
-fn object_name(kind: String, id: u64) -> String uses {} {
-  let mut out: List[u8] = []
-  text.append(mut out, kind)
-  list.push(mut out, b'/')
-  // Twenty decimal digits, most significant first, so names sort as ids do.
-  let mut place: u64 = 10000000000000000000
-  while place > 0 {
-    list.push(mut out, b'0' + int.truncate(id / place % 10))
-    place = place / 10
-  }
-  text.finish_valid(take out)
-}
-
-fn log_name(id: u64) -> String uses {} {
-  object_name("log", id)
-}
-
-fn snap_name(id: u64) -> String uses {} {
-  object_name("snap", id)
-}
-
-fn manifest_name(id: u64) -> String uses {} {
-  object_name("manifest", id)
-}
-
-// Writes the pending commits as one log object, the commit point of each.
-fn flush[S](mut s: Store[S]) -> Result[(), StoreError] {
-  if list.len(s.pending) == 0 {
-    return Ok(())
-  }
-  let id = s.next_log
-  let data = encode_log(id, s.epoch, s.durable + 1, s.pending)
-  let mode = s.config.durability
-  create(mut s, log_name(id), take data, mode)?
-  s.next_log += 1
-  s.durable = s.visible
-  s.pending = []
-  s.pending_bytes = 0
-  Ok(())
-}
-
-fn publish_manifest[S](mut s: Store[S]) -> Result[(), StoreError] {
-  let id = s.next_manifest
-  let data = encode_manifest(id, s.epoch, s.snap, s.log_start)
-  create(mut s, manifest_name(id), take data, Durable())?
-  s.next_manifest += 1
-  Ok(())
-}
-
-// Loads the newest valid state, then claims the store at the next epoch.
-fn recover[S](mut s: Store[S]) -> Result[(), StoreError] {
-  make_dir(mut s, "manifest")?
-  make_dir(mut s, "log")?
-  make_dir(mut s, "snap")?
-  let mut max_epoch: u64 = 0
-  let manifests = list_ids(mut s, "manifest")?
-  if list.len(manifests) > 0 {
-    let id = manifests[list.len(manifests) - 1]
-    let name = manifest_name(id)
-    let data = read(mut s, copy name)?
-    let Ok(m) = decode_manifest(data, id) else {
-      return Error(stop(mut s, Corrupt(name)))
-    }
-    max_epoch = m.epoch
-    s.next_manifest = id + 1
-    s.snap = m.snap
-    s.log_start = m.log_start
-  }
-  s.next_log = s.log_start
-  if let Some(snap) = s.snap {
-    let mut stream: List[u8] = []
-    for i in 0u64..snap.parts {
-      let name = snap_name(snap.first + i)
-      let data = read(mut s, copy name)?
-      let Ok(()) = decode_snapshot_part(data, snap, i, mut stream) else {
-        return Error(stop(mut s, Corrupt(name)))
-      }
-    }
-    let Ok(index) = decode_entries(bytes.from_list(take stream)) else {
-      return Error(stop(mut s, Corrupt(snap_name(snap.first))))
-    }
-    s.index = take index
-    s.visible = snap.seq
-    s.next_snap = snap.first + snap.parts
-  }
-  let snaps = list_ids(mut s, "snap")?
-  if list.len(snaps) > 0 && snaps[list.len(snaps) - 1] >= s.next_snap {
-    // A snapshot an interrupted compaction wrote without its manifest.
-    s.next_snap = snaps[list.len(snaps) - 1] + 1
-  }
-  let logs = list_ids(mut s, "log")?
-  let mut log_epoch: u64 = 0
-  let mut tail = false
-  for id in logs {
-    if id < s.log_start {
-      continue
-    }
-    let name = log_name(id)
-    if tail {
-      // Past a lost or torn volatile log: the rest of the suffix is lost too.
-      remove(mut s, take name)?
-      continue
-    }
-    let durable_mode = match s.config.durability {
-      Durable() => true,
-      Volatile() => false,
-    }
-    let data = read(mut s, copy name)?
-    let decoded = if id == s.next_log {
-      decode_log(data, id)
-    } else {
-      Error(())
-    }
-    let Ok(batch) = decoded else {
-      // A gap or a bad object. A Durable create is whole or nothing at its
-      // final name, so a bad Durable log, the last one included, is
-      // corruption after its acknowledgement: refuse and remove nothing.
-      // Volatile logs lose any suffix, so the first bad one truncates the
-      // log there.
-      if durable_mode {
-        return Error(stop(mut s, Corrupt(name)))
-      }
-      remove(mut s, take name)?
-      tail = true
-      continue
-    }
-    // Epochs never decrease along the log: a stale writer's object cannot
-    // follow a newer writer's fence.
-    if batch.epoch < log_epoch {
-      return Error(stop(mut s, Corrupt(name)))
-    }
-    log_epoch = batch.epoch
-    let mut seq = batch.first_seq
-    for set in batch.commits {
-      if seq > s.visible + 1 {
-        return Error(stop(mut s, Corrupt(copy name)))
-      }
-      if seq == s.visible + 1 {
-        apply(mut s.index, set)
-        s.visible = seq
-      }
-      seq += 1
-    }
-    s.next_log = id + 1
-  }
-  s.durable = s.visible
-  let newest = if log_epoch > max_epoch {
-    log_epoch
-  } else {
-    max_epoch
-  }
-  claim(mut s, newest + 1)
-}
-
-fn apply(mut index: ordered_map.OrderedMap[Bytes, Bytes], set: List[Write]) -> () uses {} {
+fn apply(mut index: ordered_map.OrderedMap[Bytes, Bytes], set: List[history.Write]) -> () uses {} {
   for w in set {
     match w {
       Put(key: k, value: v) => ordered_map.insert(mut index, unique k, unique v),
@@ -2531,323 +2754,6 @@ fn apply(mut index: ordered_map.OrderedMap[Bytes, Bytes], set: List[Write]) -> (
   }
 }
 
-// Fences every older writer, then records the new epoch in a manifest.
-fn claim[S](mut s: Store[S], epoch: u64) -> Result[(), StoreError] {
-  s.epoch = epoch
-  let id = s.next_log
-  let empty: List[List[Write]] = []
-  let fence = encode_log(id, epoch, s.visible + 1, empty)
-  create(mut s, log_name(id), take fence, Durable())?
-  s.next_log += 1
-  publish_manifest(mut s)
-}
-
-// Objects are a header (magic, version, kind, id, epoch), a body and a
-// CRC-32C of everything before it, all integers little-endian.
-type Manifest {
-  epoch: u64,
-  snap: Option[SnapRef],
-  log_start: u64,
-}
-
-// A snapshot: the commit it reflects, held as `parts` objects from `first`.
-type SnapRef {
-  first: u64,
-  seq: u64,
-  parts: u64,
-}
-
-type Group {
-  epoch: u64,
-  first_seq: u64,
-  commits: List[List[Write]],
-}
-
-fn put_u8(mut out: List[u8], value: u8) -> () uses {} {
-  list.push(mut out, value)
-}
-
-fn put_u32(mut out: List[u8], value: u32) -> () uses {} {
-  for i in 0u32..4 {
-    list.push(mut out, int.truncate(value >> i * 8))
-  }
-}
-
-fn put_u64(mut out: List[u8], value: u64) -> () uses {} {
-  for i in 0u64..8 {
-    list.push(mut out, int.truncate(value >> i * 8))
-  }
-}
-
-fn put_bytes(mut out: List[u8], data: Bytes) -> () uses {} {
-  put_u64(mut out, bytes.len(data))
-  for b in data {
-    list.push(mut out, b)
-  }
-}
-
-fn header(kind: u8, id: u64, epoch: u64) -> List[u8] uses {} {
-  let mut out: List[u8] = []
-  put_u32(mut out, MAGIC)
-  put_u8(mut out, VERSION)
-  put_u8(mut out, kind)
-  put_u64(mut out, id)
-  put_u64(mut out, epoch)
-  out
-}
-
-fn seal(take out: List[u8]) -> Bytes uses {} {
-  let mut sealed = take out
-  let body = bytes.from_list(copy sealed)
-  put_u32(mut sealed, crc32c.digest(body))
-  bytes.from_list(take sealed)
-}
-
-fn encode_log(id: u64, epoch: u64, first_seq: u64, commits: List[List[Write]]) -> Bytes uses {} {
-  let mut out = header(KIND_LOG, id, epoch)
-  put_u64(mut out, first_seq)
-  put_u64(mut out, list.len(commits))
-  for set in commits {
-    put_u64(mut out, list.len(set))
-    for w in set {
-      match w {
-        Put(key: k, value: v) => {
-          put_u8(mut out, OP_PUT)
-          put_bytes(mut out, k)
-          put_bytes(mut out, v)
-        },
-        Delete(key: k) => {
-          put_u8(mut out, OP_DELETE)
-          put_bytes(mut out, k)
-        },
-      }
-    }
-  }
-  seal(take out)
-}
-
-// A snapshot is its entry stream (the entry count, then each key and value)
-// cut into parts of at most `payload` bytes, one object each from `first`.
-fn encode_snapshot(
-  first: u64,
-  epoch: u64,
-  seq: u64,
-  index: ordered_map.OrderedMap[Bytes, Bytes],
-  payload: u64
-) -> List[Bytes] uses {} {
-  let mut start: List[u8] = []
-  put_u64(mut start, ordered_map.len(index))
-  let stream = ordered_map.fold_range(
-    index,
-    Unbounded(),
-    Unbounded(),
-    Ascending(),
-    take start,
-    fn(take acc: List[u8], k: Bytes, v: Bytes) -> (List[u8], bool) {
-      let mut buffer = take acc
-      put_bytes(mut buffer, k)
-      put_bytes(mut buffer, v)
-      (take buffer, true)
-    }
-  )
-  let total = list.len(stream)
-  let parts = (total + payload - 1) / payload
-  let mut objects: List[Bytes] = []
-  for i in 0u64..parts {
-    let mut part = header(KIND_SNAP, first + i, epoch)
-    put_u64(mut part, seq)
-    put_u64(mut part, i)
-    put_u64(mut part, parts)
-    let end = if (i + 1) * payload < total {
-      (i + 1) * payload
-    } else {
-      total
-    }
-    for at in i * payload..end {
-      list.push(mut part, stream[at])
-    }
-    list.push(mut objects, seal(take part))
-  }
-  objects
-}
-
-fn encode_manifest(id: u64, epoch: u64, snap: Option[SnapRef], log_start: u64) -> Bytes uses {} {
-  let mut out = header(KIND_MANIFEST, id, epoch)
-  match snap {
-    Some(r) => {
-      put_u8(mut out, 1)
-      put_u64(mut out, r.first)
-      put_u64(mut out, r.seq)
-      put_u64(mut out, r.parts)
-    },
-    None() => put_u8(mut out, 0),
-  }
-  put_u64(mut out, log_start)
-  seal(take out)
-}
-
-// A cursor over an object's bytes. Every read checks the bounds first.
-type Cursor {
-  at: u64,
-  end: u64,
-}
-
-fn get_u8(data: Bytes, mut c: Cursor) -> Result[u8, ()] uses {} {
-  if c.at >= c.end {
-    return Error(())
-  }
-  let b = data[c.at]
-  c.at += 1
-  Ok(b)
-}
-
-fn get_u32(data: Bytes, mut c: Cursor) -> Result[u32, ()] uses {} {
-  if c.end - c.at < 4 {
-    return Error(())
-  }
-  let mut value: u32 = 0
-  for i in 0u64..4 {
-    let b: u32 = int.widen(data[c.at + i])
-    value = value | b << int.truncate(i * 8)
-  }
-  c.at += 4
-  Ok(value)
-}
-
-fn get_u64(data: Bytes, mut c: Cursor) -> Result[u64, ()] uses {} {
-  if c.end - c.at < 8 {
-    return Error(())
-  }
-  let mut value: u64 = 0
-  for i in 0u64..8 {
-    let b: u64 = int.widen(data[c.at + i])
-    value = value | b << i * 8
-  }
-  c.at += 8
-  Ok(value)
-}
-
-fn get_bytes(data: Bytes, mut c: Cursor) -> Result[Bytes, ()] uses {} {
-  let n = get_u64(data, mut c)?
-  if c.end - c.at < n {
-    return Error(())
-  }
-  let part = unique bytes.slice(data, c.at, c.at + n)
-  c.at += n
-  Ok(take part)
-}
-
-// Checks the trailer and header and returns a cursor over the body and the
-// object's epoch.
-fn open_object(data: Bytes, kind: u8, id: u64) -> Result[(Cursor, u64), ()] uses {} {
-  let total = bytes.len(data)
-  if total < 26 {
-    return Error(())
-  }
-  let mut trailer = Cursor(at: total - 4, end: total)
-  let stored = get_u32(data, mut trailer)?
-  if crc32c.digest(bytes.slice(data, 0, total - 4)) != stored {
-    return Error(())
-  }
-  let mut c = Cursor(at: 0, end: total - 4)
-  if get_u32(data, mut c)? != MAGIC || get_u8(data, mut c)? != VERSION || get_u8(
-    data,
-    mut c
-  )? != kind {
-    return Error(())
-  }
-  if get_u64(data, mut c)? != id {
-    return Error(())
-  }
-  let epoch = get_u64(data, mut c)?
-  Ok((c, epoch))
-}
-
-fn decode_manifest(data: Bytes, id: u64) -> Result[Manifest, ()] uses {} {
-  let (c0, epoch) = open_object(data, KIND_MANIFEST, id)?
-  let mut c = c0
-  let snap: Option[SnapRef] = match get_u8(data, mut c)? {
-    0 => None(),
-    1 => {
-      let first = get_u64(data, mut c)?
-      let seq = get_u64(data, mut c)?
-      let parts = get_u64(data, mut c)?
-      if parts == 0 {
-        return Error(())
-      }
-      Some(SnapRef(first: first, seq: seq, parts: parts))
-    },
-    _ => return Error(()),
-  }
-  let log_start = get_u64(data, mut c)?
-  if c.at != c.end {
-    return Error(())
-  }
-  Ok(Manifest(epoch: epoch, snap: snap, log_start: log_start))
-}
-
-fn decode_log(data: Bytes, id: u64) -> Result[Group, ()] uses {} {
-  let (c0, epoch) = open_object(data, KIND_LOG, id)?
-  let mut c = c0
-  let first_seq = get_u64(data, mut c)?
-  let count = get_u64(data, mut c)?
-  let mut commits: List[List[Write]] = []
-  for _ in 0u64..count {
-    let writes = get_u64(data, mut c)?
-    let mut set: List[Write] = []
-    for _ in 0u64..writes {
-      let op = get_u8(data, mut c)?
-      let k = get_bytes(data, mut c)?
-      if op == OP_PUT {
-        let v = get_bytes(data, mut c)?
-        list.push(mut set, Put(key: take k, value: take v))
-      } else if op == OP_DELETE {
-        list.push(mut set, Delete(key: take k))
-      } else {
-        return Error(())
-      }
-    }
-    list.push(mut commits, take set)
-  }
-  if c.at != c.end {
-    return Error(())
-  }
-  Ok(Group(epoch: epoch, first_seq: first_seq, commits: take commits))
-}
-
-// Checks part `i` of `snap` and appends its share of the entry stream.
-fn decode_snapshot_part(data: Bytes, snap: SnapRef, i: u64, mut stream: List[u8]) -> Result[
-  (),
-  ()
-] uses {} {
-  let (c0, _) = open_object(data, KIND_SNAP, snap.first + i)?
-  let mut c = c0
-  if get_u64(data, mut c)? != snap.seq || get_u64(data, mut c)? != i || get_u64(
-    data,
-    mut c
-  )? != snap.parts {
-    return Error(())
-  }
-  for at in c.at..c.end {
-    list.push(mut stream, data[at])
-  }
-  Ok(())
-}
-
-fn decode_entries(data: Bytes) -> Result[ordered_map.OrderedMap[Bytes, Bytes], ()] uses {} {
-  let mut c = Cursor(at: 0, end: bytes.len(data))
-  let count = get_u64(data, mut c)?
-  let mut index: ordered_map.OrderedMap[Bytes, Bytes] = ordered_map.empty(compare_keys)
-  for _ in 0u64..count {
-    let k = get_bytes(data, mut c)?
-    let v = get_bytes(data, mut c)?
-    ordered_map.insert(mut index, take k, take v)
-  }
-  if c.at != c.end || ordered_map.len(index) != count {
-    return Error(())
-  }
-  Ok(take index)
-}
 
 // Typed operations preflight the complete prospective write set before mutating
 // the live Tx, so a limit refusal changes nothing and the body can continue.

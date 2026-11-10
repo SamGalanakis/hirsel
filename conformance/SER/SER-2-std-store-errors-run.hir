@@ -64,11 +64,11 @@ pub fn main(t: Test) -> Result[(), DecodeError] {
       _ => false,
     }
   )
-  let storage: store.TxFailure[u8] = Storage(Corrupt("log/00000000000000000001"))
+  let storage: store.TxFailure[u8] = Storage(Corrupt("history/1"))
   test.check(
     t,
     match round(t, storage)? {
-      Storage(Corrupt(name)) => name == "log/00000000000000000001",
+      Storage(Corrupt(name)) => name == "history/1",
       _ => false,
     }
   )
@@ -80,11 +80,11 @@ pub fn main(t: Test) -> Result[(), DecodeError] {
       _ => false,
     }
   )
-  let unknown: store.TxFailure[u8] = Unknown(Storage(FileFault(5)))
+  let unknown: store.TxFailure[u8] = Unknown(Storage(Status(503)))
   test.check(
     t,
     match round(t, unknown)? {
-      Unknown(Storage(FileFault(code))) => code == 5,
+      Unknown(Storage(Status(code))) => code == 503,
       _ => false,
     }
   )
@@ -93,6 +93,14 @@ pub fn main(t: Test) -> Result[(), DecodeError] {
     t,
     match round(t, fenced)? {
       Fenced() => true,
+      _ => false,
+    }
+  )
+  let size: store.StoreError = Unsupported(Size(needed: 67108865, max_entry: 67108864))
+  test.check(
+    t,
+    match round(t, size)? {
+      Unsupported(Size(needed: n, max_entry: m)) => n == 67108865 && m == 67108864,
       _ => false,
     }
   )

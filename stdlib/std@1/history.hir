@@ -286,6 +286,13 @@ pub fn writer_bytes(w: GroupWriter) -> u64 uses {} {
   list.len(w.out)
 }
 
+/// Removes the commit added last, which began at encoded length `at`: a
+/// commit the store refused after encoding it.
+pub fn drop_last(mut w: GroupWriter, at: u64) -> () uses {} {
+  core@1/list.truncate(mut w.out, at)
+  w.count -= 1
+}
+
 /// Appends the definition table and returns the group's bytes and digest.
 pub fn finish_group(take w: GroupWriter, defs: List[Def]) -> (Bytes, Bytes) uses {} {
   let GroupWriter(out: start, count: count) = take w
@@ -582,6 +589,16 @@ pub fn decode_group(data: Bytes, expected: Bytes) -> Result[Group, Fault] uses {
     return Error(Corrupt())
   }
   corrupt(group_fields(data))
+}
+
+/// Decodes a group read from the history, whose digest is not yet known:
+/// the group and its digest, every field checked as `decode_group` checks
+/// them.
+pub fn decode_entry(data: Bytes) -> Result[(Group, Bytes), Fault] uses {} {
+  format(data, GROUP_MAGIC)?
+  let d = digest(data)
+  let g = corrupt(group_fields(data))?
+  Ok((take g, take d))
 }
 
 fn group_fields(data: Bytes) -> Result[Group, ()] uses {} {
@@ -951,6 +968,25 @@ fn cut_here(key: Bytes, size: u64, mean: u32) -> bool uses {} {
 }
 
 /// Adds the next entry of the state, whose key is above every earlier one.
+/// `add_entry` over an owned builder, for a fold.
+/// The checkpoint tree of a whole state, its entries added in key order.
+pub fn checkpoint_tree(b: Bounds, state: ordered_map.OrderedMap[Bytes, Bytes]) -> Tree uses {} {
+  let start = tree_builder(b)
+  let built = ordered_map.fold_range(
+    state,
+    Unbounded(),
+    Unbounded(),
+    Ascending(),
+    take start,
+    fn(take acc: TreeBuilder, k: Bytes, v: Bytes) -> (TreeBuilder, bool) {
+      let mut t = take acc
+      add_entry(mut t, k, v)
+      (take t, true)
+    }
+  )
+  finish_tree(take built)
+}
+
 pub fn add_entry(mut t: TreeBuilder, key: Bytes, value: Bytes) -> () uses {} {
   let mut entry: List[u8] = []
   put_bytes(mut entry, key)

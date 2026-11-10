@@ -1,0 +1,6 @@
+// rule: CAP-1
+// expect: reject CAP-1 at line 5
+// twin: CAP/CAP-1-store-open-authority-ok.hir
+fn denied(a: Authority) -> Result[store.Store, store.StoreError] uses {} {
+  store.open(a, store.default_config())
+}

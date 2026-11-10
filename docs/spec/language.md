@@ -531,8 +531,8 @@ fn put_blob(mut tx: store.Tx, info: store.CallInfo, data: Bytes) -> Result[(), s
   store.tx_put(mut tx, b"blob", unique data)
 }
 
-fn save(dir: Dir, data: Bytes) -> Result[(), DbError] {
-  let mut s = store.open(dir, store.default_config()) ? Open   // plain ? is LANG-8 here
+fn save(a: Authority, data: Bytes) -> Result[(), DbError] {
+  let mut s = store.open(a, store.default_config()) ? Open   // plain ? is LANG-8 here
   store.transact(mut s, put_blob, data) ? Save
   store.close(take s) ? Close
   Ok(())

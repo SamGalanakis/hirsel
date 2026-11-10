@@ -39,15 +39,15 @@ fn balance(tx: store.Tx, info: store.CallInfo, account: u64) -> Result[
 }
 
 /// The ledger place's head: it opens the store over the place's `ledger`
-/// directory and serves the entries until its host stops.
+/// authority and serves the entries until its host stops.
 pub fn head(rt: Io, a: ()) -> Result[(), store.StoreError] {
-  let Ok(d) = io.dir(rt, path.of("ledger")) else {
+  let Ok(ledger) = io.authority(rt, "ledger") else {
     return Error(Corrupt("ledger"))
   }
   let Ok(inbox) = io.inbox(rt) else {
     return Error(Corrupt("inbox"))
   }
-  let mut s = store.open(d, store.default_config())?
+  let mut s = store.open(ledger, store.default_config())?
   store.serve(
     mut s,
     take inbox,
@@ -69,10 +69,10 @@ fn store_error(e: store.StoreError) -> String {
     Refused(_) => "refused",
     Corrupt(name) => f"corrupt {name}",
     Fenced() => "fenced",
-    Limit(_) => "limit",
-    Injected() => "injected",
     Closed() => "closed",
+    Unsupported(_) => "unsupported",
     NoLevel() => "no such level",
+    Foreign() => "foreign",
     InvalidInput() => "invalid input",
   }
 }

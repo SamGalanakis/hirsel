@@ -1,5 +1,6 @@
 // rule: STORE-12
 // expect: run
+// authorities: {"main":{"provider":"authority.memory@1","floor":"memory"}}
 // steps: 8000000
 // The stream row a store.call commit writes counts against the store's limits
 // like the body's writes: an outcome whose row would exceed value_bytes is
@@ -11,10 +12,10 @@ type Short = Empty | Db(store.TxError)
 
 fn request(position: u64, digest: Bytes, acknowledged: u64) -> CallRequest {
   CallRequest(
-    stream: b"caller-1",
+    stream: d32(b"caller-1"),
     epoch: 1,
     position: position,
-    digest: unique digest,
+    digest: d32(digest),
     acknowledged: acknowledged
   )
 }
@@ -40,32 +41,49 @@ fn counted(mut tx: store.Tx, info: store.CallInfo, n: u64) -> Result[Bytes, Shor
 }
 
 // Adds one to the counter and returns `n` bytes.
-fn bump(mut s: store.Store[Dir], req: CallRequest, n: u64) -> Result[
+fn bump(mut s: store.Store, req: CallRequest, n: u64) -> Result[
   Bytes,
   store.CallFailure[Short]
 ] {
   store.call(mut s, req, counted, n)
 }
 
-fn counter(mut s: store.Store[Dir]) -> Option[Bytes] {
-  store.get(store.snapshot(mut s), b"counter")
+fn counter(a: Authority, mut s: store.Store) -> Option[Bytes] {
+  match store.snapshot(a, mut s, authority.floor(a)) {
+    Ok(snap) => store.get(snap, b"counter"),
+    Error(_) => None(),
+  }
 }
 
-pub fn main(t: Test) -> Result[(), store.StoreError] {
-  let d = test.dir(t, [])
+// Streams and request digests are 32 bytes: the SHA-256 of a name.
+fn d32(name: Bytes) -> Bytes {
+  bytes.from_inline(sha256.digest(name))
+}
+
+pub type Failed = Check | Store(store.StoreError)
+
+fn check(ok: bool) -> Result[(), Failed] {
+  if ok {
+    Ok(())
+  } else {
+    Error(Check())
+  }
+}
+
+pub fn main(rt: Io, args: Args) -> Result[(), Failed] {
+  let Ok(a) = io.authority(rt, "main") else {
+    return Error(Check())
+  }
   let mut config = store.default_config()
   config.limits.value_bytes = 4096
-  let mut s = store.open(d, config)?
+  let mut s = store.open(a, config) ? Store
   // The body's own write fits; the row recording its 3000-byte result does not.
-  test.check(
-    t,
-    bump(mut s, request(1, b"a", 0), 3000) == Error(Tx(Limit(ValueBytes())))
-  )
-  test.check(t, counter(mut s) == None())
+  check(bump(mut s, request(1, b"a", 0), 3000) == Error(Tx(Limit(ValueBytes()))))?
+  check(counter(a, mut s) == None())?
   // The limit was recorded: its duplicate returns it without running.
-  test.check(t, bump(mut s, request(1, b"a", 0), 8) == Error(Tx(Limit(ValueBytes()))))
-  test.check(t, bump(mut s, request(2, b"b", 1), 8) == Ok(filled(8)))
-  test.check(t, counter(mut s) == Some(b"\x01"))
+  check(bump(mut s, request(1, b"a", 0), 8) == Error(Tx(Limit(ValueBytes()))))?
+  check(bump(mut s, request(2, b"b", 1), 8) == Ok(filled(8)))?
+  check(counter(a, mut s) == Some(b"\x01"))?
   // A caller that never acknowledges again fills its row until even a limit
   // cannot be recorded.
   let mut position: u64 = 3
@@ -73,18 +91,18 @@ pub fn main(t: Test) -> Result[(), store.StoreError] {
   while position < 60 && !refused_unrecorded {
     let r = bump(mut s, request(position, b"c", 1), 200)
     if r != Ok(filled(200)) {
-      test.check(t, r == Error(Tx(Limit(ValueBytes()))))
+      check(r == Error(Tx(Limit(ValueBytes()))))?
       // Acknowledging every earlier outcome: a recorded limit is returned as a
       // duplicate, an unrecorded refusal left the position to run now.
       let again = bump(mut s, request(position, b"c", position - 1), 200)
       if again == Ok(filled(200)) {
         refused_unrecorded = true
       } else {
-        test.check(t, again == Error(Tx(Limit(ValueBytes()))))
+        check(again == Error(Tx(Limit(ValueBytes()))))?
       }
     }
     position = position + 1
   }
-  test.check(t, refused_unrecorded)
+  check(refused_unrecorded)?
   Ok(())
 }

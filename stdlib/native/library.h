@@ -300,10 +300,10 @@ uint8_t hirsel_rt_v2_io_authority(hirsel_rt_v2_ctx*, void*, hirsel_rt_v2_handle_
 uint8_t hirsel_rt_v2_authority_levels(hirsel_rt_v2_ctx*, void*, hirsel_rt_v2_header**, const uint64_t*);
 uint8_t hirsel_rt_v2_authority_level(hirsel_rt_v2_ctx*, void*, hirsel_rt_v2_handle_result*, const uint64_t*, hirsel_rt_v2_header*, uint64_t, uint64_t);
 uint8_t hirsel_rt_v2_authority_floor(hirsel_rt_v2_ctx*, void*, uint64_t*, const uint64_t*);
-uint8_t hirsel_rt_v2_authority_max_entry(hirsel_rt_v2_ctx*, void*, uint64_t*, const uint64_t*);
+uint8_t hirsel_rt_v2_authority_max_entry(hirsel_rt_v2_ctx*, uint64_t*, const uint64_t*);
 uint8_t hirsel_rt_v2_level_name(hirsel_rt_v2_ctx*, void*, hirsel_rt_v2_slice*, const uint64_t*);
 uint8_t hirsel_rt_v2_level_narrow(hirsel_rt_v2_ctx*, void*, hirsel_rt_v2_handle_result*, const uint64_t*, const uint64_t*);
-uint8_t hirsel_rt_v2_claim_end(hirsel_rt_v2_ctx*, void*, uint64_t*, const uint64_t*);
+uint8_t hirsel_rt_v2_claim_end(hirsel_rt_v2_ctx*, uint64_t*, const uint64_t*);
 uint8_t hirsel_rt_v2_claim_narrow(hirsel_rt_v2_ctx*, void*, hirsel_rt_v2_handle_result*, const uint64_t*, uint64_t*);
 uint8_t hirsel_rt_v2_authority_claim(hirsel_rt_v2_ctx*, void*, void*, const uint64_t*);
 uint8_t hirsel_rt_v2_authority_advance(hirsel_rt_v2_ctx*, void*, void*, const uint64_t*, uint64_t*, uint64_t, hirsel_rt_v2_header*, uint64_t, uint64_t, const uint64_t*);

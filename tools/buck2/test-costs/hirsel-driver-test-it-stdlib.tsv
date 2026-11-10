@@ -113,7 +113,6 @@ cbor_upstream_25::partition_31	27.087
 cbor_upstream_25::partition_32	28.865
 cbor_upstream_25::partition_33	35.854
 checked_h_put_bytes_15::direct_bytes	25.387
-checked_h_put_bytes_15::minimal_store	47.141
 checked_h_put_bytes_15::tiny_iter_match	9.561
 cidr_8::every_width_masks_host_bits_roundtrips_and_membership	202.543
 cidr_8::generated_overlap_symmetry_and_containment	150.224
@@ -998,7 +997,6 @@ stdlib_wave2_num::source_exact_sum_matches_rational_vectors_224_to_255_in_both_o
 stdlib_wave2_num::source_parser_rounds_midpoints_and_unbounded_decimal_suffixes_like_rust	68.189
 stdlib_xxhash64::source_xxhash64_binary_stripes_and_mixed_updates	6.551
 stdlib_xxhash64::source_xxhash64_testall_every_chunk_size	73.474
-store_authority_14::compaction_success_and_injected_failure_agree_on_h_llvm_and_cranelift	48.990
 stream_item_bound_38::checked_controls	14.812
 stream_item_bound_38::checked_failures	16.602
 stream_item_bound_38::cranelift_controls	10.158

@@ -5,20 +5,23 @@ implementation is converging on it:
 
 - **Shipped and unchanged here:** the key encoding (STORE-6, `std@1/keys`); typed tables'
   create, drop, get, put, delete and range, row epochs, storage identity, rename history
-  and migrations (STORE-5, STORE-7, STORE-9); the output gate over one durable version (STORE-2); the
-  call-stream decisions as `store.call` (STORE-12); and recording of a store's backend
-  requests (STORE-10). `packages/s3@1` implements object-storage requests and grants.
+  and migrations (STORE-5, STORE-7, STORE-9); the call-stream decisions as `store.call`
+  (STORE-12). `packages/s3@1` is an object-storage client; a store over S3 waits on an
+  `objects.s3@1` provider for `authority.objects@1`.
 - **Shipped:** transactions as entries: `store.transact`, `store.query` and `store.call`
   run an `Entry` through `runner.apply_mut` on decoded argument bytes, with `CallInfo`
   minted before the run and a failure in the run ending as `Faulted` (STORE-2, STORE-4,
   STORE-12, STORE-13). A query entry borrows its `Tx`, and reads record through the
-  borrow.
-- **Shipped, removed by this part, and deleted at the cutover:** the `Backend[S]` record,
-  `local_backend` and `PutError`, and their layout of numbered manifest, log and snapshot
-  objects with fence objects, under which no object is ever removed;
-  `StoreConfig.durability` and `StoreConfig.faults`; the `StopAfterWrites` seam and
-  `Injected()`; `store.sequence`. The [standard library](std-library.md) lists the shipped
-  operations until then. The history format (STORE-11) replaces that layout.
+  borrow. The engine over the authority seam: `store.open(a, config)`, the history format
+  with claim, Genesis and Checkpoint commits, `store.compact` writing the checkpoint tree,
+  `store.ticket`, `store.durable` and `store.snapshot` at a level (STORE-1, STORE-2,
+  STORE-8, STORE-11). Stores written by the earlier numbered-object layout are not
+  opened.
+- **Format, at the cutover:** each commit records its call (entry index, call
+  information, argument bytes and outcome bytes), and the definition table's `revision`
+  is empty until the runtime contract revision is exposed to std. A stream still keeps
+  its retained outcomes in its head row; the per-position outcome rows of STORE-12 land
+  in the change after the cutover, and stores written before it are not opened.
 - **Planned (their names do not resolve yet):** everything else in this part.
 - Items marked **Reserved** have no implementation owner.
 
@@ -294,7 +297,9 @@ fn table.scope_keys[K: key + serializable, V: serializable](tx: Tx, t: Table[K, 
   the one reserved row where the library keeps everything a row operation reads about the
   table (the schemas its rows were written under, its renames, its current generation and
   any migration mark), and its **history rows**, one reserved row per schema history entry,
-  which only `create`, `history`, `rename` and a migration's install touch. It reads
+  which only `create`, `history`, `rename` and a migration's install touch, and, read
+  only, the store's **pending deletions** of its rows and history rows, which `create`
+  checks so a generation is reused only once its earlier rows are gone. It reads
   nothing, so it serves a table that the body will create, and holds the rows under any
   generation; the operations reach only the current one
   ([STORE-7](#store-7-rows-and-storage-identity)). `table.scope_keys` holds the rows of
@@ -605,7 +610,7 @@ fails either check is `Storage(Corrupt())`.
 ```text
 Version    // opaque: copyable, data, key, inert, sendable; ordered
 Snapshot   // opaque: copyable, inert, sendable; holds no authority
-fn store.snapshot(a: Authority, s: Store, at: Level of a) -> Result[Snapshot, StoreError]
+fn store.snapshot(a: Authority, mut s: Store, at: Level of a) -> Result[Snapshot, StoreError]
 fn store.version(snap: Snapshot) -> Version
 fn store.at(a: Authority, v: Version) -> Result[Snapshot, StoreError]
 fn store.fork(from: Authority, v: Version, to: Authority) -> Result[(), StoreError]
@@ -626,6 +631,8 @@ Releasing that result at a stronger level waits for that level like any outcome,
 reading one's own write takes `store.durable` on its ticket and then a new snapshot; a
 snapshot never advances. The head keeps the state at `V` and at each declared level's
 `D(L)`, sharing equal states, so the snapshots it can take cost O(levels) retained states.
+`store.snapshot` takes the store `mut` because it shares a state the head holds,
+which it moves out and back, though it changes nothing observable.
 `store.version` names a snapshot's version. `store.at` opens the state at a retained version from the store's authority without
 claiming it: a read "as of" that version, available to any holder of the authority, on
 any machine. A query runs against a snapshot on any task, in parallel with the store's
@@ -963,7 +970,9 @@ authority.
 recorded by its Genesis commit. A creation whose largest group the format could not frame
 within `authority.max_entry` (**Bounds** below) refuses with `Unsupported(Size(..))`, so
 no commit within the limits is undecidable for size. A refused limit has no effect and is
-definite, never `Unknown(..)`. A deterministic bound on the work one body may do, equal
+definite, never `Unknown(..)`: `store.open` checks the limits it is passed before it
+claims, whether or not the store exists, because a claim is an effect and a first claim
+not followed by its Genesis leaves a history no open accepts. A deterministic bound on the work one body may do, equal
 on every engine, is **Reserved**. It must charge every core operation by its operands, as
 the [long pure primitives](determinism.md#run-configuration) are charged, because an
 operation the host implements costs one step whatever its size; and its charges belong to

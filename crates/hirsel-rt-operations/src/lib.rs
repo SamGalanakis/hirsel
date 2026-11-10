@@ -2484,7 +2484,7 @@ pub const HIRSEL_ABI_EXPORTS: &[AbiExport] = &[
     AbiExport {
         caller_site: false,
         symbol: "hirsel_rt_v2_authority_max_entry",
-        destination: true,
+        destination: false,
         result: Some((8, 8)),
         parameters: &[Physical::Pointer],
     },
@@ -2505,7 +2505,7 @@ pub const HIRSEL_ABI_EXPORTS: &[AbiExport] = &[
     AbiExport {
         caller_site: false,
         symbol: "hirsel_rt_v2_claim_end",
-        destination: true,
+        destination: false,
         result: Some((8, 8)),
         parameters: &[Physical::Pointer],
     },

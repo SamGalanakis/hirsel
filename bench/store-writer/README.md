@@ -19,7 +19,7 @@ Eight accounts start with 1,000,000 units each. Transfer i moves 1 + i mod 3 uni
 from account i mod 8 to its successor, wrapping at 8. There are 512 successful
 transfers per sample. Groups contain 1 or 8 transfers in one atomic transaction,
 with one durable output gate per group. This is application batching, not eight
-independent transactions sharing a store log group. Store `group_limit` is 1.
+independent transactions sharing a store log group. Store `group_commits` is 1.
 One or four closed-loop clients each keep one group outstanding. Hirsel clients
 are cooperative tasks on one execution worker and the Rust clients are threads, all feeding one writer.
 Admission, channel queuing, commit, sync, and joining clients are included in

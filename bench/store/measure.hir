@@ -2,7 +2,8 @@
 // of 16 bytes with 100-byte values through store.transact, 100 keys per
 // commit, then by `mode`: "load" stops there, "compact" compacts once
 // and "recompact" compacts, commits one more key and compacts again. Prints the
-// snapshot object's bytes.
+// bytes of the checkpoint objects the log authority `main` keeps under
+// `store/objects` in the `data` directory.
 fn key(i: u64) -> unique Bytes uses {} {
   let mut out: List[u8] = []
   for b in b"key/" {
@@ -39,7 +40,7 @@ fn puts(mut tx: store.Tx, info: store.CallInfo, span: Keys) -> Result[(), ()] {
   Ok(())
 }
 
-fn load(mut s: store.Store[Dir], from: u64, to: u64) -> Result[(), ()] {
+fn load(mut s: store.Store, from: u64, to: u64) -> Result[(), ()] {
   let mut i = from
   while i < to {
     let end = if i + 100 < to {
@@ -60,8 +61,8 @@ fn load(mut s: store.Store[Dir], from: u64, to: u64) -> Result[(), ()] {
   Ok(())
 }
 
-fn snap_bytes(d: Dir) -> Result[u64, FileError] uses {d} {
-  let entries = match file.read_dir(d, path.of("snap")) {
+fn checkpoint_bytes(d: Dir) -> Result[u64, FileError] uses {d} {
+  let entries = match file.read_dir(d, path.of("store/objects")) {
     Ok(entries) => take entries,
     Error(NotFound()) => return Ok(0),
     Error(err) => return Error(take err),
@@ -91,7 +92,10 @@ pub fn main(rt: Io, args: Args) -> Result[(), ()] {
   let Ok(n) = u64.parse(n_text) else {
     return Error(())
   }
-  let Ok(opened) = store.open(d, store.default_config()) else {
+  let Ok(a) = io.authority(rt, "main") else {
+    return Error(())
+  }
+  let Ok(opened) = store.open(a, store.default_config()) else {
     return Error(())
   }
   let mut s = take opened
@@ -110,7 +114,7 @@ pub fn main(rt: Io, args: Args) -> Result[(), ()] {
   if store.close(take s) != Ok(()) {
     return Error(())
   }
-  let Ok(size) = snap_bytes(d) else {
+  let Ok(size) = checkpoint_bytes(d) else {
     return Error(())
   }
   let Ok(_) = out.print(stdout, f"{size}\n") else {

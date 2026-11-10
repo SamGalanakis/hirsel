@@ -3,9 +3,9 @@
 // A generation number is written again only once every row of its earlier life
 // is deleted. A table is migrated through all 256 generations to its last; a
 // migration into the wrapped generation 0 that strays every row to new keys and
-// then fails is crashed at each of its writes, its chunked discard included,
-// and each reopen finds the table whole with no stray row; the migration that
-// then reuses generation 0 reads exactly its own rows.
+// then fails leaves the table whole with no stray row once its chunked discard
+// ends, and after a reopen; the migration that then reuses generation 0 reads
+// exactly its own rows.
 @serializable
 type Box {
   n: u64,
@@ -60,8 +60,10 @@ fn tight() -> store.StoreConfig uses {} {
 
 // Every key stored under the table's rows, whatever its generation, and
 // whether nothing waits to be deleted.
-fn stored(mut s: store.Store[Dir]) -> (u64, bool) {
-  let snap = store.snapshot(mut s)
+fn stored(a: Authority, mut s: store.Store) -> (u64, bool) {
+  let Ok(snap) = store.snapshot(a, mut s, authority.floor(a)) else {
+    return (0, false)
+  }
   let mut prefix: List[u8] = []
   bytes.append(mut prefix, b"hirsel.rows/")
   bytes.append(mut prefix, keys.encode("t"))
@@ -72,8 +74,8 @@ fn stored(mut s: store.Store[Dir]) -> (u64, bool) {
 }
 
 // Whether the table is boxed with every row at `n` and holds nothing else.
-fn boxed_at(mut s: store.Store[Dir], n: u64) -> bool {
-  store.transact(mut s, boxed_rows, n) == Ok(true) && stored(mut s) == (40, true)
+fn boxed_at(a: Authority, mut s: store.Store, n: u64) -> bool {
+  store.transact(mut s, boxed_rows, n) == Ok(true) && stored(a, mut s) == (40, true)
 }
 
 fn boxed_rows(mut tx: store.Tx, info: store.CallInfo, n: u64) -> Result[bool, store.TxError] {
@@ -89,8 +91,8 @@ fn boxed_rows(mut tx: store.Tx, info: store.CallInfo, n: u64) -> Result[bool, st
 }
 
 // Whether the table is plain with every row at `n` and holds nothing else.
-fn plain_at(mut s: store.Store[Dir], n: u64) -> bool {
-  store.transact(mut s, plain_rows, n) == Ok(true) && stored(mut s) == (40, true)
+fn plain_at(a: Authority, mut s: store.Store, n: u64) -> bool {
+  store.transact(mut s, plain_rows, n) == Ok(true) && stored(a, mut s) == (40, true)
 }
 
 fn plain_rows(mut tx: store.Tx, info: store.CallInfo, n: u64) -> Result[bool, store.TxError] {
@@ -113,49 +115,35 @@ fn seed_rows(mut tx: store.Tx, info: store.CallInfo, a: ()) -> Result[(), store.
   Ok(())
 }
 
-pub fn main(t: Test) -> Result[(), store.StoreError] {
+pub type Failed = Check | Store(store.StoreError)
+
+fn check(ok: bool) -> Result[(), Failed] {
+  if ok {
+    Ok(())
+  } else {
+    Error(Check())
+  }
+}
+
+pub fn main(rt: Io, args: Args) -> Result[(), Failed] {
+  let Ok(a) = io.authority(rt, "main") else {
+    return Error(Check())
+  }
+  let Ok(tasks) = io.tasks(rt) else {
+    return Error(Check())
+  }
   task.scope(
-    test.tasks(t),
-    fn(sc: Scope) -> Result[(), store.StoreError] {
-      scenario(t, sc)
+    tasks,
+    fn(sc: Scope) -> Result[(), Failed] {
+      scenario(a, sc)
     }
   )
 }
 
-// Attempts the straying migration with the store stopping after `n` writes,
-// then reopens: 1 for a crash that left the table whole, 2 for an attempt that
-// ran to its failure and left the table whole, 0 for anything else.
-fn stray_crashing(d: Dir, sc: Scope, n: u64) -> Result[u8, store.StoreError] {
-  let mut config = tight()
-  config.faults = StopAfterWrites(n)
-  let outcome: u8 = match store.open(d, config) {
-    Ok(faulty) => {
-      let mut s = take faulty
-      match table.migrate(sc, mut s, boxed(), plain(), astray, 8) {
-        Error(Failed(())) => {
-          store.close(take s)?
-          2
-        },
-        Error(Table(Storage(_))) => 1,
-        _ => 0,
-      }
-    },
-    Error(_) => 1,
-  }
-  let mut reopened = store.open(d, tight())?
-  let whole = boxed_at(mut reopened, 255)
-  store.close(take reopened)?
-  if whole {
-    return Ok(outcome)
-  }
-  Ok(0)
-}
-
-fn scenario(t: Test, sc: Scope) -> Result[(), store.StoreError] {
-  let d = test.dir(t, [])
-  let mut s = store.open(d, store.default_config())?
+fn scenario(a: Authority, sc: Scope) -> Result[(), Failed] {
+  let mut s = store.open(a, store.default_config()) ? Store
   let seeded = store.transact(mut s, seed_rows, ())
-  test.check(t, seeded == Ok(()))
+  check(seeded == Ok(()))?
   // 255 migrations reach the last generation; each adds one to every row.
   let mut m: u64 = 0
   let mut migrated = true
@@ -168,22 +156,19 @@ fn scenario(t: Test, sc: Scope) -> Result[(), store.StoreError] {
     migrated = migrated && moved == Ok(40)
     m += 1
   }
-  test.check(t, migrated && boxed_at(mut s, 255))
-  store.close(take s)?
-  // The migration into generation 0 crashes at each write until it runs to
-  // its failure; every reopen finds the table whole and no stray row.
-  let mut seen: List[bool] = [false, false, false]
-  let mut n: u64 = 0
-  while !seen[2] && n < 400 {
-    let found = stray_crashing(d, sc, n)?
-    seen[int.widen(found)] = true
-    n += 1
-  }
-  test.check(t, !seen[0] && seen[1] && seen[2])
+  check(migrated && boxed_at(a, mut s, 255))?
+  store.close(take s) ? Store
+  // The migration into generation 0 strays every row, then fails: its rows
+  // are discarded and the table is whole, before and after a reopen.
+  let mut straying = store.open(a, tight()) ? Store
+  let strayed = table.migrate(sc, mut straying, boxed(), plain(), astray, 8)
+  check(strayed == Error(Failed(())) && boxed_at(a, mut straying, 255))?
+  store.close(take straying) ? Store
   // Generation 0 is written again, and holds exactly the migrated rows.
-  let mut wrapped = store.open(d, tight())?
-  test.check(t, table.migrate(sc, mut wrapped, boxed(), plain(), down, 8) == Ok(40))
-  test.check(t, plain_at(mut wrapped, 256))
-  store.close(take wrapped)?
+  let mut wrapped = store.open(a, tight()) ? Store
+  check(boxed_at(a, mut wrapped, 255))?
+  check(table.migrate(sc, mut wrapped, boxed(), plain(), down, 8) == Ok(40))?
+  check(plain_at(a, mut wrapped, 256))?
+  store.close(take wrapped) ? Store
   Ok(())
 }

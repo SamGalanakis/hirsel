@@ -45,28 +45,12 @@ and idempotent DELETE. Failed requests are not retried. LIST requests URL
 encoding, decodes keys, rejects keys outside the prefix, and returns sorted
 unique keys. One listing reads at most `max_list_pages` pages and `max_list_keys`
 keys and refuses with `ListLimit()` past either, whatever the server sends. No object exceeds `max_object_bytes`, so there is no multipart
-upload: the store backend declares that cap, `store.open_backend` refuses a
-`transaction_bytes` limit an object cannot hold, group commits are cut to fit
-it, and compaction writes a snapshot as as many objects as it needs.
+upload.
 
-`object_state` and `object_backend` implement store.Backend[ObjectBackend].
-Open with `store.open_backend(s3.object_state(client)?, s3.object_backend(),
-store.default_config())`. Store handles uncertain creates by comparing the
-exact bytes read back; a different object fences the writer. Store retains
-all manifest, segment, compaction and durability logic. The object backend
-first probes conditional-create support, refusing a server that ignores the header
-with `ConditionalUnsupported(endpoint)`. Raw GET/LIST remain usable directly.
-The probe uses a timestamped scratch object and leaves a colliding existing key alone.
-It uses range reads and an optional bounded cache (0 disables it), invalidated
-on creates, deletes and discovery. S3 acknowledges every create durably even
-when the engine asks for Volatile.
-
-`simulated(dir, latency, fail_at, lost_reply_at, race_at)` supplies the same
-backend over a Test Dir. Ordinals are deterministic backend operations; 0
-means off. A race installs different bytes before conditional creation. A
-lost reply writes the complete object before failing. Virtual latency adds
-`latency` ticks per operation without sleeping. The original db-local corpus
-has matching simulator variants, including every crash/compaction boundary.
+A store keeps its history behind an authority (std@1/store over
+`authority.objects@1`); this package is not a store backend. A store over an
+S3 bucket waits on an `objects.s3@1` provider for that authority, which the
+runtime does not offer yet.
 
 Protocol references read from shallow clones (no server code copied):
 
@@ -97,25 +81,18 @@ receive no updates. Real-server validation uses Garage or RustFS in scratch.
 
 The `e2e/read-only.hir.json` example delegates a `public/` reader.
 The standalone `e2e/hirsel.json` program loads a named `data` object store from
-`--grants`, reports one acknowledged commit group's elapsed nanoseconds, then
-compacts, reopens and verifies the value. Grant stdout and a read-only credentials
+`--grants`, reports one conditional create's elapsed nanoseconds, reads the
+value back, checks that a second create is refused with `Exists()` and deletes
+the key. Grant stdout and a read-only credentials
 Dir alongside the `object_stores` declaration (see docs/spec/determinism.md).
 Server contract probes against scratch release binaries found RustFS 1.0.3 returns
 200 then 412 for competing create-only PUTs and retains the first bytes. Garage
-2.4.1 returns 200 twice and replaces the bytes; the backend must refuse its open.
+2.4.1 returns 200 twice and replaces the bytes, so it cannot serve a store.
 
 Differences from botocore are explicit Hirsel inputs in place of ambient SDK
 credentials, clock and request state; the caller supplies only stable headers,
 which are all signed. Bounded byte payloads always use their SHA-256, so there
 is no streaming checksum or unsigned-payload branch. HTTP effects use Net and
 WallClock grants and never automatically retry, keeping authority and replay
-visible to the caller. The store resolves uncertain creates through its own
-read-back protocol. LIST needs only a bounded scan of the URL-encoded S3 fields
+visible to the caller. LIST needs only a bounded scan of the URL-encoded S3 fields
 rather than the SDK's general XML model decoder; malformed required fields refuse.
-
-Known engine/checker findings are tracked separately: concurrent openers that
-finish discovery before either publishes can create identical epoch claims,
-so the inherited fence protocol needs a unique per-attempt ownership token.
-The generic callback authority regression is retained as a rejected corpus twin
-and listed in tools/known-failures.tsv until the source checker fixes it.
-Neither issue is resolved by the provider or the conditional-support probe.

@@ -24,18 +24,6 @@
       "module": [
         "s3"
       ]
-    },
-    {
-      "path": "../backend.hir",
-      "module": [
-        "s3"
-      ]
-    },
-    {
-      "path": "../sim.hir",
-      "module": [
-        "s3"
-      ]
     }
   ],
   "dependencies": [

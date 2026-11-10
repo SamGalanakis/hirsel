@@ -477,6 +477,12 @@ impl HostLibrary {
                 .map(|io| io.runners.clone())
                 .unwrap_or_default(),
             fault_seed: record.inputs.fault_seed.unwrap_or(0),
+            // The host adapter serves them (`host_authority`); the library keeps the grant.
+            authorities: record
+                .io
+                .as_ref()
+                .map(|io| io.authorities.clone())
+                .unwrap_or_default(),
             ..Default::default()
         };
         let mut library = Library::new(run, config)?;
@@ -864,6 +870,99 @@ impl HostLibrary {
             self.echoed = (stdout.len(), stderr.len());
         }
         Ok(())
+    }
+    /// The store authorities are the host adapter's, as a native run's are, so a host tape
+    /// holds the same seam requests: the library keeps the program's handles and what the
+    /// grant answers, and each projection, narrowing and provider request is the host's.
+    fn host_authority(
+        &mut self,
+        name: &str,
+        operation: hirsel_interp::OperationId,
+        call: OperationCall<'_>,
+        cx: &mut OperationContext<'_>,
+    ) -> Result<Option<OperationResult>, Error> {
+        use hirsel_rt::authority::{SeamCompletion, SeamRequest};
+        let a: &[Value] = &call.arguments;
+        let returned = |result: &Option<OperationResult>| match result {
+            Some(OperationResult::Complete { value, .. }) => Some(value.clone()),
+            _ => None,
+        };
+        match name {
+            "io.authority" => {
+                let request = R::Seam(SeamRequest::Project {
+                    io: 1,
+                    name: text(&a[1])?,
+                });
+                let result = self.library.call_resolved(operation, call, cx)?;
+                match (returned(&result), self.host(request)?) {
+                    (Some(Value::Variant { variant: 0, fields }), C::Handle(Ok(host))) => {
+                        let Some(Some(Value::Handle { id, .. })) = fields.first() else {
+                            return Err(invalid());
+                        };
+                        self.handles.insert(*id, host);
+                    }
+                    (
+                        Some(Value::Variant { variant: 1, .. }),
+                        C::Handle(Err(hirsel_rt::io::IoError::NotGranted)),
+                    ) => {}
+                    _ => return Err(invalid()),
+                }
+                Ok(result)
+            }
+            "claim.narrow" => {
+                let request = R::Seam(SeamRequest::ClaimNarrow {
+                    authority: self.id(&a[0])?,
+                    claim: self.id(&a[1])?,
+                });
+                let C::Seam(SeamCompletion::Optional(kept)) = self.host(request)? else {
+                    return Err(invalid());
+                };
+                let narrowed = match &a[1] {
+                    Value::Handle { id, .. } => *id,
+                    _ => return Err(invalid()),
+                };
+                let result = self.library.call_resolved(operation, call, cx)?;
+                match returned(&result) {
+                    Some(Value::Variant { variant: 1, .. }) if kept.is_some() => {}
+                    Some(Value::Variant { variant: 0, .. }) if kept.is_none() => {
+                        self.handles.remove(&narrowed);
+                    }
+                    _ => return Err(invalid()),
+                }
+                Ok(result)
+            }
+            _ => {
+                let Some(request) = self.library.authority_request(name, a)? else {
+                    return self.library.call_resolved(operation, call, cx);
+                };
+                let seam = SeamRequest::Provider {
+                    authority: self.id(&a[0])?,
+                    claim: if request.claimed() {
+                        Some(self.id(&a[1])?)
+                    } else {
+                        None
+                    },
+                    request: request.clone(),
+                };
+                let C::Seam(SeamCompletion::Outcome { outcome, claim }) =
+                    self.host(R::Seam(seam))?
+                else {
+                    return Err(invalid());
+                };
+                self.library.host_authority_outcome(request, outcome);
+                let result = self.library.call_resolved(operation, call, cx)?;
+                if let Some(host) = claim {
+                    let Some(Value::Variant { variant: 0, fields }) = returned(&result) else {
+                        return Err(invalid());
+                    };
+                    let Some(Some(Value::Handle { id, .. })) = fields.first() else {
+                        return Err(invalid());
+                    };
+                    self.handles.insert(*id, host);
+                }
+                Ok(result)
+            }
+        }
     }
     fn id(&self, v: &Value) -> Result<u64, Error> {
         if let Value::Handle { id, .. } = v {
@@ -3219,6 +3318,9 @@ impl hirsel_interp::OperationsAdapter for HostLibrary {
         {
             return self.host_network(&name, call.arguments, cx).map(Some);
         }
+        if name == "io.authority" || name.starts_with("authority.") || name == "claim.narrow" {
+            return self.host_authority(&name, operation, call, cx);
+        }
         let result = self.library.call_resolved(operation, call, cx);
         for (scope, clock, at) in self.library.take_deadlines() {
             // Native Free replay has no timer request or live readiness source.
@@ -3261,6 +3363,12 @@ impl hirsel_interp::OperationsAdapter for HostLibrary {
             }
             self.pending_free_drop = Some(self.free_drop(kind, id, handle, cx)?);
             return Ok(());
+        }
+        // A dropped claim ends at the host and in the library.
+        if kind == "Claim"
+            && let Some(handle) = self.handles.remove(&id)
+        {
+            self.host(R::Close { handle })?;
         }
         if matches!(
             kind,

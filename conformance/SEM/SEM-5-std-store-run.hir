@@ -1,6 +1,7 @@
 // rule: SEM-5
 // expect: run
-// std@1/store over a test Dir: a transaction reads its own writes, a commit is
+// authorities: {"main":{"provider":"authority.memory@1","floor":"memory"}}
+// std@1/store over a memory authority: a transaction reads its own writes, a commit is
 // visible to later snapshots at once, a snapshot never changes, ranges walk
 // either way with paging and prefix bounds, and a reopened store holds every
 // commit.
@@ -33,71 +34,63 @@ fn third(mut tx: store.Tx, info: store.CallInfo, a: ()) -> Result[(), store.TxEr
   store.tx_put(mut tx, b"user/x", b"x")
 }
 
-pub fn main(t: Test) -> Result[(), store.StoreError] {
-  let d = test.dir(t, [])
-  let mut s = store.open(d, store.default_config())?
-  let earlier = store.snapshot(mut s)
-  test.check(t, store.transact(mut s, first, ()) == Ok(true))
-  let after = store.snapshot(mut s)
-  test.check(t, store.snapshot_sequence(after) == 1)
-  test.check(
-    t,
-    store.get(earlier, b"user/ada") == None() && store.get(after, b"user/ada") == Some(
+pub type Failed = Check | Store(store.StoreError)
+
+fn check(ok: bool) -> Result[(), Failed] {
+  if ok {
+    Ok(())
+  } else {
+    Error(Check())
+  }
+}
+
+pub fn main(rt: Io, args: Args) -> Result[(), Failed] {
+  let Ok(a) = io.authority(rt, "main") else {
+    return Error(Check())
+  }
+  let at = authority.floor(a)
+  let mut s = store.open(a, store.default_config()) ? Store
+  let earlier = store.snapshot(a, mut s, at) ? Store
+  check(store.transact(mut s, first, ()) == Ok(true))?
+  let after = store.snapshot(a, mut s, at) ? Store
+  check(store.version(earlier) < store.version(after))?
+  check(store.get(earlier, b"user/ada") == None() && store.get(after, b"user/ada") == Some(
       b"1815"
-    )
-  )
+    ))?
   // Ranges: ascending, descending, paging and prefixes.
   let up: ordered_map.Direction = Ascending()
   let down: ordered_map.Direction = Descending()
   let all: ordered_map.Bound[Bytes] = Unbounded()
-  test.check(
-    t,
-    keys(store.range(after, all, Unbounded(), up, 10)) == [
+  check(keys(store.range(after, all, Unbounded(), up, 10)) == [
       b"user/ada",
       b"user/alan",
       b"user/grace"
-    ]
-  )
-  test.check(
-    t,
-    keys(store.range(after, all, Unbounded(), down, 2)) == [b"user/grace", b"user/alan"]
-  )
+    ])?
+  check(keys(store.range(after, all, Unbounded(), down, 2)) == [b"user/grace", b"user/alan"])?
   let page = store.range(after, all, Unbounded(), up, 1)
   let (last, _) = page[0]
   let next: ordered_map.Bound[Bytes] = Excluded(unique last)
-  test.check(t, keys(store.range(after, next, Unbounded(), up, 1)) == [b"user/alan"])
+  check(keys(store.range(after, next, Unbounded(), up, 1)) == [b"user/alan"])?
   let (low, high) = store.prefix_bounds(b"user/a")
-  test.check(
-    t,
-    keys(store.range(after, low, high, up, 10)) == [b"user/ada", b"user/alan"]
-  )
+  check(keys(store.range(after, low, high, up, 10)) == [b"user/ada", b"user/alan"])?
   let (ff_low, ff_high) = store.prefix_bounds(b"\xff")
-  test.check(
-    t,
-    store.range(after, ff_low, ff_high, up, 10) == [] && ff_high == Unbounded()
-  )
-  test.check(t, store.transact(mut s, second, ()) == Ok(()))
-  test.check(t, store.transact(mut s, third, ()) == Ok(()))
-  test.check(t, store.snapshot_sequence(store.snapshot(mut s)) == 3)
-  test.check(
-    t,
-    keys(store.range(after, all, Unbounded(), up, 10)) == [
+  check(store.range(after, ff_low, ff_high, up, 10) == [] && ff_high == Unbounded())?
+  check(store.transact(mut s, second, ()) == Ok(()))?
+  check(store.transact(mut s, third, ()) == Ok(()))?
+  let latest = store.snapshot(a, mut s, at) ? Store
+  check(keys(store.range(after, all, Unbounded(), up, 10)) == [
       b"user/ada",
       b"user/alan",
       b"user/grace"
-    ]
-  )
-  store.close(take s)?
-  let mut again = store.open(d, store.default_config())?
-  let now = store.snapshot(mut again)
-  test.check(t, store.snapshot_sequence(now) == 3)
-  test.check(
-    t,
-    store.get(now, b"user/ada") == Some(b"1815-12-10") && store.get(now, b"user/alan") == None() && store.get(
+    ])?
+  store.close(take s) ? Store
+  let mut again = store.open(a, store.default_config()) ? Store
+  let now = store.snapshot(a, mut again, at) ? Store
+  check(store.version(now) == store.version(latest))?
+  check(store.get(now, b"user/ada") == Some(b"1815-12-10") && store.get(now, b"user/alan") == None() && store.get(
       now,
       b"user/x"
-    ) == Some(b"x")
-  )
-  store.close(take again)?
+    ) == Some(b"x"))?
+  store.close(take again) ? Store
   Ok(())
 }

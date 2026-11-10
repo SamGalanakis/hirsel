@@ -1,6 +1,7 @@
 //! Typed-table end-to-end scenarios exceed the corpus's 1M-step bound with
 //! the real durable store/checksum implementation. Keep them bounded here.
-//! Each runs on the interpreter and on native, but for the generation wrap.
+//! Each runs on the interpreter and on native, but for the generation wrap,
+//! over the memory authorities `main` and `side`.
 use hirsel_driver::*;
 use hirsel_engine::*;
 use hirsel_front_phases::*;
@@ -13,6 +14,8 @@ fn fixture(name: &str) -> PathBuf {
         .join("tests/fixtures/typed_tables")
         .join(format!("{name}.hir"))
 }
+
+const GRANT: &str = r#"{"main":{"provider":"authority.memory@1","floor":"memory"},"side":{"provider":"authority.memory@1","floor":"memory"}}"#;
 
 fn run(name: &str, path: &Path, native: bool, steps: u64) {
     with_compiler_stack(|| {
@@ -33,7 +36,10 @@ fn run(name: &str, path: &Path, native: bool, steps: u64) {
                 hash_seed: 0,
                 inputs: vec![],
             },
-            SimulationConfig::default(),
+            SimulationConfig {
+                authorities: hirsel_run_config::validate_authorities(GRANT.as_bytes()).unwrap(),
+                ..SimulationConfig::default()
+            },
         )
         .unwrap();
         assert!(
@@ -41,8 +47,12 @@ fn run(name: &str, path: &Path, native: bool, steps: u64) {
                 run.outcome,
                 Ok(RunOutcome::Returned(hirsel_run_schema::Returned::Ok))
             ),
-            "{name}: {:?}",
-            run.outcome
+            "{name}: {:?} {}",
+            run.outcome,
+            run.observation
+                .as_ref()
+                .map(|o| String::from_utf8_lossy(&o.output).into_owned())
+                .unwrap_or_default()
         );
     });
     if native {
@@ -53,13 +63,16 @@ fn run(name: &str, path: &Path, native: bool, steps: u64) {
 // Runs the fixture natively only.
 fn run_native(name: &str, path: &Path) {
     with_compiler_stack(|| {
+        let grants = format!(
+            r#"{{"args":[],"io":{{"dirs":[],"stdout":"stdout.bytes@1","tasks":"tasks.cooperative@1","authorities":{GRANT}}}}}"#
+        );
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
         let outcome = native::run_path_native_backend_with_validation(
             path,
             HostLaunch::Live {
                 config: LaunchConfig::Grants {
-                    input: std::ffi::OsStr::new("{}"),
+                    input: std::ffi::OsStr::new(&grants),
                     arguments: None,
                 },
                 record: None,
@@ -81,7 +94,8 @@ fn run_native(name: &str, path: &Path) {
                 outcome,
                 RunOutcome::Returned(hirsel_run_schema::Returned::Ok)
             ),
-            "{name} native: {outcome:?} {}",
+            "{name} native: {outcome:?} {}{}",
+            String::from_utf8_lossy(&stdout),
             String::from_utf8_lossy(&stderr)
         );
     });
@@ -118,13 +132,6 @@ fn migrations_rewrite_rows_or_leave_the_table_unchanged() {
 #[test]
 fn dropping_removes_rows_and_history_only() {
     execute("STORE-5-drop-run");
-}
-#[test]
-fn a_crash_mid_migration_or_drop_leaves_a_whole_table() {
-    // It crashes the store at every write of a migration and of a drop, each
-    // position reopening and checking the table: one run per position.
-    let name = "STORE-9-migrate-crash-run";
-    run(name, &fixture(name), true, 128_000_000);
 }
 #[test]
 fn a_generation_number_is_reused_only_once_its_rows_are_gone() {

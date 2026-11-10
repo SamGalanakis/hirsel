@@ -2281,12 +2281,12 @@ reconstruct authority from a run record.
 
 ### Stores
 
-`std@1/store`, an embedded transactional store written in Hirsel over a `Dir` grant, with
-typed tables, schema history and migrations, is specified in [storage](storage.md).
-The authority seam it will open over is core, not std: `io.authority` returns a granted
-authority by name, whose provider declares its own durability levels (`Level of a`), and
-a store writes only under a `Claim of a` that a later claim fences
-([core library](core-library.md)).
+`std@1/store`, an embedded transactional store written in Hirsel over a granted
+authority, with typed tables, schema history and migrations, is specified in
+[storage](storage.md); its API is under [Stores](#stores-1). The authority seam it opens
+over is core, not std: `io.authority` returns a granted authority by name, whose provider
+declares its own durability levels (`Level of a`), and a store writes only under a
+`Claim of a` that a later claim fences ([core library](core-library.md)).
 
 ### HTTP/2 through the HTTP API
 
@@ -4181,10 +4181,10 @@ entries, and all subsequent lookups retain the existing Dir confinement.
 ## Stores
 
 ```text
-StoreConfig { durability: Durability, group_limit: u64, faults: StoreFaults, limits: StoreLimits }
+StoreConfig { group_commits: u64, group_bytes: u64, limits: StoreLimits }
 StoreLimits { key_bytes: u64, value_bytes: u64, transaction_bytes: u64, range_rows: u64 }
-StoreFaults = NoFaults | StopAfterWrites(u64)
-StoreError = Storage(FileError) | Refused(FileError) | Corrupt(String) | Fenced | Limit(TxLimit) | Injected | Closed
+StoreError = Storage(AuthorityError) | Refused(AuthorityError) | Corrupt(String) | Fenced | Closed | Unsupported(Unsupported) | NoLevel | Foreign | InvalidInput
+Unsupported = Format(found: Bytes, object: String) | Size(needed: u64, max_entry: u64) | Conditional
 TxFailure[E] = Aborted(E) | Canceled(CancelCause) | Faulted(Failure) | Storage(StoreError) | Limit(TxLimit) | Unknown(StoreError)
 TxLimit = KeyBytes | ValueBytes | TransactionBytes | RangeRows
 RangeBound[K] = Unbounded | Included(K) | Excluded(K)
@@ -4192,13 +4192,24 @@ ScanOrder = Ascending | Descending
 Access = Read | ReadWrite
 SchemaError = KeyMismatch | ValueMismatch | Renamed(String, String)
 TxError = NoTable | TableExists | Schema(SchemaError) | Migrating | ReadOnly | OutOfScope | InvalidInput | Limit(TxLimit) | Storage(StoreError)
+CallFailure[E] = Tx(TxFailure[E]) | Denied | Rejected
+Store      // opaque, affine: the store's only writer; keeps its authority and claim
+Ticket     // opaque: copyable, data, inert
+Version    // opaque: copyable, plain, data, key, inert; ordered
+Snapshot   // opaque: copyable; holds no authority
 KeyScope   // opaque: copyable, data, inert
 CallInfo   // opaque: copyable, data, inert
-CallFailure[E] = Tx(TxFailure[E]) | Denied | Rejected
 fn store.default_config() -> store.StoreConfig uses {}
-fn store.transact[S, A: serializable, R: serializable, E: serializable](mut s: store.Store[S], f: Entry[fn(mut tx: store.Tx, info: store.CallInfo, a: A) -> Result[R, E]], a: A) -> Result[R, store.TxFailure[E]] uses {s}
+fn store.open(a: Authority, config: store.StoreConfig) -> Result[store.Store, store.StoreError]
+fn store.close(take store: store.Store) -> Result[(), store.StoreError]
+fn store.ticket(s: store.Store) -> store.Ticket uses {}
+fn store.durable(a: Authority, mut s: store.Store, t: store.Ticket, at: Level of a) -> Result[(), store.StoreError]
+fn store.snapshot(a: Authority, mut s: store.Store, at: Level of a) -> Result[store.Snapshot, store.StoreError]
+fn store.version(snap: store.Snapshot) -> store.Version uses {}
+fn store.compact(mut s: store.Store) -> Result[(), store.StoreError]
+fn store.transact[A: serializable, R: serializable, E: serializable](mut s: store.Store, f: Entry[fn(mut tx: store.Tx, info: store.CallInfo, a: A) -> Result[R, E]], a: A) -> Result[R, store.TxFailure[E]]
 fn store.query[A: serializable, R: serializable, E: serializable](take snap: store.Snapshot, f: Entry[fn(tx: store.Tx, info: store.CallInfo, a: A) -> Result[R, E]], a: A) -> Result[R, store.TxFailure[E]] uses {}
-fn store.call[S, A: serializable, R: serializable, E: serializable](mut s: store.Store[S], req: CallRequest, f: Entry[fn(mut tx: store.Tx, info: store.CallInfo, a: A) -> Result[R, E]], a: A) -> Result[R, store.CallFailure[E]] uses {s}
+fn store.call[A: serializable, R: serializable, E: serializable](mut s: store.Store, req: CallRequest, f: Entry[fn(mut tx: store.Tx, info: store.CallInfo, a: A) -> Result[R, E]], a: A) -> Result[R, store.CallFailure[E]]
 fn call_info.caller(c: store.CallInfo) -> String uses {}
 fn call_info.at(c: store.CallInfo) -> i64 uses {}
 fn call_info.seed(c: store.CallInfo) -> u64 uses {}
@@ -4212,53 +4223,58 @@ fn store.join(a: store.KeyScope, b: store.KeyScope) -> store.KeyScope uses {}
 fn store.narrow[R: inert](mut tx: store.Tx, scope: store.KeyScope, body: fn(mut sub: store.Tx) -> R uses {}) -> Result[R, store.TxError]
 fn store.narrow_read[R: inert](tx: store.Tx, scope: store.KeyScope, body: fn(sub: store.Tx) -> R uses {}) -> Result[R, store.TxError]
 fn store.reserved(key: Bytes) -> bool uses {}
-fn store.open(d: Dir, config: store.StoreConfig) -> Result[store.Store[Dir], store.StoreError] uses {d}
-fn store.snapshot[S](mut s: store.Store[S]) -> store.Snapshot uses {}
-fn store.snapshot_sequence(snap: store.Snapshot) -> u64 uses {}
 fn store.get(snap: store.Snapshot, key: Bytes) -> Option[Bytes] in snap uses {}
 fn store.range(snap: store.Snapshot, from: ordered_map.Bound[Bytes], to: ordered_map.Bound[Bytes], direction: ordered_map.Direction, limit: u64) -> List[(Bytes, Bytes)] uses {}
 fn store.prefix_bounds(prefix: Bytes) -> (ordered_map.Bound[Bytes], ordered_map.Bound[Bytes]) uses {}
 fn store.compare_keys(a: Bytes, b: Bytes) -> i32 uses {}
 type store.AccessSet { points: List[Bytes], spans: List[store.Span] }
 type store.Span { from: ordered_map.Bound[Bytes], to: ordered_map.Bound[Bytes], direction: ordered_map.Direction }
-fn store.sequence(t: store.Ticket) -> u64 uses {}
-fn store.compact[S](mut s: store.Store[S]) -> Result[(), store.StoreError] uses {s}
-fn store.close[S](take store: store.Store[S]) -> Result[(), store.StoreError] uses {store}
 ```
 
 **History format.** `std@1/history` is the codec of the
-[history format](storage.md#history-format) the store cutover writes: `encode_group` and
-the streaming `group_writer`/`add_commit`/`finish_group` (each commit's bytes copied once
-into one buffer, the definition table and count added at the cut), `decode_group`
-against the digest that names the group, `follow` for the chain rules across groups,
-`build_tree` and the streaming `tree_builder` for content-cut checkpoint nodes,
+[history format](storage.md#history-format) the store writes: `encode_group` and the
+streaming `group_writer`/`add_commit`/`finish_group` (each commit's bytes copied once into
+one buffer, the definition table and count added at the cut), `claim_group`,
+`decode_group` against the digest that names the group and `decode_entry` for an entry
+read back from the authority, `follow` for the chain rules across groups, `build_tree`,
+`checkpoint_tree` and the streaming `tree_builder` for content-cut checkpoint nodes,
 `check_level` to validate a checkpoint level by level from `root_expect`, and
 `encode_head`/`decode_head`. Decoders refuse with
 `history.Fault = Corrupt() | Unsupported(found: Bytes)`: `Unsupported` carries the magic
 of a record in another format version, recognised before any digest or sum is checked.
 
 `std@1/store` is an embedded, transactional, ordered key-value store written in Hirsel
-over an explicit `Backend[S]` function dictionary and owned backend state `S`. The store
-cutover replaces `Backend[S]`, `StoreFaults` and `Injected` with the authority seam of
-[STORE-11](storage.md#store-11-engine-and-storage-seam).
-`open(d, config)` selects the local Dir backend; real files, Test dirs and recordings
-work unchanged. Keys and values are `Bytes`, ordered
-byte-lexicographically (`compare_keys`). An affine `Store[S]` is the single writer of its backend;
-a `Snapshot` is a copyable value that holds no authority.
+over a store authority ([STORE-11](storage.md#store-11-engine-and-storage-seam)), granted
+by name as `io.authority(rt, name)`. Keys and values are `Bytes`, ordered
+byte-lexicographically (`compare_keys`). A `Store` is the single writer of its
+authority's history; a `Snapshot` is a copyable value that holds no authority.
+
+**Open.** `open(a, config)` first refuses limits above `u32`, or node bounds that cannot
+hold the largest key and value, with `InvalidInput()`, and limits whose largest group,
+`transaction_bytes` plus 8 KiB, exceeds `authority.max_entry(a)` with
+`Unsupported(Size(needed, max_entry))`. These checks run before the claim, whether or not
+the store exists, so a refused open has no effect. It then claims the authority, which
+appends a claim group with the next writer epoch and fences every earlier head, and reads
+the history back: each group against its digest and the chain rules, the newest
+checkpoint's nodes, and the commits after it in order. When the claim was the history's
+first, the store commits its Genesis, which records `config.limits` and the node bounds;
+an existing store keeps the limits its Genesis recorded. A history whose first group is a
+claim not followed by a Genesis, or any group, node or chain that fails a check, is
+`Corrupt(name)`; a record of another format version is `Unsupported(Format(..))`.
+Stores written by the earlier numbered-object layout are not opened.
 
 **Transactions.** A transaction is an entry ([STORE-2](storage.md#store-2-transactions)):
 a top-level function `fn(mut tx: Tx, info: CallInfo, a: A) -> Result[R, E]` named by
 `Entry`, run with its argument decoded afresh from `a`'s canonical bytes. `transact` holds
 the store from the run to its commit, so transactions run one at a time in commit order
-and never conflict. Commits are numbered by consecutive sequences from 1 and visible at
-once to later `snapshot`s and transactions. Every read through a `Tx` enters its access set
-(`AccessSet`, [STORE-14](storage.md#store-14-tracked-access)): every key `tx_get` read,
-present or absent, and every interval a `tx_range` consumed as a `Span` in key order, up to
-the last entry it returned when it returned `limit` of them and the whole range otherwise.
-`range` and `tx_range` return at most `limit` entries between the bounds in order as fresh
-copies; `prefix_bounds(p)` gives the bounds of exactly the keys starting with `p`. A
-`Snapshot` reflects every commit up to `snapshot_sequence`, and later commits never change
-it: holding one never holds up the writer.
+and never conflict. A commit applies to the head's state at once, raising the visible
+version, and is visible to later transactions. Every read through a `Tx` enters its
+access set (`AccessSet`, [STORE-14](storage.md#store-14-tracked-access)): every key
+`tx_get` read, present or absent, and every interval a `tx_range` consumed as a `Span` in
+key order, up to the last entry it returned when it returned `limit` of them and the whole
+range otherwise. `range` and `tx_range` return at most `limit` entries between the bounds
+in order as fresh copies; `prefix_bounds(p)` gives the bounds of exactly the keys starting
+with `p`.
 
 **Running an entry.** `transact` mints the run's `CallInfo`
 ([STORE-4](storage.md#store-4-call-information)), with no caller or time and a seed from
@@ -4266,21 +4282,21 @@ the commit's place in the order, then runs `f` once through `runner.apply_mut`, 
 boundary ([FAIL-2](failure.md#fail-2-isolation)), with a fresh `Tx`, the scoped capability
 ([MODE-6](ownership.md#mode-6-scoped-capabilities)) of a transaction at the latest commit;
 `tx_get`, `tx_put`, `tx_delete` and `tx_range` read and write through it; the reads
-borrow it and record their access in its recorders. `Ok(v)` commits the writes as one commit (none when
-the entry wrote nothing) and returns `v`; `Error(e)` discards them and returns
-`Aborted(e)`; a failure in the run discards them and returns `Faulted(f)`, records
-nothing, and leaves the store usable. Every outcome is released only once every commit the
-run could see, and its own, is durable. `query` runs `f` the same way through `runner.apply` on a `Snapshot`, with
-a borrowed `Tx`, through which no write can be made, and a `CallInfo` with no time or seed (a
-query is not ordered). `call_info.caller`, `at` and `seed` read a `CallInfo`. A commit with a key over `limits.key_bytes`, a value over `limits.value_bytes`, or
-an encoded size over `limits.transaction_bytes` returns `Limit(..)` with no effect; the
-encoded size is that of the log object holding the commit alone, 50 bytes plus 17 and the
-key and value per put and 9 and the key per delete. `open` refuses with
-`Limit(TransactionBytes())` a `transaction_bytes` over the backend's `max_object_bytes`. A failed storage write before the commit is `Storage(e)`; a create that failed
-with a file error leaves the commit's durability to the next `open` and is `Unknown(e)`.
-`transact` checks no cancellation; `Canceled` is the runner form's. Keys beginning with
-`hirsel.` (`reserved`) are the store's own: `tx_get`, `tx_put` and `tx_delete` require a
-key outside them, and `tx_range` passes over them.
+borrow it and record their access in its recorders. `Ok(v)` commits the writes as one
+commit and returns `v`; `Error(e)` discards them and returns `Aborted(e)`; a failure in
+the run discards them and returns `Faulted(f)`, records nothing, and leaves the store
+usable. Each commit records its call: the entry's index in its group's definition table,
+the call information, the argument bytes and the outcome bytes. `query` runs `f` the same
+way through `runner.apply` on a `Snapshot`, with a borrowed `Tx`, through which no write
+can be made, and a `CallInfo` with no time or seed (a query is not ordered).
+`call_info.caller`, `at` and `seed` read a `CallInfo`. A commit with a key over
+`limits.key_bytes`, a value over `limits.value_bytes`, or an encoded commit, its call
+record and outcome included, over `limits.transaction_bytes` returns `Limit(..)` with no
+effect. A storage failure before the commit's group advanced is `Storage(e)`; one whose
+advance may have taken effect is `Unknown(e)`, which the next `open` decides. `transact`
+checks no cancellation; `Canceled` is the runner form's. Keys beginning with `hirsel.`
+(`reserved`) are the store's own: `tx_get`, `tx_put` and `tx_delete` require a key outside
+them, and `tx_range` passes over them.
 
 **Key scopes.** A `Tx` has a key scope, every key with `ReadWrite` in the `Tx` that
 `transact` and `call` give the body. `narrow` and `narrow_read` run `body` with a `Tx` of
@@ -4296,93 +4312,43 @@ over the spans otherwise, with no allocation. `tx_get` checks `limits.key_bytes`
 `InvalidInput`); the write limits are checked at commit.
 
 **Call streams.** `call` is `transact` as one exactly-once request, a core `CallRequest`,
-on an ordered call stream ([STORE-12](storage.md#store-12-transactions-at-a-runner)). The stream's row, under
-`hirsel.streams/` and the stream bytes, holds its executor epoch, the last applied and
-acknowledged positions, and the digest and encoded outcome of each position between them.
-An epoch below the row's is `Denied()`. A position at or below the acknowledged one, past
-the next one, retained under another digest, or with `acknowledged` not below it is
-`Rejected()`. A retained position with an equal digest returns its recorded outcome
-without running `f`. The next position runs `f`; the same commit stores the outcome,
-sets `applied`, raises `acknowledged` and drops the outcomes at or below it, and an
-outcome that writes nothing (`Aborted`, `Limit`) is recorded by a commit of the row alone.
-A request with a higher epoch raises the row's, a duplicate's included. A storage failure
-or a failure in the run (`Tx(Faulted(f))`) records nothing, so the caller resends the same
-position.
+on an ordered call stream ([STORE-12](storage.md#store-12-transactions-at-a-runner)). The
+stream identity and request digest are 32 bytes each; any other length is `Rejected()`.
+The stream's row, under `hirsel.streams/` and the stream bytes, holds its executor epoch,
+the last applied and acknowledged positions, and the digest and encoded outcome of each
+position between them. An epoch below the row's is `Denied()`. A position at or below the
+acknowledged one, past the next one, retained under another digest, or with
+`acknowledged` not below it is `Rejected()`. A retained position with an equal digest
+returns its recorded outcome without running `f`. The next position runs `f`; the same
+commit stores the outcome, sets `applied`, raises `acknowledged` and drops the outcomes at
+or below it, and an outcome that writes nothing (`Aborted`, `Limit`) is recorded by a
+commit of the row alone. A request with a higher epoch raises the row's, a duplicate's
+included. A storage failure or a failure in the run (`Tx(Faulted(f))`) records nothing,
+so the caller resends the same position.
 
-**Output gate.** Each transaction's commit is written as one log object before its
-outcome is released. With `durability` `Durable()` (the default) a log object is created
-with `file.put_new(.., Durable())` and so is synced first; with `Volatile()` it is created
-unsynced, and a crash may lose any suffix of the commits, never part of one.
-`group_limit` is the most commits one log object may hold, for the serving form that
-batches them.
+**Groups and the output gate.** Commits join a pending group, which advances the history
+as one authority entry once it holds `group_commits` commits or `group_bytes` encoded
+bytes, or when an outcome awaits its durability; never on a timer. For each level the
+authority declares, the store keeps `D(L)`, the highest version durable at `L`, and the
+state at it. Every outcome of `transact` and `call` is released only once every commit the
+run could see, and its own, is durable at the authority's floor. `ticket(s)` names the
+visible version; `durable(a, s, t, at)` returns once every commit up to `t` is durable at
+`at`, advancing the pending group if needed. `snapshot(a, s, at)` is the state at `D(at)`,
+which waits for nothing; reading one's own write takes `durable` on its ticket first.
+`version(snap)` names a snapshot's version, and versions of one store compare in commit
+order. A level of another authority is `NoLevel()` and a ticket of another store
+`Foreign()`; neither changes the store.
 
-**Layout.** Under the `Dir`, every object is immutable and created only by `put_new`,
-named by a kind directory and a 20-digit decimal id: `manifest/N` names the writer epoch,
-the current snapshot's first object, sequence and part count and the first log id to
-replay; `log/N` holds one commit group, the first commit's sequence and each commit's
-ordered write set; consecutive `snap/N` objects hold one snapshot, each its sequence, part
-index, part count and its share of the entry stream (the entry count, then each key and
-value), none over the backend's `max_object_bytes`. Every object is a header (magic
-`HSTR`, format version 2,
-kind, its own id, the writer epoch), a body and a CRC-32C of everything before it,
-integers little-endian, so a misdirected or torn object fails its check.
+**Compaction.** `compact` makes every commit durable at the strongest declared level,
+puts the content-cut nodes of a checkpoint of the visible state that the authority does
+not already hold, and records the checkpoint's descriptor by a Checkpoint commit, so
+recovery reads that checkpoint and applies only the commits after it.
 
-**Open, recovery and fencing.** `open` creates the three directories when absent, reads
-the newest manifest, loads its snapshot and replays the log objects from its first log id
-in id order, applying each commit after the snapshot's. A `Durable()` create is whole or
-nothing at its final name, so a bad log object, the last one included, a missing log
-object before the last, a bad manifest or snapshot, or a commit sequence or writer epoch
-out of order refuses the open with `Corrupt(name)` and removes nothing; in a `Volatile()`
-store the first bad or missing log object ends the log instead, and it and the objects
-after it are removed. The opener then claims the
-store: it creates an empty fence log at the next log id and then the next manifest with
-the next epoch. A writer that finds the id of its next object taken has been fenced by
-another writer and returns `Fenced()`. `Storage`, `Corrupt`, `Fenced` and `Injected`
-close the store; every later call returns `Closed()`.
-
-**Compaction.** `compact` writes any pending group, writes every entry into the next
-snapshot, as many objects as the object cap requires, and publishes it with the next manifest, whose first log id is the next log
-id. It removes nothing: every created name stays taken, so a superseded writer's next
-create collides and returns `Fenced()` rather than reusing a freed name. Older manifests,
-unreached snapshots and logs before the first log id are never read again, so a crash at
-any point recovers.
-
-**Storage contract.** The engine needs exactly these operations of its storage, which an
-object-storage provider must offer: create an object whole if its name is absent
-(`put_new`, reporting `AlreadyExists` otherwise; `Durable()` makes it survive a crash),
-read a whole object, list a kind directory's names in byte order, and remove an object.
-It never appends, renames, overwrites or reads at an offset. `StopAfterWrites(n)` is the
-fault seam for crash tests: the store's storage mutation after its first `n` (creates,
-removals and directory creations, from `open` on) returns `Injected()` with no effect.
-
-**Backend interface.** `store.Backend[S]` contains `read(mut state: S, name: String)`
-returning `Result[Bytes, FileError]`, `put_new(mut state: S, name: String, data: Bytes,
-mode: Durability)` returning `Result[(), PutError]` (STORE-11: `Taken()`, `Refused(e)` before
-any effect, or `Undecided(e)`; `Ok` only once equal bytes hold the name durably), `list(mut
-state: S, prefix: String)`
-returning `Result[List[String], FileError]`, `remove` and `mkdir` with the same
-state/name inputs and unit result, and `max_object_bytes(mut state: S)` returning the
-largest object `put_new` accepts as `u64`. Every callback declares `uses {state}`. `list` returns
-full relative names in byte order. The shipped dictionaries use top-level functions and put provider authority in
-the state; any captured callback authority remains explicit erased evidence. `Store[S]` is ordinary opaque, with `@captures(backend)` and `uses {S}`:
-it exports no copying bound, has no automatic flush and keeps its callbacks' erased
-authority.
-
-```text
-fn store.local_backend() -> store.Backend[Dir] uses {}
-fn store.open_backend[S](take state: S, take backend: store.Backend[S], config: store.StoreConfig) -> Result[store.Store[S], store.StoreError] uses {state, backend}
-fn store.into_state[S](take store: store.Store[S]) -> Result[S, store.StoreError] uses {store}
-```
-
-`open_backend` runs the same recovery, fencing and group-commit protocol as `open`.
-An error from conditional creation is resolved by an uncached whole-object read-back:
-exact requested bytes prove success, different bytes fence, and a failed read leaves
-the store closed with the storage error. No blind create retry occurs. `into_state`
-flushes like `close`, then returns the owned backend state for lifecycle management and
-simulation observations. S3 is the pure Hirsel package `s3@1`, not a std dependency;
-its backend and its deterministic simulator implement this dictionary. Cache and
-transport policy live in the backend, and cache size zero disables caching.
-
+**Failures and close.** `Storage`, `Refused`, `Corrupt`, `Fenced` and `Closed` close the
+store: every later call returns `Closed()`. `close` makes every commit durable at the
+strongest declared level and releases the store and its claim. Crash and fault behaviour
+belongs to the authority provider (`authority.memory@1`, `authority.sim@1`,
+`authority.log@1`, `authority.objects@1`), not to the store.
 
 ## Compressed data
 

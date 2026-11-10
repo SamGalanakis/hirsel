@@ -27,18 +27,18 @@ fn moves(mut tx: store.Tx, info: store.CallInfo, req: Transfer) -> Result[
 }
 ```
 
-The place's head opens the store once, over the place's `ledger` directory, and serves
+The place's head opens the store once, over the place's `ledger` authority, and serves
 the entries until its host stops:
 
 ```hirsel
 pub fn head(rt: Io, a: ()) -> Result[(), store.StoreError] {
-  let Ok(d) = io.dir(rt, path.of("ledger")) else {
+  let Ok(ledger) = io.authority(rt, "ledger") else {
     return Error(Corrupt("ledger"))
   }
   let Ok(inbox) = io.inbox(rt) else {
     return Error(Corrupt("inbox"))
   }
-  let mut s = store.open(d, store.default_config())?
+  let mut s = store.open(ledger, store.default_config())?
   store.serve(
     mut s,
     take inbox,
@@ -104,8 +104,8 @@ The replay prints the same eleven lines.
 
 ## What is not here yet
 
-- A `sim@1` place's head runs in the simulated world, so its store lives in memory for
-  the run. The runner's `db` grant must name an existing directory but is not written,
+- A `sim@1` place's head runs in the simulated world, and its `ledger` grant is an
+  `authority.memory@1` authority, so its store lives in memory for the run. The runner's `db` grant must name an existing directory but is not written,
   and a second run starts from an empty store.
 - `sim@1` produces no faults at a `db@1` place, so the crash and lost-reply paths are not
   exercised here.

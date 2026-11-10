@@ -24,6 +24,14 @@
       "kinds": [
         "terminate"
       ]
+    },
+    "authorities": {
+      "main": {
+        "provider": "authority.log@1",
+        "floor": "host",
+        "mount": "data",
+        "path": "store"
+      }
     }
   }
 }

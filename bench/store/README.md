@@ -17,7 +17,7 @@ supply a grants file with this shape, replacing `/tmp/store-data` with that
 directory's absolute path:
 
 ```json
-{"io":{"stdout":"stdout.bytes@1","dirs":[{"path":"data","host":"/tmp/store-data","access":"read_write"}]},"args":[]}
+{"io":{"stdout":"stdout.bytes@1","dirs":[{"path":"data","host":"/tmp/store-data","access":"read_write"}],"authorities":{"main":{"provider":"authority.log@1","floor":"host","mount":"data","path":"store"}}},"args":[]}
 ```
 
 Run the same executable and key count for every compared revision:
@@ -37,16 +37,17 @@ Select an ordinary CPU allowed by the host. Start with 100 keys; every process
 stays within 60 CPU seconds and 2 GiB. The program writes 16-byte keys and
 100-byte values in transactions of at most 100 keys. Modes are `load`,
 `compact` (one compaction after loading) and `recompact` (compact, commit one
-more key, compact again). All modes close the store before printing total snapshot bytes.
-A zero byte total is expected when no snapshot exists; this is not a work
+more key, compact again). All modes close the store before printing the bytes of its checkpoint objects
+(`store/objects` under the data directory).
+A zero byte total is expected when no checkpoint exists; this is not a work
 counter. A nonzero exit refuses the sample. This workload has no correctness oracle: it
-does not check reopened rows, and printing snapshot bytes is not correctness coverage.
+does not check reopened rows, and printing checkpoint bytes is not correctness coverage.
 
 Compare whole-process `instructions:u` and peak RSS externally, alongside the
-printed snapshot bytes. Use three seeded interleaved rounds, a fresh empty
+printed checkpoint bytes. Use three seeded interleaved rounds, a fresh empty
 store for every cell, and retain the revision, mode, key count, grants, argv,
 stdout/stderr and counters. Compare the same mode and key count across
 revisions. To study scaling, retain the smaller and larger key counts as
 separate cells. Startup, loading and close are included, so these totals do
 not isolate a single store operation. There is no committed baseline or cost
-gate yet; snapshot bytes alone cannot establish an index CPU or memory win.
+gate yet; checkpoint bytes alone cannot establish an index CPU or memory win.

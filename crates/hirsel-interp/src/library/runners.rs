@@ -848,6 +848,7 @@ pub(super) fn callee_world(
         callees,
         net: grants.net.clone(),
         process: grants.process.clone(),
+        authorities: grants.authorities.clone(),
         ..Default::default()
     };
     world.grants = std::iter::once("Io")

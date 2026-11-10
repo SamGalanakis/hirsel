@@ -10,7 +10,7 @@
   },
   "sources": [
     {
-      "path": "DET-1-std-store-fence-run.hir",
+      "path": "STORE-3-table-scope-denied-run.hir",
       "module": []
     }
   ],

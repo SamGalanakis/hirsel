@@ -1,5 +1,5 @@
 // Store adapter for the ledger workload. Each group is one transaction.
-pub type Error = File(FileError) | Grant(GrantError) | Clock(ClockError) | Output(
+pub type Error = Grant(GrantError) | Clock(ClockError) | Output(
   OutputError
 ) | Input(InputError) | Store(store.StoreError) | Tx(store.TxFailure[ledger.Refusal]) | Usage
 
@@ -132,7 +132,7 @@ fn run(rt: Io, args: Args) -> Result[(), Error] {
   let input = io.stdin(rt) ? Grant
   let c = io.monotonic_clock(rt) ? Grant
   let tasks = io.tasks(rt) ? Grant
-  let d = io.dir(rt, path.of("db")) ? File
+  let a = io.authority(rt, "db") ? Grant
   let accounts = number(args, 0)
   let initial = number(args, 1)
   let count = number(args, 2)
@@ -143,9 +143,8 @@ fn run(rt: Io, args: Args) -> Result[(), Error] {
     return Error(Usage())
   }
   let mut config = store.default_config()
-  config.durability = Durable()
-  config.group_limit = 1
-  let mut db = store.open(d, config) ? Store
+  config.group_commits = 1
+  let mut db = store.open(a, config) ? Store
   for account in 0u64..accounts {
     let _ = store.transact(
       mut db,
@@ -160,7 +159,7 @@ fn run(rt: Io, args: Args) -> Result[(), Error] {
   let start = now(c)
   let outcome = task.scope(
     tasks,
-    fn(scope: Scope) -> Result[(store.Store[Dir], List[u64]), Error] {
+    fn(scope: Scope) -> Result[(store.Store, List[u64]), Error] {
       let mut writer = take db
       let mut rx = take receiver
       let mut latencies: List[u64] = []
@@ -218,7 +217,7 @@ fn run(rt: Io, args: Args) -> Result[(), Error] {
   let _ = input.read_line(input) ? Input
   let (committed_store, latencies) = take outcome?
   store.close(take committed_store) ? Store
-  let mut recovered = store.open(d, config) ? Store
+  let mut recovered = store.open(a, config) ? Store
   // The oracle runs outside the timed phase.
   let _ = store.transact(
     mut recovered,

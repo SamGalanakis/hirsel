@@ -6,6 +6,16 @@ use hirsel_host_io::launch::*;
 use hirsel_intern::jobs::with_compiler_stack;
 
 fn execute(source: &str, simulation: SimulationConfig) -> hirsel_engine::ObservedExecution {
+    execute_returning(source, simulation, true).unwrap()
+}
+
+/// `execute`, except that when `must_return` is false a run whose `main` returns an
+/// error yields `None` instead of failing the test.
+fn execute_returning(
+    source: &str,
+    simulation: SimulationConfig,
+    must_return: bool,
+) -> Option<hirsel_engine::ObservedExecution> {
     let mut engine = source_std::engine();
     let file = engine.sources.add("host-io.hir", source.into()).unwrap();
     let context = default_context();
@@ -17,6 +27,14 @@ fn execute(source: &str, simulation: SimulationConfig) -> hirsel_engine::Observe
         inputs: vec![],
     };
     let result = run_observed_snapshot(&mut engine, &run, simulation.clone()).unwrap();
+    if !must_return
+        && matches!(
+            result.outcome,
+            Ok(RunOutcome::Returned(hirsel_run_schema::Returned::Error))
+        )
+    {
+        return None;
+    }
     assert!(
         matches!(
             result.outcome,
@@ -56,7 +74,7 @@ fn execute(source: &str, simulation: SimulationConfig) -> hirsel_engine::Observe
         replay.outcome
     );
     assert_eq!(result.observation, replay.observation);
-    result
+    Some(result)
 }
 
 #[test]
@@ -216,45 +234,49 @@ pub fn main(rt: Io) -> Result[(), GrantError] {
     });
 }
 
-/// The cancellation sweep over a writer's seam calls (STORE-3, STORE-11, CONC-3): a
-/// cancel delivered at any seam call is observed only at the writer's next
-/// cancellation point, between its steps, so the calls of the step it arrived in
-/// complete and every step the writer acknowledged is in the history a later read
-/// returns. The writer is one claim, then four steps of an advance and a durable
-/// (calls 2j and 2j + 1 for step j), as a commit is; delivered at call k it
-/// acknowledges k / 2 steps (the durable after a cancelled advance still answers),
-/// and the history holds its claim and those. The storage cutover writes each step
-/// as a store transaction.
+/// The cancellation sweep over a store writer (STORE-2, STORE-3, STORE-11, CONC-3): a
+/// cancel delivered at any seam call, during the open, a commit or the close, is
+/// observed only at the writer's next cancellation point, between its transactions,
+/// so no seam call is a cancellation point and every transaction whose outcome the
+/// writer received is in the store a later open recovers, and nothing else is. The
+/// writer opens the store, runs up to four transactions, checking for cancellation
+/// before each, and closes it; a later head reopens the store and counts the rows.
 #[test]
-fn a_cancel_at_any_seam_call_is_observed_between_advances() {
+fn a_cancel_at_any_seam_call_is_observed_between_transactions() {
     use hirsel_interp::library::simulation::SimulationDebug;
     const SOURCE: &str = r#"
 pub type Failed = Failed()
 
-fn writer(s: Scope, a: Authority) -> (u64, bool) {
-  let floor = authority.floor(a)
-  let Ok(made) = authority.claim(a) else {
-    return (0, false)
+fn step(mut tx: store.Tx, info: store.CallInfo, j: u64) -> Result[(), store.TxError] {
+  store.tx_put(mut tx, copy string.as_bytes(f"k/{j}"), b"v")
+}
+
+fn writer(s: Scope, a: Authority) -> (u64, bool, bool) {
+  let Ok(opened) = store.open(a, store.default_config()) else {
+    return (0, false, false)
   }
-  let mut c = take made
+  let mut db = take opened
   let mut acked: u64 = 0
-  while acked < 4 {
-    let Ok(()) = task.check_canceled(s) else {
-      return (acked, true)
+  let mut canceled = false
+  while acked < 4 && !canceled {
+    if let Error(_) = task.check_canceled(s) {
+      canceled = true
+    } else {
+      let done: Result[(), store.TxFailure[store.TxError]] = store.transact(mut db, step, acked)
+      if done != Ok(()) {
+        let _ = store.close(take db)
+        return (acked, canceled, false)
+      }
+      acked = acked + 1
     }
-    let from = claim.end(c)
-    let Advanced(_) = authority.advance(a, mut c, from, b"entry", floor) else {
-      return (acked, false)
-    }
-    let Ok(_) = authority.durable(a, mut c, floor) else {
-      return (acked, false)
-    }
-    acked = acked + 1
   }
-  let Ok(()) = task.check_canceled(s) else {
-    return (acked, true)
+  if !canceled {
+    if let Error(_) = task.check_canceled(s) {
+      canceled = true
+    }
   }
-  (acked, false)
+  let closed = store.close(take db) == Ok(())
+  (acked, canceled, closed)
 }
 
 fn say(stdout: Stdout, line: String) -> Result[(), Failed] {
@@ -274,33 +296,36 @@ pub fn main(rt: Io) -> Result[(), Failed] {
   let Ok(a) = io.authority(rt, "main") else {
     return say(stdout, "no authority")
   }
-  let (acked, canceled) = task.scope(
+  let (acked, canceled, closed) = task.scope(
     tasks,
-    fn(s: Scope) -> (u64, bool) {
+    fn(s: Scope) -> (u64, bool, bool) {
       let child = task.async(
         s,
-        fn() -> (u64, bool) {
-          task.scope(tasks, fn(inner: Scope) -> (u64, bool) { writer(inner, a) })
+        fn() -> (u64, bool, bool) {
+          task.scope(tasks, fn(inner: Scope) -> (u64, bool, bool) { writer(inner, a) })
         }
       )
       task.await(s, take child)
     }
   )
-  let Ok(all) = authority.read(a, 0, authority.floor(a), 100) else {
-    return say(stdout, f"acked {acked} canceled {canceled}, recovery read refused")
+  let Ok(reopened) = store.open(a, store.default_config()) else {
+    return say(stdout, f"acked {acked} canceled {canceled} closed {closed}, reopen refused")
   }
-  let mut held: u64 = 0
-  for _ in all {
-    held = held + 1
+  let mut db = take reopened
+  let Ok(snap) = store.snapshot(a, mut db, authority.floor(a)) else {
+    return say(stdout, f"acked {acked} canceled {canceled} closed {closed}, snapshot refused")
   }
-  say(stdout, f"acked {acked} canceled {canceled} held {held}")
+  let (from, to) = store.prefix_bounds(b"k/")
+  let held = list.len(store.range(snap, from, to, Ascending(), 100))
+  let _ = store.close(take db)
+  say(stdout, f"acked {acked} canceled {canceled} closed {closed} held {held}")
 }
 "#;
     with_compiler_stack(|| {
         let grant: hirsel_run_schema::AuthorityGrant =
             serde_json::from_str(r#"{"provider":"authority.memory@1","floor":"memory"}"#).unwrap();
         let run = |cancel_at_seam| {
-            let result = execute(
+            let result = execute_returning(
                 SOURCE,
                 SimulationConfig {
                     authorities: [("main".to_string(), grant.clone())].into(),
@@ -310,18 +335,37 @@ pub fn main(rt: Io) -> Result[(), Failed] {
                     },
                     ..Default::default()
                 },
-            );
-            String::from_utf8(result.observation.unwrap().output).unwrap()
+                false,
+            )?;
+            Some(String::from_utf8(result.observation.unwrap().output).unwrap())
         };
-        // The writer's claim is 1 entry, then 1 per advance. (Its entries are opaque,
-        // so the reader reads without claiming: a claim validates the chain.)
-        assert_eq!(run(None), "acked 4 canceled false held 5\n");
-        for k in 1..=9u64 {
+        assert_eq!(
+            run(None).as_deref(),
+            Some("acked 4 canceled false closed true held 4\n")
+        );
+        // Every seam call of the writer's run, up to the first one past it: a cancel
+        // there lands on the root task's reopen, which cancels the run's own output,
+        // so `main` returns an error and the sweep is over.
+        let mut last = 0;
+        for k in 1u64.. {
+            assert!(k < 1000, "no cancel reached the root task's reopen");
+            let Some(line) = run(Some(k)) else {
+                assert!(k > 1, "the writer made no seam call");
+                break;
+            };
+            let words: Vec<&str> = line.split_whitespace().collect();
+            let acked: u64 = words[1].parse().unwrap();
+            // Only a cancel stops the writer early, and it never costs an
+            // acknowledged transaction or adds an unacknowledged one.
+            let canceled = acked < 4 || words[3] == "true";
             assert_eq!(
-                run(Some(k)),
-                format!("acked {} canceled true held {}\n", k / 2, k / 2 + 1),
+                line,
+                format!("acked {acked} canceled {canceled} closed true held {acked}\n"),
                 "cancel at seam call {k}"
             );
+            assert!(acked >= last, "cancel at seam call {k}: {line}");
+            last = acked;
         }
+        assert_eq!(last, 4, "no cancel landed after the last transaction");
     });
 }

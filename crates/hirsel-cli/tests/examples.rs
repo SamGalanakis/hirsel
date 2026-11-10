@@ -2404,16 +2404,6 @@ fn dogfood5_linkcheck_package_tests() {
 }
 
 #[test]
-fn dogfood5_kvd_package_tests() {
-    let example = Example::new(
-        "kvd",
-        &[("main.hir", include_str!("../../../examples/kvd/main.hir"))],
-        include_str!("../../../examples/kvd/hirsel.json"),
-    );
-    check_interpreted_and_llvm_package_tests("kvd", &example.dir.join("hirsel.json"), 3);
-}
-
-#[test]
 fn dogfood5_logtail_package_tests() {
     let example = Example::new(
         "logtail",

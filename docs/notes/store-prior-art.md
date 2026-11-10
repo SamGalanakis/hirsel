@@ -10,28 +10,17 @@ are now entries that hold the store from their run to their commit
 (STORE-2), so none can conflict, and the port, its conflict cases and
 `Isolation` were deleted.
 
-## Fencing (`fence.rs`)
+## Fencing
 
-The safety properties match: a new writer leaves an empty fence log as the
-newest log object, log ids stay contiguous, the fenced writer's next write
-fails `Fenced()` and every later call `Closed()`, a writer that fenced
-another is fenced in turn by a third, and a reopen holds every acknowledged
-commit and no stale one (`DET-1-std-store-fence-chain-run`, after
-`test_fence` and `test_fencer_fenced_after_claiming_epoch`). Two deviations,
-both kept:
-
-- The fence log is created before the manifest, and the fence log itself
-  carries the new epoch (recovery takes the larger of the manifest and log
-  epochs). SlateDB first bumps the epoch in the manifest by compare-and-swap
-  (`FenceableManifest::init_writer`), then writes the fence WAL. A `Dir` and
-  an S3 object store offer create-if-absent, not compare-and-swap on a mutable
-  manifest, so the manifests here are immutable numbered objects.
-- When the fence id is already taken, `open` fails with `Fenced()`. SlateDB
-  refreshes the manifest and retries at the next WAL id
-  (`wal/slatedb/writer_init.rs:107-150`) because its epoch is already
-  exclusive. Here the taken id may belong to a concurrent opener at the same
-  epoch, so the opener cannot retry safely; its caller can reopen. This costs
-  liveness under racing opens, never safety.
+SlateDB fences a writer by bumping the epoch in its manifest with
+compare-and-swap (`FenceableManifest::init_writer`) and writing a fence WAL.
+The store has no fence objects: since place-store-681 it is a writer over an
+authority (storage.md STORE-11), and a writer holds the history by its claim.
+`authority.claim` ends every earlier claim, and an ended claim's
+`authority.advance` answers `Fenced` with nothing appended, which is SlateDB's
+guarantee made by the authority instead of by the store's layout. The model
+negative controls for it are `harness_objects.rs` (`no_cas`, `any_epoch`,
+`trust_listing`).
 
 ## Memory and compaction cost
 

@@ -716,7 +716,6 @@ pub unsafe extern "C" fn hirsel_rt_v2_authority_floor(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hirsel_rt_v2_authority_max_entry(
     ctx: *mut crate::TaskCtx,
-    _destination: *mut u8,
     out: *mut u64,
     a: *const u64,
 ) -> u8 {
@@ -773,7 +772,6 @@ pub unsafe extern "C" fn hirsel_rt_v2_level_narrow(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hirsel_rt_v2_claim_end(
     ctx: *mut crate::TaskCtx,
-    _destination: *mut u8,
     out: *mut u64,
     c: *const u64,
 ) -> u8 {

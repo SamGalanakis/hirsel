@@ -1,11 +1,15 @@
 // rule: STORE-2
 // expect: run
+// authorities: {"main":{"provider":"authority.memory@1","floor":"memory"},"small":{"provider":"authority.memory@1","floor":"memory"}}
 // store.transact runs a transaction entry: it commits the entry's writes as
 // one commit when it returns Ok, discards them and returns Aborted when it
 // returns Error, refuses a commit over a limit with no effect, and ends a run
 // that fails as Faulted with nothing committed and the store still usable; a
 // reopened store holds exactly the committed transactions.
 // store.query runs its entry on its snapshot, not the latest commit.
+// Limits no group could frame within the authority's 64 MiB entries are
+// refused at open, and a commit encoding past transaction_bytes is refused
+// definitely and leaves the store open.
 @serializable
 type Short = TooFew(u64) | Db(store.TxError)
 
@@ -60,45 +64,114 @@ fn peek(tx: store.Tx, call: store.CallInfo, n: u64) -> Result[u64, Short] {
   count(tx)
 }
 
-pub fn main(t: Test) -> Result[(), store.StoreError] {
-  let d = test.dir(t, [])
+@serializable
+type Pair {
+  key: Bytes,
+  value: Bytes,
+}
+
+fn puts(mut tx: store.Tx, info: store.CallInfo, p: Pair) -> Result[(), store.TxError] {
+  store.tx_put(mut tx, unique p.key, unique p.value)
+}
+
+fn filled(n: u64) -> Bytes {
+  let mut v: List[u8] = []
+  for _ in 0u64..n {
+    list.push(mut v, 97)
+  }
+  bytes.from_list(take v)
+}
+
+pub type Failed = Check | Store(store.StoreError)
+
+fn check(ok: bool) -> Result[(), Failed] {
+  if ok {
+    Ok(())
+  } else {
+    Error(Check())
+  }
+}
+
+pub fn main(rt: Io, args: Args) -> Result[(), Failed] {
+  let Ok(a) = io.authority(rt, "main") else {
+    return Error(Check())
+  }
+  let at = authority.floor(a)
   let mut config = store.default_config()
   config.limits.value_bytes = 4
-  let mut s = store.open(d, config)?
-  let empty = store.snapshot(mut s)
+  let mut s = store.open(a, config) ? Store
+  let empty = store.snapshot(a, mut s, at) ? Store
   let one: Result[u64, store.TxFailure[Short]] = store.transact(mut s, first, 5u64)
-  test.check(t, one == Ok(5))
+  check(one == Ok(5))?
+  let after_one = store.snapshot(a, mut s, at) ? Store
   let two: Result[u64, store.TxFailure[Short]] = store.transact(mut s, short, 9u64)
-  test.check(t, two == Error(Aborted(TooFew(9))))
+  check(two == Error(Aborted(TooFew(9))))?
   let three: Result[(), store.TxFailure[Short]] = store.transact(mut s, big, 1u64)
-  test.check(t, three == Error(Limit(ValueBytes())))
+  check(three == Error(Limit(ValueBytes())))?
   let four: Result[(), store.TxFailure[Short]] = store.transact(mut s, overflows, 1u8)
   let faulted = match four {
     Error(Faulted(f)) => f.rule == "SEM-1",
     _ => false,
   }
-  test.check(t, faulted)
-  // The store is usable after the fault, and the fault committed nothing.
+  check(faulted)?
+  // Neither the abort, the limit nor the fault committed anything.
+  let settled = store.snapshot(a, mut s, at) ? Store
+  check(store.version(settled) == store.version(after_one))?
+  // The store is usable after the fault.
   let five: Result[u64, store.TxFailure[Short]] = store.transact(mut s, first, 5u64)
-  test.check(t, five == Ok(5))
-  let snap = store.snapshot(mut s)
-  test.check(
-    t,
+  check(five == Ok(5))?
+  let snap = store.snapshot(a, mut s, at) ? Store
+  check(
     store.get(snap, b"count") == Some(b"\x05") && store.get(snap, b"name") == Some(
       b"ada"
     ) && store.get(snap, b"big") == None()
-  )
-  test.check(t, store.snapshot_sequence(snap) == 2)
-  test.check(t, store.query(copy snap, peek, 0u64) == Ok(5))
-  test.check(t, store.query(take empty, peek, 0u64) == Ok(0))
-  store.close(take s)?
-  let mut again = store.open(d, store.default_config())?
-  let reopened = store.snapshot(mut again)
-  test.check(
-    t,
+  )?
+  check(store.version(after_one) < store.version(snap))?
+  check(store.query(copy snap, peek, 0u64) == Ok(5))?
+  check(store.query(take empty, peek, 0u64) == Ok(0))?
+  store.close(take s) ? Store
+  sizes(rt)?
+  let mut again = store.open(a, store.default_config()) ? Store
+  let reopened = store.snapshot(a, mut again, at) ? Store
+  check(
     store.get(reopened, b"count") == Some(b"\x05") && store.get(reopened, b"name") == Some(
       b"ada"
     )
+  )?
+  Ok(())
+}
+
+// The group overhead is 8192 bytes, so transaction_bytes of 64 MiB less 8191
+// needs 64 MiB and one byte and is refused before any claim. A put of a 3-byte
+// key and a 200-byte value encodes past transaction_bytes 128: refused, no
+// effect.
+fn sizes(rt: Io) -> Result[(), Failed] {
+  let Ok(a) = io.authority(rt, "small") else {
+    return Error(Check())
+  }
+  let mut config = store.default_config()
+  config.limits.transaction_bytes = 67100673
+  let over = match store.open(a, config) {
+    Error(Unsupported(Size(needed: 67108865, max_entry: 67108864))) => true,
+    _ => false,
+  }
+  check(over)?
+  config.limits.transaction_bytes = 128
+  let mut s = store.open(a, config) ? Store
+  let oversized: Result[(), store.TxFailure[store.TxError]] = store.transact(
+    mut s,
+    puts,
+    Pair(key: b"big", value: filled(200))
   )
+  check(oversized == Error(Limit(TransactionBytes())))?
+  let small: Result[(), store.TxFailure[store.TxError]] = store.transact(
+    mut s,
+    puts,
+    Pair(key: b"big", value: filled(20))
+  )
+  check(small == Ok(()))?
+  let snap = store.snapshot(a, mut s, authority.floor(a)) ? Store
+  check(store.get(snap, b"big") == Some(filled(20)))?
+  store.close(take s) ? Store
   Ok(())
 }

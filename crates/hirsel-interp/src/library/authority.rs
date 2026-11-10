@@ -2,7 +2,8 @@
 //! projects a granted authority, whose provider the run makes at its first projection and
 //! every later projection of the name shares. The simulation serves `authority.memory@1`
 //! and `authority.sim@1`; `authority.log@1` keeps a host directory, which a simulated run
-//! has none of.
+//! has none of. On a host the adapter serves every provider, as it does a native run's,
+//! and hands the library each outcome (`host_authority_outcome`).
 //!
 //! What a provider decides (each claim, advance, barrier, read and object request) is a
 //! recorded capability input of `Authority`: the request is the grant name and the
@@ -32,6 +33,9 @@ pub(super) struct Authorities {
     attempts: u64,
     /// Seam calls that reached a provider, for `SimulationDebug::cancel_at_seam`.
     pub(super) seam_calls: u64,
+    /// The host's outcome of the next provider request, when a host adapter serves the
+    /// run's authorities: the request it answered and its outcome.
+    host: Option<(wire::Request, Outcome)>,
 }
 
 /// A claim the program holds: its authority, its end and, outside replay, the provider's
@@ -216,34 +220,41 @@ impl Library {
         input.push(0);
         input.extend_from_slice(&r.encode());
         let mut minted = None;
-        let outcome = match self
-            .simulation
-            .replay_output("Authority", operation, &input)?
-        {
-            Some(recorded) => wire::decode(recorded)
-                .ok_or_else(|| invalid("invalid authority tape completion"))?,
-            None => {
-                let p = self.provider(name)?;
-                let claim = match held {
-                    Some(h) => Some(
-                        h.claim
-                            .clone()
-                            .ok_or_else(|| invalid("a replayed claim outside replay"))?,
-                    ),
-                    None => None,
-                };
-                let mut guard = claim.as_ref().map(|c| c.lock().unwrap());
-                let n = self.authorities.attempts;
-                let instance = self.simulation.config.instance;
-                let (o, c) = wire::serve(
-                    &mut **p.lock().unwrap(),
-                    guard.as_deref_mut(),
-                    r.clone(),
-                    || wire::draw(&instance, n),
-                )
-                .map_err(invalid)?;
-                minted = c;
-                o
+        let outcome = if let Some((answered, outcome)) = self.authorities.host.take() {
+            if answered != r {
+                return Err(invalid("host authority outcome answers another request"));
+            }
+            outcome
+        } else {
+            match self
+                .simulation
+                .replay_output("Authority", operation, &input)?
+            {
+                Some(recorded) => wire::decode(recorded)
+                    .ok_or_else(|| invalid("invalid authority tape completion"))?,
+                None => {
+                    let p = self.provider(name)?;
+                    let claim = match held {
+                        Some(h) => Some(
+                            h.claim
+                                .clone()
+                                .ok_or_else(|| invalid("a replayed claim outside replay"))?,
+                        ),
+                        None => None,
+                    };
+                    let mut guard = claim.as_ref().map(|c| c.lock().unwrap());
+                    let n = self.authorities.attempts;
+                    let instance = self.simulation.config.instance;
+                    let (o, c) = wire::serve(
+                        &mut **p.lock().unwrap(),
+                        guard.as_deref_mut(),
+                        r.clone(),
+                        || wire::draw(&instance, n),
+                    )
+                    .map_err(invalid)?;
+                    minted = c;
+                    o
+                }
             }
         };
         if !r.admits(&outcome) {
@@ -262,6 +273,43 @@ impl Library {
             context,
         )?;
         Ok((outcome, minted))
+    }
+
+    /// The provider request an `authority.*` operation makes with these arguments, for a
+    /// host adapter that serves the run's authorities; `None` for the operations the grant
+    /// alone answers.
+    pub fn authority_request(&self, op: &str, a: &[Value]) -> Result<Option<wire::Request>, Error> {
+        let name = || self.authority_name(arg(a, 0)?);
+        Ok(Some(match op {
+            "authority.claim" => wire::Request::Claim,
+            "authority.advance" => wire::Request::Advance {
+                from: u64_arg(arg(a, 2)?, "from")?,
+                at: self.level_of(&name()?, arg(a, 4)?)?,
+                entry: bytes(arg(a, 3)?)?.to_vec(),
+            },
+            "authority.durable" => wire::Request::Durable {
+                at: self.level_of(&name()?, arg(a, 2)?)?,
+            },
+            "authority.reclaim" => wire::Request::Reclaim,
+            "authority.read" => wire::Request::Read {
+                from: u64_arg(arg(a, 1)?, "from")?,
+                at: self.level_of(&name()?, arg(a, 2)?)?,
+                max: u64_arg(arg(a, 3)?, "max")?,
+            },
+            "authority.get" => wire::Request::Get {
+                name: text(arg(a, 1)?)?.to_string(),
+            },
+            "authority.put" => wire::Request::Put {
+                name: text(arg(a, 1)?)?.to_string(),
+                data: bytes(arg(a, 2)?)?.to_vec(),
+            },
+            _ => return Ok(None),
+        }))
+    }
+
+    /// The host's outcome of the provider request the next `authority.*` operation makes.
+    pub fn host_authority_outcome(&mut self, request: wire::Request, outcome: Outcome) {
+        self.authorities.host = Some((request, outcome));
     }
 
     pub(super) fn authority_call(
@@ -466,7 +514,13 @@ impl Library {
             }
             _ => return Err(invalid(format!("unknown authority operation {op}"))),
         };
-        Ok(OperationResult::returned(value))
+        let result = OperationResult::returned(value);
+        // A narrowed claim is the taken one: it moves into the result, never dropped.
+        Ok(if op == "claim.narrow" {
+            result.transferring([1])
+        } else {
+            result
+        })
     }
 
     /// A dropped claim ends.

@@ -1,12 +1,12 @@
-//! A recording of a run that opens a std@1/store and runs transactions holds every byte
-//! the store read (its objects, and through them every value a body saw), so it replays
-//! exactly with the store's directory gone.
+//! A recording of a run that opens a std@1/store over an `authority.log@1` grant and runs
+//! transactions holds every byte the store read (its history, and through it every value a
+//! body saw), so it replays exactly with the authority's directory gone.
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 /// Each run counts itself in the store, aborts one transaction, and replays a stream
 /// call it already made in an earlier run.
-const PROGRAM: &str = r#"pub type AppError = Grant(GrantError) | Files(FileError) | Store(store.StoreError) | Output(OutputError)
+const PROGRAM: &str = r#"pub type AppError = Grant(GrantError) | Store(store.StoreError) | Output(OutputError)
 
 fn runs(mut tx: store.Tx) -> u64 {
   match store.tx_get(tx, b"runs") {
@@ -32,11 +32,17 @@ fn tenfold(mut tx: store.Tx, info: store.CallInfo, a: ()) -> Result[u64, String]
 
 pub fn main(rt: Io) -> Result[(), AppError] {
   let output = io.stdout(rt) ? Grant
-  let d = io.dir(rt, path.of("data")) ? Files
-  let mut s = store.open(d, store.default_config()) ? Store
+  let a = io.authority(rt, "main") ? Grant
+  let mut s = store.open(a, store.default_config()) ? Store
   let counted: Result[u64, store.TxFailure[String]] = store.transact(mut s, count, ())
   let aborted: Result[u64, store.TxFailure[String]] = store.transact(mut s, abort, ())
-  let first = CallRequest(stream: b"s", epoch: 1, position: 1, digest: b"d", acknowledged: 0)
+  let first = CallRequest(
+    stream: bytes.from_inline(sha256.digest(b"s")),
+    epoch: 1,
+    position: 1,
+    digest: bytes.from_inline(sha256.digest(b"d")),
+    acknowledged: 0
+  )
   let called: Result[u64, store.CallFailure[String]] = store.call(mut s, first, tenfold, ())
   store.close(take s) ? Store
   match (counted, aborted, called) {
@@ -73,7 +79,7 @@ impl Fixture {
         .unwrap();
         std::fs::write(
             root.join("grants.json"),
-            serde_json::json!({"io":{"stdout":"stdout.bytes@1","dirs":[{"path":"data","host":root.join("data"),"access":"read_write"}]},"args":[]}).to_string(),
+            serde_json::json!({"io":{"stdout":"stdout.bytes@1","dirs":[{"path":"data","host":root.join("data"),"access":"read_write"}],"authorities":{"main":{"provider":"authority.log@1","floor":"host","mount":"data","path":"store"}}},"args":[]}).to_string(),
         )
         .unwrap();
         let _ = root_scratch.keep();
@@ -114,7 +120,7 @@ fn assert_printed(output: &Output, expected: &str, what: &str) {
 fn a_store_recording_replays_every_read_without_its_directory() {
     let fixture = Fixture::new("replay");
     assert_printed(&fixture.live(None), "1 10\n", "first live run");
-    // The recorded run recovers the first run's objects, so its tape holds their bytes.
+    // The recorded run recovers the first run's history, so its tape holds its bytes.
     let tape = fixture.0.join("run.tape");
     assert_printed(&fixture.live(Some(&tape)), "2 10\n", "recorded run");
     std::fs::rename(fixture.0.join("data"), fixture.0.join("gone")).unwrap();

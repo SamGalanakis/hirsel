@@ -174,7 +174,8 @@ def sample(kind, group, submitters, workload, out, compiler, source_sha, profile
     grants = directory / 'grants.json'
     grants.write_text(json.dumps(dict(io=dict(stdout='stdout.bytes@1', stdin='stdin.bytes@1',
         tasks='tasks.cooperative@1', monotonic_clock='clock.monotonic.ns@1',
-        dirs=[dict(path='db', host=str(db), access='read_write')]), args=list(map(str, arguments)))))
+        dirs=[dict(path='db', host=str(db), access='read_write')],
+        authorities=dict(db=dict(provider='authority.log@1', floor='host', mount='db', path='store'))), args=list(map(str, arguments)))))
     if kind == 'interp':
         executable = compiler
         command = [compiler, 'run', '--mem-usage', HERE / 'hirsel.json', '--grants', grants,

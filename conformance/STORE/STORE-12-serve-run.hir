@@ -1,6 +1,6 @@
 // rule: STORE-12
 // expect: run
-// runners: [{"name":"ledger","provider":"sim@1","node":"bank","models":"db@1","head":"application@1/head","grants":{"dirs":[{"path":"place","host":"/place","access":"read_write"}]},"definitions":null},{"name":"synced","provider":"sim@1","node":"bank","models":"db@1","head":"application@1/head","level":"synced","grants":{"dirs":[{"path":"place","host":"/place","access":"read_write"}]},"definitions":null}]
+// runners: [{"name":"ledger","provider":"sim@1","node":"bank","models":"db@1","head":"application@1/head","grants":{"dirs":[],"authorities":{"place":{"provider":"authority.memory@1","floor":"memory"}}},"definitions":null},{"name":"synced","provider":"sim@1","node":"bank","models":"db@1","head":"application@1/head","level":"synced","grants":{"dirs":[],"authorities":{"place":{"provider":"authority.memory@1","floor":"memory"}}},"definitions":null}]
 // A db@1 place's head serves its entries with store.serve. Transact calls run
 // once each on the caller's stream and commit at the place, and a query reads
 // its latest commit. A call to an entry the head does not serve is Denied, and
@@ -39,13 +39,13 @@ fn balance(tx: store.Tx, info: store.CallInfo, a: ()) -> Result[u64, Short] {
 
 // The place's head: one store, served until the execution ends.
 pub fn head(rt: Io, a: ()) -> Result[(), store.StoreError] {
-  let Ok(d) = io.dir(rt, path.of("place")) else {
+  let Ok(place) = io.authority(rt, "place") else {
     return Error(Corrupt("place"))
   }
   let Ok(inbox) = io.inbox(rt) else {
     return Error(Corrupt("inbox"))
   }
-  let mut s = store.open(d, store.default_config())?
+  let mut s = store.open(place, store.default_config())?
   store.serve(
     mut s,
     take inbox,

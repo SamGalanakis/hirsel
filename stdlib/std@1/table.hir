@@ -725,7 +725,7 @@ pub fn rename(mut tx: store.Tx, name: String, from: String, to: String) -> Resul
 /// its catalog entry, and its rows and history go in transactions that each fit the
 /// store's limits, so a drop is bounded by no commit limit. A refusal is
 /// `Aborted(e)`, with the error `e` of the table operations.
-pub fn drop[K: key + serializable, V: serializable, S](mut s: store.Store[S], t: Table[K, V]) -> Result[
+pub fn drop[K: key + serializable, V: serializable](mut s: store.Store, t: Table[K, V]) -> Result[
   (),
   store.TxFailure[store.TxError]
 ] {
@@ -887,7 +887,7 @@ fn install[K: key + serializable, B: serializable, E](
 
 // Discards a migration and returns `why`, or the failure that prevented the
 // discard.
-fn abandon[S, R, E](mut s: store.Store[S], take why: MigrateError[E]) -> Result[
+fn abandon[R, E](mut s: store.Store, take why: MigrateError[E]) -> Result[
   R,
   MigrateError[E]
 ] {
@@ -921,18 +921,17 @@ pub fn migrate[
   A: serializable,
   K: key + serializable,
   B: serializable,
-  E: serializable,
-  S
+  E: serializable
 ](
   within: Scope,
-  mut s: store.Store[S],
+  mut s: store.Store,
   from: Table[J, A],
   to: Table[K, B],
   f: Entry[fn(c: (), key: J, old: A) -> Result[(K, B), E]],
   batch: u64
 ) -> Result[u64, MigrateError[E]] {
   let name = table_name(from)
-  if !valid(name) || table_name(to) != name || batch == 0 || batch > s.config.limits.range_rows {
+  if !valid(name) || table_name(to) != name || batch == 0 || batch > s.limits.range_rows {
     return Error(Table(InvalidInput()))
   }
   let begun = store.transact_body(

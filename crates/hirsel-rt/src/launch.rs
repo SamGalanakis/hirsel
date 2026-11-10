@@ -70,7 +70,7 @@ pub type ZeroEntry = unsafe extern "C" fn(*mut TaskCtx, *mut u8, *mut u8) -> u8;
 /// Uniform compiler-generated adapter: roots are [Io, Args, Env, Unsafe, Test].
 pub type RootsEntry = unsafe extern "C" fn(*mut TaskCtx, *mut u8, *mut u8, *mut u64) -> u8;
 /// The largest inline result an entry may return.
-pub const RESULT_MAX: u64 = 64;
+pub const RESULT_MAX: u64 = 128;
 
 /// A compiled entry at the Hirsel ABI v2 (module documentation).
 pub type Entry = unsafe extern "C" fn(
@@ -1921,7 +1921,9 @@ pub(crate) unsafe fn execute(
         .transpose()?;
     let seed = launch_config.test_seed;
     if !(1..=RESULT_MAX).contains(&result_size) || (program.return_kind != 1 && result_size < 4) {
-        return Err("the entry result is not a Result of at most 64 bytes".into());
+        return Err(format!(
+            "the entry result is not a Result of at most {RESULT_MAX} bytes"
+        ));
     }
     let inherited_outputs = match crate::host_paths::inherited_output_pins() {
         Ok(pins) => pins,

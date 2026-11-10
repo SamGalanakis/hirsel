@@ -463,6 +463,7 @@ impl FrontLowerQueries {
                 path,
                 &outcome.reads,
                 outcome.execution.as_ref(),
+                &self.registrations_admitted,
                 |path, read| self.observe(path, read),
             )
             .ok()?;

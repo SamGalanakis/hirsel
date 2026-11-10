@@ -486,6 +486,8 @@ pub struct FrontLowerQueries {
     generator: Option<(DefId, Span)>,
     staged: staged::Staged,
     paths: inputs::Paths,
+    /// Every namespace registration validated through this owner's observer.
+    registrations_admitted: std::sync::OnceLock<()>,
     /// Implementation hashes of the opaque types a lowered body can read the
     /// private representation of: its LayoutBody inputs.
     layouts: Arc<inputs::Shared<BTreeMap<DefId, ContentHash>>>,
@@ -3585,6 +3587,7 @@ impl QueryEngine {
             generator,
             staged,
             paths,
+            registrations_admitted: std::sync::OnceLock::new(),
             layouts,
             front,
             namespace,

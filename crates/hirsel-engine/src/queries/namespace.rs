@@ -397,15 +397,26 @@ impl NamespaceCapture {
     }
     /// Candidate observations stay private until bindings, semantic reads and
     /// V's complete execution context all hold in this exact capture.
+    ///
+    /// `registrations` belongs to the one observer `observe` reads through.
+    /// Every registration and every value that observer reports are fixed for
+    /// its lifetime (evicted header rows are reproduced from the same inputs),
+    /// so the registrations' validation is a property of the observer: once
+    /// all of them have held, a fresh validation holds again. A refusal is
+    /// never remembered, so an operational failure is retried.
     pub(crate) fn admit_reuse(
         &self,
         owner: &DefPath,
         reads: &Reads,
         execution: Option<&hirsel_validate::ExecutionReceipt>,
+        registrations: &std::sync::OnceLock<()>,
         mut observe: impl FnMut(&DefPath, &ReadKey) -> Option<ContentHash>,
     ) -> Result<(Reads, Option<hirsel_validate::ExecutionReceipt>), QueryError> {
-        for registration in self.registrations.values() {
-            registration.validate_current(self, &mut observe)?;
+        if registrations.get().is_none() {
+            for registration in self.registrations.values() {
+                registration.validate_current(self, &mut observe)?;
+            }
+            let _ = registrations.set(());
         }
         if let Some(key) = reads.first_changed(|key| {
             if matches!(key, ReadKey::ValidationUniverse(_)) && execution.is_some() {

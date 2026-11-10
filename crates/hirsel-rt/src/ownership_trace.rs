@@ -13,8 +13,7 @@ use std::sync::{
 };
 pub(crate) mod results;
 
-pub const ABI_VERSION: u32 = 109;
-const _: () = assert!(ABI_VERSION > crate::ABI_VERSION);
+pub const ABI_VERSION: u32 = hirsel_rt_operations::OWNERSHIP_TRACE_ABI_VERSION;
 const LIMIT: usize = 65_536;
 
 /// Checked source intent, retained by the runtime's actual spawn command.

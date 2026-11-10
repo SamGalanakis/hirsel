@@ -8,6 +8,18 @@ use hirsel_core_contract::{
 
 include!(concat!(env!("OUT_DIR"), "/reviewed.rs"));
 
+/// The native runtime interface version: the one definition `hirsel-rt`
+/// (`hirsel_rt::ABI_VERSION`) and the compiler (`hirsel_lir::RUNTIME_ABI_VERSION`)
+/// both read. `hirsel_rt_v2.h` restates it for C; hirsel-lir's schema test
+/// requires the header to match.
+pub const RUNTIME_ABI_VERSION: u32 = 108;
+/// The ownership-trace extension's version, which emitted traced code passes to
+/// `hirsel_rt_v2_ownership_enter` and the runtime requires. One definition for the
+/// runtime and both native emitters; `hirsel_rt_ownership_trace.h` restates it
+/// for C, checked by hirsel-llvm's ownership_native test.
+pub const OWNERSHIP_TRACE_ABI_VERSION: u32 = 109;
+const _: () = assert!(OWNERSHIP_TRACE_ABI_VERSION > RUNTIME_ABI_VERSION);
+
 /// Classify exactly the reserved inventory. The declaration producer supplies digest/ownership.
 /// Runtime ABI emission for aggregate wrappers awaits I/K; those rows explicitly say unavailable.
 pub fn classify(mut row: OperationRow) -> Result<OperationRow, String> {

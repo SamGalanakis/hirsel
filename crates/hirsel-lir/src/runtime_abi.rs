@@ -12,7 +12,7 @@
 use crate::layout_types::{ScalarKind, StorageKind};
 use hirsel_codec::snapshot_enum;
 
-pub const ABI_VERSION: u32 = 107;
+pub const ABI_VERSION: u32 = hirsel_rt_operations::RUNTIME_ABI_VERSION;
 /// Original CPU worker capture in the runtime's fixed native record prefix.
 /// The runtime asserts this existing offset; no Rust service frame is read.
 pub const AHEAD_WORKER_ENVIRONMENT_OFFSET: u64 = 40;

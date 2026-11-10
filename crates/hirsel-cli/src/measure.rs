@@ -17,8 +17,8 @@ pub struct Measure {
     query_profile: Option<std::path::PathBuf>,
 }
 
-/// The commands that compile: check, build, run and test.
-const COMMANDS: [&str; 4] = ["check", "build", "run", "test"];
+/// The commands that compile: check, build, run, test and precompute.
+const COMMANDS: [&str; 5] = ["check", "build", "run", "test", "precompute"];
 
 impl Measure {
     /// Take `--timings`, `--timings=json` and `--mem-usage` from anywhere
@@ -77,7 +77,9 @@ impl Measure {
         if (measure.timings.is_some() || measure.memory)
             && !command.is_some_and(|c| COMMANDS.contains(&c))
         {
-            return Err("--timings and --mem-usage apply to check, build, run and test".into());
+            return Err(
+                "--timings and --mem-usage apply to check, build, run, test and precompute".into(),
+            );
         }
         Ok(measure)
     }

@@ -767,7 +767,11 @@ impl InstalledPackage {
         records: &InstallationRecords,
     ) -> std::io::Result<()> {
         let mut records = records.clone();
+        // One index publication for every definition row; the fresh reads
+        // in check_records below observe the finished batch.
+        let batch = store.batch();
         self.index_definitions(store, &mut records)?;
+        batch.finish()?;
         self.rows = records
             .rows
             .iter()

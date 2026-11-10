@@ -34,6 +34,7 @@ MODE/MODE-1-result-part-arena-error-bad.hir
 MODE/MODE-1-result-part-arena-error-ok.hir
 MODE/MODE-1-result-part-error-borrow-bad.hir
 MODE/MODE-1-result-part-error-borrow-ok.hir
+MODE/MODE-1-result-part-matched-error-run.hir
 MODE/MODE-1-result-part-retained-write-bad.hir
 MODE/MODE-1-result-part-retained-write-ok.hir
 MODE/MODE-2-loop-place-52-copy-bad.hir

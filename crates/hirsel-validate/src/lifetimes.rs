@@ -6,6 +6,10 @@ use super::*;
 pub(crate) struct ContentInputs {
     receiving_roots: BTreeSet<u32>,
     global_projections: BTreeSet<u32>,
+    /// MODE-1: projections into an unselected part of a result whose parts
+    /// select their own relations, in storage that only receives such
+    /// results. The callee's return proved that part global.
+    unselected_projections: BTreeSet<u32>,
 }
 
 pub(crate) struct ContentProof {
@@ -81,9 +85,25 @@ impl Checker<'_, '_> {
                     .then_some(index as u32)
             })
             .collect();
+        let unselected_projections = self
+            .body
+            .places
+            .iter()
+            .enumerate()
+            .filter_map(|(index, place)| {
+                let store = self.t;
+                (!place.projection.is_empty()
+                    && self.unselected_part_type(store, place).is_some_and(|part| {
+                        self.lifetime(&store.get(part).unwrap().modes.relation)
+                            .is_global()
+                    }))
+                .then_some(index as u32)
+            })
+            .collect();
         let _ = inputs.set(ContentInputs {
             receiving_roots,
             global_projections,
+            unselected_projections,
         });
     }
 
@@ -126,7 +146,8 @@ impl Checker<'_, '_> {
                             .relation,
                     )
                     .is_global()
-                || self.content_inputs().global_projections.contains(&place.0),
+                || self.content_inputs().global_projections.contains(&place.0)
+                || self.unselected_projection(place),
             deep: state.is_some_and(|state| {
                 (state.must[root].has(MustFacts::GLOBAL)
                     || !access.projection.is_empty()
@@ -140,6 +161,14 @@ impl Checker<'_, '_> {
         }
     }
 
+    /// Whether `place` lies in an unselected part of a result whose parts
+    /// select their own relations (`ContentInputs::unselected_projections`).
+    pub(crate) fn unselected_projection(&self, place: PlaceId) -> bool {
+        self.content_inputs()
+            .unselected_projections
+            .contains(&place.0)
+    }
+
     pub(super) fn current_content_global(&self, state: &State, value: &Operand) -> bool {
         let access = &self.body.places[value.place.0 as usize];
         let receiving = &self
@@ -148,6 +177,9 @@ impl Checker<'_, '_> {
             .unwrap()
             .modes
             .relation;
+        if self.unselected_projection(value.place) {
+            return true;
+        }
         let proof = self.content_proof(Some(state), value.place);
         proof.acquirable
             && (proof.deep
@@ -165,6 +197,9 @@ impl Checker<'_, '_> {
             .unwrap()
             .modes
             .relation;
+        if self.unselected_projection(value.place) {
+            return true;
+        }
         let proof = self.content_proof(Some(state), value.place);
         proof.acquirable
             && (self

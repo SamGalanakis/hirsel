@@ -493,8 +493,9 @@ the old copy.
   `--test-threads` cannot exceed it. Pool actions require the explicit
   reservation, since their sandbox need not expose `cpu.max`.
   It also runs one shard of a sharded binary,
-  by exact names: cases go longest first to the least loaded shard, weighted
-  by the binary's measured cost table. It asks the compiled harness to apply
+  by exact names: the cost table's rows go longest first to the least loaded
+  shard, and a case without a row to the shard its name hashes to, so a
+  case's shard never depends on which other cases exist. It asks the compiled harness to apply
   caller filters, then applies sharding.
   The `full_gate_ --ignored` group also emits the unpartitioned compiled case
   inventory. `full_gate_counts.py --run <command...>` streams Buck2's log and
@@ -605,9 +606,10 @@ one long action holding the whole examples suite's reservation.
 
 A binary in `SHARDED` (`sync.py`) has a table of measured seconds per case,
 `test-costs/<binary>.tsv`. `sync.py` gives it `ceil(total / (cpu_count *
-SHARD_SECONDS))` shards using its pool grant from `test-sizes.json`, and `test_launcher.sh` deals its listed cases out
-longest first to the least loaded shard; a case without a row costs the
-table's mean. After tests are added, slowed or sped up, re-measure every
+SHARD_SECONDS))` shards using its pool grant from `test-sizes.json`, and `test_launcher.sh` deals the table's rows
+longest first to the least loaded shard and a listed case without a row by a
+hash of its name. A case's shard is a function of the table and its name, so
+`tools/consumers` maps changed cases to shards without building a harness. After tests are added, slowed or sped up, re-measure every
 shard of the binary with libtest's timing report and regenerate:
 
 ```sh

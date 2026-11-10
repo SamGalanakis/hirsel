@@ -473,18 +473,36 @@ if [ -n "$shard" ]; then
             NF && !($0 in skip)')"
         fi ;;
     esac
-    # Longest-first greedy assignment by measured seconds (HIRSEL_TEST_COSTS:
-    # `case<TAB>seconds` rows, tools/buck2/test_costs.py). A case without a
-    # row costs the mean of the measured ones (1 without any), so equal costs
-    # deal cases out in name order. Every shard computes the same assignment.
-    cases="$(printf '%s\n' "$cases" | awk -F '\t' -v costs="${costs:-/dev/null}" '
-      BEGIN { while ((getline row < costs) > 0) { split(row, f, "\t"); cost[f[1]] = f[2] + 0; sum += f[2]; n++ } }
-      NF { name[++m] = $0 }
-      END { mean = n ? sum / n : 1; for (i = 1; i <= m; i++) printf "%.3f\t%s\n", (name[i] in cost) ? cost[name[i]] : mean, name[i] }' |
-      LC_ALL=C sort -t "$(printf '\t')" -k1,1nr -k2,2 |
-      awk -F '\t' -v index_="$index" -v count="$count" '{
-        best = 1; for (s = 2; s <= count; s++) if (load[s] < load[best]) best = s
-        load[best] += $1; if (best == index_) print $2 }' | LC_ALL=C sort)"
+    # Longest-first greedy assignment of the cost table's rows
+    # (HIRSEL_TEST_COSTS: `case<TAB>seconds`, tools/buck2/test_costs.py) in
+    # this shard set's width group; a listed case without a row goes to the
+    # shard its name hashes to. A case's shard depends only on the table and
+    # its name, never on which other cases are live, so tools/consumers maps a
+    # case to its shard without building the harness. A binary without a
+    # table deals the live cases at equal cost in name order.
+    if [ -n "$costs" ]; then
+      owned="$(awk -F '\t' -v declared="$case_cpus" -v group="$cpu_group" '
+        BEGIN { n = split(declared, rows, " "); for (i = 1; i <= n; i++) { split(rows[i], f, "="); width[f[1]] = f[2] } }
+        NF && (($1 in width) ? width[$1] : "") == group { printf "%.3f\t%s\n", $2 + 0, $1 }' "$costs" |
+        LC_ALL=C sort -t "$(printf '\t')" -k1,1nr -k2,2 |
+        awk -F '\t' -v index_="$index" -v count="$count" '{
+          best = 1; for (s = 2; s <= count; s++) if (load[s] < load[best]) best = s
+          load[best] += $1; if (best == index_) print $2 }')"
+      cases="$(printf '%s\n' "$cases" | awk -F '\t' -v costs="$costs" -v owned="$owned" -v index_="$index" -v count="$count" '
+        BEGIN {
+          for (i = 1; i < 256; i++) code[sprintf("%c", i)] = i
+          while ((getline row < costs) > 0) { split(row, f, "\t"); measured[f[1]] = 1 }
+          n = split(owned, rows, "\n"); for (i = 1; i <= n; i++) mine[rows[i]] = 1
+        }
+        NF {
+          if ($0 in measured) { if ($0 in mine) print; next }
+          h = 0; for (i = 1; i <= length($0); i++) h = (h * 31 + code[substr($0, i, 1)]) % 2147483647
+          if (h % count + 1 == index_) print
+        }' | LC_ALL=C sort)"
+    else
+      cases="$(printf '%s\n' "$cases" | awk 'NF' | LC_ALL=C sort |
+        awk -v index_="$index" -v count="$count" '{ if ((NR - 1) % count + 1 == index_) print }')"
+    fi
   fi
 fi
 # Deal every original case before removing isolated bodies, so unrelated

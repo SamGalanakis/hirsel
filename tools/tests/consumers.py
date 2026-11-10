@@ -159,43 +159,6 @@ fn regression() { fixture(); }
             self.assertEqual(source.matching({'regression', 'unrelated'}, re.compile(r'\btoml\.')),
                              {'regression'})
 
-    def test_libtest_discovery_builds_the_harness_and_does_not_book_a_test_action(self):
-        binary = 'hirsel-cli-test-cli'
-        graph = graph_for({binary: set()})
-        outputs = json.dumps({'root//:' + binary + '-harness': 'built/cli'})
-        listing = subprocess.CompletedProcess([], 0, 'https::verifies_replay: test\n', '')
-        with patch.object(consumers, 'buck', return_value=outputs) as build, \
-                patch.object(consumers.subprocess, 'run', return_value=listing) as run:
-            self.assertEqual(consumers.listings(ROOT, graph), {binary: {'https::verifies_replay'}})
-        self.assertEqual(build.call_args.args[1:], ('build', 'root//:' + binary + '-harness', '--show-json-output'))
-        self.assertEqual(run.call_args.args[0], [str(ROOT / 'tools/capped'), str(ROOT / 'built/cli'), '--list', '--format', 'terse'])
-        self.assertEqual(run.call_args.kwargs['env']['HIRSEL_JOBS'], '1')
-        with patch.object(consumers, 'buck', return_value=outputs), \
-                patch.object(consumers.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, '', '')):
-            with self.assertRaisesRegex(ValueError, 'no case listing for hirsel-cli-test-cli'):
-                consumers.listings(ROOT, graph)
-
-    def test_discovery_keeps_configured_skips_out_of_the_shard_inventory(self):
-        binary = 'hirsel-driver-test-it'
-        graph = graph_for({binary: set()})
-        graph['root//:' + binary + '-shard-1']['args'] = ['--skip', 'held_case']
-        with tempfile.TemporaryDirectory() as directory:
-            harness = Path(directory) / 'harness'
-            harness.write_text('''#!/usr/bin/env python3
-import argparse
-p = argparse.ArgumentParser()
-p.add_argument('--skip', action='append', default=[])
-p.add_argument('--list', action='store_true')
-p.add_argument('--format')
-args = p.parse_args()
-for case in ['held_case', 'active_case']:
-    if not any(skip in case for skip in args.skip): print(case + ': test')
-''')
-            harness.chmod(0o755)
-            outputs = json.dumps({'root//:' + binary + '-harness': str(harness)})
-            with patch.object(consumers, 'buck', return_value=outputs):
-                self.assertEqual(consumers.listings(ROOT, graph), {binary: {'active_case'}})
-
     def test_isolated_body_selects_its_dedicated_target_after_balancing(self):
         binary = 'hirsel-cli-test-free'
         inventories = {binary: {'isolated', 'ordinary'}}
@@ -207,7 +170,9 @@ for case in ['held_case', 'active_case']:
         self.assertEqual(after[binary, 'ordinary'], before[binary, 'ordinary'])
 
     def test_cost_assignment_matches_the_existing_launcher_vector(self):
-        # Same measured/unmeasured vector as buck2_launcher's behavioral test.
+        # Same rule as buck2_launcher's behavioral test: table rows longest
+        # first (heap, then smoke and prefix on the lighter shard 2); other
+        # and host by name hash, both even: shard 1.
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             (root / 'costs').write_text('heap\t9\nprefix\t1\nsmoke\t2\n')
@@ -216,14 +181,14 @@ for case in ['held_case', 'active_case']:
                                               shards=2, costs='root//:costs') for index in range(2)}
             result = consumers.assignments(root, graph, {binary: {'heap', 'prefix', 'smoke', 'other', 'host'}}, widths={})
             self.assertEqual({case: target for (_, case), target in result.items()},
-                             dict(heap='shard-1', prefix='shard-1', smoke='shard-2',
-                                  other='shard-2', host='shard-2'))
+                             dict(heap='shard-1', prefix='shard-2', smoke='shard-2',
+                                  other='shard-1', host='shard-1'))
             # A declared width group leaves the measured deal; it has its own shards.
             graph['wide-shard-1'] = dict(test_binary=binary, shard_index=0, shards=1, exact_cpus=4, costs='root//:costs')
             result = consumers.assignments(root, graph, {binary: {'heap', 'prefix', 'smoke', 'other', 'host'}},
                                            widths={binary: {'heap': 4}})
             self.assertEqual({case: target for (_, case), target in result.items()},
-                             dict(heap='wide-shard-1', host='shard-1', other='shard-2',
+                             dict(heap='wide-shard-1', host='shard-1', other='shard-1',
                                   smoke='shard-1', prefix='shard-2'))
 
 

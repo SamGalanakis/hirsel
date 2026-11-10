@@ -616,16 +616,19 @@ class LauncherSelection(LauncherFixture):
 
     def test_costs_balance_shards_longest_first(self):
         costs = self.root / 'costs.tsv'
-        # Unmeasured pool::other and pool::full_gate_prefix_host cost the
-        # measured mean, 4: 9 + 1 against 4 + 4 + 2.
+        # The table's rows deal longest first (heap 9 to shard 1; smoke 2,
+        # then prefix 1, to the lighter shard 2). Unmeasured cases go by name
+        # hash (h = h * 31 + byte mod 2^31 - 1): pool::other and
+        # pool::full_gate_prefix_host are both odd, shard 2.
         costs.write_text('pool::full_gate_heap\t9\npool::full_gate_prefix\t1\npool::smoke\t2\n')
         shards = {}
         for shard in ('1/2', '2/2'):
             self.env['HIRSEL_TEST_COSTS'] = str(costs)
             result, _ = self.run_cases('--include-ignored', '--skip=host::', shard=shard)
             shards[shard] = set(result['cases'])
-        self.assertEqual(shards, {'1/2': {'pool::full_gate_heap', 'pool::full_gate_prefix'},
-                                  '2/2': {'pool::full_gate_prefix_host', 'pool::other', 'pool::smoke'}})
+        self.assertEqual(shards, {'1/2': {'pool::full_gate_heap'},
+                                  '2/2': {'pool::full_gate_prefix', 'pool::full_gate_prefix_host',
+                                          'pool::other', 'pool::smoke'}})
 
     def test_cost_tables_enable_timing_once_including_unsharded_binaries(self):
         costs = self.root / 'costs.tsv'

@@ -254,7 +254,7 @@ def seeded(source_dir: pathlib.Path, crate_root: pathlib.Path) -> bool:
 # measured seconds per case on the pool (test-costs/<binary>.tsv, written by
 # test_costs.py). A binary gets enough shards that its total over its granted CPUs
 # concurrent cases is at most SHARD_SECONDS per shard, and test_launcher.sh
-# deals the cases out longest first. SHARD_SECONDS leaves room for the slow
+# deals the table's cases out longest first. SHARD_SECONDS leaves room for the slow
 # worker class, for pool load (the same case measured up to 4x slower on a
 # loaded pool than alone on the host), for a shard's longest case, and for cases
 # that run their own worker threads, which oversubscribe a shard's CPUs: on

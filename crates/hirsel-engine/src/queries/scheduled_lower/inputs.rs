@@ -195,23 +195,34 @@ impl Waiting {
     }
 }
 
-/// Capture-salted addresses need their own reverse lookup. Index only queried
-/// definitions, charging actual capacity to the existing partition. A full
-/// binding scan remains exact when optional index growth cannot be admitted.
+/// Capture-salted addresses need their own reverse lookup. Queried
+/// definitions are remembered by full address, charging actual capacity to the
+/// existing partition. The first miss indexes every input once, so later
+/// misses are definite without rehashing every binding. When that growth
+/// cannot be admitted, the exact binding scan remains.
 pub(super) struct Paths {
     rows: Mutex<PathRows>,
 }
+#[derive(Default)]
+struct PathIndex {
+    rows: Vec<(ContentHash, DefId)>,
+    /// Every input's address is present, each mapped to the definition the
+    /// binding scan finds first; a miss is definite.
+    complete: bool,
+    /// Admission refused the complete index; misses keep the exact scan.
+    refused: bool,
+}
 struct PathRows {
-    lower: Vec<(u32, DefId)>,
-    evaluate: Vec<(u32, DefId)>,
+    lower: PathIndex,
+    evaluate: PathIndex,
     charge: LowerInputCharge,
 }
 impl Paths {
     pub(super) fn new(partition: &LowerPartition) -> Self {
         Self {
             rows: Mutex::new(PathRows {
-                lower: Vec::new(),
-                evaluate: Vec::new(),
+                lower: PathIndex::default(),
+                evaluate: PathIndex::default(),
                 charge: LowerInputCharge::empty(partition.request()),
             }),
         }
@@ -222,9 +233,6 @@ impl Paths {
         drop(std::mem::take(&mut index.evaluate));
         index.charge.release();
     }
-    fn prefix(address: ContentHash) -> u32 {
-        u32::from_le_bytes([address.0[0], address.0[1], address.0[2], address.0[3]])
-    }
     pub(super) fn remember(&self, query: QueryId, id: DefId) {
         let mut index = self.rows.lock().unwrap_or_else(|e| e.into_inner());
         let PathRows {
@@ -232,19 +240,23 @@ impl Paths {
             evaluate,
             charge,
         } = &mut *index;
-        let rows = match query.kind {
+        let index = match query.kind {
             FRONT_LOWER_KIND => lower,
             FRONT_EVALUATE_KIND => evaluate,
             _ => return,
         };
-        let row = (Self::prefix(query.address.0), id);
+        if index.complete {
+            return;
+        }
+        let rows = &mut index.rows;
+        let row = (query.address.0, id);
         let Err(at) = rows.binary_search(&row) else {
             return;
         };
         if rows.len() == rows.capacity() {
             let capacity = rows.capacity().max(4);
             let Some(bytes) = capacity
-                .checked_mul(size_of::<(u32, DefId)>())
+                .checked_mul(size_of::<(ContentHash, DefId)>())
                 .and_then(|bytes| u64::try_from(bytes).ok())
             else {
                 return;
@@ -270,23 +282,57 @@ impl Paths {
             };
             namespace.query_id(*kind, key).address.0
         };
-        {
-            let index = self.rows.lock().unwrap_or_else(|e| e.into_inner());
-            let rows = match *kind {
-                FRONT_LOWER_KIND => &index.lower,
-                FRONT_EVALUATE_KIND => &index.evaluate,
-                _ => return None,
-            };
-            let prefix = Self::prefix(*address);
-            let start = rows.partition_point(|(candidate, _)| *candidate < prefix);
-            if let Some(id) = rows[start..]
-                .iter()
-                .take_while(|(candidate, _)| *candidate == prefix)
-                .find_map(|(_, id)| (identity(inputs.get_id(*id)?) == *address).then_some(*id))
-            {
-                return Some(id);
-            }
+        let mut guard = self.rows.lock().unwrap_or_else(|e| e.into_inner());
+        let PathRows {
+            lower,
+            evaluate,
+            charge,
+        } = &mut *guard;
+        let index = match *kind {
+            FRONT_LOWER_KIND => lower,
+            FRONT_EVALUATE_KIND => evaluate,
+            _ => return None,
+        };
+        let found = |rows: &[(ContentHash, DefId)]| {
+            let start = rows.partition_point(|(candidate, _)| candidate < address);
+            rows.get(start)
+                .filter(|(candidate, _)| candidate == address)
+                .map(|(_, id)| *id)
+        };
+        if let Some(id) = found(&index.rows) {
+            return Some(id);
         }
+        if index.complete {
+            return None;
+        }
+        if !index.refused {
+            // Inputs and the namespace are immutable for this owner, so each
+            // address keeps the definition the binding scan finds first.
+            let mut rows = inputs
+                .iter()
+                .enumerate()
+                .map(|(at, (path, input))| (identity(input), at, DefId::intern(path)))
+                .collect::<Vec<_>>();
+            rows.sort_unstable_by_key(|(address, at, _)| (*address, *at));
+            rows.dedup_by_key(|(address, _, _)| *address);
+            let mut rows = rows
+                .into_iter()
+                .map(|(address, _, id)| (address, id))
+                .collect::<Vec<_>>();
+            rows.shrink_to_fit();
+            let growth = rows
+                .capacity()
+                .saturating_sub(index.rows.capacity())
+                .checked_mul(size_of::<(ContentHash, DefId)>())
+                .and_then(|bytes| u64::try_from(bytes).ok());
+            if growth.and_then(|bytes| charge.grow(bytes)).is_some() {
+                index.rows = rows;
+                index.complete = true;
+                return found(&index.rows);
+            }
+            index.refused = true;
+        }
+        drop(guard);
         let id = inputs
             .iter()
             .find_map(|(path, input)| (identity(input) == *address).then(|| DefId::intern(path)))?;

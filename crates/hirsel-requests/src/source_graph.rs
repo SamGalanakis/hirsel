@@ -1498,20 +1498,30 @@ pub(super) fn install(
             program.engine.front_proof_signatures_bytes(&front)
         } else {
             program.engine.front_checked_signatures_bytes(&front)
-        }
-        .map_err(&query_error)?;
-        let minimum = headers
-            .checked_add(super::safe_check::BYTES)
-            .and_then(|bytes| bytes.checked_add(super::proof_export::BYTES));
-        if shared_source && minimum.is_none_or(|bytes| bytes > installed.request.free()) {
-            available_export = false;
-            export_error = Some(QueryError::Operational(hirsel_types::OperationalFailure {
-                operation: "proof export inputs".into(),
-                message: "proof export inputs exceed admission".into(),
-            }));
-            None
-        } else {
-            Some(headers)
+        };
+        match headers {
+            Err(error) if shared_source => {
+                available_export = false;
+                export_error = Some(error);
+                None
+            }
+            Err(error) => return Err(query_error(error)),
+            Ok(headers) => {
+                let minimum = headers
+                    .checked_add(super::safe_check::BYTES)
+                    .and_then(|bytes| bytes.checked_add(super::proof_export::BYTES));
+                if shared_source && minimum.is_none_or(|bytes| bytes > installed.request.free()) {
+                    available_export = false;
+                    export_error =
+                        Some(QueryError::Operational(hirsel_types::OperationalFailure {
+                            operation: "proof export inputs".into(),
+                            message: "proof export inputs exceed admission".into(),
+                        }));
+                    None
+                } else {
+                    Some(headers)
+                }
+            }
         }
     } else {
         None

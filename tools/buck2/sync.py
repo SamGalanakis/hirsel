@@ -241,8 +241,13 @@ CONSUMER_CASES = {
 SEEDED = re.compile(r"\bproptest!")
 
 
+@functools.cache
+def _seeded_text(text: str) -> bool:
+    return SEEDED.search(text) is not None
+
+
 def seeded(source_dir: pathlib.Path, crate_root: pathlib.Path) -> bool:
-    return any(SEEDED.search(READS.text(source)) for source in sorted(set(READS.glob(source_dir, "**/*.rs")) | {crate_root}))
+    return any(_seeded_text(READS.text(source)) for source in sorted(set(READS.glob(source_dir, "**/*.rs")) | {crate_root}))
 
 
 # Test binaries whose cases are split over parallel targets. Each has a table of
@@ -748,13 +753,12 @@ def relative(path: pathlib.Path) -> str:
     return path.resolve().relative_to(ROOT).as_posix()
 
 
-def references(source: pathlib.Path, seen: set[pathlib.Path]) -> set[str]:
-    """Repository paths of the files `source` pulls in at compile time, transitively."""
-    if source in seen or not READS.is_file(source):
-        return set()
-    seen.add(source)
+@functools.cache
+def _direct(source: pathlib.Path, text: str) -> tuple[frozenset[str], tuple[pathlib.Path, ...]]:
+    """What one source file names at compile time: repository paths, and the
+    files to scan next. Every target that reaches the file shares the scan."""
     found = set()
-    text = READS.text(source, errors="replace")
+    follow = []
     for prefix in set(INCLUDE_CONCAT.findall(text)):
         for match in LITERAL.finditer(text):
             target = (source.parent / (prefix + match.group(1))).resolve()
@@ -764,7 +768,7 @@ def references(source: pathlib.Path, seen: set[pathlib.Path]) -> set[str]:
         target = (source.parent / match.group(1)).resolve()
         found.add(relative(target))
         if target.suffix == ".rs":
-            found |= references(target, seen)
+            follow.append(target)
     for match in PATH_ATTR.finditer(text):
         # `#[path]` is relative to the directory of the file holding it, or of a
         # non-mod.rs file's own module directory; both resolve in one of these.
@@ -773,10 +777,24 @@ def references(source: pathlib.Path, seen: set[pathlib.Path]) -> set[str]:
             if READS.is_file(target):
                 # Its own `mod x;` items live beside it, so take its directory.
                 found.add("dir:" + relative(target.parent))
-                found |= references(target, seen)
-                for sibling in READS.glob(target.parent, "**/*.rs"):
-                    found |= references(sibling, seen)
+                follow.append(target)
+                follow.extend(READS.glob(target.parent, "**/*.rs"))
                 break
+    return frozenset(found), tuple(follow)
+
+
+def references(source: pathlib.Path, seen: set[pathlib.Path]) -> set[str]:
+    """Repository paths of the files `source` pulls in at compile time, transitively."""
+    found: set[str] = set()
+    pending = [source]
+    while pending:
+        source = pending.pop()
+        if source in seen or not READS.is_file(source):
+            continue
+        seen.add(source)
+        direct, follow = _direct(source, READS.text(source, errors="replace"))
+        found |= direct
+        pending.extend(follow)
     return found
 
 

@@ -273,19 +273,27 @@ fn result_paths_689_selected_part_forged_global_is_refused() {
 fn result_paths_689_mixed_storage_keeps_error_relation() {
     with_compiler_stack(|| {
         let mut accepted = vec![];
-        for (name, body) in [
-            ("joined", "let r = if c { get(h, 1) } else { whole(h) }"),
+        for (name, params, body) in [
+            ("joined", "", "let r = if c { get(h, 1) } else { whole(h) }"),
             (
                 "reassigned",
+                "",
                 "let mut r = get(h, 1)\n if c { r = whole(h) }",
             ),
             (
                 "moved",
+                "",
                 "let w = whole(h)\n let mut r = get(h, 1)\n if c { r = w }",
+            ),
+            // Review 704 (c): an entry value is a write the inventory sees.
+            (
+                "entry",
+                ", take w: Result[Option[Bytes], Failed] in h",
+                "let r = if c { get(h, 1) } else { take w }",
             ),
         ] {
             let source = format!(
-                "{HOLDER}fn {name}(h: Holder, c: bool) -> u64 {{ {body}\n match r {{ Ok(v) => size(v), Error(e) => esize(e) }} }}\npub fn main(){{}}"
+                "{HOLDER}fn {name}(h: Holder, c: bool{params}) -> u64 {{ {body}\n match r {{ Ok(v) => size(v), Error(e) => esize(e) }} }}\npub fn main(){{}}"
             );
             let (engine, input) = prepared(&source);
             let definition = named(&input, name);
@@ -298,6 +306,113 @@ fn result_paths_689_mixed_storage_keeps_error_relation() {
         assert!(
             accepted.is_empty(),
             "V accepted an Error part related to `h` typed global: {accepted:?}"
+        );
+    });
+}
+
+fn path_of(input: &NativeInput, name: &str) -> hirsel_syntax::DefPath {
+    input
+        .definitions
+        .keys()
+        .find(|path| path.0.name == name)
+        .cloned()
+        .unwrap()
+}
+
+/// Forge every call of, and reference to, `from` in `definition` to name `to`
+/// instead: a valid caller of a same-shaped function becomes a caller of
+/// `to` that keeps every destination, type and cleanup the front end gave
+/// the original.
+fn retarget(definition: &Definition, from: &str, to: &hirsel_syntax::DefPath) -> Definition {
+    let mut forged = definition.clone();
+    let mut changed = 0;
+    for body in &mut forged.bodies {
+        for block in &mut body.blocks {
+            if let Terminator::Call {
+                callee: hirsel_tir::Callee::Definition { path, .. },
+                ..
+            } = &mut block.terminator
+                && path.0.name == from
+            {
+                *path = to.clone();
+                changed += 1;
+            }
+        }
+        for value in &mut body.rvalues {
+            if let Rvalue::FunctionReference { definition, .. } = value
+                && definition.0.name == from
+            {
+                *definition = to.clone();
+                changed += 1;
+            }
+        }
+    }
+    assert!(changed > 0, "nothing names `{from}`");
+    forged
+}
+
+/// Review 704 (a): an arena-placed selected part does not become global at
+/// a call. `escape` calls `plain` with a global destination; forged to call
+/// `good`, whose Ok payload lives in `a`, it would return arena data as heap.
+#[test]
+fn result_paths_689_arena_part_kept_at_call() {
+    with_compiler_stack(|| {
+        let (engine, input) = prepared(
+            "fn mk(a: Arena) -> Bytes in a { b\"x\" }\n\
+             fn good(a: Arena) -> Result[Bytes in a, Bytes] { Ok(mk(a)) }\n\
+             fn plain(a: Arena) -> Result[Bytes, Bytes] { Ok(b\"x\") }\n\
+             fn escape(a: Arena) -> Result[Bytes, Bytes] { plain(a) }\n\
+             fn bound(a: Arena) -> Result[Bytes, Bytes] { let r = plain(a)\n r }\n\
+             pub fn main(){}",
+        );
+        let good = path_of(&input, "good");
+        let mut accepted = vec![];
+        for name in ["escape", "bound"] {
+            let definition = named(&input, name);
+            let mut forged = retarget(&definition, "plain", &good);
+            if violations(&engine, &input, &definition, &mut forged).is_empty() {
+                accepted.push(name);
+            }
+        }
+        assert!(
+            accepted.is_empty(),
+            "V accepted arena data of `good` received as global: {accepted:?}"
+        );
+    });
+}
+
+/// Review 704 (d): an entry's declared function type is its contract. A
+/// reference typed `Entry[fn(..) -> Result[Bytes, Bytes]]` to `plain`,
+/// forged to name `good`, whose Ok part borrows `xs`, claims a global result
+/// the definition does not give; so does a whole-result `in xs` one.
+#[test]
+fn result_paths_689_entry_contract_is_checked() {
+    with_compiler_stack(|| {
+        let (engine, input) = prepared(
+            "fn good(xs: Bytes, ys: Bytes) -> Result[Bytes in xs, Bytes] { Ok(copy xs) }\n\
+             fn plain(xs: Bytes, ys: Bytes) -> Result[Bytes, Bytes] { Ok(b\"x\") }\n\
+             fn whole(xs: Bytes, ys: Bytes) -> Bytes in xs { copy xs }\n\
+             fn flatten(xs: Bytes, ys: Bytes) -> Bytes { b\"x\" }\n\
+             fn parts() -> u64 { let g: Entry[fn(xs: Bytes, ys: Bytes) -> Result[Bytes, Bytes]] = plain\n 0 }\n\
+             fn wholes() -> u64 { let g: Entry[fn(xs: Bytes, ys: Bytes) -> Bytes] = flatten\n 0 }\n\
+             fn value() -> u64 { let g: fn(xs: Bytes, ys: Bytes) -> Result[Bytes, Bytes] = plain\n 0 }\n\
+             pub fn main(){}",
+        );
+        let mut accepted = vec![];
+        for (name, from, to) in [
+            ("parts", "plain", "good"),
+            ("wholes", "flatten", "whole"),
+            ("value", "plain", "good"),
+        ] {
+            let definition = named(&input, name);
+            let mut forged = retarget(&definition, from, &path_of(&input, to));
+            if violations(&engine, &input, &definition, &mut forged).is_empty() {
+                accepted.push(name);
+            }
+        }
+        assert!(
+            accepted.is_empty(),
+            "V accepted a function reference whose type misstates its result: {accepted:?}"
         );
     });
 }

@@ -2741,9 +2741,25 @@ impl<'a, 'input> Checker<'a, 'input> {
         // MODE-1: the root of a result whose parts select their own
         // relations is global; storage receiving it may be as local as its
         // parts, and its type names no part relation: flow installs each
-        // part's own dependencies.
+        // part's own dependencies, but not arena placement: erasing a part
+        // placed in an arena needs the receiving root to name that arena.
+        let cover = expected.map(|expected| self.result_cover(expected));
         let (expected, actual) = match (expected, actual) {
-            (Some(expected), Some(actual)) if !self.result_cover(expected).is_empty() => {
+            (Some(expected), Some(actual)) if cover.as_ref().is_some_and(|c| !c.is_empty()) => {
+                let root = target.get(actual).unwrap().modes.relation.clone();
+                let covered = cover.iter().flatten().all(|leaf| {
+                    leaf.relation.as_ref().is_none_or(|relation| {
+                        self.frame_relation(relation).reaches().iter().all(|reach| {
+                            hirsel_types::Relation::new([reach.clone()]).contained_in(&root)
+                                || !matches!(reach, Reach::Place(o) if self.arena_place(o))
+                        })
+                    })
+                });
+                if !covered {
+                    self.error(ViolationKind::TypeMismatch {
+                        entity: "call result",
+                    });
+                }
                 let mut row = target
                     .get(hirsel_types::unique_rows::erase_result_parts(
                         target, expected,
@@ -2766,6 +2782,28 @@ impl<'a, 'input> Checker<'a, 'input> {
                 entity: "call result",
             });
         }
+    }
+
+    /// MODE-1: two function types' results select the same relations, the
+    /// whole result's or each part's. Shape equality ignores relations, so a
+    /// callback or entry type checked by shape states its result contract
+    /// only through this.
+    fn same_result_relations(&self, store: &TypeInterner, a: TypeId, b: TypeId) -> bool {
+        let result = |ty: TypeId| match &store.get(ty).unwrap().kind {
+            TypeKind::Function(f) => Some(f.result),
+            _ => None,
+        };
+        let (Some(a), Some(b)) = (result(a), result(b)) else {
+            return false;
+        };
+        let roles = self
+            .signatures
+            .get(self.definition.path)
+            .map(|s| s.metadata.roles.clone())
+            .unwrap_or_default();
+        let mut lookup = |d: DefId| self.signatures.get(d).cloned().map(std::sync::Arc::new);
+        hirsel_types::unique_rows::result_relations(store, a, &roles, &mut lookup)
+            == hirsel_types::unique_rows::result_relations(store, b, &roles, &mut lookup)
     }
 
     /// PROV-4: a global environment outlives every arena and region, and a
@@ -3076,12 +3114,16 @@ impl<'a, 'input> Checker<'a, 'input> {
                     _ => None,
                 };
                 let matches = match (callback, entry) {
-                    (Some(signature), _) => store.shape_eq(signature, derived).unwrap_or(false),
+                    (Some(signature), _) => {
+                        store.shape_eq(signature, derived).unwrap_or(false)
+                            && self.same_result_relations(store, signature, derived)
+                    }
                     (None, Some(signature)) => {
                         declared.foreign.is_none()
                             && declared.generics.is_empty()
                             && !declared.incomplete
                             && store.shape_eq(signature, derived).unwrap_or(false)
+                            && self.same_result_relations(store, signature, derived)
                     }
                     (None, None) => self.compatible(store, ty, derived, TypeRelation::Value),
                 };

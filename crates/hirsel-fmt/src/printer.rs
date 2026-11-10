@@ -286,13 +286,12 @@ impl<'a> Printer<'a> {
     }
     fn bounds(&self, bounds: &[Bound]) -> Doc {
         join(
-            bounds.iter().map(|b| {
-                token(match b {
-                    Bound::NoallocDrop => "noalloc_drop".into(),
-                    Bound::Serializable => "serializable".into(),
-                    Bound::OrderedOf => "ordered of".into(),
-                    _ => format!("{b:?}").to_lowercase(),
-                })
+            bounds.iter().map(|b| match b {
+                // Two source tokens; trivia merges token by token.
+                Bound::OrderedOf => cat([token("ordered"), Space, token("of")]),
+                Bound::NoallocDrop => token("noalloc_drop"),
+                Bound::Serializable => token("serializable"),
+                _ => token(format!("{b:?}").to_lowercase()),
             }),
             cat([Space, token("+"), Space]),
         )

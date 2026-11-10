@@ -1659,9 +1659,9 @@ impl Builder<'_, '_> {
         } else {
             (Storage::Temporary, span)
         };
-        // A projected callable's header owns its nested result contracts.
-        // The expression judgment can carry stronger current evidence; it
-        // cannot rewrite the physical call receipt under that header.
+        // A projected callable's header owns its result contracts. The
+        // expression judgment can carry stronger current evidence; it cannot
+        // rewrite the physical call receipt under that header.
         let receipt = match &callee {
             Callee::Indirect {
                 value, arguments, ..
@@ -1671,21 +1671,10 @@ impl Builder<'_, '_> {
                 else {
                     return self.error(span, "indirect call has no physical header");
                 };
-                let declared = self.types.row(header.result);
-                let checked = self.types.row(ty);
-                if declared.kind == checked.kind {
+                if self.types.row(header.result).kind == self.types.row(ty).kind {
                     ty
                 } else {
-                    // Keep caller-instantiated brands, placement and capture
-                    // metadata at the root; only the declared nested contract
-                    // and its conservative root modes come from the header.
-                    let mut receipt = checked.clone();
-                    receipt.kind = declared.kind.clone();
-                    receipt.modes.uniqueness = declared.modes.uniqueness;
-                    receipt.modes.multiplicity = declared.modes.multiplicity;
-                    receipt.modes.sendability = declared.modes.sendability.clone();
-                    receipt.sendability_requirement = declared.sendability_requirement;
-                    self.types.intern(receipt)
+                    receipt_contract(self.types, header.result, ty)
                 }
             }
             _ => ty,
@@ -1984,4 +1973,117 @@ impl Builder<'_, '_> {
         }
         Ok(value)
     }
+}
+
+/// The receipt of an indirect call: at every node, the header's declared
+/// contract (uniqueness, multiplicity, sendability and its fixed requirement)
+/// with the caller's instantiation from the checked type (brands, relations,
+/// placement, captures). The header's own rows name the callee's binder
+/// (`File of d` is branded by the callee's parameter), which no caller can
+/// name; the checked type has substituted the call's arguments for it.
+fn receipt_contract(
+    types: &hirsel_types::TypeInterner,
+    declared: TypeId,
+    checked: TypeId,
+) -> TypeId {
+    use hirsel_types::{GenericArgument as A, TypeKind as K};
+    if declared == checked {
+        return checked;
+    }
+    let (header, row) = (types.row(declared), types.row(checked));
+    let pair = |d: &TypeId, c: &TypeId| receipt_contract(types, *d, *c);
+    let arguments = |d: &[A], c: &[A]| -> Option<hirsel_types::SharedSlice<A>> {
+        (d.len() == c.len()).then(|| {
+            d.iter()
+                .zip(c)
+                .map(|(d, c)| match (d, c) {
+                    (A::Type(d), A::Type(c)) => A::Type(pair(d, c)),
+                    (_, c) => c.clone(),
+                })
+                .collect()
+        })
+    };
+    // Children pair positionally only where the header and the judgment have
+    // one shape; nested callables keep the judgment, which instantiated them.
+    let kind = match (&header.kind, &row.kind) {
+        (K::Tuple(d), K::Tuple(c)) if d.len() == c.len() => Some(K::Tuple(
+            d.iter().zip(c.iter()).map(|(d, c)| pair(d, c)).collect(),
+        )),
+        (
+            K::Named {
+                definition: dd,
+                arguments: da,
+            },
+            K::Named {
+                definition,
+                arguments: ca,
+            },
+        ) if dd == definition => arguments(da, ca).map(|arguments| K::Named {
+            definition: definition.clone(),
+            arguments,
+        }),
+        (
+            K::Builtin {
+                kind: dk,
+                arguments: da,
+            },
+            K::Builtin {
+                kind,
+                arguments: ca,
+            },
+        ) if dk == kind => arguments(da, ca).map(|arguments| K::Builtin {
+            kind: *kind,
+            arguments,
+        }),
+        (K::Record(d), K::Record(c))
+            if d.len() == c.len() && d.iter().zip(c.iter()).all(|(d, c)| d.name == c.name) =>
+        {
+            Some(K::Record(
+                d.iter()
+                    .zip(c.iter())
+                    .map(|(d, c)| hirsel_types::Field {
+                        ty: pair(&d.ty, &c.ty),
+                        ..c.clone()
+                    })
+                    .collect(),
+            ))
+        }
+        (K::Variant(d), K::Variant(c))
+            if d.len() == c.len()
+                && d.iter().zip(c.iter()).all(|(d, c)| {
+                    d.name == c.name
+                        && d.fields.len() == c.fields.len()
+                        && d.fields
+                            .iter()
+                            .zip(c.fields.iter())
+                            .all(|(d, c)| d.0 == c.0)
+                }) =>
+        {
+            Some(K::Variant(
+                d.iter()
+                    .zip(c.iter())
+                    .map(|(d, c)| hirsel_types::Variant {
+                        name: c.name.clone(),
+                        fields: d
+                            .fields
+                            .iter()
+                            .zip(c.fields.iter())
+                            .map(|(d, c)| (c.0.clone(), pair(&d.1, &c.1)))
+                            .collect(),
+                    })
+                    .collect(),
+            ))
+        }
+        (K::Box(d), K::Box(c)) => Some(K::Box(pair(d, c))),
+        _ => None,
+    };
+    let mut receipt = row.clone();
+    if let Some(kind) = kind {
+        receipt.kind = kind;
+    }
+    receipt.modes.uniqueness = header.modes.uniqueness;
+    receipt.modes.multiplicity = header.modes.multiplicity;
+    receipt.modes.sendability = header.modes.sendability.clone();
+    receipt.sendability_requirement = header.sendability_requirement;
+    types.intern(receipt)
 }

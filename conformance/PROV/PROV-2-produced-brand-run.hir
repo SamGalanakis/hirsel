@@ -5,7 +5,9 @@
 // brand their declared result states, and stamps of one owner compare.
 pub type Failed = Failed()
 
-pub opaque type Stamp: copyable + plain + inert + ordered of uses {} { n: u64 }
+pub opaque type Stamp: copyable + plain + inert + ordered of uses {} {
+  n: u64,
+}
 
 fn stamp(book: String, n: u64) -> Stamp of book {
   Stamp(n: n)
@@ -38,8 +40,7 @@ pub fn main(rt: Io, args: Args) -> Result[(), Failed] {
   let Ok(last) = checked(book, 10) else {
     return Error(Failed())
   }
-  if !(early < late && late == held && first < second && second < early
-    && early < middle && middle < late && late < last) {
+  if !(early < late && late == held && first < second && second < early && early < middle && middle < late && late < last) {
     return Error(Failed())
   }
   let Ok(stdout) = io.stdout(rt) else {

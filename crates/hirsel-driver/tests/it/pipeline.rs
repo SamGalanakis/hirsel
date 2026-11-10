@@ -1515,6 +1515,90 @@ fn an_element_of_a_capture_has_its_own_name_but_cannot_take_the_captures() {
     );
 }
 
+/// A call through a function value receives its result in the caller's
+/// frame: the header's `File of d` names the callee's binder, which the
+/// receipt must carry as the argument it was called with. V accepts that
+/// receipt and refuses one that claims the caller's other directory.
+#[test]
+fn function_value_receipt_names_the_called_owner() {
+    hirsel_intern::jobs::with_compiler_stack(|| {
+        use hirsel_tir::{Callee, Terminator};
+        use hirsel_types::{Origin, OriginRoot, ParamId, ParameterRef, SignatureProvider};
+        let source = "fn probe(d:Dir,e:Dir,p:Path){let open=file.open;let r=open(d,p);let _=r}";
+        let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
+        edit(&mut engine, source);
+        let output = engine.lower_to_tir(&path("probe")).unwrap();
+        let mut signatures = hirsel_validate::SignatureMap::new(engine.types().clone());
+        for signature in hirsel_registry::BuiltinRegistry::new().signatures() {
+            signatures.insert(signature.definition.clone(), signature.as_ref().clone());
+        }
+        for name in ["probe"] {
+            let signature = engine
+                .signature(hirsel_syntax::DefId::intern(&path(name)))
+                .unwrap();
+            signatures.insert(path(name), signature.as_ref().clone());
+        }
+        let report =
+            hirsel_validate::validate(&output.value, engine.types(), &signatures, &mut vec![])
+                .unwrap();
+        assert!(report.violations.is_empty(), "{report:?}");
+        let mut changed = output.value.as_ref().clone();
+        let body = &mut changed.bodies[changed.entry.0 as usize];
+        let root = body
+            .blocks
+            .iter()
+            .find_map(|block| match &block.terminator {
+                Terminator::Call {
+                    callee: Callee::Indirect { .. },
+                    returns: Some(receipt),
+                    ..
+                } => Some(body.places[receipt.destination.0 as usize].root),
+                _ => None,
+            })
+            .expect("the call through `open`");
+        // `d` and `e` are probe's parameters 0 and 1: re-own `File of d` by `e`.
+        let forge = |ty| {
+            hirsel_types::map_brand_origins(engine.types(), ty, |origin, _| {
+                Ok(match &origin.root {
+                    OriginRoot::Parameter(ParameterRef::Body { scope, parameter })
+                        if *parameter == ParamId(0) =>
+                    {
+                        Origin {
+                            root: OriginRoot::Parameter(ParameterRef::body(*scope, ParamId(1))),
+                            fields: origin.fields.clone(),
+                        }
+                    }
+                    _ => origin.clone(),
+                })
+            })
+            .unwrap()
+        };
+        // Re-own every slot consistently (the receipt, `r` and `_`), so only
+        // the call's own receipt disagrees with the header instantiated at `d`.
+        let receipt = body.locals[root.0 as usize].ty;
+        for local in &mut body.locals {
+            local.ty = forge(local.ty);
+        }
+        for place in &mut body.places {
+            place.ty = forge(place.ty);
+        }
+        assert_ne!(
+            body.locals[root.0 as usize].ty, receipt,
+            "the receipt names `d`"
+        );
+        changed.types = hirsel_tir::definition_types(engine.types(), &changed);
+        let report =
+            hirsel_validate::validate(&changed, engine.types(), &signatures, &mut vec![]).unwrap();
+        assert!(
+            report.violations.iter().any(|v| v.kind
+                == hirsel_validate::ViolationKind::TypeMismatch {
+                    entity: "call result"
+                }),
+            "{report:?}"
+        );
+    });
+}
+
 #[test]
 fn fresh_alias_join_identity_is_independently_checked() {
     hirsel_intern::jobs::with_compiler_stack(|| {

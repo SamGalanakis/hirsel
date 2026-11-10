@@ -1,9 +1,12 @@
 // rule: PROV-1
-// expect: reject PROV-1 at line 11
+// expect: reject PROV-1 at line 14
 // twin: PROV/PROV-2-produced-brand-run.hir
 // A produced brand obeys owner liveness: the annotated owner's identity ends
 // at its reassignment, and the token is used after it.
-pub opaque type Tok: copyable + plain + inert + ordered of uses {} { n: u64 }
+pub opaque type Tok: copyable + plain + inert + ordered of uses {} {
+  n: u64,
+}
+
 fn stale() -> bool {
   let mut owner = "first"
   let t: Tok of owner = Tok(n: 1)

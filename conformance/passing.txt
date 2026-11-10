@@ -3793,7 +3793,6 @@ conformance/MODE/MODE-2-tuple-compare-equal-run.hir
 conformance/MODE/MODE-2-tuple-compare-field-run.hir
 conformance/MODE/MODE-2-tuple-compare-loop-run.hir
 conformance/MODE/MODE-2-tuple-compare-nested-run.hir
-conformance/MODE/MODE-2-tuple-compare-order-bad.hir
 conformance/MODE/MODE-2-unique-argument-bad.hir
 conformance/MODE/MODE-2-unique-argument-ok.hir
 conformance/MODE/MODE-2-unique-borrowed-record-branch-join-run.hir

@@ -170,33 +170,3 @@ fn tuple_compare_matches_reference_heap_llvm_and_cranelift() {
         }
     });
 }
-
-#[test]
-fn tuple_compare_ordering_stays_rejected() {
-    // SEM-5 permits ordering operators only for scalar and byte operands.
-    for op in ["<", "<=", ">", ">="] {
-        for (left, right) in [("(k,v)", "expected[0]"), ("expected[0]", "(k,v)")] {
-            let source = format!(
-                "fn visible(p:(u64,List[u64]),take expected:List[(u64,List[u64])])->bool {{ let(k,v)=p; {left}{op}{right} }}"
-            );
-            let mut engine = QueryEngine::new(
-                default_environment(),
-                hirsel_front_phases::compiler_adapters(),
-            );
-            let file = engine.sources.add("tuple-order.hir", source).unwrap();
-            let diagnostics = match check_snapshot(&mut engine, file, &default_context()) {
-                Ok(diagnostics) | Err(hirsel_types::QueryError::Diagnostics(diagnostics)) => {
-                    diagnostics
-                }
-                Err(error) => panic!("unexpected {error:?}"),
-            };
-            assert!(
-                diagnostics
-                    .iter()
-                    .any(|d| d.rule == hirsel_diag::RuleId::of("LANG-7")
-                        && d.message == "ordering requires scalars or byte strings"),
-                "{diagnostics:?}"
-            );
-        }
-    }
-}

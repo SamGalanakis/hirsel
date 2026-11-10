@@ -38,6 +38,13 @@ const CRATES: &[(&str, Class)] = &[
     ("hirsel-codec", Class::Data),
     ("hirsel-types", Class::Data),
     ("hirsel-artifact-store", Class::Storage),
+    ("hirsel-engine-store", Class::Storage),
+    ("hirsel-store-authority", Class::Storage),
+    // Shared admission, task/product protocols and checked product data,
+    // independent of the compiler phase adapters.
+    ("hirsel-engine-admission", Class::Data),
+    ("hirsel-engine-runtime", Class::Data),
+    ("hirsel-query-products", Class::Data),
     ("hirsel-product-codec", Class::Data),
     ("hirsel-type-analysis", Class::Data),
     ("hirsel-tir", Class::Data),
@@ -71,6 +78,7 @@ const CRATES: &[(&str, Class)] = &[
     ("hirsel-remote", Class::Implementation),
     ("hirsel-kernels", Class::LeafKernel),
     ("hirsel-engine", Class::Wiring),
+    ("hirsel-registry", Class::Wiring),
     ("hirsel-compiler-identity", Class::LeafUtility),
     ("hirsel-front-phases", Class::Wiring),
     ("hirsel-host-io", Class::Wiring),
@@ -114,6 +122,33 @@ const STORAGE_CONSUMERS: &[&str] = &[
     "hirsel-lir",
     "hirsel-product-codec",
     "hirsel-validate",
+    "hirsel-engine-runtime",
+    "hirsel-engine-store",
+    "hirsel-registry",
+];
+
+// The extracted request store and authority seam retain explicit consumers;
+// their admission does not grant a new edge to the raw artifact store.
+const ENGINE_STORE_CONSUMERS: &[&str] = &[
+    "hirsel-candidate",
+    "hirsel-cli",
+    "hirsel-conformance",
+    "hirsel-driver",
+    "hirsel-engine",
+    "hirsel-native",
+    "hirsel-native-batch",
+    "hirsel-native-cache",
+    "hirsel-native-queries",
+    "hirsel-native-testing",
+    "hirsel-ownership",
+    "hirsel-pipeline-tests",
+    "hirsel-requests",
+];
+const STORE_AUTHORITY_CONSUMERS: &[&str] = &[
+    "hirsel-interp",
+    "hirsel-native-testing",
+    "hirsel-rt",
+    "hirsel-run-config",
 ];
 
 /// Shared utilities and native data crates take no external production dependency.
@@ -165,7 +200,11 @@ fn check_edge(from: &str, to: &str, kind: Kind) -> Result<(), String> {
             matches!(from, "hirsel-rt" | "hirsel-interp" | "hirsel-heapcheck")
         }
         (Class::LeafKernel, _) => false,
-        (_, Class::Storage) => STORAGE_CONSUMERS.contains(&from),
+        (_, Class::Storage) => match to {
+            "hirsel-engine-store" => ENGINE_STORE_CONSUMERS.contains(&from),
+            "hirsel-store-authority" => STORE_AUTHORITY_CONSUMERS.contains(&from),
+            _ => STORAGE_CONSUMERS.contains(&from),
+        },
         (_, Class::Data) => true,
         (Class::Wiring, Class::Implementation) => {
             from != "hirsel-engine" || ENGINE_IMPLEMENTATIONS.contains(&to)
@@ -179,10 +218,13 @@ fn check_edge(from: &str, to: &str, kind: Kind) -> Result<(), String> {
         }
         (_, Class::Tool) => false,
         (Class::Wiring, Class::Wiring) => match from {
-            "hirsel-front-phases" | "hirsel-host-io" | "hirsel-native" => to == "hirsel-engine",
+            "hirsel-front-phases" | "hirsel-host-io" => to == "hirsel-engine",
+            "hirsel-engine" => to == "hirsel-registry",
+            "hirsel-native" => matches!(to, "hirsel-engine" | "hirsel-registry"),
             "hirsel-native-cache" | "hirsel-project-info" => {
                 matches!(to, "hirsel-engine" | "hirsel-front-phases")
                     || from == "hirsel-native-cache" && to == "hirsel-native"
+                    || from == "hirsel-project-info" && to == "hirsel-registry"
             }
             "hirsel-native-queries" => matches!(
                 to,
@@ -367,6 +409,12 @@ fn layering_controls() {
     }
     assert!(check_edge("hirsel-graph", "hirsel-artifact-store", Kind::Production).is_err());
     assert!(check_edge("hirsel-kernels", "hirsel-artifact-store", Kind::Production).is_err());
+    assert!(check_edge("hirsel-ownership", "hirsel-engine-store", Kind::Production).is_ok());
+    assert!(check_edge("hirsel-check", "hirsel-engine-store", Kind::Production).is_err());
+    assert!(check_edge("hirsel-rt", "hirsel-store-authority", Kind::Production).is_ok());
+    assert!(check_edge("hirsel-graph", "hirsel-store-authority", Kind::Production).is_err());
+    assert!(check_edge("hirsel-engine-store", "hirsel-interp", Kind::Production).is_err());
+    assert!(check_edge("hirsel-engine-runtime", "hirsel-check", Kind::Production).is_err());
     for consumer in ["hirsel-rc", "hirsel-cli", "hirsel-conformance"] {
         for kind in [Kind::Production, Kind::Build] {
             assert!(check_edge(consumer, "hirsel-artifact-store", kind).is_err());

@@ -1031,7 +1031,7 @@ fn narrowed(grants: &IoGrants, keep: &Value) -> Result<Option<IoGrants>, Error> 
 
 /// `value`'s canonical bytes under `schema`: a launch's argument, as a host that starts the
 /// run states it.
-pub fn encode(schema: &SerializableSchema, value: &Value) -> Result<Vec<u8>, Error> {
+pub fn encode(schema: &CodecProgram, value: &Value) -> Result<Vec<u8>, Error> {
     super::codec::encode(schema, value)?.map_err(|e| invalid(format!("codec: {e:?}")))
 }
 

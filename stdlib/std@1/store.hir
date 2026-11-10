@@ -1189,12 +1189,9 @@ pub opaque type Served: copyable uses {} {
   replay: fn(recorded: Bytes) -> Option[CallEnd] uses {},
 }
 
-// A body takes its call's caller and seed rather than a `CallInfo`, which it
-// mints: a `CallInfo` parameter in a declared function type is resolved with a
-// different drop allocation from the closure's (TIR validation rejects it).
 type ServedBody = Transacting(
-  fn(mut tx: Tx, caller: String, seed: u64, argument: Bytes) -> Evaluated uses {}
-) | Querying(fn(tx: Tx, caller: String, seed: u64, argument: Bytes) -> Evaluated uses {})
+  fn(mut tx: Tx, info: CallInfo, argument: Bytes) -> Evaluated uses {}
+) | Querying(fn(tx: Tx, info: CallInfo, argument: Bytes) -> Evaluated uses {})
 
 // One evaluation of a served entry: an argument that does not decode, a
 // failure in the run, or the body's outcome as the stream records it (a
@@ -1207,8 +1204,7 @@ pub fn served_transact[A: serializable, R: serializable, E: serializable](
 ) -> Served uses {} {
   Served(
     entry: runner.entry_id(f),
-    body: Transacting(fn(mut tx: Tx, caller: String, seed: u64, argument: Bytes) -> Evaluated {
-      let info = CallInfo(caller: copy caller, at: 0, seed: seed)
+    body: Transacting(fn(mut tx: Tx, info: CallInfo, argument: Bytes) -> Evaluated {
       let decoded: Result[A, DecodeError] = codec.decode(argument)
       let Ok(a) = take decoded else {
         return Undecoded()
@@ -1255,8 +1251,7 @@ pub fn served_query[A: serializable, R: serializable, E: serializable](
 ) -> Served uses {} {
   Served(
     entry: runner.entry_id(f),
-    body: Querying(fn(tx: Tx, caller: String, seed: u64, argument: Bytes) -> Evaluated {
-      let info = CallInfo(caller: copy caller, at: 0, seed: seed)
+    body: Querying(fn(tx: Tx, info: CallInfo, argument: Bytes) -> Evaluated {
       let decoded: Result[A, DecodeError] = codec.decode(argument)
       let Ok(a) = take decoded else {
         return Undecoded()
@@ -1383,7 +1378,7 @@ fn serve_one[S](mut s: Store[S], entries: List[Served], take request: Arrived) -
         points: recorder.new(),
         spans: recorder.new()
       )
-      let evaluated = body(tx, request.caller, 0, request.argument)
+      let evaluated = body(tx, CallInfo(caller: copy request.caller, at: 0, seed: 0), request.argument)
       let Tx(txn: _, limits: _, scope: _, points: read_points, spans: read_spans) = take tx
       let _: List[Bytes] = recorder.finish(take read_points)
       let _: List[Span] = recorder.finish(take read_spans)
@@ -1404,7 +1399,7 @@ fn serve_one[S](mut s: Store[S], entries: List[Served], take request: Arrived) -
 fn serve_transact[S](
   mut s: Store[S],
   served: Served,
-  body: fn(mut tx: Tx, caller: String, seed: u64, argument: Bytes) -> Evaluated uses {},
+  body: fn(mut tx: Tx, info: CallInfo, argument: Bytes) -> Evaluated uses {},
   req: CallRequest,
   caller: String,
   argument: Bytes
@@ -1451,7 +1446,7 @@ fn serve_transact[S](
   )
   // The row read decides the request, so the run read it.
   recorder.append(tx.points, copy key)
-  let evaluated = body(mut tx, caller, seed, argument)
+  let evaluated = body(mut tx, CallInfo(caller: copy caller, at: 0, seed: seed), argument)
   let Tx(txn: ran, limits: _, scope: _, points: read_points, spans: read_spans) = take tx
   let mut done = take ran
   done.access = AccessSet(

@@ -71,6 +71,37 @@ type Catalog {
   migrating: bool,
 }
 
+// A table type's key and value storage descriptors, and the SER-2 envelope
+// heads of `Option[K]` and `Option[V]` that precede a payload `codec.decode`
+// reads. A stored epoch whose descriptor equals the type's own, with no rename
+// declared, needs no projection: its payloads are the codec's own.
+type Layout {
+  key: Bytes,
+  value: Bytes,
+  key_head: Bytes,
+  value_head: Bytes,
+}
+
+// The descriptor of `Option[T]`'s envelope and its head, the bytes before the
+// payload length.
+fn envelope_head(template: Bytes) -> Bytes uses {} {
+  unique bytes.slice(template, 0, 16 + bytes.len(internal.table_schema.descriptor(template)))
+}
+
+// The layout of `Table[K, V]`: its compiled schemas and envelope heads.
+fn layout[K: key + serializable, V: serializable](t: Table[K, V]) -> Layout uses {} {
+  let k: Option[K] = None()
+  let v: Option[V] = None()
+  let key_template = codec.encode(k)
+  let value_template = codec.encode(v)
+  Layout(
+    key: internal.table_schema.stored_schema(key_template),
+    value: internal.table_schema.stored_schema(value_template),
+    key_head: envelope_head(key_template),
+    value_head: envelope_head(value_template)
+  )
+}
+
 fn corrupt() -> store.TxError uses {} {
   let error: store.StoreError = Corrupt("typed table")
   Storage(take error)
@@ -176,35 +207,26 @@ fn writable(c: Catalog) -> Result[(), store.TxError] uses {} {
   Ok(())
 }
 
-fn schemas[K: key + serializable, V: serializable](c: Catalog, t: Table[K, V]) -> Result[
-  (),
-  store.TxError
-] uses {} {
+// Whether `c`'s latest schemas are those of the layout `l`.
+fn schemas(c: Catalog, l: Layout) -> Result[(), store.TxError] uses {} {
   let latest = current(c)
-  let k: Option[K] = None()
-  let v: Option[V] = None()
-  match internal.table_schema.equivalent(
-    latest.key,
-    internal.table_schema.schema(k),
-    [],
-    true
-  ) {
+  match internal.table_schema.equivalent(latest.key, l.key, [], true) {
     Ok(()) => (),
     Error(e) => match e {
       Renamed(from, to) => return Error(Schema(Renamed(unique from, unique to))),
       _ => return Error(Schema(KeyMismatch())),
     },
   }
-  internal.table_schema.equivalent(latest.value, internal.table_schema.schema(v), [], false) ? Schema
+  internal.table_schema.equivalent(latest.value, l.value, [], false) ? Schema
   Ok(())
 }
 
-fn checked[K: key + serializable, V: serializable](tx: store.Tx, t: Table[K, V]) -> Result[
+fn checked[K: key + serializable, V: serializable](tx: store.Tx, t: Table[K, V], l: Layout) -> Result[
   Catalog,
   store.TxError
 ] {
   let c = load_catalog(tx, table_name(t))?
-  schemas(c, t)?
+  schemas(c, l)?
   Ok(take c)
 }
 
@@ -249,13 +271,12 @@ pub fn create[K: key + serializable, V: serializable](mut tx: store.Tx, t: Table
     return Error(TableExists())
   }
   unused(tx, table_name(t), 0)?
-  let k: Option[K] = None()
-  let v: Option[V] = None()
+  let l = layout(t)
   let c = Catalog(
     epochs: [
       Epoch(
-        key: internal.table_schema.schema(k),
-        value: internal.table_schema.schema(v),
+        key: unique l.key,
+        value: unique l.value,
         change: Created()
       )
     ],
@@ -267,11 +288,17 @@ pub fn create[K: key + serializable, V: serializable](mut tx: store.Tx, t: Table
   Ok(())
 }
 
+// `key`'s encoding under the stored key schema `schema`, whose compiled
+// descriptor is `expected`.
 fn encoded_key[K: key + serializable](
   schema: Bytes,
+  expected: Bytes,
   key: K,
   renames: List[(String, String)]
 ) -> Result[Bytes, store.TxError] uses {} {
+  if list.len(renames) == 0 && schema == expected {
+    return Ok(keys.encode(key))
+  }
   let data = match internal.table_schema.encode(schema, key, renames) {
     Ok(data) => data,
     Error(_) => return Error(corrupt()),
@@ -279,7 +306,7 @@ fn encoded_key[K: key + serializable](
   Ok(keys.encode_payload(schema, data))
 }
 
-fn row_key[K: key + serializable, V: serializable](t: Table[K, V], c: Catalog, key: K) -> Result[
+fn row_key[K: key + serializable, V: serializable](t: Table[K, V], c: Catalog, l: Layout, key: K) -> Result[
   Bytes,
   store.TxError
 ] uses {} {
@@ -288,7 +315,7 @@ fn row_key[K: key + serializable, V: serializable](t: Table[K, V], c: Catalog, k
   Ok(
     concat(
       rows_of(table_name(t), c.generation),
-      encoded_key(c.epochs[key_epoch(c)].key, key, c.renames)?
+      encoded_key(c.epochs[key_epoch(c)].key, l.key, key, c.renames)?
     )
   )
 }
@@ -305,7 +332,21 @@ fn row_value[V: serializable](c: Catalog, value: V) -> Result[Bytes, store.TxErr
   Ok(bytes.from_list(take out))
 }
 
-fn decode_value[V: serializable](c: Catalog, data: Bytes) -> Result[V, store.TxError] uses {} {
+// The value of `payload` under `head`, the envelope head of `Option[T]`.
+fn from_payload[T: serializable](head: Bytes, payload: Bytes) -> Result[T, DecodeError] uses {} {
+  let mut whole: List[u8] = []
+  bytes.append(mut whole, head)
+  internal.table_schema.little(mut whole, 4 + bytes.len(payload), 8)
+  internal.table_schema.little(mut whole, 1, 4)
+  bytes.append(mut whole, payload)
+  let value: Option[T] = codec.decode(bytes.from_list(take whole))?
+  match take value {
+    Some(v) => Ok(take v),
+    None() => Error(Tag()),
+  }
+}
+
+fn decode_value[V: serializable](c: Catalog, l: Layout, data: Bytes) -> Result[V, store.TxError] uses {} {
   if bytes.len(data) < 4 {
     return Error(corrupt())
   }
@@ -320,12 +361,13 @@ fn decode_value[V: serializable](c: Catalog, data: Bytes) -> Result[V, store.TxE
     return Error(corrupt())
   }
   let stored = c.epochs[n].value
-  let decoded: Result[V, DecodeError] = internal.table_schema.decode(
-    stored,
-    bytes.slice(data, 4, bytes.len(data)),
-    c.renames
-  )
-  match take decoded {
+  let payload = bytes.slice(data, 4, bytes.len(data))
+  let value: Result[V, DecodeError] = if list.len(c.renames) == 0 && stored == l.value {
+    from_payload(l.value_head, payload)
+  } else {
+    internal.table_schema.decode(stored, payload, c.renames)
+  }
+  match take value {
     Ok(v) => Ok(take v),
     Error(_) => Error(corrupt()),
   }
@@ -336,12 +378,13 @@ pub fn get[K: key + serializable, V: serializable](tx: store.Tx, t: Table[K, V],
   Option[V],
   store.TxError
 ] {
-  let c = checked(tx, t)?
-  let encoded = row_key(t, c, key)?
+  let l = layout(t)
+  let c = checked(tx, t, l)?
+  let encoded = row_key(t, c, l, key)?
   store.admit_read(tx, encoded)?
   match store.table_read(tx, copy encoded) {
     Some(data) => {
-      let value: V = decode_value(c, data)?
+      let value: V = decode_value(c, l, data)?
       Ok(Some(take value))
     },
     None() => Ok(None()),
@@ -355,9 +398,10 @@ pub fn put[K: key + serializable, V: serializable](
   key: K,
   value: V
 ) -> Result[(), store.TxError] {
-  let c = checked(tx, t)?
+  let l = layout(t)
+  let c = checked(tx, t, l)?
   writable(c)?
-  let physical_key = row_key(t, c, key)?
+  let physical_key = row_key(t, c, l, key)?
   let encoded_value = row_value(c, value)?
   store.table_put(mut tx, take physical_key, take encoded_value)
 }
@@ -368,9 +412,10 @@ pub fn delete[K: key + serializable, V: serializable](
   t: Table[K, V],
   key: K
 ) -> Result[bool, store.TxError] {
-  let c = checked(tx, t)?
+  let l = layout(t)
+  let c = checked(tx, t, l)?
   writable(c)?
-  let encoded = row_key(t, c, key)?
+  let encoded = row_key(t, c, l, key)?
   store.admit_write(tx, encoded)?
   let exists = match store.table_read(tx, copy encoded) {
     Some(_) => true,
@@ -385,13 +430,14 @@ pub fn delete[K: key + serializable, V: serializable](
 // The least row key of `t`'s rows a lower bound admits.
 fn lower[K: key + serializable](
   schema: Bytes,
+  expected: Bytes,
   prefix: Bytes,
   renames: List[(String, String)],
   b: store.RangeBound[K]
 ) -> Result[Bytes, store.TxError] uses {} {
   match b {
-    Included(key) => Ok(concat(prefix, encoded_key(schema, key, renames)?)),
-    Excluded(key) => Ok(successor(concat(prefix, encoded_key(schema, key, renames)?))),
+    Included(key) => Ok(concat(prefix, encoded_key(schema, expected, key, renames)?)),
+    Excluded(key) => Ok(successor(concat(prefix, encoded_key(schema, expected, key, renames)?))),
     Unbounded() => Ok(unique prefix),
   }
 }
@@ -399,14 +445,39 @@ fn lower[K: key + serializable](
 // The least row key above every key an upper bound admits; `None()` for none.
 fn upper[K: key + serializable](
   schema: Bytes,
+  expected: Bytes,
   prefix: Bytes,
   renames: List[(String, String)],
   b: store.RangeBound[K]
 ) -> Result[Option[Bytes], store.TxError] uses {} {
   match b {
-    Included(key) => Ok(Some(successor(concat(prefix, encoded_key(schema, key, renames)?)))),
-    Excluded(key) => Ok(Some(concat(prefix, encoded_key(schema, key, renames)?))),
+    Included(key) => Ok(Some(successor(concat(prefix, encoded_key(schema, expected, key, renames)?)))),
+    Excluded(key) => Ok(Some(concat(prefix, encoded_key(schema, expected, key, renames)?))),
     Unbounded() => Ok(keys.prefix_end(prefix)),
+  }
+}
+
+// The key a row key's encoded part `raw` holds under the stored key schema
+// `schema`, whose compiled descriptor is `expected` and envelope head `head`.
+fn decode_key[K: key + serializable](
+  schema: Bytes,
+  expected: Bytes,
+  head: Bytes,
+  renames: List[(String, String)],
+  raw: Bytes
+) -> Result[K, store.TxError] uses {} {
+  let payload = match keys.decode_payload(schema, raw) {
+    Ok(p) => p,
+    Error(_) => return Error(corrupt()),
+  }
+  let key: Result[K, DecodeError] = if list.len(renames) == 0 && schema == expected {
+    from_payload(head, payload)
+  } else {
+    internal.table_schema.decode(schema, payload, renames)
+  }
+  match take key {
+    Ok(k) => Ok(take k),
+    Error(_) => Error(corrupt()),
   }
 }
 
@@ -426,32 +497,20 @@ pub fn range[K: key + serializable, V: serializable](
   if limit == 0 {
     return Error(InvalidInput())
   }
-  let c = checked(tx, t)?
+  let l = layout(t)
+  let c = checked(tx, t, l)?
   let prefix = rows_of(table_name(t), c.generation)
   let schema = c.epochs[key_epoch(c)].key
-  let low = lower(schema, prefix, c.renames, from)?
-  let high = upper(schema, prefix, c.renames, to)?
+  let low = lower(schema, l.key, prefix, c.renames, from)?
+  let high = upper(schema, l.key, prefix, c.renames, to)?
   let rows = store.table_range(tx, take low, take high, limit, order)?
   let mut out: List[(K, V)] = []
   for (key, value) in rows {
     if bytes.len(key) < bytes.len(prefix) || bytes.slice(key, 0, bytes.len(prefix)) != prefix {
       return Error(corrupt())
     }
-    let raw = bytes.slice(key, bytes.len(prefix), bytes.len(key))
-    let payload = match keys.decode_payload(schema, raw) {
-      Ok(p) => p,
-      Error(_) => return Error(corrupt()),
-    }
-    let decoded_key: Result[K, DecodeError] = internal.table_schema.decode(
-      schema,
-      payload,
-      c.renames
-    )
-    let k = match take decoded_key {
-      Ok(k) => k,
-      Error(_) => return Error(corrupt()),
-    }
-    list.push(mut out, (take k, decode_value(c, value)?))
+    let k: K = decode_key(schema, l.key, l.key_head, c.renames, bytes.slice(key, bytes.len(prefix), bytes.len(key)))?
+    list.push(mut out, (take k, decode_value(c, l, value)?))
   }
   Ok(take out)
 }
@@ -483,12 +542,13 @@ pub fn scope_keys[K: key + serializable, V: serializable](
   to: store.RangeBound[K],
   access: store.Access
 ) -> Result[store.KeyScope, store.TxError] {
-  let c = checked(tx, t)?
+  let l = layout(t)
+  let c = checked(tx, t, l)?
   let name = table_name(t)
   let prefix = rows_of(name, c.generation)
   let schema = c.epochs[key_epoch(c)].key
-  let low = lower(schema, prefix, c.renames, from)?
-  let high = upper(schema, prefix, c.renames, to)?
+  let low = lower(schema, l.key, prefix, c.renames, from)?
+  let high = upper(schema, l.key, prefix, c.renames, to)?
   let catalog = metadata_key(name)
   Ok(
     store.join(
@@ -577,7 +637,7 @@ pub fn drop[K: key + serializable, V: serializable, S](mut s: store.Store[S], t:
   store.transact_body(
     mut s,
     fn(mut tx: store.Tx) -> Result[(), store.TxError] {
-      let c = checked(tx, t)?
+      let c = checked(tx, t, layout(t))?
       writable(c)?
       let name = table_name(t)
       store.table_delete(mut tx, metadata_key(name))?
@@ -619,10 +679,10 @@ fn start[
 ](mut tx: store.Tx, from: Table[J, A], to: Table[K, B]) -> Result[Start, MigrateError[E]] {
   let name = table_name(from)
   let c = load_catalog(tx, name) ? Table
-  if let Ok(()) = schemas(c, to) {
+  if let Ok(()) = schemas(c, layout(to)) {
     return Ok(Current())
   }
-  schemas(c, from) ? Table
+  schemas(c, layout(from)) ? Table
   let catalog = metadata_key(name)
   let generation = next_generation(c.generation)
   unused(tx, name, generation) ? Table
@@ -658,14 +718,12 @@ fn advance[
   mut tx: store.Tx,
   name: String,
   catalog: Catalog,
+  source: Layout,
+  target: Layout,
   f: Entry[fn(c: (), key: J, old: A) -> Result[(K, B), E]],
   p: Progress,
   batch: u64
 ) -> Result[(Progress, bool), MigrateError[E]] {
-  let key_type: Option[K] = None()
-  let value_type: Option[B] = None()
-  let target_key = internal.table_schema.schema(key_type)
-  let target_value = internal.table_schema.schema(value_type)
   let prefix = rows_of(name, catalog.generation)
   let low = match p.cursor {
     Some(last) => successor(last),
@@ -681,40 +739,31 @@ fn advance[
   }
   let mut count = p.count
   for (key, value) in rows {
-    let payload = match keys.decode_payload(
+    let old_key: J = decode_key(
       stored,
+      source.key,
+      source.key_head,
+      catalog.renames,
       bytes.slice(key, bytes.len(prefix), bytes.len(key))
-    ) {
-      Ok(payload) => payload,
-      Error(_) => return Error(Table(corrupt())),
-    }
-    let decoded: Result[J, DecodeError] = internal.table_schema.decode(
-      stored,
-      payload,
-      catalog.renames
-    )
-    let old_key = match take decoded {
-      Ok(k) => k,
-      Error(_) => return Error(Table(corrupt())),
-    }
-    let old: A = decode_value(catalog, value) ? Table
+    ) ? Table
+    let old: A = decode_value(catalog, source, value) ? Table
     let (new_key, new_value) = match core@1/runner.apply(f, (), old_key, old) {
       Ok(Ok(row)) => row,
       Ok(Error(e)) => return Error(Failed(take e)),
       Error(failure) => return Error(Faulted(take failure)),
     }
-    let target = concat(next, encoded_key(target_key, new_key, []) ? Table)
-    if let Some(_) = store.table_read(tx, copy target) {
+    let row = concat(next, encoded_key(target.key, target.key, new_key, []) ? Table)
+    if let Some(_) = store.table_read(tx, copy row) {
       return Error(Collision())
     }
     let mut out: List[u8] = []
     internal.table_schema.little(mut out, epoch, 4)
-    let data = match internal.table_schema.encode(target_value, new_value, []) {
+    let data = match internal.table_schema.encode(target.value, new_value, []) {
       Ok(data) => data,
       Error(_) => return Error(Table(corrupt())),
     }
     bytes.append(mut out, data)
-    store.table_put(mut tx, take target, bytes.from_list(take out)) ? Table
+    store.table_put(mut tx, take row, bytes.from_list(take out)) ? Table
     cursor = Some(unique key)
     count += 1
   }
@@ -732,8 +781,7 @@ fn install[K: key + serializable, B: serializable, E](
 ) -> Result[(), MigrateError[E]] {
   let name = table_name(to)
   let generation = next_generation(c.generation)
-  let k: Option[K] = None()
-  let b: Option[B] = None()
+  let l = layout(to)
   let mut next = Catalog(
     epochs: unique c.epochs,
     renames: [],
@@ -743,8 +791,8 @@ fn install[K: key + serializable, B: serializable, E](
   list.push(
     mut next.epochs,
     Epoch(
-      key: internal.table_schema.schema(k),
-      value: internal.table_schema.schema(b),
+      key: unique l.key,
+      value: unique l.value,
       change: Migrated(unique entry)
     )
   )
@@ -825,7 +873,7 @@ pub fn migrate[
     let stepped = store.transact_body(
       mut s,
       fn(mut tx: store.Tx) -> Result[(Progress, bool), MigrateError[E]] {
-        advance(mut tx, name, c, f, held, batch)
+        advance(mut tx, name, c, layout(from), layout(to), f, held, batch)
       }
     )
     if let Some(l) = over_limit(stepped) {

@@ -488,13 +488,26 @@ def _stage(name):
     return stage if sep and shard.isdigit() else name
 
 def selected_paths(key, index):
-    """Slice `index` (1-based) of the corpus paths a lane chose, from
-    `-c hirsel.<key>=<slice>;<slice>...`, each slice `<path>|<path>...`; None
-    past the last slice."""
+    """Slice `index` (1-based) of the corpus paths a lane chose, as the
+    arguments after the path flag's pairs: `-c hirsel.<key>=<slice>;<slice>...`,
+    each slice `<path>|<path>...`, gives slice `index` and no extra arguments.
+    One slice with `-c hirsel.<key>_split=N` gives every slice `1..N` that
+    slice's paths and `--shard <index>/N`, the binary's stable path-hash
+    partition, so tools/corpus spreads a whole directory over N pool actions
+    without naming its files. None past the last slice."""
     slices = [part for part in read_root_config("hirsel", key, "").split(";") if part]
+    split = int(read_root_config("hirsel", key + "_split", "1"))
+    if split > 1:
+        if key != "conformance_paths":
+            fail("only hirsel.conformance_paths takes a _split")
+        if len(slices) != 1:
+            fail("hirsel.{}_split needs exactly one slice in hirsel.{}".format(key, key))
+        if index > split:
+            return None
+        return slices[0].split("|"), ["--shard", "{}/{}".format(index, split)]
     if index > len(slices):
         return None
-    return slices[index - 1].split("|")
+    return slices[index - 1].split("|"), []
 
 def hirsel_command_test(name, binary, args, data, cwd, runtime_archives = None, products = None, full = False, native_selection = None, changed_native = False, selected = None, measured_as = None):
     """A gate stage as a test: `binary args...` run from its package directory `cwd`.
@@ -516,10 +529,11 @@ def hirsel_command_test(name, binary, args, data, cwd, runtime_archives = None, 
         # A slice of the lane's chosen programs; the setting is part of the
         # test command and therefore its cache key. No slice, no target.
         key, flag, index = selected
-        paths = selected_paths(key, index)
-        if paths == None:
+        chosen = selected_paths(key, index)
+        if chosen == None:
             return
-        args = args + [arg for path in paths for arg in [flag, path]]
+        paths, extra = chosen
+        args = args + [arg for path in paths for arg in [flag, path]] + extra
     if "--corpus" in args:
         # The LLVM slice rotates with each full run's fresh seed.
         args = args + ["--seed", TEST_SEED]

@@ -236,7 +236,7 @@ native programs run through the selected targets (`;` separates slices, `|` the 
 
 ```sh
 .buck2/bin/buck2 test //:hirsel-lir-unittest //:hirsel-lir-test-it
-.buck2/bin/buck2 test -c hirsel.conformance_paths='<case>|<case>' //:gate-conformance-selected-shard-1
+tools/corpus <case-or-directory>...  # checked compiler, std from this checkout, sliced over the pool
 .buck2/bin/buck2 test -c hirsel.agree_paths='<case>|<case>' //:gate-agree-selected-shard-1
 python3 tools/buck2/native.py <program> <program>  # cost-bounded shards, both backends
 ```

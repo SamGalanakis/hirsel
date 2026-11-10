@@ -348,7 +348,7 @@ Target names follow Cargo's targets, all in the root package:
 | a sharded test binary (`SHARDED` in `sync.py`) | `//:hirsel-x-test-it-shard-<i>` |
 | a corpus campaign | `//:gate-<stage>` (label `gate`) |
 | a conformance shard (`CONFORMANCE_SHARDS`) | `//:gate-conformance-shard-<i>` |
-| a slice of the corpus cases a lane chose (`-c hirsel.conformance_paths`, up to `SELECTED_SLICES`) | `//:gate-conformance-selected-shard-<i>` |
+| a slice of the corpus cases a lane chose (`-c hirsel.conformance_paths`, up to `SELECTED_SLICES`; with `-c hirsel.conformance_paths_split=N` one slice's path-hash shard `i/N`, as `tools/corpus` runs it) | `//:gate-conformance-selected-shard-<i>` |
 | a slice of the chosen cases' variants in the seed-1 sample (`-c hirsel.agree_paths`) | `//:gate-agree-selected-shard-<i>` |
 | a budgeted full agreement shard (`AGREE_FULL_SHARDS`, full suite only) | `//:gate-agree-full-shard-<i>` |
 | a budgeted native agreement shard (`AGREE_NATIVE_FULL_SHARDS`, full suite only; `agree.py --native-full` runs and merges them) | `//:gate-agree-native-full-shard-<i>` |

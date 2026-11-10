@@ -414,10 +414,12 @@ AGREE_LIMIT = 5000
 # selected_paths), each of at least the smallest slice's cases. Conformance
 # spreads them wide: cases differ in cost by more than tenfold (on 2026-10-19
 # 120 toml cases ran 970 s in one slice, where a whole-campaign shard runs 340
-# mixed cases in about 200 s). An agreement slice first ranks the whole
-# corpus's catalogue, so it takes about as many cases as a sample shard.
-SELECTED_SLICES = 16
-CONFORMANCE_SLICE_PROGRAMS = 20
+# mixed cases in about 200 s; on 2026-11-10 the 25 STORE cases ran 156 s in one
+# slice). tools/corpus gives each path-hash slice about CONFORMANCE_SLICE_PROGRAMS
+# cases. An agreement slice first ranks the whole corpus's catalogue, so it takes
+# about as many cases as a sample shard.
+SELECTED_SLICES = 32
+CONFORMANCE_SLICE_PROGRAMS = 6
 AGREE_SLICE_PROGRAMS = 260
 # The unrestricted campaign (tools/main-runs) runs as shards of the whole
 # seed-1 catalogue by stable variant rank, with progress attributed to each shard.

@@ -1,0 +1,84 @@
+#!/usr/bin/env python3
+"""Run chosen conformance cases on the checked compiler, spread over the pool.
+
+    tools/corpus conformance/STORE conformance/MODE/MODE-3-   # directories, files or prefixes
+    tools/corpus --slices 12 conformance/SEM
+
+Buck2 builds the checked `hirsel-conformance` and the std products it needs
+from this checkout (cached by content on the pool), so a std or compiler edit
+is picked up without a local toolchain or precompute step. The prefixes run as
+`//:gate-conformance-selected-shard-<i>`, each the binary's `--shard i/N`
+path-hash partition of the same `--path` selection (`hirsel.conformance_paths_split`,
+defs.bzl selected_paths), with about CONFORMANCE_SLICE_PROGRAMS cases per slice.
+Prints the summed counts and every failing case; exits non-zero when any slice
+fails or none executed a case.
+"""
+import argparse
+import math
+from pathlib import Path
+import subprocess
+import sys
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / 'tools/buck2'))
+import conformance  # noqa: E402
+import event_logs  # noqa: E402
+from sync import CONFORMANCE_SLICE_PROGRAMS, SELECTED_SLICES  # noqa: E402
+
+
+def cases(root):
+    """Repository-relative corpus files, as hirsel-conformance discovers them."""
+    found = []
+    stack = [root / 'conformance']
+    while stack:
+        for entry in stack.pop().iterdir():
+            if entry.is_dir():
+                if entry.name != 'reports':
+                    stack.append(entry)
+            elif entry.suffix == '.hir':
+                found.append(entry.relative_to(root).as_posix())
+    return found
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument('--slices', type=int, help=f'pool actions (1-{SELECTED_SLICES}; default by case count)')
+    parser.add_argument('prefixes', nargs='+', metavar='PREFIX')
+    args = parser.parse_args()
+    prefixes = [p.rstrip('/') + '/' if (ROOT / p).is_dir() else p for p in args.prefixes]
+    corpus = cases(ROOT)
+    unmatched = [p for p in prefixes if not any(c.startswith(p) for c in corpus)]
+    if unmatched or any('|' in p or ';' in p for p in prefixes):
+        print(f'corpus: no corpus case matches {unmatched or prefixes}', file=sys.stderr)
+        return 2
+    selected = sum(any(c.startswith(p) for p in prefixes) for c in corpus)
+    slices = args.slices or math.ceil(selected / CONFORMANCE_SLICE_PROGRAMS)
+    slices = max(1, min(slices, SELECTED_SLICES, selected))
+    print(f'corpus: {selected} cases in {slices} slices', file=sys.stderr, flush=True)
+    subprocess.run([sys.executable, str(ROOT / 'tools/buck2/sync.py'), '--if-stale'], cwd=ROOT, check=True)
+    targets = [f'//:gate-conformance-selected-shard-{i}' for i in range(1, slices + 1)]
+    config = ['-c', 'hirsel.conformance_paths=' + '|'.join(prefixes),
+              '-c', f'hirsel.conformance_paths_split={slices}']
+    with event_logs.recorded('corpus') as event_log:
+        status = subprocess.call([str(conformance.BUCK2), 'test', *conformance.CONFIG, *config,
+                                  '--event-log', str(event_log), *targets], cwd=ROOT)
+        outputs = conformance.shard_outputs(event_log)
+    for name, output in sorted(outputs.items()):
+        for line in output.splitlines():
+            if line.startswith('conformance/') or line.startswith('--path ') or 'matched no corpus' in line:
+                print(f'{name.rsplit("-", 1)[-1]}: {line}')
+    try:
+        lines = conformance.summarize(outputs, slices)
+    except ValueError as error:
+        print(f'corpus: {error}', file=sys.stderr)
+        return status or 1
+    print('\n'.join(lines))
+    executed = int(lines[0].split(': ', 1)[1].split()[0])
+    if executed != selected:
+        print(f'corpus: {executed} of {selected} selected cases executed', file=sys.stderr)
+        return status or 1
+    return status
+
+
+if __name__ == '__main__':
+    sys.exit(main())

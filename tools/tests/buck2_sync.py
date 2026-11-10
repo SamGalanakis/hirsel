@@ -271,6 +271,14 @@ class NativePoolRouting(unittest.TestCase):
         scope['hirsel_command_test']('gate-conformance-selected-shard-3', '//:binary',
                                      [], [], '.', selected=('conformance_paths', '--path', 3))
         self.assertEqual(len(calls), 2)
+        # One slice split N ways: every target keeps every prefix and takes its own shard.
+        scope['read_root_config'] = lambda section, key, default: {
+            'conformance_paths': f'{real}|{missing}', 'conformance_paths_split': '3'}.get(key, default)
+        for index in [1, 2, 3, 4]:
+            scope['hirsel_command_test'](f'gate-conformance-selected-shard-{index}', '//:binary',
+                                         [], [], '.', selected=('conformance_paths', '--path', index))
+        self.assertEqual([call['args'] for call in calls[2:]],
+                         [['--path', real, '--path', missing, '--shard', f'{i}/3'] for i in [1, 2, 3]])
 
     def test_generated_tests_have_no_host_partition(self):
         buck = (sync.ROOT / 'BUCK').read_text()

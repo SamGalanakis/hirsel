@@ -60,7 +60,8 @@ recovery for abandoned tickets. These adaptations serve independent
 processes and survive a lane crash on this single Linux host.
 
 Land fetches and rebases onto a captured `origin/main` commit, regenerates
-stale build inventories, and checks the workspace build, Clippy and fmt.
+stale build inventories, and checks the workspace build, package and example
+manifests, Clippy and fmt.
 The build covers workspace compilation, including test harness compilation;
 it excludes test execution, campaigns, the two-host link check, std images
 and native std precompilation/packaging. The latter are integration artifacts
@@ -73,8 +74,12 @@ Build, Clippy and fmt always check their full aggregates.
 It pushes the exact checked commit SHA, after verifying that HEAD and the
 worktree still match. A red check refuses the push. Source conflicts stop
 and abort the rebase; resolve them yourself and run land again. Land does
-not run tests or commit generated files. Main's scheduled run owns the API
-index; the generated-file and independent-line-list rules still apply.
+not run other tests or commit generated files. `test-package-manifests` checks
+every package and example manifest with the release compiler and current std products.
+It requires the named rejection for the two intentional negative package
+fixtures and generates the ignored JSON-kit hooks as its guide requires.
+Main's scheduled run owns the API index; the generated-file and
+independent-line-list rules still apply.
 
 Before publishing a ticket, land finds and probes Cargo and rustc locally;
 an unavailable toolchain refuses submission with one line. Checks and
@@ -126,8 +131,9 @@ captured `origin/main`, in ticket order, onto the tree of the tickets ahead
 of it (`git rebase --onto <batch> <main> <head>`), detached in the land-owned
 checkout. It reads other lanes' commits by SHA from the shared object
 store and never touches their worktrees or branches. The checks (hot files,
-regenerated build files, build, Clippy and fmt) run once on the combined
-tree, in the land-owned checkout, and one push carries every commit. Each lane's commits stay separate,
+regenerated build files, build, package and example manifests, Clippy and fmt)
+run once on the combined tree, in the land-owned checkout, and one push carries
+every commit. Each lane's commits stay separate,
 with their authors; nothing is squashed. Each landed ticket gets its own row
 in `hirsel-landings.jsonl`.
 

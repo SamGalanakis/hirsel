@@ -2473,5 +2473,10 @@
     "memory_kb": 1572864,
     "cpu_class": "",
     "inherited_from": "hirsel-driver-unittest"
+  },
+  "test-package-manifests": {
+    "cpu_class": "",
+    "cpu_count": 2,
+    "memory_kb": 2097152
   }
 }

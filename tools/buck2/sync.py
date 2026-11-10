@@ -1123,6 +1123,11 @@ def first_party(meta: dict) -> str:
                             files_env={"HIRSEL_DISTRIBUTION_NOTICES": "//tools/toolchain-dist:notices.py"}))
     out.append("\n" + call("hirsel_script_test", name="test-pubsub-registration", script="tools/tests/pubsub_registration.py", full=False,
                             data=Raw('glob(["tools/tests/pubsub_registration.py", "crates/hirsel-cli/tests/support/pubsub_relay_30/*.py", "crates/hirsel-cli/tests/support/pubsub_relay_30/cases.json", "crates/hirsel-cli/tests/cli/pubsub_relay_30*.rs"])')))
+    out.append("\n" + call("hirsel_script_test", name="test-package-manifests",
+                            script="tools/tests/package_manifests.py", full=False, production=True,
+                            bin_exes={"hirsel": "//:hirsel-cli-bin-hirsel"}, products=PRODUCTS,
+                            args=["--hirsel", "buck-out/tmp/cargo-bin-exe/test-package-manifests/hirsel"],
+                            data=Raw('["tools/json-hooks"] + glob(["packages/**", "examples/**", "stdlib/**"])')))
     out.append("\n" + call("hirsel_script_test", name="test-land", script="tools/tests/land.py", full=False, host=True,
                             data=["tools/land", "tools/land-run", "tools/land_events.py", "tools/tests/land.py", "tools/check-hot-files", "tools/main-runs",
                                   "//tools/buck2:run_failures.py", "//tools/buck2:generated.py",

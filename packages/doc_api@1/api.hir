@@ -10,7 +10,12 @@ pub const LIMIT: u64 = 7
 /// A label with explicit formatting.
 @format(render)
 pub type Label { text: String }
-fn render(value: Label) -> String { value.text }
+@preserves_unique(out)
+fn render(value: Label, mut out: List[u8]) -> () {
+  for byte in string.as_bytes(value.text) {
+    list.push(mut out, byte)
+  }
+}
 
 /// Keeps its representation private.
 pub opaque type Secret: inert uses {} { secret: u64 }
@@ -20,10 +25,10 @@ pub opaque type Secret: inert uses {} { secret: u64 }
 ///
 /// The callback's authority is explicit.
 ///
-///     retain(source, target, value, callback)
+///     retain(source, file, target, value, callback)
 @noalloc
-pub fn retain[T: data](source: Dir, mut target: Bytes, take value: T,
-  callback: fn(T) -> bool uses {}) -> File of source uses {} { unreachable() }
+pub fn retain[T: data + noalloc_drop](source: Dir, take file: File of source, mut target: Bytes,
+  take value: T, callback: fn(T) -> bool uses {}) -> File of source uses {} { take file }
 
 /// Accepts the selected dependency through its local alias and full identity.
 pub fn token(value: wire.Token) -> doc_dep@2/model.Token { value }

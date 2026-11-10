@@ -90,7 +90,7 @@ pub fn key(mut cursor: json.Reader, mut first: bool, expected: String) -> Result
   let Ok(Some(value)) = json.object_key(mut cursor, mut first) else {
     return Error(problem("schema"))
   }
-  if !json.text_is(value, expected) {
+  if !json.key_is(cursor.data, value, expected) {
     return Error(problem("schema"))
   }
   let Ok(()) = json.colon(mut cursor) else {

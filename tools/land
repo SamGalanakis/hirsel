@@ -23,7 +23,8 @@ full. Transient push failures retry the same checked commit once while main
 is unchanged, fetching to resolve ambiguous completion. A red check
 refuses the push and prints its first error.
 
-Land runs no tests: the lane runs the tests its change can break, and
+Land checks every package and example manifest before pushing. The lane runs
+the other tests its change can break, and
 tools/main-runs runs the full suite on main every hour. Each push is appended
 to `hirsel-landings.jsonl` in the common git directory, from which main-runs
 names the lane of a commit.
@@ -491,6 +492,8 @@ def full(tree, screened=False):
         else:
             report = (check('workspace build', [PY, 'tools/buck2/event_logs.py', 'build', *CONFIG,
                                                 '--materializations', 'none', *query.stdout.split()])
+                      or check('package and example manifests', [BUCK2, 'test', *CONFIG,
+                                                                 '//:test-package-manifests'])
                       or check('Clippy', [PY, 'tools/buck2/clippy.py']))
     # fast(tree) checked this exact tree's formatting (now or when screened);
     # fmt reads only tracked sources and the pinned rustfmt, so no rerun.

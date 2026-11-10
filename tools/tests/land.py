@@ -160,6 +160,18 @@ class Land(unittest.TestCase):
         self.assertEqual(log.count('EXIT 1'), 1)
         self.assertEqual(self.main_log(), ['base'])
 
+    def test_manifest_compile_failure_refuses_the_push(self):
+        prepare = self.lane / 'tools/buck2/prepare.py'
+        with prepare.open('a') as script:
+            script.write("\np.write_text('#!/bin/sh\\nif [ \"$1\" = test ]; then echo LANG-4 >&2; exit 1; fi\\necho root//:a\\n')\n")
+        self.git(self.lane, 'add', str(prepare.relative_to(self.lane)))
+        self.git(self.lane, 'commit', '-qm', 'manifest check refuses')
+        refused = self.land()
+        self.assertEqual(refused.returncode, 1, refused.stdout + refused.stderr)
+        self.assertIn('package and example manifests', refused.stdout)
+        self.assertIn('LANG-4', refused.stdout)
+        self.assertEqual(self.main_log(), ['base'])
+
     def test_detached_wrapper_preserves_one_submission_across_reexec(self):
         other = self.top / 'other'
         self.git(self.top, 'clone', '-q', str(self.origin), str(other))

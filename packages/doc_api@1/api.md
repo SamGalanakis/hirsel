@@ -68,14 +68,14 @@ Keeps its representation private.
 
 <a id="def-doc_5fapi_401_2fapi_2fretain"></a>
 
-- `@noalloc pub fn api.retain[T: data](source: Dir, mut target: Bytes, take value: T, callback: fn(T) -> bool uses {}) -> File of source uses {}`
+- `@noalloc pub fn api.retain[T: data + noalloc_drop](source: Dir, take file: File of source, mut target: Bytes, take value: T, callback: fn(T) -> bool uses {}) -> File of source uses {}`
 
 Retains a source brand and all parameter modes.
 A second sentence is kept, too.
 
 The callback's authority is explicit.
 
-    retain(source, target, value, callback)
+    retain(source, file, target, value, callback)
 
 References: [`core@1/Bytes`](https://github.com/SamGalanakis/hirsel-lang/blob/main/docs/api.md#def-core_401_2fBytes), [`core@1/Dir`](https://github.com/SamGalanakis/hirsel-lang/blob/main/docs/api.md#def-core_401_2fDir), [`core@1/File`](https://github.com/SamGalanakis/hirsel-lang/blob/main/docs/api.md#def-core_401_2fFile), [`core@1/bool`](https://github.com/SamGalanakis/hirsel-lang/blob/main/docs/api.md#def-core_401_2fbool)
 

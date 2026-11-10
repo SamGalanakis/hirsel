@@ -91,9 +91,9 @@ fn next_fresh(mut t: Transport) -> Option[u32] uses {} {
 // Forgets a finished stream.
 fn close_inbox(mut t: Transport, id: u32) -> () uses {} {
   let mut kept: List[Inbox] = []
-  for inbox in t.inboxes {
-    if inbox.id != id {
-      list.push(mut kept, unique inbox)
+  for stream_inbox in t.inboxes {
+    if stream_inbox.id != id {
+      list.push(mut kept, unique stream_inbox)
     }
   }
   t.inboxes = take kept

@@ -448,6 +448,30 @@ pub(super) mod tests {
 
     #[test]
     pub(crate) fn a_second_real_frame_runs_before_its_spawn_is_admitted_and_is_adopted_once() {
+        const CHILD: &str = "HIRSEL_PRIVATE_FRAMES_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "tasks::ordered::ahead::tests::a_second_real_frame_runs_before_its_spawn_is_admitted_and_is_adopted_once",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        // The first child waits for the second to enter, so the run needs two
+        // permits at once. The compute grant is process-wide and other tests
+        // set it to one concurrently; with one permit the first child held it
+        // and spun forever. Own the grant in this process.
+        crate::pool::set_compute_grant(4);
         private_frames_case(2, false);
         private_frames_case(4, false);
     }

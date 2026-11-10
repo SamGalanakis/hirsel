@@ -828,10 +828,12 @@ mod native {
         probe.entered[ordinal as usize].fetch_add(1, Ordering::AcqRel);
         if ahead::private(ctx) {
             probe.private.fetch_add(1, Ordering::AcqRel);
-            // Let a later sibling's private start overlap this one.
-
+            // Let a later sibling's private start overlap this one. Wait as
+            // the runtime's own waits do, suspended: a thread spinning here
+            // kept its worker, and with every worker holding a private child
+            // the parent that adopts them never ran.
             while ahead::private(ctx) {
-                std::thread::yield_now();
+                unsafe { ahead::barrier(ctx) };
             }
         }
         let status = unsafe { finish(ctx, ordinal) };

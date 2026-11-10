@@ -7439,6 +7439,7 @@ conformance/STORE/STORE-2-transact-run.hir
 conformance/STORE/STORE-3-body-capture-bad.hir
 conformance/STORE/STORE-3-body-capture-ok.hir
 conformance/STORE/STORE-3-narrow-scope-run.hir
+conformance/STORE/STORE-3-table-scope-denied-run.hir
 conformance/STORE/STORE-3-table-scope-run.hir
 conformance/STORE/STORE-3-tx-escape-bad.hir
 conformance/STORE/STORE-3-tx-escape-ok.hir

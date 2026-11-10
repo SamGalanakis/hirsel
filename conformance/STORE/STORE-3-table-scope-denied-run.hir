@@ -1,0 +1,97 @@
+// rule: STORE-3
+// expect: run
+// steps: 8000000
+// A Tx narrowed to one table's keys gets the same OutOfScope() from history,
+// range and scope_keys on a table outside its scope whether that table exists,
+// is missing, or exists under another schema: a denied read discloses nothing.
+fn rows() -> table.Table[u64, u64] uses {} {
+  table.named("a")
+}
+
+fn neighbour() -> table.Table[u64, u64] uses {} {
+  table.named("ab")
+}
+
+fn retyped() -> table.Table[u64, String] uses {} {
+  table.named("ab")
+}
+
+fn absent() -> table.Table[u64, u64] uses {} {
+  table.named("a\x01")
+}
+
+fn fill(mut tx: store.Tx, t: table.Table[u64, u64]) -> Result[(), store.TxError] {
+  table.create(mut tx, t)?
+  for k in 0u64..4u64 {
+    table.put(mut tx, t, k, k)?
+  }
+  Ok(())
+}
+
+fn fill_rows(mut tx: store.Tx, info: store.CallInfo, a: ()) -> Result[(), store.TxError] {
+  fill(mut tx, rows())?
+  fill(mut tx, neighbour())
+}
+
+fn denied(sub: store.Tx) -> bool {
+  let histories = table.history(sub, "ab") == Error(OutOfScope()) && table.history(
+    sub,
+    "a\x01"
+  ) == Error(OutOfScope())
+  let ranges = table.range(sub, neighbour(), Unbounded(), Unbounded(), 8, Ascending()) == Error(
+    OutOfScope()
+  ) && table.range(sub, absent(), Unbounded(), Unbounded(), 8, Ascending()) == Error(
+    OutOfScope()
+  ) && table.range(sub, retyped(), Unbounded(), Unbounded(), 8, Ascending()) == Error(
+    OutOfScope()
+  )
+  let scopes = table.scope_keys(sub, neighbour(), Included(1), Excluded(3), Read()) == Error(
+    OutOfScope()
+  ) && table.scope_keys(sub, absent(), Included(1), Excluded(3), Read()) == Error(
+    OutOfScope()
+  ) && table.scope_keys(sub, retyped(), Included(1), Excluded(3), Read()) == Error(
+    OutOfScope()
+  )
+  let gets = table.get(sub, retyped(), 1) == Error(OutOfScope())
+  histories && ranges && scopes && gets
+}
+
+fn check_rows(mut tx: store.Tx, info: store.CallInfo, a: ()) -> Result[
+  bool,
+  store.TxError
+] {
+  let keys = table.scope_keys(tx, rows(), Included(1), Excluded(3), ReadWrite())?
+  let by_keys = store.narrow(
+    mut tx,
+    keys,
+    fn(mut sub: store.Tx) -> bool {
+      denied(sub)
+    }
+  )?
+  let by_table = store.narrow(
+    mut tx,
+    table.scope(rows(), ReadWrite()),
+    fn(mut sub: store.Tx) -> bool {
+      denied(sub)
+    }
+  )?
+  Ok(by_keys && by_table)
+}
+
+pub fn main(t: Test) -> Result[(), store.StoreError] {
+  let d = test.dir(t, [])
+  let mut s = store.open(d, store.default_config())?
+  let setup: Result[(), store.TxFailure[store.TxError]] = store.transact(
+    mut s,
+    fill_rows,
+    ()
+  )
+  test.check(t, setup == Ok(()))
+  let checked: Result[bool, store.TxFailure[store.TxError]] = store.transact(
+    mut s,
+    check_rows,
+    ()
+  )
+  test.check(t, checked == Ok(true))
+  Ok(())
+}

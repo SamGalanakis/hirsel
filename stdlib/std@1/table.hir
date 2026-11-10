@@ -601,15 +601,25 @@ pub fn range[K: key + serializable, V: serializable](
 }
 
 /// The whole table with `access`: its rows, its catalog entry, where the
-/// library keeps its live schemas and renames, and its schema history rows. It reads nothing, so it
-/// serves a table the body will create. An invalid name holds no key.
+/// library keeps its live schemas and renames, and its schema history rows,
+/// and read only, the garbage records of its rows and history, which `create`
+/// checks before reusing them. Every key it holds names this table, so a `Tx`
+/// narrowed to it learns nothing of another. It reads nothing, so it serves a
+/// table the body will create. An invalid name holds no key.
 pub fn scope[K: key + serializable, V: serializable](t: Table[K, V], access: store.Access) -> store.KeyScope uses {} {
   let name = table_name(t)
   if !valid(name) {
     return store.interval(b"", Some(b""), access)
   }
   let prefix = table_rows(name)
-  store.join(store.interval(copy prefix, keys.prefix_end(prefix), access), catalog_span(name, access))
+  let pending = store.garbage(copy prefix)
+  let stale = store.garbage(history_rows(name))
+  let owned = store.join(store.interval(copy prefix, keys.prefix_end(prefix), access), catalog_span(name, access))
+  let garbage = store.join(
+    store.interval(copy pending, keys.prefix_end(pending), Read()),
+    store.interval(copy stale, keys.prefix_end(stale), Read())
+  )
+  store.join(owned, garbage)
 }
 
 /// The rows whose keys lie between `from` and `to` with `access`, and the

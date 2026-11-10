@@ -5843,8 +5843,10 @@ record in the key is a key change, refused with `Schema(KeyMismatch)` until a
 migration; ranges are always a bounded index scan.
 
 `table.scope(t, access)` is the key scope of the whole table with `access`: its
-rows, under any generation, and its catalog entry. It reads nothing; the table
-operations reach only the current generation.
+rows, under any generation, its catalog entry and history rows, and with `Read`
+the store's garbage records of those rows and history rows, which `create` checks
+before reusing a name or generation. Every key it holds names `t`. It reads
+nothing; the table operations reach only the current generation.
 `table.scope_keys(tx, t, from, to, access)` holds the rows of the current
 generation between `from` and `to` with `access` and the catalog entry with
 `Read`. Neither holds another table's catalog entry, so a `Tx` narrowed to one

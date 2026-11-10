@@ -206,6 +206,11 @@ static EMPTY_ENVIRONMENT: EmptyEnvironment = EmptyEnvironment {
     },
 };
 
+/// The empty environment's word, which a plain function reference carries.
+pub(super) fn empty_environment() -> usize {
+    (&EMPTY_ENVIRONMENT.header as *const Header) as usize
+}
+
 /// Bind an independently replayed callee to its checked function reference and
 /// owned canonical argument. No caller, grant provider or live child is created.
 pub(crate) fn replay_state(

@@ -52,6 +52,8 @@ pub struct NativeLinkSource {
     call_launch: Option<(DefPath, super::link::LaunchKind)>,
     requested_run: Option<(DefPath, Arc<hirsel_run_config::ValidatedRun>)>,
     test_entries: Vec<(DefPath, u64)>,
+    /// The `db@1` place heads the build serves, each with its runner main's decoder symbol.
+    heads: Vec<(DefPath, String)>,
     metadata_owner: Mutex<Option<Arc<hirsel_engine_admission::MemoryReservation>>>,
 }
 
@@ -259,6 +261,7 @@ impl NativeLinkSource {
             call_launch: None,
             requested_run: None,
             test_entries: Vec::new(),
+            heads: Vec::new(),
             metadata_owner: Mutex::new(None),
         })
     }
@@ -286,6 +289,7 @@ impl NativeLinkSource {
             call_launch,
             requested_run,
             test_entries,
+            heads,
             metadata_owner: _,
         } = self;
         w.add(size_of::<Self>() + 2 * size_of::<usize>());
@@ -339,6 +343,10 @@ impl NativeLinkSource {
             w.path(path);
         }
         w.vec(test_entries, |w, (path, _)| w.path(path));
+        w.vec(heads, |w, (path, decoder)| {
+            w.path(path);
+            w.add(decoder.capacity());
+        });
         w.bytes()
     }
     pub fn retain_metadata(
@@ -444,6 +452,41 @@ impl NativeLinkSource {
         ));
         Ok(request)
     }
+    /// Root each `db@1` place head's runner main, which runs the head as a callee run's
+    /// main runs its entry: the runtime finds the head and its main in the Entry table, the
+    /// main under `hirsel_run_schema::place_main_path`.
+    pub fn bind_heads(
+        &mut self,
+        program: &hirsel_rc::instance::Program,
+        heads: &[DefPath],
+        target: &hirsel_lir::layout_types::TargetSpec,
+    ) -> Result<Vec<hirsel_rc::library::Request>, NativeError> {
+        if self.metadata_allowance().is_some() || !self.heads.is_empty() {
+            return Err(failed("native place heads are already selected"));
+        }
+        let owners =
+            hirsel_rc::library::owners(&program.types, &program.signatures).over(&program.owners);
+        let mut requests = Vec::new();
+        for head in heads {
+            if !self.functions.contains_key(head) {
+                return Err(failed(format!(
+                    "place head {head} is not a source function"
+                )));
+            }
+            let request = hirsel_rc::library::runners::replay_main(program, head)
+                .map_err(|e| failed(format!("place head main: {e}")))?;
+            let layouts = hirsel_layout::layout::LayoutBuilder::new(target, &owners);
+            let key = request
+                .key(&program.types, &layouts)
+                .map_err(|e| failed(format!("place head main key: {e:?}")))?;
+            self.heads.push((
+                head.clone(),
+                hirsel_lir::emission::symbol_name(key.definition(), Some(&key.digest())),
+            ));
+            requests.push(request);
+        }
+        Ok(requests)
+    }
     pub fn bind_run(
         &mut self,
         entry: &DefPath,
@@ -521,6 +564,37 @@ impl NativeLinkSource {
             program.entries.insert(
                 hirsel_lir::emission::function_thunk_name(entry, Some(&instance)),
                 entry.to_string(),
+            );
+        }
+        for (head, decoder) in &self.heads {
+            let instance = *program
+                .functions
+                .get(head)
+                .ok_or_else(|| failed("a place head has no admitted source instance"))?;
+            let unit = program
+                .summaries
+                .iter_mut()
+                .find(|unit| unit.definition == *head && unit.instance == instance)
+                .ok_or_else(|| failed("a place head has no admitted source unit"))?;
+            unit.glue.entries.insert((head.clone(), Some(instance)));
+            program.entries.insert(
+                hirsel_lir::emission::function_thunk_name(head, Some(&instance)),
+                head.to_string(),
+            );
+            let main = program
+                .summaries
+                .iter_mut()
+                .find(|unit| {
+                    hirsel_lir::emission::symbol_name(&unit.definition, Some(&unit.instance))
+                        == *decoder
+                })
+                .ok_or_else(|| failed("a place head has no admitted runner main unit"))?;
+            main.glue
+                .entries
+                .insert((main.definition.clone(), Some(main.instance)));
+            program.entries.insert(
+                hirsel_lir::emission::function_thunk_name(&main.definition, Some(&main.instance)),
+                hirsel_run_schema::place_main_path(&head.to_string()),
             );
         }
         program.bind_source(&self.view())?;
@@ -606,6 +680,7 @@ impl NativeLinkSource {
                 .as_ref()
                 .map(|(entry, run)| (entry, run.launch_bytes())),
             &self.test_entries,
+            &self.heads,
             self.call_launch.as_ref().map(|(entry, kind)| match kind {
                 super::link::LaunchKind::Call { roots, decoder } => (
                     entry,

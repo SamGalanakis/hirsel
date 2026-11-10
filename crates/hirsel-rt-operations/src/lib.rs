@@ -373,6 +373,12 @@ pub fn classify(mut row: OperationRow) -> Result<OperationRow, String> {
         "io.runner" | "test.runner" | "runner.narrow" | "runner.only" | "runner.entry_id" => {
             Some(format!("hirsel_rt_v2_{}", name.replace('.', "_")))
         }
+        // db@1 places (STORE-12, `runners/places.rs`): a head's inbox and arrivals, and a
+        // caller's served call.
+        "io.inbox" | "inbox.take" | "arrival.request" | "arrival.end" => {
+            Some(format!("hirsel_rt_v2_{}", name.replace('.', "_")))
+        }
+        "runner.send" => Some("hirsel_rt_v2_place_send".into()),
         "$intrinsic.RunnerSend" => Some("hirsel_rt_v2_runner_send".into()),
         "$intrinsic.RunnerWait" => Some("hirsel_rt_v2_runner_wait".into()),
         "$intrinsic.RunnerTake" => Some("hirsel_rt_v2_runner_take".into()),
@@ -1128,6 +1134,48 @@ pub const HIRSEL_ABI_EXPORTS: &[AbiExport] = &[
         destination: true,
         result: Some((72, 8)),
         parameters: &[Physical::Pointer],
+    },
+    AbiExport {
+        caller_site: false,
+        symbol: "hirsel_rt_v2_io_inbox",
+        destination: true,
+        result: Some((16, 8)),
+        parameters: &[Physical::Pointer],
+    },
+    AbiExport {
+        caller_site: false,
+        symbol: "hirsel_rt_v2_inbox_take",
+        destination: true,
+        result: Some((8, 8)),
+        parameters: &[Physical::Pointer, Physical::I8],
+    },
+    AbiExport {
+        caller_site: false,
+        symbol: "hirsel_rt_v2_arrival_request",
+        destination: true,
+        result: Some((224, 8)),
+        parameters: &[Physical::Pointer],
+    },
+    AbiExport {
+        caller_site: false,
+        symbol: "hirsel_rt_v2_arrival_end",
+        destination: false,
+        result: None,
+        parameters: &[Physical::Pointer, Physical::Pointer],
+    },
+    AbiExport {
+        caller_site: false,
+        symbol: "hirsel_rt_v2_place_send",
+        destination: true,
+        result: Some((32, 8)),
+        parameters: &[
+            Physical::Pointer,
+            Physical::Pointer,
+            Physical::Pointer,
+            Physical::Pointer,
+            Physical::I64,
+            Physical::I64,
+        ],
     },
     AbiExport {
         caller_site: false,
@@ -3151,7 +3199,7 @@ pub const NATIVE_PATHS: &[&str] = &[
     "runner.call",
     "runner.spawn",
     "test.runner",
-    // db@1 places (STORE-12): interpreter-only until the native head and provider land.
+    // db@1 places (STORE-12, `hirsel-rt/src/runners/places.rs`).
     "runner.send",
     "io.inbox",
     "inbox.take",

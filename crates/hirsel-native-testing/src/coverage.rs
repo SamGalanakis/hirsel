@@ -262,6 +262,7 @@ pub fn backend_features(input: &ValidatedNativeInput) -> (BTreeSet<String>, Vec<
                 discharge: Default::default(),
                 launch: Default::default(),
                 validation: hirsel_native::Validation::EveryStage,
+                places: Vec::new(),
             };
             match build(input, &options) {
                 Err(error) => {

@@ -44,6 +44,22 @@ pub struct Fixture {
     pub migrate: bool,
 }
 
+impl Fixture {
+    /// The `db@1` place heads its runners name, which a build of its program roots
+    /// (`Options::places`).
+    pub fn place_heads(&self) -> Vec<hirsel_syntax::DefPath> {
+        let mut heads: Vec<_> = self
+            .runners
+            .iter()
+            .filter_map(|runner| runner.head.as_deref())
+            .filter_map(hirsel_syntax::DefPath::from_full)
+            .collect();
+        heads.sort();
+        heads.dedup();
+        heads
+    }
+}
+
 impl Default for Fixture {
     fn default() -> Self {
         Self {

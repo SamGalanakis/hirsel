@@ -287,6 +287,13 @@ uint8_t hirsel_rt_v2_runner_entry(hirsel_rt_v2_ctx*, void*, uintptr_t*);
 uint8_t hirsel_rt_v2_runner_argument(hirsel_rt_v2_ctx*, void*, hirsel_rt_v2_slice*);
 uint8_t hirsel_rt_v2_runner_io(hirsel_rt_v2_ctx*, void*, uint64_t*);
 uint8_t hirsel_rt_v2_runner_reply(hirsel_rt_v2_ctx*, uint64_t, hirsel_rt_v2_header*, uint64_t, uint64_t);
+/* db@1 places: Inbox and Arrival are handles; an Arrived image is 224 bytes, a CallEnd 32,
+   and inbox.take's Option[List[Arrival]] is a list block whose null is None. */
+uint8_t hirsel_rt_v2_io_inbox(hirsel_rt_v2_ctx*, void*, hirsel_rt_v2_handle_result*, const uint64_t*);
+uint8_t hirsel_rt_v2_inbox_take(hirsel_rt_v2_ctx*, void*, hirsel_rt_v2_header**, const uint64_t*, uint8_t);
+uint8_t hirsel_rt_v2_arrival_request(hirsel_rt_v2_ctx*, void*, void*, const uint64_t*);
+uint8_t hirsel_rt_v2_arrival_end(hirsel_rt_v2_ctx*, const uint64_t*, const void*);
+uint8_t hirsel_rt_v2_place_send(hirsel_rt_v2_ctx*, void*, void*, const uint64_t*, const uint32_t*, const uintptr_t*, hirsel_rt_v2_header*, uint64_t, uint64_t);
 /* The store authority seam: Authority and Claim are handles, a Level is a value word;
    provider results are the Result[_, SeamError] images (64 bytes) and Advanced (24). */
 uint8_t hirsel_rt_v2_io_authority(hirsel_rt_v2_ctx*, void*, hirsel_rt_v2_handle_result*, const uint64_t*, hirsel_rt_v2_header*, uint64_t, uint64_t);

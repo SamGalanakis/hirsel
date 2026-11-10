@@ -122,6 +122,7 @@ impl NativeBootstrap {
             plan.options.flat_walk,
             plan.options.scoped_specialization,
             discharge,
+            &plan.options.places,
             proofs
                 .as_ref()
                 .map(|proofs| super::native_products::evidence_identity(&proofs.evidence)),
@@ -372,7 +373,7 @@ impl NativeBootstrap {
             &reader,
         )
         .map_err(|e| e.to_string())?;
-        let library_roots = if plan
+        let mut library_roots = if plan
             .requested_run
             .as_ref()
             .is_some_and(|run| run.record().launch == hirsel_run_schema::LaunchKind::Call)
@@ -410,6 +411,17 @@ impl NativeBootstrap {
         } else {
             Vec::new()
         };
+        if !plan.options.places.is_empty() {
+            library_roots.extend(
+                source
+                    .bind_heads(
+                        &declarations.program,
+                        &plan.options.places,
+                        &plan.options.target,
+                    )
+                    .map_err(|e| e.to_string())?,
+            );
+        }
         if let Some(run) = plan.requested_run {
             source
                 .bind_run(&facts.run.entry, run)

@@ -2106,16 +2106,39 @@ pub(crate) unsafe fn execute(
             entry.name, entry.provider
         ));
     }
-    // `runner.grants` compiles to the six flags and empty lists (RUN-2).
+    // `runner.grants` compiles to the six flags and empty lists (RUN-2). A `db@1` place's
+    // head alone runs under its runner's grants, directories among them (in memory, as
+    // `sim@1` simulates them); its callers' calls never do.
+    let place = |e: &hirsel_run_schema::RunnerEntry| {
+        e.provider == "sim@1" && e.models.as_deref() == Some("db@1") && e.head.is_some()
+    };
     if let Some(entry) = runners.iter().find(|e| {
-        e.grants
-            .as_ref()
-            .is_some_and(|g| !g.dirs.is_empty() || g.net.is_some() || g.process.is_some())
+        e.grants.as_ref().is_some_and(|g| {
+            (!g.dirs.is_empty() && !place(e)) || g.net.is_some() || g.process.is_some()
+        })
     }) {
         return Err(format!(
             "runner {} grants directories, network or processes, which native runners do not",
             entry.name
         ));
+    }
+    if let Some(entry) = runners.iter().find(|e| place(e)) {
+        if production_free {
+            return Err(format!(
+                "runner {} is a db@1 place, which native code serves only under the harness",
+                entry.name
+            ));
+        }
+        // The build roots each head and its runner main (`Options::places`).
+        let head = entry.head.as_deref().unwrap_or_default();
+        for path in [head.to_owned(), hirsel_run_schema::place_main_path(head)] {
+            if !program.entries.iter().any(|(_, p)| *p == path) {
+                return Err(format!(
+                    "runner {}'s place head {head} is not built into this program ({path})",
+                    entry.name
+                ));
+            }
+        }
     }
     let fault_seed = if production_free {
         requested

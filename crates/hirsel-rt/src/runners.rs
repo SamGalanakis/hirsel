@@ -48,6 +48,7 @@ use crate::views::Slice;
 use crate::{Header, STATUS_OK, TaskCtx, fault};
 
 pub(crate) mod native;
+pub(crate) mod places;
 
 type Concurrent = std::sync::Arc<dyn crate::io_concurrent::ConcurrentAdapter>;
 type HomeOwner = Box<dyn std::any::Any>;
@@ -65,12 +66,15 @@ type Admit = unsafe fn(
 pub(crate) struct Launch {
     pub(crate) admit: Admit,
     pub(crate) finish_replay: unsafe fn(*mut TaskCtx) -> Stopped<u8>,
+    /// Drop a place head's `Inbox` or `Arrival`.
+    pub(crate) close_place: unsafe fn(*mut TaskCtx, u64) -> u8,
 }
 
 #[unsafe(export_name = "hirsel.runtime.runners.provider")]
 static LAUNCH: Launch = Launch {
     admit,
     finish_replay: native::finish_replay,
+    close_place: places::close,
 };
 
 unsafe fn admit(
@@ -170,6 +174,8 @@ pub(crate) struct Execution {
     /// The root's cooperative readiness, which callee runs share under their own tags.
     readiness: Option<crate::readiness::Readiness>,
     tags: u64,
+    /// The `db@1` places this execution's calls reached.
+    places: places::Places,
 }
 
 /// One run.
@@ -202,6 +208,8 @@ struct Callee {
     binding: Box<Binding>,
     /// Its tape, when it records one.
     recording: bool,
+    /// The place this run is the head of: it answers no call, and its end closes the place.
+    head: Option<String>,
 }
 
 /// What a callee run starts from: its main, its entry and its argument.
@@ -275,6 +283,7 @@ impl Execution {
             driving: false,
             readiness: None,
             tags: 0,
+            places: places::Places::default(),
         }
     }
     fn ready(&mut self, index: usize) {
@@ -381,6 +390,7 @@ unsafe fn drive_idle(ctx: *mut TaskCtx) -> Stopped<()> {
     // SAFETY: the context is live.
     unsafe {
         take_calls(ctx, me)?;
+        places::take_heads(ctx, me)?;
         take_cancels(ctx, me)?;
     }
     if let Some(callee) = &mut execution(ctx).runs[me].callee {
@@ -396,6 +406,8 @@ unsafe fn drive_idle(ctx: *mut TaskCtx) -> Stopped<()> {
         // SAFETY: the context is live and nothing is borrowed across the switch.
         unsafe { switch(ctx, next) };
     }
+    // SAFETY: this run is active again.
+    unsafe { places::resumed(ctx, me) };
     Ok(())
 }
 
@@ -652,6 +664,7 @@ unsafe fn take_calls(ctx: *mut TaskCtx, me: usize) -> Stopped<()> {
                 io,
                 binding,
                 recording: tape.is_some(),
+                head: None,
             }),
         });
         e.ready.push_back(index);
@@ -720,6 +733,10 @@ unsafe fn finish(index: usize, end: &End) -> Stopped<()> {
         .callee
         .as_mut()
         .unwrap_or_else(|| fault("the root ended as a callee"));
+    if callee.head.is_some() {
+        // A head answers no call and keeps no tape of its own.
+        return Ok(());
+    }
     let outcome = match end {
         End::Replied(tag, bytes) => Some(match *tag {
             REPLY_OK => CalleeOutcome::Ok(bytes.clone()),
@@ -820,7 +837,10 @@ unsafe fn retire(ctx: *mut TaskCtx, me: usize, end: End) -> ! {
         e.runs[me].ended = true;
         e.ready.retain(|&r| r != me);
         let callee = e.runs[me].callee.as_ref().unwrap();
-        ended(callee.caller, callee.token, end);
+        match &callee.head {
+            Some(key) => places::head_ended(&key.clone()),
+            None => ended(callee.caller, callee.token, end),
+        }
         // A stop here ends the execution.
         let next = crate::stop::check(ctx, next_run());
         depart(ctx, next)

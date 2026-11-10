@@ -48,6 +48,9 @@ pub struct Options {
     pub scoped_specialization: bool,
     /// PS-13 checks accepted evidence licenses removing (`--proofs`).
     pub discharge: Discharge,
+    /// The `db@1` place heads the build serves (STORE-12): each head's runner main is
+    /// rooted, and both are in the Entry table.
+    pub places: Vec<DefPath>,
 }
 
 impl Options {
@@ -63,6 +66,7 @@ impl Options {
             flat_walk: true,
             scoped_specialization: true,
             discharge: Discharge::default(),
+            places: Vec::new(),
         }
     }
 }

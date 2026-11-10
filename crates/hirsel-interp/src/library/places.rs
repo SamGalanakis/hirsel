@@ -67,22 +67,6 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// A full versioned path `package@version/module/.../name`.
-fn def_path(path: &str) -> Option<hirsel_syntax::DefPath> {
-    let mut parts = path.split('/');
-    let (name, version) = parts.next()?.split_once('@')?;
-    let mut modules: Vec<String> = parts.map(str::to_owned).collect();
-    let item = modules.pop()?;
-    Some(hirsel_syntax::DefPath(hirsel_syntax::ItemPath {
-        package: hirsel_syntax::PackageId {
-            name: name.into(),
-            version: version.into(),
-        },
-        modules,
-        name: item,
-    }))
-}
-
 /// A `CallEnd` value.
 pub(super) fn call_end(outcome: &CallOutcome) -> Value {
     match outcome {
@@ -317,7 +301,10 @@ impl Library {
             .definitions
             .as_ref()
             .is_none_or(|allowed| allowed.contains(&path));
-        let head = entry_model.head.as_deref().and_then(def_path);
+        let head = entry_model
+            .head
+            .as_deref()
+            .and_then(hirsel_syntax::DefPath::from_full);
         let (Some(head), true, true) = (head, place && form.served(), listed) else {
             return Ok(OperationResult::returned(call_end(&CallOutcome::NotRun(
                 DENIED,

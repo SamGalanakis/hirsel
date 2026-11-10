@@ -112,6 +112,14 @@ pub(crate) unsafe fn run_close(
                 .close_endpoint)(ctx, handle, anchor, operation_site)
         });
     }
+    if handle >> 59 == 1 {
+        // SAFETY: the dropped value owned this Inbox or Arrival of the running place head.
+        return shielded(ctx, |ctx| unsafe {
+            (crate::runtime_roots::runners()
+                .unwrap_or_else(|| fault("a place handle close without the runners provider"))
+                .close_place)(ctx, handle)
+        });
+    }
     let Some(close) = ctx.run_ref().close_handle else {
         fault("a handle drop in a context without an Io adapter's close_handle");
     };

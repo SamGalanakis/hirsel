@@ -114,5 +114,7 @@ pub fn host_capability_kind(name: &str) -> bool {
             | "ChildGroup"
             | "Authority"
             | "Claim"
+            | "Inbox"
+            | "Arrival"
     )
 }

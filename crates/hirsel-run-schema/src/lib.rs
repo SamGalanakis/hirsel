@@ -34,7 +34,8 @@ pub use grants::{
 };
 pub use runners::{
     DEFAULT_QUEUE, DEFAULT_RECONNECT, DEFAULT_THREADS, Endpoint, FaultRate, PlaceAdmission,
-    PlaceState, Placed, Retry, Roots, RunnerEntry, SIM_FAULT_SITES, TlsFiles, sim_model_sites,
+    PlaceState, Placed, Retry, Roots, RunnerEntry, SIM_FAULT_SITES, TlsFiles, place_main_path,
+    sim_model_sites,
 };
 mod outcome;
 pub use outcome::{

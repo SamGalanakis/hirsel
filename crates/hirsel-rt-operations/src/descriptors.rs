@@ -839,6 +839,12 @@ pub const ENTRIES: &[Entry] = &[
     ops("hirsel_rt_v2_runner_only", HOST),
     ops("hirsel_rt_v2_runner_grants", HOST),
     ops("hirsel_rt_v2_runner_entry_id", HOST),
+    // runners/places.rs: db@1 places.
+    ops("hirsel_rt_v2_io_inbox", HOST),
+    ops("hirsel_rt_v2_inbox_take", HOST),
+    ops("hirsel_rt_v2_arrival_request", HOST),
+    ops("hirsel_rt_v2_arrival_end", HOST),
+    ops("hirsel_rt_v2_place_send", HOST),
     ops("hirsel_rt_v2_runner_send", HOST),
     ops("hirsel_rt_v2_runner_wait", HOST),
     ops("hirsel_rt_v2_runner_take", HOST),

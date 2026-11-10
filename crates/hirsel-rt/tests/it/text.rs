@@ -106,92 +106,110 @@ fn byte_descriptor_and_text_records_match_derivation_on_both_targets() {
     }
 }
 
+/// The runtime's own list descriptors are the derivation's, element for element, on both
+/// targets: `List[Bytes]` releases each owner; `List[Arrival]` closes each resource handle.
 #[test]
-fn bytes_list_descriptor_matches_derivation_on_both_targets() {
-    use hirsel_layout::layout::{LayoutBuilder, Owners};
+fn runtime_list_descriptors_match_derivation_on_both_targets() {
+    use hirsel_layout::layout::{LayoutBuilder, OwnerRepresentation, Owners};
     use hirsel_lir::layout_types::{LayoutKind, TargetSpec};
     use hirsel_types::Primitive;
+    let arrival = hirsel_syntax::DefPath::core("Arrival");
+    let owners = Owners {
+        nominals: [(
+            hirsel_syntax::DefId::intern(&arrival),
+            OwnerRepresentation::Handle {
+                revision: hirsel_syntax::ContentHash::of_bytes(b"Arrival"),
+                resource: true,
+            },
+        )]
+        .into(),
+        ..Default::default()
+    };
     for target in [
         TargetSpec::x86_64_unknown_linux_gnu(),
         TargetSpec::aarch64_unknown_linux_gnu(),
     ] {
         let mut ty = support::schema::ty();
         let bytes = ty.p(Primitive::Bytes);
-        let list = ty.list(bytes);
-        let owners = Owners::default();
-        let mut builder = LayoutBuilder::new(&target, &owners);
-        let slice = builder.layout(&ty.store, bytes).unwrap();
-        builder.layout(&ty.store, list).unwrap();
-        let table = builder.finish();
-        hirsel_lir::layout_validate::validate_table(&table, &target).unwrap();
-        let payload = table
-            .layouts
-            .iter()
-            .position(|r| matches!(r.kind, LayoutKind::Sequence { element } if element == slice))
-            .unwrap();
-        let derived = hirsel_lir::rt_program::descriptor(
-            &table,
-            hirsel_lir::layout_types::LayoutId(payload as u32),
-        )
-        .unwrap();
-        let runtime = &BYTES_LIST_DESCRIPTOR.0;
-        assert_eq!(
-            (
-                runtime.magic,
-                runtime.version,
-                runtime.size,
-                runtime.align,
-                runtime.field_count,
-                runtime.flags,
-                runtime.logical
-            ),
-            (
-                hirsel_rt::LAYOUT_MAGIC,
-                hirsel_rt::LAYOUT_VERSION,
-                derived.size,
-                derived.align,
-                derived.field_count,
-                derived.flags,
-                derived.logical
+        let handle = ty.named(&arrival, vec![]);
+        for (element, runtime) in [
+            (bytes, &BYTES_LIST_DESCRIPTOR.0),
+            (handle, &HANDLE_LIST_DESCRIPTOR.0),
+        ] {
+            let list = ty.list(element);
+            let mut builder = LayoutBuilder::new(&target, &owners);
+            let element = builder.layout(&ty.store, element).unwrap();
+            builder.layout(&ty.store, list).unwrap();
+            let table = builder.finish();
+            hirsel_lir::layout_validate::validate_table(&table, &target).unwrap();
+            let payload = table
+                .layouts
+                .iter()
+                .position(|r| matches!(r.kind, LayoutKind::Sequence { element: e } if e == element))
+                .unwrap();
+            let derived = hirsel_lir::rt_program::descriptor(
+                &table,
+                hirsel_lir::layout_types::LayoutId(payload as u32),
             )
-        );
-        assert!(runtime.finalizer.is_none() && derived.finalizer.is_none());
-        let steps =
-            unsafe { std::slice::from_raw_parts(runtime.steps, runtime.step_count as usize) };
-        let steps: Vec<_> = steps
-            .iter()
-            .map(|s| {
-                assert!(s.layout.is_null());
+            .unwrap();
+            assert_eq!(
                 (
-                    s.kind,
-                    s.field,
-                    s.variant,
-                    s.span,
-                    s.offset,
-                    s.stride,
-                    s.count,
-                    s.count_offset,
-                )
-            })
-            .collect();
-        let expected: Vec<_> = derived
-            .steps
-            .iter()
-            .map(|s| {
-                assert!(s.layout.is_none());
+                    runtime.magic,
+                    runtime.version,
+                    runtime.size,
+                    runtime.align,
+                    runtime.field_count,
+                    runtime.flags,
+                    runtime.logical
+                ),
                 (
-                    s.kind.code(),
-                    s.field,
-                    s.variant,
-                    s.span,
-                    s.offset,
-                    s.stride,
-                    s.count,
-                    s.count_offset,
+                    hirsel_rt::LAYOUT_MAGIC,
+                    hirsel_rt::LAYOUT_VERSION,
+                    derived.size,
+                    derived.align,
+                    derived.field_count,
+                    derived.flags,
+                    derived.logical
                 )
-            })
-            .collect();
-        assert_eq!(steps, expected);
+            );
+            assert!(runtime.finalizer.is_none() && derived.finalizer.is_none());
+            let steps =
+                unsafe { std::slice::from_raw_parts(runtime.steps, runtime.step_count as usize) };
+            let steps: Vec<_> = steps
+                .iter()
+                .map(|s| {
+                    assert!(s.layout.is_null());
+                    (
+                        s.kind,
+                        s.field,
+                        s.variant,
+                        s.span,
+                        s.offset,
+                        s.stride,
+                        s.count,
+                        s.count_offset,
+                    )
+                })
+                .collect();
+            let expected: Vec<_> = derived
+                .steps
+                .iter()
+                .map(|s| {
+                    assert!(s.layout.is_none());
+                    (
+                        s.kind.code(),
+                        s.field,
+                        s.variant,
+                        s.span,
+                        s.offset,
+                        s.stride,
+                        s.count,
+                        s.count_offset,
+                    )
+                })
+                .collect();
+            assert_eq!(steps, expected);
+        }
     }
 }
 

@@ -95,6 +95,64 @@ pub static BYTES_LIST_DESCRIPTOR: BytesListDescriptor = BytesListDescriptor(Layo
 /// # Safety
 /// `ctx` is a live run context.
 pub unsafe fn bytes_list_index(ctx: *mut TaskCtx) -> u32 {
+    unsafe { (*ctx).heap().layout_count() - 2 }
+}
+
+/// The payload descriptor of a runtime list of resource handles (`inbox.take`'s
+/// `List[Arrival]`): a sequence of 8-byte handle words whose drop program closes each,
+/// highest index first. Its steps are the derivation's (`hirsel_lir::rt_program`).
+#[repr(transparent)]
+pub struct HandleListDescriptor(pub Layout);
+// SAFETY: this immutable descriptor points only at the immutable steps below.
+unsafe impl Sync for HandleListDescriptor {}
+static HANDLE_LIST_STEPS: BytesListSteps = BytesListSteps([
+    crate::Step {
+        kind: crate::STEP_LOOP,
+        field: crate::WHOLE_VALUE,
+        variant: 0,
+        span: 1,
+        offset: 16,
+        stride: 8,
+        count: 0,
+        count_offset: 0,
+        layout: std::ptr::null(),
+    },
+    crate::Step {
+        kind: crate::STEP_CLOSE_HANDLE,
+        field: crate::WHOLE_VALUE,
+        variant: 0,
+        span: 0,
+        offset: 0,
+        stride: 0,
+        count: 0,
+        count_offset: crate::NO_OFFSET,
+        layout: std::ptr::null(),
+    },
+]);
+pub static HANDLE_LIST_DESCRIPTOR: HandleListDescriptor = HandleListDescriptor(Layout {
+    magic: LAYOUT_MAGIC,
+    version: LAYOUT_VERSION,
+    size: 16,
+    align: 8,
+    finalizer: None,
+    steps: HANDLE_LIST_STEPS.0.as_ptr(),
+    step_count: 2,
+    field_count: 0,
+    flags: LAYOUT_DYNAMIC
+        | crate::LAYOUT_LOGICAL_PER_ELEMENT
+        | crate::LAYOUT_SEQUENCE
+        | crate::release::LAYOUT_WIDE_CURSOR,
+    logical: 8,
+    logical_count: std::ptr::null(),
+    scan: std::ptr::null(),
+    scan_words: 0,
+});
+
+/// The registry index of [`HANDLE_LIST_DESCRIPTOR`]: the last, after the runtime's
+/// `List[Bytes]`.
+/// # Safety
+/// `ctx` is a live run context.
+pub unsafe fn handle_list_index(ctx: *mut TaskCtx) -> u32 {
     unsafe { (*ctx).heap().layout_count() - 1 }
 }
 

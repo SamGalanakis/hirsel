@@ -83,6 +83,13 @@ pub struct RunnerEntry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub level: Option<String>,
 }
+/// The path a natively compiled program lists a place head's main under, beside the head
+/// itself in its entries: `$native.runner_main[<head>]`, the runner main the compiler roots
+/// for each head the build names, which runs the head as a callee's main runs its entry.
+pub fn place_main_path(head: &str) -> String {
+    format!("$native.runner_main[{head}]")
+}
+
 /// A runner host's endpoint: `{"tcp": {"address", "service"}}` or `{"unix": path}`.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase", deny_unknown_fields)]

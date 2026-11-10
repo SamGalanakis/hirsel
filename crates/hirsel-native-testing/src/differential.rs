@@ -193,6 +193,7 @@ fn options(target: &TargetSpec, regions: bool, elide: bool, reuse: bool) -> Opti
         flat_walk: true,
         scoped_specialization: true,
         discharge: Default::default(),
+        places: Vec::new(),
     }
 }
 
@@ -406,6 +407,7 @@ pub fn same_options(a: &Options, b: &Options) -> bool {
         && a.reuse == b.reuse
         && a.flat_walk == b.flat_walk
         && a.scoped_specialization == b.scoped_specialization
+        && a.places == b.places
 }
 
 /// Run `entry` under each configuration and compare with `reference`.
@@ -428,6 +430,15 @@ pub fn differential(
         dir,
         &Fixture::default(),
     )
+}
+
+/// `options` building `fixture`'s program: with the place heads its runners name
+/// (`Options::places`), whatever its passes.
+fn fixture_options(options: &Options, fixture: &Fixture) -> Options {
+    Options {
+        places: fixture.place_heads(),
+        ..options.clone()
+    }
 }
 
 /// The matrix over supplied Ready programs, one per distinct pass options.
@@ -457,7 +468,7 @@ pub fn differential_ready<P: ReadyExecution>(
         env: fixture.env.clone(),
         steps: fixture.steps,
     };
-    let mut built: Vec<(&Options, Result<P, NativeError>)> = Vec::new();
+    let mut built: Vec<(Options, Result<P, NativeError>)> = Vec::new();
     type Objects = Result<Vec<hirsel_lir::stage::ObjectArtifact>, NativeError>;
     let mut emitted: Vec<((usize, Backend, OptLevel, Partition), Objects)> = Vec::new();
     let mut out = Vec::with_capacity(configurations.len());
@@ -508,13 +519,12 @@ pub fn differential_ready<P: ReadyExecution>(
         Ok(observation)
     };
     for configuration in configurations {
-        let index = match built
-            .iter()
-            .position(|(o, _)| same_options(o, &configuration.options))
-        {
+        let options = fixture_options(&configuration.options, fixture);
+        let index = match built.iter().position(|(o, _)| same_options(o, &options)) {
             Some(index) => index,
             None => {
-                built.push((&configuration.options, ready(&configuration.options)));
+                let program = ready(&options);
+                built.push((options, program));
                 built.len() - 1
             }
         };
@@ -592,7 +602,7 @@ pub fn runner_oracle_ready<P: ReadyExecution>(
         let toolchain = toolchain.with_runtime(runtime.build());
         let diagnostic = runtime == Runtime::Diagnostic;
         let mut run = || -> Result<(), NativeError> {
-            let ready = ready(&configuration.options)?;
+            let ready = ready(&fixture_options(&configuration.options, fixture))?;
             let (program, sites) = (ready.program(), ready.sites());
             let target = &program.target;
             let objects = emit_backend_objects(
@@ -798,7 +808,7 @@ pub fn real_io_replay_ready<P: ReadyExecution>(
     let mut run = || {
         let options = real_io_replay_options(launch_config.clone());
         let target = options.target.clone();
-        let ready = ready(&options)?;
+        let ready = ready(&fixture_options(&options, fixture))?;
         let (program, sites) = (ready.program(), &ready.sites());
         let objects = emit_backend_objects(
             program,

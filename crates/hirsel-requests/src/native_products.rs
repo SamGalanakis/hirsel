@@ -369,6 +369,9 @@ pub(super) fn request_metadata(
     weight.add(target.cpu.capacity());
     weight.vec(&target.features, |w, feature| w.add(feature.capacity()));
     weight.add(target.llvm_data_layout.capacity());
+    weight.vec(&request.options.passes.places, |weight, path| {
+        weight.path(path)
+    });
     if let Some(scheduler) = &request.options.passes.launch.scheduler {
         weight.add(scheduler.algorithm.capacity());
     }

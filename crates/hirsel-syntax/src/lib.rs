@@ -159,6 +159,22 @@ impl DefPath {
     pub fn package_is(&self, name: &str, version: &str) -> bool {
         self.0.package.package_is(name, version)
     }
+    /// The path a full versioned spelling `package@version/module/.../name` names: the
+    /// inverse of `Display`.
+    pub fn from_full(path: &str) -> Option<Self> {
+        let mut parts = path.split('/');
+        let (name, version) = parts.next()?.split_once('@')?;
+        let mut modules: Vec<String> = parts.map(str::to_owned).collect();
+        let item = modules.pop()?;
+        Some(Self(ItemPath {
+            package: PackageId {
+                name: name.into(),
+                version: version.into(),
+            },
+            modules,
+            name: item,
+        }))
+    }
     pub fn fingerprint(&self) -> ContentHash {
         let p = &self.0;
         let parts = std::iter::once(p.package.name.as_bytes())

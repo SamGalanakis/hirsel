@@ -24,13 +24,14 @@ ROOT = Path(__file__).resolve().parents[2]
 BUCK2 = ROOT / '.buck2/bin/buck2'
 # The configuration tools/land and tools/main-runs run Buck2 with, plus the Clippy twins.
 CONFIG = os.environ.get('HIRSEL_BUCK2_CONFIG', '').split() + ['-c', 'hirsel.clippy=true']
+# Every Clippy twin; tools/land (CLIPPY_TWINS) builds their reports with the workspace.
+QUERY = 'attrregexfilter(name, "-clippy$", kind("^rust_(library|binary)$", root//:))'
 
 
 def main():
     argparse.ArgumentParser(description=__doc__).parse_args()
-    query = 'attrregexfilter(name, "-clippy$", kind("^rust_(library|binary)$", root//:))'
     targets = subprocess.run(
-        [str(BUCK2), 'uquery', *CONFIG, query],
+        [str(BUCK2), 'uquery', *CONFIG, QUERY],
         cwd=ROOT, check=True, capture_output=True, text=True).stdout.split()
     if not targets:
         raise SystemExit('clippy: empty target query; refusing an unchecked aggregate')

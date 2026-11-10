@@ -67,13 +67,16 @@ if os.environ.get('FAKE_RED_AFTER_RACE') and STAGE == os.environ['FAKE_RED_AFTER
 '''
 
 FAKES = {
-    '.buck2/bin/buck2': '#!/bin/sh\necho root//:a\n',
-    'tools/buck2/prepare.py': "from pathlib import Path\np = Path('.buck2/bin/buck2')\np.parent.mkdir(parents=True, exist_ok=True)\np.write_text('#!/bin/sh\\necho root//:a\\n')\np.chmod(0o755)\n",
+    '.buck2/bin/buck2': '#!/bin/sh\n[ "$1" = test ] && [ -n "$FAKE_SLOW_TEST" ] && sleep "$FAKE_SLOW_TEST"\necho root//:a\n',
+    'tools/buck2/prepare.py': "from pathlib import Path\np = Path('.buck2/bin/buck2')\np.parent.mkdir(parents=True, exist_ok=True)\np.write_text('#!/bin/sh\\n[ \"$1\" = test ] && [ -n \"$FAKE_SLOW_TEST\" ] && sleep \"$FAKE_SLOW_TEST\"\\necho root//:a\\n')\np.chmod(0o755)\n",
     'tools/buck2/sync.py': '',
     'tools/check-hot-files': '',
     'tools/buck2/event_logs.py': "PASS, SKIP, OMITTED = 'PASS', 'SKIP', 'OMITTED'\n",
     # The first Clippy run lands another lane's commit on origin, as a lane landing meanwhile would.
-    'tools/buck2/clippy.py': '''import os, subprocess
+    'tools/buck2/clippy.py': '''import os, subprocess, sys
+if os.environ.get('FAKE_CLIPPY_RED'):
+    print('error[E0063]: missing field')
+    sys.exit(1)
 other = os.environ.get('FAKE_OTHER_LANE')
 if other and not os.path.exists(other):
     subprocess.run(['git', 'clone', '-q', os.environ['FAKE_ORIGIN'], other], check=True)
@@ -1208,6 +1211,17 @@ if not marker.exists():
         self.assertEqual(refused.returncode, 1, refused.stdout + refused.stderr)
         self.assertIn('conflicts in: source.rs', refused.stdout)
         self.assertEqual(self.git(self.lane, 'branch', '--show-current').strip(), 'my-lane')
+
+    def test_a_clippy_red_refuses_before_the_manifests_run(self):
+        # One build compiles for every check; Clippy then reads its reports in
+        # seconds, so its red refuses without waiting for a minute-long manifests run.
+        started = time.monotonic()
+        refused = self.land(FAKE_CLIPPY_RED='1', FAKE_SLOW_TEST='60')
+        self.assertLess(time.monotonic() - started, 30, refused.stdout + refused.stderr)
+        self.assertEqual(refused.returncode, 1, refused.stdout + refused.stderr)
+        self.assertIn('FAIL  Clippy', refused.stdout)
+        self.assertIn('error[E0063]: missing field', refused.stdout)
+        self.assertEqual(self.main_log(), ['base'])
 
     def test_a_red_check_refuses_the_push_and_prints_its_first_error(self):
         refused = self.land(FAKE_FMT_RED='1')

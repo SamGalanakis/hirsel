@@ -414,7 +414,10 @@ def _rust_test_impl(ctx):
         env["HIRSEL_REPLAY_FIXTURE_OUT"] = cmd_args(fixture.as_output())
         ctx.actions.run(command, env = env, category = "deadline_replay_fixture")
         return [DefaultInfo(default_output = fixture)]
-    sub_targets = {}
+    # Everything the run reads, built without running it: tools/land compiles a
+    # test's binaries and products in the same build as the workspace.
+    sub_targets = {"inputs": [DefaultInfo(default_output = ctx.attrs.harness[DefaultInfo].default_outputs[0],
+                                          other_outputs = inputs)]}
     if ctx.attrs.test_binary.startswith("hirsel-cli-test-cpu_pool_"):
         # Materialize the existing launcher and its exact environment before a
         # fenced CPU window, so no Buck daemon or build shares the test scope.

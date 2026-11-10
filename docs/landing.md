@@ -60,8 +60,14 @@ recovery for abandoned tickets. These adaptations serve independent
 processes and survive a lane crash on this single Linux host.
 
 Land fetches and rebases onto a captured `origin/main` commit, regenerates
-stale build inventories, and checks the workspace build, package and example
-manifests, Clippy and fmt.
+stale build inventories, and checks the workspace build, Clippy, package and
+example manifests and fmt. One Buck2 build compiles everything those checks
+read (the workspace, every Clippy twin's report and the manifests check's
+release compiler and std products, its `[inputs]` subtarget): a daemon serves
+one command at a time while another holds a different state, so separate
+concurrent checks would wait for each other. Clippy and the manifests check
+then only read reports and run. The land checkout's daemon keeps 128 remote
+actions in flight, a lane's 32 (`.buckconfig`, `HIRSEL_BUCK2_RE_CONCURRENCY`).
 The build covers workspace compilation, including test harness compilation;
 it excludes test execution, campaigns, the two-host link check, std images
 and native std precompilation/packaging. The latter are integration artifacts

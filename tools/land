@@ -69,6 +69,10 @@ ENV = {'HIRSEL_BUCK2_CONFIG': ' '.join(CONFIG), 'GIT_EDITOR': 'true',
 BUILD_SET = ('root//: - kind("_rust_test", root//:) - attrregexfilter(name, "-clippy$", root//:)'
              ' - attrfilter(labels, gate, root//:) - kind("_link_hosts_local", root//:)'
              ' - rdeps(root//:, kind("_hirsel_products", root//:))')
+# tools/buck2/clippy.py's query: the twins whose reports Clippy reads.
+CLIPPY_TWINS = 'attrregexfilter(name, "-clippy$", kind("^rust_(library|binary)$", root//:))'
+# The manifests check: one target, or its shards `-shard-<i>` (tools/buck2/sync.py).
+MANIFESTS = 'attrregexfilter(name, "^test-package-manifests(-shard-[0-9]+)?$", root//:)'
 REJECTED = ('[rejected]', 'fetch first', 'non-fast-forward', 'failed to update ref', 'cannot lock ref')
 LANDINGS = 'hirsel-landings.jsonl'
 # Tickets per batch, the head's own included (bors-ng's max_batch_size).
@@ -487,16 +491,24 @@ def full(tree, screened=False):
         raise Refusal('the worktree changed before checks; refusing to push')
     report = None if screened else fast(tree)
     if report is None:
-        query = run([BUCK2, 'uquery', *CONFIG, BUILD_SET])
-        if query.returncode or not query.stdout.strip():
-            report = ['FAIL  the build set query', *first_error(query.stderr).splitlines()]
+        # Buck2 serves one command at a time when another holds a different
+        # state (a running `buck2 test` refuses even a same-config query), so
+        # one build compiles everything the checks read: the workspace, the
+        # Clippy reports and the manifests check's compiler and std products.
+        # Clippy and the manifests run then only read and execute.
+        queries = [run([BUCK2, 'uquery', *CONFIG, expression]) for expression in (BUILD_SET, CLIPPY_TWINS, MANIFESTS)]
+        if any(query.returncode or not query.stdout.strip() for query in queries):
+            failed = next(query for query in queries if query.returncode or not query.stdout.strip())
+            report = ['FAIL  the build set query', *first_error(failed.stderr).splitlines()]
             say('\n'.join(report))
         else:
+            manifests = queries[2].stdout.split()
+            targets = [*queries[0].stdout.split(), *(t + '[clippy.txt]' for t in queries[1].stdout.split()),
+                       *(t + '[inputs]' for t in manifests)]
             report = (check('workspace build', [PY, 'tools/buck2/event_logs.py', 'build', *CONFIG,
-                                                '--materializations', 'none', *query.stdout.split()])
-                      or check('package and example manifests', [BUCK2, 'test', *CONFIG,
-                                                                 '//:test-package-manifests'])
-                      or check('Clippy', [PY, 'tools/buck2/clippy.py']))
+                                                '--materializations', 'none', *targets])
+                      or check('Clippy', [PY, 'tools/buck2/clippy.py'])
+                      or check('package and example manifests', [BUCK2, 'test', *CONFIG, *manifests]))
     # fast(tree) checked this exact tree's formatting (now or when screened);
     # fmt reads only tracked sources and the pinned rustfmt, so no rerun.
     if not unchanged(tree):

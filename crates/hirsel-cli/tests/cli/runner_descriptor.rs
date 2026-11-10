@@ -1,6 +1,47 @@
 use super::*;
 
 #[test]
+fn entry_identity_and_apply_work_without_runners_on_interpreter_and_native() {
+    let source = file(
+        r#"fn half(c: (), key: u32, n: u64) -> Result[(u32, u64), String] { Ok((key, n / 2u64)) }
+pub type AppError = Grant(GrantError) | Output(OutputError)
+pub fn main(rt: Io) -> Result[(), AppError] {
+  let output = io.stdout(rt) ? Grant
+  let f: Entry[fn(c: (), key: u32, n: u64) -> Result[(u32, u64), String]] = half
+  out.print(output, runner.entry_id(f).path) ? Output
+  let value = match runner.apply(f, (), 7u32, 8u64) {
+    Ok(Ok((7, n))) => n,
+    _ => 99u64,
+  }
+  out.print(output, f" {value}\n") ? Output
+  Ok(())
+}
+"#,
+    );
+    let grants = r#"{"io":{"stdout":"stdout.bytes@1","dirs":[],"runners":[]}}"#;
+    for engine in [
+        vec![],
+        vec!["--native", "--backend", "llvm"],
+        vec!["--native", "--backend", "cranelift"],
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_hirsel"))
+            .arg("run")
+            .args(&engine)
+            .arg(&source)
+            .args(["--grants", grants])
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{engine:?}: {output:?}");
+        assert_eq!(
+            output.stdout, b"standalone@0/half 4\n",
+            "{engine:?}: {output:?}"
+        );
+        assert!(output.stderr.is_empty(), "{engine:?}: {output:?}");
+    }
+    std::fs::remove_file(source).unwrap();
+}
+
+#[test]
 fn callee_metadata_is_loaded_before_runner_execution_on_both_native_backends() {
     let source = file(
         r#"fn half(n: u64) -> Result[u64, String] { Ok(n / 2u64) }

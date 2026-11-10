@@ -1071,9 +1071,15 @@ fn join_flags<R: Reporter>(
         );
     }
     let mut params: BTreeMap<BlockId, Flags> = BTreeMap::new();
-    for (&block, (entry, _, _)) in &walks {
+    for (&block, (entry, _, outs)) in &walks {
         for (part, &value) in entry {
-            if block != ed.unit.entry && value == Tri::Maybe {
+            // A tag switch can expose a descendant's conditional ownership
+            // on an outgoing edge even when an enclosing variant makes it
+            // absent at block entry. Carry the entry's truth through that
+            // observation too, as C carries flags through switch_parts.
+            if block != ed.unit.entry
+                && (value == Tri::Maybe || outs.values().any(|state| state[part] == Tri::Maybe))
+            {
                 let value = ed.value(bool_ty, Holding::Plain);
                 let path = flag_projection(ed, &part.1)?;
                 ed.unit.tables.init_flags.push(hirsel_lir::ir::InitFlag {

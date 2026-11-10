@@ -14,6 +14,7 @@ conformance/LANG/LANG-13-loop-element-match-run.hir
 conformance/LANG/LANG-13-loop-tuple-payload-part-run.hir
 conformance/LANG/LANG-13-nested-match-on-binding-run.hir
 conformance/LANG/LANG-13-nested-ok-none-error-paths-run.hir
+conformance/LANG/LANG-13-nested-owned-presence-run.hir
 conformance/LANG/LANG-13-nested-single-variant-pattern-run.hir
 conformance/LANG/LANG-13-nested-variant-payload-drop-run.hir
 conformance/LANG/LANG-13-recursive-list-member-pattern-run.hir

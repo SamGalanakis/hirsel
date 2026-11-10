@@ -71,8 +71,9 @@ BUILD_SET = ('root//: - kind("_rust_test", root//:) - attrregexfilter(name, "-cl
              ' - rdeps(root//:, kind("_hirsel_products", root//:))')
 # tools/buck2/clippy.py's query: the twins whose reports Clippy reads.
 CLIPPY_TWINS = 'attrregexfilter(name, "-clippy$", kind("^rust_(library|binary)$", root//:))'
-# The manifests check: one target, or its shards `-shard-<i>` (tools/buck2/sync.py).
-MANIFESTS = 'attrregexfilter(name, "^test-package-manifests(-shard-[0-9]+)?$", root//:)'
+# The manifests check: one test, or its shards `-shard-<i>` (tools/buck2/sync.py),
+# never their suite `test-package-manifests`, which the tool before this one runs.
+MANIFESTS = 'kind("_rust_test", attrregexfilter(name, "^test-package-manifests(-shard-[0-9]+)?$", root//:))'
 REJECTED = ('[rejected]', 'fetch first', 'non-fast-forward', 'failed to update ref', 'cannot lock ref')
 LANDINGS = 'hirsel-landings.jsonl'
 # Tickets per batch, the head's own included (bors-ng's max_batch_size).

@@ -615,28 +615,49 @@ def _script_binary_impl(ctx):
 
 _script_binary = rule(impl = _script_binary_impl, attrs = {"script": attrs.source()})
 
-def hirsel_script_test(name, script, data, runtime_archives = None, full = True, args = [], bin_exes = {}, products = None, production = False, files_env = {}, sanitizer = None, host = False):
+def _test_suite_impl(_ctx):
+    return [DefaultInfo()]
+
+# `buck2 test <suite>` runs the targets in its built-in `tests` attribute.
+_test_suite = rule(impl = _test_suite_impl, attrs = {
+    "labels": attrs.list(attrs.string(), default = []),
+})
+
+def hirsel_script_test(name, script, data, runtime_archives = None, full = True, args = [], bin_exes = {}, products = None, production = False, files_env = {}, sanitizer = None, host = False, shards = 1):
     """A script harness with the same hermetic inputs as native Rust tests.
     `files_env` names further input files as environment variables. `host`
-    runs it on the invoking host, never the pool: for a tool built there."""
+    runs it on the invoking host, never the pool: for a tool built there.
+    `shards` > 1 makes targets `<name>-shard-<i>`, each running the script
+    with `--shard <i>/<shards>` appended (the script deals its own work), and
+    `<name>` the suite of exactly those shards, so `buck2 test :<name>` still
+    runs the whole check."""
     if full and not FULL_GATE:
         return
     if sanitizer and read_root_config("hirsel", "sanitizer", "") != sanitizer:
         return
     binary = name + "-script"
     _script_binary(name = binary, script = script)
-    _rust_test(
-        name = name, harness = ":" + binary, args = args, data = data, cwd = ".",
-        bin_exes = {} if production else bin_exes, release_bin_exes = bin_exes if production else {},
-        bin_exe_dir = BIN_EXE_DIR + "/" + name, products = products, files_env = files_env,
-        llvm = "root//tools/buck2/native-toolchain:llvm",
-        native_tools = native_tool_inputs() if runtime_archives else {},
-        runtime_archives = runtime_archives, labels = ["gate"],
-        exec_compatible_with = [budget_constraint("host")] if host else _test_platform(name),
-        pool = not (TESTS_ON_HOST or host),
-        request = _request(name),
-        visibility = ["PUBLIC"],
-    )
+    for shard in range(1, shards + 1):
+        _rust_test(
+            name = name if shards == 1 else "{}-shard-{}".format(name, shard), harness = ":" + binary,
+            args = args if shards == 1 else args + ["--shard", "{}/{}".format(shard, shards)], data = data, cwd = ".",
+            bin_exes = {} if production else bin_exes, release_bin_exes = bin_exes if production else {},
+            bin_exe_dir = BIN_EXE_DIR + "/" + name, products = products, files_env = files_env,
+            llvm = "root//tools/buck2/native-toolchain:llvm",
+            native_tools = native_tool_inputs() if runtime_archives else {},
+            runtime_archives = runtime_archives, labels = ["gate"],
+            exec_compatible_with = [budget_constraint("host")] if host else _test_platform(name),
+            pool = not (TESTS_ON_HOST or host),
+            request = _request(name),
+            visibility = ["PUBLIC"],
+        )
+    if shards > 1:
+        _test_suite(
+            name = name,
+            tests = [":{}-shard-{}".format(name, shard) for shard in range(1, shards + 1)],
+            labels = ["gate"],
+            visibility = ["PUBLIC"],
+        )
 
 def _link_hosts_local_impl(ctx):
     digests = ctx.actions.declare_output("digests.txt")

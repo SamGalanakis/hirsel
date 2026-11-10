@@ -81,7 +81,10 @@ It pushes the exact checked commit SHA, after verifying that HEAD and the
 worktree still match. A red check refuses the push. Source conflicts stop
 and abort the rebase; resolve them yourself and run land again. Land does
 not run other tests or commit generated files. `test-package-manifests` checks
-every package and example manifest with the release compiler and current std products.
+every package and example manifest with the release compiler and current std products,
+in four shards (`test-package-manifests-shard-<i>`) that deal the manifests longest
+first by the seconds in `tools/tests/package_manifests.tsv`; a manifest without a
+row costs the mean, so each is checked by exactly one shard.
 It requires the named rejection for the two intentional negative package
 fixtures and generates the ignored JSON-kit hooks as its guide requires.
 Main's scheduled run owns the API index; the generated-file and

@@ -1752,19 +1752,24 @@ pub fn tx_delete(mut tx: Tx, take key: Bytes) -> Result[(), TxError]
   Ok(())
 }
 
-/// At most `limit` entries with keys between `from` and `to` as the
-/// transaction sees them, in `order`, as fresh copies. Keys in the reserved
-/// namespace are passed over as if absent, and the scope need not hold them.
-/// The interval each part of the scan consumed enters the run's access set:
-/// up to the last entry returned when it returned `limit` of them, the whole
-/// part otherwise.
-pub fn tx_range(
+/// Folds `step` over at most `limit` entries with keys between `from` and
+/// `to` as the transaction sees them, in `order`, starting from `initial`.
+/// `step` gets each key and value as views of the transaction's state that
+/// last for its call, and returns the next accumulator and whether to go on;
+/// it copies what it keeps, and cannot write through `tx` while the fold
+/// reads it. Keys in the reserved namespace are passed over as if absent, and
+/// the scope need not hold them. The interval the fold consumed enters the
+/// run's access set: up to the entry where `step` stopped or the `limit`-th
+/// entry, the whole range otherwise.
+pub fn tx_range[A](
   tx: Tx,
   from: RangeBound[Bytes],
   to: RangeBound[Bytes],
   limit: u64,
-  order: ScanOrder
-) -> Result[List[(Bytes, Bytes)], TxError] {
+  order: ScanOrder,
+  take initial: A,
+  step: fn(take A, Bytes, Bytes) -> (A, bool)
+) -> Result[A, TxError] {
   if limit == 0 {
     return Error(InvalidInput())
   }
@@ -1806,26 +1811,31 @@ pub fn tx_range(
   } else {
     (take above, take below)
   }
-  let mut out = scan(tx, take first, ascending, limit)
-  let got = list.len(out)
-  if got < limit {
-    for (k, v) in scan(tx, take second, ascending, limit - got) {
-      list.push(mut out, (unique k, unique v))
-    }
+  let (folded, left) = scan(tx, take first, ascending, limit, take initial, step)
+  if left == 0 {
+    return Ok(take folded)
   }
+  let (out, _) = scan(tx, take second, ascending, left, take folded, step)
   Ok(take out)
 }
 
-// The entries of the part [lo, hi) of a range, at most `limit` of them,
-// recording the interval the scan consumed.
-fn scan(tx: Tx, take part: Option[(Bytes, Option[Bytes])], ascending: bool, limit: u64) -> List[
-  (Bytes, Bytes)
-] {
+// Folds `step` over the part [lo, hi) of a range, at most `limit` entries,
+// and records the interval it consumed. Returns the accumulator and how many
+// more entries the range may take: 0 once `step` stopped or the limit was
+// reached, so a later part is not read.
+fn scan[A](
+  tx: Tx,
+  take part: Option[(Bytes, Option[Bytes])],
+  ascending: bool,
+  limit: u64,
+  take initial: A,
+  step: fn(take A, Bytes, Bytes) -> (A, bool)
+) -> (A, u64) {
   let Some((lo, hi)) = take part else {
-    return []
+    return (take initial, limit)
   }
   if !before_end(lo, hi) {
-    return []
+    return (take initial, limit)
   }
   let low: ordered_map.Bound[Bytes] = Included(take lo)
   let high: ordered_map.Bound[Bytes] = match take hi {
@@ -1837,11 +1847,33 @@ fn scan(tx: Tx, take part: Option[(Bytes, Option[Bytes])], ascending: bool, limi
   } else {
     Descending()
   }
-  let rows = entries_in(tx.txn.state, low, high, direction, limit)
-  if let Some(span) = consumed(take low, take high, direction, limit, rows) {
-    recorder.append(tx.spans, take span)
+  // The accumulator, the entries left, and the key the fold stopped at.
+  let start: (A, u64, Option[Bytes]) = (take initial, limit, None())
+  let (folded, left, cut) = ordered_map.fold_range(
+    tx.txn.state,
+    low,
+    high,
+    direction,
+    take start,
+    fn(take walk: (A, u64, Option[Bytes]), k: Bytes, v: Bytes) -> ((A, u64, Option[Bytes]), bool) {
+      let (acc, left, _) = take walk
+      let (next, more) = step(take acc, k, v)
+      if more && left > 1 {
+        ((take next, left - 1, None()), true)
+      } else {
+        ((take next, 0, Some(copy_to(heap, k))), false)
+      }
+    }
+  )
+  let span = match take cut {
+    Some(c) => match direction {
+      Ascending() => Span(from: take low, to: Included(take c), direction: direction),
+      Descending() => Span(from: Included(take c), to: take high, direction: direction),
+    },
+    None() => Span(from: take low, to: take high, direction: direction),
   }
-  take rows
+  recorder.append(tx.spans, take span)
+  (take folded, left)
 }
 
 // The least key a lower bound admits.
@@ -2012,15 +2044,18 @@ fn table_delete(mut tx: Tx, take key: Bytes) -> Result[(), TxError] {
   Ok(())
 }
 
-// Reads at most `limit` entries of [lo, hi) after checking read access to all
-// of it, reserved keys included, and the row limit.
-fn table_range(
+// Folds `step` over at most `limit` entries of [lo, hi), as `tx_range` does,
+// after checking read access to all of it, reserved keys included, and the
+// row limit.
+fn table_range[A](
   tx: Tx,
   take lo: Bytes,
   take hi: Option[Bytes],
   limit: u64,
-  order: ScanOrder
-) -> Result[List[(Bytes, Bytes)], TxError] {
+  order: ScanOrder,
+  take initial: A,
+  step: fn(take A, Bytes, Bytes) -> (A, bool)
+) -> Result[A, TxError] {
   if !tx.scope.whole {
     check(spans_hold(tx.scope.spans, lo, hi, false), false)?
   }
@@ -2031,7 +2066,8 @@ fn table_range(
     Ascending() => true,
     Descending() => false,
   }
-  Ok(scan(tx, Some((take lo, take hi)), ascending, limit))
+  let (folded, _) = scan(tx, Some((take lo, take hi)), ascending, limit, take initial, step)
+  Ok(take folded)
 }
 
 // Checks write access to one key without touching it: an operation that
@@ -2751,18 +2787,23 @@ fn check_delete_all(tx: Tx, doomed: List[Bytes]) -> Option[TxLimit] uses {} {
   over_limit(tx.limits, trial.writes)
 }
 
-// Every entry in [lo, hi), reserved keys included, after checking read (or,
-// with `write`, write) access to all of it: for a library operation over a
-// whole namespace of its own, such as dropping a table. `range_rows` does not
-// bound it; the commit's limits do.
-fn table_all(tx: Tx, take lo: Bytes, take hi: Option[Bytes], write: bool) -> Result[
-  List[(Bytes, Bytes)],
-  TxError
-] {
+// Folds `step` over every entry in [lo, hi), reserved keys included, as
+// `tx_range` does, after checking read (or, with `write`, write) access to all
+// of it: for a library operation over a whole namespace of its own, such as
+// dropping a table. `range_rows` does not bound it; the commit's limits do.
+fn table_all[A](
+  tx: Tx,
+  take lo: Bytes,
+  take hi: Option[Bytes],
+  write: bool,
+  take initial: A,
+  step: fn(take A, Bytes, Bytes) -> (A, bool)
+) -> Result[A, TxError] {
   if !tx.scope.whole {
     check(spans_hold(tx.scope.spans, lo, hi, write), write)?
   }
-  Ok(scan(tx, Some((take lo, take hi)), true, 18446744073709551615))
+  let (folded, _) = scan(tx, Some((take lo, take hi)), true, 18446744073709551615, take initial, step)
+  Ok(take folded)
 }
 
 // Deletes the keys starting with `prefix` in key order within the

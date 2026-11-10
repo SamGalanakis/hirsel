@@ -1,0 +1,24 @@
+// rule: MODE-1
+// expect: reject MODE-1 at line 16
+// twin: CLO/CLO-1-tx-range-step-write-ok.hir
+// The key and value `store.tx_range` gives its step last only for the call,
+// so the step cannot keep one in the accumulator without copying it.
+fn copy_rows(mut tx: store.Tx) -> Result[u64, store.TxError] {
+  let none: Option[Bytes] = None()
+  let last = store.tx_range(
+    tx,
+    Unbounded(),
+    Unbounded(),
+    8,
+    Ascending(),
+    take none,
+    fn(take kept: Option[Bytes], key: Bytes, value: Bytes) -> (Option[Bytes], bool) {
+      (Some(value), true)
+    }
+  )?
+  if let Some(value) = take last {
+    store.tx_put(mut tx, b"copied", take value)?
+    return Ok(1)
+  }
+  Ok(0)
+}

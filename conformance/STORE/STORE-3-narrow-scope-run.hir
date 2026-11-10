@@ -190,7 +190,11 @@ fn probe(mut sub: store.Tx, parts: List[Part], at: List[Bytes]) -> bool {
           Included(unique k),
           Excluded(unique h),
           8,
-          Ascending()
+          Ascending(),
+          0u64,
+          fn(take n: u64, key: Bytes, value: Bytes) -> (u64, bool) {
+            (n + 1, true)
+          }
         )
         let refused = match scanned {
           Error(OutOfScope()) => true,
@@ -310,8 +314,18 @@ fn named_cases(mut tx: store.Tx) -> bool {
           true
         }
       )
-      let scanned = store.tx_range(sub, Unbounded(), Unbounded(), 8, Ascending())
-      all == Error(OutOfScope()) && scanned == Ok([])
+      let scanned = store.tx_range(
+        sub,
+        Unbounded(),
+        Unbounded(),
+        8,
+        Ascending(),
+        0u64,
+        fn(take n: u64, key: Bytes, value: Bytes) -> (u64, bool) {
+          (n + 1, true)
+        }
+      )
+      all == Error(OutOfScope()) && scanned == Ok(0)
     }
   )
   clipped == Ok(true)

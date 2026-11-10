@@ -234,7 +234,7 @@ and `ScanOrder` as [STORE-5](#store-5-tables) declares them:
 
 ```text
 fn store.tx_get(tx: Tx, key: Bytes) -> Result[Option[Bytes], TxError]
-fn store.tx_range(tx: Tx, from: RangeBound[Bytes], to: RangeBound[Bytes], limit: u64, order: ScanOrder) -> Result[List[(Bytes, Bytes)], TxError]
+fn store.tx_range[A](tx: Tx, from: RangeBound[Bytes], to: RangeBound[Bytes], limit: u64, order: ScanOrder, take initial: A, step: fn(take A, Bytes, Bytes) -> (A, bool)) -> Result[A, TxError]
 fn store.tx_put(mut tx: Tx, take key: Bytes, take value: Bytes) -> Result[(), TxError]
 fn store.tx_delete(mut tx: Tx, take key: Bytes) -> Result[(), TxError]
 ```
@@ -243,7 +243,12 @@ fn store.tx_delete(mut tx: Tx, take key: Bytes) -> Result[(), TxError]
 ([FACT-1](contracts.md#fact-1-contracts)); `tx_range` passes over the keys in it as if they
 were absent. They check, in order: argument validity (`limit` of at least 1), else
 `InvalidInput()`; access, below; and the configured limits, else `Limit(..)`. `tx_range`
-returns at most `limit` entries between `from` and `to` in key order, as fresh copies. A
+folds `step` over at most `limit` entries between `from` and `to` in `order`, starting
+from `initial`. Each call gets the entry's key and value as views of the transaction's
+state that last for that call, and returns the next accumulator and whether to go on;
+the fold ends there, at the `limit`-th entry or at the far bound. `step` copies what it
+keeps, and cannot write through the `Tx` while the fold reads it
+([CLO-1](closures.md#clo-1-scoped)). It is the only range read through a `Tx`. A
 failed operation changes nothing.
 
 **Narrowing.** A `Tx` can only be narrowed, as every capability can

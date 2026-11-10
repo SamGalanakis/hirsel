@@ -375,8 +375,18 @@ fn unused(tx: store.Tx, take rows: Bytes) -> Result[(), store.TxError] {
   if let Some(_) = store.table_read(tx, take pending)? {
     return Error(reused())
   }
-  let left = store.table_range(tx, copy rows, keys.prefix_end(rows), 1, Ascending())?
-  if list.len(left) != 0 {
+  let left = store.table_range(
+    tx,
+    copy rows,
+    keys.prefix_end(rows),
+    1,
+    Ascending(),
+    false,
+    fn(take seen: bool, key: Bytes, value: Bytes) -> (bool, bool) {
+      (true, false)
+    }
+  )?
+  if left {
     return Error(reused())
   }
   Ok(())
@@ -633,17 +643,50 @@ pub fn range[K: key + serializable, V: serializable](
   let prefix = unique o.rows
   let low = lower(o.key, prefix, o.renames, o.plain, from)?
   let high = upper(o.key, prefix, o.renames, o.plain, to)?
-  let rows = store.table_range(tx, take low, take high, limit, order)?
   let reader = key_reader(o)
-  let mut out: List[(K, V)] = []
-  for (key, value) in rows {
-    if bytes.len(key) < bytes.len(prefix) || bytes.slice(key, 0, bytes.len(prefix)) != prefix {
-      return Error(corrupt())
+  // Each row is decoded from the transaction's state in place.
+  let initial: Result[List[(K, V)], store.TxError] = Ok([])
+  let rows = store.table_range(
+    tx,
+    take low,
+    take high,
+    limit,
+    order,
+    take initial,
+    fn(take acc: Result[List[(K, V)], store.TxError], key: Bytes, value: Bytes) -> (
+      Result[List[(K, V)], store.TxError],
+      bool
+    ) {
+      let mut out = match take acc {
+        Ok(out) => out,
+        Error(e) => return (Error(e), false),
+      }
+      let decoded: Result[(K, V), store.TxError] = decode_row(reader, o, prefix, key, value)
+      match take decoded {
+        Ok(row) => {
+          list.push(mut out, take row)
+          (Ok(take out), true)
+        },
+        Error(e) => (Error(e), false),
+      }
     }
-    let k: K = decode_key(reader, bytes.slice(key, bytes.len(prefix), bytes.len(key)))?
-    list.push(mut out, (take k, decode_value(o, value)?))
+  )?
+  take rows
+}
+
+// One row of a table's key prefix `prefix`, decoded.
+fn decode_row[K: key + serializable, V: serializable](
+  reader: KeyReader,
+  o: Open,
+  prefix: Bytes,
+  key: Bytes,
+  value: Bytes
+) -> Result[(K, V), store.TxError] uses {} {
+  if bytes.len(key) < bytes.len(prefix) || bytes.slice(key, 0, bytes.len(prefix)) != prefix {
+    return Error(corrupt())
   }
-  Ok(take out)
+  let k: K = decode_key(reader, bytes.slice(key, bytes.len(prefix), bytes.len(key)))?
+  Ok((take k, decode_value(o, value)?))
 }
 
 /// The whole table with `access`: its rows, its catalog entry, where the
@@ -694,28 +737,43 @@ pub fn history(tx: store.Tx, name: String) -> Result[List[SchemaEntry], store.Tx
   // bound reading them, as it did not bound the catalog value they were.
   let prefix = history_rows(name)
   let end = keys.prefix_end(prefix)
-  let rows = store.table_all(tx, take prefix, take end, false)?
-  let mut out: List[SchemaEntry] = []
-  for (key, value) in rows {
-    let n = list.len(out)
-    if key != history_key(name, n) {
-      return Error(corrupt())
-    }
-    let decoded: Result[Epoch, DecodeError] = codec.decode(value)
-    let epoch = match take decoded {
-      Ok(e) => e,
-      Error(_) => return Error(corrupt()),
-    }
-    list.push(
-      mut out,
-      SchemaEntry(
-        epoch: int.truncate(n),
-        key_schema: sha256.digest_hex(epoch.key),
-        value_schema: sha256.digest_hex(epoch.value),
-        change: unique epoch.change
+  let initial: Result[List[SchemaEntry], store.TxError] = Ok([])
+  let read = store.table_all(
+    tx,
+    take prefix,
+    take end,
+    false,
+    take initial,
+    fn(take acc: Result[List[SchemaEntry], store.TxError], key: Bytes, value: Bytes) -> (
+      Result[List[SchemaEntry], store.TxError],
+      bool
+    ) {
+      let mut out = match take acc {
+        Ok(out) => out,
+        Error(e) => return (Error(e), false),
+      }
+      let n = list.len(out)
+      if key != history_key(name, n) {
+        return (Error(corrupt()), false)
+      }
+      let decoded: Result[Epoch, DecodeError] = codec.decode(value)
+      let epoch = match take decoded {
+        Ok(e) => e,
+        Error(_) => return (Error(corrupt()), false),
+      }
+      list.push(
+        mut out,
+        SchemaEntry(
+          epoch: int.truncate(n),
+          key_schema: sha256.digest_hex(epoch.key),
+          value_schema: sha256.digest_hex(epoch.value),
+          change: unique epoch.change
+        )
       )
-    )
-  }
+      (Ok(take out), true)
+    }
+  )?
+  let out = read?
   if list.len(out) != next_epoch(c) {
     return Error(corrupt())
   }
@@ -858,34 +916,84 @@ fn advance[
     Some(last) => successor(last),
     None() => copy prefix,
   }
-  let rows = store.table_range(tx, take low, keys.prefix_end(prefix), batch, Ascending()) ? Table
   let reader = key_reader(o)
   let next = rows_of(name, next_generation(catalog.generation))
   let epoch = next_epoch(catalog)
+  // The source rows are rewritten as they are read in place, and written once
+  // the read is over, since `tx` cannot be written while it is read: each
+  // rewritten row with the source key it came from, then the first failure.
+  let initial: (List[(Bytes, Bytes, Bytes)], Option[MigrateError[E]]) = ([], None())
+  let (rewritten, failed) = store.table_range(
+    tx,
+    take low,
+    keys.prefix_end(prefix),
+    batch,
+    Ascending(),
+    take initial,
+    fn(take acc: (List[(Bytes, Bytes, Bytes)], Option[MigrateError[E]]), key: Bytes, value: Bytes) -> (
+      (List[(Bytes, Bytes, Bytes)], Option[MigrateError[E]]),
+      bool
+    ) {
+      let (rows, _) = take acc
+      let mut out = take rows
+      match rewrite(reader, o, f, next, epoch, prefix, key, value) {
+        Ok((row, data)) => {
+          list.push(mut out, (unique key, take row, take data))
+          ((take out, None()), true)
+        },
+        Error(e) => ((take out, Some(take e)), false),
+      }
+    }
+  ) ? Table
+  let read = list.len(rewritten)
   let mut cursor: Option[Bytes] = match p.cursor {
     Some(last) => Some(unique last),
     None() => None(),
   }
   let mut count = p.count
-  for (key, value) in rows {
-    let old_key: J = decode_key(reader, bytes.slice(key, bytes.len(prefix), bytes.len(key))) ? Table
-    let old: A = decode_value(o, value) ? Table
-    let (new_key, new_value) = match core@1/runner.apply(f, (), old_key, old) {
-      Ok(Ok(row)) => row,
-      Ok(Error(e)) => return Error(Failed(take e)),
-      Error(failure) => return Error(Faulted(take failure)),
-    }
-    // The target rows are the codec's own encodings of K and B.
-    let row = concat(next, encoded_key(b"", new_key, [], true) ? Table)
+  for (key, row, data) in rewritten {
     if let Some(_) = store.table_read(tx, copy row) ? Table {
       return Error(Collision())
     }
-    let data = row_value(epoch, b"", new_value, true) ? Table
-    store.table_put(mut tx, take row, take data) ? Table
+    store.table_put(mut tx, unique row, unique data) ? Table
     cursor = Some(unique key)
     count += 1
   }
-  Ok((Progress(cursor: take cursor, count: count), list.len(rows) == batch))
+  if let Some(e) = take failed {
+    return Error(take e)
+  }
+  Ok((Progress(cursor: take cursor, count: count), read == batch))
+}
+
+// The row and value a source row of `prefix` becomes in the generation
+// `next` under `f` and the target schema.
+fn rewrite[
+  J: key + serializable,
+  A: serializable,
+  K: key + serializable,
+  B: serializable,
+  E: serializable
+](
+  reader: KeyReader,
+  o: Open,
+  f: Entry[fn(c: (), key: J, old: A) -> Result[(K, B), E]],
+  next: Bytes,
+  epoch: u64,
+  prefix: Bytes,
+  key: Bytes,
+  value: Bytes
+) -> Result[(Bytes, Bytes), MigrateError[E]] {
+  let old_key: J = decode_key(reader, bytes.slice(key, bytes.len(prefix), bytes.len(key))) ? Table
+  let old: A = decode_value(o, value) ? Table
+  let (new_key, new_value) = match core@1/runner.apply(f, (), old_key, old) {
+    Ok(Ok(row)) => row,
+    Ok(Error(e)) => return Error(Failed(take e)),
+    Error(failure) => return Error(Faulted(take failure)),
+  }
+  // The target rows are the codec's own encodings of K and B.
+  let row = concat(next, encoded_key(b"", new_key, [], true) ? Table)
+  let data = row_value(epoch, b"", new_value, true) ? Table
+  Ok((take row, take data))
 }
 
 // The install: the catalog names the next generation and the target schema

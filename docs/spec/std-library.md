@@ -4216,7 +4216,7 @@ fn call_info.seed(c: store.CallInfo) -> u64 uses {}
 fn store.tx_get(tx: store.Tx, key: Bytes) -> Result[Option[Bytes], store.TxError] requires !store.reserved(key)
 fn store.tx_put(mut tx: store.Tx, take key: Bytes, take value: Bytes) -> Result[(), store.TxError] requires !store.reserved(key)
 fn store.tx_delete(mut tx: store.Tx, take key: Bytes) -> Result[(), store.TxError] requires !store.reserved(key)
-fn store.tx_range(tx: store.Tx, from: store.RangeBound[Bytes], to: store.RangeBound[Bytes], limit: u64, order: store.ScanOrder) -> Result[List[(Bytes, Bytes)], store.TxError]
+fn store.tx_range[A](tx: store.Tx, from: store.RangeBound[Bytes], to: store.RangeBound[Bytes], limit: u64, order: store.ScanOrder, take initial: A, step: fn(take A, Bytes, Bytes) -> (A, bool)) -> Result[A, store.TxError]
 fn store.keys(from: store.RangeBound[Bytes], to: store.RangeBound[Bytes], access: store.Access) -> store.KeyScope uses {}
 fn store.all(access: store.Access) -> store.KeyScope uses {}
 fn store.join(a: store.KeyScope, b: store.KeyScope) -> store.KeyScope uses {}
@@ -4277,9 +4277,10 @@ and never conflict. A commit applies to the head's state at once, raising the vi
 version, and is visible to later transactions. Every read through a `Tx` enters its
 access set (`AccessSet`, [STORE-14](storage.md#store-14-tracked-access)): every key
 `tx_get` read, present or absent, and every interval a `tx_range` consumed as a `Span` in
-key order, up to the last entry it returned when it returned `limit` of them and the whole
-range otherwise. `range` and `tx_range` return at most `limit` entries between the bounds
-in order as fresh copies; `prefix_bounds(p)` gives the bounds of exactly the keys starting
+key order, up to the entry where `step` stopped or the `limit`-th entry, and the whole
+range otherwise. `range` returns at most `limit` entries between the bounds in order as
+fresh copies; `tx_range` folds its `step` over them, passing each key and value as views
+that last for the call; `prefix_bounds(p)` gives the bounds of exactly the keys starting
 with `p`.
 
 **Running an entry.** `transact` mints the run's `CallInfo`

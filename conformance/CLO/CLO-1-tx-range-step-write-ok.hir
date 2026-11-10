@@ -1,0 +1,23 @@
+// rule: CLO-1
+// expect: accept
+// A write that follows the fold, with what the step kept, is not concurrent
+// with the read.
+fn copy_rows(mut tx: store.Tx) -> Result[u64, store.TxError] {
+  let none: Option[Bytes] = None()
+  let last = store.tx_range(
+    tx,
+    Unbounded(),
+    Unbounded(),
+    8,
+    Ascending(),
+    take none,
+    fn(take kept: Option[Bytes], key: Bytes, value: Bytes) -> (Option[Bytes], bool) {
+      (Some(unique value), true)
+    }
+  )?
+  if let Some(value) = take last {
+    store.tx_put(mut tx, b"copied", take value)?
+    return Ok(1)
+  }
+  Ok(0)
+}

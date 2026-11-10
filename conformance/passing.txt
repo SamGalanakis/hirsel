@@ -7269,6 +7269,7 @@ conformance/SEM/SEM-5-map-update-value-17-run.hir
 conformance/SEM/SEM-5-map-upsert-update-run.hir
 conformance/SEM/SEM-5-mut-map-value-ok.hir
 conformance/SEM/SEM-5-ordered-levels-run.hir
+conformance/SEM/SEM-5-ordered-map-named-step-run.hir
 conformance/SEM/SEM-5-ordered-tokens-run.hir
 conformance/SEM/SEM-5-pqcombined-example-run.hir
 conformance/SEM/SEM-5-pqcombined-root-updates-run.hir

@@ -2163,6 +2163,12 @@ fn callable_nominal_cleanup_resolves_in_the_selected_declaration_view() {
                 ty: nominal,
             }]
             .into();
+            f.result = types.intern(Type {
+                drop_allocation: types.row(nominal).drop_allocation.clone(),
+                ..Type::with_kind(TypeKind::Tuple(
+                    vec![nominal, types.intern(scalar())].into(),
+                ))
+            });
             let callable = types.intern(callable);
             let resolved = canonical_plain_type_in(&types, callable, &generics, &mut |id| {
                 assert_eq!(id, definition);
@@ -2173,6 +2179,7 @@ fn callable_nominal_cleanup_resolves_in_the_selected_declaration_view() {
                 unreachable!()
             };
             assert_eq!(types.row(f.parameters[0].ty).drop_allocation, expected);
+            assert_eq!(types.row(f.result).drop_allocation, expected);
         }
     }
 }

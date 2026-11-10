@@ -941,6 +941,7 @@ fn normalize_graph_cached(
             _ => (generics.clone(), binders.to_vec()),
         };
         let child_contract = contract || matches!(row.kind, TypeKind::Function(_));
+        let original_kind = row.kind.clone();
         row.kind = row.kind.try_map_edges(|ty| {
             visit(
                 store,
@@ -982,6 +983,38 @@ fn normalize_graph_cached(
         {
             let cleanup = declared_cleanup(declaration, store, arguments, |ty| {
                 store.row(ty).drop_allocation.clone()
+            });
+            if row.drop_allocation != cleanup {
+                row.drop_allocation = cleanup;
+                current = store.intern(row.clone());
+            }
+        }
+        // A nominal child's cleanup may change with its declaration view.
+        // Rebuild its enclosing value's summary from those normalized parts;
+        // callable and iterator captures remain independent producer evidence.
+        let child_cleanup_changed = original_kind
+            .graph_edges()
+            .iter()
+            .zip(row.kind.graph_edges())
+            .any(|(before, after)| {
+                store.row(before.ty).drop_allocation != store.row(after.ty).drop_allocation
+            });
+        if child_cleanup_changed
+            && !matches!(
+                row.kind,
+                TypeKind::Named { .. }
+                    | TypeKind::Parameter(_)
+                    | TypeKind::Function(_)
+                    | TypeKind::Error
+                    | TypeKind::Builtin {
+                        kind: BuiltinType::Iter | BuiltinType::SortedMap,
+                        ..
+                    }
+            )
+        {
+            let cleanup = cleanup_summary(&row.kind, |leaf| match leaf {
+                CleanupLeaf::Component(ty) => store.row(ty).drop_allocation.clone(),
+                CleanupLeaf::Parameter(_) | CleanupLeaf::Nominal(..) => unreachable!(),
             });
             if row.drop_allocation != cleanup {
                 row.drop_allocation = cleanup;

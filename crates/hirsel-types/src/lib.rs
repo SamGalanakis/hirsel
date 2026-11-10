@@ -37,7 +37,7 @@ pub use iteration::*;
 mod cleanup;
 mod properties;
 pub use authority::*;
-pub use cleanup::{declared_cleanup, specialized_cleanup};
+pub use cleanup::{CleanupLeaf, cleanup_summary, declared_cleanup, specialized_cleanup};
 use hirsel_intern::Symbol;
 use hirsel_syntax::FileContext;
 pub use hirsel_syntax::{Bound, LexicalOwner, NameSite, PassingMode, SiteRef};

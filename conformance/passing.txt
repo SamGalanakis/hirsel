@@ -3883,6 +3883,8 @@ conformance/MODE/MODE-4-arena-bad.hir
 conformance/MODE/MODE-4-arena-ok.hir
 conformance/MODE/MODE-4-borrowed-parameter-callable-bad.hir
 conformance/MODE/MODE-4-borrowed-parameter-callable-run.hir
+conformance/MODE/MODE-4-borrowed-parameter-capture-closure-bad.hir
+conformance/MODE/MODE-4-borrowed-parameter-capture-closure-ok.hir
 conformance/MODE/MODE-4-contextual-sendable-part-bad.hir
 conformance/MODE/MODE-4-contextual-sendable-part-run.hir
 conformance/MODE/MODE-4-counted-bad.hir

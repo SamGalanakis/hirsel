@@ -206,7 +206,7 @@ the stdin, stdout and network script domains.
 driver-supplied snapshots and builds core `ShapeInfo` data with canonical type
 spellings; the `shape(T)` rvalue it reads is a payload-free token (`Value::Unit`).
 
-`codec.encode` and `codec.decode` prove concrete schemas from driver-supplied checked declarations and convert values iteratively through hirsel-types::wire. All format validation stays in that shared codec; only complete decoded values become evaluator data. Malformed input returns DecodeError, while codec budgets remain operational refusal.
+`codec.encode` and `codec.decode` prove concrete schemas from driver-supplied checked declarations and convert values iteratively through hirsel-types::wire. All format validation stays in that shared codec; only complete decoded values become evaluator data. Malformed input returns DecodeError, while codec budgets remain operational refusal. `codec.descriptor` and `codec.descriptor_digest` return the version-free descriptor of the call's `T`, or its SHA-256, from the same load's codec program.
 
 Scripted port-0 listeners bind their client queue to the first ephemeral listen on
 that IP. Each world allocates from 49152 upward, skips script-reserved and bound

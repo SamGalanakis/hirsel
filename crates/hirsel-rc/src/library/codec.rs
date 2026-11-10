@@ -9,7 +9,7 @@ use hirsel_lir::codec::{
     CONTAINER_ENTRIES, CONTAINER_INDEX, CodecCheck, CodecNode, CodecNodeId, CodecPlan,
     DECODE_ERRORS,
 };
-use hirsel_lir::ir::Inst;
+use hirsel_lir::ir::{ConstantValue, Inst};
 use hirsel_lir::layout_types::{CopyRecipe, LayoutId, LayoutKind, LayoutRecord, LayoutTable};
 use hirsel_syntax::DefPath;
 use hirsel_types::serialization::{SchemaArgument, SchemaId, SchemaNode, SerializableSchema};
@@ -25,6 +25,50 @@ pub static DECODE: InlineLowering = InlineLowering {
     path: || hirsel_syntax::DefPath::core("codec.decode"),
     lower: decode,
 };
+
+pub static DESCRIPTOR: InlineLowering = InlineLowering {
+    path: || hirsel_syntax::DefPath::core("codec.descriptor"),
+    lower: descriptor,
+};
+
+pub static DESCRIPTOR_DIGEST: InlineLowering = InlineLowering {
+    path: || hirsel_syntax::DefPath::core("codec.descriptor_digest"),
+    lower: descriptor_digest,
+};
+
+fn descriptor(cx: &mut ImportCx<'_>, call: &CallShape<'_>) -> R<bool> {
+    static_bytes(cx, call, |d| d)
+}
+
+fn descriptor_digest(cx: &mut ImportCx<'_>, call: &CallShape<'_>) -> R<bool> {
+    static_bytes(cx, call, |d| {
+        hirsel_types::wire::descriptor_digest(&d).to_vec()
+    })
+}
+
+/// A call whose result is a function of `T` alone: the bytes are computed here
+/// from `T`'s version-free descriptor and the call becomes a static literal.
+/// The `Option[T]` witness only names `T`; it is not read.
+fn static_bytes(
+    cx: &mut ImportCx<'_>,
+    call: &CallShape<'_>,
+    of: impl FnOnce(Vec<u8>) -> Vec<u8>,
+) -> R<bool> {
+    let ([argument], [GenericArgument::Type(ty)]) = (call.arguments, call.generics) else {
+        return Ok(false);
+    };
+    let witness = cx.place_layout(argument.value.place)?;
+    if !read_only(cx, argument, witness) {
+        return Ok(false);
+    }
+    let schema = schema(cx, *ty)?;
+    let descriptor = hirsel_types::wire::version_free_descriptor(&schema)
+        .map_err(|e| PassError::Malformed(format!("a descriptor of an invalid schema: {e:?}")))?;
+    let bytes = cx.place_layout(call.destination)?;
+    let result = cx.constant(bytes, ConstantValue::Bytes(of(descriptor)));
+    cx.finish(call, result)?;
+    Ok(true)
+}
 
 fn encode(cx: &mut ImportCx<'_>, call: &CallShape<'_>) -> R<bool> {
     let ([argument], [GenericArgument::Type(ty)]) = (call.arguments, call.generics) else {

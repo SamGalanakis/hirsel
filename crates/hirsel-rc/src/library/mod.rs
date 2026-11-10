@@ -224,6 +224,8 @@ pub const INLINE: &[&InlineLowering] = &[
     // codec (ser2-native): codec.encode and codec.decode.
     &codec::ENCODE,
     &codec::DECODE,
+    &codec::DESCRIPTOR,
+    &codec::DESCRIPTOR_DIGEST,
 ];
 
 /// The result of an import hook.

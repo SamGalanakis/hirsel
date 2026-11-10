@@ -15,6 +15,7 @@ hirsel-syntax = { path = "../hirsel-syntax" }
 hirsel-intern = { path = "../hirsel-intern" }
 hirsel-diag = { path = "../hirsel-diag" }
 serde = { version = "1", features = ["derive", "rc"] }
+sha2 = "0.10"
 
 [dev-dependencies]
 hirsel-type-analysis = { path = "../hirsel-type-analysis" }

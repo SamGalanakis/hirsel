@@ -56,6 +56,25 @@ pub(super) fn call(
     }
 }
 
+/// `codec.descriptor` or `codec.descriptor_digest` of the call's `T`: the
+/// version-free descriptor of its schema, or that descriptor's SHA-256.
+pub(super) fn descriptor(name: &str, call: &OperationCall<'_>) -> R<Value> {
+    let [GenericArgument::Type(ty)] = call.generics else {
+        return Err(invalid("codec type actual"));
+    };
+    let program = program(
+        call,
+        *ty,
+        "codec.descriptor requires a checked concrete serializable schema",
+    )?;
+    let descriptor = wire::version_free_descriptor(&program.schema).map_err(codec_error)?;
+    Ok(Value::Bytes(if name == "codec.descriptor" {
+        descriptor
+    } else {
+        wire::descriptor_digest(&descriptor).to_vec()
+    }))
+}
+
 /// The codec program of `ty` at `call`, built once per load.
 pub(super) fn program(
     call: &OperationCall<'_>,

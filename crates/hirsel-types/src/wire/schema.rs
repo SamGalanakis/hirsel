@@ -88,7 +88,7 @@ impl Codec {
         Ok(Self {
             nodes,
             root: schema.root.0 as usize,
-            descriptor: descriptor(schema)?,
+            descriptor: descriptor(schema, true)?,
             fixed_flat: fixed_flat(schema),
         })
     }
@@ -205,7 +205,24 @@ fn number(out: &mut Vec<u8>, n: usize) -> Result<(), Error> {
 fn id(out: &mut Vec<u8>, t: SchemaId) {
     out.extend_from_slice(&t.0.to_le_bytes());
 }
-fn descriptor(schema: &SerializableSchema) -> Result<Vec<u8>, Error> {
+/// The version-free descriptor of `schema` (`codec.descriptor`): the concrete
+/// descriptor `codec.encode` embeds, with every Nominal node's package version
+/// text empty, so data stored under one package version names its type under
+/// every other.
+pub fn version_free_descriptor(schema: &SerializableSchema) -> Result<Vec<u8>, Error> {
+    // The same checks and canonical form as the codec's own descriptor.
+    Codec::new(schema)?;
+    let schema = schema.clone().canonicalized().ok_or(Error::Schema)?;
+    descriptor(&schema, false)
+}
+
+/// The SHA-256 digest of a descriptor (`codec.descriptor_digest`).
+pub fn descriptor_digest(descriptor: &[u8]) -> [u8; 32] {
+    use sha2::Digest;
+    sha2::Sha256::digest(descriptor).into()
+}
+
+fn descriptor(schema: &SerializableSchema, versions: bool) -> Result<Vec<u8>, Error> {
     let mut out = vec![];
     out.extend_from_slice(&schema.version.to_le_bytes());
     id(&mut out, schema.root);
@@ -273,7 +290,14 @@ fn descriptor(schema: &SerializableSchema) -> Result<Vec<u8>, Error> {
             } => {
                 out.push(6);
                 text(&mut out, &definition.0.package.name);
-                text(&mut out, &definition.0.package.version);
+                text(
+                    &mut out,
+                    if versions {
+                        &definition.0.package.version
+                    } else {
+                        ""
+                    },
+                );
                 number(&mut out, definition.0.modules.len())?;
                 for name in &definition.0.modules {
                     text(&mut out, name);

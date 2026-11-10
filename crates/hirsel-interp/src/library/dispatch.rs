@@ -2155,6 +2155,7 @@ primary_operations! { library, call, context, name, a, value;
     Primitive: "codec.encode" | "codec.decode" => {
         return super::codec::call(library, name, &call).map(Some);
     },
+    Primitive: "codec.descriptor" | "codec.descriptor_digest" => super::codec::descriptor(name, &call)?,
     Primitive: "type_shape.info" => super::shape::info(&call)?,
     // Typed generation: a generated body is its text; only the compiler reads it.
     Primitive: "codegen.body" => Value::String(text(arg(a, 0)?)?.to_owned()),

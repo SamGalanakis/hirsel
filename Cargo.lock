@@ -1807,6 +1807,7 @@ dependencies = [
  "hirsel-type-analysis",
  "serde",
  "serde_json",
+ "sha2",
 ]
 
 [[package]]

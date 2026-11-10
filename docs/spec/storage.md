@@ -575,7 +575,8 @@ A table's schema is identified by **names and shape**: the package, module, type
 and variant names of every nominal type it reaches, and its structure, with every package
 version text excluded. The **storage descriptor** of a type is its concrete schema
 descriptor ([SER-2](serialization.md#concrete-schema-descriptor)) with the exact version
-text of every Nominal node replaced by the empty text atom. A schema matches a stored one
+text of every Nominal node replaced by the empty text atom: the core library's
+`codec.descriptor`, which the compiler emits as static data. A schema matches a stored one
 when their storage descriptors are equal after record fields are matched **by name**:
 
 - a package version change that keeps names and shape needs nothing;

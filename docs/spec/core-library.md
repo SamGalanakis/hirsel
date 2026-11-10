@@ -42,6 +42,8 @@ declarations but are exempt from runtime dispatch and operation manifests.
 // SER-1/2
 fn codec.encode[T: serializable](value: T) -> Bytes
 fn codec.decode[T: serializable](data: Bytes) -> Result[T, DecodeError]
+fn codec.descriptor[T: serializable](of: Option[T]) -> Bytes
+fn codec.descriptor_digest[T: serializable](of: Option[T]) -> Bytes
 
 // CT-3
 fn type_shape.info[T](s: TypeShape[T]) -> ShapeInfo
@@ -1887,6 +1889,15 @@ run-time implementation.
 `DecodeError` is the nullary variant `Version | SchemaMismatch | Truncated |
 Trailing | Scalar | Utf8 | Tag | Length | Duplicate | Order | Invalid`, itself `serializable`; these are expected
 validation failures with no partially decoded value. Operational refusal is separate.
+
+`codec.descriptor(of)` is the version-free descriptor of `T`: the concrete schema
+descriptor `codec.encode` embeds for `T` ([SER-2](serialization.md#ser-2-canonical-codec)),
+with the package version text of every Nominal node replaced by the empty text atom, so
+data stored under one version of a package names its type under every other.
+`codec.descriptor_digest(of)` is the 32-byte SHA-256 digest of those bytes. Both are
+functions of `T` alone: `of` only names `T` (expressions carry no type arguments, and
+`None()` exists for every `T`) and is not read. The compiler computes both bytes and
+emits them as static data, so neither call encodes or hashes anything at run time.
 
 `bytes.find_any(src, needles, start)` returns the first relative byte offset at or after
 `start` whose byte occurs in `needles`, or `bytes.len(src)` if there is none. Empty

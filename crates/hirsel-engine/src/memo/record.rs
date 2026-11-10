@@ -3,7 +3,7 @@
 use super::{ReadKey, Reads};
 use hirsel_query_products::QueryKind;
 use hirsel_syntax::{ContentHash, DefId};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
 
@@ -85,6 +85,8 @@ impl<T> Clone for Memo<T> {
 #[derive(Clone, Debug, Default)]
 pub struct Changes {
     pub reads: BTreeSet<ReadKey>,
+    /// Settled input values: a reader that already observed these stays current.
+    pub values: BTreeMap<ReadKey, ContentHash>,
     pub texts: BTreeSet<DefId>,
     /// A name appeared, disappeared or changed kind or visibility: every
     /// lookup observation is stale.
@@ -98,7 +100,14 @@ impl Changes {
         self.reads.is_empty() && self.texts.is_empty() && !self.lookups && !self.validation_contexts
     }
     pub fn read(&mut self, key: ReadKey) {
+        self.values.remove(&key);
         self.reads.insert(key);
+    }
+    pub(crate) fn read_value(&mut self, key: ReadKey, value: Option<ContentHash>) {
+        self.read(key);
+        if let Some(value) = value {
+            self.values.insert(key, value);
+        }
     }
     pub fn text(&mut self, def: DefId) {
         self.texts.insert(def);
@@ -106,8 +115,8 @@ impl Changes {
     /// Whether the memo `key` with `reads` observed a change.
     pub fn stales(&self, key: &MemoKey, reads: &Reads) -> bool {
         self.texts.contains(&key.def)
-            || reads.iter().any(|(read, _)| {
-                self.reads.contains(read)
+            || reads.iter().any(|(read, value)| {
+                (self.reads.contains(read) && self.values.get(read) != Some(value))
                     || (self.lookups && matches!(read, ReadKey::Lookup(_)))
                     || (self.validation_contexts
                         && matches!(

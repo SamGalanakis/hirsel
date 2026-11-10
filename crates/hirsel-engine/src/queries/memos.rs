@@ -821,7 +821,8 @@ impl QueryEngine {
                         ReadKey::FailedSignature(id),
                         ReadKey::ExecutedSignature(id),
                     ] {
-                        changes.read(k);
+                        let value = self.observe(path, &k);
+                        changes.read_value(k, value);
                     }
                 }
             }

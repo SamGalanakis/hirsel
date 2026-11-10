@@ -281,10 +281,12 @@ fn optimize(
     // Runtime fast paths become visible only after the main optimization
     // pipeline. Fold their scalar carriers and checks against the dominating
     // guards now visible in the caller, retaining every unproved failure edge.
+    // Keep LLVM's bounded cleanup without the textual parser's optional
+    // fixpoint assertion, which can reject a valid module for a missed fold.
     if opt != OptLevel::None {
         module
             .run_passes(
-                "function(sroa,early-cse,instcombine,correlated-propagation,constraint-elimination,simplifycfg,adce)",
+                "function(sroa,early-cse,instcombine<no-verify-fixpoint>,correlated-propagation,constraint-elimination,simplifycfg,adce)",
                 machine,
             )
             .map_err(|message| CodegenError::Passes { message })?;

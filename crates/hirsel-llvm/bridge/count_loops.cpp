@@ -235,7 +235,7 @@ public:
       return Simplified ? PreservedAnalyses::none() : PreservedAnalyses::all();
     AM.invalidate(F, PreservedAnalyses::none());
     FunctionPassManager Clean;
-    Clean.addPass(InstCombinePass());
+    Clean.addPass(InstCombinePass(InstCombineOptions().setVerifyFixpoint(false)));
     Clean.addPass(SimplifyCFGPass());
     Clean.run(F, AM);
     return PreservedAnalyses::none();
@@ -280,7 +280,7 @@ public:
       // before the standard vectorizer examines the new loop.
       AM.invalidate(F, PreservedAnalyses::none());
       FunctionPassManager Clean;
-      Clean.addPass(InstCombinePass());
+      Clean.addPass(InstCombinePass(InstCombineOptions().setVerifyFixpoint(false)));
       Clean.addPass(SimplifyCFGPass());
       Clean.addPass(LoopSimplifyPass());
       Clean.addPass(LCSSAPass());
@@ -546,7 +546,7 @@ public:
     if (!Changed) return PreservedAnalyses::all();
     AM.invalidate(F, PreservedAnalyses::none());
     FunctionPassManager Clean;
-    Clean.addPass(InstCombinePass());
+    Clean.addPass(InstCombinePass(InstCombineOptions().setVerifyFixpoint(false)));
     Clean.addPass(SimplifyCFGPass());
     Clean.addPass(LoopSimplifyPass());
     Clean.addPass(LCSSAPass());

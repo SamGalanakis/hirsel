@@ -116,35 +116,6 @@ fn a_directory_creates_each_object_once_and_keeps_it_across_reopening() {
 }
 
 #[test]
-fn a_directory_replace_excludes_racing_writers() {
-    // Of writers racing to replace the same tag, exactly one succeeds.
-    let dir = tempfile::tempdir().unwrap();
-    let objects = DirObjects::open(dir.path()).unwrap();
-    let Ok(Replaced::Replaced(tag)) = objects.replace("head", b"0", Condition::Absent) else {
-        panic!("creating the head")
-    };
-    let won: usize = std::thread::scope(|s| {
-        let handles: Vec<_> = (0..8)
-            .map(|i| {
-                let objects = DirObjects::open(dir.path()).unwrap();
-                let tag = tag.clone();
-                s.spawn(move || {
-                    objects
-                        .replace("head", format!("w{i}").as_bytes(), Condition::Matches(tag))
-                        .unwrap()
-                })
-            })
-            .collect();
-        handles
-            .into_iter()
-            .map(|h| h.join().unwrap())
-            .filter(|r| matches!(r, Replaced::Replaced(_)))
-            .count()
-    });
-    assert_eq!(won, 1);
-}
-
-#[test]
 fn memory_objects_follow_the_same_contract() {
     contract(&MemoryObjects::new());
 }

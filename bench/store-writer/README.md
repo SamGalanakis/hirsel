@@ -80,7 +80,12 @@ perf counters, and stderr remain beside each database. `results.json` summarizes
 the matrix. To resume the same unchanged build after a failed case, keep its
 failed evidence elsewhere, remove just that incomplete case directory, and use
 `--compiler <release-toolchain>/hirsel --skip-build --resume`; completed samples
-are reused. Do not resume across workload or executable changes.
+are reused only when their saved source revision, full workload, engine, group,
+submitter count and diagnostic mode match. Missing bindings and mismatches are
+refused, including allocation, raw and profile cells. Legacy evidence stays intact;
+use a fresh output directory to measure a changed revision or workload. The runner
+requires committed source and keeps the captured revision in every cell and summary.
+Do not resume across executable changes.
 
 The published baseline was measured 2026-11-10 on
 storage base `4722e8cb`, LLVM release, an AMD Ryzen 9 5950X, affinity 0-1, and

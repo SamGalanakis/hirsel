@@ -1106,13 +1106,19 @@ mod tests {
         vec![0u8, 255].encode(&mut bytes);
         Ok::<u32, u32>(0x12345678).encode(&mut bytes);
         Some(9u8).encode(&mut bytes);
+        let fixed = [
+            0x34, 0x12, 2, 0, 0, 0, 0, 0, 0, 0, 0, 255, 0, 0, 0, 0, 0x78, 0x56, 0x34, 0x12, 1, 9,
+        ];
+        assert_eq!(bytes, fixed);
+        let mut input = Decode(&fixed);
+        assert_eq!(u16::decode(&mut input).unwrap(), 0x1234);
+        assert_eq!(Vec::<u8>::decode(&mut input).unwrap(), [0, 255]);
         assert_eq!(
-            bytes,
-            [
-                0x34, 0x12, 2, 0, 0, 0, 0, 0, 0, 0, 0, 255, 0, 0, 0, 0, 0x78, 0x56, 0x34, 0x12, 1,
-                9
-            ]
+            Result::<u32, u32>::decode(&mut input).unwrap(),
+            Ok(0x12345678)
         );
+        assert_eq!(Option::<u8>::decode(&mut input).unwrap(), Some(9));
+        assert!(input.0.is_empty());
         assert!(decode::<Vec<u8>>(&u64::MAX.to_le_bytes()).is_err());
         assert!(decode::<Vec<String>>(&u64::MAX.to_le_bytes()).is_err());
         assert!(decode::<bool>(&[2]).is_err());

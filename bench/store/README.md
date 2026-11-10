@@ -39,7 +39,8 @@ stays within 60 CPU seconds and 2 GiB. The program writes 16-byte keys and
 `compact` (one compaction after loading) and `recompact` (compact, commit one
 more key, compact again). All modes close the store before printing total snapshot bytes.
 A zero byte total is expected when no snapshot exists; this is not a work
-counter. A nonzero exit refuses the sample.
+counter. A nonzero exit refuses the sample. This workload has no correctness oracle: it
+does not check reopened rows, and printing snapshot bytes is not correctness coverage.
 
 Compare whole-process `instructions:u` and peak RSS externally, alongside the
 printed snapshot bytes. Use three seeded interleaved rounds, a fresh empty

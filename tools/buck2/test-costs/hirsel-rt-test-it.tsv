@@ -278,7 +278,6 @@ roots::entry_and_exit_alternate_at_the_bound	0.000
 signals::a_run_without_the_grant_cannot_project_signals	0.000
 signals::replay_refuses_a_completion_that_contradicts_the_grant_or_the_waited_kinds	0.000
 signals::scripted_arrivals_complete_waits_at_idle_points_and_replay_from_their_tape_forms	0.000
-tape_property::full_gate_generated_tape_round_trip	0.160
 tape_property::generated_tape_round_trip	0.020
 tasks::a_detached_child_drops_its_own_result_and_a_completed_one_drops_it_at_once	0.000
 tasks::a_failed_child_fails_its_join_and_cancels_its_siblings	0.000

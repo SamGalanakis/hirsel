@@ -677,10 +677,5 @@ fn round_trips(draws: usize) {
 }
 #[test]
 fn generated_tape_round_trip() {
-    round_trips(32);
-}
-#[test]
-#[ignore = "full gate: expanded tape property"]
-fn full_gate_generated_tape_round_trip() {
     round_trips(256);
 }

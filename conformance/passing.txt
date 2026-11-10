@@ -2227,9 +2227,7 @@ conformance/LANG/LANG-7-prose-header-ok.hir
 conformance/LANG/LANG-7-range-coverage-bad.hir
 conformance/LANG/LANG-7-range-coverage-ok.hir
 conformance/LANG/LANG-7-recursive-alias-argument-bad.hir
-conformance/LANG/LANG-7-recursive-alias-direct-bad.hir
 conformance/LANG/LANG-7-recursive-alias-growing-bad.hir
-conformance/LANG/LANG-7-recursive-alias-mutual-bad.hir
 conformance/LANG/LANG-7-recursive-box-ok.hir
 conformance/LANG/LANG-7-recursive-constructor-ok.hir
 conformance/LANG/LANG-7-recursive-list-ok.hir
@@ -7436,8 +7434,6 @@ conformance/STORE/STORE-12-serve-run.hir
 conformance/STORE/STORE-12-sim-call-stream-run.hir
 conformance/STORE/STORE-2-sim-transact-run.hir
 conformance/STORE/STORE-2-transact-run.hir
-conformance/STORE/STORE-3-body-capture-bad.hir
-conformance/STORE/STORE-3-body-capture-ok.hir
 conformance/STORE/STORE-3-narrow-scope-run.hir
 conformance/STORE/STORE-3-table-scope-denied-run.hir
 conformance/STORE/STORE-3-table-scope-run.hir

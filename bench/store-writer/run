@@ -141,7 +141,29 @@ def sync_trace(path):
     return syncs, puts
 
 
-def sample(kind, group, submitters, workload, out, compiler, profile=False, allocation_events=()):
+def source_revision():
+    revision = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=ROOT, text=True).strip()
+    if subprocess.call(['git', 'diff', '--quiet', 'HEAD', '--', '.'], cwd=ROOT):
+        raise RuntimeError('commit source changes before measuring or resuming')
+    return revision
+
+
+def binding(source_sha, workload, kind, group, submitters, profile=False, allocations=False):
+    return dict(source_sha=source_sha, workload=workload, engine=kind, group=group,
+                submitters=submitters, profile=profile, allocations=allocations)
+
+
+def saved_sample(path, expected):
+    row = json.loads(path.read_text())
+    if row.get('binding') != expected:
+        raise RuntimeError(f'{path}: source/workload binding differs or is missing; '
+                           'use a fresh output directory')
+    return row
+
+
+def sample(kind, group, submitters, workload, out, compiler, source_sha, profile=False, allocation_events=()):
+    if source_revision() != source_sha:
+        raise RuntimeError('source revision changed before measurement')
     suffix = f'{kind}-g{group}-c{submitters}' + ('-profile' if profile else '-allocations' if allocation_events else '')
     directory = out / suffix
     directory.mkdir()  # Never reuse an old database or overwrite original evidence.
@@ -253,7 +275,8 @@ def sample(kind, group, submitters, workload, out, compiler, profile=False, allo
         allocations = next(int(line.split()[1]) for line in lines if line.startswith('allocations '))
     else:
         allocations = sum(metrics[event] for event in allocation_events) if allocation_events else None
-    row = dict(engine=kind, group=group, submitters=submitters, transfers=workload['transfers'],
+    row = dict(binding=binding(source_sha, workload, kind, group, submitters, profile, bool(allocation_events)),
+        engine=kind, group=group, submitters=submitters, transfers=workload['transfers'],
         commits=commits, elapsed_ns=elapsed, transfers_s=workload['transfers'] * 1e9 / elapsed,
         p50_us=latencies[math.ceil(len(latencies) * .50) - 1] / 1000,
         p99_us=latencies[math.ceil(len(latencies) * .99) - 1] / 1000,
@@ -272,6 +295,8 @@ def sample(kind, group, submitters, workload, out, compiler, profile=False, allo
         row['sync_trace_calls'] = len(trace_syncs)
         row['sync_us_commit'] = sum(trace_syncs) * 1e6 / commits
         metric_file.unlink()  # Keep readable attribution, not raw dwarf stacks.
+    if source_revision() != source_sha:
+        raise RuntimeError('source revision changed during measurement; no result written')
     (directory / 'result.json').write_text(json.dumps(row, indent=2) + '\n')
     print(json.dumps(row), flush=True)
     return row
@@ -285,6 +310,7 @@ def main():
     parser.add_argument('--resume', action='store_true', help='reuse completed samples in this evidence directory')
     parser.add_argument('--profile', action='store_true', help='also collect one phase-gated writer profile per engine')
     args = parser.parse_args()
+    source_sha = source_revision()
     allowed = sorted(os.sched_getaffinity(0) - BANNED)
     if len(allowed) < 2:
         parser.error('two allowed CPUs required')
@@ -312,25 +338,29 @@ def main():
                 for kind in ('metal', 'native', 'interp'):
                     saved = out / f'{kind}-g{group}-c{clients}' / 'result.json'
                     if args.resume and saved.exists():
-                        rows.append(json.loads(saved.read_text()))
+                        rows.append(saved_sample(saved, binding(source_sha, workload, kind, group, clients)))
                     else:
-                        rows.append(sample(kind, group, clients, workload, out, compiler))
+                        rows.append(sample(kind, group, clients, workload, out, compiler, source_sha))
                     if kind == 'native' and rows[-1].get('allocations_commit') is None:
                         alloc_saved = out / f'native-g{group}-c{clients}-allocations/result.json'
-                        diagnostic = (json.loads(alloc_saved.read_text()) if args.resume and alloc_saved.exists()
-                            else sample(kind, group, clients, workload, out, compiler, allocation_events=events))
+                        diagnostic = (saved_sample(alloc_saved, binding(source_sha, workload, kind, group, clients, allocations=True)) if args.resume and alloc_saved.exists()
+                            else sample(kind, group, clients, workload, out, compiler, source_sha, allocation_events=events))
                         rows[-1]['allocations_commit'] = diagnostic['allocations_commit']
                         saved.write_text(json.dumps(rows[-1], indent=2) + '\n')
         raw_workload = dict(workload, groups=[1], submitters=[1])
         raw_saved = out / 'raw-g1-c1/result.json'
-        rows.append(json.loads(raw_saved.read_text()) if args.resume and raw_saved.exists()
-                    else sample('raw', 1, 1, raw_workload, out, compiler))
+        rows.append(saved_sample(raw_saved, binding(source_sha, raw_workload, 'raw', 1, 1)) if args.resume and raw_saved.exists()
+                    else sample('raw', 1, 1, raw_workload, out, compiler, source_sha))
         if args.profile:
             for kind in ('native', 'interp'):
                 saved = out / f'{kind}-g1-c1-profile/result.json'
-                if not (args.resume and saved.exists()):
-                    sample(kind, 1, 1, workload, out, compiler, profile=True)
-    summary = dict(source_sha=subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=ROOT, text=True).strip(),
+                if args.resume and saved.exists():
+                    saved_sample(saved, binding(source_sha, workload, kind, 1, 1, profile=True))
+                else:
+                    sample(kind, 1, 1, workload, out, compiler, source_sha, profile=True)
+    if source_revision() != source_sha:
+        raise RuntimeError('source revision changed during measurement; no summary written')
+    summary = dict(source_sha=source_sha,
         workload=workload, cpus=allowed[:2], compiler=str(compiler), rows=rows)
     (out / 'results.json').write_text(json.dumps(summary, indent=2) + '\n')
 

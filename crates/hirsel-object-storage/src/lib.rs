@@ -227,6 +227,48 @@ impl DirObjects {
         }
     }
 
+    fn replace_checked(
+        &self,
+        key: &str,
+        bytes: &[u8],
+        condition: Condition,
+        after_check: impl FnOnce(),
+    ) -> Result<Replaced, StorageError> {
+        check_key(key)?;
+        let _lock = self.lock()?;
+        let current = self.read(key)?.map(|b| content_tag(&b));
+        let holds = match &condition {
+            Condition::Absent => current.is_none(),
+            Condition::Matches(tag) => current.as_ref() == Some(tag),
+        };
+        if !holds {
+            return Ok(Replaced::Mismatch);
+        }
+        after_check();
+        let path = self.root.join(key);
+        let parent = path
+            .parent()
+            .expect("an object key names a file under the root");
+        fs::create_dir_all(parent).map_err(|e| io(parent, e))?;
+        let temporary = parent.join(format!(
+            ".tmp-{}-{}",
+            std::process::id(),
+            TEMPORARY.fetch_add(1, Ordering::Relaxed)
+        ));
+        let written = (|| {
+            let mut file = File::create_new(&temporary)?;
+            file.write_all(bytes)?;
+            file.sync_all()?;
+            fs::rename(&temporary, &path)
+        })();
+        if let Err(e) = written {
+            let _ = fs::remove_file(&temporary);
+            return Err(io(&path, e));
+        }
+        self.sync_directories(&path)?;
+        Ok(Replaced::Replaced(content_tag(bytes)))
+    }
+
     /// Every key under the directory `dir`, whose key prefix is `base`.
     fn walk(&self, dir: &Path, base: &str, out: &mut Vec<String>) -> Result<(), StorageError> {
         let entries = match fs::read_dir(dir) {
@@ -273,38 +315,7 @@ impl ObjectStorage for DirObjects {
         bytes: &[u8],
         condition: Condition,
     ) -> Result<Replaced, StorageError> {
-        check_key(key)?;
-        let _lock = self.lock()?;
-        let current = self.read(key)?.map(|b| content_tag(&b));
-        let holds = match &condition {
-            Condition::Absent => current.is_none(),
-            Condition::Matches(tag) => current.as_ref() == Some(tag),
-        };
-        if !holds {
-            return Ok(Replaced::Mismatch);
-        }
-        let path = self.root.join(key);
-        let parent = path
-            .parent()
-            .expect("an object key names a file under the root");
-        fs::create_dir_all(parent).map_err(|e| io(parent, e))?;
-        let temporary = parent.join(format!(
-            ".tmp-{}-{}",
-            std::process::id(),
-            TEMPORARY.fetch_add(1, Ordering::Relaxed)
-        ));
-        let written = (|| {
-            let mut file = File::create_new(&temporary)?;
-            file.write_all(bytes)?;
-            file.sync_all()?;
-            fs::rename(&temporary, &path)
-        })();
-        if let Err(e) = written {
-            let _ = fs::remove_file(&temporary);
-            return Err(io(&path, e));
-        }
-        self.sync_directories(&path)?;
-        Ok(Replaced::Replaced(content_tag(bytes)))
+        self.replace_checked(key, bytes, condition, || {})
     }
     fn list(&self, prefix: &str, after: &str) -> Result<Listing, StorageError> {
         // Walk only the directory the prefix's complete segments name.
@@ -573,5 +584,67 @@ pub fn open(entry: &serde_json::Value) -> Result<Arc<dyn ObjectStorage>, String>
             uint("seed")?,
             uint("fail_one_in")?,
         ))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn directory_check_and_publish_exclude_a_competing_writer() {
+        let directory = tempfile::tempdir().unwrap();
+        let objects = DirObjects::open(directory.path()).unwrap();
+        File::create(directory.path().join(".lock")).unwrap();
+        objects.replace("head", b"old", Condition::Absent).unwrap();
+        let old = content_tag(b"old");
+        std::thread::scope(|scope| {
+            let (checked, at_check) = std::sync::mpsc::channel();
+            let (probed, probe_result) = std::sync::mpsc::channel();
+            let (published, after_publish) = std::sync::mpsc::channel();
+            let competing = DirObjects::open(directory.path()).unwrap();
+            let tag = old.clone();
+            let writer = scope.spawn(move || {
+                at_check.recv().unwrap();
+                let file = File::open(competing.root().join(".lock")).unwrap();
+                // SAFETY: the descriptor belongs to this thread. LOCK_NB makes
+                // the check/publish overlap observable without a timing race.
+                let excluded =
+                    unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0;
+                if excluded {
+                    assert_eq!(
+                        std::io::Error::last_os_error().kind(),
+                        ErrorKind::WouldBlock
+                    );
+                }
+                drop(file);
+                if excluded {
+                    probed.send(true).unwrap();
+                    after_publish.recv().unwrap();
+                }
+                let outcome = competing
+                    .replace("head", b"competitor", Condition::Matches(tag))
+                    .unwrap();
+                if !excluded {
+                    probed.send(false).unwrap();
+                }
+                outcome
+            });
+            let mut excluded = false;
+            let first = objects
+                .replace_checked("head", b"first", Condition::Matches(old), || {
+                    checked.send(()).unwrap();
+                    excluded = probe_result.recv().unwrap();
+                    assert_eq!(objects.get("head").unwrap().unwrap(), b"old");
+                })
+                .unwrap();
+            if excluded {
+                published.send(()).unwrap();
+            }
+            let second = writer.join().unwrap();
+            assert_eq!(first, Replaced::Replaced(content_tag(b"first")));
+            assert_eq!(second, Replaced::Mismatch);
+            assert_eq!(objects.get("head").unwrap().unwrap(), b"first");
+        });
     }
 }

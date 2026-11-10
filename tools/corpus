@@ -40,11 +40,13 @@ import math
 from pathlib import Path
 import subprocess
 import sys
+import re
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'tools/buck2'))
 import conformance  # noqa: E402
 import event_logs  # noqa: E402
+from run_failures import first_error_line  # noqa: E402
 from sync import CONFORMANCE_SLICE_PROGRAMS, NATIVE_SELECTED_SLICES, SELECTED_SLICES  # noqa: E402
 
 
@@ -62,6 +64,31 @@ def cases(root):
     return found
 
 
+def interpreter_reports(outputs):
+    """Decode the compiler's existing JSON report, preserving every case verdict."""
+    reports = []
+    for name, output in sorted(outputs.items()):
+        match = re.search(r'^\{', output, re.M)
+        if not match:
+            raise ValueError(f'{name}: no conformance JSON report')
+        report = json.JSONDecoder().raw_decode(output, match.start())[0]
+        reports.append(report)
+    return reports
+
+
+def execute(command, structured=False):
+    if not structured:
+        return subprocess.call(command, cwd=ROOT)
+    # Buck echoes each failing compiler's entire JSON report. The event log
+    # retains it; print the case diagnostics below instead of duplicating it.
+    with subprocess.Popen(command, cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                          text=True, errors='replace') as child:
+        for line in child.stdout:
+            if not re.match(r'^(?:\[[^]]+\] )?\{"errors":', line):
+                print(line, end='', flush=True)
+        return child.wait()
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('--slices', type=int, help=f'pool actions (1-{SELECTED_SLICES}; default by case count)')
@@ -72,6 +99,7 @@ def main():
                         help='--native: run only this configuration (repeatable; default smoke)')
     parser.add_argument('--full-matrix', action='store_true',
                         help="--native: every configuration of each case's full-gate cover")
+    parser.add_argument('--report-json', type=Path, help='write per-slice compiler reports for main-runs')
     parser.add_argument('prefixes', nargs='+', metavar='PREFIX')
     args = parser.parse_args()
     if (args.parts or args.config or args.full_matrix or args.heap_parts != 1) and not args.native:
@@ -104,9 +132,44 @@ def main():
     config = ['-c', 'hirsel.conformance_paths=' + '|'.join(prefixes),
               '-c', f'hirsel.conformance_paths_split={slices}']
     with event_logs.recorded('corpus') as event_log:
-        status = subprocess.call([str(conformance.BUCK2), 'test', *conformance.CONFIG, *config,
-                                  '--event-log', str(event_log), *targets], cwd=ROOT)
+        status = execute([str(conformance.BUCK2), 'test', *conformance.CONFIG, *config,
+                                  '--event-log', str(event_log), *targets,
+                                  *(['--', '--test-arg=--json'] if args.report_json else [])], structured=bool(args.report_json))
         outputs = conformance.shard_outputs(event_log)
+    if args.report_json:
+        reports, names, problems = [], [], []
+        for name, output in sorted(outputs.items()):
+            try:
+                reports.extend(interpreter_reports({name: output}))
+                names.append(name)
+            except (ValueError, KeyError) as error:
+                problems.append(str(error))
+        # A failed slice must not discard all the other slices' observations.
+        # Keep the report inputs small; event logs retain the compiler's full output.
+        records = []
+        for report in reports:
+            record = {key: report[key] for key in ('summary', 'in_gate', 'selection', 'format_exemptions', 'errors') if key in report}
+            failed = {case['path'] for case in report['tests'] if case['status'] == 'fail'}
+            if 'errors' in record:
+                record['errors'] = [error for error in record['errors'] if not
+                    (error.partition(': ')[0] in failed and ': an in-gate file must pass, got ' in error)]
+            record['tests'] = [dict(path=case['path'], status=case['status'], reason=first_error_line(case.get('reason') or '') or None,
+                                    actual=case.get('actual') if re.fullmatch(r'accept(?:ed)?(?: entry)?', case.get('actual') or '', re.I) else None)
+                               for case in report['tests']]
+            records.append(record)
+        with args.report_json.open('w') as out:
+            json.dump(dict(version=1, expected_slices=slices, reports=records, problems=problems,
+                           selected_cases=sorted(c for c in corpus if any(c.startswith(p) for p in prefixes))), out)
+        # Keep the usual CLI summaries and failure lines as well as the JSON artifact.
+        outputs = {name: '\n'.join([
+            f'{label}: ' + ' / '.join(f'{report[key][field]} {word}' for field, word in
+                [('validated', 'validated'), ('passing', 'passing'), ('failing', 'failing'), ('not_implemented', 'not implemented')])
+            for label, key in [('whole corpus', 'summary'), ('in-gate corpus', 'in_gate')]])
+            + f'\ncorpus formatting: {len(report["format_exemptions"])} intentional syntax rejections exempt\n'
+            + '\n'.join(f'{test["path"]}: {test["reason"]}' for test in report['tests'] if test['status'] == 'fail')
+            for name, report in zip(names, reports)}
+        for problem in problems:
+            print(f'corpus: {problem}', file=sys.stderr)
     for name, output in sorted(outputs.items()):
         for line in output.splitlines():
             if line.startswith('conformance/') or line.startswith('--path ') or 'matched no corpus' in line:
@@ -144,6 +207,7 @@ def native(prefixes, selected, args):
                                   '--event-log', str(event_log), *targets], cwd=ROOT)
         outputs = conformance.shard_outputs(event_log)
     attempts = cases = 0
+    reports = []
     problems = []
     for name, output in sorted(outputs.items()):
         start = output.find('\n{\n') + 1 if not output.startswith('{\n') else 0
@@ -161,6 +225,7 @@ def native(prefixes, selected, args):
             expected = {'index': (int(slice_name) - 1) // (shards * parts) + 1, 'count': args.heap_parts}
             if report.get('heap_partition') != expected:
                 problems.append(f'{slice_name}: missing or incorrect heap partition: expected {expected}')
+        reports.append(report)
         attempts += report['configuration_attempts']
         if (int(slice_name) - 1) // shards == 0:
             cases += report['baseline_executable']
@@ -172,6 +237,8 @@ def native(prefixes, selected, args):
     print(f'native: {cases} executable cases, {attempts} configuration attempts, {len(outputs)} of {slices} slices')
     for line in problems:
         print(line)
+    if args.report_json:
+        args.report_json.write_text(json.dumps(dict(version=1, native=True, expected_slices=slices, reports=reports)) + '\n')
     if len(outputs) != slices or not cases:
         print('corpus: a slice did not report, or no executable case ran', file=sys.stderr)
         return status or 1

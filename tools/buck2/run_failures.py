@@ -26,6 +26,14 @@ DIAGNOSTICS = (
 )
 
 
+def first_error_line(details):
+    """The diagnostic, without Query's Debug dump of every source file."""
+    line = next(iter(details.splitlines()), '')
+    if line.startswith('tool error: Query {') and ', sources: SourceMap {' in line:
+        return line.split(', sources: SourceMap {', 1)[0] + ' }'
+    return line
+
+
 def infra_reason(exit_code=0, details='', *, timed_out=False):
     """Return a short infra reason, or None for an ordinary code failure."""
     details = re.sub(r'\x1b\[[0-9;]*m', '', details)

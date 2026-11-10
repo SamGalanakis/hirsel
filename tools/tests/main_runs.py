@@ -18,7 +18,7 @@ import time
 import tracemalloc
 import unittest
 from concurrent.futures import ThreadPoolExecutor
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -168,6 +168,16 @@ class Lifecycle(unittest.TestCase):
         result['details'] = result['details'].replace('known_case', 'new_case')
         reds, _ = self.observe([('binary-shard-1', result)], ['binary::known_case'], command=command)
         self.assertEqual(reds['workspace tests: binary-shard-1']['ids'], ['binary::new_case'])
+
+    def test_doctest_names_with_spaces_have_exact_green_and_failure_identities(self):
+        name = 'crates/example/src/lib.rs - constructor (line 12)'
+        passing = self.result([(name, 'ok')])
+        self.assertTrue(self.tool['complete_cases'](passing))
+        _, status = self.observe([('binary', passing)], [])
+        self.assertEqual(self.tool['result_index'](status['observations'])['workspace tests'][f'binary::{name}'], 'pass')
+        failed = self.result([(name, 'FAILED')])
+        reds, _ = self.observe([('binary', failed)], [])
+        self.assertEqual(reds['workspace tests: binary']['ids'], [f'binary::{name}'])
 
     def test_failed_child_stdout_belongs_to_its_started_parent(self):
         result = self.result([('parent', 'FAILED')])
@@ -461,9 +471,11 @@ class Tiers(unittest.TestCase):
             finally:
                 os.environ.clear()
                 os.environ.update(env)
-        fast = [n for n in named['fast'] if not n.startswith('tool tests: ')]
+        fast = [n for n in named['fast'] if not n.startswith(('tool tests: ', 'interpreter conformance: ', 'ownership trace: '))]
         self.assertEqual(fast, ['Buck2 toolchains and pool configuration', 'Buck2 build files and test-cost coverage',
-                                'workspace build', 'workspace clippy', 'formatting', 'workspace tests', 'free-mode GenMC models',
+                                'workspace build', 'workspace clippy', 'formatting', 'workspace tests',
+                                'native conformance smoke',
+                                'free-mode GenMC models',
                                 'fresh std instruction budget'])
         self.assertEqual(named['full'][:len(named['fast'])], named['fast'])
         self.assertIn('native passing corpus with independent second hash seed', named['full'])
@@ -675,6 +687,261 @@ class RunningReport(unittest.TestCase):
                 else:
                     self.assertIn('root//:binary', text)
                     self.assertIn('| no |', text)
+
+
+class RegressionReports(unittest.TestCase):
+    def setUp(self):
+        self.tool = runpy.run_path(str(ROOT / 'tools/main-runs'))
+
+    def observation(self, identity, state, **kwargs):
+        return dict(stage='tests', target='binary', identity=identity, scope='case', state=state,
+                    complete=True, first_error='assertion failed: expected 7, got 8', **kwargs)
+
+    def test_new_red_requires_explicit_green_in_previous_completed_same_stage(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            previous = root / 'previous.json'
+            previous.write_text(json.dumps({'tests': {'binary::regressed': 'pass', 'binary::old': 'failure',
+                                                      'binary::partial': 'incomplete', 'binary::skipped': 'skipped'}}))
+            history = [dict(sha='old', start=1, stages=['tests'], results_path=str(previous)),
+                       dict(sha='other-stage', start=2, stages=['full-only']),
+                       dict(sha='invalid-config', start=3, stages=['tests'], configuration_error='bad table')]
+            status = empty_status() | dict(observations=[self.observation('binary::' + name, 'failure')
+                                            for name in ('regressed', 'old', 'absent', 'partial', 'skipped')])
+            # Legacy target summaries retain only a few IDs. A later case's
+            # NEW verdict must still prevent heuristic blame of that target.
+            red = dict(stage='tests', target='binary', ids=['binary::old'], kind='code')
+            with patch.dict(self.tool['red_sections'].__globals__, ROWS=root / 'missing'):
+                report = '\n'.join(self.tool['red_sections']('head', status, history, {'red': red}))
+            self.assertIn('NEW binary::regressed; commits old..head; bisect this range', report)
+            for name in ('old', 'absent', 'partial', 'skipped'):
+                self.assertNotIn(f'NEW binary::{name}', report)
+            self.assertEqual(red['new_range'], 'old..head')
+            with patch.dict(self.tool['attribute'].__globals__, git=lambda *args: self.fail('NEW must not guess a culprit')):
+                owners = self.tool['attribute']('head', {'red': red}, history)
+            self.assertIn('old..head', owners[0])
+            self.assertIsNone(red['culprit'])
+
+    def test_first_failure_run_does_not_invent_a_new_range(self):
+        status = empty_status() | dict(observations=[self.observation('binary::broken', 'failure')])
+        reds = {'red': dict(stage='tests', target='binary', ids=['binary::broken'], kind='code')}
+        report = '\n'.join(self.tool['red_sections']('head', status, [], reds))
+        self.assertIn('binary::broken: assertion failed', report)
+        self.assertNotIn('NEW ', report)
+        with patch.dict(self.tool['attribute'].__globals__, git=lambda *args: self.fail('no prior green means no guessed culprit')):
+            owners = self.tool['attribute']('head', reds, [])
+        self.assertEqual(owners, ['- red -> unowned; first observation without a previous green'])
+
+    def test_legacy_run_uses_explicit_archived_observations_without_loading_history(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / 'runs.jsonl'
+            path.write_text(json.dumps(dict(sha='old', start=1, stages=['tests'], exception_status=dict(
+                observations=[self.observation('binary::regressed', 'pass')]))) + '\n')
+            with patch.dict(self.tool['rows'].__globals__, ROWS=path):
+                history = self.tool['rows']()
+                self.assertNotIn('exception_status', history[0])
+                previous, states = self.tool['previous_results']('tests', history)
+            self.assertEqual(previous['sha'], 'old')
+            self.assertEqual(states, {'binary::regressed': 'pass'})
+
+    def test_scratch_publication_preserves_bad_acceptance_known_counts_and_errors(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            bad = 'conformance/MODE/MODE-1-wrong-bad.hir'
+            good = 'conformance/MODE/MODE-1-good-run.hir'
+            outside_gate = 'conformance/SEM/SEM-3-step-limit-run.hir'
+            artifact = dict(reports=[dict(selection=dict(executed=3, selected=3), tests=[
+                dict(path=bad, status='fail', reason='expected Reject; got accept\nsecond line', actual='accept'),
+                dict(path=good, status='pass', reason=None, actual='RAN'),
+                dict(path=outside_gate, status='fail', reason='step limit reached', actual='tool error')])])
+            command = [sys.executable, '-c', 'import pathlib,sys; pathlib.Path(sys.argv[1]).write_text(sys.argv[2])',
+                       '{report}', json.dumps(artifact)]
+            def stages(stage, tier):
+                stage('corpus', command, corpus=True)
+            def publish(stage_status, reds):
+                self.tool['publish']('head', 'fast', root / 'run', 1, reds, ['corpus'], [], None,
+                                     stage_status, update_main=False, finished=2)
+            def attribute(sha, reds, history):
+                for red in reds.values():
+                    red.update(culprit=None, lane=None, since=sha)
+                return []
+            known = {bad: [bad, 'expected Reject; got accept', 'unowned', '2026-11-10']}
+            with patch.dict(self.tool['run_stages'].__globals__, stages=stages, stage_plan=lambda _: {'corpus': command},
+                            exception_tables=lambda: ({}, known, {}), RUNS=root, ROWS=root / 'runs.jsonl', attribute=attribute):
+                (root / 'run').mkdir()
+                with (root / 'run/run.log').open('w') as log:
+                    reds, _, _, _, status = self.tool['run_stages'](root / 'run', log, 'fast')
+                self.assertEqual(reds[f'corpus: {outside_gate}']['reason'], 'step limit reached')
+                publish(status, reds)
+            report = (root / 'latest.md').read_text()
+            self.assertLess(report.index('## WRONGLY ACCEPTED'), report.index('## Owners'))
+            self.assertIn(f'- corpus: {bad}: expected Reject; got accept', report)
+            self.assertIn('Known reds by owner: unowned: 1.', report)
+            self.assertIn('conformance/MODE: 2 total / 1 passing / 1 failing', report)
+            self.assertIn(f'{outside_gate}: step limit reached', report)
+            self.assertNotIn('second line', report)
+            self.assertEqual(json.loads((root / 'run/results.json').read_text())['corpus'][good], 'pass')
+
+    def test_unlisted_cases_precede_owner_counts_and_errors_are_case_specific(self):
+        details = ('---- first stdout ----\nthread first panicked at a.rs:1\nfirst diagnostic\n'
+                   '---- second stdout ----\nthread second panicked at b.rs:2\nsecond diagnostic\n')
+        error = self.tool['first_error'](details, 'binary::second')
+        self.assertEqual(error, 'thread second panicked at b.rs:2')
+        status = empty_status() | dict(known=[dict(identity='binary::known', owner='lane')],
+                    observations=[self.observation('binary::known', 'failure'),
+                                  self.observation('binary::unlisted', 'failure')])
+        report = '\n'.join(self.tool['red_sections']('head', status, [], {}))
+        self.assertLess(report.index('binary::unlisted'), report.index('Known reds by owner: lane: 1'))
+        self.assertNotIn('- binary::known', report)
+
+    def test_fast_selects_all_registered_diagnostic_cases_and_caps_corpus_slices(self):
+        commands = self.tool['stage_plan']('fast')
+        registry = json.loads((ROOT / 'tools/ignored-tests.json').read_text())
+        expected = {case for case, home in registry.items() if 'hirsel.ownership_trace=true' in home.get('config', [])}
+        selected = {arg.removeprefix('--test-arg=') for name, command in commands.items() if name.startswith('ownership trace:')
+                    for arg in command if arg.startswith('--test-arg=') and not arg.startswith('--test-arg=--')}
+        self.assertEqual(selected, expected)
+        interpreter = [name for name in commands if name.startswith('interpreter conformance: ')]
+        corpus = runpy.run_path(str(ROOT / 'tools/corpus'))
+        cases = corpus['cases'](ROOT)
+        selected = [case for name in interpreter for case in cases if case.startswith(commands[name][-1] + '/')]
+        self.assertCountEqual(selected, cases)
+        for name in [*interpreter, 'native conformance smoke']:
+            self.assertIn('--slices', commands[name])
+            self.assertEqual(commands[name][commands[name].index('--slices') + 1], '48')
+
+    def test_corpus_structured_output_keeps_all_verdicts_and_rejects_missing_reports(self):
+        corpus = runpy.run_path(str(ROOT / 'tools/corpus'))
+        report = dict(tests=[dict(path='conformance/MODE/wrong-bad.hir', status='fail', actual='ACCEPTED')])
+        self.assertEqual(corpus['interpreter_reports']({'slice': '---- STDOUT ----\n' + json.dumps(report) + '\n---- STDERR ----'}), [report])
+        with self.assertRaisesRegex(ValueError, 'no conformance JSON report'):
+            corpus['interpreter_reports']({'slice': 'killed before reporting'})
+
+    def test_partial_corpus_is_not_green_and_accept_text_in_a_tool_error_is_not_acceptance(self):
+        artifact = dict(expected_slices=2, reports=[dict(selection=dict(selected=2, executed=2), tests=[
+            dict(path='conformance/MODE/green-run.hir', status='pass', actual='exit 0'),
+            dict(path='conformance/MODE/rejected-bad.hir', status='fail', actual='tool error: accepted execution failed', reason='compiler failed')])],
+            selected_cases=['conformance/MODE/green-run.hir', 'conformance/MODE/rejected-bad.hir', 'conformance/MODE/missing-run.hir'])
+        observed = self.tool['corpus_observations']('corpus', artifact)
+        self.assertTrue(all(not o['complete'] for o in observed))
+        self.assertFalse(any(o['wrongly_accepted'] for o in observed))
+        self.assertEqual(self.tool['result_index'](observed)['corpus']['conformance/MODE/green-run.hir'], 'incomplete')
+        self.assertEqual(observed[-1]['state'], 'unobserved')
+
+    def test_corpus_json_option_uses_existing_compiler_json_and_keeps_cli_counts(self):
+        corpus = runpy.run_path(str(ROOT / 'tools/corpus'))
+        counts = dict(validated=1, passing=0, failing=1, not_implemented=0)
+        report = dict(summary=counts, in_gate=counts, format_exemptions={},
+                      tests=[dict(path='conformance/MODE/wrong-bad.hir', status='fail', actual='accept', reason='expected Reject; got accept')])
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / 'conformance').mkdir()
+            (root / 'conformance/case.hir').touch()
+            artifact = root / 'report.json'
+            invoke = Mock(return_value=1)
+            with patch.dict(corpus['main'].__globals__, ROOT=root), \
+                    patch.object(sys, 'argv', ['corpus', '--slices', '1', '--report-json', str(artifact), 'conformance']), \
+                    patch.object(corpus['event_logs'], 'recorded', return_value=contextlib.nullcontext(root / 'events')), \
+                    patch.object(corpus['conformance'], 'shard_outputs', return_value={'slice-1': json.dumps(report)}), \
+                    patch('subprocess.run', return_value=subprocess.CompletedProcess([], 0)), \
+                    patch.dict(corpus['main'].__globals__, execute=invoke), \
+                    contextlib.redirect_stdout(io.StringIO()) as output, contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(corpus['main'](), 1)
+            self.assertEqual(invoke.call_args.args[0][-2:], ['--', '--test-arg=--json'])
+            self.assertEqual(json.loads(artifact.read_text())['reports'], [report])
+            self.assertIn('whole corpus: 1 validated / 0 passing / 1 failing', output.getvalue())
+
+    def test_corpus_keeps_other_slices_when_one_dies_and_reports_validation_errors(self):
+        corpus = runpy.run_path(str(ROOT / 'tools/corpus'))
+        counts = dict(validated=0, passing=0, failing=0, not_implemented=0)
+        path = 'conformance/MODE/bad-header.hir'
+        report = dict(selection=dict(selected=1, executed=0), summary=counts, in_gate=counts,
+                      format_exemptions={}, tests=[], errors=[f'{path}: malformed expect directive'])
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / 'conformance/MODE').mkdir(parents=True)
+            (root / 'conformance/MODE/bad-header.hir').touch()
+            (root / 'conformance/MODE/missing.hir').touch()
+            artifact = root / 'report.json'
+            with patch.dict(corpus['main'].__globals__, ROOT=root), \
+                    patch.object(sys, 'argv', ['corpus', '--slices', '2', '--report-json', str(artifact), 'conformance']), \
+                    patch.object(corpus['event_logs'], 'recorded', return_value=contextlib.nullcontext(root / 'events')), \
+                    patch.object(corpus['conformance'], 'shard_outputs', return_value={'slice-1': json.dumps(report), 'slice-2': 'memory limit reached'}), \
+                    patch('subprocess.run', return_value=subprocess.CompletedProcess([], 0)), \
+                    patch.dict(corpus['main'].__globals__, execute=lambda *args, **kwargs: 1), contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(corpus['main'](), 1)
+            saved = json.loads(artifact.read_text())
+            self.assertEqual(len(saved['reports']), 1)
+            self.assertEqual(saved['expected_slices'], 2)
+            self.assertIn('slice-2', saved['problems'][0])
+            observations = self.tool['corpus_observations']('corpus', saved)
+            error = next(o for o in observations if o['identity'] == path)
+            self.assertEqual((error['state'], error['first_error']), ('failure', 'malformed expect directive'))
+            self.assertFalse(error['complete'])
+
+    def test_structured_cli_keeps_build_errors_without_echoing_duplicate_compiler_reports(self):
+        corpus = runpy.run_path(str(ROOT / 'tools/corpus'))
+        script = ('print("building compiler")\nprint(\'{"errors":[],"tests":[]}\')\n'
+                  'print("error[E0310]: compiler failed")\nraise SystemExit(7)')
+        with contextlib.redirect_stdout(io.StringIO()) as output:
+            self.assertEqual(corpus['execute']([sys.executable, '-c', script], structured=True), 7)
+        self.assertEqual(output.getvalue(), 'building compiler\nerror[E0310]: compiler failed\n')
+
+    def test_memory_failure_names_the_active_case_and_keeps_the_stage_incomplete(self):
+        tool = self.tool
+        identity = 'conformance/CLO/recursive-bad.hir'
+        details = ('hirsel: memory limit reached\nHIRSEL_TEST_PHASE_RUNNING invalid-json\n'
+                   'HIRSEL_TEST_PHASE_RUNNING ' + json.dumps(dict(phase='corpus-case', detail=identity)) + '\n')
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            logs = root / 'logs/corpus'
+            logs.mkdir(parents=True)
+            (logs / 'test.pb.zst').touch()
+            (logs / 'corpus.json').write_text(json.dumps(dict(expected_slices=1, reports=[], selected_cases=[identity])))
+            def stages(stage, tier):
+                stage('corpus', ['buck2', 'test'], corpus=True,
+                      corpus_inventory=[identity, 'conformance/CLO/unobserved-run.hir'])
+            result = dict(status=tool['event_logs'].FAIL, details=details,
+                          provenance=dict(execution='fresh', signed_exit_code=71, command_succeeded=False))
+            with patch.dict(tool['run_stages'].__globals__, stages=stages, stage_plan=lambda _: {'corpus': []},
+                            exception_tables=lambda: ({}, {}, {})), \
+                    patch('subprocess.run', return_value=subprocess.CompletedProcess([], 1)), \
+                    patch.object(tool['event_logs'], 'test_results', return_value=[('slice-1', result)]):
+                with (root / 'run.log').open('w') as log:
+                    reds, _, _, _, status = tool['run_stages'](root, log, 'fast')
+            report = '\n'.join(tool['red_sections']('head', status, [], reds))
+            self.assertIn(f'{identity}: hirsel: memory limit reached', report)
+            self.assertIn('1 infrastructure / 1 unobserved', report)
+            verdict = next(o for o in status['observations'] if o['scope'] == 'stage')
+            self.assertFalse(verdict['complete'])
+            self.assertEqual(verdict['state'], 'infrastructure')
+
+    def test_corpus_recovery_uses_owning_slice_provenance_and_preserves_cached_passes(self):
+        identity = 'conformance/MODE/good-run.hir'
+        artifact = dict(reports=[dict(selection=dict(selected=1, executed=1, shard='1/1'),
+                                     tests=[dict(path=identity, status='pass')])])
+        known = {identity: [identity, 'old error', 'unowned', '2026-11-10']}
+        for execution, expected in [('fresh', ['corpus']), ('cached', [])]:
+            with self.subTest(execution=execution):
+                target = dict(target='gate-conformance-selected-shard-1', state='failure', status=self.tool['event_logs'].FAIL,
+                              provenance=dict(execution=execution, command_succeeded=False))
+                observed = self.tool['corpus_observations']('corpus', artifact, {target['target']: target})
+                status = self.tool['lifecycle'](known, observed, [], {})
+                self.assertEqual(status['known'][0]['recovery_stages'], expected)
+                self.assertEqual(observed[0]['provenance']['execution'], execution)
+
+    def test_case_validation_errors_override_normal_passes_and_query_context_is_not_the_diagnostic(self):
+        identity = 'conformance/MODE/good-run.hir'
+        report = dict(selection=dict(selected=1, executed=1), tests=[dict(path=identity, status='pass')],
+                      errors=[f'{identity}: checked execution disagrees with normal execution'])
+        observed = self.tool['corpus_observations']('corpus', dict(reports=[report]))
+        self.assertEqual((observed[0]['state'], observed[0]['first_error']),
+                         ('failure', 'checked execution disagrees with normal execution'))
+        error = 'tool error: Query { error: NotImplemented, phase: None, sources: SourceMap { files: ["all of std"] } }'
+        report['tests'] = [dict(path=identity, status='fail', reason=error)]
+        report['errors'] = []
+        observed = self.tool['corpus_observations']('corpus', dict(reports=[report]))
+        self.assertEqual(observed[0]['first_error'], 'tool error: Query { error: NotImplemented, phase: None }')
 
 
 class ReportMemory(unittest.TestCase):

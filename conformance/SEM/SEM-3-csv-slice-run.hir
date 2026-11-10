@@ -40,7 +40,7 @@ fn parse(text: String, config: std@1/csv.Config) -> Result[
 
 fn check(text: String, expected: List[List[String]]) {
   let config = std@1/csv.default_config()
-  failure.check(parse(text, config) == Ok(expected), TextInvariant())
+  failure.check(parse(text, config) == Ok(copy expected), TextInvariant())
 }
 
 pub fn main() -> Result[(), ()] {

@@ -7,7 +7,7 @@ pub fn main(t: Test) -> Result[(), store.StoreError] {
   let b: table.Table[table_models@2/model.Row, u32] = table.named("keys")
   let wrote = store.transact(
     mut s,
-    fn(mut tx: store.Tx) -> Result[(), table.TxError] {
+    fn(mut tx: store.Tx) -> Result[(), store.TxError] {
       table.create(mut tx, a)?
       table.put(mut tx, a, table_models@1/model.Row(label: "a", count: 9), 1)?
       table.put(mut tx, a, table_models@1/model.Row(label: "b", count: 1), 2)?
@@ -15,30 +15,29 @@ pub fn main(t: Test) -> Result[(), store.StoreError] {
     }
   )
   test.check(t, wrote == Ok(()))
+  // A table has one key order, its byte order: a reordered key record is a
+  // key change, refused on every access until a migration.
   let read = store.transact(
     mut s,
-    fn(mut tx: store.Tx) -> Result[bool, table.TxError] {
-      if table.get(mut tx, b, table_models@2/model.Row(count: 9, label: "a"))? != Some(
-        1
+    fn(mut tx: store.Tx) -> Result[bool, store.TxError] {
+      if table.get(mut tx, b, table_models@2/model.Row(count: 9, label: "a")) != Error(
+        Schema(KeyMismatch())
       ) {
         return Ok(false)
       }
-      let rows = table.range(mut tx, b, Unbounded(), Unbounded(), 2, Ascending())?
-      if rows != [
-        (table_models@2/model.Row(count: 1, label: "b"), 2),
-        (table_models@2/model.Row(count: 9, label: "a"), 1)
-      ] {
+      if table.range(mut tx, b, Unbounded(), Unbounded(), 2, Ascending()) != Error(
+        Schema(KeyMismatch())
+      ) {
         return Ok(false)
       }
-      let bounded = table.range(
-        mut tx,
-        b,
-        Included(table_models@2/model.Row(count: 9, label: "a")),
-        Unbounded(),
-        2,
-        Descending()
-      )?
-      Ok(bounded == [(table_models@2/model.Row(count: 9, label: "a"), 1)])
+      if table.put(mut tx, b, table_models@2/model.Row(count: 1, label: "c"), 3) != Error(
+        Schema(KeyMismatch())
+      ) {
+        return Ok(false)
+      }
+      Ok(
+        table.get(mut tx, a, table_models@1/model.Row(label: "a", count: 9))? == Some(1)
+      )
     }
   )
   test.check(t, read == Ok(true))

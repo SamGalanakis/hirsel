@@ -38,7 +38,9 @@ fn load(mut s: store.Store[Dir], from: u64, to: u64) -> Result[(), ()] {
       mut s,
       fn(mut tx: store.Tx) -> Result[(), ()] {
         for k in first..end {
-          store.tx_put(mut tx, key(k), value(k))
+          if store.tx_put(mut tx, key(k), value(k)) != Ok(()) {
+            return Error(())
+          }
         }
         Ok(())
       }

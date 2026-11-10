@@ -10,7 +10,7 @@ pub type Receipt {
 }
 
 @serializable
-pub type Refusal = NoAccount(u64) | Insufficient(u64) | Table(table.TxError)
+pub type Refusal = NoAccount(u64) | Insufficient(u64) | Table(store.TxError)
 
 fn balances() -> table.Table[u64, u64] {
   table.named("balances")

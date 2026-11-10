@@ -11,7 +11,7 @@ pub fn main(t: Test) -> Result[(), store.StoreError] {
   let retyped: table.Table[u32, table_models@4/model.Row] = table.named("rows")
   let written = store.transact(
     mut s,
-    fn(mut tx: store.Tx) -> Result[(), table.TxError] {
+    fn(mut tx: store.Tx) -> Result[(), store.TxError] {
       table.create(mut tx, old)?
       table.put(mut tx, old, 1, table_models@1/model.Row(label: "one", count: 42))?
       Ok(())
@@ -29,7 +29,7 @@ pub fn main(t: Test) -> Result[(), store.StoreError] {
   let mut reopened = store.open(d, store.default_config())?
   let evolved = store.transact(
     mut reopened,
-    fn(mut tx: store.Tx) -> Result[bool, table.TxError] {
+    fn(mut tx: store.Tx) -> Result[bool, store.TxError] {
       let value = table.get(mut tx, reordered, 1)?
       if value != Some(table_models@2/model.Row(count: 42, label: "one")) {
         return Ok(false)

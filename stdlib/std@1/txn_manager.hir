@@ -129,7 +129,7 @@ fn forget(mut m: Manager, id: u64) -> () uses {} {
 /// (check_has_conflict, has_write_write_conflict and has_read_write_conflict,
 /// transaction_manager.rs:190, 324 and 350). Under snapshot isolation `reads`
 /// holds only the keys marked read.
-pub fn has_conflict(m: Manager, started: u64, writes: List[Bytes], reads: store.Access) -> bool uses {} {
+pub fn has_conflict(m: Manager, started: u64, writes: List[Bytes], reads: store.AccessSet) -> bool uses {} {
   if list.len(writes) == 0 && list.len(reads.points) == 0 && list.len(reads.spans) == 0 {
     return false
   }

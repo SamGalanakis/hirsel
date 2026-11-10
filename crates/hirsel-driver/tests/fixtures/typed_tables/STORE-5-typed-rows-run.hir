@@ -8,7 +8,7 @@ pub fn main(t: Test) -> Result[(), store.StoreError] {
   let rows: table.Table[i64, String] = table.named("rows")
   let created = store.transact(
     mut s,
-    fn(mut tx: store.Tx) -> Result[(), table.TxError] {
+    fn(mut tx: store.Tx) -> Result[(), store.TxError] {
       table.create(mut tx, rows)?
       table.put(mut tx, rows, 256, "large")?
       table.put(mut tx, rows, -2, "negative")?
@@ -21,7 +21,7 @@ pub fn main(t: Test) -> Result[(), store.StoreError] {
   test.check(t, created == Ok(()))
   let read = store.transact(
     mut s,
-    fn(mut tx: store.Tx) -> Result[(), table.TxError] {
+    fn(mut tx: store.Tx) -> Result[(), store.TxError] {
       let ordered = table.range(mut tx, rows, Unbounded(), Unbounded(), 10, Ascending())?
       if ordered != [(-2, "negative"), (0, "zero"), (1, "replaced"), (256, "large")] {
         return Error(InvalidInput())
@@ -59,7 +59,7 @@ pub fn main(t: Test) -> Result[(), store.StoreError] {
   let mut reopened = store.open(d, store.default_config())?
   let read_again = store.transact(
     mut reopened,
-    fn(mut tx: store.Tx) -> Result[Option[String], table.TxError] {
+    fn(mut tx: store.Tx) -> Result[Option[String], store.TxError] {
       table.get(mut tx, rows, 256)
     }
   )

@@ -56,7 +56,7 @@ fn version_reorder_rename_and_type_change_history() {
     execute("STORE-7-schema-history-run");
 }
 #[test]
-fn reordered_record_keys_keep_logical_range_order() {
+fn reordered_record_keys_need_a_migration() {
     execute("STORE-7-key-reorder-run");
 }
 #[test]

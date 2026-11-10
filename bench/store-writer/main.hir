@@ -161,7 +161,7 @@ fn run(rt: Io, args: Args) -> Result[(), Error] {
       let balances: table.Table[u64, u64] = table.named("balances")
       let mut total: u64 = 0
       for account in 0u64..accounts {
-        let value = table.get(tx, balances, account) ? Table
+        let value = table.get(mut tx, balances, account) ? Table
         let Some(balance) = value else {
           return Error(NoAccount(account))
         }

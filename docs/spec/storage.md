@@ -225,7 +225,7 @@ with an access, read or read and write.
 
 ```text
 Access   = Read() | ReadWrite()
-KeyScope   // opaque: copyable, data, inert, sendable; a set of byte keys, each with an Access
+KeyScope   // opaque: copyable, data, inert; a set of byte keys, each with an Access
 fn store.keys(from: RangeBound[Bytes], to: RangeBound[Bytes], access: Access) -> KeyScope
 fn store.all(access: Access) -> KeyScope
 fn store.join(a: KeyScope, b: KeyScope) -> KeyScope
@@ -274,9 +274,7 @@ fn table.scope_keys[K: key + serializable, V: serializable](tx: Tx, t: Table[K, 
   between `from` and `to` with `access`, and the catalog entry with `Read()`, so that
   get, put, delete, range and history work on those rows and nothing can create, drop
   or rename the table. It reads the catalog entry through `tx` to encode the bounds, and
-  fails as `table.get` does when that read fails; a table whose stored key schema orders
-  `K`'s fields differently from `K` has no key interval for a range of `K`, so it returns
-  `Schema(KeyMismatch())`. Neither holds any other table's catalog entry, so a narrowed
+  fails as `table.get` does when that read fails. Neither holds any other table's catalog entry, so a narrowed
   `Tx` learns nothing of a table outside its scope, not even whether it exists.
 
 A narrowing is computation inside one run of a body. It records nothing, and
@@ -536,8 +534,12 @@ text of every Nominal node replaced by the empty text atom. A schema matches a s
 when their storage descriptors are equal after record fields are matched **by name**:
 
 - a package version change that keeps names and shape needs nothing;
-- reordering a record's fields needs nothing: fields are matched by name, and a stored row
-  is read in its stored field order;
+- reordering the fields of a record in the value needs nothing: fields are matched by
+  name, and a stored row is read in its stored field order;
+- reordering the fields of a record in the key, at any depth, is a key change: a table has
+  one key order, the byte order of its encoded keys, and a key record's fields are encoded
+  in declaration order, so it refuses with `Schema(KeyMismatch())` like any other key
+  change;
 - a name that differs (a package, module, type, field or variant renamed) refuses with
   `Schema(Renamed(..))`, which names the stored and the expected spelling as a suggested
   rename, until the table's history declares that rename

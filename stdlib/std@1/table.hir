@@ -5,14 +5,6 @@ pub opaque type Table[K: key + serializable, V: serializable]: copyable + data +
 }
 
 @serializable
-pub type SchemaError = Renamed(String, String) | KeyMismatch | ValueMismatch
-
-@serializable
-pub type TxError = InvalidInput | ReadOnly | NoTable | TableExists | Schema(SchemaError) | Migrating | Limit(
-  store.TxLimit
-) | Storage(store.StoreError)
-
-@serializable
 pub type SchemaChange = Created | Renamed(String, String) | Migrated(String, String)
 
 @serializable
@@ -22,10 +14,6 @@ pub type SchemaEntry {
   value_schema: String,
   change: SchemaChange,
 }
-
-pub type RangeBound[K] = Unbounded | Included(K) | Excluded(K)
-
-pub type ScanOrder = Ascending | Descending
 
 /// Names a table without opening or creating it. Operations validate its name.
 pub fn named[K: key + serializable, V: serializable](name: String) -> Table[K, V] uses {} {
@@ -73,7 +61,7 @@ type Catalog {
   renames: List[(String, String)],
 }
 
-fn corrupt() -> TxError uses {} {
+fn corrupt() -> store.TxError uses {} {
   let error: store.StoreError = Corrupt("typed table")
   Storage(take error)
 }
@@ -106,11 +94,13 @@ fn concat(prefix: Bytes, suffix: Bytes) -> Bytes uses {} {
   bytes.from_list(take out)
 }
 
-fn load_catalog(mut tx: store.Tx, name: String) -> Result[Catalog, TxError] {
+fn load_catalog(mut tx: store.Tx, name: String) -> Result[Catalog, store.TxError] {
   if !valid(name) {
     return Error(InvalidInput())
   }
-  let raw = match store.tx_get(mut tx, metadata_key(name)) {
+  let key = metadata_key(name)
+  store.admit_read(tx, key)?
+  let raw = match store.table_read(mut tx, take key) {
     Some(raw) => raw,
     None() => return Error(NoTable()),
   }
@@ -131,7 +121,7 @@ fn current(c: Catalog) -> Epoch uses {} {
 
 fn schemas[K: key + serializable, V: serializable](c: Catalog, t: Table[K, V]) -> Result[
   (),
-  TxError
+  store.TxError
 ] uses {} {
   let latest = current(c)
   let k: Option[K] = None()
@@ -139,7 +129,8 @@ fn schemas[K: key + serializable, V: serializable](c: Catalog, t: Table[K, V]) -
   match internal.table_schema.equivalent(
     latest.key,
     internal.table_schema.schema(k),
-    []
+    [],
+    true
   ) {
     Ok(()) => (),
     Error(e) => match e {
@@ -147,38 +138,34 @@ fn schemas[K: key + serializable, V: serializable](c: Catalog, t: Table[K, V]) -
       _ => return Error(Schema(KeyMismatch())),
     },
   }
-  internal.table_schema.equivalent(latest.value, internal.table_schema.schema(v), []) ? Schema
+  internal.table_schema.equivalent(latest.value, internal.table_schema.schema(v), [], false) ? Schema
   Ok(())
 }
 
 fn checked[K: key + serializable, V: serializable](mut tx: store.Tx, t: Table[K, V]) -> Result[
   Catalog,
-  TxError
+  store.TxError
 ] {
   let c = load_catalog(mut tx, table_name(t))?
   schemas(c, t)?
   Ok(take c)
 }
 
-fn save(mut tx: store.Tx, name: String, c: Catalog) -> Result[(), TxError] {
-  let key = metadata_key(name)
-  let value = codec.encode(c)
-  if let Some(limit) = store.check_put(tx, key, value) {
-    return Error(Limit(limit))
-  }
-  store.table_put(mut tx, take key, take value)
-  Ok(())
+fn save(mut tx: store.Tx, name: String, c: Catalog) -> Result[(), store.TxError] {
+  store.table_put(mut tx, metadata_key(name), codec.encode(c))
 }
 
 /// Creates an empty table with one schema entry; creation is explicit.
 pub fn create[K: key + serializable, V: serializable](mut tx: store.Tx, t: Table[K, V]) -> Result[
   (),
-  TxError
+  store.TxError
 ] {
   if !valid(table_name(t)) {
     return Error(InvalidInput())
   }
-  if let Some(_) = store.tx_get(mut tx, metadata_key(table_name(t))) {
+  let catalog = metadata_key(table_name(t))
+  store.admit_write(tx, catalog)?
+  if let Some(_) = store.table_read(mut tx, take catalog) {
     return Error(TableExists())
   }
   let k: Option[K] = None()
@@ -201,7 +188,7 @@ fn encoded_key[K: key + serializable](
   schema: Bytes,
   key: K,
   renames: List[(String, String)]
-) -> Result[Bytes, TxError] uses {} {
+) -> Result[Bytes, store.TxError] uses {} {
   let data = match internal.table_schema.encode(schema, key, renames) {
     Ok(data) => data,
     Error(_) => return Error(corrupt()),
@@ -211,14 +198,14 @@ fn encoded_key[K: key + serializable](
 
 fn row_key[K: key + serializable, V: serializable](t: Table[K, V], c: Catalog, key: K) -> Result[
   Bytes,
-  TxError
+  store.TxError
 ] uses {} {
   // Metadata renames do not rewrite keys, so the physical key schema stays at
   // the first epoch until a migration atomically installs a new row generation.
   Ok(concat(row_prefix(table_name(t)), encoded_key(c.epochs[0].key, key, c.renames)?))
 }
 
-fn row_value[V: serializable](c: Catalog, value: V) -> Result[Bytes, TxError] uses {} {
+fn row_value[V: serializable](c: Catalog, value: V) -> Result[Bytes, store.TxError] uses {} {
   let n = list.len(c.epochs) - 1
   let mut out: List[u8] = []
   internal.table_schema.little(mut out, n, 4)
@@ -230,7 +217,7 @@ fn row_value[V: serializable](c: Catalog, value: V) -> Result[Bytes, TxError] us
   Ok(bytes.from_list(take out))
 }
 
-fn decode_value[V: serializable](c: Catalog, data: Bytes) -> Result[V, TxError] uses {} {
+fn decode_value[V: serializable](c: Catalog, data: Bytes) -> Result[V, store.TxError] uses {} {
   if bytes.len(data) < 4 {
     return Error(corrupt())
   }
@@ -257,15 +244,14 @@ fn decode_value[V: serializable](c: Catalog, data: Bytes) -> Result[V, TxError] 
 }
 
 /// Returns a fresh value, or None when this transaction sees no row.
-pub fn get[K: key + serializable, V: serializable](
-  mut tx: store.Tx,
-  t: Table[K, V],
-  key: K
-) -> Result[Option[V], TxError] {
+pub fn get[K: key + serializable, V: serializable](mut tx: store.Tx, t: Table[K, V], key: K) -> Result[
+  Option[V],
+  store.TxError
+] {
   let c = checked(mut tx, t)?
   let encoded = row_key(t, c, key)?
-  read_key_limit(tx, encoded)?
-  match store.tx_get(mut tx, take encoded) {
+  store.admit_read(tx, encoded)?
+  match store.table_read(mut tx, copy encoded) {
     Some(data) => {
       let value: V = decode_value(c, data)?
       Ok(Some(take value))
@@ -280,15 +266,11 @@ pub fn put[K: key + serializable, V: serializable](
   t: Table[K, V],
   key: K,
   value: V
-) -> Result[(), TxError] {
+) -> Result[(), store.TxError] {
   let c = checked(mut tx, t)?
   let physical_key = row_key(t, c, key)?
   let encoded_value = row_value(c, value)?
-  if let Some(limit) = store.check_put(tx, physical_key, encoded_value) {
-    return Error(Limit(limit))
-  }
   store.table_put(mut tx, take physical_key, take encoded_value)
-  Ok(())
 }
 
 /// Deletes one row and reports whether it existed in this transaction.
@@ -296,74 +278,70 @@ pub fn delete[K: key + serializable, V: serializable](
   mut tx: store.Tx,
   t: Table[K, V],
   key: K
-) -> Result[bool, TxError] {
+) -> Result[bool, store.TxError] {
   let c = checked(mut tx, t)?
   let encoded = row_key(t, c, key)?
-  read_key_limit(tx, encoded)?
-  let exists = match store.tx_get(mut tx, copy encoded) {
+  store.admit_write(tx, encoded)?
+  let exists = match store.table_read(mut tx, copy encoded) {
     Some(_) => true,
     None() => false,
   }
   if exists {
-    if let Some(limit) = store.check_delete(tx, encoded) {
-      return Error(Limit(limit))
-    }
-    store.table_delete(mut tx, take encoded)
+    store.table_delete(mut tx, take encoded)?
   }
   Ok(exists)
 }
 
-fn bound[K: key + serializable](
+// The least row key of `t`'s rows a lower bound admits.
+fn lower[K: key + serializable](
   schema: Bytes,
   prefix: Bytes,
   renames: List[(String, String)],
-  b: RangeBound[K],
-  lower: bool
-) -> Result[ordered_map.Bound[Bytes], TxError] uses {} {
+  b: store.RangeBound[K]
+) -> Result[Bytes, store.TxError] uses {} {
   match b {
-    Included(key) => Ok(Included(concat(prefix, encoded_key(schema, key, renames)?))),
-    Excluded(key) => Ok(Excluded(concat(prefix, encoded_key(schema, key, renames)?))),
-    Unbounded() => if lower {
-      Ok(Included(unique prefix))
-    } else {
-      match keys.prefix_end(prefix) {
-        Some(end) => Ok(Excluded(take end)),
-        None() => Ok(Unbounded()),
-      }
-    },
+    Included(key) => Ok(concat(prefix, encoded_key(schema, key, renames)?)),
+    Excluded(key) => Ok(successor(concat(prefix, encoded_key(schema, key, renames)?))),
+    Unbounded() => Ok(unique prefix),
   }
+}
+
+// The least row key above every key an upper bound admits; `None()` for none.
+fn upper[K: key + serializable](
+  schema: Bytes,
+  prefix: Bytes,
+  renames: List[(String, String)],
+  b: store.RangeBound[K]
+) -> Result[Option[Bytes], store.TxError] uses {} {
+  match b {
+    Included(key) => Ok(Some(successor(concat(prefix, encoded_key(schema, key, renames)?)))),
+    Excluded(key) => Ok(Some(concat(prefix, encoded_key(schema, key, renames)?))),
+    Unbounded() => Ok(keys.prefix_end(prefix)),
+  }
+}
+
+fn successor(k: Bytes) -> Bytes uses {} {
+  concat(k, b"\x00")
 }
 
 /// Scans in key value order with inclusive/exclusive bounds and a positive limit.
 pub fn range[K: key + serializable, V: serializable](
   mut tx: store.Tx,
   t: Table[K, V],
-  from: RangeBound[K],
-  to: RangeBound[K],
+  from: store.RangeBound[K],
+  to: store.RangeBound[K],
   limit: u64,
-  order: ScanOrder
-) -> Result[List[(K, V)], TxError] {
+  order: store.ScanOrder
+) -> Result[List[(K, V)], store.TxError] {
   if limit == 0 {
     return Error(InvalidInput())
   }
   let c = checked(mut tx, t)?
-  if limit > tx.limits.range_rows {
-    let exceeded: store.TxLimit = RangeRows()
-    return Error(Limit(exceeded))
-  }
   let prefix = row_prefix(table_name(t))
   let schema = c.epochs[0].key
-  let witness: Option[K] = None()
-  if schema != internal.table_schema.schema(witness) {
-    return reordered_range(mut tx, t, c, from, to, limit, order)
-  }
-  let low = bound(schema, prefix, c.renames, from, true)?
-  let high = bound(schema, prefix, c.renames, to, false)?
-  let direction: ordered_map.Direction = match order {
-    Ascending() => Ascending(),
-    Descending() => Descending(),
-  }
-  let rows = store.tx_range(mut tx, take low, take high, direction, limit)
+  let low = lower(schema, prefix, c.renames, from)?
+  let high = upper(schema, prefix, c.renames, to)?
+  let rows = store.table_range(mut tx, take low, take high, limit, order)?
   let mut out: List[(K, V)] = []
   for (key, value) in rows {
     if bytes.len(key) < bytes.len(prefix) || bytes.slice(key, 0, bytes.len(prefix)) != prefix {
@@ -388,8 +366,50 @@ pub fn range[K: key + serializable, V: serializable](
   Ok(take out)
 }
 
+/// The whole table with `access`: its rows and its catalog entry, where the
+/// library keeps its schema history and renames. It reads nothing, so it serves
+/// a table the body will create. An invalid name holds no key.
+pub fn scope[K: key + serializable, V: serializable](t: Table[K, V], access: store.Access) -> store.KeyScope uses {} {
+  let name = table_name(t)
+  if !valid(name) {
+    return store.interval(b"", Some(b""), access)
+  }
+  let prefix = row_prefix(name)
+  let catalog = metadata_key(name)
+  store.join(
+    store.interval(copy prefix, keys.prefix_end(prefix), access),
+    store.interval(copy catalog, Some(successor(catalog)), access)
+  )
+}
+
+/// The rows whose keys lie between `from` and `to` with `access`, and the
+/// table's catalog entry read only: enough for get, put, delete, range and
+/// history on those rows, and not to create, drop or rename the table. It reads
+/// the catalog through `tx` to encode the bounds and fails as `get` does.
+pub fn scope_keys[K: key + serializable, V: serializable](
+  mut tx: store.Tx,
+  t: Table[K, V],
+  from: store.RangeBound[K],
+  to: store.RangeBound[K],
+  access: store.Access
+) -> Result[store.KeyScope, store.TxError] {
+  let c = checked(mut tx, t)?
+  let name = table_name(t)
+  let prefix = row_prefix(name)
+  let schema = c.epochs[0].key
+  let low = lower(schema, prefix, c.renames, from)?
+  let high = upper(schema, prefix, c.renames, to)?
+  let catalog = metadata_key(name)
+  Ok(
+    store.join(
+      store.interval(low, high, access),
+      store.interval(copy catalog, Some(successor(catalog)), Read())
+    )
+  )
+}
+
 /// Returns the immutable schema history; hashes exclude package version text.
-pub fn history(mut tx: store.Tx, name: String) -> Result[List[SchemaEntry], TxError] {
+pub fn history(mut tx: store.Tx, name: String) -> Result[List[SchemaEntry], store.TxError] {
   let c = load_catalog(mut tx, name)?
   let mut out: List[SchemaEntry] = []
   let mut n: u64 = 0
@@ -411,11 +431,15 @@ pub fn history(mut tx: store.Tx, name: String) -> Result[List[SchemaEntry], TxEr
 /// Declares a spelling change once, appending metadata without rewriting rows.
 pub fn rename(mut tx: store.Tx, name: String, from: String, to: String) -> Result[
   (),
-  TxError
+  store.TxError
 ] {
   if from == "" || to == "" || from == to {
     return Error(InvalidInput())
   }
+  if !valid(name) {
+    return Error(InvalidInput())
+  }
+  store.admit_write(tx, metadata_key(name))?
   let mut c = load_catalog(mut tx, name)?
   let latest = current(c)
   let key = internal.table_schema.rename_schema(latest.key, from, to)
@@ -448,75 +472,5 @@ pub fn rename(mut tx: store.Tx, name: String, from: String, to: String) -> Resul
   )
   list.push(mut c.renames, (unique from, unique to))
   save(mut tx, name, c)?
-  Ok(())
-}
-
-// A key record can itself be reordered without rewriting rows. In that case
-// physical order is the older schema's order: project first, then scan in the
-// caller's key order. The index remains an ordinary persistent ordered map.
-fn reordered_range[K: key + serializable, V: serializable](
-  mut tx: store.Tx,
-  t: Table[K, V],
-  c: Catalog,
-  from: RangeBound[K],
-  to: RangeBound[K],
-  limit: u64,
-  order: ScanOrder
-) -> Result[List[(K, V)], TxError] {
-  let prefix = row_prefix(table_name(t))
-  let (physical_low, physical_high) = store.prefix_bounds(prefix)
-  let rows = store.tx_range(
-    mut tx,
-    take physical_low,
-    take physical_high,
-    Ascending(),
-    18446744073709551615
-  )
-  let mut logical: ordered_map.OrderedMap[Bytes, Bytes] = ordered_map.empty(
-    store.compare_keys
-  )
-  for (key, value) in rows {
-    let raw = bytes.slice(key, bytes.len(prefix), bytes.len(key))
-    let payload = match keys.decode_payload(c.epochs[0].key, raw) {
-      Ok(p) => p,
-      Error(_) => return Error(corrupt()),
-    }
-    let decoded: Result[K, DecodeError] = internal.table_schema.decode(
-      c.epochs[0].key,
-      payload,
-      c.renames
-    )
-    let k = match take decoded {
-      Ok(k) => k,
-      Error(_) => return Error(corrupt()),
-    }
-    ordered_map.insert(mut logical, keys.encode(k), unique value)
-  }
-  let witness: Option[K] = None()
-  let expected = internal.table_schema.schema(witness)
-  let low = bound(expected, b"", [], from, true)?
-  let high = bound(expected, b"", [], to, false)?
-  let direction: ordered_map.Direction = match order {
-    Ascending() => Ascending(),
-    Descending() => Descending(),
-  }
-  let selected = store.entries_in(logical, low, high, direction, limit)
-  let mut out: List[(K, V)] = []
-  for (key, value) in selected {
-    let decoded: Result[K, DecodeError] = keys.decode(key)
-    let k = match take decoded {
-      Ok(k) => k,
-      Error(_) => return Error(corrupt()),
-    }
-    list.push(mut out, (take k, decode_value(c, value)?))
-  }
-  Ok(take out)
-}
-
-fn read_key_limit(tx: store.Tx, encoded: Bytes) -> Result[(), TxError] {
-  if bytes.len(encoded) > tx.limits.key_bytes {
-    let exceeded: store.TxLimit = KeyBytes()
-    return Error(Limit(exceeded))
-  }
   Ok(())
 }

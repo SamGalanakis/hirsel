@@ -7,7 +7,7 @@
 // acknowledges is refused once not even the row recording a limit fits; that
 // refusal is unrecorded, so after an acknowledgement the position runs.
 @serializable
-type Short = Empty()
+type Short = Empty | Db(store.TxError)
 
 fn request(position: u64, digest: Bytes, acknowledged: u64) -> store.CallRequest {
   store.CallRequest(
@@ -39,10 +39,11 @@ fn bump(mut s: store.Store[Dir], req: store.CallRequest, n: u64) -> Result[
     req,
     fn(mut tx: store.Tx) -> Result[Bytes, Short] {
       let c: u64 = match store.tx_get(mut tx, b"counter") {
-        Some(b) => int.widen(b[0]),
-        None() => 0,
+        Ok(Some(b)) => int.widen(b[0]),
+        Ok(None()) => 0,
+        Error(e) => return Error(Db(unique e)),
       }
-      store.tx_put(mut tx, b"counter", bytes.from_list([int.truncate(c + 1)]))
+      store.tx_put(mut tx, b"counter", bytes.from_list([int.truncate(c + 1)])) ? Db
       Ok(filled(n))
     }
   )

@@ -298,9 +298,11 @@ fn qualified(owner: String, name: String) -> String uses {} {
 
 // A finite pair worklist compares recursive graphs without recursively expanding
 // them. Record names select their children; tuple and arm order stay significant.
-fn equivalent(a: Bytes, b: Bytes, renames: List[(String, String)]) -> Result[
+// `ordered` also requires every record's fields in the same order, as a key's
+// byte order follows its fields' order: a reorder is then `KeyMismatch()`.
+fn equivalent(a: Bytes, b: Bytes, renames: List[(String, String)], ordered: bool) -> Result[
   (),
-  table.SchemaError
+  store.SchemaError
 ] uses {} {
   if a == b && list.len(renames) == 0 {
     return Ok(())
@@ -354,11 +356,11 @@ fn equivalent(a: Bytes, b: Bytes, renames: List[(String, String)]) -> Result[
         _ => return Error(ValueMismatch()),
       },
       Tuple(x) => match right[r] {
-        Tuple(y) => compare_fields(x, y, false, owner, renames, mut pending)?,
+        Tuple(y) => compare_fields(x, y, false, false, owner, renames, mut pending)?,
         _ => return Error(ValueMismatch()),
       },
       Record(x) => match right[r] {
-        Record(y) => compare_fields(x, y, true, owner, renames, mut pending)?,
+        Record(y) => compare_fields(x, y, true, ordered, owner, renames, mut pending)?,
         _ => return Error(ValueMismatch()),
       },
       Arms(xn, xs) => match right[r] {
@@ -379,7 +381,7 @@ fn equivalent(a: Bytes, b: Bytes, renames: List[(String, String)]) -> Result[
                 )
               )
             }
-            compare_fields(xs[i], ys[i], false, owner, renames, mut pending)?
+            compare_fields(xs[i], ys[i], false, false, owner, renames, mut pending)?
             i += 1
           }
         },
@@ -407,10 +409,11 @@ fn compare_fields(
   a: Fields,
   b: Fields,
   by_name: bool,
+  ordered: bool,
   owner: String,
   renames: List[(String, String)],
   mut pending: List[(u64, u64, String)]
-) -> Result[(), table.SchemaError] uses {} {
+) -> Result[(), store.SchemaError] uses {} {
   if list.len(a.children) != list.len(b.children) {
     return Error(ValueMismatch())
   }
@@ -430,6 +433,9 @@ fn compare_fields(
     }
     match found {
       Some(k) => {
+        if ordered && k != i {
+          return Error(KeyMismatch())
+        }
         if !by_name && a.names[i] != b.names[k] {
           return Error(
             Renamed(

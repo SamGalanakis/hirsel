@@ -17,8 +17,8 @@ fn none() -> List[Bytes] uses {} {
   []
 }
 
-fn no_reads() -> store.Access uses {} {
-  store.Access(points: [], spans: [])
+fn no_reads() -> store.AccessSet uses {} {
+  store.AccessSet(points: [], spans: [])
 }
 
 fn fresh() -> txn_manager.Manager uses {} {
@@ -226,14 +226,14 @@ fn phantom(t: Test) -> () {
   let _guard = txn_manager.begin_at(mut m, 200)
   let writer = txn_manager.begin_at(mut m, 60)
   txn_manager.track_committed(mut m, writer, 120, [b"foo5"])
-  let scanned = store.Access(
+  let scanned = store.AccessSet(
     points: [],
     spans: [
       store.Span(from: Included(b"foo0"), to: Included(b"foo9"), direction: Ascending())
     ]
   )
   test.check(t, txn_manager.has_conflict(m, 100, none(), scanned))
-  let outside = store.Access(
+  let outside = store.AccessSet(
     points: [],
     spans: [
       store.Span(from: Excluded(b"foo5"), to: Unbounded(), direction: Ascending())
@@ -242,7 +242,12 @@ fn phantom(t: Test) -> () {
   test.check(t, !txn_manager.has_conflict(m, 100, none(), outside))
   test.check(
     t,
-    txn_manager.has_conflict(m, 100, none(), store.Access(points: [b"foo5"], spans: []))
+    txn_manager.has_conflict(
+      m,
+      100,
+      none(),
+      store.AccessSet(points: [b"foo5"], spans: [])
+    )
   )
 }
 

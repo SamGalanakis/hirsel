@@ -1,7 +1,7 @@
 // Reads and writes inside a std@1/store transaction. Reads see the snapshot
 // the transaction began at with its own earlier writes applied; nothing is
 // visible to anyone else until store.commit. Under SerializableSnapshot a
-// read enters the transaction's access set (store.Access), so a commit after
+// read enters the transaction's access set (store.AccessSet), so a commit after
 // the transaction began that writes into it makes store.commit return
 // Conflict(), as SlateDB's DbTransaction::get and scan track reads
 // (db_transaction.rs:150, 299), except that a scan records the interval it

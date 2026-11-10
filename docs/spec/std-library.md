@@ -4183,15 +4183,26 @@ StoreFaults = NoFaults | StopAfterWrites(u64)
 StoreError = Storage(FileError) | Refused(FileError) | Corrupt(String) | Fenced | Conflict | Limit(TxLimit) | Injected | Closed
 TxFailure[E] = Aborted(E) | Canceled(CancelCause) | Storage(StoreError) | Limit(TxLimit) | Unknown(StoreError)
 TxLimit = KeyBytes | ValueBytes | TransactionBytes | RangeRows
+RangeBound[K] = Unbounded | Included(K) | Excluded(K)
+ScanOrder = Ascending | Descending
+Access = Read | ReadWrite
+SchemaError = KeyMismatch | ValueMismatch | Renamed(String, String)
+TxError = NoTable | TableExists | Schema(SchemaError) | Migrating | ReadOnly | OutOfScope | InvalidInput | Limit(TxLimit) | Storage(StoreError)
+KeyScope   // opaque: copyable, data, inert
 CallRequest { stream: Bytes, epoch: u64, position: u64, digest: Bytes, acknowledged: u64 }
 CallFailure[E] = Tx(TxFailure[E]) | Denied | Rejected
 fn store.default_config() -> store.StoreConfig uses {}
 fn store.transact[S, R: inert, E: inert](mut s: store.Store[S], body: fn(mut tx: store.Tx) -> Result[R, E] uses {}) -> Result[R, store.TxFailure[E]] uses {s}
 fn store.call[S, R: inert + serializable, E: inert + serializable](mut s: store.Store[S], req: store.CallRequest, body: fn(mut tx: store.Tx) -> Result[R, E] uses {}) -> Result[R, store.CallFailure[E]] uses {s}
-fn store.tx_get(mut tx: store.Tx, take key: Bytes) -> Option[Bytes] in tx uses {}
-fn store.tx_put(mut tx: store.Tx, take key: Bytes, take value: Bytes) -> () uses {} requires !store.reserved(key)
-fn store.tx_delete(mut tx: store.Tx, take key: Bytes) -> () uses {} requires !store.reserved(key)
-fn store.tx_range(mut tx: store.Tx, take from: ordered_map.Bound[Bytes], take to: ordered_map.Bound[Bytes], direction: ordered_map.Direction, limit: u64) -> List[(Bytes, Bytes)] uses {}
+fn store.tx_get(mut tx: store.Tx, take key: Bytes) -> Result[Option[Bytes], store.TxError] in tx requires !store.reserved(key)
+fn store.tx_put(mut tx: store.Tx, take key: Bytes, take value: Bytes) -> Result[(), store.TxError] requires !store.reserved(key)
+fn store.tx_delete(mut tx: store.Tx, take key: Bytes) -> Result[(), store.TxError] requires !store.reserved(key)
+fn store.tx_range(mut tx: store.Tx, from: store.RangeBound[Bytes], to: store.RangeBound[Bytes], limit: u64, order: store.ScanOrder) -> Result[List[(Bytes, Bytes)], store.TxError]
+fn store.keys(from: store.RangeBound[Bytes], to: store.RangeBound[Bytes], access: store.Access) -> store.KeyScope uses {}
+fn store.all(access: store.Access) -> store.KeyScope uses {}
+fn store.join(a: store.KeyScope, b: store.KeyScope) -> store.KeyScope uses {}
+fn store.narrow[R: inert](mut tx: store.Tx, scope: store.KeyScope, body: fn(mut sub: store.Tx) -> R uses {}) -> Result[R, store.TxError]
+fn store.narrow_read[R: inert](mut tx: store.Tx, scope: store.KeyScope, body: fn(mut sub: store.Tx) -> R uses {}) -> Result[R, store.TxError]
 fn store.reserved(key: Bytes) -> bool uses {}
 fn store.open(d: Dir, config: store.StoreConfig) -> Result[store.Store[Dir], store.StoreError] uses {d}
 fn store.snapshot[S](mut s: store.Store[S]) -> store.Snapshot uses {}
@@ -4201,7 +4212,7 @@ fn store.range(snap: store.Snapshot, from: ordered_map.Bound[Bytes], to: ordered
 fn store.prefix_bounds(prefix: Bytes) -> (ordered_map.Bound[Bytes], ordered_map.Bound[Bytes]) uses {}
 fn store.compare_keys(a: Bytes, b: Bytes) -> i32 uses {}
 type store.Isolation = SnapshotIsolation | SerializableSnapshot
-type store.Access { points: List[Bytes], spans: List[store.Span] }
+type store.AccessSet { points: List[Bytes], spans: List[store.Span] }
 type store.Span { from: ordered_map.Bound[Bytes], to: ordered_map.Bound[Bytes], direction: ordered_map.Direction }
 fn store.begin[S](mut s: store.Store[S]) -> store.Txn uses {}
 fn store.begin_with[S](mut s: store.Store[S], isolation: store.Isolation) -> store.Txn uses {}
@@ -4248,7 +4259,7 @@ returns its `Ticket`. Conflicts are per key, after SlateDB's transaction manager
 (`std@1/txn_manager`): `commit` returns `Conflict()` with no effect when a commit made
 after the transaction began wrote a key it writes or marked with `txn.mark_read`
 (`SnapshotIsolation`), or also a key in its access set (`SerializableSnapshot`, the
-default, so write skew conflicts too). The access set (`Access`,
+default, so write skew conflicts too). The access set (`AccessSet`,
 [STORE-14](storage.md#store-14-tracked-access)) holds every key `txn.get` read, present
 or absent, and every interval a `txn.range` consumed as a `Span` in key order: up to the
 last entry it returned when it returned `limit` of them, the whole range otherwise, so a
@@ -4277,8 +4288,21 @@ and returns `Limit(..)`, leaving the store open. `open` refuses with
 `Limit(TransactionBytes())` a `transaction_bytes` over the backend's `max_object_bytes`. A failed storage write before the commit is `Storage(e)`; a create that failed
 with a file error leaves the commit's durability to the next `open` and is `Unknown(e)`.
 `transact` checks no cancellation; `Canceled` is the runner form's. Keys beginning with
-`hirsel.` (`reserved`) are the store's own: `tx_put` and `tx_delete` require a key outside
-them.
+`hirsel.` (`reserved`) are the store's own: `tx_get`, `tx_put` and `tx_delete` require a
+key outside them, and `tx_range` passes over them.
+
+**Key scopes.** A `Tx` has a key scope, every key with `ReadWrite` in the `Tx` that
+`transact` and `call` give the body. `narrow` and `narrow_read` run `body` with a `Tx` of
+the same transaction whose scope is `scope`, and refuse with `OutOfScope` unless `scope`
+is within the `Tx`'s own ([STORE-3](storage.md#store-3-transaction-scope)). `narrow_read`
+narrows to `scope` with every key `Read`, so the scope refuses its writes; its reads enter
+the transaction's access set as any other's.
+Every operation checks its keys before it reads or writes: a key or range outside the
+scope is `OutOfScope`, a write to a key held with `Read` is `ReadOnly`. A scope is held as
+sorted disjoint spans: the check is one branch for an unnarrowed `Tx` and a binary search
+over the spans otherwise, with no allocation. `tx_get` checks `limits.key_bytes` and
+`tx_range` `limits.range_rows` (a `limit` above it is `Limit(RangeRows)`, a zero `limit`
+`InvalidInput`); the write limits are checked at commit.
 
 **Call streams.** `call` is `transact` as one exactly-once request on an ordered call
 stream ([STORE-12](storage.md#store-12-transactions-at-a-runner)). The stream's row, under
@@ -5769,13 +5793,15 @@ refused with STORE-6, including nested and inactive-arm occurrences.
 
 ```text
 fn table.named[K: key + serializable, V: serializable](name: String) -> table.Table[K, V]
-fn table.create[K: key + serializable, V: serializable](mut tx: store.Tx, t: table.Table[K, V]) -> Result[(), table.TxError]
-fn table.get[K: key + serializable, V: serializable](mut tx: store.Tx, t: table.Table[K, V], key: K) -> Result[Option[V], table.TxError]
-fn table.put[K: key + serializable, V: serializable](mut tx: store.Tx, t: table.Table[K, V], key: K, value: V) -> Result[(), table.TxError]
-fn table.delete[K: key + serializable, V: serializable](mut tx: store.Tx, t: table.Table[K, V], key: K) -> Result[bool, table.TxError]
-fn table.range[K: key + serializable, V: serializable](mut tx: store.Tx, t: table.Table[K, V], from: table.RangeBound[K], to: table.RangeBound[K], limit: u64, order: table.ScanOrder) -> Result[List[(K, V)], table.TxError]
-fn table.history(mut tx: store.Tx, name: String) -> Result[List[table.SchemaEntry], table.TxError]
-fn table.rename(mut tx: store.Tx, name: String, from: String, to: String) -> Result[(), table.TxError]
+fn table.create[K: key + serializable, V: serializable](mut tx: store.Tx, t: table.Table[K, V]) -> Result[(), store.TxError]
+fn table.get[K: key + serializable, V: serializable](mut tx: store.Tx, t: table.Table[K, V], key: K) -> Result[Option[V], store.TxError]
+fn table.put[K: key + serializable, V: serializable](mut tx: store.Tx, t: table.Table[K, V], key: K, value: V) -> Result[(), store.TxError]
+fn table.delete[K: key + serializable, V: serializable](mut tx: store.Tx, t: table.Table[K, V], key: K) -> Result[bool, store.TxError]
+fn table.range[K: key + serializable, V: serializable](mut tx: store.Tx, t: table.Table[K, V], from: store.RangeBound[K], to: store.RangeBound[K], limit: u64, order: store.ScanOrder) -> Result[List[(K, V)], store.TxError]
+fn table.history(mut tx: store.Tx, name: String) -> Result[List[table.SchemaEntry], store.TxError]
+fn table.rename(mut tx: store.Tx, name: String, from: String, to: String) -> Result[(), store.TxError]
+fn table.scope[K: key + serializable, V: serializable](t: table.Table[K, V], access: store.Access) -> store.KeyScope
+fn table.scope_keys[K: key + serializable, V: serializable](mut tx: store.Tx, t: table.Table[K, V], from: store.RangeBound[K], to: store.RangeBound[K], access: store.Access) -> Result[store.KeyScope, store.TxError]
 ```
 
 Creation is explicit. `get` returns fresh owned data; `delete` reports whether a
@@ -5798,21 +5824,23 @@ change. Rows retain their epoch followed by the canonical value payload;
 decoding projects the stored field order into the expected type and applies
 all canonical codec validation.
 
-`TxError` is `InvalidInput | ReadOnly | NoTable | TableExists | Schema(SchemaError)
-| Migrating | Limit(store.TxLimit) | Storage(store.StoreError)`;
-`SchemaError` is `Renamed(String, String) | KeyMismatch | ValueMismatch`.
-These and the history records are serializable. An operation's refusal leaves
+Failures are `store.TxError` and `store.SchemaError`
+([Stores](#stores)); they and the history records are serializable. An operation's refusal leaves
 the transaction running with no changes from that operation.
 
 `table.migrate` and the reserved `table.drop` spelling are not implemented yet.
 The former needs pure Entry invocation and code identity support; the latter
 conflicts with the current reserved `drop` keyword.
 
-A table's first key layout remains physical until a key migration. When a
-record-key declaration is reordered, lookups project back to that layout and
-ranges sort the projected keys in the caller's order. That fallback reads the
-table's rows into an ordinary in-memory ordered map; schemas whose key layout
-already agrees use a bounded index scan.
+A table has one key order, the byte order of its encoded keys. Reordering the
+fields of a record in the key is a key change, refused with
+`Schema(KeyMismatch)` until a migration; ranges are always a bounded index scan.
+
+`table.scope(t, access)` is the key scope of the whole table with `access`: its
+rows and its catalog entry. `table.scope_keys(tx, t, from, to, access)` holds
+the rows between `from` and `to` with `access` and the catalog entry with
+`Read`. Neither holds another table's catalog entry, so a `Tx` narrowed to one
+cannot tell whether another table exists.
 
 ## Scoped CSV stream consumption
 

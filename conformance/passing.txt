@@ -2555,6 +2555,8 @@ conformance/MEM/MEM-13-sequence-index-ok.hir
 conformance/MEM/MEM-13-sequential-walk.hir
 conformance/MEM/MEM-13-soa-packed-field-bad.hir
 conformance/MEM/MEM-13-whole-container-assignment.hir
+conformance/MEM/MEM-14-byte-loop-reborrow-shorter-fail.hir
+conformance/MEM/MEM-14-byte-loop-short-table-fail.hir
 conformance/MEM/MEM-14-contract6-advance-error-bad.hir
 conformance/MEM/MEM-14-contract6-advance-error-ok.hir
 conformance/MEM/MEM-14-contract6-advance-failure-bad.hir
@@ -7406,8 +7408,8 @@ conformance/SER/SER-2-truncated-run.hir
 conformance/SER/SER-2-utf8-run.hir
 conformance/SER/SER-2-variable-flat-run.hir
 conformance/SER/SER-2-vectors-run.hir
-conformance/STORE/STORE-12-call-stream-run.hir
 conformance/STORE/STORE-12-call-row-limit-run.hir
+conformance/STORE/STORE-12-call-stream-run.hir
 conformance/STORE/STORE-12-sim-call-stream-run.hir
 conformance/STORE/STORE-14-access-run.hir
 conformance/STORE/STORE-2-sim-transact-run.hir
@@ -7417,6 +7419,8 @@ conformance/STORE/STORE-2-txn-isolation-run.hir
 conformance/STORE/STORE-2-txn-manager-run.hir
 conformance/STORE/STORE-3-body-capture-bad.hir
 conformance/STORE/STORE-3-body-capture-ok.hir
+conformance/STORE/STORE-3-narrow-scope-run.hir
+conformance/STORE/STORE-3-table-scope-run.hir
 conformance/STORE/STORE-3-tx-escape-bad.hir
 conformance/STORE/STORE-3-tx-escape-ok.hir
 conformance/STORE/STORE-6-function-key-bad.hir
@@ -7431,5 +7435,3 @@ conformance/STORE/STORE-6-set-key-bad.hir
 conformance/STORE/STORE-6-set-key-ok.hir
 conformance/STORE/STORE-6-simd-key-bad.hir
 conformance/STORE/STORE-6-simd-key-ok.hir
-conformance/MEM/MEM-14-byte-loop-reborrow-shorter-fail.hir
-conformance/MEM/MEM-14-byte-loop-short-table-fail.hir

@@ -8,7 +8,7 @@ pub fn main(t: Test) -> Result[(), store.StoreError] {
   let b: table.Table[u32, table_models@2/model.Pair] = table.named("pairs")
   let setup = store.transact(
     mut s,
-    fn(mut tx: store.Tx) -> Result[(), table.TxError] {
+    fn(mut tx: store.Tx) -> Result[(), store.TxError] {
       table.create(mut tx, a)?
       table.put(
         mut tx,
@@ -31,7 +31,7 @@ pub fn main(t: Test) -> Result[(), store.StoreError] {
   test.check(t, setup == Ok(()))
   let read = store.transact(
     mut s,
-    fn(mut tx: store.Tx) -> Result[Option[table_models@2/model.Pair], table.TxError] {
+    fn(mut tx: store.Tx) -> Result[Option[table_models@2/model.Pair], store.TxError] {
       table.get(mut tx, b, 1)
     }
   )

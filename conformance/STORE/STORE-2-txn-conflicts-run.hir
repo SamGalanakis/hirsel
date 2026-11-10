@@ -13,7 +13,9 @@ fn db_put(mut s: store.Store[Dir], k: Bytes, v: Bytes) -> Result[(), store.Store
   let done: Result[(), store.TxFailure[()]] = store.transact(
     mut s,
     fn(mut tx: store.Tx) -> Result[(), ()] {
-      store.tx_put(mut tx, unique key, unique value)
+      if store.tx_put(mut tx, unique key, unique value) != Ok(()) {
+        return Error(())
+      }
       Ok(())
     }
   )

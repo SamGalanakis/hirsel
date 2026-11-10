@@ -480,42 +480,84 @@ pub fn open_backend[S](take state: S, take backend: Backend[S], config: StoreCon
   match recover(mut s) {
     Ok(()) => {
       s.txns = txn_manager.new(s.visible, txn_manager.default_limits())
-      discard_migrations(mut s)?
+      collect(mut s)?
       Ok(take s)
     },
     Error(e) => Error(e),
   }
 }
 
-// The typed-table library's running migrations (STORE-9): one mark per table
-// under the first prefix, the rows written so far under the second. Opening a
-// store discards what a process crash left of a migration, shadow rows first,
-// in commits within the store limits.
-fn migration_marks() -> Bytes uses {} {
-  b"hirsel.migrations/"
+// Deletions a library has committed to, such as the typed-table library's
+// dropped tables and the generations a migration replaces or abandons
+// (STORE-5, STORE-9): one key per key prefix to delete, `hirsel.garbage/`
+// followed by the prefix. Its value is empty, or `restoring`'s: a key to put
+// back once no key under the prefix remains, in the commit that removes the
+// entry. `collect` runs at every open, so a crash leaves no deletion half done.
+fn garbage(prefix: Bytes) -> Bytes uses {} {
+  let mut out: List[u8] = []
+  bytes.append(mut out, b"hirsel.garbage/")
+  bytes.append(mut out, prefix)
+  bytes.from_list(take out)
 }
 
-fn migration_shadows() -> Bytes uses {} {
-  b"hirsel.shadow/"
+// A garbage entry's value that puts `value` under `key` once its prefix is empty.
+fn restoring(key: Bytes, value: Bytes) -> Bytes uses {} {
+  let mut out: List[u8] = []
+  let n = bytes.len(key)
+  let mut i: u64 = 0
+  while i < 4 {
+    list.push(mut out, int.truncate((n >> (i * 8)) & 255))
+    i += 1
+  }
+  bytes.append(mut out, key)
+  bytes.append(mut out, value)
+  bytes.from_list(take out)
 }
 
-fn discard_migrations[S](mut s: Store[S]) -> Result[(), StoreError] {
-  // Shadow rows go before marks: a table is never writable while rows of its
-  // shadow remain. Each commit stays within the limits, and a crash between
-  // them leaves the rest for the next open.
-  for prefix in [migration_shadows(), migration_marks()] {
-    let (low, high) = prefix_bounds(prefix)
-    let mut done = false
-    while !done {
-      let mut t = serial(mut s)
-      done = delete_within(mut t, s.config.limits, low, high)
-      if ordered_map.len(t.writes) == 0 {
-        discard(mut s, take t)
-        break
-      }
-      let ticket = commit(mut s, take t)?
-      durable(mut s, ticket)?
+// Carries out every garbage entry in key order: deletes the keys under its
+// prefix in commits within the store's limits, then, in one more commit,
+// removes the entry and puts back the key it restores. A crash between these
+// commits leaves the rest to the next call.
+fn collect[S](mut s: Store[S]) -> Result[(), StoreError] {
+  let (low, high) = prefix_bounds(b"hirsel.garbage/")
+  while true {
+    let mut t = serial(mut s)
+    let _ = read_span(mut t.access, unique low, unique high, Ascending(), 1, [])
+    let found = entries_in(t.state, low, high, Ascending(), 1)
+    if list.len(found) == 0 {
+      discard(mut s, take t)
+      return Ok(())
     }
+    let (entry, value) = unique found[0]
+    let skip = bytes.len(b"hirsel.garbage/")
+    let (from, to) = prefix_bounds(bytes.slice(entry, skip, bytes.len(entry)))
+    if delete_within(mut t, s.config.limits, from, to) && ordered_map.len(t.writes) == 0 {
+      txn.delete(mut t, unique entry)
+      if bytes.len(value) >= 4 {
+        let mut n: u64 = 0
+        let mut i: u64 = 0
+        while i < 4 {
+          let byte: u64 = int.widen(value[i])
+          n = n | (byte << (i * 8))
+          i += 1
+        }
+        if 4 + n > bytes.len(value) {
+          discard(mut s, take t)
+          return Error(Corrupt("garbage entry"))
+        }
+        txn.put(
+          mut t,
+          bytes.slice(value, 4, 4 + n),
+          bytes.slice(value, 4 + n, bytes.len(value))
+        )
+      }
+    } else if ordered_map.len(t.writes) == 0 {
+      // No single delete fits the commit limit.
+      discard(mut s, take t)
+      return Error(Limit(TransactionBytes()))
+    }
+    let ticket = commit(mut s, take t)?
+    durable(mut s, ticket)?
   }
   Ok(())
 }

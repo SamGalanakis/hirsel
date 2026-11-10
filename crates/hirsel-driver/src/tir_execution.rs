@@ -367,8 +367,11 @@ fn run_provider_on_host(
         Some(_) => Some(call_schemas(&signature, &runtime)?),
         None => None,
     };
+    // Every run carries its entries' identities: `runner.entry_id` and `runner.apply` read
+    // them with no runner involved (RUN-3).
+    let callees = std::sync::Arc::new(input.callees.clone());
+    operations.set_callees(callees.clone());
     if run.calls() || call.is_some() {
-        let callees = input.callees.clone();
         // A live run's remote runners open their providers now, reading their TLS material.
         let remote = match &operations.io {
             hirsel_host_io::HostIo::Live(_) => hirsel_host_io::RemoteRunners::open(
@@ -384,7 +387,7 @@ fn run_provider_on_host(
         };
         operations.set_runners(hirsel_host_io::RunnerContext {
             instance,
-            callees: std::sync::Arc::new(callees),
+            callees,
             tape,
             role: call_schemas.as_ref().map(|(schemas, _)| schemas.clone()),
             remote,

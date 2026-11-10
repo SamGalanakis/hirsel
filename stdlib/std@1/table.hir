@@ -65,6 +65,10 @@ type Epoch {
 type Catalog {
   epochs: List[Epoch],
   renames: List[(String, String)],
+  // The generation the table's rows live under.
+  generation: u8,
+  // Whether a migration is writing the next generation.
+  migrating: bool,
 }
 
 fn corrupt() -> store.TxError uses {} {
@@ -89,18 +93,30 @@ fn metadata_key(name: String) -> Bytes uses {} {
   concat(b"hirsel.tables/", keys.encode(name))
 }
 
-fn row_prefix(name: String) -> Bytes uses {} {
+// Every generation of a table's rows.
+fn table_rows(name: String) -> Bytes uses {} {
   concat(b"hirsel.rows/", keys.encode(name))
 }
 
-// A table's migration mark and shadow rows live in the store's reserved
-// migration spaces, which opening a store clears.
-fn mark_key(name: String) -> Bytes uses {} {
-  concat(store.migration_marks(), keys.encode(name))
+// One generation of a table's rows: the table's name, then the generation as
+// one byte, then each row's encoded key. A migration writes the next
+// generation, (g + 1) mod 256, and installs it by naming it in the catalog;
+// the replaced or abandoned one is deleted before any other transaction runs,
+// or by the next open, so no table holds rows under more than two.
+fn rows_of(name: String, generation: u8) -> Bytes uses {} {
+  let mut out: List[u8] = []
+  bytes.append(mut out, b"hirsel.rows/")
+  bytes.append(mut out, keys.encode(name))
+  list.push(mut out, generation)
+  bytes.from_list(take out)
 }
 
-fn shadow_prefix(name: String) -> Bytes uses {} {
-  concat(store.migration_shadows(), keys.encode(name))
+fn next_generation(g: u8) -> u8 uses {} {
+  if g == 255 {
+    0
+  } else {
+    g + 1
+  }
 }
 
 fn concat(prefix: Bytes, suffix: Bytes) -> Bytes uses {} {
@@ -137,7 +153,7 @@ fn current(c: Catalog) -> Epoch uses {} {
 
 // The epoch whose key schema the stored keys use: the last creation or
 // migration. Renames rewrite no key, so later rename epochs keep it.
-fn generation(c: Catalog) -> u64 uses {} {
+fn key_epoch(c: Catalog) -> u64 uses {} {
   let mut g: u64 = 0
   let mut i: u64 = 0
   for epoch in c.epochs {
@@ -153,10 +169,8 @@ fn generation(c: Catalog) -> u64 uses {} {
 }
 
 // A write to a table under migration returns `Migrating()`.
-fn writable(tx: store.Tx, name: String) -> Result[(), store.TxError] {
-  let mark = mark_key(name)
-  store.admit_read(tx, mark)?
-  if let Some(_) = store.table_read(tx, take mark) {
+fn writable(c: Catalog) -> Result[(), store.TxError] uses {} {
+  if c.migrating {
     return Error(Migrating())
   }
   Ok(())
@@ -221,7 +235,9 @@ pub fn create[K: key + serializable, V: serializable](mut tx: store.Tx, t: Table
         change: Created()
       )
     ],
-    renames: []
+    renames: [],
+    generation: 0,
+    migrating: false
   )
   save(mut tx, table_name(t), c)?
   Ok(())
@@ -247,8 +263,8 @@ fn row_key[K: key + serializable, V: serializable](t: Table[K, V], c: Catalog, k
   // the generation's epoch until a migration atomically installs a new one.
   Ok(
     concat(
-      row_prefix(table_name(t)),
-      encoded_key(c.epochs[generation(c)].key, key, c.renames)?
+      rows_of(table_name(t), c.generation),
+      encoded_key(c.epochs[key_epoch(c)].key, key, c.renames)?
     )
   )
 }
@@ -316,7 +332,7 @@ pub fn put[K: key + serializable, V: serializable](
   value: V
 ) -> Result[(), store.TxError] {
   let c = checked(tx, t)?
-  writable(tx, table_name(t))?
+  writable(c)?
   let physical_key = row_key(t, c, key)?
   let encoded_value = row_value(c, value)?
   store.table_put(mut tx, take physical_key, take encoded_value)
@@ -329,7 +345,7 @@ pub fn delete[K: key + serializable, V: serializable](
   key: K
 ) -> Result[bool, store.TxError] {
   let c = checked(tx, t)?
-  writable(tx, table_name(t))?
+  writable(c)?
   let encoded = row_key(t, c, key)?
   store.admit_write(tx, encoded)?
   let exists = match store.table_read(tx, copy encoded) {
@@ -387,8 +403,8 @@ pub fn range[K: key + serializable, V: serializable](
     return Error(InvalidInput())
   }
   let c = checked(tx, t)?
-  let prefix = row_prefix(table_name(t))
-  let schema = c.epochs[generation(c)].key
+  let prefix = rows_of(table_name(t), c.generation)
+  let schema = c.epochs[key_epoch(c)].key
   let low = lower(schema, prefix, c.renames, from)?
   let high = upper(schema, prefix, c.renames, to)?
   let rows = store.table_range(tx, take low, take high, limit, order)?
@@ -417,28 +433,23 @@ pub fn range[K: key + serializable, V: serializable](
 }
 
 /// The whole table with `access`: its rows and its catalog entry, where the
-/// library keeps its schema history and renames, and its migration mark read
-/// only. It reads nothing, so it serves a table the body will create. An
-/// invalid name holds no key.
+/// library keeps its schema history and renames. It reads nothing, so it
+/// serves a table the body will create. An invalid name holds no key.
 pub fn scope[K: key + serializable, V: serializable](t: Table[K, V], access: store.Access) -> store.KeyScope uses {} {
   let name = table_name(t)
   if !valid(name) {
     return store.interval(b"", Some(b""), access)
   }
-  let prefix = row_prefix(name)
+  let prefix = table_rows(name)
   let catalog = metadata_key(name)
-  let mark = mark_key(name)
   store.join(
-    store.join(
-      store.interval(copy prefix, keys.prefix_end(prefix), access),
-      store.interval(copy catalog, Some(successor(catalog)), access)
-    ),
-    store.interval(copy mark, Some(successor(mark)), Read())
+    store.interval(copy prefix, keys.prefix_end(prefix), access),
+    store.interval(copy catalog, Some(successor(catalog)), access)
   )
 }
 
 /// The rows whose keys lie between `from` and `to` with `access`, and the
-/// table's catalog entry and migration mark read only: enough for get, put, delete, range and
+/// table's catalog entry read only: enough for get, put, delete, range and
 /// history on those rows, and not to create, drop or rename the table. It reads
 /// the catalog through `tx` to encode the bounds and fails as `get` does.
 pub fn scope_keys[K: key + serializable, V: serializable](
@@ -450,19 +461,15 @@ pub fn scope_keys[K: key + serializable, V: serializable](
 ) -> Result[store.KeyScope, store.TxError] {
   let c = checked(tx, t)?
   let name = table_name(t)
-  let prefix = row_prefix(name)
-  let schema = c.epochs[generation(c)].key
+  let prefix = rows_of(name, c.generation)
+  let schema = c.epochs[key_epoch(c)].key
   let low = lower(schema, prefix, c.renames, from)?
   let high = upper(schema, prefix, c.renames, to)?
   let catalog = metadata_key(name)
-  let mark = mark_key(name)
   Ok(
     store.join(
-      store.join(
-        store.interval(low, high, access),
-        store.interval(copy catalog, Some(successor(catalog)), Read())
-      ),
-      store.interval(copy mark, Some(successor(mark)), Read())
+      store.interval(low, high, access),
+      store.interval(copy catalog, Some(successor(catalog)), Read())
     )
   )
 }
@@ -500,7 +507,7 @@ pub fn rename(mut tx: store.Tx, name: String, from: String, to: String) -> Resul
   }
   store.admit_write(tx, metadata_key(name))?
   let mut c = load_catalog(tx, name)?
-  writable(tx, name)?
+  writable(c)?
   let latest = current(c)
   let key = internal.table_schema.rename_schema(latest.key, from, to)
   let value = internal.table_schema.rename_schema(latest.value, from, to)
@@ -535,28 +542,25 @@ pub fn rename(mut tx: store.Tx, name: String, from: String, to: String) -> Resul
   Ok(())
 }
 
-/// Removes the table, its rows and its schema history in this transaction.
-pub fn drop[K: key + serializable, V: serializable](mut tx: store.Tx, t: Table[K, V]) -> Result[
+/// Removes the table, its rows and its schema history: one transaction removes
+/// its catalog entry, and its rows go in transactions that each fit the
+/// store's limits, so a drop is bounded by no commit limit. A refusal is
+/// `Aborted(e)`, with the error `e` of the table operations.
+pub fn drop[K: key + serializable, V: serializable, S](mut s: store.Store[S], t: Table[K, V]) -> Result[
   (),
-  store.TxError
+  store.TxFailure[store.TxError]
 ] {
-  let _ = checked(tx, t)?
-  let name = table_name(t)
-  let catalog = metadata_key(name)
-  store.admit_write(tx, catalog)?
-  writable(tx, name)?
-  let prefix = row_prefix(name)
-  let mut doomed: List[Bytes] = []
-  for (key, _) in store.table_all(tx, copy prefix, keys.prefix_end(prefix), true)? {
-    list.push(mut doomed, unique key)
-  }
-  list.push(mut doomed, take catalog)
-  if let Some(limit) = store.check_delete_all(tx, doomed) {
-    return Error(Limit(limit))
-  }
-  for key in doomed {
-    store.table_delete(mut tx, unique key)?
-  }
+  store.transact(
+    mut s,
+    fn(mut tx: store.Tx) -> Result[(), store.TxError] {
+      let c = checked(tx, t)?
+      writable(c)?
+      let name = table_name(t)
+      store.table_delete(mut tx, metadata_key(name))?
+      store.table_put(mut tx, store.garbage(rows_of(name, c.generation)), b"")
+    }
+  )?
+  store.collect(mut s) ? Storage
   Ok(())
 }
 
@@ -578,6 +582,9 @@ fn settled[R, E](take r: Result[R, store.TxFailure[MigrateError[E]]]) -> Result[
 // The first transaction: finish at once, or mark the table.
 type Start = Current | Marked(Catalog)
 
+// Marks the table as migrating and records the next generation as garbage
+// that, once deleted, restores the unmarked catalog: a migration that does
+// not install leaves the table as it was, after a crash too.
 fn start[
   J: key + serializable,
   A: serializable,
@@ -591,7 +598,16 @@ fn start[
     return Ok(Current())
   }
   schemas(c, from) ? Table
-  store.table_put(mut tx, mark_key(name), b"") ? Table
+  let catalog = metadata_key(name)
+  let next = rows_of(name, next_generation(c.generation))
+  store.table_put(mut tx, store.garbage(next), store.restoring(catalog, codec.encode(c))) ? Table
+  let marked = Catalog(
+    epochs: unique c.epochs,
+    renames: unique c.renames,
+    generation: c.generation,
+    migrating: true
+  )
+  save(mut tx, name, marked) ? Table
   Ok(Marked(take c))
 }
 
@@ -603,8 +619,8 @@ type Progress {
 }
 
 // Applies `f` to up to `batch` rows after the cursor, in key order, writing
-// each result into the shadow under the target schema. Returns the advanced
-// progress and whether rows may remain.
+// each result into the next generation under the target schema. Returns the
+// advanced progress and whether rows may remain.
 fn advance[
   J: key + serializable,
   A: serializable,
@@ -623,14 +639,14 @@ fn advance[
   let value_type: Option[B] = None()
   let target_key = internal.table_schema.schema(key_type)
   let target_value = internal.table_schema.schema(value_type)
-  let prefix = row_prefix(name)
+  let prefix = rows_of(name, catalog.generation)
   let low = match p.cursor {
     Some(last) => successor(last),
     None() => copy prefix,
   }
   let rows = store.table_range(tx, take low, keys.prefix_end(prefix), batch, Ascending()) ? Table
-  let stored = catalog.epochs[generation(catalog)].key
-  let shadow = shadow_prefix(name)
+  let stored = catalog.epochs[key_epoch(catalog)].key
+  let next = rows_of(name, next_generation(catalog.generation))
   let epoch = list.len(catalog.epochs)
   let mut cursor: Option[Bytes] = match p.cursor {
     Some(last) => Some(unique last),
@@ -660,7 +676,7 @@ fn advance[
       Ok(Error(e)) => return Error(Failed(take e)),
       Error(failure) => return Error(Faulted(take failure)),
     }
-    let target = concat(shadow, encoded_key(target_key, new_key, []) ? Table)
+    let target = concat(next, encoded_key(target_key, new_key, []) ? Table)
     if let Some(_) = store.table_read(tx, copy target) {
       return Error(Collision())
     }
@@ -678,8 +694,9 @@ fn advance[
   Ok((Progress(cursor: take cursor, count: count), list.len(rows) == batch))
 }
 
-// The last transaction: the shadow's rows replace the table's, the target
-// schema becomes current, and the mark goes.
+// The install: the catalog names the next generation and appends the target
+// schema, and the replaced generation becomes garbage. It writes three keys
+// whatever the table's size.
 fn install[K: key + serializable, B: serializable, E](
   mut tx: store.Tx,
   to: Table[K, B],
@@ -687,19 +704,15 @@ fn install[K: key + serializable, B: serializable, E](
   entry: EntryId
 ) -> Result[(), MigrateError[E]] {
   let name = table_name(to)
-  let prefix = row_prefix(name)
-  for (key, _) in store.table_all(tx, copy prefix, keys.prefix_end(prefix), true) ? Table {
-    store.table_delete(mut tx, unique key) ? Table
-  }
-  let shadow = shadow_prefix(name)
-  for (key, value) in store.table_all(tx, copy shadow, keys.prefix_end(shadow), true) ? Table {
-    let live = concat(prefix, bytes.slice(key, bytes.len(shadow), bytes.len(key)))
-    store.table_delete(mut tx, unique key) ? Table
-    store.table_put(mut tx, take live, unique value) ? Table
-  }
+  let generation = next_generation(c.generation)
   let k: Option[K] = None()
   let b: Option[B] = None()
-  let mut next = Catalog(epochs: unique c.epochs, renames: [])
+  let mut next = Catalog(
+    epochs: unique c.epochs,
+    renames: [],
+    generation: generation,
+    migrating: false
+  )
   list.push(
     mut next.epochs,
     Epoch(
@@ -709,47 +722,21 @@ fn install[K: key + serializable, B: serializable, E](
     )
   )
   save(mut tx, name, next) ? Table
-  store.table_delete(mut tx, mark_key(name)) ? Table
+  store.table_delete(mut tx, store.garbage(rows_of(name, generation))) ? Table
+  store.table_put(mut tx, store.garbage(rows_of(name, c.generation)), b"") ? Table
   Ok(())
-}
-
-// One step of discarding a migration: removes shadow rows within the
-// transaction's limits, and the mark once none remain, so the table is never
-// writable while rows of its shadow remain. True when the table is as it was
-// before the migration began.
-fn discard(mut tx: store.Tx, name: String) -> Result[bool, store.TxError] {
-  if !store.table_delete_within(mut tx, shadow_prefix(name))? {
-    return Ok(false)
-  }
-  match store.table_delete(mut tx, mark_key(name)) {
-    Ok(()) => Ok(true),
-    Error(Limit(_)) => Ok(false),
-    Error(e) => Error(e),
-  }
 }
 
 // Discards a migration and returns `why`, or the failure that prevented the
 // discard.
-fn abandon[S, R, E](mut s: store.Store[S], name: String, take why: MigrateError[E]) -> Result[
+fn abandon[S, R, E](mut s: store.Store[S], take why: MigrateError[E]) -> Result[
   R,
   MigrateError[E]
 ] {
-  let mut done = false
-  while !done {
-    let step = store.transact(
-      mut s,
-      fn(mut tx: store.Tx) -> Result[bool, store.TxError] {
-        discard(mut tx, name)
-      }
-    )
-    done = match take step {
-      Ok(finished) => finished,
-      Error(Aborted(e)) => return Error(Table(take e)),
-      Error(Storage(e)) => return Error(Table(Storage(take e))),
-      Error(Unknown(e)) => return Error(Table(Storage(take e))),
-      Error(Limit(l)) => return Error(Table(Limit(l))),
-      Error(Canceled(cause)) => return Error(Canceled(cause)),
-    }
+  // An abandoned migration's next generation is garbage; deleting it puts back
+  // the unmarked catalog entry.
+  if let Error(e) = store.collect(mut s) {
+    return Error(Table(Storage(take e)))
   }
   Error(take why)
 }
@@ -766,8 +753,10 @@ fn over_limit[R, E](r: Result[R, store.TxFailure[MigrateError[E]]]) -> Option[st
 
 /// Migrates every row of a table from schema (J, A) to (K, B) with the pure
 /// row function `f`, in batches of `batch` rows per transaction, checking
-/// `within` for cancellation between them (STORE-9). The table is unchanged
-/// unless every row migrates: a row function's error, a failure in it, a key
+/// `within` for cancellation between them (STORE-9). The new rows go to the
+/// table's next generation, and one small transaction installs it, so a
+/// migration is bounded by no commit limit. The table is unchanged unless
+/// every row migrates: a row function's error, a failure in it, a key
 /// collision, cancellation or a refused commit discards the migration.
 pub fn migrate[
   J: key + serializable,
@@ -803,7 +792,7 @@ pub fn migrate[
   while more {
     if let Error(Canceled(cause)) = core@1/task.check_canceled(within) {
       let canceled: MigrateError[E] = Canceled(cause)
-      return abandon(mut s, name, take canceled)
+      return abandon(mut s, take canceled)
     }
     let held = take progress
     let stepped = store.transact(
@@ -814,14 +803,14 @@ pub fn migrate[
     )
     if let Some(l) = over_limit(stepped) {
       let refused: MigrateError[E] = Table(Limit(l))
-      return abandon(mut s, name, take refused)
+      return abandon(mut s, take refused)
     }
     match take stepped {
       Ok((next, rest)) => {
         progress = take next
         more = rest
       },
-      Error(Aborted(why)) => return abandon(mut s, name, take why),
+      Error(Aborted(why)) => return abandon(mut s, take why),
       Error(other) => {
         let failed: Result[u64, store.TxFailure[MigrateError[E]]] = Error(take other)
         return settled(take failed)
@@ -835,11 +824,16 @@ pub fn migrate[
       install(mut tx, to, c, entry)
     }
   )
-  // An install that does not fit one commit leaves the table as it was.
+  // The install writes the catalog entry and two garbage entries; one too
+  // large for a commit leaves the table as it was.
   if let Some(l) = over_limit(installed) {
     let refused: MigrateError[E] = Table(Limit(l))
-    return abandon(mut s, name, take refused)
+    return abandon(mut s, take refused)
   }
   settled(take installed)?
+  // The replaced generation is garbage.
+  if let Error(e) = store.collect(mut s) {
+    return Error(Table(Storage(take e)))
+  }
   Ok(progress.count)
 }

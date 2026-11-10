@@ -14,13 +14,13 @@ fn fixture(name: &str) -> PathBuf {
         .join(format!("{name}.hir"))
 }
 
-fn run(name: &str, path: &Path, native: bool) {
+fn run(name: &str, path: &Path, native: bool, steps: u64) {
     with_compiler_stack(|| {
         let mut loaded = load_program(path).unwrap();
         loaded.check_for_execution().unwrap();
         loaded.engine.adapters.interpreter = Some(Box::new(InterpreterAdapter {
             limits: hirsel_interp::Limits {
-                steps: Some(16_000_000),
+                steps: Some(steps),
                 call_depth: 256,
                 source: None,
             },
@@ -82,7 +82,7 @@ fn run(name: &str, path: &Path, native: bool) {
 }
 
 fn execute(name: &str) {
-    run(name, &fixture(name), true);
+    run(name, &fixture(name), true, 16_000_000);
 }
 
 #[test]
@@ -114,6 +114,9 @@ fn dropping_removes_rows_and_history_only() {
     execute("STORE-5-drop-run");
 }
 #[test]
-fn a_crash_mid_migration_leaves_the_old_or_the_new_table() {
-    execute("STORE-9-migrate-crash-run");
+fn a_crash_mid_migration_or_drop_leaves_a_whole_table() {
+    // It crashes the store at every write of a migration and of a drop, each
+    // position reopening and checking the table: one run per position.
+    let name = "STORE-9-migrate-crash-run";
+    run(name, &fixture(name), true, 128_000_000);
 }

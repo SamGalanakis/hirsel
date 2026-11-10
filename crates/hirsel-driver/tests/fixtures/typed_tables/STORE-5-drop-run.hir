@@ -1,14 +1,21 @@
 // rule: STORE-5
 // expect: run
-// Dropping a table removes its rows and history and nothing else; refusals
-// and an aborted body change nothing.
+// Dropping a table removes its rows and history and nothing else, in commits
+// within the store's limits however large the table; refusals change nothing.
 fn rows(mut s: store.Store[Dir], name: String) -> u64 {
   let snap = store.snapshot(mut s)
   let mut prefix: List[u8] = []
   bytes.append(mut prefix, b"hirsel.rows/")
   bytes.append(mut prefix, keys.encode(name))
   let (low, high) = store.prefix_bounds(bytes.from_list(take prefix))
-  list.len(store.range(snap, low, high, Ascending(), 100))
+  list.len(store.range(snap, low, high, Ascending(), 200))
+}
+
+// Nothing waits to be deleted.
+fn settled(mut s: store.Store[Dir]) -> bool {
+  let snap = store.snapshot(mut s)
+  let (low, high) = store.prefix_bounds(b"hirsel.garbage/")
+  list.len(store.range(snap, low, high, Ascending(), 10)) == 0
 }
 
 pub fn main(t: Test) -> Result[(), store.StoreError] {
@@ -23,6 +30,8 @@ pub fn main(t: Test) -> Result[(), store.StoreError] {
       table.create(mut tx, items)?
       for k in 1u32..6u32 {
         table.put(mut tx, item, k, "kept")?
+      }
+      for k in 1u32..101u32 {
         table.put(mut tx, items, k, "dropped")?
       }
       Ok(())
@@ -30,51 +39,37 @@ pub fn main(t: Test) -> Result[(), store.StoreError] {
   )
   test.check(t, seeded == Ok(()))
   store.close(take s)?
-  // Five deletes and the catalog's exceed 60 bytes: refused, nothing changes.
+  // Under these limits no one commit deletes every row of `items`.
   let mut tight = store.default_config()
-  tight.limits.transaction_bytes = 60
+  tight.limits.transaction_bytes = 1500
   let mut small = store.open(d, tight)?
-  let refused = store.transact(
+  let too_large = store.transact(
     mut small,
-    fn(mut tx: store.Tx) -> Result[bool, store.TxError] {
-      if table.drop(mut tx, items) != Error(Limit(TransactionBytes())) {
-        return Ok(false)
-      }
-      Ok(table.get(tx, items, 3)? == Some("dropped"))
-    }
-  )
-  test.check(t, refused == Ok(true))
-  store.close(take small)?
-  let mut again = store.open(d, store.default_config())?
-  let aborted = store.transact(
-    mut again,
     fn(mut tx: store.Tx) -> Result[(), store.TxError] {
-      table.drop(mut tx, items)?
-      Error(InvalidInput())
+      for k in 1u32..101u32 {
+        let _ = table.delete(mut tx, items, k)?
+      }
+      Ok(())
     }
   )
-  test.check(t, aborted == Error(Aborted(InvalidInput())))
-  test.check(t, rows(mut again, "items") == 5)
+  test.check(t, too_large == Error(Aborted(Limit(TransactionBytes()))))
   let wrong: table.Table[u32, u64] = table.named("items")
   let invalid: table.Table[u32, String] = table.named("hirsel.items")
   let missing: table.Table[u32, String] = table.named("missing")
-  let dropped = store.transact(
-    mut again,
+  test.check(t, table.drop(mut small, wrong) == Error(Aborted(Schema(ValueMismatch()))))
+  test.check(t, table.drop(mut small, invalid) == Error(Aborted(InvalidInput())))
+  test.check(t, table.drop(mut small, missing) == Error(Aborted(NoTable())))
+  test.check(t, rows(mut small, "items") == 100)
+  test.check(t, table.drop(mut small, items) == Ok(()))
+  test.check(t, table.drop(mut small, items) == Error(Aborted(NoTable())))
+  test.check(t, rows(mut small, "items") == 0 && rows(mut small, "item") == 5 && settled(mut small))
+  let gone = store.transact(
+    mut small,
     fn(mut tx: store.Tx) -> Result[bool, store.TxError] {
-      if table.drop(mut tx, wrong) != Error(Schema(ValueMismatch())) || table.drop(
-        mut tx,
-        invalid
-      ) != Error(InvalidInput()) || table.drop(mut tx, missing) != Error(NoTable()) {
-        return Ok(false)
-      }
-      table.drop(mut tx, items)?
       if table.get(tx, items, 1) != Error(NoTable()) || table.history(
         tx,
         "items"
       ) != Error(NoTable()) {
-        return Ok(false)
-      }
-      if table.drop(mut tx, items) != Error(NoTable()) {
         return Ok(false)
       }
       // A table of the same name starts empty with a fresh history.
@@ -83,7 +78,6 @@ pub fn main(t: Test) -> Result[(), store.StoreError] {
       Ok(list.len(fresh) == 0 && list.len(table.history(tx, "items")?) == 1)
     }
   )
-  test.check(t, dropped == Ok(true))
-  test.check(t, rows(mut again, "items") == 0 && rows(mut again, "item") == 5)
+  test.check(t, gone == Ok(true))
   Ok(())
 }

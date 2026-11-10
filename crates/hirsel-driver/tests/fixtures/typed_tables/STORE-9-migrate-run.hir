@@ -76,14 +76,18 @@ fn seed[S](mut s: store.Store[S], name: String) -> bool {
   written == Ok(())
 }
 
-// Nothing of a discarded migration remains in the store's reserved spaces.
+// Nothing of a discarded migration remains: no generation waits to be
+// deleted, and the table's keys are its five rows.
 fn no_leftovers[S](mut s: store.Store[S]) -> bool {
   let snap = store.snapshot(mut s)
-  let (low, high) = store.prefix_bounds(b"hirsel.migrations/")
-  let (shadow_low, shadow_high) = store.prefix_bounds(b"hirsel.shadow/")
+  let (low, high) = store.prefix_bounds(b"hirsel.garbage/")
+  let mut prefix: List[u8] = []
+  bytes.append(mut prefix, b"hirsel.rows/")
+  bytes.append(mut prefix, keys.encode("items"))
+  let (rows_low, rows_high) = store.prefix_bounds(bytes.from_list(take prefix))
   list.len(store.range(snap, low, high, Ascending(), 10)) == 0 && list.len(
-    store.range(snap, shadow_low, shadow_high, Ascending(), 10)
-  ) == 0
+    store.range(snap, rows_low, rows_high, Ascending(), 10)
+  ) == 5
 }
 
 // The five seeded rows are intact and the table accepts writes again.

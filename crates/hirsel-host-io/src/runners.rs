@@ -74,6 +74,11 @@ impl HostLibrary {
             hirsel_run_schema::Environmental::Stopped,
         ))
     }
+    /// The identities of the program's entries, which `runner.entry_id` and `runner.apply`
+    /// read whether or not the run has runners.
+    pub fn set_callees(&mut self, callees: Arc<BTreeMap<String, CalleeFacts>>) {
+        self.library.simulation.config.callees = callees;
+    }
     /// Configure the run's runners: its instance, the callee facts and its tape.
     pub fn set_runners(&mut self, context: RunnerContext) {
         let config = &mut self.library.simulation.config;

@@ -5798,7 +5798,7 @@ refused with STORE-6, including nested and inactive-arm occurrences.
 ```text
 fn table.named[K: key + serializable, V: serializable](name: String) -> table.Table[K, V]
 fn table.create[K: key + serializable, V: serializable](mut tx: store.Tx, t: table.Table[K, V]) -> Result[(), store.TxError]
-fn table.drop[K: key + serializable, V: serializable](mut tx: store.Tx, t: table.Table[K, V]) -> Result[(), store.TxError]
+fn table.drop[K: key + serializable, V: serializable, S](mut s: store.Store[S], t: table.Table[K, V]) -> Result[(), store.TxFailure[store.TxError]]
 fn table.get[K: key + serializable, V: serializable](tx: store.Tx, t: table.Table[K, V], key: K) -> Result[Option[V], store.TxError]
 fn table.put[K: key + serializable, V: serializable](mut tx: store.Tx, t: table.Table[K, V], key: K, value: V) -> Result[(), store.TxError]
 fn table.delete[K: key + serializable, V: serializable](mut tx: store.Tx, t: table.Table[K, V], key: K) -> Result[bool, store.TxError]
@@ -5810,10 +5810,11 @@ fn table.scope[K: key + serializable, V: serializable](t: table.Table[K, V], acc
 fn table.scope_keys[K: key + serializable, V: serializable](tx: store.Tx, t: table.Table[K, V], from: store.RangeBound[K], to: store.RangeBound[K], access: store.Access) -> Result[store.KeyScope, store.TxError]
 ```
 
-Creation is explicit. `drop` removes the table, its rows and its schema
-history in the transaction; it refuses a table under migration with
-`Migrating()` and preflights every delete against the limits, so a refused
-drop changes nothing, and a later `create` starts a new history at epoch 0.
+Creation is explicit. `drop` takes the store: one transaction removes the
+table's catalog entry, and with it the schema history, and the rows are then
+deleted in commits within the store limits, so a table of any size can be
+dropped. A refusal is `Aborted(e)`, a table under migration `Aborted(Migrating())`,
+and changes nothing; a later `create` starts a new history at epoch 0.
 `get` returns fresh owned data; `delete` reports whether a row existed. `RangeBound` is `Unbounded | Included(K) | Excluded(K)` and
 `ScanOrder` is `Ascending | Descending`; scans return at most a positive `limit`
 rows, with `Excluded(last key)` for paging. Names are 1–255 UTF-8 bytes with no
@@ -5839,14 +5840,17 @@ the transaction running with no changes from that operation.
 
 `migrate` rewrites every row through the pure row entry `f`, run with
 `runner.apply`, in batches of `batch` rows per transaction, checking `within`
-for cancellation between them, and installs the rows and the target schema in
-one last transaction, recording `Migrated(runner.entry_id(f))` in the history.
-`MigrateError` is `Failed(E) | Faulted(Failure) | Collision | Table(store.TxError)
-| Canceled(CancelCause)`; on any of them the migration is discarded and the
-table is unchanged. The install must fit one commit: a table whose rows exceed
-`transaction_bytes` returns `Table(Limit(..))`. While a migration runs, writes
-to the table return `Migrating()`. Opening a store discards the mark and shadow
-rows a process crash left behind, in commits within the store limits.
+for cancellation between them. The new rows go to the table's next
+generation, and one small transaction installs it: the catalog entry names
+the new generation and records `Migrated(runner.entry_id(f))` in the history.
+The replaced generation is then deleted in commits within the store limits, so
+a migration is bounded by no commit limit. `MigrateError` is `Failed(E) |
+Faulted(Failure) | Collision | Table(store.TxError) | Canceled(CancelCause)`;
+on any of them the migration is discarded, its generation deleted the same
+way, and the table is unchanged. While a migration runs, writes to the table
+return `Migrating()`. Opening a store finishes the deletion of any generation a
+crash left unnamed by a catalog entry, so a crash leaves the old table or the
+migrated one.
 
 A table has one key order, the byte order of its encoded keys under the key
 layout of its creation or its latest migration. Reordering the fields of a
@@ -5854,9 +5858,11 @@ record in the key is a key change, refused with `Schema(KeyMismatch)` until a
 migration; ranges are always a bounded index scan.
 
 `table.scope(t, access)` is the key scope of the whole table with `access`: its
-rows and its catalog entry, and its migration mark with `Read`.
-`table.scope_keys(tx, t, from, to, access)` holds the rows between `from` and
-`to` with `access` and the catalog entry and migration mark with `Read`. Neither holds another table's catalog entry, so a `Tx` narrowed to one
+rows, under any generation, and its catalog entry. It reads nothing; the table
+operations reach only the current generation.
+`table.scope_keys(tx, t, from, to, access)` holds the rows of the current
+generation between `from` and `to` with `access` and the catalog entry with
+`Read`. Neither holds another table's catalog entry, so a `Tx` narrowed to one
 cannot tell whether another table exists.
 
 ## Scoped CSV stream consumption

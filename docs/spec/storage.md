@@ -287,8 +287,11 @@ fn table.scope_keys[K: key + serializable, V: serializable](tx: Tx, t: Table[K, 
 
   `table.scope` holds the whole table with `access`: its rows and its **catalog entry**,
   the one reserved row where the library keeps everything it reads about the table (its
-  schema history, its renames and any migration mark). It reads nothing, so it serves a
-  table that the body will create. `table.scope_keys` holds the rows whose keys lie
+  schema history, its renames, its current generation and any migration mark). It reads
+  nothing, so it serves a table that the body will create, and holds the rows under any
+  generation; the operations reach only the current one
+  ([STORE-7](#store-7-rows-and-storage-identity)). `table.scope_keys` holds the rows of
+  the current generation whose keys lie
   between `from` and `to` with `access`, and the catalog entry with `Read()`, so that
   get, put, delete, range and history work on those rows and nothing can create, drop
   or rename the table. It reads the catalog entry through `tx` to encode the bounds, and
@@ -425,7 +428,7 @@ carries no authority, and every operation on it takes a `Tx`. Every operation re
 ```text
 fn table.named[K: key + serializable, V: serializable](name: String) -> Table[K, V]
 fn table.create[K: key + serializable, V: serializable](mut tx: Tx, t: Table[K, V]) -> Result[(), TxError]
-fn table.drop[K: key + serializable, V: serializable](mut tx: Tx, t: Table[K, V]) -> Result[(), TxError]
+fn table.drop[K: key + serializable, V: serializable](mut s: Store, t: Table[K, V]) -> Result[(), TxFailure[TxError]]
 fn table.get[K: key + serializable, V: serializable](tx: Tx, t: Table[K, V], key: K) -> Result[Option[V], TxError]
 fn table.put[K: key + serializable, V: serializable](mut tx: Tx, t: Table[K, V], key: K, value: V) -> Result[(), TxError]
 fn table.delete[K: key + serializable, V: serializable](mut tx: Tx, t: Table[K, V], key: K) -> Result[bool, TxError]
@@ -438,6 +441,12 @@ fn table.history(tx: Tx, name: String) -> Result[List[SchemaEntry], TxError]
   for the store's own tables.
 - `create` makes an empty table whose schema history holds one entry for `K` and `V`;
   `drop` removes the table, its rows and its history. There is no implicit creation.
+  `drop` takes the store, not a `Tx`: one transaction removes the table's catalog entry,
+  and its rows are then deleted in transactions that each fit the store's limits, so a
+  table of any size can be dropped. It returns `Aborted(e)` for a refusal, with the error
+  `e` below, and the store's failure otherwise; a crash before the catalog entry's removal
+  commits leaves the table whole, and one after it leaves rows that the next open deletes
+  ([STORE-7](#store-7-rows-and-storage-identity)).
 - `get` returns a fresh owned copy of the value stored under `key`, or `None`. `put`
   inserts or replaces. `delete` removes the row and returns whether it existed.
 - `range` returns the rows whose keys lie between `from` and `to` in key order
@@ -543,6 +552,17 @@ tags and trailing bytes); a stored key that does not decode is `Storage(Corrupt(
 A row's value is stored as a `u32` little-endian schema epoch followed by the canonical
 codec payload of the value, with no envelope; the table's schema history holds the
 descriptors once ([STORE-9](#store-9-schema-history-renames-and-migrations)).
+
+A table's rows live under a **generation**, one byte after the table's encoded name in
+every row key, followed by the encoded key ([STORE-6](#store-6-key-encoding)); within a
+generation the byte order of row keys is the table's key order. The table's catalog entry
+names its current generation, and every table operation takes it from the catalog entry it
+already reads, so a read records the same access as without one. Only a migration writes a
+second generation, the table's next, and installs it by pointing the catalog entry at it
+([STORE-9](#store-9-schema-history-renames-and-migrations)). A generation no catalog
+entry names is garbage: the store records it in the reserved space `hirsel.garbage/` in
+the transaction that orphans it, deletes it in transactions that each fit the store's
+limits, and finishes that deletion when it is opened after a crash.
 
 A table's schema is identified by **names and shape**: the package, module, type, field
 and variant names of every nominal type it reaches, and its structure, with every package
@@ -660,24 +680,31 @@ store's `range_rows` limit, else `Table(InvalidInput())`. Then:
 
 1. A table whose current schema already matches `K` and `B` returns `Ok(0)`. Otherwise its
    current schema must match `J` and `A`, else `Table(Schema(..))`.
-2. One transaction marks the table as migrating. Until the migration ends, writes to the
-   table return `Migrating()`; reads through `from` continue.
+2. One transaction marks the table as migrating and records its next generation
+   ([STORE-7](#store-7-rows-and-storage-identity)) as garbage. Until the migration ends,
+   writes to the table return `Migrating()`; reads through `from` continue, and see only
+   the current generation.
 3. Successive transactions each read up to `batch` rows after the last one migrated, in
    key order, apply `f` to each in order through `runner.apply(f, (), key, old)`
-   ([RUN-3](runners.md#run-3-entries)), and write the results into a shadow table under
-   the new schema. Cancellation of `within` is checked between these transactions.
-4. One final transaction replaces the table's rows with the shadow's, appends the new
-   schema entry `Migrated(runner.entry_id(f))`, the identity of `f` (its path, signature
-   fingerprint and code hash, [RUN-8](runners.md#run-8-identity-and-arrival)), clears the
-   mark, and the call returns `Ok(n)` with the number of rows migrated.
+   ([RUN-3](runners.md#run-3-entries)), and write the results into the next generation
+   under the new schema. Cancellation of `within` is checked between these transactions.
+4. One transaction installs the migration whatever the table's size: it points the
+   catalog entry at the next generation, appends the new schema entry
+   `Migrated(runner.entry_id(f))`, the identity of `f` (its path, signature fingerprint
+   and code hash, [RUN-8](runners.md#run-8-identity-and-arrival)), clears the mark, and
+   records the replaced generation as garbage. The replaced rows are then deleted, and the
+   call returns `Ok(n)` with the number of rows migrated.
 
-If `f` returns `Error(e)`, fails (`runner.apply` returns `Error(failure)`), two rows map to
-the same new key, `within` is cancelled, or a step's commit exceeds the store's limits,
-the migration is discarded and the call returns `Failed(e)`, `Faulted(failure)`,
-`Collision()`, `Canceled(cause)` or `Table(Limit(..))`; the table is unchanged. A discard
-removes the shadow rows and then the mark, in transactions that each fit the store's
-limits, so the table never accepts writes while shadow rows remain. Opening a store
-discards the mark and shadow rows a process crash left behind. Key migrations are allowed,
+No commit of a migration holds more than one batch of rows, so a migration is bounded by
+no commit limit. If `f` returns `Error(e)`, fails (`runner.apply` returns
+`Error(failure)`), two rows map to the same new key, `within` is cancelled, or a step's
+commit exceeds the store's limits, the migration is discarded and the call returns
+`Failed(e)`, `Faulted(failure)`, `Collision()`, `Canceled(cause)` or `Table(Limit(..))`;
+the table is unchanged. A discard deletes the next generation, in transactions that each
+fit the store's limits, and its last transaction clears the mark, so the table never
+accepts writes while rows of the discarded generation remain. A crash leaves the table
+either as it was or migrated: before the install commits, opening the store discards the
+migration; after, it deletes the replaced generation. Key migrations are allowed,
 since `f` maps the key too. Tooling may propose migrations for additive changes; the store
 applies none on its own.
 

@@ -201,14 +201,14 @@ pub fn admit_bound_host_run(
     }
 }
 
-/// A callee entry's call schemas and its argument's schema, from its checked signature.
+/// A callee entry's call schemas and its argument's codec program, from its checked signature.
 pub fn call_schemas(
     signature: &hirsel_types::Signature,
     runtime: &hirsel_interp::aggregate::RuntimeTypes,
 ) -> Result<
     (
         hirsel_interp::CallSchemas,
-        hirsel_types::serialization::SerializableSchema,
+        std::sync::Arc<hirsel_interp::aggregate::CodecProgram>,
     ),
     ToolError,
 > {
@@ -217,15 +217,11 @@ pub fn call_schemas(
         return Err(invalid());
     };
     let schema = |ty| {
-        hirsel_types::serialization::serializable_schema(
-            &runtime.types,
-            ty,
-            &hirsel_types::GenericDeclarations::default(),
-            &mut |d: hirsel_syntax::DefId| runtime.serialization.get(d.path()),
-        )
-        .ok()
-        .flatten()
-        .ok_or_else(invalid)
+        runtime
+            .codec(&runtime.types, ty)
+            .ok()
+            .flatten()
+            .ok_or_else(invalid)
     };
     let Some(hirsel_types::TypeKind::Named { arguments, .. }) =
         runtime.types.get(function.result).map(|t| &t.kind)

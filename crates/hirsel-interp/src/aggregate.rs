@@ -168,6 +168,30 @@ impl Nominal {
         }))
     }
 }
+/// A type's codec for one program load: its checked schema, the wire codec compiled from
+/// it, and the rows deriving the schema read.
+pub struct CodecProgram {
+    pub schema: hirsel_types::serialization::SerializableSchema,
+    pub codec: hirsel_types::wire::Codec,
+    reads: BTreeMap<DefPath, ContentHash>,
+}
+impl std::fmt::Debug for CodecProgram {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("CodecProgram")
+            .field(&self.schema.root)
+            .finish()
+    }
+}
+/// The codec programs a load has built, by type; clones of its runtime types share them.
+#[derive(Clone, Default)]
+pub struct CodecPrograms(
+    Arc<std::sync::Mutex<std::collections::HashMap<hirsel_types::TypeId, Arc<CodecProgram>>>>,
+);
+impl std::fmt::Debug for CodecPrograms {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("CodecPrograms")
+    }
+}
 #[derive(Default)]
 pub struct Serialization {
     views: Arc<Views>,
@@ -248,6 +272,12 @@ impl Serialization {
     pub fn record(&self) {
         self.recordings.lock().unwrap().push(BTreeMap::new());
     }
+    /// Add `reads` to the innermost recording, if one is open.
+    fn replay(&self, reads: &BTreeMap<DefPath, ContentHash>) {
+        if let Some(recording) = self.recordings.lock().unwrap().last_mut() {
+            recording.extend(reads.iter().map(|(path, digest)| (path.clone(), *digest)));
+        }
+    }
     /// Close the innermost recording and return its reads, which also join
     /// the enclosing recording: an evaluation's reads include its nested ones.
     pub fn finish(&self) -> BTreeMap<DefPath, ContentHash> {
@@ -276,6 +306,8 @@ pub struct RuntimeTypes {
     pub checked: Option<crate::checked::CheckedRuntime>,
     /// The host's run budgets; the default bounds nothing.
     pub budgets: crate::RunBudgets,
+    /// Each type's codec program, built on its first encode or decode of this load.
+    pub codecs: CodecPrograms,
 }
 impl RuntimeTypes {
     /// Runtime facts over `types` with no nominals, checking or budgets.
@@ -289,7 +321,45 @@ impl RuntimeTypes {
             forget: None,
             checked: None,
             budgets: Default::default(),
+            codecs: Default::default(),
         }
+    }
+    /// `ty`'s codec program over `types`, or None when `ty` has no checked concrete
+    /// serializable schema. Over the load's own interner the program is built once and
+    /// every later encode and decode shares it, re-reading no row: an open recording gets
+    /// the rows the build read.
+    pub fn codec(
+        &self,
+        types: &TypeInterner,
+        ty: hirsel_types::TypeId,
+    ) -> Result<Option<Arc<CodecProgram>>, Error> {
+        let shared = std::ptr::eq(types, &*self.types);
+        if shared && let Some(program) = self.codecs.0.lock().unwrap().get(&ty).cloned() {
+            self.serialization.replay(&program.reads);
+            return Ok(Some(program));
+        }
+        self.serialization.record();
+        let schema = hirsel_types::serialization::serializable_schema(
+            types,
+            ty,
+            &hirsel_types::GenericDeclarations::default(),
+            &mut |d: hirsel_syntax::DefId| self.serialization.get(d.path()),
+        );
+        let reads = self.serialization.finish();
+        let Some(schema) = schema.map_err(Error::Query)? else {
+            return Ok(None);
+        };
+        let codec = hirsel_types::wire::Codec::new(&schema)
+            .map_err(|e| invalid(format!("codec schema: {e:?}")))?;
+        let program = Arc::new(CodecProgram {
+            schema,
+            codec,
+            reads,
+        });
+        if shared {
+            self.codecs.0.lock().unwrap().insert(ty, program.clone());
+        }
+        Ok(Some(program))
     }
     /// Whether `path` has a row: an explicit nominal, a held view or a
     /// settled demanded row. Asking demands nothing.

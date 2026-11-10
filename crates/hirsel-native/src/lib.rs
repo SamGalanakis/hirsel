@@ -188,14 +188,9 @@ pub fn settled_callee_metadata(
                 .map(|definitions| (grants, definitions))
         })
         .map_err(|e| failed(format!("runner request schemas: {e:?}")))?;
-    let descriptor = |schema: &hirsel_types::serialization::SerializableSchema| {
-        hirsel_types::wire::Codec::new(schema)
-            .map(|codec| codec.descriptor().to_vec())
-            .map_err(|e| failed(format!("runner request codec: {e:?}")))
-    };
     let request_schemas = hirsel_rt::program::RunnerRequestSchemas::new(
-        descriptor(&schemas.0)?,
-        descriptor(&schemas.1)?,
+        schemas.0.codec.descriptor().to_vec(),
+        schemas.1.codec.descriptor().to_vec(),
     )
     .map_err(failed)?;
     Ok(hirsel_rt::program::CalleeMetadata {

@@ -304,9 +304,9 @@ pub fn wire(runtime: &hirsel_interp::aggregate::RuntimeTypes, limit: u64) -> Res
     use hirsel_interp::library::runners::{allowlist_schema, core_schema};
     let schema = |r: Result<_, hirsel_interp::Error>| r.map_err(|e| format!("RunFrame: {e:?}"));
     Wire::new(
-        &schema(core_schema(runtime, "RunFrame"))?,
-        &schema(core_schema(runtime, "GrantSet"))?,
-        &schema(allowlist_schema(runtime))?,
+        &schema(core_schema(runtime, "RunFrame"))?.schema,
+        &schema(core_schema(runtime, "GrantSet"))?.schema,
+        &schema(allowlist_schema(runtime))?.schema,
         limit,
     )
     .map_err(|e| format!("RunFrame: {e:?}"))

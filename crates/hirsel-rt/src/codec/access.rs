@@ -1,6 +1,6 @@
 //! Borrow-only cursors over the existing validated physical access program.
 //!
-//! Reuses Program::parse_access and the owning cursor's actual projections, including
+//! Reads the emitted program words in place through the owning cursor's actual projections, including
 //! virtual SoA rows and live keyed slots. It adds no graph/encoding, wire schema,
 //! serialization checks, invocation, Depth policy, budget debit or source Take.
 //! Box/framing/checked wrappers remain explicit steps instead of disappearing
@@ -18,15 +18,16 @@ use view::{Location, Projection, View};
 /// Parsed existing program. Node ordinals are local to these exact words,
 /// never durable identities or a source type/profile proof.
 pub struct Access {
-    program: Program,
+    words: Vec<u64>,
 }
 impl Access {
     /// Parse compiler-emitted access metadata. As in the existing admitted
     /// readers, malformed program words are runtime invariants, not wire data.
     /// Successful parsing itself proves no source or physical correspondence.
     pub fn parse(words: &[u64]) -> Self {
+        Program::new(words);
         Self {
-            program: Program::parse_access(words),
+            words: words.to_vec(),
         }
     }
 
@@ -43,9 +44,10 @@ impl Access {
         &'program self,
         bytes: &'value [u8],
     ) -> Cursor<'program, 'value> {
+        let program = Program::new(&self.words);
         Cursor {
-            program: &self.program,
-            projection: Projection::at(self.program.root, bytes.as_ptr()),
+            program,
+            projection: Projection::at(program.root, bytes.as_ptr()),
             lifetime: PhantomData,
         }
     }
@@ -55,7 +57,7 @@ impl Access {
 /// The program and the original live value both outlive every derived cursor.
 #[derive(Clone, Copy)]
 pub struct Cursor<'program, 'value> {
-    program: &'program Program,
+    program: Program<'program>,
     projection: Projection,
     lifetime: PhantomData<&'value [u8]>,
 }
@@ -119,19 +121,19 @@ impl<'program, 'value> Cursor<'program, 'value> {
         // SAFETY: borrow established immutable live storage for every typed
         // projection. No read below changes a header, source value or holder.
         unsafe {
-            let wrapper = match &self.program.nodes[self.projection.node] {
+            let wrapper = match self.program.node(self.projection.node) {
                 Node::Checked { value, .. } => Some(Projection {
-                    node: *value,
+                    node: value,
                     location: self.projection.location,
                 }),
                 Node::Framed(value) => Some(Projection::at(
-                    *value,
+                    value,
                     self.address()
                         .unwrap_or_else(|| fault("framing without an address"))
                         .add(8),
                 )),
                 Node::Box { payload: value, .. } => Some(Projection::at(
-                    *value,
+                    value,
                     payload(pointer(
                         self.address()
                             .unwrap_or_else(|| fault("box without an address")),
@@ -144,12 +146,7 @@ impl<'program, 'value> Cursor<'program, 'value> {
             }
             match view::view(self.program, self.projection) {
                 View::Scalar { kind, code, at } => {
-                    let width = match kind {
-                        Scalar::Bool => 1,
-                        Scalar::Integer(width) => width,
-                        Scalar::F32 | Scalar::Char => 4,
-                        Scalar::F64 => 8,
-                    };
+                    let width = kind.width();
                     Value::Scalar {
                         code,
                         bytes: std::slice::from_raw_parts(at, width),

@@ -1,10 +1,10 @@
 //! Source values cross SER-2 through the shared, schema-directed Rust codec.
+use crate::aggregate::CodecProgram;
 use crate::{Error, Integer, OperationCall, OperationResult, Value, invalid};
-use hirsel_types::serialization::{
-    SchemaArgument, SchemaId, SchemaNode, SerializableSchema, serializable_schema,
-};
-use hirsel_types::wire::{self, Codec, ValueId, ValueNode};
-use hirsel_types::{BuiltinType, GenericArgument, GenericDeclarations, Primitive};
+use hirsel_types::serialization::{SchemaArgument, SchemaId, SchemaNode, SerializableSchema};
+use hirsel_types::wire::{self, ValueId, ValueNode};
+use hirsel_types::{BuiltinType, GenericArgument, Primitive};
+use std::sync::Arc;
 
 type R<T> = Result<T, Error>;
 
@@ -19,20 +19,17 @@ pub(super) fn call(
     let [GenericArgument::Type(ty)] = call.generics else {
         return Err(invalid("codec type actual"));
     };
-    let schema = serializable_schema(
-        call.types,
+    let program = program(
+        call,
         *ty,
-        &GenericDeclarations::default(),
-        &mut |d: hirsel_syntax::DefId| call.runtime.serialization.get(d.path()),
-    )
-    .map_err(Error::Query)?
-    .ok_or_else(|| invalid("codec requires a checked concrete serializable schema"))?;
-    let codec = Codec::new(&schema).map_err(|e| invalid(format!("codec schema: {e:?}")))?;
+        "codec requires a checked concrete serializable schema",
+    )?;
+    let (schema, codec) = (&program.schema, &program.codec);
     let [value] = &*call.arguments else {
         return Err(invalid("codec arity"));
     };
     if name == "codec.encode" {
-        let value = to_wire(&schema, value)?;
+        let value = to_wire(schema, value)?;
         return codec
             .encode(&value, wire::Limits::default())
             .map(|bytes| OperationResult::returned(Value::Bytes(bytes)))
@@ -43,7 +40,7 @@ pub(super) fn call(
     };
     match codec.decode(bytes, wire::Limits::default()) {
         Ok(value) => {
-            let (value, checks) = from_wire(&schema, value, call.runtime)?;
+            let (value, checks) = from_wire(schema, value, call.runtime)?;
             let checks = checks
                 .into_iter()
                 .map(|(check, occurrence)| Ok((check_function(&check, call.runtime)?, occurrence)))
@@ -59,42 +56,40 @@ pub(super) fn call(
     }
 }
 
-/// The checked serializable schema of `ty` at `call`.
-pub(super) fn schema(call: &OperationCall<'_>, ty: hirsel_types::TypeId) -> R<SerializableSchema> {
-    serializable_schema(
-        call.types,
-        ty,
-        &GenericDeclarations::default(),
-        &mut |d: hirsel_syntax::DefId| call.runtime.serialization.get(d.path()),
-    )
-    .map_err(Error::Query)?
-    .ok_or_else(|| invalid("a runner call requires checked concrete serializable schemas"))
+/// The codec program of `ty` at `call`, built once per load.
+pub(super) fn program(
+    call: &OperationCall<'_>,
+    ty: hirsel_types::TypeId,
+    missing: &str,
+) -> R<Arc<CodecProgram>> {
+    call.runtime
+        .codec(call.types, ty)?
+        .ok_or_else(|| invalid(missing))
 }
 /// `value` in canonical codec bytes, or `Limit` when the codec's budgets refuse it.
-pub(super) fn encode(
-    schema: &SerializableSchema,
-    value: &Value,
-) -> R<Result<Vec<u8>, wire::Error>> {
-    let codec = Codec::new(schema).map_err(|e| invalid(format!("codec schema: {e:?}")))?;
-    match codec.encode(&to_wire(schema, value)?, wire::Limits::default()) {
+pub(super) fn encode(program: &CodecProgram, value: &Value) -> R<Result<Vec<u8>, wire::Error>> {
+    match program
+        .codec
+        .encode(&to_wire(&program.schema, value)?, wire::Limits::default())
+    {
         Ok(bytes) => Ok(Ok(bytes)),
         Err(wire::Error::Limit) => Ok(Err(wire::Error::Limit)),
         Err(error) => Err(codec_error(error)),
     }
 }
-/// The fresh value canonical bytes of `schema` hold.
+/// The fresh value canonical bytes of `program` hold.
 pub(super) fn decode(
-    schema: &SerializableSchema,
+    program: &CodecProgram,
     bytes: &[u8],
     runtime: &crate::aggregate::RuntimeTypes,
 ) -> R<Value> {
-    let codec = Codec::new(schema).map_err(|e| invalid(format!("codec schema: {e:?}")))?;
-    let value = codec
+    let value = program
+        .codec
         .decode(bytes, wire::Limits::default())
         .map_err(codec_error)?;
     // A runner call's bytes encode a live value of this run, not outside input, so
     // they hold no occurrence a check (SER-1) has not already seen constructed.
-    Ok(from_wire(schema, value, runtime)?.0)
+    Ok(from_wire(&program.schema, value, runtime)?.0)
 }
 /// `Error(e)` of a decode, for the `DecodeError` ordinal `e`.
 pub(super) fn decode_error(ordinal: u32) -> Value {

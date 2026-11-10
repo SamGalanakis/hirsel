@@ -13,6 +13,7 @@
 use super::dispatch::{arg, text, variant};
 use super::simulation::{Grant, SimulationConfig};
 use super::{Library, collection, error, ok};
+use crate::aggregate::CodecProgram;
 use crate::observation::FailureRecord;
 use crate::{
     BlockedWait, CallSchemas, CallStart, CalleeEnd, CalleeStart, Error, OperationCall,
@@ -22,9 +23,9 @@ use hirsel_run_schema::{
     Access, CallForm, CallOutcome, CalleeOutcome, Cause, CodeReach, GrantSet, IoGrants,
     RunnerCompletion, RunnerEntry, RunnerRequest,
 };
-use hirsel_types::serialization::SerializableSchema;
 use hirsel_types::{BuiltinType, GenericArgument};
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 /// A runner handle's place and the authority its callees run under.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -115,23 +116,17 @@ fn refused(outcome: Refused) -> RunnerCompletion {
     }
 }
 
-/// The codec schema of a type graph over core types, whose first row is the root; the
+/// The codec program of a type graph over core types, whose first row is the root; the
 /// program's runtime types declare every core nominal, so these schemas are the registry's.
 fn core_graph_schema(
     runtime: &crate::aggregate::RuntimeTypes,
     count: usize,
     rows: impl FnOnce(&[hirsel_types::TypeId]) -> Vec<hirsel_types::Type>,
-) -> Result<SerializableSchema, Error> {
+) -> Result<Arc<CodecProgram>, Error> {
     let ids = runtime.types.intern_graph(count, rows);
-    let root = ids[0];
-    hirsel_types::serialization::serializable_schema(
-        &runtime.types,
-        root,
-        &hirsel_types::GenericDeclarations::default(),
-        &mut |d: hirsel_syntax::DefId| runtime.serialization.get(d.path()),
-    )
-    .map_err(Error::Query)?
-    .ok_or_else(|| invalid("a core type has no codec schema"))
+    runtime
+        .codec(&runtime.types, ids[0])?
+        .ok_or_else(|| invalid("a core type has no codec schema"))
 }
 fn named(definition: &str, arguments: Vec<GenericArgument>) -> hirsel_types::Type {
     hirsel_types::Type::with_kind(hirsel_types::TypeKind::Named {
@@ -143,19 +138,19 @@ fn named(definition: &str, arguments: Vec<GenericArgument>) -> hirsel_types::Typ
 pub fn core_schema(
     runtime: &crate::aggregate::RuntimeTypes,
     name: &str,
-) -> Result<SerializableSchema, Error> {
+) -> Result<Arc<CodecProgram>, Error> {
     core_graph_schema(runtime, 1, |_| vec![named(name, vec![])])
 }
 /// The codec schema of core `Failure`, which a `Faulted` outcome's bytes hold.
 pub fn failure_schema(
     runtime: &crate::aggregate::RuntimeTypes,
-) -> Result<SerializableSchema, Error> {
+) -> Result<Arc<CodecProgram>, Error> {
     core_schema(runtime, "Failure")
 }
 /// The codec schema of a request's allowlist, `Option[List[String]]` (RUN-11).
 pub fn allowlist_schema(
     runtime: &crate::aggregate::RuntimeTypes,
-) -> Result<SerializableSchema, Error> {
+) -> Result<Arc<CodecProgram>, Error> {
     core_graph_schema(runtime, 3, |ids| {
         vec![
             named("Option", vec![GenericArgument::Type(ids[1])]),
@@ -181,7 +176,7 @@ fn request_bytes(
         bytes.map_err(|e| invalid(format!("a request's grants exceed the codec: {e:?}")))
     };
     let grants = exact(super::codec::encode(
-        &core_schema(runtime, "GrantSet")?,
+        &*core_schema(runtime, "GrantSet")?,
         &grant_set(grants)?,
     )?)?;
     let list = match definitions {
@@ -194,7 +189,7 @@ fn request_bytes(
             )],
         ),
     };
-    let definitions = exact(super::codec::encode(&allowlist_schema(runtime)?, &list)?)?;
+    let definitions = exact(super::codec::encode(&*allowlist_schema(runtime)?, &list)?)?;
     Ok((grants, definitions))
 }
 
@@ -206,9 +201,8 @@ pub fn callee_outcome(
     schemas: &CallSchemas,
     context: &OperationContext<'_>,
 ) -> Result<Option<CalleeOutcome>, Error> {
-    let bytes = |schema: &SerializableSchema, value: &Value| {
-        super::codec::encode(schema, value).map(Result::ok)
-    };
+    let bytes =
+        |schema: &CodecProgram, value: &Value| super::codec::encode(schema, value).map(Result::ok);
     Ok(match end {
         CalleeEnd::Returned(Value::Variant {
             variant: tag,
@@ -414,10 +408,17 @@ impl Library {
         else {
             return Err(invalid("runner call type actuals"));
         };
-        let argument_schema = super::codec::schema(call, argument)?;
+        let schema = |ty| {
+            super::codec::program(
+                call,
+                ty,
+                "a runner call requires checked concrete serializable schemas",
+            )
+        };
+        let argument_schema = schema(argument)?;
         let schemas = CallSchemas {
-            result: super::codec::schema(call, result)?,
-            error: super::codec::schema(call, failure)?,
+            result: schema(result)?,
+            error: schema(failure)?,
             failure: failure_schema(call.runtime)?,
         };
         let task = match scope {
@@ -586,7 +587,7 @@ impl Library {
         path: &hirsel_syntax::DefPath,
         cause: Cause,
         bytes: &[u8],
-        argument: SerializableSchema,
+        argument: Arc<CodecProgram>,
         schemas: &CallSchemas,
         call: &OperationCall<'_>,
     ) -> Result<Result<(Option<CalleeStart>, bool), Refused>, Error> {
@@ -1031,7 +1032,7 @@ fn narrowed(grants: &IoGrants, keep: &Value) -> Result<Option<IoGrants>, Error> 
 /// The value canonical `bytes` of `schema` hold, as fresh storage: a callee run's
 /// argument, decoded where its run starts.
 pub fn decode(
-    schema: &SerializableSchema,
+    schema: &CodecProgram,
     bytes: &[u8],
     runtime: &crate::aggregate::RuntimeTypes,
 ) -> Result<Value, Error> {

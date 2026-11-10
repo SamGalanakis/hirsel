@@ -274,9 +274,9 @@ pub struct CallStart {
 /// The codec schemas of a call's result and error, and of a run's `Failure`.
 #[derive(Clone, Debug)]
 pub struct CallSchemas {
-    pub result: hirsel_types::serialization::SerializableSchema,
-    pub error: hirsel_types::serialization::SerializableSchema,
-    pub failure: hirsel_types::serialization::SerializableSchema,
+    pub result: std::sync::Arc<aggregate::CodecProgram>,
+    pub error: std::sync::Arc<aggregate::CodecProgram>,
+    pub failure: std::sync::Arc<aggregate::CodecProgram>,
 }
 /// A transact or query call to a `db@1` place in this execution (STORE-12): the
 /// execution delivers it to the place's head run, starting the head from `head` when the

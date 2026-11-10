@@ -62,6 +62,19 @@ def main():
             text = re.sub(r'(?m)^\[test\][ \t]*(?:\n|$)', lambda m: '[test]\n' + setting, text, count=1)
         else:
             text += '\n[test]\n' + setting
+        # The daemon reads its remote client's settings from config files when
+        # it starts, never from `-c`: a caller allowed a wider share of the
+        # pool than .buckconfig's per-checkout ceiling (tools/land) names it
+        # in $HIRSEL_BUCK2_RE_CONCURRENCY, and the change restarts the daemon.
+        text = re.sub(r'(?m)^execution_concurrency_limit\s*=.*\n?', '', text)
+        if limit := os.environ.get('HIRSEL_BUCK2_RE_CONCURRENCY', ''):
+            if not limit.isdecimal() or int(limit) < 1:
+                print(f'prepare: HIRSEL_BUCK2_RE_CONCURRENCY must be a positive integer, not {limit!r}',
+                      file=sys.stderr)
+                return 1
+            text = re.sub(r'(?m)^\[buck2_re_client\][ \t]*(?:\n|$)',
+                          lambda m: f'[buck2_re_client]\nexecution_concurrency_limit = {int(limit)}\n',
+                          text, count=1)
         local.write_text(text)
     if (local.read_bytes() if local.is_file() else None) != before:
         subprocess.run([str(ROOT / '.buck2/bin/buck2'), 'kill'], cwd=ROOT, capture_output=True)

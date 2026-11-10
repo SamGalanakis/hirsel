@@ -2618,19 +2618,9 @@ impl<'a, 'input> Checker<'a, 'input> {
         });
         let expected =
             expected.and_then(|root| hirsel_types::declared_receipt_evidence(target, root).ok());
-        let sharing_result = match &store.get(f.result).unwrap().kind {
-            TypeKind::Parameter(TypeParameterRef::Bound {
-                depth: 0,
-                parameter,
-            }) => sharing_type_parameters(store, f).contains(parameter),
-            TypeKind::Parameter(_) => self.bound(
-                store,
-                f.result,
-                Bound::Copyable,
-                &self.generic_declarations(),
-            ),
-            _ => false,
-        };
+        let sharing_result = hirsel_types::shares_result(store, f, |result| {
+            self.bound(store, result, Bound::Copyable, &self.generic_declarations())
+        });
         // MODE-2: a result that is a bare type parameter is a value occurrence,
         // so its root holds the declared modes: a generic body proves no `T`
         // unique, whatever contract argument instantiates it.
@@ -2641,11 +2631,7 @@ impl<'a, 'input> Checker<'a, 'input> {
             if held_result {
                 row.modes.uniqueness = Uniqueness::Aliased;
             }
-            if sharing_result
-                && row.sendability_requirement == SendabilityRequirement::None
-                && row.modes.uniqueness == Uniqueness::Aliased
-                && matches!(row.kind, TypeKind::Parameter(_))
-            {
+            if sharing_result && hirsel_types::shared_result_row(&row) {
                 row.modes.sendability = self
                     .proof(
                         &target,

@@ -112,6 +112,35 @@ pub fn sharing_type_parameters(
     }).collect()
 }
 
+/// MODE-2/MODE-4: a call result declared as a bare type parameter with
+/// copying permission may also stay with the callee, so the caller receives a
+/// shared value. `copyable` answers the bound for a parameter the call does
+/// not bind (an enclosing body's), in the caller's declarations.
+pub fn shares_result(
+    types: &TypeInterner,
+    function: &FunctionType,
+    copyable: impl FnOnce(TypeId) -> bool,
+) -> bool {
+    match &types.get(function.result).unwrap().kind {
+        TypeKind::Parameter(TypeParameterRef::Bound {
+            depth: 0,
+            parameter,
+        }) => sharing_type_parameters(types, function).contains(parameter),
+        TypeKind::Parameter(_) => copyable(function.result),
+        _ => false,
+    }
+}
+
+/// The instantiated result row of a sharing call ([`shares_result`]) whose
+/// sendability is the after-sharing proof (`sendability_after_sharing`):
+/// one still the abstract parameter, aliased, and with no written receiving
+/// requirement of its own.
+pub fn shared_result_row(row: &Type) -> bool {
+    row.sendability_requirement == SendabilityRequirement::None
+        && row.modes.uniqueness == Uniqueness::Aliased
+        && matches!(row.kind, TypeKind::Parameter(_))
+}
+
 fn redundant(
     store: &TypeInterner,
     root: TypeId,

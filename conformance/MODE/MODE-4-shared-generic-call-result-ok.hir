@@ -1,0 +1,9 @@
+// rule: MODE-4
+// expect: accept
+// Without copying permission f cannot keep the U it returns, so the result
+// has no other holder and crosses as U's bound allows.
+fn sink[E](take e: sendable E) {}
+
+fn relay[T, U: sendable](take x: T, take f: fn(take T) -> U) uses {f} {
+  sink(f(take x))
+}

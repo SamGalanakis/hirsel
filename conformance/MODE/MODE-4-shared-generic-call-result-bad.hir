@@ -1,0 +1,11 @@
+// rule: MODE-4
+// expect: reject MODE-4 at line 10
+// twin: MODE/MODE-4-shared-generic-call-result-ok.hir
+// With copying permission, f may keep a copy of the U it returns, so the
+// call result is received shared and is not sendable (MODE-4: counted values
+// that are not unique are not sendable), whatever U's own bound says.
+fn sink[E](take e: sendable E) {}
+
+fn relay[T, U: copyable + sendable](take x: T, take f: fn(take T) -> U) uses {f} {
+  sink(f(take x))
+}

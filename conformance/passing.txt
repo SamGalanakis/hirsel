@@ -1,4 +1,3 @@
-
 CAP/CAP-2-stream-bound-38-authority-bad.hir
 CAP/CAP-2-stream-bound-38-authority-ok.hir
 CLO/CLO-2-carrier-uses-empty-bad.hir
@@ -3956,6 +3955,8 @@ conformance/MODE/MODE-4-scope-ok.hir
 conformance/MODE/MODE-4-send-after-related-holder-dies-run.hir
 conformance/MODE/MODE-4-send-related-holder-live-bad.hir
 conformance/MODE/MODE-4-sender.hir
+conformance/MODE/MODE-4-shared-generic-call-result-bad.hir
+conformance/MODE/MODE-4-shared-generic-call-result-ok.hir
 conformance/MODE/MODE-4-shared-root-child-run.hir
 conformance/MODE/MODE-4-shared.hir
 conformance/MODE/MODE-4-std-stream-sendable-bad.hir

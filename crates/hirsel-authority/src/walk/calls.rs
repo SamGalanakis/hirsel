@@ -1750,6 +1750,21 @@ impl Checker<'_> {
             &partitions,
         );
         let result = declared_receipt_evidence(self.t, result).expect("declared call result");
+        // MODE-4: a result the callee may also keep is received shared, so its
+        // sendability is the after-sharing proof, as V expects it.
+        let types = self.t;
+        let result = if hirsel_types::shares_result(types, &f, |result| {
+            self.property(result, Bound::Copyable)
+        }) && hirsel_types::shared_result_row(types.get(result).unwrap())
+        {
+            let mut row = types.get(result).unwrap().clone();
+            row.modes.sendability = self.proof(Sendability::NotSendable, |memo| {
+                hirsel_modes::proofs::sendability_after_sharing(memo, result)
+            });
+            self.intern(row)
+        } else {
+            result
+        };
         let result = self.mut_content_placement(result, &f, &ordered);
         let result = self.renew_result_brands(declared_result, result);
         self.set_ty(e, result);

@@ -26,6 +26,7 @@ pub struct AcceptedFrontRegistration {
     execution: Option<hirsel_validate::ExecutionReceipt>,
     original: (hirsel_span::Anchor, u32, ContentHash),
     generated: (FileId, Span),
+    pub(super) instantiation: Option<Span>,
     schema_origins: Vec<(std::ops::Range<usize>, hirsel_diag::Label)>,
     checked_prefix: Vec<SignatureDependency>,
     _allowance: Arc<hirsel_engine_admission::MemoryReservation>,
@@ -72,6 +73,7 @@ impl AcceptedFrontRegistration {
             execution,
             original: self.original,
             generated: self.generated,
+            instantiation: self.instantiation,
             schema_origins: self.schema_origins.clone(),
             checked_prefix: self.checked_prefix.clone(),
             _allowance: self._allowance.clone(),
@@ -115,6 +117,12 @@ impl AcceptedFrontRegistration {
             };
             if !diagnostic.secondary.contains(&origin) {
                 diagnostic.secondary.push(origin);
+            }
+            if let Some(site) = self.instantiation {
+                diagnostic
+                    .notes
+                    .push(format!("generated text span {}..{}", at.start, at.end));
+                diagnostic.primary = site;
             }
         }
     }
@@ -569,6 +577,7 @@ impl AcceptanceInputs {
                 execution,
                 original: (original.anchor, original.occurrence, original.text_hash),
                 generated: (file, site),
+                instantiation: None,
                 schema_origins: self.schema_origins,
                 checked_prefix: dependencies,
                 _allowance: retained_allowance,

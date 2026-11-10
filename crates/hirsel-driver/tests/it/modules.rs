@@ -34,6 +34,7 @@ mod closure_effect_joins_26;
 mod closure_loop_rc;
 mod codec;
 mod comptime;
+mod comptime_diag_707;
 mod comptime_budget_54;
 mod contract_diagnostics;
 mod contracts;

@@ -527,12 +527,11 @@ impl Task {
                         .paths
                         .iter()
                         .map(|work| work.path.clone());
-                    match self
-                        .queries
-                        .plan
-                        .lower
-                        .selected_instances(roots, self.queries.weight.scratch)
-                    {
+                    match self.queries.plan.lower.selected_instances_for_check(
+                        roots,
+                        self.queries.weight.scratch,
+                        cx,
+                    ) {
                         Ok(paths) => {
                             self.publication = Publication::Instances {
                                 file: index,

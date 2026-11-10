@@ -1077,6 +1077,37 @@ impl FrontLowerQueries {
         roots: impl IntoIterator<Item = DefPath>,
         limit: u64,
     ) -> Result<BTreeSet<DefPath>, QueryError> {
+        self.selected_instances_with(roots, limit, |path| Ok(self.front.checked_definition(path)))
+    }
+    pub(crate) fn selected_instances_for_check(
+        &self,
+        roots: impl IntoIterator<Item = DefPath>,
+        limit: u64,
+        cx: &mut dyn QueryContext,
+    ) -> Result<BTreeSet<DefPath>, QueryError> {
+        self.selected_instances_with(roots, limit, |path| {
+            let query = self.front.query(path).ok_or(QueryError::NotImplemented)?;
+            let selected = cx.read(query);
+            if let Some(product) = self.front.checked(selected.clone()) {
+                return Ok(Some(product));
+            }
+            Err(self
+                .front
+                .completed_error(path)
+                .or_else(|| {
+                    selected
+                        .err()
+                        .and_then(|reference| self.front.runtime_error(reference))
+                })
+                .unwrap_or(QueryError::NotImplemented))
+        })
+    }
+    fn selected_instances_with(
+        &self,
+        roots: impl IntoIterator<Item = DefPath>,
+        limit: u64,
+        mut checked: impl FnMut(&DefPath) -> Result<Option<FrontCheckedOutput>, QueryError>,
+    ) -> Result<BTreeSet<DefPath>, QueryError> {
         if self.namespace.instances.declarations.is_empty() {
             return Ok(BTreeSet::new());
         }
@@ -1131,7 +1162,7 @@ impl FrontLowerQueries {
             {
                 continue;
             }
-            let product = self.front.checked_definition(path.path()).ok_or_else(|| {
+            let product = checked(path.path())?.ok_or_else(|| {
                 self.front
                     .completed_error(path.path())
                     .unwrap_or_else(refused)
@@ -1172,10 +1203,7 @@ impl FrontLowerQueries {
                             self.namespace.snapshot.types(),
                             &actuals.arguments,
                         )
-                        .map_err(|error| {
-                            self.front.require_discovery(root.path());
-                            error
-                        })?
+                        .inspect_err(|_| self.front.require_discovery(root.path()))?
                         .ok_or_else(refused)?;
                     if !selected.contains(instance.path()) {
                         work.tree::<DefPath, ()>(0);

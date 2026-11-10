@@ -1875,7 +1875,7 @@ impl QueryTask for BodyTask {
             let Some(producer) = self.queries.demand_producer() else {
                 if self.queries.namespace.consumers_admitted() {
                     self.queries.require_discovery(dependency.path());
-                    let result = self.publish_generation_failure(
+                    let result = self.publish_failure(
                         cx,
                         QueryError::Operational(hirsel_types::OperationalFailure {
                             operation: "consumer discovery dependency".into(),
@@ -1991,7 +1991,7 @@ impl BodyTask {
         cx: &mut dyn QueryContext,
         failure: generation::demand::DemandFailure,
     ) -> Result<ProductRef, Reference> {
-        self.publish_generation_failure(
+        self.publish_failure(
             cx,
             failure.error,
             failure.reads,
@@ -1999,7 +1999,7 @@ impl BodyTask {
             Some(QueryKind::Generate),
         )
     }
-    fn publish_generation_failure(
+    fn publish_failure(
         &self,
         cx: &mut dyn QueryContext,
         error: QueryError,
@@ -2453,7 +2453,7 @@ impl BodyTask {
                 site,
             );
             return self
-                .publish_generation_failure(cx, error, Arc::new(reads), None, Some(done.phase))
+                .publish_failure(cx, error, Arc::new(reads), None, Some(done.phase))
                 .map_err(Into::into);
         }
         if let Some(registration) = &input.registration {

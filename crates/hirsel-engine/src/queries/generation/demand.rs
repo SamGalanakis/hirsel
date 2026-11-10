@@ -331,23 +331,15 @@ impl DemandProducer {
                 message: format!("selects instance {}", key.instance_name(declaration)),
             };
             for diagnostic in diagnostics {
+                if diagnostic.secondary.contains(&label) {
+                    continue;
+                }
                 let at = sources.resolve(diagnostic.primary);
-                diagnostic.notes.push(format!(
-                    "generated instance span {}..{}: {:?}",
-                    at.start,
-                    at.end,
-                    sources.slice(diagnostic.primary).unwrap_or("")
-                ));
-                if sources.file(at.file).is_none_or(|file| {
-                    file.logical_path()
-                        .to_string_lossy()
-                        .starts_with("<generated:")
-                }) {
-                    diagnostic.primary = site;
-                }
-                if !diagnostic.secondary.contains(&label) {
-                    diagnostic.secondary.push(label.clone());
-                }
+                diagnostic
+                    .notes
+                    .push(format!("generated text span {}..{}", at.start, at.end,));
+                diagnostic.primary = site;
+                diagnostic.secondary.push(label.clone());
             }
         }
         error
@@ -1362,6 +1354,9 @@ impl DemandProducer {
             }
 
             let mut transaction = DemandTransaction::new(self);
+            let mut diagnostic_sources = previous.sources.clone();
+            let selected_key =
+                hirsel_tir::InstanceBodies::key(previous.snapshot.types(), arguments);
             let result = (|| {
                 let current = self
                     .state
@@ -1467,6 +1462,7 @@ impl DemandProducer {
                     .values()
                     .cloned()
                     .collect::<Vec<_>>();
+                diagnostic_sources = engine.sources.clone();
                 let lower = if generic {
                     self.view(&mut engine, &definitions, &registrations)?
                 } else {
@@ -1570,7 +1566,7 @@ impl DemandProducer {
                 let observed = output.reads().clone();
                 let output_capture = output.namespace().clone();
                 let mut engine = output_capture.assembly(&self.adapters)?;
-                let accepted = match engine.accept_front_registration(output, &self.request) {
+                let mut accepted = match engine.accept_front_registration(output, &self.request) {
                     Ok(accepted) => accepted,
                     Err(mut failure) => {
                         failure.error = self.label_selection(
@@ -1594,6 +1590,11 @@ impl DemandProducer {
                         });
                     }
                 };
+                if generic {
+                    Arc::get_mut(&mut accepted)
+                        .ok_or_else(|| refused("new accepted registration is already shared"))?
+                        .instantiation = Some(site);
+                }
                 let observed = accepted.reads().clone();
                 let mut registrations = output_capture
                     .registrations
@@ -1606,6 +1607,7 @@ impl DemandProducer {
                     .keys()
                     .map(|id| id.path().clone())
                     .collect::<Vec<_>>();
+                diagnostic_sources = engine.sources.clone();
                 let successor = self.view(&mut engine, &definitions, &registrations)?;
                 let result = scheduled_lower::SuccessorCapture::new(previous, successor.clone())?;
                 let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
@@ -1631,7 +1633,47 @@ impl DemandProducer {
                 })
             })();
             transaction.completed = true;
-            result
+            result.map_err(|error| {
+                if self
+                    .failure
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .is_some()
+                {
+                    return error;
+                }
+                let error =
+                    self.label_selection(declaration, selected_key, error, &diagnostic_sources);
+                if matches!(error, QueryError::Diagnostics(_)) {
+                    let required = diagnostic_sources
+                        .retained_snapshot_metadata_bytes()
+                        .checked_add(hirsel_query_products::retained::retained_query_error_bytes(
+                            &error,
+                        ))
+                        .and_then(|bytes| {
+                            bytes.checked_add(
+                                (size_of::<FrontRegistrationFailure>() + 4 * size_of::<usize>())
+                                    as u64,
+                            )
+                        })
+                        .ok_or_else(|| refused("early generation diagnostic size overflow"));
+                    let allowance =
+                        match required.and_then(|bytes| Self::take(&self.request, bytes)) {
+                            Ok(allowance) => Arc::new(allowance),
+                            Err(error) => return error,
+                        };
+                    let failure = FrontRegistrationFailure {
+                        definition: declaration_id,
+                        span: Some(site),
+                        error: error.clone(),
+                        sources: diagnostic_sources.clone().retain_owner(allowance.clone()),
+                        _allowance: allowance,
+                    };
+                    *self.failure.lock().unwrap_or_else(|e| e.into_inner()) =
+                        Some(FrontRegistrationBootstrapError::Acceptance(failure));
+                }
+                error
+            })
         }
     }
 }

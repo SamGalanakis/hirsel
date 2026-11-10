@@ -236,7 +236,9 @@ independent of topology ([PROG-5](programs.md#prog-5-topology)).
   every ownership, mode, authority, allocation and contract rule, so a `-> unique T`
   header requires a body that builds a fresh value (MODE-2). A client package cannot
   reach an opaque representation through generated text. Diagnostics keep their ordinary
-  rule owners; the primary span is in the generated text and a secondary label marks `e`.
+  rule owners. For a nongeneric declaration the primary span is in the generated text and
+  a secondary label marks `e`. For a selected generic instance the primary span marks the
+  selecting call, with the generated text's byte span as a note and `e` as a secondary site.
   Generated bodies construct and read values only through ordinary source, so nominal
   identities, explicit capability parameters and allocation sites stay visible in them.
   `hirsel expand <file>` prints each generated body of a source file as source.
@@ -258,8 +260,8 @@ independent of topology ([PROG-5](programs.md#prog-5-topology)).
   own modes do not distinguish instances: an instance's header takes the closed types'
   defaults ([MODE-7](ownership.md#mode-7-modes-inside-a-body)). Unselected instances are never generated, and a call
   evaluated at compile time selects its instance when it runs. An instance's diagnostics
-  are in its text, on the declaration's lines, with a secondary label at the call that
-  selected it. One declaration selects at most 256 instances; selecting another is CT-1
+  point at the call that selected it, with the instantiated or emitted text's byte span
+  as a note. One declaration selects at most 256 instances; selecting another is CT-1
   at `e`, with a secondary label at the selecting call, so a body that selects ever-new
   instances stops. Each generator evaluation has the CT-4 budget.
 

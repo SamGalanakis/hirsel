@@ -1,6 +1,6 @@
 // rule: CT-5
-// expect: reject CT-5 at line 27
-// twin: CT/CT-5-generic-instance-run.hir
+// expect: run
+// stdout: 128
 // CT-5: a generated declaration whose comptime expression is a block binding
 // locals of the declaration's type parameters before calling the generator.
 fn body[T, K: serializable](s: TypeShape[T], k: Option[K]) -> Result[

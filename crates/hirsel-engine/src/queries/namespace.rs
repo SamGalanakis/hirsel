@@ -668,6 +668,23 @@ impl NamespaceCapture {
         &self,
         syntax: &ItemSyntax,
     ) -> Result<Arc<[Arc<ItemSyntax>]>, QueryError> {
+        // A parsed generated body keeps the declaring lexical name, while its
+        // written instance is indexed by the closed instance identity. Follow
+        // that relation only through the exact accepted syntax, then let the
+        // ordinary captured binding check validate the written source.
+        let written = if matches!(
+            syntax.item.generated,
+            Some(hirsel_syntax::Generated::Body(_))
+        ) {
+            self.registrations
+                .values()
+                .find(|registration| registration.syntax.as_ref() == syntax)
+                .map(|registration| self.syntax(registration.definition()))
+                .transpose()?
+        } else {
+            None
+        };
+        let syntax = written.as_deref().unwrap_or(syntax);
         if let Some(items) = self.inputs.siblings(syntax)? {
             return Ok(items);
         }

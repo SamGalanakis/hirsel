@@ -51,7 +51,22 @@ pub enum Scope<K> {
     /// Persist complete inline identities, independent of enclosing tables.
     Inline,
 }
-pub type Scopes<K> = RefCell<Vec<Scope<K>>>;
+pub type ScopeStack<T> = RefCell<smallvec::SmallVec<[T; 4]>>;
+pub type Scopes<K> = ScopeStack<Scope<K>>;
+
+pub const fn empty_scope_stack<T>() -> ScopeStack<T> {
+    RefCell::new(smallvec::SmallVec::new_const())
+}
+
+pub fn pop_scope<T: 'static>(stack: &'static LocalKey<ScopeStack<T>>) -> Option<T> {
+    stack.with_borrow_mut(|scopes| {
+        let value = scopes.pop();
+        if scopes.is_empty() {
+            scopes.shrink_to_fit();
+        }
+        value
+    })
+}
 
 pub fn scope_working_bytes<K: 'static>(
     stack: &'static LocalKey<Scopes<K>>,
@@ -93,7 +108,7 @@ struct Popped<'a, K: 'static> {
 }
 impl<K: 'static> Drop for Popped<'_, K> {
     fn drop(&mut self) {
-        if let Some(Scope::Encode(numbering)) = self.stack.with_borrow_mut(|s| s.pop()) {
+        if let Some(Scope::Encode(numbering)) = pop_scope(self.stack) {
             *self.numbering = numbering;
         }
     }
@@ -109,7 +124,7 @@ pub fn with_source<K: 'static, R>(
     struct Pop<K: 'static>(&'static LocalKey<Scopes<K>>);
     impl<K: 'static> Drop for Pop<K> {
         fn drop(&mut self) {
-            self.0.with_borrow_mut(|s| s.pop());
+            pop_scope(self.0);
         }
     }
     let _pop = Pop(stack);
@@ -124,7 +139,7 @@ pub fn with_inline<K: 'static, R>(stack: &'static LocalKey<Scopes<K>>, f: impl F
     struct Pop<K: 'static>(&'static LocalKey<Scopes<K>>);
     impl<K: 'static> Drop for Pop<K> {
         fn drop(&mut self) {
-            self.0.with_borrow_mut(|s| s.pop());
+            pop_scope(self.0);
         }
     }
     let _pop = Pop(stack);
@@ -151,7 +166,7 @@ pub fn decoding<K: 'static>(stack: &'static LocalKey<Scopes<K>>) -> Option<Arc<d
 }
 
 thread_local! {
-    static SYMBOLS: Scopes<Symbol> = const { RefCell::new(vec![]) };
+    static SYMBOLS: Scopes<Symbol> = const { empty_scope_stack() };
 }
 
 /// Run `f` with every `Symbol` serializing as its number in `numbering`.

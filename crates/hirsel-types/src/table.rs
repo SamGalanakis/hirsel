@@ -3,7 +3,6 @@
 //! depend only on the graphs' content, never on interner numbering or the
 //! order rows were interned in.
 use crate::*;
-use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -289,7 +288,7 @@ impl TableBuilder {
         struct Restore<'a>(&'a mut TableBuilder);
         impl Drop for Restore<'_> {
             fn drop(&mut self) {
-                if let Some(Scope::Grow(builder)) = SCOPE.with_borrow_mut(|s| s.pop()) {
+                if let Some(Scope::Grow(builder)) = hirsel_intern::persist::pop_scope(&SCOPE) {
                     *self.0 = builder;
                 }
             }
@@ -373,14 +372,14 @@ enum Scope {
     },
 }
 thread_local! {
-    static SCOPE: RefCell<Vec<Scope>> = const { RefCell::new(vec![]) };
+    static SCOPE: hirsel_intern::persist::ScopeStack<Scope> = const { hirsel_intern::persist::empty_scope_stack() };
 }
 fn scoped<R>(scope: Scope, f: impl FnOnce() -> R) -> R {
     SCOPE.with_borrow_mut(|s| s.push(scope));
     struct Pop;
     impl Drop for Pop {
         fn drop(&mut self) {
-            SCOPE.with_borrow_mut(|s| s.pop());
+            hirsel_intern::persist::pop_scope(&SCOPE);
         }
     }
     let _pop = Pop;
@@ -434,7 +433,7 @@ pub fn with_bounded_table_collection<R>(
     struct Pop;
     impl Drop for Pop {
         fn drop(&mut self) {
-            SCOPE.with_borrow_mut(|s| s.pop());
+            hirsel_intern::persist::pop_scope(&SCOPE);
         }
     }
     let pop = Pop;

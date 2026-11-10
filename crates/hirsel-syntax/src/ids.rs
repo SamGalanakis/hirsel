@@ -201,7 +201,7 @@ impl std::fmt::Debug for DefId {
 mod tests;
 
 thread_local! {
-    static PERSIST: persist::Scopes<DefId> = const { std::cell::RefCell::new(vec![]) };
+    static PERSIST: persist::Scopes<DefId> = const { persist::empty_scope_stack() };
 }
 
 /// Run `f` with every `DefId` serializing as its number in `numbering`: a

@@ -825,7 +825,8 @@ level. It removes entries and derived objects that only versions below the floor
 and objects written under a claim older than the newest that no entry names. A floor
 never decreases and a claim is never reused, so a reclaim that runs from a stale reading
 of the history removes nothing that a newer reading keeps, a successor's checkpoint
-included. Recovery never lists objects; only reclamation does, so an incomplete listing leaves garbage for a later reclaim and
+included. Recovery never depends on a listing: it may use one only to fetch in parallel
+what it then reaches by name. An incomplete listing leaves garbage for a later reclaim and
 never loses state.
 
 **Providers.** The run configuration grants authorities by name
@@ -851,18 +852,24 @@ floor.
   returns an entry a host crash could lose. A failed `fdatasync` returns
   `Undecided(Io(..))`.
 - **Object storage.** The head object is the only mutable object and changes only by a
-  conditional replace. An advance puts the entry as a segment object named by its claim
-  and position, create-if-absent, then replaces the head with one that names the new
-  segment and its digest, conditional on the entity tag the writer's own previous replace
-  returned. The writer takes that tag only from its own replace's response, or from a
-  read of the head that shows its own claim at its own end, never from any other read. A
-  head names its claim and end, so no two heads have equal bytes and no tag recurs. A
-  claim reads the head and replaces it conditionally, or creates it when absent; of racing
-  claims one replace succeeds. The head names every segment and checkpoint the retained
-  history needs, with its digest, so recovery reads the head and the objects it names. An
-  object-storage entry whose endpoint does not honour create-if-absent and conditional
-  replace refuses every claim with `Unsupported(Conditional())`; `objects.s3@1` uses
-  `If-None-Match: *` and `If-Match`.
+  conditional replace. An advance puts the entry as a group object named by its position
+  and digest, create-if-absent, then replaces the head with one that names its claim, the
+  new end and the entry's digest, conditional on the entity tag the writer's own previous
+  replace returned. The writer takes that tag only from its own replace's response, or
+  from a read of the head that shows its own claim at its own end, never from any other
+  read. A head names its claim and end, so no two heads have equal bytes and no tag
+  recurs; a replace whose response was lost is therefore retried as the identical
+  request, of which at most one lands. A claim reads the head and replaces it
+  conditionally, or creates it when absent; of racing claims one replace succeeds. Every
+  entry names its predecessor's digest, so the head reaches every retained entry by name:
+  recovery reads the head and gets each group by its name, back to what it already holds.
+  It lists `h/` only as a hint that lets those gets run in parallel, and a group the
+  listing omits is fetched by name, never taken as missing. Recovering `n` groups costs a
+  head read, `ceil(n / 1000)` listing pages and `n` gets, or a head read and `n`
+  sequential gets with no listing. Reclamation removes only group objects at positions up
+  to the head's end that the chain does not name. An object-storage entry whose endpoint
+  does not honour create-if-absent and conditional replace refuses every claim with
+  `Unsupported(Conditional())`; `objects.s3@1` uses `If-None-Match: *` and `If-Match`.
 - **Memory** keeps the history in the host process for tests and scratch stores.
 - **Simulated.** `authority.sim@1` represents a log or object storage by the same rules
   and injects, by seed, what the store must survive by detecting and refusing, never by
@@ -1045,9 +1052,9 @@ digest, so a group is hashed once. A segment starts at the first group after a
 checkpoint, so earlier segments are reclaimed whole. One advance is one append and one
 `fdatasync`.
 
-**Object storage.** A group is the object `h/` followed by its first version as 20
+**Object storage.** A group is the object `h/` followed by its history position as 20
 decimal digits, `-` and its digest in lowercase hexadecimal, put only if free; then the
-head record is replaced conditionally on the one it read. A node is `n/` followed by its
+head is replaced conditionally on the tag of the writer's own last replace. A node is `n/` followed by its
 hexadecimal digest. A group object no head record's chain reaches, left by a writer
 fenced or undecided before its head replace, is not history and is reclaimed. A listing
 only finds candidates: every object is checked against the digest that names it.
@@ -1065,9 +1072,9 @@ local group at 4 GiB.
 2. the checkpoint it names, nodes level by level, every leaf in parallel, validated as
    above;
 3. the groups after the checkpoint: on a local log from the locator by sequential reads;
-   on object storage by listing `h/` from the checkpoint's version and reading every
-   candidate in parallel, then following `prev` back from the group whose digest the head
-   record names to the checkpoint's digest; other candidates are orphans;
+   on object storage by following `prev` back by name from the group whose position and
+   digest the head names to the checkpoint's digest, getting in parallel the candidates
+   a listing of `h/` offers and the rest by name; other candidates are orphans;
 4. each group in order, checking its chain fields and applying its write sets.
 
 Only the last frame of the last local segment can be **torn**: an incomplete final

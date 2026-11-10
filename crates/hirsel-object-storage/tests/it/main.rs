@@ -23,6 +23,46 @@ fn contract(objects: &dyn ObjectStorage) {
         objects.get("sig/a1/k-2").unwrap().as_deref(),
         Some(&b""[..])
     );
+    // A replace takes effect exactly when its condition holds.
+    assert_eq!(
+        objects.replace("head", b"h1", Condition::Matches(Tag("x".into()))),
+        Ok(Replaced::Mismatch)
+    );
+    let Ok(Replaced::Replaced(t1)) = objects.replace("head", b"h1", Condition::Absent) else {
+        panic!("creating an absent head")
+    };
+    assert_eq!(
+        objects.replace("head", b"h0", Condition::Absent),
+        Ok(Replaced::Mismatch)
+    );
+    assert_eq!(
+        objects.get_tagged("head").unwrap(),
+        Some((b"h1".to_vec(), t1.clone()))
+    );
+    let Ok(Replaced::Replaced(t2)) = objects.replace("head", b"h2", Condition::Matches(t1.clone()))
+    else {
+        panic!("replacing on the current tag")
+    };
+    assert_ne!(t1, t2);
+    // A stale tag no longer matches: the writer that holds it is fenced.
+    assert_eq!(
+        objects.replace("head", b"h3", Condition::Matches(t1)),
+        Ok(Replaced::Mismatch)
+    );
+    assert_eq!(objects.get("head").unwrap().as_deref(), Some(&b"h2"[..]));
+    // Listings are ordered, bounded by prefix and start after `after`;
+    // nested keys are found, temporary files never are.
+    for key in ["h/2", "h/1", "h/3/x", "hx"] {
+        objects.put_new(key, b"").unwrap();
+    }
+    let list = |prefix: &str, after: &str| objects.list(prefix, after).unwrap().keys;
+    assert_eq!(list("h/", ""), ["h/1", "h/2", "h/3/x"]);
+    assert_eq!(list("h/", "h/1"), ["h/2", "h/3/x"]);
+    assert_eq!(list("h", "h/3/x"), ["head", "hx"]);
+    objects.delete("h/2").unwrap();
+    objects.delete("h/2").unwrap();
+    assert_eq!(objects.get("h/2").unwrap(), None);
+    assert_eq!(list("h/", ""), ["h/1", "h/3/x"]);
     for bad in [
         "",
         "/x",
@@ -62,6 +102,46 @@ fn a_directory_creates_each_object_once_and_keeps_it_across_reopening() {
         .map(|e| e.unwrap().file_name().into_string().unwrap())
         .collect();
     assert_eq!(names, ["a1"]);
+    // Pages hold at most LIST_PAGE keys and say when more follow.
+    for i in 0..LIST_PAGE + 1 {
+        reopened.put_new(&format!("p/{i:05}"), b"").unwrap();
+    }
+    let first = reopened.list("p/", "").unwrap();
+    assert!(first.truncated && first.keys.len() == LIST_PAGE);
+    let rest = reopened.list("p/", first.keys.last().unwrap()).unwrap();
+    assert_eq!(
+        (rest.keys, rest.truncated),
+        (vec![format!("p/{LIST_PAGE:05}")], false)
+    );
+}
+
+#[test]
+fn a_directory_replace_excludes_racing_writers() {
+    // Of writers racing to replace the same tag, exactly one succeeds.
+    let dir = tempfile::tempdir().unwrap();
+    let objects = DirObjects::open(dir.path()).unwrap();
+    let Ok(Replaced::Replaced(tag)) = objects.replace("head", b"0", Condition::Absent) else {
+        panic!("creating the head")
+    };
+    let won: usize = std::thread::scope(|s| {
+        let handles: Vec<_> = (0..8)
+            .map(|i| {
+                let objects = DirObjects::open(dir.path()).unwrap();
+                let tag = tag.clone();
+                s.spawn(move || {
+                    objects
+                        .replace("head", format!("w{i}").as_bytes(), Condition::Matches(tag))
+                        .unwrap()
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .map(|h| h.join().unwrap())
+            .filter(|r| matches!(r, Replaced::Replaced(_)))
+            .count()
+    });
+    assert_eq!(won, 1);
 }
 
 #[test]

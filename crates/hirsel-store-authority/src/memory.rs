@@ -79,6 +79,7 @@ impl Authority for Memory {
             durable: vec![end],
             segment: 0,
             length: 0,
+            tag: None,
             dead: false,
         };
         Ok(Claimed { claim, end })

@@ -6,6 +6,7 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+hirsel-object-storage = { path = "../hirsel-object-storage" }
 hirsel-run-schema = { path = "../hirsel-run-schema" }
 libc = "0.2"
 sha2 = "0.10"

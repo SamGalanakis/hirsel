@@ -1329,7 +1329,9 @@ name = "hirsel-object-storage"
 version = "0.1.0"
 dependencies = [
  "hirsel-guard",
+ "libc",
  "serde_json",
+ "sha2",
  "tempfile",
 ]
 
@@ -1747,6 +1749,7 @@ name = "hirsel-store-authority"
 version = "0.1.0"
 dependencies = [
  "hirsel-guard",
+ "hirsel-object-storage",
  "hirsel-run-schema",
  "libc",
  "sha2",

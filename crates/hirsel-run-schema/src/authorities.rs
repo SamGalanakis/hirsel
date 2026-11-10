@@ -18,6 +18,13 @@ pub struct AuthorityGrant {
     /// `authority.log@1`: a canonical relative directory within `mount`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
+    /// `authority.objects@1`: an entry of the host's object-storage seam
+    /// (`objects.dir@1`, `objects.s3@1`, `objects.sim@1`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub objects: Option<serde_json::Value>,
+    /// `authority.objects@1`: the one level the operator states the storage provides.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub level: Option<String>,
     /// `authority.sim@1`: the seed every simulated fault is drawn from.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub seed: Option<u64>,

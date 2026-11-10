@@ -169,6 +169,13 @@ impl Library {
                     .into(),
             ));
         }
+        if grant.provider == "authority.objects@1"
+            && hirsel_store_authority::objects_provider(grant) != Some("objects.sim@1")
+        {
+            return Err(Error::Unavailable(
+                "authority.objects@1 here keeps its objects in objects.sim@1".into(),
+            ));
+        }
         let p = hirsel_store_authority::open(grant, None)
             .map_err(|e| invalid(format!("authority grant: {}", e.0)))?;
         let p = Arc::new(Mutex::new(p));

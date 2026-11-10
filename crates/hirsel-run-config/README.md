@@ -82,10 +82,13 @@ does not convey this adjunct implicitly.
 `io.authorities` maps a name (a lowercase letter, then lowercase letters and digits) to
 an `AuthorityGrant`: `authority.memory@1`, `authority.log@1` (a `mount` naming a granted
 read-write Dir and a canonical relative `path` in it; no two log directories nest) or
-`authority.sim@1` (`seed`, `represent`, `levels`, `faults`), and a `floor` among the
-levels the provider declares. `hirsel_store_authority::check` owns the per-provider
-members; a member another provider takes refuses. `validate_authorities` reads the
-conformance `authorities` directive, which refuses `authority.log@1` (no host directory).
+`authority.objects@1` (an `objects` entry of the object-storage seam and its one
+`level`; no two `objects.dir@1` directories nest) or `authority.sim@1` (`seed`,
+`represent`, `levels`, `faults`), and a `floor` among the levels the provider
+declares. `hirsel_store_authority::check` owns the per-provider members; a member
+another provider takes refuses. `validate_authorities` reads the conformance
+`authorities` directive, which refuses `authority.log@1` (no host directory) and an
+`authority.objects@1` whose objects are not `objects.sim@1`.
 `inputs.scheduler` names `fifo`, `random` or `pct`, version 1 (docs/spec/determinism.md,
 "Scheduler"); any other refuses as Unsupported. `Config::scheduler` projects its launch
 word (`Scheduler::CONTRACTS`, shared with `hirsel_kernels::schedule::Algorithm::code`) and

@@ -1,14 +1,17 @@
-//! Object storage: immutable objects by key, written create-if-absent. This
-//! is the storage seam the code store and the object-store-backed providers
-//! share: [`ObjectStorage`] is a conditional PUT (`If-None-Match: *`) and a
-//! GET, which a directory, an S3-compatible bucket and a simulation all
-//! implement.
+//! Object storage: objects by key, written create-if-absent or replaced
+//! conditionally on their entity tag. This is the storage seam the code store
+//! and `authority.objects@1` share: [`ObjectStorage`] is a conditional PUT
+//! (`If-None-Match: *`), a conditional replace (`If-Match`), a GET with the
+//! object's tag, a listing and a delete, which a directory, an S3-compatible
+//! bucket and a simulation all implement.
 
 #[cfg(test)]
 hirsel_guard::install!();
+use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::fs::{self, File};
 use std::io::{ErrorKind, Write};
+use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -21,6 +24,52 @@ pub enum Put {
     /// An object already existed under the key; it is unchanged, whatever
     /// its bytes.
     Exists,
+}
+
+/// An object's entity tag. Equal bytes have equal tags under one storage, as an
+/// S3 single-part ETag does, so a tag names a content, not a write: a caller
+/// that replaces conditionally must never write bytes a key held before.
+#[derive(Clone, Debug, Eq, PartialEq, Hash)]
+pub struct Tag(pub String);
+
+/// The condition of [`ObjectStorage::replace`].
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum Condition {
+    /// Only when no object exists under the key (`If-None-Match: *`).
+    Absent,
+    /// Only when the object's tag is this one (`If-Match`).
+    Matches(Tag),
+}
+
+/// The outcome of [`ObjectStorage::replace`].
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum Replaced {
+    /// The object now holds the bytes and has this tag.
+    Replaced(Tag),
+    /// The condition did not hold; nothing changed.
+    Mismatch,
+}
+
+/// One page of a listing: keys in ascending order, and whether more follow
+/// the last one.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct Listing {
+    pub keys: Vec<String>,
+    pub truncated: bool,
+}
+
+/// The largest page a listing returns, as an S3 `ListObjectsV2` does.
+pub const LIST_PAGE: usize = 1000;
+
+/// The tag of `bytes` for storages that tag by content: the hexadecimal
+/// SHA-256 digest.
+pub fn content_tag(bytes: &[u8]) -> Tag {
+    let digest = Sha256::digest(bytes);
+    let mut out = String::with_capacity(64);
+    for b in digest {
+        out.push_str(&format!("{b:02x}"));
+    }
+    Tag(out)
 }
 
 /// Why an object operation did not complete. A failed `put_new` may or may
@@ -47,16 +96,39 @@ impl std::fmt::Display for StorageError {
 
 impl std::error::Error for StorageError {}
 
-/// Immutable objects by key. Keys are `/`-separated segments of lowercase
-/// ASCII letters, digits, `.`, `_` and `-`, none empty or starting with `.`
-/// ([`check_key`]).
+/// Objects by key. Keys are `/`-separated segments of lowercase ASCII
+/// letters, digits, `.`, `_` and `-`, none empty or starting with `.`
+/// ([`check_key`]). Every write is whole or not at all and durable before it
+/// returns; a failed write may or may not have taken effect.
 pub trait ObjectStorage: Send + Sync {
+    /// The object under `key` and its tag, if one exists.
+    fn get_tagged(&self, key: &str) -> Result<Option<(Vec<u8>, Tag)>, StorageError>;
     /// The object under `key`, if one exists.
-    fn get(&self, key: &str) -> Result<Option<Vec<u8>>, StorageError>;
-    /// Create the object under `key` with `bytes` when none exists, whole or
-    /// not at all, durably before returning `Created`; an existing object
-    /// is left unchanged.
+    fn get(&self, key: &str) -> Result<Option<Vec<u8>>, StorageError> {
+        Ok(self.get_tagged(key)?.map(|(bytes, _)| bytes))
+    }
+    /// Each of `keys`, as [`get`](Self::get) would return it. A storage
+    /// whose requests have latency issues them in parallel.
+    fn get_many(&self, keys: &[String]) -> Vec<Result<Option<Vec<u8>>, StorageError>> {
+        keys.iter().map(|k| self.get(k)).collect()
+    }
+    /// Create the object under `key` with `bytes` when none exists; an
+    /// existing object is left unchanged.
     fn put_new(&self, key: &str, bytes: &[u8]) -> Result<Put, StorageError>;
+    /// Write `bytes` under `key` only when `condition` holds, atomically with
+    /// the check.
+    fn replace(
+        &self,
+        key: &str,
+        bytes: &[u8],
+        condition: Condition,
+    ) -> Result<Replaced, StorageError>;
+    /// The keys starting with `prefix` and greater than `after`, ascending,
+    /// at most [`LIST_PAGE`] of them. A listing may be incomplete: callers
+    /// treat it as a hint and never conclude from a key's absence.
+    fn list(&self, prefix: &str, after: &str) -> Result<Listing, StorageError>;
+    /// Remove the object under `key`; removing an absent one is success.
+    fn delete(&self, key: &str) -> Result<(), StorageError>;
 }
 
 /// Refuse a key outside the object key grammar.
@@ -81,7 +153,11 @@ pub fn check_key(key: &str) -> Result<(), StorageError> {
 /// directory and every one above it up to the root, so directories the put
 /// created are durable too. A put that finds the key taken runs the same
 /// directory barrier before returning `Exists`, so the existing entry is
-/// durable whoever linked it.
+/// durable whoever linked it. A replace holds the root's `.lock` file lock
+/// (an open-file-description lock, so every handle in every process
+/// excludes the others), compares the current content's tag, then writes a
+/// synced temporary file and renames it over the key. Tags are content
+/// digests ([`content_tag`]).
 #[derive(Clone, Debug)]
 pub struct DirObjects {
     root: PathBuf,
@@ -120,13 +196,136 @@ fn io(path: &Path, error: std::io::Error) -> StorageError {
     StorageError::Io(format!("{}: {error}", path.display()))
 }
 
-impl ObjectStorage for DirObjects {
-    fn get(&self, key: &str) -> Result<Option<Vec<u8>>, StorageError> {
+impl DirObjects {
+    /// Hold the root's replace lock until the returned file drops.
+    fn lock(&self) -> Result<File, StorageError> {
+        let path = self.root.join(".lock");
+        let file = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&path)
+            .map_err(|e| io(&path, e))?;
+        // SAFETY: flock on a descriptor this function owns; dropping the
+        // file closes it and releases the lock.
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
+            return Err(io(&path, std::io::Error::last_os_error()));
+        }
+        Ok(file)
+    }
+
+    fn read(&self, key: &str) -> Result<Option<Vec<u8>>, StorageError> {
         check_key(key)?;
         let path = self.root.join(key);
         match fs::read(&path) {
             Ok(bytes) => Ok(Some(bytes)),
-            Err(e) if e.kind() == ErrorKind::NotFound => Ok(None),
+            Err(e) if matches!(e.kind(), ErrorKind::NotFound | ErrorKind::NotADirectory) => {
+                Ok(None)
+            }
+            Err(e) => Err(io(&path, e)),
+        }
+    }
+
+    /// Every key under the directory `dir`, whose key prefix is `base`.
+    fn walk(&self, dir: &Path, base: &str, out: &mut Vec<String>) -> Result<(), StorageError> {
+        let entries = match fs::read_dir(dir) {
+            Ok(entries) => entries,
+            Err(e) if matches!(e.kind(), ErrorKind::NotFound | ErrorKind::NotADirectory) => {
+                return Ok(());
+            }
+            Err(e) => return Err(io(dir, e)),
+        };
+        for entry in entries {
+            let entry = entry.map_err(|e| io(dir, e))?;
+            let Some(name) = entry.file_name().to_str().map(str::to_string) else {
+                continue;
+            };
+            if name.starts_with('.') {
+                continue;
+            }
+            let key = if base.is_empty() {
+                name
+            } else {
+                format!("{base}/{name}")
+            };
+            let kind = entry.file_type().map_err(|e| io(dir, e))?;
+            if kind.is_dir() {
+                self.walk(&entry.path(), &key, out)?;
+            } else if kind.is_file() {
+                out.push(key);
+            }
+        }
+        Ok(())
+    }
+}
+
+impl ObjectStorage for DirObjects {
+    fn get_tagged(&self, key: &str) -> Result<Option<(Vec<u8>, Tag)>, StorageError> {
+        Ok(self.read(key)?.map(|bytes| {
+            let tag = content_tag(&bytes);
+            (bytes, tag)
+        }))
+    }
+    fn replace(
+        &self,
+        key: &str,
+        bytes: &[u8],
+        condition: Condition,
+    ) -> Result<Replaced, StorageError> {
+        check_key(key)?;
+        let _lock = self.lock()?;
+        let current = self.read(key)?.map(|b| content_tag(&b));
+        let holds = match &condition {
+            Condition::Absent => current.is_none(),
+            Condition::Matches(tag) => current.as_ref() == Some(tag),
+        };
+        if !holds {
+            return Ok(Replaced::Mismatch);
+        }
+        let path = self.root.join(key);
+        let parent = path
+            .parent()
+            .expect("an object key names a file under the root");
+        fs::create_dir_all(parent).map_err(|e| io(parent, e))?;
+        let temporary = parent.join(format!(
+            ".tmp-{}-{}",
+            std::process::id(),
+            TEMPORARY.fetch_add(1, Ordering::Relaxed)
+        ));
+        let written = (|| {
+            let mut file = File::create_new(&temporary)?;
+            file.write_all(bytes)?;
+            file.sync_all()?;
+            fs::rename(&temporary, &path)
+        })();
+        if let Err(e) = written {
+            let _ = fs::remove_file(&temporary);
+            return Err(io(&path, e));
+        }
+        self.sync_directories(&path)?;
+        Ok(Replaced::Replaced(content_tag(bytes)))
+    }
+    fn list(&self, prefix: &str, after: &str) -> Result<Listing, StorageError> {
+        // Walk only the directory the prefix's complete segments name.
+        let (dir, base) = match prefix.rfind('/') {
+            Some(i) => (self.root.join(&prefix[..i]), &prefix[..i]),
+            None => (self.root.clone(), ""),
+        };
+        let mut keys = Vec::new();
+        self.walk(&dir, base, &mut keys)?;
+        keys.retain(|k| k.starts_with(prefix) && k.as_str() > after);
+        keys.sort();
+        let truncated = keys.len() > LIST_PAGE;
+        keys.truncate(LIST_PAGE);
+        Ok(Listing { keys, truncated })
+    }
+    fn delete(&self, key: &str) -> Result<(), StorageError> {
+        check_key(key)?;
+        let path = self.root.join(key);
+        match fs::remove_file(&path) {
+            Ok(()) => self.sync_directories(&path),
+            Err(e) if e.kind() == ErrorKind::NotFound => Ok(()),
             Err(e) => Err(io(&path, e)),
         }
     }
@@ -172,10 +371,11 @@ impl ObjectStorage for DirObjects {
     }
 }
 
-/// In-memory objects with an S3 bucket's conditional-PUT semantics
+/// In-memory objects with an S3 bucket's conditional-write semantics
 /// (`objects.sim@1`), optionally failing operations at seeded points. A
-/// faulted put fails before or after its write, as a lost reply does, so
-/// callers see both outcomes of an uncertain write.
+/// faulted write fails before or after its effect, as a lost reply does, so
+/// callers see both outcomes of an uncertain write; a faulted listing fails
+/// or returns every other key.
 #[derive(Debug, Default)]
 pub struct MemoryObjects {
     objects: Mutex<BTreeMap<String, Vec<u8>>>,
@@ -241,12 +441,77 @@ fn unavailable(operation: &str, key: &str) -> StorageError {
 }
 
 impl ObjectStorage for MemoryObjects {
-    fn get(&self, key: &str) -> Result<Option<Vec<u8>>, StorageError> {
+    fn get_tagged(&self, key: &str) -> Result<Option<(Vec<u8>, Tag)>, StorageError> {
         check_key(key)?;
         if self.fault().is_some() {
             return Err(unavailable("get", key));
         }
-        Ok(self.objects.lock().expect("objects").get(key).cloned())
+        Ok(self
+            .objects
+            .lock()
+            .expect("objects")
+            .get(key)
+            .map(|b| (b.clone(), content_tag(b))))
+    }
+    fn replace(
+        &self,
+        key: &str,
+        bytes: &[u8],
+        condition: Condition,
+    ) -> Result<Replaced, StorageError> {
+        check_key(key)?;
+        let fault = self.fault();
+        if fault == Some(false) {
+            return Err(unavailable("replace", key));
+        }
+        let mut objects = self.objects.lock().expect("objects");
+        let current = objects.get(key).map(|b| content_tag(b));
+        let holds = match &condition {
+            Condition::Absent => current.is_none(),
+            Condition::Matches(tag) => current.as_ref() == Some(tag),
+        };
+        let replaced = if holds {
+            objects.insert(key.into(), bytes.to_vec());
+            Replaced::Replaced(content_tag(bytes))
+        } else {
+            Replaced::Mismatch
+        };
+        match fault {
+            Some(_) => Err(unavailable("replace reply", key)),
+            None => Ok(replaced),
+        }
+    }
+    fn list(&self, prefix: &str, after: &str) -> Result<Listing, StorageError> {
+        let fault = self.fault();
+        if fault == Some(false) {
+            return Err(unavailable("list", prefix));
+        }
+        let objects = self.objects.lock().expect("objects");
+        let mut keys: Vec<String> = objects
+            .keys()
+            .filter(|k| k.starts_with(prefix) && k.as_str() > after)
+            .take(LIST_PAGE + 1)
+            .cloned()
+            .collect();
+        let truncated = keys.len() > LIST_PAGE;
+        keys.truncate(LIST_PAGE);
+        if fault.is_some() {
+            // An incomplete listing: every other key is missing.
+            keys = keys.into_iter().step_by(2).collect();
+        }
+        Ok(Listing { keys, truncated })
+    }
+    fn delete(&self, key: &str) -> Result<(), StorageError> {
+        check_key(key)?;
+        let fault = self.fault();
+        if fault == Some(false) {
+            return Err(unavailable("delete", key));
+        }
+        self.objects.lock().expect("objects").remove(key);
+        match fault {
+            Some(_) => Err(unavailable("delete reply", key)),
+            None => Ok(()),
+        }
     }
     fn put_new(&self, key: &str, bytes: &[u8]) -> Result<Put, StorageError> {
         check_key(key)?;

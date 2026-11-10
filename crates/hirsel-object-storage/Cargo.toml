@@ -6,7 +6,9 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+libc = "0.2"
 serde_json = "1"
+sha2 = "0.10"
 
 [dev-dependencies]
 hirsel-guard = { path = "../hirsel-guard" }

@@ -24,7 +24,7 @@ use crate::{Advanced, Authority, Claim, Error, Level};
 use std::collections::BTreeMap;
 
 /// A non-claim group following `tip`, unique by `tag`.
-fn entry(tip: &Tip, tag: u64) -> Vec<u8> {
+pub(crate) fn entry(tip: &Tip, tag: u64) -> Vec<u8> {
     let mut out = Vec::new();
     out.extend_from_slice(b"HSHIST01");
     out.extend_from_slice(&tip.digest);
@@ -40,16 +40,16 @@ fn entry(tip: &Tip, tag: u64) -> Vec<u8> {
     out
 }
 
-struct Rng(u64);
+pub(crate) struct Rng(pub(crate) u64);
 
 impl Rng {
-    fn next(&mut self) -> u64 {
+    pub(crate) fn next(&mut self) -> u64 {
         self.0 ^= self.0 << 13;
         self.0 ^= self.0 >> 7;
         self.0 ^= self.0 << 17;
         self.0
     }
-    fn below(&mut self, n: u64) -> u64 {
+    pub(crate) fn below(&mut self, n: u64) -> u64 {
         self.next() % n
     }
 }
@@ -102,6 +102,7 @@ fn schedule(seed: u64, steps: u32, levels: u8, bug: Option<Bug>) -> Result<(), S
     let root = Sim::new(
         Config {
             seed,
+            represent: crate::sim::Represent::Log,
             levels: names,
             faults,
         },

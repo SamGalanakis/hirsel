@@ -1106,8 +1106,11 @@ provider declares, [STORE-2](storage.md#store-2-transactions), such as `"host"` 
   `code.object@1`, [RUN-13](runners.md#run-13-provider-seams)) and `level`, the name of
   the one level the operator states that storage provides, such as `"zone"`.
 - `authority.sim@1`: `seed`, `represent` (`"log"` or `"objects"`), `levels` (a nonempty
-  list of distinct level names, weakest first, which the simulated authority declares) and `faults`, a sorted object mapping each fault the simulated
-  authority injects to a `fail_one_in` count (u64, 0 for never).
+  list of distinct level names, weakest first, which the simulated authority declares;
+  exactly one for `"objects"`) and `faults`, a sorted object mapping each fault the
+  simulated authority injects to a `fail_one_in` count (u64, 0 for never): for `"log"`
+  `barrier`, `garbage`, `lost_response`, `refuse` and `torn`, for `"objects"`
+  `incomplete_listing`, `lost_response` and `refuse`.
 
 A floor the provider does not declare, a level name that is not lowercase ASCII letters
 and digits starting with a letter, two entries over the same directory or object prefix,

@@ -316,6 +316,7 @@ impl Authority for Log {
             durable: vec![position, position],
             segment,
             length,
+            tag: None,
             dead: false,
         };
         Ok(Claimed {

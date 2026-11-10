@@ -55,6 +55,17 @@ pub fn digest(data: &[u8]) -> [u8; 32] {
     Sha256::digest(data).into()
 }
 
+/// The digest of the entry before `entry`, from its header.
+pub fn prev(entry: &[u8]) -> Result<[u8; 32], Bad> {
+    if entry.len() >= 8 && &entry[..8] != MAGIC && &entry[..6] == FAMILY {
+        return Err(Bad::Unsupported(entry[..8].try_into().unwrap()));
+    }
+    if entry.len() < HEADER || &entry[..8] != MAGIC {
+        return Err(Bad::Corrupt);
+    }
+    Ok(entry[8..40].try_into().unwrap())
+}
+
 /// The tip after `entry`, which must follow `tip` by its header: `prev`, `first`
 /// and `epoch`, and a claim's identity. Checks only what the authority relies
 /// on; the engine checks the whole group.

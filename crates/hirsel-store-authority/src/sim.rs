@@ -1,9 +1,12 @@
-//! `authority.sim@1`: a simulated authority, the one fault path. It keeps a
-//! log representation by the log's rules and injects, by seed, what a store
-//! must survive by detecting and refusing: the loss of anything not yet
-//! durable at a level, torn and garbage tails, refused requests, lost
-//! responses and failed barriers. Handles made by [`Sim::share`] race on one
-//! history.
+//! `authority.sim@1`: a simulated authority, the one fault path. With
+//! `represent: "log"` it keeps a log representation by the log's rules and
+//! injects, by seed, what a store must survive by detecting and refusing: the
+//! loss of anything not yet durable at a level, torn and garbage tails, refused
+//! requests, lost responses and failed barriers. Handles made by [`Sim::share`]
+//! race on one history. With `represent: "objects"` it is
+//! [`crate::objects::Objects`] over a [`Bucket`], a simulated object storage
+//! that refuses requests, loses responses after their effect and returns
+//! incomplete listings.
 //!
 //! Levels are the grant's, weakest first. An append is durable at the weakest
 //! level; a barrier at a level makes everything appended durable at it and
@@ -15,15 +18,28 @@ use crate::{
     Advanced, Authority, AuthorityError, AuthorityGrant, Claim, Claimed, ConfigError, Error, Level,
     MAX_ENTRY, level_name_ok, live, owner_id,
 };
+use hirsel_object_storage::{
+    Condition, LIST_PAGE, Listing, ObjectStorage, Put, Replaced, StorageError, Tag, check_key,
+    content_tag,
+};
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
-/// The faults the simulated authority injects, each with a `fail_one_in` count.
+/// The faults the simulated log injects, each with a `fail_one_in` count.
 pub const FAULTS: [&str; 5] = ["barrier", "garbage", "lost_response", "refuse", "torn"];
+/// The faults the simulated object storage injects.
+pub const OBJECT_FAULTS: [&str; 3] = ["incomplete_listing", "lost_response", "refuse"];
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Represent {
+    Log,
+    Objects,
+}
 
 #[derive(Clone, Debug)]
 pub struct Config {
     pub seed: u64,
+    pub represent: Represent,
     pub levels: Vec<String>,
     /// `fail_one_in` by fault name, 0 for never.
     pub faults: BTreeMap<String, u64>,
@@ -32,15 +48,11 @@ pub struct Config {
 impl Config {
     pub fn from_grant(g: &AuthorityGrant) -> Result<Self, ConfigError> {
         let fail = |m: String| ConfigError(m);
-        match g.represent.as_deref() {
-            Some("log") => {}
-            Some("objects") => {
-                return Err(fail(
-                    "sim `represent: objects` arrives with authority.objects@1".into(),
-                ));
-            }
+        let represent = match g.represent.as_deref() {
+            Some("log") => Represent::Log,
+            Some("objects") => Represent::Objects,
             _ => return Err(fail("sim `represent` is \"log\" or \"objects\"".into())),
-        }
+        };
         let levels = g
             .levels
             .clone()
@@ -55,12 +67,22 @@ impl Config {
                 )));
             }
         }
+        if represent == Represent::Objects && levels.len() != 1 {
+            return Err(fail(
+                "sim `represent: objects` declares one level, as object storage does".into(),
+            ));
+        }
+        let known: &[&str] = match represent {
+            Represent::Log => &FAULTS,
+            Represent::Objects => &OBJECT_FAULTS,
+        };
         let faults = g.faults.clone().unwrap_or_default();
-        if let Some(k) = faults.keys().find(|k| !FAULTS.contains(&k.as_str())) {
+        if let Some(k) = faults.keys().find(|k| !known.contains(&k.as_str())) {
             return Err(fail(format!("unknown sim fault `{k}`")));
         }
         Ok(Config {
             seed: g.seed.unwrap_or(0),
+            represent,
             levels,
             faults,
         })
@@ -233,6 +255,7 @@ impl Authority for Sim {
             durable: vec![end; self.levels.len()],
             segment: 0,
             length: 0,
+            tag: None,
             dead: false,
         };
         Ok(Claimed { claim, end })
@@ -370,5 +393,148 @@ impl Authority for Sim {
             return Err(Error::Fenced);
         }
         Ok(())
+    }
+}
+
+/// A simulated object storage with a bucket's conditional-write semantics,
+/// drawing every fault from one seeded stream: `refuse` fails a request before
+/// its effect, `lost_response` after it, and `incomplete_listing` drops each key
+/// of a listing page with probability one half. It counts requests.
+pub struct Bucket {
+    world: Mutex<BucketWorld>,
+    /// Called before every request, outside the bucket's lock: the harness's
+    /// scheduler interleaves racing handles here.
+    #[cfg(test)]
+    pub(crate) before: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+}
+
+struct BucketWorld {
+    objects: BTreeMap<String, Vec<u8>>,
+    draws: Draws,
+    faults: BTreeMap<String, u64>,
+    requests: u64,
+}
+
+impl BucketWorld {
+    fn fault(&mut self, name: &str) -> bool {
+        let one_in = self.faults.get(name).copied().unwrap_or(0);
+        one_in != 0 && self.draws.next().is_multiple_of(one_in)
+    }
+}
+
+fn unavailable(what: &str) -> StorageError {
+    StorageError::Unavailable(format!("simulated {what}"))
+}
+
+impl Bucket {
+    pub fn new(seed: u64, faults: BTreeMap<String, u64>) -> Self {
+        Bucket {
+            world: Mutex::new(BucketWorld {
+                objects: BTreeMap::new(),
+                draws: Draws(seed),
+                faults,
+                requests: 0,
+            }),
+            #[cfg(test)]
+            before: Mutex::new(None),
+        }
+    }
+
+    /// Requests served so far.
+    pub fn requests(&self) -> u64 {
+        self.world.lock().unwrap().requests
+    }
+
+    /// Every object, read past any fault and uncounted.
+    pub fn contents(&self) -> BTreeMap<String, Vec<u8>> {
+        self.world.lock().unwrap().objects.clone()
+    }
+
+    /// Start a request: run the scheduler hook, then count it and draw
+    /// whether it is refused.
+    fn request(&self) -> Result<std::sync::MutexGuard<'_, BucketWorld>, StorageError> {
+        #[cfg(test)]
+        {
+            let before = self.before.lock().unwrap().clone();
+            if let Some(f) = before {
+                f();
+            }
+        }
+        let mut w = self.world.lock().unwrap();
+        w.requests += 1;
+        if w.fault("refuse") {
+            return Err(unavailable("refusal"));
+        }
+        Ok(w)
+    }
+
+    /// End a request that took effect: its response may be lost.
+    fn respond<T>(w: &mut BucketWorld, value: T) -> Result<T, StorageError> {
+        if w.fault("lost_response") {
+            return Err(unavailable("lost response"));
+        }
+        Ok(value)
+    }
+}
+
+impl ObjectStorage for Bucket {
+    fn get_tagged(&self, key: &str) -> Result<Option<(Vec<u8>, Tag)>, StorageError> {
+        check_key(key)?;
+        let w = self.request()?;
+        Ok(w.objects.get(key).map(|b| (b.clone(), content_tag(b))))
+    }
+    fn put_new(&self, key: &str, bytes: &[u8]) -> Result<Put, StorageError> {
+        check_key(key)?;
+        let mut w = self.request()?;
+        let put = if w.objects.contains_key(key) {
+            Put::Exists
+        } else {
+            w.objects.insert(key.into(), bytes.to_vec());
+            Put::Created
+        };
+        Self::respond(&mut w, put)
+    }
+    fn replace(
+        &self,
+        key: &str,
+        bytes: &[u8],
+        condition: Condition,
+    ) -> Result<Replaced, StorageError> {
+        check_key(key)?;
+        let mut w = self.request()?;
+        let current = w.objects.get(key).map(|b| content_tag(b));
+        let holds = match &condition {
+            Condition::Absent => current.is_none(),
+            Condition::Matches(tag) => current.as_ref() == Some(tag),
+        };
+        let replaced = if holds {
+            w.objects.insert(key.into(), bytes.to_vec());
+            Replaced::Replaced(content_tag(bytes))
+        } else {
+            Replaced::Mismatch
+        };
+        Self::respond(&mut w, replaced)
+    }
+    fn list(&self, prefix: &str, after: &str) -> Result<Listing, StorageError> {
+        let mut w = self.request()?;
+        let mut keys: Vec<String> = w
+            .objects
+            .keys()
+            .filter(|k| k.starts_with(prefix) && k.as_str() > after)
+            .take(LIST_PAGE + 1)
+            .cloned()
+            .collect();
+        let truncated = keys.len() > LIST_PAGE;
+        keys.truncate(LIST_PAGE);
+        if w.fault("incomplete_listing") {
+            keys.retain(|_| w.draws.next() & 1 == 0);
+        }
+        Ok(Listing { keys, truncated })
+    }
+    fn delete(&self, key: &str) -> Result<(), StorageError> {
+        check_key(key)?;
+        let mut w = self.request()?;
+        w.objects.remove(key);
+        Self::respond(&mut w, ())
     }
 }

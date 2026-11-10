@@ -54,6 +54,15 @@ pub fn validate_authorities(
             "a fixture has no host directory for authority.log@1",
         ));
     }
+    if io.authorities.values().any(|g| {
+        g.provider == "authority.objects@1"
+            && hirsel_store_authority::objects_provider(g) != Some("objects.sim@1")
+    }) {
+        return Err(invalid(
+            "io.authorities",
+            "a fixture's authority.objects@1 keeps its objects in objects.sim@1",
+        ));
+    }
     Ok(std::mem::take(&mut io.authorities))
 }
 use std::collections::{BTreeMap, BTreeSet};
@@ -1055,10 +1064,12 @@ fn validate_io(io: &mut IoGrants, field: &str) -> Result<(), RunRefusal> {
     Ok(())
 }
 /// `io.authorities` (determinism.md, Authority grants): each name, its provider's
-/// settings and floor, and for a log a directory inside a writable mount that no other
-/// authority's directory contains or is contained by.
+/// settings and floor, for a log a directory inside a writable mount that no other
+/// authority's directory contains or is contained by, and for object storage a
+/// directory no other authority's contains or is contained by.
 fn authorities(io: &IoGrants, field: &str) -> Result<(), RunRefusal> {
     let mut logs: Vec<(&str, &str)> = vec![];
+    let mut object_dirs: Vec<&str> = vec![];
     for (name, grant) in &io.authorities {
         let at = format!("{field}.{name}");
         if !name.as_bytes().first().is_some_and(u8::is_ascii_lowercase)
@@ -1091,6 +1102,23 @@ fn authorities(io: &IoGrants, field: &str) -> Result<(), RunRefusal> {
                 return Err(invalid(&at, "two authorities over one directory"));
             }
             logs.push((mount, path));
+        }
+        if hirsel_store_authority::objects_provider(grant) == Some("objects.dir@1")
+            && let Some(path) = grant
+                .objects
+                .as_ref()
+                .and_then(|o| o.get("path"))
+                .and_then(|p| p.as_str())
+        {
+            let path = path.trim_end_matches('/');
+            let nested = |a: &str, b: &str| a == b || b.starts_with(&format!("{a}/"));
+            if object_dirs
+                .iter()
+                .any(|p| nested(p, path) || nested(path, p))
+            {
+                return Err(invalid(&at, "two authorities over one object prefix"));
+            }
+            object_dirs.push(path);
         }
     }
     Ok(())

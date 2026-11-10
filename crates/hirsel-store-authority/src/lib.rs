@@ -9,8 +9,10 @@
 //! list and means nothing to any other authority.
 //!
 //! Providers: [`memory::Memory`] (`authority.memory@1`), [`log::Log`]
-//! (`authority.log@1`) and [`sim::Sim`] (`authority.sim@1`, the one fault
-//! path). [`open`] makes one from a run-configuration entry.
+//! (`authority.log@1`), [`objects::Objects`] (`authority.objects@1`) and
+//! `authority.sim@1`, the one fault path: [`sim::Sim`] for a log
+//! representation, [`objects::Objects`] over a [`sim::Bucket`] for an object
+//! one. [`open`] makes one from a run-configuration entry.
 
 #[cfg(test)]
 hirsel_guard::install!();
@@ -18,8 +20,11 @@ hirsel_guard::install!();
 pub mod group;
 #[cfg(test)]
 mod harness;
+#[cfg(test)]
+mod harness_objects;
 pub mod log;
 pub mod memory;
+pub mod objects;
 pub mod sim;
 pub mod wire;
 
@@ -83,6 +88,8 @@ pub struct Claim {
     /// writer's own last append.
     pub(crate) segment: u64,
     pub(crate) length: u64,
+    /// `authority.objects@1`: the head's tag from the writer's own last replace.
+    pub(crate) tag: Option<hirsel_object_storage::Tag>,
     pub(crate) dead: bool,
 }
 
@@ -187,6 +194,11 @@ pub const MAX_ENTRY: u64 = 64 << 20;
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ConfigError(pub String);
 
+/// The object-storage provider an `authority.objects@1` grant's entry names.
+pub fn objects_provider(g: &AuthorityGrant) -> Option<&str> {
+    g.objects.as_ref()?.get("provider")?.as_str()
+}
+
 /// The levels `g`'s provider declares and its floor among them, refusing what the
 /// grant cannot mean: an unknown provider, a member another provider takes, a sim
 /// configuration out of range or a floor the provider does not declare.
@@ -196,6 +208,8 @@ pub fn check(g: &AuthorityGrant) -> Result<(Vec<String>, Level), ConfigError> {
     let members = [
         ("mount", g.mount.is_some(), p == "authority.log@1"),
         ("path", g.path.is_some(), p == "authority.log@1"),
+        ("objects", g.objects.is_some(), p == "authority.objects@1"),
+        ("level", g.level.is_some(), p == "authority.objects@1"),
         ("seed", g.seed.is_some(), p == "authority.sim@1"),
         ("represent", g.represent.is_some(), p == "authority.sim@1"),
         ("levels", g.levels.is_some(), p == "authority.sim@1"),
@@ -204,6 +218,15 @@ pub fn check(g: &AuthorityGrant) -> Result<(Vec<String>, Level), ConfigError> {
     let levels = match p {
         "authority.memory@1" => memory::levels(),
         "authority.log@1" => log::levels(),
+        "authority.objects@1" => {
+            let level = g.level.clone().unwrap_or_default();
+            if !level_name_ok(&level) {
+                return Err(fail(format!(
+                    "`authority.objects@1` level `{level}` is not a lowercase name"
+                )));
+            }
+            vec![level]
+        }
         "authority.sim@1" => sim::Config::from_grant(g)?.levels,
         _ => return Err(fail(format!("unknown authority provider `{p}`"))),
     };
@@ -235,6 +258,30 @@ pub fn open(
                     .map_err(|e| ConfigError(format!("authority log: {e}")))?,
             )
         }
-        _ => Box::new(sim::Sim::new(sim::Config::from_grant(g)?, floor)),
+        "authority.objects@1" => {
+            let entry = g
+                .objects
+                .as_ref()
+                .expect("checked: objects@1 has its entry");
+            let store = hirsel_object_storage::open(entry)
+                .map_err(|e| ConfigError(format!("authority objects: {e}")))?;
+            let level = g.level.clone().expect("checked: objects@1 names its level");
+            Box::new(objects::Objects::new(store, level, floor))
+        }
+        _ => {
+            let config = sim::Config::from_grant(g)?;
+            match config.represent {
+                sim::Represent::Log => Box::new(sim::Sim::new(config, floor)),
+                sim::Represent::Objects => {
+                    let bucket = sim::Bucket::new(config.seed, config.faults);
+                    let level = config.levels[0].clone();
+                    Box::new(objects::Objects::new(
+                        std::sync::Arc::new(bucket),
+                        level,
+                        floor,
+                    ))
+                }
+            }
+        }
     })
 }

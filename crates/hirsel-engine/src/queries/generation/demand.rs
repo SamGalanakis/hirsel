@@ -1446,6 +1446,20 @@ impl DemandProducer {
                             .transpose()?,
                     });
                 }
+                if self
+                    .state
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .producing
+                    .contains_key(&DefId::intern(&selected))
+                {
+                    let body = generator(&original).ok_or(QueryError::NotImplemented)?;
+                    return Err(QueryError::Diagnostics(vec![Diagnostic::error(
+                        const { hirsel_diag::RuleId::of("CT-4") },
+                        original.tree.expressions[body.0 as usize].origin.span,
+                        "generation needs its own result",
+                    )]));
+                }
                 let mut definitions = current
                     .capture()
                     .bodies

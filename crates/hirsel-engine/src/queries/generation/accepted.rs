@@ -409,8 +409,16 @@ impl AcceptanceInputs {
         let mut sources = self.sources.clone();
         let mut generated = None;
         let result = (|| -> Result<Arc<AcceptedFrontRegistration>, QueryError> {
+            let execution_refusal = |message: &str| {
+                QueryError::Operational(hirsel_types::OperationalFailure {
+                    operation: "generated syntax acceptance".into(),
+                    message: message.into(),
+                })
+            };
             let execution = if self.verify == Verify::On {
-                let receipt = output.acceptance().ok_or_else(refusal)?;
+                let receipt = output.acceptance().ok_or_else(|| {
+                    execution_refusal("generator output has no private execution receipt")
+                })?;
                 Some(
                     self.snapshot
                         .revalidate_execution(receipt, |path, occurrence| {
@@ -428,7 +436,7 @@ impl AcceptanceInputs {
                                 })
                             })
                         })?
-                        .ok_or_else(refusal)?,
+                        .ok_or_else(|| execution_refusal("V refused the generator's private execution receipt in its accepting snapshot"))?,
                 )
             } else {
                 None

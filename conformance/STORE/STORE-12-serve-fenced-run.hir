@@ -1,0 +1,53 @@
+// rule: STORE-12
+// expect: run
+// runners: [{"name":"ledger","provider":"sim@1","node":"bank","models":"db@1","head":"application@1/head","grants":{"dirs":[],"authorities":{"place":{"provider":"authority.memory@1","floor":"memory"}}},"definitions":null}]
+// stdout: InDoubt(Abandoned) NotRun(Unreachable)
+// A head serves a store that a later claim of the same authority has fenced
+// (STORE-11). The first call the head takes cannot commit: its end is
+// InDoubt(Abandoned()), never an outcome or a definite failure, and serve
+// returns the store's error, ending the head. A call the head never took is
+// NotRun(Unreachable()).
+@serializable
+type Short = Db(store.TxError)
+
+fn deposit(mut tx: store.Tx, info: store.CallInfo, amount: u64) -> Result[u64, Short] {
+  store.tx_put(mut tx, b"balance", bytes.from_list([int.truncate(amount)])) ? Db
+  Ok(amount)
+}
+
+pub fn head(rt: Io, a: ()) -> Result[(), store.StoreError] {
+  let Ok(place) = io.authority(rt, "place") else {
+    return Error(Corrupt("place"))
+  }
+  let Ok(inbox) = io.inbox(rt) else {
+    return Error(Corrupt("inbox"))
+  }
+  let mut fenced = store.open(place, store.default_config())?
+  let successor = store.open(place, store.default_config())?
+  store.serve(mut fenced, take inbox, [store.served_transact(deposit)])?
+  store.close(take successor)
+}
+
+fn told(r: Result[u64, RunError[store.TxFailure[Short]]]) -> String {
+  match r {
+    Ok(n) => f"Ok({n})",
+    Error(InDoubt(Abandoned())) => "InDoubt(Abandoned)",
+    Error(InDoubt(_)) => "InDoubt(other)",
+    Error(NotRun(Unreachable())) => "NotRun(Unreachable)",
+    Error(NotRun(_)) => "NotRun(other)",
+    Error(Failed(Storage(Fenced()))) => "Failed(Storage(Fenced))",
+    Error(Failed(_)) => "Failed(other)",
+    Error(_) => "other",
+  }
+}
+
+pub fn main(rt: Io, args: Args) -> Result[(), GrantError] {
+  let ledger = io.runner(rt, "ledger")?
+  let Ok(stdout) = io.stdout(rt) else {
+    return Ok(())
+  }
+  let first = told(runner.transact(ledger, deposit, 5u64))
+  let second = told(runner.transact(ledger, deposit, 7u64))
+  let _ = out.print(stdout, f"{first} {second}\n")
+  Ok(())
+}

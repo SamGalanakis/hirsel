@@ -268,7 +268,10 @@ impl GraphProducts for SourceProducts {
         // CheckOutput owns diagnostics and contains no producer handles.
         // Its source map keeps the original source/header grant, allowing the
         // idle front, Lower and Check producers to release their own grants.
-        Some(self.meter.source_owner())
+        Some(Arc::new((
+            self.meter.source_owner(),
+            self.store.source_files_owner(),
+        )))
     }
     fn accepts(&self, operation: &CompileOperation) -> bool {
         if self.front.discovery_dependency().is_some() {

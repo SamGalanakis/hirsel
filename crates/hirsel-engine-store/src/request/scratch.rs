@@ -8,10 +8,47 @@ use std::{
     path::{Path, PathBuf},
 };
 
-struct Root(PathBuf);
+pub(super) struct Root {
+    path: PathBuf,
+    memory: hirsel_engine_admission::MemoryReservation,
+}
+impl Root {
+    pub(super) fn new(
+        memory: &mut hirsel_engine_admission::MemoryReservation,
+        parent: &Path,
+    ) -> std::io::Result<Arc<Self>> {
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let path = parent.join(format!(
+            ".hirsel-request-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        let bytes =
+            hirsel_engine_admission::retained_arc_bytes(&std::mem::MaybeUninit::<Self>::uninit())
+                .checked_add(path.capacity() as u64)
+                .ok_or_else(|| std::io::Error::other("scratch directory size overflow"))?;
+        let owner = memory
+            .split(bytes)
+            .ok_or_else(|| std::io::Error::other("scratch directory exceeds admitted transport"))?;
+        let mut builder = fs::DirBuilder::new();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            builder.mode(0o700);
+        }
+        builder.create(&path)?;
+        Ok(Arc::new(Self {
+            path,
+            memory: owner,
+        }))
+    }
+    pub(super) fn retained_bytes(&self) -> u64 {
+        self.memory.bytes()
+    }
+}
 impl Drop for Root {
     fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.0);
+        let _ = fs::remove_dir_all(&self.path);
     }
 }
 struct Entry {
@@ -128,23 +165,9 @@ impl ScratchStore {
     pub(crate) fn new(
         selected: Arc<dyn ResultStore>,
         admission: Arc<Admission>,
-        parent: &Path,
+        root: Arc<Root>,
         disk_limit: u64,
     ) -> std::io::Result<Self> {
-        static NEXT: AtomicU64 = AtomicU64::new(0);
-        let path = parent.join(format!(
-            ".hirsel-request-{}-{}",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
-        ));
-        let mut builder = fs::DirBuilder::new();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::DirBuilderExt;
-            builder.mode(0o700);
-        }
-        builder.create(&path)?;
-        let root = Arc::new(Root(path));
         let mut options = fs::OpenOptions::new();
         options.read(true).write(true).create_new(true);
         #[cfg(unix)]
@@ -152,10 +175,8 @@ impl ScratchStore {
             use std::os::unix::fs::OpenOptionsExt;
             options.mode(0o600);
         }
-        let spool = options.open(root.0.join("contents"))?;
-        let metadata = ENTRY_CHARGE
-            .saturating_add(root.0.capacity() as u64)
-            .saturating_add(index_bytes(0));
+        let spool = options.open(root.path.join("contents"))?;
+        let metadata = ENTRY_CHARGE.saturating_add(index_bytes(0));
         if !admission.charge(metadata) {
             return Err(std::io::Error::other(
                 "scratch metadata exceeds admitted transport",
@@ -298,7 +319,7 @@ impl ResultStore for ScratchStore {
                     store.hold_content(
                         expected,
                         self.root
-                            .0
+                            .path
                             .join(format!("provider-{}", files.entries.len())),
                     )
                 })
@@ -398,8 +419,8 @@ impl ScratchStore {
             Err(ProductArchiveError::Admission {
                 stage,
                 requested: bytes,
-                retained: self.admission.used.load(Ordering::Acquire),
-                limit: self.admission.memory.bytes(),
+                retained: self.admission.retained_bytes(),
+                limit: self.admission.limit_bytes(),
             })
         }
     }

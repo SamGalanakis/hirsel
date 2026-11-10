@@ -38,11 +38,20 @@ struct Admission {
     memory: hirsel_engine_admission::MemoryReservation,
     used: AtomicU64,
     exhausted: AtomicBool,
-    scratch: OnceLock<Arc<dyn Send + Sync>>,
+    scratch: OnceLock<Arc<scratch::Root>>,
     verifier: OnceLock<Weak<hirsel_validate::VerifierCache>>,
     reads: OnceLock<Weak<scratch::ReadCache>>,
 }
 impl Admission {
+    fn scratch_bytes(&self) -> u64 {
+        self.scratch.get().map_or(0, |root| root.retained_bytes())
+    }
+    fn retained_bytes(&self) -> u64 {
+        self.used.load(Ordering::Acquire) + self.scratch_bytes()
+    }
+    fn limit_bytes(&self) -> u64 {
+        self.memory.bytes() + self.scratch_bytes()
+    }
     fn try_charge(&self, bytes: u64) -> bool {
         let reserve = || {
             self.used
@@ -83,8 +92,8 @@ impl Admission {
             Err(ProductArchiveError::Admission {
                 stage,
                 requested: bytes,
-                retained: self.used.load(Ordering::Acquire),
-                limit: self.memory.bytes(),
+                retained: self.retained_bytes(),
+                limit: self.limit_bytes(),
             })
         }
     }
@@ -137,11 +146,12 @@ impl RequestStore {
     /// caller's disk bound and are deleted after the last transported view.
     pub fn with_scratch(
         backend: Arc<dyn ResultStore>,
-        memory: hirsel_engine_admission::MemoryReservation,
+        mut memory: hirsel_engine_admission::MemoryReservation,
         parent: &std::path::Path,
         disk_bytes: u64,
     ) -> std::io::Result<Self> {
         let backend = backend.for_operation().unwrap_or(backend);
+        let root = scratch::Root::new(&mut memory, parent)?;
         let admission = Arc::new(Admission {
             memory,
             used: AtomicU64::new(0),
@@ -153,10 +163,18 @@ impl RequestStore {
         let backend = Arc::new(scratch::ScratchStore::new(
             backend,
             admission.clone(),
-            parent,
+            root,
             disk_bytes,
         )?);
         Ok(Self::admitted(backend, admission))
+    }
+    /// Keep private source files alive without retaining query transport or
+    /// its working reservation. The directory owns its separate charge.
+    pub fn source_files_owner(&self) -> Option<Arc<dyn Send + Sync>> {
+        self.memory
+            .scratch
+            .get()
+            .map(|root| root.clone() as Arc<dyn Send + Sync>)
     }
     /// Keep verifier content and associations in admitted request transport.
     /// A backend without a verifier uses request-local rows. Only V issues
@@ -215,7 +233,7 @@ impl RequestStore {
         self.memory.exhausted.load(Ordering::Acquire)
     }
     pub fn retained_bytes(&self) -> u64 {
-        self.memory.used.load(Ordering::Acquire)
+        self.memory.retained_bytes()
     }
     fn charge(&self, state: &mut State, bytes: u64) -> bool {
         if !self.memory.charge(bytes) {

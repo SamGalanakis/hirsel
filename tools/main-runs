@@ -1044,6 +1044,9 @@ def publish(sha, tier, directory, start, reds, ran, skipped, perf, status,
     lines = [f'# {tier} main run {sha[:12]}: {len(reds) - infra - configurations} code reds, {infra} infra reds, {configurations} configuration errors', '',
              f'{time.strftime("%Y-%m-%d %H:%M", time.gmtime(start))}Z, {minutes:.0f} min; log {directory / "run.log"}', '']
     lines += [f'Configuration: {configuration_error or "valid"}; exception status v1; SHA {sha}; tier {tier}', '']
+    previous = next((row for row in reversed(history) if not row.get('configuration_error')), None)
+    lines += [f'Commits since last completed run: {previous["sha"]}..{sha}' if previous
+              else 'Commits since last completed run: no previous completed run.', '']
     lines += details
     lines += ['## Owners', ''] + owners + ['']
     for kind, title in (('code', 'Code reds'), ('infra', 'Infrastructure reds'), ('configuration', 'Configuration errors')):

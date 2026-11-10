@@ -1048,6 +1048,10 @@ class ReportMemory(unittest.TestCase):
                 self.assertTrue((root / 'reports/run-10.md').exists())
                 self.assertEqual([row['sha'] for row in tool['rows']()], ['10', '20'])
                 self.assertEqual(histories, [[], []])
+                self.assertIn('no previous completed run', (root / 'latest.md').read_text())
+                tool['publish']('30', 'fast', root / 'run-30', 30,
+                                {}, ['tests'], [], None, status, update_main=False, finished=90)
+                self.assertIn('Commits since last completed run: 20..30', (root / 'latest.md').read_text())
             with (root / 'runs.jsonl').open() as source:
                 rows = [json.loads(line) for line in source]
             self.assertEqual(rows[-1]['exception_status'], status)

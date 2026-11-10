@@ -494,20 +494,37 @@ def selected_paths(key, index):
     One slice with `-c hirsel.<key>_split=N` gives every slice `1..N` that
     slice's paths and `--shard <index>/N`, the binary's stable path-hash
     partition, so tools/corpus spreads a whole directory over N pool actions
-    without naming its files. None past the last slice."""
+    without naming its files. The native matrix (`native_paths`) also takes
+    `_parts=K`, which multiplies the slices by K, slice `index` taking
+    `--case-part (index-1) % N + 1/N` (not the hash shard) and `--config-part (index-1) // N + 1/K` of each case's
+    configurations, and `_configs=<name>|<name>`, run only those
+    configurations. None past the last slice."""
     slices = [part for part in read_root_config("hirsel", key, "").split(";") if part]
     split = int(read_root_config("hirsel", key + "_split", "1"))
-    if split > 1:
-        if key != "conformance_paths":
-            fail("only hirsel.conformance_paths takes a _split")
+    parts = int(read_root_config("hirsel", key + "_parts", "1"))
+    configs = [name for name in read_root_config("hirsel", key + "_configs", "").split("|") if name]
+    if (parts > 1 or configs) and key != "native_paths":
+        fail("only hirsel.native_paths takes _parts and _configs")
+    extra = [arg for name in configs for arg in ["--config", name]]
+    if split > 1 or parts > 1:
+        if key not in ["conformance_paths", "native_paths"]:
+            fail("only hirsel.conformance_paths and hirsel.native_paths take a _split")
         if len(slices) != 1:
-            fail("hirsel.{}_split needs exactly one slice in hirsel.{}".format(key, key))
-        if index > split:
+            fail("hirsel.{}_split and _parts need exactly one slice in hirsel.{}".format(key, key))
+        if index > split * parts:
             return None
-        return slices[0].split("|"), ["--shard", "{}/{}".format(index, split)]
+        shard, part = (index - 1) % split + 1, (index - 1) // split + 1
+        if split > 1:
+            # Native slices split the selected cases by ID, evenly; corpus
+            # slices by the runner's path hash.
+            flag = "--case-part" if key == "native_paths" else "--shard"
+            extra = extra + [flag, "{}/{}".format(shard, split)]
+        if parts > 1:
+            extra = extra + ["--config-part", "{}/{}".format(part, parts)]
+        return slices[0].split("|"), extra
     if index > len(slices):
         return None
-    return slices[index - 1].split("|"), []
+    return slices[index - 1].split("|"), extra
 
 def hirsel_command_test(name, binary, args, data, cwd, runtime_archives = None, products = None, full = False, native_selection = None, changed_native = False, selected = None, measured_as = None):
     """A gate stage as a test: `binary args...` run from its package directory `cwd`.

@@ -3,6 +3,9 @@
 
     tools/corpus conformance/STORE conformance/MODE/MODE-3-   # directories, files or prefixes
     tools/corpus --slices 12 conformance/SEM
+    tools/corpus --native conformance/STORE/STORE-3-       # the per-push smoke configurations
+    tools/corpus --native --full-matrix conformance/OWN/OWN-4-   # every configuration the full gate runs
+    tools/corpus --native --config x86_64/regions/elide/reuse/flat-walk/llvm-O3/whole/default conformance/OWN/OWN-5-
 
 Buck2 builds the checked `hirsel-conformance` and the std products it needs
 from this checkout (cached by content on the pool), so a std or compiler edit
@@ -12,7 +15,21 @@ path-hash partition of the same `--path` selection (`hirsel.conformance_paths_sp
 defs.bzl selected_paths), with about CONFORMANCE_SLICE_PROGRAMS cases per slice.
 Prints the summed counts and every failing case; exits non-zero when any slice
 fails or none executed a case.
+
+`--native` runs the same selection through gate-native-full (`--full --filter`,
+the full gate's seed and request) as `//:gate-native-selected-shard-<i>`: even
+parts of the selected cases by ID times parts of each case's configurations
+(`hirsel.native_paths`, `_split`, `_parts`, `_configs`). By default those are
+the per-push smoke configurations (`--config smoke`: the default passes on the
+heap executor and at O3 on x86-64 with the diagnostic and shipped archives),
+each run whether or not the case's rotating cover holds it. `--config NAME`
+(repeatable, with or without launch seeds; an unknown name lists the matrix)
+runs those instead, for a bisect. `--full-matrix` runs each case's own pairwise
+cover, chosen over the whole matrix before slicing, so every (case,
+configuration) verdict is the full gate's; on 2026-11-10 that cost OWN-4's 15
+cases 42,139 pool seconds. Prints every unlisted or stale exclusion row.
 """
+import json
 import argparse
 import math
 from pathlib import Path
@@ -23,7 +40,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'tools/buck2'))
 import conformance  # noqa: E402
 import event_logs  # noqa: E402
-from sync import CONFORMANCE_SLICE_PROGRAMS, SELECTED_SLICES  # noqa: E402
+from sync import CONFORMANCE_SLICE_PROGRAMS, NATIVE_SELECTED_SLICES, SELECTED_SLICES  # noqa: E402
 
 
 def cases(root):
@@ -43,15 +60,32 @@ def cases(root):
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('--slices', type=int, help=f'pool actions (1-{SELECTED_SLICES}; default by case count)')
+    parser.add_argument('--native', action='store_true', help="through the native gate's configurations")
+    parser.add_argument('--parts', type=int, help='--native: configuration parts per case (default fills the slices)')
+    parser.add_argument('--config', action='append', default=[], metavar='NAME',
+                        help='--native: run only this configuration (repeatable; default smoke)')
+    parser.add_argument('--full-matrix', action='store_true',
+                        help="--native: every configuration of each case's full-gate cover")
     parser.add_argument('prefixes', nargs='+', metavar='PREFIX')
     args = parser.parse_args()
+    if (args.parts or args.config or args.full_matrix) and not args.native:
+        parser.error('--parts, --config and --full-matrix need --native')
+    if args.config and args.full_matrix:
+        parser.error('--config and --full-matrix exclude each other')
+    if args.native and not (args.config or args.full_matrix):
+        args.config = ['smoke']
     prefixes = [p.rstrip('/') + '/' if (ROOT / p).is_dir() else p for p in args.prefixes]
     corpus = cases(ROOT)
     unmatched = [p for p in prefixes if not any(c.startswith(p) for c in corpus)]
     if unmatched or any('|' in p or ';' in p for p in prefixes):
         print(f'corpus: no corpus case matches {unmatched or prefixes}', file=sys.stderr)
         return 2
+    if any('|' in c or ';' in c for c in args.config):
+        print(f'corpus: bad configuration name in {args.config}', file=sys.stderr)
+        return 2
     selected = sum(any(c.startswith(p) for p in prefixes) for c in corpus)
+    if args.native:
+        return native(prefixes, selected, args)
     slices = args.slices or math.ceil(selected / CONFORMANCE_SLICE_PROGRAMS)
     slices = max(1, min(slices, SELECTED_SLICES, selected))
     print(f'corpus: {selected} cases in {slices} slices', file=sys.stderr, flush=True)
@@ -78,6 +112,55 @@ def main():
         print(f'corpus: {executed} of {selected} selected cases executed', file=sys.stderr)
         return status or 1
     return status
+
+
+def native(prefixes, selected, args):
+    """The selection through gate-native-full's matrix, over path shards times configuration parts."""
+    shards = max(1, min(args.slices or selected, NATIVE_SELECTED_SLICES, selected))
+    # A named set gives each case at most that many configurations (smoke: three).
+    named = sum(3 if name == 'smoke' else 1 for name in args.config) or NATIVE_SELECTED_SLICES
+    parts = max(1, min(args.parts or named, named, NATIVE_SELECTED_SLICES // shards))
+    slices = shards * parts
+    print(f'corpus: {selected} files in {shards} case parts x {parts} configuration parts', file=sys.stderr,
+          flush=True)
+    subprocess.run([sys.executable, str(ROOT / 'tools/buck2/sync.py'), '--if-stale'], cwd=ROOT, check=True)
+    targets = [f'//:gate-native-selected-shard-{i}' for i in range(1, slices + 1)]
+    config = ['-c', 'hirsel.full=true', '-c', 'hirsel.native_paths=' + '|'.join(prefixes),
+              '-c', f'hirsel.native_paths_split={shards}', '-c', f'hirsel.native_paths_parts={parts}',
+              '-c', 'hirsel.native_paths_configs=' + '|'.join(args.config)]
+    with event_logs.recorded('corpus-native') as event_log:
+        status = subprocess.call([str(conformance.BUCK2), 'test', *conformance.CONFIG, *config,
+                                  '--event-log', str(event_log), *targets], cwd=ROOT)
+        outputs = conformance.shard_outputs(event_log)
+    attempts = cases = 0
+    problems = []
+    for name, output in sorted(outputs.items()):
+        start = output.find('\n{\n') + 1 if not output.startswith('{\n') else 0
+        try:
+            report = json.JSONDecoder().raw_decode(output, start)[0] if start or output.startswith('{') else None
+        except ValueError:
+            report = None
+        slice_name = name.rsplit('-', 1)[-1]
+        if report is None:
+            problems.append(f'{slice_name}: no report')
+            for line in output.splitlines()[-20:]:
+                print(f'{slice_name}: {line}')
+            continue
+        attempts += report['configuration_attempts']
+        if (int(slice_name) - 1) // shards == 0:
+            cases += report['baseline_executable']
+        for row in report['baseline_minus_native_unlisted'] + report['stale_exclusions']:
+            problems.append(f'{slice_name}: {row}')
+        for line in output.splitlines():
+            if line.startswith('native: '):
+                print(f'{slice_name}: {line}')
+    print(f'native: {cases} executable cases, {attempts} configuration attempts, {len(outputs)} of {slices} slices')
+    for line in problems:
+        print(line)
+    if len(outputs) != slices or not cases:
+        print('corpus: a slice did not report, or no executable case ran', file=sys.stderr)
+        return status or 1
+    return status or (1 if problems else 0)
 
 
 if __name__ == '__main__':

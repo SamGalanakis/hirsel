@@ -418,7 +418,7 @@ AGREE_LIMIT = 5000
 # slice). tools/corpus gives each path-hash slice about CONFORMANCE_SLICE_PROGRAMS
 # cases. An agreement slice first ranks the whole corpus's catalogue, so it takes
 # about as many cases as a sample shard.
-SELECTED_SLICES = 32
+SELECTED_SLICES = 128
 CONFORMANCE_SLICE_PROGRAMS = 6
 AGREE_SLICE_PROGRAMS = 260
 # The unrestricted campaign (tools/main-runs) runs as shards of the whole
@@ -432,6 +432,13 @@ AGREE_FULL_SHARDS = 384
 # them, and agree.py --native-full runs them together, merges them and judges
 # agree-known.txt.
 AGREE_NATIVE_FULL_SHARDS = 16
+# Chosen corpus cases through the full native matrix (tools/corpus --native):
+# gate-native-full's run of `-c hirsel.native_paths=<a>|<b>`, spread over up
+# to NATIVE_SELECTED_SLICES pool actions as even parts of the cases times parts
+# of each case's own configurations (defs.bzl selected_paths). A case's pairwise
+# cover runs its configurations one after another, each a whole compile and
+# launch, so a slice holds about one case's share of them.
+NATIVE_SELECTED_SLICES = 128
 # The full native matrix (tools/main-runs) runs as shards of the baseline by
 # path hash, each case under its rotating pairwise cover, so each shard stays well
 # under its Buck2 timeout; gate-native-full stays whole for --bless and for a
@@ -501,6 +508,10 @@ GATE_TESTS = [
     # target free of the global cover; an unfiltered CLI run derives it itself.
     dict(name="gate-native-full", full=True, binary="//:hirsel-conformance-bin-native", args=["--full"],
          runtime_archives=RUNTIME_ARCHIVES, **GATE),
+    *(dict(name=f"gate-native-selected-shard-{index}", full=True, binary="//:hirsel-conformance-bin-native",
+           args=["--full"], selected=["native_paths", "--filter", index], runtime_archives=RUNTIME_ARCHIVES,
+           measured_as="gate-native-full", **GATE)
+      for index in range(1, NATIVE_SELECTED_SLICES + 1)),
     *(dict(name=f"gate-native-full-shard-{index}", full=True, binary="//:hirsel-conformance-bin-native",
            args=["--full", "--shard", f"{index}/{NATIVE_FULL_SHARDS}"],
            runtime_archives=RUNTIME_ARCHIVES, native_selection="//:native-selection", **GATE)

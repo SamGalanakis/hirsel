@@ -45,7 +45,11 @@ clean_stale_low_disk_adaptive_unmaterialize_active = false
 [project]
 ignore = .git, buck-out, .buck2, target, tools/buck2/bin
 [buck2_re_client]
-execution_concurrency_limit = 32
+# Remote actions one daemon keeps in flight. The pool's scheduler admits each by
+# its own cpu_count and memory_kb (160 CPUs and about 310 GiB over five workers
+# on 2026-11-10, about 140 default 2 GiB actions), so this only bounds how much
+# of the pool one checkout's queue may claim; lands queue above lanes by priority.
+execution_concurrency_limit = 128
 max_concurrent_uploads_per_action = 1
 [test]
 # The pinned OSS runner has no unbounded mode. One outer bound covers all tests.

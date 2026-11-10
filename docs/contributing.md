@@ -239,9 +239,17 @@ native programs run through the selected targets (`;` separates slices, `|` the 
 ```sh
 .buck2/bin/buck2 test //:hirsel-lir-unittest //:hirsel-lir-test-it
 tools/corpus <case-or-directory>...  # checked compiler, std from this checkout, sliced over the pool
+tools/corpus --native [--config NAME]... [--full-matrix] <case-or-directory>...  # native gate configurations, sliced over the pool
 .buck2/bin/buck2 test -c hirsel.agree_paths='<case>|<case>' //:gate-agree-selected-shard-1
 python3 tools/buck2/native.py <program> <program>  # cost-bounded shards, both backends
 ```
+
+`tools/corpus --native` runs each chosen case under the per-push smoke
+configurations as parallel slices of gate-native-full and merges their reports;
+`--config` (repeatable; the name after `under` in a failure line, and an unknown
+name lists them all) runs those configurations instead, for a bisect, and
+`--full-matrix` runs every configuration of each case's full-gate cover, whose
+verdicts are the gate's. `--bless` still needs the whole `//:gate-native-full`.
 
 Each conformance slice validates every `|`-separated prefix against the whole
 corpus before partitioning. A typo beside a valid case fails the slice before

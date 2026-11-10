@@ -34,7 +34,7 @@ use hirsel_native_testing::topology_matrix;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-const USAGE: &str = "usage: native --std-compile [--filter MODULE] [--shard I/N] | --corpus [--seed N] [--shard I/N] | --bugs | --smoke [--filter TEXT]... | --sanitize [--filter TEXT]... | --cranelift [--clif] [--aarch64] [--filter TEXT]... [--shard I/N] | --cranelift-times [--filter TEXT]... | --trace-roots [--filter TEXT]... [--shard I/N] | --migrate [--filter TEXT]... [--shard I/N] | --full [--bless] [--filter TEXT]... [--shard I/N] [--engine heap|llvm|diagnostic|default|system] [--seed N] [--exhaustive] | --hash-sweep [--filter TEXT]... | --replay DIR | --reduce DIR\n\
+const USAGE: &str = "usage: native --std-compile [--filter MODULE] [--shard I/N] | --corpus [--seed N] [--shard I/N] | --bugs | --smoke [--filter TEXT]... | --sanitize [--filter TEXT]... | --cranelift [--clif] [--aarch64] [--filter TEXT]... [--shard I/N] | --cranelift-times [--filter TEXT]... | --trace-roots [--filter TEXT]... [--shard I/N] | --migrate [--filter TEXT]... [--shard I/N] | --full [--bless] [--filter TEXT]... [--shard I/N] [--engine heap|llvm|diagnostic|default|system] [--seed N] [--exhaustive] [--config NAME|smoke]... [--config-part K/N] [--case-part K/N] | --hash-sweep [--filter TEXT]... | --replay DIR | --reduce DIR\n\
                      options: [--case ID]... [--root PATH] [--jobs N] [--out DIR] [--hash-seed N]";
 
 fn main() -> ExitCode {
@@ -464,6 +464,7 @@ fn run() -> Result<bool, String> {
             )
         });
     let mut engine = None;
+    let mut configs = Chosen::default();
     let mut common = CommonOptions::default();
     let help = parse_or_exit((|| {
         let mut args = Parser::from_env();
@@ -504,6 +505,22 @@ fn run() -> Result<bool, String> {
                     };
                     engine = Some(Selected { class, runtime });
                 }
+                Long("config") => match args.value()?.string()?.as_str() {
+                    "smoke" => configs.names.extend(smoke_matrix().iter().map(base_name)),
+                    name => configs.names.push(name.to_string()),
+                },
+                Long("case-part") => {
+                    let value = args.value()?.string()?;
+                    configs.cases = Some(
+                        Shard::parse(&value).ok_or("--case-part must be K/N with 1 <= K <= N")?,
+                    );
+                }
+                Long("config-part") => {
+                    let value = args.value()?.string()?;
+                    configs.part = Some(
+                        Shard::parse(&value).ok_or("--config-part must be K/N with 1 <= K <= N")?,
+                    );
+                }
                 Long("jobs") => jobs = Some(args.value()?.parse()?),
                 Long("help") | Short('h') => return Ok(true),
                 _ => return Err(arg.unexpected()),
@@ -525,6 +542,9 @@ fn run() -> Result<bool, String> {
     let (mode, dir) = mode.ok_or(USAGE)?;
     if engine.is_some() && mode != "--full" {
         return Err("--engine requires --full".into());
+    }
+    if !configs.is_all() && mode != "--full" {
+        return Err("--config, --config-part and --case-part require --full".into());
     }
     if filter.1.is_some()
         && !matches!(
@@ -878,6 +898,7 @@ fn run() -> Result<bool, String> {
                 exhaustive,
             },
             engine,
+            &configs,
         ),
         "--hash-sweep" => hash_sweep(&root, jobs, &filter, hash_seed),
         "--replay" | "--reduce" => {
@@ -1093,6 +1114,97 @@ impl Selected {
     }
 }
 
+/// `--config NAME`... and `--config-part K/N`: which configurations this run
+/// executes for each case. Without names, a part of the case's own
+/// configurations (the gate's per-case choice, made over the whole matrix
+/// first, so the choice and each verdict are the gate's); with names, those
+/// configurations of the whole matrix whether or not the case's rotating
+/// cover holds them (`smoke` names the per-push smoke matrix);
+/// `--case-part K/N`: every Nth of the selected cases by ID, so parts differ
+/// by at most one case (path-hash shards leave some empty, some doubled).
+/// `tools/corpus --native` spreads one selection over pool slices; a lane
+/// bisects by naming configurations.
+#[derive(Default)]
+struct Chosen {
+    names: Vec<String>,
+    part: Option<Shard>,
+    cases: Option<Shard>,
+}
+
+impl Chosen {
+    fn is_all(&self) -> bool {
+        self.names.is_empty() && self.part.is_none() && self.cases.is_none()
+    }
+
+    /// This part's share of the selected cases.
+    fn keep_cases(&self, cases: &mut Vec<Case>) {
+        if let Some(part) = self.cases {
+            cases.sort_by(|a, b| a.id.cmp(&b.id));
+            let mut index = 0u64;
+            cases.retain(|_| {
+                index += 1;
+                (index - 1) % part.count == part.index - 1
+            });
+        }
+    }
+
+    /// Every name must name a configuration of the matrix, with or without
+    /// its launch seeds.
+    fn check(&self, matrix: &[Configuration]) -> Result<(), String> {
+        for name in &self.names {
+            if !matrix.iter().any(|c| Self::named(c, name)) {
+                let known: Vec<_> = matrix.iter().map(base_name).collect();
+                return Err(format!(
+                    "--config {name}: no such configuration; one of {known:?}"
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn named(c: &Configuration, name: &str) -> bool {
+        c.name() == name || base_name(c) == name
+    }
+
+    /// The configurations this run executes for a case whose own are
+    /// `selected`, drawn from `matrix`, in the gate's order.
+    fn keep(&self, selected: Vec<Configuration>, matrix: &[Configuration]) -> Vec<Configuration> {
+        let pool = if self.names.is_empty() {
+            selected
+        } else {
+            let mut named: Vec<Configuration> = Vec::new();
+            for c in matrix.iter().chain(&selected) {
+                if self.names.iter().any(|n| Self::named(c, n))
+                    && !named.iter().any(|kept| kept.name() == c.name())
+                {
+                    named.push(c.clone());
+                }
+            }
+            named
+        };
+        pool.into_iter()
+            .enumerate()
+            .filter(|(index, _)| {
+                self.part
+                    .is_none_or(|part| *index as u64 % part.count == part.index - 1)
+            })
+            .map(|(_, c)| c)
+            .collect()
+    }
+
+    /// Per-case campaigns outside the matrix (the runner oracle) run once:
+    /// in an unrestricted run or the first part, never under named configurations.
+    fn runs_case_campaigns(&self) -> bool {
+        self.names.is_empty() && self.part.is_none_or(|part| part.index == 1)
+    }
+}
+
+fn base_name(c: &Configuration) -> String {
+    let mut base = c.clone();
+    base.options.launch = Default::default();
+    base.name()
+}
+
 struct Coverage {
     hash_seed: u64,
     seed: u64,
@@ -1107,6 +1219,7 @@ fn full(
     bless: bool,
     coverage: Coverage,
     engine: Option<Selected>,
+    configs: &Chosen,
 ) -> Result<bool, String> {
     let Coverage {
         hash_seed,
@@ -1122,6 +1235,9 @@ fn full(
     if bless && filter.1.is_some() {
         return Err("--bless needs the whole baseline, without --shard".into());
     }
+    if bless && !configs.is_all() {
+        return Err("--bless needs every configuration, without --config or --config-part".into());
+    }
     let out = match out {
         Some(out) => {
             std::fs::create_dir_all(&out).map_err(|e| format!("{}: {e}", out.display()))?;
@@ -1133,6 +1249,7 @@ fn full(
         .into_iter()
         .filter(|c| engine.is_none_or(|e| e.keeps(c)))
         .collect();
+    configs.check(&matrix)?;
     let toolchain = toolchain(&matrix)?;
     let selection = if exhaustive || !filter.is_empty() {
         None
@@ -1151,7 +1268,7 @@ fn full(
             .chain(&partitioned)
             .map(|c| c.id.as_str()),
     );
-    let complete = filter.is_empty() && engine.is_none();
+    let complete = filter.is_empty() && engine.is_none() && configs.is_all();
     // Only the whole run must find every campaign non-empty; a shard may hold
     // no topology or generated case.
     let whole = complete && filter.1.is_none();
@@ -1162,9 +1279,12 @@ fn full(
                     .as_ref()
                     .is_none_or(|s| s.selected.contains(&c.id)))
     });
+    configs.keep_cases(&mut cases);
     let results = native::run_cases_with(&cases, &native::scratch("full")?, jobs, |case, dir| {
-        let selected =
-            native::diet::configurations(&matrix, &case.id, seed, exhaustive, &exclusions);
+        let selected = configs.keep(
+            native::diet::configurations(&matrix, &case.id, seed, exhaustive, &exclusions),
+            &matrix,
+        );
         case.run(&selected, &toolchain, dir)
     });
     let write = |name: &str, text: &str| {
@@ -1288,7 +1408,9 @@ fn full(
         .into_iter()
         .filter(|c| engine.is_none_or(|e| e.keeps(c)))
         .collect();
+    let topology = configs.keep(topology.clone(), &topology);
     partitioned.retain(|c| filter.keeps(&c.id));
+    configs.keep_cases(&mut partitioned);
     let topology_results = native::run_cases(
         &partitioned,
         &topology,
@@ -1306,6 +1428,7 @@ fn full(
     // Generated successes and directed failures agree under every
     // configuration of the matrix.
     generated.retain(|c| filter.keeps(&c.id));
+    configs.keep_cases(&mut generated);
     let generated_results = native::run_cases_with(
         &generated,
         &native::scratch("generated")?,
@@ -1323,7 +1446,7 @@ fn full(
                     TargetSpec::x86_64_unknown_linux_gnu(),
                 )));
             }
-            case.run(&selected, &toolchain, dir)
+            case.run(&configs.keep(selected, &matrix), &toolchain, dir)
         },
     );
     write(
@@ -1353,7 +1476,7 @@ fn full(
             oracle_matrix.push(configuration.clone());
         }
     }
-    if !oracle_matrix.is_empty() {
+    if !oracle_matrix.is_empty() && configs.runs_case_campaigns() {
         let oracle =
             native::run_cases_with(&cases, &native::scratch("oracle")?, jobs, |case, dir| {
                 native::oracle_source(
@@ -1393,6 +1516,7 @@ fn full(
         && partitioned.is_empty()
         && generated.is_empty()
         && empty_fails
+        && configs.cases.is_none()
     {
         eprintln!("native: --filter {:?} selected no cases", filter.0);
         ok = false;

@@ -352,6 +352,7 @@ Target names follow Cargo's targets, all in the root package:
 | a corpus campaign | `//:gate-<stage>` (label `gate`) |
 | a conformance shard (`CONFORMANCE_SHARDS`) | `//:gate-conformance-shard-<i>` |
 | a slice of the corpus cases a lane chose (`-c hirsel.conformance_paths`, up to `SELECTED_SLICES`; with `-c hirsel.conformance_paths_split=N` one slice's path-hash shard `i/N`, as `tools/corpus` runs it) | `//:gate-conformance-selected-shard-<i>` |
+| a slice of chosen corpus cases through the full native matrix (`-c hirsel.native_paths`, up to `NATIVE_SELECTED_SLICES`; `_split=S` gives case part `--case-part i/S`, `_parts=K` configuration part `--config-part j/K` of each case's pairwise cover, `_configs=a\|b` only those configurations of the whole matrix, `smoke` the per-push set, as `tools/corpus --native` runs it) | `//:gate-native-selected-shard-<i>` |
 | a slice of the chosen cases' variants in the seed-1 sample (`-c hirsel.agree_paths`) | `//:gate-agree-selected-shard-<i>` |
 | a budgeted full agreement shard (`AGREE_FULL_SHARDS`, full suite only) | `//:gate-agree-full-shard-<i>` |
 | a budgeted native agreement shard (`AGREE_NATIVE_FULL_SHARDS`, full suite only; `agree.py --native-full` runs and merges them) | `//:gate-agree-native-full-shard-<i>` |

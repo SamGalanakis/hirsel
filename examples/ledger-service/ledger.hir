@@ -27,6 +27,14 @@ pub fn open(mut tx: store.Tx, account: u64, cents: u64) -> Result[u64, Refusal] 
   Ok(cents)
 }
 
+/// `account`'s balance.
+pub fn balance(tx: store.Tx, account: u64) -> Result[u64, Refusal] {
+  match table.get(tx, balances(), account) ? Table {
+    Some(cents) => Ok(cents),
+    None() => Error(NoAccount(account)),
+  }
+}
+
 /// Moves `cents` from one account to another.
 pub fn transfer(mut tx: store.Tx, from: u64, to: u64, cents: u64) -> Result[
   Receipt,

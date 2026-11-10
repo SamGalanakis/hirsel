@@ -1,23 +1,22 @@
 # Replay a service
 
 Every effect a Hirsel run performs is recorded, so a whole system of runs can be
-replayed, cross-checked and tried against new code. This guide walks through
-[examples/ledger-service](../examples/ledger-service/main.hir). It is a small ledger
-whose store lives at one place and whose client calls it through a runner. The run
-injects a crash in the middle of a commit and loses a reply. It then replays every run
-from its tape, checks the links between the tapes, and replays the client's calls
-against a fork of the store under a changed transfer function.
+replayed from its tape. This guide walks through
+[examples/ledger-service](../examples/ledger-service/main.hir). It is a small ledger whose
+store lives at one place, a `db@1` place whose head holds the store open and serves
+transaction entries, and whose client calls those entries through a runner.
 
-The rules are in [runners](spec/runners.md) and [storage](spec/storage.md).
+The rules are in [runners](spec/runners.md) (`db@1`) and [storage](spec/storage.md)
+(STORE-12).
 
 ## The service
 
-`ledger.hir` holds the ledger's rules: `open` and `transfer` are transaction bodies
-over a typed table `balances: Table[u64, u64]`. They hold only a `Tx` and data, so a
-store can run them again. `main.hir` has two entries that run at the ledger's place,
-`open_account(rt: Io, req: Opening)` and `transfer(rt: Io, req: Transfer)`. Each opens
-the store over the place's `ledger` directory and runs one `store.call` on the client's
-call stream, with a transaction entry and the request as its argument:
+`ledger.hir` holds the ledger's rules: `open`, `transfer` and `balance` are functions over
+a `Tx` and a typed table `balances: Table[u64, u64]`. They hold only a `Tx` and data, so a
+store can run them again.
+
+`main.hir` wraps them as entries the place serves. A transaction entry takes the `Tx`,
+the call's `CallInfo` and its argument:
 
 ```hirsel
 fn moves(mut tx: store.Tx, info: store.CallInfo, req: Transfer) -> Result[
@@ -26,162 +25,93 @@ fn moves(mut tx: store.Tx, info: store.CallInfo, req: Transfer) -> Result[
 ] {
   ledger.transfer(mut tx, req.from, req.to, req.cents)
 }
+```
 
-fn transfer(rt: Io, req: Transfer) -> Result[ledger.Receipt, LedgerError] {
-  let d = io.dir(rt, path.of("ledger")) ? Grant
-  let mut s = store.open(d, store.default_config()) ? Store
-  let outcome = store.call(mut s, req.call, moves, req)
-  store.close(take s) ? Store
-  Ok(outcome ? Call)
+The place's head opens the store once, over the place's `ledger` directory, and serves
+the entries until its host stops:
+
+```hirsel
+pub fn head(rt: Io, a: ()) -> Result[(), store.StoreError] {
+  let Ok(d) = io.dir(rt, path.of("ledger")) else {
+    return Error(Corrupt("ledger"))
+  }
+  let Ok(inbox) = io.inbox(rt) else {
+    return Error(Corrupt("inbox"))
+  }
+  let mut s = store.open(d, store.default_config())?
+  store.serve(
+    mut s,
+    take inbox,
+    [
+      store.served_transact(opens),
+      store.served_transact(moves),
+      store.served_query(balance),
+    ]
+  )
 }
 ```
 
-The client in `main` numbers its calls by stream position. When a call's outcome is
-`InDoubt`, it sends the same request again at the same position. The store runs each
-position once (STORE-12). If the first attempt's commit was lost, the body runs again.
-If the commit happened and only its reply was lost, the store returns the recorded
-outcome without running anything. So every call takes effect exactly once, without
-the client knowing which case it was in.
+The client calls an entry with `runner.transact(ledger, moves, Transfer(...))` and reads
+with `runner.query(ledger, balance, account)`. A transact call takes the next position of
+the client's call stream. The store decides each position once, inside the commit
+(STORE-12): when a call's provider sends it again after an in-doubt end, the store returns
+the outcome it recorded for that position instead of running the entry twice. A query
+uses position 0, which no stream decides, and reads the latest commit.
+
+The head checks what the host leaves to it: an entry it does not serve ends
+`NotRun(Denied())`, a call naming other code `NotRun(VersionMismatch())`, and a level the
+place does not declare `Failed(Storage(NoLevel()))`, each before anything runs.
 
 ## Run it under a simulated place
 
-The `ledger` runner is a `sim@1` node that models `remote.tls@1`. Its callees run
-under a grant set that holds one directory, `db`. Copy the three grants templates to
-a scratch directory, because relative `host` paths resolve beside the template:
+The `ledger` runner is a `sim@1` node that models `db@1` and names `head` as the place's
+head entry. The first call to the node starts the head as a run of the same execution,
+under the runner's grants, holding the place's inbox. Copy the grants template to a
+scratch directory, because relative `host` paths resolve beside the template:
 
 ```sh
-mkdir -p /tmp/ledger/db && cp examples/ledger-service/*.json /tmp/ledger/
-rm /tmp/ledger/hirsel.json
-hirsel run examples/ledger-service/hirsel.json --grants /tmp/ledger/grants.json
-```
-
-That opens accounts 1 and 2 (positions 1 and 2). Fork the store now, before the next
-calls. The store is a directory of immutable objects, so a copy is a consistent fork,
-and opening it claims its own writer epoch:
-
-```sh
-cp -r /tmp/ledger/db /tmp/ledger/fork
-```
-
-`faults.json` turns on `sim@1`'s `crash` and `lose_reply` faults with
-`inputs.fault_seed` 2071. Run the trading phase and record it:
-
-```sh
-hirsel run examples/ledger-service/hirsel.json --grants /tmp/ledger/faults.json --record /tmp/ledger/T
+mkdir -p /tmp/ledger/db && cp examples/ledger-service/grants.json /tmp/ledger/
+hirsel run examples/ledger-service/hirsel.json --grants /tmp/ledger/grants.json --record /tmp/ledger/T
 ```
 
 ```text
-3: in doubt, sending it again
-3: moved 200 from 1 to 2, fee 0
-4: opened 3 with 0
-5: moved 50 from 2 to 3, fee 0
-6: in doubt, sending it again
-6: moved 250 from 2 to 1, fee 0
-7: insufficient: 550
+opened 1 with 500
+opened 2 with 100
+moved 200 from 1 to 2, fee 0
+opened 3 with 0
+moved 50 from 2 to 3, fee 0
+moved 250 from 2 to 1, fee 0
+insufficient: 550
+account 1: 550
+account 2: 0
+account 3: 50
+account 4: no account 4
 ```
 
-The first attempt at position 3 crashed its node just before the commit's log object
-was written. The callee stops before one of its requests, chosen by the fault seed
-(runners.md, `sim@1`). The store recovered without that commit, and the second attempt
-ran the transfer. At position 6, the reply was lost after the commit. The second
-attempt read the outcome the store had recorded for that position.
+The last transfer is refused with its sender's balance, and nothing it touched changes.
 
 ## Replay the whole system
 
-`--record T` writes the client's tape to `T` and each callee run's tape to
-`T.call-<n>`, where `n` is the request's ordinal. Every tape replays alone, with no
-directory and no place:
+The head is a run of the client's execution, and its place, store and directory are part
+of the same deterministic simulation. So `--record T` writes one tape for the whole
+system, and it replays alone, with no directory and no place:
 
 ```sh
 hirsel run examples/ledger-service/hirsel.json --replay /tmp/ledger/T
-hirsel run examples/ledger-service/hirsel.json --replay /tmp/ledger/T.call-0
 ```
 
-The caller's replay prints the same seven lines. Each call's outcome comes from its
-tape. The crashed callee's tape, `T.call-0`, ends with a `stopped` event where its place
-stopped it. Its replay re-reads every object the store loaded, stops at the same point,
-and ends with `environmental failure: its place stopped the run` (exit status 6), as the
-live run did. The other callees replay to their recorded outcomes.
-
-`hirsel tapes check` joins the set. For every link, the callee's argument bytes and
-request digest must equal the caller's request. Where the caller received an outcome,
-its bytes must equal what the callee recorded as it returned:
-
-```sh
-hirsel tapes check /tmp/ledger/T /tmp/ledger/T.call-*
-```
-
-```text
-tapes: 7 links checked, 0 unchecked
-```
-
-## Try a changed function against the fork
-
-`examples/ledger-service/trial` is a candidate revision of the same package. Only
-`ledger.transfer` differs: it charges a 1% fee on top of the amount moved.
-`hirsel tapes trial` takes every runner call the client's tape recorded and issues it
-again, in order, to a callee of the candidate. Each call keeps its own entry, argument
-bytes and cause, and runs under the runner grants of `fork.json`, which mount the fork:
-
-```sh
-hirsel tapes trial examples/ledger-service/trial/hirsel.json --grants /tmp/ledger/fork.json /tmp/ledger/T
-```
-
-```text
-call 0 ledger_service@1/transfer (changed code): unrecorded
-  recorded InDoubt(Abandoned())
-  trial    Ok(Receipt(from: 1, to: 2, moved: 200, fee: 2))
-call 1 ledger_service@1/transfer (changed code): DIVERGED
-  recorded Ok(Receipt(from: 1, to: 2, moved: 200, fee: 0))
-  trial    Ok(Receipt(from: 1, to: 2, moved: 200, fee: 2))
-call 2 ledger_service@1/open_account (same code): same
-  recorded Ok(0)
-  trial    Ok(0)
-call 3 ledger_service@1/transfer (changed code): same
-  recorded Ok(Receipt(from: 2, to: 3, moved: 50, fee: 0))
-  trial    Ok(Receipt(from: 2, to: 3, moved: 50, fee: 0))
-call 4 ledger_service@1/transfer (changed code): unrecorded
-  recorded InDoubt(Lost())
-  trial    Failed(Call(Tx(Aborted(Insufficient(250)))))
-call 5 ledger_service@1/transfer (changed code): DIVERGED
-  recorded Ok(Receipt(from: 2, to: 1, moved: 250, fee: 0))
-  trial    Failed(Call(Tx(Aborted(Insufficient(250)))))
-call 6 ledger_service@1/transfer (changed code): DIVERGED
-  recorded Failed(Call(Tx(Aborted(Insufficient(550)))))
-  trial    Failed(Call(Tx(Aborted(Insufficient(298)))))
-trial: 7 calls, first divergence at call 1
-```
-
-The trial issues the in-doubt attempts too, so each position runs once and its re-send
-returns the trial's own recorded outcome, as in the live run. For each call, the trial
-reports two things. `same code` means the candidate's callee
-has the code hash and signature fingerprint that the recorded request named. `same`
-means its outcome bytes equal the recorded ones. Every `transfer` is changed code:
-
-- Calls 0 and 1 move 200 cents from 1 to 2 with a 2-cent fee. Call 0 is `unrecorded`
-  because its recorded outcome was in doubt. Its re-send, call 1, diverges because
-  the receipt now reports a fee of 2 instead of 0.
-- Call 2 opens account 3. `open_account` does not reach the changed function, so
-  both its code and outcome match.
-- Call 3 moves 50 cents from 2 to 3. Its outcome matches because the fee rounds to 0.
-- Calls 4 and 5 attempt to move 250 cents from 2 to 1. Account 2 holds 250 cents in
-  both runs, but the candidate needs 252 including its fee, so it refuses the move.
-  Call 4 is `unrecorded` because its recorded outcome was in doubt. Its re-send,
-  call 5, diverges from the recorded success directly because of the fee.
-- Call 6 attempts to move 900 cents from 1 to 2. Both runs refuse it, but report
-  different balances: 550 in the recording and 298 in the trial. The earlier 2-cent
-  fee and refused 250-cent transfer account for this drift.
-
-`--from <n>` starts at request `n`. The exit status is 1 when any call diverges,
-so a trial can gate an upgrade.
+The replay prints the same eleven lines.
 
 ## What is not here yet
 
-- The callees open the store on every call, because the `db@1` provider and
-  `runner.transact` (a transaction body run inside the place that holds the store) are
-  reserved. Exactly-once still holds, because `store.call` decides each position
-  inside the commit.
-- A crash on a host directory keeps every write the callee completed. Only a
-  simulated `Dir` loses unsynced writes.
-- The fork is a copy of the store's directory taken between runs. Forking at any
-  commit version, and the store's command log and verifier (STORE-12), are reserved.
+- A `sim@1` place's head runs in the simulated world, so its store lives in memory for
+  the run. The runner's `db` grant must name an existing directory but is not written,
+  and a second run starts from an empty store.
+- `sim@1` produces no faults at a `db@1` place, so the crash and lost-reply paths are not
+  exercised here.
+- The head does not yet record each take and end on a tape of its own, so
+  `hirsel tapes check` finds no links and `hirsel tapes trial` re-executes no transact or
+  query calls (STORE-15).
+- `hirsel serve` can host a real place (`place` in its host configuration), but a
+  caller's `db@1` runner over `remote.tls@1` does not send transact or query calls yet, and
+  native runs do not reach places.

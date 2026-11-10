@@ -656,6 +656,14 @@ operation records its typed input and completion through the ordinary replay
 check. `supply_stdin` lets a host adapter provide one already-read chunk without
 changing authority or replay state; it then uses the same operation implementation.
 
+SimulationConfig's `authorities` are the `io.authorities` grants
+(`library/authority.rs`). Level and claim handles carry no state beyond their grant
+name; level, floor, name, narrow and entry-bound answers derive from the grant and are
+not recorded. `claim`, `advance`, `durable`, `reclaim`, `read`, `get` and `put` record
+under capability `Authority` in `hirsel_store_authority::wire` form, so replay needs no
+provider. Providers start on first use; `authority.log@1` is unavailable here, having
+no host directory. Claim attempts are drawn from the run instance.
+
 `OperationsAdapter` forwards every hook from the Operations method inventory; operation
 layers override only intercepted hooks. `Operations::wait` is called only after all
 runnable work is exhausted. The simulation returns false (CONC-8); a host adapter may

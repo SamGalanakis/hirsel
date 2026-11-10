@@ -27,6 +27,9 @@ pub fn io_within(a: &IoGrants, b: &IoGrants) -> bool {
         && optional(&a.process, &b.process, process_within)
         && optional(&a.telemetry, &b.telemetry, |a, b| a == b)
         && optional(&a.signals, &b.signals, signals_within)
+        && a.authorities
+            .iter()
+            .all(|(name, g)| b.authorities.get(name) == Some(g))
         && optional(&a.cpu, &b.cpu, |a, b| {
             a.provider == b.provider
                 && a.max_workers <= b.max_workers

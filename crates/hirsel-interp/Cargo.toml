@@ -11,6 +11,7 @@ base64 = "=0.22.1"
 hirsel-type-analysis = { path = "../hirsel-type-analysis" }
 sha2 = "0.10"
 hirsel-run-schema = { path = "../hirsel-run-schema" }
+hirsel-store-authority = { path = "../hirsel-store-authority" }
 hirsel-kernels = { path = "../hirsel-kernels" }
 hirsel-free = { path = "../hirsel-free" }
 hirsel-span = { path = "../hirsel-span" }

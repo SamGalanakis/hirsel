@@ -79,6 +79,13 @@ Absent or null grants are omitted from canonical bytes. Present grants and every
 limit contribute to semantic identity and the grant subset relation. The schema
 does not itself start workers or certify physical width. Runner grant narrowing
 does not convey this adjunct implicitly.
+`io.authorities` maps a name (a lowercase letter, then lowercase letters and digits) to
+an `AuthorityGrant`: `authority.memory@1`, `authority.log@1` (a `mount` naming a granted
+read-write Dir and a canonical relative `path` in it; no two log directories nest) or
+`authority.sim@1` (`seed`, `represent`, `levels`, `faults`), and a `floor` among the
+levels the provider declares. `hirsel_store_authority::check` owns the per-provider
+members; a member another provider takes refuses. `validate_authorities` reads the
+conformance `authorities` directive, which refuses `authority.log@1` (no host directory).
 `inputs.scheduler` names `fifo`, `random` or `pct`, version 1 (docs/spec/determinism.md,
 "Scheduler"); any other refuses as Unsupported. `Config::scheduler` projects its launch
 word (`Scheduler::CONTRACTS`, shared with `hirsel_kernels::schedule::Algorithm::code`) and

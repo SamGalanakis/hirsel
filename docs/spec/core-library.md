@@ -62,6 +62,22 @@ N fn instant.checked_add(clock: MonotonicClock, start: Instant of clock, nanosec
 N fn io.net(rt: Io) -> Result[Net, GrantError]
 N fn io.random(rt: Io) -> Result[Random, GrantError]
 N fn io.signals(rt: Io) -> Result[Signals, GrantError]
+N fn io.authority(rt: Io, name: String) -> Result[Authority, GrantError]
+fn authority.levels(a: Authority) -> List[String]
+fn authority.level(a: Authority, name: String) -> Option[Level of a]
+fn authority.floor(a: Authority) -> Level of a
+fn level.name(l: Level) -> String
+fn level.narrow(a: Authority, l: Level) -> Option[Level of a]
+fn authority.max_entry(a: Authority) -> u64
+fn authority.claim(a: Authority) -> Result[Claim of a, SeamError]
+fn claim.end(c: Claim) -> u64
+fn claim.narrow(a: Authority, take c: Claim) -> Option[Claim of a]
+fn authority.advance(a: Authority, mut c: Claim of a, from: u64, take entry: Bytes, at: Level of a) -> Advanced
+fn authority.durable(a: Authority, mut c: Claim of a, at: Level of a) -> Result[u64, SeamError]
+fn authority.read(a: Authority, from: u64, at: Level of a, max: u64) -> Result[List[Bytes], SeamError]
+fn authority.get(a: Authority, name: String) -> Result[Option[Bytes], SeamError]
+fn authority.put(a: Authority, name: String, take data: Bytes) -> Result[(), SeamError]
+fn authority.reclaim(a: Authority, mut c: Claim of a) -> Result[(), SeamError]
 N fn signal.wait(s: Signals, kinds: List[SignalKind]) -> Result[SignalKind, SignalError]
 fn random.bytes(r: Random, count: u64) -> Result[Bytes, RandomError]
 N fn io.process(rt: Io) -> Result[Proc, GrantError]
@@ -770,6 +786,17 @@ waiting on it is never Blocked ([CONC-8](concurrency.md#conc-8-global-quiescence
 scripted provider delivers its arrivals at the run's idle points
 ([providers](determinism.md#run-configuration)); a run waiting with none left to deliver is
 Blocked. A completed wait is recorded with its kind; replay returns it without a signal.
+
+`io.authority(rt, name)` projects the store authority the run configuration grants under
+`name` ([authority grants](determinism.md#authority-grants)), and `NotGranted()` for any
+other name. The `authority.*`, `level.*` and `claim.*` operations are the store authority
+seam, specified with their outcomes in
+[STORE-11](storage.md#store-11-engine-and-storage-seam) and, for levels,
+[STORE-2](storage.md#store-2-transactions). A `Level of a` is one of the levels `a`
+declares; it is plain, copyable and sendable but not data, so levels have no equality or
+order. A `Claim` is an affine resource; dropping one ends it. Each provider decision an
+operation observes (an outcome, a claim's attempt identity, the bytes read) is a
+recorded capability input, so a run replays from its tape without the provider.
 
 ### Telemetry capture
 

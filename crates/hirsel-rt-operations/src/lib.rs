@@ -2932,6 +2932,23 @@ pub const NATIVE_PATHS: &[&str] = &[
     "runner.call",
     "runner.spawn",
     "test.runner",
+    // The store authority seam: interpreter-only until its runtime entries land.
+    "io.authority",
+    "authority.levels",
+    "authority.level",
+    "authority.floor",
+    "level.name",
+    "level.narrow",
+    "authority.max_entry",
+    "authority.claim",
+    "claim.end",
+    "claim.narrow",
+    "authority.advance",
+    "authority.durable",
+    "authority.read",
+    "authority.get",
+    "authority.put",
+    "authority.reclaim",
 ];
 
 /// Stable declaration ownership transport, used by the independently retained inventory.

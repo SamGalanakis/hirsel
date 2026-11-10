@@ -4636,6 +4636,7 @@ conformance/PROV/PROV-1-annotated-tuple-part-bad.hir
 conformance/PROV/PROV-1-array-index-container-bad.hir
 conformance/PROV/PROV-1-array-index-container-ok.hir
 conformance/PROV/PROV-1-atomic-moved-result.hir
+conformance/PROV/PROV-1-authority-level-of-other-bad.hir
 conformance/PROV/PROV-1-block-computed-owner-bad.hir
 conformance/PROV/PROV-1-block-computed-owner-ok.hir
 conformance/PROV/PROV-1-block-identity-ok.hir
@@ -7410,6 +7411,7 @@ conformance/SER/SER-2-truncated-run.hir
 conformance/SER/SER-2-utf8-run.hir
 conformance/SER/SER-2-variable-flat-run.hir
 conformance/SER/SER-2-vectors-run.hir
+conformance/STORE/STORE-11-authority-seam-run.hir
 conformance/STORE/STORE-12-call-row-limit-run.hir
 conformance/STORE/STORE-12-call-stream-run.hir
 conformance/STORE/STORE-12-sim-call-stream-run.hir

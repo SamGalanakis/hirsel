@@ -2283,6 +2283,10 @@ reconstruct authority from a run record.
 
 `std@1/store`, an embedded transactional store written in Hirsel over a `Dir` grant, with
 typed tables, schema history and migrations, is specified in [storage](storage.md).
+The authority seam it will open over is core, not std: `io.authority` returns a granted
+authority by name, whose provider declares its own durability levels (`Level of a`), and
+a store writes only under a `Claim of a` that a later claim fences
+([core library](core-library.md)).
 
 ### HTTP/2 through the HTTP API
 

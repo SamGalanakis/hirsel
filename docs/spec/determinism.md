@@ -1092,24 +1092,25 @@ collector; source has no global exporter or exporter-controlled enabled branch.
 
 ### Authority grants
 
-A run record or grants template may declare a sorted object `authorities`, naming the
+A run's `io` grants may declare a sorted object `authorities`, naming the
 store authorities `io.authority` returns ([STORE-11](storage.md#store-11-engine-and-storage-seam)).
 Omission and the empty object normalize to no member. Names follow the rules of
-`object_stores` names. Each entry has `provider`, `floor` (a level name of
-[STORE-2](storage.md#store-2-transactions), such as `"HostCrash"`) and the provider's
-settings:
+`object_stores` names. Each entry has `provider`, `floor` (the name of a level the
+provider declares, [STORE-2](storage.md#store-2-transactions), such as `"host"` for
+`authority.log@1`) and the provider's settings:
 
 - `authority.memory@1`: none.
 - `authority.log@1`: `mount` (the virtual path of an explicitly granted writable Dir) and
   `path` (a canonical relative directory within it).
 - `authority.objects@1`: `objects` (an entry of the host's object-storage seam, as for
-  `code.object@1`, [RUN-13](runners.md#run-13-provider-seams)) and `level`, the one level
-  the operator states that storage provides.
+  `code.object@1`, [RUN-13](runners.md#run-13-provider-seams)) and `level`, the name of
+  the one level the operator states that storage provides, such as `"zone"`.
 - `authority.sim@1`: `seed`, `represent` (`"log"` or `"objects"`), `levels` (a nonempty
-  list, weakest first) and `faults`, a sorted object mapping each fault the simulated
+  list of distinct level names, weakest first, which the simulated authority declares) and `faults`, a sorted object mapping each fault the simulated
   authority injects to a `fail_one_in` count (u64, 0 for never).
 
-A floor no declared level covers, two entries over the same directory or object prefix,
+A floor the provider does not declare, a level name that is not lowercase ASCII letters
+and digits starting with a letter, two entries over the same directory or object prefix,
 unknown fields and references outside a granted mount refuse before entry. An authority
 grant gives the run nothing else: its provider reaches its directory or objects itself,
 and `io.authority` on an undeclared name returns `NotGranted()`. The grants determine

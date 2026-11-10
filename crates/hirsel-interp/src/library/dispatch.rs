@@ -28,6 +28,7 @@ pub struct Library {
     pub(super) process_advance: Option<(u64, u64)>,
     pub(super) timers: super::timers::Timers,
     pub(super) signals: super::signals::Signals,
+    pub(super) authorities: super::authority::Authorities,
     pub(super) callbacks: std::collections::BTreeMap<u64, super::callbacks::Pending>,
     pub(super) next_callback: u64,
     pub(super) cpu_certified: bool,
@@ -116,6 +117,7 @@ impl Library {
             process_advance: None,
             timers: Default::default(),
             signals: Default::default(),
+            authorities: Default::default(),
             callbacks: Default::default(),
             next_callback: 0,
             cpu_jobs: Default::default(),
@@ -1843,6 +1845,10 @@ impl Operations for Library {
             self.tasks.drop_set(id);
             return Ok(());
         }
+        if kind == "Claim" {
+            self.drop_claim(id);
+            return Ok(());
+        }
         if matches!(kind, "ReadHalf" | "WriteHalf") {
             if !matches!(
                 self.simulation.grants.get(&id),
@@ -2211,6 +2217,13 @@ primary_operations! { library, call, context, name, a, value;
     Primitive: "runner.apply" | "runner.apply_mut" => { return library.runner_apply(name, a).map(Some); },
     Capability: "io.runner" | "runner.grants" | "runner.narrow" | "runner.only" | "runner.compute" | "runner.call" | "runner.spawn" | "test.runner" => {
         return library.runner_call(name, &call, context).map(Some);
+    },
+    Capability: "io.authority" | "authority.levels" | "authority.level" | "authority.floor" | "level.name" | "level.narrow" | "authority.max_entry" | "authority.claim" | "claim.end" | "claim.narrow" | "authority.advance" | "authority.durable" | "authority.read" | "authority.get" | "authority.put" | "authority.reclaim" => {
+        // A rejected replay never publishes effects or keeps a claim.
+        let saved = (!context.configuration.inputs.is_empty()).then(|| (library.simulation.clone(), library.authorities.clone()));
+        let result = library.authority_call(name, &call, context);
+        if result.is_err() && let Some((simulation, authorities)) = saved { library.simulation = simulation; library.authorities = authorities; }
+        return result.map(Some);
     },
     Capability: "signal.wait" => {
         // The initial attempt suspends once. A host poll completes the same

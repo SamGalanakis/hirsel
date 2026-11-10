@@ -218,7 +218,7 @@ pub struct Header {
 }
 
 /// Header directive names; other colon-bearing comments are prose.
-const DIRECTIVES: [&str; 17] = [
+const DIRECTIVES: [&str; 18] = [
     "rule",
     "expect",
     "stdout",
@@ -235,6 +235,7 @@ const DIRECTIVES: [&str; 17] = [
     "runners",
     "fault_seed",
     "signals",
+    "authorities",
     "twin",
 ];
 
@@ -327,6 +328,14 @@ pub fn fixture(source: &str) -> Result<hirsel_native::Fixture, String> {
                 }
                 fixture.signals = Some(grant);
             }
+            "authorities" => {
+                if !fixture.authorities.is_empty() {
+                    return Err("duplicate authorities directive".into());
+                }
+                fixture.authorities =
+                    hirsel_run_config::validate_authorities(value.trim().as_bytes())
+                        .map_err(|e| e.to_string())?;
+            }
             "steps" => {
                 if fixture.steps.is_some() {
                     return Err("duplicate steps directive".into());
@@ -388,6 +397,7 @@ pub(crate) fn simulation(source: &str) -> Result<hirsel_engine::SimulationConfig
         net: fixture.net,
         process: fixture.process,
         signals: fixture.signals,
+        authorities: fixture.authorities,
         env: fixture.env.unwrap_or_default(),
         runners: fixture.runners,
         fault_seed: fixture.fault_seed.unwrap_or(0),
@@ -552,7 +562,7 @@ pub fn parse_header(path: &Path, source: &str, rules: &Rules) -> Result<Header, 
                             .map_err(|_| "exit must be an integer")?,
                     );
                 }
-                "grant" | "env" | "net" | "process" | "runners" | "fault_seed" | "signals" => {}
+                "grant" | "env" | "net" | "process" | "runners" | "fault_seed" | "signals" | "authorities" => {}
                 "twin" => {
                     if twin.is_some() {
                         return Err("duplicate twin directive".into());
@@ -610,7 +620,8 @@ pub fn parse_header(path: &Path, source: &str, rules: &Rules) -> Result<Header, 
         ) && (fixture.monotonic.is_some()
             || fixture.net.is_some()
             || fixture.process.is_some()
-            || fixture.signals.is_some())
+            || fixture.signals.is_some()
+            || !fixture.authorities.is_empty())
         {
             return Err("fixture directives require expect: run, fail, blocked or signaled".into());
         }

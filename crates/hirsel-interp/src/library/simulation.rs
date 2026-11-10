@@ -98,6 +98,8 @@ pub struct SimulationConfig {
     /// The observed kinds and the `signals.script@1` arrivals; absent, the run has no
     /// Signals and receives no signal.
     pub signals: Option<hirsel_run_schema::SignalsGrant>,
+    /// The store authorities `io.authority` projects, by name.
+    pub authorities: BTreeMap<String, hirsel_run_schema::AuthorityGrant>,
     pub random_seed: u64,
     pub test_seed: u64,
     /// The `telemetry.null@1` identity seed: a stream separate from Random's.
@@ -150,6 +152,7 @@ impl Default for SimulationConfig {
             cpu: None,
             tasks_free: false,
             signals: None,
+            authorities: BTreeMap::new(),
             random_seed: 0,
             test_seed: 0,
             telemetry_seed: 0,

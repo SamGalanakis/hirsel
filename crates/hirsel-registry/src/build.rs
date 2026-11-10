@@ -25,6 +25,7 @@ pub(crate) fn registry(types: &Arc<TypeInterner>) -> BTreeMap<DefId, SignatureRe
         "Stderr",
         "Stdout",
         "Signals",
+        "Authority",
         "MonotonicClock",
         "WallClock",
         "Random",
@@ -68,17 +69,24 @@ pub(crate) fn registry(types: &Arc<TypeInterner>) -> BTreeMap<DefId, SignatureRe
         );
     }
     // These inert, plain views/positions have intrinsic loop/brand rules (docs/spec/core-library.md).
-    for name in ["Instant", "Path", "StrPos", "ScalarView", "PositionView"] {
+    for name in [
+        "Instant",
+        "Level",
+        "Path",
+        "StrPos",
+        "ScalarView",
+        "PositionView",
+    ] {
         let b = Builder::new(types, "").with_declarations(&out);
         let mut t = type_definition(vec![], None);
         t.bounds = vec![Bound::Copyable, Bound::Inert, Bound::NoallocDrop];
-        if matches!(name, "Instant" | "Path" | "StrPos") {
+        if matches!(name, "Instant" | "Level" | "Path" | "StrPos") {
             t.bounds.push(Bound::Plain);
         }
         if matches!(name, "Path" | "StrPos") {
             t.bounds.extend([Bound::Data, Bound::Key, Bound::Sendable]);
         }
-        if name == "Instant" {
+        if matches!(name, "Instant" | "Level") {
             t.bounds.push(Bound::Sendable);
         }
         serializable_core(name, &mut t);
@@ -199,6 +207,22 @@ pub(crate) fn registry(types: &Arc<TypeInterner>) -> BTreeMap<DefId, SignatureRe
             "Send(Bytes)|Expect(Bytes)|Stall()|Close()|Reset()|Truncate()",
         ),
         ("GrantError", "", "NotGranted()"),
+        // STORE-11: the store authority seam.
+        (
+            "AuthorityError",
+            "",
+            "Io(FileError)|Status(u16)|Unreachable()",
+        ),
+        (
+            "SeamError",
+            "",
+            "Storage(AuthorityError)|Refused(AuthorityError)|Corrupt(String)|Fenced()|Format(Bytes,String)",
+        ),
+        (
+            "Advanced",
+            "",
+            "Advanced(u64)|Fenced()|Refused(AuthorityError)|Undecided(AuthorityError)",
+        ),
         ("GrantAccess", "", "Read()|ReadWrite()"),
         (
             "NotRunReason",
@@ -462,6 +486,26 @@ pub(crate) fn registry(types: &Arc<TypeInterner>) -> BTreeMap<DefId, SignatureRe
         "Open(SessionOpen)|Opened(SessionOpened)|Refused(NotRunReason)|Call(RemoteCall)|Outcome(RemoteOutcome)|Cancel(CallRef,CancelCause)|Acknowledged(CallRef)|Status(CallRef)|Running(CallRef)|Unknown(CallRef)|Close(u64,u64)",
         &mut out,
     );
+    // STORE-11: a claim is the affine right to extend one authority's history.
+    {
+        let b = Builder::new(types, "").with_declarations(&out);
+        let mut t = type_definition(vec![], None);
+        t.resource = true;
+        t.bounds = vec![Bound::NoallocDrop];
+        t.destructor_allocation = Allocation::NoAlloc;
+        t.authority = AuthoritySummary::Known(
+            vec![AuthorityTerm::Capability(hirsel_syntax::DefPath::core(
+                "Authority",
+            ))]
+            .into(),
+        );
+        t.drop = Some(hirsel_syntax::DefPath::core("Claim"));
+        publish(
+            types,
+            b.signature("Claim", SignatureKind::Type(Box::new(t)), true),
+            &mut out,
+        );
+    }
     for (name, fields) in [
         ("File", ""),
         ("AtomicFile", "dir: Dir,tmp: Path,dst: Path"),
@@ -1190,6 +1234,9 @@ fn serializable_core(name: &str, t: &mut TypeDefinition) {
             | "TlsFailure"
             | "NetError"
             | "GrantError"
+            | "AuthorityError"
+            | "SeamError"
+            | "Advanced"
             | "ExitStatus"
             | "ProcessOutput"
             | "PipelineOutput"
@@ -1476,6 +1523,7 @@ impl Builder {
                                 | "Stderr"
                                 | "Stdout"
                                 | "Signals"
+                                | "Authority"
                                 | "MonotonicClock"
                                 | "WallClock"
                                 | "Random"

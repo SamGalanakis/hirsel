@@ -1005,6 +1005,7 @@ dependencies = [
  "hirsel-kernels",
  "hirsel-run-schema",
  "hirsel-span",
+ "hirsel-store-authority",
  "hirsel-syntax",
  "hirsel-tir",
  "hirsel-type-analysis",
@@ -1693,6 +1694,7 @@ version = "0.1.0"
 dependencies = [
  "hirsel-guard",
  "hirsel-run-schema",
+ "hirsel-store-authority",
  "libc",
  "proptest",
  "serde",
@@ -1737,6 +1739,17 @@ dependencies = [
  "hirsel-guard",
  "hirsel-intern",
  "serde",
+]
+
+[[package]]
+name = "hirsel-store-authority"
+version = "0.1.0"
+dependencies = [
+ "hirsel-guard",
+ "hirsel-run-schema",
+ "libc",
+ "sha2",
+ "tempfile",
 ]
 
 [[package]]

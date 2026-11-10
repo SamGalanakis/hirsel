@@ -32,6 +32,30 @@ mod cpu;
 mod signals;
 use sha2::{Digest as _, Sha256};
 pub use signals::validate_signals_grant;
+
+/// An `io.authorities` object on its own, for a fixture with no mounts: simulated
+/// providers only, each checked as a run's would be.
+pub fn validate_authorities(
+    bytes: &[u8],
+) -> Result<BTreeMap<String, hirsel_run_schema::AuthorityGrant>, RunRefusal> {
+    let mut io = IoGrants {
+        authorities: serde_json::from_slice(bytes)
+            .map_err(|error| invalid("io.authorities", &error.to_string()))?,
+        ..IoGrants::default()
+    };
+    authorities(&io, "io.authorities")?;
+    if io
+        .authorities
+        .values()
+        .any(|g| g.provider == "authority.log@1")
+    {
+        return Err(invalid(
+            "io.authorities",
+            "a fixture has no host directory for authority.log@1",
+        ));
+    }
+    Ok(std::mem::take(&mut io.authorities))
+}
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
@@ -1015,6 +1039,7 @@ fn validate_io(io: &mut IoGrants, field: &str) -> Result<(), RunRefusal> {
         provider(&at("signals.provider"), &signals.provider)?;
         signals::validate(signals)?;
     }
+    authorities(io, &at("authorities"))?;
     if let Some(telemetry) = &io.telemetry {
         provider(&at("telemetry.provider"), &telemetry.provider)?;
         // The host provider draws its identities; only the null provider takes a seed
@@ -1025,6 +1050,47 @@ fn validate_io(io: &mut IoGrants, field: &str) -> Result<(), RunRefusal> {
                 &at("telemetry"),
                 "telemetry.null@1 requires a seed and alone takes a queue",
             ));
+        }
+    }
+    Ok(())
+}
+/// `io.authorities` (determinism.md, Authority grants): each name, its provider's
+/// settings and floor, and for a log a directory inside a writable mount that no other
+/// authority's directory contains or is contained by.
+fn authorities(io: &IoGrants, field: &str) -> Result<(), RunRefusal> {
+    let mut logs: Vec<(&str, &str)> = vec![];
+    for (name, grant) in &io.authorities {
+        let at = format!("{field}.{name}");
+        if !name.as_bytes().first().is_some_and(u8::is_ascii_lowercase)
+            || !name
+                .bytes()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+        {
+            return Err(invalid(
+                &at,
+                "name is lowercase ASCII letters and digits, starting with a letter",
+            ));
+        }
+        hirsel_store_authority::check(grant).map_err(|e| invalid(&at, &e.0))?;
+        if let (Some(mount), Some(path)) = (&grant.mount, &grant.path) {
+            if !io
+                .dirs
+                .iter()
+                .any(|m| m.path == *mount && m.access == hirsel_run_schema::Access::ReadWrite)
+            {
+                return Err(invalid(&at, "mount is not a granted writable directory"));
+            }
+            if !portable_path(path, false) {
+                return Err(invalid(&at, "path is a canonical relative directory"));
+            }
+            let nested = |a: &str, b: &str| a == b || b.starts_with(&format!("{a}/"));
+            if logs
+                .iter()
+                .any(|(m, p)| *m == mount && (nested(p, path) || nested(path, p)))
+            {
+                return Err(invalid(&at, "two authorities over one directory"));
+            }
+            logs.push((mount, path));
         }
     }
     Ok(())

@@ -20,6 +20,8 @@ pub struct Fixture {
     pub process: Option<hirsel_run_schema::ProcessGrant>,
     /// The `io.signals` grant, with its script under `signals.script@1`.
     pub signals: Option<hirsel_run_schema::SignalsGrant>,
+    /// The `io.authorities` grant (`// authorities:`): simulated providers only.
+    pub authorities: std::collections::BTreeMap<String, hirsel_run_schema::AuthorityGrant>,
     /// The root Env's snapshot: each granted name and its value, null when unset.
     pub env: Option<std::collections::BTreeMap<String, Option<String>>>,
     /// A corpus program's raised interpreter step budget (`// steps:`); H's
@@ -58,6 +60,7 @@ impl Default for Fixture {
             net: None,
             process: None,
             signals: None,
+            authorities: Default::default(),
             env: None,
             steps: None,
             runners: vec![],
@@ -83,6 +86,7 @@ impl From<&Fixture> for hirsel_engine::SimulationConfig {
             net: fixture.net.clone(),
             process: fixture.process.clone(),
             signals: fixture.signals.clone(),
+            authorities: fixture.authorities.clone(),
             env: fixture.env.clone().unwrap_or_default(),
             monotonic: fixture.monotonic.unwrap_or(0),
             runners: fixture.runners.clone(),

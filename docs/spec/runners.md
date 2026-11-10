@@ -839,7 +839,7 @@ query calls to the head through its inbox:
 Inbox    // core capability: resource, sendable; a place's arrived transact and query calls
 Arrival  // core opaque: affine, sendable; one arrived call, owed exactly one end
 Arrived  = { form: CallForm, entry: EntryId, caller: String, request: CallRequest,
-             level: Option[Level], argument: Bytes }
+             level: Option[String], argument: Bytes }
 CallRequest = { stream: Bytes, epoch: u64, position: u64, digest: Bytes, acknowledged: u64 }
 N fn io.inbox(rt: Io) -> Result[Inbox, GrantError]
 fn inbox.take(mut i: Inbox, wait: bool) -> Option[List[Arrival]]
@@ -851,12 +851,14 @@ fn arrival.end(take a: Arrival, end: CallEnd) -> ()
 `inbox.take` returns the arrivals that passed the host's checks, in the order they
 arrived, waiting for one when `wait` is true; it is `None` once the host
 stops. `caller` is the admitted caller's identity, or a client's principal; `level` is
-the level ([STORE-2](storage.md#store-2-transactions)) the request names, if any. `arrival.end` sends the call's end; an `Arrival`
+the name of the level ([STORE-2](storage.md#store-2-transactions)) the request waits for, if any, which the head resolves
+with `authority.level` against its own authority; a name it does not declare ends the call
+`NotRun(Rejected())` before anything runs. `arrival.end` sends the call's end; an `Arrival`
 dropped without one ends its call `InDoubt(Abandoned())`, as does the head run's own end.
 The head records each take and each end on its tape.
 
 A caller's `db@1` runner takes the fields of `remote.tls@1` and an optional `level`, the
-`Level` name its transact calls wait for ([STORE-2](storage.md#store-2-transactions)).
+name of a level the called place's authority declares, which its transact calls wait for ([STORE-2](storage.md#store-2-transactions)).
 Transact and query calls travel as `Call` frames of form `Transact()` or `Query()`; a
 transact call's `epoch` and `position` are its call-stream request, and a query uses
 position 0, which no stream decides. The outcomes are those of the providers table.

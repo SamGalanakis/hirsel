@@ -52,7 +52,7 @@ fn store.close(take s: Store) -> Result[(), StoreError]
 `store.open` opens or creates the store kept by the authority `a`
 ([STORE-11](#store-11-engine-and-storage-seam)) and claims it as its writer: it appends a
 claim entry with the next **writer epoch** to the history, recovers the newest state the
-history holds, and returns a `Store`. Of openers that race, exactly one claim succeeds and
+history holds, and returns a `Store` that keeps `a`. Of openers that race, exactly one claim succeeds and
 every other open returns `Fenced()`. `Store` is an ordinary affine opaque type; it exports no copying or sending
 bound, and every operation that changes it takes it `mut`. One `Store` value is the
 store's **head**: its only writer. A later claim of the same authority, in this process
@@ -150,17 +150,22 @@ It is that provider's cost model, not part of the contract.
 #### Visibility and the output gate
 
 Commits on one store are numbered by consecutive **commit versions**. The store's
-**visible version** `V` is the highest commit applied to the head's state. An authority
-declares its **durability levels** ([STORE-11](#store-11-engine-and-storage-seam)); for
+**visible version** `V` is the highest commit applied to the head's state. Each authority
+declares its own **durability levels** ([STORE-11](#store-11-engine-and-storage-seam)); for
 each level `L`, the **durable version** `D(L)` is the highest commit version such that
 it and every lower one are durable at `L`. No `D(L)` decreases or exceeds `V`, and a
 stronger level's is never ahead of a weaker one's.
 
 ```text
-Level  = Nothing() | ProcessCrash() | HostCrash() | MachineLoss() | ZoneLoss() | RegionLoss()
+Level  // core opaque: copyable, sendable; not data, no equality or order; `Level of a`
 Ticket // opaque: copyable, data, inert, sendable
+fn authority.levels(a: Authority) -> List[String]
+fn authority.level(a: Authority, name: String) -> Option[Level of a]
+fn authority.floor(a: Authority) -> Level of a
+fn level.name(l: Level) -> String
+fn level.narrow(a: Authority, l: Level) -> Option[Level of a]
 fn store.ticket(s: Store) -> Ticket
-fn store.durable(mut s: Store, ticket: Ticket, at: Level) -> Result[(), StoreError]
+fn store.durable(a: Authority, mut s: Store, ticket: Ticket, at: Level of a) -> Result[(), StoreError]
 ```
 
 - **Visibility.** A deciding run observes every commit up to `V`, durable or not.
@@ -175,17 +180,27 @@ fn store.durable(mut s: Store, ticket: Ticket, at: Level) -> Result[(), StoreErr
   transaction that observed a lost commit has `g` above it, so no outcome released at `L`
   depends on lost state.
 
-`Level` names what a failure destroys, weakest first, variant ordinals in the order
-written: nothing survives; the process; the operating system or power, the disk
-surviving; the machine and its disks; one zone; one region. A level survives every
-failure a weaker one survives. An authority declares the levels it provides
-([STORE-11](#store-11-engine-and-storage-seam)), and a wait or floor at a level it does
-not declare is served at the weakest declared level that is at least as strong; when
-there is none the operation returns `NoLevel()`.
+An authority declares an ordered list of levels, weakest first, each a name and the
+failures it survives; a later level survives every failure an earlier one survives, and
+"stronger" and "below" mean later and earlier in that list. There is no level vocabulary
+shared by every authority ([RUN-13](runners.md#run-13-provider-seams)). A `Level of a` is
+one of the levels `a` declares: `authority.levels` lists their names, weakest first,
+`authority.level` resolves a name to one, and `authority.floor` is the deployment's floor. A level belongs to its authority: the
+checker refuses a level of one authority where another's is required
+([PROV-1](brands.md#prov-1-brands)), and levels have no equality or order, so no
+comparison of levels, of one store or two, type-checks; their order is only the declared
+list's. A level kept where its brand cannot be written (a field, a list) is recovered
+with `level.narrow`, which is `None()` for a level of another authority. A level travels
+between places and hosts only as its name (`level.name`), which the receiving head
+resolves with `authority.level`; a name the authority does not declare is `None()`, and
+the store operation it was for returns `NoLevel()`, definite and without effect, never a
+nearby level.
 
 `store.ticket` names the store's visible version `V` in its history: a transaction's own
 commit when taken right after it. A ticket carries the store identity, so it never names
-a version of another history. `store.durable` returns once `D(at)` reaches the ticket's
+a version of another history. `store.durable` takes the store's authority with it, so
+`at` is checked to belong to `a` by the checker; a store that does not keep `a` returns
+`NoLevel()`, as the level is not one of its authority's. It returns once `D(at)` reaches the ticket's
 version, advancing the queued group if needed; a ticket of another store returns
 `Foreign()`. Neither changes the store. Any other error closes the store and never claims
 that the ticket's commit is lost: the next open settles it.
@@ -559,7 +574,7 @@ fails either check is `Storage(Corrupt())`.
 ```text
 Version    // opaque: copyable, data, key, inert, sendable; ordered
 Snapshot   // opaque: copyable, inert, sendable; holds no authority
-fn store.snapshot(s: Store, at: Level) -> Result[Snapshot, StoreError]
+fn store.snapshot(a: Authority, s: Store, at: Level of a) -> Result[Snapshot, StoreError]
 fn store.version(snap: Snapshot) -> Version
 fn store.at(a: Authority, v: Version) -> Result[Snapshot, StoreError]
 fn store.fork(from: Authority, v: Version, to: Authority) -> Result[(), StoreError]
@@ -573,14 +588,13 @@ versions of one store compare, and nothing else about them is observable; in par
 no program learns how many commits a store has made.
 
 A **snapshot** is the immutable state of a store at one version, together with the store
-identity and the level it was taken at. `store.snapshot` takes one at `D(at)`, for the
-level `at` resolves to ([STORE-2](#store-2-transactions)), and waits for nothing, so what
+identity and the level it was taken at. `store.snapshot` takes one at `D(at)`
+([STORE-2](#store-2-transactions)) and waits for nothing, so what
 a query reads from it depends on no commit that a failure level `at` survives could lose.
 Releasing that result at a stronger level waits for that level like any outcome, and
 reading one's own write takes `store.durable` on its ticket and then a new snapshot; a
 snapshot never advances. The head keeps the state at `V` and at each declared level's
 `D(L)`, sharing equal states, so the snapshots it can take cost O(levels) retained states.
-`store.snapshot` returns `NoLevel()` when no declared level covers `at`, and
 `store.version` names a snapshot's version. `store.at` opens the state at a retained version from the store's authority without
 claiming it: a read "as of" that version, available to any holder of the authority, on
 any machine. A query runs against a snapshot on any task, in parallel with the store's
@@ -711,22 +725,30 @@ release waits, what each failure can lose, and which other machines can reach th
 ```text
 Authority      // opaque capability: copyable, sendable; not data
 Claim          // opaque: affine, neither copyable nor sendable; valid for one authority
-Claimed        = { claim: Claim, end: u64 }
-Advanced       = Advanced(end: u64) | Fenced() | Refused(AuthorityError) | Undecided(AuthorityError)
+Advanced       = Advanced(u64) | Fenced() | Refused(AuthorityError) | Undecided(AuthorityError)
 AuthorityError = Io(FileError) | Status(u16) | Unreachable()
+SeamError      = Storage(AuthorityError) | Refused(AuthorityError) | Corrupt(String) | Fenced()
+               | Format(Bytes, String)
 
 fn io.authority(rt: Io, name: String) -> Result[Authority, GrantError]
-fn authority.levels(a: Authority) -> List[Level]
-fn authority.floor(a: Authority) -> Level
 fn authority.max_entry(a: Authority) -> u64
-fn authority.claim(a: Authority) -> Result[Claimed, StoreError]
-fn authority.advance(a: Authority, mut c: Claim of a, from: u64, take entry: Bytes, at: Level) -> Advanced
-fn authority.durable(a: Authority, mut c: Claim of a, at: Level) -> Result[u64, StoreError]
-fn authority.read(a: Authority, from: u64, at: Level, max: u64) -> Result[List[Bytes], StoreError]
-fn authority.get(a: Authority, name: String) -> Result[Option[Bytes], StoreError]
-fn authority.put(a: Authority, name: String, take data: Bytes) -> Result[(), StoreError]
-fn authority.reclaim(a: Authority, mut c: Claim of a) -> Result[(), StoreError]
+fn authority.claim(a: Authority) -> Result[Claim of a, SeamError]
+fn claim.end(c: Claim) -> u64
+fn claim.narrow(a: Authority, take c: Claim) -> Option[Claim of a]
+fn authority.advance(a: Authority, mut c: Claim of a, from: u64, take entry: Bytes, at: Level of a) -> Advanced
+fn authority.durable(a: Authority, mut c: Claim of a, at: Level of a) -> Result[u64, SeamError]
+fn authority.read(a: Authority, from: u64, at: Level of a, max: u64) -> Result[List[Bytes], SeamError]
+fn authority.get(a: Authority, name: String) -> Result[Option[Bytes], SeamError]
+fn authority.put(a: Authority, name: String, take data: Bytes) -> Result[(), SeamError]
+fn authority.reclaim(a: Authority, mut c: Claim of a) -> Result[(), SeamError]
 ```
+
+`SeamError` is the seam's own failure, a core type; the engine reports each as the
+`StoreError` of the same name, `Format(..)` as `Unsupported(Format(..))`
+([STORE-13](#store-13-failures)). `claim.end` is the position the claim's holder last
+extended the history to. A claim kept where its brand cannot be written (a field of the
+store) is recovered with `claim.narrow`, which is `None()`, ending the claim, when it is
+not `a`'s.
 
 The engine, `std@1/store`, is the caller these operations serve. Holding an `Authority`
 grants what holding the store's files grants: an entry written outside the engine is read
@@ -772,9 +794,10 @@ holds it.
 durable at `at`, issuing at most one barrier for every entry since the last.
 `authority.read(a, from, at, max)` returns up to `max` entries after position `from`
 that are durable at `at`. It needs no claim: followers and `store.at` read this way.
-`authority.levels` lists the levels the provider declares, weakest first;
-`authority.floor` is the deployment's floor for the place, taken from the grant;
-`authority.max_entry` bounds the bytes of one entry.
+`authority.levels` lists the names of the levels the provider declares, weakest first
+([STORE-2](#store-2-transactions)); `authority.floor` is the deployment's floor for the
+place, the declared level the grant names; `authority.max_entry` bounds the bytes of one
+entry.
 
 **Objects.** `authority.put` creates an immutable named object only if its name is free;
 an existing object with equal bytes is success, and one with other bytes is
@@ -797,9 +820,9 @@ floor.
 
 | Provider | History | Levels |
 |---|---|---|
-| `authority.memory@1` | host memory | `Nothing()` |
-| `authority.log@1` | segment files and a lock file in a granted directory | `ProcessCrash()`, `HostCrash()` |
-| `authority.objects@1` | a head object and immutable segment objects in an object-storage entry | the one level its grant states, such as `ZoneLoss()` or `RegionLoss()` |
+| `authority.memory@1` | host memory | `memory` (survives no failure) |
+| `authority.log@1` | segment files and a lock file in a granted directory | `process` (the process's crash: the entry is written to the operating system), `host` (the operating system or power failing, the disk surviving: the entry is synchronized) |
+| `authority.objects@1` | a head object and immutable segment objects in an object-storage entry | the one level its grant names and states, such as `zone` or `region` |
 | `authority.sim@1` | either representation, simulated | as its grant states |
 
 - **Local log.** An advance takes the lock file's open-file-description lock (`flock` or
@@ -807,9 +830,9 @@ floor.
   the file releases), compares the active segment's length with the length the writer's
   own last append left, appends the entry with one `write`, and releases the lock; a
   different length means another claim appended, and the advance returns `Fenced()` with
-  no effect. It then issues one `fdatasync` when `at` is `HostCrash()`. A new segment
+  no effect. It then issues one `fdatasync` when `at` is `host`. A new segment
   adds a directory sync when it is created. A claim takes the same lock, truncates only a
-  torn tail, appends its claim entry and synchronizes. A reader at `HostCrash()` notes the
+  torn tail, appends its claim entry and synchronizes. A reader at `host` notes the
   file's length, synchronizes the file and returns entries up to that length, so it never
   returns an entry a host crash could lose. A failed `fdatasync` returns
   `Undecided(Io(..))`.
@@ -835,7 +858,7 @@ floor.
   exactly the same engine, and it is the one fault path; the engine has no other fault
   seam.
 
-**Cost per commit group.** The log: one `write` and, at `HostCrash()`, one `fdatasync`,
+**Cost per commit group.** The log: one `write` and, at `host`, one `fdatasync`,
 plus the lock, unlock and length check, with no read. Object storage: two requests (the
 segment put and the head replace); the next group's segment put may be in flight while
 this group's head replace is pending, and head replaces are serialized. A claim costs a
@@ -850,12 +873,13 @@ and two that derive the same object write equal bytes. The history records the r
 contract revision in force beside every code hash it names. Their bytes are declared
 under **History format** below.
 
-**Levels.** A provider declares the levels of [STORE-2](#store-2-transactions) whose
-failures it survives, and documents how. A provider that acknowledges at a fast level and
-publishes to a stronger one later declares both, and each `D(L)` reports its own
-progress. There is no level every provider must offer
-([RUN-13](runners.md#run-13-provider-seams)). Opening a store resolves the floor as a
-wait resolves its level, and refuses with `NoLevel()` when no declared level covers it.
+**Levels.** A provider declares its own ordered levels ([STORE-2](#store-2-transactions)),
+names the failures each survives, and documents how. A provider that acknowledges at a
+fast level and publishes to a stronger one later declares both, and each `D(L)` reports
+its own progress. There is no level every provider must offer and no mapping between
+providers' levels ([RUN-13](runners.md#run-13-provider-seams)); a deployment that moves a
+place to another provider names that provider's levels in its grant and its callers'
+runners. The grant's floor is a name the provider declares, checked before entry.
 
 **Group commit.** Commits apply to the head's state at once, raising `V`, and queue. A
 queue is advanced as one group when an outcome awaits its durability or a group bound in
@@ -1244,7 +1268,7 @@ object)` that the named record is in another history format version, whose magic
 carries (an open, which refuses and removes nothing); `Size(needed, max_entry)` that a
 creation's limits need groups larger than the authority's largest entry; `Conditional()`
 that an object-storage endpoint does not honour create-if-absent and conditional
-replace. `NoLevel()` (no declared level covers the one asked for), `Foreign()` (a
+replace. `NoLevel()` (a level name the authority does not declare), `Foreign()` (a
 ticket of another store) and `InvalidInput()` are definite, have no effect and leave the
 store open.
 No outcome reports a conflict or an exhausted retry ([STORE-2](#store-2-transactions)).
@@ -1594,8 +1618,8 @@ defaults:
  "frame_bytes": 2097152, "stream_idle_ns": 2592000000000000}
 ```
 
-`level` names a level of the store's backend, `null` meaning the deployment floor; a level
-below the floor is refused. `resume_key` is a file of 16 bytes; replacing it makes every
+`level` names a level the store's authority declares, `null` meaning the deployment floor;
+a name it does not declare, or a level below the floor, is refused before the host serves. `resume_key` is a file of 16 bytes; replacing it makes every
 resume a reset. `frame_bytes` must exceed the store's `key_bytes` plus `value_bytes` plus
 64, so one row always fits a frame. A `Hello` past `sessions` or `sessions_per_principal`
 closes `Overloaded()`.

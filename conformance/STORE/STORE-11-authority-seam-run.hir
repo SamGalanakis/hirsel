@@ -1,0 +1,115 @@
+// rule: STORE-11
+// expect: run
+// authorities: {"main":{"provider":"authority.memory@1","floor":"memory"},"other":{"provider":"authority.sim@1","floor":"disk","seed":7,"represent":"log","levels":["cache","disk"],"faults":{}}}
+// stdout: absent: not granted
+// stdout: other levels: cache disk, floor disk
+// stdout: main declares no disk
+// stdout: claimed to 1
+// stdout: second claim to 2
+// stdout: first writer fenced
+// stdout: fenced claim stays fenced
+// stdout: advanced to 3
+// stdout: read 3, entry 3 kept
+// stdout: put twice: ok
+// stdout: other bytes: corrupt x
+// stdout: missing object: none
+// stdout: a level of other is not main's
+// stdout: a claim of main is not other's
+// The authority seam: a grant names each authority and the levels its provider declares;
+// a later claim fences the writer before it, whose claim stays dead; objects are created
+// once; and a level or claim of one authority never narrows to another.
+pub type Failed = Failed()
+
+fn say(stdout: Stdout, line: String) -> Result[(), Failed] {
+  match out.print(stdout, f"{line}\n") {
+    Ok(_) => Ok(()),
+    Error(_) => Error(Failed()),
+  }
+}
+
+pub fn main(rt: Io, args: Args) -> Result[(), Failed] {
+  let Ok(stdout) = io.stdout(rt) else {
+    return Error(Failed())
+  }
+  match io.authority(rt, "absent") {
+    Ok(_) => say(stdout, "absent: granted")?,
+    Error(NotGranted()) => say(stdout, "absent: not granted")?,
+  }
+  let Ok(a) = io.authority(rt, "main") else {
+    return Error(Failed())
+  }
+  let Ok(b) = io.authority(rt, "other") else {
+    return Error(Failed())
+  }
+  let mut names = ""
+  for l in authority.levels(b) {
+    names = f"{names} {l}"
+  }
+  say(stdout, f"other levels:{names}, floor {level.name(authority.floor(b))}")?
+  match authority.level(a, "disk") {
+    Some(_) => say(stdout, "main declares disk")?,
+    None() => say(stdout, "main declares no disk")?,
+  }
+  let floor = authority.floor(a)
+  let Ok(made_first) = authority.claim(a) else {
+    return Error(Failed())
+  }
+  let mut first = take made_first
+  say(stdout, f"claimed to {claim.end(first)}")?
+  let Ok(made_second) = authority.claim(a) else {
+    return Error(Failed())
+  }
+  let mut second = take made_second
+  say(stdout, f"second claim to {claim.end(second)}")?
+  match authority.advance(a, mut first, 1, b"stale", floor) {
+    Fenced() => say(stdout, "first writer fenced")?,
+    _ => say(stdout, "first writer advanced")?,
+  }
+  match authority.durable(a, mut first, floor) {
+    Error(Fenced()) => say(stdout, "fenced claim stays fenced")?,
+    _ => say(stdout, "fenced claim revived")?,
+  }
+  match authority.advance(a, mut second, 2, b"three", floor) {
+    Advanced(end) => say(stdout, f"advanced to {end}")?,
+    _ => say(stdout, "second writer refused")?,
+  }
+  let Ok(all) = authority.read(a, 0, floor, 10) else {
+    return Error(Failed())
+  }
+  let mut count: u64 = 0
+  let mut kept = false
+  for e in all {
+    count = count + 1
+    if count == 3 {
+      kept = e == b"three"
+    }
+  }
+  if kept {
+    say(stdout, f"read {count}, entry 3 kept")?
+  } else {
+    say(stdout, f"read {count}, entry 3 lost")?
+  }
+  let made = authority.put(a, "x", b"1")
+  let twice = authority.put(a, "x", b"1")
+  match (made, twice) {
+    (Ok(()), Ok(())) => say(stdout, "put twice: ok")?,
+    _ => say(stdout, "put twice: refused")?,
+  }
+  match authority.put(a, "x", b"2") {
+    Error(Corrupt(name)) => say(stdout, f"other bytes: corrupt {name}")?,
+    _ => say(stdout, "other bytes: accepted")?,
+  }
+  match authority.get(a, "y") {
+    Ok(None()) => say(stdout, "missing object: none")?,
+    _ => say(stdout, "missing object: found")?,
+  }
+  match level.narrow(a, authority.floor(b)) {
+    None() => say(stdout, "a level of other is not main's")?,
+    Some(_) => say(stdout, "a level of other narrowed to main")?,
+  }
+  match claim.narrow(b, take second) {
+    None() => say(stdout, "a claim of main is not other's")?,
+    Some(_) => say(stdout, "a claim of main narrowed to other")?,
+  }
+  Ok(())
+}

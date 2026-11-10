@@ -53,7 +53,9 @@ pub use net::{
     encode_net_peers, first_expecting_client, listener_name, net_client_mismatch,
     net_client_unaccepted, net_client_unmet,
 };
+mod authorities;
 mod child;
+pub use authorities::AuthorityGrant;
 mod signals;
 pub use signals::{SignalKind, SignalsGrant, signal_kinds};
 pub mod tls;
@@ -281,6 +283,10 @@ pub struct IoGrants {
     /// Finite scoped CPU service authority, subordinate to the Tasks grant.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cpu: Option<CpuGrant>,
+    /// The store authorities `io.authority` returns, by name; absent from canonical
+    /// bytes when there are none, so records without them keep their identity.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub authorities: std::collections::BTreeMap<String, AuthorityGrant>,
 }
 /// A scoped CPU service's bounds. Validation requires Tasks, a known provider,
 /// 1..=16 workers, one active domain, and positive byte limits.

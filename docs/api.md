@@ -4,9 +4,37 @@ Generated from manifest-selected public declarations. Do not edit by hand.
 Signatures retain modes, brands, attributes, relations and `uses` clauses.
 Opaque representations stay hidden; bodies are not checked or evaluated.
 
-2303 exported definitions; 1019 variants.
+2387 exported definitions; 1058 variants.
 
 ## Types and roots
+
+<a id="def-core_401_2fAdvanced"></a>
+
+- `type Advanced: plain + copyable + data + key + sendable + inert + noalloc_drop + serializable uses {} = Advanced(u64) | Fenced() | Refused(AuthorityError) | Undecided(AuthorityError)`
+
+<a id="def-core_401_2fAdvanced_23Advanced"></a>
+
+- `Advanced(u64) -> Advanced`
+
+Variant of Advanced.
+
+<a id="def-core_401_2fAdvanced_23Fenced"></a>
+
+- `Fenced() -> Advanced`
+
+Variant of Advanced.
+
+<a id="def-core_401_2fAdvanced_23Refused"></a>
+
+- `Refused(AuthorityError) -> Advanced`
+
+Variant of Advanced.
+
+<a id="def-core_401_2fAdvanced_23Undecided"></a>
+
+- `Undecided(AuthorityError) -> Advanced`
+
+Variant of Advanced.
 
 <a id="def-core_401_2fArena"></a>
 
@@ -43,6 +71,32 @@ Variant of ArgError.
 <a id="def-core_401_2fAtomicFile"></a>
 
 - `resource type AtomicFile: noalloc_drop uses {Dir} = { dir: Dir, tmp: Path, dst: Path }`
+
+<a id="def-core_401_2fAuthority"></a>
+
+- `@capability(global) opaque type Authority: plain + copyable + sendable + noalloc_drop uses {Authority}`
+
+<a id="def-core_401_2fAuthorityError"></a>
+
+- `type AuthorityError: plain + copyable + data + key + sendable + inert + noalloc_drop + serializable uses {} = Io(FileError) | Status(u16) | Unreachable()`
+
+<a id="def-core_401_2fAuthorityError_23Io"></a>
+
+- `Io(FileError) -> AuthorityError`
+
+Variant of AuthorityError.
+
+<a id="def-core_401_2fAuthorityError_23Status"></a>
+
+- `Status(u16) -> AuthorityError`
+
+Variant of AuthorityError.
+
+<a id="def-core_401_2fAuthorityError_23Unreachable"></a>
+
+- `Unreachable() -> AuthorityError`
+
+Variant of AuthorityError.
 
 <a id="def-core_401_2fBase64Alphabet"></a>
 
@@ -276,6 +330,10 @@ Variant of ChildStep.
 
 Variant of ChildStep.
 
+<a id="def-core_401_2fClaim"></a>
+
+- `opaque resource type Claim: noalloc_drop uses {Authority}`
+
 <a id="def-core_401_2fCliError"></a>
 
 - `type CliError: plain + copyable + data + key + sendable + inert + noalloc_drop + serializable uses {} = Usage(ArgError) | Files(FileError) | Output(OutputError)`
@@ -499,6 +557,10 @@ Variant of Durability.
 <a id="def-core_401_2fEntry"></a>
 
 - `opaque type Entry[F]: plain + copyable + inert + sendable + noalloc_drop uses {}`
+
+<a id="def-core_401_2fEntryId"></a>
+
+- `type EntryId: serializable uses {} = { path: String, fingerprint: Bytes, code: Bytes }`
 
 <a id="def-core_401_2fEnv"></a>
 
@@ -819,6 +881,10 @@ Variant of IpAddr.
 <a id="def-core_401_2fIter"></a>
 
 - `type Iter[T]`
+
+<a id="def-core_401_2fLevel"></a>
+
+- `opaque type Level: copyable + inert + noalloc_drop + plain + sendable uses {}`
 
 <a id="def-core_401_2fList"></a>
 
@@ -1499,6 +1565,40 @@ Variant of RunFrame.
 <a id="def-core_401_2fScope"></a>
 
 - `@capability(local) opaque type Scope: noalloc_drop uses {Scope}`
+
+<a id="def-core_401_2fSeamError"></a>
+
+- `type SeamError: copyable + data + inert + noalloc_drop + serializable uses {} = Storage(AuthorityError) | Refused(AuthorityError) | Corrupt(String) | Fenced() | Format(Bytes, String)`
+
+<a id="def-core_401_2fSeamError_23Corrupt"></a>
+
+- `Corrupt(String) -> SeamError`
+
+Variant of SeamError.
+
+<a id="def-core_401_2fSeamError_23Fenced"></a>
+
+- `Fenced() -> SeamError`
+
+Variant of SeamError.
+
+<a id="def-core_401_2fSeamError_23Format"></a>
+
+- `Format(Bytes, String) -> SeamError`
+
+Variant of SeamError.
+
+<a id="def-core_401_2fSeamError_23Refused"></a>
+
+- `Refused(AuthorityError) -> SeamError`
+
+Variant of SeamError.
+
+<a id="def-core_401_2fSeamError_23Storage"></a>
+
+- `Storage(AuthorityError) -> SeamError`
+
+Variant of SeamError.
 
 <a id="def-core_401_2fSender"></a>
 
@@ -2287,6 +2387,53 @@ References: [`core@1/Bytes`](#def-core_401_2fBytes), [`core@1/String`](#def-core
 <a id="def-core_401_2fatomic_2fstore"></a>
 
 - `@noalloc fn atomic.store[A](tasks: Tasks, a: Atomic[A], value: A) -> ()`
+
+
+## authority
+
+<a id="def-core_401_2fauthority_2fadvance"></a>
+
+- `fn authority.advance(a: Authority, mut c: Claim of a, from: u64, take entry: Bytes, at: Level of a) -> Advanced`
+
+<a id="def-core_401_2fauthority_2fclaim"></a>
+
+- `fn authority.claim(a: Authority) -> Result[Claim of a, SeamError]`
+
+<a id="def-core_401_2fauthority_2fdurable"></a>
+
+- `fn authority.durable(a: Authority, mut c: Claim of a, at: Level of a) -> Result[u64, SeamError]`
+
+<a id="def-core_401_2fauthority_2ffloor"></a>
+
+- `fn authority.floor(a: Authority) -> Level of a`
+
+<a id="def-core_401_2fauthority_2fget"></a>
+
+- `fn authority.get(a: Authority, name: String) -> Result[Option[Bytes], SeamError]`
+
+<a id="def-core_401_2fauthority_2flevel"></a>
+
+- `fn authority.level(a: Authority, name: String) -> Option[Level of a]`
+
+<a id="def-core_401_2fauthority_2flevels"></a>
+
+- `fn authority.levels(a: Authority) -> List[String]`
+
+<a id="def-core_401_2fauthority_2fmax_5fentry"></a>
+
+- `fn authority.max_entry(a: Authority) -> u64`
+
+<a id="def-core_401_2fauthority_2fput"></a>
+
+- `fn authority.put(a: Authority, name: String, take data: Bytes) -> Result[(), SeamError]`
+
+<a id="def-core_401_2fauthority_2fread"></a>
+
+- `fn authority.read(a: Authority, from: u64, at: Level of a, max: u64) -> Result[List[Bytes], SeamError]`
+
+<a id="def-core_401_2fauthority_2freclaim"></a>
+
+- `fn authority.reclaim(a: Authority, mut c: Claim of a) -> Result[(), SeamError]`
 
 
 ## base32
@@ -3802,6 +3949,17 @@ References: [`core@1/bool`](#def-core_401_2fbool), [`std@1/cidr/Prefix`](#def-st
 - `pub fn cidr.parse(text: String) -> Result[Prefix, PrefixError] uses {}`
 
 References: [`core@1/Result`](#def-core_401_2fResult), [`core@1/String`](#def-core_401_2fString), [`std@1/cidr/Prefix`](#def-std_401_2fcidr_2fPrefix), [`std@1/cidr/PrefixError`](#def-std_401_2fcidr_2fPrefixError)
+
+
+## claim
+
+<a id="def-core_401_2fclaim_2fend"></a>
+
+- `fn claim.end(c: Claim) -> u64`
+
+<a id="def-core_401_2fclaim_2fnarrow"></a>
+
+- `fn claim.narrow(a: Authority, take c: Claim) -> Option[Claim of a]`
 
 
 ## cli
@@ -6784,6 +6942,558 @@ References: [`core@1/Bytes`](#def-core_401_2fBytes), [`core@1/String`](#def-core
 References: [`core@1/Bytes`](#def-core_401_2fBytes), [`core@1/List`](#def-core_401_2fList), [`core@1/u8`](#def-core_401_2fu8)
 
 
+## history
+
+<a id="def-std_401_2fhistory_2fArrival"></a>
+
+- `pub type history.Arrival { identity: Bytes, position: u64, digest: Bytes, }`
+
+The call stream, position and request digest a transaction arrived with
+(STORE-12).
+
+References: [`core@1/Bytes`](#def-core_401_2fBytes), [`core@1/u64`](#def-core_401_2fu64)
+
+<a id="def-std_401_2fhistory_2fBody"></a>
+
+- `pub type history.Body = Transaction(Call) | Engine(Engine) | Run(run: Bytes, records: List[Record])`
+
+What a commit records besides its writes: kind 1, 2 or 3.
+
+References: [`core@1/Bytes`](#def-core_401_2fBytes), [`core@1/List`](#def-core_401_2fList), [`std@1/history/Call`](#def-std_401_2fhistory_2fCall), [`std@1/history/Engine`](#def-std_401_2fhistory_2fEngine), [`std@1/history/Record`](#def-std_401_2fhistory_2fRecord)
+
+<a id="def-std_401_2fhistory_2fBody_23Engine"></a>
+
+- `Engine(Engine) -> history.Body`
+
+Variant of history.Body.
+
+References: [`std@1/history/Engine`](#def-std_401_2fhistory_2fEngine)
+
+<a id="def-std_401_2fhistory_2fBody_23Run"></a>
+
+- `Run(run: Bytes, records: List[Record]) -> history.Body`
+
+Variant of history.Body.
+
+References: [`core@1/Bytes`](#def-core_401_2fBytes), [`core@1/List`](#def-core_401_2fList), [`std@1/history/Record`](#def-std_401_2fhistory_2fRecord)
+
+<a id="def-std_401_2fhistory_2fBody_23Transaction"></a>
+
+- `Transaction(Call) -> history.Body`
+
+Variant of history.Body.
+
+References: [`std@1/history/Call`](#def-std_401_2fhistory_2fCall)
+
+<a id="def-std_401_2fhistory_2fBounds"></a>
+
+- `pub type history.Bounds { node_min: u32, node_mean: u32, node_max: u32, }`
+
+The checkpoint node bounds a store records in its genesis.
+
+References: [`core@1/u32`](#def-core_401_2fu32)
+
+<a id="def-std_401_2fhistory_2fCall"></a>
+
+- `pub type history.Call { def: u32, at: i64, seed: u64, caller: Bytes, arrival: Option[Arrival], args: Bytes, outcome: Bytes, }`
+
+A transaction's call record (STORE-2, STORE-4): its entry, call
+information, arrival, argument bytes and canonical outcome bytes.
+
+References: [`core@1/Bytes`](#def-core_401_2fBytes), [`core@1/Option`](#def-core_401_2fOption), [`core@1/i64`](#def-core_401_2fi64), [`core@1/u32`](#def-core_401_2fu32), [`core@1/u64`](#def-core_401_2fu64), [`std@1/history/Arrival`](#def-std_401_2fhistory_2fArrival)
+
+<a id="def-std_401_2fhistory_2fChild"></a>
+
+- `pub type history.Child { first: Bytes, digest: Bytes, entries: u64, }`
+
+References: [`core@1/Bytes`](#def-core_401_2fBytes), [`core@1/u64`](#def-core_401_2fu64)
+
+<a id="def-std_401_2fhistory_2fCommit"></a>
+
+- `pub type history.Commit { body: Body, writes: List[Write], }`
+
+References: [`core@1/List`](#def-core_401_2fList), [`std@1/history/Body`](#def-std_401_2fhistory_2fBody), [`std@1/history/Write`](#def-std_401_2fhistory_2fWrite)
+
+<a id="def-std_401_2fhistory_2fDef"></a>
+
+- `pub type history.Def { path: Bytes, fingerprint: Bytes, code: Bytes, revision: Bytes, }`
+
+An entry a group's commits ran: definition path, signature fingerprint,
+code hash and runtime contract revision (RUN-3, RUN-8). Commits refer to it by index.
+
+References: [`core@1/Bytes`](#def-core_401_2fBytes)
+
+<a id="def-std_401_2fhistory_2fDescriptor"></a>
+
+- `pub type history.Descriptor { version: u64, digest: Bytes, root: Bytes, height: u8, entries: u64, bytes: u64, }`
+
+A checkpoint descriptor: the checkpoint's version (a group's last), that
+group's digest, the root node, the number of tree levels, and the state's
+entry count and key and value bytes.
+
+References: [`core@1/Bytes`](#def-core_401_2fBytes), [`core@1/u64`](#def-core_401_2fu64), [`core@1/u8`](#def-core_401_2fu8)
+
+<a id="def-std_401_2fhistory_2fEngine"></a>
+
+- `pub type history.Engine = Genesis( key_bytes: u32, value_bytes: u32, transaction_bytes: u32, range_rows: u32, bounds: Bounds ) | Claim(epoch: u64, attempt: Bytes, identity: Bytes) | Checkpoint(Descriptor) | Retain( floor: u64, pins: List[Pin], checkpoints: List[Descriptor] ) | Fork(identity: Bytes, origin: Bytes, at: u64) | StreamFence(Bytes) | StreamPurge( Bytes ) | Library(name: Bytes, payload: Bytes)`
+
+A commit the engine makes on its own behalf.
+
+References: [`core@1/Bytes`](#def-core_401_2fBytes), [`core@1/List`](#def-core_401_2fList), [`core@1/u32`](#def-core_401_2fu32), [`core@1/u64`](#def-core_401_2fu64), [`std@1/history/Bounds`](#def-std_401_2fhistory_2fBounds), [`std@1/history/Descriptor`](#def-std_401_2fhistory_2fDescriptor), [`std@1/history/Pin`](#def-std_401_2fhistory_2fPin)
+
+<a id="def-std_401_2fhistory_2fEngine_23Checkpoint"></a>
+
+- `Checkpoint(Descriptor) -> history.Engine`
+
+Variant of history.Engine.
+
+References: [`std@1/history/Descriptor`](#def-std_401_2fhistory_2fDescriptor)
+
+<a id="def-std_401_2fhistory_2fEngine_23Claim"></a>
+
+- `Claim(epoch: u64, attempt: Bytes, identity: Bytes) -> history.Engine`
+
+Variant of history.Engine.
+
+References: [`core@1/Bytes`](#def-core_401_2fBytes), [`core@1/u64`](#def-core_401_2fu64)
+
+<a id="def-std_401_2fhistory_2fEngine_23Fork"></a>
+
+- `Fork(identity: Bytes, origin: Bytes, at: u64) -> history.Engine`
+
+Variant of history.Engine.
+
+References: [`core@1/Bytes`](#def-core_401_2fBytes), [`core@1/u64`](#def-core_401_2fu64)
+
+<a id="def-std_401_2fhistory_2fEngine_23Genesis"></a>
+
+- `Genesis( key_bytes: u32, value_bytes: u32, transaction_bytes: u32, range_rows: u32, bounds: Bounds ) -> history.Engine`
+
+Variant of history.Engine.
+
+References: [`core@1/u32`](#def-core_401_2fu32), [`std@1/history/Bounds`](#def-std_401_2fhistory_2fBounds)
+
+<a id="def-std_401_2fhistory_2fEngine_23Library"></a>
+
+- `Library(name: Bytes, payload: Bytes) -> history.Engine`
+
+Variant of history.Engine.
+
+References: [`core@1/Bytes`](#def-core_401_2fBytes)
+
+<a id="def-std_401_2fhistory_2fEngine_23Retain"></a>
+
+- `Retain( floor: u64, pins: List[Pin], checkpoints: List[Descriptor] ) -> history.Engine`
+
+Variant of history.Engine.
+
+References: [`core@1/List`](#def-core_401_2fList), [`core@1/u64`](#def-core_401_2fu64), [`std@1/history/Descriptor`](#def-std_401_2fhistory_2fDescriptor), [`std@1/history/Pin`](#def-std_401_2fhistory_2fPin)
+
+<a id="def-std_401_2fhistory_2fEngine_23StreamFence"></a>
+
+- `StreamFence(Bytes) -> history.Engine`
+
+Variant of history.Engine.
+
+References: [`core@1/Bytes`](#def-core_401_2fBytes)
+
+<a id="def-std_401_2fhistory_2fEngine_23StreamPurge"></a>
+
+- `StreamPurge( Bytes ) -> history.Engine`
+
+Variant of history.Engine.
+
+References: [`core@1/Bytes`](#def-core_401_2fBytes)
+
+<a id="def-std_401_2fhistory_2fExpect"></a>
+
+- `pub type history.Expect { digest: Bytes, level: u8, first: Option[Bytes], below: Option[Bytes], entries: u64, }`
+
+A node a checkpoint reader still has to check: the digest that names it,
+its level, the first key it must start with (none for the root), the key
+every entry must stay below (none for the last), and its entry count.
+
+References: [`core@1/Bytes`](#def-core_401_2fBytes), [`core@1/Option`](#def-core_401_2fOption), [`core@1/u64`](#def-core_401_2fu64), [`core@1/u8`](#def-core_401_2fu8)
+
+<a id="def-std_401_2fhistory_2fFault"></a>
+
+- `pub type history.Fault = Corrupt() | Unsupported(found: Bytes)`
+
+Why a record was refused. `Unsupported(found)` is a record of another
+format version: its magic is the record's family with other version
+digits, carried as found. Anything else that fails a check is
+`Corrupt()`. Either refuses the open; neither removes or cuts anything.
+
+References: [`core@1/Bytes`](#def-core_401_2fBytes)
+
+<a id="def-std_401_2fhistory_2fFault_23Corrupt"></a>
+
+- `Corrupt() -> history.Fault`
+
+Variant of history.Fault.
+
+<a id="def-std_401_2fhistory_2fFault_23Unsupported"></a>
+
+- `Unsupported(found: Bytes) -> history.Fault`
+
+Variant of history.Fault.
+
+References: [`core@1/Bytes`](#def-core_401_2fBytes)
+
+<a id="def-std_401_2fhistory_2fGROUP_5fHEADER"></a>
+
+- `pub const history.GROUP_HEADER: u64`
+
+The bytes of a group before its first commit: magic, prev, first, epoch
+and count.
+
+References: [`core@1/u64`](#def-core_401_2fu64)
+
+<a id="def-std_401_2fhistory_2fGroup"></a>
+
+- `pub type history.Group { prev: Bytes, first: u64, epoch: u64, commits: List[Commit], defs: List[Def], }`
+
+The commits of one advance. `first` is the version of its first commit.
+
+References: [`core@1/Bytes`](#def-core_401_2fBytes), [`core@1/List`](#def-core_401_2fList), [`core@1/u64`](#def-core_401_2fu64), [`std@1/history/Commit`](#def-std_401_2fhistory_2fCommit), [`std@1/history/Def`](#def-std_401_2fhistory_2fDef)
+
+<a id="def-std_401_2fhistory_2fGroupWriter"></a>
+
+- `pub opaque type history.GroupWriter: () uses {}`
+
+An encoder of one group into one buffer: the header, then each commit as
+it is added, then the definition table; the count is patched at the end,
+so every commit's bytes are copied once.
+
+<a id="def-std_401_2fhistory_2fHead"></a>
+
+- `pub type history.Head { identity: Bytes, epoch: u64, attempt: Bytes, end: u64, digest: Bytes, checkpoint: Option[Descriptor], locator: Bytes, retain: Bytes, origin: Option[(Bytes, u64)], }`
+
+The mutable record naming the history's end on one backend.
+
+References: [`core@1/Bytes`](#def-core_401_2fBytes), [`core@1/Option`](#def-core_401_2fOption), [`core@1/u64`](#def-core_401_2fu64), [`std@1/history/Descriptor`](#def-std_401_2fhistory_2fDescriptor)
+
+<a id="def-std_401_2fhistory_2fNODE_5fHEADER"></a>
+
+- `pub const history.NODE_HEADER: u64`
+
+The bytes of a node before its first entry: magic, level and count.
+
+References: [`core@1/u64`](#def-core_401_2fu64)
+
+<a id="def-std_401_2fhistory_2fNode"></a>
+
+- `pub type history.Node = Leaf(List[(Bytes, Bytes)]) | Index(level: u8, children: List[Child])`
+
+One checkpoint node: a leaf of entries, or an index of children with
+each child's first key, digest and leaf entry count.
+
+References: [`core@1/Bytes`](#def-core_401_2fBytes), [`core@1/List`](#def-core_401_2fList), [`core@1/u8`](#def-core_401_2fu8), [`std@1/history/Child`](#def-std_401_2fhistory_2fChild)
+
+<a id="def-std_401_2fhistory_2fNode_23Index"></a>
+
+- `Index(level: u8, children: List[Child]) -> history.Node`
+
+Variant of history.Node.
+
+References: [`core@1/List`](#def-core_401_2fList), [`core@1/u8`](#def-core_401_2fu8), [`std@1/history/Child`](#def-std_401_2fhistory_2fChild)
+
+<a id="def-std_401_2fhistory_2fNode_23Leaf"></a>
+
+- `Leaf(List[(Bytes, Bytes)]) -> history.Node`
+
+Variant of history.Node.
+
+References: [`core@1/Bytes`](#def-core_401_2fBytes), [`core@1/List`](#def-core_401_2fList)
+
+<a id="def-std_401_2fhistory_2fPin"></a>
+
+- `pub type history.Pin { name: Bytes, version: u64, }`
+
+A named pin of a retained version (STORE-8).
+
+References: [`core@1/Bytes`](#def-core_401_2fBytes), [`core@1/u64`](#def-core_401_2fu64)
+
+<a id="def-std_401_2fhistory_2fRecord"></a>
+
+- `pub type history.Record { kind: u8, payload: Bytes, }`
+
+One journal record of a run at the place (STORE-18).
+
+References: [`core@1/Bytes`](#def-core_401_2fBytes), [`core@1/u8`](#def-core_401_2fu8)
+
+<a id="def-std_401_2fhistory_2fStep"></a>
+
+- `pub type history.Step = Next(List[Expect]) | Leaves(List[(Bytes, Bytes)])`
+
+What one checked level of a checkpoint yields: the nodes of the level
+below to read next, or, at the leaves, the state's entries.
+
+References: [`core@1/Bytes`](#def-core_401_2fBytes), [`core@1/List`](#def-core_401_2fList), [`std@1/history/Expect`](#def-std_401_2fhistory_2fExpect)
+
+<a id="def-std_401_2fhistory_2fStep_23Leaves"></a>
+
+- `Leaves(List[(Bytes, Bytes)]) -> history.Step`
+
+Variant of history.Step.
+
+References: [`core@1/Bytes`](#def-core_401_2fBytes), [`core@1/List`](#def-core_401_2fList)
+
+<a id="def-std_401_2fhistory_2fStep_23Next"></a>
+
+- `Next(List[Expect]) -> history.Step`
+
+Variant of history.Step.
+
+References: [`core@1/List`](#def-core_401_2fList), [`std@1/history/Expect`](#def-std_401_2fhistory_2fExpect)
+
+<a id="def-std_401_2fhistory_2fTip"></a>
+
+- `pub type history.Tip { digest: Bytes, last: u64, epoch: u64, identity: Bytes, }`
+
+What a reader trusts after the groups it has checked: the last group's
+digest and version, the writer epoch, and the store identity.
+
+References: [`core@1/Bytes`](#def-core_401_2fBytes), [`core@1/u64`](#def-core_401_2fu64)
+
+<a id="def-std_401_2fhistory_2fTree"></a>
+
+- `pub type history.Tree { nodes: List[(Bytes, Bytes)], root: Bytes, height: u8, entries: u64, bytes: u64, }`
+
+A finished checkpoint: its nodes (digest and bytes, children before
+parents), root, height, entry count and key and value bytes.
+
+References: [`core@1/Bytes`](#def-core_401_2fBytes), [`core@1/List`](#def-core_401_2fList), [`core@1/u64`](#def-core_401_2fu64), [`core@1/u8`](#def-core_401_2fu8)
+
+<a id="def-std_401_2fhistory_2fTreeBuilder"></a>
+
+- `pub opaque type history.TreeBuilder: () uses {}`
+
+A checkpoint under construction: add the state's entries in ascending
+key order, then `finish_tree`.
+
+<a id="def-std_401_2fhistory_2fWrite"></a>
+
+- `pub type history.Write = Put(key: Bytes, value: Bytes) | Delete(key: Bytes)`
+
+One write of a commit: a put (op 1) or a delete (op 2).
+
+References: [`core@1/Bytes`](#def-core_401_2fBytes)
+
+<a id="def-std_401_2fhistory_2fWrite_23Delete"></a>
+
+- `Delete(key: Bytes) -> history.Write`
+
+Variant of history.Write.
+
+References: [`core@1/Bytes`](#def-core_401_2fBytes)
+
+<a id="def-std_401_2fhistory_2fWrite_23Put"></a>
+
+- `Put(key: Bytes, value: Bytes) -> history.Write`
+
+Variant of history.Write.
+
+References: [`core@1/Bytes`](#def-core_401_2fBytes)
+
+<a id="def-std_401_2fhistory_2fadd_5fcommit"></a>
+
+- `pub fn history.add_commit(mut w: GroupWriter, c: Commit) -> () uses {}`
+
+Appends one commit. Writes must strictly ascend by key.
+
+References: [`std@1/history/Commit`](#def-std_401_2fhistory_2fCommit), [`std@1/history/GroupWriter`](#def-std_401_2fhistory_2fGroupWriter)
+
+<a id="def-std_401_2fhistory_2fadd_5fentry"></a>
+
+- `pub fn history.add_entry(mut t: TreeBuilder, key: Bytes, value: Bytes) -> () uses {}`
+
+Adds the next entry of the state, whose key is above every earlier one.
+
+References: [`core@1/Bytes`](#def-core_401_2fBytes), [`std@1/history/TreeBuilder`](#def-std_401_2fhistory_2fTreeBuilder)
+
+<a id="def-std_401_2fhistory_2fbounds_5ffit"></a>
+
+- `pub fn history.bounds_fit(key_bytes: u32, value_bytes: u32, b: Bounds) -> bool uses {}`
+
+Whether node bounds can hold every entry the limits admit, and let index
+levels shrink: `node_min <= node_mean <= node_max`, a positive mean, the
+largest leaf entry fits a node, and two of the largest index entries do.
+
+References: [`core@1/bool`](#def-core_401_2fbool), [`core@1/u32`](#def-core_401_2fu32), [`std@1/history/Bounds`](#def-std_401_2fhistory_2fBounds)
+
+<a id="def-std_401_2fhistory_2fbuild_5ftree"></a>
+
+- `pub fn history.build_tree(entries: List[(Bytes, Bytes)], b: Bounds) -> Tree uses {}`
+
+Builds the checkpoint of `entries`, ascending by key.
+
+References: [`core@1/Bytes`](#def-core_401_2fBytes), [`core@1/List`](#def-core_401_2fList), [`std@1/history/Bounds`](#def-std_401_2fhistory_2fBounds), [`std@1/history/Tree`](#def-std_401_2fhistory_2fTree)
+
+<a id="def-std_401_2fhistory_2fcheck_5flevel"></a>
+
+- `pub fn history.check_level(expects: List[Expect], blobs: List[Bytes]) -> Result[Step, Fault] uses {}`
+
+Checks one level of a checkpoint: `blobs[i]` holds the bytes read for
+`expects[i]`, all of one level, in key order. Each node must have the
+digest, level, first key, key bound and entry count its parent named,
+strictly ascending keys and nothing after its last entry.
+
+References: [`core@1/Bytes`](#def-core_401_2fBytes), [`core@1/List`](#def-core_401_2fList), [`core@1/Result`](#def-core_401_2fResult), [`std@1/history/Expect`](#def-std_401_2fhistory_2fExpect), [`std@1/history/Fault`](#def-std_401_2fhistory_2fFault), [`std@1/history/Step`](#def-std_401_2fhistory_2fStep)
+
+<a id="def-std_401_2fhistory_2fclaim_5fgroup"></a>
+
+- `pub fn history.claim_group(tip: Tip, attempt: Bytes, identity: Bytes) -> (Bytes, Bytes) uses {}`
+
+A claim group: the one commit a provider appends to claim the history,
+after the group whose digest and last version `tip` names. The claim's
+epoch is one above the tip's; the first claim mints `identity`.
+
+References: [`core@1/Bytes`](#def-core_401_2fBytes), [`std@1/history/Tip`](#def-std_401_2fhistory_2fTip)
+
+<a id="def-std_401_2fhistory_2fdecode_5fgroup"></a>
+
+- `pub fn history.decode_group(data: Bytes, expected: Bytes) -> Result[Group, Fault] uses {}`
+
+Decodes the group `data` named by `expected`, checking the digest, every
+field, the format's rules inside one group and that nothing follows it.
+Chain rules across groups are `follow`'s.
+
+References: [`core@1/Bytes`](#def-core_401_2fBytes), [`core@1/Result`](#def-core_401_2fResult), [`std@1/history/Fault`](#def-std_401_2fhistory_2fFault), [`std@1/history/Group`](#def-std_401_2fhistory_2fGroup)
+
+<a id="def-std_401_2fhistory_2fdecode_5fhead"></a>
+
+- `pub fn history.decode_head(data: Bytes) -> Result[Head, Fault] uses {}`
+
+Decodes a head record, refusing a wrong magic, sum or field, or any byte
+after the sum.
+
+References: [`core@1/Bytes`](#def-core_401_2fBytes), [`core@1/Result`](#def-core_401_2fResult), [`std@1/history/Fault`](#def-std_401_2fhistory_2fFault), [`std@1/history/Head`](#def-std_401_2fhistory_2fHead)
+
+<a id="def-std_401_2fhistory_2fdefault_5fbounds"></a>
+
+- `pub fn history.default_bounds() -> Bounds uses {}`
+
+The default checkpoint node bounds: 256 KiB, 1 MiB and 4 MiB.
+
+References: [`std@1/history/Bounds`](#def-std_401_2fhistory_2fBounds)
+
+<a id="def-std_401_2fhistory_2fdescriptor"></a>
+
+- `pub fn history.descriptor(tree: Tree, version: u64, d: Bytes) -> Descriptor uses {}`
+
+The descriptor of `tree` as the checkpoint of the group whose last
+version is `version` and whose digest is `d`.
+
+References: [`core@1/Bytes`](#def-core_401_2fBytes), [`core@1/u64`](#def-core_401_2fu64), [`std@1/history/Descriptor`](#def-std_401_2fhistory_2fDescriptor), [`std@1/history/Tree`](#def-std_401_2fhistory_2fTree)
+
+<a id="def-std_401_2fhistory_2fdigest"></a>
+
+- `pub fn history.digest(data: Bytes) -> unique Bytes uses {}`
+
+The SHA-256 of `data`, as 32 bytes.
+
+References: [`core@1/Bytes`](#def-core_401_2fBytes)
+
+<a id="def-std_401_2fhistory_2fencode_5fgroup"></a>
+
+- `pub fn history.encode_group(g: Group) -> (Bytes, Bytes) uses {}`
+
+A group's bytes and digest.
+
+References: [`core@1/Bytes`](#def-core_401_2fBytes), [`std@1/history/Group`](#def-std_401_2fhistory_2fGroup)
+
+<a id="def-std_401_2fhistory_2fencode_5fhead"></a>
+
+- `pub fn history.encode_head(h: Head) -> Bytes uses {}`
+
+The head record's bytes, ending with the SHA-256 of everything before it.
+
+References: [`core@1/Bytes`](#def-core_401_2fBytes), [`std@1/history/Head`](#def-std_401_2fhistory_2fHead)
+
+<a id="def-std_401_2fhistory_2ffinish_5fgroup"></a>
+
+- `pub fn history.finish_group(take w: GroupWriter, defs: List[Def]) -> (Bytes, Bytes) uses {}`
+
+Appends the definition table and returns the group's bytes and digest.
+
+References: [`core@1/Bytes`](#def-core_401_2fBytes), [`core@1/List`](#def-core_401_2fList), [`std@1/history/Def`](#def-std_401_2fhistory_2fDef), [`std@1/history/GroupWriter`](#def-std_401_2fhistory_2fGroupWriter)
+
+<a id="def-std_401_2fhistory_2ffinish_5ftree"></a>
+
+- `pub fn history.finish_tree(take t: TreeBuilder) -> Tree uses {}`
+
+Finishes the tree: each level's pending node is closed, lowest first,
+until a level has closed exactly one node, the root. An empty state is
+one empty leaf.
+
+References: [`std@1/history/Tree`](#def-std_401_2fhistory_2fTree), [`std@1/history/TreeBuilder`](#def-std_401_2fhistory_2fTreeBuilder)
+
+<a id="def-std_401_2fhistory_2ffollow"></a>
+
+- `pub fn history.follow(tip: Tip, g: Group, d: Bytes) -> Result[Tip, ()] uses {}`
+
+Checks that `g`, whose digest is `d`, follows `tip`, and returns the tip
+after it: `prev` is the tip's digest, `first` is one above its last
+version, a claim group raises the epoch by one, every other group keeps
+it, nothing precedes the first claim, and every claim names the store
+identity, which the first claim and a fork set.
+
+References: [`core@1/Bytes`](#def-core_401_2fBytes), [`core@1/Result`](#def-core_401_2fResult), [`std@1/history/Group`](#def-std_401_2fhistory_2fGroup), [`std@1/history/Tip`](#def-std_401_2fhistory_2fTip)
+
+<a id="def-std_401_2fhistory_2fgroup_5fwriter"></a>
+
+- `pub fn history.group_writer(prev: Bytes, first: u64, epoch: u64) -> GroupWriter uses {}`
+
+References: [`core@1/Bytes`](#def-core_401_2fBytes), [`core@1/u64`](#def-core_401_2fu64), [`std@1/history/GroupWriter`](#def-std_401_2fhistory_2fGroupWriter)
+
+<a id="def-std_401_2fhistory_2forigin_5ftip"></a>
+
+- `pub fn history.origin_tip() -> Tip uses {}`
+
+The reader's state before a history's first group.
+
+References: [`std@1/history/Tip`](#def-std_401_2fhistory_2fTip)
+
+<a id="def-std_401_2fhistory_2froot_5fexpect"></a>
+
+- `pub fn history.root_expect(d: Descriptor) -> Expect uses {}`
+
+The root a checkpoint reader starts from.
+
+References: [`std@1/history/Descriptor`](#def-std_401_2fhistory_2fDescriptor), [`std@1/history/Expect`](#def-std_401_2fhistory_2fExpect)
+
+<a id="def-std_401_2fhistory_2ftree_5fbuilder"></a>
+
+- `pub fn history.tree_builder(b: Bounds) -> TreeBuilder uses {}`
+
+References: [`std@1/history/Bounds`](#def-std_401_2fhistory_2fBounds), [`std@1/history/TreeBuilder`](#def-std_401_2fhistory_2fTreeBuilder)
+
+<a id="def-std_401_2fhistory_2fwriter_5fbytes"></a>
+
+- `pub fn history.writer_bytes(w: GroupWriter) -> u64 uses {}`
+
+The encoded bytes so far, without the definition table.
+
+References: [`core@1/u64`](#def-core_401_2fu64), [`std@1/history/GroupWriter`](#def-std_401_2fhistory_2fGroupWriter)
+
+<a id="def-std_401_2fhistory_2fwriter_5fcount"></a>
+
+- `pub fn history.writer_count(w: GroupWriter) -> u32 uses {}`
+
+The commits added so far.
+
+References: [`core@1/u32`](#def-core_401_2fu32), [`std@1/history/GroupWriter`](#def-std_401_2fhistory_2fGroupWriter)
+
+<a id="def-std_401_2fhistory_2fzero_5fdigest"></a>
+
+- `pub fn history.zero_digest() -> Bytes uses {}`
+
+Thirty-two zero bytes: the `prev` of a history's first group.
+
+References: [`core@1/Bytes`](#def-core_401_2fBytes)
+
+
 ## hkdf
 
 <a id="def-std_401_2fhkdf_2fderive"></a>
@@ -9292,6 +10002,10 @@ References: [`core@1/Option`](#def-core_401_2fOption), [`core@1/Result`](#def-co
 
 ## io
 
+<a id="def-core_401_2fio_2fauthority"></a>
+
+- `@noalloc fn io.authority(rt: Io, name: String) -> Result[Authority, GrantError]`
+
 <a id="def-core_401_2fio_2fdir"></a>
 
 - `fn io.dir(rt: Io, p: Path) -> Result[Dir, FileError]`
@@ -10622,6 +11336,17 @@ References: [`core@1/List`](#def-core_401_2fList), [`core@1/u8`](#def-core_401_2
 - `pub fn keys.prefix_end(prefix: Bytes) -> Option[unique Bytes] uses {}`
 
 References: [`core@1/Bytes`](#def-core_401_2fBytes), [`core@1/Option`](#def-core_401_2fOption)
+
+
+## level
+
+<a id="def-core_401_2flevel_2fname"></a>
+
+- `fn level.name(l: Level) -> String`
+
+<a id="def-core_401_2flevel_2fnarrow"></a>
+
+- `fn level.narrow(a: Authority, l: Level) -> Option[Level of a]`
 
 
 ## line_scan
@@ -13470,6 +14195,14 @@ References: [`core@1/Result`](#def-core_401_2fResult)
 
 ## runner
 
+<a id="def-core_401_2frunner_2fapply"></a>
+
+- `fn runner.apply[C, I, A: serializable, R: serializable, E: serializable](f: Entry[fn(c: C, call: I, a: A) -> Result[R, E]], c: C, call: I, a: A) -> Result[Result[R, E], Failure]`
+
+<a id="def-core_401_2frunner_2fapply_5fmut"></a>
+
+- `fn runner.apply_mut[C, I, A: serializable, R: serializable, E: serializable](f: Entry[fn(mut c: C, call: I, a: A) -> Result[R, E]], mut c: C, call: I, a: A) -> Result[Result[R, E], Failure]`
+
 <a id="def-core_401_2frunner_2fcall"></a>
 
 - `fn runner.call[A: serializable, R: serializable, E: serializable](r: Runner, f: Entry[fn(rt: Io, a: A) -> Result[R, E]], a: A) -> unique Result[R, RunError[E]]`
@@ -13478,9 +14211,9 @@ References: [`core@1/Result`](#def-core_401_2fResult)
 
 - `fn runner.compute[A: serializable, R: serializable, E: serializable](r: Runner, f: Entry[fn(a: A) -> Result[R, E]], a: A) -> unique Result[R, RunError[E]]`
 
-<a id="def-core_401_2frunner_2fentry_5fpath"></a>
+<a id="def-core_401_2frunner_2fentry_5fid"></a>
 
-- `fn runner.entry_path[F](f: Entry[F]) -> String`
+- `fn runner.entry_id[F](f: Entry[F]) -> EntryId`
 
 <a id="def-core_401_2frunner_2fgrants"></a>
 
@@ -15650,6 +16383,36 @@ References: [`core@1/String`](#def-core_401_2fString), [`std@1/sse/Parser`](#def
 
 ## store
 
+<a id="def-std_401_2fstore_2fAccess"></a>
+
+- `@serializable pub type store.Access = Read | ReadWrite`
+
+What a key scope lets a `Tx` do with a key.
+
+<a id="def-std_401_2fstore_2fAccess_23Read"></a>
+
+- `Read -> store.Access`
+
+Variant of store.Access.
+
+<a id="def-std_401_2fstore_2fAccess_23ReadWrite"></a>
+
+- `ReadWrite -> store.Access`
+
+Variant of store.Access.
+
+<a id="def-std_401_2fstore_2fAccessSet"></a>
+
+- `pub type store.AccessSet { points: List[Bytes], spans: List[Span], }`
+
+What one run of a body read (STORE-14), over byte keys. `points` holds
+every key it read, whether or not the key held a value, in the order read
+and possibly repeated; `spans` every interval a scan consumed. The run's
+writes are its write set. A commit that writes no key in it cannot change
+the run's outcome.
+
+References: [`core@1/Bytes`](#def-core_401_2fBytes), [`core@1/List`](#def-core_401_2fList), [`std@1/store/Span`](#def-std_401_2fstore_2fSpan)
+
 <a id="def-std_401_2fstore_2fBackend"></a>
 
 - `pub type store.Backend[S] { read: fn(mut state: S, String) -> Result[Bytes, FileError] uses {state}, put_new: fn(mut state: S, String, Bytes, Durability) -> Result[(), PutError] uses {state}, list: fn(mut state: S, String) -> Result[List[String], FileError] uses {state}, remove: fn(mut state: S, String) -> Result[(), FileError] uses {state}, mkdir: fn(mut state: S, String) -> Result[(), FileError] uses {state}, max_object_bytes: fn(mut state: S) -> u64 uses {state}, }`
@@ -15712,8 +16475,7 @@ References: [`core@1/Bytes`](#def-core_401_2fBytes), [`core@1/u64`](#def-core_40
 How a transaction's commit detects conflicts, after SlateDB's
 IsolationLevel (transaction_manager.rs:13). `SnapshotIsolation` conflicts
 with a later commit that wrote a key it writes or marked read;
-`SerializableSnapshot` also with one that wrote a key it read with
-`txn.get` or inside a range it read with `txn.range`.
+`SerializableSnapshot` also with one that wrote a key in its access set.
 
 <a id="def-std_401_2fstore_2fIsolation_23SerializableSnapshot"></a>
 
@@ -15726,6 +16488,15 @@ Variant of store.Isolation.
 - `SnapshotIsolation -> store.Isolation`
 
 Variant of store.Isolation.
+
+<a id="def-std_401_2fstore_2fKeyScope"></a>
+
+- `pub opaque type store.KeyScope: copyable + data + inert uses {}`
+
+A set of byte keys, each with an `Access`. Data without authority: it
+grants nothing until a `Tx` is narrowed to it. Its spans are sorted,
+disjoint and nonempty, with adjacent spans of equal access merged, so two
+scopes holding the same keys with the same accesses are equal.
 
 <a id="def-std_401_2fstore_2fPutError"></a>
 
@@ -15763,11 +16534,92 @@ Variant of store.PutError.
 
 References: [`core@1/FileError`](#def-core_401_2fFileError)
 
+<a id="def-std_401_2fstore_2fRangeBound"></a>
+
+- `pub type store.RangeBound[K] = Unbounded | Included(K) | Excluded(K)`
+
+One end of a key range: no limit, the key itself included, or excluded.
+
+<a id="def-std_401_2fstore_2fRangeBound_23Excluded"></a>
+
+- `Excluded(K) -> store.RangeBound[K]`
+
+Variant of store.RangeBound.
+
+<a id="def-std_401_2fstore_2fRangeBound_23Included"></a>
+
+- `Included(K) -> store.RangeBound[K]`
+
+Variant of store.RangeBound.
+
+<a id="def-std_401_2fstore_2fRangeBound_23Unbounded"></a>
+
+- `Unbounded -> store.RangeBound[K]`
+
+Variant of store.RangeBound.
+
+<a id="def-std_401_2fstore_2fScanOrder"></a>
+
+- `pub type store.ScanOrder = Ascending | Descending`
+
+The order a range is returned in.
+
+<a id="def-std_401_2fstore_2fScanOrder_23Ascending"></a>
+
+- `Ascending -> store.ScanOrder`
+
+Variant of store.ScanOrder.
+
+<a id="def-std_401_2fstore_2fScanOrder_23Descending"></a>
+
+- `Descending -> store.ScanOrder`
+
+Variant of store.ScanOrder.
+
+<a id="def-std_401_2fstore_2fSchemaError"></a>
+
+- `@serializable pub type store.SchemaError = KeyMismatch | ValueMismatch | Renamed(String, String)`
+
+Why a table's stored schema refuses the operation's key or value type.
+
+References: [`core@1/String`](#def-core_401_2fString)
+
+<a id="def-std_401_2fstore_2fSchemaError_23KeyMismatch"></a>
+
+- `KeyMismatch -> store.SchemaError`
+
+Variant of store.SchemaError.
+
+<a id="def-std_401_2fstore_2fSchemaError_23Renamed"></a>
+
+- `Renamed(String, String) -> store.SchemaError`
+
+Variant of store.SchemaError.
+
+References: [`core@1/String`](#def-core_401_2fString)
+
+<a id="def-std_401_2fstore_2fSchemaError_23ValueMismatch"></a>
+
+- `ValueMismatch -> store.SchemaError`
+
+Variant of store.SchemaError.
+
 <a id="def-std_401_2fstore_2fSnapshot"></a>
 
 - `pub opaque type store.Snapshot: copyable uses {}`
 
 A stable view of the store as of one commit: later commits never change it.
+
+<a id="def-std_401_2fstore_2fSpan"></a>
+
+- `pub type store.Span { from: ordered_map.Bound[Bytes], to: ordered_map.Bound[Bytes], direction: ordered_map.Direction, }`
+
+The interval one scan consumed, from `from` to `to` in key order whatever
+its `direction`: from the bound the scan started at to the last key it
+examined, or to the range's far bound when it exhausted the range. A scan
+cut short by its limit depends on no key past the cut.
+
+References: [`core@1/Bytes`](#def-core_401_2fBytes), [`std@1/ordered_map/Bound`](#def-std_401_2fordered_5fmap_2fBound), [`std@1/ordered_map/Direction`](#def-std_401_2fordered_5fmap_2fDirection)
 
 <a id="def-std_401_2fstore_2fStore"></a>
 
@@ -15911,7 +16763,77 @@ A commit's place in the store's commit order, awaited with `durable`.
 - `@capability(local) pub opaque type store.Tx: () uses {}`
 
 The scoped capability a `transact` body holds: reads see the commit the
-transaction began at plus its own writes. It cannot leave the body.
+transaction began at plus its own writes. It cannot leave the body, and it
+reaches only the keys of its scope.
+
+<a id="def-std_401_2fstore_2fTxError"></a>
+
+- `@serializable pub type store.TxError = NoTable | TableExists | Schema(SchemaError) | Migrating | ReadOnly | OutOfScope | InvalidInput | Limit( TxLimit ) | Storage(StoreError)`
+
+The outcome of one failed operation inside a transaction body. A failed
+operation changes nothing, and the body continues.
+
+References: [`std@1/store/SchemaError`](#def-std_401_2fstore_2fSchemaError), [`std@1/store/StoreError`](#def-std_401_2fstore_2fStoreError), [`std@1/store/TxLimit`](#def-std_401_2fstore_2fTxLimit)
+
+<a id="def-std_401_2fstore_2fTxError_23InvalidInput"></a>
+
+- `InvalidInput -> store.TxError`
+
+Variant of store.TxError.
+
+<a id="def-std_401_2fstore_2fTxError_23Limit"></a>
+
+- `Limit( TxLimit ) -> store.TxError`
+
+Variant of store.TxError.
+
+References: [`std@1/store/TxLimit`](#def-std_401_2fstore_2fTxLimit)
+
+<a id="def-std_401_2fstore_2fTxError_23Migrating"></a>
+
+- `Migrating -> store.TxError`
+
+Variant of store.TxError.
+
+<a id="def-std_401_2fstore_2fTxError_23NoTable"></a>
+
+- `NoTable -> store.TxError`
+
+Variant of store.TxError.
+
+<a id="def-std_401_2fstore_2fTxError_23OutOfScope"></a>
+
+- `OutOfScope -> store.TxError`
+
+Variant of store.TxError.
+
+<a id="def-std_401_2fstore_2fTxError_23ReadOnly"></a>
+
+- `ReadOnly -> store.TxError`
+
+Variant of store.TxError.
+
+<a id="def-std_401_2fstore_2fTxError_23Schema"></a>
+
+- `Schema(SchemaError) -> store.TxError`
+
+Variant of store.TxError.
+
+References: [`std@1/store/SchemaError`](#def-std_401_2fstore_2fSchemaError)
+
+<a id="def-std_401_2fstore_2fTxError_23Storage"></a>
+
+- `Storage(StoreError) -> store.TxError`
+
+Variant of store.TxError.
+
+References: [`std@1/store/StoreError`](#def-std_401_2fstore_2fStoreError)
+
+<a id="def-std_401_2fstore_2fTxError_23TableExists"></a>
+
+- `TableExists -> store.TxError`
+
+Variant of store.TxError.
 
 <a id="def-std_401_2fstore_2fTxFailure"></a>
 
@@ -16000,6 +16922,14 @@ Variant of store.TxLimit.
 
 A transaction: reads see the snapshot it began at plus its own writes.
 Dropping it aborts it; `rollback` also frees its conflict tracking at once.
+
+<a id="def-std_401_2fstore_2fall"></a>
+
+- `pub fn store.all(access: Access) -> KeyScope uses {}`
+
+Every key, the reserved namespace included, with `access`.
+
+References: [`std@1/store/Access`](#def-std_401_2fstore_2fAccess), [`std@1/store/KeyScope`](#def-std_401_2fstore_2fKeyScope)
 
 <a id="def-std_401_2fstore_2fbegin"></a>
 
@@ -16114,6 +17044,23 @@ lifecycle management, simulation observations or reopening the same medium.
 
 References: [`core@1/Result`](#def-core_401_2fResult), [`std@1/store/Store`](#def-std_401_2fstore_2fStore), [`std@1/store/StoreError`](#def-std_401_2fstore_2fStoreError)
 
+<a id="def-std_401_2fstore_2fjoin"></a>
+
+- `pub fn store.join(a: KeyScope, b: KeyScope) -> KeyScope uses {}`
+
+The keys of `a` and of `b`, each with the stronger of its accesses.
+
+References: [`std@1/store/KeyScope`](#def-std_401_2fstore_2fKeyScope)
+
+<a id="def-std_401_2fstore_2fkeys"></a>
+
+- `pub fn store.keys(from: RangeBound[Bytes], to: RangeBound[Bytes], access: Access) -> KeyScope uses {}`
+
+The keys between `from` and `to` outside the reserved namespace, each with
+`access`.
+
+References: [`core@1/Bytes`](#def-core_401_2fBytes), [`std@1/store/Access`](#def-std_401_2fstore_2fAccess), [`std@1/store/KeyScope`](#def-std_401_2fstore_2fKeyScope), [`std@1/store/RangeBound`](#def-std_401_2fstore_2fRangeBound)
+
 <a id="def-std_401_2fstore_2flocal_5fbackend"></a>
 
 - `pub fn store.local_backend() -> Backend[Dir] uses {}`
@@ -16121,6 +17068,27 @@ References: [`core@1/Result`](#def-core_401_2fResult), [`std@1/store/Store`](#de
 The default backend: an explicitly granted local or simulated Dir.
 
 References: [`core@1/Dir`](#def-core_401_2fDir), [`std@1/store/Backend`](#def-std_401_2fstore_2fBackend)
+
+<a id="def-std_401_2fstore_2fnarrow"></a>
+
+- `pub fn store.narrow[R: inert](mut tx: Tx, scope: KeyScope, body: fn(mut sub: Tx) -> R uses {}) -> Result[ R, TxError ]`
+
+Runs `body` once with a `Tx` of the same transaction whose scope is exactly
+`scope`, and returns its result; `OutOfScope()` without running `body`
+unless `scope` is within `tx`'s scope. The narrowed `Tx` reads the same
+state, and its writes are the transaction's writes.
+
+References: [`core@1/Result`](#def-core_401_2fResult), [`std@1/store/KeyScope`](#def-std_401_2fstore_2fKeyScope), [`std@1/store/Tx`](#def-std_401_2fstore_2fTx), [`std@1/store/TxError`](#def-std_401_2fstore_2fTxError)
+
+<a id="def-std_401_2fstore_2fnarrow_5fread"></a>
+
+- `pub fn store.narrow_read[R: inert](mut tx: Tx, scope: KeyScope, body: fn(mut sub: Tx) -> R uses {}) -> Result[ R, TxError ]`
+
+`narrow` to `scope` with every key Read: `body` reads through the same
+transaction, so its reads enter the run's access set, and the scope refuses
+its writes with `ReadOnly()`.
+
+References: [`core@1/Result`](#def-core_401_2fResult), [`std@1/store/KeyScope`](#def-std_401_2fstore_2fKeyScope), [`std@1/store/Tx`](#def-std_401_2fstore_2fTx), [`std@1/store/TxError`](#def-std_401_2fstore_2fTxError)
 
 <a id="def-std_401_2fstore_2fopen"></a>
 
@@ -16216,36 +17184,42 @@ References: [`core@1/Result`](#def-core_401_2fResult), [`std@1/store/Store`](#de
 
 <a id="def-std_401_2fstore_2ftx_5fdelete"></a>
 
-- `pub fn store.tx_delete(mut tx: Tx, take key: Bytes) -> () uses {} requires !reserved(key)`
+- `pub fn store.tx_delete(mut tx: Tx, take key: Bytes) -> Result[(), TxError] requires !reserved(key)`
 
 Removes `key` when the transaction commits.
 
-References: [`core@1/Bytes`](#def-core_401_2fBytes), [`std@1/store/Tx`](#def-std_401_2fstore_2fTx), [`std@1/store/reserved`](#def-std_401_2fstore_2freserved)
+References: [`core@1/Bytes`](#def-core_401_2fBytes), [`core@1/Result`](#def-core_401_2fResult), [`std@1/store/Tx`](#def-std_401_2fstore_2fTx), [`std@1/store/TxError`](#def-std_401_2fstore_2fTxError), [`std@1/store/reserved`](#def-std_401_2fstore_2freserved)
 
 <a id="def-std_401_2fstore_2ftx_5fget"></a>
 
-- `pub fn store.tx_get(tx: Tx, key: Bytes) -> Option[Bytes] in tx uses {}`
+- `pub fn store.tx_get(mut tx: Tx, take key: Bytes) -> Result[Option[Bytes], TxError] in tx requires !reserved(key)`
 
-The value under `key` as the transaction sees it.
+The value under `key` as the transaction sees it. The read enters the
+run's access set, whether or not `key` holds a value.
 
-References: [`core@1/Bytes`](#def-core_401_2fBytes), [`core@1/Option`](#def-core_401_2fOption), [`std@1/store/Tx`](#def-std_401_2fstore_2fTx)
+References: [`core@1/Bytes`](#def-core_401_2fBytes), [`core@1/Option`](#def-core_401_2fOption), [`core@1/Result`](#def-core_401_2fResult), [`std@1/store/Tx`](#def-std_401_2fstore_2fTx), [`std@1/store/TxError`](#def-std_401_2fstore_2fTxError), [`std@1/store/reserved`](#def-std_401_2fstore_2freserved)
 
 <a id="def-std_401_2fstore_2ftx_5fput"></a>
 
-- `pub fn store.tx_put(mut tx: Tx, take key: Bytes, take value: Bytes) -> () uses {} requires !reserved(key)`
+- `pub fn store.tx_put(mut tx: Tx, take key: Bytes, take value: Bytes) -> Result[(), TxError] requires !reserved(key)`
 
-Stores `value` under `key` when the transaction commits.
+Stores `value` under `key` when the transaction commits. The commit
+checks the write limits.
 
-References: [`core@1/Bytes`](#def-core_401_2fBytes), [`std@1/store/Tx`](#def-std_401_2fstore_2fTx), [`std@1/store/reserved`](#def-std_401_2fstore_2freserved)
+References: [`core@1/Bytes`](#def-core_401_2fBytes), [`core@1/Result`](#def-core_401_2fResult), [`std@1/store/Tx`](#def-std_401_2fstore_2fTx), [`std@1/store/TxError`](#def-std_401_2fstore_2fTxError), [`std@1/store/reserved`](#def-std_401_2fstore_2freserved)
 
 <a id="def-std_401_2fstore_2ftx_5frange"></a>
 
-- `pub fn store.tx_range( tx: Tx, from: ordered_map.Bound[Bytes], to: ordered_map.Bound[Bytes], direction: ordered_map.Direction, limit: u64 ) -> List[(Bytes, Bytes)] uses {}`
+- `pub fn store.tx_range( mut tx: Tx, from: RangeBound[Bytes], to: RangeBound[Bytes], limit: u64, order: ScanOrder ) -> Result[List[(Bytes, Bytes)], TxError]`
 
 At most `limit` entries with keys between `from` and `to` as the
-transaction sees them, in `direction` order, as fresh copies.
+transaction sees them, in `order`, as fresh copies. Keys in the reserved
+namespace are passed over as if absent, and the scope need not hold them.
+The interval each part of the scan consumed enters the run's access set:
+up to the last entry returned when it returned `limit` of them, the whole
+part otherwise.
 
-References: [`core@1/Bytes`](#def-core_401_2fBytes), [`core@1/List`](#def-core_401_2fList), [`core@1/u64`](#def-core_401_2fu64), [`std@1/ordered_map/Bound`](#def-std_401_2fordered_5fmap_2fBound), [`std@1/ordered_map/Direction`](#def-std_401_2fordered_5fmap_2fDirection), [`std@1/store/Tx`](#def-std_401_2fstore_2fTx)
+References: [`core@1/Bytes`](#def-core_401_2fBytes), [`core@1/List`](#def-core_401_2fList), [`core@1/Result`](#def-core_401_2fResult), [`core@1/u64`](#def-core_401_2fu64), [`std@1/store/RangeBound`](#def-std_401_2fstore_2fRangeBound), [`std@1/store/ScanOrder`](#def-std_401_2fstore_2fScanOrder), [`std@1/store/Tx`](#def-std_401_2fstore_2fTx), [`std@1/store/TxError`](#def-std_401_2fstore_2fTxError)
 
 
 ## stream
@@ -16692,49 +17666,55 @@ References: [`core@1/String`](#def-core_401_2fString)
 
 ## table
 
-<a id="def-std_401_2ftable_2fRangeBound"></a>
+<a id="def-std_401_2ftable_2fMigrateError"></a>
 
-- `pub type table.RangeBound[K] = Unbounded | Included(K) | Excluded(K)`
+- `@serializable pub type table.MigrateError[E] = Failed(E) | Faulted(Failure) | Collision | Table(store.TxError) | Canceled( CancelCause )`
 
-<a id="def-std_401_2ftable_2fRangeBound_23Excluded"></a>
+Why `table.migrate` returned without migrating; the table is unchanged.
 
-- `Excluded(K) -> table.RangeBound[K]`
+References: [`core@1/CancelCause`](#def-core_401_2fCancelCause), [`core@1/Failure`](#def-core_401_2fFailure), [`std@1/store/TxError`](#def-std_401_2fstore_2fTxError)
 
-Variant of table.RangeBound.
+<a id="def-std_401_2ftable_2fMigrateError_23Canceled"></a>
 
-<a id="def-std_401_2ftable_2fRangeBound_23Included"></a>
+- `Canceled( CancelCause ) -> table.MigrateError[E]`
 
-- `Included(K) -> table.RangeBound[K]`
+Variant of table.MigrateError.
 
-Variant of table.RangeBound.
+References: [`core@1/CancelCause`](#def-core_401_2fCancelCause)
 
-<a id="def-std_401_2ftable_2fRangeBound_23Unbounded"></a>
+<a id="def-std_401_2ftable_2fMigrateError_23Collision"></a>
 
-- `Unbounded -> table.RangeBound[K]`
+- `Collision -> table.MigrateError[E]`
 
-Variant of table.RangeBound.
+Variant of table.MigrateError.
 
-<a id="def-std_401_2ftable_2fScanOrder"></a>
+<a id="def-std_401_2ftable_2fMigrateError_23Failed"></a>
 
-- `pub type table.ScanOrder = Ascending | Descending`
+- `Failed(E) -> table.MigrateError[E]`
 
-<a id="def-std_401_2ftable_2fScanOrder_23Ascending"></a>
+Variant of table.MigrateError.
 
-- `Ascending -> table.ScanOrder`
+<a id="def-std_401_2ftable_2fMigrateError_23Faulted"></a>
 
-Variant of table.ScanOrder.
+- `Faulted(Failure) -> table.MigrateError[E]`
 
-<a id="def-std_401_2ftable_2fScanOrder_23Descending"></a>
+Variant of table.MigrateError.
 
-- `Descending -> table.ScanOrder`
+References: [`core@1/Failure`](#def-core_401_2fFailure)
 
-Variant of table.ScanOrder.
+<a id="def-std_401_2ftable_2fMigrateError_23Table"></a>
+
+- `Table(store.TxError) -> table.MigrateError[E]`
+
+Variant of table.MigrateError.
+
+References: [`std@1/store/TxError`](#def-std_401_2fstore_2fTxError)
 
 <a id="def-std_401_2ftable_2fSchemaChange"></a>
 
-- `@serializable pub type table.SchemaChange = Created | Renamed(String, String) | Migrated(String, String)`
+- `@serializable pub type table.SchemaChange = Created | Renamed(String, String) | Migrated(EntryId)`
 
-References: [`core@1/String`](#def-core_401_2fString)
+References: [`core@1/EntryId`](#def-core_401_2fEntryId), [`core@1/String`](#def-core_401_2fString)
 
 <a id="def-std_401_2ftable_2fSchemaChange_23Created"></a>
 
@@ -16744,11 +17724,11 @@ Variant of table.SchemaChange.
 
 <a id="def-std_401_2ftable_2fSchemaChange_23Migrated"></a>
 
-- `Migrated(String, String) -> table.SchemaChange`
+- `Migrated(EntryId) -> table.SchemaChange`
 
 Variant of table.SchemaChange.
 
-References: [`core@1/String`](#def-core_401_2fString)
+References: [`core@1/EntryId`](#def-core_401_2fEntryId)
 
 <a id="def-std_401_2ftable_2fSchemaChange_23Renamed"></a>
 
@@ -16764,129 +17744,63 @@ References: [`core@1/String`](#def-core_401_2fString)
 
 References: [`core@1/String`](#def-core_401_2fString), [`core@1/u32`](#def-core_401_2fu32), [`std@1/table/SchemaChange`](#def-std_401_2ftable_2fSchemaChange)
 
-<a id="def-std_401_2ftable_2fSchemaError"></a>
-
-- `@serializable pub type table.SchemaError = Renamed(String, String) | KeyMismatch | ValueMismatch`
-
-References: [`core@1/String`](#def-core_401_2fString)
-
-<a id="def-std_401_2ftable_2fSchemaError_23KeyMismatch"></a>
-
-- `KeyMismatch -> table.SchemaError`
-
-Variant of table.SchemaError.
-
-<a id="def-std_401_2ftable_2fSchemaError_23Renamed"></a>
-
-- `Renamed(String, String) -> table.SchemaError`
-
-Variant of table.SchemaError.
-
-References: [`core@1/String`](#def-core_401_2fString)
-
-<a id="def-std_401_2ftable_2fSchemaError_23ValueMismatch"></a>
-
-- `ValueMismatch -> table.SchemaError`
-
-Variant of table.SchemaError.
-
 <a id="def-std_401_2ftable_2fTable"></a>
 
 - `pub opaque type table.Table[K: key + serializable, V: serializable]: copyable + data + key + inert + sendable uses {}`
 
 An inert name and expected schema; authority comes from each operation's Tx.
 
-<a id="def-std_401_2ftable_2fTxError"></a>
-
-- `@serializable pub type table.TxError = InvalidInput | ReadOnly | NoTable | TableExists | Schema(SchemaError) | Migrating | Limit( store.TxLimit ) | Storage(store.StoreError)`
-
-References: [`std@1/store/StoreError`](#def-std_401_2fstore_2fStoreError), [`std@1/store/TxLimit`](#def-std_401_2fstore_2fTxLimit), [`std@1/table/SchemaError`](#def-std_401_2ftable_2fSchemaError)
-
-<a id="def-std_401_2ftable_2fTxError_23InvalidInput"></a>
-
-- `InvalidInput -> table.TxError`
-
-Variant of table.TxError.
-
-<a id="def-std_401_2ftable_2fTxError_23Limit"></a>
-
-- `Limit( store.TxLimit ) -> table.TxError`
-
-Variant of table.TxError.
-
-References: [`std@1/store/TxLimit`](#def-std_401_2fstore_2fTxLimit)
-
-<a id="def-std_401_2ftable_2fTxError_23Migrating"></a>
-
-- `Migrating -> table.TxError`
-
-Variant of table.TxError.
-
-<a id="def-std_401_2ftable_2fTxError_23NoTable"></a>
-
-- `NoTable -> table.TxError`
-
-Variant of table.TxError.
-
-<a id="def-std_401_2ftable_2fTxError_23ReadOnly"></a>
-
-- `ReadOnly -> table.TxError`
-
-Variant of table.TxError.
-
-<a id="def-std_401_2ftable_2fTxError_23Schema"></a>
-
-- `Schema(SchemaError) -> table.TxError`
-
-Variant of table.TxError.
-
-References: [`std@1/table/SchemaError`](#def-std_401_2ftable_2fSchemaError)
-
-<a id="def-std_401_2ftable_2fTxError_23Storage"></a>
-
-- `Storage(store.StoreError) -> table.TxError`
-
-Variant of table.TxError.
-
-References: [`std@1/store/StoreError`](#def-std_401_2fstore_2fStoreError)
-
-<a id="def-std_401_2ftable_2fTxError_23TableExists"></a>
-
-- `TableExists -> table.TxError`
-
-Variant of table.TxError.
-
 <a id="def-std_401_2ftable_2fcreate"></a>
 
-- `pub fn table.create[K: key + serializable, V: serializable](mut tx: store.Tx, t: Table[K, V]) -> Result[ (), TxError ]`
+- `pub fn table.create[K: key + serializable, V: serializable](mut tx: store.Tx, t: Table[K, V]) -> Result[ (), store.TxError ]`
 
 Creates an empty table with one schema entry; creation is explicit.
 
-References: [`core@1/Result`](#def-core_401_2fResult), [`std@1/store/Tx`](#def-std_401_2fstore_2fTx), [`std@1/table/Table`](#def-std_401_2ftable_2fTable), [`std@1/table/TxError`](#def-std_401_2ftable_2fTxError)
+References: [`core@1/Result`](#def-core_401_2fResult), [`std@1/store/Tx`](#def-std_401_2fstore_2fTx), [`std@1/store/TxError`](#def-std_401_2fstore_2fTxError), [`std@1/table/Table`](#def-std_401_2ftable_2fTable)
 
 <a id="def-std_401_2ftable_2fdelete"></a>
 
-- `pub fn table.delete[K: key + serializable, V: serializable]( mut tx: store.Tx, t: Table[K, V], key: K ) -> Result[bool, TxError]`
+- `pub fn table.delete[K: key + serializable, V: serializable]( mut tx: store.Tx, t: Table[K, V], key: K ) -> Result[bool, store.TxError]`
 
 Deletes one row and reports whether it existed in this transaction.
 
-References: [`core@1/Result`](#def-core_401_2fResult), [`core@1/bool`](#def-core_401_2fbool), [`std@1/store/Tx`](#def-std_401_2fstore_2fTx), [`std@1/table/Table`](#def-std_401_2ftable_2fTable), [`std@1/table/TxError`](#def-std_401_2ftable_2fTxError)
+References: [`core@1/Result`](#def-core_401_2fResult), [`core@1/bool`](#def-core_401_2fbool), [`std@1/store/Tx`](#def-std_401_2fstore_2fTx), [`std@1/store/TxError`](#def-std_401_2fstore_2fTxError), [`std@1/table/Table`](#def-std_401_2ftable_2fTable)
+
+<a id="def-std_401_2ftable_2fdrop"></a>
+
+- `pub fn table.drop[K: key + serializable, V: serializable](mut tx: store.Tx, t: Table[K, V]) -> Result[ (), store.TxError ]`
+
+Removes the table, its rows and its schema history in this transaction.
+
+References: [`core@1/Result`](#def-core_401_2fResult), [`std@1/store/Tx`](#def-std_401_2fstore_2fTx), [`std@1/store/TxError`](#def-std_401_2fstore_2fTxError), [`std@1/table/Table`](#def-std_401_2ftable_2fTable)
 
 <a id="def-std_401_2ftable_2fget"></a>
 
-- `pub fn table.get[K: key + serializable, V: serializable](tx: store.Tx, t: Table[K, V], key: K) -> Result[ Option[V], TxError ]`
+- `pub fn table.get[K: key + serializable, V: serializable](mut tx: store.Tx, t: Table[K, V], key: K) -> Result[ Option[V], store.TxError ]`
 
 Returns a fresh value, or None when this transaction sees no row.
 
-References: [`core@1/Option`](#def-core_401_2fOption), [`core@1/Result`](#def-core_401_2fResult), [`std@1/store/Tx`](#def-std_401_2fstore_2fTx), [`std@1/table/Table`](#def-std_401_2ftable_2fTable), [`std@1/table/TxError`](#def-std_401_2ftable_2fTxError)
+References: [`core@1/Option`](#def-core_401_2fOption), [`core@1/Result`](#def-core_401_2fResult), [`std@1/store/Tx`](#def-std_401_2fstore_2fTx), [`std@1/store/TxError`](#def-std_401_2fstore_2fTxError), [`std@1/table/Table`](#def-std_401_2ftable_2fTable)
 
 <a id="def-std_401_2ftable_2fhistory"></a>
 
-- `pub fn table.history(tx: store.Tx, name: String) -> Result[List[SchemaEntry], TxError]`
+- `pub fn table.history(mut tx: store.Tx, name: String) -> Result[List[SchemaEntry], store.TxError]`
 
 Returns the immutable schema history; hashes exclude package version text.
 
-References: [`core@1/List`](#def-core_401_2fList), [`core@1/Result`](#def-core_401_2fResult), [`core@1/String`](#def-core_401_2fString), [`std@1/store/Tx`](#def-std_401_2fstore_2fTx), [`std@1/table/SchemaEntry`](#def-std_401_2ftable_2fSchemaEntry), [`std@1/table/TxError`](#def-std_401_2ftable_2fTxError)
+References: [`core@1/List`](#def-core_401_2fList), [`core@1/Result`](#def-core_401_2fResult), [`core@1/String`](#def-core_401_2fString), [`std@1/store/Tx`](#def-std_401_2fstore_2fTx), [`std@1/store/TxError`](#def-std_401_2fstore_2fTxError), [`std@1/table/SchemaEntry`](#def-std_401_2ftable_2fSchemaEntry)
+
+<a id="def-std_401_2ftable_2fmigrate"></a>
+
+- `pub fn table.migrate[ J: key + serializable, A: serializable, K: key + serializable, B: serializable, E: serializable, S ]( within: Scope, mut s: store.Store[S], from: Table[J, A], to: Table[K, B], f: Entry[fn(c: (), key: J, old: A) -> Result[(K, B), E]], batch: u64 ) -> Result[u64, MigrateError[E]]`
+
+Migrates every row of a table from schema (J, A) to (K, B) with the pure
+row function `f`, in batches of `batch` rows per transaction, checking
+`within` for cancellation between them (STORE-9). The table is unchanged
+unless every row migrates: a row function's error, a failure in it, a key
+collision, cancellation or a refused commit discards the migration.
+
+References: [`core@1/Entry`](#def-core_401_2fEntry), [`core@1/Result`](#def-core_401_2fResult), [`core@1/Scope`](#def-core_401_2fScope), [`core@1/u64`](#def-core_401_2fu64), [`std@1/store/Store`](#def-std_401_2fstore_2fStore), [`std@1/table/MigrateError`](#def-std_401_2ftable_2fMigrateError), [`std@1/table/Table`](#def-std_401_2ftable_2fTable)
 
 <a id="def-std_401_2ftable_2fnamed"></a>
 
@@ -16898,27 +17812,49 @@ References: [`core@1/String`](#def-core_401_2fString), [`std@1/table/Table`](#de
 
 <a id="def-std_401_2ftable_2fput"></a>
 
-- `pub fn table.put[K: key + serializable, V: serializable]( mut tx: store.Tx, t: Table[K, V], key: K, value: V ) -> Result[(), TxError]`
+- `pub fn table.put[K: key + serializable, V: serializable]( mut tx: store.Tx, t: Table[K, V], key: K, value: V ) -> Result[(), store.TxError]`
 
 Inserts or replaces one row in the transaction's write set.
 
-References: [`core@1/Result`](#def-core_401_2fResult), [`std@1/store/Tx`](#def-std_401_2fstore_2fTx), [`std@1/table/Table`](#def-std_401_2ftable_2fTable), [`std@1/table/TxError`](#def-std_401_2ftable_2fTxError)
+References: [`core@1/Result`](#def-core_401_2fResult), [`std@1/store/Tx`](#def-std_401_2fstore_2fTx), [`std@1/store/TxError`](#def-std_401_2fstore_2fTxError), [`std@1/table/Table`](#def-std_401_2ftable_2fTable)
 
 <a id="def-std_401_2ftable_2frange"></a>
 
-- `pub fn table.range[K: key + serializable, V: serializable]( tx: store.Tx, t: Table[K, V], from: RangeBound[K], to: RangeBound[K], limit: u64, order: ScanOrder ) -> Result[List[(K, V)], TxError]`
+- `pub fn table.range[K: key + serializable, V: serializable]( mut tx: store.Tx, t: Table[K, V], from: store.RangeBound[K], to: store.RangeBound[K], limit: u64, order: store.ScanOrder ) -> Result[List[(K, V)], store.TxError]`
 
 Scans in key value order with inclusive/exclusive bounds and a positive limit.
 
-References: [`core@1/List`](#def-core_401_2fList), [`core@1/Result`](#def-core_401_2fResult), [`core@1/u64`](#def-core_401_2fu64), [`std@1/store/Tx`](#def-std_401_2fstore_2fTx), [`std@1/table/RangeBound`](#def-std_401_2ftable_2fRangeBound), [`std@1/table/ScanOrder`](#def-std_401_2ftable_2fScanOrder), [`std@1/table/Table`](#def-std_401_2ftable_2fTable), [`std@1/table/TxError`](#def-std_401_2ftable_2fTxError)
+References: [`core@1/List`](#def-core_401_2fList), [`core@1/Result`](#def-core_401_2fResult), [`core@1/u64`](#def-core_401_2fu64), [`std@1/store/RangeBound`](#def-std_401_2fstore_2fRangeBound), [`std@1/store/ScanOrder`](#def-std_401_2fstore_2fScanOrder), [`std@1/store/Tx`](#def-std_401_2fstore_2fTx), [`std@1/store/TxError`](#def-std_401_2fstore_2fTxError), [`std@1/table/Table`](#def-std_401_2ftable_2fTable)
 
 <a id="def-std_401_2ftable_2frename"></a>
 
-- `pub fn table.rename(mut tx: store.Tx, name: String, from: String, to: String) -> Result[ (), TxError ]`
+- `pub fn table.rename(mut tx: store.Tx, name: String, from: String, to: String) -> Result[ (), store.TxError ]`
 
 Declares a spelling change once, appending metadata without rewriting rows.
 
-References: [`core@1/Result`](#def-core_401_2fResult), [`core@1/String`](#def-core_401_2fString), [`std@1/store/Tx`](#def-std_401_2fstore_2fTx), [`std@1/table/TxError`](#def-std_401_2ftable_2fTxError)
+References: [`core@1/Result`](#def-core_401_2fResult), [`core@1/String`](#def-core_401_2fString), [`std@1/store/Tx`](#def-std_401_2fstore_2fTx), [`std@1/store/TxError`](#def-std_401_2fstore_2fTxError)
+
+<a id="def-std_401_2ftable_2fscope"></a>
+
+- `pub fn table.scope[K: key + serializable, V: serializable](t: Table[K, V], access: store.Access) -> store.KeyScope uses {}`
+
+The whole table with `access`: its rows and its catalog entry, where the
+library keeps its schema history and renames, and its migration mark read
+only. It reads nothing, so it serves a table the body will create. An
+invalid name holds no key.
+
+References: [`std@1/store/Access`](#def-std_401_2fstore_2fAccess), [`std@1/store/KeyScope`](#def-std_401_2fstore_2fKeyScope), [`std@1/table/Table`](#def-std_401_2ftable_2fTable)
+
+<a id="def-std_401_2ftable_2fscope_5fkeys"></a>
+
+- `pub fn table.scope_keys[K: key + serializable, V: serializable]( mut tx: store.Tx, t: Table[K, V], from: store.RangeBound[K], to: store.RangeBound[K], access: store.Access ) -> Result[store.KeyScope, store.TxError]`
+
+The rows whose keys lie between `from` and `to` with `access`, and the
+table's catalog entry and migration mark read only: enough for get, put, delete, range and
+history on those rows, and not to create, drop or rename the table. It reads
+the catalog through `tx` to encode the bounds and fails as `get` does.
+
+References: [`core@1/Result`](#def-core_401_2fResult), [`std@1/store/Access`](#def-std_401_2fstore_2fAccess), [`std@1/store/KeyScope`](#def-std_401_2fstore_2fKeyScope), [`std@1/store/RangeBound`](#def-std_401_2fstore_2fRangeBound), [`std@1/store/Tx`](#def-std_401_2fstore_2fTx), [`std@1/store/TxError`](#def-std_401_2fstore_2fTxError), [`std@1/table/Table`](#def-std_401_2ftable_2fTable)
 
 
 ## tar
@@ -18814,8 +19750,9 @@ References: [`core@1/Bytes`](#def-core_401_2fBytes), [`std@1/store/Txn`](#def-st
 
 At most `limit` entries with keys between `from` and `to` as this
 transaction sees them, in `direction` order, as fresh copies. A
-serializable transaction records the whole range it asked for, entries
-it did not return included.
+serializable transaction records the interval the scan consumed: up to the
+last entry returned when it returned `limit` of them, the whole range
+otherwise.
 
 References: [`core@1/Bytes`](#def-core_401_2fBytes), [`core@1/List`](#def-core_401_2fList), [`core@1/u64`](#def-core_401_2fu64), [`std@1/ordered_map/Bound`](#def-std_401_2fordered_5fmap_2fBound), [`std@1/ordered_map/Direction`](#def-std_401_2fordered_5fmap_2fDirection), [`std@1/store/Txn`](#def-std_401_2fstore_2fTxn)
 
@@ -18836,14 +19773,6 @@ References: [`core@1/u64`](#def-core_401_2fu64)
 - `pub opaque type txn_manager.Manager: () uses {}`
 
 Conflict state for one store's transactions.
-
-<a id="def-std_401_2ftxn_5fmanager_2fReadRange"></a>
-
-- `pub type txn_manager.ReadRange { from: ordered_map.Bound[Bytes], to: ordered_map.Bound[Bytes], }`
-
-A key range read: both ends, as `ordered_map.fold_range` takes them.
-
-References: [`core@1/Bytes`](#def-core_401_2fBytes), [`std@1/ordered_map/Bound`](#def-std_401_2fordered_5fmap_2fBound)
 
 <a id="def-std_401_2ftxn_5fmanager_2factive"></a>
 
@@ -18871,14 +19800,6 @@ new_txn_with_id, transaction_manager.rs:130).
 
 References: [`core@1/u64`](#def-core_401_2fu64), [`std@1/txn_manager/Manager`](#def-std_401_2ftxn_5fmanager_2fManager)
 
-<a id="def-std_401_2ftxn_5fmanager_2fcontains"></a>
-
-- `pub fn txn_manager.contains(r: ReadRange, key: Bytes) -> bool uses {}`
-
-Whether `key` lies in `r`.
-
-References: [`core@1/Bytes`](#def-core_401_2fBytes), [`core@1/bool`](#def-core_401_2fbool), [`std@1/txn_manager/ReadRange`](#def-std_401_2ftxn_5fmanager_2fReadRange)
-
 <a id="def-std_401_2ftxn_5fmanager_2fdefault_5flimits"></a>
 
 - `pub fn txn_manager.default_limits() -> Limits uses {}`
@@ -18899,15 +19820,15 @@ References: [`core@1/u64`](#def-core_401_2fu64), [`std@1/txn_manager/Manager`](#
 
 <a id="def-std_401_2ftxn_5fmanager_2fhas_5fconflict"></a>
 
-- `pub fn txn_manager.has_conflict( m: Manager, started: u64, writes: List[Bytes], reads: List[Bytes], ranges: List[ReadRange] ) -> bool uses {}`
+- `pub fn txn_manager.has_conflict(m: Manager, started: u64, writes: List[Bytes], reads: store.AccessSet) -> bool uses {}`
 
 Whether a transaction that began at `started` conflicts with a commit
-after it: one that wrote a key in `writes` or `reads`, or a key inside one
-of `ranges` (check_has_conflict, has_write_write_conflict and
-has_read_write_conflict, transaction_manager.rs:190, 324 and 350). Pass
-empty `reads` and `ranges` for snapshot isolation.
+after it: one that wrote a key in `writes` or in `reads`
+(check_has_conflict, has_write_write_conflict and has_read_write_conflict,
+transaction_manager.rs:190, 324 and 350). Under snapshot isolation `reads`
+holds only the keys marked read.
 
-References: [`core@1/Bytes`](#def-core_401_2fBytes), [`core@1/List`](#def-core_401_2fList), [`core@1/bool`](#def-core_401_2fbool), [`core@1/u64`](#def-core_401_2fu64), [`std@1/txn_manager/Manager`](#def-std_401_2ftxn_5fmanager_2fManager), [`std@1/txn_manager/ReadRange`](#def-std_401_2ftxn_5fmanager_2fReadRange)
+References: [`core@1/Bytes`](#def-core_401_2fBytes), [`core@1/List`](#def-core_401_2fList), [`core@1/bool`](#def-core_401_2fbool), [`core@1/u64`](#def-core_401_2fu64), [`std@1/store/AccessSet`](#def-std_401_2fstore_2fAccessSet), [`std@1/txn_manager/Manager`](#def-std_401_2ftxn_5fmanager_2fManager)
 
 <a id="def-std_401_2ftxn_5fmanager_2fhorizon"></a>
 

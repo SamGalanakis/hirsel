@@ -1,0 +1,9 @@
+// rule: MODE-1
+// expect: reject MODE-1 at line 8
+// twin: MODE/MODE-1-unique-local-taken-let-ok.hir
+// Binding `unique x` of a value already unique keeps x's relation, so the
+// binding is as local as x's argument and cannot leave as a global result.
+fn preserve(take x: unique Bytes in x) -> unique Bytes {
+  let y = unique x
+  y
+}

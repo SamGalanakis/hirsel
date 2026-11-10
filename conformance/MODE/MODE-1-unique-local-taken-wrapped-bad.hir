@@ -1,0 +1,8 @@
+// rule: MODE-1
+// expect: reject MODE-1 at line 7
+// twin: MODE/MODE-1-unique-local-taken-wrapped-ok.hir
+// A constructor holding `unique x` of a value already unique holds x's
+// relation, so the option cannot be a global result.
+fn preserve(take x: unique Bytes in x) -> Option[unique Bytes] {
+  Some(unique x)
+}

@@ -5871,9 +5871,14 @@ impl Checker<'_, '_> {
                             ..
                         }
                     ) {
-                        // MODE-2 (D4): every `unique x` of counted content is a
-                        // deep copy; only V may elide it (SPEC 4.4).
-                        if !property.plain {
+                        // MODE-1/MODE-2: `unique x` is a deep copy, with a fresh
+                        // global result, only where x is not provably unique.
+                        // An operand already unique is x itself and keeps its
+                        // loans, whether or not lowering still emits the copy.
+                        if (value.modes.uniqueness != Uniqueness::Unique
+                            || value.aliased().is_some())
+                            && !property.plain
+                        {
                             value.deep_copy = true;
                         }
                         if value.deep_copy {

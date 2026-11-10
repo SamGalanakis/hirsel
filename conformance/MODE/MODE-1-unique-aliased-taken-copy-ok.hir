@@ -1,0 +1,7 @@
+// rule: MODE-1
+// expect: accept
+// x is not provably unique, so `unique x` is a deep copy: fresh blocks that
+// hold no loan on x's own root, so the result may be global.
+fn fresh(take x: Bytes in x) -> unique Bytes {
+  unique x
+}

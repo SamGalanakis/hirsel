@@ -128,8 +128,8 @@ fn a_crash_mid_migration_or_drop_leaves_a_whole_table() {
 }
 #[test]
 fn a_generation_number_is_reused_only_once_its_rows_are_gone() {
-    // The wrap takes 256 migrations, each decoding the whole schema history:
-    // about 15 minutes on the interpreter, so it runs natively only.
+    // The wrap takes 256 migrations, too many for the interpreter's step
+    // budget here, so it runs natively only.
     let name = "STORE-9-generation-reuse-run";
     run_native(name, &fixture(name));
 }

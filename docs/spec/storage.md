@@ -288,14 +288,16 @@ fn table.scope[K: key + serializable, V: serializable](t: Table[K, V], access: A
 fn table.scope_keys[K: key + serializable, V: serializable](tx: Tx, t: Table[K, V], from: RangeBound[K], to: RangeBound[K], access: Access) -> Result[KeyScope, TxError]
 ```
 
-  `table.scope` holds the whole table with `access`: its rows and its **catalog entry**,
-  the one reserved row where the library keeps everything it reads about the table (its
-  schema history, its renames, its current generation and any migration mark). It reads
+  `table.scope` holds the whole table with `access`: its rows, its **catalog entry**,
+  the one reserved row where the library keeps everything a row operation reads about the
+  table (the schemas its rows were written under, its renames, its current generation and
+  any migration mark), and its **history rows**, one reserved row per schema history entry,
+  which only `create`, `history`, `rename` and a migration's install touch. It reads
   nothing, so it serves a table that the body will create, and holds the rows under any
   generation; the operations reach only the current one
   ([STORE-7](#store-7-rows-and-storage-identity)). `table.scope_keys` holds the rows of
   the current generation whose keys lie
-  between `from` and `to` with `access`, and the catalog entry with `Read()`, so that
+  between `from` and `to` with `access`, and the catalog entry and history rows with `Read()`, so that
   get, put, delete, range and history work on those rows and nothing can create, drop
   or rename the table. It reads the catalog entry through `tx` to encode the bounds, and
   fails as `table.get` does when that read fails. Neither holds any other table's catalog entry, so a narrowed
@@ -445,7 +447,7 @@ fn table.history(tx: Tx, name: String) -> Result[List[SchemaEntry], TxError]
 - `create` makes an empty table whose schema history holds one entry for `K` and `V`;
   `drop` removes the table, its rows and its history. There is no implicit creation.
   `drop` takes the store, not a `Tx`: one transaction removes the table's catalog entry,
-  and its rows are then deleted in transactions that each fit the store's limits, so a
+  and its rows and history rows are then deleted in transactions that each fit the store's limits, so a
   table of any size can be dropped. It returns `Aborted(e)` for a refusal, with the error
   `e` below, and the store's failure otherwise; a crash before the catalog entry's removal
   commits leaves the table whole, and one after it leaves rows that the next open deletes

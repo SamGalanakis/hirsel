@@ -506,13 +506,18 @@ fn encode_payload(schema: Bytes, data: Bytes) -> Bytes uses {} {
   core@1/bytes.from_list(take out)
 }
 
-fn decode_payload(schema: Bytes, data: Bytes) -> Result[Bytes, DecodeError] uses {} {
+// The parsed nodes of a stored key schema, for `decode_payload`: a range
+// parses its schema once for all its rows.
+fn key_schema(schema: Bytes) -> Envelope uses {} {
   let mut envelope_bytes: List[u8] = []
   append(mut envelope_bytes, b"HSC1\x01\x00\x00\x00")
   put_little(core@1/bytes.len(schema), 8, mut envelope_bytes)
   append(mut envelope_bytes, schema)
   put_little(0, 8, mut envelope_bytes)
-  let parsed = envelope(core@1/bytes.from_list(take envelope_bytes))
+  envelope(core@1/bytes.from_list(take envelope_bytes))
+}
+
+fn decode_payload(parsed: Envelope, data: Bytes) -> Result[Bytes, DecodeError] uses {} {
   let mut out: List[u8] = []
   let end = absorb(parsed.nodes, 0, data, 0, mut out)?
   if end != core@1/bytes.len(data) {

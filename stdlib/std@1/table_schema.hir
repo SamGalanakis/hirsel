@@ -250,11 +250,24 @@ fn schema[T: serializable](witness: Option[T]) -> Bytes uses {} {
 // so the render is a copy with ids shifted and version atoms emptied.
 fn stored_schema(none: Bytes) -> Bytes uses {} {
   let witness = descriptor(none)
-  match rooted(witness) {
-    Ok(out) => return take out,
-    Error(_) => (),
+  let mut sink = Sink(out: [], against: b"", at: 0, comparing: false, same: true)
+  let walked = rooted(witness, mut sink)
+  let Sink(out: out, against: _, at: _, comparing: _, same: _) = take sink
+  if let Ok(()) = walked {
+    return bytes.from_list(take out)
   }
   rendered(witness)
+}
+
+// Whether `stored` is the storage descriptor of T, from `Option[T]`'s
+// envelope `none`, compared in place without rendering it.
+fn fits(stored: Bytes, none: Bytes) -> bool uses {} {
+  let witness = descriptor(none)
+  let mut sink = Sink(out: [], against: unique stored, at: 0, comparing: true, same: true)
+  match rooted(witness, mut sink) {
+    Ok(()) => sink.same && sink.at == bytes.len(stored),
+    Error(_) => stored == rendered(witness),
+  }
 }
 
 fn rendered(witness: Bytes) -> Bytes uses {} {
@@ -269,7 +282,51 @@ fn rendered(witness: Bytes) -> Bytes uses {} {
   normalized(nodes, start, [])
 }
 
-fn rooted(witness: Bytes) -> Result[Bytes, DecodeError] uses {} {
+// Where `rooted` puts the descriptor: appended to `out`, or, `comparing`,
+// matched against `against` from `at`, `same` while every byte has matched.
+type Sink {
+  out: List[u8],
+  against: Bytes,
+  at: u64,
+  comparing: bool,
+  same: bool,
+}
+
+fn put(mut k: Sink, value: u64, width: u64) -> () uses {} {
+  if !k.comparing {
+    little(mut k.out, value, width)
+    return
+  }
+  if !k.same || width > bytes.len(k.against) - k.at {
+    k.same = false
+    return
+  }
+  let mut i: u64 = 0
+  while i < width {
+    let byte: u64 = int.widen(k.against[k.at + i])
+    if byte != value >> i * 8 & 255 {
+      k.same = false
+      return
+    }
+    i += 1
+  }
+  k.at += width
+}
+
+fn put_bytes(mut k: Sink, data: Bytes, from: u64, to: u64) -> () uses {} {
+  if !k.comparing {
+    bytes.append(mut k.out, bytes.slice(data, from, to))
+    return
+  }
+  let n = to - from
+  if !k.same || n > bytes.len(k.against) - k.at || bytes.slice(k.against, k.at, k.at + n) != bytes.slice(data, from, to) {
+    k.same = false
+    return
+  }
+  k.at += n
+}
+
+fn rooted(witness: Bytes, mut out: Sink) -> Result[(), DecodeError] uses {} {
   let mut c = Cursor(data: unique witness, at: 0)
   if number(mut c, 4)? != 1 || number(mut c, 4)? != 0 {
     return Error(SchemaMismatch())
@@ -278,7 +335,7 @@ fn rooted(witness: Bytes) -> Result[Bytes, DecodeError] uses {} {
   if count < 3 {
     return Error(SchemaMismatch())
   }
-  let mut skipped: List[u8] = []
+  let mut skipped = Sink(out: [], against: b"", at: 0, comparing: false, same: true)
   if number(mut c, 1)? != 6 {
     return Error(SchemaMismatch())
   }
@@ -294,23 +351,22 @@ fn rooted(witness: Bytes) -> Result[Bytes, DecodeError] uses {} {
   if number(mut c, 4)? != 1 || number(mut c, 1)? != 0 || number(mut c, 4)? != 2 {
     return Error(SchemaMismatch())
   }
-  let mut out: List[u8] = []
-  little(mut out, 1, 4)
-  little(mut out, 0, 4)
-  little(mut out, count - 2, 4)
+  put(mut out, 1, 4)
+  put(mut out, 0, 4)
+  put(mut out, count - 2, 4)
   let mut i: u64 = 2
   while i < count {
     let tag = number(mut c, 1)?
-    little(mut out, tag, 1)
+    put(mut out, tag, 1)
     if tag == 0 {
-      little(mut out, number(mut c, 1)?, 1)
+      put(mut out, number(mut c, 1)?, 1)
     } else if tag == 1 {
       copy_fields(mut c, mut out, 0)?
     } else if tag == 2 {
       copy_fields(mut c, mut out, 1)?
     } else if tag == 3 {
       let arms = number(mut c, 4)?
-      little(mut out, arms, 4)
+      put(mut out, arms, 4)
       let mut a: u64 = 0
       while a < arms {
         copy_atom(mut c, mut out)?
@@ -320,9 +376,9 @@ fn rooted(witness: Bytes) -> Result[Bytes, DecodeError] uses {} {
     } else if tag == 4 {
       shifted(mut c, mut out, 2)?
     } else if tag == 5 {
-      little(mut out, number(mut c, 1)?, 1)
+      put(mut out, number(mut c, 1)?, 1)
       let arguments = number(mut c, 4)?
-      little(mut out, arguments, 4)
+      put(mut out, arguments, 4)
       let mut children: List[u64] = []
       let mut sizes: List[u64] = []
       let mut a: u64 = 0
@@ -342,12 +398,12 @@ fn rooted(witness: Bytes) -> Result[Bytes, DecodeError] uses {} {
         a += 1
       }
       for child in children {
-        little(mut out, 0, 1)
-        little(mut out, child, 4)
+        put(mut out, 0, 1)
+        put(mut out, child, 4)
       }
       for size in sizes {
-        little(mut out, 1, 1)
-        little(mut out, size, 8)
+        put(mut out, 1, 1)
+        put(mut out, size, 8)
       }
     } else if tag == 6 {
       copy_nominal(mut c, mut out, 2)?
@@ -359,16 +415,16 @@ fn rooted(witness: Bytes) -> Result[Bytes, DecodeError] uses {} {
   if c.at != bytes.len(c.data) {
     return Error(Trailing())
   }
-  Ok(bytes.from_list(take out))
+  Ok(())
 }
 
 // A nominal's body with its version atom emptied and its child less `shift`.
-fn copy_nominal(mut c: Cursor, mut out: List[u8], shift: u64) -> Result[(), DecodeError] uses {} {
+fn copy_nominal(mut c: Cursor, mut out: Sink, shift: u64) -> Result[(), DecodeError] uses {} {
   copy_atom(mut c, mut out)?
   skip_atom(mut c)?
-  little(mut out, 0, 8)
+  put(mut out, 0, 8)
   let modules = number(mut c, 4)?
-  little(mut out, modules, 4)
+  put(mut out, modules, 4)
   let mut m: u64 = 0
   while m < modules {
     copy_atom(mut c, mut out)?
@@ -378,9 +434,9 @@ fn copy_nominal(mut c: Cursor, mut out: List[u8], shift: u64) -> Result[(), Deco
   shifted(mut c, mut out, shift)
 }
 
-fn copy_fields(mut c: Cursor, mut out: List[u8], style: u8) -> Result[(), DecodeError] uses {} {
+fn copy_fields(mut c: Cursor, mut out: Sink, style: u8) -> Result[(), DecodeError] uses {} {
   let count = number(mut c, 4)?
-  little(mut out, count, 4)
+  put(mut out, count, 4)
   let mut i: u64 = 0
   while i < count {
     let labelled = if style == 2 {
@@ -388,7 +444,7 @@ fn copy_fields(mut c: Cursor, mut out: List[u8], style: u8) -> Result[(), Decode
       if marker > 1 {
         return Error(Tag())
       }
-      little(mut out, marker, 1)
+      put(mut out, marker, 1)
       marker == 1
     } else {
       style == 1
@@ -402,12 +458,12 @@ fn copy_fields(mut c: Cursor, mut out: List[u8], style: u8) -> Result[(), Decode
   Ok(())
 }
 
-fn shifted(mut c: Cursor, mut out: List[u8], shift: u64) -> Result[(), DecodeError] uses {} {
+fn shifted(mut c: Cursor, mut out: Sink, shift: u64) -> Result[(), DecodeError] uses {} {
   let id = number(mut c, 4)?
   if id < shift {
     return Error(SchemaMismatch())
   }
-  little(mut out, id - shift, 4)
+  put(mut out, id - shift, 4)
   Ok(())
 }
 
@@ -420,13 +476,13 @@ fn skip_atom(mut c: Cursor) -> Result[(), DecodeError] uses {} {
   Ok(())
 }
 
-fn copy_atom(mut c: Cursor, mut out: List[u8]) -> Result[(), DecodeError] uses {} {
+fn copy_atom(mut c: Cursor, mut out: Sink) -> Result[(), DecodeError] uses {} {
   let n = number(mut c, 8)?
   if n > bytes.len(c.data) - c.at {
     return Error(Truncated())
   }
-  little(mut out, n, 8)
-  bytes.append(mut out, bytes.slice(c.data, c.at, c.at + n))
+  put(mut out, n, 8)
+  put_bytes(mut out, c.data, c.at, c.at + n)
   c.at += n
   Ok(())
 }

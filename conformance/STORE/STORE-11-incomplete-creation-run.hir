@@ -7,13 +7,20 @@
 // stdout: claimsobjects: created, kept 1, limits kept
 // stdout: orphanobjects: corrupt history/2
 // stdout: damagedobjects: corrupt history/2
+// steps: 20000000
+// a reopen on each authority and a transaction of 200 writes at the size limit
 // An incomplete creation is no store, and nothing else is read as one. Each history is
 // built through the seam, then opened as a store, once over a local history
 // (memory) and once over object storage (objects.sim@1), where one refused or lost
 // request during a creation leaves the same history:
 // - claims: two claims and no Genesis, as two creations cut before their Genesis leave
 //   it. The open creates the store with the limits it is passed (its Genesis is commit
-//   4), and a commit survives a reopen that passes other limits.
+//   4), and a commit survives a reopen that passes other limits. The reopened store
+//   holds the creation's limits, each far under its default, at their edges: an
+//   8-byte key and a 16-byte value commit and a 9-byte key or a 17-byte value is
+//   refused; one small write commits and 200 writes of 24 bytes, over the 4096
+//   transaction bytes, are refused; a range of 3 rows reads, in a transaction and in a
+//   query on a snapshot of the reopened store, and a range of 4 is refused in both.
 // - orphan: a claim, then a group holding a commit that is not the Genesis. Nothing
 //   proves a creation that never happened; it is corruption at entry 2.
 // - damaged: a claim, a Genesis group cut short by a byte, a later claim and a committed
@@ -28,21 +35,70 @@ fn say(stdout: Stdout, line: String) -> Result[(), Failed] {
   }
 }
 
-// Puts the key of `n` bytes `k`.
-fn put(mut tx: store.Tx, info: store.CallInfo, n: u64) -> Result[(), store.TxError] {
-  let mut key: List[u8] = []
-  for _ in 0u64..n {
-    list.push(mut key, 107)
+// Puts `count` keys of `key` bytes, `k` and then the key's index plus `k`, each
+// with a value of `value` bytes.
+fn put(mut tx: store.Tx, info: store.CallInfo, w: (u64, u64, u64)) -> Result[
+  (),
+  store.TxError
+] {
+  let (count, key, value) = w
+  for i in 0u64..count {
+    let mut k: List[u8] = []
+    for _ in 1u64..key {
+      list.push(mut k, 107)
+    }
+    list.push(mut k, int.truncate(107 + i))
+    let mut v: List[u8] = []
+    for _ in 0u64..value {
+      list.push(mut v, 118)
+    }
+    store.tx_put(mut tx, bytes.from_list(take k), bytes.from_list(take v))?
   }
-  store.tx_put(mut tx, bytes.from_list(take key), b"v")?
   Ok(())
 }
 
-// Limits under the defaults: an 8-byte key is the largest.
+// How many rows a range of at most `limit` over every key returns.
+fn rows(tx: store.Tx, info: store.CallInfo, limit: u64) -> Result[u64, store.TxError] {
+  let got = store.tx_range(tx, Unbounded(), Unbounded(), limit, Ascending())?
+  Ok(list.len(got))
+}
+
+// `rows` as a transaction.
+fn scan(mut tx: store.Tx, info: store.CallInfo, limit: u64) -> Result[
+  u64,
+  store.TxError
+] {
+  rows(tx, info, limit)
+}
+
+// Whether a range returned `n` rows, or was refused for `range_rows` when `n` is None.
+fn ranged(r: Result[u64, store.TxFailure[store.TxError]], n: Option[u64]) -> bool {
+  match (copy r, n) {
+    (Ok(got), Some(want)) => got == want,
+    (Error(Limit(RangeRows())), None()) => true,
+    (Error(Aborted(Limit(RangeRows()))), None()) => true,
+    _ => false,
+  }
+}
+
+// Limits far under the defaults: 8-byte keys, 16-byte values, 4096-byte
+// transactions and 3-row ranges.
 fn tight() -> store.StoreConfig {
   let mut c = store.default_config()
   c.limits.key_bytes = 8
+  c.limits.value_bytes = 16
+  c.limits.transaction_bytes = 4096
+  c.limits.range_rows = 3
   c
+}
+
+// Whether a commit of `w` is refused for `limit`, or commits when `limit` is None.
+fn commits(mut s: store.Store, w: (u64, u64, u64), limit: Option[store.TxLimit]) -> bool {
+  let r: Result[(), store.TxFailure[store.TxError]] = store.transact(mut s, put, w)
+  match limit {
+    None() => r == Ok(()),
+    Some(l) => r == Error(Limit(l)),
+  }
 }
 
 // The tip after the history's entries, read through the seam.
@@ -109,7 +165,11 @@ fn claims_only(rt: Io, stdout: Stdout, name: String) -> Result[(), Failed] {
     return say(stdout, f"{name}: refused")
   }
   let mut s = take made
-  let r: Result[(), store.TxFailure[store.TxError]] = store.transact(mut s, put, 1u64)
+  let r: Result[(), store.TxFailure[store.TxError]] = store.transact(
+    mut s,
+    put,
+    (1u64, 1u64, 1u64)
+  )
   let Ok(()) = r else {
     return Error(Failed("commit"))
   }
@@ -127,15 +187,37 @@ fn claims_only(rt: Io, stdout: Stdout, name: String) -> Result[(), Failed] {
     Some(_) => 1,
     None() => 0,
   }
-  // The creation's 8-byte key limit holds: a 9-byte key is refused.
-  let long: Result[(), store.TxFailure[store.TxError]] = store.transact(
+  // The creation's limits hold at their edges, each far under its default.
+  let edges = [
+    commits(mut s2, (1, 8, 16), None()),
+    commits(mut s2, (2, 2, 1), None()),
+    commits(mut s2, (1, 9, 1), Some(KeyBytes())),
+    commits(mut s2, (1, 1, 17), Some(ValueBytes())),
+    commits(mut s2, (200, 8, 16), Some(TransactionBytes()))
+  ]
+  // Four rows now: `k`, `kk`, `kl` and the 8-byte key.
+  let r3: Result[u64, store.TxFailure[store.TxError]] = store.transact(
     mut s2,
-    put,
-    9u64
+    scan,
+    3u64
   )
-  let limits = match long {
-    Ok(()) => "limits lost",
-    Error(_) => "limits kept",
+  let r4: Result[u64, store.TxFailure[store.TxError]] = store.transact(
+    mut s2,
+    scan,
+    4u64
+  )
+  let q3 = store.query(copy snap, rows, 3u64)
+  let q4 = store.query(take snap, rows, 4u64)
+  let scans = ranged(r3, Some(3)) && ranged(r4, None())
+  let queries = ranged(q3, Some(1)) && ranged(q4, None())
+  let mut kept_limits = scans && queries
+  for e in edges {
+    kept_limits = kept_limits && e
+  }
+  let limits = if kept_limits {
+    "limits kept"
+  } else {
+    "limits lost"
   }
   say(stdout, f"{name}: created, kept {kept}, {limits}")
 }

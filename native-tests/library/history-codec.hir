@@ -8,7 +8,9 @@
 //    flipped bytes' own digest re-encodes to those same bytes;
 // 4. leaves are cut exactly where a flat reference of the cut rule cuts,
 //    the tree reads back to its state, and equal states give equal roots;
-// 5. the chain rules: prev, first, claim epochs and the store identity.
+// 5. the chain rules: prev, first, claim epochs and the store identity;
+// 6. vectors written by hand from the format: each decodes to exactly its
+//    value and that value encodes to exactly its bytes (see `wire_vectors`).
 
 fn random_bytes(mut g: prng.Generator, max: u64) -> Bytes {
   let n = prng.u64(mut g) % (max + 1)
@@ -359,6 +361,526 @@ fn read_tree(tree: history.Tree, d: history.Descriptor) -> Result[(List[u64], Li
   Error(Corrupt())
 }
 
+// Law 6: wire vectors written by hand from docs/spec/storage.md, History
+// format: every field of every record kind at a value whose bytes differ
+// under any reordering or byte order. Each decodes to exactly the value it
+// was written from and that value encodes to exactly its bytes; groups
+// malformed only in a rule the spec states, under their own digests, and
+// checkpoint nodes cut short or wrong across a child boundary, are corrupt.
+
+fn cat(parts: List[Bytes]) -> Bytes {
+  let mut out: List[u8] = []
+  for p in parts {
+    bytes.append(mut out, p)
+  }
+  bytes.from_list(take out)
+}
+
+fn rep(b: u8, n: u64) -> Bytes {
+  let mut out: List[u8] = []
+  for _ in 0u64..n {
+    list.push(mut out, b)
+  }
+  bytes.from_list(take out)
+}
+
+fn sha(x: Bytes) -> Bytes {
+  bytes.from_inline(sha256.digest(x))
+}
+
+// A group's bytes from its header fields' bytes, commits and definitions.
+fn wire_group(first: Bytes, epoch: Bytes, count: Bytes, commits: List[Bytes], defs: Bytes) -> Bytes {
+  let mut out: List[u8] = []
+  for p in [b"HSHIST01", rep(17, 32), copy first, copy epoch, copy count] {
+    bytes.append(mut out, p)
+  }
+  for c in commits {
+    bytes.append(mut out, c)
+  }
+  bytes.append(mut out, defs)
+  bytes.from_list(take out)
+}
+
+// first 0x0102030405060708, epoch 0x1112131415161718.
+const V_FIRST: Bytes = b"\x08\x07\x06\x05\x04\x03\x02\x01"
+
+const V_EPOCH: Bytes = b"\x18\x17\x16\x15\x14\x13\x12\x11"
+
+// Transaction: def 1, at -2, seed 0x2122232425262728, caller "cl", stream 1
+// with identity 32 x 0x31, position 0x3132333435363738, digest 32 x 0x32,
+// args "ar", outcome "out"; writes put k1=v1, delete k2.
+fn wire_call(def: Bytes, writes: Bytes) -> Bytes {
+  cat(
+    [
+      b"\x01",
+      copy def,
+      b"\xfe\xff\xff\xff\xff\xff\xff\xff",
+      b"\x28\x27\x26\x25\x24\x23\x22\x21",
+      b"\x02\x00\x00\x00cl",
+      b"\x01",
+      rep(49, 32),
+      b"\x38\x37\x36\x35\x34\x33\x32\x31",
+      rep(50, 32),
+      b"\x02\x00\x00\x00ar",
+      b"\x03\x00\x00\x00out",
+      copy writes
+    ]
+  )
+}
+
+const V_WRITES: Bytes = b"\x02\x00\x00\x00\x01\x02\x00\x00\x00k1\x02\x00\x00\x00v1\x02\x02\x00\x00\x00k2"
+
+// Transaction: def 0, at 5, seed 6, caller "", stream 0, args "", outcome "o".
+const V_CALL2: Bytes = b"\x01\x00\x00\x00\x00\x05\x00\x00\x00\x00\x00\x00\x00\x06\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x01\x00\x00\x00o\x00\x00\x00\x00"
+
+// Run 16 x 0x41 with one record of kind 4, payload "rp".
+fn wire_run() -> Bytes {
+  cat([b"\x03", rep(65, 16), b"\x01\x00\x00\x00\x04\x02\x00\x00\x00rp", b"\x00\x00\x00\x00"])
+}
+
+// Engine Library: name "nm", payload "pl".
+const V_LIBRARY: Bytes = b"\x02\x07\x0c\x00\x00\x00\x02\x00\x00\x00nm\x02\x00\x00\x00pl\x00\x00\x00\x00"
+
+// Two definitions: p0 f0 32 x 0x51 r0, p1 f1 32 x 0x52 r1.
+fn wire_defs() -> Bytes {
+  cat(
+    [
+      b"\x02\x00\x00\x00",
+      b"\x02\x00\x00\x00p0\x02\x00\x00\x00f0",
+      rep(81, 32),
+      b"\x02\x00\x00\x00r0",
+      b"\x02\x00\x00\x00p1\x02\x00\x00\x00f1",
+      rep(82, 32),
+      b"\x02\x00\x00\x00r1"
+    ]
+  )
+}
+
+fn v1_value() -> history.Group {
+  history.Group(
+    prev: rep(17, 32),
+    first: 72623859790382856,
+    epoch: 1230066625199609624,
+    commits: [
+      history.Commit(
+        body: Transaction(
+          history.Call(
+            def: 1,
+            at: -2,
+            seed: 2387509390608836392,
+            caller: b"cl",
+            arrival: Some(history.Arrival(identity: rep(49, 32), position: 3544952156018063160, digest: rep(50, 32))),
+            args: b"ar",
+            outcome: b"out"
+          )
+        ),
+        writes: [Put(key: b"k1", value: b"v1"), Delete(key: b"k2")]
+      ),
+      history.Commit(
+        body: Transaction(history.Call(def: 0, at: 5, seed: 6, caller: b"", arrival: None(), args: b"", outcome: b"o")),
+        writes: []
+      ),
+      history.Commit(body: Run(run: rep(65, 16), records: [history.Record(kind: 4, payload: b"rp")]), writes: []),
+      history.Commit(body: Engine(Library(name: b"nm", payload: b"pl")), writes: [])
+    ],
+    defs: [
+      history.Def(path: b"p0", fingerprint: b"f0", code: rep(81, 32), revision: b"r0"),
+      history.Def(path: b"p1", fingerprint: b"f1", code: rep(82, 32), revision: b"r1")
+    ]
+  )
+}
+
+fn v1_wire() -> Bytes {
+  wire_group(
+    V_FIRST,
+    V_EPOCH,
+    b"\x04\x00\x00\x00",
+    [wire_call(b"\x01\x00\x00\x00", V_WRITES), V_CALL2, wire_run(), V_LIBRARY],
+    wire_defs()
+  )
+}
+
+// A descriptor: version 0x4142434445464748, digest 32 x 0x61, root 32 x 0x62,
+// height 2, entries 0x0102, bytes 0x030405.
+fn wire_descriptor() -> Bytes {
+  cat(
+    [
+      b"\x48\x47\x46\x45\x44\x43\x42\x41",
+      rep(97, 32),
+      rep(98, 32),
+      b"\x02",
+      b"\x02\x01\x00\x00\x00\x00\x00\x00",
+      b"\x05\x04\x03\x00\x00\x00\x00\x00"
+    ]
+  )
+}
+
+fn descriptor_value() -> history.Descriptor {
+  history.Descriptor(version: 4702394921427289928, digest: rep(97, 32), root: rep(98, 32), height: 2, entries: 258, bytes: 197637)
+}
+
+// Engine commits: Checkpoint, Retain (floor 9, pins a=1 and bc=2, one
+// descriptor), StreamFence 32 x 0x71, StreamPurge 32 x 0x72, Genesis with the
+// default limits and bounds, Fork (identity 32 x 0x81, origin 32 x 0x82, at
+// 0x0102030405060708). First 0x0a0b, epoch 3.
+fn v2_wire() -> Bytes {
+  wire_group(
+    b"\x0b\x0a\x00\x00\x00\x00\x00\x00",
+    b"\x03\x00\x00\x00\x00\x00\x00\x00",
+    b"\x06\x00\x00\x00",
+    [
+      cat([b"\x02\x03\x59\x00\x00\x00", wire_descriptor(), b"\x00\x00\x00\x00"]),
+      cat(
+        [
+          b"\x02\x04\x84\x00\x00\x00",
+          b"\x09\x00\x00\x00\x00\x00\x00\x00",
+          b"\x02\x00\x00\x00",
+          b"\x01\x00\x00\x00a\x01\x00\x00\x00\x00\x00\x00\x00",
+          b"\x02\x00\x00\x00bc\x02\x00\x00\x00\x00\x00\x00\x00",
+          b"\x01\x00\x00\x00",
+          wire_descriptor(),
+          b"\x00\x00\x00\x00"
+        ]
+      ),
+      cat([b"\x02\x06\x21\x00\x00\x00\x01", rep(113, 32), b"\x00\x00\x00\x00"]),
+      cat([b"\x02\x06\x21\x00\x00\x00\x02", rep(114, 32), b"\x00\x00\x00\x00"]),
+      b"\x02\x01\x1c\x00\x00\x00\x00\x10\x00\x00\x00\x00\x10\x00\x00\x00\x00\x01\x10\x27\x00\x00\x00\x00\x04\x00\x00\x00\x10\x00\x00\x00\x40\x00\x00\x00\x00\x00",
+      cat([b"\x02\x05\x48\x00\x00\x00", rep(129, 32), rep(130, 32), V_FIRST, b"\x00\x00\x00\x00"])
+    ],
+    b"\x00\x00\x00\x00"
+  )
+}
+
+fn v2_value() -> history.Group {
+  history.Group(
+    prev: rep(17, 32),
+    first: 2571,
+    epoch: 3,
+    commits: [
+      history.Commit(body: Engine(Checkpoint(descriptor_value())), writes: []),
+      history.Commit(
+        body: Engine(
+          Retain(floor: 9, pins: [history.Pin(name: b"a", version: 1), history.Pin(name: b"bc", version: 2)], checkpoints: [descriptor_value()])
+        ),
+        writes: []
+      ),
+      history.Commit(body: Engine(StreamFence(rep(113, 32))), writes: []),
+      history.Commit(body: Engine(StreamPurge(rep(114, 32))), writes: []),
+      history.Commit(
+        body: Engine(
+          Genesis(
+            key_bytes: 4096,
+            value_bytes: 1048576,
+            transaction_bytes: 16777216,
+            range_rows: 10000,
+            bounds: history.Bounds(node_min: 262144, node_mean: 1048576, node_max: 4194304)
+          )
+        ),
+        writes: []
+      ),
+      history.Commit(body: Engine(Fork(identity: rep(129, 32), origin: rep(130, 32), at: 72623859790382856)), writes: [])
+    ],
+    defs: []
+  )
+}
+
+// The first claim: prev zeros, first 1, epoch 1, Claim(1, 16 x 0x91, 32 x 0x92).
+fn v3_wire() -> Bytes {
+  cat(
+    [
+      b"HSHIST01",
+      rep(0, 32),
+      b"\x01\x00\x00\x00\x00\x00\x00\x00\x01\x00\x00\x00\x00\x00\x00\x00\x01\x00\x00\x00",
+      b"\x02\x02\x38\x00\x00\x00\x01\x00\x00\x00\x00\x00\x00\x00",
+      rep(145, 16),
+      rep(146, 32),
+      b"\x00\x00\x00\x00\x00\x00\x00\x00"
+    ]
+  )
+}
+
+fn v3_value() -> history.Group {
+  history.Group(
+    prev: rep(0, 32),
+    first: 1,
+    epoch: 1,
+    commits: [history.Commit(body: Engine(Claim(epoch: 1, attempt: rep(145, 16), identity: rep(146, 32))), writes: [])],
+    defs: []
+  )
+}
+
+// A head record with a checkpoint and an origin, and one with neither.
+fn wire_head(full: bool) -> Bytes {
+  let mut parts: List[Bytes] = [
+    b"HSHEAD01",
+    rep(161, 32),
+    b"\x02\x01\x00\x00\x00\x00\x00\x00",
+    rep(162, 16),
+    b"\x04\x03\x00\x00\x00\x00\x00\x00",
+    rep(163, 32)
+  ]
+  if full {
+    list.push(mut parts, wire_descriptor())
+  } else {
+    list.push(mut parts, rep(0, 89))
+  }
+  list.push(mut parts, b"\x02\x00\x00\x00lo\x02\x00\x00\x00re")
+  if full {
+    list.push(mut parts, b"\x01")
+    list.push(mut parts, rep(164, 32))
+    list.push(mut parts, b"\x06\x05\x00\x00\x00\x00\x00\x00")
+  } else {
+    list.push(mut parts, b"\x00")
+  }
+  let body = cat(take parts)
+  cat([copy body, sha(body)])
+}
+
+fn head_value(full: bool) -> history.Head {
+  history.Head(
+    identity: rep(161, 32),
+    epoch: 258,
+    attempt: rep(162, 16),
+    end: 772,
+    digest: rep(163, 32),
+    checkpoint: if full {
+      Some(descriptor_value())
+    } else {
+      None()
+    },
+    locator: b"lo",
+    retain: b"re",
+    origin: if full {
+      Some((rep(164, 32), 1286u64))
+    } else {
+      None()
+    }
+  )
+}
+
+// Both directions for one group vector.
+fn group_vector(wire: Bytes, value: history.Group) -> bool {
+  let decoded = match history.decode_group(wire, sha(wire)) {
+    Ok(g) => g == value,
+    Error(_) => false,
+  }
+  let (encoded, d) = history.encode_group(value)
+  decoded && encoded == wire && d == sha(wire)
+}
+
+fn corrupt_group(wire: Bytes) -> bool {
+  match history.decode_group(wire, sha(wire)) {
+    Error(Corrupt()) => true,
+    _ => false,
+  }
+}
+
+// A group of these commits with the first header and the two definitions.
+fn plain(commits: List[Bytes]) -> Bytes {
+  wire_group(V_FIRST, V_EPOCH, b"\x01\x00\x00\x00", commits, wire_defs())
+}
+
+// Groups that break one stated rule each, under their own digests, each with
+// a twin that differs only in that rule and decodes.
+fn malformed_groups() -> List[(Bytes, Bytes)] {
+  let defs = wire_defs()
+  let four = b"\x04\x00\x00\x00"
+  let one = b"\x01\x00\x00\x00"
+  [
+    // A definition index out of range.
+    (
+      wire_group(V_FIRST, V_EPOCH, four, [wire_call(b"\x02\x00\x00\x00", V_WRITES), V_CALL2, wire_run(), V_LIBRARY], defs),
+      v1_wire()
+    ),
+    // A write op out of range.
+    (
+      plain([wire_call(one, b"\x01\x00\x00\x00\x03\x02\x00\x00\x00k1")]),
+      plain([wire_call(one, b"\x01\x00\x00\x00\x02\x02\x00\x00\x00k1")])
+    ),
+    // Keys out of order, and a key twice.
+    (
+      plain([wire_call(one, b"\x02\x00\x00\x00\x02\x02\x00\x00\x00k2\x01\x02\x00\x00\x00k1\x02\x00\x00\x00v1")]),
+      plain([wire_call(one, V_WRITES)])
+    ),
+    (
+      plain([wire_call(one, b"\x02\x00\x00\x00\x01\x02\x00\x00\x00k1\x02\x00\x00\x00v1\x02\x02\x00\x00\x00k1")]),
+      plain([wire_call(one, V_WRITES)])
+    ),
+    // Bytes after the definition table.
+    (cat([v1_wire(), b"\x00"]), v1_wire()),
+    // No commit, and a count above the commits there are.
+    (wire_group(V_FIRST, V_EPOCH, b"\x00\x00\x00\x00", [], defs), plain([V_LIBRARY])),
+    (
+      wire_group(V_FIRST, V_EPOCH, b"\x05\x00\x00\x00", [wire_call(one, V_WRITES), V_CALL2, wire_run(), V_LIBRARY], defs),
+      wire_group(V_FIRST, V_EPOCH, four, [wire_call(one, V_WRITES), V_CALL2, wire_run(), V_LIBRARY], defs)
+    ),
+    // A stream byte, a commit kind, an engine op and a stream op out of range.
+    (
+      plain([b"\x01\x00\x00\x00\x00\x05\x00\x00\x00\x00\x00\x00\x00\x06\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x02\x00\x00\x00\x00\x01\x00\x00\x00o\x00\x00\x00\x00"]),
+      plain([V_CALL2])
+    ),
+    (
+      plain([cat([b"\x04", rep(65, 16), b"\x00\x00\x00\x00\x00\x00\x00\x00"])]),
+      plain([cat([b"\x03", rep(65, 16), b"\x00\x00\x00\x00\x00\x00\x00\x00"])])
+    ),
+    (plain([b"\x02\x08\x0c\x00\x00\x00\x02\x00\x00\x00nm\x02\x00\x00\x00pl\x00\x00\x00\x00"]), plain([V_LIBRARY])),
+    (
+      plain([cat([b"\x02\x06\x21\x00\x00\x00\x03", rep(113, 32), b"\x00\x00\x00\x00"])]),
+      plain([cat([b"\x02\x06\x21\x00\x00\x00\x01", rep(113, 32), b"\x00\x00\x00\x00"])])
+    ),
+    // Retain pins not sorted by name.
+    (
+      plain(
+        [
+          b"\x02\x04\x2b\x00\x00\x00\x09\x00\x00\x00\x00\x00\x00\x00\x02\x00\x00\x00\x02\x00\x00\x00bc\x02\x00\x00\x00\x00\x00\x00\x00\x01\x00\x00\x00a\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"
+        ]
+      ),
+      plain(
+        [
+          b"\x02\x04\x2b\x00\x00\x00\x09\x00\x00\x00\x00\x00\x00\x00\x02\x00\x00\x00\x01\x00\x00\x00a\x01\x00\x00\x00\x00\x00\x00\x00\x02\x00\x00\x00bc\x02\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"
+        ]
+      )
+    ),
+    // Version 1 that is not a claim; a claim not alone in its group; a claim
+    // whose epoch is not its group's.
+    (
+      wire_group(b"\x01\x00\x00\x00\x00\x00\x00\x00", V_EPOCH, one, [V_LIBRARY], defs),
+      wire_group(b"\x02\x00\x00\x00\x00\x00\x00\x00", V_EPOCH, one, [V_LIBRARY], defs)
+    ),
+    (
+      cat([bytes.slice(v3_wire(), 0, 56), b"\x02\x00\x00\x00", bytes.slice(v3_wire(), 60, 126), V_LIBRARY, b"\x00\x00\x00\x00"]),
+      v3_wire()
+    ),
+    (cat([bytes.slice(v3_wire(), 0, 66), b"\x02", bytes.slice(v3_wire(), 67, bytes.len(v3_wire()))]), v3_wire())
+  ]
+}
+
+fn decodes(wire: Bytes) -> bool {
+  match history.decode_group(wire, sha(wire)) {
+    Ok(_) => true,
+    Error(_) => false,
+  }
+}
+
+// The checkpoint of a("a" = 90 x 0x78) and ("b" = the same) under bounds of
+// 112 bytes, one entry's node: two leaves under one index root.
+fn leaf(key: Bytes, extra: Bytes) -> Bytes {
+  cat([b"HSNODE01\x00\x01\x00\x00\x00", b"\x01\x00\x00\x00", copy key, b"\x5a\x00\x00\x00", rep(120, 90), copy extra])
+}
+
+fn index(first: Bytes, a: Bytes, na: Bytes, second: Bytes, b: Bytes) -> Bytes {
+  cat(
+    [
+      b"HSNODE01\x01\x02\x00\x00\x00",
+      b"\x01\x00\x00\x00",
+      copy first,
+      sha(a),
+      copy na,
+      b"\x01\x00\x00\x00",
+      copy second,
+      sha(b),
+      b"\x01\x00\x00\x00\x00\x00\x00\x00"
+    ]
+  )
+}
+
+fn tree_descriptor(root: Bytes, entries: u64) -> history.Descriptor {
+  history.Descriptor(version: 7, digest: rep(1, 32), root: sha(root), height: 2, entries: entries, bytes: 182)
+}
+
+// Reads a two-level checkpoint from its root and leaves.
+fn read_two(d: history.Descriptor, root: Bytes, leaves: List[Bytes]) -> Result[List[(Bytes, Bytes)], history.Fault] {
+  match history.check_level([history.root_expect(d)], [copy root])? {
+    Next(below) => match history.check_level(below, leaves)? {
+      Leaves(entries) => Ok(take entries),
+      Next(_) => Error(Corrupt()),
+    },
+    Leaves(_) => Error(Corrupt()),
+  }
+}
+
+fn corrupt_read(r: Result[List[(Bytes, Bytes)], history.Fault]) -> bool {
+  match r {
+    Error(Corrupt()) => true,
+    _ => false,
+  }
+}
+
+fn node_vectors() -> (bool, bool) {
+  let la = leaf(b"a", b"")
+  let lb = leaf(b"b", b"")
+  let one = b"\x01\x00\x00\x00\x00\x00\x00\x00"
+  let root = index(b"a", la, one, b"b", lb)
+  let state = [(b"a", rep(120, 90)), (b"b", rep(120, 90))]
+  // Encoding: the tree is exactly these three nodes.
+  let tree = history.build_tree(state, history.Bounds(node_min: 112, node_mean: 112, node_max: 112))
+  let mut encoded = tree.root == sha(root) && tree.height == 2 && list.len(tree.nodes) == 3
+  for (d, data) in tree.nodes {
+    encoded = encoded && d == sha(data) && (data == la || data == lb || data == root)
+  }
+  // Decoding: the root names each leaf's digest, first key, bound and count.
+  let decoded = match history.check_level([history.root_expect(tree_descriptor(root, 2))], [copy root]) {
+    Ok(Next(below)) => below == [
+      history.Expect(digest: sha(la), level: 0, first: Some(b"a"), below: Some(b"b"), entries: 1),
+      history.Expect(digest: sha(lb), level: 0, first: Some(b"b"), below: None(), entries: 1)
+    ],
+    _ => false,
+  } && match read_two(tree_descriptor(root, 2), root, [copy la, copy lb]) {
+    Ok(entries) => entries == state,
+    Error(_) => false,
+  }
+  // Damage under the digests that name it: a leaf cut short, a leaf with a
+  // byte after its entry, children out of order, a leaf whose key is not the
+  // first its parent names, a leaf holding a key at its right neighbour's
+  // bound, a count its leaf does not hold, and a child of no entries.
+  let cut = bytes.slice(la, 0, bytes.len(la) - 1)
+  let long = leaf(b"a", b"\x00")
+  let a0 = leaf(b"a0", b"")
+  let c = leaf(b"c", b"")
+  let zero = b"\x00\x00\x00\x00\x00\x00\x00\x00"
+  let two = b"\x02\x00\x00\x00\x00\x00\x00\x00"
+  let damage = [
+    corrupt_read(read_two(tree_descriptor(index(b"a", cut, one, b"b", lb), 2), index(b"a", cut, one, b"b", lb), [copy cut, copy lb])),
+    corrupt_read(read_two(tree_descriptor(index(b"a", long, one, b"b", lb), 2), index(b"a", long, one, b"b", lb), [copy long, copy lb])),
+    corrupt_read(read_two(tree_descriptor(index(b"b", lb, one, b"a", la), 2), index(b"b", lb, one, b"a", la), [copy lb, copy la])),
+    corrupt_read(read_two(tree_descriptor(index(b"a", a0, one, b"b", lb), 2), index(b"a", a0, one, b"b", lb), [copy a0, copy lb])),
+    corrupt_read(read_two(tree_descriptor(index(b"a", c, one, b"b", lb), 2), index(b"a", c, one, b"b", lb), [copy c, copy lb])),
+    corrupt_read(read_two(tree_descriptor(index(b"a", la, two, b"b", lb), 3), index(b"a", la, two, b"b", lb), [copy la, copy lb])),
+    corrupt_read(read_two(tree_descriptor(index(b"a", la, zero, b"b", lb), 1), index(b"a", la, zero, b"b", lb), [copy la, copy lb])),
+  ]
+  let mut all_damage = true
+  for d in damage {
+    all_damage = all_damage && d
+  }
+  (encoded && decoded, all_damage)
+}
+
+// Law 6 on the hand-written vectors.
+fn wire_vectors(stdout: Stdout) -> () {
+  let claim_ok = group_vector(v3_wire(), v3_value()) && match history.claim_group(history.origin_tip(), rep(145, 16), rep(146, 32)) {
+    (w, d) => w == v3_wire() && d == sha(v3_wire()),
+  }
+  report(stdout, "wire vectors: calls, runs and definitions", group_vector(v1_wire(), v1_value()))
+  report(stdout, "wire vectors: engine commits", group_vector(v2_wire(), v2_value()))
+  report(stdout, "wire vectors: the first claim", claim_ok)
+  let mut heads = true
+  for full in [true, false] {
+    heads = heads && history.encode_head(head_value(full)) == wire_head(full) && match history.decode_head(wire_head(full)) {
+      Ok(h) => h == head_value(full),
+      Error(_) => false,
+    }
+  }
+  report(stdout, "wire vectors: head records", heads)
+  let mut malformed = true
+  for (bad, twin) in malformed_groups() {
+    malformed = malformed && corrupt_group(bad) && decodes(twin)
+  }
+  report(stdout, "wire vectors: each malformed group refused, its twin read", malformed)
+  let (nodes, damage) = node_vectors()
+  report(stdout, "wire vectors: checkpoint nodes", nodes)
+  report(stdout, "wire vectors: damaged checkpoint nodes refused", damage)
+}
+
 fn report(stdout: Stdout, name: String, ok: bool) -> () {
   let _ = out.print(stdout, if ok {
     f"ok {name}\n"
@@ -602,6 +1124,7 @@ pub fn main(rt: Io, args: Args) -> Result[(), GrantError] {
   }
   chain = chain && is_error(history.follow(tip2, ag, add))
   report(stdout, "chain rules", chain)
+  wire_vectors(stdout)
   Ok(())
 }
 

@@ -1,0 +1,187 @@
+// rule: STORE-8
+// expect: run
+// authorities: {"lv":{"provider":"authority.sim@1","floor":"cache","seed":3,"represent":"log","levels":["cache","disk"],"faults":{}}}
+// stdout: lv: 100 steps, laws hold
+// steps: 20000000
+// a hundred seeded operations, each reopen recovering the whole history so far
+// A snapshot at a level holds the state at D(level), checked against a model of
+// the history, not against the store. Commit j writes `n` = j and the key `x` j, so
+// the state after commit j has exactly the rows `n` and `x`1 to `x`j. A seeded run
+// commits, waits at cache or at disk, takes snapshots at both levels, and closes and
+// reopens. What is acknowledged where follows from the operations alone: a commit's
+// outcome is released at the floor, cache (STORE-2), so each commit is durable at
+// cache when `transact` returns; a wait at disk acknowledges every commit there, and a
+// close makes every commit durable at the strongest level. So each snapshot at cache
+// holds exactly the state after the last commit and each at disk exactly the state
+// after the last commit acknowledged at disk: never less, which would lose an
+// acknowledged commit, and never more, which a disk failure could lose. The
+// snapshots' versions compare as their commits do.
+pub type Failed = Failed(String)
+
+fn say(stdout: Stdout, line: String) -> Result[(), Failed] {
+  match out.print(stdout, f"{line}\n") {
+    Ok(_) => Ok(()),
+    Error(_) => Error(Failed("print")),
+  }
+}
+
+fn next(mut seed: u64) -> u64 uses {} {
+  seed = int.wrapping_add(
+    int.wrapping_mul(seed, 6364136223846793005),
+    1442695040888963407
+  )
+  seed >> 33
+}
+
+fn le(j: u64) -> Bytes {
+  let mut v: List[u8] = []
+  for i in 0u64..8 {
+    list.push(mut v, int.truncate(j >> i * 8))
+  }
+  bytes.from_list(take v)
+}
+
+fn x_key(j: u64) -> Bytes {
+  let mut k: List[u8] = [120]
+  for i in 0u64..8 {
+    list.push(mut k, int.truncate(j >> (7 - i) * 8))
+  }
+  bytes.from_list(take k)
+}
+
+// Commit j.
+fn step(mut tx: store.Tx, info: store.CallInfo, j: u64) -> Result[(), store.TxError] {
+  store.tx_put(mut tx, b"n", le(j))?
+  store.tx_put(mut tx, x_key(j), b"")?
+  Ok(())
+}
+
+// The commit whose state `snap` holds, None when it is no such state.
+fn commit_of(snap: store.Snapshot) -> Option[u64] {
+  let j: u64 = match store.get(snap, b"n") {
+    None() => 0,
+    Some(v) => {
+      let mut j: u64 = 0
+      for i in 0u64..8 {
+        let b: u64 = int.widen(v[i])
+        j = j | b << i * 8
+      }
+      j
+    },
+  }
+  let all = store.range(snap, Unbounded(), Unbounded(), Ascending(), 1000000)
+  let rows: u64 = if j == 0 {
+    0
+  } else {
+    j + 1
+  }
+  if list.len(all) != rows {
+    return None()
+  }
+  for i in 1u64..j + 1 {
+    let Some(_) = store.get(snap, x_key(i)) else {
+      return None()
+    }
+  }
+  Some(j)
+}
+
+// The last commit made and the last acknowledged at disk.
+type Model {
+  made: u64,
+  disk: u64,
+}
+
+fn run(rt: Io, stdout: Stdout, name: String, steps: u64) -> Result[(), Failed] {
+  let Ok(a) = io.authority(rt, name) else {
+    return Error(Failed("authority"))
+  }
+  let Some(cache) = authority.level(a, "cache") else {
+    return Error(Failed("cache"))
+  }
+  let Some(disk) = authority.level(a, "disk") else {
+    return Error(Failed("disk"))
+  }
+  let Ok(opened) = store.open(a, store.default_config()) else {
+    return Error(Failed("open"))
+  }
+  let mut s = take opened
+  let mut m = Model(made: 0, disk: 0)
+  let mut seed: u64 = 7
+  for k in 0u64..steps {
+    let r = next(mut seed) % 10
+    if r < 5 {
+      let j = m.made + 1
+      let done: Result[(), store.TxFailure[store.TxError]] = store.transact(
+        mut s,
+        step,
+        j
+      )
+      let Ok(()) = done else {
+        return say(stdout, f"{name}: commit {j} failed at step {k}")
+      }
+      m.made = j
+    } else if r < 7 {
+      let t = store.ticket(s)
+      let at = if r == 5 {
+        cache
+      } else {
+        disk
+      }
+      let Ok(()) = store.durable(a, mut s, t, at) else {
+        return say(stdout, f"{name}: wait failed at step {k}")
+      }
+      if r == 6 {
+        m.disk = m.made
+      }
+    } else if r < 9 {
+      let Ok(sc) = store.snapshot(a, mut s, cache) else {
+        return say(stdout, f"{name}: snapshot failed at step {k}")
+      }
+      let Ok(sd) = store.snapshot(a, mut s, disk) else {
+        return say(stdout, f"{name}: snapshot failed at step {k}")
+      }
+      let Some(jc) = commit_of(sc) else {
+        return say(stdout, f"{name}: a cache snapshot is no commit's state at step {k}")
+      }
+      let Some(jd) = commit_of(sd) else {
+        return say(stdout, f"{name}: a disk snapshot is no commit's state at step {k}")
+      }
+      if jc != m.made || jd != m.disk {
+        return say(
+          stdout,
+          f"{name}: snapshots hold commits {jc} at cache and {jd} at disk at step {k}, not {m.made} and {m.disk}"
+        )
+      }
+      let vc = store.version(a, sc)
+      let vd = store.version(a, sd)
+      if (vd < vc) != (jd < jc) || (vd == vc) != (jd == jc) {
+        return say(
+          stdout,
+          f"{name}: versions do not compare as the commits at step {k}"
+        )
+      }
+    } else {
+      // A close makes every commit durable at disk.
+      let Ok(()) = store.close(take s) else {
+        return say(stdout, f"{name}: close failed at step {k}")
+      }
+      let Ok(again) = store.open(a, store.default_config()) else {
+        return say(stdout, f"{name}: reopen failed at step {k}")
+      }
+      s = take again
+      m.disk = m.made
+    }
+  }
+  let Ok(()) = store.close(take s) else {
+    return Error(Failed("close"))
+  }
+  say(stdout, f"{name}: {steps} steps, laws hold")
+}
+
+pub fn main(rt: Io, args: Args) -> Result[(), Failed] {
+  let Ok(stdout) = io.stdout(rt) else {
+    return Error(Failed("stdout"))
+  }
+  run(rt, stdout, "lv", 100)
+}

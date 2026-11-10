@@ -2,7 +2,7 @@ use hirsel_run_config::*;
 use hirsel_run_schema::{LaunchKind, RunRefusal};
 
 fn declaration() -> serde_json::Value {
-    serde_json::json!({"object_stores":{"data":{"endpoint":"https://storage.example:9443", "bucket":"hirsel-data", "region":"auto", "prefix":"service/db", "cache_bytes":4096, "credentials":{"mount":"secrets","path":"data.json"}}}, "io":{"dirs":[{"path":"secrets","host":"/srv/credentials","access":"read"}]}})
+    serde_json::json!({"object_stores":{"data":{"endpoint":"https://storage.example:9443", "bucket":"hirsel-data", "region":"auto", "prefix":"service/db", "credentials":{"mount":"secrets","path":"data.json"}}}, "io":{"dirs":[{"path":"secrets","host":"/srv/credentials","access":"read"}]}})
 }
 fn bind(value: serde_json::Value) -> Result<ValidatedRun, RunRefusal> {
     RunConfig::bind_grants(
@@ -108,4 +108,39 @@ fn duplicate_store_names_and_inline_secrets_are_rejected() {
     let mut value = declaration();
     value["object_stores"]["data"]["secret_key"] = "inline".into();
     assert!(bind(value).is_err());
+}
+
+/// Two `authority.objects@1` grants whose S3 key prefixes nest on one bucket would
+/// each fence the other's head as a stranger's write and fork one history
+/// (determinism.md, Authority grants: no two authorities over one object prefix).
+#[test]
+fn two_authorities_over_one_bucket_prefix_are_refused() {
+    let s3 = |bucket: &str, prefix: &str| {
+        serde_json::json!({"provider":"authority.objects@1","floor":"durable","level":"durable",
+            "objects":{"provider":"objects.s3@1","endpoint":"https://s3.example","bucket":bucket,
+                "region":"auto","prefix":prefix,"credentials":"/srv/creds.json"}})
+    };
+    let validate = |a: serde_json::Value, b: serde_json::Value| {
+        let mut record = serde_json::to_value(RunConfig::empty(
+            [0; 32],
+            "probe@1/main".into(),
+            LaunchKind::Main,
+        ))
+        .unwrap();
+        record["io"] = serde_json::json!({"dirs": [], "authorities": {"a": a, "b": b}});
+        RunConfig::validate(&serde_json::to_vec(&record).unwrap())
+    };
+    for (a, b) in [("db", "db"), ("db", "db/x"), ("", "db")] {
+        assert!(
+            matches!(validate(s3("one", a), s3("one", b)),
+                Err(RunRefusal::Invalid { detail, .. }) if detail.contains("one object prefix")),
+            "{a:?} and {b:?} share keys"
+        );
+    }
+    for (x, y) in [
+        (s3("one", "db"), s3("one", "dbx")),
+        (s3("one", "db"), s3("two", "db")),
+    ] {
+        validate(x, y).unwrap();
+    }
 }

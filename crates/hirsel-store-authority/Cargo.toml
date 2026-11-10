@@ -12,5 +12,6 @@ libc = "0.2"
 sha2 = "0.10"
 
 [dev-dependencies]
+hirsel-object-storage = { path = "../hirsel-object-storage", features = ["testing"] }
 hirsel-guard = { path = "../hirsel-guard" }
 tempfile = "3"

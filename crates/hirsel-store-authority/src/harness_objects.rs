@@ -18,12 +18,21 @@
 //!    damages it.
 //!
 //! Each planted defect must break a law.
+//!
+//! The same schedules run over two media: the simulated bucket, and
+//! `objects.s3@1` over the fake S3 server (`hirsel_object_storage::fake_s3`)
+//! drawing the same three faults from the same seed, each writer on its own
+//! provider handle and connections. Over S3 the turn passes before every
+//! provider call rather than every request, since a `get_many` sends its gets
+//! at once.
 
 use crate::group::{self, Tip};
 use crate::harness::{Rng, entry};
 use crate::objects::{Bug, Objects};
 use crate::sim::Bucket;
 use crate::{Advanced, Authority, Claim, Error, Level};
+use hirsel_object_storage::fake_s3::FakeS3;
+use hirsel_object_storage::{Condition, Listing, ObjectStorage, Put, Replaced, StorageError, Tag};
 use std::cell::Cell;
 use std::collections::BTreeMap;
 use std::sync::{Arc, Condvar, Mutex};
@@ -91,17 +100,130 @@ fn read_all(h: &mut Objects) -> Result<Vec<Vec<u8>>, String> {
 }
 
 type Ledger = Arc<Mutex<BTreeMap<u64, Vec<u8>>>>;
+type Hook = Arc<Mutex<Option<Arc<dyn Fn() + Send + Sync>>>>;
+
+/// Where a schedule's history lives.
+#[derive(Clone, Copy, Debug)]
+enum Medium {
+    Sim,
+    S3,
+}
+
+/// A provider handle that runs the scheduler hook before each call.
+struct Turned {
+    inner: Arc<dyn ObjectStorage>,
+    before: Hook,
+}
+
+impl Turned {
+    fn turn(&self) {
+        let f = self.before.lock().unwrap().clone();
+        if let Some(f) = f {
+            f();
+        }
+    }
+}
+
+impl ObjectStorage for Turned {
+    fn get_tagged(&self, key: &str) -> Result<Option<(Vec<u8>, Tag)>, StorageError> {
+        self.turn();
+        self.inner.get_tagged(key)
+    }
+    fn get(&self, key: &str) -> Result<Option<Vec<u8>>, StorageError> {
+        self.turn();
+        self.inner.get(key)
+    }
+    fn get_many(&self, keys: &[String]) -> Vec<Result<Option<Vec<u8>>, StorageError>> {
+        self.turn();
+        self.inner.get_many(keys)
+    }
+    fn put_new(&self, key: &str, bytes: &[u8]) -> Result<Put, StorageError> {
+        self.turn();
+        self.inner.put_new(key, bytes)
+    }
+    fn replace(
+        &self,
+        key: &str,
+        bytes: &[u8],
+        condition: Condition,
+    ) -> Result<Replaced, StorageError> {
+        self.turn();
+        self.inner.replace(key, bytes, condition)
+    }
+    fn list(&self, prefix: &str, after: &str) -> Result<Listing, StorageError> {
+        self.turn();
+        self.inner.list(prefix, after)
+    }
+    fn delete(&self, key: &str) -> Result<(), StorageError> {
+        self.turn();
+        self.inner.delete(key)
+    }
+}
+
+/// One schedule's storage: a fresh handle per writer, and the hook the
+/// scheduler interleaves them with.
+struct Media {
+    bucket: Option<Arc<Bucket>>,
+    fake: Option<(FakeS3, tempfile::TempDir)>,
+    hook: Hook,
+}
+
+impl Media {
+    fn new(medium: Medium, seed: u64, faults: BTreeMap<String, u64>) -> Media {
+        match medium {
+            Medium::Sim => {
+                let bucket = Arc::new(Bucket::new(seed, faults));
+                let hook: Hook = Arc::default();
+                let h = hook.clone();
+                *bucket.before.lock().unwrap() = Some(Arc::new(move || {
+                    let f = h.lock().unwrap().clone();
+                    if let Some(f) = f {
+                        f();
+                    }
+                }));
+                Media {
+                    bucket: Some(bucket),
+                    fake: None,
+                    hook,
+                }
+            }
+            Medium::S3 => Media {
+                bucket: None,
+                fake: Some((FakeS3::start(seed, faults), tempfile::tempdir().unwrap())),
+                hook: Arc::default(),
+            },
+        }
+    }
+
+    fn handle(&self) -> Arc<dyn ObjectStorage> {
+        match (&self.bucket, &self.fake) {
+            (Some(b), _) => b.clone(),
+            (_, Some((fake, dir))) => {
+                // Opening probes the server; keep its requests out of the
+                // fault stream's way by opening with faults paused.
+                let paused = std::mem::take(&mut fake.world.lock().unwrap().faults);
+                let opened = hirsel_object_storage::open(&fake.entry(dir.path(), "zone", 5000));
+                fake.world.lock().unwrap().faults = paused;
+                Arc::new(Turned {
+                    inner: opened.expect("objects.s3@1 opens on the fake"),
+                    before: self.hook.clone(),
+                })
+            }
+            _ => unreachable!(),
+        }
+    }
+}
 
 fn writer(
     me: usize,
     seed: u64,
     steps: u32,
-    bucket: Arc<Bucket>,
+    store: Arc<dyn ObjectStorage>,
     bug: Option<Bug>,
     ledger: Ledger,
 ) -> Result<(), String> {
     let mut rng = Rng(seed.wrapping_mul(0x9E37_79B9) ^ (me as u64 + 1) | 1);
-    let mut h = Objects::new(bucket, "zone".into(), Level(0));
+    let mut h = Objects::new(store, "zone".into(), Level(0));
     h.bug = bug;
     let mut held: Option<(Claim, Tip)> = None;
     let mut n = 0u64;
@@ -180,29 +302,35 @@ fn writer(
 }
 
 /// One schedule; `Err` names the first broken law.
-fn schedule(seed: u64, writers: usize, steps: u32, bug: Option<Bug>) -> Result<(), String> {
+fn schedule(
+    medium: Medium,
+    seed: u64,
+    writers: usize,
+    steps: u32,
+    bug: Option<Bug>,
+) -> Result<(), String> {
     let mut rng = Rng(seed | 1);
     let mut faults = BTreeMap::new();
     for f in crate::sim::OBJECT_FAULTS {
         faults.insert(f.to_string(), 3 + rng.below(10));
     }
-    let bucket = Arc::new(Bucket::new(seed, faults));
+    let media = Media::new(medium, seed, faults);
     let baton = Arc::new(Baton {
         state: Mutex::new((0, (0..writers).collect(), Rng(seed ^ 0x5bd1_e995 | 1))),
         turned: Condvar::new(),
     });
     let b = baton.clone();
-    *bucket.before.lock().unwrap() = Some(Arc::new(move || b.pass()));
+    *media.hook.lock().unwrap() = Some(Arc::new(move || b.pass()));
     let ledger: Ledger = Arc::default();
     let results: Vec<Result<(), String>> = std::thread::scope(|s| {
         let handles: Vec<_> = (0..writers)
             .map(|me| {
-                let (bucket, baton, ledger) = (bucket.clone(), baton.clone(), ledger.clone());
+                let (store, baton, ledger) = (media.handle(), baton.clone(), ledger.clone());
                 s.spawn(move || {
                     ME.set(me);
                     baton.wait(me);
                     let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        writer(me, seed, steps, bucket, bug, ledger)
+                        writer(me, seed, steps, store, bug, ledger)
                     }))
                     .unwrap_or_else(|_| Err(format!("writer {me} panicked")));
                     baton.exit(me);
@@ -216,8 +344,8 @@ fn schedule(seed: u64, writers: usize, steps: u32, bug: Option<Bug>) -> Result<(
         r?;
     }
     // Recovery by a fresh handle, through the same faults.
-    *bucket.before.lock().unwrap() = None;
-    let mut fresh = Objects::new(bucket.clone(), "zone".into(), Level(0));
+    *media.hook.lock().unwrap() = None;
+    let mut fresh = Objects::new(media.handle(), "zone".into(), Level(0));
     fresh.bug = bug;
     let all = read_all(&mut fresh).map_err(|e| format!("recovery: {e}"))?;
     for (p, b) in ledger.lock().unwrap().iter() {
@@ -230,9 +358,9 @@ fn schedule(seed: u64, writers: usize, steps: u32, bug: Option<Bug>) -> Result<(
     Ok(())
 }
 
-fn sweep(bug: Option<Bug>, seeds: u64) -> Option<String> {
+fn sweep(medium: Medium, bug: Option<Bug>, seeds: u64) -> Option<String> {
     (1..=seeds).find_map(|seed| {
-        schedule(seed * 7919, 3, 120, bug)
+        schedule(medium, seed * 7919, 3, 120, bug)
             .err()
             .map(|e| format!("seed {seed}: {e}"))
     })
@@ -240,14 +368,63 @@ fn sweep(bug: Option<Bug>, seeds: u64) -> Option<String> {
 
 #[test]
 fn object_storage_law_holds() {
-    assert_eq!(sweep(None, 200), None);
+    assert_eq!(sweep(Medium::Sim, None, 200), None);
 }
 
 #[test]
 fn every_planted_defect_breaks_the_object_storage_law() {
     for bug in [Bug::NoCas, Bug::AnyEpoch, Bug::TrustListing] {
-        assert!(sweep(Some(bug), 400).is_some(), "{bug:?} went unnoticed");
+        assert!(
+            sweep(Medium::Sim, Some(bug), 400).is_some(),
+            "{bug:?} went unnoticed"
+        );
     }
+}
+
+#[test]
+fn object_storage_law_holds_over_s3() {
+    assert_eq!(sweep(Medium::S3, None, 200), None);
+}
+
+#[test]
+fn every_planted_defect_breaks_the_object_storage_law_over_s3() {
+    for bug in [Bug::NoCas, Bug::AnyEpoch, Bug::TrustListing] {
+        assert!(
+            sweep(Medium::S3, Some(bug), 400).is_some(),
+            "{bug:?} went unnoticed over S3"
+        );
+    }
+}
+
+/// The spec's cost over `objects.s3@1`, counted by the server: an advance is
+/// two requests, `durable` one, and recovering `n` groups one head GET,
+/// `ceil(n / 1000)` listing pages and `n` group GETs.
+#[test]
+fn over_s3_an_advance_is_two_requests_and_recovery_gets_each_group_once() {
+    let media = Media::new(Medium::S3, 1, BTreeMap::new());
+    let fake = &media.fake.as_ref().unwrap().0;
+    let mut h = Objects::new(media.handle(), "zone".into(), Level(0));
+    let mut c = h.claim([1; 16], [7; 32]).unwrap().claim;
+    let mut tip = group::follow(&Tip::origin(), &read_all(&mut h).unwrap()[0]).unwrap();
+    for tag in 0..1000 {
+        let e = entry(&tip, tag);
+        let before = fake.requests();
+        let from = c.end();
+        assert_eq!(
+            h.advance(&mut c, from, e.clone(), Level(0)),
+            Advanced::Advanced(from + 1)
+        );
+        assert_eq!(fake.requests() - before, 2);
+        tip = group::follow(&tip, &e).unwrap();
+    }
+    let before = fake.requests();
+    assert_eq!(h.durable(&mut c, Level(0)), Ok(1001));
+    assert_eq!(fake.requests() - before, 1);
+    let mut fresh = Objects::new(media.handle(), "zone".into(), Level(0));
+    let before = fake.requests();
+    let all = fresh.read(0, Level(0), u64::MAX).unwrap();
+    assert_eq!(all.len(), 1001);
+    assert_eq!(fake.requests() - before, 1 + 2 + 1001);
 }
 
 /// The cost the spec states: an advance is two requests (the group put and the

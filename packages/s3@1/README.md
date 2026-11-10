@@ -20,7 +20,7 @@ one endpoint host/port (TLS-only for HTTPS). Missing endpoint authority is `Gran
 and obtains the explicitly granted network and wall clock. Credentials JSON:
 `{"access_key":"...","secret_key":"...","session_token":"..."}`; the token
 may be omitted. Config carries the endpoint origin, bucket, signing region,
-object prefix, cache byte bound and maximum object size. HTTP redirects and
+object prefix and maximum object size. HTTP redirects and
 response decompression are disabled for signed requests.
 
 `read_only(c) -> Client` copies a facet that refuses PUT and DELETE with `Denied`.
@@ -49,8 +49,9 @@ upload.
 
 A store keeps its history behind an authority (std@1/store over
 `authority.objects@1`); this package is not a store backend. A store over an
-S3 bucket waits on an `objects.s3@1` provider for that authority, which the
-runtime does not offer yet.
+S3 bucket grants that authority the host provider `objects.s3@1`
+(`crates/hirsel-object-storage/src/s3`), which signs and sends its own requests
+and refuses at open a server that ignores `If-None-Match: *`.
 
 Protocol references read from shallow clones (no server code copied):
 

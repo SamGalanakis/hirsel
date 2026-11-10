@@ -13,8 +13,6 @@ pub struct ObjectStore {
     pub region: String,
     #[serde(default)]
     pub prefix: String,
-    #[serde(default)]
-    pub cache_bytes: u64,
     pub credentials: CredentialsReference,
 }
 /// A relative file within an explicitly granted directory mount; never a secret.
@@ -146,7 +144,6 @@ pub(super) fn expand(record: &mut RunConfig) -> Result<(), RunRefusal> {
             ("BUCKET", store.bucket.clone()),
             ("REGION", store.region.clone()),
             ("PREFIX", store.prefix.clone()),
-            ("CACHE_BYTES", store.cache_bytes.to_string()),
             ("CREDENTIALS_DIR", reference.mount.clone()),
             ("CREDENTIALS", reference.path.clone()),
         ] {

@@ -1,12 +1,11 @@
 /// One S3-compatible path-style endpoint. Prefixes have no leading/trailing slash.
-/// Reads are bounded by max_object_bytes; cache_bytes=0 is the cheap default.
+/// Reads are bounded by max_object_bytes.
 /// One list_objects reads at most max_list_pages pages and max_list_keys keys.
 pub type Config {
   endpoint: String,
   bucket: String,
   region: String,
   prefix: String,
-  cache_bytes: u64,
   max_object_bytes: u64,
   max_list_pages: u64,
   max_list_keys: u64,
@@ -198,10 +197,6 @@ pub fn from_grants(io: Io, env: Env, name: String) -> Result[Client, S3Error] {
     None() => None(),
     _ => return Error(Malformed()),
   }
-  let cache = match u64.parse(grant(env, prefix, "CACHE_BYTES")?) {
-    Ok(capacity) => capacity,
-    Error(_) => return Error(Invalid()),
-  }
   client(
     n,
     clock,
@@ -210,7 +205,6 @@ pub fn from_grants(io: Io, env: Env, name: String) -> Result[Client, S3Error] {
       bucket: grant(env, prefix, "BUCKET")?,
       region: grant(env, prefix, "REGION")?,
       prefix: grant(env, prefix, "PREFIX")?,
-      cache_bytes: cache,
       max_object_bytes: 16777216,
       max_list_pages: 4096,
       max_list_keys: 1048576

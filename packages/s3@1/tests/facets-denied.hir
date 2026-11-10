@@ -8,7 +8,6 @@ fn make(n: Net, clock: WallClock, endpoint: String) -> Result[s3.Client, s3.S3Er
       bucket: "bucket",
       region: "us-east-1",
       prefix: "root",
-      cache_bytes: 0,
       max_object_bytes: 1024,
       max_list_pages: 16,
       max_list_keys: 1024

@@ -1329,10 +1329,14 @@ name = "hirsel-object-storage"
 version = "0.1.0"
 dependencies = [
  "hirsel-guard",
+ "hirsel-object-storage",
+ "hirsel-run-schema",
  "libc",
+ "rustls",
  "serde_json",
  "sha2",
  "tempfile",
+ "webpki-roots",
 ]
 
 [[package]]

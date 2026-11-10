@@ -1126,7 +1126,7 @@ named S3-compatible endpoints. Omission and the empty object normalize to no mem
 Names are lowercase ASCII letters and digits starting with a letter. Each entry has
 `endpoint` (an HTTP or HTTPS origin URL, canonical host and nonzero port, with no
 userinfo, query or fragment), `bucket`, `region`, `prefix` (canonical relative path,
-default empty), `cache_bytes` (u64, default zero), and `credentials` with `mount`
+default empty) and `credentials` with `mount`
 (the virtual path of an explicitly granted Dir) and `path` (a canonical relative file
 within that mount). Unknown fields, duplicate names, inline secrets and references
 outside a granted mount refuse before entry. File access follows ordinary pinned
@@ -1134,7 +1134,7 @@ Dir confinement, including physical symlink checks; validation reads no credenti
 
 ```json
 {"object_stores":{"data":{"endpoint":"https://objects.example",
- "bucket":"hirsel-data","region":"auto","prefix":"service/db","cache_bytes":0,
+ "bucket":"hirsel-data","region":"auto","prefix":"service/db",
  "credentials":{"mount":"credentials","path":"data.json"}}},
  "io":{"dirs":[{"path":"credentials","host":"/srv/hirsel/credentials","access":"read"}]}}
 ```
@@ -1143,7 +1143,7 @@ Normalization projects each declaration into the existing grants: its endpoint's
 exact Net rule (`connect_tls` for HTTPS, `connect` for HTTP), a wall clock for SigV4
 (default `clock.wall.unix_ns@1`), the referenced existing directory mount, and Env
 snapshots `HIRSEL_S3_<UPPERCASE_NAME>_ENDPOINT`, `_BUCKET`, `_REGION`, `_PREFIX`,
-`_CACHE_BYTES`, `_CREDENTIALS_DIR` and `_CREDENTIALS`. The last two name the mount and
+`_CREDENTIALS_DIR` and `_CREDENTIALS`. The last two name the mount and
 relative file, never secret bytes. An explicit Env value that differs from a projection
 refuses; equal values normalize idempotently. Multiple stores share only identical Net
 rules. The pure Hirsel `s3.from_grants(io, env, name)` reads these explicit snapshots and

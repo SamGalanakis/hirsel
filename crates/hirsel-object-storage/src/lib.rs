@@ -16,6 +16,11 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
+#[cfg(feature = "testing")]
+pub mod fake_s3;
+mod s3;
+pub use s3::S3Objects;
+
 /// The outcome of [`ObjectStorage::put_new`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Put {
@@ -545,9 +550,13 @@ impl ObjectStorage for MemoryObjects {
 }
 
 /// Open an object storage provider entry: `{"provider": "objects.dir@1",
-/// "path": "<absolute directory>"}` or `{"provider": "objects.sim@1",
+/// "path": "<absolute directory>"}`, `{"provider": "objects.sim@1",
 /// "seed": <u64>, "fail_one_in": <u64>}` (both members optional, default
-/// 0). Unknown members and providers are refused.
+/// 0) or `{"provider": "objects.s3@1", "endpoint": "http[s]://host[:port]",
+/// "bucket": .., "region": .., "prefix": .., "credentials": "<absolute JSON
+/// file>", "roots": "<absolute PEM file>", "connect_timeout_ms": ..,
+/// "request_timeout_ms": ..}` (`prefix`, `roots` and the timeouts optional; see
+/// [`S3Objects`]). Unknown members and providers are refused.
 pub fn open(entry: &serde_json::Value) -> Result<Arc<dyn ObjectStorage>, String> {
     let members = entry
         .as_object()
@@ -559,6 +568,7 @@ pub fn open(entry: &serde_json::Value) -> Result<Arc<dyn ObjectStorage>, String>
     let allowed: &[&str] = match provider {
         "objects.dir@1" => &["provider", "path"],
         "objects.sim@1" => &["provider", "seed", "fail_one_in"],
+        "objects.s3@1" => s3::MEMBERS,
         other => return Err(format!("unsupported object storage provider {other}")),
     };
     if let Some(unknown) = members.keys().find(|k| !allowed.contains(&k.as_str())) {
@@ -580,6 +590,7 @@ pub fn open(entry: &serde_json::Value) -> Result<Arc<dyn ObjectStorage>, String>
                 .ok_or("objects.dir@1 path is an absolute directory")?;
             Ok(Arc::new(DirObjects::open(path).map_err(|e| e.to_string())?))
         }
+        "objects.s3@1" => Ok(Arc::new(S3Objects::open(members)?)),
         _ => Ok(Arc::new(MemoryObjects::with_faults(
             uint("seed")?,
             uint("fail_one_in")?,

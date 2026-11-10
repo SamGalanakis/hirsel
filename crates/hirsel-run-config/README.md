@@ -232,7 +232,7 @@ see the [PROG-3 table](../../docs/spec/programs.md#prog-3-entry). `Site::report`
 formats complete human/JSON failures, and `Wait::encode`/`decode` carry native
 parked-wait reports. A multi-run host keeps outcomes and never exits for a run.
 
-`object_stores` maps lowercase names to S3 endpoint/bucket/region/prefix/cache_bytes
+`object_stores` maps lowercase names to S3 endpoint/bucket/region/prefix
 and a credentials reference `{mount, path}` inside an explicitly granted Dir. The
 validator expands it to per-store `HIRSEL_S3_<NAME>_*` Env snapshots, the exact Net
 endpoint rule and a signing WallClock. Secrets remain in a granted credential file.

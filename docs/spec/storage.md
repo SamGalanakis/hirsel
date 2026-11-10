@@ -6,8 +6,9 @@ implementation is converging on it:
 - **Shipped and unchanged here:** the key encoding (STORE-6, `std@1/keys`); typed tables'
   create, drop, get, put, delete and range, row epochs, storage identity, rename history
   and migrations (STORE-5, STORE-7, STORE-9); the call-stream decisions as `store.call`
-  (STORE-12). `packages/s3@1` is an object-storage client; a store over S3 waits on an
-  `objects.s3@1` provider for `authority.objects@1`.
+  (STORE-12). `packages/s3@1` is an object-storage client; a store over S3 grants
+  `authority.objects@1` the host provider `objects.s3@1`, which a host run admits and a
+  simulated run (fixtures, the interpreter) refuses like `objects.dir@1`.
 - **Shipped:** transactions as entries: `store.transact`, `store.query` and `store.call`
   run an `Entry` through `runner.apply_mut` on decoded argument bytes, with `CallInfo`
   minted before the run and a failure in the run ending as `Faulted` (STORE-2, STORE-4,

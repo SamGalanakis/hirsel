@@ -1,8 +1,49 @@
 //! The object storage contract, run against every implementation.
 
-hirsel_guard::install!();
+hirsel_guard::install!(Counting);
+use hirsel_object_storage::fake_s3::FakeS3;
 use hirsel_object_storage::*;
+use std::alloc::{GlobalAlloc, Layout, System};
+use std::cell::Cell;
+use std::collections::BTreeMap;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+/// The system allocator, counting the allocations each thread makes.
+struct Counting;
+
+thread_local! {
+    static ALLOCATIONS: Cell<u64> = const { Cell::new(0) };
+}
+
+fn count() {
+    let _ = ALLOCATIONS.try_with(|c| c.set(c.get() + 1));
+}
+
+unsafe impl GlobalAlloc for Counting {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        count();
+        unsafe { System.alloc(layout) }
+    }
+    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+        count();
+        unsafe { System.alloc_zeroed(layout) }
+    }
+    unsafe fn realloc(&self, block: *mut u8, layout: Layout, size: usize) -> *mut u8 {
+        count();
+        unsafe { System.realloc(block, layout, size) }
+    }
+    unsafe fn dealloc(&self, block: *mut u8, layout: Layout) {
+        unsafe { System.dealloc(block, layout) }
+    }
+}
+
+/// Allocations `f` makes on this thread.
+fn allocations<T>(f: impl FnOnce() -> T) -> (u64, T) {
+    let before = ALLOCATIONS.with(Cell::get);
+    let out = f();
+    (ALLOCATIONS.with(Cell::get) - before, out)
+}
 
 fn contract(objects: &dyn ObjectStorage) {
     assert_eq!(objects.get("code/a1").unwrap(), None);
@@ -163,9 +204,251 @@ fn entries_open_their_provider_and_refuse_unknown_members() {
         ),
         (
             serde_json::json!({"provider": "objects.s3@1"}),
-            "unsupported object storage provider objects.s3@1",
+            "objects.s3@1 needs endpoint",
+        ),
+        (
+            serde_json::json!({"provider": "objects.s3@1", "cache_bytes": 1}),
+            "objects.s3@1 has no member \"cache_bytes\"",
+        ),
+        (
+            serde_json::json!({"provider": "objects.s4@1"}),
+            "unsupported object storage provider objects.s4@1",
         ),
     ] {
         assert_eq!(open(&entry).err().as_deref(), Some(error));
+    }
+}
+
+/// An `objects.s3@1` storage on `fake` under `prefix`.
+fn s3(
+    fake: &FakeS3,
+    dir: &std::path::Path,
+    prefix: &str,
+    timeout_ms: u64,
+) -> Result<Arc<dyn ObjectStorage>, String> {
+    open(&fake.entry(dir, prefix, timeout_ms))
+}
+
+fn faults(pairs: &[(&str, u64)]) -> BTreeMap<String, u64> {
+    pairs.iter().map(|(k, v)| (k.to_string(), *v)).collect()
+}
+
+#[test]
+fn an_s3_bucket_follows_the_same_contract_under_its_prefix() {
+    let dir = tempfile::tempdir().unwrap();
+    let fake = FakeS3::start(1, BTreeMap::new());
+    contract(&*s3(&fake, dir.path(), "tenant/store", 5000).unwrap());
+    // Another prefix in the same bucket is another storage.
+    let other = s3(&fake, dir.path(), "tenant/other", 5000).unwrap();
+    assert_eq!(other.get("code/a1").unwrap(), None);
+    assert_eq!(other.list("", "").unwrap().keys, Vec::<String>::new());
+    let objects = fake.world.lock().unwrap().objects.clone();
+    assert!(objects.contains_key("tenant/store/code/a1"));
+    assert!(
+        objects.keys().all(|k| k.starts_with("tenant/store/")),
+        "{objects:?}"
+    );
+    // Pages hold at most LIST_PAGE keys and say when more follow.
+    let store = s3(&fake, dir.path(), "", 5000).unwrap();
+    for i in 0..LIST_PAGE + 1 {
+        store.put_new(&format!("p/{i:05}"), b"").unwrap();
+    }
+    let first = store.list("p/", "").unwrap();
+    assert!(first.truncated && first.keys.len() == LIST_PAGE);
+    let rest = store.list("p/", first.keys.last().unwrap()).unwrap();
+    assert_eq!(
+        (rest.keys, rest.truncated),
+        (vec![format!("p/{LIST_PAGE:05}")], false)
+    );
+}
+
+/// Garage 2.4.1 answers 200 to a second create-only PUT and overwrites; a
+/// server that ignores If-Match would let a fenced writer replace the head.
+#[test]
+fn a_server_that_ignores_conditional_writes_fails_the_open() {
+    let dir = tempfile::tempdir().unwrap();
+    let fake = FakeS3::start(1, BTreeMap::new());
+    fake.world.lock().unwrap().honour_if_none_match = false;
+    let refused = s3(&fake, dir.path(), "", 5000).err().unwrap();
+    assert!(
+        refused.contains("does not honour If-None-Match: *"),
+        "{refused}"
+    );
+    let fake = FakeS3::start(1, BTreeMap::new());
+    fake.world.lock().unwrap().honour_if_match = false;
+    let refused = s3(&fake, dir.path(), "", 5000).err().unwrap();
+    assert!(refused.contains("does not honour If-Match"), "{refused}");
+    // The probe leaves nothing behind, and a conforming server opens.
+    let fake = FakeS3::start(1, BTreeMap::new());
+    s3(&fake, dir.path(), "", 5000).unwrap();
+    assert!(fake.world.lock().unwrap().objects.is_empty());
+}
+
+#[test]
+fn credentials_never_appear_in_errors() {
+    let dir = tempfile::tempdir().unwrap();
+    let creds = dir.path().join("creds.json");
+    std::fs::write(
+        &creds,
+        r#"{"access_key":"AKIDSECRETISH","secret_key":"hunter2-secret","bogus":"x"}"#,
+    )
+    .unwrap();
+    let entry = serde_json::json!({
+        "provider": "objects.s3@1", "endpoint": "http://127.0.0.1:1", "bucket": "bkt",
+        "region": "us-east-1", "credentials": creds, "connect_timeout_ms": 200,
+    });
+    let e = open(&entry).err().unwrap();
+    assert!(
+        e.contains("no member \"bogus\"") && !e.contains("hunter2") && !e.contains("AKIDSECRETISH"),
+        "{e}"
+    );
+    std::fs::write(
+        &creds,
+        r#"{"access_key":"AKIDSECRETISH","secret_key":"hunter2-secret"}"#,
+    )
+    .unwrap();
+    // Port 1 refuses: the probe fails unavailable, naming no credential.
+    let e = open(&entry).err().unwrap();
+    assert!(
+        e.contains("unavailable") && !e.contains("hunter2") && !e.contains("AKIDSECRETISH"),
+        "{e}"
+    );
+}
+
+/// A response lost after its effect, a 5xx after it, a truncated body or a
+/// timeout is Unavailable, never a success or a Mismatch, and the write did
+/// happen; the next request reconnects.
+#[test]
+fn uncertain_responses_are_unavailable_and_the_provider_reconnects() {
+    let dir = tempfile::tempdir().unwrap();
+    for fault in ["lost_response", "slow"] {
+        let fake = FakeS3::start(3, BTreeMap::new());
+        fake.world.lock().unwrap().slow_ms = 400;
+        let store = s3(&fake, dir.path(), "", 150).unwrap();
+        let Ok(Replaced::Replaced(t1)) = store.replace("head", b"h1", Condition::Absent) else {
+            panic!("creating the head")
+        };
+        fake.world.lock().unwrap().faults = faults(&[(fault, 1)]);
+        for i in 0..6 {
+            let bytes = format!("h-{fault}-{i}");
+            let r = store.replace("head", bytes.as_bytes(), Condition::Matches(t1.clone()));
+            assert!(
+                matches!(r, Err(StorageError::Unavailable(_))),
+                "{fault} {i}: {r:?}"
+            );
+            let r = store.put_new(&format!("k{i}"), b"v");
+            assert!(
+                matches!(r, Err(StorageError::Unavailable(_))),
+                "{fault} {i}: {r:?}"
+            );
+        }
+        fake.world.lock().unwrap().faults.clear();
+        std::thread::sleep(Duration::from_millis(450));
+        let contents = fake.world.lock().unwrap().objects.clone();
+        // The first lost replace applied; the later ones found another tag.
+        assert_eq!(
+            contents["head"],
+            format!("h-{fault}-0").as_bytes(),
+            "{fault}"
+        );
+        assert_eq!(contents.len(), 7, "{fault}");
+        assert_eq!(
+            store.get("k5").unwrap().as_deref(),
+            Some(&b"v"[..]),
+            "{fault}"
+        );
+    }
+    // A refused request (503) had no effect and is Unavailable too.
+    let fake = FakeS3::start(3, faults(&[]));
+    let store = s3(&fake, dir.path(), "", 2000).unwrap();
+    fake.world.lock().unwrap().faults = faults(&[("refuse", 1)]);
+    assert!(matches!(
+        store.put_new("x", b"1"),
+        Err(StorageError::Unavailable(_))
+    ));
+    fake.world.lock().unwrap().faults.clear();
+    assert_eq!(store.get("x").unwrap(), None);
+    // A server closing every connection after one response is still served.
+    fake.world.lock().unwrap().close_after_each = true;
+    for i in 0..4 {
+        assert_eq!(store.put_new(&format!("c{i}"), b"1").unwrap(), Put::Created);
+    }
+}
+
+/// A wrong ETag in a replace's response makes the writer's next If-Match a
+/// Mismatch, never an overwrite.
+#[test]
+fn a_wrong_tag_fences_rather_than_overwrites() {
+    let dir = tempfile::tempdir().unwrap();
+    let fake = FakeS3::start(3, BTreeMap::new());
+    let store = s3(&fake, dir.path(), "", 2000).unwrap();
+    fake.world.lock().unwrap().faults = faults(&[("wrong_etag", 1)]);
+    let Ok(Replaced::Replaced(t)) = store.replace("head", b"h1", Condition::Absent) else {
+        panic!("creating the head")
+    };
+    fake.world.lock().unwrap().faults.clear();
+    assert_eq!(
+        store.replace("head", b"h2", Condition::Matches(t)),
+        Ok(Replaced::Mismatch)
+    );
+    assert_eq!(store.get("head").unwrap().as_deref(), Some(&b"h1"[..]));
+}
+
+/// get_many runs its GETs at once over several connections: eight slow
+/// responses take about one delay, not eight.
+#[test]
+fn get_many_overlaps_its_requests() {
+    let dir = tempfile::tempdir().unwrap();
+    let fake = FakeS3::start(3, BTreeMap::new());
+    let store = s3(&fake, dir.path(), "", 5000).unwrap();
+    let keys: Vec<String> = (0..8).map(|i| format!("g/{i}")).collect();
+    for k in &keys[..7] {
+        store.put_new(k, k.as_bytes()).unwrap();
+    }
+    {
+        let mut w = fake.world.lock().unwrap();
+        w.slow_ms = 300;
+        w.faults = faults(&[("slow", 1)]);
+    }
+    let started = Instant::now();
+    let got = store.get_many(&keys);
+    let took = started.elapsed();
+    for (k, g) in keys[..7].iter().zip(&got) {
+        assert_eq!(g.as_ref().unwrap().as_deref(), Some(k.as_bytes()));
+    }
+    assert_eq!(got[7], Ok(None));
+    assert!(took < Duration::from_millis(1200), "{took:?}");
+}
+
+/// Steady-state requests build their head, canonical request and signature
+/// in reused buffers: a create-only PUT, a refused replace and a DELETE
+/// allocate nothing; a GET allocates only the bytes and tag it returns.
+#[test]
+fn steady_state_requests_allocate_only_what_they_return() {
+    let dir = tempfile::tempdir().unwrap();
+    let fake = FakeS3::start(3, BTreeMap::new());
+    let store = s3(&fake, dir.path(), "zone", 5000).unwrap();
+    let stale = Tag("\"stale\"".into());
+    for i in 0..4 {
+        store.put_new(&format!("w/{i}"), b"warm").unwrap();
+        store.get_tagged("w/0").unwrap();
+        store.delete(&format!("w/{i}")).unwrap();
+        store
+            .replace("head", b"x", Condition::Matches(stale.clone()))
+            .unwrap();
+    }
+    for i in 0..16 {
+        let key = format!("k/{i}");
+        let (n, put) = allocations(|| store.put_new(&key, b"bytes"));
+        assert_eq!((n, put), (0, Ok(Put::Created)), "put {i}");
+        let (n, replaced) =
+            allocations(|| store.replace("head", b"x", Condition::Matches(stale.clone())));
+        // The clone of the condition's tag is the caller's.
+        assert_eq!((n, replaced), (1, Ok(Replaced::Mismatch)), "replace {i}");
+        let (n, got) = allocations(|| store.get_tagged(&key));
+        assert_eq!(n, 2, "get {i}");
+        assert_eq!(got.unwrap().unwrap().0, b"bytes");
+        let (n, deleted) = allocations(|| store.delete(&key));
+        assert_eq!((n, deleted), (0, Ok(())), "delete {i}");
     }
 }

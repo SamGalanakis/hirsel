@@ -1066,10 +1066,10 @@ fn validate_io(io: &mut IoGrants, field: &str) -> Result<(), RunRefusal> {
 /// `io.authorities` (determinism.md, Authority grants): each name, its provider's
 /// settings and floor, for a log a directory inside a writable mount that no other
 /// authority's directory contains or is contained by, and for object storage a
-/// directory no other authority's contains or is contained by.
+/// directory, or a bucket prefix, no other authority's contains or is contained by.
 fn authorities(io: &IoGrants, field: &str) -> Result<(), RunRefusal> {
     let mut logs: Vec<(&str, &str)> = vec![];
-    let mut object_dirs: Vec<&str> = vec![];
+    let mut object_scopes: Vec<((&str, &str), &str)> = vec![];
     for (name, grant) in &io.authorities {
         let at = format!("{field}.{name}");
         if !name.as_bytes().first().is_some_and(u8::is_ascii_lowercase)
@@ -1103,25 +1103,35 @@ fn authorities(io: &IoGrants, field: &str) -> Result<(), RunRefusal> {
             }
             logs.push((mount, path));
         }
-        if hirsel_store_authority::objects_provider(grant) == Some("objects.dir@1")
-            && let Some(path) = grant
-                .objects
-                .as_ref()
-                .and_then(|o| o.get("path"))
-                .and_then(|p| p.as_str())
-        {
-            let path = path.trim_end_matches('/');
-            let nested = |a: &str, b: &str| a == b || b.starts_with(&format!("{a}/"));
-            if object_dirs
+        if let Some(scope) = object_scope(grant) {
+            let nested =
+                |a: &str, b: &str| a.is_empty() || a == b || b.starts_with(&format!("{a}/"));
+            if object_scopes
                 .iter()
-                .any(|p| nested(p, path) || nested(path, p))
+                .any(|(at, p)| *at == scope.0 && (nested(p, scope.1) || nested(scope.1, p)))
             {
                 return Err(invalid(&at, "two authorities over one object prefix"));
             }
-            object_dirs.push(path);
+            object_scopes.push(scope);
         }
     }
     Ok(())
+}
+/// Where an `authority.objects@1` grant keeps its objects outside the run: a
+/// directory (`objects.dir@1`, scope `("", "")`) or a bucket on an endpoint
+/// (`objects.s3@1`), with the path or key prefix inside it. A simulated bucket
+/// has none.
+fn object_scope(grant: &hirsel_run_schema::AuthorityGrant) -> Option<((&str, &str), &str)> {
+    let entry = grant.objects.as_ref()?;
+    let text = |m: &str| entry.get(m).and_then(|v| v.as_str());
+    match hirsel_store_authority::objects_provider(grant)? {
+        "objects.dir@1" => Some((("", ""), text("path")?.trim_end_matches('/'))),
+        "objects.s3@1" => Some((
+            (text("endpoint")?.trim_end_matches('/'), text("bucket")?),
+            text("prefix").unwrap_or(""),
+        )),
+        _ => None,
+    }
 }
 /// Whether every provider of one `io` grant set, at `field`, is supported.
 fn supported_io(io: &IoGrants, field: &str) -> Result<(), RunRefusal> {

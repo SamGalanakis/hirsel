@@ -491,8 +491,9 @@ def full(tree, screened=False):
         else:
             report = (check('workspace build', [PY, 'tools/buck2/event_logs.py', 'build', *CONFIG,
                                                 '--materializations', 'none', *query.stdout.split()])
-                      or check('Clippy', [PY, 'tools/buck2/clippy.py'])
-                      or check('formatting', [PY, 'tools/buck2/fmt.py', '--check']))
+                      or check('Clippy', [PY, 'tools/buck2/clippy.py']))
+    # fast(tree) checked this exact tree's formatting (now or when screened);
+    # fmt reads only tracked sources and the pinned rustfmt, so no rerun.
     if not unchanged(tree):
         raise Refusal('the worktree changed during checks; refusing to push')
     return report

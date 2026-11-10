@@ -327,7 +327,7 @@ Path(os.environ['FAKE_PREPARED']).write_text(found)
         landed, pushes = self.push_errors([dict(stderr='fatal: The requested URL returned error: 500')])
         self.assertEqual(landed.returncode, 0, landed.stdout + landed.stderr)
         self.assertEqual(pushes, [pushes[0], pushes[0]])
-        for stage in ('workspace build', 'Clippy', 'formatting'):
+        for stage in ('workspace build', 'Clippy'):
             self.assertEqual(landed.stdout.count('pass  ' + stage), 1)
         self.assertEqual(self.main_log(), ['change', 'base'])
         self.assertEqual(self.queued(), [])
@@ -336,7 +336,7 @@ Path(os.environ['FAKE_PREPARED']).write_text(found)
         refused, pushes = self.push_errors([dict(stderr='fatal: HTTP 500') for _ in range(3)])
         self.assertEqual(refused.returncode, 1, refused.stdout + refused.stderr)
         self.assertEqual(pushes, [pushes[0]] * 2)
-        for stage in ('workspace build', 'Clippy', 'formatting'):
+        for stage in ('workspace build', 'Clippy'):
             self.assertEqual(refused.stdout.count('pass  ' + stage), 1)
         self.assertEqual(self.main_log(), ['base'])
         self.assertFalse((self.lane / '.git/hirsel-landings.jsonl').exists())
@@ -356,7 +356,7 @@ Path(os.environ['FAKE_PREPARED']).write_text(found)
         self.assertEqual(landed.returncode, 0, landed.stdout + landed.stderr)
         self.assertEqual(len(pushes), 2)
         self.assertNotEqual(pushes[0], pushes[1])
-        for stage in ('workspace build', 'Clippy', 'formatting'):
+        for stage in ('workspace build', 'Clippy'):
             self.assertEqual(landed.stdout.count('pass  ' + stage), 2)
         self.assertEqual(self.main_log(), ['change', 'other', 'base'])
         self.assertEqual(self.queued(), [])
@@ -365,7 +365,7 @@ Path(os.environ['FAKE_PREPARED']).write_text(found)
         landed, pushes = self.push_errors([dict(stderr='fatal: unable to access origin: Recv failure: Connection reset by peer')])
         self.assertEqual(landed.returncode, 0, landed.stdout + landed.stderr)
         self.assertEqual(pushes, [pushes[0], pushes[0]])
-        for stage in ('workspace build', 'Clippy', 'formatting'):
+        for stage in ('workspace build', 'Clippy'):
             self.assertEqual(landed.stdout.count('pass  ' + stage), 1)
         self.assertEqual(self.main_log(), ['change', 'base'])
 
@@ -408,7 +408,8 @@ import os, pathlib, subprocess, sys
 root = pathlib.Path(os.environ['FAKE_CHECKS'])
 for line in sys.stdin:
     old, new, ref = line.split()
-    stages = [root / new / stage for stage in ('build', 'clippy', 'fmt')]
+    # fmt is the screen's check of the same tree, which may sit under another commit.
+    stages = [root / new / stage for stage in ('build', 'clippy')]
     if not all(path.is_file() for path in stages):
         print('UNCHECKED TREE', new, file=sys.stderr)
         sys.exit(1)
@@ -569,7 +570,6 @@ if not (root / 'release-build').exists():
         outputs = [self.finish_land(land) for land in lands]
         self.assertIn('batch of 3 tickets', outputs[0])
         self.assertEqual(sum(out.count('pass  workspace build') for out in outputs), 1, outputs)
-        self.assertEqual(sum(out.count('pass  formatting') for out in outputs), 1, outputs)
         # One push of all three commits, each lane's own and in ticket order.
         self.assertEqual(len((checks / 'received').read_text().splitlines()), 1)
         self.assertEqual(self.main_log()[:4], ['lane 2', 'lane 1', 'lane 0', 'record checks'])
@@ -844,7 +844,7 @@ if not (root / 'release-retry').exists():
         self.assertEqual(len(received), 3, received)
         self.assertEqual(self.subjects(received), ['main move', 'lane 2', 'newcomer'])
         self.assertNotIn('newcomer', self.git(self.origin, 'log', '--format=%s', received[1]).splitlines())
-        for stage in ('build', 'clippy', 'fmt'):
+        for stage in ('build', 'clippy'):
             self.assertEqual((checks / received[2] / stage).read_text(), received[1])
         self.assertEqual(len(list(checks.glob('*/build'))), 2)
 
@@ -866,7 +866,7 @@ if not (root / 'release-retry').exists():
     def test_a_source_main_move_still_rechecks_the_batch(self):
         checks, output = self.batch_with_main_moves([[('source.rs', 'fn changed() {}\n')]])
         self.assertNotIn('reuses all passed checks', output)
-        for stage in ('workspace build', 'Clippy', 'formatting', 'screen: formatting'):
+        for stage in ('workspace build', 'Clippy', 'screen: formatting'):
             self.assertEqual(output.count('pass  ' + stage), 2, output)
         self.assertEqual(len(list(checks.glob('*/build'))), 2)
 
@@ -917,7 +917,7 @@ if not (root / 'release-retry').exists():
         outputs = [self.finish_land(proc) for proc in (first, second, third)]
         # The holder had no waiters when it started; the second lands the third with its own.
         for out, runs in zip(outputs, (1, 1, 0)):
-            for stage in ('workspace build', 'Clippy', 'formatting'):
+            for stage in ('workspace build', 'Clippy'):
                 self.assertEqual(out.count('pass  ' + stage), runs, out)
             self.assertNotIn('main moved during the checks', out)
         self.assertIn('queue position 2; head my-lane', outputs[1])
@@ -1090,7 +1090,7 @@ for i in range(22):
 """)
         landed = self.land()
         self.assertEqual(landed.returncode, 0, landed.stdout + landed.stderr)
-        for stage in ('workspace build', 'Clippy', 'formatting'):
+        for stage in ('workspace build', 'Clippy'):
             self.assertEqual(landed.stdout.count('pass  ' + stage), 23)
         self.assertEqual(landed.stdout.count('main moved during the checks'), 22)
         self.assertNotIn('unchecked', landed.stdout)

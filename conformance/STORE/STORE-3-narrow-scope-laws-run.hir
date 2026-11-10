@@ -1,0 +1,275 @@
+// rule: STORE-3
+// expect: run
+// authorities: {"main":{"provider":"authority.memory@1","floor":"memory"}}
+// steps: 12000000
+// random scope pairs of up to six parts each, against the naive per-key oracle
+// A narrowing succeeds exactly when every key's access in the child is at
+// most its access in the parent, and a read narrowing exactly when every key
+// the child holds the parent holds at all, both read naively from the
+// scopes' parts at every boundary of either scope. A scope is the same
+// whatever order its keys are given in and when each part is cut in two,
+// and joining two scopes gives the same scope either way round.
+@serializable
+type Part {
+  lo: Bytes,
+  hi: Option[Bytes],
+  write: bool,
+}
+
+fn reserved_band(k: Bytes) -> bool uses {} {
+  b"hirsel." <= k && k < b"hirsel/"
+}
+
+// The access `parts` built by store.keys give `k`: 0 none, 1 read, 2 write.
+fn access(parts: List[Part], k: Bytes) -> u8 uses {} {
+  if reserved_band(k) {
+    return 0
+  }
+  let mut best: u8 = 0
+  for p in parts {
+    let below = match p.hi {
+      Some(h) => k < h,
+      None() => true,
+    }
+    if p.lo <= k && below {
+      let a: u8 = if p.write {
+        2
+      } else {
+        1
+      }
+      if a > best {
+        best = a
+      }
+    }
+  }
+  best
+}
+
+fn scope_of(parts: List[Part]) -> store.KeyScope uses {} {
+  let mut s = store.keys(Included(b"a"), Excluded(b"a"), Read())
+  for p in parts {
+    let to = match p.hi {
+      Some(h) => Excluded(unique h),
+      None() => Unbounded(),
+    }
+    let a = if p.write {
+      ReadWrite()
+    } else {
+      Read()
+    }
+    s = store.join(s, store.keys(Included(unique p.lo), to, a))
+  }
+  s
+}
+
+fn next(mut seed: u64) -> u64 uses {} {
+  seed = int.wrapping_add(
+    int.wrapping_mul(seed, 6364136223846793005),
+    1442695040888963407
+  )
+  seed >> 33
+}
+
+fn random_key(mut seed: u64) -> unique Bytes uses {} {
+  let pool = [
+    b"",
+    b"a",
+    b"ab",
+    b"b",
+    b"hirsel",
+    b"hirsel.",
+    b"hirsel.rows/",
+    b"hirsel/",
+    b"z",
+    b"\xff"
+  ]
+  let tails: List[u8] = [0, 1, 46, 47, 97, 255]
+  let mut out: List[u8] = []
+  for b in pool[next(mut seed) % 10] {
+    list.push(mut out, b)
+  }
+  let extra = next(mut seed) % 3
+  for _ in 0u64..extra {
+    list.push(mut out, tails[next(mut seed) % 6])
+  }
+  bytes.from_list(take out)
+}
+
+fn random_parts(mut seed: u64) -> List[Part] uses {} {
+  let mut parts: List[Part] = []
+  let n = next(mut seed) % 7
+  for _ in 0u64..n {
+    let x = random_key(mut seed)
+    let y = random_key(mut seed)
+    let endless = next(mut seed) % 7 == 0
+    let write = next(mut seed) % 2 == 0
+    let swap = y < x
+    let lo = if swap {
+      copy y
+    } else {
+      copy x
+    }
+    let end = if swap {
+      x
+    } else {
+      y
+    }
+    let hi: Option[Bytes] = if endless {
+      None()
+    } else {
+      Some(end)
+    }
+    list.push(mut parts, Part(lo: lo, hi: hi, write: write))
+  }
+  parts
+}
+
+// Every boundary of either scope, the reserved band's and the first key: each
+// scope's access is constant from one boundary to the next.
+fn boundaries(a: List[Part], b: List[Part]) -> List[Bytes] uses {} {
+  let mut out: List[Bytes] = [b"", b"hirsel.", b"hirsel/"]
+  for p in a {
+    list.push(mut out, unique p.lo)
+    if let Some(h) = p.hi {
+      list.push(mut out, unique h)
+    }
+  }
+  for p in b {
+    list.push(mut out, unique p.lo)
+    if let Some(h) = p.hi {
+      list.push(mut out, unique h)
+    }
+  }
+  out
+}
+
+fn contained(child: List[Part], parent: List[Part], at: List[Bytes], read: bool) -> bool uses {} {
+  for k in at {
+    let mut wanted = access(child, k)
+    if read && wanted > 1 {
+      wanted = 1
+    }
+    if wanted > access(parent, k) {
+      return false
+    }
+  }
+  true
+}
+
+// `parts` with each part that holds more than its first key cut in two after
+// that key: the same keys with the same accesses.
+fn split(parts: List[Part]) -> List[Part] uses {} {
+  let mut out: List[Part] = []
+  for p in parts {
+    let mut cut: List[u8] = []
+    for b in p.lo {
+      list.push(mut cut, b)
+    }
+    list.push(mut cut, 0)
+    let mid = bytes.from_list(take cut)
+    let inside = match p.hi {
+      Some(h) => mid < h,
+      None() => true,
+    }
+    if inside {
+      list.push(mut out, Part(lo: unique p.lo, hi: Some(copy mid), write: p.write))
+      list.push(mut out, Part(lo: take mid, hi: unique p.hi, write: p.write))
+    } else {
+      list.push(mut out, unique p)
+    }
+  }
+  out
+}
+
+// `parts` joined last part first.
+fn reversed(parts: List[Part]) -> List[Part] uses {} {
+  let mut out: List[Part] = []
+  let mut i = list.len(parts)
+  while i > 0 {
+    i -= 1
+    list.push(mut out, unique parts[i])
+  }
+  out
+}
+
+@serializable
+type Round {
+  parent: List[Part],
+  child: List[Part],
+  expected: bool,
+  expected_read: bool,
+}
+
+fn round_of(mut tx: store.Tx, info: store.CallInfo, r: Round) -> Result[bool, ()] {
+  let outcome = store.narrow(
+    mut tx,
+    scope_of(r.parent),
+    fn(mut sub: store.Tx) -> bool {
+      let nested = store.narrow(
+        mut sub,
+        scope_of(r.child),
+        fn(mut x: store.Tx) -> bool {
+          true
+        }
+      )
+      let read = store.narrow_read(
+        sub,
+        scope_of(r.child),
+        fn(x: store.Tx) -> bool {
+          true
+        }
+      )
+      (nested == Ok(true)) == r.expected && (read == Ok(true)) == r.expected_read
+    }
+  )
+  if outcome != Ok(true) {
+    return Ok(false)
+  }
+  // Abort, so each round starts from an empty store.
+  Error(())
+}
+
+pub type Failed = Check | Store(store.StoreError)
+
+fn check(ok: bool) -> Result[(), Failed] {
+  if ok {
+    Ok(())
+  } else {
+    Error(Check())
+  }
+}
+
+pub fn main(rt: Io, args: Args) -> Result[(), Failed] {
+  let Ok(a) = io.authority(rt, "main") else {
+    return Error(Check())
+  }
+  let mut s = store.open(a, store.default_config()) ? Store
+  let mut seed: u64 = 683
+  for round in 0u64..40u64 {
+    let parent = random_parts(mut seed)
+    let child = random_parts(mut seed)
+    let at = boundaries(parent, child)
+    let expected = contained(child, parent, at, false)
+    let expected_read = contained(child, parent, at, true)
+    check(scope_of(parent) == scope_of(reversed(parent)))?
+    check(scope_of(parent) == scope_of(split(parent)))?
+    check(
+      store.join(scope_of(parent), scope_of(child)) == store.join(
+        scope_of(child),
+        scope_of(parent)
+      )
+    )?
+    let checked: Result[bool, store.TxFailure[()]] = store.transact(
+      mut s,
+      round_of,
+      Round(
+        parent: parent,
+        child: child,
+        expected: expected,
+        expected_read: expected_read
+      )
+    )
+    check(checked == Error(Aborted(())))?
+  }
+  Ok(())
+}

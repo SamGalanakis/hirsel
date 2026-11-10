@@ -2097,7 +2097,7 @@ pub fn keys(from: RangeBound[Bytes], to: RangeBound[Bytes], access: Access) -> K
     }
     list.push(mut parts, ScopeSpan(lo: take start, hi: copy hi, write: write))
   }
-  normal(parts)
+  union(parts, [])
 }
 
 /// Every key, the reserved namespace included, with `access`.
@@ -2109,19 +2109,12 @@ pub fn all(access: Access) -> KeyScope uses {} {
 // The keys in [lo, hi), the reserved namespace included, with `access`: for
 // libraries that build scopes over their own rows.
 fn interval(lo: Bytes, hi: Option[Bytes], access: Access) -> KeyScope uses {} {
-  normal([ScopeSpan(lo: unique lo, hi: unique hi, write: writable(access))])
+  union([ScopeSpan(lo: unique lo, hi: unique hi, write: writable(access))], [])
 }
 
 /// The keys of `a` and of `b`, each with the stronger of its accesses.
 pub fn join(a: KeyScope, b: KeyScope) -> KeyScope uses {} {
-  let mut parts: List[ScopeSpan] = []
-  for span in a.spans {
-    list.push(mut parts, unique span)
-  }
-  for span in b.spans {
-    list.push(mut parts, unique span)
-  }
-  normal(parts)
+  union(a.spans, b.spans)
 }
 
 /// Runs `body` once with a `Tx` of the same transaction whose scope is exactly
@@ -2174,28 +2167,58 @@ pub fn narrow_read[R: inert](tx: Tx, scope: KeyScope, body: fn(sub: Tx) -> R use
   Ok(take returned)
 }
 
-// `scope` with every key Read.
+// `scope` with every key Read: one pass, joining spans that touch, since
+// equal access now merges them.
 fn read_only(scope: KeyScope) -> KeyScope uses {} {
-  let mut parts: List[ScopeSpan] = []
+  let mut spans: List[ScopeSpan] = []
   for span in scope.spans {
-    list.push(
-      mut parts,
-      ScopeSpan(lo: unique span.lo, hi: unique span.hi, write: false)
-    )
+    let last = list.len(spans)
+    if last > 0 && spans[last - 1].hi == Some(copy span.lo) {
+      spans[last - 1].hi = unique span.hi
+    } else {
+      list.push(
+        mut spans,
+        ScopeSpan(lo: unique span.lo, hi: unique span.hi, write: false)
+      )
+    }
   }
-  normal(parts)
+  KeyScope(spans: take spans, whole: false)
 }
 
 // Whether every key `inner` holds, `outer` holds with an access at least as
-// strong: one merge pass over both span lists.
+// strong: one pass over both sorted span lists, never moving back in `outer`.
 fn scope_within(inner: KeyScope, outer: KeyScope) -> bool uses {} {
   if outer.whole {
     return true
   }
+  let n = list.len(outer.spans)
+  let mut j: u64 = 0
   for span in inner.spans {
-    let held = spans_hold(outer.spans, span.lo, span.hi, span.write)
-    if held == 0 || span.write && held == 1 {
-      return false
+    while j < n && !before_end(span.lo, outer.spans[j].hi) {
+      j += 1
+    }
+    // Walk the outer spans that cover [span.lo, span.hi) without a gap.
+    let mut at = copy span.lo
+    let mut held = false
+    while !held {
+      if j == n || at < outer.spans[j].lo || span.write && !outer.spans[j].write {
+        return false
+      }
+      match outer.spans[j].hi {
+        None() => {
+          held = true
+        },
+        Some(end) => {
+          held = match span.hi {
+            Some(h) => h <= end,
+            None() => false,
+          }
+          if !held {
+            at = copy end
+            j += 1
+          }
+        },
+      }
     }
   }
   true
@@ -2213,89 +2236,91 @@ fn everything() -> KeyScope uses {} {
   all(ReadWrite())
 }
 
-// The normal form of a union of spans: each key with its strongest access,
-// sorted, disjoint, nonempty, adjacent spans of equal access merged.
-fn normal(parts: List[ScopeSpan]) -> KeyScope uses {} {
-  // Every finite span end, sorted and distinct, and whether a span is endless.
-  let mut cuts: List[Bytes] = []
-  let mut endless = false
-  for span in parts {
-    if !before_end(span.lo, span.hi) {
-      continue
-    }
-    insert_cut(mut cuts, span.lo)
-    match span.hi {
-      Some(h) => insert_cut(mut cuts, h),
-      None() => {
-        endless = true
-      },
-    }
-  }
+// The normal form of the union of `a` and `b`, each sorted and disjoint (empty
+// spans allowed): each key with its stronger access, sorted, disjoint,
+// nonempty, adjacent spans of equal access merged. One sweep in key order
+// over both lists; each step passes a span end or start.
+fn union(a: List[ScopeSpan], b: List[ScopeSpan]) -> KeyScope uses {} {
   let mut spans: List[ScopeSpan] = []
-  let n = list.len(cuts)
+  let na = list.len(a)
+  let nb = list.len(b)
   let mut i: u64 = 0
-  while i < n {
-    let lo = cuts[i]
-    let hi: Option[Bytes] = if i + 1 < n {
-      Some(copy cuts[i + 1])
-    } else {
-      None()
+  let mut j: u64 = 0
+  let mut at: Bytes in {a, b} = b""
+  let mut going = true
+  while going {
+    while i < na && !before_end(at, a[i].hi) {
+      i += 1
     }
-    i += 1
-    if hi == None() && !endless {
+    while j < nb && !before_end(at, b[j].hi) {
+      j += 1
+    }
+    if i == na && j == nb {
+      going = false
       continue
     }
-    // The strongest access of the parts that cover the piece [lo, hi).
-    let mut held: u8 = 0
-    for span in parts {
-      let starts = span.lo <= lo
-      let ends = match span.hi {
-        None() => true,
-        Some(e) => match hi {
-          Some(h) => h <= e,
-          None() => false,
-        },
-      }
-      if starts && ends && before_end(span.lo, span.hi) {
-        let a: u8 = if span.write {
-          2
-        } else {
-          1
-        }
-        if a > held {
-          held = a
-        }
-      }
-    }
-    if held == 0 {
-      continue
-    }
-    let write = held == 2
-    let last = list.len(spans)
-    if last > 0 && spans[last - 1].write == write && spans[last - 1].hi == Some(copy lo) {
-      spans[last - 1].hi = hi
+    // Each list's access at `at` and where it next changes; None is past
+    // every key.
+    let (held_a, next_a) = piece(a, i, at)
+    let (held_b, next_b) = piece(b, j, at)
+    let end = if ends_before(next_a, next_b) {
+      next_a
     } else {
-      list.push(mut spans, ScopeSpan(lo: copy lo, hi: hi, write: write))
+      next_b
+    }
+    let held = if held_a > held_b {
+      held_a
+    } else {
+      held_b
+    }
+    if held > 0 {
+      let write = held == 2
+      let last = list.len(spans)
+      if last > 0 && spans[last - 1].write == write && spans[last - 1].hi == Some(copy at) {
+        spans[last - 1].hi = unique end
+      } else {
+        list.push(mut spans, ScopeSpan(lo: unique at, hi: unique end, write: write))
+      }
+    }
+    match end {
+      None() => {
+        going = false
+      },
+      Some(e) => {
+        at = copy e
+      },
     }
   }
   let whole = list.len(spans) == 1 && spans[0].write && spans[0].lo == b"" && spans[0].hi == None()
   KeyScope(spans: take spans, whole: whole)
 }
 
-// Inserts `k` into the sorted, distinct `cuts` unless it is there.
-fn insert_cut(mut cuts: unique List[Bytes], k: Bytes) -> () uses {} {
-  let mut at = list.len(cuts)
-  while at > 0 && k < cuts[at - 1] {
-    at -= 1
+// The access the `k`th of `spans` gives `at` (0 none, 1 read, 2 write), all of
+// `spans` before it ending at or before `at`, and the next key where that
+// changes; None past every key.
+fn piece(spans: List[ScopeSpan], k: u64, at: Bytes) -> (u8, Option[Bytes] in spans) uses {} {
+  if k == list.len(spans) {
+    return (0, None())
   }
-  if at > 0 && cuts[at - 1] == k {
-    return
+  if at < spans[k].lo {
+    return (0, Some(copy spans[k].lo))
   }
-  list.push(mut cuts, unique k)
-  let mut j = list.len(cuts) - 1
-  while j > at {
-    core@1/list.swap(mut cuts, j - 1, j)
-    j -= 1
+  let held: u8 = if spans[k].write {
+    2
+  } else {
+    1
+  }
+  (held, copy spans[k].hi)
+}
+
+// Whether end `x` comes before end `y`, None being past every key.
+fn ends_before(x: Option[Bytes], y: Option[Bytes]) -> bool uses {} {
+  match x {
+    None() => false,
+    Some(a) => match y {
+      None() => true,
+      Some(b) => a < b,
+    },
   }
 }
 

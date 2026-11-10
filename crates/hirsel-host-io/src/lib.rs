@@ -18,7 +18,10 @@ mod free;
 mod remote;
 mod runners;
 mod walk;
-pub use remote::{CancelHandle, ExternalCancel, RemoteRunners, wire as remote_wire};
+pub use remote::{
+    CancelHandle, ExternalCancel, Hosted, PlaceFeed, PlaceHandle, RemoteRunners,
+    wire as remote_wire,
+};
 pub use runners::RunnerContext;
 
 fn invalid() -> Error {
@@ -2920,7 +2923,7 @@ impl hirsel_interp::OperationsAdapter for HostLibrary {
         self.library.deliver_arrival(id, call)
     }
     fn take_arrival_ends(&mut self) -> Vec<(u64, hirsel_run_schema::CallOutcome)> {
-        self.library.take_arrival_ends()
+        self.arrival_ends()
     }
     fn place_closed(&mut self) -> Vec<(u64, hirsel_run_schema::CallOutcome)> {
         self.library.place_closed()

@@ -8,11 +8,16 @@
 //! Connections run on their own threads; the callee runs run one at a time on the calling
 //! thread, which owns the program. A cancellation a caller forwards reaches the running
 //! callee through its [`ExternalCancel`](hirsel_host_io::ExternalCancel).
+//!
+//! A host whose configuration names a `place` is a `db@1` place (runners.md `db@1`): its
+//! head runs on its own thread from startup, and each transact or query call that passes
+//! the host's checks reaches the head's inbox through a [`PlaceHandle`]; the head's ends go
+//! back to the caller through the host.
 use crate::{HostLaunch, ToolError};
-use hirsel_host_io::{CancelHandle, ExternalCancel};
+use hirsel_host_io::{CancelHandle, ExternalCancel, Hosted, PlaceFeed, PlaceHandle};
 use hirsel_remote::frame::Call;
 use hirsel_remote::host::{
-    ABANDONED, Action, Caller, Host, Limits, Place, Refusal, RunId, SessionId, Start,
+    ABANDONED, Action, Arrival, Caller, Host, Limits, Place, Refusal, RunId, SessionId, Start,
 };
 use hirsel_remote::transport::{Command, Event, HostTls, Listener};
 use hirsel_remote::wire::Wire;
@@ -32,6 +37,24 @@ struct Served {
     entries: BTreeMap<String, (CalleeFacts, CallForm)>,
     /// `admit.safe@1`: a callee that reaches an extern or `Unsafe` operation is refused.
     safe_only: bool,
+    /// This host is a `db@1` place: it has a head to hand transact and query calls to.
+    place: bool,
+}
+impl Served {
+    /// Check 4's allowlists and code policy, shared by every call form.
+    fn permitted(&self, caller: &Caller, call: &Call) -> bool {
+        let listed = |allowlist: &Option<Vec<String>>| {
+            allowlist
+                .as_ref()
+                .is_none_or(|paths| paths.contains(&call.path))
+        };
+        let safe = !self.safe_only
+            || self
+                .entries
+                .get(&call.path)
+                .is_none_or(|(facts, _)| facts.reach == CodeReach::Safe);
+        listed(&caller.definitions) && listed(&call.definitions) && safe
+    }
 }
 impl Place for Served {
     /// RUN-8 checks 3 and 4, for a caller the session already admitted (check 2).
@@ -43,21 +66,26 @@ impl Place for Served {
         if facts.code != call.code || facts.fingerprint != call.fingerprint {
             return refuse(VERSION_MISMATCH, vec![call.code]);
         }
-        let listed = |allowlist: &Option<Vec<String>>| {
-            allowlist
-                .as_ref()
-                .is_none_or(|paths| paths.contains(&call.path))
-        };
-        if *form != call.form
-            || !listed(&caller.definitions)
-            || !listed(&call.definitions)
-            || (self.safe_only && facts.reach != CodeReach::Safe)
-        {
+        if *form != call.form || !self.permitted(caller, call) {
             return refuse(DENIED, vec![]);
         }
         match hirsel_run_schema::narrow(&caller.grants, &call.grants) {
             Some(grants) => Ok(grants),
             None => refuse(DENIED, vec![]),
+        }
+    }
+    /// The host's share of check 4 at a place; the head checks the entries it serves.
+    fn admit_served(&mut self, caller: &Caller, call: &Call) -> Result<(), Refusal> {
+        if self.place
+            && self.permitted(caller, call)
+            && hirsel_run_schema::narrow(&caller.grants, &call.grants).is_some()
+        {
+            Ok(())
+        } else {
+            Err(Refusal {
+                reason: DENIED,
+                missing: vec![],
+            })
         }
     }
 }
@@ -67,6 +95,8 @@ struct Shared {
     place: Served,
     sessions: BTreeMap<SessionId, Sender<Command>>,
     cancels: BTreeMap<RunId, CancelHandle>,
+    /// The place's head inbox, once the head runs.
+    head: Option<PlaceHandle>,
     next_session: SessionId,
     work: Sender<Work>,
 }
@@ -114,8 +144,37 @@ impl Shared {
                         handle.cancel();
                     }
                 }
+                Action::Arrive(arrival) => match &self.head {
+                    Some(head) => head.arrive(arrival.id, arrived(*arrival)),
+                    // Served calls are admitted only at a place, whose head is set first.
+                    None => {
+                        let actions = self
+                            .host
+                            .arrival_ended(arrival.id, CallOutcome::NotRun(DENIED));
+                        self.act(actions);
+                    }
+                },
             }
         }
+    }
+}
+
+/// A served call as the head's `arrival.request` states it.
+fn arrived(arrival: Arrival) -> hirsel_interp::ArrivedCall {
+    let call = arrival.call;
+    hirsel_interp::ArrivedCall {
+        form: call.form,
+        path: call.path,
+        fingerprint: call.fingerprint,
+        code: call.code,
+        caller: arrival.caller,
+        stream: arrival.stream,
+        epoch: call.epoch,
+        position: call.position,
+        digest: arrival.digest,
+        acknowledged: call.acknowledged,
+        level: call.level,
+        argument: call.argument,
     }
 }
 
@@ -209,13 +268,18 @@ pub fn serve(
         place: Served {
             entries: entries.clone(),
             safe_only: config.admission.is_some(),
+            place: config.place.is_some(),
         },
         sessions: BTreeMap::new(),
         cancels: BTreeMap::new(),
+        head: None,
         next_session: 1,
         work,
     }));
     let config = Arc::new(config);
+    if config.place.is_some() {
+        start_head(program, policy, fresh, &config, &shared)?;
+    }
     {
         let (shared, config, wire) = (shared.clone(), config.clone(), wire.clone());
         std::thread::Builder::new()
@@ -249,6 +313,108 @@ pub fn serve(
         shared.dispatch(actions);
     }
     stopped(&shared.lock().unwrap()).map_or(Ok(()), Err)
+}
+
+/// Start the place's head on its own thread: the host hands it the served calls it admits
+/// and sends the ends it reports; once it ends, later served calls are unreachable.
+fn start_head(
+    program: &Path,
+    policy: crate::session::Policy,
+    instance: [u8; 16],
+    config: &Arc<HostConfig>,
+    shared: &Arc<Mutex<Shared>>,
+) -> Result<(), ToolError> {
+    let ends = shared.clone();
+    let (feed, handle) = PlaceFeed::pair(Box::new(move |id, end| {
+        let mut shared = ends.lock().unwrap();
+        let actions = shared.host.arrival_ended(id, end);
+        shared.dispatch(actions);
+    }))
+    .map_err(|e| host_error("the place's inbox", e))?;
+    shared.lock().unwrap().head = Some(handle);
+    let (program, config, shared) = (program.to_path_buf(), config.clone(), shared.clone());
+    std::thread::Builder::new()
+        .name("place head".into())
+        .spawn(move || {
+            if let Err(error) = run_head(&program, policy, instance, &config, feed) {
+                eprintln!("hirsel serve: the place's head: {error:?}");
+            }
+            let mut shared = shared.lock().unwrap();
+            let actions = shared.host.head_ended();
+            shared.dispatch(actions);
+        })
+        .map_err(|e| host_error("the place's head", e))?;
+    Ok(())
+}
+
+/// Run the place's head entry `fn(rt: Io, a: ()) -> Result[(), E]` under the place's
+/// grants, with its inbox fed by `feed`, until it ends.
+fn run_head(
+    program: &Path,
+    policy: crate::session::Policy,
+    instance: [u8; 16],
+    config: &HostConfig,
+    feed: PlaceFeed,
+) -> Result<(), ToolError> {
+    let place = config.place.as_ref().expect("a place host");
+    let definition =
+        crate::def_path(&place.head).ok_or_else(|| host_error("host.place.head", &place.head))?;
+    // The head runs beside the callee runs, so it holds its own compiler session.
+    let mut session = crate::session::Session::open_resident(program, policy);
+    let selected = session.request(crate::requests::CompileOperation::Tir {
+        definition: Some(definition),
+    })?;
+    let crate::requests::CompileResult::Tir(input) = &selected.result else {
+        return Err(host_error("host.place.head", "not a runnable entry"));
+    };
+    let (_, schema) = crate::call_schemas(&input.signature, &input.runtime)
+        .map_err(|e| host_error("host.place.head", format!("{e:?}")))?;
+    let argument = hirsel_interp::library::runners::encode(&schema, &hirsel_interp::Value::Unit)
+        .map_err(|e| host_error("host.place.head", format!("{e:?}")))?;
+    let cause = hirsel_run_schema::Cause {
+        instance,
+        ordinal: 0,
+        digest: [0; 32],
+    };
+    let key = hirsel_run_schema::call_key(&instance, 0);
+    let seed = |name: &str| hirsel_run_schema::callee_seed(&key, name);
+    let mut record = hirsel_run_config::RunConfig::empty(
+        input.revision.digest(),
+        place.head.clone(),
+        hirsel_run_schema::LaunchKind::Call,
+    );
+    record.call = Some(hirsel_run_schema::CallRecord::new(
+        CallForm::Call,
+        &cause,
+        &argument,
+    ));
+    record.inputs.hash_seed = seed("hash");
+    record.inputs.random_seed = seed("random");
+    record.inputs.test_seed = seed("test");
+    record.io = Some(place.grants.clone());
+    let run = record
+        .validated()
+        .map_err(|e| host_error("host.place", e))?;
+    let tape = config
+        .tapes
+        .as_ref()
+        .map(|dir| PathBuf::from(dir).join("head.tape"));
+    let launch = HostLaunch::Callee {
+        run: &run,
+        record: tape.as_deref(),
+    };
+    let selection = crate::launch_binding::LaunchSelection::read(launch)?;
+    let (outcome, _) = crate::tir_execution::run_tir_on_host(
+        input,
+        launch,
+        selection,
+        None,
+        None,
+        Some(Hosted::Head(feed)),
+        false,
+    )?;
+    eprintln!("hirsel serve: the place's head ended: {outcome:?}");
+    Ok(())
 }
 
 /// Accept connections until the listener fails; each runs on its own thread.
@@ -404,7 +570,7 @@ fn run_callee(
             selection,
             None,
             None,
-            Some(cancel),
+            Some(Hosted::Callee(cancel)),
             false,
         )
     });

@@ -21,6 +21,9 @@ use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
 
+/// `NotRun(Unreachable())`: an arrival a place's head never took before it ended.
+const UNREACHABLE: u32 = 2;
+
 /// A host run's runner calls and the callee runs it starts.
 #[derive(Default)]
 pub struct HostRunners {
@@ -38,6 +41,8 @@ pub struct HostRunners {
     remote_calls: BTreeMap<u64, String>,
     /// A runner host's cancellation of this run, when a host serves it.
     external: Option<super::remote::ExternalCancel>,
+    /// A runner host's `db@1` inbox, when this run is the place's head.
+    place: Option<super::remote::PlaceFeed>,
     /// A live `sim@1` callee whose place crashes: it stops before this request.
     pub(super) crash: Option<u64>,
     /// The requests this run has issued.
@@ -196,28 +201,68 @@ impl HostLibrary {
         }
         Ok(issued)
     }
-    /// A runner host serves this run: its cancellation wakes the run's idle wait.
-    pub fn set_external_cancel(
-        &mut self,
-        cancel: super::remote::ExternalCancel,
-    ) -> Result<(), String> {
+    /// A runner host serves this run: a callee's cancellation, or a head's arrivals, wake
+    /// the run's idle wait. A head's `io.inbox` grants its inbox, which the feed fills.
+    pub fn set_hosted(&mut self, hosted: super::remote::Hosted) -> Result<(), String> {
+        let fd = match &hosted {
+            super::remote::Hosted::Callee(cancel) => cancel.wake_fd(),
+            super::remote::Hosted::Head(feed) => feed.wake_fd(),
+        };
         if let HostIo::Live(io) = &self.io
             && let Some(readiness) = io.readiness()
         {
-            readiness
-                .wake_on(cancel.wake_fd())
-                .map_err(|e| format!("{e:?}"))?;
+            readiness.wake_on(fd).map_err(|e| format!("{e:?}"))?;
         }
-        self.runners.external = Some(cancel);
+        match hosted {
+            super::remote::Hosted::Callee(cancel) => self.runners.external = Some(cancel),
+            super::remote::Hosted::Head(feed) => {
+                self.library.serve_place();
+                self.runners.place = Some(feed);
+            }
+        }
         Ok(())
     }
-    /// A scheduling point: a host's cancellation of this run cancels its root scope, and
-    /// the remote calls whose completion arrived are delivered.
+    /// The head ended: its host gets the end of every arrival it held or never took.
+    pub fn close_place(&mut self) {
+        let Some(mut place) = self.runners.place.take() else {
+            return;
+        };
+        let mut ends = hirsel_interp::Operations::place_closed(&mut self.library);
+        ends.extend(
+            place
+                .take()
+                .into_iter()
+                .map(|(id, _)| (id, hirsel_run_schema::CallOutcome::NotRun(UNREACHABLE))),
+        );
+        for (id, end) in ends {
+            place.ended(id, end);
+        }
+    }
+    /// A head's ends go to its host, not to a run of this execution.
+    pub(super) fn arrival_ends(&mut self) -> Vec<(u64, hirsel_run_schema::CallOutcome)> {
+        let ends = hirsel_interp::Operations::take_arrival_ends(&mut self.library);
+        let Some(place) = &mut self.runners.place else {
+            return ends;
+        };
+        for (id, end) in ends {
+            place.ended(id, end);
+        }
+        vec![]
+    }
+    /// A scheduling point: a host's cancellation of this run cancels its root scope, the
+    /// arrivals at a head's inbox are delivered, and the remote calls whose completion
+    /// arrived are delivered.
     pub(super) fn remote_deliveries(&mut self) {
         if let Some(external) = &mut self.runners.external
             && external.take()
         {
             hirsel_interp::Operations::cancel_run(&mut self.library);
+        }
+        if let Some(place) = &mut self.runners.place {
+            for (id, call) in place.take() {
+                // Nothing a live head refuses: a closed inbox ends the call itself.
+                let _ = hirsel_interp::Operations::deliver_arrival(&mut self.library, id, call);
+            }
         }
         let (Some(remote), HostIo::Live(io)) = (&self.runners.remote, &mut self.io) else {
             return;

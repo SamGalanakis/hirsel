@@ -14,6 +14,10 @@
 //!  "runs": 1, "queue": 64, "streams": 65536, "unacknowledged": 65}
 //! ```
 //!
+//! A `db@1` place adds `"place": {"head": "billing@1/head", "grants": {...}}`: the head entry,
+//! `fn(rt: Io, a: ()) -> Result[(), E]`, runs for the host's life under `grants` and takes
+//! the transact and query calls through its inbox (runners.md `db@1`).
+//!
 //! `clients` null serves clients without certificates, all of them the one caller whose
 //! identity is `"anonymous"`; with trust anchors, a client presents a certificate they
 //! issued and is the caller whose identity names its certificate's SHA-256 or a DNS
@@ -60,6 +64,16 @@ pub struct HostConfig {
     /// The largest frame read, in bytes (default 64 MiB).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub frame_bytes: Option<u64>,
+    /// A `db@1` place: its head entry and the head's grants.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub place: Option<PlaceEntry>,
+}
+/// A `db@1` place's head: the full versioned path of its entry and its grant set.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PlaceEntry {
+    pub head: String,
+    pub grants: IoGrants,
 }
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -240,6 +254,22 @@ impl HostConfig {
                     "expected none or record, and tapes only when recording",
                 ));
             }
+        }
+        if let Some(place) = &mut config.place {
+            if !definition_path(&place.head) {
+                return Err(invalid(
+                    "host.place.head",
+                    "expected a full versioned definition path",
+                ));
+            }
+            if place.grants.stdin.is_some() || !place.grants.runners.is_empty() {
+                return Err(invalid(
+                    "host.place.grants",
+                    "a head's grant set has no stdin and no runners",
+                ));
+            }
+            crate::validate_io(&mut place.grants, "host.place.grants")?;
+            crate::supported_io(&place.grants, "host.place.grants")?;
         }
         for (field, value, default) in [
             ("host.runs", &mut config.runs, DEFAULT_RUNS),

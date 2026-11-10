@@ -298,6 +298,7 @@ impl World {
                         r.1 = true;
                     }
                 }
+                Action::Arrive(arrival) => panic!("the simulated host is no place: {arrival:?}"),
             }
         }
     }

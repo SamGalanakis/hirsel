@@ -174,6 +174,12 @@ fn list(elements: Vec<Value>) -> Value {
 }
 
 impl Library {
+    /// This run is a `db@1` place's head that a runner host serves: `io.inbox` grants its
+    /// inbox once.
+    pub fn serve_place(&mut self) {
+        self.simulation.config.place = true;
+    }
+
     pub(super) fn place_call(
         &mut self,
         name: &str,

@@ -364,3 +364,64 @@ impl CancelHandle {
         let _ = (&*self.signal).write(&[1]);
     }
 }
+
+/// How a runner host serves a run: a callee its host can cancel, or a `db@1` place's head.
+pub enum Hosted {
+    Callee(ExternalCancel),
+    Head(PlaceFeed),
+}
+
+/// A `db@1` place's inbox as its head run sees it (runners.md `db@1`): the host's thread
+/// pushes each arrival that passed its checks and writes a byte, which wakes the head's
+/// idle wait; the head's run takes them into its inbox at its next scheduling point and
+/// reports each call's end, and the ends of every call it held when it ended, to `ended`.
+pub struct PlaceFeed {
+    arrivals: Arc<std::sync::Mutex<Vec<(u64, hirsel_interp::ArrivedCall)>>>,
+    wake: UnixStream,
+    ended: Box<dyn FnMut(u64, hirsel_run_schema::CallOutcome) + Send>,
+}
+/// The host's side of a [`PlaceFeed`].
+#[derive(Clone)]
+pub struct PlaceHandle {
+    arrivals: Arc<std::sync::Mutex<Vec<(u64, hirsel_interp::ArrivedCall)>>>,
+    signal: Arc<UnixStream>,
+}
+impl PlaceFeed {
+    pub fn pair(
+        ended: Box<dyn FnMut(u64, hirsel_run_schema::CallOutcome) + Send>,
+    ) -> std::io::Result<(Self, PlaceHandle)> {
+        let (wake, signal) = UnixStream::pair()?;
+        wake.set_nonblocking(true)?;
+        signal.set_nonblocking(true)?;
+        let arrivals = Arc::new(std::sync::Mutex::new(Vec::new()));
+        Ok((
+            Self {
+                arrivals: arrivals.clone(),
+                wake,
+                ended,
+            },
+            PlaceHandle {
+                arrivals,
+                signal: Arc::new(signal),
+            },
+        ))
+    }
+    pub fn wake_fd(&self) -> RawFd {
+        self.wake.as_raw_fd()
+    }
+    /// The arrivals pushed since the last take, in arrival order.
+    pub fn take(&mut self) -> Vec<(u64, hirsel_interp::ArrivedCall)> {
+        let mut drained = [0u8; 16];
+        while matches!((&self.wake).read(&mut drained), Ok(n) if n > 0) {}
+        std::mem::take(&mut *self.arrivals.lock().unwrap())
+    }
+    pub fn ended(&mut self, id: u64, end: hirsel_run_schema::CallOutcome) {
+        (self.ended)(id, end)
+    }
+}
+impl PlaceHandle {
+    pub fn arrive(&self, id: u64, call: hirsel_interp::ArrivedCall) {
+        self.arrivals.lock().unwrap().push((id, call));
+        let _ = (&*self.signal).write(&[1]);
+    }
+}

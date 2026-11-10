@@ -44,6 +44,15 @@
 //! its running callees cancelled with cause `Parent` and its queued ones decided
 //! `Canceled(Parent())` (RUN-9); the caller learns those outcomes through status queries.
 //!
+//! **Served calls.** At a `db@1` place a transact or query call is not decided here: its
+//! stream position is the store's ([STORE-12](../../../docs/spec/storage.md)). The host makes
+//! RUN-8 checks 1, 2, 4 without the place's own list of served entries, 6 and 7 (the call
+//! key is the stream instance's), then hands the call to the place's head as an
+//! [`Arrival`]; the head makes checks 3, the served-entry list, 5 and 8, and the host sends
+//! the end it reports ([`Host::arrival_ended`]) to the stream's current session. Nothing of
+//! a served call is journaled or retained once it ends: a caller that lost its outcome
+//! sends the call again, and the store answers it from the stream rows it recorded.
+//!
 //! **A failed journal stops the host.** Every record is appended before it is acted on: a
 //! stream before it opens, an admission before its callee may start, a decision before its
 //! outcome is sent, an acknowledgement before its outcomes are dropped. When an append
@@ -64,6 +73,7 @@ pub type SessionId = u64;
 pub type RunId = u64;
 
 pub const DENIED: u32 = 0;
+pub const UNREACHABLE: u32 = 2;
 pub const OVERLOADED: u32 = 3;
 pub const REJECTED: u32 = 4;
 pub const ABANDONED: u32 = 2;
@@ -92,6 +102,15 @@ pub struct Refusal {
 /// policy and the argument's schema. On success, the grant set the callee runs under.
 pub trait Place {
     fn admit(&mut self, caller: &Caller, call: &Call) -> Result<IoGrants, Refusal>;
+    /// The host's share of RUN-8 check 4 for a transact or query call at a `db@1` place:
+    /// the requested grant set and both allowlists against the caller's, and the code
+    /// policy; the head checks the entries it serves. A place without a head serves none.
+    fn admit_served(&mut self, _caller: &Caller, _call: &Call) -> Result<(), Refusal> {
+        Err(Refusal {
+            reason: DENIED,
+            missing: vec![],
+        })
+    }
 }
 
 /// A request's digest as the caller computed it (RUN-11).
@@ -108,6 +127,19 @@ pub enum Action {
     Start(Start),
     /// Forward a cancellation to a running callee (cause ordinal).
     Cancel(RunId, u32),
+    /// Hand a served call to the place's head.
+    Arrive(Box<Arrival>),
+}
+
+/// A transact or query call that passed the host's checks, for the place's head.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Arrival {
+    pub id: u64,
+    /// The admitted caller's name.
+    pub caller: String,
+    pub stream: [u8; 32],
+    pub digest: [u8; 32],
+    pub call: Call,
 }
 
 /// A callee to run as its own run (RUN-10).
@@ -211,6 +243,13 @@ struct Session {
     /// A refusal was sent; discard further frames until the transport disconnects.
     closing: bool,
 }
+/// A served call the head holds: where its end goes.
+struct Served {
+    stream: StreamKey,
+    position: u64,
+    key: [u8; 32],
+    digest: [u8; 32],
+}
 struct Run {
     stream: StreamKey,
     position: u64,
@@ -229,6 +268,11 @@ pub struct Host {
     queued: VecDeque<RunId>,
     running: u64,
     next_run: RunId,
+    /// Served calls handed to the head and not yet ended.
+    served: BTreeMap<u64, Served>,
+    next_arrival: u64,
+    /// The place's head ended: no served call reaches it again.
+    head_ended: bool,
     /// The append failure that stopped the host.
     failure: Option<String>,
 }
@@ -338,6 +382,9 @@ impl Host {
             queued: VecDeque::new(),
             running: 0,
             next_run: 1,
+            served: BTreeMap::new(),
+            next_arrival: 1,
+            head_ended: false,
             failure: None,
         })
     }
@@ -577,6 +624,9 @@ impl Host {
             return actions;
         }
         match frame {
+            Frame::Call(call) if call.form.served() => {
+                self.serve(session, &key, &caller, *call, place, digests, &mut actions)
+            }
             Frame::Call(call) => {
                 self.call(session, &key, &caller, *call, place, digests, &mut actions)
             }
@@ -950,6 +1000,88 @@ impl Host {
             };
             self.decide_refused(key, next, k, d, REJECTED, vec![], session, actions);
         }
+    }
+
+    /// A transact or query call: the host's checks, then the head (module docs).
+    #[allow(clippy::too_many_arguments)]
+    fn serve(
+        &mut self,
+        session: SessionId,
+        key: &StreamKey,
+        caller: &Caller,
+        call: Call,
+        place: &mut dyn Place,
+        digests: &dyn Digests,
+        actions: &mut Vec<Action>,
+    ) {
+        let digest = digests.digest(&call);
+        let stream = &self.streams[key];
+        let epoch = stream.epoch;
+        if call.key != call_key(&stream.instance, call.ordinal) {
+            return Self::refuse(session, epoch, &call, digest, REJECTED, actions);
+        }
+        if let Err(refusal) = place.admit_served(caller, &call) {
+            return Self::refuse(session, epoch, &call, digest, refusal.reason, actions);
+        }
+        if self.head_ended {
+            return Self::refuse(session, epoch, &call, digest, UNREACHABLE, actions);
+        }
+        if self.served.len() as u64 >= self.limits.runs + self.limits.queue {
+            return Self::refuse(session, epoch, &call, digest, OVERLOADED, actions);
+        }
+        let id = self.next_arrival;
+        self.next_arrival += 1;
+        self.served.insert(
+            id,
+            Served {
+                stream: key.clone(),
+                position: call.position,
+                key: call.key,
+                digest,
+            },
+        );
+        actions.push(Action::Arrive(Box::new(Arrival {
+            id,
+            caller: caller.name.clone(),
+            stream: key.stream,
+            digest,
+            call,
+        })));
+    }
+
+    /// The head ended served call `id`: its outcome goes to its stream's current session.
+    pub fn arrival_ended(&mut self, id: u64, end: CallOutcome) -> Vec<Action> {
+        let mut actions = vec![];
+        let Some(served) = self.served.remove(&id) else {
+            return actions;
+        };
+        if let Some(stream) = self.streams.get(&served.stream)
+            && let Some(session) = stream.session
+        {
+            actions.push(Action::Send(
+                session,
+                Frame::Outcome(Box::new(Outcome {
+                    epoch: stream.epoch,
+                    position: served.position,
+                    key: served.key,
+                    digest: served.digest,
+                    end,
+                    callee: None,
+                    missing: vec![],
+                })),
+            ));
+        }
+        actions
+    }
+
+    /// The place's head ended. It reported the end of every call it held; any it did not
+    /// is in doubt, and later served calls are `NotRun(Unreachable())`.
+    pub fn head_ended(&mut self) -> Vec<Action> {
+        self.head_ended = true;
+        let ids: Vec<u64> = self.served.keys().copied().collect();
+        ids.into_iter()
+            .flat_map(|id| self.arrival_ended(id, CallOutcome::InDoubt(ABANDONED)))
+            .collect()
     }
 
     /// Refuse the session before another decision would exceed the stream's retention.

@@ -563,7 +563,7 @@ pub(crate) fn run_request_on_host(
     launch: HostLaunch<'_>,
     max_steps: Option<u64>,
     observed: Option<&mut Option<hirsel_interp::observation::Observable>>,
-    cancel: Option<hirsel_host_io::ExternalCancel>,
+    hosted: Option<hirsel_host_io::Hosted>,
     checked: bool,
 ) -> Result<(RunOutcome, Option<hirsel_run_schema::CalleeOutcome>), ToolError> {
     let selection = launch_binding::LaunchSelection::read(launch)?;
@@ -579,7 +579,7 @@ pub(crate) fn run_request_on_host(
         request_tir(path, policy, selection.entry().cloned())?
     };
     tir_execution::run_tir_on_host(
-        &input, launch, selection, max_steps, observed, cancel, checked,
+        &input, launch, selection, max_steps, observed, hosted, checked,
     )
 }
 

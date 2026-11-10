@@ -22,11 +22,11 @@ pub(crate) fn run_tir_on_host(
     selection: LaunchSelection,
     max_steps: Option<u64>,
     observed: Option<&mut Option<hirsel_interp::observation::Observable>>,
-    cancel: Option<hirsel_host_io::ExternalCancel>,
+    hosted: Option<hirsel_host_io::Hosted>,
     checked: bool,
 ) -> Result<(RunOutcome, Option<hirsel_run_schema::CalleeOutcome>), ToolError> {
     run_tir_on_host_with_grants(
-        input, launch, selection, max_steps, observed, cancel, checked, None,
+        input, launch, selection, max_steps, observed, hosted, checked, None,
     )
 }
 
@@ -36,12 +36,12 @@ pub(crate) fn run_tir_on_host_with_grants(
     selection: LaunchSelection,
     max_steps: Option<u64>,
     observed: Option<&mut Option<hirsel_interp::observation::Observable>>,
-    cancel: Option<hirsel_host_io::ExternalCancel>,
+    hosted: Option<hirsel_host_io::Hosted>,
     checked: bool,
     snapshot: Option<hirsel_rt::host_launch::HostGrants>,
 ) -> Result<(RunOutcome, Option<hirsel_run_schema::CalleeOutcome>), ToolError> {
     run_tir_on_host_traced(
-        input, launch, selection, max_steps, observed, cancel, checked, snapshot, None,
+        input, launch, selection, max_steps, observed, hosted, checked, snapshot, None,
     )
 }
 
@@ -51,7 +51,7 @@ pub(crate) fn run_tir_on_host_traced(
     selection: LaunchSelection,
     max_steps: Option<u64>,
     observed: Option<&mut Option<hirsel_interp::observation::Observable>>,
-    cancel: Option<hirsel_host_io::ExternalCancel>,
+    hosted: Option<hirsel_host_io::Hosted>,
     checked: bool,
     snapshot: Option<hirsel_rt::host_launch::HostGrants>,
     ownership: Option<&mut crate::ownership_trace::Capture>,
@@ -75,7 +75,7 @@ pub(crate) fn run_tir_on_host_traced(
         selection,
         max_steps,
         observed,
-        cancel,
+        hosted,
         checked,
         snapshot,
         ownership,
@@ -102,7 +102,7 @@ pub(crate) fn run_loaded_on_host_with_checks(
     launch: HostLaunch<'_>,
     max_steps: Option<u64>,
     observed: Option<&mut Option<hirsel_interp::observation::Observable>>,
-    cancel: Option<hirsel_host_io::ExternalCancel>,
+    hosted: Option<hirsel_host_io::Hosted>,
     checked: bool,
     snapshot: Option<hirsel_rt::host_launch::HostGrants>,
 ) -> Result<(RunOutcome, Option<hirsel_run_schema::CalleeOutcome>), ToolError> {
@@ -195,7 +195,7 @@ pub(crate) fn run_loaded_on_host_with_checks(
             selection,
             max_steps,
             observed,
-            cancel,
+            hosted,
             checked,
             snapshot,
             None,
@@ -265,7 +265,7 @@ fn run_provider_on_host(
     selection: LaunchSelection,
     max_steps: Option<u64>,
     observed: Option<&mut Option<hirsel_interp::observation::Observable>>,
-    cancel: Option<hirsel_host_io::ExternalCancel>,
+    hosted: Option<hirsel_host_io::Hosted>,
     checked: bool,
     snapshot: Option<hirsel_rt::host_launch::HostGrants>,
     ownership: Option<&mut crate::ownership_trace::Capture>,
@@ -393,9 +393,9 @@ fn run_provider_on_host(
             remote,
         });
     }
-    if let Some(cancel) = cancel {
+    if let Some(hosted) = hosted {
         operations
-            .set_external_cancel(cancel)
+            .set_hosted(hosted)
             .map_err(|e| ToolError::Runtime(format!("launch: {e}")))?;
     }
     // F0's free-mode test channel (`hirsel_free::session::TestHook`).
@@ -472,6 +472,7 @@ fn run_provider_on_host(
             &runtime,
         )
     };
+    operations.close_place();
     if let Some(hook) = &free
         && let Some(session) = operations.library.take_free()
     {

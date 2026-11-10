@@ -254,6 +254,13 @@ uint8_t hirsel_rt_v2_mutex_cause(hirsel_rt_v2_ctx*, const uint64_t*);
 uint8_t hirsel_rt_v2_atomic_create(hirsel_rt_v2_ctx*, void*, uint64_t*, const uint8_t*, uint64_t, uint64_t, uint64_t);
 uint8_t hirsel_rt_v2_atomic_load(hirsel_rt_v2_ctx*, const uint64_t*, uint8_t*, uint64_t);
 uint8_t hirsel_rt_v2_atomic_store(hirsel_rt_v2_ctx*, const uint64_t*, const uint8_t*, uint64_t);
+/* Recorders (core Recorder[E]). A recorder is a run-local handle word. Open takes the None
+   image of Option[E] and its descriptor; an event crosses as the Some image of that Option,
+   and append and take leave the slot holding None. Take faults when nothing is queued. */
+uint8_t hirsel_rt_v2_recorder_open(hirsel_rt_v2_ctx*, void*, uint64_t*, const uint8_t*, uint32_t);
+uint8_t hirsel_rt_v2_recorder_append(hirsel_rt_v2_ctx*, const uint64_t*, uint8_t*);
+uint8_t hirsel_rt_v2_recorder_count(hirsel_rt_v2_ctx*, uint64_t*, const uint64_t*);
+uint8_t hirsel_rt_v2_recorder_take(hirsel_rt_v2_ctx*, const uint64_t*, uint8_t*);
 /* shared.thaw (MEM-11): 1 when the borrowed root is the last; in free mode an op whose answer
    is recorded and replayed. */
 uint8_t hirsel_rt_v2_thaw_turn(hirsel_rt_v2_ctx*, uint8_t*, hirsel_rt_v2_header*);

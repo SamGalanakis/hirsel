@@ -2152,7 +2152,7 @@ macro_rules! primary_operations {
 }
 
 primary_operations! { library, call, context, name, a, value;
-    Primitive: "codec.encode" | "codec.decode" => {
+    Primitive: "codec.encode" | "codec.decode" | "codec.encode_payload" | "codec.decode_payload" => {
         return super::codec::call(library, name, &call).map(Some);
     },
     Primitive: "codec.descriptor" | "codec.descriptor_digest" => super::codec::descriptor(name, &call)?,

@@ -3154,7 +3154,7 @@ fn strings_and_bytes_share_physical_layouts_in_every_request_order() {
 /// and Path. Editing a layout the plan reaches changes the key.
 #[test]
 fn codec_keys_survive_unrelated_layouts() {
-    use hirsel_lir::codec::{CodecNode, CodecNodeId, CodecPlan};
+    use hirsel_lir::codec::{CodecForm, CodecNode, CodecNodeId, CodecPlan};
     use hirsel_lir::glue::GlueCodec;
     let owners = |set_index: Primitive| {
         let mut owners = Owners::default();
@@ -3276,6 +3276,7 @@ fn codec_keys_survive_unrelated_layouts() {
             },
         ];
         let plan = CodecPlan {
+            form: CodecForm::Envelope,
             descriptor: b"fixture schema".to_vec(),
             nodes,
             root: n(7),

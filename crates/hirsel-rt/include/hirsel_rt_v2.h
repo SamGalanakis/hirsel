@@ -17,7 +17,7 @@
 extern "C" {
 #endif
 
-#define HIRSEL_RT_V2_ABI_VERSION 108
+#define HIRSEL_RT_V2_ABI_VERSION 109
 /* TaskSpawn trailing flags: compiler proofs, ignored in ordered execution and replay. */
 #define HIRSEL_RT_V2_SPAWN_IMMEDIATE_AWAIT 1
 #define HIRSEL_RT_V2_SPAWN_OP_FREE 2
@@ -581,6 +581,8 @@ uint64_t hirsel_rt_v2_hash_finish(uint64_t state);
 #define HIRSEL_RT_V2_CODEC_NODE_PATH 16
 #define HIRSEL_RT_V2_CODEC_NODE_CHECKED 17
 #define HIRSEL_RT_V2_CODEC_NO_NODE UINT64_MAX
+#define HIRSEL_RT_V2_CODEC_FORM_ENVELOPE 0
+#define HIRSEL_RT_V2_CODEC_FORM_PAYLOAD 1
 /* A checked opaque type's check on the borrowed value at `value`: writes its verdict (0 or 1)
  * at `verdict`; returns 0, or 1 with the check's failure recorded. */
 typedef uint8_t (*hirsel_rt_v2_check_thunk)(hirsel_rt_v2_ctx *ctx, const void *value, uint8_t *verdict);
@@ -591,6 +593,8 @@ typedef struct hirsel_rt_v2_codec {
     uint64_t program_length;
     const hirsel_rt_v2_check_thunk *checks;
     uint64_t check_count;
+    /* HIRSEL_RT_V2_CODEC_FORM_*: what the bytes are (runtime ABI 109). */
+    uint64_t form;
 } hirsel_rt_v2_codec;
 void hirsel_rt_v2_codec_encode(hirsel_rt_v2_ctx *ctx, const hirsel_rt_v2_codec *codec, const void *value, void *out);
 void hirsel_rt_v2_codec_decode(hirsel_rt_v2_ctx *ctx, const hirsel_rt_v2_codec *codec, const void *bytes, void *out);

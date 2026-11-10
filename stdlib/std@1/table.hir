@@ -122,23 +122,6 @@ fn descriptors[K: key + serializable, V: serializable](t: Table[K, V]) -> Schema
   Schemas(key: codec.descriptor(k), value: codec.descriptor(v))
 }
 
-// A table type's SER-2 envelopes of `None()` as `Option[K]` and `Option[V]`:
-// their heads precede a payload `codec.decode` reads.
-type Layout {
-  key: Bytes,
-  value: Bytes,
-}
-
-fn layout[K: key + serializable, V: serializable](t: Table[K, V]) -> Layout uses {} {
-  let k: Option[K] = None()
-  Layout(key: codec.encode(k), value: none_value(t))
-}
-
-fn none_value[K: key + serializable, V: serializable](t: Table[K, V]) -> Bytes uses {} {
-  let v: Option[V] = None()
-  codec.encode(v)
-}
-
 // What a row operation knows of its table once the schemas are checked. Its
 // rows are `plain`, the codec's own encodings of the caller's types, when the
 // catalog's digests are the caller's: a rename changes names, never a
@@ -474,7 +457,7 @@ fn row_value[V: serializable](n: u64, schema: Bytes, value: V, plain: bool) -> R
   let mut out: List[u8] = []
   internal.table_schema.little(mut out, n, 4)
   if plain {
-    bytes.append(mut out, internal.table_schema.payload(codec.encode(value)))
+    bytes.append(mut out, codec.encode_payload(value))
   } else {
     let data = match internal.table_schema.encode(schema, value, []) {
       Ok(data) => data,
@@ -485,24 +468,14 @@ fn row_value[V: serializable](n: u64, schema: Bytes, value: V, plain: bool) -> R
   Ok(bytes.from_list(take out))
 }
 
-// The value of `payload` under `none`, the `None()` envelope of `Option[T]`.
-fn from_payload[T: serializable](none: Bytes, payload: Bytes) -> Result[T, DecodeError] uses {} {
-  let head = internal.table_schema.head(none)
-  let mut whole: List[u8] = []
-  list.reserve(mut whole, head + 12 + bytes.len(payload))
-  bytes.append(mut whole, bytes.slice(none, 0, head))
-  internal.table_schema.little(mut whole, 4 + bytes.len(payload), 8)
-  internal.table_schema.little(mut whole, 1, 4)
-  bytes.append(mut whole, payload)
-  let value: Option[T] = codec.decode(bytes.from_list(take whole))?
-  match take value {
-    Some(v) => Ok(take v),
-    None() => Error(Tag()),
-  }
+// The value whose codec payload is `payload`.
+fn from_payload[T: serializable](payload: Bytes) -> Result[T, DecodeError] uses {} {
+  let none: Option[T] = None()
+  codec.decode_payload(none, payload)
 }
 
-// The value a stored row value holds; `none` is `Option[V]`'s `None()` envelope.
-fn decode_value[V: serializable](o: Open, none: Bytes, data: Bytes) -> Result[V, store.TxError] uses {} {
+// The value a stored row value holds.
+fn decode_value[V: serializable](o: Open, data: Bytes) -> Result[V, store.TxError] uses {} {
   if bytes.len(data) < 4 {
     return Error(corrupt())
   }
@@ -512,7 +485,7 @@ fn decode_value[V: serializable](o: Open, none: Bytes, data: Bytes) -> Result[V,
   }
   let payload = bytes.slice(data, 4, bytes.len(data))
   let value: Result[V, DecodeError] = if o.plain {
-    from_payload(none, payload)
+    from_payload(payload)
   } else {
     internal.table_schema.decode(o.epochs[n - o.base].value, payload, o.renames)
   }
@@ -531,7 +504,7 @@ pub fn get[K: key + serializable, V: serializable](tx: store.Tx, t: Table[K, V],
   let encoded = row_key(o, key)?
   match store.table_read(tx, take encoded)? {
     Some(data) => {
-      let value: V = decode_value(o, none_value(t), data)?
+      let value: V = decode_value(o, data)?
       Ok(Some(take value))
     },
     None() => Ok(None()),
@@ -605,22 +578,20 @@ fn upper[K: key + serializable](
   }
 }
 
-// How a range reads its rows' keys: the stored key schema, parsed once, its
-// renames, and `Option[K]`'s `None()` envelope for rows that are `plain`.
+// How a range reads its rows' keys: the stored key schema, parsed once, and
+// its renames.
 type KeyReader {
   schema: Bytes,
   parsed: keys.Envelope,
   renames: List[(String, String)],
-  none: Bytes,
   plain: bool,
 }
 
-fn key_reader(o: Open, none: Bytes) -> KeyReader uses {} {
+fn key_reader(o: Open) -> KeyReader uses {} {
   KeyReader(
     parsed: keys.key_schema(o.key),
     schema: unique o.key,
     renames: unique o.renames,
-    none: unique none,
     plain: o.plain
   )
 }
@@ -632,7 +603,7 @@ fn decode_key[K: key + serializable](r: KeyReader, raw: Bytes) -> Result[K, stor
     Error(_) => return Error(corrupt()),
   }
   let key: Result[K, DecodeError] = if r.plain {
-    from_payload(r.none, payload)
+    from_payload(payload)
   } else {
     internal.table_schema.decode(r.schema, payload, r.renames)
   }
@@ -658,20 +629,19 @@ pub fn range[K: key + serializable, V: serializable](
   if limit == 0 {
     return Error(InvalidInput())
   }
-  let l = layout(t)
   let (_, o) = opened(tx, t)?
   let prefix = unique o.rows
   let low = lower(o.key, prefix, o.renames, o.plain, from)?
   let high = upper(o.key, prefix, o.renames, o.plain, to)?
   let rows = store.table_range(tx, take low, take high, limit, order)?
-  let reader = key_reader(o, l.key)
+  let reader = key_reader(o)
   let mut out: List[(K, V)] = []
   for (key, value) in rows {
     if bytes.len(key) < bytes.len(prefix) || bytes.slice(key, 0, bytes.len(prefix)) != prefix {
       return Error(corrupt())
     }
     let k: K = decode_key(reader, bytes.slice(key, bytes.len(prefix), bytes.len(key)))?
-    list.push(mut out, (take k, decode_value(o, l.value, value)?))
+    list.push(mut out, (take k, decode_value(o, value)?))
   }
   Ok(take out)
 }
@@ -879,7 +849,6 @@ fn advance[
   name: String,
   catalog: Catalog,
   o: Open,
-  source: Layout,
   f: Entry[fn(c: (), key: J, old: A) -> Result[(K, B), E]],
   p: Progress,
   batch: u64
@@ -890,7 +859,7 @@ fn advance[
     None() => copy prefix,
   }
   let rows = store.table_range(tx, take low, keys.prefix_end(prefix), batch, Ascending()) ? Table
-  let reader = key_reader(o, source.key)
+  let reader = key_reader(o)
   let next = rows_of(name, next_generation(catalog.generation))
   let epoch = next_epoch(catalog)
   let mut cursor: Option[Bytes] = match p.cursor {
@@ -900,7 +869,7 @@ fn advance[
   let mut count = p.count
   for (key, value) in rows {
     let old_key: J = decode_key(reader, bytes.slice(key, bytes.len(prefix), bytes.len(key))) ? Table
-    let old: A = decode_value(o, source.value, value) ? Table
+    let old: A = decode_value(o, value) ? Table
     let (new_key, new_value) = match core@1/runner.apply(f, (), old_key, old) {
       Ok(Ok(row)) => row,
       Ok(Error(e)) => return Error(Failed(take e)),
@@ -1010,7 +979,7 @@ pub fn migrate[
     let stepped = store.transact_body(
       mut s,
       fn(mut tx: store.Tx) -> Result[(Progress, bool), MigrateError[E]] {
-        advance(mut tx, name, c, o, layout(from), f, held, batch)
+        advance(mut tx, name, c, o, f, held, batch)
       }
     )
     if let Some(l) = over_limit(stepped) {

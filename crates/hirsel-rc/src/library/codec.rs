@@ -1,12 +1,13 @@
-//! `codec.encode` and `codec.decode` (SER-2; LIR schema revision 29): each call becomes one
-//! `Encode` or `Decode` of a codec plan that pairs the call's concrete schema with the layouts
-//! of its values. The schema is proved and described by `hirsel_types::serialization`, its
+//! `codec.encode` and `codec.decode` (SER-2; LIR schema revision 29), and their bare-payload
+//! pair `codec.encode_payload` and `codec.decode_payload` (revision 66): each call becomes one
+//! `Encode` or `Decode` of a codec plan, in the call's form, that pairs the call's concrete
+//! schema with the layouts of its values. The schema is proved and described by `hirsel_types::serialization`, its
 //! descriptor bytes by `hirsel_types::wire`; this module only walks schema and layout together.
 use super::{CallShape, InlineLowering, R};
 use crate::PassError;
 use crate::import::ImportCx;
 use hirsel_lir::codec::{
-    CONTAINER_ENTRIES, CONTAINER_INDEX, CodecCheck, CodecNode, CodecNodeId, CodecPlan,
+    CONTAINER_ENTRIES, CONTAINER_INDEX, CodecCheck, CodecForm, CodecNode, CodecNodeId, CodecPlan,
     DECODE_ERRORS,
 };
 use hirsel_lir::ir::{ConstantValue, Inst};
@@ -18,12 +19,22 @@ use std::collections::BTreeMap;
 
 pub static ENCODE: InlineLowering = InlineLowering {
     path: || hirsel_syntax::DefPath::core("codec.encode"),
-    lower: encode,
+    lower: |cx, call| encode(cx, call, CodecForm::Envelope),
 };
 
 pub static DECODE: InlineLowering = InlineLowering {
     path: || hirsel_syntax::DefPath::core("codec.decode"),
-    lower: decode,
+    lower: |cx, call| decode(cx, call, CodecForm::Envelope),
+};
+
+pub static ENCODE_PAYLOAD: InlineLowering = InlineLowering {
+    path: || hirsel_syntax::DefPath::core("codec.encode_payload"),
+    lower: |cx, call| encode(cx, call, CodecForm::Payload),
+};
+
+pub static DECODE_PAYLOAD: InlineLowering = InlineLowering {
+    path: || hirsel_syntax::DefPath::core("codec.decode_payload"),
+    lower: |cx, call| decode(cx, call, CodecForm::Payload),
 };
 
 pub static DESCRIPTOR: InlineLowering = InlineLowering {
@@ -70,7 +81,7 @@ fn static_bytes(
     Ok(true)
 }
 
-fn encode(cx: &mut ImportCx<'_>, call: &CallShape<'_>) -> R<bool> {
+fn encode(cx: &mut ImportCx<'_>, call: &CallShape<'_>, form: CodecForm) -> R<bool> {
     let ([argument], [GenericArgument::Type(ty)]) = (call.arguments, call.generics) else {
         return Ok(false);
     };
@@ -80,7 +91,7 @@ fn encode(cx: &mut ImportCx<'_>, call: &CallShape<'_>) -> R<bool> {
     }
     let bytes = cx.place_layout(call.destination)?;
     let schema = schema(cx, *ty)?;
-    let plan = Plan::new(cx.layout_table(), &schema, None).build(root, bytes, None)?;
+    let plan = Plan::new(cx.layout_table(), &schema, None).build(form, root, bytes, None)?;
     let value = cx.operand(&argument.value)?;
     let codec = cx.codec(plan);
     let result = cx.fresh(bytes);
@@ -94,9 +105,22 @@ fn encode(cx: &mut ImportCx<'_>, call: &CallShape<'_>) -> R<bool> {
     Ok(true)
 }
 
-fn decode(cx: &mut ImportCx<'_>, call: &CallShape<'_>) -> R<bool> {
-    let ([argument], [GenericArgument::Type(ty)]) = (call.arguments, call.generics) else {
+/// A decode of the call's last argument; `decode_payload`'s first, the `Option[T]`
+/// witness, only names `T` and is not read.
+fn decode(cx: &mut ImportCx<'_>, call: &CallShape<'_>, form: CodecForm) -> R<bool> {
+    let [GenericArgument::Type(ty)] = call.generics else {
         return Ok(false);
+    };
+    let argument = match (form, call.arguments) {
+        (CodecForm::Envelope, [argument]) => argument,
+        (CodecForm::Payload, [witness, argument]) => {
+            let layout = cx.place_layout(witness.value.place)?;
+            if !read_only(cx, witness, layout) {
+                return Ok(false);
+            }
+            argument
+        }
+        _ => return Ok(false),
     };
     let bytes = cx.place_layout(argument.value.place)?;
     if !read_only(cx, argument, bytes) {
@@ -121,7 +145,7 @@ fn decode(cx: &mut ImportCx<'_>, call: &CallShape<'_>) -> R<bool> {
     };
     let (root, error) = (arm(0)?, arm(1)?);
     let plan =
-        Plan::new(table, &schema, Some(checks)).build(root, bytes, Some((result_layout, error)))?;
+        Plan::new(table, &schema, Some(checks)).build(form, root, bytes, Some((result_layout, error)))?;
     let value = cx.operand(&argument.value)?;
     let codec = cx.codec(plan);
     let result = cx.fresh(result_layout);
@@ -193,7 +217,12 @@ pub(super) fn body_plan(
     if decode.is_some() && checked {
         return unsupported("a runner call's decode of a checked type");
     }
-    Plan::new(cx.layouts.table(), &schema, decode.map(|_| vec![])).build(root, bytes, decode)
+    Plan::new(cx.layouts.table(), &schema, decode.map(|_| vec![])).build(
+        CodecForm::Envelope,
+        root,
+        bytes,
+        decode,
+    )
 }
 
 fn unsupported<T>(what: impl Into<String>) -> R<T> {
@@ -280,6 +309,7 @@ impl<'a> Plan<'a> {
 
     fn build(
         mut self,
+        form: CodecForm,
         root: LayoutId,
         bytes: LayoutId,
         result: Option<(LayoutId, LayoutId)>,
@@ -303,11 +333,15 @@ impl<'a> Plan<'a> {
                 }))
             }
         };
-        let descriptor = hirsel_types::wire::Codec::new(self.schema)
-            .map_err(|e| PassError::Malformed(format!("SER-2 descriptor: {e:?}")))?
-            .descriptor()
-            .to_vec();
+        let descriptor = match form {
+            CodecForm::Envelope => hirsel_types::wire::Codec::new(self.schema)
+                .map_err(|e| PassError::Malformed(format!("SER-2 descriptor: {e:?}")))?
+                .descriptor()
+                .to_vec(),
+            CodecForm::Payload => vec![],
+        };
         let plan = CodecPlan {
+            form,
             descriptor,
             nodes: self.nodes,
             root,

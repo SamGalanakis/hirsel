@@ -107,6 +107,17 @@ Result[T, DecodeError]` borrows the input and validates it against the concrete
 schema of `T` before returning fresh owned data. Both operations require the
 whole SER-1 schema, including explicit opt-in for user nominal types.
 
+`codec.encode_payload[T: serializable](value: T) -> Bytes` returns exactly the
+payload of the envelope `codec.encode(value)` would produce: the version-1
+payload bytes with no magic, version, descriptor or length prefix.
+`codec.decode_payload[T: serializable](of: Option[T], data: Bytes) ->
+Result[T, DecodeError]` decodes such bytes as one payload of `T`; `of` only names
+`T` and is not read. It applies every payload validation below and rejects
+remaining bytes as `Trailing`. It never returns `Version` or `SchemaMismatch`,
+because the bytes carry no envelope or descriptor: the caller is responsible for
+knowing which schema wrote them, and a payload written under another schema
+either fails some validation or decodes as a valid but different value of `T`.
+
 `DecodeError` has nullary cases: `Version` (magic or codec version),
 `SchemaMismatch` (descriptor differs from the expected schema), `Truncated`
 (incomplete input), `Trailing` (extra payload or envelope bytes), `Scalar`

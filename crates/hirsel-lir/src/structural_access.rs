@@ -93,6 +93,7 @@ impl AccessPlan {
             }
         }
         crate::codec::CodecPlan {
+            form: crate::codec::CodecForm::Payload,
             descriptor: vec![],
             nodes: self.nodes.clone(),
             root: self.root,

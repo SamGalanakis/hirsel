@@ -4,7 +4,7 @@
 use crate::support;
 
 use hirsel_core_contract::Passing;
-use hirsel_lir::codec::{CodecCheck, CodecNode, CodecNodeId, CodecPlan, DECODE_ERRORS};
+use hirsel_lir::codec::{CodecCheck, CodecForm, CodecNode, CodecNodeId, CodecPlan, DECODE_ERRORS};
 use hirsel_lir::ir::*;
 use hirsel_lir::layout_types::*;
 use hirsel_lir::stage::Value;
@@ -316,6 +316,7 @@ fn plan(t: &mut Lir<Value>, decode: bool, checked: bool, m: Mutant) -> (CodecPla
         }
     }
     let plan = CodecPlan {
+        form: CodecForm::Envelope,
         descriptor: vec![4],
         nodes,
         root: CodecNodeId(0),

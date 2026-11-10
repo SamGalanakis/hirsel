@@ -202,6 +202,7 @@ pub fn main()->u64 {
                     _ => summary.glue.codecs.push(hirsel_lir::glue::GlueCodec {
                         key: hirsel_lir::glue::CodecKey(ContentHash::of_bytes(b"closure-control")),
                         plan: hirsel_lir::codec::CodecPlan {
+                            form: hirsel_lir::codec::CodecForm::Payload,
                             descriptor: vec![],
                             nodes: vec![],
                             root: hirsel_lir::codec::CodecNodeId(0),

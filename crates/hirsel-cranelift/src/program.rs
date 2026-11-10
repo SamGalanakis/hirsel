@@ -90,7 +90,7 @@ impl Emitter<'_> {
 
     /// The codec `codec` as the exported `hirsel_rt_v2_codec` record `hirsel.codec.<key>`:
     /// `{descriptor, descriptor length, program, program length, check thunks, check
-    /// count}`, with every layout its program allocates described.
+    /// count, form}`, with every layout its program allocates described.
     fn codec(&mut self, codec: &GlueCodec) -> Emitted {
         let definition = glue_definition();
         let plan = &codec.plan;
@@ -108,10 +108,11 @@ impl Emitter<'_> {
         let bytes = words.iter().flat_map(|w| w.to_le_bytes()).collect();
         let program = self.constant("hirsel.codec.program", bytes, 8)?;
         let checks = self.codec_checks(codec)?;
-        let mut image = vec![0u8; 48];
+        let mut image = vec![0u8; 56];
         image[8..16].copy_from_slice(&(plan.descriptor.len() as u64).to_le_bytes());
         image[24..32].copy_from_slice(&(words.len() as u64).to_le_bytes());
         image[40..48].copy_from_slice(&(codec.checks.len() as u64).to_le_bytes());
+        image[48..56].copy_from_slice(&plan.form.word().to_le_bytes());
         let name = codec_symbol(&codec.key);
         let (id, _) = self.declare_data(&name, Linkage::Export)?;
         let mut description = DataDescription::new();

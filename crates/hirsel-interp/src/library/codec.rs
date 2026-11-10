@@ -25,20 +25,31 @@ pub(super) fn call(
         "codec requires a checked concrete serializable schema",
     )?;
     let (schema, codec) = (&program.schema, &program.codec);
-    let [value] = &*call.arguments else {
-        return Err(invalid("codec arity"));
+    // `decode_payload`'s first argument, the `Option[T]` witness, only names `T`.
+    let value = match (name, &*call.arguments) {
+        ("codec.decode_payload", [_, value]) | (_, [value]) => value,
+        _ => return Err(invalid("codec arity")),
     };
-    if name == "codec.encode" {
+    if name == "codec.encode" || name == "codec.encode_payload" {
         let value = to_wire(schema, value)?;
-        return codec
-            .encode(&value, wire::Limits::default())
-            .map(|bytes| OperationResult::returned(Value::Bytes(bytes)))
-            .map_err(codec_error);
+        let limits = wire::Limits::default();
+        return if name == "codec.encode" {
+            codec.encode(&value, limits)
+        } else {
+            codec.encode_payload(&value, limits)
+        }
+        .map(|bytes| OperationResult::returned(Value::Bytes(bytes)))
+        .map_err(codec_error);
     }
     let (Value::Bytes(bytes) | Value::ArenaBytes { bytes, .. }) = value else {
         return Err(invalid("codec.decode expects Bytes"));
     };
-    match codec.decode(bytes, wire::Limits::default()) {
+    let decoded = if name == "codec.decode" {
+        codec.decode(bytes, wire::Limits::default())
+    } else {
+        codec.decode_payload(bytes, wire::Limits::default())
+    };
+    match decoded {
         Ok(value) => {
             let (value, checks) = from_wire(schema, value, call.runtime)?;
             let checks = checks

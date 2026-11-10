@@ -665,7 +665,7 @@ impl<'m, 'a> ProgramEmitter<'m, 'a> {
         let global = self.module.exported_constant(
             &name,
             self.module
-                .struct_type(&[ptr, i64_ty, ptr, i64_ty, ptr, i64_ty]),
+                .struct_type(&[ptr, i64_ty, ptr, i64_ty, ptr, i64_ty, i64_ty]),
             8,
         );
         let initializer = self.module.const_struct(&[
@@ -675,6 +675,7 @@ impl<'m, 'a> ProgramEmitter<'m, 'a> {
             self.const_u64(words.len() as u64),
             checks,
             self.const_u64(codec.checks.len() as u64),
+            self.const_u64(plan.form.word()),
         ]);
         self.module.set_initializer(global, initializer);
         self.export(&name);

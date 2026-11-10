@@ -226,6 +226,8 @@ pub const INLINE: &[&InlineLowering] = &[
     &codec::DECODE,
     &codec::DESCRIPTOR,
     &codec::DESCRIPTOR_DIGEST,
+    &codec::ENCODE_PAYLOAD,
+    &codec::DECODE_PAYLOAD,
 ];
 
 /// The result of an import hook.

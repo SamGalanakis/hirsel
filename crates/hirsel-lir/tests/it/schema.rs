@@ -12,7 +12,7 @@ use hirsel_layout::instance::{
     ParameterView, Substitution,
 };
 use hirsel_lir::abi_types::*;
-use hirsel_lir::codec::{CodecNode, CodecNodeId, CodecPlan};
+use hirsel_lir::codec::{CodecForm, CodecNode, CodecNodeId, CodecPlan};
 use hirsel_lir::effect::{Effects, Opcode};
 use hirsel_lir::ir::*;
 use hirsel_lir::layout_types::*;
@@ -679,6 +679,7 @@ fn fixture_unit<S: Stage>(table: &LayoutTable) -> LirUnit<S> {
         },
     ];
     t.codecs = vec![CodecPlan {
+        form: CodecForm::Envelope,
         descriptor: vec![4],
         nodes: vec![
             CodecNode::Scalar(LayoutId(0)),

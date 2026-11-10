@@ -7445,6 +7445,8 @@ conformance/SER/SER-2-noncanonical-bool-run.hir
 conformance/SER/SER-2-noncanonical-nan-run.hir
 conformance/SER/SER-2-overflow-length-run.hir
 conformance/SER/SER-2-path-run.hir
+conformance/SER/SER-2-payload-property-run.hir
+conformance/SER/SER-2-payload-run.hir
 conformance/SER/SER-2-recursive-box-option-run.hir
 conformance/SER/SER-2-recursive-list-option-run.hir
 conformance/SER/SER-2-roundtrip-run.hir

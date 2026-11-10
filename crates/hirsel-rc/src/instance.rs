@@ -1617,7 +1617,7 @@ impl Expander<'_, '_, '_> {
             } = &block.terminator
             {
                 self.source_reference(path, arguments, &actuals)?;
-                if path.is_core("codec.decode") {
+                if path.is_core("codec.decode") || path.is_core("codec.decode_payload") {
                     for argument in arguments {
                         let GenericArgument::Type(ty) = argument else {
                             continue;

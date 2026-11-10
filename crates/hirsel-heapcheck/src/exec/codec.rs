@@ -6,7 +6,9 @@
 //! runtime zeroes them, each held by exactly one counted cell.
 use super::compare::At;
 use super::*;
-use hirsel_lir::codec::{CONTAINER_ENTRIES, CONTAINER_INDEX, CodecNode, CodecNodeId, CodecPlan};
+use hirsel_lir::codec::{
+    CONTAINER_ENTRIES, CONTAINER_INDEX, CodecForm, CodecNode, CodecNodeId, CodecPlan,
+};
 use hirsel_lir::layout_types::{FieldLayout, TagEncoding};
 use std::collections::BTreeSet;
 
@@ -183,21 +185,28 @@ impl<S: Stage> Machine<'_, S> {
         })
     }
 
-    /// `Inst::Encode`: the envelope of `val`, as a fresh owned Bytes image.
+    /// `Inst::Encode`: the plan's form of `val` (its envelope or bare payload), as a fresh
+    /// owned Bytes image.
     pub(super) fn codec_encode(&mut self, plan: &CodecPlan, val: &Val) -> Checked<Val> {
         let root_layout = self.plan_node(plan, plan.root)?.layout();
         let image = self.codec_image(val, root_layout)?;
-        let out = self.codec_payload(plan, At::Image(&image, 0), None)?;
-        let mut envelope = MAGIC.to_vec();
-        envelope.extend_from_slice(&VERSION.to_le_bytes());
-        envelope.extend_from_slice(&(plan.descriptor.len() as u64).to_le_bytes());
-        envelope.extend_from_slice(&plan.descriptor);
-        envelope.extend_from_slice(&(out.len() as u64).to_le_bytes());
-        envelope.extend_from_slice(&out);
+        let payload = self.codec_payload(plan, At::Image(&image, 0), None)?;
+        let out = match plan.form {
+            CodecForm::Envelope => {
+                let mut envelope = MAGIC.to_vec();
+                envelope.extend_from_slice(&VERSION.to_le_bytes());
+                envelope.extend_from_slice(&(plan.descriptor.len() as u64).to_le_bytes());
+                envelope.extend_from_slice(&plan.descriptor);
+                envelope.extend_from_slice(&(payload.len() as u64).to_le_bytes());
+                envelope.extend_from_slice(&payload);
+                envelope
+            }
+            CodecForm::Payload => payload,
+        };
         let bytes = self.plan_node(plan, plan.bytes)?;
         let mut image = Extent::new(self.size(bytes.layout())?);
         image.write_bytes(0, &vec![0; image.len() as usize]);
-        self.codec_text(&mut image, Dest::Image(0), bytes, &envelope)?;
+        self.codec_text(&mut image, Dest::Image(0), bytes, &out)?;
         Ok(Val::Image(image))
     }
 
@@ -595,7 +604,7 @@ impl<S: Stage> Machine<'_, S> {
         Ok((block, start, stride))
     }
 
-    /// The reference's validation of a complete envelope, in its reading order.
+    /// The reference's validation of complete input in the plan's form, in its reading order.
     fn codec_validate<'b>(
         &self,
         plan: &CodecPlan,
@@ -617,9 +626,12 @@ impl<S: Stage> Machine<'_, S> {
             }
             Ok(payload)
         };
-        let payload = match envelope(&mut input) {
-            Ok(payload) => payload,
-            Err(e) => return Ok(Err(e)),
+        let payload = match plan.form {
+            CodecForm::Envelope => match envelope(&mut input) {
+                Ok(payload) => payload,
+                Err(e) => return Ok(Err(e)),
+            },
+            CodecForm::Payload => bytes,
         };
         enum Job {
             Visit(CodecNodeId),

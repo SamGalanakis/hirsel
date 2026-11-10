@@ -652,19 +652,7 @@ fn decode[T: serializable](stored: Bytes, data: Bytes, renames: List[(String, St
   if c.at != bytes.len(data) {
     return Error(Trailing())
   }
-  let mut whole: List[u8] = []
-  bytes.append(
-    mut whole,
-    bytes.slice(expected, 0, 16 + bytes.len(descriptor(expected)))
-  )
-  little(mut whole, 4 + bytes.len(transformed), 8)
-  little(mut whole, 1, 4)
-  bytes.append(mut whole, transformed)
-  let decoded: Option[T] = codec.decode(bytes.from_list(take whole))?
-  match take decoded {
-    Some(value) => Ok(value),
-    None() => Error(Tag()),
-  }
+  codec.decode_payload(none, transformed)
 }
 
 fn text_atom(mut out: List[u8], value: String) -> () uses {} {

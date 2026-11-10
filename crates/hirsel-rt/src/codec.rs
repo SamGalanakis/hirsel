@@ -1,4 +1,5 @@
-//! The canonical SER-2 codec over native layouts (runtime ABI 9; LIR schema revision 29).
+//! The canonical SER-2 codec over native layouts (runtime ABI 9; LIR schema revision 29), as
+//! the whole envelope or its bare payload (`Codec::form`, runtime ABI 109).
 //!
 //! `hirsel_rt_v2_codec_encode` and `_decode` walk a compiler-emitted codec program
 //! (`hirsel_rt_v2.h`, "The canonical SER-2 codec") that pairs each schema node with the layout
@@ -30,6 +31,21 @@ pub struct Codec {
     /// The checks a decode's `CHECKED` nodes call (runtime ABI 23), `check_count` of them.
     pub checks: *const CheckThunk,
     pub check_count: u64,
+    /// What the bytes are (runtime ABI 109): `FORM_ENVELOPE` or `FORM_PAYLOAD`.
+    pub form: u64,
+}
+
+/// `Codec::form`: the canonical SER-2 envelope around the payload.
+pub const FORM_ENVELOPE: u64 = 0;
+/// `Codec::form`: exactly the envelope's payload section, with no descriptor to match.
+pub const FORM_PAYLOAD: u64 = 1;
+
+/// A codec's form, read from its record; any other word is a stale or foreign record,
+/// which faults rather than reading the bytes with another walk.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Form {
+    Envelope,
+    Payload,
 }
 
 /// `hirsel_rt_v2_check_thunk`: a checked opaque type's check (SER-1) on the borrowed value
@@ -614,10 +630,15 @@ impl<'a> Program<'a> {
     }
 }
 
-/// The program, descriptor and checks of the compiler-emitted static codec at `codec`.
-unsafe fn program<'a>(codec: *const Codec) -> (Program<'a>, &'a [u8], &'a [CheckThunk]) {
+/// The program, form, descriptor and checks of the compiler-emitted static codec at `codec`.
+unsafe fn program<'a>(codec: *const Codec) -> (Program<'a>, Form, &'a [u8], &'a [CheckThunk]) {
     unsafe {
         let codec = &*codec;
+        let form = match codec.form {
+            FORM_ENVELOPE => Form::Envelope,
+            FORM_PAYLOAD => Form::Payload,
+            _ => fault("a codec of an unknown form"),
+        };
         let words = std::slice::from_raw_parts(codec.program, codec.program_length as usize);
         let descriptor =
             std::slice::from_raw_parts(codec.descriptor, codec.descriptor_length as usize);
@@ -626,7 +647,7 @@ unsafe fn program<'a>(codec: *const Codec) -> (Program<'a>, &'a [u8], &'a [Check
         } else {
             std::slice::from_raw_parts(codec.checks, codec.check_count as usize)
         };
-        (Program::new(words), descriptor, checks)
+        (Program::new(words), form, descriptor, checks)
     }
 }
 
@@ -1451,22 +1472,26 @@ unsafe fn encode(
     out: *mut c_void,
 ) -> Stopped<()> {
     unsafe {
-        let (program, descriptor, _) = program(codec);
+        let (program, form, descriptor, _) = program(codec);
         let text = program.bytes();
         with_scratch(|s| {
-            // The envelope, its payload encoded in place after a patched length.
-            s.out.extend_from_slice(MAGIC);
-            s.out.extend_from_slice(&WIRE_VERSION.to_le_bytes());
-            s.out
-                .extend_from_slice(&(descriptor.len() as u64).to_le_bytes());
-            s.out.extend_from_slice(descriptor);
-            s.out.extend_from_slice(&[0; 8]);
+            // An envelope encodes its payload in place after a patched length.
+            if form == Form::Envelope {
+                s.out.extend_from_slice(MAGIC);
+                s.out.extend_from_slice(&WIRE_VERSION.to_le_bytes());
+                s.out
+                    .extend_from_slice(&(descriptor.len() as u64).to_le_bytes());
+                s.out.extend_from_slice(descriptor);
+                s.out.extend_from_slice(&[0; 8]);
+            }
             let start = s.out.len();
             if !encode_payload(ctx, program, value.cast(), None, s)? {
                 fault("an encoding rejected by a check");
             }
-            let length = (s.out.len() - start) as u64;
-            s.out[start - 8..start].copy_from_slice(&length.to_le_bytes());
+            if form == Form::Envelope {
+                let length = (s.out.len() - start) as u64;
+                s.out[start - 8..start].copy_from_slice(&length.to_le_bytes());
+            }
             if s.out.len() as u64 > LIMIT_BYTES {
                 return Err(budget());
             }
@@ -2053,14 +2078,18 @@ unsafe fn decode(
     s: &mut Scratch,
 ) -> Stopped<()> {
     unsafe {
-        let (program, descriptor, checks) = program(codec);
+        let (program, form, descriptor, checks) = program(codec);
         let input = text_bytes(&program.bytes(), bytes.cast());
         if input.len() as u64 > LIMIT_BYTES {
             return Err(budget());
         }
         let out = out.cast::<u8>();
         std::ptr::write_bytes(out, 0, program.out_size as usize);
-        let checked = match envelope(input, descriptor).map_err(Invalid::Decode) {
+        let payload = match form {
+            Form::Envelope => envelope(input, descriptor),
+            Form::Payload => Ok(input),
+        };
+        let checked = match payload.map_err(Invalid::Decode) {
             Ok(payload) => validate(program, payload, &mut s.check).map(|()| payload),
             Err(invalid) => Err(invalid),
         };

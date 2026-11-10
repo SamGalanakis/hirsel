@@ -162,10 +162,37 @@ impl CodecNode {
     }
 }
 
+/// What a plan's bytes are (LIR schema revision 66): which framing an `Encode`
+/// writes and a `Decode` reads. Every form pairs with both instructions.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub enum CodecForm {
+    /// The canonical SER-2 envelope: magic, wire version, `descriptor`, then
+    /// the payload.
+    Envelope,
+    /// Exactly the envelope's payload section; there is no descriptor to check.
+    Payload,
+}
+
+impl CodecForm {
+    /// The runtime `Codec::form` word.
+    pub const fn word(self) -> u64 {
+        match self {
+            Self::Envelope => FORM_ENVELOPE,
+            Self::Payload => FORM_PAYLOAD,
+        }
+    }
+}
+
+/// `Codec::form` words (runtime ABI 109).
+pub const FORM_ENVELOPE: u64 = 0;
+pub const FORM_PAYLOAD: u64 = 1;
+
 /// One `Encode` or `Decode` site's codec (`SideTables::codecs`).
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub struct CodecPlan {
-    /// The concrete schema's SER-2 descriptor bytes.
+    pub form: CodecForm,
+    /// The concrete schema's SER-2 descriptor bytes for an `Envelope`; empty for
+    /// every other form, which no descriptor frames.
     pub descriptor: Vec<u8>,
     pub nodes: Vec<CodecNode>,
     /// The encoded value's node.
@@ -373,6 +400,13 @@ impl CodecPlan {
     /// storage is the byte sequence of its slice; the decode result is
     /// `Result[root, DecodeError]`.
     pub fn check(&self, table: &LayoutTable) -> Result<(), String> {
+        if (self.form == CodecForm::Envelope) == self.descriptor.is_empty() {
+            return Err(format!(
+                "a {:?} codec whose descriptor is {}",
+                self.form,
+                if self.descriptor.is_empty() { "empty" } else { "present" }
+            ));
+        }
         for id in [Some(self.root), Some(self.bytes), self.result]
             .into_iter()
             .flatten()
@@ -1068,7 +1102,9 @@ snapshot_enum!(CodecNode {
     },
 });
 snapshot_struct!(CodecCheck { symbol, abi });
+snapshot_enum!(CodecForm { Envelope, Payload });
 snapshot_struct!(CodecPlan {
+    form,
     descriptor,
     nodes,
     root,

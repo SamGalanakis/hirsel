@@ -44,6 +44,8 @@ fn codec.encode[T: serializable](value: T) -> Bytes
 fn codec.decode[T: serializable](data: Bytes) -> Result[T, DecodeError]
 fn codec.descriptor[T: serializable](of: Option[T]) -> Bytes
 fn codec.descriptor_digest[T: serializable](of: Option[T]) -> Bytes
+fn codec.encode_payload[T: serializable](value: T) -> Bytes
+fn codec.decode_payload[T: serializable](of: Option[T], data: Bytes) -> Result[T, DecodeError]
 
 // CT-3
 fn type_shape.info[T](s: TypeShape[T]) -> ShapeInfo
@@ -1889,6 +1891,12 @@ run-time implementation.
 `DecodeError` is the nullary variant `Version | SchemaMismatch | Truncated |
 Trailing | Scalar | Utf8 | Tag | Length | Duplicate | Order | Invalid`, itself `serializable`; these are expected
 validation failures with no partially decoded value. Operational refusal is separate.
+
+`codec.encode_payload` and `codec.decode_payload(of, data)` are the same codec without the
+envelope ([SER-2 source operations](serialization.md#source-operations)): the payload of
+`codec.encode(value)` is `codec.encode_payload(value)`, and decoding it runs every payload
+validation, with `DecodeError` other than `Version` and `SchemaMismatch`. As with
+`codec.descriptor`, `of` only names `T`.
 
 `codec.descriptor(of)` is the version-free descriptor of `T`: the concrete schema
 descriptor `codec.encode` embeds for `T` ([SER-2](serialization.md#ser-2-canonical-codec)),

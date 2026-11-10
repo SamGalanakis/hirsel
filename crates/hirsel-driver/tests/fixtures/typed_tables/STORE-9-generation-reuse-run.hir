@@ -28,7 +28,7 @@ fn row_key(k: u32) -> String uses {} {
   }
   let mut out = f"row {pad}{k}"
   let mut i: u32 = 0
-  while i < 60 {
+  while i < 64 {
     out = f"{out} under a key long enough that a deletion takes more commits"
     i += 1
   }
@@ -51,7 +51,9 @@ fn astray(c: (), key: String, old: Box) -> Result[(String, u64), ()] {
   Ok((f"stray {key}", 0))
 }
 
-// Commits hold the 48 KB catalog twice but not every row's key.
+// The store's limits, fixed at its creation: a commit holds 8 rows but not
+// the deletes of the 32 strays' keys (about 128 KB), so discarding them takes
+// more than one commit.
 fn tight() -> store.StoreConfig uses {} {
   let mut config = store.default_config()
   config.limits.transaction_bytes = 120000
@@ -107,9 +109,12 @@ fn plain_rows(mut tx: store.Tx, info: store.CallInfo, n: u64) -> Result[bool, st
   Ok(k == 40)
 }
 
-fn seed_rows(mut tx: store.Tx, info: store.CallInfo, a: ()) -> Result[(), store.TxError] {
-  table.create(mut tx, plain())?
-  for k in 1u32..41u32 {
+// Rows `from` through `from + 7`; the first batch creates the table.
+fn seed_rows(mut tx: store.Tx, info: store.CallInfo, from: u32) -> Result[(), store.TxError] {
+  if from == 1 {
+    table.create(mut tx, plain())?
+  }
+  for k in from..from + 8 {
     table.put(mut tx, plain(), row_key(k), 0)?
   }
   Ok(())
@@ -141,9 +146,12 @@ pub fn main(rt: Io, args: Args) -> Result[(), Failed] {
 }
 
 fn scenario(a: Authority, sc: Scope) -> Result[(), Failed] {
-  let mut s = store.open(a, store.default_config()) ? Store
-  let seeded = store.transact(mut s, seed_rows, ())
-  check(seeded == Ok(()))?
+  let mut s = store.open(a, tight()) ? Store
+  let mut from: u32 = 1
+  while from < 41 {
+    check(store.transact(mut s, seed_rows, from) == Ok(()))?
+    from += 8
+  }
   // 255 migrations reach the last generation; each adds one to every row.
   let mut m: u64 = 0
   let mut migrated = true
@@ -160,12 +168,13 @@ fn scenario(a: Authority, sc: Scope) -> Result[(), Failed] {
   store.close(take s) ? Store
   // The migration into generation 0 strays every row, then fails: its rows
   // are discarded and the table is whole, before and after a reopen.
-  let mut straying = store.open(a, tight()) ? Store
+  // A reopen keeps the limits the store was created with.
+  let mut straying = store.open(a, store.default_config()) ? Store
   let strayed = table.migrate(sc, mut straying, boxed(), plain(), astray, 8)
   check(strayed == Error(Failed(())) && boxed_at(a, mut straying, 255))?
   store.close(take straying) ? Store
   // Generation 0 is written again, and holds exactly the migrated rows.
-  let mut wrapped = store.open(a, tight()) ? Store
+  let mut wrapped = store.open(a, store.default_config()) ? Store
   check(boxed_at(a, mut wrapped, 255))?
   check(table.migrate(sc, mut wrapped, boxed(), plain(), down, 8) == Ok(40))?
   check(plain_at(a, mut wrapped, 256))?

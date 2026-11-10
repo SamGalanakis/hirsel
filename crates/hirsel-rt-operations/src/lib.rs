@@ -3147,6 +3147,12 @@ pub const NATIVE_PATHS: &[&str] = &[
     "runner.call",
     "runner.spawn",
     "test.runner",
+    // db@1 places (STORE-12): interpreter-only until the native head and provider land.
+    "runner.send",
+    "io.inbox",
+    "inbox.take",
+    "arrival.request",
+    "arrival.end",
     // The store authority seam (`hirsel-rt/src/authority.rs`).
     "io.authority",
     "authority.levels",

@@ -87,6 +87,8 @@ arg.len	a3cd8811dbd3874f30400ddbbd6d5bda8010c1f33e1fd35dcc572c392bc002ea	0:b:n->
 arg.path	6d95133f4ab5739068a993b822de10cab23149e81f8795b1f223222687baa4fb	0:b:n;1:b:n->n
 arg.text	9d1b246a9eae36dd73b02720116739f5bb60f7f4ebb89cab16fa89c8d0825f6e	0:b:n;1:b:n->n
 array.len	a5e17064f82a07d63edac9fe1c1c7a11f0a24aa48cbfaf7b3bc4b6252d7c82f0	0:b:[0]->n
+arrival.end	5417503921e4b2b1bc4cfe873d7dfe2affdace3096d2c5b1071878df0058535d	0:t:n;1:b:n->n
+arrival.request	a9742c0834a0422263698d6a982cc13ea198c0b9455b1b72fe4b66eed33516b7	0:b:n->n
 atomic.create	70d6f500e3109d5317a6ce686188fc99b70aff726538649ea16c734e30c617cb	0:b:n;1:b:n->n
 atomic.load	241679ffb01e1e9d4549acc84d6f3927a34d8dc3572e799382d91bd6095347b6	0:b:n;1:b:n->n
 atomic.store	adedffc915f9d726048f51494daa4a677fd42051c82dbae8c73af9ff1dd20641	0:b:n;1:b:n;2:b:n->n
@@ -205,6 +207,7 @@ group.close_stdin	08f4d37fd09f237acbcd6166e6e47ccd95d301f1f7d58081e4ca43b00c0e7e
 group.kill	2dea625cafe8fde152f1a9e195fe859a28141b01d1ca24433f350f44c260c3af	0:b:n;1:m:n;2:b:n->n
 group.read_stdout	8ec4d1862966dcf64a76247d1244a58d305a04d3475276f2c6b8d284fa630923	0:b:n;1:m:n;2:m:n;3:b:n->n
 group.write	50dd8ad4ecfe43283212949578df565a4605915aa8b0b8f1235a1d9c8931bf9c	0:b:n;1:m:n;2:b:n->n
+inbox.take	728fed0de1b36456dd98fd01c4973e1f4fad069b1e291bf8573814e35110c61c	0:m:n;1:b:n->n
 instant.checked_add	7f5978ff4281a5066d6596147eeff657c66d690420466d4c4670cdbcee912684	0:b:n;1:b:n;2:b:n->n
 instant.ticks	257fd0bec30629898da99481df470042edc9226272a1e22e8b28ff51791f836b	0:b:n->n
 int.checked_add	0434a4813d057e7c1e165a095e5a5afa12fb33bf1df83e9e1e56e5fff09fd268	0:b:n;1:b:n->n
@@ -230,6 +233,7 @@ int.wrapping_mul	ee1913f8c8b517836abd97bdc14b358b57e9ed952f4063c1bccdad3d039b38f
 int.wrapping_sub	6478a4df1cf03c7465dab1189b6fdba150878016be28b43d7a98fc1da4cab16e	0:b:n;1:b:n->n
 io.authority	0b493d3718c31a9dcaa49e05ad8525434684141adda7c5a339887238d5291851	0:b:n;1:b:n->n
 io.dir	f5db15637eb2e59193f544588a88ae81af3c3bf42ead82d0fd30b8e8741e1cdf	0:b:n;1:b:n->n
+io.inbox	09c2d561409555a7bbebeb09af8f01800757a1962cb6135383c6f153c38eab3f	0:b:n->n
 io.monotonic_clock	6ad4291b3a7dd6f94fac494ded5773c6179f513e04ec20f5b98bbcd537bbecf0	0:b:n->n
 io.net	875e99626d30a92298ca884bae222795c883e398f86a647387785707ab57b5a5	0:b:n->n
 io.process	22644e7cbce16a9defe467db7f3511ba81ddf458e41cf958268962232f08d20c	0:b:n->n
@@ -314,6 +318,7 @@ runner.entry_id	cdef22d4e65fef59f8d8b2cb466f3d32b88ddde66af6dd2bd1f3f1ba032693c6
 runner.grants	88c1333c5984b4d1a2fadb974c1ed9bc1cf491d72559dc0a3fcc2258cb9af8b4	0:b:n->n
 runner.narrow	bbb5fed5d32b81fc54dcc29bd6303b06372e66752c34ee61e992dc96b2824e10	0:b:n;1:b:n->n
 runner.only	13824d405dc068fe015ad5724f90f388fbb6eb96b90f457fa712fec06db29875	0:b:n;1:b:n->n
+runner.send	3eba3c7a71bdc1374328d493ebc8ac652efeba89164a479dbe2f288082487571	0:b:n;1:b:n;2:b:n;3:b:n->n
 runner.spawn	be5e7171e87bec1fb0ddde4628ac843d04bbee4dd8332f1f80bc0c5c71b0b951	0:b:n;1:b:n;2:b:n;3:b:[0]->[1,2]
 sender.dup	46b33678f4e11e670bbf2b459e015958530588fd69f36f46f25bdd8228ae4858	0:b:n;1:b:[0]->[0]
 set.contains	41be487ae19b90378e2fb160befe1ed947ee7a38b66b40ed8445cfdf0f3745ba	0:b:[0];1:b:[0]->n

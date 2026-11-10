@@ -611,7 +611,13 @@ earlier call is observable.
 **`sim@1`** runs every callee of every `sim@1` runner of the run as a node of one
 deterministic simulation in this process, under the run's seeded scheduler. Each runner
 names its `node` and the runner contract it `models`, including `local.threads@1`,
-`local.process@1` or `remote.tls@1`, and produces only that contract's outcomes.
+`local.process@1`, `remote.tls@1` or `db@1`, and produces only that contract's outcomes.
+A node modelling `db@1` names its `head`, the full path of the place's head entry
+`fn(rt: Io, a: ()) -> Result[(), E]`, which the first transact or query call to the node
+starts as a run of this execution under the runner's grants, with the place's inbox;
+runners naming one node reach one place, each caller on its own streams. Once the head
+ends, every call it never took is `NotRun(Unreachable())` and every call it took and did
+not end is `InDoubt(Abandoned())`.
 Faults are provider outcomes drawn from
 `inputs.fault_seed`: each named fault site is enabled once per run with probability
 `enable` and then fires per evaluation with probability `fire`, both in parts per million.
@@ -696,7 +702,8 @@ SessionOpened = { epoch: u64, incarnation: Bytes, applied: u64, reconciles: bool
 CallRef       = { epoch: u64, position: u64, key: Bytes }
 RemoteCall    = { epoch: u64, position: u64, ordinal: u64, key: Bytes, form: CallForm,
                   path: String, fingerprint: Bytes, code: Bytes, grants: GrantSet,
-                  definitions: Option[List[String]], argument: Bytes, acknowledged: u64 }
+                  definitions: Option[List[String]], argument: Bytes, acknowledged: u64,
+                  level: Option[String] }
 RemoteOutcome = { epoch: u64, position: u64, key: Bytes, digest: Bytes, end: CallEnd,
                   callee: Option[Bytes], missing: List[Bytes] }
 CallForm      = Compute() | Call() | Transact() | Query()
@@ -845,6 +852,7 @@ N fn io.inbox(rt: Io) -> Result[Inbox, GrantError]
 fn inbox.take(mut i: Inbox, wait: bool) -> Option[List[Arrival]]
 fn arrival.request(a: Arrival) -> Arrived
 fn arrival.end(take a: Arrival, end: CallEnd) -> ()
+fn runner.send[F](r: Runner, form: CallForm, f: Entry[F], argument: Bytes) -> CallEnd
 ```
 
 `io.inbox` is granted only to a place's head run, once; elsewhere it is `NotGranted()`.
@@ -853,13 +861,17 @@ arrived, waiting for one when `wait` is true; it is `None` once the host
 stops. `caller` is the admitted caller's identity, or a client's principal; `level` is
 the name of the level ([STORE-2](storage.md#store-2-transactions)) the request waits for, if any, which the head resolves
 with `authority.level` against its own authority; a name it does not declare ends the call
-`NotRun(Rejected())` before anything runs. `arrival.end` sends the call's end; an `Arrival`
+`Failed` with the `TxFailure` `Storage(NoLevel())`, definite, before anything runs. `arrival.end` sends the call's end; an `Arrival`
 dropped without one ends its call `InDoubt(Abandoned())`, as does the head run's own end.
 The head records each take and each end on its tape.
 
 A caller's `db@1` runner takes the fields of `remote.tls@1` and an optional `level`, the
 name of a level the called place's authority declares, which its transact calls wait for ([STORE-2](storage.md#store-2-transactions)).
-Transact and query calls travel as `Call` frames of form `Transact()` or `Query()`; a
+`runner.send` is the caller's side of one transact or query call: `runner.transact` and
+`runner.query` encode the argument, send it and decode the `CallEnd`, so a call crosses
+as bytes both ways. A form other than `Transact()` or `Query()`, or a runner that is not
+a `db@1` place, ends `NotRun(Denied())` without sending. Transact and query calls travel
+as `Call` frames of form `Transact()` or `Query()`, with the runner's `level`; a
 transact call's `epoch` and `position` are its call-stream request, and a query uses
 position 0, which no stream decides. The outcomes are those of the providers table.
 

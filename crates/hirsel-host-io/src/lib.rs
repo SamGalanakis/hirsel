@@ -2912,6 +2912,27 @@ impl hirsel_interp::OperationsAdapter for HostLibrary {
     ) -> Result<(), Error> {
         self.callee_finished(end, cx)
     }
+    // A sim@1 place runs in this execution, so replay runs it again.
+    fn take_arrivals(&mut self) -> Vec<hirsel_interp::PlaceArrival> {
+        self.library.take_arrivals()
+    }
+    fn deliver_arrival(&mut self, id: u64, call: hirsel_interp::ArrivedCall) -> Result<(), Error> {
+        self.library.deliver_arrival(id, call)
+    }
+    fn take_arrival_ends(&mut self) -> Vec<(u64, hirsel_run_schema::CallOutcome)> {
+        self.library.take_arrival_ends()
+    }
+    fn place_closed(&mut self) -> Vec<(u64, hirsel_run_schema::CallOutcome)> {
+        self.library.place_closed()
+    }
+    fn arrival_ended(
+        &mut self,
+        token: u64,
+        end: hirsel_run_schema::CallOutcome,
+        cx: &mut OperationContext<'_>,
+    ) -> Result<(), Error> {
+        self.library.arrival_ended(token, end, cx)
+    }
     fn stops_itself(&self) -> bool {
         self.runners.crash.is_some()
     }

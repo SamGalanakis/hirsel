@@ -1204,6 +1204,8 @@ pub unsafe extern "C" fn hirsel_rt_v2_test_runner(
         timeout_ns: None,
         reconnect: None,
         reconcile: false,
+        head: None,
+        level: None,
     };
     let word = runner_word(
         ctx,

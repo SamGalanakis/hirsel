@@ -415,6 +415,11 @@ fn run_provider_on_host(
             match call.form() {
                 hirsel_run_schema::CallForm::Call => vec![operations.library.root_io(), value],
                 hirsel_run_schema::CallForm::Compute => vec![value],
+                hirsel_run_schema::CallForm::Transact | hirsel_run_schema::CallForm::Query => {
+                    return Err(ToolError::Runtime(
+                        "launch: a served call starts no callee run".into(),
+                    ));
+                }
             }
         }
         _ => operations

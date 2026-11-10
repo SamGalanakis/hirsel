@@ -276,7 +276,7 @@ impl Library {
         self.tasks.shielded = previous.1;
     }
 
-    fn runner(&self, value: &Value) -> Result<&RunnerGrant, Error> {
+    pub(super) fn runner(&self, value: &Value) -> Result<&RunnerGrant, Error> {
         let id = self.simulation.id(value, "Runner")?;
         match self.simulation.grants.get(&id) {
             Some(Grant::Runner(runner)) => Ok(runner),
@@ -343,6 +343,8 @@ impl Library {
                     timeout_ns: None,
                     reconnect: None,
                     reconcile: false,
+                    head: None,
+                    level: None,
                 };
                 self.runner_handle(RunnerGrant {
                     entry,
@@ -829,7 +831,7 @@ fn task_handle(task: u64) -> Value {
 
 /// The callee's world: the runner's grant set as its root grants, its seeds derived from
 /// the call key (RUN-10), and none of the caller's state.
-fn callee_world(
+pub(super) fn callee_world(
     grants: &IoGrants,
     random_seed: u64,
     test_seed: u64,

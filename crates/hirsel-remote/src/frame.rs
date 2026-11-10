@@ -33,6 +33,9 @@ pub struct Call {
     pub definitions: Option<Vec<String>>,
     pub argument: Vec<u8>,
     pub acknowledged: u64,
+    /// A transact call's level (`db@1`): the name of a level of the place's authority its
+    /// end waits for; absent waits for the place's floor.
+    pub level: Option<String>,
 }
 impl Call {
     pub fn reference(&self) -> CallRef {
@@ -241,6 +244,8 @@ impl Frame {
                     unit(match call.form {
                         CallForm::Compute => 0,
                         CallForm::Call => 1,
+                        CallForm::Transact => 2,
+                        CallForm::Query => 3,
                     }),
                     Data::Text(call.path.clone()),
                     bytes(&call.fingerprint),
@@ -249,6 +254,7 @@ impl Frame {
                     allowlist_data(call.definitions.as_deref()),
                     bytes(&call.argument),
                     u(call.acknowledged),
+                    option(call.level.as_ref().map(|l| Data::Text(l.clone()))),
                 ])],
             ),
             Self::Outcome(outcome) => Data::Variant(
@@ -310,6 +316,8 @@ impl Frame {
                     form: match r.unit()? {
                         0 => CallForm::Compute,
                         1 => CallForm::Call,
+                        2 => CallForm::Transact,
+                        3 => CallForm::Query,
                         _ => return Err(Malformed("CallForm")),
                     },
                     path: r.text()?,
@@ -322,6 +330,11 @@ impl Frame {
                     },
                     argument: r.bytes()?,
                     acknowledged: r.u64()?,
+                    level: match r.option()? {
+                        None => None,
+                        Some(Data::Text(level)) => Some(level),
+                        Some(_) => return Err(Malformed("level")),
+                    },
                 }))
             }
             4 => {

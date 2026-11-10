@@ -978,6 +978,12 @@
       ]
     },
     {
+      "path": "runner.hir",
+      "module": [
+        "runner"
+      ]
+    },
+    {
       "path": "call_info.hir",
       "module": [
         "call_info"

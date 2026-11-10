@@ -120,6 +120,18 @@ pub fn trial_tapes(
         record.io = match request.form {
             CallForm::Call => Some(entry.grants.clone().unwrap_or_default()),
             CallForm::Compute => None,
+            // A served call's body runs in its place's head, which no trial re-runs.
+            CallForm::Transact | CallForm::Query => {
+                trials.push(TrialCall {
+                    ordinal,
+                    path: request.path.clone(),
+                    same_code,
+                    recorded,
+                    trial: "a served call starts no callee run".into(),
+                    same_outcome: None,
+                });
+                continue;
+            }
         };
         record.admission = entry
             .admission

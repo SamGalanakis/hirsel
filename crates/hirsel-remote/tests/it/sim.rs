@@ -194,6 +194,7 @@ impl World {
             definitions: None,
             argument: token.to_le_bytes().to_vec(),
             acknowledged: 0,
+            level: None,
         };
         let digest = TestDigests.digest(&call);
         let actions = self.client.submit(token, call, digest);
@@ -737,6 +738,7 @@ fn duplicates_get_the_stored_outcome_and_gaps_stay_refused() {
         definitions: None,
         argument: vec![ordinal as u8],
         acknowledged: 0,
+        level: None,
     };
     let send = |host: &mut Host, c: Call| {
         host.frame(1, Frame::Call(Box::new(c)), &mut TestPlace, &TestDigests)
@@ -844,6 +846,7 @@ fn call(epoch: u64, position: u64) -> Call {
         definitions: None,
         argument: vec![position as u8],
         acknowledged: 0,
+        level: None,
     }
 }
 fn status(epoch: u64, position: u64) -> Frame {
@@ -1018,6 +1021,7 @@ fn an_adversarial_caller_keeps_host_state_and_frame_work_within_its_limits() {
         definitions: None,
         argument: vec![argument],
         acknowledged,
+        level: None,
     };
     let mut refusals = 0;
     let mut resumed = 0;

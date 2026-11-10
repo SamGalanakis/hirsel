@@ -12,16 +12,27 @@ pub enum CallForm {
     Compute,
     /// `runner.call` and `runner.spawn`: the callee receives the place's `Io`.
     Call,
+    /// `runner.transact` (STORE-12): a transaction at a `db@1` place, decided on the
+    /// caller's call stream; no callee run starts.
+    Transact,
+    /// `runner.query` (STORE-12): a query at a `db@1` place, at stream position 0.
+    Query,
 }
 impl CallForm {
     pub const fn name(self) -> &'static str {
         match self {
             Self::Compute => "compute",
             Self::Call => "call",
+            Self::Transact => "transact",
+            Self::Query => "query",
         }
     }
+    /// The served forms, which a place's head evaluates in its own run.
+    pub const fn served(self) -> bool {
+        matches!(self, Self::Transact | Self::Query)
+    }
     pub fn parse(name: &str) -> Option<Self> {
-        [Self::Compute, Self::Call]
+        [Self::Compute, Self::Call, Self::Transact, Self::Query]
             .into_iter()
             .find(|form| form.name() == name)
     }

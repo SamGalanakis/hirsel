@@ -1,0 +1,75 @@
+// rule: STORE-12
+// expect: run
+// runners: [{"name":"ledger","provider":"sim@1","node":"bank","models":"db@1","head":"application@1/head","grants":{"dirs":[{"path":"place","host":"/place","access":"read_write"}]},"definitions":null},{"name":"synced","provider":"sim@1","node":"bank","models":"db@1","head":"application@1/head","level":"synced","grants":{"dirs":[{"path":"place","host":"/place","access":"read_write"}]},"definitions":null}]
+// A db@1 place's head serves its entries with store.serve. Transact calls run
+// once each on the caller's stream and commit at the place, and a query reads
+// its latest commit. A call to an entry the head does not serve is Denied, and
+// one waiting for a level the place does not declare is NoLevel, with no
+// effect.
+@serializable
+type Short = Overdrawn(u64) | Db(store.TxError)
+
+fn read(tx: store.Tx) -> Result[u64, Short] {
+  match store.tx_get(tx, b"balance") {
+    Ok(Some(b)) => Ok(int.widen(b[0])),
+    Ok(None()) => Ok(0),
+    Error(e) => Error(Db(unique e)),
+  }
+}
+
+// Adds `amount` (negative amounts as withdrawals) and returns the balance.
+fn deposit(mut tx: store.Tx, info: store.CallInfo, amount: u64) -> Result[u64, Short] {
+  let n = read(tx)? + amount
+  store.tx_put(mut tx, b"balance", bytes.from_list([int.truncate(n)])) ? Db
+  Ok(n)
+}
+
+fn withdraw(mut tx: store.Tx, info: store.CallInfo, amount: u64) -> Result[u64, Short] {
+  let n = read(tx)?
+  if amount > n {
+    return Error(Overdrawn(n))
+  }
+  store.tx_put(mut tx, b"balance", bytes.from_list([int.truncate(n - amount)])) ? Db
+  Ok(n - amount)
+}
+
+fn balance(tx: store.Tx, info: store.CallInfo, a: ()) -> Result[u64, Short] {
+  read(tx)
+}
+
+// The place's head: one store, served until the execution ends.
+pub fn head(rt: Io, a: ()) -> Result[(), store.StoreError] {
+  let Ok(d) = io.dir(rt, path.of("place")) else {
+    return Error(Corrupt("place"))
+  }
+  let Ok(inbox) = io.inbox(rt) else {
+    return Error(Corrupt("inbox"))
+  }
+  let mut s = store.open(d, store.default_config())?
+  store.serve(
+    mut s,
+    take inbox,
+    [store.served_transact(deposit), store.served_query(balance)]
+  )
+}
+
+pub fn main(rt: Io, args: Args) -> Result[(), GrantError] {
+  let ledger = io.runner(rt, "ledger")?
+  failure.check(runner.transact(ledger, deposit, 5u64) == Ok(5u64), Arithmetic())
+  failure.check(runner.transact(ledger, deposit, 7u64) == Ok(12u64), Arithmetic())
+  failure.check(runner.query(ledger, balance, ()) == Ok(12u64), Arithmetic())
+  // The head serves no withdraw: nothing runs.
+  failure.check(
+    runner.transact(ledger, withdraw, 1u64) == Error(NotRun(Denied())),
+    Arithmetic()
+  )
+  // Another caller stream at the same place, waiting for a level the place
+  // does not declare.
+  let synced = io.runner(rt, "synced")?
+  failure.check(
+    runner.transact(synced, deposit, 1u64) == Error(Failed(Storage(NoLevel()))),
+    Arithmetic()
+  )
+  failure.check(runner.query(ledger, balance, ()) == Ok(12u64), Arithmetic())
+  Ok(())
+}

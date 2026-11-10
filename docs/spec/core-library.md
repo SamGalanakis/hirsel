@@ -405,6 +405,11 @@ fn runner.apply_mut[C, I, A: serializable, R: serializable, E: serializable](f: 
 fn runner.compute[A: serializable, R: serializable, E: serializable](r: Runner, f: Entry[fn(a: A) -> Result[R, E]], a: A) -> unique Result[R, RunError[E]]
 fn runner.call[A: serializable, R: serializable, E: serializable](r: Runner, f: Entry[fn(rt: Io, a: A) -> Result[R, E]], a: A) -> unique Result[R, RunError[E]]
 fn runner.spawn[A: serializable, R: serializable, E: serializable](s: Scope, r: Runner, f: Entry[fn(rt: Io, a: A) -> Result[R, E]], a: A) -> Task[Result[R, RunError[E]]] of s
+fn runner.send[F](r: Runner, form: CallForm, f: Entry[F], argument: Bytes) -> CallEnd
+N fn io.inbox(rt: Io) -> Result[Inbox, GrantError]
+fn inbox.take(mut i: Inbox, wait: bool) -> Option[List[Arrival]]
+fn arrival.request(a: Arrival) -> Arrived
+fn arrival.end(take a: Arrival, end: CallEnd) -> ()
 fn test.runner(t: Test) -> Runner
 ```
 

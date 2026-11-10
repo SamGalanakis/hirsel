@@ -43,6 +43,7 @@ pub struct Library {
     /// A scripted client's unmet Expect at the last handle drop (LANG-9).
     pub(super) drop_failure: Option<(String, String)>,
     pub(super) runners: super::runners::Runners,
+    pub(super) places: super::places::Places,
     /// Free mode (`tasks.free@1`): the run's session and pending states.
     pub(super) free: Option<super::free::Free>,
 }
@@ -132,6 +133,7 @@ impl Library {
             next_shared: 0,
             drop_failure: None,
             runners: Default::default(),
+            places: Default::default(),
             free: None,
         })
     }
@@ -1422,6 +1424,12 @@ impl Library {
         if self.runners.waits_on(token) {
             return self.poll_runner(token, context);
         }
+        if self.places.waits_on(token) {
+            return self.poll_place(token);
+        }
+        if self.places.inbox_waits_on(token) {
+            return self.poll_inbox(token);
+        }
         if self.signals.contains(token) {
             let saved = (!context.configuration.inputs.is_empty()).then(|| self.simulation.clone());
             let result = self.poll_signal(token, context);
@@ -1778,6 +1786,27 @@ impl Operations for Library {
     ) -> Result<(), Error> {
         self.runner_ended(token, end, context)
     }
+    fn take_arrivals(&mut self) -> Vec<crate::PlaceArrival> {
+        self.take_place_arrivals()
+    }
+    fn deliver_arrival(&mut self, id: u64, call: crate::ArrivedCall) -> Result<(), Error> {
+        self.deliver_place_arrival(id, call);
+        Ok(())
+    }
+    fn take_arrival_ends(&mut self) -> Vec<(u64, hirsel_run_schema::CallOutcome)> {
+        self.take_place_ends()
+    }
+    fn place_closed(&mut self) -> Vec<(u64, hirsel_run_schema::CallOutcome)> {
+        self.close_place()
+    }
+    fn arrival_ended(
+        &mut self,
+        token: u64,
+        end: hirsel_run_schema::CallOutcome,
+        _context: &mut OperationContext<'_>,
+    ) -> Result<(), Error> {
+        self.place_ended(token, end)
+    }
     fn cancel_run(&mut self) {
         // The provider cancels the callee run's root scope with cause `Parent` (RUN-9).
         self.tasks.cancel_root(1);
@@ -1850,6 +1879,14 @@ impl Operations for Library {
         }
         if kind == "Claim" {
             self.drop_claim(id);
+            return Ok(());
+        }
+        if kind == "Arrival" {
+            self.drop_arrival(id);
+            return Ok(());
+        }
+        if kind == "Inbox" {
+            self.drop_inbox();
             return Ok(());
         }
         if kind == "Recorder" {
@@ -2227,6 +2264,9 @@ primary_operations! { library, call, context, name, a, value;
     Primitive: "runner.apply" | "runner.apply_mut" => { return library.runner_apply(name, a).map(Some); },
     Capability: "io.runner" | "runner.grants" | "runner.narrow" | "runner.only" | "runner.compute" | "runner.call" | "runner.spawn" | "test.runner" => {
         return library.runner_call(name, &call, context).map(Some);
+    },
+    Capability: "runner.send" | "io.inbox" | "inbox.take" | "arrival.request" | "arrival.end" => {
+        return library.place_call(name, &call, context).map(Some);
     },
     Capability: "io.authority" | "authority.levels" | "authority.level" | "authority.floor" | "level.name" | "level.narrow" | "authority.max_entry" | "authority.claim" | "claim.end" | "claim.narrow" | "authority.advance" | "authority.durable" | "authority.read" | "authority.get" | "authority.put" | "authority.reclaim" => {
         // A rejected replay never publishes effects or keeps a claim.

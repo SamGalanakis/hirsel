@@ -708,7 +708,9 @@ wire_struct!(crate::process::Deadline { clock, ticks });
 
 wire_enum!(hirsel_run_schema::CallForm {
     0 => Compute,
-    1 => Call
+    1 => Call,
+    2 => Transact,
+    3 => Query
 });
 
 wire_struct!(hirsel_run_schema::RunnerRequest {

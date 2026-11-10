@@ -10,7 +10,7 @@ use crate::eval::{Scheduler, Step, enter_checked, execute_frames};
 use crate::frame::Frame;
 use crate::*;
 use hirsel_tir::TirProvider;
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 /// One run of the execution.
 pub(crate) struct Run {
@@ -119,7 +119,23 @@ struct Callee {
     /// Suspensions so far, and the point at which its place crashes (`sim@1`).
     suspensions: u32,
     crash_after: Option<u32>,
+    /// The `db@1` place this run is the head of; its end ends the place's calls, not a
+    /// call of its starter's.
+    place: Option<String>,
 }
+
+/// The `db@1` places in this execution (STORE-12): each one's head run, the places whose
+/// head ended, and every delivered call still owed an end, by arrival.
+#[derive(Default)]
+struct Places {
+    heads: BTreeMap<String, usize>,
+    closed: BTreeSet<String>,
+    /// Arrival to its place, calling run and that run's wait.
+    owed: BTreeMap<u64, (String, usize, u64)>,
+    next: u64,
+}
+const UNREACHABLE: u32 = 2;
+const ABANDONED: u32 = 2;
 
 /// Run the root and every callee run it starts until the root ends; the root's outcome
 /// and its result. A callee's tooling limit, undefined behavior, trap or environmental
@@ -136,6 +152,7 @@ pub(crate) fn execute<O: crate::ownership_trace::Observer>(
 ) -> (Run, Result<(), Error>) {
     let mut callees: Vec<Option<Callee>> = vec![];
     let mut ready: VecDeque<usize> = VecDeque::from([0]);
+    let mut places = Places::default();
     let result = 'run: loop {
         let Some(index) = ready.pop_front() else {
             // Nothing is ready: first the runs whose provider already has a ready wait,
@@ -227,6 +244,20 @@ pub(crate) fn execute<O: crate::ownership_trace::Observer>(
                 .append(&mut callee.run.execution.stdout);
             step
         };
+        if let Err(error) = route_places(
+            provider,
+            sources,
+            limits,
+            runtime,
+            &mut root,
+            &mut *root_operations,
+            &mut callees,
+            &mut ready,
+            &mut places,
+            index,
+        ) {
+            break 'run Err(error);
+        }
         let end = match step {
             Ok(Step::Idle) => {
                 let operations = match index {
@@ -257,6 +288,7 @@ pub(crate) fn execute<O: crate::ownership_trace::Observer>(
                         started: false,
                         suspensions: 0,
                         crash_after: call.crash_after,
+                        place: None,
                     }));
                     ready.push_back(callees.len());
                 }
@@ -355,6 +387,36 @@ pub(crate) fn execute<O: crate::ownership_trace::Observer>(
         if let Some(end) = end {
             let mut callee = callees[index - 1].take().unwrap();
             ready.retain(|r| *r != index);
+            if let Some(place) = callee.place.take() {
+                // The head's end ends every call it was owed (runners.md, db@1).
+                places.heads.remove(&place);
+                places.closed.insert(place.clone());
+                let mut ends = callee.operations.place_closed();
+                ends.extend(
+                    places
+                        .owed
+                        .iter()
+                        .filter(|(id, (p, ..))| *p == place && !ends.iter().any(|(e, _)| e == *id))
+                        .map(|(id, _)| (*id, hirsel_run_schema::CallOutcome::InDoubt(ABANDONED)))
+                        .collect::<Vec<_>>(),
+                );
+                for (id, outcome) in ends {
+                    if let Err(error) = end_arrival(
+                        sources,
+                        runtime,
+                        &mut root,
+                        &mut *root_operations,
+                        &mut callees,
+                        &mut ready,
+                        &mut places,
+                        id,
+                        outcome,
+                    ) {
+                        break 'run Err(error);
+                    }
+                }
+                continue;
+            }
             if let Err(error) = callee.operations.callee_ended(
                 &end,
                 runtime,
@@ -412,4 +474,146 @@ fn ended(
                 .call_ended(token, end, &mut callee.run.context(sources, runtime))
         }
     }
+}
+
+/// Route the calls run `index` sent to places, and the ends it gave as a head.
+#[allow(clippy::too_many_arguments)]
+fn route_places(
+    provider: &mut (impl TirProvider + ?Sized),
+    sources: &SourceMap,
+    limits: Limits,
+    runtime: &aggregate::RuntimeTypes,
+    root: &mut Run,
+    root_operations: &mut dyn Operations,
+    callees: &mut Vec<Option<Callee>>,
+    ready: &mut VecDeque<usize>,
+    places: &mut Places,
+    index: usize,
+) -> Result<(), Error> {
+    let (arrivals, ends) = {
+        let operations: &mut dyn Operations = match index {
+            0 => root_operations,
+            i => match callees[i - 1].as_mut() {
+                Some(callee) => callee.operations.as_mut(),
+                None => return Ok(()),
+            },
+        };
+        (operations.take_arrivals(), operations.take_arrival_ends())
+    };
+    for arrival in arrivals {
+        let head = match places.heads.get(&arrival.place) {
+            Some(head) => Some(*head),
+            None if places.closed.contains(&arrival.place) => None,
+            None => match arrival.head {
+                Some(start) => {
+                    let checker = runtime.checked.clone().map(checked::state);
+                    let run = Run::new(
+                        provider,
+                        start.configuration,
+                        start.arguments,
+                        limits,
+                        runtime,
+                        RunBudgets::default(),
+                        checker.as_ref(),
+                    )
+                    .map_err(|error| error.error)?;
+                    callees.push(Some(Callee {
+                        run,
+                        operations: start.operations,
+                        caller: index,
+                        token: 0,
+                        started: false,
+                        suspensions: 0,
+                        crash_after: None,
+                        place: Some(arrival.place.clone()),
+                    }));
+                    places.heads.insert(arrival.place.clone(), callees.len());
+                    Some(callees.len())
+                }
+                None => None,
+            },
+        };
+        let Some(head) = head else {
+            // No head holds the place: the call never ran.
+            let id = places.next;
+            places.next += 1;
+            places
+                .owed
+                .insert(id, (arrival.place, index, arrival.token));
+            let root_operations = &mut *root_operations;
+            end_arrival(
+                sources,
+                runtime,
+                root,
+                root_operations,
+                callees,
+                ready,
+                places,
+                id,
+                hirsel_run_schema::CallOutcome::NotRun(UNREACHABLE),
+            )?;
+            continue;
+        };
+        let id = places.next;
+        places.next += 1;
+        places
+            .owed
+            .insert(id, (arrival.place, index, arrival.token));
+        callees[head - 1]
+            .as_mut()
+            .ok_or_else(|| invalid("a place's head outlived its run"))?
+            .operations
+            .deliver_arrival(id, arrival.call)?;
+        if !ready.contains(&head) {
+            ready.push_back(head);
+        }
+    }
+    for (id, outcome) in ends {
+        end_arrival(
+            sources,
+            runtime,
+            root,
+            &mut *root_operations,
+            callees,
+            ready,
+            places,
+            id,
+            outcome,
+        )?;
+    }
+    Ok(())
+}
+
+/// Deliver arrival `id`'s end to the run that sent it, if that run is live.
+#[allow(clippy::too_many_arguments)]
+fn end_arrival(
+    sources: &SourceMap,
+    runtime: &aggregate::RuntimeTypes,
+    root: &mut Run,
+    root_operations: &mut dyn Operations,
+    callees: &mut [Option<Callee>],
+    ready: &mut VecDeque<usize>,
+    places: &mut Places,
+    id: u64,
+    outcome: hirsel_run_schema::CallOutcome,
+) -> Result<(), Error> {
+    let Some((_, caller, token)) = places.owed.remove(&id) else {
+        return Err(invalid("an end for an arrival owed none"));
+    };
+    match caller {
+        0 => root_operations.arrival_ended(token, outcome, &mut root.context(sources, runtime))?,
+        i => match callees[i - 1].as_mut() {
+            Some(callee) => callee.operations.arrival_ended(
+                token,
+                outcome,
+                &mut callee.run.context(sources, runtime),
+            )?,
+            // Its caller ended first: no one waits for the end.
+            None => return Ok(()),
+        },
+    }
+    if !ready.contains(&caller) {
+        ready.push_back(caller);
+    }
+    Ok(())
 }

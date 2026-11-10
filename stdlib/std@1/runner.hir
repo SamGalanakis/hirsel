@@ -1,0 +1,58 @@
+// Transactions and queries at a `db@1` place (STORE-12): the call crosses as
+// argument bytes and comes back as one `CallEnd`, which this decodes into the
+// caller's result. `runner.transact` and `runner.query` name `store.Tx`,
+// `store.CallInfo` and `store.TxFailure`, so they are declared beside them.
+
+/// Runs the transaction entry `f` at `r`'s place, exactly once on the caller's
+/// call stream. `Error(Failed(f))` is the transaction's own failure (an abort,
+/// a limit, a level the place does not declare); the runner reports the rest.
+pub fn transact[A: serializable, R: serializable, E: serializable](
+  r: Runner,
+  f: Entry[fn(mut tx: store.Tx, info: store.CallInfo, a: A) -> Result[R, E]],
+  a: A
+) -> Result[R, RunError[store.TxFailure[E]]] {
+  ended(core@1/runner.send(r, Transact(), f, codec.encode(a)))
+}
+
+/// Runs the query entry `f` at `r`'s place, on its latest commit.
+pub fn query[A: serializable, R: serializable, E: serializable](
+  r: Runner,
+  f: Entry[fn(tx: store.Tx, info: store.CallInfo, a: A) -> Result[R, E]],
+  a: A
+) -> Result[R, RunError[store.TxFailure[E]]] {
+  ended(core@1/runner.send(r, Query(), f, codec.encode(a)))
+}
+
+// The caller's result of a call that ended with `end`. Bytes that do not
+// decode as the caller's types cannot cross: `NotRun(Rejected())`.
+fn ended[R: serializable, E: serializable](take end: CallEnd) -> Result[
+  R,
+  RunError[store.TxFailure[E]]
+] uses {} {
+  match take end {
+    Returned(data) => {
+      let decoded: Result[R, DecodeError] = codec.decode(data)
+      match take decoded {
+        Ok(v) => Ok(take v),
+        Error(_) => Error(NotRun(Rejected())),
+      }
+    },
+    Failed(data) => {
+      let decoded: Result[store.TxFailure[E], DecodeError] = codec.decode(data)
+      match take decoded {
+        Ok(f) => Error(Failed(take f)),
+        Error(_) => Error(NotRun(Rejected())),
+      }
+    },
+    Faulted(data) => {
+      let decoded: Result[Failure, DecodeError] = codec.decode(data)
+      match take decoded {
+        Ok(f) => Error(Faulted(take f)),
+        Error(_) => Error(NotRun(Rejected())),
+      }
+    },
+    NotRun(reason) => Error(NotRun(reason)),
+    InDoubt(reason) => Error(InDoubt(reason)),
+    Canceled(cause) => Error(Canceled(cause)),
+  }
+}

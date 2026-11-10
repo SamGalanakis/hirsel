@@ -440,6 +440,9 @@ impl HostLibrary {
                 roots: match call.form {
                     CallForm::Call => vec![hirsel_run_config::Root::Io],
                     CallForm::Compute => vec![],
+                    CallForm::Transact | CallForm::Query => {
+                        return Err("a served call starts no callee run".into());
+                    }
                 },
                 code: facts.reach.clone(),
             })
@@ -491,7 +494,7 @@ impl HostLibrary {
             .ok_or("a runner call without its argument")?;
         start.arguments = match call.form {
             CallForm::Call => vec![callee.library.root_io(), argument],
-            CallForm::Compute => vec![argument],
+            CallForm::Compute | CallForm::Transact | CallForm::Query => vec![argument],
         };
         start.operations = Box::new(callee);
         Ok(start)

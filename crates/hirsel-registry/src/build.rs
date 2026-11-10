@@ -451,7 +451,13 @@ pub(crate) fn registry(types: &Arc<TypeInterner>) -> BTreeMap<DefId, SignatureRe
         &mut out,
     );
     // RUN-13: the frames a caller's remote.tls@1 provider and a runner host exchange.
-    variant(types, "CallForm", "", "Compute()|Call()", &mut out);
+    variant(
+        types,
+        "CallForm",
+        "",
+        "Compute()|Call()|Transact()|Query()",
+        &mut out,
+    );
     variant(
         types,
         "CallEnd",
@@ -468,7 +474,12 @@ pub(crate) fn registry(types: &Arc<TypeInterner>) -> BTreeMap<DefId, SignatureRe
         ("CallRef", "epoch: u64,position: u64,key: Bytes"),
         (
             "RemoteCall",
-            "epoch: u64,position: u64,ordinal: u64,key: Bytes,form: CallForm,path: String,fingerprint: Bytes,code: Bytes,grants: GrantSet,definitions: Option[List[String]],argument: Bytes,acknowledged: u64",
+            "epoch: u64,position: u64,ordinal: u64,key: Bytes,form: CallForm,path: String,fingerprint: Bytes,code: Bytes,grants: GrantSet,definitions: Option[List[String]],argument: Bytes,acknowledged: u64,level: Option[String]",
+        ),
+        // db@1: one transact or query call a place's head took from its inbox.
+        (
+            "Arrived",
+            "form: CallForm,entry: EntryId,caller: String,request: CallRequest,level: Option[String],argument: Bytes",
         ),
         (
             "RemoteOutcome",
@@ -567,6 +578,10 @@ pub(crate) fn registry(types: &Arc<TypeInterner>) -> BTreeMap<DefId, SignatureRe
         ("UdpSocket", "Net"),
         ("Child", "Proc"),
         ("ChildGroup", "Proc"),
+        // db@1: a place's inbox, and one arrived call owed exactly one end; dropping an
+        // Arrival ends its call InDoubt(Abandoned()).
+        ("Inbox", "Runner"),
+        ("Arrival", "Runner"),
     ] {
         let b = Builder::new(types, "").with_declarations(&out);
         let mut t = type_definition(vec![], None);
@@ -1341,6 +1356,7 @@ fn serializable_core(name: &str, t: &mut TypeDefinition) {
             | "SessionOpened"
             | "CallRef"
             | "RemoteCall"
+            | "Arrived"
             | "RemoteOutcome"
             | "RunFrame"
     ) {

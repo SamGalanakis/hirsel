@@ -74,6 +74,22 @@ pub(crate) fn validate(
                 if runner.threads.is_some() {
                     return Err(invalid("io.runners.threads", "sim@1 runs no threads"));
                 }
+                match (model, &runner.head) {
+                    ("db@1", Some(head)) if !definition_path(head) => {
+                        return Err(invalid(
+                            "io.runners.head",
+                            "expected a full versioned definition path",
+                        ));
+                    }
+                    ("db@1", Some(_)) => (),
+                    ("db@1", None) => {
+                        return Err(invalid("io.runners.head", "a db@1 node needs a head"));
+                    }
+                    (_, Some(_)) => {
+                        return Err(invalid("io.runners.head", "only a db@1 node has a head"));
+                    }
+                    (_, None) => (),
+                }
             }
             "remote.tls@1" => remote(runner)?,
             _ => {
@@ -81,6 +97,12 @@ pub(crate) fn validate(
                     field: "io.runners.provider".into(),
                 });
             }
+        }
+        if runner.level.is_some() && runner.models.as_deref() != Some("db@1") {
+            return Err(invalid("io.runners.level", "only a db@1 place has levels"));
+        }
+        if runner.provider != "sim@1" && runner.head.is_some() {
+            return Err(invalid("io.runners.head", "only a db@1 node has a head"));
         }
         if runner.provider != "remote.tls@1"
             && (runner.endpoint.is_some()

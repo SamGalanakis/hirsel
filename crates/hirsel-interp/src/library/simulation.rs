@@ -146,6 +146,8 @@ pub struct SimulationConfig {
     /// Record every live `Shared` root's count at every scheduling point
     /// (`--trace-roots`, S-14) into `ObservedSimulation::root_trace`.
     pub trace_roots: bool,
+    /// This run is a `db@1` place's head: `io.inbox` grants its inbox once (STORE-12).
+    pub place: bool,
 }
 impl Default for SimulationConfig {
     fn default() -> Self {
@@ -200,6 +202,7 @@ impl Default for SimulationConfig {
             instance: [0; 16],
             callees: Default::default(),
             trace_roots: false,
+            place: false,
         }
     }
 }

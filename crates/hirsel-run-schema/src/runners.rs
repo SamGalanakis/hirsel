@@ -73,6 +73,15 @@ pub struct RunnerEntry {
     /// its status answers prove a call never ran (default false, absent).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub reconcile: bool,
+    /// A `sim@1` node modeling `db@1`: the full path of the place's head entry,
+    /// `fn(rt: Io, a: ()) -> Result[(), E]`, which runs under `grants` with the place's
+    /// inbox (STORE-12).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub head: Option<String>,
+    /// `db@1`: the name of the level of the called place's authority its transact calls
+    /// wait for; absent waits for the place's floor (STORE-2).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub level: Option<String>,
 }
 /// A runner host's endpoint: `{"tcp": {"address", "service"}}` or `{"unix": path}`.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -131,6 +140,8 @@ pub fn sim_model_sites(model: &str) -> Option<&'static [&'static str]> {
         // local.threads@1 can refuse only for capacity.
         "local.threads@1" => Some(&["overload"]),
         "local.process@1" | "remote.tls@1" => Some(SIM_FAULT_SITES),
+        // A place in this execution: its head, not the node, decides each call.
+        "db@1" => Some(&[]),
         _ => None,
     }
 }

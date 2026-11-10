@@ -278,6 +278,41 @@ pub struct CallSchemas {
     pub error: hirsel_types::serialization::SerializableSchema,
     pub failure: hirsel_types::serialization::SerializableSchema,
 }
+/// A transact or query call to a `db@1` place in this execution (STORE-12): the
+/// execution delivers it to the place's head run, starting the head from `head` when the
+/// place has none yet, and returns the head's end to the caller's wait `token`.
+pub struct PlaceArrival {
+    /// The place: the `sim@1` node that holds it.
+    pub place: String,
+    pub token: u64,
+    /// The head's run, from the caller that first reached the place.
+    pub head: Option<HeadStart>,
+    pub call: ArrivedCall,
+}
+/// A place's head run: its entry's configuration and arguments, and its provider, which
+/// grants the place's inbox.
+pub struct HeadStart {
+    pub configuration: RunConfiguration,
+    pub arguments: Vec<Value>,
+    pub operations: Box<dyn Operations>,
+}
+/// One arrived call as the head's `arrival.request` states it (core `Arrived`).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ArrivedCall {
+    pub form: hirsel_run_schema::CallForm,
+    pub path: String,
+    pub fingerprint: [u8; 32],
+    pub code: [u8; 32],
+    pub caller: String,
+    pub stream: [u8; 32],
+    pub epoch: u64,
+    pub position: u64,
+    pub digest: [u8; 32],
+    pub acknowledged: u64,
+    pub level: Option<String>,
+    pub argument: Vec<u8>,
+}
+
 /// How a callee run ended, as its caller's provider learns it.
 #[derive(Debug)]
 pub enum CalleeEnd {
@@ -558,6 +593,30 @@ operation_boundary! {
         _end: CalleeEnd,
         _context: &mut OperationContext<'_>) -> Result<(), Error> {
         Err(invalid("unexpected callee outcome"))
+    }
+    /// The calls this run sent to places in this execution since the last take.
+    fn take_arrivals(&mut self) -> Vec<PlaceArrival> {
+        vec![]
+    }
+    /// This run is a place's head: `call` arrived in its inbox as arrival `id`.
+    fn deliver_arrival(&mut self, _id: u64, _call: ArrivedCall) -> Result<(), Error> {
+        Err(invalid("an arrival for a run that holds no inbox"))
+    }
+    /// The ends this head gave since the last take, by arrival.
+    fn take_arrival_ends(&mut self) -> Vec<(u64, hirsel_run_schema::CallOutcome)> {
+        vec![]
+    }
+    /// This head ended: the ends of the arrivals it held, `NotRun` for those it never
+    /// took. Any other arrival still owed an end is `InDoubt(Abandoned())`.
+    fn place_closed(&mut self) -> Vec<(u64, hirsel_run_schema::CallOutcome)> {
+        vec![]
+    }
+    /// The call this run sent to a place, parked at `token`, ended.
+    fn arrival_ended(&mut self,
+        _token: u64,
+        _end: hirsel_run_schema::CallOutcome,
+        _context: &mut OperationContext<'_>) -> Result<(), Error> {
+        Err(invalid("an end for a run that sent no arrival"))
     }
     /// A forwarded cancellation: cancel this callee run's root scope with cause `Parent`.
     fn cancel_run(&mut self) {}

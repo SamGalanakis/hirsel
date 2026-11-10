@@ -1169,8 +1169,8 @@ The **head run** of a place is the run that holds its `Store`. Its host routes t
 transact and query calls that pass the host's arrival checks, through the `Inbox` its
 `Io` projects ([`db@1`](runners.md#providers)), and the head serves them with
 `store.serve` until the inbox closes, which returns `Ok(())`, or the store closes, which
-returns the store's error. An `entries` list that names one path twice is a failure of
-rule STORE-12.
+returns the store's error. An `entries` list that names one path twice is
+`InvalidInput()`, before any arrival is taken.
 
 **Naming and resolution.** A served call names its entry only by identity: its path,
 signature fingerprint and code hash ([RUN-3](runners.md#run-3-entries)), never by a
@@ -1777,6 +1777,14 @@ An activation commits only when the result is coherent:
 
 A refused activation changes nothing. Places activate independently: a revision reaches
 many places one activation at a time, and no activation spans two places.
+
+A head serves one revision, its own, and loads no code
+([STORE-12](#store-12-transactions-at-a-runner)). The activation is the old head's last
+commit. A head built from the new revision then claims the history, which fences the old
+head ([STORE-11](#store-11-engine-and-storage-seam)): a fenced head stops serving, ends
+every call it holds `InDoubt(Abandoned())` and leaves the calls it never took to the new
+head. Callers retry through their call streams, which resolve each in-doubt position at
+the new head exactly as at the old.
 
 ### STORE-20: One history, many machines
 

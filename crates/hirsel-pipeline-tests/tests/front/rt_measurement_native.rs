@@ -194,7 +194,9 @@ fn free_worker_reports_include_the_allocation_population_at_widths_1_and_8() {
                 .unwrap()
                 .iter()
                 .filter(|site| {
-                    site["file"].as_str().unwrap().ends_with("allocation.hir") && site["line"] == 15
+                    site["file"].as_str().unwrap().ends_with("allocation.hir")
+                        && site["line"] == 15
+                        && site["operation"] == "Call"
                 })
                 .map(|site| site["counts"]["allocations"].as_u64().unwrap_or(0))
                 .sum();

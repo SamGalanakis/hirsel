@@ -23,5 +23,6 @@ hirsel-intern = { path = "../hirsel-intern" }
 
 
 [dev-dependencies]
+hirsel-types = { path = "../hirsel-types", features = ["testing"] }
 hirsel-guard = { path = "../hirsel-guard" }
 hirsel-validate = { path = "../hirsel-validate" }

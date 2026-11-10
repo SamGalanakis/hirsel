@@ -1,0 +1,9 @@
+// rule: PROV-1
+// expect: reject PROV-1 at line 7
+// twin: PROV/PROV-1-branded-list-call-result-literal-ok.hir
+// The first element fixes the element brand, so a level of `b` cannot join a
+// list of levels of `a`.
+fn both(a: Authority, b: Authority) -> u64 {
+  let levels = [authority.floor(a), authority.floor(b)]
+  list.len(levels)
+}

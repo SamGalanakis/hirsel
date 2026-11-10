@@ -4656,10 +4656,15 @@ conformance/PROV/PROV-1-brand-take-parameter-bad.hir
 conformance/PROV/PROV-1-brand-take-parameter-ok.hir
 conformance/PROV/PROV-1-branded-function-value-bad.hir
 conformance/PROV/PROV-1-branded-function-value-ok.hir
+conformance/PROV/PROV-1-branded-list-call-result-literal-ok.hir
+conformance/PROV/PROV-1-branded-list-call-result-mixed-bad.hir
+conformance/PROV/PROV-1-branded-list-element-other-authority-bad.hir
 conformance/PROV/PROV-1-branded-list-from-empty-bad.hir
 conformance/PROV/PROV-1-branded-list-from-empty-ok.hir
 conformance/PROV/PROV-1-branded-list-generic-push-bad.hir
 conformance/PROV/PROV-1-branded-list-generic-push-ok.hir
+conformance/PROV/PROV-1-branded-list-inferred-push-other-bad.hir
+conformance/PROV/PROV-1-branded-list-iterate-run.hir
 conformance/PROV/PROV-1-branded-list-literal-element-bad.hir
 conformance/PROV/PROV-1-branded-list-literal-element-ok.hir
 conformance/PROV/PROV-1-branded-map-from-empty-bad.hir

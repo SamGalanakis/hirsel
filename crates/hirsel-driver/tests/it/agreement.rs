@@ -579,6 +579,30 @@ fn an_unbranded_parameter_borrows_a_branded_data_value_and_a_branded_one_require
 }
 
 #[test]
+fn a_list_element_keeps_its_authority_through_a_loop_and_another_authority_is_refused() {
+    with_compiler_stack(|| {
+        let rest = "fn probe(a: Authority, b: Authority) -> u64 {\n  let levels = [authority.floor(a)]\n  let mut n: u64 = 0\n  for l in levels {\n    n = n + at(a, b, l)\n  }\n  n\n}\nfn main() {}";
+        let (probe, signatures) = lowered(
+            &format!("fn at(a: Authority, b: Authority, l: Level of a) -> u64 {{ 1 }}\n{rest}"),
+            "probe",
+        );
+        assert_eq!(kinds(&probe, &signatures), []);
+        let other = with(
+            &signatures,
+            "fn at(a: Authority, b: Authority, l: Level of b) -> u64 { 1 }\nfn main() {}",
+            "at",
+        );
+        let violations = kinds(&probe, &other);
+        assert!(
+            violations.contains(&ViolationKind::TypeMismatch {
+                entity: "call argument"
+            }),
+            "{violations:?}"
+        );
+    });
+}
+
+#[test]
 fn a_written_field_of_a_computed_binding_is_named_by_the_binding_and_not_by_a_sibling() {
     with_compiler_stack(|| {
         let rest = "type R { n: u64, other: u64 }\nfn id(x: R) -> R { copy x }\nfn make_n(r: R) -> Option[u8 of r.n] { None }\nfn probe(x: R) { let mut r = id(x); r.n = 3; let q = make_n(r); r.other = 4; inspect(r, q) }\nfn main() {}";

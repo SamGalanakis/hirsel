@@ -262,10 +262,43 @@ impl ModesPhase for ModeAdapter {
             .any(|d| d.severity == hirsel_diag::Severity::Error)
         {
             for plan in &mut typed.plans.loops {
-                let hirsel_check_protocol::body::ForPlanKind::Cursor { cursor, .. } =
-                    &mut plan.kind
-                else {
-                    continue;
+                let cursor = match &mut plan.kind {
+                    hirsel_check_protocol::body::ForPlanKind::Cursor { cursor, .. } => cursor,
+                    hirsel_check_protocol::body::ForPlanKind::Direct {
+                        statement,
+                        execution,
+                    } => {
+                        let hirsel_syntax::StmtKind::For { source, .. } =
+                            syntax.tree.statements[statement.0 as usize].kind
+                        else {
+                            return Err(invariant("direct loop plan names no for statement"));
+                        };
+                        use hirsel_check_protocol::body::{ForExecution, LoopLength, LoopRead};
+                        let callees: Vec<_> = match &*execution {
+                            ForExecution::Indexed { length, read } => [
+                                match length {
+                                    LoopLength::Definition { definition, .. } => Some(definition),
+                                    LoopLength::Inline { .. } => None,
+                                },
+                                match read {
+                                    LoopRead::MapIndex { advance, .. } => Some(advance),
+                                    LoopRead::Index { .. } => None,
+                                },
+                            ]
+                            .into_iter()
+                            .flatten()
+                            .collect(),
+                            ForExecution::Advance { operation, .. } => vec![operation],
+                            ForExecution::Range | ForExecution::Recovery => vec![],
+                        };
+                        hirsel_authority::refine_direct_loop(
+                            t,
+                            &mut output.body,
+                            source,
+                            &callees,
+                        )?;
+                        continue;
+                    }
                 };
                 let identity = output
                     .cursor_identities

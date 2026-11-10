@@ -1,0 +1,33 @@
+// rule: PROV-1
+// expect: run
+// authorities: {"other":{"provider":"authority.sim@1","floor":"disk","seed":7,"represent":"log","levels":["cache","disk"],"faults":{}}}
+// stdout: cache
+// stdout: disk
+// Iterating a `List[Level of b]` reads it through `list.len` at its element type,
+// brand included, and yields levels of `b` that a parameter `of b` accepts.
+pub type Failed = Failed()
+
+fn name_at(b: Authority, at: Level of b) -> String {
+  level.name(at)
+}
+
+pub fn main(rt: Io, args: Args) -> Result[(), Failed] {
+  let Ok(stdout) = io.stdout(rt) else {
+    return Error(Failed())
+  }
+  let Ok(b) = io.authority(rt, "other") else {
+    return Error(Failed())
+  }
+  let Some(cache) = authority.level(b, "cache") else {
+    return Error(Failed())
+  }
+  let mut levels: List[Level of b] = []
+  list.push(mut levels, cache)
+  list.push(mut levels, authority.floor(b))
+  for l in levels {
+    let Ok(_) = out.print(stdout, f"{name_at(b, l)}\n") else {
+      return Error(Failed())
+    }
+  }
+  Ok(())
+}

@@ -1,0 +1,14 @@
+// rule: PROV-1
+// expect: reject PROV-1 at line 10
+// twin: PROV/PROV-1-branded-list-call-result-literal-ok.hir
+// An element read from a `List[Level of a]` is a level of `a`, so `b` cannot
+// read at it.
+fn misuse(a: Authority, b: Authority) -> u64 {
+  let levels = [authority.floor(a)]
+  let mut n: u64 = 0
+  for l in levels {
+    let _ = authority.read(b, 0, l, 1)
+    n = n + 1
+  }
+  n
+}

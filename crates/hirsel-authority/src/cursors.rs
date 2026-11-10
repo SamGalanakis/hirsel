@@ -292,3 +292,84 @@ pub fn refine_cursor_plan(
         })
         .collect())
 }
+
+/// H specializes a direct loop's protocol `callees` (sequence or map length,
+/// map advance, iterator next) from the source's written arguments, before J
+/// resolves the brands those arguments state. Transport the source's current
+/// brands into each call's recorded actuals, so a `List[Level of a]` is read
+/// through `list.len[Level of a]` (PROV-1). Only brands move: every other
+/// contract of H's specialization stays as it was checked.
+pub fn refine_direct_loop(
+    t: &TypeInterner,
+    body: &mut CheckedBody,
+    source: ExprId,
+    callees: &[&DefPath],
+) -> Result<(), QueryError> {
+    if callees.is_empty() {
+        return Ok(());
+    }
+    let current = body
+        .expressions
+        .iter()
+        .find(|e| e.expression == source)
+        .ok_or_else(|| cursor_error("missing loop source"))?
+        .ty;
+    let TypeKind::Builtin {
+        arguments: current, ..
+    } = t.row(current).kind.clone()
+    else {
+        return Ok(());
+    };
+    for row in &mut body.instantiations {
+        if row.expression != source
+            || !callees.contains(&&row.callee)
+            || row.arguments.len() != current.len()
+        {
+            continue;
+        }
+        for (argument, now) in row.arguments.iter_mut().zip(current.iter()) {
+            if let (GenericArgument::Type(ty), GenericArgument::Type(now)) = (argument, now) {
+                *ty = with_brands(t, *ty, *now);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// `to` with `from`'s brands at every depth where the two have the same shape.
+fn with_brands(t: &TypeInterner, to: TypeId, from: TypeId) -> TypeId {
+    let (a, b) = (t.row(to).clone(), t.row(from).clone());
+    if std::mem::discriminant(&a.kind) != std::mem::discriminant(&b.kind) {
+        return to;
+    }
+    let mut row = a.clone();
+    row.brand = b.brand.clone();
+    let (ap, bp) = (a.kind.value_parts(), b.kind.value_parts());
+    if ap.len() == bp.len() && !ap.is_empty() {
+        let map: std::collections::HashMap<TypeId, TypeId> = ap
+            .iter()
+            .zip(&bp)
+            .map(|(part, source)| (*part, with_brands(t, *part, *source)))
+            .collect();
+        let swap = |ty: &mut TypeId| *ty = map.get(ty).copied().unwrap_or(*ty);
+        match &mut row.kind {
+            TypeKind::Named { arguments, .. } | TypeKind::Builtin { arguments, .. } => {
+                let mut list: Vec<_> = arguments.iter().cloned().collect();
+                for argument in &mut list {
+                    if let GenericArgument::Type(ty) = argument {
+                        swap(ty);
+                    }
+                }
+                *arguments = list.into();
+            }
+            TypeKind::Tuple(parts) => {
+                let mut list: Vec<_> = parts.iter().copied().collect();
+                list.iter_mut().for_each(swap);
+                *parts = list.into();
+            }
+            TypeKind::Box(part) => swap(part),
+            _ => {}
+        }
+    }
+    if row == a { to } else { t.intern(row) }
+}

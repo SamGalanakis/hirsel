@@ -198,6 +198,9 @@ pub(super) struct Checker<'a> {
     cursor_loops: BTreeMap<hirsel_syntax::StmtId, CursorPlan>,
     /// The callee path of the direct call being entered, which is not a value.
     direct_callee: Option<ExprId>,
+    /// The initializer of an unannotated `let`: its expected row is H's
+    /// inference of the value itself, which states no brand of its own.
+    inferred_initializer: Option<ExprId>,
     clauses: Vec<(ExprId, TypeId)>,
     in_clause: bool,
 }
@@ -446,6 +449,7 @@ impl<'a> Checker<'a> {
             block_exits: vec![],
             cursor_loops: BTreeMap::new(),
             direct_callee: None,
+            inferred_initializer: None,
             clauses: vec![],
             in_clause: false,
         }
@@ -1142,7 +1146,7 @@ impl<'a> Checker<'a> {
                 // belongs to. The expected element type supplies them, and
                 // every element is then kept against it, so `[p]` transports
                 // p's evidence and `[]`, holding no element, satisfies any.
-                if matches!(kind, ExprKind::Sequence(_)) {
+                if matches!(kind, ExprKind::Sequence(_)) && self.inferred_initializer != Some(e) {
                     let actual = self.ty(e).unwrap();
                     let branded = self.part_brands(actual, *expected);
                     if branded != actual {
@@ -1537,10 +1541,16 @@ impl<'a> Checker<'a> {
                     self.tree.expressions[e.0 as usize].kind,
                     ExprKind::Sequence(_)
                 );
-                let parts = self.ty(e).map(|t| {
+                let mut parts = self.ty(e).map(|t| {
                     let parts = self.t.get(t).unwrap().kind.value_parts();
                     (t, parts)
                 });
+                // PROV-1: with no written expected type, a sequence's element
+                // type is inferred from its first element, so it states that
+                // element's resolved brands; every element is kept against them.
+                let inferred = sequence
+                    && (self.inferred_initializer == Some(e)
+                        || !matches!(context, Some((_, Some(_), _))));
                 // A tuple typed by its operands follows their refined rows.
                 let mut refined = parts.clone().filter(|_| !sequence);
                 for (ordinal, child) in es.into_iter().enumerate() {
@@ -1564,6 +1574,27 @@ impl<'a> Checker<'a> {
                         });
                     self.expr(child, contextual);
                     used = used.join(self.used(child));
+                    if inferred && ordinal == 0 {
+                        if let (Some((owner, _)), Some(first)) =
+                            (parts.as_ref(), self.construction_part_type(child))
+                        {
+                            let mut row = self.t.get(*owner).unwrap().clone();
+                            if let TypeKind::Builtin { arguments, .. } = &mut row.kind {
+                                let mut list: Vec<_> = arguments.iter().cloned().collect();
+                                if let Some(GenericArgument::Type(element)) = list.first_mut() {
+                                    *element = first;
+                                }
+                                *arguments = list.into();
+                            }
+                            let template = self.intern(row);
+                            let branded = self.part_brands(*owner, template);
+                            if branded != *owner {
+                                self.set_ty(e, branded);
+                                let value_parts = self.t.get(branded).unwrap().kind.value_parts();
+                                parts = Some((branded, value_parts));
+                            }
+                        }
+                    }
                     if let (Some((_, parts)), Some(now)) = (&mut refined, self.ty(child)) {
                         let constructed = self.construction_part_type(child).unwrap_or(now);
                         if parts.get(ordinal).copied() == written {
@@ -2238,7 +2269,12 @@ impl<'a> Checker<'a> {
                         const { RuleId::of("CAP-3") },
                     ))
                 };
+                let outer = std::mem::replace(
+                    &mut self.inferred_initializer,
+                    ty.is_none().then_some(value),
+                );
                 self.expr(value, context);
+                self.inferred_initializer = outer;
                 // LANG-13: the else block runs before any binding exists.
                 if let Some(otherwise) = otherwise {
                     self.expr(otherwise, None);

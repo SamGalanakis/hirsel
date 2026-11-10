@@ -6,7 +6,7 @@ hirsel_guard::install!();
 
 mod closure_rows;
 mod cursors;
-pub use cursors::refine_cursor_plan;
+pub use cursors::{refine_cursor_plan, refine_direct_loop};
 mod facts;
 mod identities;
 mod source_rows;

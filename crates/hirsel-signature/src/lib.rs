@@ -91,6 +91,8 @@ fn normalize_inner(
         aliases: BTreeSet::new(),
         arena_places: BTreeSet::new(),
         current_parameter: None,
+        result_parts: false,
+        selected_parts: Vec::new(),
         public: item.visibility == ast::Visibility::Public,
         span: item.origin.span,
         proof_failure: failure,
@@ -792,6 +794,11 @@ struct Normalizer<'a, 'b> {
     /// The parameter whose type is being lowered, so `take x: T in x` names
     /// its own argument (MODE-1).
     current_parameter: Option<usize>,
+    /// Lowering a callable's result type, outside any nested callable: a
+    /// type argument or tuple element may select its own relation (MODE-1).
+    result_parts: bool,
+    /// The result parts lowered so far that select their own relation.
+    selected_parts: Vec<(Span, Relation)>,
     public: bool,
     span: Span,
     proof_failure: &'b std::cell::RefCell<Option<QueryError>>,
@@ -1386,6 +1393,7 @@ impl Normalizer<'_, '_> {
         }
         let attrs = self.attributes(&s.attributes, &dummy)?;
         let current = self.current_parameter;
+        let result_parts = std::mem::replace(&mut self.result_parts, false);
         let mut parameters = s
             .parameters
             .iter()
@@ -1410,10 +1418,33 @@ impl Normalizer<'_, '_> {
                 })
             })
             .collect::<Result<Vec<_>, QueryError>>()?;
+        self.result_parts = true;
+        let selected = std::mem::take(&mut self.selected_parts);
         let result = match s.result {
-            Some(t) => self.ty(t, Position::Result)?,
-            None => self.push(TypeKind::Tuple(vec![].into()), Position::Result)?,
+            Some(t) => self.ty(t, Position::Result),
+            None => self.push(TypeKind::Tuple(vec![].into()), Position::Result),
         };
+        self.result_parts = result_parts;
+        let parts = std::mem::replace(&mut self.selected_parts, selected);
+        let result = result?;
+        // MODE-1: selected result parts are disjoint subtrees of a global
+        // root; a whole-result relation already selects the root.
+        if let Some((span, _)) = parts.first()
+            && !self.types.get(result).unwrap().modes.relation.is_global()
+        {
+            return Err(diagnostic(
+                const { RuleId::of("MODE-1") },
+                *span,
+                "a related result cannot also relate its parts: relate the whole result or each part",
+            ));
+        }
+        if let Some((span, _)) = parts.iter().find(|(_, r)| r.has_environment()) {
+            return Err(diagnostic(
+                const { RuleId::of("MODE-1") },
+                *span,
+                "a selected result part names its sources, `in x`, not `env`",
+            ));
+        }
         // MODE-1: a named function has no environment, so its local result
         // names its sources (spec #70).
         if !closure
@@ -1817,7 +1848,10 @@ impl Normalizer<'_, '_> {
                 self.push(TypeKind::Tuple(ts), pos)?
             }
             ast::TypeExprKind::Box(t) => {
-                let t = self.part(*t)?;
+                let parts = std::mem::replace(&mut self.result_parts, false);
+                let t = self.part(*t);
+                self.result_parts = parts;
+                let t = t?;
                 self.push(TypeKind::Box(t), pos)?
             }
             ast::TypeExprKind::Function(s) => {
@@ -1891,10 +1925,22 @@ impl Normalizer<'_, '_> {
                     }
                     self.push(TypeKind::Primitive(p), pos)?
                 } else {
+                    // MODE-1: only Result and Option payloads carry a selected
+                    // result relation; any other nominal's arguments are parts.
+                    let carrier = self.result_parts
+                        && self.input.resolution.types.iter().any(|(t, r)| {
+                            *t == id
+                                && matches!(r, ResolvedName::Definition(d)
+                                    if Some(d) == self.input.metadata.result_type.as_ref()
+                                        || *d == ast::DefPath::core("Option"))
+                        });
+                    let parts = std::mem::replace(&mut self.result_parts, carrier);
                     let args = arguments
                         .iter()
                         .map(|a| self.argument(a))
-                        .collect::<Result<Vec<_>, _>>()?;
+                        .collect::<Result<Vec<_>, _>>();
+                    self.result_parts = parts;
+                    let args = args?;
                     // Builtin identity is the core@1 declaration's, never the
                     // spelling's: a user `Map` stays nominal and `core@1/Map` is
                     // builtin. Only an unresolved name falls back to its spelling.
@@ -2042,18 +2088,33 @@ impl Normalizer<'_, '_> {
     /// A field, payload, element or type argument is as local as its owner and
     /// its current content (OWN-8; spec #71).
     /// Locality written on one, or reaching it through an alias, is LANG-7.
+    /// In a callable's result, a tuple element or a `Result`/`Option`
+    /// payload argument may select its own relation (MODE-1): a disjoint
+    /// subtree, so no part nested inside a selected one selects again.
     fn part(&mut self, id: ast::TypeExprId) -> Result<TypeId, QueryError> {
+        let before = self.selected_parts.len();
         let ty = self.ty(id, Position::Field)?;
-        if !self
-            .lifetime(&self.types.get(ty).unwrap().modes.relation)
-            .is_global()
-        {
+        let relation = self.lifetime(&self.types.get(ty).unwrap().modes.relation);
+        if relation.is_global() {
+            return Ok(ty);
+        }
+        let span = self.input.syntax.tree.types[id.0 as usize].origin.span;
+        if !self.result_parts {
             return Err(diagnostic(
                 const { RuleId::of("LANG-7") },
-                self.input.syntax.tree.types[id.0 as usize].origin.span,
+                span,
                 PART_LOCALITY,
             ));
         }
+        if self.selected_parts.len() > before {
+            return Err(diagnostic(
+                const { RuleId::of("MODE-1") },
+                span,
+                "a selected result part cannot contain another: relate disjoint parts",
+            ));
+        }
+        let relation = self.types.get(ty).unwrap().modes.relation.clone();
+        self.selected_parts.push((span, relation));
         Ok(ty)
     }
     fn argument(&mut self, a: &ast::TypeArgument) -> Result<GenericArgument, QueryError> {

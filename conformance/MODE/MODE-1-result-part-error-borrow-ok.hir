@@ -1,0 +1,10 @@
+// rule: MODE-1
+// expect: accept
+// "Each selected subtree obeys MODE-1 with its declared sources." The success
+// payload selects `xs`, so it may borrow it; the error payload is global.
+fn good(xs: Bytes, fail: bool) -> Result[Bytes in xs, Bytes] {
+  if fail {
+    return Error(b"failed")
+  }
+  Ok(copy xs)
+}

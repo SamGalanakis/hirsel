@@ -1,0 +1,28 @@
+// rule: MODE-1
+// expect: reject MODE-1 at line 23
+// twin: MODE/MODE-1-result-part-retained-write-ok.hir
+// "projection preserves the selected subtree's dependencies": the success
+// payload `?` yields still borrows `h`, so `h` cannot be written while it is
+// live (OWN-3).
+type Failed = Failed()
+
+type Holder {
+  data: Bytes,
+}
+
+fn get(h: Holder) -> Result[Option[Bytes] in h, Failed] {
+  Ok(Some(copy h.data))
+}
+
+fn put(mut h: Holder, take b: Bytes) -> () {
+  h.data = b
+}
+
+fn user(mut h: Holder) -> Result[u64, Failed] {
+  let v = get(h)?
+  put(mut h, b"y")
+  match v {
+    Some(b) => Ok(bytes.len(b)),
+    None() => Ok(0),
+  }
+}

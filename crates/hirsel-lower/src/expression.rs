@@ -59,7 +59,7 @@ impl Builder<'_, '_> {
                 message: "missing checked source place".into(),
             })
     }
-    fn physical_projection(
+    pub(super) fn physical_projection(
         &self,
         id: ExprId,
         fallback: hirsel_types::TypeId,
@@ -1276,35 +1276,57 @@ impl Builder<'_, '_> {
         // independently of argument evaluation order and of the result's
         // instantiated local access mode.
         let lifetime = self.lifetime(&self.types.get(ty).unwrap().modes.relation);
-        let retained: Option<std::sync::Arc<[hirsel_types::ParameterRef]>> = if lifetime.is_global()
-        {
-            Some(Default::default())
-        } else if let hirsel_types::TypeKind::Function(f) =
-            &self.types.get(self.decision(callee_id)?.ty).unwrap().kind
-        {
-            // The callee's own Arena parameters place the result; they
-            // are not lifetime sources the result retains (PROV-4).
-            let relation = &self.types.get(f.result).unwrap().modes.relation;
-            let lifetime = match &self.input.arena {
+        let callee_function = match &self.types.get(self.decision(callee_id)?.ty).unwrap().kind {
+            hirsel_types::TypeKind::Function(f) => Some(f.clone()),
+            _ => None,
+        };
+        // The callee's own Arena parameters place the result; they are not
+        // lifetime sources the result retains (PROV-4).
+        let callee_lifetime = |f: &hirsel_types::FunctionType,
+                               relation: &hirsel_types::Relation| {
+            match &self.input.arena {
                 Some(arena) => relation.retain(|r| {
                     !matches!(r, hirsel_types::Reach::Place(o)
                             if hirsel_types::arena_parameter(self.types, f, o, 0, arena))
                 }),
                 None => relation.clone(),
-            };
-            if lifetime.is_global() {
-                Some(Default::default())
-            } else {
-                lifetime.named_parameters().map(|ps| {
-                    ps.into_iter()
-                        .filter(|p| !global_arguments.contains(p))
-                        .collect::<Vec<_>>()
-                        .into()
-                })
             }
-        } else {
-            None
         };
+        // MODE-1: a global result whose parts select their own relations
+        // keeps the arguments those parts select.
+        let part_relation = callee_function
+            .as_ref()
+            .filter(|_| constructor.is_none())
+            .map(|f| {
+                hirsel_types::unique_rows::part_relations(self.types, f.result)
+                    .iter()
+                    .fold(hirsel_types::Relation::global(), |all, r| {
+                        all.union(&callee_lifetime(f, r))
+                    })
+            })
+            .filter(|r| !r.is_global());
+        let retained: Option<std::sync::Arc<[hirsel_types::ParameterRef]>> =
+            if lifetime.is_global() && part_relation.is_none() {
+                Some(Default::default())
+            } else if let Some(f) = &callee_function {
+                let root = callee_lifetime(f, &self.types.get(f.result).unwrap().modes.relation);
+                let lifetime = match &part_relation {
+                    Some(relation) if root.is_global() => relation.clone(),
+                    _ => root,
+                };
+                if lifetime.is_global() {
+                    Some(Default::default())
+                } else {
+                    lifetime.named_parameters().map(|ps| {
+                        ps.into_iter()
+                            .filter(|p| !global_arguments.contains(p))
+                            .collect::<Vec<_>>()
+                            .into()
+                    })
+                }
+            } else {
+                None
+            };
         // A result related only to a field path of a parameter reads only
         // that path of its argument (#77).
         let related = match &self.types.get(self.decision(callee_id)?.ty).unwrap().kind {

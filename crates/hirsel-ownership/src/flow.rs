@@ -320,6 +320,11 @@ struct ValueData {
     unique_copy_site: Option<ExprId>,
     /// An owned call receipt whose outer root has never been shared.
     fresh_receipt: bool,
+    /// MODE-1: the relations of a value's parts, refined from the whole
+    /// relation recorded beside them. Every part outside them is global.
+    /// Valid only while the whole relation is unchanged: any later widening
+    /// applies to every part.
+    part_relations: Option<Arc<PartRelations>>,
     /// The parameter of this body and the field paths within it that this
     /// value was read from, as finite prefix states per joined alternative. A
     /// result related to `p.a` must stay within `p.a` (#77).
@@ -468,6 +473,19 @@ impl Value {
         if path.is_empty() {
             return;
         }
+        // Only a call's selected parts bound what is read from them: a
+        // constructed aggregate's parts share its locality (MODE-1).
+        if self.part_relations.as_ref().is_some_and(|r| r.selected)
+            && self.part_relations().is_some()
+        {
+            let (relation, parts) = self.select_part_relations(path);
+            self.modes.relation = relation.clone();
+            self.part_relations = Some(Arc::new(PartRelations {
+                whole: relation,
+                parts,
+                selected: true,
+            }));
+        }
         if self.unique_parts.iter().any(|p| path.starts_with(p)) {
             self.modes.uniqueness = Uniqueness::Unique;
         }
@@ -540,13 +558,94 @@ impl Value {
             copy_site: None,
             unique_copy_site: None,
             fresh_receipt: false,
+            part_relations: None,
             part_of: None,
             borrow_only: false,
             parked: NO_PARKED_SHARES.clone(),
         }))
     }
 }
+/// MODE-1: a value's part relations and the whole relation they refine.
+/// `selected` marks parts a callee's result selects: reading such a part
+/// carries only its own relation. A constructed aggregate records its parts
+/// for checking a result part by part, but what is read from it keeps the
+/// aggregate's locality.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PartRelations {
+    whole: Relation,
+    parts: Vec<(Vec<Projection>, Relation)>,
+    selected: bool,
+}
 impl ValueData {
+    /// The part relations, while they still refine the whole.
+    fn part_relations(&self) -> Option<&[(Vec<Projection>, Relation)]> {
+        self.part_relations
+            .as_ref()
+            .filter(|refined| refined.whole == self.modes.relation)
+            .map(|refined| refined.parts.as_slice())
+    }
+    /// The parts a call result selects (MODE-1), while they refine the whole.
+    fn selected_parts(&self) -> Option<&[(Vec<Projection>, Relation)]> {
+        self.part_relations
+            .as_ref()
+            .filter(|refined| refined.selected)
+            .and_then(|_| self.part_relations())
+    }
+    /// Relates the selected parts of a value (MODE-1): its whole relation
+    /// is their union, and every other part is global.
+    fn refine_parts(&mut self, parts: Vec<(Vec<Projection>, Relation)>) {
+        let whole = parts
+            .iter()
+            .fold(Relation::global(), |whole, (_, part)| whole.union(part));
+        self.modes.relation = whole.clone();
+        self.part_relations = Some(Arc::new(PartRelations {
+            whole,
+            parts,
+            selected: true,
+        }));
+    }
+    /// The relation of the part at `path` and the selected parts within it.
+    fn select_part_relations(
+        &self,
+        path: &[Projection],
+    ) -> (Relation, Vec<(Vec<Projection>, Relation)>) {
+        let Some(parts) = self.part_relations() else {
+            return (self.modes.relation.clone(), vec![]);
+        };
+        let mut relation = Relation::global();
+        let mut selected = Vec::new();
+        for (part, related) in parts {
+            if let Some(within) = part.strip_prefix(path) {
+                selected.push((within.to_vec(), related.clone()));
+            } else if path.starts_with(part) {
+                selected.push((vec![], related.clone()));
+            } else {
+                continue;
+            }
+            relation = relation.union(related);
+        }
+        (relation, selected)
+    }
+    /// The relation of every part outside `paths`: the whole's unless refined.
+    fn relation_outside(&self, paths: &[Vec<Projection>]) -> Relation {
+        let Some(parts) = self.part_relations() else {
+            return self.modes.relation.clone();
+        };
+        parts
+            .iter()
+            .filter(|(part, _)| !paths.iter().any(|path| part.starts_with(path)))
+            .fold(Relation::global(), |rest, (_, relation)| {
+                rest.union(relation)
+            })
+    }
+    /// The relation of the part at `path`: the whole's unless a call
+    /// selected its parts.
+    fn relation_at(&self, path: &[Projection]) -> Relation {
+        if self.selected_parts().is_none() {
+            return self.modes.relation.clone();
+        }
+        self.select_part_relations(path).0
+    }
     /// A related call result holds counted shares of this storage (MODE-2).
     fn borrow_share(&mut self) {
         self.borrow_only |= self.modes.uniqueness == Uniqueness::Unique;
@@ -805,6 +904,21 @@ impl ValueData {
                 Some(Arc::new(parts))
             }
         };
+        let selected = [&*self, other]
+            .iter()
+            .all(|v| v.part_relations.as_ref().is_some_and(|r| r.selected));
+        let refined = match (self.part_relations(), other.part_relations()) {
+            (Some(mine), Some(theirs)) => {
+                let mut parts = mine.to_vec();
+                for part in theirs {
+                    if !parts.contains(part) {
+                        parts.push(part.clone());
+                    }
+                }
+                Some(parts)
+            }
+            _ => None,
+        };
         self.usage = join_usage(self.usage, other.usage);
         if !other.modes.relation.is_global() && self.modes.relation.is_global() {
             self.site = other.site;
@@ -825,6 +939,18 @@ impl ValueData {
             Arc::make_mut(&mut self.parked).extend(other.parked.iter().copied());
         }
         self.modes = self.modes.join(&other.modes);
+        self.part_relations = refined.and_then(|parts| {
+            let whole = parts
+                .iter()
+                .fold(Relation::global(), |whole, (_, part)| whole.union(part));
+            (whole == self.modes.relation).then(|| {
+                Arc::new(PartRelations {
+                    whole,
+                    parts,
+                    selected,
+                })
+            })
+        });
         // Values aliasing different storage depend on both, and the join
         // aliases the first.
         let (mine, theirs) = (self.alias(), other.alias());
@@ -1419,6 +1545,9 @@ struct Checker<'a, 's> {
     binding_parts: BTreeMap<usize, SharedParts>,
     pattern_modes: BTreeMap<hirsel_syntax::PatternId, Modes>,
     physical_modes: BTreeMap<ExprId, Modes>,
+    /// MODE-1: the error payload relation of a `?` whose operand selects
+    /// result parts, joined over every path reaching it.
+    propagated_errors: BTreeMap<ExprId, (TypeId, Relation)>,
     capture_physical_modes: BTreeMap<usize, Modes>,
     /// The authority pass's frame results, by closure.
     frame_results: &'a BTreeMap<NameSite, TypeId>,
@@ -1633,6 +1762,16 @@ fn shared_part_row(
     let id = t.intern(row);
     properties.insert(id, property);
     id
+}
+
+/// A declared result step as the flow names value parts.
+fn result_projection(step: hirsel_types::unique_rows::ResultStep) -> Projection {
+    match step {
+        hirsel_types::unique_rows::ResultStep::Element(index) => Projection::Field(index),
+        hirsel_types::unique_rows::ResultStep::Payload { variant, field } => {
+            Projection::VariantField { variant, field }
+        }
+    }
 }
 
 fn fold_part_locality(
@@ -1924,6 +2063,7 @@ pub(super) fn check(
         binding_parts: BTreeMap::new(),
         pattern_modes: BTreeMap::new(),
         physical_modes: BTreeMap::new(),
+        propagated_errors: BTreeMap::new(),
         capture_physical_modes,
         frame_results,
         environment_results: BTreeSet::new(),
@@ -2120,6 +2260,18 @@ pub(super) fn check(
         ty.modes.relation = relation;
         let physical = checker.t.intern(ty);
         checker.properties.inherit(physical, plan.physical);
+        checker
+            .facts
+            .physical_projections
+            .push((expression, physical));
+    }
+    // Lowering reads a `?` error payload through its owner's bounds; a
+    // selected result's unselected error part has its own (MODE-1).
+    for (expression, (payload, relation)) in checker.propagated_errors {
+        let mut ty = checker.t.get(payload).unwrap().clone();
+        ty.modes.relation = relation;
+        let physical = checker.t.intern(ty);
+        checker.properties.inherit(physical, payload);
         checker
             .facts
             .physical_projections
@@ -2705,12 +2857,13 @@ impl Checker<'_, '_> {
         state: &State,
         projection: &super::properties::ProjectionLifetime,
     ) -> Relation {
+        // MODE-1: a result's selected part relations bound its projections.
         let root = match projection.root {
             super::properties::ProjectionRoot::Value(root) => {
-                self.value(state, root).modes.relation.clone()
+                self.value(state, root).relation_at(&projection.path)
             }
             super::properties::ProjectionRoot::Binding(root) => {
-                state.slots[root].value.modes.relation.clone()
+                state.slots[root].value.relation_at(&projection.path)
             }
             super::properties::ProjectionRoot::Constant(root) => {
                 self.t.get(root).unwrap().modes.relation.clone()
@@ -4591,6 +4744,293 @@ impl Checker<'_, '_> {
             && value.reached().iter().any(|root| *root != binding)
             && self.property(result).is_some_and(|p| p.data)
     }
+    /// MODE-1: the dependencies a call result takes from the arguments of
+    /// the parameters its (selected part's) relation names: their bounds,
+    /// read loans on their places and the crossing borrows they lend.
+    #[allow(clippy::too_many_arguments)]
+    fn relate_call_result(
+        &mut self,
+        state: &State,
+        value: &mut Value,
+        parameters: &[ParameterRef],
+        callee: &ExprId,
+        expression: &ExprId,
+        arguments: &[hirsel_syntax::Argument],
+        requirements: &[Option<super::cfg::Requirement>],
+    ) {
+        value.modes.relation = Relation::global();
+        if parameters
+            .iter()
+            .any(|parameter| !matches!(parameter, ParameterRef::Bound { depth: 0, .. }))
+        {
+            value.bound_within(&self.value(state, *callee), true);
+        }
+        for parameter in parameters {
+            if let ParameterRef::Body { scope, parameter } = parameter {
+                if let Some(index) = self.body.bindings.iter().position(|b| {
+                    self.body.lexical.site(b.owner) == *scope
+                        && b.binding == ResolvedName::Parameter(*parameter)
+                }) {
+                    let part = &state.slots[index].value;
+                    if !self.arenas.global(&part.modes.relation) {
+                        value.modes.relation =
+                            self.join_lifetime(&value.modes.relation, &part.modes.relation);
+                    }
+                    if self.arenas.placed(
+                        &self
+                            .t
+                            .get(self.body.bindings[index].ty)
+                            .unwrap()
+                            .modes
+                            .relation,
+                    ) {
+                        value.modes.relation = Relation::environment();
+                    }
+                    value.read(index, Site::Expression(*expression));
+                    value.read_through(part);
+                    value.inherit_crossing_borrows(part);
+                    if self.ty(*expression).is_some_and(|ty| {
+                        matches!(self.t.get(ty).unwrap().kind, TypeKind::Function(_))
+                    }) {
+                        value.inherit_callable_captures(part);
+                    }
+                } else {
+                    value.modes.relation = Relation::environment();
+                }
+                continue;
+            }
+            let ParameterRef::Bound {
+                depth: 0,
+                parameter,
+            } = parameter
+            else {
+                value.modes.relation = Relation::environment();
+                continue;
+            };
+            let position = requirements.iter().position(|r| {
+                r.as_ref()
+                    .is_some_and(|r| r.parameter == parameter.0 as usize)
+            });
+            let requirement_passing = position
+                .and_then(|i| requirements[i].as_ref())
+                .map(|r| r.passing);
+            if let Some(arg) = position.and_then(|i| arguments.get(i)) {
+                let part = self.value(state, arg.value);
+                let mut retained = part.clone();
+                if let Some(source) = place(self.body, arg.value, self.source_rows) {
+                    if let Some(within) = self.field_loan(state, arg.value, source) {
+                        retained.project_content(
+                            &within
+                                .into_iter()
+                                .map(Projection::Field)
+                                .collect::<Vec<_>>(),
+                        );
+                    }
+                }
+                value.inherit_crossing_borrows(&retained);
+                if self
+                    .ty(*expression)
+                    .is_some_and(|ty| matches!(self.t.get(ty).unwrap().kind, TypeKind::Function(_)))
+                {
+                    value.inherit_callable_captures(&retained);
+                }
+                if !self.arenas.global(&part.modes.relation) {
+                    value.modes.relation =
+                        self.join_lifetime(&value.modes.relation, &part.modes.relation);
+                }
+                let placed = self
+                    .ty(arg.value)
+                    .is_some_and(|ty| self.arenas.placed(&self.t.get(ty).unwrap().modes.relation));
+                let source = place(self.body, arg.value, self.source_rows);
+                // An arena-only argument, computed, named or
+                // copied, contributes its arena bound and a read
+                // loan on its place, which ends at return (MODE-1,
+                // P2). A taken parameter's storage is not one: a
+                // result holding it must name it (MODE-1). A
+                // closure call's result may share what its
+                // environment captures (#80): it is arena-only
+                // when the closure's captures are known and each
+                // is, and it reads them. A written use mode on the
+                // call shares what the call does.
+                let mut call = arg.value;
+                while let ExprKind::Unary {
+                    op:
+                        hirsel_syntax::UnaryOp::Copy
+                        | hirsel_syntax::UnaryOp::Take
+                        | hirsel_syntax::UnaryOp::Mut
+                        | hirsel_syntax::UnaryOp::Unique,
+                    value,
+                } = &self.tree.expressions[call.0 as usize].kind
+                {
+                    call = *value;
+                }
+                let closure_call = self
+                    .source_rows
+                    .call(call)
+                    .is_some_and(|i| matches!(self.body.calls[i].target, CallTarget::Value(_)));
+                let shared = if closure_call {
+                    self.shared_captures(state, call)
+                } else {
+                    Some((vec![], false))
+                };
+                let arena_only = placed
+                    && shared.as_ref().is_some_and(|(_, taken)| !taken)
+                    && self.arenas.global(&part.modes.relation)
+                    && !source
+                        .as_ref()
+                        .is_some_and(|p| self.taken_storage(state, p.binding))
+                    && !self.tail_taken(state, arg.value)
+                    && !part
+                        .roots()
+                        .into_iter()
+                        .any(|root| self.taken_storage(state, root));
+                if placed && !arena_only {
+                    value.modes.relation = Relation::environment();
+                }
+                // A written copy or a moved value is a new value,
+                // as a computed argument is: neither is the place
+                // it reads. One that is local bounds the result to
+                // a temporary; a global heap value is its own
+                // share.
+                // So is a closure call over known captures none of
+                // which is taken storage: it shares them as their
+                // copy would (#80). One over a taken capture is
+                // bounded by its temporary, as lowering keeps it.
+                let computed = matches!(
+                    self.tree.expressions[arg.value.0 as usize].kind,
+                    ExprKind::Unary {
+                        op: hirsel_syntax::UnaryOp::Copy | hirsel_syntax::UnaryOp::Take,
+                        ..
+                    }
+                ) || closure_call
+                    && shared.as_ref().is_some_and(|(_, taken)| !taken);
+                if (computed || source.is_none())
+                    && (!self.arenas.global(&part.modes.relation)
+                        || (placed && !computed && !arena_only))
+                {
+                    let scope = self.graph.lifetimes.expressions[&arg.value];
+                    value.bound_by(scope, Site::Expression(arg.value));
+                }
+                let mut part = part;
+                if let Some(p) = source {
+                    // A result reads the argument's field place,
+                    // extended by the field path of this parameter
+                    // its relation names (#77).
+                    let copied = matches!(
+                        self.tree.expressions[arg.value.0 as usize].kind,
+                        ExprKind::Unary {
+                            op: hirsel_syntax::UnaryOp::Copy,
+                            ..
+                        }
+                    );
+                    let within = (!computed || copied)
+                        .then(|| self.field_loan(state, arg.value, p))
+                        .flatten();
+                    if within.is_some() && part.aliased() == Some(p.binding) {
+                        part.set_alias(None);
+                    }
+                    // MODE-1: relations compose through a local view.
+                    let composed = !computed
+                        && within.is_none()
+                        && requirement_passing == Some(PassingMode::Borrow)
+                        && self.related_view(state, p.binding, *expression);
+                    if composed {
+                        // It reads what the binding reaches, not
+                        // the binding itself.
+                        if part.aliased() == Some(p.binding) {
+                            part.set_alias(None);
+                        }
+                        if self.emit && !self.facts.composed_arguments.contains(&arg.value) {
+                            self.facts.composed_arguments.push(arg.value);
+                        }
+                    } else {
+                        value.read_within(
+                            p.binding,
+                            within.as_deref().unwrap_or(&[]),
+                            Site::Expression(arg.value),
+                        );
+                    }
+                    if !computed && !arena_only && !composed {
+                        self.retain_binding_scope(value, p.binding);
+                    }
+                }
+                for capture in shared
+                    .into_iter()
+                    .flat_map(|(captures, _)| captures)
+                    .filter(|_| arena_only)
+                {
+                    value.read(capture, Site::Expression(arg.value));
+                }
+                value.bound_within(&part, true);
+                value.read_through(&part);
+            }
+        }
+    }
+    /// The parts of a call result that depend on named parameters (MODE-1):
+    /// the root for a whole-result relation, or each selected part of a
+    /// global result. None when the result depends on none.
+    fn selected_result(
+        &self,
+        result: &Modes,
+        expression: ExprId,
+    ) -> Option<Vec<(Vec<Projection>, Vec<ParameterRef>)>> {
+        if let Some(parameters) = result.relation.named_parameters() {
+            return Some(vec![(vec![], parameters)]);
+        }
+        if !result.relation.is_global() {
+            return None;
+        }
+        let call = &self.body.calls[self.source_rows.call(expression)?];
+        if matches!(call.target, CallTarget::Constructor(_)) {
+            return None;
+        }
+        let selected = hirsel_types::unique_rows::result_relations(
+            self.t,
+            call.result,
+            &self.own.metadata.roles,
+            &mut |d| self.signatures.cached(d),
+        );
+        // The callee's own Arena parameters place a part; they bound no
+        // lifetime, as for a whole-result relation (PROV-4).
+        let arena =
+            |parameter: &ParameterRef| {
+                let ParameterRef::Bound {
+                    depth: 0,
+                    parameter,
+                } = parameter
+                else {
+                    return false;
+                };
+                call.arguments.iter().any(|argument| {
+                    argument.parameter.as_ref().is_some_and(|(ordinal, p)| {
+                        *ordinal == parameter.0
+                            && self.arenas.definition.as_ref().is_some_and(|arena| {
+                                hirsel_types::is_arena_type(self.t, p.ty, arena)
+                            })
+                    })
+                })
+            };
+        // A whole-result relation is the declared modes' own; only parts
+        // below a global root select here.
+        let selected: Vec<_> = selected
+            .into_iter()
+            .filter(|(path, _)| !path.is_empty())
+            .filter_map(|(path, relation)| {
+                let parameters: Vec<_> = relation
+                    .named_parameters()?
+                    .into_iter()
+                    .filter(|parameter| !arena(parameter))
+                    .collect();
+                (!parameters.is_empty()).then(|| {
+                    (
+                        path.into_iter().map(result_projection).collect(),
+                        parameters,
+                    )
+                })
+            })
+            .collect();
+        (!selected.is_empty()).then_some(selected)
+    }
     fn retain_binding_scope(&mut self, value: &mut Value, binding: usize) {
         if let Some(&scope) = self
             .graph
@@ -5598,6 +6038,7 @@ impl Checker<'_, '_> {
                             value.crossing_parts = CrossingParts::default();
                             value.shared_parts = SharedParts::default();
                             value.crossing_borrows = NO_CROSSING_BORROWS.clone();
+                            value.part_relations = None;
                             for (index, child) in children.iter().enumerate() {
                                 let projection = if sequence {
                                     Projection::Elements
@@ -5669,6 +6110,7 @@ impl Checker<'_, '_> {
 
                                 value.crossing_parts = CrossingParts::default();
                                 value.shared_parts = SharedParts::default();
+                                value.part_relations = None;
                                 self.construction_part(
                                     &mut value,
                                     &Projection::Field(0),
@@ -7243,6 +7685,7 @@ impl Checker<'_, '_> {
                     {
                         let mut retained = Vec::new();
                         value.crossing_borrows = NO_CROSSING_BORROWS.clone();
+                        value.part_relations = None;
                         for argument in &call.arguments {
                             if let Some((ordinal, _)) = &argument.parameter {
                                 let projection = match &call.target {
@@ -7299,213 +7742,44 @@ impl Checker<'_, '_> {
                         value.install_content(retained);
                     }
                     value.modes.multiplicity = result.multiplicity;
-                } else if let Some(parameters) = result.relation.named_parameters() {
-                    value.modes.relation = Relation::global();
-                    if parameters
-                        .iter()
-                        .any(|parameter| !matches!(parameter, ParameterRef::Bound { depth: 0, .. }))
+                } else if let Some(selected) = self.selected_result(result, *expression) {
+                    if let [(path, parameters)] = selected.as_slice()
+                        && path.is_empty()
                     {
-                        value.bound_within(&self.value(state, *callee), true);
-                    }
-                    for parameter in &parameters {
-                        if let ParameterRef::Body { scope, parameter } = parameter {
-                            if let Some(index) = self.body.bindings.iter().position(|b| {
-                                self.body.lexical.site(b.owner) == *scope
-                                    && b.binding == ResolvedName::Parameter(*parameter)
-                            }) {
-                                let part = &state.slots[index].value;
-                                if !self.arenas.global(&part.modes.relation) {
-                                    value.modes.relation = self
-                                        .join_lifetime(&value.modes.relation, &part.modes.relation);
-                                }
-                                if self.arenas.placed(
-                                    &self
-                                        .t
-                                        .get(self.body.bindings[index].ty)
-                                        .unwrap()
-                                        .modes
-                                        .relation,
-                                ) {
-                                    value.modes.relation = Relation::environment();
-                                }
-                                value.read(index, Site::Expression(*expression));
-                                value.read_through(part);
-                                value.inherit_crossing_borrows(part);
-                                if self.ty(*expression).is_some_and(|ty| {
-                                    matches!(self.t.get(ty).unwrap().kind, TypeKind::Function(_))
-                                }) {
-                                    value.inherit_callable_captures(part);
-                                }
-                            } else {
-                                value.modes.relation = Relation::environment();
-                            }
-                            continue;
+                        self.relate_call_result(
+                            state,
+                            &mut value,
+                            parameters,
+                            callee,
+                            expression,
+                            arguments,
+                            requirements,
+                        );
+                    } else {
+                        // MODE-1: each selected part depends on the arguments
+                        // its own relation names; every other part is global.
+                        let base = value.clone();
+                        let mut contents = Vec::new();
+                        let mut relations = Vec::new();
+                        merge_part(&mut contents, vec![], &base.content.summary());
+                        for (path, parameters) in &selected {
+                            let mut part = base.clone();
+                            self.relate_call_result(
+                                state,
+                                &mut part,
+                                parameters,
+                                callee,
+                                expression,
+                                arguments,
+                                requirements,
+                            );
+                            merge_part(&mut contents, path.clone(), &part.content.summary());
+                            relations.push((path.clone(), part.modes.relation.clone()));
+                            value.loans.join(&part.loans);
+                            value.inherit_crossing_borrows(&part);
                         }
-                        let ParameterRef::Bound {
-                            depth: 0,
-                            parameter,
-                        } = parameter
-                        else {
-                            value.modes.relation = Relation::environment();
-                            continue;
-                        };
-                        let position = requirements.iter().position(|r| {
-                            r.as_ref()
-                                .is_some_and(|r| r.parameter == parameter.0 as usize)
-                        });
-                        let requirement_passing = position
-                            .and_then(|i| requirements[i].as_ref())
-                            .map(|r| r.passing);
-                        if let Some(arg) = position.and_then(|i| arguments.get(i)) {
-                            let part = self.value(state, arg.value);
-                            let mut retained = part.clone();
-                            if let Some(source) = place(self.body, arg.value, self.source_rows) {
-                                if let Some(within) = self.field_loan(state, arg.value, source) {
-                                    retained.project_content(
-                                        &within
-                                            .into_iter()
-                                            .map(Projection::Field)
-                                            .collect::<Vec<_>>(),
-                                    );
-                                }
-                            }
-                            value.inherit_crossing_borrows(&retained);
-                            if self.ty(*expression).is_some_and(|ty| {
-                                matches!(self.t.get(ty).unwrap().kind, TypeKind::Function(_))
-                            }) {
-                                value.inherit_callable_captures(&retained);
-                            }
-                            if !self.arenas.global(&part.modes.relation) {
-                                value.modes.relation =
-                                    self.join_lifetime(&value.modes.relation, &part.modes.relation);
-                            }
-                            let placed = self.ty(arg.value).is_some_and(|ty| {
-                                self.arenas.placed(&self.t.get(ty).unwrap().modes.relation)
-                            });
-                            let source = place(self.body, arg.value, self.source_rows);
-                            // An arena-only argument, computed, named or
-                            // copied, contributes its arena bound and a read
-                            // loan on its place, which ends at return (MODE-1,
-                            // P2). A taken parameter's storage is not one: a
-                            // result holding it must name it (MODE-1). A
-                            // closure call's result may share what its
-                            // environment captures (#80): it is arena-only
-                            // when the closure's captures are known and each
-                            // is, and it reads them. A written use mode on the
-                            // call shares what the call does.
-                            let mut call = arg.value;
-                            while let ExprKind::Unary {
-                                op:
-                                    hirsel_syntax::UnaryOp::Copy
-                                    | hirsel_syntax::UnaryOp::Take
-                                    | hirsel_syntax::UnaryOp::Mut
-                                    | hirsel_syntax::UnaryOp::Unique,
-                                value,
-                            } = &self.tree.expressions[call.0 as usize].kind
-                            {
-                                call = *value;
-                            }
-                            let closure_call = self.source_rows.call(call).is_some_and(|i| {
-                                matches!(self.body.calls[i].target, CallTarget::Value(_))
-                            });
-                            let shared = if closure_call {
-                                self.shared_captures(state, call)
-                            } else {
-                                Some((vec![], false))
-                            };
-                            let arena_only = placed
-                                && shared.as_ref().is_some_and(|(_, taken)| !taken)
-                                && self.arenas.global(&part.modes.relation)
-                                && !source
-                                    .as_ref()
-                                    .is_some_and(|p| self.taken_storage(state, p.binding))
-                                && !self.tail_taken(state, arg.value)
-                                && !part
-                                    .roots()
-                                    .into_iter()
-                                    .any(|root| self.taken_storage(state, root));
-                            if placed && !arena_only {
-                                value.modes.relation = Relation::environment();
-                            }
-                            // A written copy or a moved value is a new value,
-                            // as a computed argument is: neither is the place
-                            // it reads. One that is local bounds the result to
-                            // a temporary; a global heap value is its own
-                            // share.
-                            // So is a closure call over known captures none of
-                            // which is taken storage: it shares them as their
-                            // copy would (#80). One over a taken capture is
-                            // bounded by its temporary, as lowering keeps it.
-                            let computed = matches!(
-                                self.tree.expressions[arg.value.0 as usize].kind,
-                                ExprKind::Unary {
-                                    op: hirsel_syntax::UnaryOp::Copy | hirsel_syntax::UnaryOp::Take,
-                                    ..
-                                }
-                            ) || closure_call
-                                && shared.as_ref().is_some_and(|(_, taken)| !taken);
-                            if (computed || source.is_none())
-                                && (!self.arenas.global(&part.modes.relation)
-                                    || (placed && !computed && !arena_only))
-                            {
-                                let scope = self.graph.lifetimes.expressions[&arg.value];
-                                value.bound_by(scope, Site::Expression(arg.value));
-                            }
-                            let mut part = part;
-                            if let Some(p) = source {
-                                // A result reads the argument's field place,
-                                // extended by the field path of this parameter
-                                // its relation names (#77).
-                                let copied = matches!(
-                                    self.tree.expressions[arg.value.0 as usize].kind,
-                                    ExprKind::Unary {
-                                        op: hirsel_syntax::UnaryOp::Copy,
-                                        ..
-                                    }
-                                );
-                                let within = (!computed || copied)
-                                    .then(|| self.field_loan(state, arg.value, p))
-                                    .flatten();
-                                if within.is_some() && part.aliased() == Some(p.binding) {
-                                    part.set_alias(None);
-                                }
-                                // MODE-1: relations compose through a local view.
-                                let composed = !computed
-                                    && within.is_none()
-                                    && requirement_passing == Some(PassingMode::Borrow)
-                                    && self.related_view(state, p.binding, *expression);
-                                if composed {
-                                    // It reads what the binding reaches, not
-                                    // the binding itself.
-                                    if part.aliased() == Some(p.binding) {
-                                        part.set_alias(None);
-                                    }
-                                    if self.emit
-                                        && !self.facts.composed_arguments.contains(&arg.value)
-                                    {
-                                        self.facts.composed_arguments.push(arg.value);
-                                    }
-                                } else {
-                                    value.read_within(
-                                        p.binding,
-                                        within.as_deref().unwrap_or(&[]),
-                                        Site::Expression(arg.value),
-                                    );
-                                }
-                                if !computed && !arena_only && !composed {
-                                    self.retain_binding_scope(&mut value, p.binding);
-                                }
-                            }
-                            for capture in shared
-                                .into_iter()
-                                .flat_map(|(captures, _)| captures)
-                                .filter(|_| arena_only)
-                            {
-                                value.read(capture, Site::Expression(arg.value));
-                            }
-                            value.bound_within(&part, true);
-                            value.read_through(&part);
-                        }
+                        value.install_content(contents);
+                        value.refine_parts(relations);
                     }
                     if self.property(*expression).is_some_and(|p| p.plain) {
                         value
@@ -7985,15 +8259,28 @@ impl Checker<'_, '_> {
                         }
                     }
                     let property = self.property(*value);
-                    self.result_locality(
-                        state,
-                        &actual,
-                        *value,
-                        property,
-                        site,
-                        result,
-                        requirement,
-                    );
+                    let selections = self.result_selections(result);
+                    if selections.is_empty() {
+                        self.result_locality(
+                            state,
+                            &actual,
+                            *value,
+                            property,
+                            site,
+                            result,
+                            requirement,
+                        );
+                    } else {
+                        self.selected_result_locality(
+                            state,
+                            &actual,
+                            *value,
+                            property,
+                            site,
+                            result,
+                            &selections,
+                        );
+                    }
                 }
             }
         }
@@ -8065,10 +8352,17 @@ impl Checker<'_, '_> {
         if actual.invalid {
             return;
         }
+        let selected = actual.selected_parts().is_some();
         actual.project_content(&[Projection::VariantField {
             variant: error,
             field: 0,
         }]);
+        if selected {
+            self.propagated_errors
+                .entry(expression)
+                .and_modify(|(_, relation)| *relation = relation.union(&actual.modes.relation))
+                .or_insert((payload, actual.modes.relation.clone()));
+        }
         // A fresh call receipt owns its outer variant, but not an
         // unqualified counted error payload. A written nested unique
         // receipt, or a currently unique whole, supplies that evidence.
@@ -8217,9 +8511,88 @@ impl Checker<'_, '_> {
         if self.environment_frame {
             result.relation = Relation::environment();
         }
+        // MODE-1: the error payload is the part `Error(e)` would be, so a
+        // selected error part bounds it; any part selected within it does
+        // not bound the whole payload, which is then global.
+        let path = [Projection::VariantField {
+            variant: error,
+            field: 0,
+        }];
+        if let Some((_, relation)) = self
+            .result_selections(&result)
+            .into_iter()
+            .find(|(selected, _)| selected.as_slice() == path.as_slice())
+        {
+            result.relation = relation;
+        }
         let requirement = self.result_requirement(&result);
         let site = self.span_of(expression);
         self.result_locality(state, &actual, value, property, site, &result, requirement);
+    }
+    /// MODE-1: the selected parts of this frame's declared result, by path,
+    /// when its root is global. Empty for a whole-result relation.
+    fn result_selections(&self, result: &Modes) -> Vec<(Vec<Projection>, Relation)> {
+        if self.environment_frame || !result.relation.is_global() {
+            return vec![];
+        }
+        let Some(root) = self.graph.result_ty else {
+            return vec![];
+        };
+        hirsel_types::unique_rows::result_relations(
+            self.t,
+            root,
+            &self.own.metadata.roles,
+            &mut |d| self.signatures.cached(d),
+        )
+        .into_iter()
+        .map(|(path, relation)| {
+            (
+                path.into_iter().map(result_projection).collect(),
+                self.arenas.lifetime(&relation),
+            )
+        })
+        .collect()
+    }
+    /// MODE-1: a result with selected parts is checked part by part: each
+    /// selected part against its own relation, and the rest as global.
+    #[allow(clippy::too_many_arguments)]
+    fn selected_result_locality(
+        &mut self,
+        state: &State,
+        actual: &Value,
+        value: ExprId,
+        property: Option<Properties>,
+        site: Span,
+        result: &Modes,
+        selections: &[(Vec<Projection>, Relation)],
+    ) {
+        let paths: Vec<_> = selections.iter().map(|(path, _)| path.clone()).collect();
+        let mut rest = actual.clone();
+        rest.modes.relation = actual.relation_outside(&paths);
+        let reported = self.diagnostics.len();
+        self.result_locality(
+            state,
+            &rest,
+            value,
+            property,
+            site,
+            result,
+            self.result_requirement(result),
+        );
+        if self.diagnostics.len() != reported {
+            return;
+        }
+        for (path, relation) in selections {
+            let mut part = actual.clone();
+            part.project_content(path);
+            // Checked part by part, a constructed part carries its own
+            // relation too.
+            part.modes.relation = actual.select_part_relations(path).0;
+            let mut required = result.clone();
+            required.relation = relation.clone();
+            let requirement = self.result_requirement(&required);
+            self.result_locality(state, &part, value, property, site, &required, requirement);
+        }
     }
     /// A `?` mapper function whose result names no source returns a value
     /// independent of the error it was given; a variant mapper keeps it.
@@ -8740,6 +9113,33 @@ impl Checker<'_, '_> {
         aggregate
             .shared_parts
             .install(std::slice::from_ref(projection), &part.shared_parts);
+        // MODE-1: each part keeps its own relation, so a result whose parts
+        // select different relations can be checked part by part. The
+        // refinement holds while the aggregate's relation is their union.
+        let mut parts = aggregate
+            .part_relations
+            .take()
+            .map(|refined| refined.parts.clone())
+            .unwrap_or_default();
+        match part.part_relations() {
+            Some(within) => parts.extend(within.iter().map(|(path, relation)| {
+                let mut installed = vec![projection.clone()];
+                installed.extend(path.iter().cloned());
+                (installed, relation.clone())
+            })),
+            None if !part.modes.relation.is_global() => {
+                parts.push((vec![projection.clone()], part.modes.relation.clone()));
+            }
+            None => (),
+        }
+        let whole = parts
+            .iter()
+            .fold(Relation::global(), |whole, (_, part)| whole.union(part));
+        aggregate.part_relations = Some(Arc::new(PartRelations {
+            whole,
+            parts,
+            selected: false,
+        }));
     }
     /// MODE-2: a nested `unique` contract of the receiving type cannot hold a
     /// part that is currently aliased. J compares the rows; this is the part

@@ -1646,6 +1646,8 @@ impl Fixture {
             span: Span::default(),
             arena_places: BTreeSet::new(),
             current_parameter: None,
+            result_parts: false,
+            selected_parts: Vec::new(),
         };
         n.type_authority(Some(root))
     }

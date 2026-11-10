@@ -1,0 +1,13 @@
+// rule: MODE-1
+// expect: reject PROV-4 at line 12
+// twin: MODE/MODE-1-result-part-arena-error-ok.hir
+// "Unselected subtrees must be global." The success payload selects arena
+// `a`; the error payload declares no placement, so an arena value cannot be
+// kept there (PROV-4).
+fn mk(a: Arena) -> Bytes in a {
+  b"x"
+}
+
+fn bad(a: Arena) -> Result[Bytes in a, Bytes] {
+  Error(mk(a))
+}

@@ -1297,7 +1297,10 @@ impl Builder<'_, '_> {
             if block == bad {
                 self.terminate(Terminator::Unreachable, span);
             } else if block == no {
-                let ty = self.part_type(carrier, plan.error_type);
+                // MODE-1: ownership publishes the error part of a result
+                // that selects its parts; others take the owner's bounds.
+                let owned = self.part_type(carrier, plan.error_type);
+                let ty = self.physical_projection(id, owned)?;
                 let error = self.project(
                     value.place,
                     Projection::VariantField {

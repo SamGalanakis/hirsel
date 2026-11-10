@@ -2781,7 +2781,17 @@ impl Checker<'_> {
         }
         let mut row = self.t.get(root).unwrap().clone();
         let relation = row.modes.relation.union(&parts);
-        if relation != row.modes.relation {
+        // MODE-1: a destination whose parts select their own relations keeps
+        // a global root; each held part is checked against its own part.
+        let selected = expected.is_some_and(|expected| {
+            let roles = self.signature.metadata.roles.clone();
+            let selections =
+                hirsel_types::unique_rows::result_relations(self.t, expected, &roles, &mut |d| {
+                    self.read(d)
+                });
+            !selections.is_empty() && selections.iter().all(|(path, _)| !path.is_empty())
+        });
+        if relation != row.modes.relation && !selected {
             // PROV-4: the destination arena and all held parts bound the
             // constructed value, even when the destination already names one.
             row.modes.relation = relation;

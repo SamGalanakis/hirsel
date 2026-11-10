@@ -1297,6 +1297,13 @@ impl Checker<'_, '_> {
         } else {
             self.substitute(result, &args)?
         };
+        // MODE-1: the caller holds a callee's result parts in flow, not in its
+        // type; a construction takes its parts from the expected type.
+        let ty = if matches!(target, CallTarget::Constructor(_)) {
+            ty
+        } else {
+            hirsel_types::unique_rows::erase_result_parts(self.types, ty)
+        };
         if !bad
             && let CallTarget::Definition(callee) = &target
             && !self.table_key_arguments(id, callee, &args)?

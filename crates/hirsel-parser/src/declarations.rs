@@ -457,7 +457,10 @@ impl Parser<'_> {
             p.parameter(anonymous)
         })?;
         let result = if (!anonymous || self.continuing()) && self.eat("->") {
-            Some(self.ty()?)
+            let result_parts = std::mem::replace(&mut self.result_parts, true);
+            let result = self.ty();
+            self.result_parts = result_parts;
+            Some(result?)
         } else {
             None
         };

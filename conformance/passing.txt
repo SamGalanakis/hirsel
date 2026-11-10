@@ -26,6 +26,12 @@ MODE/MODE-1-replace-local-content-33-concrete-run.hir
 MODE/MODE-1-replace-local-content-33-mutation-bad.hir
 MODE/MODE-1-replace-local-content-33-projected-run.hir
 MODE/MODE-1-replace-local-content-33-retained-bad.hir
+MODE/MODE-1-result-part-arena-error-bad.hir
+MODE/MODE-1-result-part-arena-error-ok.hir
+MODE/MODE-1-result-part-error-borrow-bad.hir
+MODE/MODE-1-result-part-error-borrow-ok.hir
+MODE/MODE-1-result-part-retained-write-bad.hir
+MODE/MODE-1-result-part-retained-write-ok.hir
 MODE/MODE-2-loop-place-52-copy-bad.hir
 MODE/MODE-2-loop-place-52-copy-ok.hir
 MODE/MODE-2-loop-place-52-field-run.hir

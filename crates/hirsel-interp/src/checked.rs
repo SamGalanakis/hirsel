@@ -1720,7 +1720,17 @@ impl FrameCheck {
     pub fn returned_to_caller(&self, body: &Body, types: &hirsel_types::TypeInterner) -> Shadow {
         let mut shadow = self.returned.clone().unwrap_or_default();
         let relation = types.get(body.result).map(|t| &t.modes.relation);
-        let map: Vec<(u32, Bound)> = match relation.and_then(|r| r.named_parameters()) {
+        // A result whose parts select their own relations (MODE-1) is bounded
+        // by every parameter a part names.
+        let parts = hirsel_types::unique_rows::part_relations(types, body.result);
+        let named = relation.and_then(|r| r.named_parameters()).or_else(|| {
+            let mut listed = parts.first()?.named_parameters()?;
+            for part in &parts[1..] {
+                listed.extend(part.named_parameters()?);
+            }
+            Some(listed)
+        });
+        let map: Vec<(u32, Bound)> = match named {
             Some(listed) => listed
                 .iter()
                 .filter_map(|p| match p {

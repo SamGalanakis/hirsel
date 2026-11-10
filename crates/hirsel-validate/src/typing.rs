@@ -361,25 +361,31 @@ impl<'a, 'input> Checker<'a, 'input> {
             } else {
                 actual
             };
-            let valid = expected.is_some_and(|expected| {
-                let actual = self.comparison_evidence(store, expected, actual);
-                let mut row = store.get(actual).unwrap().clone();
-                if !matches!(
-                    row.kind,
-                    TypeKind::Function(_)
-                        | TypeKind::Builtin {
-                            kind: BuiltinType::Iter,
-                            ..
-                        }
-                ) {
-                    row.modes.sendability = store.get(expected).unwrap().modes.sendability.clone();
-                }
-                let actual = store.intern(row);
-                self.t.semantic_eq(expected, actual)
-                    || current.is_some_and(|current| self.t.semantic_eq(current, p.ty))
-                    || (!p.projection.is_empty()
-                        && (self.has_origins(&store, expected) || self.has_origins(self.t, p.ty)))
-            });
+            let global_part = self.unselected_part_type(store, p);
+            let valid = [expected, global_part]
+                .into_iter()
+                .flatten()
+                .any(|expected| {
+                    let actual = self.comparison_evidence(store, expected, actual);
+                    let mut row = store.get(actual).unwrap().clone();
+                    if !matches!(
+                        row.kind,
+                        TypeKind::Function(_)
+                            | TypeKind::Builtin {
+                                kind: BuiltinType::Iter,
+                                ..
+                            }
+                    ) {
+                        row.modes.sendability =
+                            store.get(expected).unwrap().modes.sendability.clone();
+                    }
+                    let actual = store.intern(row);
+                    self.t.semantic_eq(expected, actual)
+                        || current.is_some_and(|current| self.t.semantic_eq(current, p.ty))
+                        || (!p.projection.is_empty()
+                            && (self.has_origins(&store, expected)
+                                || self.has_origins(self.t, p.ty)))
+                });
             if !valid {
                 self.error(ViolationKind::InvalidProjection(PlaceId(i as u32)));
             }
@@ -484,6 +490,23 @@ impl<'a, 'input> Checker<'a, 'input> {
                             self.error(ViolationKind::TypeMismatch { entity: "return" });
                         }
                     } else {
+                        // MODE-1: a result whose parts select their own
+                        // relations has a global root, while the value built
+                        // for it is as local as its parts. Flow checks each
+                        // part against its selection and every other part
+                        // global; the shape below is still compared here.
+                        let expected = if self.result_cover(self.body.result).is_empty() {
+                            expected
+                        } else {
+                            let mut row = store.get(expected).unwrap().clone();
+                            row.modes.relation = store
+                                .get(self.place_type(value.place))
+                                .unwrap()
+                                .modes
+                                .relation
+                                .clone();
+                            store.intern(row)
+                        };
                         self.storage_value_type_in(
                             store,
                             expected,
@@ -849,12 +872,15 @@ impl<'a, 'input> Checker<'a, 'input> {
     /// root evidence about either holder takes part: uniqueness, nested
     /// `unique` parts included, is set aside, differing relations, arena
     /// placement included, meet at a common borrowed root (a read is the same
-    /// wherever the content lives), and brands, nested ones included, are
+    /// wherever the content lives), as result parts do, and brands, nested ones included, are
     /// identity evidence rather than operand type. Cleanup and every other
     /// nested qualifier remain exact. Sendability is derived again for a row
     /// whose holder evidence changed, never for one compared as published.
     fn comparison_type(&mut self, left: TypeId, right: TypeId) {
         let store = self.t;
+        // Result parts (MODE-1) are relations too, read in place alike.
+        let [left, right] =
+            [left, right].map(|t| hirsel_types::unique_rows::erase_result_parts(store, t));
         let rows = [left, right].map(|t| store.get(t).unwrap().clone());
         let relations = rows[0].modes.relation != rows[1].modes.relation;
         let [left, right] = rows.map(|mut row| {
@@ -2712,6 +2738,28 @@ impl<'a, 'input> Checker<'a, 'input> {
                 self.comparison_evidence(target, expected, actual)
             })
         });
+        // MODE-1: the root of a result whose parts select their own
+        // relations is global; storage receiving it may be as local as its
+        // parts, and its type names no part relation: flow installs each
+        // part's own dependencies.
+        let (expected, actual) = match (expected, actual) {
+            (Some(expected), Some(actual)) if !self.result_cover(expected).is_empty() => {
+                let mut row = target
+                    .get(hirsel_types::unique_rows::erase_result_parts(
+                        target, expected,
+                    ))
+                    .unwrap()
+                    .clone();
+                row.modes.relation = target.get(actual).unwrap().modes.relation.clone();
+                (
+                    Some(target.intern(row)),
+                    Some(hirsel_types::unique_rows::erase_result_parts(
+                        target, actual,
+                    )),
+                )
+            }
+            pair => pair,
+        };
         let valid = matches!((expected, actual), (Some(expected), Some(actual)) if self.compatible(target, expected, actual, TypeRelation::Exact));
         if !valid {
             self.error(ViolationKind::TypeMismatch {
@@ -3735,6 +3783,136 @@ impl<'a, 'input> Checker<'a, 'input> {
             }
         }
         bound
+    }
+    /// MODE-1: the row of `p` when it lies in an unselected part of a
+    /// result whose parts select their own relations, held in storage that
+    /// only ever receives such results: that part is global, whatever its
+    /// root's relation summarises. Flow still checks each part's sources.
+    pub(super) fn unselected_part_type(
+        &mut self,
+        store: &TypeInterner,
+        p: &Place,
+    ) -> Option<TypeId> {
+        let unselected = self.scratch.unselected_parts[self.site.body.0 as usize]
+            .get_or_init(|| self.unselected_result_parts())
+            .get(&p.root)?
+            .iter()
+            .any(|u| p.projection.starts_with(u));
+        if !unselected {
+            return None;
+        }
+        let mut root = store
+            .get(self.body.locals[p.root.0 as usize].ty)
+            .unwrap()
+            .clone();
+        root.modes.relation = Relation::global();
+        let root = store.intern(root);
+        self.projection_type_at(store, p, root, |_, _| None)
+            .map(|part| self.canonical_plain(store, part))
+    }
+    /// The unselected result parts of each local that only ever receives
+    /// whole results whose parts select their own relations: a call's, or
+    /// another such local's.
+    fn unselected_result_parts(&self) -> HashMap<hirsel_tir::LocalId, Vec<Vec<Projection>>> {
+        enum Write {
+            Parts(Vec<Vec<Projection>>),
+            From(hirsel_tir::LocalId),
+            Other,
+        }
+        let whole = |place: PlaceId| {
+            let p = &self.body.places[place.0 as usize];
+            p.projection.is_empty().then_some(p.root)
+        };
+        let mut writes: HashMap<hirsel_tir::LocalId, Vec<Write>> = HashMap::default();
+        let mut other = |writes: &mut HashMap<hirsel_tir::LocalId, Vec<Write>>, place: PlaceId| {
+            let root = self.body.places[place.0 as usize].root;
+            writes.entry(root).or_default().push(Write::Other);
+        };
+        for block in self.body.blocks.iter() {
+            for instruction in &block.instructions {
+                match &instruction.kind {
+                    InstructionKind::Assign { destination, value } => {
+                        match (&self.body.rvalues[value.0 as usize], whole(*destination)) {
+                            (Rvalue::Use(operand), Some(root)) => {
+                                let write = match whole(operand.place) {
+                                    Some(source) => Write::From(source),
+                                    None => Write::Other,
+                                };
+                                writes.entry(root).or_default().push(write);
+                            }
+                            _ => other(&mut writes, *destination),
+                        }
+                    }
+                    InstructionKind::Replace { destination, .. }
+                    | InstructionKind::Snapshot { destination, .. } => {
+                        other(&mut writes, *destination)
+                    }
+                    _ => {}
+                }
+            }
+            if let Terminator::Call {
+                callee,
+                returns: Some(returns),
+                ..
+            } = &block.terminator
+            {
+                let parts = self
+                    .callee_function(callee)
+                    .map(|f| f.result)
+                    .map(|result| {
+                        self.result_cover(result)
+                            .into_iter()
+                            .filter(|leaf| leaf.relation.is_none())
+                            .map(|leaf| leaf.path)
+                            .collect::<Vec<_>>()
+                    })
+                    .filter(|parts| !parts.is_empty());
+                match (parts, whole(returns.destination)) {
+                    (Some(parts), Some(root)) => {
+                        writes.entry(root).or_default().push(Write::Parts(parts))
+                    }
+                    _ => other(&mut writes, returns.destination),
+                }
+            }
+        }
+        let mut known: HashMap<hirsel_tir::LocalId, Vec<Vec<Projection>>> = HashMap::default();
+        loop {
+            let mut changed = false;
+            for (local, written) in &writes {
+                if known.contains_key(local) {
+                    continue;
+                }
+                let mut parts: Option<Vec<Vec<Projection>>> = None;
+                let mut resolved = true;
+                for write in written {
+                    let these = match write {
+                        Write::Parts(parts) => parts,
+                        Write::From(source) => match known.get(source) {
+                            Some(parts) => parts,
+                            None => {
+                                resolved = false;
+                                break;
+                            }
+                        },
+                        Write::Other => {
+                            resolved = false;
+                            break;
+                        }
+                    };
+                    parts = Some(match parts {
+                        None => these.clone(),
+                        Some(mine) => mine.into_iter().filter(|p| these.contains(p)).collect(),
+                    });
+                }
+                if let Some(parts) = parts.filter(|parts| resolved && !parts.is_empty()) {
+                    known.insert(*local, parts);
+                    changed = true;
+                }
+            }
+            if !changed {
+                return known;
+            }
+        }
     }
     pub(super) fn projection_type(
         &mut self,

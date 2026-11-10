@@ -65,6 +65,7 @@ pub fn parse(
         nesting_limit: None,
         formats: 0,
         analyses: vec![],
+        result_parts: false,
     };
     let mut items = vec![];
     // The first token the next item owns: everything after the previous one's.
@@ -143,6 +144,9 @@ struct Parser<'a> {
     formats: usize,
     /// The current item's analysis annotations, attached once it has an id (PS-17).
     analyses: Vec<AnalysisAnnotation>,
+    /// Inside a function's result type, outside any nested callable: a
+    /// type argument or tuple element may select its own relation (MODE-1).
+    result_parts: bool,
 }
 
 impl Parser<'_> {

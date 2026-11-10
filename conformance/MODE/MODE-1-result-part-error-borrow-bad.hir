@@ -1,0 +1,10 @@
+// rule: MODE-1
+// expect: reject MODE-1 at line 9
+// twin: MODE/MODE-1-result-part-error-borrow-ok.hir
+// "Each selected subtree obeys MODE-1 with its declared sources; unselected
+// subtrees must be global." The success payload selects `xs`, so the error
+// payload is global: a borrowed Bytes there is local to the caller, though
+// Bytes is inert.
+fn bad(xs: Bytes) -> Result[Bytes in xs, Bytes] {
+  Error(copy xs)
+}

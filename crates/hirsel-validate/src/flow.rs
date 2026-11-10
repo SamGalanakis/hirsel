@@ -495,6 +495,42 @@ impl Plan {
                     })
             })
             .collect();
+        // MODE-1: a value of a result row whose parts select their own
+        // relations keeps a place for each part of its cover, so its sources
+        // and loans stay apart per part through moves, projections and the
+        // return, whether or not the body names the part.
+        let mut covers: crate::hashed::HashMap<TypeId, Vec<(Vec<Projection>, TypeId)>> =
+            HashMap::default();
+        let mut cover_paths = BTreeSet::new();
+        for (index, local) in body.locals.iter().enumerate() {
+            let cover = covers.entry(local.ty).or_insert_with(|| {
+                // A value built for such a result is as local as its parts
+                // at its root; its parts are where they are selected.
+                let mut row = checker.t.get(local.ty).unwrap().clone();
+                row.modes.relation = hirsel_types::Relation::global();
+                let parts = checker.t.intern(row);
+                checker
+                    .result_cover(parts)
+                    .into_iter()
+                    .map(|leaf| (leaf.path, leaf.row))
+                    .collect()
+            });
+            for (path, row) in cover.iter() {
+                cover_paths.insert(super::flow_origins::EnvironmentField::path(path));
+                canonical
+                    .entry((index as u32, path.clone().into()))
+                    .or_insert_with(|| {
+                        places.push(Place {
+                            loan: None,
+                            binding: None,
+                            root: LocalId(index as u32),
+                            projection: path.clone().into(),
+                            ty: *row,
+                        });
+                        places.len() - 1
+                    });
+            }
+        }
         let mut body_roots = vec![None; body.locals.len()];
         let mut root_accesses = vec![vec![]; body.locals.len()];
         for (index, place) in body.places.iter().enumerate() {
@@ -754,6 +790,11 @@ impl Plan {
                             .insert(path[start..].to_vec());
                     }
                 }
+            }
+        }
+        for path in cover_paths {
+            for start in 0..path.len() {
+                std::rc::Rc::make_mut(&mut environment_paths).insert(path[start..].to_vec());
             }
         }
         let result_reads = result_read_sites(body);
@@ -2467,6 +2508,9 @@ impl Checker<'_, '_> {
         let actual =
             super::flow_origins::canonical(store, access.ty, &proof, &|o| self.arena_place(o)).ok();
         let expected = expected.map(|root| self.canonical_plain(store, root));
+        let global_part = self.unselected_part_type(store, access).and_then(|ty| {
+            super::flow_origins::canonical(store, ty, &proof, &|o| self.arena_place(o)).ok()
+        });
         let actual = actual.map(|root| {
             let physical = store.get(root).unwrap().modes.clone();
             let root = self.canonical_plain(store, root);
@@ -2475,22 +2519,28 @@ impl Checker<'_, '_> {
             row.modes.uniqueness = physical.uniqueness;
             store.intern(row)
         });
-        let actual = actual.zip(expected).map(|(actual, expected)| {
-            let actual = self.comparison_evidence(store, expected, actual);
-            let mut row = store.get(actual).unwrap().clone();
-            if !matches!(
-                row.kind,
-                TypeKind::Function(_)
-                    | TypeKind::Builtin {
-                        kind: BuiltinType::Iter,
-                        ..
-                    }
-            ) {
-                row.modes.sendability = store.get(expected).unwrap().modes.sendability.clone();
-            }
-            store.intern(row)
-        });
-        if !matches!((expected, actual), (Some(a), Some(b)) if self.t.semantic_eq(a, b)) {
+        let matches = |this: &mut Self, expected: TypeId| {
+            actual.is_some_and(|actual| {
+                let actual = this.comparison_evidence(store, expected, actual);
+                let mut row = store.get(actual).unwrap().clone();
+                if !matches!(
+                    row.kind,
+                    TypeKind::Function(_)
+                        | TypeKind::Builtin {
+                            kind: BuiltinType::Iter,
+                            ..
+                        }
+                ) {
+                    row.modes.sendability = store.get(expected).unwrap().modes.sendability.clone();
+                }
+                this.t.semantic_eq(expected, store.intern(row))
+            })
+        };
+        if ![expected, global_part]
+            .into_iter()
+            .flatten()
+            .any(|expected| matches(self, expected))
+        {
             self.flow_error(report, ViolationKind::InvalidProjection(place));
             return;
         }
@@ -3713,6 +3763,104 @@ impl Checker<'_, '_> {
             }
         }
     }
+    /// The sources held in the subtree at `path` below `place`: every model
+    /// part at or below it, or, where the body keeps no part there, the
+    /// nearest enclosing part's, which holds the subtree's too.
+    fn subtree_sources(
+        &self,
+        model: &Model,
+        state: &State,
+        place: PlaceId,
+        path: &[Projection],
+    ) -> BTreeSet<usize> {
+        let index = model.mapping[place.0 as usize];
+        let base = model.places[index].projection.len();
+        let mut held = BTreeSet::new();
+        let mut exact = false;
+        let mut enclosing: Option<usize> = None;
+        for part in model.contents(index) {
+            let relative = &model.places[part].projection.to_vec()[base..];
+            if relative.starts_with(path) {
+                exact |= relative.len() == path.len();
+                held.extend(state.sources[part].iter().copied());
+            } else if path.starts_with(relative)
+                && enclosing.is_none_or(|e| {
+                    model.places[e].projection.len() < model.places[part].projection.len()
+                })
+            {
+                enclosing = Some(part);
+            }
+        }
+        if !exact && let Some(part) = enclosing {
+            held.extend(state.sources[part].iter().copied());
+        }
+        held
+    }
+    /// An operand's sources (see `sources`) that its part at `path` holds.
+    /// A source the operand acquires as a whole, such as the root it
+    /// borrows, holds for every part.
+    fn part_sources(
+        &self,
+        model: &Model,
+        state: &State,
+        operand: &Operand,
+        path: &[Projection],
+    ) -> BTreeSet<usize> {
+        let whole = self.sources(model, state, operand);
+        if whole.is_empty() || path.is_empty() {
+            return whole;
+        }
+        let all = self.subtree_sources(model, state, operand.place, &[]);
+        let part = self.subtree_sources(model, state, operand.place, path);
+        whole
+            .into_iter()
+            .filter(|s| part.contains(s) || !all.contains(s))
+            .collect()
+    }
+    /// Per model part of `destination`, the sources its relative path
+    /// receives. None when the destination has a single part, which takes
+    /// the whole sources.
+    fn source_plan(
+        &self,
+        model: &Model,
+        destination: PlaceId,
+        mut at: impl FnMut(&[Projection]) -> BTreeSet<usize>,
+    ) -> Option<Vec<(usize, BTreeSet<usize>)>> {
+        let index = model.mapping[destination.0 as usize];
+        if model.contents(index).nth(1).is_none() {
+            return None;
+        }
+        let base = model.places[index].projection.len();
+        Some(
+            model
+                .contents(index)
+                .map(|part| (part, at(&model.places[part].projection.to_vec()[base..])))
+                .collect(),
+        )
+    }
+    /// Install `sources` in `destination`, distributed per part by `plan`. A
+    /// source the plan does not place, such as a bound added for the whole
+    /// value, holds for every part; one the final sources dropped, for none.
+    fn set_planned_sources(
+        &self,
+        model: &Model,
+        state: &mut State,
+        destination: PlaceId,
+        plan: Option<Vec<(usize, BTreeSet<usize>)>>,
+        sources: BTreeSet<usize>,
+    ) {
+        let Some(plan) = plan else {
+            return self.set_sources(model, state, destination, sources);
+        };
+        let placed: BTreeSet<usize> = plan.iter().flat_map(|(_, s)| s.iter().copied()).collect();
+        for (part, planned) in plan {
+            state.sources[part] = sources
+                .iter()
+                .copied()
+                .filter(|s| planned.contains(s) || !placed.contains(s))
+                .collect();
+        }
+    }
     /// Signature-selected result dependencies; argument evaluation order is not
     /// parameter order. A nested callable retains its own parameter binder.
     /// The lifetime relation of a callee's result.
@@ -3815,6 +3963,53 @@ impl Checker<'_, '_> {
                 (operands, environment)
             }
         }
+    }
+    /// MODE-1: per part a callee's result selects, the arguments (and the
+    /// callable's environment) the part depends on. Empty unless the result's
+    /// parts select their own relations.
+    fn result_part_arguments<'b>(
+        &self,
+        callee: &'b Callee,
+        arguments: &'b [CallArgument],
+    ) -> Vec<(Vec<Projection>, Vec<&'b Operand>, Option<&'b Operand>)> {
+        let Some(function) = self.callee_function(callee).cloned() else {
+            return vec![];
+        };
+        let environment = match callee {
+            Callee::Indirect { value, .. } => Some(value),
+            Callee::Definition { .. } => None,
+        };
+        self.result_cover(function.result)
+            .into_iter()
+            .filter_map(|leaf| {
+                let relation = self.signature_lifetime(self.t, &function, &leaf.relation?);
+                if relation.is_global() {
+                    return None;
+                }
+                Some(match relation.named_parameters() {
+                    Some(parameters) => (
+                        leaf.path,
+                        arguments
+                            .iter()
+                            .filter(|a| {
+                                parameters.contains(&hirsel_types::ParameterRef::bound(a.parameter))
+                            })
+                            .map(|a| &a.value)
+                            .collect(),
+                        environment.filter(|_| {
+                            parameters.iter().any(|p| {
+                                !matches!(p, hirsel_types::ParameterRef::Bound { depth: 0, .. })
+                            })
+                        }),
+                    ),
+                    None => (
+                        leaf.path,
+                        arguments.iter().map(|a| &a.value).collect(),
+                        environment,
+                    ),
+                })
+            })
+            .collect()
     }
     fn set_dependencies(
         &self,
@@ -5643,6 +5838,54 @@ impl Checker<'_, '_> {
                             .flat_map(|o| self.sources(model, state, o))
                             .collect()
                     };
+                    // MODE-1: each part of a moved or constructed value holds
+                    // only its own content's sources.
+                    let source_plan = match rvalue {
+                        _ if sources.is_empty() => None,
+                        Rvalue::Use(operand)
+                            if model
+                                .contents(model.mapping[operand.place.0 as usize])
+                                .nth(1)
+                                .is_none() =>
+                        {
+                            None
+                        }
+                        Rvalue::Use(operand) => self.source_plan(model, *destination, |path| {
+                            self.part_sources(model, state, operand, path)
+                        }),
+                        Rvalue::Construct {
+                            constructor:
+                                constructor @ (Constructor::Tuple
+                                | Constructor::Record(_)
+                                | Constructor::Variant { .. }),
+                            fields,
+                            ..
+                        } => self.source_plan(model, *destination, |path| {
+                            let Some((first, rest)) = path.split_first() else {
+                                return fields
+                                    .iter()
+                                    .flat_map(|f| self.sources(model, state, &f.value))
+                                    .collect();
+                            };
+                            fields
+                                .iter()
+                                .find(|f| {
+                                    *first
+                                        == match constructor {
+                                            Constructor::Variant { variant, .. } => {
+                                                Projection::VariantField {
+                                                    variant: *variant,
+                                                    field: f.field,
+                                                }
+                                            }
+                                            _ => Projection::Field(f.field),
+                                        }
+                                })
+                                .map(|f| self.part_sources(model, state, &f.value, rest))
+                                .unwrap_or_default()
+                        }),
+                        _ => None,
+                    };
                     let authority = self.rvalue_authority(model, state, rvalue);
                     let nested_shared =
                         self.rvalue_shares_unique_parts(state, *destination, rvalue);
@@ -5871,7 +6114,7 @@ impl Checker<'_, '_> {
                     self.set_authority(model, state, *destination, authority);
                     self.install_tags(model, state, *destination, tag_parts);
                     self.set_loan_content(model, state, *destination, &content_loans);
-                    self.set_sources(model, state, *destination, sources);
+                    self.set_planned_sources(model, state, *destination, source_plan, sources);
                     self.set_borrowed_shares(model, state, *destination, shares, true);
                     let root = self.body.places[destination.0 as usize].root.0 as usize;
                     if model.mutable_parameters[root] {
@@ -6264,7 +6507,11 @@ impl Checker<'_, '_> {
                     .iter()
                     .flat_map(|a| self.operand_shares(state, &a.value).held())
                     .collect();
+                // MODE-1: a result whose parts select their own relations
+                // depends, per part, on the arguments its part selects.
+                let part_arguments = self.result_part_arguments(callee, arguments);
                 let global_result = matches!(callee, Callee::Definition { .. })
+                    && part_arguments.is_empty()
                     && self
                         .result_relation(callee)
                         .is_some_and(|relation| relation.is_global());
@@ -6278,8 +6525,16 @@ impl Checker<'_, '_> {
                     argument_shares.clone()
                 };
                 let result = if let Some(destination) = destination {
-                    let (result_arguments, result_environment) =
+                    let (mut result_arguments, mut result_environment) =
                         self.result_arguments(callee, arguments);
+                    for (_, operands, environment) in &part_arguments {
+                        for operand in operands {
+                            if !result_arguments.iter().any(|o| o.place == operand.place) {
+                                result_arguments.push(operand);
+                            }
+                        }
+                        result_environment = result_environment.or(*environment);
+                    }
                     let mut returned_environment = super::flow_origins::Environment::default();
                     if !self.bound(
                         self.t,
@@ -6321,10 +6576,11 @@ impl Checker<'_, '_> {
                                     [self.body.places[o.place.0 as usize].root.0 as usize])
                         })
                         .collect();
-                    let sources = local_arguments
+                    let argument_sources: Vec<BTreeSet<usize>> = local_arguments
                         .iter()
-                        .flat_map(|(o, _)| self.sources(model, state, o))
+                        .map(|(o, _)| self.sources(model, state, o))
                         .collect();
+                    let sources = argument_sources.iter().flatten().copied().collect();
                     let result_row = self.t.get(self.place_type(destination)).unwrap();
                     let shared_result = matches!(
                         result_row.kind,
@@ -6373,9 +6629,9 @@ impl Checker<'_, '_> {
                         hirsel_types::Bound::Data,
                         &self.generic_declarations(),
                     );
-                    let result_dependencies = local_arguments
+                    let argument_dependencies: Vec<BTreeSet<usize>> = local_arguments
                         .iter()
-                        .flat_map(|(o, environment)| {
+                        .map(|(o, environment)| {
                             if *environment {
                                 // Invocation borrows the callable slot. The returned
                                 // content depends on its environment, independently
@@ -6398,7 +6654,28 @@ impl Checker<'_, '_> {
                             }
                         })
                         .collect();
-                    Some((returned_environment, sources, result_dependencies))
+                    let result_dependencies =
+                        argument_dependencies.iter().flatten().copied().collect();
+                    let parts: Vec<_> = part_arguments
+                        .iter()
+                        .map(|(path, operands, environment)| {
+                            let mut sources = BTreeSet::new();
+                            let mut dependencies = BTreeSet::new();
+                            for (i, (o, is_environment)) in local_arguments.iter().enumerate() {
+                                let selected = if *is_environment {
+                                    environment.is_some()
+                                } else {
+                                    operands.iter().any(|p| p.place == o.place)
+                                };
+                                if selected {
+                                    sources.extend(&argument_sources[i]);
+                                    dependencies.extend(&argument_dependencies[i]);
+                                }
+                            }
+                            (path.clone(), sources, dependencies)
+                        })
+                        .collect();
+                    Some((returned_environment, sources, result_dependencies, parts))
                 } else {
                     None
                 };
@@ -6630,8 +6907,10 @@ impl Checker<'_, '_> {
                 // Transfers have happened: caller's failure list must exclude
                 // Take temporaries, and its result is not yet initialized.
                 self.failure_cleanup(model, state, *on_failure, report, true);
-                let (Some(destination), Some((returned_environment, sources, result_dependencies))) =
-                    (destination, result)
+                let (
+                    Some(destination),
+                    Some((returned_environment, sources, result_dependencies, parts)),
+                ) = (destination, result)
                 else {
                     return;
                 };
@@ -6775,20 +7054,51 @@ impl Checker<'_, '_> {
                         .modes
                         .relation,
                 );
-                let dependencies = if locality.is_global() {
-                    BTreeSet::new()
+                if !parts.is_empty() {
+                    // MODE-1: each selected part holds what its selected
+                    // arguments reach; every other part is global.
+                    let mut content = loan_content::Content::default();
+                    for (path, _, dependencies) in &parts {
+                        content.insert(
+                            &super::flow_origins::EnvironmentField::path(path),
+                            &loan_content::Content::whole(dependencies.clone()),
+                            &model.environment_paths,
+                        );
+                    }
+                    self.set_loan_content(model, state, destination, &content);
+                    let held = |relative: &[Projection]| -> BTreeSet<usize> {
+                        parts
+                            .iter()
+                            .filter(|(path, ..)| {
+                                relative.starts_with(path) || path.starts_with(relative)
+                            })
+                            .flat_map(|(_, sources, _)| sources.iter().copied())
+                            .collect()
+                    };
+                    match self.source_plan(model, destination, held) {
+                        Some(plan) => {
+                            for (part, sources) in plan {
+                                state.sources[part] = sources;
+                            }
+                        }
+                        None => self.set_sources(model, state, destination, held(&[])),
+                    }
                 } else {
-                    result_dependencies
-                };
-                self.set_dependencies(model, state, destination, dependencies);
-                // A local(x) result over globally owned storage is Global at
-                // this call site; the callee transfers an owned value (MODE-1).
-                let sources = if locality.is_global() {
-                    BTreeSet::new()
-                } else {
-                    sources
-                };
-                self.set_sources(model, state, destination, sources);
+                    let dependencies = if locality.is_global() {
+                        BTreeSet::new()
+                    } else {
+                        result_dependencies
+                    };
+                    self.set_dependencies(model, state, destination, dependencies);
+                    // A local(x) result over globally owned storage is Global at
+                    // this call site; the callee transfers an owned value (MODE-1).
+                    let sources = if locality.is_global() {
+                        BTreeSet::new()
+                    } else {
+                        sources
+                    };
+                    self.set_sources(model, state, destination, sources);
+                }
                 self.set_borrowed_shares(
                     model,
                     state,
@@ -6833,7 +7143,78 @@ impl Checker<'_, '_> {
                 self.nested_crossing_receipt(state, self.t, self.body.result, value, report);
                 let result = self.t.get(self.body.result).unwrap();
                 let result_lifetime = self.lifetime(&result.modes.relation);
+                let parameter_roots = |relation: &hirsel_types::Relation| -> BTreeSet<usize> {
+                    relation
+                        .named_parameters()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|p| match p {
+                            hirsel_types::ParameterRef::Body { scope, parameter }
+                                if scope == self.body.parameter_scope =>
+                            {
+                                self.body
+                                    .parameters
+                                    .get(parameter.0 as usize)
+                                    .map(|l| l.0 as usize)
+                            }
+                            _ => None,
+                        })
+                        .collect()
+                };
+                // MODE-1: a result whose parts select their own relations.
+                // Each selected part holds only what its own parameters
+                // reach; every other part, like a global result, nothing.
+                let mut part_roots = BTreeSet::new();
+                let mut part_dependencies = vec![];
+                for leaf in self.result_cover(self.body.result) {
+                    let field = super::flow_origins::EnvironmentField::path(&leaf.path);
+                    let held = self
+                        .operand_loans(model, state, value)
+                        .project(&field)
+                        .held();
+                    let sources = self.part_sources(model, state, value, &leaf.path);
+                    let relation = leaf.relation.map(|r| self.lifetime(&r));
+                    let allowed = relation.as_ref().map(parameter_roots).unwrap_or_default();
+                    if relation.as_ref().is_none_or(|r| r.is_global()) {
+                        if !held.is_empty() || !sources.is_empty() {
+                            self.flow_error(
+                                report,
+                                ViolationKind::InvalidResultSource(value.place),
+                            );
+                        }
+                        continue;
+                    }
+                    if relation
+                        .as_ref()
+                        .is_some_and(|r| r.named_parameters().is_none())
+                        || !sources.is_subset(&allowed)
+                    {
+                        self.flow_error(report, ViolationKind::InvalidResultSource(value.place));
+                    }
+                    part_roots.extend(&allowed);
+                    part_dependencies.push((held, allowed));
+                }
+                if !part_dependencies.is_empty() {
+                    // A part's loan on a parameter it does not select would
+                    // outlive the call in the caller's view.
+                    for (held, allowed) in &part_dependencies {
+                        for &dependency in held {
+                            let source = model.loans[dependency].1;
+                            let root = self.body.places[source.0 as usize].root.0 as usize;
+                            if self.body.locals[root].storage == Storage::Parameter
+                                && !allowed.contains(&root)
+                            {
+                                self.flow_error(
+                                    report,
+                                    ViolationKind::InvalidResultSource(value.place),
+                                );
+                            }
+                        }
+                    }
+                }
+                let selected_parts = !part_dependencies.is_empty();
                 let named: Option<BTreeSet<_>> = match result_lifetime.named_parameters() {
+                    _ if selected_parts => Some(part_roots),
                     // An environment-local body row is a closure's or function
                     // type's `in env` result (#72): inputs and environment
                     // storage endure across this return; this body's own frame
@@ -6867,13 +7248,16 @@ impl Checker<'_, '_> {
                     ),
                     _ => None,
                 };
-                if let Some(allowed) = &named {
+                if let Some(allowed) = &named
+                    && !selected_parts
+                {
                     let actual = self.sources(model, state, value);
                     if !actual.is_subset(allowed) {
                         self.flow_error(report, ViolationKind::InvalidResultSource(value.place));
                     }
                 }
                 if result_lifetime.is_global()
+                    && !selected_parts
                     && (!self.sources(model, state, value).is_empty()
                         || !self.dependencies(model, state, value).is_empty())
                 {

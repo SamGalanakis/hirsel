@@ -445,6 +445,8 @@ pub(super) enum ProjectionRoot {
 }
 pub(super) struct ProjectionLifetime {
     pub root: ProjectionRoot,
+    /// The projected path from the root, as the flow names value parts.
+    pub path: Vec<super::Projection>,
     pub parts: Vec<(Relation, bool)>,
     pub physical: TypeId,
     /// Replacement traverses a counted owner, rather than inline storage alone.
@@ -704,6 +706,22 @@ pub(super) fn projection_lifetimes(
                     place.expression,
                     ProjectionLifetime {
                         root,
+                        path: place
+                            .projections
+                            .iter()
+                            .map(|step| match step.kind {
+                                SourceProjectionKind::Field(field) => {
+                                    super::Projection::Field(field.0)
+                                }
+                                SourceProjectionKind::VariantField { variant, field } => {
+                                    super::Projection::VariantField {
+                                        variant: variant.0,
+                                        field: field.0,
+                                    }
+                                }
+                                SourceProjectionKind::Index(_) => super::Projection::Elements,
+                            })
+                            .collect(),
                         parts,
                         physical,
                         counted_path,

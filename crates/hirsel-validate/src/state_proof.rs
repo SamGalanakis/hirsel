@@ -223,7 +223,7 @@ impl Checker<'_, '_> {
         .is_ok_and(|proof| proof == hirsel_types::Sendability::Sendable)
     }
 
-    fn callee_function(&self, callee: &Callee) -> Option<&hirsel_types::FunctionType> {
+    pub(crate) fn callee_function(&self, callee: &Callee) -> Option<&hirsel_types::FunctionType> {
         match callee {
             Callee::Definition { path, .. } => {
                 self.signatures.get(path).and_then(|s| match &s.kind {

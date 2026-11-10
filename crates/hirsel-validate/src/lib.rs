@@ -745,6 +745,13 @@ struct Site {
     block: Option<BlockId>,
     instruction: Option<u32>,
 }
+/// One leaf of a result cover (MODE-1): a selected part and its relation, or
+/// an unselected sibling (`relation` None), which must be global.
+struct ResultLeaf {
+    path: Vec<Projection>,
+    row: TypeId,
+    relation: Option<hirsel_types::Relation>,
+}
 struct Checker<'a, 'input> {
     definition: &'a ReadDefinition<'input>,
     body: &'a ReadBody<'input>,
@@ -822,6 +829,59 @@ impl<'a, 'input> Checker<'a, 'input> {
             }
             r => vec![r.clone()],
         })
+    }
+    /// MODE-1 result parts: a cover of a result row whose root is global but
+    /// whose parts select their own relations. Each leaf is a selected part
+    /// with its relation, or an unselected sibling, which must be global; with
+    /// its projection path and row. Empty when the root is selected or the
+    /// row is global throughout.
+    fn result_cover(&self, ty: TypeId) -> Vec<ResultLeaf> {
+        let roles = self
+            .signatures
+            .get(self.definition.path)
+            .map(|s| s.metadata.roles.clone())
+            .unwrap_or_default();
+        let mut lookup = |d: DefId| self.signatures.get(d).cloned().map(std::sync::Arc::new);
+        let selected = hirsel_types::unique_rows::result_relations(self.t, ty, &roles, &mut lookup);
+        if selected.is_empty() || selected.iter().any(|(path, _)| path.is_empty()) {
+            return vec![];
+        }
+        let step = |s: &hirsel_types::unique_rows::ResultStep| match *s {
+            hirsel_types::unique_rows::ResultStep::Element(i) => Projection::Field(i),
+            hirsel_types::unique_rows::ResultStep::Payload { variant, field } => {
+                Projection::VariantField { variant, field }
+            }
+        };
+        let selected: Vec<(Vec<Projection>, hirsel_types::Relation)> = selected
+            .into_iter()
+            .map(|(path, relation)| (path.iter().map(step).collect(), relation))
+            .collect();
+        let mut leaves = vec![];
+        let mut pending = vec![(vec![], ty)];
+        while let Some((path, row)) = pending.pop() {
+            if let Some((_, relation)) = selected.iter().find(|(p, _)| *p == path) {
+                leaves.push(ResultLeaf {
+                    path,
+                    row,
+                    relation: Some(relation.clone()),
+                });
+            } else if selected.iter().any(|(p, _)| p.starts_with(&path)) {
+                for (s, part) in
+                    hirsel_types::unique_rows::result_parts(self.t, row, &roles, &mut lookup)
+                {
+                    let mut path = path.clone();
+                    path.push(step(&s));
+                    pending.push((path, part));
+                }
+            } else {
+                leaves.push(ResultLeaf {
+                    path,
+                    row,
+                    relation: None,
+                });
+            }
+        }
+        leaves
     }
     /// A body row's placement: its arena places and regions only.
     fn placement(&self, relation: &hirsel_types::Relation) -> hirsel_types::Relation {

@@ -1,0 +1,11 @@
+// rule: MODE-1
+// expect: accept
+// "Each selected subtree obeys MODE-1 with its declared sources." The success
+// payload selects arena `a`, so it may be placed there.
+fn mk(a: Arena) -> Bytes in a {
+  b"x"
+}
+
+fn good(a: Arena) -> Result[Bytes in a, Bytes] {
+  Ok(mk(a))
+}

@@ -1,0 +1,55 @@
+// rule: MODE-1
+// expect: accept
+// "Refinement removes only dependencies exclusive to impossible variants":
+// `?` and a match keep the success payload's borrow of `h` and map only the
+// global error, so `h` may be written once the payload is dead.
+type Failed = Failed()
+
+type Holder {
+  data: Bytes,
+}
+
+fn get(h: Holder, k: u64) -> Result[Option[Bytes] in h, Failed] {
+  if k > 9 {
+    return Error(Failed())
+  }
+  Ok(Some(copy h.data))
+}
+
+fn put(mut h: Holder, take b: Bytes) -> () {
+  h.data = b
+}
+
+fn propagated(mut h: Holder) -> Result[u64, Failed] {
+  let v = get(h, 1)?
+  let n = match v {
+    Some(b) => bytes.len(b),
+    None() => 0,
+  }
+  put(mut h, b"y")
+  Ok(n)
+}
+
+fn matched(mut h: Holder) -> Result[u64, Failed] {
+  let n = match get(h, 1) {
+    Ok(Some(b)) => bytes.len(b),
+    Ok(None()) => 0,
+    Error(e) => return Error(take e),
+  }
+  put(mut h, b"y")
+  Ok(n)
+}
+
+type Short = Db(Failed)
+
+fn mapped(h: Holder) -> Result[u64, Short] {
+  let n: u64 = match get(h, 1) ? Db {
+    Some(b) => int.widen(b[0]),
+    None() => 0,
+  }
+  Ok(n)
+}
+
+fn compared(h: Holder) -> bool {
+  get(h, 1) == Ok(None())
+}

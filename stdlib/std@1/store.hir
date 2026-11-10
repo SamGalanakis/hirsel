@@ -1502,9 +1502,10 @@ const RESERVED_LO: Bytes = b"hirsel."
 
 const RESERVED_HI: Bytes = b"hirsel/"
 
-/// The value under `key` as the transaction sees it. The read enters the
-/// run's access set, whether or not `key` holds a value.
-pub fn tx_get(tx: Tx, key: Bytes) -> Result[Option[Bytes], TxError]
+/// The value under `key` as the transaction sees it, a view into `tx`: it
+/// stays valid until `tx` is next written. The read enters the run's access
+/// set, whether or not `key` holds a value.
+pub fn tx_get(tx: Tx, key: Bytes) -> Result[Option[Bytes] in tx, TxError]
   requires !reserved(key) {
   // Inline, passing no Tx to a callee: unnarrowed, the scope costs one branch.
   if !tx.scope.whole {
@@ -1514,10 +1515,7 @@ pub fn tx_get(tx: Tx, key: Bytes) -> Result[Option[Bytes], TxError]
     return Error(Limit(KeyBytes()))
   }
   recorder.append(tx.points, copy_to(heap, key))
-  match ordered_map.get(tx.txn.state, key) {
-    Some(v) => Ok(Some(copy_to(heap, v))),
-    None() => Ok(None()),
-  }
+  Ok(ordered_map.get(tx.txn.state, key))
 }
 
 /// Stores `value` under `key` when the transaction commits. The commit

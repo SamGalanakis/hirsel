@@ -128,6 +128,33 @@ fn first[T: copyable](xs: List[T]) -> Option[T] in xs {
 fn escape(xs: List[u64]) -> List[u64] { xs }   // MODE-1: a borrowed xs is local to the caller
 ```
 
+**Result parts.** A result may instead relate disjoint parts: the elements of a result
+tuple and the payloads of a result `Result` or `Option`, at any depth through these
+carriers (`-> Result[Option[Bytes] in tx, TxError]`). A whole-result relation is the
+shorthand for the root; a result relates either its root or its parts, never both, and a
+related part cannot contain another. Each related part obeys the rules above with its own
+sources, which name parameters (not `env`); every other part must be global, however inert
+its type. Construction and return prove each part on its own. At a call each part depends
+only on the arguments it names: the caller treats those places as borrowed while a value
+holding that part lives. A match or `?` that selects an alternative keeps that
+alternative's dependencies and drops only those of impossible alternatives; projecting a
+part keeps its dependencies. Moves, copies and joins keep them per part. Relating a part
+grants no ownership, copyability, uniqueness, authority or sendability.
+
+```hirsel
+fn get(h: Holder, k: u64) -> Result[Option[Bytes] in h, Failed] {
+  if k > 9 { return Error(Failed()) }
+  Ok(Some(copy h.data))
+}
+
+fn size(mut h: Holder) -> Result[u64, Failed] {
+  let v = get(h, 1)?             // v borrows h; the error was global
+  let n = match v { Some(b) => bytes.len(b), None() => 0 }
+  put(mut h, b"y")               // v is dead: h may be written
+  Ok(n)
+}
+```
+
 **Borrowed and `mut` parameters** are local to themselves. Inside the body, `x: T in S`
 reaches `x` and `S`: a written `S` adds to `x`'s own root and never replaces it. The
 caller's argument must be within `S`, apart from the read loan the call takes on its
@@ -724,7 +751,8 @@ a borrow-only use. Its origins and access dependencies follow the underlying own
 including through an earlier cursor value, rather than the intermediate cursor name.
 
 Part types (record fields, variant payloads, tuple elements, `box` payloads and type
-arguments) carry no relation; a function type in a field keeps its own result relation
+arguments) carry no relation, except the result parts of a function result
+([MODE-1](#mode-1-locality)); a function type in a field keeps its own result relation
 (`f: fn() -> T in env`), which is not a relation on the field value. Physical projections
 and patterns keep the contracts their declarations own; bound names describe what was
 transferred to them. Writes obey fixed receiving contracts. To move a part out of an owned

@@ -26,6 +26,12 @@ impl Parser<'_> {
         Ok(ty)
     }
     fn check_part(&mut self, ty: TypeExprId) -> Parsed<()> {
+        if self.result_parts {
+            return Ok(());
+        }
+        self.check_unrelated_part(ty)
+    }
+    fn check_unrelated_part(&mut self, ty: TypeExprId) -> Parsed<()> {
         let written = &self.tree.types[ty.0 as usize];
         if let TypeExprKind::Qualified {
             relation: Some(relation),
@@ -100,7 +106,8 @@ impl Parser<'_> {
                 result?
             }
         } else if self.eat("box") {
-            let value = self.part_type()?;
+            let value = self.ty()?;
+            self.check_unrelated_part(value)?;
             self.push_type(start, TypeExprKind::Box(value))
         } else if self.at("fn") || self.at("@") {
             let mut attrs = vec![];
@@ -118,7 +125,11 @@ impl Parser<'_> {
                 attrs.push(attr);
             }
             self.expect("fn", const { RuleId::of("LANG-7") })?;
-            let mut signature = self.header(true, false)?;
+            // A callable binder ends the enclosing result's selectable parts.
+            let result_parts = std::mem::replace(&mut self.result_parts, false);
+            let signature = self.header(true, false);
+            self.result_parts = result_parts;
+            let mut signature = signature?;
             signature.attributes = attrs;
             self.push_type(start, TypeExprKind::Function(signature))
         } else {

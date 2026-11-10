@@ -1910,11 +1910,6 @@ impl hirsel_engine_runtime::LiveProductValue for LiveSummaryProduct {
     fn evictable(&self) -> bool {
         true
     }
-    fn retain_after_consumption(&self) -> bool {
-        // Front still caches this publication. Keep its bounded runtime spill
-        // entry so pressure can archive the owner after Check consumes it.
-        true
-    }
 }
 impl LiveSummaryProduct {
     pub(crate) fn publish(

@@ -104,6 +104,11 @@ pub trait QueryTask: Send {
 
 /// Installed by the engine for one immutable input snapshot, never by clients.
 pub trait QueryFactory: Send + Sync {
+    /// A completed product retained by this immutable factory's admitted owner.
+    /// This lookup executes no producer or dependency.
+    fn completed(&self, _key: QueryId) -> Option<QueryOutcome> {
+        None
+    }
     /// Release reconstructible source caches, independently of a settled node.
     fn evict_cache(&self, _scratch: u64) -> bool {
         false

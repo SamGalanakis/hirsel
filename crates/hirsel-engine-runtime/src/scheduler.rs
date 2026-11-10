@@ -416,6 +416,12 @@ impl State {
             self.stats.duplicate_reads += 1;
             return outcome.clone();
         }
+        if let Some(Factory::Send(factory)) = self.factories.get(&query.0)
+            && let Some(outcome) = factory.completed(id(query))
+        {
+            self.stats.duplicate_reads += 1;
+            return outcome;
+        }
         if self.stack.iter().any(|(active, _)| *active == query) {
             return Err(self.errors.cycle);
         }

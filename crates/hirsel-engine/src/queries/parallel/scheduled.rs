@@ -1765,6 +1765,12 @@ impl FrontBodyQueries {
 }
 struct Factory(Arc<FrontBodyQueries>);
 impl QueryFactory for Factory {
+    fn completed(&self, query: QueryId) -> Option<QueryOutcome> {
+        if query.kind != FRONT_BODY_KIND || !self.0.inputs.contains_key(&query.address.0) {
+            return None;
+        }
+        self.0.completed_product(query)
+    }
     fn evict_cache(&self, _scratch: u64) -> bool {
         self.0
             .namespace

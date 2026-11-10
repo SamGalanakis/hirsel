@@ -21,6 +21,9 @@ pub struct DirStore {
     operation: bool,
     installed_capture: Option<Arc<Mutex<Option<super::installed::OpenedInstallation>>>>,
     installation: Option<std::sync::Arc<std::sync::Mutex<super::installed::InstallationRecords>>>,
+    /// Set once `root` exists. Clones and operations share the answer, so a
+    /// put no longer re-creates an existing directory.
+    root_ready: Arc<std::sync::OnceLock<()>>,
 }
 
 /// What a collection found and removed.
@@ -34,7 +37,23 @@ pub struct GcReport {
 
 impl DirStore {
     pub fn new(root: PathBuf) -> Self {
-        let physical = hirsel_artifact_store::Store::rebuildable(root.clone());
+        Self::with_physical(
+            root.clone(),
+            hirsel_artifact_store::Store::rebuildable(root),
+        )
+    }
+    /// An explicit package producer's output. It records the producer's
+    /// complete closure and writes a strict installation store.
+    pub fn installation(root: PathBuf) -> Self {
+        Self {
+            installation: Some(Default::default()),
+            ..Self::with_physical(
+                root.clone(),
+                hirsel_artifact_store::Store::installation(root),
+            )
+        }
+    }
+    fn with_physical(root: PathBuf, physical: hirsel_artifact_store::Store) -> Self {
         physical.set_cache_cap(DEFAULT_CAP);
         Self {
             verifier: std::sync::Arc::new(hirsel_validate::VerifierCache::directory_store(
@@ -48,6 +67,7 @@ impl DirStore {
             operation: false,
             installed_capture: None,
             installation: None,
+            root_ready: Arc::default(),
         }
     }
     /// Select an independently constructed local verifier for installation.
@@ -63,25 +83,13 @@ impl DirStore {
         self.verifier = installation.verifier();
         self
     }
-    /// Track the complete closure of an explicit package producer.
-    pub fn recording_installation(mut self) -> Self {
-        self.installation = Some(Default::default());
-        self
-    }
     pub fn publish_installation(&self, package: super::InstalledPackage) -> std::io::Result<()> {
         let records = self
             .installation
             .as_ref()
             .ok_or_else(|| std::io::Error::other("installation was not recorded"))?;
-        let store = hirsel_artifact_store::Store::new(self.root.clone());
+        let store = hirsel_artifact_store::Store::installation(self.root.clone());
         let records = records.lock().unwrap_or_else(|error| error.into_inner());
-        store.pack_contents(
-            records
-                .contents
-                .values()
-                .copied()
-                .chain(records.rows.values().map(|(_, reference)| *reference)),
-        )?;
         package.publish(&store, &records)
     }
     fn record_content(&self, reference: super::Reference) {
@@ -204,6 +212,7 @@ impl DirStore {
             operation: false,
             installed_capture: Some(Default::default()),
             installation: None,
+            root_ready: Arc::default(),
         })
     }
     /// Compose environment-selected local storage with installed ordinary
@@ -233,7 +242,10 @@ impl DirStore {
         // A batch can retain unpublished bytes before its eventual disk flush.
         // An impossible directory (notably ENOTDIR) must remain a cache miss,
         // rather than serving those buffered writes as successful local hits.
-        fs::create_dir_all(&self.root).ok()?;
+        if self.root_ready.get().is_none() {
+            fs::create_dir_all(&self.root).ok()?;
+            let _ = self.root_ready.set(());
+        }
         Some(store)
     }
     pub fn root(&self) -> &Path {
@@ -356,6 +368,7 @@ impl ResultStore for DirStore {
             installed_capture: Some(Default::default()),
             verifier_identity: None,
             installation: self.installation.clone(),
+            root_ready: self.root_ready.clone(),
         };
         match self.verifier_identity {
             Some(identity) => selected
@@ -866,6 +879,7 @@ mod tests {
             operation: false,
             installed_capture: None,
             installation: None,
+            root_ready: Arc::default(),
         };
         // Initialize the installed store's ordinary read lock before observing
         // query writes; lock creation is independent of query publication.

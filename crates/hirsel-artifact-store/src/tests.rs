@@ -986,21 +986,17 @@ fn small_records_share_bounded_atomic_batches_and_survive_relocation() {
         );
         assert_eq!(&*reader.get(*reference).unwrap(), &bytes);
     }
+    // An installation writes medium contents into segments; no standalone
+    // copy is ever published, and an ordinary reader still finds them.
+    let installation = Store::installation(root.clone());
     let medium: Vec<_> = [5000, 6000]
         .into_iter()
         .map(|len| {
             let bytes = vec![(len / 1000) as u8; len];
-            (store.put(DOMAIN, &bytes).unwrap(), bytes)
+            (installation.put(DOMAIN, &bytes).unwrap(), bytes)
         })
         .collect();
-    let retired: Vec<_> = medium
-        .iter()
-        .map(|(reference, _)| store.output_path(*reference))
-        .collect();
-    store
-        .pack_contents(medium.iter().map(|(reference, _)| *reference))
-        .unwrap();
-    assert!(retired.iter().all(|path| !path.exists()));
+    assert!(!root.join("outputs").exists());
     for (reference, bytes) in &medium {
         assert_eq!(&*reader.get(*reference).unwrap(), bytes);
     }

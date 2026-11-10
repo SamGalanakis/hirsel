@@ -300,11 +300,9 @@ unsafe impl Sync for Region {}
 impl Region {
     fn open(path: &Path, retain_file: bool) -> io::Result<Self> {
         let file = File::open(path)?;
-        let len = usize::try_from(file.metadata()?.len()).map_err(|_| invalid())?;
-        if !(HEADER..=HEADER + MAX_RECORD).contains(&len) {
-            return Err(invalid());
-        }
-        if !file.metadata()?.is_file() {
+        let metadata = file.metadata()?;
+        let len = usize::try_from(metadata.len()).map_err(|_| invalid())?;
+        if !(HEADER..=HEADER + MAX_RECORD).contains(&len) || !metadata.is_file() {
             return Err(invalid());
         }
         #[cfg(target_os = "linux")]
@@ -812,6 +810,8 @@ pub struct Store {
     collection_cap: Arc<AtomicU64>,
     cache_cap: Arc<AtomicU64>,
     disk_estimate: Arc<AtomicU64>,
+    /// Contents up to one segment go into pack segments, not standalone files.
+    packs_medium: bool,
 }
 const REGION_BYTES: usize = 32 << 20;
 const REGION_COUNT: usize = 64;
@@ -937,6 +937,15 @@ impl Store {
     pub fn rebuildable(root: PathBuf) -> Self {
         Self::with_durability(root, Durability::Rebuildable)
     }
+    /// A package installation: sole-copy distribution, so strict. Its medium
+    /// contents go straight into pack segments; readers of an installation
+    /// open segments rather than one file per content.
+    pub fn installation(root: PathBuf) -> Self {
+        Self {
+            packs_medium: true,
+            ..Self::new(root)
+        }
+    }
     fn with_durability(root: PathBuf, durability: Durability) -> Self {
         Self {
             root,
@@ -947,6 +956,7 @@ impl Store {
             collection_cap: Arc::new(AtomicU64::new(u64::MAX)),
             cache_cap: Arc::new(AtomicU64::new(u64::MAX)),
             disk_estimate: Arc::new(AtomicU64::new(u64::MAX)),
+            packs_medium: false,
         }
     }
     /// Opt into counters on this physical owner and all of its existing clones.
@@ -1112,7 +1122,12 @@ impl Store {
         header.extend(reference.len.to_le_bytes());
         header.extend(reference.output.0.0);
         header.extend([0; 8]);
-        if bytes.len() <= pack::SMALL {
+        if self.packs(reference.len) {
+            // An installation keeps one indexed copy of each medium content.
+            if bytes.len() > pack::SMALL && self.packed_source(0, reference.output.0).is_some() {
+                self.count(Counter::IdenticalUpdates, 1);
+                return Ok(reference);
+            }
             header.extend(bytes);
             self.packed_put(0, reference.output.0, header.into())?;
         } else {
@@ -1135,7 +1150,7 @@ impl Store {
     /// Rust 1.97.1 std fs.rs:2837-2880 hard_link retains the inode without copying it;
     /// opening the link before checking binds validation to the retained inode.
     pub fn hold_content(&self, reference: Reference, path: PathBuf) -> Option<HeldContent> {
-        if reference.len <= pack::SMALL as u64 || reference.len > MAX_RECORD as u64 {
+        if self.packs(reference.len) || reference.len > MAX_RECORD as u64 {
             return None;
         }
         #[cfg(unix)]
@@ -1178,9 +1193,19 @@ impl Store {
         checked_container(Bytes::from(bytes.to_vec()), reference)
             .ok_or(ContentReadError::InvalidContent)
     }
+    /// Whether a content of this length is written into pack segments.
+    fn packs(&self, len: u64) -> bool {
+        len <= pack::SMALL as u64 || (self.packs_medium && len <= pack::PACKED as u64)
+    }
     fn raw_container(&self, reference: Reference) -> Result<Bytes, ContentReadError> {
         if reference.len <= pack::SMALL as u64 {
             return self.packed_get(0, reference.output.0);
+        }
+        if self.packs(reference.len) {
+            match self.packed_get(0, reference.output.0) {
+                Err(ContentReadError::NotFound) => (),
+                result => return result,
+            }
         }
         let path = self
             .private_output_path(reference.output.0)
@@ -1499,17 +1524,27 @@ fn publish(
 ) -> io::Result<()> {
     static NEXT: AtomicU64 = AtomicU64::new(0);
     let parent = path.parent().ok_or_else(invalid)?;
-    fs::create_dir_all(parent)?;
     let temporary = parent.join(format!(
         ".{}.{}.tmp",
         std::process::id(),
         NEXT.fetch_add(1, Ordering::Relaxed)
     ));
     let result = (|| {
-        let mut file = File::options()
-            .write(true)
-            .create_new(true)
-            .open(&temporary)?;
+        let create = || {
+            File::options()
+                .write(true)
+                .create_new(true)
+                .open(&temporary)
+        };
+        // Fan-out directories exist after their first publication; create one
+        // only when the file cannot be created without it.
+        let mut file = match create() {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                fs::create_dir_all(parent)?;
+                create()?
+            }
+            file => file?,
+        };
         for part in parts {
             file.write_all(part)?;
         }

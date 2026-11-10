@@ -26,6 +26,8 @@ enum Maintenance {
 
 pub(super) const SMALL: usize = 4096;
 const LIMIT: usize = 1 << 20;
+/// The largest content one segment holds beside its own header.
+pub(super) const PACKED: usize = LIMIT - 2 * HEADER - 7;
 const RECORDS: usize = 1024;
 const SEGMENT: &[u8; 8] = b"HIRPAK02";
 #[derive(Default)]
@@ -355,47 +357,6 @@ impl Store {
             region,
             range: 0..len,
         })
-    }
-    /// Compact published installation contents through the existing bounded
-    /// epoch writer. Neither the segment, scratch nor record limits change.
-    /// Durable index publication precedes retiring the standalone copies.
-    pub fn pack_contents(&self, references: impl IntoIterator<Item = Reference>) -> io::Result<()> {
-        let store = self.for_operation();
-        let request = store.request();
-        let mut retired = Vec::new();
-        for reference in references
-            .into_iter()
-            .collect::<std::collections::BTreeSet<_>>()
-        {
-            if reference.len <= SMALL as u64
-                || reference.len > (LIMIT - 2 * HEADER - 7) as u64
-                || store.packed_source(0, reference.output.0).is_some()
-            {
-                continue;
-            }
-            let path = store.output_path(reference);
-            let bytes = store.container(reference).ok_or_else(invalid)?;
-            store.packed_put(0, reference.output.0, bytes)?;
-            retired.push((reference, path));
-        }
-        request.finish()?;
-        // Cache publication can decline persistence. Observe every new route
-        // through a fresh reader before removing any original sole-copy file.
-        let published = self.for_operation();
-        let _read = published.batch();
-        for (reference, _) in &retired {
-            if published.packed_source(0, reference.output.0).is_none() {
-                return Err(io::Error::other("installation pack was not published"));
-            }
-        }
-        for (_, path) in retired {
-            match fs::remove_file(path) {
-                Ok(()) => (),
-                Err(error) if error.kind() == io::ErrorKind::NotFound => (),
-                Err(error) => return Err(error),
-            }
-        }
-        Ok(())
     }
     pub(super) fn packed_put(&self, tag: u8, key: ContentHash, bytes: Bytes) -> io::Result<()> {
         let mut state = self.state();

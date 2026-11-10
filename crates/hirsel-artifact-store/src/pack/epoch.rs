@@ -273,8 +273,13 @@ impl Store {
     }
     fn install_private(&self, private: &Path, final_path: &Path) -> io::Result<()> {
         let parent = final_path.parent().ok_or_else(invalid)?;
-        fs::create_dir_all(parent)?;
-        fs::rename(private, final_path)?;
+        match fs::rename(private, final_path) {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                fs::create_dir_all(parent)?;
+                fs::rename(private, final_path)?;
+            }
+            result => result?,
+        }
         if self.durability == Durability::Strict {
             self.count(Counter::DirectorySyncs, 1);
             File::open(parent)?.sync_all()?;
